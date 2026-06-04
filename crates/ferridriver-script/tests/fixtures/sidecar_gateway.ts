@@ -5,7 +5,7 @@
 //
 // Exercises the full sidecar JS surface: connect, send (request/response),
 // on + the returned unsubscribe function, and bridging a pushed event back
-// to an awaited Promise. Each tool sets `exposeAsTool` so it is callable over
+// to an awaited Promise. Each tool sets `exposeAsMcpTool` so it is callable over
 // the MCP server.
 
 interface SidecarHandle {
@@ -42,7 +42,7 @@ function gateway(): Promise<SidecarHandle> {
 defineTool({
   name: "gateway.ping",
   description: "Health-check the gateway sidecar.",
-  exposeAsTool: true,
+  exposeAsMcpTool: true,
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   handler: async () => {
     const sc = await gateway();
@@ -54,7 +54,7 @@ defineTool({
 defineTool({
   name: "gateway.call",
   description: "Forward an arbitrary { method, params } to the gateway sidecar.",
-  exposeAsTool: true,
+  exposeAsMcpTool: true,
   inputSchema: {
     type: "object",
     properties: {
@@ -75,7 +75,7 @@ defineTool({
   description:
     "Register a listener, trigger the sidecar to push an event, and resolve " +
     "with that event's params. Proves the on()/pushed-event path end to end.",
-  exposeAsTool: true,
+  exposeAsMcpTool: true,
   inputSchema: {
     type: "object",
     properties: {
@@ -115,7 +115,7 @@ defineTool({
 defineTool({
   name: "gateway.close",
   description: "Close the gateway sidecar transport.",
-  exposeAsTool: true,
+  exposeAsMcpTool: true,
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   handler: async () => {
     if (cached) {

@@ -31,12 +31,10 @@ async fn load_run_plugins(roots: &[String]) -> Vec<ferridriver_script::PluginBin
   if roots.is_empty() {
     return Vec::new();
   }
-  let mut files = Vec::new();
-  for root in roots {
-    match ferridriver_mcp::plugin::discover(std::path::Path::new(root)) {
-      Ok(v) => files.extend(v),
-      Err(e) => tracing::warn!(path = %root, error = %e, "plugin discovery failed; skipping"),
-    }
+  let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+  let (mut files, errors) = ferridriver_script::discover::resolve_extension_specs(roots, &cwd);
+  for (spec, e) in errors {
+    tracing::warn!(extension = %spec, error = %e.message, "plugin discovery failed; skipping");
   }
   if files.is_empty() {
     return Vec::new();
@@ -44,7 +42,7 @@ async fn load_run_plugins(roots: &[String]) -> Vec<ferridriver_script::PluginBin
   // rolldown resolves the bundle entry from an absolute id; a relative
   // path (e.g. `extensions = ["gateway.ts"]` in ferridriver.toml) would
   // fail with UnresolvedEntry. Canonicalize, dropping any that vanished.
-  let files: Vec<std::path::PathBuf> = files
+  files = files
     .into_iter()
     .filter_map(|f| match std::fs::canonicalize(&f) {
       Ok(abs) => Some(abs),
@@ -256,7 +254,10 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   // Thread the `[scripting]` env allow-list into the BDD step VM — the
   // same resolution the MCP server and `ferridriver run` use. Must be
   // set before the run starts.
-  ferridriver_bdd::js::set_bdd_script_caps(ferridriver_script::ScriptCaps::resolve(&config.scripting.allow_env));
+  ferridriver_bdd::js::set_bdd_script_caps(ferridriver_script::ScriptCaps::resolve_with_commands(
+    &config.scripting.allow_env,
+    config.scripting.allow.commands.clone(),
+  ));
   ferridriver_bdd::js::set_bdd_sidecars(sidecar_specs(&config));
   let mut overrides = ferridriver_test::config::CliOverrides {
     bdd_tags: args.tags,
@@ -350,11 +351,14 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
   // `ferridriver run` honours a ferridriver.toml in scope for the
   // scripting sandbox env allow-list and declared sidecars.
   let file_config = FerridriverConfig::load(None).unwrap_or_default();
-  let caps = ferridriver_script::ScriptCaps::resolve(&file_config.scripting.allow_env);
+  let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
+    &file_config.scripting.allow_env,
+    file_config.scripting.allow.commands.clone(),
+  );
   let sidecars = sidecar_specs(&file_config);
 
-  // Plugins: config `extensions` plus any `--plugin` paths. Their
-  // `defineTool` tools become `plugins['<name>'](args)` in the script.
+  // Extensions: config `extensions` plus any `--plugin` specs. Their
+  // `tool` registrations become `tools.*` callables in the script.
   let mut plugin_roots = file_config.extensions.clone();
   plugin_roots.extend(args.plugins.iter().cloned());
   let plugins = load_run_plugins(&plugin_roots).await;
@@ -461,8 +465,8 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   // The mcp section drives chrome args, instances, and server metadata.
   // CLI flags fall back when the [mcp] section is empty so the user can
   // launch the server with no config file at all.
-  let extension_paths: Vec<std::path::PathBuf> = config.extensions.iter().map(std::path::PathBuf::from).collect();
   let sidecars = sidecar_specs(&config);
+  let extensions = config.extensions.clone();
   let scripting = config.scripting;
   let mcp = config.mcp;
   let backend = if mcp.browser.backend.is_some() {
@@ -477,11 +481,12 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   };
   let connect_mode = args.browser.connect_mode();
 
-  let caps = ferridriver_script::ScriptCaps::resolve(&scripting.allow_env);
+  let caps =
+    ferridriver_script::ScriptCaps::resolve_with_commands(&scripting.allow_env, scripting.allow.commands.clone());
   let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(mcp))
     .with_script_caps(caps)
     .with_sidecars(sidecars);
-  server.load_extensions(&extension_paths).await;
+  server.load_extensions(&extensions).await;
   match args.transport.transport {
     cli::Transport::Stdio => ferridriver_mcp::mcp::serve_stdio_with(server).await,
     cli::Transport::Http => ferridriver_mcp::mcp::serve_http_with(server, args.transport.port).await,

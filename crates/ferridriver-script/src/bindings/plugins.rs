@@ -2,13 +2,13 @@
 //!
 //! A plugin/extension file is rolldown-bundled to `QuickJS` bytecode
 //! once at startup. Loading + evaluating that bytecode in a session runs
-//! its top-level `defineTool(...)` (and any `Given/When/Then`) calls,
+//! its top-level `tool(...)` / `defineTool(...)` (and any `Given/When/Then`) calls,
 //! registering directly into the shared Rust `ExtensionRegistry`.
-//! `defineTool` is the only tool-registration surface — no
+//! `tool` is the canonical tool-registration surface — no
 //! `globalThis.exports`, no legacy shapes.
 //!
 //! There is **no synthesized JS and no `globalThis.__*`**: the
-//! `plugins.<name>` callable is a native Rust closure that restores the
+//! `tools.<name>` callable is a native Rust closure that restores the
 //! handler from the registry, builds `{ args, page, context, request,
 //! commands }` with the Object API, applies the handler and returns its
 //! promise — the exact mechanism BDD steps use (`invoke_step`). The
@@ -16,14 +16,14 @@
 //! (`PluginCommandsJs`, `HttpClientJs::with_net`); the allow-list
 //! is checked in Rust before any shell/network I/O.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rquickjs::function::{Func, Opt};
+use rquickjs::function::Opt;
 use rquickjs::promise::{MaybePromise, Promised};
-use rquickjs::{Ctx, IntoJs, JsLifetime, Module, Object, Value, class::Class, class::Trace};
+use rquickjs::{Ctx, Function, IntoJs, JsLifetime, Module, Object, Value, class::Class, class::Trace};
 
 use super::bdd::{tool_dispatch, tool_names};
 use super::http_client::HttpClientJs;
@@ -65,6 +65,10 @@ pub struct PluginCommandsJs {
 }
 
 impl PluginCommandsJs {
+  pub(crate) fn new(allowed: Arc<BTreeMap<String, CommandSpec>>, procs: Option<Arc<SessionProcs>>) -> Self {
+    Self { allowed, procs }
+  }
+
   fn cmd_err(verb: &'static str, msg: impl std::fmt::Display) -> rquickjs::Error {
     rquickjs::Error::new_from_js_message(verb, "Error", msg.to_string())
   }
@@ -152,7 +156,7 @@ fn rq(e: &ScriptError) -> rquickjs::Error {
 /// Install loaded plugins: load+evaluate each file's bytecode (which
 /// registers its tools into the shared registry, native or legacy
 /// shape), then expose every registered tool as a native
-/// `plugins.<name>` callable.
+/// `tools.<name>` callable.
 pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Result<()> {
   for file in files {
     // SAFETY: `file.bytecode` was produced by `Module::write` in THIS
@@ -161,33 +165,101 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
     // persisted — the precondition `Module::load` documents.
     #[allow(unsafe_code)]
     let module = unsafe { Module::load(ctx.clone(), &file.bytecode) }?;
-    // Evaluating the module runs its top-level `defineTool(...)` /
+    // Evaluating the module runs its top-level `tool(...)` /
     // `Given(...)` calls, registering directly into the extension
     // registry. No `globalThis.exports`, no post-eval ingest.
     let (_evaluated, _promise) = module.eval()?;
   }
 
   let names = tool_names(ctx).map_err(|e| rq(&e))?;
-  let plugins_obj = Object::new(ctx.clone())?;
+  let tools_obj = Object::new(ctx.clone())?;
+  let mut created_global_roots = BTreeSet::new();
   for (idx, name) in names.into_iter().enumerate() {
     // The closure forwards into a generic fn so `Ctx`/`Value`/return
     // share one `'js` (an inline closure with `<'_>` would give each its
     // own lifetime and `Function::call`'s result could not be returned).
-    let f = Func::from(move |ctx, call_args| dispatch_tool(ctx, idx, call_args));
-    plugins_obj.set(name.as_str(), f)?;
+    let f = Function::new(ctx.clone(), move |ctx, call_args| dispatch_tool(ctx, idx, call_args))?;
+    tools_obj.set(name.as_str(), f.clone())?;
+    install_tool_namespace(ctx, &tools_obj, &name, f, &mut created_global_roots)?;
   }
-  ctx.globals().set("plugins", plugins_obj)?;
+  ctx.globals().set("tools", tools_obj)?;
+  crate::bindings::runtime::mirror_global(ctx, "tools")?;
   Ok(())
 }
 
-/// Native `plugins.<name>(args)` body: restore the tool's handler from
+fn install_tool_namespace<'js>(
+  ctx: &Ctx<'js>,
+  tools_obj: &Object<'js>,
+  name: &str,
+  f: Function<'js>,
+  created_global_roots: &mut BTreeSet<String>,
+) -> rquickjs::Result<()> {
+  let parts: Vec<&str> = name.split('.').collect();
+  if parts.len() < 2 || parts.iter().any(|p| !is_js_identifier(p)) {
+    return Ok(());
+  }
+
+  set_nested(ctx, tools_obj, &parts, f.clone().into_value())?;
+
+  let globals = ctx.globals();
+  let root_name = parts[0];
+  if globals.contains_key(root_name)? {
+    if created_global_roots.contains(root_name)
+      && let Ok(root) = globals.get::<_, Object<'js>>(root_name)
+    {
+      set_nested(ctx, &root, &parts[1..], f)?;
+    }
+    return Ok(());
+  }
+
+  let root = Object::new(ctx.clone())?;
+  globals.set(root_name, root.clone())?;
+  created_global_roots.insert(root_name.to_string());
+  set_nested(ctx, &root, &parts[1..], f)
+}
+
+fn set_nested<'js, V>(ctx: &Ctx<'js>, root: &Object<'js>, parts: &[&str], value: V) -> rquickjs::Result<()>
+where
+  V: IntoJs<'js>,
+{
+  if parts.is_empty() {
+    return Ok(());
+  }
+
+  let mut current = root.clone();
+  for part in &parts[..parts.len() - 1] {
+    let next = match current.get::<_, Object<'js>>(*part) {
+      Ok(obj) => obj,
+      Err(_) => {
+        let obj = Object::new(ctx.clone())?;
+        current.set(*part, obj.clone())?;
+        obj
+      },
+    };
+    current = next;
+  }
+  current.set(*parts.last().expect("non-empty parts"), value)
+}
+
+fn is_js_identifier(part: &str) -> bool {
+  let mut chars = part.chars();
+  let Some(first) = chars.next() else {
+    return false;
+  };
+  if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
+    return false;
+  }
+  chars.all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
+}
+
+/// Native `tools.<name>(args)` body: restore the tool's handler from
 /// the registry, build `{ args, page, context, request, commands }` via
 /// the Object API (per-tool `commands` allow-list + optional net-guarded
 /// `request`, both Rust-enforced), apply the handler and await its
 /// result. When the manifest declared `timeoutMs`, the handler is raced
 /// against that bound natively (same mechanism `invoke_step` uses) so
 /// every caller — promoted MCP tool, `invoke_plugin`, or another
-/// extension calling `plugins.<name>` — is covered, not just the MCP
+/// extension calling `tools.<name>` — is covered, not just the MCP
 /// entry point. Returns a JS promise; the caller `await`s it. No
 /// synthesized JS.
 fn dispatch_tool<'js>(
@@ -236,13 +308,7 @@ fn dispatch_tool<'js>(
     arg.set("request", request_out)?;
 
     let procs = ctx.userdata::<SessionProcsUd>().map(|u| u.0.clone());
-    let commands = Class::instance(
-      ctx.clone(),
-      PluginCommandsJs {
-        allowed: Arc::new(d.allowed_commands),
-        procs,
-      },
-    )?;
+    let commands = Class::instance(ctx.clone(), PluginCommandsJs::new(Arc::new(d.allowed_commands), procs))?;
     arg.set("commands", commands)?;
 
     // The same `allow.net` must also bind the global `fetch` (a facade
@@ -250,8 +316,8 @@ fn dispatch_tool<'js>(
     // userdata; bracket every poll of THIS handler's future so the cell
     // holds this tool's list whenever its continuation runs and is
     // restored to the caller's value otherwise — correct under nesting
-    // (a tool calling `plugins.other`) and concurrent interleaving
-    // (`Promise.all([plugins.a(), plugins.b()])`) because the swap and
+    // (a tool calling `tools.other`) and concurrent interleaving
+    // (`Promise.all([tools.a(), tools.b()])`) because the swap and
     // the synchronous `fetch` guard both run within a single poll on the
     // single QuickJS thread.
     let policy_cell = ctx

@@ -108,7 +108,7 @@ connect_url = "ws://staging-host:9222"
 ## Extensions
 
 JavaScript / TypeScript extension files declare additional MCP tools via
-`defineTool` and / or BDD steps via `Given` / `When` / `Then`. They run on
+`tool` and / or BDD steps via `Given` / `When` / `Then`. They run on
 the same QuickJS engine as `run_script` and BDD step bodies. See
 [`docs/extensions.md`](../../docs/extensions.md) for the contract.
 

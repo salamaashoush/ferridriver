@@ -89,7 +89,7 @@ async fn argv_form_runs_without_a_shell_so_metachars_are_inert() {
   "#;
   let r = run_with(
     plugin,
-    "return await plugins['t']({ m: '$(touch /tmp/ferri_pwned); a && b' });",
+    "return await tools['t']({ m: '$(touch /tmp/ferri_pwned); a && b' });",
   )
   .await;
   assert_eq!(ok(&r), &serde_json::json!("$(touch /tmp/ferri_pwned); a && b"));
@@ -105,11 +105,11 @@ async fn output_modes_text_json_lines() {
     defineTool({ name: 'x', allow: { commands: { c: "echo hi" } },
       handler: async ({ commands }) => commands.run('c') });
   "#;
-  let j = run_with(plugin, "return await plugins['j']();").await;
+  let j = run_with(plugin, "return await tools['j']();").await;
   assert_eq!(ok(&j), &serde_json::json!({ "a": 1 }));
-  let l = run_with(plugin, "return await plugins['l']();").await;
+  let l = run_with(plugin, "return await tools['l']();").await;
   assert_eq!(ok(&l), &serde_json::json!(["a", "b", "c"]));
-  let x = run_with(plugin, "return await plugins['x']();").await;
+  let x = run_with(plugin, "return await tools['x']();").await;
   assert_eq!(ok(&x), &serde_json::json!("hi"));
 }
 
@@ -119,7 +119,7 @@ async fn strict_unknown_placeholder_errors() {
     defineTool({ name: 't', allow: { commands: { c: "echo ${name}" } },
       handler: async ({ commands }) => commands.run('c', {}) });
   "#;
-  let r = run_with(plugin, "return await plugins['t']();").await;
+  let r = run_with(plugin, "return await tools['t']();").await;
   assert!(err_msg(&r).contains("${name}"), "{}", err_msg(&r));
 }
 
@@ -129,7 +129,7 @@ async fn undeclared_command_is_denied() {
     defineTool({ name: 't', allow: { commands: { allowed: "echo ok" } },
       handler: async ({ commands }) => commands.run('other') });
   "#;
-  let r = run_with(plugin, "return await plugins['t']();").await;
+  let r = run_with(plugin, "return await tools['t']();").await;
   assert!(
     err_msg(&r).contains("not in the commands allow-list"),
     "{}",
@@ -144,7 +144,7 @@ async fn timeout_kills_a_slow_command() {
       handler: async ({ commands }) => commands.run('slow') });
   "#;
   let started = std::time::Instant::now();
-  let r = run_with(plugin, "return await plugins['t']();").await;
+  let r = run_with(plugin, "return await tools['t']();").await;
   assert!(err_msg(&r).contains("timed out after 150ms"), "{}", err_msg(&r));
   assert!(
     started.elapsed() < Duration::from_secs(2),
@@ -160,9 +160,9 @@ async fn run_rejects_a_persistent_spec_and_vice_versa() {
     defineTool({ name: 'o', allow: { commands: { one: "echo hi" } },
       handler: async ({ commands }) => commands.start('one') });
   "#;
-  let r = run_with(plugin, "return await plugins['p']();").await;
+  let r = run_with(plugin, "return await tools['p']();").await;
   assert!(err_msg(&r).contains("persistent"), "{}", err_msg(&r));
-  let r = run_with(plugin, "return await plugins['o']();").await;
+  let r = run_with(plugin, "return await tools['o']();").await;
   assert!(err_msg(&r).contains("not declared `persistent`"), "{}", err_msg(&r));
 }
 
@@ -190,7 +190,7 @@ async fn persistent_start_status_stop_lifecycle() {
     let r = bs
       .run(
         ScriptEngineConfig::default(),
-        "return await plugins['srv']({ op: 'start' });",
+        "return await tools['srv']({ op: 'start' });",
         &[],
         RunOptions::default(),
         context.clone(),
@@ -208,7 +208,7 @@ async fn persistent_start_status_stop_lifecycle() {
     let r = bs
       .run(
         ScriptEngineConfig::default(),
-        "return await plugins['srv']({ op: 'status' });",
+        "return await tools['srv']({ op: 'status' });",
         &[],
         RunOptions::default(),
         context.clone(),
@@ -228,7 +228,7 @@ async fn persistent_start_status_stop_lifecycle() {
     let _ = bs
       .run(
         ScriptEngineConfig::default(),
-        "return await plugins['srv']({ op: 'stop' });",
+        "return await tools['srv']({ op: 'stop' });",
         &[],
         RunOptions::default(),
         context.clone(),
@@ -239,7 +239,7 @@ async fn persistent_start_status_stop_lifecycle() {
     let r = bs
       .run(
         ScriptEngineConfig::default(),
-        "return await plugins['srv']({ op: 'status' });",
+        "return await tools['srv']({ op: 'status' });",
         &[],
         RunOptions::default(),
         context.clone(),

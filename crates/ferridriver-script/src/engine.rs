@@ -107,12 +107,12 @@ pub struct RunOptions {
 
 /// Which host is running the extension/registry. Exposed to JS as the
 /// native global `ferridriver.host` ("mcp" | "bdd" | "script") so one
-/// extension file can branch its contributions — e.g. only `defineTool`
+/// extension file can branch its contributions — e.g. only `tool`
 /// under MCP, only `Given/When/Then` under the test runner — without any
 /// runtime cost (a single string set once per session).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExtensionHost {
-  /// MCP server (`ferridriver mcp`) — consumes `defineTool` tools.
+  /// MCP server (`ferridriver mcp`) — consumes `tool` registrations.
   Mcp,
   /// BDD test runner (`ferridriver bdd`) — consumes step/hook defs.
   Bdd,
@@ -152,8 +152,7 @@ pub struct RunContext {
   /// `browser.newContext(BrowserContextOptions)` — the natural
   /// Playwright entry point that §4.1's options bag attaches to.
   pub browser: Option<Arc<ferridriver::Browser>>,
-  /// Plugin bindings to install on the `plugins` global. Empty means no
-  /// `plugins` global is exposed beyond the singleton commands runner.
+  /// Extension bindings to install on the `tools` global.
   pub plugins: Vec<crate::bindings::PluginBinding>,
   /// When true, ES module imports use normal filesystem resolution
   /// instead of the `PathSandbox`-rooted loader. Intended for trusted
@@ -178,6 +177,9 @@ pub struct ScriptCaps {
   /// allow-list intersected with the real environment. Empty ⇒
   /// `process.env` is an empty object.
   pub env: std::collections::BTreeMap<String, String>,
+  /// First-party command grants exposed as `commands` /
+  /// `ferridriver.commands` outside plugin handlers.
+  pub commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
 }
 
 impl ScriptCaps {
@@ -191,7 +193,21 @@ impl ScriptCaps {
       .iter()
       .filter_map(|k| std::env::var(k).ok().map(|v| (k.clone(), v)))
       .collect();
-    Self { env }
+    Self {
+      env,
+      commands: std::collections::BTreeMap::new(),
+    }
+  }
+
+  /// Resolve from env names and a pre-parsed command allow-list.
+  #[must_use]
+  pub fn resolve_with_commands(
+    allow_env: &[String],
+    commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
+  ) -> Self {
+    let mut caps = Self::resolve(allow_env);
+    caps.commands = commands;
+    caps
   }
 }
 
@@ -210,7 +226,7 @@ unsafe impl rquickjs::JsLifetime<'_> for SessionAsyncCtx {
 }
 
 /// The session's durable persistent-process registry, stashed as
-/// userdata so `plugins.<name>` dispatch can hand a tool's `commands`
+/// userdata so `tools.<name>` dispatch can hand a tool's `commands`
 /// binding the registry without threading it through `RunContext`.
 /// Re-installed (same `Arc`) on every VM (re)build by
 /// [`crate::session_table::BrowserSession::run`], so a persistent
@@ -290,6 +306,7 @@ pub struct Session {
   ctx: AsyncContext,
   config: ScriptEngineConfig,
   default_request: Arc<ferridriver::http_client::HttpClient>,
+  caps: ScriptCaps,
   /// Last resource limits pushed to `runtime`. `set_memory_limit` /
   /// `set_max_stack_size` / `set_gc_threshold` each take the runtime's
   /// async lock; re-pushing identical values every `execute` is pure
@@ -363,6 +380,7 @@ impl Session {
     let artifacts = context.artifacts.clone();
     let host = context.host;
     let caps = context.caps.clone();
+    let caps_for_session = caps.clone();
     let sidecars = config.sidecars.clone();
     let ud_ctx = ctx.clone();
     let install: Result<(), ScriptError> = async_with!(ctx => |ctx| {
@@ -373,7 +391,7 @@ impl Session {
       let _ = ctx.store_userdata(SessionAsyncCtx(ud_ctx));
       // The active-tool net allow-list cell `fetch` reads (resting state
       // = unrestricted). Stored once per VM so it survives rebuilds and
-      // is present even when no plugin runs; `plugins::dispatch_tool`
+      // is present even when no tool runs; `plugins::dispatch_tool`
       // swaps it around each net-restricted handler's poll.
       let _ = ctx.store_userdata(crate::bindings::fetch::NetPolicyUd(
         crate::bindings::fetch::NetPolicy::default(),
@@ -397,6 +415,8 @@ impl Session {
       install_fs(&ctx, sandbox).map_err(|e| ScriptError::internal(format!("failed to install fs: {e}")))?;
       crate::bindings::process::install(&ctx, &caps, &sandbox_root)
         .map_err(|e| ScriptError::internal(format!("failed to install process: {e}")))?;
+      install_commands(&ctx, &caps, None)
+        .map_err(|e| ScriptError::internal(format!("failed to install commands: {e}")))?;
       if let Some(artifacts) = artifacts {
         crate::bindings::install_artifacts(&ctx, artifacts)
           .map_err(|e| ScriptError::internal(format!("failed to install artifacts: {e}")))?;
@@ -424,15 +444,8 @@ impl Session {
       crate::bindings::install_sidecars(&ctx, &sidecars)
         .map_err(|e| ScriptError::internal(format!("failed to install sidecars: {e}")))?;
 
-      // `ferridriver.host` — the native context flag an extension reads
-      // to branch between MCP and the test runner. One string, set once.
-      let fd = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(format!("ferridriver global: {e}")))?;
-      fd.set("host", host.as_str())
-        .map_err(|e| ScriptError::internal(format!("ferridriver.host: {e}")))?;
-      ctx
-        .globals()
-        .set("ferridriver", fd)
-        .map_err(|e| ScriptError::internal(format!("install ferridriver global: {e}")))?;
+      crate::bindings::runtime::install_host(&ctx, host.as_str())
+        .map_err(|e| ScriptError::internal(format!("install ferridriver.host: {e}")))?;
 
       crate::bindings::install_plugins(&ctx, &plugins)
         .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")))
@@ -452,6 +465,7 @@ impl Session {
       default_request: Arc::new(ferridriver::http_client::HttpClient::new(
         ferridriver::http_client::HttpClientOptions::default(),
       )),
+      caps: caps_for_session,
       applied,
     })
   }
@@ -469,8 +483,11 @@ impl Session {
   /// same `Arc` is re-installed on each VM rebuild (the registry is
   /// durable session state, the VM is not).
   pub async fn install_session_procs(&self, procs: std::sync::Arc<crate::session_procs::SessionProcs>) {
+    let caps = self.caps.clone();
     async_with!(self.ctx => |ctx| {
       let _ = ctx.store_userdata(SessionProcsUd(procs));
+      let procs = ctx.userdata::<SessionProcsUd>().map(|u| u.0.clone());
+      let _ = install_commands(&ctx, &caps, procs);
     })
     .await;
   }
@@ -862,6 +879,21 @@ fn install_vars(ctx: &Ctx<'_>, vars: Arc<dyn VarsStore>) -> rquickjs::Result<()>
   }
 
   ctx.globals().set("vars", obj)?;
+  crate::bindings::runtime::mirror_global(ctx, "vars")?;
+  Ok(())
+}
+
+fn install_commands(
+  ctx: &Ctx<'_>,
+  caps: &ScriptCaps,
+  procs: Option<Arc<crate::session_procs::SessionProcs>>,
+) -> rquickjs::Result<()> {
+  let commands = rquickjs::class::Class::instance(
+    ctx.clone(),
+    crate::bindings::PluginCommandsJs::new(Arc::new(caps.commands.clone()), procs),
+  )?;
+  ctx.globals().set("commands", commands)?;
+  crate::bindings::runtime::mirror_global(ctx, "commands")?;
   Ok(())
 }
 
@@ -958,6 +990,7 @@ fn install_fs(ctx: &Ctx<'_>, sandbox: Arc<PathSandbox>) -> rquickjs::Result<()> 
   obj.set("root", sandbox.root().to_string_lossy().into_owned())?;
 
   ctx.globals().set("fs", obj)?;
+  crate::bindings::runtime::mirror_global(ctx, "fs")?;
   Ok(())
 }
 

@@ -5,7 +5,9 @@ in Rust at the binding boundary. The handler source cannot grant itself
 authority it did not declare.
 
 ```ts
-defineTool({
+import { tool } from "ferridriver";
+
+tool({
   name: "git.sha",
   allow: {
     commands: {
@@ -37,6 +39,25 @@ defineTool({
 A name → command map. The handler may only run commands it declared
 (default-deny). Each value is a **shorthand string** (a `sh -c` line)
 or a **spec object**.
+
+The same command schema is available to first-party scripts and BDD
+step files through config:
+
+```toml
+[scripting.allow.commands]
+headSha = { run = ["git", "rev-parse", "HEAD"], output = "text" }
+```
+
+Then:
+
+```ts
+import { commands } from "ferridriver";
+
+const sha = await commands.run("headSha");
+```
+
+Plugin/tool handlers do **not** inherit these configured commands
+automatically; a tool still needs its own `allow.commands` declaration.
 
 ### Spec object fields
 
@@ -141,5 +162,5 @@ handle, so an `fs` scope would gate nothing.
 
 Call the built-in `ferridriver_extensions` MCP tool with
 `include_schema: true` to see every loaded extension, its tools, their
-`exposeAsTool` status, their `timeoutMs`, and their declared
+`exposeAsMcpTool` status, their `timeoutMs`, and their declared
 capabilities — useful for security review before deploying a server.

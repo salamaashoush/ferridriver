@@ -135,6 +135,7 @@ pub fn install(ctx: &Ctx<'_>, caps: &ScriptCaps, cwd: &str) -> rquickjs::Result<
   )?;
 
   g.set("process", p)?;
+  crate::bindings::runtime::mirror_global(ctx, "process")?;
   Ok(())
 }
 

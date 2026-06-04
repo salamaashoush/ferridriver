@@ -78,7 +78,7 @@ fn declared_sidecar_is_reachable_from_a_script() {
 
 /// The gateway extension (`fixtures/sidecar_gateway.ts`) is loaded via
 /// `--plugin` and drives the declared sidecar through its tools — the real
-/// deployed path (extension → `plugins['gateway.*']` → `sidecars`). Covers
+/// deployed path (extension → `tools['gateway.*']` → `sidecars`). Covers
 /// the event path (`on` + pushed frame) that deadlocked under the
 /// multi-threaded runtime before the pump moved onto `ctx.spawn`.
 fn gateway_fixture() -> PathBuf {
@@ -96,10 +96,10 @@ fn gateway_plugin_drives_sidecar_over_the_real_binary() {
   std::fs::write(dir.path().join("ferridriver.toml"), toml).unwrap();
 
   let script = "\
-    const ping = await plugins['gateway.ping']();\n\
-    const echoed = await plugins['gateway.call']({ method: 'echo', params: { n: 7 } });\n\
-    const evt = await plugins['gateway.roundtripEvent']({ event: 'tick', params: { event: 'tick', payload: { hits: 3 } } });\n\
-    await plugins['gateway.close']();\n\
+    const ping = await tools['gateway.ping']();\n\
+    const echoed = await tools['gateway.call']({ method: 'echo', params: { n: 7 } });\n\
+    const evt = await tools['gateway.roundtripEvent']({ event: 'tick', params: { event: 'tick', payload: { hits: 3 } } });\n\
+    await tools['gateway.close']();\n\
     return { ping, echoed, evt };";
 
   let out = Command::new(ferridriver_bin())

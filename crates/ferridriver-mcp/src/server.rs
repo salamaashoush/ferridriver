@@ -448,27 +448,26 @@ impl McpServer {
   }
 
   /// Discover and load every configured extension file as MCP tools.
-  /// `paths` come from the top-level `extensions` config (resolved by
-  /// the CLI), each a `.js`/`.mjs`/`.ts`/`.mts` file or a directory.
+  /// `specs` come from the top-level `extensions` config: each is a
+  /// source file, source directory, package directory, or ESM package
+  /// specifier resolved from `node_modules`.
   ///
   /// Failed extensions are logged and skipped -- one broken file should
   /// not prevent the server from starting. Successfully loaded tools are
   /// stored in `self.plugins` and become available as `run_script`
-  /// bindings (and, when `exposeAsTool`, as MCP tools).
-  pub async fn load_extensions(&mut self, paths: &[std::path::PathBuf]) {
-    if paths.is_empty() {
+  /// bindings (and, when `exposeAsMcpTool`, as MCP tools).
+  pub async fn load_extensions(&mut self, specs: &[String]) {
+    if specs.is_empty() {
       return;
     }
 
     // Discover every file across all configured roots, then bundle +
     // compile + extract the whole set in ONE batch runtime (rolldown ->
     // QuickJS bytecode; TypeScript and plugin-local imports resolved).
-    let mut files = Vec::new();
-    for root in paths {
-      match crate::plugin::discover(root) {
-        Ok(v) => files.extend(v),
-        Err(e) => tracing::warn!(path = %root.display(), error = %e, "plugin discovery failed; skipping path"),
-      }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let (files, discovery_errors) = crate::plugin::discover_specs(specs, &cwd);
+    for e in discovery_errors {
+      tracing::warn!(error = %e, "plugin discovery failed; skipping path");
     }
     if files.is_empty() {
       return;
@@ -488,9 +487,9 @@ impl McpServer {
   }
 
   /// Register a dynamic tool route for each plugin manifest that declares
-  /// `exposeAsTool: true`. The tool's name, description, and `inputSchema`
+  /// `exposeAsMcpTool: true`. The tool's name, description, and `inputSchema`
   /// come from the manifest. The dispatcher synthesises a one-line script
-  /// that awaits the matching binding (`await plugins['<name>'](args[0])`)
+  /// that awaits the matching binding (`await tools.<namespace>(args[0])`)
   /// so the tool path and the `run_script` binding path share one handler.
   fn promote_plugins(&mut self) {
     use rmcp::handler::server::router::tool::ToolRoute;
@@ -541,7 +540,7 @@ impl McpServer {
   }
 
   /// Invoke a plugin by manifest name with the given argument object.
-  /// Backs both the `exposeAsTool` registration and any direct caller
+  /// Backs both the `exposeAsMcpTool` registration and any direct caller
   /// that wants to dispatch a plugin without writing JS by hand.
   ///
   /// `args_obj` is wrapped into a single positional `args[0]` for the
@@ -585,7 +584,7 @@ impl McpServer {
     let context = self.mcp_run_context(&session).await?;
 
     let name_literal = serde_json::to_string(plugin_name).unwrap_or_else(|_| "\"\"".into());
-    let source = format!("return await plugins[{name_literal}](args[0]);");
+    let source = format!("return await tools[{name_literal}](args[0]);");
     let args = vec![args_obj];
 
     let result = self

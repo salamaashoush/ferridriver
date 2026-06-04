@@ -89,10 +89,21 @@ catching protocol exceptions.
 | `fetch` / `Headers` / `Request` / `Response` / `AbortController` / `AbortSignal` / `Blob` / `FormData` / `ReadableStream` | Standard web APIs — see [Sandbox](/scripting/sandbox) |
 | `process` | Sandbox-safe subset. `process.env` is `{}` by default; opt-in keys via `[scripting] allowEnv` |
 | `expect` | Auto-retrying matchers — same as Rust `ferridriver-expect`, callable from JS |
+| `commands` | Sandboxed command runner from `[scripting.allow.commands]`: `run`, `start`, `status`, `stop` |
+| `tools` | Callable extension/tool namespace. A tool named `box.login` is available as `tools.box.login(args)` |
+| `ferridriver` | Canonical host object. Mirrors `host`, `commands`, `fs`, `vars`, `sidecars`, `artifacts`, `bdd`, `tool`, `tools`, and live browser bindings |
 
 `ES module import './foo.js'` resolves inside `script_root` with the
-same sandbox rules. Bare specifiers (`import 'lodash'`) are rejected —
-no `node_modules` resolution at runtime.
+same sandbox rules. Bare runtime modules are limited to ferridriver's
+shims:
+
+```js
+import { commands, fs, vars, tool, tools, bdd } from "ferridriver";
+import { Given, When, Then } from "@cucumber/cucumber";
+```
+
+Other bare specifiers (`import 'lodash'`) are rejected — no
+`node_modules` resolution at runtime.
 
 ## Examples
 

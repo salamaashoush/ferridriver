@@ -1,8 +1,8 @@
-//! Introspection tool: list the extensions/plugins loaded at startup.
+//! Introspection tool: list the extensions loaded at startup.
 //!
-//! Before this, the only signal that a plugin loaded (or failed to) was
+//! Before this, the only signal that an extension loaded (or failed to) was
 //! a `tracing` line at boot. This surfaces the live registry to the
-//! client so an agent can discover available plugin tools and their
+//! client so an agent can discover available tools and their
 //! declared capabilities without restarting the server to read logs.
 
 use rmcp::{
@@ -26,10 +26,10 @@ pub struct ExtensionsParams {
 impl McpServer {
   #[tool(
     name = "ferridriver_extensions",
-    description = "List the extensions/plugins loaded at server startup: for each source file, \
+    description = "List the extensions loaded at server startup: for each source file, \
     the tools it declares with their description, whether they are exposed as first-class MCP \
     tools, the per-tool timeout, and the declared capability allow-lists (exec command names, \
-    net host patterns). Use to discover available plugin tools and audit what authority each \
+    net host patterns). Use to discover available tools and audit what authority each \
     one was granted."
   )]
   async fn ferridriver_extensions(
@@ -52,7 +52,7 @@ impl McpServer {
             let mut obj = serde_json::json!({
               "name": t.name,
               "description": t.description,
-              "exposeAsTool": t.expose_as_tool,
+              "exposeAsMcpTool": t.expose_as_mcp_tool,
               "timeoutMs": t.timeout_ms,
               "allow": {
                 "commands": command_names,

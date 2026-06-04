@@ -8,7 +8,7 @@ it to four first-class surfaces. All four share one bundler
 |----------------------|--------------------------------------|----------------|
 | **MCP `run_script`** | tool call from an LLM client          | sandboxed JavaScript against the live browser session |
 | **BDD JS / TS steps**| `ferridriver bdd --steps 'steps/**/*.{js,ts}'` | `Given` / `When` / `Then` step bodies for `.feature` files |
-| **Extensions**       | `extensions = ["..."]` in `ferridriver.toml` | `.ts` / `.js` files that register MCP tools (`defineTool`) and / or BDD steps |
+| **Extensions**       | `extensions = ["@scope/pkg", "./extensions"]` in `ferridriver.toml` | ESM packages or source files that register MCP tools (`tool`) and / or BDD steps |
 | **Standalone scripts** | `ferridriver run script.ts`        | Playwright-style scripts with `chromium()` / `firefox()` / `webkit()` globals |
 
 All four reach the same Rust core (`Page`, `BrowserContext`, `Locator`,
@@ -26,11 +26,13 @@ source files (.js / .ts / .mjs / .tsx / ...)
         │
         ▼  Module::load per session VM (no re-parse, no resolver — imports already inlined)
         │
-        ▼  top-level Given() / defineTool() side effects populate the Rust ExtensionRegistry
+        ▼  top-level Given() / tool() side effects populate the Rust ExtensionRegistry
 ```
 
-- **Imports work.** `import './helpers.ts'`, `import pkg from 'some-dep'`
-  — all bundled and tree-shaken.
+- **Imports work.** `import './helpers.ts'`, `import pkg from 'some-dep'`,
+  and `import { tool, bdd } from 'ferridriver'` are bundled and
+  tree-shaken. Cucumber-compatible code can import from
+  `@cucumber/cucumber`.
 - **No Node, no Bun in the run path.** Rolldown runs `Platform::Neutral`;
   QuickJS has no Node builtins.
 - **Bytecode is cached in-memory and on disk.** An in-process cache
@@ -64,7 +66,7 @@ source files (.js / .ts / .mjs / .tsx / ...)
 
 ## Pages in this section
 
-- [Extensions](/scripting/extensions) — `defineTool`, `exposeAsTool`,
+- [Extensions](/scripting/extensions) — `tool`, `exposeAsMcpTool`,
   `ferridriver.host`, handler context, lifecycle.
 - [BDD JS / TS API](/scripting/bdd-js-api) — full Cucumber-shaped
   reference: `Given` / `When` / `Then` / `defineStep`, hooks, World,

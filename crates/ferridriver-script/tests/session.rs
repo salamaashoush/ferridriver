@@ -16,6 +16,9 @@ use ferridriver_script::{
 const DEMO_PLUGIN: &str = "defineTool({ name: 'demo', handler: async ({ args }) => { \
   globalThis.__n = (globalThis.__n || 0) + 1; return { n: globalThis.__n, got: args }; } });";
 
+const BOX_PLUGIN: &str =
+  "defineTool({ name: 'box.login', handler: async ({ args }) => ({ ok: true, user: args.user }) });";
+
 /// Bundle + compile the demo plugin through the production pipeline
 /// (rolldown -> bytecode) and wrap it as a `PluginBinding`.
 async fn demo_binding() -> (tempfile::TempDir, PluginBinding) {
@@ -52,7 +55,7 @@ async fn run_demo_plugin_twice() {
 
   let r1 = session
     .execute(
-      "return await plugins['demo']({ x: 1 });",
+      "return await tools['demo']({ x: 1 });",
       &[],
       RunOptions::default(),
       &ctx,
@@ -67,7 +70,7 @@ async fn run_demo_plugin_twice() {
   // `globalThis` state — proves plugin install-once + persistent VM.
   let r2 = session
     .execute(
-      "return await plugins['demo']({ x: 2 });",
+      "return await tools['demo']({ x: 2 });",
       &[],
       RunOptions::default(),
       &ctx,
@@ -76,6 +79,61 @@ async fn run_demo_plugin_twice() {
   match r2.result.outcome {
     Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "n": 2, "got": { "x": 2 } })),
     Outcome::Error { error } => panic!("plugin call 2 failed: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dotted_tool_names_are_projected_as_namespaces() {
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let path = tmp.path().join("box.js");
+  std::fs::write(&path, BOX_PLUGIN).expect("write plugin");
+  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let cp = compiled.into_iter().next().expect("one compiled plugin");
+
+  let sb_tmp = tempfile::tempdir().expect("tempdir");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: vec![PluginBinding { bytecode: cp.bytecode }],
+    trusted_modules: false,
+    host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+  let r = session
+    .execute(
+      "return { \
+        flat: await tools['box.login']({ user: 'a' }), \
+        nested: await tools.box.login({ user: 'b' }), \
+        tools: await tools.box.login({ user: 'c' }), \
+        ferridriver: await ferridriver.tools.box.login({ user: 'd' }), \
+        global: await box.login({ user: 'e' }) \
+      };",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => assert_eq!(
+      success.value,
+      serde_json::json!({
+        "flat": { "ok": true, "user": "a" },
+        "nested": { "ok": true, "user": "b" },
+        "tools": { "ok": true, "user": "c" },
+        "ferridriver": { "ok": true, "user": "d" },
+        "global": { "ok": true, "user": "e" }
+      })
+    ),
+    Outcome::Error { error } => panic!("namespaced plugin failed: {error:?}"),
   }
 }
 
@@ -94,7 +152,7 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
     tmp.path().join("plug.ts"),
     "import { tag } from './helper';\n\
      interface In { n: number }\n\
-     defineTool({ name: 'ts', exposeAsTool: true, \
+     defineTool({ name: 'ts', exposeAsMcpTool: true, \
        async handler({ args }: { args: In }) { return { tag: tag(args.n) }; } });\n",
   )
   .expect("write plugin");
@@ -121,12 +179,7 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
     .await
     .expect("session create");
   let r = session
-    .execute(
-      "return await plugins['ts']({ n: 7 });",
-      &[],
-      RunOptions::default(),
-      &ctx,
-    )
+    .execute("return await tools['ts']({ n: 7 });", &[], RunOptions::default(), &ctx)
     .await;
   match r.result.outcome {
     Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "tag": "t7" })),
@@ -174,7 +227,7 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
   // Disallowed host: rejected by the capability guard, no call made.
   let blocked = session
     .execute(
-      "return await plugins['net']({ url: 'http://blocked.test/' });",
+      "return await tools['net']({ url: 'http://blocked.test/' });",
       &[],
       RunOptions::default(),
       &ctx,
@@ -195,7 +248,7 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
   // for a non-capability reason (connection refused on port 1).
   let allowed = session
     .execute(
-      "return await plugins['net']({ url: 'http://127.0.0.1:1/' });",
+      "return await tools['net']({ url: 'http://127.0.0.1:1/' });",
       &[],
       RunOptions::default(),
       &ctx,
@@ -253,7 +306,7 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
   // Disallowed host: rejected by the capability guard before any I/O.
   let blocked = session
     .execute(
-      "return await plugins['netf']({ url: 'http://blocked.test/' });",
+      "return await tools['netf']({ url: 'http://blocked.test/' });",
       &[],
       RunOptions::default(),
       &ctx,
@@ -272,7 +325,7 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
   // a non-capability reason (connection refused on port 1).
   let allowed = session
     .execute(
-      "return await plugins['netf']({ url: 'http://127.0.0.1:1/' });",
+      "return await tools['netf']({ url: 'http://127.0.0.1:1/' });",
       &[],
       RunOptions::default(),
       &ctx,
@@ -333,8 +386,8 @@ async fn fetch_net_policy_does_not_leak_between_concurrent_tools() {
   let r = session
     .execute(
       "const [a, b] = await Promise.all([ \
-         plugins['restricted']({ url: 'http://blocked.test/' }), \
-         plugins['open']({ url: 'http://127.0.0.1:1/' }) ]); \
+         tools['restricted']({ url: 'http://blocked.test/' }), \
+         tools['open']({ url: 'http://127.0.0.1:1/' }) ]); \
        return { restricted: a, open: b };",
       &[],
       RunOptions::default(),
@@ -363,7 +416,7 @@ async fn extension_branches_on_ferridriver_host_flag() {
   // One extension file, two contributions gated on the native
   // `ferridriver.host` flag: a tool only under MCP, a step only under
   // BDD. Under host=Mcp the tool registers (callable); under host=Bdd
-  // it does NOT (the `plugins.<name>` binding is absent).
+  // it does NOT (the `tools.<name>` binding is absent).
   const EXT: &str = "if (ferridriver.host === 'mcp') { \
       defineTool({ name: 'mcpOnly', handler: async () => 'tool-ran' }); \
     } \
@@ -401,7 +454,7 @@ async fn extension_branches_on_ferridriver_host_flag() {
     .await
     .expect("session create");
   let r = session
-    .execute("return await plugins['mcpOnly']({});", &[], RunOptions::default(), &ctx)
+    .execute("return await tools['mcpOnly']({});", &[], RunOptions::default(), &ctx)
     .await;
   match r.result.outcome {
     Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("tool-ran")),
@@ -414,7 +467,7 @@ async fn extension_branches_on_ferridriver_host_flag() {
     .await
     .expect("session create");
   let r = session
-    .execute("return typeof plugins['mcpOnly'];", &[], RunOptions::default(), &ctx)
+    .execute("return typeof tools['mcpOnly'];", &[], RunOptions::default(), &ctx)
     .await;
   match r.result.outcome {
     Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("undefined")),
@@ -796,7 +849,7 @@ async fn duplicate_tool_name_is_rejected_at_load() {
 #[tokio::test(flavor = "multi_thread")]
 async fn per_tool_timeout_ms_is_enforced_for_every_caller() {
   // `timeoutMs` races the handler natively in dispatch_tool, so the
-  // bound holds for an in-VM `plugins.<name>()` call (not only the MCP
+  // bound holds for an in-VM `tools.<name>()` call (not only the MCP
   // entry point). A handler that sleeps past the bound rejects; a fast
   // one resolves.
   let (_tmp, binding) = binding_from(
@@ -828,7 +881,7 @@ async fn per_tool_timeout_ms_is_enforced_for_every_caller() {
 
   let slow = session
     .execute(
-      "try { await plugins['slow'](); return 'resolved'; } catch (e) { return String(e); }",
+      "try { await tools['slow'](); return 'resolved'; } catch (e) { return String(e); }",
       &[],
       RunOptions::default(),
       &ctx,
@@ -846,7 +899,7 @@ async fn per_tool_timeout_ms_is_enforced_for_every_caller() {
   }
 
   let fast = session
-    .execute("return await plugins['fast']();", &[], RunOptions::default(), &ctx)
+    .execute("return await tools['fast']();", &[], RunOptions::default(), &ctx)
     .await;
   match fast.result.outcome {
     Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("quick")),

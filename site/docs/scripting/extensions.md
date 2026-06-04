@@ -3,7 +3,7 @@
 An **extension** is a single JavaScript or TypeScript file that
 contributes at runtime to one or more ferridriver hosts:
 
-- **MCP server** (`ferridriver mcp`) — registers tools via `defineTool(...)`.
+- **MCP server** (`ferridriver mcp`) — registers tools via `tool(...)`.
 - **BDD test runner** (`ferridriver bdd`) — registers Cucumber step
   definitions, hooks, and parameter types via `Given` / `When` / `Then` /
   `Before` / `After` / `defineParameterType` / `setWorldConstructor` / `setDefaultTimeout`.
@@ -15,7 +15,7 @@ global to decide which contributions apply where.
 
 ## Mental model
 
-Registration functions (`defineTool`, `Given`, `Before`, …) are
+Registration functions (`tool`, `Given`, `Before`, …) are
 **native Rust functions**, not JS shims. Calling them at the top level
 of your module pushes an entry into a Rust-owned registry. Hosts read
 back the kinds they care about and invoke your handler natively — the
@@ -32,8 +32,11 @@ or `"script"`. Gate your registrations so one file does not pollute the
 wrong host:
 
 ```ts
+import { tool } from "ferridriver";
+import { Given } from "@cucumber/cucumber";
+
 if (ferridriver.host === "mcp") {
-  defineTool({
+  tool({
     name: "box.login",
     description: "Log a test user in and return the session cookie",
     inputSchema: {
@@ -61,25 +64,28 @@ if (ferridriver.host === "bdd") {
 Registering for the wrong host is harmless (the host ignores kinds it
 does not consume), but it wastes work and muddies intent.
 
-## `defineTool`
+## `tool`
 
 Two equivalent forms:
 
 ```ts
 // Inline handler on the manifest object
-defineTool({
+tool({
   name: "vendor.area.action",   // required, globally unique
   description: "...",            // optional, surfaced in tools/list
   inputSchema: { ... },          // optional JSON Schema; ENFORCED
-  exposeAsTool: true,            // optional, default false
+  exposeAsMcpTool: true,         // optional, default false
   timeoutMs: 30000,              // optional per-invocation timeout
   allow: { ... },                // optional capability manifest
   handler: async (ctx) => { ... },
 });
 
 // Or manifest + separate handler
-defineTool(manifest, async (ctx) => { ... });
+tool(manifest, async (ctx) => { ... });
 ```
+
+`defineTool(...)` remains as a global compatibility alias for
+`ferridriver.tool(...)` / `tool(...)`.
 
 ### Fields
 
@@ -89,17 +95,20 @@ defineTool(manifest, async (ctx) => { ... });
 | description    | `description`    | none    | Shown in MCP `tools/list`. |
 | input schema   | `inputSchema`    | none    | JSON Schema. **Enforced** — non-conforming calls rejected before the handler. |
 | allow          | `allow`          | `{}`    | Capability manifest. See [Capabilities](/scripting/capabilities). |
-| expose as tool | `exposeAsTool`   | `false` | Promote to a first-class MCP tool. |
+| expose as MCP tool | `exposeAsMcpTool` | `false` | Promote to a first-class MCP tool. |
 | timeout ms     | `timeoutMs`      | none    | Per-invocation handler timeout (ms); enforced for every caller. |
 
-### `exposeAsTool`
+### `exposeAsMcpTool`
 
 - `false` (default): the tool is callable from other extension / script
-  code as `await plugins["name"](args)`, but **not** advertised in the
-  MCP server's `tools/list`. Use for shared helpers.
+  code as `await tools.vendor.area.action(args)`, but **not** advertised
+  in the MCP server's `tools/list`. Use for shared helpers.
 - `true`: additionally promoted to a first-class MCP tool. `name`,
   `description`, and `inputSchema` become the tool contract. The tool
-  call and the `plugins[...]` binding route through the same handler.
+  call and the script binding route through the same handler.
+
+Dotted names are projected to namespaces: `tools.box.login(args)` and
+`box.login(args)` both call a tool named `box.login`.
 
 ### Handler context
 
@@ -125,11 +134,10 @@ tool error and the handler is never entered.
 Extensions are configured in `ferridriver.toml`:
 
 ```toml
-# Files or directories. A directory is scanned RECURSIVELY for any
-# source file (.js .cjs .mjs .jsx .ts .cts .mts .tsx). Used by the MCP
-# server (tools) AND, bundled alongside BDD step files, by the test
+# ESM packages, package subpaths, files, or directories. Used by the
+# MCP server (tools) AND, bundled alongside BDD step files, by the test
 # runner (steps).
-extensions = ["./extensions", "./tools/box-login.ts"]
+extensions = ["@acme/ferridriver-box", "@acme/ferridriver-box/login", "./extensions", "./tools/box-login.ts"]
 
 [scripting]
 # Sandbox relaxations — default-deny, like allow.net.
@@ -148,9 +156,21 @@ steps = ["features/steps/**/*.ts"]
 `extensions` into one module, so an extension's `Given` / `When` /
 `Then` are available to tests exactly like a step file's.
 
-Both discovery paths (MCP loader and BDD runner) share one
-accepted-extension set and one recursive walk — a `.tsx` / `.cts`
-extension is visible identically to both hosts.
+Package entries use standard ESM package metadata:
+
+- `exports` is preferred, including conditional `import` / `default`.
+- `module` is accepted.
+- `main` is accepted only when it points at an ESM source entry.
+- `index.mjs`, `index.mts`, `index.ts`, and `index.js` are used as
+  fallback entries; `.js` requires `"type": "module"`.
+
+CommonJS entries are intentionally rejected. There is no ferridriver
+manifest field; use normal `package.json` ESM metadata.
+
+Both discovery paths (MCP loader and BDD runner) share the same package
+resolver, accepted-extension set, and recursive walk. A package, package
+subpath, `.tsx`, or `.cts` extension is visible identically to both
+hosts.
 
 ## Runtime guarantees
 
@@ -170,9 +190,11 @@ extension is visible identically to both hosts.
 4. **`timeoutMs` is honoured for every caller** — whether the tool is
    invoked as a promoted MCP tool or by another extension. Without it,
    only the session-wide script timeout applies.
-5. **Discovery is recursive and uniform.** A configured directory is
-   scanned recursively; `.js .cjs .mjs .jsx .ts .cts .mts .tsx` are
-   all accepted, the same way for the MCP server and the test runner.
+5. **Discovery is recursive and uniform.** Configured ESM packages,
+   package subpaths, files, and directories resolve the same way for
+   the MCP server and the test runner. Directories are scanned
+   recursively; `.js .cjs .mjs .jsx .ts .cts .mts .tsx` source files
+   are all accepted.
 6. **You can inspect what loaded.** The built-in
    `ferridriver_extensions` MCP tool lists every loaded extension file,
    its tools, descriptions, whether each is exposed, its timeout, and

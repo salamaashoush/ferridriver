@@ -123,21 +123,10 @@ pub fn discover_step_files(globs: &[String], cwd: &Path) -> Vec<PathBuf> {
 /// plugin loader uses, so one extension serves both hosts). A file the
 /// user named explicitly is taken as-is regardless of extension.
 pub fn discover_extension_files(paths: &[String], cwd: &Path) -> Vec<PathBuf> {
-  let mut files = Vec::new();
-  for raw in paths {
-    let p = if Path::new(raw).is_absolute() {
-      PathBuf::from(raw)
-    } else {
-      cwd.join(raw)
-    };
-    match std::fs::metadata(&p) {
-      Ok(m) if m.is_file() => files.push(p),
-      Ok(m) if m.is_dir() => files.extend(walk_source_files(&p)),
-      _ => {},
-    }
+  let (files, errors) = ferridriver_script::discover::resolve_extension_specs(paths, cwd);
+  for (spec, err) in errors {
+    tracing::warn!(extension = %spec, error = %err.message, "extension discovery failed; skipping");
   }
-  files.sort();
-  files.dedup();
   files
 }
 

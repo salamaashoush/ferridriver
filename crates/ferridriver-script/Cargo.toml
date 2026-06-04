@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 ferridriver = { workspace = true }
+ferridriver-config = { workspace = true }
 ferridriver-expect = { workspace = true }
 
 tokio = { workspace = true }
@@ -53,6 +54,7 @@ rquickjs-extra-console = "0.2"
 # bytecode once.
 rolldown = "1"
 rolldown_common = "1"
+rolldown_plugin = "1"
 # Remap QuickJS error line:col (bundled output) back to original .ts/.js.
 sourcemap = "9"
 

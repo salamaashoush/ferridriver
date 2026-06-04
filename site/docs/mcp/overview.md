@@ -57,7 +57,7 @@ session: "staging:qa"     context "qa" on Chrome instance "staging"
 ## Extensions
 
 JS / TS extension files can register additional MCP tools via
-`defineTool` and / or BDD steps via `Given` / `When` / `Then`. They run
+`tool` and / or BDD steps via `Given` / `When` / `Then`. They run
 on the same QuickJS engine as `run_script` and BDD step bodies. See
 [`docs/extensions.md`](https://github.com/salamaashoush/ferridriver/blob/main/docs/extensions.md)
 for the authoring contract (manifest, capabilities, `allow.commands`,

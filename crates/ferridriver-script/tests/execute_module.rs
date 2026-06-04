@@ -95,3 +95,41 @@ async fn module_without_default_export_yields_null() {
     Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
   }
 }
+
+#[tokio::test]
+async fn bundled_module_can_import_ferridriver_and_cucumber_shims() {
+  let dir = tempfile::tempdir().expect("tempdir");
+  let entry = dir.path().join("main.ts");
+  std::fs::write(
+    &entry,
+    r#"
+      import { tool, bdd } from "ferridriver";
+      import { Given } from "@cucumber/cucumber";
+
+      export default {
+        tool: typeof tool,
+        bdd: typeof bdd.Given,
+        same: Given === bdd.Given,
+      };
+    "#,
+  )
+  .expect("entry");
+
+  let bundle = bundle_and_compile(std::slice::from_ref(&entry), dir.path())
+    .await
+    .expect("bundle");
+  let context = ctx(dir.path());
+  let session = Session::create(ScriptEngineConfig::default(), &context)
+    .await
+    .expect("session");
+  let run = session
+    .execute_module(&bundle, &[], RunOptions::default(), &context)
+    .await;
+  match run.result.outcome {
+    Outcome::Ok { success, .. } => assert_eq!(
+      success.value,
+      serde_json::json!({ "tool": "function", "bdd": "function", "same": true })
+    ),
+    Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
+  }
+}

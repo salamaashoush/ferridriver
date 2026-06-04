@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct PluginManifest {
   /// Globally unique handler name. Used as the binding key under the
-  /// `plugins` global (`plugins['box.login']`) and as the MCP tool name
-  /// when `expose_as_tool` is true. Dot-separated namespacing is recommended.
+  /// `tools` namespace (`tools.box.login`) and as the MCP tool name when
+  /// `expose_as_mcp_tool` is true. Dot-separated namespacing is recommended.
   pub name: String,
 
   /// Human-readable description. Surfaced in `tools/list` when the plugin
@@ -41,11 +41,12 @@ pub struct PluginManifest {
   #[serde(default)]
   pub allow: PluginAllow,
 
-  /// When true, the plugin is registered as a first-class MCP tool with
+  /// When true, the extension is registered as a first-class MCP tool with
   /// `name` as the tool name. Both the tool invocation and the binding
   /// invocation route through the same handler.
   #[serde(default)]
-  pub expose_as_tool: bool,
+  #[serde(alias = "exposeAsTool")]
+  pub expose_as_mcp_tool: bool,
 
   /// Optional per-invocation handler timeout (milliseconds). Enforced
   /// natively for every caller in `plugins::dispatch_tool` (the handler
@@ -97,6 +98,6 @@ impl PluginManifest {
   /// Returns `true` when the plugin should be surfaced in `tools/list`.
   #[must_use]
   pub fn is_tool(&self) -> bool {
-    self.expose_as_tool
+    self.expose_as_mcp_tool
   }
 }

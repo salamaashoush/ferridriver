@@ -13,7 +13,7 @@
 //! 2. **Multiple tools, plain array** -- `globalThis.exports = [ {...},
 //!    {...} ]`.
 //! 3. **Single tool** -- `globalThis.exports = { name, description,
-//!    inputSchema, allow, exposeAsTool, handler }`. Treated as
+//!    inputSchema, allow, exposeAsMcpTool, handler }`. Treated as
 //!    `tools: [exports]`.
 //!
 //! Each manifest's `handler` is stripped during extraction (functions
@@ -145,4 +145,18 @@ pub fn discover(path: &Path) -> Result<Vec<PathBuf>, PluginLoadError> {
   }
 
   Ok(walk_source_files(path))
+}
+
+/// Resolve configured extension specifiers (paths or ESM packages) to
+/// concrete entry files.
+pub fn discover_specs(specs: &[String], cwd: &Path) -> (Vec<PathBuf>, Vec<PluginLoadError>) {
+  let (files, errors) = ferridriver_script::discover::resolve_extension_specs(specs, cwd);
+  let errors = errors
+    .into_iter()
+    .map(|(spec, e)| PluginLoadError::Bundle {
+      path: PathBuf::from(spec),
+      message: e.message,
+    })
+    .collect();
+  (files, errors)
 }
