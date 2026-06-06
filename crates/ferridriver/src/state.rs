@@ -1119,6 +1119,14 @@ async fn discover_ws_from_http(http_url: &str) -> Result<String> {
   let stream = tokio::net::TcpStream::connect(host_port)
     .await
     .map_err(|e| FerriError::backend(format!("Cannot connect to {host_port}: {e}")))?;
+  // Chrome advertises `webSocketDebuggerUrl` as `ws://localhost:PORT/...` even
+  // though it binds only the loopback address it actually listens on. On a
+  // dual-stack host `localhost` resolves to `::1` first, so following the
+  // advertised host stalls the ws upgrade. Pin the ws authority to the address
+  // this HTTP request actually reached.
+  let peer_addr = stream
+    .peer_addr()
+    .map_err(|e| FerriError::backend(format!("peer_addr for {host_port}: {e}")))?;
   let (reader, mut writer) = stream.into_split();
   let req = format!("GET /json/version HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
   writer
@@ -1156,11 +1164,25 @@ async fn discover_ws_from_http(http_url: &str) -> Result<String> {
   let json: serde_json::Value =
     serde_json::from_str(&body_str).map_err(|e| FerriError::Backend(format!("Parse /json/version: {e}")))?;
 
-  json
+  let ws_url = json
     .get("webSocketDebuggerUrl")
     .and_then(|v| v.as_str())
-    .map(std::string::ToString::to_string)
-    .ok_or_else(|| FerriError::backend("No webSocketDebuggerUrl in /json/version"))
+    .ok_or_else(|| FerriError::backend("No webSocketDebuggerUrl in /json/version"))?;
+
+  Ok(pin_ws_authority(ws_url, peer_addr))
+}
+
+/// Replace the host:port authority of a `ws://`/`wss://` URL with `addr`,
+/// preserving the scheme and path. Returns the URL unchanged if it does not
+/// look like a ws URL with an authority.
+fn pin_ws_authority(ws_url: &str, addr: std::net::SocketAddr) -> String {
+  for scheme in ["ws://", "wss://"] {
+    if let Some(rest) = ws_url.strip_prefix(scheme) {
+      let path = rest.find('/').map_or("", |i| &rest[i..]);
+      return format!("{scheme}{addr}{path}");
+    }
+  }
+  ws_url.to_string()
 }
 
 /// Discover a running Chrome instance by reading its `DevToolsActivePort` file.
@@ -1815,6 +1837,35 @@ mod tests {
   use std::sync::Arc;
 
   use super::*;
+
+  #[test]
+  fn pin_ws_authority_rewrites_advertised_localhost_host() {
+    let addr = "127.0.0.1:9222".parse().unwrap();
+    // Chrome advertises localhost; the actual listener is 127.0.0.1.
+    assert_eq!(
+      pin_ws_authority("ws://localhost:9222/devtools/browser/abc-123", addr),
+      "ws://127.0.0.1:9222/devtools/browser/abc-123"
+    );
+    // Path-less and wss variants are handled; non-ws input is untouched.
+    assert_eq!(pin_ws_authority("ws://localhost:9222", addr), "ws://127.0.0.1:9222");
+    assert_eq!(
+      pin_ws_authority("wss://localhost:9222/x", addr),
+      "wss://127.0.0.1:9222/x"
+    );
+    assert_eq!(
+      pin_ws_authority("http://localhost:9222/x", addr),
+      "http://localhost:9222/x"
+    );
+  }
+
+  #[test]
+  fn pin_ws_authority_preserves_ipv6_literal() {
+    let addr: std::net::SocketAddr = "[::1]:9222".parse().unwrap();
+    assert_eq!(
+      pin_ws_authority("ws://localhost:9222/devtools/browser/x", addr),
+      "ws://[::1]:9222/devtools/browser/x"
+    );
+  }
   use crate::backend::BackendKind;
 
   /// Test helper: build a `BrowserState` with the minimum `LaunchPlan`
