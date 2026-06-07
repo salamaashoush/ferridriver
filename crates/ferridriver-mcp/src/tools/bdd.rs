@@ -43,24 +43,32 @@ use crate::server::{McpServer, sess};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RunBddParams {
-  #[schemars(description = "Inline Gherkin feature text to run. Mutually exclusive with `features`. \
+  #[schemars(
+    description = "Inline Gherkin feature text to run. Mutually exclusive with `features`. \
     Example: 'Feature: Login\\n  Scenario: Valid login\\n    Given I navigate to \"https://example.com\"\\n    \
-    Then \"h1\" should contain text \"Example\"'. Parsed as a single feature.")]
+    Then \"h1\" should contain text \"Example\"'. Parsed as a single feature."
+  )]
   pub gherkin: Option<String>,
 
-  #[schemars(description = "Feature file globs or paths, e.g. ['tests/features/**/*.feature']. A directory \
+  #[schemars(
+    description = "Feature file globs or paths, e.g. ['tests/features/**/*.feature']. A directory \
     expands to '<dir>/**/*.feature'. Mutually exclusive with `gherkin`. When both are omitted, the configured \
-    [test].features globs are used. Globs resolve against the MCP server's working directory.")]
+    [test].features globs are used. Globs resolve against the MCP server's working directory."
+  )]
   pub features: Option<Vec<String>>,
 
-  #[schemars(description = "JavaScript/TypeScript step-definition file globs (cucumber-js style), e.g. \
+  #[schemars(
+    description = "JavaScript/TypeScript step-definition file globs (cucumber-js style), e.g. \
     ['steps/**/*.ts']. Overrides [test].steps. These are ADDED ON TOP of the always-available built-in Rust \
-    steps, so a scenario can mix both. Resolved against the server's working directory.")]
+    steps, so a scenario can mix both. Resolved against the server's working directory."
+  )]
   pub steps: Option<Vec<String>>,
 
-  #[schemars(description = "Session identifier (same as other tools, e.g. 'default' or 'instance:context'). \
+  #[schemars(
+    description = "Session identifier (same as other tools, e.g. 'default' or 'instance:context'). \
     The scenario runs on this session's CURRENT live page, with its existing cookies, storage and navigation \
-    state -- the same session `run_script` / `snapshot` / `click` use. Default: 'default'.")]
+    state -- the same session `run_script` / `snapshot` / `click` use. Default: 'default'."
+  )]
   pub session: Option<String>,
 
   #[schemars(description = "Tag filter expression, e.g. '@smoke and not @wip'. Omit to run all scenarios.")]
@@ -81,12 +89,16 @@ pub struct RunBddParams {
   #[schemars(description = "Per-step timeout in milliseconds (built-in Rust steps). Defaults to [test].timeout.")]
   pub step_timeout: Option<u64>,
 
-  #[schemars(description = "Gherkin keyword language for parsing feature FILES (e.g. 'en', 'de', 'fr'). \
-    Inline gherkin uses a '# language: xx' directive instead.")]
+  #[schemars(
+    description = "Gherkin keyword language for parsing feature FILES (e.g. 'en', 'de', 'fr'). \
+    Inline gherkin uses a '# language: xx' directive instead."
+  )]
   pub language: Option<String>,
 
-  #[schemars(description = "Cucumber world parameters as a JSON object, exposed to JS steps as `this.parameters`. \
-    Overrides [test].worldParameters.")]
+  #[schemars(
+    description = "Cucumber world parameters as a JSON object, exposed to JS steps as `this.parameters`. \
+    Overrides [test].worldParameters."
+  )]
   pub world_parameters: Option<serde_json::Value>,
 }
 
@@ -386,7 +398,10 @@ impl McpServer {
 
     // ── 6. Aggregate + return. ──
     let passed = out.iter().filter(|s| s.status == "passed").count();
-    let failed = out.iter().filter(|s| s.status == "failed" || s.status == "undefined").count();
+    let failed = out
+      .iter()
+      .filter(|s| s.status == "failed" || s.status == "undefined")
+      .count();
     let total = out.len();
     let skipped = total - passed - failed;
     let duration_ms: u128 = out.iter().map(|s| s.duration_ms).sum();

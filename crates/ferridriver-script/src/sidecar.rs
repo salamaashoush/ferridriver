@@ -45,7 +45,7 @@ pub enum SidecarError {
   Remote { code: i64, message: String },
 }
 
-/// How to launch a sidecar. The command's argv[0] is the program; the rest
+/// How to launch a sidecar. The command's `argv[0]` is the program; the rest
 /// are its arguments. fd 3/4 are wired by the transport, not via argv.
 #[derive(Clone, Debug)]
 pub struct SidecarSpec {
@@ -160,7 +160,7 @@ impl Sidecar {
   /// Send N requests as one batch: all frames are written in a single
   /// `write_all` (one syscall instead of N), all ids registered under one
   /// `pending` lock, then every response is awaited together. Responses are
-  /// still id-correlated by [`read_loop`], so the child may answer in any
+  /// still id-correlated by `read_loop`, so the child may answer in any
   /// order. Results are returned positionally (`results[i]` is the reply to
   /// `calls[i]`); a per-call `{error}` reply becomes `Err` in that slot
   /// without failing the batch. `timeout_ms` (0 = wait indefinitely) bounds

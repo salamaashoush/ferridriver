@@ -102,7 +102,11 @@ fn test_engine_is_reused(c: &mut McpClient) {
   };
 
   let r1 = call(c, "1");
-  assert_eq!(payload(&r1)["status"], "passed", "first run should see counter==1: {r1}");
+  assert_eq!(
+    payload(&r1)["status"],
+    "passed",
+    "first run should see counter==1: {r1}"
+  );
   // If the engine were rebuilt per call, the module would re-init counter to 0
   // and this would fail (it'd be 1, not 2). Passing proves the VM was reused.
   let r2 = call(c, "2");
