@@ -460,6 +460,14 @@ fn exec_command(command: &str) -> Result<Vec<String>, String> {
 mod tests {
   use super::*;
 
+  // Serialize tests that bind ephemeral 127.0.0.1:0 ports. Several assert a
+  // just-freed port is dead; without this, a sibling test binding :0 can grab
+  // that exact freed port and make the assertion flake.
+  static PORT_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+  fn port_guard() -> std::sync::MutexGuard<'static, ()> {
+    PORT_GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
   const TEST_DEFAULTS: &str = "Browser automation via the Model Context Protocol.";
 
   #[test]
@@ -653,6 +661,7 @@ mod tests {
 
   #[test]
   fn discover_command_returns_ws_url() {
+    let _net = port_guard();
     // A reachable port is required: discovery validates endpoint liveness.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -667,6 +676,7 @@ mod tests {
 
   #[test]
   fn discover_command_substitutes_instance() {
+    let _net = port_guard();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let mut config = McpConfig::default();
@@ -680,6 +690,7 @@ mod tests {
 
   #[test]
   fn discover_command_rejects_dead_endpoint() {
+    let _net = port_guard();
     // Bind then drop to obtain a port guaranteed not to be listening.
     let port = {
       let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -734,6 +745,7 @@ mod tests {
 
   #[test]
   fn unknown_instance_falls_through_to_discover_command() {
+    let _net = port_guard();
     let mut config = McpConfig::default();
     config.browser.instances.insert(
       "staging".into(),
@@ -797,6 +809,7 @@ mod tests {
 
   #[test]
   fn ws_endpoint_is_live_true_for_listening_port() {
+    let _net = port_guard();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     assert!(ws_endpoint_is_live(&format!(
@@ -806,6 +819,7 @@ mod tests {
 
   #[test]
   fn ws_endpoint_is_live_false_for_dead_port() {
+    let _net = port_guard();
     let port = {
       let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
       l.local_addr().unwrap().port()
@@ -825,6 +839,7 @@ mod tests {
 
   #[test]
   fn discover_command_evicts_stale_cache_entry() {
+    let _net = port_guard();
     // First discovery caches a live endpoint; after the listener drops, a second
     // resolve within TTL must not return the now-dead cached endpoint.
     let mut config = McpConfig::default();
@@ -848,6 +863,7 @@ mod tests {
 
   #[test]
   fn discover_command_does_not_cache_failure() {
+    let _net = port_guard();
     // Command emits a ws URL only once a sentinel file exists, simulating a
     // browser that is not up on the first resolve but appears before the second.
     // A negative result must not be cached for the TTL.
