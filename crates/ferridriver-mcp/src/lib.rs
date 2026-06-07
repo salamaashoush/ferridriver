@@ -9,6 +9,7 @@
 //! - Use [`McpServer::with_extension`] to attach custom state accessible
 //!   from tool handlers via [`McpServer::extension`].
 
+pub mod bdd_engine;
 pub mod config;
 pub mod mcp;
 pub mod params;

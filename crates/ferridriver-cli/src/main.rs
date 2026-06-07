@@ -467,6 +467,7 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   // launch the server with no config file at all.
   let sidecars = sidecar_specs(&config);
   let extensions = config.extensions.clone();
+  let test_config = config.test.clone();
   let scripting = config.scripting;
   let mcp = config.mcp;
   let backend = if mcp.browser.backend.is_some() {
@@ -485,7 +486,8 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
     ferridriver_script::ScriptCaps::resolve_with_commands(&scripting.allow_env, scripting.allow.commands.clone());
   let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(mcp))
     .with_script_caps(caps)
-    .with_sidecars(sidecars);
+    .with_sidecars(sidecars)
+    .with_test_config(test_config);
   server.load_extensions(&extensions).await;
   match args.transport.transport {
     cli::Transport::Stdio => ferridriver_mcp::mcp::serve_stdio_with(server).await,

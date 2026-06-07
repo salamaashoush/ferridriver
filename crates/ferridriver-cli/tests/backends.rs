@@ -583,3 +583,12 @@ backend_module!(cdp_pipe, "cdp-pipe");
 backend_module!(cdp_raw, "cdp-raw");
 backend_module!(webkit, "webkit");
 backend_module!(bidi, "bidi");
+
+// `run_bdd` runs on the live MCP session (the same browser the client
+// drives), reusing the BDD step engine. It is session-driven, not
+// backend-specific, so it runs once rather than per-backend.
+#[test]
+fn run_bdd_tool() {
+  let mut c = McpClient::new("cdp-pipe");
+  backends_support::bdd::run(&mut c);
+}

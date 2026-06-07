@@ -344,6 +344,27 @@ pub struct McpServer {
   /// Plugins discovered + parsed at startup. Empty by default; populated
   /// by [`McpServer::load_plugins`].
   pub(crate) plugins: crate::plugin::PluginRegistry,
+  /// Resolved `[test]` config (feature/step globs, browser, workers,
+  /// retries, reporters, ...). Default = `TestConfig::default()`; set by
+  /// [`McpServer::with_test_config`] from the operator's `ferridriver.toml`.
+  /// Used as the base config for the `run_bdd` tool so an MCP-driven BDD
+  /// run inherits the same `[test]` settings as the `ferridriver bdd` CLI.
+  pub(crate) test_config: ferridriver_test::config::TestConfig,
+  /// Top-level `extensions` specs (files/dirs/packages) recorded at
+  /// startup by [`McpServer::load_extensions`]. The `run_bdd` tool bundles
+  /// these alongside step globs so one extension serves MCP tools AND BDD
+  /// step definitions, exactly like the CLI.
+  pub(crate) extension_specs: Vec<String>,
+  /// The single cached BDD step engine for the `run_bdd` JS path — loaded
+  /// once, reused across calls and browser sessions, reloaded on a step-set
+  /// or source change. The lock is the build+run guard. See
+  /// [`crate::bdd_engine`].
+  pub(crate) bdd_engine: Arc<Mutex<crate::bdd_engine::BddEngine>>,
+  /// Built-in BDD step registry, built once (immutable) and shared by
+  /// every built-in-only `run_bdd` call. `StepRegistry::build()` walks
+  /// `inventory` + compiles cucumber expressions, so rebuilding it per
+  /// call is pure waste.
+  pub(crate) builtin_steps: Arc<std::sync::OnceLock<Arc<ferridriver_bdd::registry::StepRegistry>>>,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -459,6 +480,10 @@ impl McpServer {
       sessions,
       script_caps: ferridriver_script::ScriptCaps::default(),
       plugins: crate::plugin::PluginRegistry::default(),
+      test_config: ferridriver_test::config::TestConfig::default(),
+      extension_specs: Vec::new(),
+      bdd_engine: Arc::new(Mutex::new(crate::bdd_engine::BddEngine::new())),
+      builtin_steps: Arc::new(std::sync::OnceLock::new()),
     }
   }
 
@@ -472,6 +497,9 @@ impl McpServer {
   /// stored in `self.plugins` and become available as `run_script`
   /// bindings (and, when `exposeAsMcpTool`, as MCP tools).
   pub async fn load_extensions(&mut self, specs: &[String]) {
+    // Record the specs so the BDD path can re-bundle them as step sources
+    // even though run_script consumes them as already-loaded plugins.
+    self.extension_specs = specs.to_vec();
     if specs.is_empty() {
       return;
     }
@@ -759,6 +787,27 @@ impl McpServer {
     self
   }
 
+  /// Set the base `[test]` config used by the `run_bdd` tool. Without this
+  /// the tool falls back to `TestConfig::default()`. Pass the operator's
+  /// resolved `FerridriverConfig::test` so MCP-driven BDD runs honour the
+  /// same feature/step globs, browser, workers, and retries as the CLI.
+  #[must_use]
+  pub fn with_test_config(mut self, test_config: ferridriver_test::config::TestConfig) -> Self {
+    self.test_config = test_config;
+    self
+  }
+
+  /// The built-in BDD step registry, built once and shared. Immutable, so
+  /// every built-in-only `run_bdd` reuses the same `Arc` instead of
+  /// re-walking `inventory` + recompiling expressions per call.
+  pub(crate) fn builtin_registry(&self) -> Arc<ferridriver_bdd::registry::StepRegistry> {
+    Arc::clone(
+      self
+        .builtin_steps
+        .get_or_init(|| Arc::new(ferridriver_bdd::registry::StepRegistry::build())),
+    )
+  }
+
   /// Declare the sidecar processes scripts may `sidecars.connect(name)`.
   /// Rebuilds the scripting engine with the specs merged into its config
   /// (the engine was constructed with `config.script_engine_config()`,
@@ -967,7 +1016,7 @@ fn validate_plugin_args(plugin: &str, schema: &serde_json::Value, args: &serde_j
   let mut messages: Vec<String> = validator
     .iter_errors(args)
     .map(|e| {
-      let path = e.instance_path.to_string();
+      let path = e.instance_path().to_string();
       if path.is_empty() {
         e.to_string()
       } else {

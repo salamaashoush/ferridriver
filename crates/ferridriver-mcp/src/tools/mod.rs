@@ -10,11 +10,14 @@
 //!   `evaluate`, `search_page`
 //! - **network** — session diagnostics: `diagnostics`
 //! - **script** — imperative scripting: `run_script` (the action path)
+//! - **bdd** — `run_bdd`: Gherkin features (inline or files) through the
+//!   same engine as the `ferridriver bdd` CLI (JS/TS steps included)
 //! - **extensions** — `ferridriver_extensions`: introspect loaded plugins
 //!
 //! Browser interaction flows through `run_script`, which exposes `page`,
 //! `context`, and `request` globals over the ferridriver core.
 
+pub mod bdd;
 pub mod content;
 pub mod extensions;
 pub mod navigation;
@@ -36,6 +39,7 @@ impl McpServer {
       + Self::content_router()
       + Self::network_router()
       + Self::script_router()
+      + Self::bdd_router()
       + Self::extensions_router()
   }
 }

@@ -222,23 +222,22 @@ fn set_nested<'js, V>(ctx: &Ctx<'js>, root: &Object<'js>, parts: &[&str], value:
 where
   V: IntoJs<'js>,
 {
-  if parts.is_empty() {
+  let Some((last, ancestors)) = parts.split_last() else {
     return Ok(());
-  }
+  };
 
   let mut current = root.clone();
-  for part in &parts[..parts.len() - 1] {
-    let next = match current.get::<_, Object<'js>>(*part) {
-      Ok(obj) => obj,
-      Err(_) => {
-        let obj = Object::new(ctx.clone())?;
-        current.set(*part, obj.clone())?;
-        obj
-      },
+  for part in ancestors {
+    let next = if let Ok(obj) = current.get::<_, Object<'js>>(*part) {
+      obj
+    } else {
+      let obj = Object::new(ctx.clone())?;
+      current.set(*part, obj.clone())?;
+      obj
     };
     current = next;
   }
-  current.set(*parts.last().expect("non-empty parts"), value)
+  current.set(*last, value)
 }
 
 fn is_js_identifier(part: &str) -> bool {

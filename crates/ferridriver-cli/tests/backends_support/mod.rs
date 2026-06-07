@@ -9,6 +9,7 @@
 //! functions via the module path.
 
 pub mod action_options;
+pub mod bdd;
 pub mod binding_surface;
 pub mod browser_context_options;
 pub mod browser_type;
