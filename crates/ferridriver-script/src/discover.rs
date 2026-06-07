@@ -133,12 +133,12 @@ fn split_package_spec(spec: &str) -> Result<(String, Option<&str>), ScriptError>
 
 fn resolve_subpath_entry(path: &Path, root_type_module: bool) -> Result<PathBuf, String> {
   if path.is_file() {
-    return ensure_esm_entry(path, root_type_module).map(|_| path.to_path_buf());
+    return ensure_esm_entry(path, root_type_module).map(|()| path.to_path_buf());
   }
   for ext in ["mjs", "mts", "js", "ts"] {
     let p = path.with_extension(ext);
     if p.is_file() {
-      return ensure_esm_entry(&p, root_type_module).map(|_| p);
+      return ensure_esm_entry(&p, root_type_module).map(|()| p);
     }
   }
   if path.is_dir() {
@@ -146,7 +146,7 @@ fn resolve_subpath_entry(path: &Path, root_type_module: bool) -> Result<PathBuf,
     for name in ["index.mjs", "index.mts", "index.ts", "index.js"] {
       let p = path.join(name);
       if p.is_file() {
-        return ensure_esm_entry(&p, type_module).map(|_| p);
+        return ensure_esm_entry(&p, type_module).map(|()| p);
       }
     }
   }

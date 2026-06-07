@@ -444,7 +444,7 @@ async fn discover_methods() {
     match s.send(m, None, 5_000).await {
       Ok(v) => eprintln!(
         "{m:>14} -> {}",
-        &serde_json::to_string(&v)
+        serde_json::to_string(&v)
           .unwrap_or_default()
           .chars()
           .take(900)

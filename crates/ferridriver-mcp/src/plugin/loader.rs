@@ -149,6 +149,7 @@ pub fn discover(path: &Path) -> Result<Vec<PathBuf>, PluginLoadError> {
 
 /// Resolve configured extension specifiers (paths or ESM packages) to
 /// concrete entry files.
+#[must_use]
 pub fn discover_specs(specs: &[String], cwd: &Path) -> (Vec<PathBuf>, Vec<PluginLoadError>) {
   let (files, errors) = ferridriver_script::discover::resolve_extension_specs(specs, cwd);
   let errors = errors

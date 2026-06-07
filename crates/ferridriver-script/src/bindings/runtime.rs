@@ -10,14 +10,12 @@ use rquickjs::{Ctx, Object, Value};
 /// Get or create `globalThis.ferridriver`.
 pub fn ensure_ferridriver<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   let g = ctx.globals();
-  match g.get::<_, Object<'js>>("ferridriver") {
-    Ok(fd) => Ok(fd),
-    Err(_) => {
-      let fd = Object::new(ctx.clone())?;
-      g.set("ferridriver", fd.clone())?;
-      Ok(fd)
-    },
+  if let Ok(fd) = g.get::<_, Object<'js>>("ferridriver") {
+    return Ok(fd);
   }
+  let fd = Object::new(ctx.clone())?;
+  g.set("ferridriver", fd.clone())?;
+  Ok(fd)
 }
 
 /// Install/update `ferridriver.host`.

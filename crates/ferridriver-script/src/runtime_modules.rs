@@ -1,7 +1,7 @@
 //! Source for the virtual runtime modules exposed to scripts and
 //! bundled extensions.
 
-pub const FERRIDRIVER_MODULE: &str = r#"
+pub const FERRIDRIVER_MODULE: &str = r"
 const fd = globalThis.ferridriver;
 export default fd;
 export const ferridriver = fd;
@@ -23,9 +23,9 @@ export const expect = globalThis.expect;
 export const chromium = globalThis.chromium;
 export const firefox = globalThis.firefox;
 export const webkit = globalThis.webkit;
-"#;
+";
 
-pub const CUCUMBER_MODULE: &str = r#"
+pub const CUCUMBER_MODULE: &str = r"
 const bdd = globalThis.ferridriver.bdd;
 export const Given = bdd.Given;
 export const When = bdd.When;
@@ -44,4 +44,4 @@ export const setDefaultTimeout = bdd.setDefaultTimeout;
 export const setDefinitionFunctionWrapper = bdd.setDefinitionFunctionWrapper;
 export const setWorldConstructor = bdd.setWorldConstructor;
 export const setParallelCanAssign = bdd.setParallelCanAssign;
-"#;
+";
