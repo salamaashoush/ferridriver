@@ -832,6 +832,36 @@ impl AnyPage {
     }
   }
 
+  /// Whether `self` and `other` wrap the SAME underlying browser page
+  /// (as opposed to being equal-valued clones of different pages).
+  /// Compared via the per-backend-page `frame_cache` allocation, which
+  /// every clone of a backend page shares. Used by the MCP server to
+  /// validate its per-context `Page`-wrapper cache against the
+  /// currently-active page.
+  #[must_use]
+  pub fn same_backend_page(&self, other: &AnyPage) -> bool {
+    std::sync::Arc::ptr_eq(self.frame_cache(), other.frame_cache())
+  }
+
+  /// Console / page-error retention backing `page.consoleMessages()` /
+  /// `page.pageErrors()`. Pinned to the backend page for the same
+  /// reason as [`Self::frame_cache`]: wrappers are minted per tool
+  /// call, but the history must span them.
+  pub(crate) fn observed(&self) -> &std::sync::Arc<std::sync::Mutex<crate::observed::ObservedBuffers>> {
+    match self {
+      AnyPage::CdpPipe(p) => &p.observed,
+      AnyPage::CdpRaw(p) => &p.observed,
+      AnyPage::WebKit(p) => &p.observed,
+      AnyPage::Bidi(p) => &p.observed,
+    }
+  }
+
+  /// Force a garbage-collection pass in the page's JS engine.
+  /// Playwright: `page.requestGC(): Promise<void>`.
+  pub async fn request_gc(&self) -> Result<()> {
+    page_dispatch!(self, request_gc())
+  }
+
   /// Atomic latch consulted by `Page::new` to spawn the frame-event
   /// listener exactly once per backend page (instead of once per
   /// wrapper). Subsequent wrappers see the latch set and skip the

@@ -95,6 +95,9 @@ impl McpServer {
     screenshots / PDFs / traces; pair with `page.screenshot()` or `page.pdf()` to save bytes), \
     `page` / `context` / `request` (live browser bindings). \
     Fresh QuickJS context per call — no state bleeds between invocations except through `vars`. \
+    `page.on(...)` listeners only fire while THIS script runs and die with it; to observe events \
+    across tool calls, poll `page.consoleMessages()` / `page.pageErrors()` (retained history) or \
+    use `page.waitForEvent(event, { predicate })` inside one script. \
     Returns structured JSON: { status: 'ok'|'error', value?, error?, duration_ms, console[] }. \
     On `error`, the payload includes message, stack, line, column, and a source snippet around the failure. \
     Pair with snapshot/screenshot tools when the LLM needs to ground selectors before acting."

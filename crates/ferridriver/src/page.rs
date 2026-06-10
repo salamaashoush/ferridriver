@@ -151,9 +151,18 @@ impl Page {
       return;
     }
     let cache = Arc::clone(&self.frame_cache);
+    let observed = Arc::clone(self.inner.observed());
     let mut rx = self.inner.events().subscribe();
     tokio::spawn(async move {
-      while let Ok(event) = rx.recv().await {
+      loop {
+        let event = match rx.recv().await {
+          Ok(e) => e,
+          // Tolerate a lapped receiver during event storms — exiting
+          // here would freeze the frame cache (and the console /
+          // page-error history) for the rest of the page's life.
+          Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+          Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        };
         match event {
           PageEvent::FrameAttached(info) => {
             if let Ok(mut g) = cache.lock() {
@@ -166,8 +175,25 @@ impl Page {
             }
           },
           PageEvent::FrameNavigated(info) => {
+            // A main-frame navigation starts a new `since-navigation`
+            // window for `consoleMessages()` / `pageErrors()`.
+            if info.parent_frame_id.is_none() {
+              if let Ok(mut o) = observed.lock() {
+                o.mark_navigation();
+              }
+            }
             if let Ok(mut g) = cache.lock() {
               g.navigated(info);
+            }
+          },
+          PageEvent::Console(msg) => {
+            if let Ok(mut o) = observed.lock() {
+              o.push_console(msg);
+            }
+          },
+          PageEvent::PageError(err) => {
+            if let Ok(mut o) = observed.lock() {
+              o.push_error(err);
             }
           },
           _ => {},
@@ -1943,6 +1969,66 @@ impl Page {
     });
   }
 
+  /// Console messages retained for this page (cap 200, like
+  /// Playwright). Playwright: `page.consoleMessages(options?: { filter?:
+  /// 'all' | 'since-navigation' }): Promise<ConsoleMessage[]>` — the
+  /// default filter only returns messages logged after the last
+  /// main-frame navigation.
+  #[must_use]
+  pub fn console_messages(
+    &self,
+    filter: crate::observed::ObservedFilter,
+  ) -> Vec<crate::console_message::ConsoleMessage> {
+    match self.inner.observed().lock() {
+      Ok(g) => g.console_messages(filter),
+      Err(poisoned) => poisoned.into_inner().console_messages(filter),
+    }
+  }
+
+  /// Drop the retained console-message history.
+  /// Playwright: `page.clearConsoleMessages(): Promise<void>`.
+  pub fn clear_console_messages(&self) {
+    match self.inner.observed().lock() {
+      Ok(mut g) => g.clear_console(),
+      Err(poisoned) => poisoned.into_inner().clear_console(),
+    }
+  }
+
+  /// Uncaught page exceptions retained for this page (cap 200).
+  /// Playwright: `page.pageErrors(options?: { filter?: 'all' |
+  /// 'since-navigation' }): Promise<Error[]>`.
+  #[must_use]
+  pub fn page_errors(&self, filter: crate::observed::ObservedFilter) -> Vec<crate::web_error::WebError> {
+    match self.inner.observed().lock() {
+      Ok(g) => g.page_errors(filter),
+      Err(poisoned) => poisoned.into_inner().page_errors(filter),
+    }
+  }
+
+  /// Drop the retained page-error history.
+  /// Playwright: `page.clearPageErrors(): Promise<void>`.
+  pub fn clear_page_errors(&self) {
+    match self.inner.observed().lock() {
+      Ok(mut g) => g.clear_errors(),
+      Err(poisoned) => poisoned.into_inner().clear_errors(),
+    }
+  }
+
+  /// Force a garbage-collection pass in the page's JS engine.
+  /// Playwright: `page.requestGC(): Promise<void>`. Supported on every
+  /// CDP backend (`HeapProfiler.collectGarbage`) and `WebKit`
+  /// (`Heap.gc`); on `BiDi` it requires a Firefox build exposing
+  /// `TestUtils.gc()` and returns `FerriError::Unsupported` otherwise
+  /// (Playwright's `BiDi` backend throws the same way).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the underlying protocol call fails or the
+  /// backend cannot trigger a collection.
+  pub async fn request_gc(&self) -> Result<()> {
+    self.inner.request_gc().await
+  }
+
   /// Remove an event listener by ID.
   pub fn off(&self, id: crate::events::ListenerId) {
     self.inner.events().off(id);
@@ -1951,6 +2037,21 @@ impl Page {
   /// Remove all event listeners.
   pub fn remove_all_listeners(&self) {
     self.inner.events().remove_all_listeners();
+  }
+
+  /// Remove every listener registered for `event_name` (Playwright's
+  /// `page.removeAllListeners(type)` with a type argument).
+  pub fn remove_listeners_named(&self, event_name: &str) {
+    self.inner.events().remove_listeners_named(event_name);
+  }
+
+  /// Live [`Frame`] handle for a backend frame id. Used by the binding
+  /// layers to lift `frameattached` / `framenavigated` / `framedetached`
+  /// event payloads into the `Frame` object Playwright hands to
+  /// listeners.
+  #[must_use]
+  pub fn frame_for_id(self: &Arc<Self>, frame_id: &str) -> Frame {
+    Frame::new(Arc::clone(self), Arc::from(frame_id))
   }
 
   /// Start listening for a navigation event. Call BEFORE the action that triggers navigation.
@@ -2655,6 +2756,8 @@ impl Page {
       }
     }
     self.inner.close_page(opts).await?;
+    // Playwright emits 'close' on the page once it is closed.
+    self.inner.events().emit(PageEvent::Close);
 
     // Remove closed page from context's page list so context.pages() stays accurate.
     if let Some(ctx) = &self.context_ref {

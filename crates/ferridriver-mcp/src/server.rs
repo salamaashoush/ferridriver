@@ -314,6 +314,13 @@ impl McpServerConfig for DefaultConfig {}
 #[derive(Clone)]
 pub struct McpServer {
   pub(crate) state: SharedState,
+  /// One cached `Arc<Page>` wrapper per context, validated against the
+  /// currently-active backend page on every lookup. Tool handlers used
+  /// to mint a fresh wrapper per call, which silently reset all
+  /// wrapper-level state (default timeouts, `emulateMedia` merge state)
+  /// between MCP tool calls. The cache keeps a context's wrapper alive
+  /// until its underlying browser page changes (new page / relaunch).
+  page_wrappers: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, Arc<Page>>>>,
   /// The composed tool router. Public so consumers can list tools or dispatch directly.
   pub tool_router: ToolRouter<Self>,
   /// Configuration trait object for customizing server behavior.
@@ -471,6 +478,7 @@ impl McpServer {
 
     Self {
       state,
+      page_wrappers: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       tool_router: Self::tool_router(),
       config,
       extensions: Arc::new(NoExtensions),
@@ -914,10 +922,33 @@ impl McpServer {
   /// for the given context cannot be retrieved.
   pub async fn page(&self, context: &str) -> Result<Arc<Page>, ErrorData> {
     let any_page = Box::pin(self.ensure_active_page(context)).await?;
-    // `Page::new` spawns the FrameAttached/Navigated/Detached listener
-    // and is sync after the eager `Page.getFrameTree` RTT was dropped
-    // (see `PERF_AUDIT` §M.4).
-    Ok(Page::new(any_page))
+    Ok(self.wrapper_for(context, any_page))
+  }
+
+  /// Cached-or-fresh `Page` wrapper for `context` over `any_page`.
+  ///
+  /// Returns the cached wrapper when it still wraps the same underlying
+  /// browser page; otherwise builds one (binding the context so
+  /// `page.context()` resolves to the live `BrowserContext` — Playwright
+  /// parity) and caches it. Reusing the wrapper keeps wrapper-level
+  /// state (default timeouts, `emulateMedia` merge state) alive across
+  /// tool calls instead of resetting it per call. `Page::with_context`
+  /// is sync and its frame-event listener spawn is latched per backend
+  /// page, so the occasional rebuild is cheap.
+  fn wrapper_for(&self, context: &str, any_page: AnyPage) -> Arc<Page> {
+    let mut cache = self
+      .page_wrappers
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(cached) = cache.get(context) {
+      if cached.inner().same_backend_page(&any_page) {
+        return Arc::clone(cached);
+      }
+    }
+    let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
+    let page = Page::with_context(any_page, ctx_ref);
+    cache.insert(context.to_string(), Arc::clone(&page));
+    page
   }
 
   /// Get raw `AnyPage` (for low-level ops that Page doesn't cover yet).
@@ -946,8 +977,8 @@ impl McpServer {
     context: &str,
   ) -> Result<(Arc<Page>, ferridriver::context::ContextRef), ErrorData> {
     let any_page = Box::pin(self.ensure_active_page(context)).await?;
-    let page = Page::new(any_page);
     let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
+    let page = self.wrapper_for(context, any_page);
     Ok((page, ctx_ref))
   }
 

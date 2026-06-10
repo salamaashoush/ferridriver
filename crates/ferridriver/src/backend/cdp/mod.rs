@@ -390,6 +390,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         page_backref: crate::backend::PageBackref::new(),
         frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
         frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       }));
     }
     Ok(pages)
@@ -467,7 +468,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // The target is paused (waitForDebuggerOnStart) so we can set up everything.
     let tid = target_id.clone();
     let sid = tokio::time::timeout(Duration::from_secs(30), async move {
-      while let Ok(event) = event_rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut event_rx).await {
         if event.get("method").and_then(|m| m.as_str()) == Some("Target.attachedToTarget") {
           if let Some(params) = event.get("params") {
             let event_tid = params
@@ -561,6 +562,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
     };
 
     // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
@@ -1227,6 +1229,11 @@ pub struct CdpPage<T: CdpTransport> {
   /// successive wrappers see the latch set and skip the spawn so we
   /// don't end up with N listeners writing the same cache.
   pub(crate) frame_listener_started: Arc<std::sync::atomic::AtomicBool>,
+  /// Console / page-error retention for `page.consoleMessages()` /
+  /// `page.pageErrors()`. Lives on the backend page (like
+  /// [`Self::frame_cache`]) so successive `crate::Page` wrappers share
+  /// one history; filled by the same listener task.
+  pub(crate) observed: Arc<std::sync::Mutex<crate::observed::ObservedBuffers>>,
 }
 
 pub struct InjectedScriptManager {
@@ -1307,6 +1314,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       page_backref: self.page_backref.clone(),
       frame_cache: self.frame_cache.clone(),
       frame_listener_started: self.frame_listener_started.clone(),
+      observed: self.observed.clone(),
     }
   }
 }
@@ -1471,6 +1479,13 @@ impl<T: CdpWrap> CdpPage<T> {
         return;
       }
     }
+  }
+
+  /// Force a GC pass in the page's JS engine. Mirrors Playwright's
+  /// `crPage.requestGC` (`HeapProfiler.collectGarbage`).
+  pub async fn request_gc(&self) -> Result<()> {
+    self.cmd("HeapProfiler.collectGarbage", serde_json::json!({})).await?;
+    Ok(())
   }
 
   pub async fn reload(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
@@ -3956,6 +3971,7 @@ impl<T: CdpWrap> CdpPage<T> {
       self.events.clone(),
       self.page_backref.clone(),
     );
+    Self::spawn_lifecycle_event_listener(&transport, session_id.as_ref(), &self.events);
     Self::spawn_network_listener(
       transport.clone(),
       session_id.clone(),
@@ -4084,6 +4100,35 @@ impl<T: CdpWrap> CdpPage<T> {
   /// the exception carries an object `preview` with a `name` property,
   /// that value overrides the parsed name — matches Playwright's
   /// `nameOverride` branch.
+  /// Bridge CDP's `Page.loadEventFired` / `Page.domContentEventFired`
+  /// onto the page emitter so `page.on('load' | 'domcontentloaded')`
+  /// and `waitForEvent` observe them (Playwright parity).
+  fn spawn_lifecycle_event_listener(
+    transport: &Arc<T>,
+    session_id: Option<&Arc<str>>,
+    emitter: &crate::events::EventEmitter,
+  ) {
+    for (method, ev) in [
+      ("Page.loadEventFired", crate::events::PageEvent::Load),
+      ("Page.domContentEventFired", crate::events::PageEvent::DomContentLoaded),
+    ] {
+      let transport = transport.clone();
+      let session_id = session_id.cloned();
+      let emitter = emitter.clone();
+      tokio::spawn(async move {
+        let mut rx = transport.subscribe_event_method(method);
+        while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+          if let Some(ref expected_sid) = session_id {
+            if event.get("sessionId").and_then(|v| v.as_str()) != Some(&**expected_sid) {
+              continue;
+            }
+          }
+          emitter.emit(ev.clone());
+        }
+      });
+    }
+  }
+
   fn spawn_web_error_listener(
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
@@ -4092,7 +4137,7 @@ impl<T: CdpWrap> CdpPage<T> {
   ) {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_event_method("Runtime.exceptionThrown");
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
@@ -4126,7 +4171,7 @@ impl<T: CdpWrap> CdpPage<T> {
     ));
     tokio::spawn(async move {
       let mut rx = transport.subscribe_event_domain("Network");
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
@@ -4207,7 +4252,7 @@ impl<T: CdpWrap> CdpPage<T> {
   ) {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_event_method("Page.javascriptDialogOpening");
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
@@ -4325,7 +4370,7 @@ impl<T: CdpWrap> CdpPage<T> {
       // newly-opened page (~5ms) when no test uses file pickers.
       let mut rx = transport.subscribe_event_method("Page.fileChooserOpened");
 
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
@@ -4427,7 +4472,7 @@ impl<T: CdpWrap> CdpPage<T> {
       let _ = downloads_dir;
       let mut rx = transport.subscribe_event_domain("Browser");
 
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         // `Browser.downloadWillBegin` / `Browser.downloadProgress` fire
         // on the root browser session (no `sessionId`) when
         // `eventsEnabled: true`. Events with a `sessionId` come from
@@ -4706,7 +4751,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     let fns = self.exposed_fns.clone();
     tokio::spawn(async move {
       let mut rx = t.subscribe_event_method("Runtime.bindingCalled");
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if let Some(ref expected_sid) = sid {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {

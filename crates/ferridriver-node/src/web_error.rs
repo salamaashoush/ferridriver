@@ -117,36 +117,6 @@ impl JsErrorValue {
   }
 }
 
-/// Cross-thread dispatch arg for `page.on(event, cb)` / `page.once`
-/// callbacks. napi-rs's threadsafe-function argument must be `Send +
-/// 'static`, so we can't hand the JS thread a live NAPI class
-/// directly from the Rust event-bus callback. Instead we send this
-/// enum and convert to the appropriate JS value inside the JS thread
-/// via [`ToNapiValue`]:
-///
-/// * `Snapshot(Value)` — JSON round-trip for events Playwright
-///   projects as plain objects (console / request / response /
-///   dialog / filechooser / download / frame* / load /
-///   domcontentloaded / close).
-/// * `PageError(JsErrorValue)` — uses the global `Error` constructor
-///   so `page.on('pageerror', err => …)` receives a real JS `Error`
-///   (Playwright:
-///   `/tmp/playwright/packages/playwright-core/types/types.d.ts:1101`
-///   `on(event: 'pageerror', listener: (error: Error) => any)`).
-pub enum PageListenerArg {
-  Snapshot(serde_json::Value),
-  PageError(JsErrorValue),
-}
-
-impl ToNapiValue for PageListenerArg {
-  unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
-    match val {
-      PageListenerArg::Snapshot(v) => unsafe { serde_json::Value::to_napi_value(env, v) },
-      PageListenerArg::PageError(e) => unsafe { JsErrorValue::to_napi_value(env, e) },
-    }
-  }
-}
-
 /// Cross-thread dispatch arg for `context.on('weberror', cb)` /
 /// `context.once`. Carries a live core [`CoreWebError`] across the
 /// tokio-to-napi boundary; on conversion, wraps it in the NAPI

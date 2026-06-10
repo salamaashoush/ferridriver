@@ -341,9 +341,11 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
     await page.waitForTimeout(500);
 
     expect(messages.length).toBeGreaterThan(0);
-    const found = messages.find((m: any) => m.text?.includes("hello from page"));
+    // Listeners receive live ConsoleMessage instances (Playwright
+    // parity: methods, not fields).
+    const found = messages.find((m: any) => m.text().includes("hello from page"));
     expect(found).toBeDefined();
-    expect(found.type).toBe("log");
+    expect(found.type()).toBe("log");
   });
 
   it("page.once('console') fires only once", async () => {
@@ -392,9 +394,66 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
       await page.waitForTimeout(500);
 
       expect(responses.length).toBeGreaterThan(0);
-      expect(responses[0].status).toBe(200);
-      expect(responses[0].url).toContain("127.0.0.1");
+      // Live Response instances, same as waitForEvent('response').
+      expect(responses[0].status()).toBe(200);
+      expect(responses[0].url()).toContain("127.0.0.1");
     });
   }
+
+  it("off(event, listener) removes by function identity (Playwright shape)", async () => {
+    const got: string[] = [];
+    const listener = (msg: any) => {
+      got.push(msg.text());
+    };
+    page.on("console", listener as any);
+    await page.evaluate("console.log('before-off-fn')");
+    await page.waitForTimeout(200);
+    expect(got.some((t) => t.includes("before-off-fn"))).toBe(true);
+    const countBefore = got.length;
+    page.off("console", listener as any);
+    await page.evaluate("console.log('after-off-fn')");
+    await page.waitForTimeout(200);
+    expect(got.length).toBe(countBefore);
+  });
+
+  it("waitForEvent(event, { predicate }) resolves on the matching live object", async () => {
+    const waiter = page.waitForEvent("console", {
+      predicate: (msg: any) => msg.text().includes("pred-pick"),
+      timeout: 8000,
+    });
+    await page.evaluate("console.log('pred-skip'); console.log('pred-pick')");
+    const msg = (await waiter) as any;
+    expect(msg.text()).toContain("pred-pick");
+    expect(msg.type()).toBe("log");
+  });
+
+  it("waitForEvent(event, predicateFn) accepts the bare-function form", async () => {
+    const waiter = page.waitForEvent(
+      "console",
+      (msg: any) => msg.text().includes("fn-pick"),
+    );
+    await page.evaluate("console.log('fn-skip'); console.log('fn-pick')");
+    const msg = (await waiter) as any;
+    expect(msg.text()).toContain("fn-pick");
+  });
+
+  it("framenavigated listener receives a live Frame; load receives the Page", async () => {
+    const frames: any[] = [];
+    const loads: any[] = [];
+    const onFrame = (f: any) => frames.push(f);
+    const onLoad = (p: any) => loads.push(p);
+    page.on("framenavigated", onFrame as any);
+    page.on("load", onLoad as any);
+    await page.goto(testUrl);
+    await page.waitForTimeout(300);
+    page.off("framenavigated", onFrame as any);
+    page.off("load", onLoad as any);
+    expect(frames.length).toBeGreaterThan(0);
+    // Live Frame instance: url() is a method.
+    expect(typeof frames[0].url).toBe("function");
+    expect(loads.length).toBeGreaterThan(0);
+    // The Page itself: title() is a method on the instance.
+    expect(typeof loads[0].title).toBe("function");
+  });
 });
 } // end for loop

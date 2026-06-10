@@ -126,6 +126,10 @@ fn register_observation(set: &mut TestSet<'_>) {
   backends_support::observation::register(set);
 }
 
+fn register_page_api(set: &mut TestSet<'_>) {
+  backends_support::page_api::register(set);
+}
+
 fn register_script_input(set: &mut TestSet<'_>) {
   backends_support::script_input::register(set);
 }
@@ -574,6 +578,10 @@ macro_rules! backend_module {
       #[test]
       fn multi_page() {
         run_category($backend, register_multi_page);
+      }
+      #[test]
+      fn page_api() {
+        run_category($backend, register_page_api);
       }
     }
   };

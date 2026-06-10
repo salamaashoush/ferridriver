@@ -78,6 +78,11 @@ pub enum Engine {
   /// with `[name=<escaped>]` using attribute-selector escape when a
   /// name filter is supplied.
   InternalRole,
+  /// Playwright-native `internal:describe` engine emitted by
+  /// `locator.describe(description)`. Pure metadata: the injected
+  /// engine passes the current element through untouched, so matching
+  /// is unaffected. Body is the JSON-quoted description.
+  InternalDescribe,
 }
 
 /// Bootstrap JS script to be evaluated on new document.
@@ -154,6 +159,7 @@ pub fn is_rich_selector(s: &str) -> bool {
     "internal:attr=",
     "internal:testid=",
     "internal:role=",
+    "internal:describe=",
   ];
   let trimmed = s.trim();
   // Has explicit engine prefix
@@ -293,6 +299,7 @@ fn parse_part(s: &str) -> SelectorPart {
     ("internal:attr=", Engine::InternalAttr),
     ("internal:testid=", Engine::InternalTestId),
     ("internal:role=", Engine::InternalRole),
+    ("internal:describe=", Engine::InternalDescribe),
   ];
 
   for (prefix, engine) in &engines {
@@ -376,6 +383,7 @@ fn engine_str(engine: &Engine) -> &'static str {
     Engine::InternalAttr => "internal:attr",
     Engine::InternalTestId => "internal:testid",
     Engine::InternalRole => "internal:role",
+    Engine::InternalDescribe => "internal:describe",
   }
 }
 

@@ -463,6 +463,12 @@ impl LocatorJs {
     crate::bindings::page::pagejs_for_ctx(&ctx, self.inner.page().clone())
   }
 
+  /// Playwright: `locator.describe(description: string): Locator`.
+  #[qjs(rename = "describe")]
+  pub fn describe(&self, description: String) -> LocatorJs {
+    LocatorJs::new(self.inner.describe(&description))
+  }
+
   #[qjs(rename = "first")]
   pub fn first(&self) -> LocatorJs {
     LocatorJs::new(self.inner.first())
