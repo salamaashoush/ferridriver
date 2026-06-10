@@ -225,7 +225,15 @@ pub async fn move_mouse_smooth(
 }
 
 pub async fn mouse_wheel(page: &WebKitPage, delta_x: f64, delta_y: f64) -> Result<()> {
-  let _ = page.target_session().send("Page.updateScrollingState", json!({})).await;
+  page
+    .target_session()
+    .send("Page.updateScrollingState", json!({}))
+    .await
+    .map_err(err)?;
+  // Wheel events hit the compositor first — wait one frame for it to
+  // sync or the event is dropped before the page scrolls (mirrors
+  // `wkInput.ts::wheel`).
+  page.wait_for_compositor_frame().await?;
   page
     .proxy_session()
     .send(

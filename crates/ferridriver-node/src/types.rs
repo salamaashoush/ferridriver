@@ -1006,6 +1006,15 @@ impl From<GotoOptions> for ferridriver::options::GotoOptions {
   }
 }
 
+/// Options for `page.consoleMessages` / `page.pageErrors`. Playwright:
+/// `{ filter?: 'all' | 'since-navigation' }` (default `since-navigation`).
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct ObservedFilterOptions {
+  #[napi(ts_type = "'all' | 'since-navigation'")]
+  pub filter: Option<String>,
+}
+
 /// Options for `page.close({ runBeforeUnload?, reason? })`. Playwright parity.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]

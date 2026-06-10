@@ -316,6 +316,16 @@ impl Locator {
     self.chain(&build_testid_selector("data-testid", test_id))
   }
 
+  /// Attach a human-readable description to this locator for trace /
+  /// error reporting. Matching is unaffected — the injected
+  /// `internal:describe` engine passes elements through untouched.
+  /// Playwright: `locator.describe(description: string): Locator`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts`).
+  #[must_use]
+  pub fn describe(&self, description: &str) -> Locator {
+    self.chain(&format!("internal:describe={}", json_quote(description)))
+  }
+
   /// First element. Opts out of strict mode because the selector explicitly
   /// narrows to a single match.
   #[must_use]
@@ -2458,6 +2468,12 @@ fn parse_aria_raw(s: &str) -> Result<AriaRaw> {
   serde_json::from_str(s).map_err(|e| crate::error::FerriError::evaluation(format!("ariaSnapshot parse: {e}")))
 }
 
+/// Compiled-once matcher for the `- iframe [ref=...]` lines
+/// `aria_stitch_frame` splices child snapshots under. `None` is
+/// unreachable for the literal pattern but preserves the error path
+/// without an unwrap.
+static IFRAME_REF_RE: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
+
 /// Render `frame` (already snapshotted into `raw`), then recurse into
 /// every rendered child iframe and splice the child lines under the
 /// matching `- iframe [ref=...]` line. Boxed so the
@@ -2485,8 +2501,10 @@ fn aria_stitch_frame(
       child_snaps.push(aria_child_snapshot(&frame, refv, &mode, depth, &raw.iframe_depths, &seq).await?);
     }
 
-    let re = regex::Regex::new(r"^(\s*)- iframe (?:\[active\] )?\[ref=([^\]]*)\]")
-      .map_err(|e| crate::error::FerriError::evaluation(format!("ariaSnapshot iframe regex: {e}")))?;
+    let re = IFRAME_REF_RE
+      .get_or_init(|| regex::Regex::new(r"^(\s*)- iframe (?:\[active\] )?\[ref=([^\]]*)\]").ok())
+      .as_ref()
+      .ok_or_else(|| crate::error::FerriError::evaluation("ariaSnapshot iframe regex failed to compile".to_string()))?;
 
     let mut out: Vec<String> = Vec::new();
     for line in raw.full.split('\n') {

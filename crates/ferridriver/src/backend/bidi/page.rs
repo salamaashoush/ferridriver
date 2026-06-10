@@ -231,6 +231,9 @@ pub struct BidiPage {
   pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
   /// Idempotent latch for the frame-event listener.
   pub(crate) frame_listener_started: Arc<AtomicBool>,
+  /// Console / page-error retention for `page.consoleMessages()` /
+  /// `page.pageErrors()` (see `CdpPage::observed`).
+  pub(crate) observed: Arc<std::sync::Mutex<crate::observed::ObservedBuffers>>,
   /// Idempotent latch for the route (`network.beforeRequestSent`) listener.
   /// Spawned once per page: it reads the shared `routes` map live, so a
   /// `route`/`unroute` cycle (which drains `intercept_ids`) must NOT
@@ -353,6 +356,7 @@ impl BidiPage {
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
       frame_listener_started: Arc::new(AtomicBool::new(false)),
+      observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       route_listener_started: Arc::new(AtomicBool::new(false)),
       handle_realms: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
     })
@@ -599,7 +603,7 @@ impl BidiPage {
     let mut rx = self.session.transport.subscribe_events();
     let ctx = self.context_id.clone();
     let timeout = tokio::time::timeout(std::time::Duration::from_secs(30), async move {
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if event.method == "browsingContext.load" {
           if let Some(c) = event.params.get("context").and_then(|v| v.as_str()) {
             if c == &*ctx {
@@ -614,6 +618,29 @@ impl BidiPage {
       Ok(result) => result,
       Err(_) => Err(FerriError::timeout("wait_for_navigation", 30_000)),
     }
+  }
+
+  /// Force a GC pass in the page's JS engine. Mirrors Playwright's
+  /// `bidiPage.requestGC`: evaluate `TestUtils.gc()` and surface an
+  /// exception result (Firefox builds without `TestUtils`) as
+  /// `Unsupported` — Playwright's `BiDi` backend throws the same way.
+  pub async fn request_gc(&self) -> Result<()> {
+    let result = self
+      .cmd(
+        "script.evaluate",
+        json!({
+          "expression": "TestUtils.gc()",
+          "target": {"context": &*self.context_id},
+          "awaitPromise": true,
+        }),
+      )
+      .await?;
+    if result.get("type").and_then(|v| v.as_str()) == Some("exception") {
+      return Err(FerriError::unsupported(
+        "requestGC: TestUtils.gc() is unavailable in this Firefox build over WebDriver BiDi",
+      ));
+    }
+    Ok(())
   }
 
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
@@ -738,7 +765,7 @@ impl BidiPage {
     let mut rx = self.session.transport.subscribe_events();
     let target = ctx.to_string();
     let waited = tokio::time::timeout(std::time::Duration::from_secs(30), async move {
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if matches!(
           event.method.as_str(),
           "browsingContext.domContentLoaded" | "browsingContext.load"
@@ -1812,7 +1839,7 @@ impl BidiPage {
     ));
 
     tokio::spawn(async move {
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         // Filter events for this context. Accepts events targeting this
         // top-level context directly, events with no `context` field
         // (session-wide), and events whose `parent` matches us — the
@@ -1905,6 +1932,37 @@ impl BidiPage {
           | "browsingContext.fragmentNavigated"
           | "browsingContext.domContentLoaded"
           | "browsingContext.load" => {
+            // Surface the main frame's cross-document navigation as
+            // `FrameNavigated` (CDP gets this from `Page.frameNavigated`;
+            // BiDi has no direct analogue). Keeps the frame cache's
+            // main-frame URL fresh and starts a new `since-navigation`
+            // window for `consoleMessages()` / `pageErrors()`. Only the
+            // `navigationStarted` arm fires — marking again at
+            // `domContentLoaded` / `load` would wrongly evict console
+            // output from inline scripts that ran during parse.
+            if event.method == "browsingContext.navigationStarted" && event_ctx == &*ctx {
+              let url = event
+                .params
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+              emitter.emit(PageEvent::FrameNavigated(crate::backend::FrameInfo {
+                frame_id: (*ctx).to_string(),
+                parent_frame_id: None,
+                name: String::new(),
+                url,
+              }));
+            }
+            // Surface the main frame's lifecycle on the page emitter so
+            // `page.on('load' | 'domcontentloaded')` observes it.
+            if event_ctx == &*ctx {
+              match event.method.as_str() {
+                "browsingContext.domContentLoaded" => emitter.emit(PageEvent::DomContentLoaded),
+                "browsingContext.load" => emitter.emit(PageEvent::Load),
+                _ => {},
+              }
+            }
             // Scope the engine-state reset to the context that actually
             // navigated. A child iframe reloading must not wipe the
             // main context's `window.__fd` (and vice-versa) — that
@@ -2349,7 +2407,7 @@ impl BidiPage {
     let event_ctx = self.context_id.clone();
 
     tokio::spawn(async move {
-      while let Ok(event) = event_rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut event_rx).await {
         let is_relevant = matches!(
           event.method.as_str(),
           "browsingContext.load" | "browsingContext.domContentLoaded" | "browsingContext.navigationCommitted"
@@ -2510,7 +2568,7 @@ impl BidiPage {
     let routes = self.routes.clone();
 
     tokio::spawn(async move {
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if event.method != "network.beforeRequestSent" {
           continue;
         }

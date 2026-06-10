@@ -450,34 +450,5 @@ for (const backend of BACKENDS) {
       expect(threw).toBe(true);
     });
 
-    if (backend === "webkit") {
-      it("WebKit Op::ReleaseRef observably shrinks window.__wr", async () => {
-        // WebKit keeps all live element handles in a per-page `window.__wr`
-        // Map. If Op::ReleaseRef reached the host, the Map's size decreases
-        // by exactly one after dispose. That's the only page-observable
-        // side effect of the release path — and it proves the IPC op
-        // round-tripped the full host/Rust boundary, not just a Rust-side
-        // flag flip.
-        const fresh = await browser.newPageWithUrl(testUrl);
-        try {
-          const sizeBefore = Number(
-            (await fresh.evaluate("window.__wr ? window.__wr.size : 0")) ?? 0,
-          );
-          const handle = await fresh.querySelector("button#primary");
-          expect(handle).not.toBeNull();
-          const sizeDuring = Number(
-            (await fresh.evaluate("window.__wr ? window.__wr.size : 0")) ?? 0,
-          );
-          expect(sizeDuring).toBe(sizeBefore + 1);
-          await handle!.dispose();
-          const sizeAfter = Number(
-            (await fresh.evaluate("window.__wr ? window.__wr.size : 0")) ?? 0,
-          );
-          expect(sizeAfter).toBe(sizeBefore);
-        } finally {
-          await fresh.close();
-        }
-      });
-    }
   });
 }

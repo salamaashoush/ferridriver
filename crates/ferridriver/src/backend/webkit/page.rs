@@ -85,6 +85,18 @@ pub struct WebKitPage {
   init_scripts: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
   /// Monotonic id source for [`Self::init_scripts`] identifiers.
   init_script_seq: Arc<std::sync::atomic::AtomicU64>,
+  /// Extra HTTP headers applied via `Network.setExtraHTTPHeaders`. The
+  /// backend recreates the target session on every cross-document navigation, so
+  /// (like Playwright's `_updateState`) the headers are stashed here and
+  /// re-applied to each new provisional target session — otherwise a
+  /// `setExtraHTTPHeaders` before a `goto` would be lost on the swap.
+  pub(crate) extra_http_headers: Arc<std::sync::Mutex<Option<serde_json::Map<String, Value>>>>,
+  /// Merged media / user-preference emulation state, stashed by
+  /// [`Self::emulate_media`] for the same reason as
+  /// [`Self::extra_http_headers`]: the backend swaps the target session
+  /// on every cross-document navigation and drops active overrides, so
+  /// the provisional-target handler replays them.
+  pub(crate) emulated_media: Arc<std::sync::Mutex<Option<crate::options::EmulateMediaOptions>>>,
   /// Live request table, keyed by PW `WebKit` `requestId`. The network
   /// listener inserts on `Network.requestWillBeSent`, links responses
   /// on `Network.responseReceived`, and removes on terminal
@@ -138,6 +150,9 @@ pub struct WebKitPage {
   pub page_backref: crate::backend::PageBackref,
   pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
   pub(crate) frame_listener_started: Arc<AtomicBool>,
+  /// Console / page-error retention for `page.consoleMessages()` /
+  /// `page.pageErrors()` (see `CdpPage::observed`).
+  pub(crate) observed: Arc<std::sync::Mutex<crate::observed::ObservedBuffers>>,
   /// Per-page lifecycle signals fed by the target-session listener.
   /// Lets navigation methods await `Page.loadEventFired` /
   /// `domContentEventFired` / `frameNavigated` survivably across
@@ -329,6 +344,8 @@ impl WebKitPage {
       binding_initialized: Arc::new(AtomicBool::new(false)),
       init_scripts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
       init_script_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+      extra_http_headers: Arc::new(std::sync::Mutex::new(None)),
+      emulated_media: Arc::new(std::sync::Mutex::new(None)),
       requests: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       nav_request_slot: crate::network::NavRequestSlot::new(),
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -344,6 +361,7 @@ impl WebKitPage {
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
       frame_listener_started: Arc::new(AtomicBool::new(false)),
+      observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       lifecycle: Arc::new(LifecycleSignals::default()),
       console_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
       network_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
@@ -667,6 +685,18 @@ impl WebKitPage {
     self.wait_for_lifecycle(NavLifecycle::Load, 30_000).await
   }
 
+  /// Force a GC pass in the page's JS engine. Mirrors Playwright's
+  /// `wkPage.requestGC` (`Heap.gc`).
+  pub async fn request_gc(&self) -> Result<()> {
+    self.ensure_open()?;
+    self
+      .target_session()
+      .send("Heap.gc", json!({}))
+      .await
+      .map_err(conn_err)?;
+    Ok(())
+  }
+
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     self.ensure_open()?;
     self.reset_realm();
@@ -748,6 +778,31 @@ impl WebKitPage {
       return Err(FerriError::evaluation(text));
     }
     self.engine_injected.store(true, Ordering::Relaxed);
+    Ok(())
+  }
+
+  /// Block until the page has painted one frame. Wheel events hit the
+  /// compositor first, so dispatching before it syncs silently drops
+  /// the scroll (mirrors `wkInput.ts::wheel`'s
+  /// `new Promise(requestAnimationFrame)` round-trip). Uses
+  /// `Runtime.callFunctionOn` because `WebKit`'s `Runtime.evaluate` has
+  /// no `awaitPromise`.
+  pub(crate) async fn wait_for_compositor_frame(&self) -> Result<()> {
+    let anchor = self.global_anchor().await?;
+    self
+      .target_session()
+      .send(
+        protocol::RUNTIME_CALL_FUNCTION_ON,
+        json!({
+          "objectId": anchor,
+          "functionDeclaration":
+            "function(){ return new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); }",
+          "returnByValue": true,
+          "awaitPromise": true,
+        }),
+      )
+      .await
+      .map_err(conn_err)?;
     Ok(())
   }
 
@@ -1029,9 +1084,30 @@ impl WebKitPage {
       .map_err(conn_err)?;
     let data_url = resp.get("dataURL").and_then(Value::as_str).unwrap_or_default();
     let b64 = data_url.split_once(',').map_or(data_url, |(_, d)| d);
-    base64::engine::general_purpose::STANDARD
+    let png = base64::engine::general_purpose::STANDARD
       .decode(b64)
-      .map_err(|e| FerriError::backend(format!("screenshot base64: {e}")))
+      .map_err(|e| FerriError::backend(format!("screenshot base64: {e}")))?;
+    match opts.format {
+      ImageFormat::Png => Ok(png),
+      // `Page.snapshotRect` only produces PNG; Playwright transcodes to
+      // JPEG client-side (`wkPage.takeScreenshot` via jpeg-js, quality
+      // default 80 from `screenshotter.ts`). Do the same here.
+      ImageFormat::Jpeg => {
+        let img = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+          .map_err(|e| FerriError::backend(format!("screenshot png decode: {e}")))?;
+        let mut out = std::io::Cursor::new(Vec::new());
+        let quality = u8::try_from(opts.quality.unwrap_or(80).clamp(0, 100)).unwrap_or(80);
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+        img
+          .to_rgb8()
+          .write_with_encoder(encoder)
+          .map_err(|e| FerriError::backend(format!("screenshot jpeg encode: {e}")))?;
+        Ok(out.into_inner())
+      },
+      ImageFormat::Webp => Err(FerriError::unsupported(
+        "screenshot type 'webp' is not supported on the WebKit backend (Page.snapshotRect produces PNG; Playwright supports webp on Chromium only)",
+      )),
+    }
   }
 
   pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>> {
@@ -1335,160 +1411,83 @@ impl WebKitPage {
     Ok(())
   }
 
-  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
+  /// Lower the merged emulation state into the protocol command list —
+  /// always all five commands, in Playwright's `wkPage._setEmulateMedia`
+  /// order. `Page.setEmulatedMedia` resets every active user-preference
+  /// override on WPE, so it must go first and the still-active
+  /// preferences must be re-asserted after it; a preference removal is
+  /// exactly "reset happened and the preference was not re-added" (an
+  /// omitted-`value` `overrideUserPreference` on its own has no effect
+  /// on a live override). The list shape lets
+  /// `handle_provisional_target_created` replay the exact commands on
+  /// the post-navigation session.
+  pub(crate) fn emulate_media_commands(opts: &crate::options::EmulateMediaOptions) -> Vec<(&'static str, Value)> {
     use crate::options::MediaOverride;
     fn user_pref(name: &str, value: Option<&str>) -> Value {
-      let mut params = json!({ "name": name });
+      // Removal is "value omitted", not `value: null` — the inspector
+      // protocol rejects an explicit null (Playwright sends `undefined`,
+      // which JSON.stringify drops).
       match value {
-        Some(v) => params["value"] = json!(v),
-        None => params["value"] = Value::Null,
+        Some(v) => json!({ "name": name, "value": v }),
+        None => json!({ "name": name }),
       }
-      params
     }
-    // Apply user-preference overrides BEFORE `Page.setEmulatedMedia`:
-    // WPE WebKit resets `PrefersColorScheme` whenever the media override
-    // is (re)assigned, so the media call has to come last.
-    if let MediaOverride::Set(v) = &opts.color_scheme {
-      let value = match v.as_str() {
-        "light" => "Light",
-        "dark" => "Dark",
-        other => other,
-      };
-      self
-        .target_session()
-        .send(
-          "Page.overrideUserPreference",
-          user_pref("PrefersColorScheme", Some(value)),
-        )
-        .await
-        .map_err(conn_err)?;
-    } else if matches!(opts.color_scheme, MediaOverride::Disabled) {
-      self
-        .target_session()
-        .send("Page.overrideUserPreference", user_pref("PrefersColorScheme", None))
-        .await
-        .map_err(conn_err)?;
+    fn pref_value(field: &MediaOverride, map: fn(&str) -> &str) -> Option<&str> {
+      match field {
+        MediaOverride::Set(v) => Some(map(v)),
+        MediaOverride::Disabled | MediaOverride::Unchanged => None,
+      }
     }
-    self.emulate_media_remaining(opts).await?;
-    match &opts.media {
-      MediaOverride::Set(v) => {
-        self
-          .target_session()
-          .send("Page.setEmulatedMedia", json!({ "media": v }))
-          .await
-          .map_err(conn_err)?;
-      },
-      MediaOverride::Disabled => {
-        self
-          .target_session()
-          .send("Page.setEmulatedMedia", json!({ "media": "" }))
-          .await
-          .map_err(conn_err)?;
-      },
-      MediaOverride::Unchanged => {},
-    }
-    // Re-assert the color-scheme override after `setEmulatedMedia` —
-    // a media change resets `PrefersColorScheme` in WPE; the second
-    // call restores the dark/light/no-preference state we want.
-    if let MediaOverride::Set(v) = &opts.color_scheme {
-      let value = match v.as_str() {
-        "light" => "Light",
-        "dark" => "Dark",
-        other => other,
-      };
-      self
-        .target_session()
-        .send(
-          "Page.overrideUserPreference",
-          user_pref("PrefersColorScheme", Some(value)),
-        )
-        .await
-        .map_err(conn_err)?;
-    }
-    Ok(())
+    let media = match &opts.media {
+      MediaOverride::Set(v) => v.as_str(),
+      MediaOverride::Disabled | MediaOverride::Unchanged => "",
+    };
+    let color = pref_value(&opts.color_scheme, |v| match v {
+      "light" => "Light",
+      "dark" => "Dark",
+      other => other,
+    });
+    let reduced = pref_value(&opts.reduced_motion, |v| match v {
+      "reduce" => "Reduce",
+      "no-preference" => "NoPreference",
+      other => other,
+    });
+    let forced = pref_value(&opts.forced_colors, |v| match v {
+      "active" => "Active",
+      "none" => "None",
+      other => other,
+    });
+    let contrast = pref_value(&opts.contrast, |v| match v {
+      "more" => "More",
+      "no-preference" => "NoPreference",
+      other => other,
+    });
+    let forced_params = match forced {
+      Some(v) => json!({ "forcedColors": v }),
+      None => json!({}),
+    };
+    vec![
+      ("Page.setEmulatedMedia", json!({ "media": media })),
+      ("Page.overrideUserPreference", user_pref("PrefersColorScheme", color)),
+      (
+        "Page.overrideUserPreference",
+        user_pref("PrefersReducedMotion", reduced),
+      ),
+      ("Page.setForcedColors", forced_params),
+      ("Page.overrideUserPreference", user_pref("PrefersContrast", contrast)),
+    ]
   }
 
-  async fn emulate_media_remaining(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
-    use crate::options::MediaOverride;
-    fn user_pref(name: &str, value: Option<&str>) -> Value {
-      let mut params = json!({ "name": name });
-      match value {
-        Some(v) => params["value"] = json!(v),
-        None => params["value"] = Value::Null,
-      }
-      params
-    }
-    // reduced_motion -> PrefersReducedMotion: "Reduce" | "NoPreference".
-    match &opts.reduced_motion {
-      MediaOverride::Set(v) => {
-        let val = match v.as_str() {
-          "reduce" => "Reduce",
-          "no-preference" => "NoPreference",
-          other => other,
-        };
-        self
-          .target_session()
-          .send(
-            "Page.overrideUserPreference",
-            user_pref("PrefersReducedMotion", Some(val)),
-          )
-          .await
-          .map_err(conn_err)?;
-      },
-      MediaOverride::Disabled => {
-        self
-          .target_session()
-          .send("Page.overrideUserPreference", user_pref("PrefersReducedMotion", None))
-          .await
-          .map_err(conn_err)?;
-      },
-      MediaOverride::Unchanged => {},
-    }
-    // forced_colors -> Page.setForcedColors { forcedColors: "Active" | "None" | null }.
-    match &opts.forced_colors {
-      MediaOverride::Set(v) => {
-        let val = match v.as_str() {
-          "active" => "Active",
-          "none" => "None",
-          other => other,
-        };
-        self
-          .target_session()
-          .send("Page.setForcedColors", json!({ "forcedColors": val }))
-          .await
-          .map_err(conn_err)?;
-      },
-      MediaOverride::Disabled => {
-        self
-          .target_session()
-          .send("Page.setForcedColors", json!({ "forcedColors": Value::Null }))
-          .await
-          .map_err(conn_err)?;
-      },
-      MediaOverride::Unchanged => {},
-    }
-    // contrast -> PrefersContrast: "More" | "NoPreference".
-    match &opts.contrast {
-      MediaOverride::Set(v) => {
-        let val = match v.as_str() {
-          "more" => "More",
-          "no-preference" => "NoPreference",
-          other => other,
-        };
-        self
-          .target_session()
-          .send("Page.overrideUserPreference", user_pref("PrefersContrast", Some(val)))
-          .await
-          .map_err(conn_err)?;
-      },
-      MediaOverride::Disabled => {
-        self
-          .target_session()
-          .send("Page.overrideUserPreference", user_pref("PrefersContrast", None))
-          .await
-          .map_err(conn_err)?;
-      },
-      MediaOverride::Unchanged => {},
+  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
+    // Persist the merged state (the core `Page` merges before
+    // delegating) so the per-target re-apply on the next navigation's
+    // provisional session keeps the overrides alive across the swap.
+    *self
+      .emulated_media
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(opts.clone());
+    for (method, params) in Self::emulate_media_commands(opts) {
+      self.target_session().send(method, params).await.map_err(conn_err)?;
     }
     Ok(())
   }
@@ -1498,6 +1497,13 @@ impl WebKitPage {
       .iter()
       .map(|(k, v)| (k.clone(), Value::String(v.clone())))
       .collect();
+    // Persist so the per-target re-apply (on the provisional session of
+    // the next navigation) keeps the headers alive across the session
+    // swap — see `Self::extra_http_headers`.
+    *self
+      .extra_http_headers
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(map.clone());
     self
       .target_session()
       .send("Network.setExtraHTTPHeaders", json!({ "headers": map }))

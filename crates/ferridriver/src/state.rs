@@ -785,7 +785,7 @@ impl BrowserState {
     // channel stays open (i.e. the page is alive).
     let mut rx = page.events().subscribe();
     tokio::spawn(async move {
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if let crate::events::PageEvent::PageError(err) = event {
           context_events.emit(crate::events::ContextEvent::WebError(err));
         }

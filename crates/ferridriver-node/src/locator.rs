@@ -178,6 +178,12 @@ impl Locator {
     crate::page::Page::wrap(self.inner.page().clone())
   }
 
+  /// Playwright: `locator.describe(description: string): Locator`.
+  #[napi]
+  pub fn describe(&self, description: String) -> Locator {
+    Self::wrap(self.inner.describe(&description))
+  }
+
   #[napi]
   pub fn first(&self) -> Locator {
     Self::wrap(self.inner.first())

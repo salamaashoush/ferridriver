@@ -82,6 +82,74 @@ pub enum PageEvent {
   Download(Download),
 }
 
+impl PageEvent {
+  /// Project the event into the compact JSON shape the binding layers
+  /// (NAPI threadsafe-function listeners, `QuickJS` cross-task dispatch,
+  /// `waitForEvent`) hand to user callbacks. Centralised here so every
+  /// binding sees one shape — the `pageerror` consumer in NAPI still
+  /// wraps the `{ name, message, stack }` object into a native JS
+  /// `Error`, but the field set originates here.
+  #[must_use]
+  pub fn to_snapshot(&self) -> serde_json::Value {
+    match self {
+      PageEvent::Console(msg) => {
+        let loc = msg.location();
+        serde_json::json!({
+          "type": msg.type_str(),
+          "text": msg.text(),
+          "location": {
+            "url": loc.url,
+            "lineNumber": loc.line_number,
+            "columnNumber": loc.column_number,
+          },
+          "timestamp": msg.timestamp(),
+          "argsCount": msg.args().len(),
+        })
+      },
+      PageEvent::Response(r) => serde_json::json!({
+        "url": r.url(),
+        "status": r.status(),
+        "statusText": r.status_text(),
+        "ok": r.ok(),
+        "fromServiceWorker": r.is_from_service_worker(),
+        "headers": r.headers(),
+      }),
+      PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => serde_json::json!({
+        "url": r.url(),
+        "method": r.method(),
+        "resourceType": r.resource_type(),
+        "isNavigationRequest": r.is_navigation_request(),
+        "headers": r.headers(),
+        "postData": r.post_data(),
+      }),
+      PageEvent::WebSocket(ws) => serde_json::json!({ "url": ws.url(), "isClosed": ws.is_closed() }),
+      PageEvent::Dialog(d) => serde_json::json!({
+        "type": d.dialog_type().as_str(),
+        "message": d.message(),
+        "defaultValue": d.default_value(),
+      }),
+      PageEvent::FileChooser(fc) => serde_json::json!({ "isMultiple": fc.is_multiple() }),
+      PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
+      PageEvent::FrameDetached { frame_id } => serde_json::json!({ "frameId": frame_id }),
+      PageEvent::Download(d) => serde_json::json!({
+        "url": d.url(),
+        "suggestedFilename": d.suggested_filename(),
+      }),
+      PageEvent::Load => serde_json::json!({ "type": "load" }),
+      PageEvent::DomContentLoaded => serde_json::json!({ "type": "domcontentloaded" }),
+      PageEvent::Close => serde_json::json!({ "type": "close" }),
+      PageEvent::PageError(err) => {
+        let d = err.error();
+        serde_json::json!({
+          "name": d.name,
+          "message": d.message,
+          "stack": d.stack,
+        })
+      },
+    }
+  }
+}
+
 /// Future returned by an [`ExposedFn`] — resolves to the page-visible
 /// result of the bound callback.
 pub type ExposedFnFuture = Pin<Box<dyn Future<Output = serde_json::Value> + Send>>;
@@ -212,6 +280,24 @@ pub fn event_name_matches(name: &str, event: &PageEvent) -> bool {
       | ("pageerror", PageEvent::PageError(_))
       | ("download", PageEvent::Download(_))
   )
+}
+
+/// Receive the next value from a broadcast receiver, surviving
+/// `Lagged`. A lapped receiver loses the dropped events but keeps the
+/// subscription alive — exiting the listener loop instead (the old
+/// `while let Ok(..)` shape) silently disabled the listener for the
+/// rest of the page's life after one event storm. Returns `None` once
+/// the channel closes.
+pub async fn recv_tolerant<T: Clone>(rx: &mut broadcast::Receiver<T>) -> Option<T> {
+  loop {
+    match rx.recv().await {
+      Ok(v) => return Some(v),
+      Err(broadcast::error::RecvError::Lagged(n)) => {
+        tracing::warn!(dropped = n, "broadcast listener lagged; dropped {n} event(s)");
+      },
+      Err(broadcast::error::RecvError::Closed) => return None,
+    }
+  }
 }
 
 // ── Event Emitter ────────────────────────────────────────────────────────────
@@ -362,7 +448,7 @@ impl EventEmitter {
     let filter_name = name.clone();
 
     let abort_handle = self.spawn_listener(async move {
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if event_name_matches(&filter_name, &event) {
           callback(event);
         }
@@ -390,7 +476,7 @@ impl EventEmitter {
     let filter_name = name.clone();
 
     let abort_handle = self.spawn_listener(async move {
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if event_name_matches(&filter_name, &event) {
           callback(event);
           if let Ok(mut guard) = listeners.lock() {
@@ -428,6 +514,22 @@ impl EventEmitter {
       for (_, entry) in listeners.drain() {
         entry.abort.abort();
       }
+    }
+  }
+
+  /// Remove every listener registered for `event_name`, leaving other
+  /// events' listeners attached (Playwright's
+  /// `removeAllListeners(type)` with a type argument).
+  pub fn remove_listeners_named(&self, event_name: &str) {
+    if let Ok(mut listeners) = self.listeners.lock() {
+      listeners.retain(|_, entry| {
+        if entry.event_name == event_name {
+          entry.abort.abort();
+          false
+        } else {
+          true
+        }
+      });
     }
   }
 }
@@ -564,7 +666,7 @@ impl ContextEventEmitter {
     let mut rx = self.tx.subscribe();
     let filter_name = event_name.to_string();
     let abort_handle = self.spawn_listener(async move {
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if context_event_name_matches(&filter_name, &event) {
           callback(event);
         }
@@ -583,7 +685,7 @@ impl ContextEventEmitter {
     let mut rx = self.tx.subscribe();
     let filter_name = event_name.to_string();
     let abort_handle = self.spawn_listener(async move {
-      while let Ok(event) = rx.recv().await {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if context_event_name_matches(&filter_name, &event) {
           callback(event);
           if let Ok(mut guard) = listeners.lock() {

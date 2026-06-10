@@ -41,6 +41,7 @@ pub mod js_handle;
 pub mod locator;
 pub mod locator_handler;
 pub mod network;
+pub mod observed;
 pub mod options;
 pub mod page;
 pub mod protocol;

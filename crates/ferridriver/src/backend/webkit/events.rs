@@ -235,6 +235,33 @@ async fn handle_provisional_target_created(params: &Value, page: &WebKitPage, pr
   let _ = new_target.send("Runtime.enable", json!({})).await;
   let _ = new_target.send("Network.enable", json!({})).await;
   let _ = new_target.send("Console.enable", json!({})).await;
+  // Re-apply extra HTTP headers on the new target — WebKit drops them on
+  // the session swap, so a `setExtraHTTPHeaders` issued before this
+  // navigation would otherwise not reach the request (mirrors
+  // Playwright's `_updateState` re-application).
+  let extra_headers = page
+    .extra_http_headers
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone();
+  if let Some(headers) = extra_headers {
+    let _ = new_target
+      .send("Network.setExtraHTTPHeaders", json!({ "headers": headers }))
+      .await;
+  }
+  // Re-apply media / user-preference emulation the same way — the new
+  // target session starts with no overrides, so a prior `emulateMedia`
+  // would otherwise stop holding after the first navigation.
+  let emulated = page
+    .emulated_media
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone();
+  if let Some(opts) = emulated {
+    for (method, params) in super::page::WebKitPage::emulate_media_commands(&opts) {
+      let _ = new_target.send(method, params).await;
+    }
+  }
   let _ = new_target
     .send(
       "Page.createUserWorld",
@@ -346,9 +373,11 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
     },
     Some("Page.loadEventFired") => {
       ctx.lifecycle.mark(crate::backend::NavLifecycle::Load);
+      ctx.emitter.emit(crate::events::PageEvent::Load);
     },
     Some("Page.domContentEventFired") => {
       ctx.lifecycle.mark(crate::backend::NavLifecycle::DomContentLoaded);
+      ctx.emitter.emit(crate::events::PageEvent::DomContentLoaded);
     },
     Some("Page.fileChooserOpened") => {
       let target = ctx.target();

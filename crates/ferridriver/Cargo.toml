@@ -34,6 +34,7 @@ parking_lot = "0.12"
 memchr = "2"
 thiserror = { workspace = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tokio-stream = "0.1"
 dirs = "6"
 tempfile = "3"
