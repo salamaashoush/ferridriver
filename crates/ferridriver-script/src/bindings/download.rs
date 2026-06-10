@@ -10,7 +10,7 @@ use ferridriver::download::Download as CoreDownload;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
-use crate::bindings::convert::FerriResultExt;
+use crate::bindings::convert::FerriResultCtxExt;
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "Download")]
@@ -50,27 +50,31 @@ impl DownloadJs {
 
   /// Playwright: `download.path(): Promise<string>`.
   #[qjs(rename = "path")]
-  pub async fn path(&self) -> rquickjs::Result<String> {
-    let p = self.inner.path().await.into_js()?;
+  pub async fn path(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
+    let p = self.inner.path().await.into_js_with(&ctx)?;
     Ok(p.to_string_lossy().into_owned())
   }
 
   /// Playwright: `download.saveAs(path): Promise<void>`.
   #[qjs(rename = "saveAs")]
-  pub async fn save_as(&self, path: String) -> rquickjs::Result<()> {
-    self.inner.save_as(&std::path::PathBuf::from(path)).await.into_js()
+  pub async fn save_as(&self, ctx: rquickjs::Ctx<'_>, path: String) -> rquickjs::Result<()> {
+    self
+      .inner
+      .save_as(&std::path::PathBuf::from(path))
+      .await
+      .into_js_with(&ctx)
   }
 
   /// Playwright: `download.cancel(): Promise<void>`.
   #[qjs(rename = "cancel")]
-  pub async fn cancel(&self) -> rquickjs::Result<()> {
-    self.inner.cancel().await.into_js()
+  pub async fn cancel(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.cancel().await.into_js_with(&ctx)
   }
 
   /// Playwright: `download.delete(): Promise<void>`.
   #[qjs(rename = "delete")]
-  pub async fn delete(&self) -> rquickjs::Result<()> {
-    self.inner.delete().await.into_js()
+  pub async fn delete(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.delete().await.into_js_with(&ctx)
   }
 
   /// Playwright: `download.failure(): Promise<string | null>`.

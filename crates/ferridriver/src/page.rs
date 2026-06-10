@@ -2054,6 +2054,15 @@ impl Page {
     Frame::new(Arc::clone(self), Arc::from(frame_id))
   }
 
+  /// Stable identity of the underlying backend page — equal for every
+  /// wrapper minted over the same browser page, distinct across pages.
+  /// Used by binding layers for per-page bookkeeping (e.g. releasing a
+  /// page's persisted event listeners when it closes).
+  #[must_use]
+  pub fn backend_page_id(&self) -> usize {
+    std::sync::Arc::as_ptr(self.inner.frame_cache()).cast::<()>() as usize
+  }
+
   /// Start listening for a navigation event. Call BEFORE the action that triggers navigation.
   /// Returns a future that resolves when navigation completes.
   ///

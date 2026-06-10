@@ -2,8 +2,7 @@
 //! `Disposable` / `DisposableStub` (`client/disposable.ts`). Returned from
 //! `page.route` / `page.addInitScript` (and context equivalents); `dispose()`
 //! reverses the registration, `remove()` is an alias.
-
-use crate::bindings::convert::FerriResultExt;
+use crate::bindings::convert::FerriResultCtxExt;
 use rquickjs::{JsLifetime, class::Trace};
 use std::sync::Arc;
 
@@ -25,15 +24,15 @@ impl DisposableJs {
 impl DisposableJs {
   /// Reverse the registration. Idempotent — repeat calls are no-ops.
   #[qjs(rename = "dispose")]
-  pub async fn dispose(&self) -> rquickjs::Result<()> {
+  pub async fn dispose(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     let inner = Arc::clone(&self.inner);
-    inner.dispose().await.into_js()
+    inner.dispose().await.into_js_with(&ctx)
   }
 
   /// Alias for `dispose()`.
   #[qjs(rename = "remove")]
-  pub async fn remove(&self) -> rquickjs::Result<()> {
+  pub async fn remove(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     let inner = Arc::clone(&self.inner);
-    inner.dispose().await.into_js()
+    inner.dispose().await.into_js_with(&ctx)
   }
 }

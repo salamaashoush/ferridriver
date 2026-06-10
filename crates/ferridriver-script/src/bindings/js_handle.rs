@@ -9,9 +9,8 @@ use ferridriver::JSHandle;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
-use crate::bindings::convert::{
-  FerriResultExt, extract_page_function, quickjs_arg_to_serialized, serialized_value_to_quickjs,
-};
+use crate::bindings::convert::FerriResultCtxExt;
+use crate::bindings::convert::{extract_page_function, quickjs_arg_to_serialized, serialized_value_to_quickjs};
 
 /// QuickJS-visible wrapper around a core [`JSHandle`].
 ///
@@ -49,8 +48,8 @@ impl JSHandleJs {
   /// `jsHandle.dispose(): Promise<void>`. Idempotent — calling twice
   /// short-circuits the second time.
   #[qjs(rename = "dispose")]
-  pub async fn dispose(&self) -> rquickjs::Result<()> {
-    self.inner.dispose().await.into_js()
+  pub async fn dispose(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.dispose().await.into_js_with(&ctx)
   }
 
   /// Playwright: `jsHandle.asElement(): ElementHandle | null`
@@ -82,14 +81,14 @@ impl JSHandleJs {
   /// `/tmp/playwright/packages/playwright-core/src/protocol/serializers.ts:19`.
   #[qjs(rename = "jsonValue")]
   pub async fn json_value<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let v = self.inner.json_value().await.into_js()?;
+    let v = self.inner.json_value().await.into_js_with(&ctx)?;
     serialized_value_to_quickjs(&ctx, &v)
   }
 
   /// Playwright: `jsHandle.getProperty(propertyName): Promise<JSHandle>`.
   #[qjs(rename = "getProperty")]
-  pub async fn get_property(&self, name: String) -> rquickjs::Result<JSHandleJs> {
-    let h = self.inner.get_property(&name).await.into_js()?;
+  pub async fn get_property(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<JSHandleJs> {
+    let h = self.inner.get_property(&name).await.into_js_with(&ctx)?;
     Ok(JSHandleJs::new(h))
   }
 
@@ -99,7 +98,7 @@ impl JSHandleJs {
   /// on the JS side without losing per-key handle identity.
   #[qjs(rename = "getProperties")]
   pub async fn get_properties<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let pairs = self.inner.get_properties().await.into_js()?;
+    let pairs = self.inner.get_properties().await.into_js_with(&ctx)?;
     let obj = rquickjs::Object::new(ctx.clone())?;
     for (k, h) in pairs {
       let handle_js = rquickjs::Class::instance(ctx.clone(), JSHandleJs::new(h))?;
@@ -120,7 +119,11 @@ impl JSHandleJs {
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     let (source, is_fn) = extract_page_function(&ctx, page_function)?;
     let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let result = self.inner.evaluate(&source, serialized, is_fn).await.into_js()?;
+    let result = self
+      .inner
+      .evaluate(&source, serialized, is_fn)
+      .await
+      .into_js_with(&ctx)?;
     serialized_value_to_quickjs(&ctx, &result)
   }
 
@@ -134,7 +137,11 @@ impl JSHandleJs {
   ) -> rquickjs::Result<JSHandleJs> {
     let (source, is_fn) = extract_page_function(&ctx, page_function)?;
     let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let handle = self.inner.evaluate_handle(&source, serialized, is_fn).await.into_js()?;
+    let handle = self
+      .inner
+      .evaluate_handle(&source, serialized, is_fn)
+      .await
+      .into_js_with(&ctx)?;
     Ok(JSHandleJs::new(handle))
   }
 }

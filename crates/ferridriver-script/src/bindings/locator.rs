@@ -6,7 +6,7 @@ use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 use rquickjs::function::Opt;
 
-use crate::bindings::convert::FerriResultExt;
+use crate::bindings::convert::FerriResultCtxExt;
 
 /// Shape of filter options read out of a JS object via prototype-aware
 /// property lookup. `has`/`hasNot` may be either a selector string or a
@@ -221,20 +221,20 @@ impl LocatorJs {
 
   /// Playwright: `locator.selectText(options?)`. Selects the element's text.
   #[qjs(rename = "selectText")]
-  pub async fn select_text(&self) -> rquickjs::Result<()> {
-    self.inner.select_text().await.into_js()
+  pub async fn select_text(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.select_text().await.into_js_with(&ctx)
   }
 
   /// Playwright: `locator.click({ button: 'right' })` shorthand.
   #[qjs(rename = "rightClick")]
-  pub async fn right_click(&self) -> rquickjs::Result<()> {
-    self.inner.right_click().await.into_js()
+  pub async fn right_click(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.right_click().await.into_js_with(&ctx)
   }
 
   /// Playwright: `locator.boundingBox()`. Returns `{x, y, width, height}` or `null`.
   #[qjs(rename = "boundingBox")]
   pub async fn bounding_box<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
-    match self.inner.bounding_box().await.into_js()? {
+    match self.inner.bounding_box().await.into_js_with(&ctx)? {
       None => Ok(rquickjs::Value::new_null(ctx)),
       Some(b) => {
         let obj = rquickjs::Object::new(ctx.clone())?;
@@ -355,15 +355,21 @@ impl LocatorJs {
   /// Playwright: `locator.elementHandle(): Promise<ElementHandle>`.
   /// Resolves and returns a pinned ElementHandle.
   #[qjs(rename = "elementHandle")]
-  pub async fn element_handle(&self) -> rquickjs::Result<crate::bindings::element_handle::ElementHandleJs> {
-    let inner = self.inner.element_handle().await.into_js()?;
+  pub async fn element_handle(
+    &self,
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<crate::bindings::element_handle::ElementHandleJs> {
+    let inner = self.inner.element_handle().await.into_js_with(&ctx)?;
     Ok(crate::bindings::element_handle::ElementHandleJs::new(inner))
   }
 
   /// Playwright: `locator.elementHandles(): Promise<ElementHandle[]>`.
   #[qjs(rename = "elementHandles")]
-  pub async fn element_handles(&self) -> rquickjs::Result<Vec<crate::bindings::element_handle::ElementHandleJs>> {
-    let inner = self.inner.element_handles().await.into_js()?;
+  pub async fn element_handles(
+    &self,
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<Vec<crate::bindings::element_handle::ElementHandleJs>> {
+    let inner = self.inner.element_handles().await.into_js_with(&ctx)?;
     Ok(
       inner
         .into_iter()
@@ -493,7 +499,7 @@ impl LocatorJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_click_options(&ctx, options)?;
-    self.inner.click(opts).await.into_js()
+    self.inner.click(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "dblclick")]
@@ -503,7 +509,7 @@ impl LocatorJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_dblclick_options(&ctx, options)?;
-    self.inner.dblclick(opts).await.into_js()
+    self.inner.dblclick(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "fill")]
@@ -514,12 +520,12 @@ impl LocatorJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_fill_options(&ctx, options)?;
-    self.inner.fill(&value, opts).await.into_js()
+    self.inner.fill(&value, opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "clear")]
-  pub async fn clear(&self) -> rquickjs::Result<()> {
-    self.inner.clear().await.into_js()
+  pub async fn clear(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.clear().await.into_js_with(&ctx)
   }
 
   /// Playwright: `highlight(options?: { style?: string | Record<string,
@@ -532,18 +538,19 @@ impl LocatorJs {
   #[qjs(rename = "highlight")]
   pub async fn highlight(
     &self,
+    ctx: rquickjs::Ctx<'_>,
     options: Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<crate::bindings::disposable::DisposableJs> {
     let style = parse_highlight_style(options)?;
-    let disposable = self.inner.highlight(style).await.into_js()?;
+    let disposable = self.inner.highlight(style).await.into_js_with(&ctx)?;
     Ok(crate::bindings::disposable::DisposableJs::new(disposable))
   }
 
   /// Playwright: `hideHighlight(): Promise<void>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:164`).
   #[qjs(rename = "hideHighlight")]
-  pub async fn hide_highlight(&self) -> rquickjs::Result<()> {
-    self.inner.hide_highlight().await.into_js()
+  pub async fn hide_highlight(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.hide_highlight().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "type")]
@@ -554,7 +561,7 @@ impl LocatorJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
-    self.inner.r#type(&text, opts).await.into_js()
+    self.inner.r#type(&text, opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "pressSequentially")]
@@ -565,7 +572,7 @@ impl LocatorJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
-    self.inner.press_sequentially(&text, opts).await.into_js()
+    self.inner.press_sequentially(&text, opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "press")]
@@ -576,7 +583,7 @@ impl LocatorJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_press_options(&ctx, options)?;
-    self.inner.press(&key, opts).await.into_js()
+    self.inner.press(&key, opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "hover")]
@@ -586,7 +593,7 @@ impl LocatorJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_hover_options(&ctx, options)?;
-    self.inner.hover(opts).await.into_js()
+    self.inner.hover(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "tap")]
@@ -596,17 +603,17 @@ impl LocatorJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_tap_options(&ctx, options)?;
-    self.inner.tap(opts).await.into_js()
+    self.inner.tap(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "focus")]
-  pub async fn focus(&self) -> rquickjs::Result<()> {
-    self.inner.focus().await.into_js()
+  pub async fn focus(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.focus().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "blur")]
-  pub async fn blur(&self) -> rquickjs::Result<()> {
-    self.inner.blur().await.into_js()
+  pub async fn blur(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.blur().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "check")]
@@ -616,7 +623,7 @@ impl LocatorJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self.inner.check(opts).await.into_js()
+    self.inner.check(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "uncheck")]
@@ -626,7 +633,7 @@ impl LocatorJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self.inner.uncheck(opts).await.into_js()
+    self.inner.uncheck(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "setChecked")]
@@ -637,7 +644,7 @@ impl LocatorJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self.inner.set_checked(checked, opts).await.into_js()
+    self.inner.set_checked(checked, opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "selectOption")]
@@ -649,7 +656,7 @@ impl LocatorJs {
   ) -> rquickjs::Result<Vec<String>> {
     let values = crate::bindings::convert::parse_select_option_values(&ctx, values)?;
     let opts = crate::bindings::convert::parse_select_option_options(&ctx, options)?;
-    self.inner.select_option(values, opts).await.into_js()
+    self.inner.select_option(values, opts).await.into_js_with(&ctx)
   }
 
   /// Attach files to a `<input type=file>` this locator matches.
@@ -664,7 +671,7 @@ impl LocatorJs {
   ) -> rquickjs::Result<()> {
     let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
     let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
-    self.inner.set_input_files(files, opts).await.into_js()
+    self.inner.set_input_files(files, opts).await.into_js_with(&ctx)
   }
 
   /// Drop a file/data payload onto this element. Mirrors Playwright's
@@ -680,12 +687,12 @@ impl LocatorJs {
   ) -> rquickjs::Result<()> {
     let payload = crate::bindings::convert::parse_drop_payload(&ctx, payload)?;
     let opts = crate::bindings::convert::parse_drop_options(&ctx, options)?;
-    self.inner.drop(payload, opts).await.into_js()
+    self.inner.drop(payload, opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "scrollIntoViewIfNeeded")]
-  pub async fn scroll_into_view_if_needed(&self) -> rquickjs::Result<()> {
-    self.inner.scroll_into_view_if_needed().await.into_js()
+  pub async fn scroll_into_view_if_needed(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.scroll_into_view_if_needed().await.into_js_with(&ctx)
   }
 
   /// Playwright: `locator.waitFor(options?: { state?: 'attached' |
@@ -714,7 +721,7 @@ impl LocatorJs {
         timeout: parsed.timeout,
       })
       .await
-      .into_js()
+      .into_js_with(&ctx)
   }
 
   /// Dispatch a DOM event on the element. Mirrors Playwright's
@@ -734,18 +741,22 @@ impl LocatorJs {
       _ => None,
     };
     let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
-    self.inner.dispatch_event(&event_type, init_json, opts).await.into_js()
+    self
+      .inner
+      .dispatch_event(&event_type, init_json, opts)
+      .await
+      .into_js_with(&ctx)
   }
 
   // ── Info ──────────────────────────────────────────────────────────────────
 
   #[qjs(rename = "count")]
-  pub async fn count(&self) -> rquickjs::Result<i32> {
+  pub async fn count(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<i32> {
     self
       .inner
       .count()
       .await
-      .into_js()
+      .into_js_with(&ctx)
       .map(|c| i32::try_from(c).unwrap_or(i32::MAX))
   }
 
@@ -753,35 +764,35 @@ impl LocatorJs {
   /// selector to its canonical recorder/codegen form and returns a new
   /// locator built from it.
   #[qjs(rename = "normalize")]
-  pub async fn normalize(&self) -> rquickjs::Result<LocatorJs> {
-    self.inner.normalize().await.into_js().map(LocatorJs::new)
+  pub async fn normalize(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<LocatorJs> {
+    self.inner.normalize().await.into_js_with(&ctx).map(LocatorJs::new)
   }
 
   /// Playwright: `locator.screenshot(options?): Promise<Buffer>`.
   /// Thin delegator to core `Locator::screenshot` (PNG bytes).
   #[qjs(rename = "screenshot")]
-  pub async fn screenshot(&self) -> rquickjs::Result<Vec<u8>> {
-    self.inner.screenshot().await.into_js()
+  pub async fn screenshot(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<Vec<u8>> {
+    self.inner.screenshot().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "textContent")]
-  pub async fn text_content(&self) -> rquickjs::Result<Option<String>> {
-    self.inner.text_content().await.into_js()
+  pub async fn text_content(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<Option<String>> {
+    self.inner.text_content().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "innerText")]
-  pub async fn inner_text(&self) -> rquickjs::Result<String> {
-    self.inner.inner_text().await.into_js()
+  pub async fn inner_text(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
+    self.inner.inner_text().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "innerHTML")]
-  pub async fn inner_html(&self) -> rquickjs::Result<String> {
-    self.inner.inner_html().await.into_js()
+  pub async fn inner_html(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
+    self.inner.inner_html().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "inputValue")]
-  pub async fn input_value(&self) -> rquickjs::Result<String> {
-    self.inner.input_value().await.into_js()
+  pub async fn input_value(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
+    self.inner.input_value().await.into_js_with(&ctx)
   }
 
   /// Playwright: `locator.ariaSnapshot(options?: TimeoutOptions &
@@ -810,47 +821,47 @@ impl LocatorJs {
       },
       _ => ferridriver::options::AriaSnapshotOptions::default(),
     };
-    self.inner.aria_snapshot(core_opts).await.into_js()
+    self.inner.aria_snapshot(core_opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "getAttribute")]
-  pub async fn get_attribute(&self, name: String) -> rquickjs::Result<Option<String>> {
-    self.inner.get_attribute(&name).await.into_js()
+  pub async fn get_attribute(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Option<String>> {
+    self.inner.get_attribute(&name).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "isVisible")]
-  pub async fn is_visible(&self) -> rquickjs::Result<bool> {
-    self.inner.is_visible().await.into_js()
+  pub async fn is_visible(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_visible().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "isHidden")]
-  pub async fn is_hidden(&self) -> rquickjs::Result<bool> {
-    self.inner.is_hidden().await.into_js()
+  pub async fn is_hidden(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_hidden().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "isEnabled")]
-  pub async fn is_enabled(&self) -> rquickjs::Result<bool> {
-    self.inner.is_enabled().await.into_js()
+  pub async fn is_enabled(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_enabled().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "isDisabled")]
-  pub async fn is_disabled(&self) -> rquickjs::Result<bool> {
-    self.inner.is_disabled().await.into_js()
+  pub async fn is_disabled(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_disabled().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "isChecked")]
-  pub async fn is_checked(&self) -> rquickjs::Result<bool> {
-    self.inner.is_checked().await.into_js()
+  pub async fn is_checked(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_checked().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "isEditable")]
-  pub async fn is_editable(&self) -> rquickjs::Result<bool> {
-    self.inner.is_editable().await.into_js()
+  pub async fn is_editable(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_editable().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "isAttached")]
-  pub async fn is_attached(&self) -> rquickjs::Result<bool> {
-    self.inner.is_attached().await.into_js()
+  pub async fn is_attached(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_attached().await.into_js_with(&ctx)
   }
 
   // ── Drag ──────────────────────────────────────────────────────────────────
@@ -872,19 +883,19 @@ impl LocatorJs {
   ) -> rquickjs::Result<()> {
     let target_inner = target.borrow().inner.clone();
     let opts = crate::bindings::page::parse_drag_options(&ctx, options)?;
-    self.inner.drag_to(&target_inner, opts).await.into_js()
+    self.inner.drag_to(&target_inner, opts).await.into_js_with(&ctx)
   }
 
   // ── All variants ──────────────────────────────────────────────────────────
 
   #[qjs(rename = "allTextContents")]
-  pub async fn all_text_contents(&self) -> rquickjs::Result<Vec<String>> {
-    self.inner.all_text_contents().await.into_js()
+  pub async fn all_text_contents(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<Vec<String>> {
+    self.inner.all_text_contents().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "allInnerTexts")]
-  pub async fn all_inner_texts(&self) -> rquickjs::Result<Vec<String>> {
-    self.inner.all_inner_texts().await.into_js()
+  pub async fn all_inner_texts(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<Vec<String>> {
+    self.inner.all_inner_texts().await.into_js_with(&ctx)
   }
 
   // ── Evaluation ────────────────────────────────────────────────────────────
@@ -899,7 +910,11 @@ impl LocatorJs {
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     let (source, is_fn) = crate::bindings::convert::extract_page_function(&ctx, page_function)?;
     let serialized = crate::bindings::convert::quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let result = self.inner.evaluate(&source, serialized, is_fn, None).await.into_js()?;
+    let result = self
+      .inner
+      .evaluate(&source, serialized, is_fn, None)
+      .await
+      .into_js_with(&ctx)?;
     crate::bindings::convert::serialized_value_to_quickjs(&ctx, &result)
   }
 
@@ -917,7 +932,7 @@ impl LocatorJs {
       .inner
       .evaluate_handle(&source, serialized, is_fn, None)
       .await
-      .into_js()?;
+      .into_js_with(&ctx)?;
     Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
   }
 
@@ -931,7 +946,11 @@ impl LocatorJs {
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     let (source, is_fn) = crate::bindings::convert::extract_page_function(&ctx, page_function)?;
     let serialized = crate::bindings::convert::quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let result = self.inner.evaluate_all(&source, serialized, is_fn).await.into_js()?;
+    let result = self
+      .inner
+      .evaluate_all(&source, serialized, is_fn)
+      .await
+      .into_js_with(&ctx)?;
     crate::bindings::convert::serialized_value_to_quickjs(&ctx, &result)
   }
 }

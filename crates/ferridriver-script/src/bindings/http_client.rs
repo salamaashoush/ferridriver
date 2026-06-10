@@ -9,7 +9,8 @@ use rquickjs::function::Opt;
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use serde::Deserialize;
 
-use crate::bindings::convert::{FerriResultExt, serde_from_js};
+use crate::bindings::convert::FerriResultCtxExt;
+use crate::bindings::convert::serde_from_js;
 
 /// Shape of per-request options accepted from JS.
 ///
@@ -158,7 +159,7 @@ impl HttpClientJs {
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.get(&url, opts).await.into_js()?;
+    let resp = self.inner.get(&url, opts).await.into_js_with(&ctx)?;
     Ok(HttpResponseJs::new(resp))
   }
 
@@ -171,7 +172,7 @@ impl HttpClientJs {
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.post(&url, opts).await.into_js()?;
+    let resp = self.inner.post(&url, opts).await.into_js_with(&ctx)?;
     Ok(HttpResponseJs::new(resp))
   }
 
@@ -184,7 +185,7 @@ impl HttpClientJs {
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.put(&url, opts).await.into_js()?;
+    let resp = self.inner.put(&url, opts).await.into_js_with(&ctx)?;
     Ok(HttpResponseJs::new(resp))
   }
 
@@ -197,7 +198,7 @@ impl HttpClientJs {
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.delete(&url, opts).await.into_js()?;
+    let resp = self.inner.delete(&url, opts).await.into_js_with(&ctx)?;
     Ok(HttpResponseJs::new(resp))
   }
 
@@ -210,7 +211,7 @@ impl HttpClientJs {
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.patch(&url, opts).await.into_js()?;
+    let resp = self.inner.patch(&url, opts).await.into_js_with(&ctx)?;
     Ok(HttpResponseJs::new(resp))
   }
 
@@ -223,7 +224,7 @@ impl HttpClientJs {
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.head(&url, opts).await.into_js()?;
+    let resp = self.inner.head(&url, opts).await.into_js_with(&ctx)?;
     Ok(HttpResponseJs::new(resp))
   }
 
@@ -239,7 +240,7 @@ impl HttpClientJs {
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.fetch(&url, opts).await.into_js()?;
+    let resp = self.inner.fetch(&url, opts).await.into_js_with(&ctx)?;
     Ok(HttpResponseJs::new(resp))
   }
 }
@@ -307,8 +308,8 @@ impl HttpResponseJs {
 
   /// Response body as UTF-8 text.
   #[qjs(rename = "text")]
-  pub fn text(&self) -> rquickjs::Result<String> {
-    self.inner.text().into_js()
+  pub fn text(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
+    self.inner.text().into_js_with(&ctx)
   }
 
   /// Response body parsed as JSON.
@@ -318,7 +319,7 @@ impl HttpResponseJs {
     // parser — no serde_json::Value middle allocation. `json_parse`
     // does not touch the JS `JSON` global, so a reassigned
     // `globalThis.JSON` cannot affect it.
-    let text = self.inner.text().into_js()?;
+    let text = self.inner.text().into_js_with(&ctx)?;
     ctx.json_parse(text)
   }
 }

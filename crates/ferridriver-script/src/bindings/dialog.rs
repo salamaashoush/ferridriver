@@ -10,7 +10,7 @@ use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 use rquickjs::function::Opt;
 
-use crate::bindings::convert::FerriResultExt;
+use crate::bindings::convert::FerriResultCtxExt;
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "Dialog")]
@@ -62,13 +62,13 @@ impl DialogJs {
   /// Playwright-exact message `"Cannot accept dialog which is already
   /// handled!"`.
   #[qjs(rename = "accept")]
-  pub async fn accept(&self, prompt_text: Opt<String>) -> rquickjs::Result<()> {
-    self.inner.accept(prompt_text.0).await.into_js()
+  pub async fn accept(&self, ctx: rquickjs::Ctx<'_>, prompt_text: Opt<String>) -> rquickjs::Result<()> {
+    self.inner.accept(prompt_text.0).await.into_js_with(&ctx)
   }
 
   /// Playwright: `dialog.dismiss(): Promise<void>`.
   #[qjs(rename = "dismiss")]
-  pub async fn dismiss(&self) -> rquickjs::Result<()> {
-    self.inner.dismiss().await.into_js()
+  pub async fn dismiss(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.dismiss().await.into_js_with(&ctx)
   }
 }
