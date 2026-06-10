@@ -12,7 +12,8 @@ use rquickjs::class::Trace;
 use rquickjs::function::Opt;
 use serde::Deserialize;
 
-use crate::bindings::convert::{FerriResultExt, serde_from_js};
+use crate::bindings::convert::FerriResultCtxExt;
+use crate::bindings::convert::serde_from_js;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -69,7 +70,7 @@ impl MouseJs {
       click_count: o.click_count,
       delay: o.delay,
     };
-    self.page.mouse().click(x, y, Some(opts)).await.into_js()
+    self.page.mouse().click(x, y, Some(opts)).await.into_js_with(&ctx)
   }
 
   /// `mouse.move(x, y, options?: { steps? })`.
@@ -85,7 +86,7 @@ impl MouseJs {
       Some(val) if !val.is_undefined() && !val.is_null() => serde_from_js::<JsMouseMoveOptions>(&ctx, val)?.steps,
       _ => None,
     };
-    self.page.mouse().r#move(x, y, steps).await.into_js()
+    self.page.mouse().r#move(x, y, steps).await.into_js_with(&ctx)
   }
 
   /// `mouse.dblclick(x, y, options?: { button? })`.
@@ -103,7 +104,7 @@ impl MouseJs {
       click_count: None,
       delay: o.delay,
     };
-    self.page.mouse().dblclick(x, y, Some(opts)).await.into_js()
+    self.page.mouse().dblclick(x, y, Some(opts)).await.into_js_with(&ctx)
   }
 
   /// `mouse.down(options?: { button?, clickCount? })`.
@@ -114,7 +115,7 @@ impl MouseJs {
       button: o.button,
       click_count: o.click_count,
     };
-    self.page.mouse().down(Some(opts)).await.into_js()
+    self.page.mouse().down(Some(opts)).await.into_js_with(&ctx)
   }
 
   /// `mouse.up(options?: { button?, clickCount? })`.
@@ -125,12 +126,12 @@ impl MouseJs {
       button: o.button,
       click_count: o.click_count,
     };
-    self.page.mouse().up(Some(opts)).await.into_js()
+    self.page.mouse().up(Some(opts)).await.into_js_with(&ctx)
   }
 
   /// `mouse.wheel(deltaX, deltaY)`.
   #[qjs(rename = "wheel")]
-  pub async fn wheel(&self, delta_x: f64, delta_y: f64) -> rquickjs::Result<()> {
-    self.page.mouse().wheel(delta_x, delta_y).await.into_js()
+  pub async fn wheel(&self, ctx: rquickjs::Ctx<'_>, delta_x: f64, delta_y: f64) -> rquickjs::Result<()> {
+    self.page.mouse().wheel(delta_x, delta_y).await.into_js_with(&ctx)
   }
 }

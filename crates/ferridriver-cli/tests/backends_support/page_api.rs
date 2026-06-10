@@ -64,6 +64,44 @@ pub fn register(set: &mut crate::TestSet<'_>) {
   set.run("page_api::test_page_page_errors", test_page_page_errors);
   set.run("page_api::test_page_request_gc", test_page_request_gc);
   set.run("page_api::test_locator_describe", test_locator_describe);
+  set.run("page_api::test_timeout_error_name", test_timeout_error_name);
+}
+
+/// Timeouts surface as a real JS `Error` with `name === 'TimeoutError'`
+/// and the core message (Playwright shape) — not the mangled
+/// "Error converting from js ..." TypeError the ctx-free conversion
+/// produced.
+fn test_timeout_error_name(c: &mut McpClient) {
+  c.nav_url(&format!("data:text/html,{}", urlencoding(H1_HTML)));
+  let v = c.script_value(
+    r"
+    try {
+      await page.waitForSelector('#does-not-exist', { timeout: 250 });
+      return { threw: false };
+    } catch (e) {
+      return {
+        threw: true,
+        name: e.name,
+        isError: e instanceof Error,
+        message: String(e.message),
+      };
+    }
+  ",
+  );
+  assert_eq!(v["threw"].as_bool(), Some(true), "waitForSelector should time out: {v}");
+  assert_eq!(
+    v["name"].as_str(),
+    Some("TimeoutError"),
+    "error name must be TimeoutError: {v}"
+  );
+  assert_eq!(v["isError"].as_bool(), Some(true), "must be instanceof Error: {v}");
+  assert!(
+    v["message"]
+      .as_str()
+      .unwrap_or("")
+      .starts_with("Timeout 250ms exceeded"),
+    "message should be the core timeout message, not a conversion wrapper: {v}"
+  );
 }
 
 /// `page.on('console', cb)` delivers a live `ConsoleMessage` instance

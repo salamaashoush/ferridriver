@@ -10,7 +10,7 @@ use ferridriver::file_chooser::FileChooser as CoreFileChooser;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
-use crate::bindings::convert::FerriResultExt;
+use crate::bindings::convert::FerriResultCtxExt;
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "FileChooser")]
@@ -60,6 +60,6 @@ impl FileChooserJs {
   ) -> rquickjs::Result<()> {
     let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
     let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
-    self.inner.set_files(files, opts).await.into_js()
+    self.inner.set_files(files, opts).await.into_js_with(&ctx)
   }
 }

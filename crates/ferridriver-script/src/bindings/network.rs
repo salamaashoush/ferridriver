@@ -12,7 +12,8 @@ use ferridriver::route::{ContinueOverrides, FulfillResponse, Route as CoreRoute}
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use crate::bindings::convert::{FerriResultExt, serde_from_js, serde_to_js};
+use crate::bindings::convert::FerriResultCtxExt;
+use crate::bindings::convert::{serde_from_js, serde_to_js};
 
 // ── RequestJs ────────────────────────────────────────────────────────────────
 
@@ -84,7 +85,7 @@ impl RequestJs {
 
   #[qjs(rename = "postDataJSON")]
   pub fn post_data_json<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let v = self.inner.post_data_json().into_js()?;
+    let v = self.inner.post_data_json().into_js_with(&ctx)?;
     let v = v.unwrap_or(serde_json::Value::Null);
     serde_to_js(&ctx, &v)
   }
@@ -103,13 +104,13 @@ impl RequestJs {
 
   #[qjs(rename = "allHeaders")]
   pub async fn all_headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let h = self.inner.all_headers().await.into_js()?;
+    let h = self.inner.all_headers().await.into_js_with(&ctx)?;
     serde_to_js(&ctx, &h)
   }
 
   #[qjs(rename = "headerValue")]
-  pub async fn header_value(&self, name: String) -> rquickjs::Result<Option<String>> {
-    self.inner.header_value(&name).await.into_js()
+  pub async fn header_value(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Option<String>> {
+    self.inner.header_value(&name).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "failure")]
@@ -131,7 +132,7 @@ impl RequestJs {
 
   #[qjs(rename = "sizes")]
   pub async fn sizes<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let sizes = self.inner.sizes().await.into_js()?;
+    let sizes = self.inner.sizes().await.into_js_with(&ctx)?;
     serde_to_js(&ctx, &sizes)
   }
 
@@ -152,8 +153,8 @@ impl RequestJs {
   }
 
   #[qjs(rename = "response")]
-  pub async fn response(&self) -> rquickjs::Result<Option<ResponseJs>> {
-    let resp = self.inner.response().await.into_js()?;
+  pub async fn response(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<Option<ResponseJs>> {
+    let resp = self.inner.response().await.into_js_with(&ctx)?;
     Ok(resp.map(|r| match self.page.as_ref() {
       Some(page) => ResponseJs::new_with_page(r, page.clone()),
       None => ResponseJs::new(r),
@@ -249,7 +250,7 @@ impl ResponseJs {
 
   #[qjs(rename = "allHeaders")]
   pub async fn all_headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let h = self.inner.all_headers().await.into_js()?;
+    let h = self.inner.all_headers().await.into_js_with(&ctx)?;
     serde_to_js(&ctx, &h)
   }
 
@@ -261,34 +262,34 @@ impl ResponseJs {
   }
 
   #[qjs(rename = "headerValue")]
-  pub async fn header_value(&self, name: String) -> rquickjs::Result<Option<String>> {
-    self.inner.header_value(&name).await.into_js()
+  pub async fn header_value(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Option<String>> {
+    self.inner.header_value(&name).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "headerValues")]
-  pub async fn header_values(&self, name: String) -> rquickjs::Result<Vec<String>> {
-    self.inner.header_values(&name).await.into_js()
+  pub async fn header_values(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Vec<String>> {
+    self.inner.header_values(&name).await.into_js_with(&ctx)
   }
 
   /// Response body as base64-encoded string. QuickJS does not have
   /// `Buffer`; scripts decode if they need raw bytes.
   #[qjs(rename = "body")]
   pub async fn body<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let bytes = self.inner.body().await.into_js()?;
+    let bytes = self.inner.body().await.into_js_with(&ctx)?;
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
     serde_to_js(&ctx, &encoded)
   }
 
   #[qjs(rename = "text")]
-  pub async fn text(&self) -> rquickjs::Result<String> {
-    self.inner.text().await.into_js()
+  pub async fn text(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
+    self.inner.text().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "json")]
   pub async fn json<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     // Body -> JS via QuickJS's C JSON parser; no serde_json::Value
     // middle allocation, no dependence on the JS `JSON` global.
-    let text = self.inner.text().await.into_js()?;
+    let text = self.inner.text().await.into_js_with(&ctx)?;
     ctx.json_parse(text)
   }
 

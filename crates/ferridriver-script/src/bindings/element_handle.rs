@@ -9,9 +9,8 @@ use ferridriver::backend::ImageFormat;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
-use crate::bindings::convert::{
-  FerriResultExt, extract_page_function, quickjs_arg_to_serialized, serialized_value_to_quickjs,
-};
+use crate::bindings::convert::FerriResultCtxExt;
+use crate::bindings::convert::{extract_page_function, quickjs_arg_to_serialized, serialized_value_to_quickjs};
 
 /// Extract `{ type?: 'png' | 'jpeg' | 'webp' }` from a user-supplied
 /// screenshot options bag. Defaults to PNG when the caller omits the
@@ -74,8 +73,8 @@ impl ElementHandleJs {
 
   /// Release the underlying remote element. Idempotent.
   #[qjs(rename = "dispose")]
-  pub async fn dispose(&self) -> rquickjs::Result<()> {
-    self.inner.dispose().await.into_js()
+  pub async fn dispose(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.dispose().await.into_js_with(&ctx)
   }
 
   /// Companion [`crate::bindings::js_handle::JSHandleJs`] sharing the
@@ -101,7 +100,7 @@ impl ElementHandleJs {
       .as_js_handle()
       .evaluate(&source, serialized, is_fn)
       .await
-      .into_js()?;
+      .into_js_with(&ctx)?;
     serialized_value_to_quickjs(&ctx, &result)
   }
 
@@ -120,67 +119,67 @@ impl ElementHandleJs {
       .as_js_handle()
       .evaluate_handle(&source, serialized, is_fn)
       .await
-      .into_js()?;
+      .into_js_with(&ctx)?;
     Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
   }
 
   // ── Content reads (Phase E) ──────────────────────────────────────────
 
   #[qjs(rename = "innerHTML")]
-  pub async fn inner_html(&self) -> rquickjs::Result<String> {
-    self.inner.inner_html().await.into_js()
+  pub async fn inner_html(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
+    self.inner.inner_html().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "innerText")]
-  pub async fn inner_text(&self) -> rquickjs::Result<String> {
-    self.inner.inner_text().await.into_js()
+  pub async fn inner_text(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
+    self.inner.inner_text().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "textContent")]
-  pub async fn text_content(&self) -> rquickjs::Result<Option<String>> {
-    self.inner.text_content().await.into_js()
+  pub async fn text_content(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<Option<String>> {
+    self.inner.text_content().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "getAttribute")]
-  pub async fn get_attribute(&self, name: String) -> rquickjs::Result<Option<String>> {
-    self.inner.get_attribute(&name).await.into_js()
+  pub async fn get_attribute(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Option<String>> {
+    self.inner.get_attribute(&name).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "inputValue")]
-  pub async fn input_value(&self) -> rquickjs::Result<String> {
-    self.inner.input_value().await.into_js()
+  pub async fn input_value(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
+    self.inner.input_value().await.into_js_with(&ctx)
   }
 
   // ── State predicates (Phase E) ───────────────────────────────────────
 
   #[qjs(rename = "isVisible")]
-  pub async fn is_visible(&self) -> rquickjs::Result<bool> {
-    self.inner.is_visible().await.into_js()
+  pub async fn is_visible(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_visible().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "isHidden")]
-  pub async fn is_hidden(&self) -> rquickjs::Result<bool> {
-    self.inner.is_hidden().await.into_js()
+  pub async fn is_hidden(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_hidden().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "isDisabled")]
-  pub async fn is_disabled(&self) -> rquickjs::Result<bool> {
-    self.inner.is_disabled().await.into_js()
+  pub async fn is_disabled(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_disabled().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "isEnabled")]
-  pub async fn is_enabled(&self) -> rquickjs::Result<bool> {
-    self.inner.is_enabled().await.into_js()
+  pub async fn is_enabled(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_enabled().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "isChecked")]
-  pub async fn is_checked(&self) -> rquickjs::Result<bool> {
-    self.inner.is_checked().await.into_js()
+  pub async fn is_checked(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_checked().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "isEditable")]
-  pub async fn is_editable(&self) -> rquickjs::Result<bool> {
-    self.inner.is_editable().await.into_js()
+  pub async fn is_editable(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<bool> {
+    self.inner.is_editable().await.into_js_with(&ctx)
   }
 
   // ── Geometry (Phase E) ───────────────────────────────────────────────
@@ -189,7 +188,7 @@ impl ElementHandleJs {
   /// `{x, y, width, height}` or `null`.
   #[qjs(rename = "boundingBox")]
   pub async fn bounding_box<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let bbox = self.inner.bounding_box().await.into_js()?;
+    let bbox = self.inner.bounding_box().await.into_js_with(&ctx)?;
     match bbox {
       None => Ok(rquickjs::Value::new_null(ctx)),
       Some(b) => {
@@ -212,7 +211,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_click_options(&ctx, options)?;
-    self.inner.click(opts).await.into_js()
+    self.inner.click(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "dblclick")]
@@ -222,7 +221,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_dblclick_options(&ctx, options)?;
-    self.inner.dblclick(opts).await.into_js()
+    self.inner.dblclick(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "hover")]
@@ -232,7 +231,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_hover_options(&ctx, options)?;
-    self.inner.hover(opts).await.into_js()
+    self.inner.hover(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "type")]
@@ -243,17 +242,17 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
-    self.inner.type_str(&text, opts).await.into_js()
+    self.inner.type_str(&text, opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "focus")]
-  pub async fn focus(&self) -> rquickjs::Result<()> {
-    self.inner.focus().await.into_js()
+  pub async fn focus(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.focus().await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "scrollIntoViewIfNeeded")]
-  pub async fn scroll_into_view_if_needed(&self) -> rquickjs::Result<()> {
-    self.inner.scroll_into_view_if_needed().await.into_js()
+  pub async fn scroll_into_view_if_needed(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.scroll_into_view_if_needed().await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.screenshot(opts?)`. Today accepts
@@ -268,7 +267,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Vec<u8>> {
     let format = parse_screenshot_format(&ctx, options)?;
-    self.inner.screenshot(format).await.into_js()
+    self.inner.screenshot(format).await.into_js_with(&ctx)
   }
 
   // ── $eval / $$eval (Playwright parity) ───────────────────────────────
@@ -289,7 +288,7 @@ impl ElementHandleJs {
       .inner
       .eval_on_selector(&selector, &source, serialized)
       .await
-      .into_js()?;
+      .into_js_with(&ctx)?;
     serialized_value_to_quickjs(&ctx, &result)
   }
 
@@ -309,7 +308,7 @@ impl ElementHandleJs {
       .inner
       .eval_on_selector_all(&selector, &source, serialized)
       .await
-      .into_js()?;
+      .into_js_with(&ctx)?;
     serialized_value_to_quickjs(&ctx, &result)
   }
 
@@ -318,16 +317,24 @@ impl ElementHandleJs {
   /// Playwright: `elementHandle.$(selector): Promise<ElementHandle | null>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:206`).
   #[qjs(rename = "$")]
-  pub async fn query_selector(&self, selector: String) -> rquickjs::Result<Option<ElementHandleJs>> {
-    let maybe = self.inner.query_selector(&selector).await.into_js()?;
+  pub async fn query_selector(
+    &self,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<Option<ElementHandleJs>> {
+    let maybe = self.inner.query_selector(&selector).await.into_js_with(&ctx)?;
     Ok(maybe.map(ElementHandleJs::new))
   }
 
   /// Playwright: `elementHandle.$$(selector): Promise<ElementHandle[]>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:210`).
   #[qjs(rename = "$$")]
-  pub async fn query_selector_all(&self, selector: String) -> rquickjs::Result<Vec<ElementHandleJs>> {
-    let handles = self.inner.query_selector_all(&selector).await.into_js()?;
+  pub async fn query_selector_all(
+    &self,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<Vec<ElementHandleJs>> {
+    let handles = self.inner.query_selector_all(&selector).await.into_js_with(&ctx)?;
     Ok(handles.into_iter().map(ElementHandleJs::new).collect())
   }
 
@@ -335,15 +342,18 @@ impl ElementHandleJs {
 
   /// Playwright: `elementHandle.ownerFrame(): Promise<Frame | null>`.
   #[qjs(rename = "ownerFrame")]
-  pub async fn owner_frame(&self) -> rquickjs::Result<Option<crate::bindings::frame::FrameJs>> {
-    let maybe = self.inner.owner_frame().await.into_js()?;
+  pub async fn owner_frame(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<Option<crate::bindings::frame::FrameJs>> {
+    let maybe = self.inner.owner_frame().await.into_js_with(&ctx)?;
     Ok(maybe.map(crate::bindings::frame::FrameJs::new))
   }
 
   /// Playwright: `elementHandle.contentFrame(): Promise<Frame | null>`.
   #[qjs(rename = "contentFrame")]
-  pub async fn content_frame(&self) -> rquickjs::Result<Option<crate::bindings::frame::FrameJs>> {
-    let maybe = self.inner.content_frame().await.into_js()?;
+  pub async fn content_frame(
+    &self,
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<Option<crate::bindings::frame::FrameJs>> {
+    let maybe = self.inner.content_frame().await.into_js_with(&ctx)?;
     Ok(maybe.map(crate::bindings::frame::FrameJs::new))
   }
 
@@ -353,23 +363,33 @@ impl ElementHandleJs {
   #[qjs(rename = "waitForElementState")]
   pub async fn wait_for_element_state(
     &self,
+    ctx: rquickjs::Ctx<'_>,
     state: String,
     timeout: rquickjs::function::Opt<f64>,
   ) -> rquickjs::Result<()> {
-    let st = ferridriver::ElementState::parse(&state).into_js()?;
+    let st = ferridriver::ElementState::parse(&state).into_js_with(&ctx)?;
     let timeout_ms = timeout.0.map(|ms| ms as u64);
-    self.inner.wait_for_element_state(st, timeout_ms).await.into_js()
+    self
+      .inner
+      .wait_for_element_state(st, timeout_ms)
+      .await
+      .into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.waitForSelector(selector, options?)`.
   #[qjs(rename = "waitForSelector")]
   pub async fn wait_for_selector(
     &self,
+    ctx: rquickjs::Ctx<'_>,
     selector: String,
     timeout: rquickjs::function::Opt<f64>,
   ) -> rquickjs::Result<Option<ElementHandleJs>> {
     let timeout_ms = timeout.0.map(|ms| ms as u64);
-    let maybe = self.inner.wait_for_selector(&selector, timeout_ms).await.into_js()?;
+    let maybe = self
+      .inner
+      .wait_for_selector(&selector, timeout_ms)
+      .await
+      .into_js_with(&ctx)?;
     Ok(maybe.map(ElementHandleJs::new))
   }
 
@@ -384,7 +404,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_fill_options(&ctx, options)?;
-    self.inner.fill(&value, opts).await.into_js()
+    self.inner.fill(&value, opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.check(options?)`.
@@ -395,7 +415,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self.inner.check(opts).await.into_js()
+    self.inner.check(opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.uncheck(options?)`.
@@ -406,7 +426,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self.inner.uncheck(opts).await.into_js()
+    self.inner.uncheck(opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.setChecked(checked, options?)`.
@@ -418,7 +438,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self.inner.set_checked(checked, opts).await.into_js()
+    self.inner.set_checked(checked, opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.tap(options?)`.
@@ -429,7 +449,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_tap_options(&ctx, options)?;
-    self.inner.tap(opts).await.into_js()
+    self.inner.tap(opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.press(key, options?)`.
@@ -441,7 +461,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_press_options(&ctx, options)?;
-    self.inner.press(&key, opts).await.into_js()
+    self.inner.press(&key, opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.dispatchEvent(type, eventInit?)`.
@@ -460,7 +480,11 @@ impl ElementHandleJs {
       _ => None,
     };
     let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
-    self.inner.dispatch_event(&event_type, init_json, opts).await.into_js()
+    self
+      .inner
+      .dispatch_event(&event_type, init_json, opts)
+      .await
+      .into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.selectOption(values, options?)`.
@@ -473,13 +497,13 @@ impl ElementHandleJs {
   ) -> rquickjs::Result<Vec<String>> {
     let values = crate::bindings::convert::parse_select_option_values(&ctx, values)?;
     let opts = crate::bindings::convert::parse_select_option_options(&ctx, options)?;
-    self.inner.select_option(values, opts).await.into_js()
+    self.inner.select_option(values, opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.selectText(options?)`.
   #[qjs(rename = "selectText")]
-  pub async fn select_text(&self) -> rquickjs::Result<()> {
-    self.inner.select_text().await.into_js()
+  pub async fn select_text(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.select_text().await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.setInputFiles(files, options?)`.
@@ -492,6 +516,6 @@ impl ElementHandleJs {
   ) -> rquickjs::Result<()> {
     let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
     let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
-    self.inner.set_input_files(files, opts).await.into_js()
+    self.inner.set_input_files(files, opts).await.into_js_with(&ctx)
   }
 }

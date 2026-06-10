@@ -18,7 +18,8 @@ use rquickjs::function::Opt;
 use rquickjs::{Ctx, JsLifetime, Value, class::Class, class::Trace};
 
 use super::context::BrowserContextJs;
-use crate::bindings::convert::{FerriResultExt, serde_from_js};
+use crate::bindings::convert::FerriResultCtxExt;
+use crate::bindings::convert::serde_from_js;
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "Browser")]
@@ -74,12 +75,12 @@ impl BrowserJs {
   /// `BrowserCloseOptions { reason }` form can be added once a script
   /// case demands it.
   #[qjs(rename = "close")]
-  pub async fn close(&self) -> rquickjs::Result<()> {
+  pub async fn close(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     self
       .inner
       .close(None)
       .await
-      .map_err(|e| crate::bindings::convert::to_rq_error(&e))?;
+      .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
     Ok(())
   }
 
@@ -100,7 +101,7 @@ impl BrowserJs {
   /// Playwright: `browser.newPage()`. Creates a page in the default context.
   #[qjs(rename = "newPage")]
   pub async fn new_page<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let page = self.inner.new_page().await.into_js()?;
+    let page = self.inner.new_page().await.into_js_with(&ctx)?;
     let wrapper = crate::bindings::page::pagejs_for_ctx(&ctx, page);
     let instance = Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
@@ -109,7 +110,7 @@ impl BrowserJs {
   /// The active page of the default context (mirrors NAPI `browser.page()`).
   #[qjs(rename = "page")]
   pub async fn page<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let page = self.inner.page().await.into_js()?;
+    let page = self.inner.page().await.into_js_with(&ctx)?;
     let wrapper = crate::bindings::page::pagejs_for_ctx(&ctx, page);
     let instance = Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)

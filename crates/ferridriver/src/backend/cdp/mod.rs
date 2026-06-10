@@ -4079,7 +4079,11 @@ impl<T: CdpWrap> CdpPage<T> {
           .map_or(0, f64_to_u64_saturating);
 
         let msg = crate::console_message::ConsoleMessage::new(&page, type_str, None, args, location, timestamp);
-        console_log.write().await.push(msg.clone());
+        crate::state::push_capped(
+          &mut *console_log.write().await,
+          msg.clone(),
+          crate::state::CONSOLE_LOG_CAP,
+        );
         emitter.emit(crate::events::PageEvent::Console(msg));
       }
     });
@@ -4319,11 +4323,15 @@ impl<T: CdpWrap> CdpPage<T> {
         // synchronously in the same stack as the CDP event arrival.
         dialog_manager.did_open(dialog);
 
-        dialog_log.write().await.push(crate::state::DialogEvent {
-          dialog_type: dialog_type_str,
-          message,
-          action: "dispatched".to_string(),
-        });
+        crate::state::push_capped(
+          &mut *dialog_log.write().await,
+          crate::state::DialogEvent {
+            dialog_type: dialog_type_str,
+            message,
+            action: "dispatched".to_string(),
+          },
+          crate::state::DIALOG_LOG_CAP,
+        );
       }
     });
   }
@@ -5695,7 +5703,11 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       self.nav_request_slot.set(new_request.clone());
     }
 
-    network_log.write().await.push(new_request.clone());
+    crate::state::push_capped(
+      &mut *network_log.write().await,
+      new_request.clone(),
+      crate::state::NETWORK_LOG_CAP,
+    );
     emitter.emit(crate::events::PageEvent::Request(new_request));
   }
 

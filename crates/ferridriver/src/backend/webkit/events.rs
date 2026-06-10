@@ -517,7 +517,11 @@ async fn handle_request_will_be_sent(
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .insert(request_id, req.clone());
-  network_log.write().await.push(req.clone());
+  crate::state::push_capped(
+    &mut *network_log.write().await,
+    req.clone(),
+    crate::state::NETWORK_LOG_CAP,
+  );
   if is_navigation_request {
     nav_slot.set(req.clone());
   }
@@ -1121,7 +1125,11 @@ async fn dispatch_console(
     None
   };
   let msg = ConsoleMessage::new(&page, ty, explicit_text, args, location, 0);
-  console_log.write().await.push(msg.clone());
+  crate::state::push_capped(
+    &mut *console_log.write().await,
+    msg.clone(),
+    crate::state::CONSOLE_LOG_CAP,
+  );
   emitter.emit(crate::events::PageEvent::Console(msg));
 }
 
@@ -1201,9 +1209,13 @@ async fn dispatch_dialog(
     page,
   );
   dialog_manager.did_open(dialog);
-  dialog_log.write().await.push(DialogEvent {
-    dialog_type: dialog_type_str,
-    message,
-    action: "dispatched".to_string(),
-  });
+  crate::state::push_capped(
+    &mut *dialog_log.write().await,
+    DialogEvent {
+      dialog_type: dialog_type_str,
+      message,
+      action: "dispatched".to_string(),
+    },
+    crate::state::DIALOG_LOG_CAP,
+  );
 }

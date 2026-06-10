@@ -24,6 +24,24 @@ pub use crate::console_message::ConsoleMessage;
 pub use crate::context::DialogEvent;
 pub use crate::network::Request;
 
+/// Retention caps for the per-context diagnostics logs. The backend
+/// listeners append on every event; without a cap a long-lived session
+/// on a chatty page grows without bound. Sized for the MCP diagnostics
+/// tools' "recent activity" reads, not full-session capture (use
+/// routing / HAR for that).
+pub const CONSOLE_LOG_CAP: usize = 500;
+pub const NETWORK_LOG_CAP: usize = 1000;
+pub const DIALOG_LOG_CAP: usize = 100;
+
+/// Append to a diagnostics log, evicting the oldest entries past `cap`.
+pub fn push_capped<T>(log: &mut Vec<T>, entry: T, cap: usize) {
+  log.push(entry);
+  if log.len() > cap {
+    let overflow = log.len() - cap;
+    log.drain(..overflow);
+  }
+}
+
 /// Arc handles to a context's log collections, usable without holding the `BrowserState` lock.
 #[derive(Clone)]
 pub struct ContextLogHandles {

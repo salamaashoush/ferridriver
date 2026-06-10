@@ -17,6 +17,39 @@ pub fn to_rq_error(err: &FerriError) -> rquickjs::Error {
   rquickjs::Error::new_from_js_message("ferridriver", err.name(), err.to_string())
 }
 
+/// Lower a [`FerriError`] into a thrown JS exception whose `name`
+/// mirrors the core error name (`"TimeoutError"`, `"TargetClosedError"`,
+/// ...). The ctx-free [`to_rq_error`] path can only produce a
+/// conversion-error shape, which surfaces in scripts as a `TypeError`
+/// with a mangled "Error converting from js ..." message; this builds a
+/// real `Error` instance so `e.name === 'TimeoutError'` holds, matching
+/// Playwright.
+pub fn ferri_throw<'js>(ctx: &Ctx<'js>, e: &FerriError) -> rquickjs::Error {
+  let built: rquickjs::Result<Value<'js>> = (|| {
+    let ctor: rquickjs::function::Constructor<'js> = ctx.globals().get("Error")?;
+    let err: Object<'js> = ctor.construct((e.to_string(),))?;
+    err.set("name", e.name())?;
+    Ok(err.into_value())
+  })();
+  match built {
+    Ok(v) => ctx.throw(v),
+    Err(_) => rquickjs::Exception::throw_message(ctx, &e.to_string()),
+  }
+}
+
+/// Adapter: `Result<T, FerriError>` into `rquickjs::Result<T>` with a
+/// properly-named thrown `Error` (see [`ferri_throw`]). Preferred over
+/// [`FerriResultExt::into_js`] wherever a `Ctx` is in scope.
+pub trait FerriResultCtxExt<T> {
+  fn into_js_with(self, ctx: &Ctx<'_>) -> rquickjs::Result<T>;
+}
+
+impl<T> FerriResultCtxExt<T> for Result<T, FerriError> {
+  fn into_js_with(self, ctx: &Ctx<'_>) -> rquickjs::Result<T> {
+    self.map_err(|e| ferri_throw(ctx, &e))
+  }
+}
+
 /// Convert a JS millisecond value (`f64`) into a `u64`, clamping
 /// negatives to `0`. Single home for the otherwise-repeated f64->u64
 /// timeout cast so call sites stay lint-clean.

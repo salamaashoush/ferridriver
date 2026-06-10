@@ -94,10 +94,11 @@ impl McpServer {
     `artifacts` (write/writeBytes/read/readBytes/list/exists/remove, dedicated output dir for \
     screenshots / PDFs / traces; pair with `page.screenshot()` or `page.pdf()` to save bytes), \
     `page` / `context` / `request` (live browser bindings). \
-    Fresh QuickJS context per call — no state bleeds between invocations except through `vars`. \
-    `page.on(...)` listeners only fire while THIS script runs and die with it; to observe events \
-    across tool calls, poll `page.consoleMessages()` / `page.pageErrors()` (retained history) or \
-    use `page.waitForEvent(event, { predicate })` inside one script. \
+    The session VM persists between calls (same `globalThis` + `vars`), but `page.on(...)` \
+    listeners only execute while a script is actively running — events arriving between calls \
+    buffer (bounded; oldest kept) and deliver at the start of the next call. For reliable \
+    cross-call observation poll `page.consoleMessages()` / `page.pageErrors()` (retained \
+    history) or use `page.waitForEvent(event, { predicate })` inside one script. \
     Returns structured JSON: { status: 'ok'|'error', value?, error?, duration_ms, console[] }. \
     On `error`, the payload includes message, stack, line, column, and a source snippet around the failure. \
     Pair with snapshot/screenshot tools when the LLM needs to ground selectors before acting."

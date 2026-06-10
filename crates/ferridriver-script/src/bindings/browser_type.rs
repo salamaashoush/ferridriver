@@ -22,7 +22,7 @@ use rquickjs::{Ctx, JsLifetime, Value, class::Class, class::Trace};
 
 use super::browser::BrowserJs;
 use super::context::BrowserContextJs;
-use crate::bindings::convert::{serde_from_js, to_rq_error};
+use crate::bindings::convert::serde_from_js;
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "BrowserType")]
@@ -60,7 +60,11 @@ impl BrowserTypeJs {
       Some(v) if v.is_undefined() || v.is_null() => LaunchOptions::default(),
       Some(v) => parse_launch_options(&ctx, v)?,
     };
-    let inner = self.inner.launch(core).await.map_err(|e| to_rq_error(&e))?;
+    let inner = self
+      .inner
+      .launch(core)
+      .await
+      .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
     let wrapper = BrowserJs::new(Arc::new(inner));
     let instance = Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
@@ -83,7 +87,7 @@ impl BrowserTypeJs {
       .inner
       .connect(&ws_endpoint, core)
       .await
-      .map_err(|e| to_rq_error(&e))?;
+      .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
     let wrapper = BrowserJs::new(Arc::new(inner));
     let instance = Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
@@ -106,7 +110,7 @@ impl BrowserTypeJs {
       .inner
       .connect_over_cdp(&endpoint_url, core)
       .await
-      .map_err(|e| to_rq_error(&e))?;
+      .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
     let wrapper = BrowserJs::new(Arc::new(inner));
     let instance = Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
@@ -136,7 +140,7 @@ impl BrowserTypeJs {
       .inner
       .launch_persistent_context(std::path::Path::new(&user_data_dir), core)
       .await
-      .map_err(|e| to_rq_error(&e))?;
+      .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
     let wrapper = BrowserContextJs::new(Arc::new(ctx_ref));
     let instance = Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)

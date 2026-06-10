@@ -13,7 +13,8 @@ use rquickjs::class::Trace;
 use rquickjs::function::Opt;
 use serde::Deserialize;
 
-use crate::bindings::convert::{FerriResultExt, serde_from_js};
+use crate::bindings::convert::FerriResultCtxExt;
+use crate::bindings::convert::serde_from_js;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -69,14 +70,14 @@ impl KeyboardJs {
 impl KeyboardJs {
   /// Dispatch a `keydown` event for `key` on the currently focused element.
   #[qjs(rename = "down")]
-  pub async fn down(&self, key: String) -> rquickjs::Result<()> {
-    self.page.keyboard().down(&key).await.into_js()
+  pub async fn down(&self, ctx: rquickjs::Ctx<'_>, key: String) -> rquickjs::Result<()> {
+    self.page.keyboard().down(&key).await.into_js_with(&ctx)
   }
 
   /// Dispatch a `keyup` event for `key` on the currently focused element.
   #[qjs(rename = "up")]
-  pub async fn up(&self, key: String) -> rquickjs::Result<()> {
-    self.page.keyboard().up(&key).await.into_js()
+  pub async fn up(&self, ctx: rquickjs::Ctx<'_>, key: String) -> rquickjs::Result<()> {
+    self.page.keyboard().up(&key).await.into_js_with(&ctx)
   }
 
   /// `keyboard.press(key, options?: { delay? })`.
@@ -89,7 +90,7 @@ impl KeyboardJs {
   ) -> rquickjs::Result<()> {
     let delay = parse_delay(&ctx, options)?;
     let opts = delay.map(|d| ferridriver::page::KeyboardPressOptions { delay: Some(d) });
-    self.page.keyboard().press(&key, opts).await.into_js()
+    self.page.keyboard().press(&key, opts).await.into_js_with(&ctx)
   }
 
   /// `keyboard.type(text, options?: { delay?, namedKeys? })`.
@@ -101,12 +102,12 @@ impl KeyboardJs {
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = parse_type_options(&ctx, options)?;
-    self.page.keyboard().r#type(&text, opts).await.into_js()
+    self.page.keyboard().r#type(&text, opts).await.into_js_with(&ctx)
   }
 
   /// `keyboard.insertText(text)` — `input` event only, no key events.
   #[qjs(rename = "insertText")]
-  pub async fn insert_text(&self, text: String) -> rquickjs::Result<()> {
-    self.page.keyboard().insert_text(&text).await.into_js()
+  pub async fn insert_text(&self, ctx: rquickjs::Ctx<'_>, text: String) -> rquickjs::Result<()> {
+    self.page.keyboard().insert_text(&text).await.into_js_with(&ctx)
   }
 }

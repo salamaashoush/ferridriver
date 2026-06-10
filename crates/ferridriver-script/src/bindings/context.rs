@@ -8,7 +8,8 @@ use rquickjs::function::Opt;
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use rustc_hash::FxHashMap;
 
-use crate::bindings::convert::{FerriResultExt, init_script_from_js, serde_from_js, serde_to_js};
+use crate::bindings::convert::FerriResultCtxExt;
+use crate::bindings::convert::{init_script_from_js, serde_from_js, serde_to_js};
 use crate::bindings::page::{call_predicate_truthy, url_value_to_matcher, with_page_callbacks};
 
 #[derive(JsLifetime, Trace)]
@@ -54,7 +55,7 @@ impl BrowserContextJs {
   /// expires, sameSite }` objects matching Playwright's cookie shape.
   #[qjs(rename = "cookies")]
   pub async fn cookies<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let cookies = self.inner.cookies().await.into_js()?;
+    let cookies = self.inner.cookies().await.into_js_with(&ctx)?;
     serde_to_js(&ctx, &cookies)
   }
 
@@ -67,7 +68,7 @@ impl BrowserContextJs {
   pub async fn add_cookies<'js>(&self, ctx: Ctx<'js>, cookies: Value<'js>) -> rquickjs::Result<()> {
     let parsed: Vec<ferridriver::backend::SetCookieParams> = serde_from_js(&ctx, cookies)?;
     let cookies: Vec<ferridriver::backend::CookieData> = parsed.into_iter().map(Into::into).collect();
-    self.inner.add_cookies(cookies).await.into_js()
+    self.inner.add_cookies(cookies).await.into_js_with(&ctx)
   }
 
   /// Playwright: `context.clearCookies(options?)`. Without options
@@ -83,8 +84,8 @@ impl BrowserContextJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     match options.0 {
-      None => self.inner.clear_cookies().await.into_js(),
-      Some(v) if v.is_undefined() || v.is_null() => self.inner.clear_cookies().await.into_js(),
+      None => self.inner.clear_cookies().await.into_js_with(&ctx),
+      Some(v) if v.is_undefined() || v.is_null() => self.inner.clear_cookies().await.into_js_with(&ctx),
       Some(v) => {
         #[derive(serde::Deserialize, Default)]
         struct Filter {
@@ -98,15 +99,19 @@ impl BrowserContextJs {
           domain: parsed.domain,
           path: parsed.path,
         };
-        self.inner.clear_cookies_filtered(&core).await.into_js()
+        self.inner.clear_cookies_filtered(&core).await.into_js_with(&ctx)
       },
     }
   }
 
   /// Delete a cookie by name (optionally scoped to a domain).
   #[qjs(rename = "deleteCookie")]
-  pub async fn delete_cookie(&self, name: String, domain: Opt<String>) -> rquickjs::Result<()> {
-    self.inner.delete_cookie(&name, domain.0.as_deref()).await.into_js()
+  pub async fn delete_cookie(&self, ctx: rquickjs::Ctx<'_>, name: String, domain: Opt<String>) -> rquickjs::Result<()> {
+    self
+      .inner
+      .delete_cookie(&name, domain.0.as_deref())
+      .await
+      .into_js_with(&ctx)
   }
 
   /// Export the current storage state — cookies + per-origin localStorage.
@@ -134,7 +139,7 @@ impl BrowserContextJs {
       },
       _ => None,
     };
-    let state = self.inner.storage_state(core_opts).await.into_js()?;
+    let state = self.inner.storage_state(core_opts).await.into_js_with(&ctx)?;
     serde_to_js(&ctx, &state)
   }
 
@@ -143,36 +148,47 @@ impl BrowserContextJs {
   /// Grant a set of permissions (e.g. `['geolocation', 'notifications']`),
   /// optionally scoped to `origin`.
   #[qjs(rename = "grantPermissions")]
-  pub async fn grant_permissions(&self, permissions: Vec<String>, origin: Opt<String>) -> rquickjs::Result<()> {
+  pub async fn grant_permissions(
+    &self,
+    ctx: rquickjs::Ctx<'_>,
+    permissions: Vec<String>,
+    origin: Opt<String>,
+  ) -> rquickjs::Result<()> {
     self
       .inner
       .grant_permissions(&permissions, origin.0.as_deref())
       .await
-      .into_js()
+      .into_js_with(&ctx)
   }
 
   /// Revoke all previously granted permissions.
   #[qjs(rename = "clearPermissions")]
-  pub async fn clear_permissions(&self) -> rquickjs::Result<()> {
-    self.inner.clear_permissions().await.into_js()
+  pub async fn clear_permissions(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.clear_permissions().await.into_js_with(&ctx)
   }
 
   // ── Emulation ─────────────────────────────────────────────────────────────
 
   /// Override the geolocation reported to pages in this context.
   #[qjs(rename = "setGeolocation")]
-  pub async fn set_geolocation(&self, latitude: f64, longitude: f64, accuracy: f64) -> rquickjs::Result<()> {
+  pub async fn set_geolocation(
+    &self,
+    ctx: rquickjs::Ctx<'_>,
+    latitude: f64,
+    longitude: f64,
+    accuracy: f64,
+  ) -> rquickjs::Result<()> {
     self
       .inner
       .set_geolocation(latitude, longitude, accuracy)
       .await
-      .into_js()
+      .into_js_with(&ctx)
   }
 
   /// Toggle offline mode for this context.
   #[qjs(rename = "setOffline")]
-  pub async fn set_offline(&self, offline: bool) -> rquickjs::Result<()> {
-    self.inner.set_offline(offline).await.into_js()
+  pub async fn set_offline(&self, ctx: rquickjs::Ctx<'_>, offline: bool) -> rquickjs::Result<()> {
+    self.inner.set_offline(offline).await.into_js_with(&ctx)
   }
 
   /// Playwright: `browserContext.setHTTPCredentials(httpCredentials |
@@ -207,7 +223,7 @@ impl BrowserContextJs {
         })
       },
     };
-    self.inner.set_http_credentials(creds).await.into_js()
+    self.inner.set_http_credentials(creds).await.into_js_with(&ctx)
   }
 
   /// Set HTTP headers sent with every request in this context.
@@ -216,7 +232,7 @@ impl BrowserContextJs {
   #[qjs(rename = "setExtraHTTPHeaders")]
   pub async fn set_extra_http_headers<'js>(&self, ctx: Ctx<'js>, headers: Value<'js>) -> rquickjs::Result<()> {
     let map: FxHashMap<String, String> = serde_from_js(&ctx, headers)?;
-    self.inner.set_extra_http_headers(&map).await.into_js()
+    self.inner.set_extra_http_headers(&map).await.into_js_with(&ctx)
   }
 
   // ── Routing ─────────────────────────────────────────────────────────────
@@ -293,19 +309,28 @@ impl BrowserContextJs {
       });
     });
 
-    self.inner.route(matcher, rust_handler, times).await.into_js()?;
+    self
+      .inner
+      .route(matcher, rust_handler, times)
+      .await
+      .into_js_with(&ctx)?;
     Ok(())
   }
 
   /// Playwright: `browserContext.routeFromHAR(har, options?)`. Replay-only.
   #[qjs(rename = "routeFromHAR")]
-  pub async fn route_from_har(&self, har: String, options: rquickjs::function::Opt<Value<'_>>) -> rquickjs::Result<()> {
+  pub async fn route_from_har(
+    &self,
+    ctx: rquickjs::Ctx<'_>,
+    har: String,
+    options: rquickjs::function::Opt<Value<'_>>,
+  ) -> rquickjs::Result<()> {
     let opts = crate::bindings::page::parse_har_options(&options)?;
     self
       .inner
       .route_from_har(std::path::Path::new(&har), opts)
       .await
-      .into_js()
+      .into_js_with(&ctx)
   }
 
   /// Playwright: `browserContext.unroute(url, handler?)` —
@@ -329,14 +354,14 @@ impl BrowserContextJs {
           .unwrap_or_else(std::sync::PoisonError::into_inner)
           .remove(&id);
         if let Some(m) = m {
-          self.inner.unroute(&m).await.into_js()?;
+          self.inner.unroute(&m).await.into_js_with(&ctx)?;
         }
         with_page_callbacks(&ctx, |r| r.remove_route(id))?;
       }
       return Ok(());
     }
     let matcher = url_value_to_matcher(&ctx, url)?;
-    self.inner.unroute(&matcher).await.into_js()
+    self.inner.unroute(&matcher).await.into_js_with(&ctx)
   }
 
   // ── Init scripts ──────────────────────────────────────────────────────────
@@ -355,7 +380,7 @@ impl BrowserContextJs {
     arg: Opt<Value<'js>>,
   ) -> rquickjs::Result<Value<'js>> {
     let (init, arg_json) = init_script_from_js(&ctx, script, arg.0)?;
-    let disposable = self.inner.add_init_script(init, arg_json).await.into_js()?;
+    let disposable = self.inner.add_init_script(init, arg_json).await.into_js_with(&ctx)?;
     let instance =
       rquickjs::class::Class::instance(ctx.clone(), crate::bindings::disposable::DisposableJs::new(disposable))?;
     rquickjs::IntoJs::into_js(instance, &ctx)
@@ -417,8 +442,8 @@ impl BrowserContextJs {
 
   /// Close the context (tears down the underlying browser state).
   #[qjs(rename = "close")]
-  pub async fn close(&self) -> rquickjs::Result<()> {
-    self.inner.close().await.into_js()
+  pub async fn close(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.close().await.into_js_with(&ctx)
   }
 
   // ── Page creation ──────────────────────────────────────────────────────
@@ -432,7 +457,7 @@ impl BrowserContextJs {
   #[qjs(rename = "newPage")]
   pub async fn new_page<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     use rquickjs::class::Class;
-    let page = self.inner.new_page().await.into_js()?;
+    let page = self.inner.new_page().await.into_js_with(&ctx)?;
     let wrapper = crate::bindings::page::pagejs_for_ctx(&ctx, page);
     let instance = Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
@@ -468,7 +493,7 @@ impl BrowserContextJs {
         height: s.height.max(0.0) as u32,
       }),
     };
-    self.inner.set_record_video(opts).await.into_js()
+    self.inner.set_record_video(opts).await.into_js_with(&ctx)
   }
 
   // ── Exposed bindings / functions ───────────────────────────────────────
@@ -491,7 +516,7 @@ impl BrowserContextJs {
     callback: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Value<'js>> {
     let binding = self.make_binding(&ctx, &name, callback, true)?;
-    self.inner.expose_binding(&name, binding).await.into_js()?;
+    self.inner.expose_binding(&name, binding).await.into_js_with(&ctx)?;
     self.make_disposable(&ctx, name)
   }
 
@@ -508,7 +533,7 @@ impl BrowserContextJs {
     callback: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Value<'js>> {
     let binding = self.make_binding(&ctx, &name, callback, false)?;
-    self.inner.expose_binding(&name, binding).await.into_js()?;
+    self.inner.expose_binding(&name, binding).await.into_js_with(&ctx)?;
     self.make_disposable(&ctx, name)
   }
 

@@ -2100,7 +2100,11 @@ impl BidiPage {
               .and_then(serde_json::Value::as_f64)
               .map_or(0, f64_to_u64_saturating);
             let msg = ConsoleMessage::new(&page, type_str, text, args, location, timestamp);
-            console_log.write().await.push(msg.clone());
+            crate::state::push_capped(
+              &mut *console_log.write().await,
+              msg.clone(),
+              crate::state::CONSOLE_LOG_CAP,
+            );
             emitter.emit(PageEvent::Console(msg));
           },
           "network.beforeRequestSent" => {
@@ -2177,11 +2181,15 @@ impl BidiPage {
             // in `backend/cdp/mod.rs` for the full rationale.
             dialog_manager.did_open(dialog);
 
-            dialog_log.write().await.push(DialogEvent {
-              dialog_type: prompt_type_str,
-              message,
-              action: "dispatched".to_string(),
-            });
+            crate::state::push_capped(
+              &mut *dialog_log.write().await,
+              DialogEvent {
+                dialog_type: prompt_type_str,
+                message,
+                action: "dispatched".to_string(),
+              },
+              crate::state::DIALOG_LOG_CAP,
+            );
           },
           "browsingContext.contextDestroyed" => {
             closed.store(true, Ordering::Relaxed);
@@ -3212,7 +3220,11 @@ impl BidiNetworkTracker {
       self.nav_request_slot.set(new_request.clone());
     }
 
-    network_log.write().await.push(new_request.clone());
+    crate::state::push_capped(
+      &mut *network_log.write().await,
+      new_request.clone(),
+      crate::state::NETWORK_LOG_CAP,
+    );
     emitter.emit(PageEvent::Request(new_request));
   }
 
