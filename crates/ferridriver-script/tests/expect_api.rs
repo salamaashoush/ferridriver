@@ -28,7 +28,6 @@ fn make_engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
     request: None,
     browser: None,
     plugins: Vec::new(),
-    trusted_modules: false,
     host: ExtensionHost::Script,
     caps: ScriptCaps::default(),
   };

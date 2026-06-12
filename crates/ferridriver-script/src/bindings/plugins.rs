@@ -34,8 +34,9 @@ use crate::error::ScriptError;
 use crate::session_procs::{self, SessionProcs};
 
 /// One plugin file handed to the engine at `install_plugins` time:
-/// just its precompiled bytecode. Tool names + capabilities are read
-/// from the manifest the module registers, not carried here.
+/// its precompiled bytecode plus a display name for diagnostics. Tool
+/// names + capabilities are read from the manifest the module
+/// registers, not carried here.
 #[derive(Debug, Clone)]
 pub struct PluginBinding {
   /// Precompiled `QuickJS` bytecode of the rolldown-bundled module,
@@ -43,6 +44,8 @@ pub struct PluginBinding {
   /// [`crate::bundle::compile_and_extract_plugins`]. `Module::load`ed
   /// per session — no per-session parse, no source retained.
   pub bytecode: Arc<[u8]>,
+  /// Source identity (file path) used only in install-failure logs.
+  pub name: String,
 }
 
 /// The `commands` object a plugin handler receives. Holds this tool's
@@ -157,18 +160,22 @@ fn rq(e: &ScriptError) -> rquickjs::Error {
 /// registers its tools into the shared registry, native or legacy
 /// shape), then expose every registered tool as a native
 /// `tools.<name>` callable.
-pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Result<()> {
+///
+/// Per-file isolation mirrors startup (`load_all`): one plugin whose
+/// top-level throws is logged and skipped — it must not take down the
+/// whole session VM (and with it every `run_script` for the session).
+pub async fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Result<()> {
   for file in files {
-    // SAFETY: `file.bytecode` was produced by `Module::write` in THIS
-    // process and this exact rquickjs/QuickJS build with native
-    // endianness (see `compile_and_extract_plugins`) and is never
-    // persisted — the precondition `Module::load` documents.
-    #[allow(unsafe_code)]
-    let module = unsafe { Module::load(ctx.clone(), &file.bytecode) }?;
-    // Evaluating the module runs its top-level `tool(...)` /
-    // `Given(...)` calls, registering directly into the extension
-    // registry. No `globalThis.exports`, no post-eval ingest.
-    let (_evaluated, _promise) = module.eval()?;
+    if let Err(e) = install_one_plugin(ctx, file).await {
+      let detail = match e {
+        rquickjs::Error::Exception => ctx.catch().try_into_exception().map_or_else(
+          |v| format!("{v:?}"),
+          |ex| ex.message().unwrap_or_else(|| "exception".into()),
+        ),
+        other => other.to_string(),
+      };
+      tracing::warn!(plugin = %file.name, error = %detail, "plugin install failed; skipping file");
+    }
   }
 
   let names = tool_names(ctx).map_err(|e| rq(&e))?;
@@ -185,6 +192,27 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
   ctx.globals().set("tools", tools_obj)?;
   crate::bindings::runtime::mirror_global(ctx, "tools")?;
   Ok(())
+}
+
+/// Load + fully evaluate one plugin module, including its top-level
+/// `await` (the extraction pass awaits the eval promise the same way —
+/// `compile_extract_one` — so a tool registered after an async setup
+/// step is visible here too, not only in the manifest).
+async fn install_one_plugin(ctx: &Ctx<'_>, file: &PluginBinding) -> rquickjs::Result<()> {
+  // SAFETY: `file.bytecode` was produced by `Module::write` by this
+  // exact rquickjs/QuickJS build with native endianness — either in
+  // this process (`compile_and_extract_plugins`) or restored from the
+  // bytecode disk cache, whose ABI tag (QuickJS version, arch,
+  // endianness, pointer width) plus transitive input hashes guarantee
+  // an ABI-identical toolchain wrote it. That satisfies the
+  // same-interpreter precondition `Module::load` documents.
+  #[allow(unsafe_code)]
+  let module = unsafe { Module::load(ctx.clone(), &file.bytecode) }?;
+  // Evaluating the module runs its top-level `tool(...)` /
+  // `Given(...)` calls, registering directly into the extension
+  // registry. No `globalThis.exports`, no post-eval ingest.
+  let (_evaluated, promise) = module.eval()?;
+  promise.into_future::<()>().await
 }
 
 fn install_tool_namespace<'js>(

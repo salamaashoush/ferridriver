@@ -53,7 +53,7 @@ fn declared_sidecar_is_reachable_from_a_script() {
   // the standard search path, so this drives config-parse → SidecarSpec →
   // ScriptEngineConfig end to end.
   let toml = format!(
-    "[[sidecars]]\nname = \"echo\"\ncommand = [\"{}\"]\nstartupTimeoutMs = 5000\n",
+    "[[sidecars]]\nname = \"echo\"\ncommand = [\"{}\"]\n",
     echo.to_str().unwrap()
   );
   std::fs::write(dir.path().join("ferridriver.toml"), toml).unwrap();

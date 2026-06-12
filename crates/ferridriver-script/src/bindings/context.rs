@@ -1,7 +1,6 @@
 //! `BrowserContextJs`: JS wrapper around `ferridriver::context::ContextRef`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use ferridriver::context::ContextRef;
 use rquickjs::function::Opt;
@@ -10,38 +9,29 @@ use rustc_hash::FxHashMap;
 
 use crate::bindings::convert::FerriResultCtxExt;
 use crate::bindings::convert::{init_script_from_js, serde_from_js, serde_to_js};
-use crate::bindings::page::{call_predicate_truthy, url_value_to_matcher, with_page_callbacks};
+use crate::bindings::page::{
+  PageCallbacks, RouteOwner, call_predicate_truthy, url_value_to_matcher, with_page_callbacks,
+};
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "BrowserContext")]
 pub struct BrowserContextJs {
   #[qjs(skip_trace)]
   inner: Arc<ContextRef>,
-  /// Per-context route registration counter. Mirrors `PageJs::next_route_id`;
-  /// each `context.route(matcher, fn)` gets a unique id used as the key in
-  /// the shared `PageCallbacks` userdata registry.
-  #[qjs(skip_trace)]
-  next_route_id: Arc<AtomicU64>,
-  /// Always-true `UrlMatcher`s registered for predicate routes, keyed by id,
-  /// so `context.unroute(fn)` can drop exactly the matching registration by
-  /// `Arc` identity. Mirrors `PageJs::route_matchers`.
-  #[qjs(skip_trace)]
-  route_matchers: Arc<std::sync::Mutex<FxHashMap<u64, ferridriver::url_matcher::UrlMatcher>>>,
 }
 
 impl BrowserContextJs {
   #[must_use]
   pub fn new(inner: Arc<ContextRef>) -> Self {
-    // Context route ids share the per-session `PageCallbacks` userdata
-    // registry with page routes (and with other contexts), so they're
-    // drawn from a process-global counter offset above any per-page id
-    // range to avoid key collisions.
-    static CONTEXT_ROUTE_BASE: AtomicU64 = AtomicU64::new(1 << 48);
-    Self {
-      inner,
-      next_route_id: Arc::new(AtomicU64::new(CONTEXT_ROUTE_BASE.fetch_add(1 << 20, Ordering::Relaxed))),
-      route_matchers: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
-    }
+    Self { inner }
+  }
+
+  /// This context's route-registry owner key. Keyed by core context
+  /// name, not wrapper identity — `page.context()` mints a fresh
+  /// `Arc<ContextRef>` per call, so `unroute(fn)` must work across
+  /// wrappers of the same context.
+  fn route_owner(&self) -> RouteOwner {
+    RouteOwner::Context(self.inner.name().to_string())
   }
 }
 
@@ -263,24 +253,20 @@ impl BrowserContextJs {
         ));
       },
     };
-    let id = self.next_route_id.fetch_add(1, Ordering::Relaxed);
+    let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
     let saved_handler = rquickjs::Persistent::save(&ctx, handler);
-    with_page_callbacks(&ctx, |r| r.insert_route_handler(id, saved_handler))?;
 
     let has_predicate = url.as_function().is_some();
-    let matcher = if let Some(pred) = url.as_function() {
+    let (matcher, saved_pred, registry_matcher) = if let Some(pred) = url.as_function() {
       let saved_pred = rquickjs::Persistent::save(&ctx, pred.clone());
-      with_page_callbacks(&ctx, |r| r.insert_route_pred(id, saved_pred))?;
       let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
-      self
-        .route_matchers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(id, m.clone());
-      m
+      (m.clone(), Some(saved_pred), Some(m))
     } else {
-      url_value_to_matcher(&ctx, url)?
+      (url_value_to_matcher(&ctx, url)?, None, None)
     };
+    with_page_callbacks(&ctx, |r| {
+      r.insert_route(id, self.route_owner(), saved_handler, saved_pred, registry_matcher);
+    })?;
 
     let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
       let async_ctx = async_ctx.clone();
@@ -339,7 +325,7 @@ impl BrowserContextJs {
   #[qjs(rename = "unroute")]
   pub async fn unroute<'js>(&self, ctx: Ctx<'js>, url: Value<'js>) -> rquickjs::Result<()> {
     if let Some(pred) = url.as_function() {
-      let saved = with_page_callbacks(&ctx, |r| r.route_preds_snapshot())?;
+      let saved = with_page_callbacks(&ctx, |r| r.predicate_routes_for_owner(&self.route_owner()))?;
       let mut victims: Vec<u64> = Vec::new();
       for (id, sp) in saved {
         let stored = sp.restore(&ctx)?;
@@ -348,15 +334,10 @@ impl BrowserContextJs {
         }
       }
       for id in victims {
-        let m = self
-          .route_matchers
-          .lock()
-          .unwrap_or_else(std::sync::PoisonError::into_inner)
-          .remove(&id);
+        let m = with_page_callbacks(&ctx, |r| r.remove_route(id))?;
         if let Some(m) = m {
           self.inner.unroute(&m).await.into_js_with(&ctx)?;
         }
-        with_page_callbacks(&ctx, |r| r.remove_route(id))?;
       }
       return Ok(());
     }
@@ -550,13 +531,10 @@ impl BrowserContextJs {
     timeout_ms: Opt<f64>,
   ) -> rquickjs::Result<Value<'js>> {
     use rquickjs::class::Class;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let timeout = timeout_ms.0.unwrap_or(30_000.0) as u64;
-    let ev = self
-      .inner
-      .wait_for_event(&event, timeout)
-      .await
-      .map_err(|e| rquickjs::Error::new_from_js_message("BrowserContext.waitForEvent", "Error", e.to_string()))?;
+    let timeout = timeout_ms
+      .0
+      .map_or_else(|| self.inner.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
+    let ev = self.inner.wait_for_event(&event, timeout).await.into_js_with(&ctx)?;
     match ev {
       ferridriver::events::ContextEvent::WebError(err) => {
         let wrapper = crate::bindings::web_error::WebErrorJs::new(err);
@@ -644,21 +622,22 @@ impl BrowserContextJs {
   /// Build the `{ dispose() }` Disposable returned from
   /// `exposeBinding` / `exposeFunction`. `dispose()` removes the
   /// binding from the registry and from every page in the context
-  /// (`window[name]` is deleted on each page).
+  /// (`window[name]` is deleted on each page), and releases the
+  /// persisted QuickJS callback so it doesn't sit in the session VM's
+  /// name-keyed registry forever.
   fn make_disposable<'js>(&self, ctx: &Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
     let obj = rquickjs::Object::new(ctx.clone())?;
     let inner = self.inner.clone();
     let dispose = rquickjs::Function::new(
       ctx.clone(),
-      rquickjs::prelude::Async(move || {
+      rquickjs::prelude::Async(move |ctx: Ctx<'_>| {
+        // Already on the interpreter (dispose is JS-invoked), so the
+        // userdata registry is directly reachable — drop the stashed
+        // callback synchronously, then have core remove `window[name]`
+        // from every page (the future must not borrow `ctx`).
+        crate::bindings::page::remove_exposed_callback(&ctx, &name);
         let inner = inner.clone();
         let name = name.clone();
-        // Core removal drops the binding from the registry AND removes
-        // `window[name]` from every page in the context. The stashed
-        // QuickJS callback stays in the name-keyed registry but is never
-        // invoked again (the page-side proxy is gone); re-entering the
-        // engine `AsyncContext` from this JS-invoked async fn would
-        // deadlock against the script's own outer `async_with`.
         async move {
           let _ = inner.remove_exposed_binding(&name).await;
         }

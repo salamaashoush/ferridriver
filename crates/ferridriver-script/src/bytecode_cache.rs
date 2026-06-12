@@ -50,6 +50,13 @@ struct Manifest {
   aux: Option<String>,
   /// `(absolute path, content hash)` for every transitive input.
   inputs: Vec<(String, u64)>,
+  /// Hash of the `.bin` this manifest was written with. `.bin` and
+  /// `.json` are two separate atomic writes; two processes racing a
+  /// store after an input edit can interleave so one writer's manifest
+  /// pairs with the other's bytecode. Verifying on load rejects the
+  /// torn pair (input hashes alone cannot — both writers read the same
+  /// new inputs).
+  bytecode_hash: u64,
 }
 
 fn disabled() -> bool {
@@ -59,6 +66,14 @@ fn disabled() -> bool {
 /// Toolchain fingerprint. Bytecode under one tag is safe to
 /// `Module::load` only by an identical toolchain. `fdbc<N>` is our own
 /// format version — bump it on any change to the manifest shape.
+///
+/// Beyond the raw bytecode ABI (QuickJS version, arch, endianness,
+/// pointer width) the tag folds in the crate version, as a proxy for
+/// the pinned rolldown/oxc bundler (a bundler upgrade alters
+/// transpilation/tree-shaking output while every input hash still
+/// matches) AND for the native module surface (`ferridriver` /
+/// `@cucumber/cucumber` / node-compat are Rust ModuleDefs resolved at
+/// link time, not bundled sources).
 fn abi_tag() -> &'static str {
   static TAG: OnceLock<String> = OnceLock::new();
   TAG.get_or_init(|| {
@@ -69,7 +84,8 @@ fn abi_tag() -> &'static str {
       .unwrap_or("unknown");
     let endian = if cfg!(target_endian = "big") { "be" } else { "le" };
     format!(
-      "fdbc1-qjs{qjs}-{}-{endian}-p{}",
+      "fdbc3-v{}-qjs{qjs}-{}-{endian}-p{}",
+      env!("CARGO_PKG_VERSION"),
       std::env::consts::ARCH,
       std::mem::size_of::<usize>() * 8,
     )
@@ -116,8 +132,15 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 /// A stable key for a set of entry paths (canonicalized, order-independent).
 /// The transitive content check on load is what actually guards freshness;
 /// this only needs to be collision-free across distinct bundle requests.
+///
+/// `kind` namespaces the consumers: the same file compiled as a plugin
+/// vs. as a BDD steps entry produces different bundles (different cwd,
+/// different aux payload), so they must not share one slot. `salt`
+/// carries extra pipeline state that changes the output without
+/// changing any input file — today the bundler-shims fingerprint
+/// (`BundlerShims::fingerprint`).
 #[must_use]
-pub fn entry_key(entry_paths: &[PathBuf]) -> u64 {
+pub fn entry_key(kind: &str, entry_paths: &[PathBuf], salt: u64) -> u64 {
   let mut canon: Vec<String> = entry_paths
     .iter()
     .map(|p| {
@@ -130,6 +153,8 @@ pub fn entry_key(entry_paths: &[PathBuf]) -> u64 {
   canon.sort();
   let mut h = std::collections::hash_map::DefaultHasher::new();
   abi_tag().hash(&mut h);
+  kind.hash(&mut h);
+  salt.hash(&mut h);
   canon.hash(&mut h);
   h.finish()
 }
@@ -192,6 +217,9 @@ pub fn load(key: u64) -> Option<CacheEntry> {
     }
   }
   let bytecode = std::fs::read(bin_path).ok()?;
+  if hash_bytes(&bytecode) != manifest.bytecode_hash {
+    return None;
+  }
   Some(CacheEntry {
     bytecode,
     source_map_json: manifest.source_map_json,
@@ -229,6 +257,7 @@ pub fn store(
     source_map_json: source_map_json.map(str::to_string),
     aux: aux.map(str::to_string),
     inputs: input_hashes,
+    bytecode_hash: hash_bytes(bytecode),
   };
   let Ok(json) = serde_json::to_vec(&manifest) else {
     return;

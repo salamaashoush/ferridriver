@@ -128,3 +128,47 @@ async fn js_steps_pass_fail_and_tag_filter() {
     "failure remaps to the original .js source via source map: {msg}"
   );
 }
+
+#[tokio::test]
+async fn before_step_and_after_step_hooks_fire_on_the_js_path() {
+  let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+  let feature_src = std::fs::read_to_string(fixtures_dir.join("step_hooks.feature")).expect("read feature");
+
+  let session = JsBddSession::from_globs(&["step_hooks.steps.js".to_string()], &fixtures_dir)
+    .await
+    .expect("load js bdd session");
+
+  let feature_set = FeatureSet::parse_text(&feature_src).expect("parse feature");
+  let scenarios = expand_feature(&feature_set.features[0]);
+  assert_eq!(scenarios.len(), 2);
+
+  let mut world = build_world().await;
+  let mut results: Vec<JsScenarioResult> = Vec::new();
+  for scenario in &scenarios {
+    world.reset_scenario_state();
+    results.push(session.run_scenario(scenario, &mut world).await);
+  }
+  session.after_all().await.expect("afterAll");
+
+  // Scenario 1: two passing steps + one failing step execute (3 step-hook
+  // pairs); the 4th step is skipped and gets NO step hooks. The failing
+  // step still gets its AfterStep, which must observe status FAILED.
+  let first = &results[0];
+  assert!(!first.passed, "first scenario has a deliberate failure");
+  let skipped = first
+    .steps
+    .iter()
+    .filter(|s| matches!(s.status, JsStepStatus::Skipped))
+    .count();
+  assert_eq!(skipped, 1, "step after the failure must be skipped");
+
+  // Scenario 2 reads the counters: its own BeforeStep has fired by the
+  // time the step body runs (before=4), its AfterStep has not (after=3),
+  // and the failing step's AfterStep saw status FAILED.
+  let second = &results[1];
+  assert!(
+    second.passed,
+    "counter assertion scenario must pass: {:?}",
+    second.steps.iter().map(|s| &s.status).collect::<Vec<_>>()
+  );
+}

@@ -4,6 +4,14 @@
 //! small delegation that converts `FerriError` into `rquickjs::Error` at the
 //! boundary via [`super::convert::FerriResultExt`].
 
+mod callbacks;
+mod events;
+mod options;
+
+pub(crate) use callbacks::*;
+pub(crate) use events::*;
+pub(crate) use options::*;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -11,9 +19,7 @@ use ferridriver::Page;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
-use ferridriver::options::WaitOptions;
 use rquickjs::function::Opt;
-use serde::Deserialize;
 
 use crate::bindings::convert::FerriResultCtxExt;
 use crate::bindings::convert::{
@@ -22,533 +28,6 @@ use crate::bindings::convert::{
 use crate::bindings::keyboard::KeyboardJs;
 use crate::bindings::locator::LocatorJs;
 use crate::bindings::mouse::MouseJs;
-
-/// Shape of `waitForSelector` options accepted from JS.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct JsWaitOptions {
-  state: Option<String>,
-  timeout: Option<u64>,
-}
-
-pub(crate) fn parse_wait_options<'js>(
-  ctx: &rquickjs::Ctx<'js>,
-  value: Opt<rquickjs::Value<'js>>,
-) -> rquickjs::Result<WaitOptions> {
-  match value.0 {
-    Some(v) if !v.is_undefined() && !v.is_null() => {
-      let js: JsWaitOptions = serde_from_js(ctx, v)?;
-      Ok(WaitOptions {
-        state: js.state,
-        timeout: js.timeout,
-      })
-    },
-    _ => Ok(WaitOptions::default()),
-  }
-}
-
-#[derive(serde::Deserialize, Debug, Default)]
-#[serde(rename_all = "camelCase", default)]
-struct JsGotoOptions {
-  wait_until: Option<String>,
-  timeout: Option<u64>,
-  referer: Option<String>,
-}
-
-fn parse_goto_options<'js>(
-  ctx: &rquickjs::Ctx<'js>,
-  value: Opt<rquickjs::Value<'js>>,
-) -> rquickjs::Result<Option<ferridriver::options::GotoOptions>> {
-  match value.0 {
-    Some(v) if !v.is_undefined() && !v.is_null() => {
-      let js: JsGotoOptions = serde_from_js(ctx, v)?;
-      Ok(Some(ferridriver::options::GotoOptions {
-        wait_until: js.wait_until,
-        timeout: js.timeout,
-        referer: js.referer,
-      }))
-    },
-    _ => Ok(None),
-  }
-}
-
-#[derive(serde::Deserialize, Debug, Default)]
-#[serde(rename_all = "camelCase", default)]
-struct JsPageCloseOptions {
-  run_before_unload: Option<bool>,
-  reason: Option<String>,
-}
-
-/// Shape of `page.dragAndDrop` / `locator.dragTo` options. Mirrors
-/// Playwright's `FrameDragAndDropOptions & TimeoutOptions` per
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2486`.
-#[derive(serde::Deserialize, Debug, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub(crate) struct JsDragAndDropOptions {
-  force: Option<bool>,
-  no_wait_after: Option<bool>,
-  source_position: Option<JsPoint>,
-  target_position: Option<JsPoint>,
-  steps: Option<u32>,
-  strict: Option<bool>,
-  timeout: Option<u64>,
-  trial: Option<bool>,
-}
-
-#[derive(serde::Deserialize, Debug, Default, Clone, Copy)]
-pub(crate) struct JsPoint {
-  x: f64,
-  y: f64,
-}
-
-impl From<JsPoint> for ferridriver::options::Point {
-  fn from(p: JsPoint) -> Self {
-    Self { x: p.x, y: p.y }
-  }
-}
-
-/// Parse the Playwright-shaped `emulateMedia` options bag from a
-/// `rquickjs::Value`. Unlike `serde_from_js`, this walks the JS object
-/// manually so we can distinguish three states for every field:
-///
-/// * absent → [`MediaOverride::Unchanged`]
-/// * explicit `null` → [`MediaOverride::Disabled`]
-/// * string value → [`MediaOverride::Set`]
-///
-/// serde-based deserialization conflates `undefined` and `null` into a
-/// single `Option::None`, which breaks the Playwright null-disables-the-
-/// override contract. See `/tmp/playwright/packages/playwright-core/types/types.d.ts:2580`
-/// for the `T | null | undefined` shape we're mirroring.
-fn parse_emulate_media_field<'js>(
-  obj: &rquickjs::Object<'js>,
-  key: &str,
-) -> rquickjs::Result<ferridriver::options::MediaOverride> {
-  use ferridriver::options::MediaOverride;
-  if !obj.contains_key(key)? {
-    return Ok(MediaOverride::Unchanged);
-  }
-  let val: rquickjs::Value<'js> = obj.get(key)?;
-  if val.is_undefined() {
-    Ok(MediaOverride::Unchanged)
-  } else if val.is_null() {
-    Ok(MediaOverride::Disabled)
-  } else if let Some(s) = val.as_string() {
-    Ok(MediaOverride::Set(s.to_string()?))
-  } else {
-    Err(rquickjs::Error::new_from_js_message(
-      "emulateMedia options",
-      "field",
-      format!("{key}: expected null, undefined, or string"),
-    ))
-  }
-}
-
-pub(crate) fn parse_emulate_media_options<'js>(
-  _ctx: &rquickjs::Ctx<'js>,
-  value: Opt<rquickjs::Value<'js>>,
-) -> rquickjs::Result<ferridriver::options::EmulateMediaOptions> {
-  let Some(v) = value.0.filter(|v| !v.is_undefined() && !v.is_null()) else {
-    return Ok(ferridriver::options::EmulateMediaOptions::default());
-  };
-  let Some(obj) = v.as_object() else {
-    return Ok(ferridriver::options::EmulateMediaOptions::default());
-  };
-  Ok(ferridriver::options::EmulateMediaOptions {
-    media: parse_emulate_media_field(obj, "media")?,
-    color_scheme: parse_emulate_media_field(obj, "colorScheme")?,
-    reduced_motion: parse_emulate_media_field(obj, "reducedMotion")?,
-    forced_colors: parse_emulate_media_field(obj, "forcedColors")?,
-    contrast: parse_emulate_media_field(obj, "contrast")?,
-  })
-}
-
-pub(crate) fn parse_drag_options<'js>(
-  ctx: &rquickjs::Ctx<'js>,
-  value: Opt<rquickjs::Value<'js>>,
-) -> rquickjs::Result<Option<ferridriver::options::DragAndDropOptions>> {
-  match value.0 {
-    Some(v) if !v.is_undefined() && !v.is_null() => {
-      let js: JsDragAndDropOptions = serde_from_js(ctx, v)?;
-      Ok(Some(ferridriver::options::DragAndDropOptions {
-        force: js.force,
-        no_wait_after: js.no_wait_after,
-        source_position: js.source_position.map(Into::into),
-        target_position: js.target_position.map(Into::into),
-        steps: js.steps,
-        strict: js.strict,
-        timeout: js.timeout,
-        trial: js.trial,
-      }))
-    },
-    _ => Ok(None),
-  }
-}
-
-fn parse_page_close_options<'js>(
-  ctx: &rquickjs::Ctx<'js>,
-  value: Opt<rquickjs::Value<'js>>,
-) -> rquickjs::Result<Option<ferridriver::options::PageCloseOptions>> {
-  match value.0 {
-    Some(v) if !v.is_undefined() && !v.is_null() => {
-      let js: JsPageCloseOptions = serde_from_js(ctx, v)?;
-      Ok(Some(ferridriver::options::PageCloseOptions {
-        run_before_unload: js.run_before_unload,
-        reason: js.reason,
-      }))
-    },
-    _ => Ok(None),
-  }
-}
-
-/// Native registry for every page JS callback dispatched cross-task
-/// (outside the QuickJS context, from a backend tokio task): `page.route`
-/// handlers + URL predicates (keyed by registration id), `page.exposeFunction`
-/// callbacks (keyed by binding name), and the single `page.startScreencast`
-/// frame callback. All kept as `Persistent<Function>` in context
-/// userdata — no `globalThis.__fd*`, exactly the `Persistent`/userdata
-/// pattern the extension registry uses.
-///
-/// Single-threaded VM ⇒ `RefCell`, never `Arc`/`Mutex` (same rationale
-/// as `BddUserData`).
-#[derive(Default)]
-pub(crate) struct PageCallbacks {
-  route_handlers: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
-  route_preds: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
-  exposed: rustc_hash::FxHashMap<String, rquickjs::Persistent<rquickjs::Function<'static>>>,
-  screencast: Option<rquickjs::Persistent<rquickjs::Function<'static>>>,
-  /// `addLocatorHandler` JS callbacks, keyed by core-registry uid so the
-  /// cross-task dispatch bridge can restore the persisted function.
-  locator_handlers: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
-  /// `page.on` / `page.once` JS listeners, keyed by the core
-  /// `ListenerId` and carrying the event name (so `off(event, fn)` can
-  /// match by JS function identity) plus the backend-page identity (so
-  /// a page's registrations can be released when it closes — the
-  /// session VM outlives pages, and orphaned `Persistent`s would
-  /// otherwise accumulate for the VM's life). The event pump restores
-  /// the persisted function by id and invokes it with the live event
-  /// object.
-  event_listeners: rustc_hash::FxHashMap<u64, EventListenerEntry>,
-}
-
-impl PageCallbacks {
-  pub(crate) fn insert_route_handler(&mut self, id: u64, f: rquickjs::Persistent<rquickjs::Function<'static>>) {
-    self.route_handlers.insert(id, f);
-  }
-
-  pub(crate) fn insert_route_pred(&mut self, id: u64, f: rquickjs::Persistent<rquickjs::Function<'static>>) {
-    self.route_preds.insert(id, f);
-  }
-
-  pub(crate) fn get_route_handler(&self, id: u64) -> Option<rquickjs::Persistent<rquickjs::Function<'static>>> {
-    self.route_handlers.get(&id).cloned()
-  }
-
-  pub(crate) fn get_route_pred(&self, id: u64) -> Option<rquickjs::Persistent<rquickjs::Function<'static>>> {
-    self.route_preds.get(&id).cloned()
-  }
-
-  pub(crate) fn route_preds_snapshot(&self) -> Vec<(u64, rquickjs::Persistent<rquickjs::Function<'static>>)> {
-    self.route_preds.iter().map(|(k, v)| (*k, v.clone())).collect()
-  }
-
-  pub(crate) fn remove_route(&mut self, id: u64) {
-    self.route_preds.remove(&id);
-    self.route_handlers.remove(&id);
-  }
-
-  pub(crate) fn remove_locator_handler(&mut self, id: u64) {
-    self.locator_handlers.remove(&id);
-  }
-
-  pub(crate) fn insert_event_listener(
-    &mut self,
-    id: u64,
-    event: String,
-    page_key: usize,
-    f: rquickjs::Persistent<rquickjs::Function<'static>>,
-  ) {
-    self.event_listeners.insert(
-      id,
-      EventListenerEntry {
-        event,
-        page_key,
-        listener: f,
-      },
-    );
-  }
-
-  pub(crate) fn get_event_listener(&self, id: u64) -> Option<rquickjs::Persistent<rquickjs::Function<'static>>> {
-    self.event_listeners.get(&id).map(|e| e.listener.clone())
-  }
-
-  pub(crate) fn remove_event_listener(&mut self, id: u64) {
-    self.event_listeners.remove(&id);
-  }
-
-  pub(crate) fn clear_event_listeners(&mut self) {
-    self.event_listeners.clear();
-  }
-
-  /// Drop every listener registered for `event`; returns the removed
-  /// core listener ids so the caller can detach them from the emitter.
-  pub(crate) fn remove_event_listeners_named(&mut self, event: &str) -> Vec<u64> {
-    let ids: Vec<u64> = self
-      .event_listeners
-      .iter()
-      .filter(|(_, e)| e.event == event)
-      .map(|(id, _)| *id)
-      .collect();
-    for id in &ids {
-      self.event_listeners.remove(id);
-    }
-    ids
-  }
-
-  /// Drop every listener registered through the page identified by
-  /// `page_key` (see `ferridriver::Page::backend_page_id`); returns the
-  /// removed core listener ids. Called when that page closes so its
-  /// persisted callbacks don't outlive it on the session VM.
-  pub(crate) fn remove_event_listeners_for_page(&mut self, page_key: usize) -> Vec<u64> {
-    let ids: Vec<u64> = self
-      .event_listeners
-      .iter()
-      .filter(|(_, e)| e.page_key == page_key)
-      .map(|(id, _)| *id)
-      .collect();
-    for id in &ids {
-      self.event_listeners.remove(id);
-    }
-    ids
-  }
-
-  /// `(id, listener)` pairs registered for `event` — the `off(event,
-  /// fn)` binding restores each and compares against the given function
-  /// by JS identity.
-  pub(crate) fn event_listeners_named(
-    &self,
-    event: &str,
-  ) -> Vec<(u64, rquickjs::Persistent<rquickjs::Function<'static>>)> {
-    self
-      .event_listeners
-      .iter()
-      .filter(|(_, e)| e.event == event)
-      .map(|(id, e)| (*id, e.listener.clone()))
-      .collect()
-  }
-}
-
-/// One `page.on` / `page.once` registration in [`PageCallbacks`].
-pub(crate) struct EventListenerEntry {
-  event: String,
-  /// `ferridriver::Page::backend_page_id()` of the registering page.
-  page_key: usize,
-  listener: rquickjs::Persistent<rquickjs::Function<'static>>,
-}
-
-pub(crate) struct PageCallbacksUd(std::cell::RefCell<PageCallbacks>);
-
-// SAFETY: holds only `'static` data (`Persistent<…>` handles), so
-// re-stating the unused `'js` lifetime is sound — identical rationale to
-// `BddUserData` / `SessionAsyncCtx`.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for PageCallbacksUd {
-  type Changed<'to> = PageCallbacksUd;
-}
-
-/// One `(listener_id, remove_after_dispatch, event)` message from a core
-/// `EventCallback` (backend task) to the context's event pump.
-type PageEventMsg = (u64, bool, Arc<Page>, ferridriver::events::PageEvent);
-
-/// Capacity of the page-event pump channel. The pump is only polled
-/// while the runtime is being driven, and session VMs persist between
-/// `run_script` calls — so a chatty page with a registered listener
-/// buffers events here while the VM idles. The bound turns that from
-/// unbounded memory growth into bounded loss: when full, the newest
-/// event is dropped with a warning (matching the broadcast `Lagged`
-/// policy elsewhere).
-const PAGE_EVENT_PUMP_CAPACITY: usize = 1024;
-
-/// Per-context sender feeding the single `page.on` event pump. Core
-/// event callbacks must NOT touch the QuickJS VM (they fire on backend
-/// tokio threads, concurrently with the script's own execute — driving
-/// the single-threaded interpreter from a second thread is UB). They
-/// only `send` here; the pump task, spawned on the runtime's own
-/// executor via `ctx.spawn`, stays on the interpreter thread and does
-/// the restore + invoke. Same pattern as the sidecar event pump.
-pub(crate) struct PageEventPumpUd(tokio::sync::mpsc::Sender<PageEventMsg>);
-
-// SAFETY: holds only a channel sender (`'static`), so re-stating the
-// unused `'js` lifetime is sound — identical rationale to `PageCallbacksUd`.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for PageEventPumpUd {
-  type Changed<'to> = PageEventPumpUd;
-}
-
-/// Get (or lazily start) this context's page-event pump and return its
-/// sender. The pump future lives on the QuickJS runtime executor: it is
-/// only polled while the runtime is driven (during a script execute /
-/// its awaits), so events buffer until the next VM activity — which is
-/// also when a listener could observe them.
-fn ensure_event_pump(ctx: &rquickjs::Ctx<'_>) -> tokio::sync::mpsc::Sender<PageEventMsg> {
-  if let Some(ud) = ctx.userdata::<PageEventPumpUd>() {
-    return ud.0.clone();
-  }
-  let (tx, mut rx) = tokio::sync::mpsc::channel::<PageEventMsg>(PAGE_EVENT_PUMP_CAPACITY);
-  let pump_ctx = ctx.clone();
-  ctx.spawn(async move {
-    while let Some((id, remove_after, page, ev)) = rx.recv().await {
-      let Ok(Some(f)) = with_page_callbacks(&pump_ctx, |r| {
-        let f = r.get_event_listener(id);
-        if remove_after {
-          r.remove_event_listener(id);
-        }
-        f
-      }) else {
-        continue;
-      };
-      // Already on the interpreter thread — restore + invoke directly. A
-      // throwing listener is swallowed so one bad callback can't kill the
-      // pump (matches the NAPI threadsafe-function listeners).
-      let Ok(func) = f.restore(&pump_ctx) else { continue };
-      let Ok(arg) = page_event_to_js(&pump_ctx, &page, ev) else {
-        continue;
-      };
-      let _: rquickjs::Result<rquickjs::Value<'_>> = func.call((arg,));
-    }
-  });
-  let _ = ctx.store_userdata(PageEventPumpUd(tx.clone()));
-  tx
-}
-
-/// Ensure the page-callbacks userdata exists on this context.
-/// Idempotent; called at `Session::create` and defensively from the
-/// `page.route` / `exposeFunction` / `startScreencast` bindings.
-pub(crate) fn ensure_page_callbacks(ctx: &rquickjs::Ctx<'_>) {
-  if ctx.userdata::<PageCallbacksUd>().is_none() {
-    let _ = ctx.store_userdata(PageCallbacksUd(std::cell::RefCell::new(PageCallbacks::default())));
-  }
-}
-
-pub(crate) fn with_page_callbacks<R>(
-  ctx: &rquickjs::Ctx<'_>,
-  f: impl FnOnce(&mut PageCallbacks) -> R,
-) -> rquickjs::Result<R> {
-  ensure_page_callbacks(ctx);
-  let ud = ctx.userdata::<PageCallbacksUd>().ok_or_else(|| {
-    rquickjs::Error::new_from_js_message("page", "Error", "page callbacks registry missing".to_string())
-  })?;
-  let mut reg = ud.0.borrow_mut();
-  Ok(f(&mut reg))
-}
-
-/// Stash an exposed-binding JS callback keyed by binding name. Shared
-/// by `page.exposeFunction` and `context.exposeBinding` /
-/// `context.exposeFunction` — both inject `window[name]`, so a single
-/// name-keyed registry suffices. Exposed `pub(crate)` so the context
-/// binding (in a sibling module) can reuse the same userdata.
-pub(crate) fn insert_exposed_callback(
-  ctx: &rquickjs::Ctx<'_>,
-  name: String,
-  cb: rquickjs::Persistent<rquickjs::Function<'static>>,
-) -> rquickjs::Result<()> {
-  with_page_callbacks(ctx, |r| r.exposed.insert(name, cb))?;
-  Ok(())
-}
-
-/// Look up a previously stashed exposed-binding callback by name.
-pub(crate) fn get_exposed_callback(
-  ctx: &rquickjs::Ctx<'_>,
-  name: &str,
-) -> rquickjs::Result<Option<rquickjs::Persistent<rquickjs::Function<'static>>>> {
-  with_page_callbacks(ctx, |r| r.exposed.get(name).cloned())
-}
-
-/// Read an optional string field from an options bag (absent / non-object
-/// / non-string → `None`). Shared by `addScriptTag` / `addStyleTag`.
-fn opt_str_field(options: &Opt<rquickjs::Value<'_>>, key: &str) -> rquickjs::Result<Option<String>> {
-  let Some(v) = options.0.as_ref() else { return Ok(None) };
-  let Some(obj) = v.as_object() else { return Ok(None) };
-  let field: rquickjs::Value<'_> = obj.get(key)?;
-  match field.as_string() {
-    Some(s) => Ok(Some(s.to_string()?)),
-    None => Ok(None),
-  }
-}
-
-/// Read an optional `{ timeout }` (ms) field from an options bag, clamped
-/// to `>= 0`. Shared by `waitForNavigation`.
-fn opt_timeout_ms(options: &Opt<rquickjs::Value<'_>>) -> rquickjs::Result<Option<u64>> {
-  let Some(v) = options.0.as_ref() else { return Ok(None) };
-  let Some(obj) = v.as_object() else { return Ok(None) };
-  let field: rquickjs::Value<'_> = obj.get("timeout")?;
-  #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-  Ok(field.as_number().map(|n| if n < 0.0 { 0 } else { n as u64 }))
-}
-
-fn parse_unroute_behavior(behavior: &str) -> rquickjs::Result<ferridriver::options::UnrouteBehavior> {
-  match behavior {
-    "default" => Ok(ferridriver::options::UnrouteBehavior::Default),
-    "wait" => Ok(ferridriver::options::UnrouteBehavior::Wait),
-    "ignoreErrors" => Ok(ferridriver::options::UnrouteBehavior::IgnoreErrors),
-    other => Err(rquickjs::Error::new_from_js_message(
-      "unrouteAll options",
-      "behavior",
-      format!("invalid behavior {other:?} (expected 'wait', 'ignoreErrors', or 'default')"),
-    )),
-  }
-}
-
-/// Extract the `times` field from a `route(url, handler, { times })` options
-/// bag. Absent/undefined options or a missing `times` yields `None`
-/// (unlimited). Shared by `page.route` and `context.route`.
-pub(crate) fn parse_route_times(
-  options: &rquickjs::function::Opt<rquickjs::Value<'_>>,
-) -> rquickjs::Result<Option<u32>> {
-  let Some(v) = options.0.as_ref() else { return Ok(None) };
-  if v.is_undefined() || v.is_null() {
-    return Ok(None);
-  }
-  let Some(obj) = v.as_object() else { return Ok(None) };
-  let t: rquickjs::Value<'_> = obj.get("times")?;
-  if t.is_undefined() || t.is_null() {
-    return Ok(None);
-  }
-  #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-  Ok(t.as_number().map(|n| if n < 0.0 { 0 } else { n as u32 }))
-}
-
-/// Parse the `{ url?, notFound? }` options bag for `routeFromHAR`. Shared by
-/// `page.routeFromHAR` and `context.routeFromHAR`. `url` is a glob string.
-pub(crate) fn parse_har_options(
-  options: &rquickjs::function::Opt<rquickjs::Value<'_>>,
-) -> rquickjs::Result<ferridriver::har::RouteFromHarOptions> {
-  let mut out = ferridriver::har::RouteFromHarOptions::default();
-  let Some(v) = options.0.as_ref() else { return Ok(out) };
-  let Some(obj) = v.as_object() else { return Ok(out) };
-  let url: rquickjs::Value<'_> = obj.get("url")?;
-  if let Some(s) = url.as_string() {
-    let glob = s.to_string()?;
-    out.url = Some(
-      ferridriver::url_matcher::UrlMatcher::glob(glob)
-        .map_err(|e| rquickjs::Error::new_from_js_message("routeFromHAR", "url", format!("invalid url glob: {e}")))?,
-    );
-  }
-  let nf: rquickjs::Value<'_> = obj.get("notFound")?;
-  if let Some(s) = nf.as_string() {
-    match s.to_string()?.as_str() {
-      "fallback" => out.not_found = ferridriver::har::HarNotFound::Fallback,
-      "abort" => out.not_found = ferridriver::har::HarNotFound::Abort,
-      other => {
-        return Err(rquickjs::Error::new_from_js_message(
-          "routeFromHAR",
-          "notFound",
-          format!("invalid notFound {other:?} (expected 'abort' or 'fallback')"),
-        ));
-      },
-    }
-  }
-  Ok(out)
-}
 
 /// JS-visible wrapper around [`ferridriver::Page`].
 ///
@@ -569,20 +48,6 @@ pub struct PageJs {
   /// `install_page` which sets this field.
   #[qjs(skip_trace)]
   async_ctx: Option<rquickjs::AsyncContext>,
-  /// Per-page route registration counter. Each `page.route(matcher, fn)`
-  /// gets a unique numeric ID; the handler/predicate are stored in the
-  /// native `RouteRegistry` userdata under that ID and the Rust handler
-  /// dispatches by ID via the AsyncContext.
-  #[qjs(skip_trace)]
-  next_route_id: Arc<AtomicU64>,
-  /// Core `UrlMatcher` registered for each function-predicate `page.route`,
-  /// keyed by the same id as the native `RouteRegistry` handler/predicate
-  /// entries. A predicate route registers an always-true matcher whose
-  /// `Arc` identity lets `unroute(fn)` remove exactly that registration
-  /// (core compares `UrlMatcher::Predicate` by `Arc::ptr_eq`). Shared so
-  /// `route` and `unroute` on the same `Page` wrapper see one table.
-  #[qjs(skip_trace)]
-  route_matchers: Arc<std::sync::Mutex<rustc_hash::FxHashMap<u64, ferridriver::url_matcher::UrlMatcher>>>,
   /// Maps a handler locator's selector to the persisted-callback ids so
   /// `removeLocatorHandler` can drop them. (QuickJS `addLocatorHandler`
   /// itself is Unsupported -- see its binding -- so this normally stays empty.)
@@ -596,8 +61,6 @@ impl PageJs {
     Self {
       inner,
       async_ctx: None,
-      next_route_id: Arc::new(AtomicU64::new(0)),
-      route_matchers: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
     }
   }
@@ -607,10 +70,13 @@ impl PageJs {
     Self {
       inner,
       async_ctx: Some(async_ctx),
-      next_route_id: Arc::new(AtomicU64::new(0)),
-      route_matchers: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
     }
+  }
+
+  /// This page's route-registry owner key.
+  fn route_owner(&self) -> RouteOwner {
+    RouteOwner::Page(self.inner.backend_page_id())
   }
 
   /// Clone of the wrapped `Arc<Page>` for cross-binding consumers
@@ -665,7 +131,7 @@ impl PageJs {
     id_slot.store(id.0, Ordering::Relaxed);
     let page_key = self.inner.backend_page_id();
     with_page_callbacks(ctx, |r| {
-      r.insert_event_listener(id.0, event.to_string(), page_key, saved)
+      r.insert_event_listener(id.0, event.to_string(), page_key, saved);
     })?;
     #[allow(clippy::cast_precision_loss)]
     Ok(id.0 as f64)
@@ -1731,7 +1197,10 @@ impl PageJs {
     // remaining life.
     tokio::task::yield_now().await;
     let page_key = self.inner.backend_page_id();
-    let ids = with_page_callbacks(&ctx, |r| r.remove_event_listeners_for_page(page_key))?;
+    let ids = with_page_callbacks(&ctx, |r| {
+      r.remove_routes_for_owner(&RouteOwner::Page(page_key));
+      r.remove_event_listeners_for_page(page_key)
+    })?;
     for id in ids {
       self.inner.off(ferridriver::events::ListenerId(id));
     }
@@ -1792,9 +1261,8 @@ impl PageJs {
         "page.route requires the script engine's AsyncContext (install_page)".to_string(),
       )
     })?;
-    let id = self.next_route_id.fetch_add(1, Ordering::Relaxed);
+    let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
     let saved_handler = rquickjs::Persistent::save(&ctx, handler);
-    with_page_callbacks(&ctx, |r| r.route_handlers.insert(id, saved_handler))?;
 
     // A JS predicate is `!Send` and core matches on the CDP recv task,
     // so it can't ride `UrlMatcher::Predicate`. Register an always-true
@@ -1802,19 +1270,16 @@ impl PageJs {
     // exactly it via `Arc::ptr_eq`); evaluate the predicate in the
     // dispatch bridge and continue the request unmodified on falsy.
     let has_predicate = url.as_function().is_some();
-    let matcher = if let Some(pred) = url.as_function() {
+    let (matcher, saved_pred, registry_matcher) = if let Some(pred) = url.as_function() {
       let saved_pred = rquickjs::Persistent::save(&ctx, pred.clone());
-      with_page_callbacks(&ctx, |r| r.route_preds.insert(id, saved_pred))?;
       let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
-      self
-        .route_matchers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(id, m.clone());
-      m
+      (m.clone(), Some(saved_pred), Some(m))
     } else {
-      url_value_to_matcher(&ctx, url)?
+      (url_value_to_matcher(&ctx, url)?, None, None)
     };
+    with_page_callbacks(&ctx, |r| {
+      r.insert_route(id, self.route_owner(), saved_handler, saved_pred, registry_matcher);
+    })?;
 
     // LIMITATION (persistent-session VMs): this closure captures a clone
     // of the session's `AsyncContext`. Core route registrations live on
@@ -1828,16 +1293,18 @@ impl PageJs {
     // "unroute all" on VM discard — tracked, not yet implemented.
     let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
       let async_ctx = async_ctx.clone();
-      // Cross-task dispatch: spawn a tokio task that grabs the
-      // AsyncContext lock and calls the JS callback (restored from the
-      // native route registry by id). Errors are swallowed because the
-      // route's own `Drop` (fail-open continue) covers the case where
-      // dispatch can't reach JS.
+      // One-shot cross-task dispatch (rule 2 of the re-entry discipline
+      // on `PageEventPumpUd`): `async_with` serializes against the
+      // script's execute via the runtime lock and — unlike a ctx.spawn
+      // pump — also runs while the VM idles, which routes require (a
+      // page request can arrive between executes). Errors are swallowed
+      // because the route's own `Drop` (fail-open continue) covers the
+      // case where dispatch can't reach JS.
       tokio::spawn(async move {
         use rquickjs::class::Class;
         let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
           if has_predicate {
-            let pred = with_page_callbacks(&ctx, |r| r.route_preds.get(&id).cloned())?
+            let pred = with_page_callbacks(&ctx, |r| r.get_route_pred(id))?
               .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route predicate gone".to_string()))?
               .restore(&ctx)?;
             let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
@@ -1847,7 +1314,7 @@ impl PageJs {
               return Ok(());
             }
           }
-          let f = with_page_callbacks(&ctx, |r| r.route_handlers.get(&id).cloned())?
+          let f = with_page_callbacks(&ctx, |r| r.get_route_handler(id))?
             .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route handler gone".to_string()))?
             .restore(&ctx)?;
           let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
@@ -1891,13 +1358,13 @@ impl PageJs {
   #[qjs(rename = "unroute")]
   pub async fn unroute<'js>(&self, ctx: rquickjs::Ctx<'js>, url: rquickjs::Value<'js>) -> rquickjs::Result<()> {
     if let Some(pred) = url.as_function() {
-      // Find every id whose stored predicate is identical (===) to the
+      // Find every id (registered through THIS page, from any of its
+      // wrappers) whose stored predicate is identical (===) to the
       // passed function, then drop its core registration + registry
-      // entries. Restoring each saved predicate yields a handle to the
+      // entry. Restoring each saved predicate yields a handle to the
       // same underlying object, so `Value` `PartialEq` (tag + pointer)
       // is still strict `===` identity.
-      let saved: Vec<(u64, rquickjs::Persistent<rquickjs::Function<'static>>)> =
-        with_page_callbacks(&ctx, |r| r.route_preds.iter().map(|(k, v)| (*k, v.clone())).collect())?;
+      let saved = with_page_callbacks(&ctx, |r| r.predicate_routes_for_owner(&self.route_owner()))?;
       let mut victims: Vec<u64> = Vec::new();
       for (id, sp) in saved {
         let stored = sp.restore(&ctx)?;
@@ -1906,18 +1373,10 @@ impl PageJs {
         }
       }
       for id in victims {
-        let m = self
-          .route_matchers
-          .lock()
-          .unwrap_or_else(std::sync::PoisonError::into_inner)
-          .remove(&id);
+        let m = with_page_callbacks(&ctx, |r| r.remove_route(id))?;
         if let Some(m) = m {
           self.inner.unroute(&m).await.into_js_with(&ctx)?;
         }
-        with_page_callbacks(&ctx, |r| {
-          r.route_preds.remove(&id);
-          r.route_handlers.remove(&id);
-        })?;
       }
       return Ok(());
     }
@@ -1942,15 +1401,7 @@ impl PageJs {
       None => None,
     };
     self.inner.unroute_all(behavior).await.into_js_with(&ctx)?;
-    self
-      .route_matchers
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .clear();
-    with_page_callbacks(&ctx, |r| {
-      r.route_preds.clear();
-      r.route_handlers.clear();
-    })?;
+    with_page_callbacks(&ctx, |r| r.remove_routes_for_owner(&self.route_owner()))?;
     Ok(())
   }
 
@@ -2184,8 +1635,7 @@ impl PageJs {
         predicate = p.as_function().cloned();
       }
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let timeout = timeout_ms.unwrap_or(30_000.0) as u64;
+    let timeout = timeout_ms.map_or_else(|| self.inner.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
     let event_lc = event.to_ascii_lowercase();
 
     // Predicate waits drain the broadcast for every event type — the
@@ -2198,9 +1648,9 @@ impl PageJs {
       loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-          return Err(rquickjs::Error::new_from_js_message(
-            "Page.waitForEvent",
-            "Error",
+          return Err(crate::bindings::convert::throw_named(
+            &ctx,
+            "TimeoutError",
             format!("Timeout {timeout}ms exceeded while waiting for event '{event}'"),
           ));
         }
@@ -2209,10 +1659,10 @@ impl PageJs {
           if recv.is_err() {
             continue; // deadline check at loop top surfaces the timeout
           }
-          return Err(rquickjs::Error::new_from_js_message(
-            "Page.waitForEvent",
+          return Err(crate::bindings::convert::throw_named(
+            &ctx,
             "Error",
-            "page closed while waiting for event".to_string(),
+            "page closed while waiting for event",
           ));
         };
         let arg = page_event_to_js(&ctx, &self.inner, ev.clone())?;
@@ -2227,11 +1677,7 @@ impl PageJs {
     // synchronous at `did_open` time (mirrors Playwright's
     // `addDialogHandler` + `dialogDidOpen` flow exactly).
     if event_lc == "dialog" {
-      let dialog = self
-        .inner
-        .wait_for_dialog(timeout)
-        .await
-        .map_err(|e| rquickjs::Error::new_from_js_message("Page.waitForEvent", "Error", e.to_string()))?;
+      let dialog = self.inner.wait_for_dialog(timeout).await.into_js_with(&ctx)?;
       let wrapper = crate::bindings::dialog::DialogJs::new(dialog);
       let instance = Class::instance(ctx.clone(), wrapper)?;
       return rquickjs::IntoJs::into_js(instance, &ctx);
@@ -2240,11 +1686,7 @@ impl PageJs {
     // per-page `FileChooserManager` so the claim is synchronous with
     // the backend event arrival.
     if event_lc == "filechooser" {
-      let chooser = self
-        .inner
-        .wait_for_file_chooser(timeout)
-        .await
-        .map_err(|e| rquickjs::Error::new_from_js_message("Page.waitForEvent", "Error", e.to_string()))?;
+      let chooser = self.inner.wait_for_file_chooser(timeout).await.into_js_with(&ctx)?;
       let wrapper = crate::bindings::file_chooser::FileChooserJs::new(chooser);
       let instance = Class::instance(ctx.clone(), wrapper)?;
       return rquickjs::IntoJs::into_js(instance, &ctx);
@@ -2252,11 +1694,7 @@ impl PageJs {
     // And for `download` — same one-shot handler pattern via the
     // per-page `DownloadManager`.
     if event_lc == "download" {
-      let download = self
-        .inner
-        .wait_for_download(timeout)
-        .await
-        .map_err(|e| rquickjs::Error::new_from_js_message("Page.waitForEvent", "Error", e.to_string()))?;
+      let download = self.inner.wait_for_download(timeout).await.into_js_with(&ctx)?;
       let wrapper = crate::bindings::download::DownloadJs::new(download);
       let instance = Class::instance(ctx.clone(), wrapper)?;
       return rquickjs::IntoJs::into_js(instance, &ctx);
@@ -2268,7 +1706,7 @@ impl PageJs {
       .events()
       .wait_for(move |e| match_event_name(&name, e), timeout)
       .await
-      .map_err(|e| rquickjs::Error::new_from_js_message("Page.waitForEvent", "Error", e.to_string()))?;
+      .into_js_with(&ctx)?;
     page_event_to_js(&ctx, &self.inner, ev)
   }
 
@@ -2511,6 +1949,15 @@ impl PageJs {
   /// maxWidth, maxHeight, callback)`. Callback receives `{ frame:
   /// Uint8Array, timestamp: number }` per frame. Backed by CDP
   /// `Page.startScreencast`; no Playwright client equivalent.
+  ///
+  /// Frames are delivered by a `ctx.spawn` pump on the interpreter
+  /// thread — NOT `tokio::spawn` + `async_with`: a long-lived loop
+  /// resolving a plain JS callback from a second thread is exactly the
+  /// pump shape that crashed the event listeners (see the module-level
+  /// re-entry discipline notes on `PageEventPumpUd`). The pump only
+  /// runs while the VM is driven; frames arriving while the VM idles
+  /// are coalesced to the newest one (a screencast consumer wants the
+  /// latest frame, and the core channel is unbounded).
   #[qjs(rename = "startScreencast")]
   pub async fn start_screencast<'js>(
     &self,
@@ -2520,49 +1967,54 @@ impl PageJs {
     max_height: u32,
     callback: rquickjs::Function<'js>,
   ) -> rquickjs::Result<()> {
-    let async_ctx = self.async_ctx.clone().ok_or_else(|| {
-      rquickjs::Error::new_from_js_message(
-        "page.startScreencast",
-        "Error",
-        "page.startScreencast requires the script engine's AsyncContext (install_page)".to_string(),
-      )
-    })?;
     let saved = rquickjs::Persistent::save(&ctx, callback);
     with_page_callbacks(&ctx, |r| r.screencast = Some(saved))?;
     // `start_screencast` returns `(rx, shutdown_tx)`. The QuickJS
     // binding doesn't expose a stop hook here; the shutdown signal is
     // dropped (which Chrome's stop-screencast path will subsequently
-    // see via teardown), and we forward frames until the listener
-    // exits on its own.
+    // see via teardown), and we forward frames until `stopScreencast`
+    // clears the callback or the channel closes.
     let (mut rx, _shutdown) = self
       .inner
       .start_screencast(quality, max_width, max_height)
       .await
       .into_js_with(&ctx)?;
-    tokio::spawn(async move {
-      while let Some((bytes, ts)) = rx.recv().await {
-        let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
-          let f = with_page_callbacks(&ctx, |r| r.screencast.clone())?
-            .ok_or_else(|| rquickjs::Error::new_from_js_message("page.startScreencast", "Error", "screencast callback gone".to_string()))?
-            .restore(&ctx)?;
-          let payload = rquickjs::Object::new(ctx.clone())?;
-          let buf = rquickjs::TypedArray::<u8>::new(ctx.clone(), bytes)?;
+    let pump_ctx = ctx.clone();
+    ctx.spawn(async move {
+      while let Some((mut bytes, mut ts)) = rx.recv().await {
+        while let Ok((b, t)) = rx.try_recv() {
+          bytes = b;
+          ts = t;
+        }
+        let Ok(Some(saved)) = with_page_callbacks(&pump_ctx, |r| r.screencast.clone()) else {
+          break; // stopScreencast cleared the callback
+        };
+        let Ok(f) = saved.restore(&pump_ctx) else { break };
+        let deliver = || -> rquickjs::Result<()> {
+          let payload = rquickjs::Object::new(pump_ctx.clone())?;
+          let buf = rquickjs::TypedArray::<u8>::new(pump_ctx.clone(), bytes)?;
           payload.set("frame", buf)?;
           payload.set("timestamp", ts)?;
           let _: rquickjs::Value<'_> = f.call((payload,))?;
           Ok(())
-        })
-        .await;
+        };
+        // A throwing callback is swallowed so one bad frame handler
+        // can't kill the pump (same policy as the event pump).
+        let _ = deliver();
       }
     });
     Ok(())
   }
 
   /// ferridriver-specific (NOT Playwright): stop the screencast
-  /// started by `startScreencast`.
+  /// started by `startScreencast`. Clears the persisted frame callback
+  /// (ending the frame pump) so it doesn't outlive the screencast in
+  /// the session VM's registry.
   #[qjs(rename = "stopScreencast")]
   pub async fn stop_screencast(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-    self.inner.stop_screencast().await.into_js_with(&ctx)
+    self.inner.stop_screencast().await.into_js_with(&ctx)?;
+    with_page_callbacks(&ctx, |r| r.screencast = None)?;
+    Ok(())
   }
 }
 
@@ -2581,488 +2033,4 @@ impl TouchscreenJs {
   pub async fn tap(&self, ctx: rquickjs::Ctx<'_>, x: f64, y: f64) -> rquickjs::Result<()> {
     self.page.touchscreen().tap(x, y).await.into_js_with(&ctx)
   }
-}
-
-/// Shape of `page.screenshot` options accepted from JS. Full Playwright
-/// `PageScreenshotOptions` surface per
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280`.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-struct JsScreenshotOptions {
-  animations: Option<String>,
-  caret: Option<String>,
-  clip: Option<JsClipRect>,
-  full_page: Option<bool>,
-  #[serde(rename = "type")]
-  format: Option<String>,
-  // `mask` is NOT decoded here: Playwright takes `Locator[]`, and a
-  // `LocatorJs` class instance is not serde-deserialisable. It is read
-  // manually from the options object via `parse_mask_locators` before
-  // this struct is built.
-  #[serde(skip)]
-  _mask_placeholder: (),
-  mask_color: Option<String>,
-  omit_background: Option<bool>,
-  path: Option<String>,
-  quality: Option<i64>,
-  scale: Option<String>,
-  style: Option<String>,
-  timeout: Option<u64>,
-}
-
-#[derive(Debug, Default, Deserialize, Clone, Copy)]
-struct JsClipRect {
-  x: f64,
-  y: f64,
-  width: f64,
-  height: f64,
-}
-
-impl From<JsClipRect> for ferridriver::options::ClipRect {
-  fn from(c: JsClipRect) -> Self {
-    Self {
-      x: c.x,
-      y: c.y,
-      width: c.width,
-      height: c.height,
-    }
-  }
-}
-
-/// Read `mask: Locator[]` from the screenshot options object. Each entry
-/// must be a `LocatorJs` class instance (Playwright's `mask?: Locator[]`);
-/// the core `Locator` is cloned out so the selector string is extracted
-/// Rust-side before backend dispatch.
-fn parse_mask_locators<'js>(obj: &rquickjs::Object<'js>) -> rquickjs::Result<Vec<ferridriver::Locator>> {
-  let v: rquickjs::Value<'js> = obj.get("mask")?;
-  if v.is_undefined() || v.is_null() {
-    return Ok(Vec::new());
-  }
-  let arr = v.into_array().ok_or_else(|| {
-    rquickjs::Error::new_from_js_message("screenshot options", "mask", "expected an array of Locator")
-  })?;
-  let mut out = Vec::with_capacity(arr.len());
-  for item in arr.iter::<rquickjs::Value<'js>>() {
-    let item = item?;
-    if let Ok(class) = rquickjs::Class::<LocatorJs>::from_value(&item) {
-      out.push(class.borrow().inner_ref().clone());
-    } else {
-      return Err(rquickjs::Error::new_from_js_message(
-        "screenshot options",
-        "mask",
-        "each mask entry must be a Locator instance",
-      ));
-    }
-  }
-  Ok(out)
-}
-
-fn parse_screenshot_options<'js>(
-  ctx: &rquickjs::Ctx<'js>,
-  value: Opt<rquickjs::Value<'js>>,
-) -> rquickjs::Result<ferridriver::options::ScreenshotOptions> {
-  match value.0 {
-    Some(v) if !v.is_undefined() && !v.is_null() => {
-      let mask = match v.as_object() {
-        Some(obj) => parse_mask_locators(obj)?,
-        None => Vec::new(),
-      };
-      let js: JsScreenshotOptions = serde_from_js(ctx, v)?;
-      Ok(ferridriver::options::ScreenshotOptions {
-        animations: js.animations,
-        caret: js.caret,
-        clip: js.clip.map(Into::into),
-        full_page: js.full_page,
-        format: js.format,
-        mask,
-        mask_color: js.mask_color,
-        omit_background: js.omit_background,
-        path: js.path.map(std::path::PathBuf::from),
-        quality: js.quality,
-        scale: js.scale,
-        style: js.style,
-        timeout: js.timeout,
-      })
-    },
-    _ => Ok(ferridriver::options::ScreenshotOptions::default()),
-  }
-}
-
-/// Subset of Playwright's `PDFOptions` exposed to scripts. Path fields and
-/// advanced page-range/margin controls are not wired yet; users who need
-/// those can use `page.evaluate` with `window.print` or extend here.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-struct JsPdfOptions {
-  format: Option<String>,
-  landscape: Option<bool>,
-  print_background: Option<bool>,
-  scale: Option<f64>,
-  display_header_footer: Option<bool>,
-  header_template: Option<String>,
-  footer_template: Option<String>,
-  page_ranges: Option<String>,
-  prefer_css_page_size: Option<bool>,
-  outline: Option<bool>,
-  tagged: Option<bool>,
-}
-
-fn parse_pdf_options<'js>(
-  ctx: &rquickjs::Ctx<'js>,
-  value: Opt<rquickjs::Value<'js>>,
-) -> rquickjs::Result<ferridriver::options::PdfOptions> {
-  match value.0 {
-    Some(v) if !v.is_undefined() && !v.is_null() => {
-      let js: JsPdfOptions = serde_from_js(ctx, v)?;
-      Ok(ferridriver::options::PdfOptions {
-        format: js.format,
-        path: None,
-        scale: js.scale,
-        display_header_footer: js.display_header_footer,
-        header_template: js.header_template,
-        footer_template: js.footer_template,
-        print_background: js.print_background,
-        landscape: js.landscape,
-        page_ranges: js.page_ranges,
-        width: None,
-        height: None,
-        margin: None,
-        prefer_css_page_size: js.prefer_css_page_size,
-        outline: js.outline,
-        tagged: js.tagged,
-      })
-    },
-    _ => Ok(ferridriver::options::PdfOptions::default()),
-  }
-}
-
-fn match_event_name(name: &str, ev: &ferridriver::events::PageEvent) -> bool {
-  use ferridriver::events::PageEvent;
-  matches!(
-    (name, ev),
-    ("console", PageEvent::Console(_))
-      | ("request", PageEvent::Request(_))
-      | ("response", PageEvent::Response(_))
-      | ("requestfinished", PageEvent::RequestFinished(_))
-      | ("requestfailed", PageEvent::RequestFailed(_))
-      | ("websocket", PageEvent::WebSocket(_))
-      | ("dialog", PageEvent::Dialog(_))
-      | ("filechooser", PageEvent::FileChooser(_))
-      | ("frameattached", PageEvent::FrameAttached(_))
-      | ("framedetached", PageEvent::FrameDetached { .. })
-      | ("framenavigated", PageEvent::FrameNavigated(_))
-      | ("load", PageEvent::Load)
-      | ("domcontentloaded", PageEvent::DomContentLoaded)
-      | ("close", PageEvent::Close)
-      | ("pageerror", PageEvent::PageError(_))
-      | ("download", PageEvent::Download(_))
-  )
-}
-
-/// Receive the next broadcast event matching `event_lc`, skipping
-/// non-matching events and lagged gaps. `None` once the channel closes.
-pub(crate) async fn recv_matching(
-  rx: &mut tokio::sync::broadcast::Receiver<ferridriver::events::PageEvent>,
-  event_lc: &str,
-) -> Option<ferridriver::events::PageEvent> {
-  loop {
-    let ev = ferridriver::events::recv_tolerant(rx).await?;
-    if match_event_name(event_lc, &ev) {
-      return Some(ev);
-    }
-  }
-}
-
-/// Lift a core [`ferridriver::events::PageEvent`] into the live class
-/// instance Playwright hands to listeners: `ConsoleMessage`, `Request`,
-/// `Response`, `WebSocket`, `Dialog`, `FileChooser`, `Download`, a live
-/// `Frame` for the frame events, the `Page` itself for `load` /
-/// `domcontentloaded` / `close`, and a native JS `Error` for
-/// `pageerror`. Mirrors the NAPI binding's `live_event_arg`; shared by
-/// the `page.on` event pump and `waitForEvent`.
-fn page_event_to_js<'js>(
-  ctx: &rquickjs::Ctx<'js>,
-  page: &Arc<Page>,
-  ev: ferridriver::events::PageEvent,
-) -> rquickjs::Result<rquickjs::Value<'js>> {
-  use ferridriver::events::PageEvent;
-  use rquickjs::IntoJs;
-  use rquickjs::class::Class;
-  match ev {
-    PageEvent::Console(m) => {
-      Class::instance(ctx.clone(), crate::bindings::console_message::ConsoleMessageJs::new(m))?.into_js(ctx)
-    },
-    PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => Class::instance(
-      ctx.clone(),
-      crate::bindings::network::RequestJs::new_with_page(r, page.clone()),
-    )?
-    .into_js(ctx),
-    PageEvent::Response(r) => Class::instance(
-      ctx.clone(),
-      crate::bindings::network::ResponseJs::new_with_page(r, page.clone()),
-    )?
-    .into_js(ctx),
-    PageEvent::WebSocket(ws) => {
-      Class::instance(ctx.clone(), crate::bindings::network::WebSocketJs::new(ws))?.into_js(ctx)
-    },
-    PageEvent::Dialog(d) => Class::instance(ctx.clone(), crate::bindings::dialog::DialogJs::new(d))?.into_js(ctx),
-    PageEvent::FileChooser(fc) => {
-      Class::instance(ctx.clone(), crate::bindings::file_chooser::FileChooserJs::new(fc))?.into_js(ctx)
-    },
-    PageEvent::Download(d) => Class::instance(ctx.clone(), crate::bindings::download::DownloadJs::new(d))?.into_js(ctx),
-    PageEvent::PageError(err) => crate::bindings::web_error::build_native_error(ctx, err.error()),
-    PageEvent::FrameAttached(info) | PageEvent::FrameNavigated(info) => Class::instance(
-      ctx.clone(),
-      crate::bindings::frame::FrameJs::new(page.frame_for_id(&info.frame_id)),
-    )?
-    .into_js(ctx),
-    PageEvent::FrameDetached { frame_id } => Class::instance(
-      ctx.clone(),
-      crate::bindings::frame::FrameJs::new(page.frame_for_id(&frame_id)),
-    )?
-    .into_js(ctx),
-    PageEvent::Load | PageEvent::DomContentLoaded | PageEvent::Close => {
-      Class::instance(ctx.clone(), pagejs_for_ctx(ctx, page.clone()))?.into_js(ctx)
-    },
-  }
-}
-
-/// ECMAScript `ToBoolean` for a predicate's return value.
-fn js_truthy(v: &rquickjs::Value<'_>) -> bool {
-  if v.is_undefined() || v.is_null() {
-    return false;
-  }
-  if let Some(b) = v.as_bool() {
-    return b;
-  }
-  if let Some(i) = v.as_int() {
-    return i != 0;
-  }
-  if let Some(f) = v.as_float() {
-    return f != 0.0 && !f.is_nan();
-  }
-  if let Some(s) = v.as_string() {
-    return !s.to_string().unwrap_or_default().is_empty();
-  }
-  true
-}
-
-/// Call a JS predicate and resolve `boolean | Promise<boolean>`.
-pub(crate) async fn call_predicate_truthy<'js>(
-  pred: &rquickjs::Function<'js>,
-  arg: impl rquickjs::IntoJs<'js>,
-  ctx: &rquickjs::Ctx<'js>,
-) -> rquickjs::Result<bool> {
-  let arg = arg.into_js(ctx)?;
-  let mp: rquickjs::promise::MaybePromise<'js> = pred.call((arg,))?;
-  let v: rquickjs::Value<'js> = mp.into_future().await?;
-  Ok(js_truthy(&v))
-}
-
-/// Binding-side wait loop for a `(Request) => boolean` predicate: the
-/// predicate needs a live `RequestJs`, so it runs in the JS runtime
-/// while the loop drains the page event broadcast.
-async fn wait_request_predicate<'js>(
-  ctx: rquickjs::Ctx<'js>,
-  page: Arc<Page>,
-  pred: rquickjs::Function<'js>,
-  timeout_ms: u64,
-) -> rquickjs::Result<crate::bindings::network::RequestJs> {
-  use ferridriver::events::PageEvent;
-  use rquickjs::class::Class;
-  let mut rx = page.events().subscribe();
-  let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-  loop {
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    if remaining.is_zero() {
-      return Err(rquickjs::Error::new_from_js_message(
-        "page.waitForRequest",
-        "TimeoutError",
-        format!("Timeout {timeout_ms}ms exceeded while waiting for request"),
-      ));
-    }
-    match tokio::time::timeout(remaining, rx.recv()).await {
-      Ok(Ok(PageEvent::Request(req))) => {
-        let probe = crate::bindings::network::RequestJs::new_with_page(req.clone(), page.clone());
-        let inst = Class::instance(ctx.clone(), probe)?;
-        if call_predicate_truthy(&pred, inst, &ctx).await? {
-          return Ok(crate::bindings::network::RequestJs::new_with_page(req, page.clone()));
-        }
-      },
-      Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {},
-      Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-        return Err(rquickjs::Error::new_from_js_message(
-          "page.waitForRequest",
-          "Error",
-          "page closed while waiting for request".to_string(),
-        ));
-      },
-      Err(_) => {
-        return Err(rquickjs::Error::new_from_js_message(
-          "page.waitForRequest",
-          "TimeoutError",
-          format!("Timeout {timeout_ms}ms exceeded while waiting for request"),
-        ));
-      },
-    }
-  }
-}
-
-/// Response-side twin of [`wait_request_predicate`].
-async fn wait_response_predicate<'js>(
-  ctx: rquickjs::Ctx<'js>,
-  page: Arc<Page>,
-  pred: rquickjs::Function<'js>,
-  timeout_ms: u64,
-) -> rquickjs::Result<crate::bindings::network::ResponseJs> {
-  use ferridriver::events::PageEvent;
-  use rquickjs::class::Class;
-  let mut rx = page.events().subscribe();
-  let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-  loop {
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    if remaining.is_zero() {
-      return Err(rquickjs::Error::new_from_js_message(
-        "page.waitForResponse",
-        "TimeoutError",
-        format!("Timeout {timeout_ms}ms exceeded while waiting for response"),
-      ));
-    }
-    match tokio::time::timeout(remaining, rx.recv()).await {
-      Ok(Ok(PageEvent::Response(resp))) => {
-        let probe = crate::bindings::network::ResponseJs::new_with_page(resp.clone(), page.clone());
-        let inst = Class::instance(ctx.clone(), probe)?;
-        if call_predicate_truthy(&pred, inst, &ctx).await? {
-          return Ok(crate::bindings::network::ResponseJs::new_with_page(resp, page.clone()));
-        }
-      },
-      Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {},
-      Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-        return Err(rquickjs::Error::new_from_js_message(
-          "page.waitForResponse",
-          "Error",
-          "page closed while waiting for response".to_string(),
-        ));
-      },
-      Err(_) => {
-        return Err(rquickjs::Error::new_from_js_message(
-          "page.waitForResponse",
-          "TimeoutError",
-          format!("Timeout {timeout_ms}ms exceeded while waiting for response"),
-        ));
-      },
-    }
-  }
-}
-
-/// Lower a JS `string | RegExp` value into a [`UrlMatcher`]. Mirrors
-/// the NAPI `JsRegExpLike` shape — the JS RegExp's `source` and
-/// `flags` getters drive `UrlMatcher::regex_from_source`. Plain
-/// strings go through `UrlMatcher::glob`.
-pub(crate) fn url_value_to_matcher<'js>(
-  ctx: &rquickjs::Ctx<'js>,
-  value: rquickjs::Value<'js>,
-) -> rquickjs::Result<ferridriver::url_matcher::UrlMatcher> {
-  if let Some(s) = value.as_string() {
-    let glob = s.to_string()?;
-    return ferridriver::url_matcher::UrlMatcher::glob(glob).into_js_with(ctx);
-  }
-  if let Some(obj) = value.as_object() {
-    // RegExp constructor.name === "RegExp" — also has `source` (string)
-    // and `flags` (string) getters per ECMAScript spec.
-    let source: rquickjs::Result<String> = obj.get("source");
-    let flags: rquickjs::Result<String> = obj.get("flags");
-    if let (Ok(source), Ok(flags)) = (source, flags) {
-      return ferridriver::url_matcher::UrlMatcher::regex_from_source(&source, &flags).into_js_with(ctx);
-    }
-  }
-  let _ = ctx;
-  Err(rquickjs::Error::new_from_js_message(
-    "Page.waitFor*",
-    "url",
-    "expected string | RegExp".to_string(),
-  ))
-}
-
-/// Lower a JS `string | RegExp` value into a Rust
-/// [`ferridriver::options::StringOrRegex`] for every `getBy*` matcher
-/// and `RoleOptions.name`. Reads `source` / `flags` via the RegExp
-/// prototype getters (same technique as NAPI's `JsRegExpLike`), so a
-/// real JS `RegExp` round-trips without a wire-shape escape.
-pub(crate) fn string_or_regex_from_js(
-  value: rquickjs::Value<'_>,
-) -> rquickjs::Result<ferridriver::options::StringOrRegex> {
-  if let Some(s) = value.as_string() {
-    return Ok(ferridriver::options::StringOrRegex::String(s.to_string()?));
-  }
-  if let Some(obj) = value.as_object() {
-    let source: rquickjs::Result<String> = obj.get("source");
-    let flags: rquickjs::Result<String> = obj.get("flags");
-    if let (Ok(source), Ok(flags)) = (source, flags) {
-      return Ok(ferridriver::options::StringOrRegex::Regex { source, flags });
-    }
-  }
-  Err(rquickjs::Error::new_from_js_message(
-    "getBy*",
-    "text",
-    "expected string | RegExp".to_string(),
-  ))
-}
-
-/// Parse `{ exact?: boolean }` options for `getByText` / `getByLabel` / etc.
-pub(crate) fn parse_text_options(
-  value: rquickjs::function::Opt<rquickjs::Value<'_>>,
-) -> ferridriver::options::TextOptions {
-  let Some(v) = value.0 else {
-    return ferridriver::options::TextOptions::default();
-  };
-  if v.is_undefined() || v.is_null() {
-    return ferridriver::options::TextOptions::default();
-  }
-  let Some(obj) = v.as_object() else {
-    return ferridriver::options::TextOptions::default();
-  };
-  let exact: Option<bool> = obj.get("exact").ok();
-  ferridriver::options::TextOptions { exact }
-}
-
-/// Parse the `getByRole` options bag. `{ name?: string | RegExp,
-/// exact?, checked?, disabled?, expanded?, level?, pressed?,
-/// selected?, includeHidden? }`. Mirrors Playwright's `ByRoleOptions`.
-pub(crate) fn parse_role_options<'js>(
-  value: rquickjs::function::Opt<rquickjs::Value<'js>>,
-) -> rquickjs::Result<ferridriver::options::RoleOptions> {
-  let Some(v) = value.0 else {
-    return Ok(ferridriver::options::RoleOptions::default());
-  };
-  if v.is_undefined() || v.is_null() {
-    return Ok(ferridriver::options::RoleOptions::default());
-  }
-  let Some(obj) = v.as_object() else {
-    return Ok(ferridriver::options::RoleOptions::default());
-  };
-  let name_val: Option<rquickjs::Value<'js>> = obj.get("name").ok();
-  let name = match name_val {
-    Some(val) if !val.is_undefined() && !val.is_null() => Some(string_or_regex_from_js(val)?),
-    _ => None,
-  };
-  let exact: Option<bool> = obj.get("exact").ok();
-  let checked: Option<bool> = obj.get("checked").ok();
-  let disabled: Option<bool> = obj.get("disabled").ok();
-  let expanded: Option<bool> = obj.get("expanded").ok();
-  let level: Option<i32> = obj.get("level").ok();
-  let pressed: Option<bool> = obj.get("pressed").ok();
-  let selected: Option<bool> = obj.get("selected").ok();
-  let include_hidden: Option<bool> = obj.get("includeHidden").ok();
-  Ok(ferridriver::options::RoleOptions {
-    name,
-    exact,
-    checked,
-    disabled,
-    expanded,
-    level,
-    pressed,
-    selected,
-    include_hidden,
-  })
 }

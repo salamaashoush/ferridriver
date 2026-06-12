@@ -58,6 +58,7 @@ const FILES: &[(&str, &str)] = &[
 
 struct Compiled {
   bytecode: Arc<[u8]>,
+  name: String,
 }
 
 fn bindings(compiled: &[Compiled]) -> Vec<PluginBinding> {
@@ -65,6 +66,7 @@ fn bindings(compiled: &[Compiled]) -> Vec<PluginBinding> {
     .iter()
     .map(|c| PluginBinding {
       bytecode: c.bytecode.clone(),
+      name: c.name.clone(),
     })
     .collect()
 }
@@ -96,7 +98,13 @@ async fn plugin_path_bench() {
   let (cp2, _) = compile_and_extract_plugins(&paths).await;
   let warm_cache_ms = warm_cache.elapsed().as_secs_f64() * 1e3;
   assert_eq!(cp2.len(), FILES.len(), "cache hit must return all files");
-  let compiled: Vec<Compiled> = cp.into_iter().map(|c| Compiled { bytecode: c.bytecode }).collect();
+  let compiled: Vec<Compiled> = cp
+    .into_iter()
+    .map(|c| Compiled {
+      bytecode: c.bytecode,
+      name: c.path.display().to_string(),
+    })
+    .collect();
 
   // ---- 2. per-session install ----
   let tmp = tempfile::tempdir().expect("tempdir");
@@ -109,7 +117,6 @@ async fn plugin_path_bench() {
     request: None,
     browser: None,
     plugins: bindings(&compiled),
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };

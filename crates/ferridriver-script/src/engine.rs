@@ -9,7 +9,7 @@
 //! [`crate::session_table::SessionTable`].
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rquickjs::function::{Async, Func};
@@ -28,6 +28,15 @@ pub const DEFAULT_MAX_CONSOLE_ENTRY_BYTES: usize = 8_192;
 
 /// Default per-script wall-clock timeout (5 minutes).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Extra slack past the script deadline before the tokio-level backstop
+/// fires. The interrupt handler is the preferred kill (it halts the
+/// interpreter cleanly with the script's console output intact), but it
+/// only runs while bytecode executes — a script parked on a native
+/// `await` (e.g. `await new Promise(() => {})`) never re-enters the
+/// interpreter, so the backstop is the only thing that frees the
+/// session slot. The grace keeps the two mechanisms from racing.
+const TIMEOUT_BACKSTOP_GRACE: Duration = Duration::from_secs(1);
 
 /// Default per-script memory quota (256 MiB).
 pub const DEFAULT_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
@@ -137,6 +146,19 @@ impl ExtensionHost {
 /// `page` / `context` / `request`). A `None` entry skips installation of
 /// the matching global so pure-compute scripts don't need the extra
 /// infrastructure.
+///
+/// # Trust contract
+///
+/// There is exactly ONE runtime posture: jailed. Everything a live VM
+/// touches by path — `fs.*`, `artifacts`, ES module imports — goes
+/// through a [`PathSandbox`]. The trusted tier is the BUNDLING step,
+/// not the VM: extension files and BDD step files are read from
+/// anywhere on disk by rolldown because the OPERATOR named them in
+/// config/CLI; by the time they execute they are bytecode, and any
+/// `import` they kept (the native `ferridriver`/node-compat set) is
+/// served by Rust `ModuleDef`s. Source handed to a live session at
+/// call time (MCP `run_script`) never gets that bundling privilege —
+/// its imports resolve only inside the sandbox root.
 #[derive(Clone)]
 pub struct RunContext {
   pub vars: Arc<dyn VarsStore>,
@@ -154,12 +176,6 @@ pub struct RunContext {
   pub browser: Option<Arc<ferridriver::Browser>>,
   /// Extension bindings to install on the `tools` global.
   pub plugins: Vec<crate::bindings::PluginBinding>,
-  /// When true, ES module imports use normal filesystem resolution
-  /// instead of the `PathSandbox`-rooted loader. Intended for trusted
-  /// first-party code (BDD step files run from the user's own CLI), so
-  /// step files can `import './helpers.js'` from anywhere on disk. The
-  /// MCP / `run_script` path leaves this `false` and stays sandboxed.
-  pub trusted_modules: bool,
   /// Which host is driving this session — surfaced to JS as
   /// `ferridriver.host`. Defaults to [`ExtensionHost::Script`].
   pub host: ExtensionHost,
@@ -314,6 +330,7 @@ pub struct Session {
   /// scripts (the MCP path). Skip the setter when the value is
   /// unchanged.
   applied: AppliedLimits,
+  timeout: Arc<TimeoutState>,
 }
 
 /// Currently-applied runtime limits, so `execute` can skip redundant
@@ -322,6 +339,51 @@ struct AppliedLimits {
   memory: AtomicUsize,
   stack: AtomicUsize,
   gc: AtomicUsize,
+}
+
+/// Deadline state consulted by the session's single interrupt handler,
+/// installed once at [`Session::create`]. Between calls the deadline
+/// rests at [`TimeoutState::DISARMED`], so a late VM entry (route /
+/// `exposeFunction` / screencast dispatch arriving after a call
+/// finished) is never force-halted by a stale deadline from the
+/// previous call. [`Session::execute`] / [`Session::execute_module`]
+/// arm it per call; [`Session::finish`] disarms it.
+struct TimeoutState {
+  epoch: Instant,
+  /// Deadline as milliseconds since `epoch`; `DISARMED` between calls.
+  deadline_ms: AtomicU64,
+  /// Set by the interrupt handler when it force-halted the interpreter.
+  timed_out: AtomicBool,
+}
+
+impl TimeoutState {
+  const DISARMED: u64 = u64::MAX;
+
+  fn new() -> Self {
+    Self {
+      epoch: Instant::now(),
+      deadline_ms: AtomicU64::new(Self::DISARMED),
+      timed_out: AtomicBool::new(false),
+    }
+  }
+
+  fn arm(&self, deadline: Instant) {
+    let ms = deadline
+      .saturating_duration_since(self.epoch)
+      .as_millis()
+      .min(u128::from(Self::DISARMED - 1)) as u64;
+    self.timed_out.store(false, Ordering::Relaxed);
+    self.deadline_ms.store(ms, Ordering::Relaxed);
+  }
+
+  fn disarm(&self) {
+    self.deadline_ms.store(Self::DISARMED, Ordering::Relaxed);
+  }
+
+  fn expired(&self) -> bool {
+    let deadline = self.deadline_ms.load(Ordering::Relaxed);
+    deadline != Self::DISARMED && self.epoch.elapsed().as_millis() as u64 >= deadline
+  }
 }
 
 impl Session {
@@ -339,29 +401,46 @@ impl Session {
     // immediately; memory_limit is the hard cap.
     runtime.set_gc_threshold(config.default_gc_threshold).await;
 
+    // One interrupt handler for the VM's lifetime, reading the shared
+    // deadline cell. Installing per call and never disarming would let a
+    // stale deadline force-halt route/exposeFunction/screencast dispatch
+    // entering the interpreter between calls.
+    let timeout = Arc::new(TimeoutState::new());
+    {
+      let state = Arc::clone(&timeout);
+      runtime
+        .set_interrupt_handler(Some(Box::new(move || {
+          if state.expired() {
+            state.timed_out.store(true, Ordering::Relaxed);
+            true
+          } else {
+            false
+          }
+        })))
+        .await;
+    }
+
     // Module loader rooted at the sandbox — lets scripts `import './x.js'`.
     // Resolver and loader both check containment; rquickjs's built-in
     // ScriptLoader is replaced with our sandboxed pair so a rogue import
     // can't escape `script_root`. Bound once: the sandbox is stable for
     // the session's lifetime.
-    if context.trusted_modules {
-      // Trusted first-party code (BDD step files): normal filesystem
-      // ESM resolution so shared `import './helpers.js'` works from
-      // anywhere, not only under the sandbox root.
-      let mut resolver = rquickjs::loader::FileResolver::default();
-      resolver.add_path(".");
-      resolver.add_path(context.sandbox.root().to_string_lossy().as_ref());
-      runtime
-        .set_loader(resolver, rquickjs::loader::ScriptLoader::default())
-        .await;
-    } else {
-      runtime
-        .set_loader(
+    // Native modules (`ferridriver`, `@cucumber/cucumber`, node-compat
+    // `fs`/`path`/`buffer`) resolve first; file resolution follows.
+    // Bundles mark these specifiers external, so the bytecode links
+    // against THIS runtime's ModuleDefs at eval.
+    runtime
+      .set_loader(
+        (
+          crate::bindings::native_modules::resolver(),
           crate::modules::SandboxResolver::new(context.sandbox.clone()),
+        ),
+        (
+          crate::bindings::native_modules::loader(),
           crate::modules::SandboxLoader::new(context.sandbox.clone()),
-        )
-        .await;
-    }
+        ),
+      )
+      .await;
 
     let ctx = AsyncContext::full(&runtime)
       .await
@@ -448,6 +527,7 @@ impl Session {
         .map_err(|e| ScriptError::internal(format!("install ferridriver.host: {e}")))?;
 
       crate::bindings::install_plugins(&ctx, &plugins)
+        .await
         .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")))
     })
     .await;
@@ -467,6 +547,7 @@ impl Session {
       )),
       caps: caps_for_session,
       applied,
+      timeout,
     })
   }
 
@@ -516,26 +597,6 @@ impl Session {
     ))
   }
 
-  /// Arm the interrupt handler for this call's deadline. The handler fires
-  /// regularly during interpretation; once the deadline passes it halts
-  /// the interpreter. Returns the flag set when a force-halt occurred.
-  async fn arm_timeout(&self, deadline: Instant) -> Arc<AtomicBool> {
-    let timed_out = Arc::new(AtomicBool::new(false));
-    let flag = timed_out.clone();
-    self
-      .runtime
-      .set_interrupt_handler(Some(Box::new(move || {
-        if Instant::now() >= deadline {
-          flag.store(true, Ordering::Relaxed);
-          true
-        } else {
-          false
-        }
-      })))
-      .await;
-    timed_out
-  }
-
   /// Per-call framework globals (`console`, `page`, `context`, ...).
   fn globals_install(&self, context: &RunContext, console: &Arc<ConsoleCapture>) -> GlobalsInstall {
     GlobalsInstall {
@@ -557,9 +618,9 @@ impl Session {
     eval_result: Result<serde_json::Value, ScriptError>,
     started: Instant,
     console: &Arc<ConsoleCapture>,
-    timed_out: &Arc<AtomicBool>,
     timeout: Duration,
   ) -> SessionRun {
+    self.timeout.disarm();
     let duration = elapsed_ms(started);
     let drained = console.drain();
     match eval_result {
@@ -568,7 +629,7 @@ impl Session {
         poisoned: false,
       },
       Err(mut err) => {
-        let timed_out = timed_out.load(Ordering::Relaxed);
+        let timed_out = self.timeout.timed_out.load(Ordering::Relaxed);
         let oom = is_oom(&err);
         let poisoned = timed_out || oom;
         if timed_out {
@@ -579,6 +640,24 @@ impl Session {
           poisoned,
         }
       },
+    }
+  }
+
+  /// Build the `SessionRun` for a tokio-level backstop fire: the script
+  /// was parked on a native `await` past the deadline, so the interrupt
+  /// handler never got a chance to halt it. The eval future was dropped
+  /// mid-flight — half-driven promises may still reference VM state, so
+  /// the run is always poisoned.
+  fn finish_backstop(&self, started: Instant, console: &Arc<ConsoleCapture>, timeout: Duration) -> SessionRun {
+    self.timeout.disarm();
+    let duration = elapsed_ms(started);
+    SessionRun {
+      result: ScriptResult::err(
+        ScriptError::timeout(duration, timeout.as_millis() as u64),
+        duration,
+        console.drain(),
+      ),
+      poisoned: true,
     }
   }
 
@@ -612,11 +691,11 @@ impl Session {
     let started = Instant::now();
     let console = self.new_console();
     let timeout = self.apply_call_limits(&options).await;
-    let timed_out = self.arm_timeout(started + timeout).await;
+    self.timeout.arm(started + timeout);
     let install = self.globals_install(context, &console);
     let source_owned = source.to_string();
 
-    let eval_result: Result<serde_json::Value, ScriptError> = async_with!(self.ctx => |ctx| {
+    let eval_fut = async_with!(self.ctx => |ctx| {
       if let Err(e) = install_call_globals(&ctx, args, install) {
         return Err(ScriptError::internal(format!("failed to install globals: {e}")));
       }
@@ -634,10 +713,15 @@ impl Session {
       };
 
       Ok(value_to_json(&ctx, result).unwrap_or(serde_json::Value::Null))
-    })
-    .await;
+    });
 
-    self.finish(eval_result, started, &console, &timed_out, timeout)
+    let backstop = timeout.saturating_add(TIMEOUT_BACKSTOP_GRACE);
+    let eval_result: Result<serde_json::Value, ScriptError> = match tokio::time::timeout(backstop, eval_fut).await {
+      Ok(r) => r,
+      Err(_) => return self.finish_backstop(started, &console, timeout),
+    };
+
+    self.finish(eval_result, started, &console, timeout)
   }
 
   /// Execute a precompiled bundled ES module against the persistent VM —
@@ -659,21 +743,21 @@ impl Session {
     let started = Instant::now();
     let console = self.new_console();
     let timeout = self.apply_call_limits(&options).await;
-    let timed_out = self.arm_timeout(started + timeout).await;
+    self.timeout.arm(started + timeout);
     let install = self.globals_install(context, &console);
     let bytecode = Arc::clone(&bundle.bytecode);
     let label = bundle.module_name.clone();
 
-    let eval_result: Result<serde_json::Value, ScriptError> = async_with!(self.ctx => |ctx| {
+    let eval_fut = async_with!(self.ctx => |ctx| {
       if let Err(e) = install_call_globals(&ctx, args, install) {
         return Err(ScriptError::internal(format!("failed to install globals: {e}")));
       }
 
-      // SAFETY: `bytecode` was produced by `Module::write` in THIS process
-      // with native endianness and is never persisted across an
-      // interpreter boundary in a form this load trusts — same contract
-      // `eval_bundle` / `install_plugins` rely on. (The disk cache only
-      // ever loads bytecode written by an ABI-identical toolchain.)
+      // SAFETY: `bytecode` was produced by `Module::write` by this exact
+      // rquickjs/QuickJS build with native endianness — either in this
+      // process or restored from the bytecode disk cache, whose ABI tag +
+      // transitive input hashes guarantee an ABI-identical toolchain
+      // wrote it. Same contract as `eval_bundle` / `install_plugins`.
       #[allow(unsafe_code)]
       let module = match (unsafe { Module::load(ctx.clone(), &bytecode) }).catch(&ctx) {
         Ok(m) => m,
@@ -693,8 +777,13 @@ impl Session {
         .and_then(|ns| ns.get::<_, Value<'_>>("default"))
         .unwrap_or_else(|_| Value::new_undefined(ctx.clone()));
       Ok(value_to_json(&ctx, default).unwrap_or(serde_json::Value::Null))
-    })
-    .await;
+    });
+
+    let backstop = timeout.saturating_add(TIMEOUT_BACKSTOP_GRACE);
+    let eval_result: Result<serde_json::Value, ScriptError> = match tokio::time::timeout(backstop, eval_fut).await {
+      Ok(r) => r,
+      Err(_) => return self.finish_backstop(started, &console, timeout),
+    };
 
     // Remap the failure location back to the original source.
     let eval_result = eval_result.map_err(|mut e| {
@@ -706,7 +795,7 @@ impl Session {
       e
     });
 
-    self.finish(eval_result, started, &console, &timed_out, timeout)
+    self.finish(eval_result, started, &console, timeout)
   }
 }
 
@@ -841,6 +930,10 @@ fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   // Native TextEncoder/TextDecoder/URL classes + queueMicrotask/btoa/
   // atob — all real #[rquickjs::class]/Func bindings, no JS glue.
   crate::bindings::webapi::install(ctx)?;
+  // Web Crypto subset: randomUUID / getRandomValues / subtle
+  // digest+HMAC — native Rust, see bindings/crypto.rs for the
+  // documented algorithm coverage.
+  crate::bindings::crypto::install(ctx)?;
   Ok(())
 }
 

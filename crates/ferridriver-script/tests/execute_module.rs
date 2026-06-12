@@ -21,7 +21,6 @@ fn ctx(dir: &std::path::Path) -> RunContext {
     request: None,
     browser: None,
     plugins: Vec::new(),
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   }

@@ -19,7 +19,6 @@ fn spec() -> SidecarSpec {
     command: vec![FIXTURE.to_string()],
     env: vec![],
     cwd: None,
-    startup_timeout_ms: 5000,
   }
 }
 
@@ -164,7 +163,6 @@ fn engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
     request: None,
     browser: None,
     plugins: Vec::new(),
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -322,4 +320,43 @@ async fn send_many_from_js_rejects_on_a_remote_error() {
     },
     Outcome::Error { error } => panic!("expected a caught rejection, got engine error: {error:?}"),
   }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connect_after_close_respawns_instead_of_returning_the_corpse() {
+  let (eng, _tmp, ctx) = engine();
+  // close() kills the shared transport AND evicts it from the
+  // connection cache — the next connect must spawn a fresh child, not
+  // return a dead handle whose every send fails Closed.
+  let src = r"
+    const first = await sidecars.connect('echo');
+    await first.send('ping');
+    await first.close();
+    const second = await sidecars.connect('echo');
+    const ping = await second.send('ping');
+    await second.close();
+    return { ok: ping.ok === true };
+  ";
+  let result = eng.run(src, &[], RunOptions::default(), ctx).await;
+  match result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "ok": true })),
+    Outcome::Error { error } => panic!("expected respawn after close, got error: {error:?}"),
+  }
+}
+
+#[tokio::test]
+async fn closed_flag_is_set_when_the_child_dies() {
+  let s = Sidecar::connect(&spec()).await.expect("connect");
+  assert!(!s.is_closed(), "fresh transport must not be closed");
+  // `exit` makes the fixture quit; the read loop sees EOF and marks the
+  // transport dead so a connection cache can respawn.
+  let _ = s.send("exit", None, 1000).await;
+  tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    while !s.is_closed() {
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .expect("transport must be marked closed after the child dies");
+  s.close().await.expect("close is idempotent");
 }
