@@ -22,10 +22,18 @@ fn disk_cache_roundtrip_invalidation_and_disable() {
   std::fs::write(&entry, "import './helper.js'; const v = 1;").expect("write entry");
   std::fs::write(&helper, "export const h = 1;").expect("write helper");
 
-  let key = entry_key(std::slice::from_ref(&entry));
+  let key = entry_key("bundle", std::slice::from_ref(&entry), 0);
   // Inputs include the transitive helper (collect_inputs would derive
   // this from the source map in production; here we pass both directly).
   let inputs = vec![entry.clone(), helper.clone()];
+
+  // The kind discriminator namespaces consumers: the same entry as a
+  // plugin must not share the bundle's slot.
+  assert_ne!(
+    key,
+    entry_key("plugin", std::slice::from_ref(&entry), 0),
+    "plugin and bundle keys must not collide for the same file"
+  );
 
   // 1. round-trip.
   store(key, b"BYTECODE-V1", "m.js", None, Some("[{\"name\":\"x\"}]"), &inputs);
@@ -45,6 +53,27 @@ fn disk_cache_roundtrip_invalidation_and_disable() {
   // 3. a deleted input invalidates.
   std::fs::remove_file(&helper).expect("rm helper");
   assert!(load(key).is_none(), "missing input must miss");
+
+  // 3b. a torn bin/json pair (manifest from one writer, bytecode from
+  // another) must miss: corrupt the .bin behind the manifest's back.
+  std::fs::write(&helper, "export const h = 2; // changed").expect("restore helper");
+  store(key, b"BYTECODE-V3", "m.js", None, None, &inputs);
+  assert_eq!(load(key).expect("fresh store hits").bytecode, b"BYTECODE-V3");
+  let bin = cache
+    .path()
+    .join("ferridriver")
+    .join("bytecode")
+    .join(
+      std::fs::read_dir(cache.path().join("ferridriver").join("bytecode"))
+        .expect("abi dir")
+        .next()
+        .expect("one abi dir")
+        .expect("entry")
+        .file_name(),
+    )
+    .join(format!("{key:016x}.bin"));
+  std::fs::write(&bin, b"TORN-OTHER-WRITER").expect("corrupt bin");
+  assert!(load(key).is_none(), "bytecode not matching the manifest hash must miss");
 
   // 4. disable switch: store no-ops, load returns None.
   unsafe { std::env::set_var("FERRIDRIVER_NO_BYTECODE_CACHE", "1") };

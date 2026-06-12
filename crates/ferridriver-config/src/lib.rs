@@ -59,10 +59,45 @@ pub struct FerridriverConfig {
   pub sidecars: Vec<Sidecar>,
   /// Sandbox-relaxation knobs for the scripting VM (default-deny).
   pub scripting: ScriptingConfig,
+  /// Options for the rolldown bundling pipeline (BDD step files,
+  /// extensions, `ferridriver run` scripts). Top-level because every
+  /// host that bundles consumes it.
+  pub bundler: BundlerConfig,
   /// MCP server configuration.
   pub mcp: mcp::McpConfig,
   /// Test runner configuration.
   pub test: test::TestConfig,
+  /// Directory of the config file this document was loaded from (set by
+  /// [`Self::load_from`]); `None` for a default/in-memory config.
+  /// Relative paths inside the document (e.g. `bundler.alias` targets)
+  /// resolve against it.
+  #[serde(skip)]
+  pub source_dir: Option<PathBuf>,
+}
+
+/// Options for the rolldown bundling pipeline.
+///
+/// ```toml
+/// [bundler.alias]
+/// "@wdio/utils" = "./shims/wdio-utils.ts"
+///
+/// [bundler.virtualModules]
+/// "box:env" = "export const env = 'staging';"
+/// ```
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BundlerConfig {
+  /// Redirect a bare import specifier to a shim file. The target is a
+  /// `.js`/`.mjs`/`.ts`/`.mts` path, resolved against the config file's
+  /// directory (or the process cwd when no config file exists). The
+  /// shim is bundled and transpiled like any other source file. Lets
+  /// legacy imports (e.g. a WDIO helper package) be served by local
+  /// compatibility shims without forking the importing code.
+  pub alias: BTreeMap<String, String>,
+  /// Virtual modules: import specifier -> inline ES-module JS source.
+  /// The specifier never touches the filesystem. For TypeScript or
+  /// multi-file shims use `alias` instead.
+  pub virtual_modules: BTreeMap<String, String>,
 }
 
 /// One declared sidecar process. Driven over fd 3/4 with NUL-delimited
@@ -82,9 +117,6 @@ pub struct Sidecar {
   pub env: Option<BTreeMap<String, String>>,
   /// Working directory for the child. Defaults to the parent's cwd.
   pub cwd: Option<String>,
-  /// How long to wait for the child to become ready before failing the
-  /// connect. Absent ⇒ the consumer's default applies.
-  pub startup_timeout_ms: Option<u64>,
 }
 
 /// Opt-in relaxations of the scripting sandbox. Every field defaults to
@@ -151,7 +183,7 @@ impl FerridriverConfig {
       std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("failed to read config {}: {e}", path.display()))?;
 
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("toml");
-    let cfg: FerridriverConfig = match ext {
+    let mut cfg: FerridriverConfig = match ext {
       "toml" => toml::from_str(&content).map_err(|e| anyhow::anyhow!("invalid TOML config {}: {e}", path.display()))?,
       "yaml" | "yml" => {
         serde_yaml::from_str(&content).map_err(|e| anyhow::anyhow!("invalid YAML config {}: {e}", path.display()))?
@@ -165,6 +197,7 @@ impl FerridriverConfig {
     cfg
       .validate()
       .map_err(|e| anyhow::anyhow!("invalid config {}: {e}", path.display()))?;
+    cfg.source_dir = path.parent().map(Path::to_path_buf);
 
     tracing::debug!("loaded ferridriver config from {}", path.display());
     Ok(cfg)
@@ -224,6 +257,37 @@ mod tests {
     let root = FerridriverConfig::default();
     assert_eq!(root.mcp.server_name(), "ferridriver");
     assert!(root.test.test_match.is_empty());
+  }
+
+  #[test]
+  fn bundler_section_parses_and_source_dir_is_recorded() {
+    let dir = std::env::temp_dir().join("ferridriver-config-bundler-ok");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("ferridriver.toml");
+    std::fs::write(
+      &path,
+      r#"
+[bundler.alias]
+"@wdio/utils" = "./shims/wdio-utils.ts"
+
+[bundler.virtualModules]
+"box:env" = "export const env = 'staging';"
+"#,
+    )
+    .unwrap();
+
+    let root = FerridriverConfig::load_from(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(
+      root.bundler.alias.get("@wdio/utils").map(String::as_str),
+      Some("./shims/wdio-utils.ts")
+    );
+    assert_eq!(
+      root.bundler.virtual_modules.get("box:env").map(String::as_str),
+      Some("export const env = 'staging';")
+    );
+    assert_eq!(root.source_dir.as_deref(), Some(dir.as_path()));
   }
 
   #[test]
@@ -357,7 +421,6 @@ test:
 name = "tooling"
 command = ["my-helper", "--serve"]
 cwd = "/tmp"
-startupTimeoutMs = 2000
 
 [sidecars.env]
 LOG = "debug"
@@ -373,7 +436,6 @@ LOG = "debug"
     assert_eq!(s.name, "tooling");
     assert_eq!(s.command, vec!["my-helper", "--serve"]);
     assert_eq!(s.cwd.as_deref(), Some("/tmp"));
-    assert_eq!(s.startup_timeout_ms, Some(2000));
     assert_eq!(
       s.env.as_ref().and_then(|e| e.get("LOG")).map(String::as_str),
       Some("debug")

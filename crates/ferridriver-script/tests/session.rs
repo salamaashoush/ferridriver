@@ -29,7 +29,13 @@ async fn demo_binding() -> (tempfile::TempDir, PluginBinding) {
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
   assert!(!cp.bytecode.is_empty(), "compiled bytecode must be non-empty");
-  (tmp, PluginBinding { bytecode: cp.bytecode })
+  (
+    tmp,
+    PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    },
+  )
 }
 
 async fn run_demo_plugin_twice() {
@@ -45,7 +51,6 @@ async fn run_demo_plugin_twice() {
     request: None,
     browser: None,
     plugins: vec![binding],
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -100,8 +105,10 @@ async fn dotted_tool_names_are_projected_as_namespaces() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![PluginBinding { bytecode: cp.bytecode }],
-    trusted_modules: false,
+    plugins: vec![PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -170,8 +177,10 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![PluginBinding { bytecode: cp.bytecode }],
-    trusted_modules: false,
+    plugins: vec![PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -215,8 +224,10 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
     browser_context: None,
     request: Some(request),
     browser: None,
-    plugins: vec![PluginBinding { bytecode: cp.bytecode }],
-    trusted_modules: false,
+    plugins: vec![PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -294,8 +305,10 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
     browser_context: None,
     request: Some(request),
     browser: None,
-    plugins: vec![PluginBinding { bytecode: cp.bytecode }],
-    trusted_modules: false,
+    plugins: vec![PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -374,8 +387,10 @@ async fn fetch_net_policy_does_not_leak_between_concurrent_tools() {
       ferridriver::http_client::HttpClientOptions::default(),
     ))),
     browser: None,
-    plugins: vec![PluginBinding { bytecode: cp.bytecode }],
-    trusted_modules: false,
+    plugins: vec![PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -440,8 +455,8 @@ async fn extension_branches_on_ferridriver_host_flag() {
       browser: None,
       plugins: vec![PluginBinding {
         bytecode: cp.bytecode.clone(),
+        name: cp.path.display().to_string(),
       }],
-      trusted_modules: false,
       host,
       caps: ferridriver_script::ScriptCaps::default(),
     };
@@ -495,7 +510,6 @@ fn make_ctx() -> (tempfile::TempDir, RunContext) {
     request: None,
     browser: None,
     plugins: Vec::new(),
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -610,6 +624,71 @@ async fn timeout_poisons_the_session() {
   // A fired timeout interrupt halts the interpreter mid-run: the VM is
   // poisoned and the caller must discard it.
   assert!(timed.poisoned, "a timeout must poison the session");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_await_park_hits_the_backstop_and_poisons() {
+  let (_tmp, ctx) = make_ctx();
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+
+  // The interrupt handler only runs while bytecode executes; a script
+  // parked on a never-resolving native promise would otherwise hold the
+  // session slot forever. The tokio-level backstop must fire instead.
+  let timed = session
+    .execute(
+      "await new Promise(() => {});",
+      &[],
+      RunOptions {
+        timeout: Some(Duration::from_millis(150)),
+        ..RunOptions::default()
+      },
+      &ctx,
+    )
+    .await;
+  match timed.result.outcome {
+    Outcome::Error { error } => assert_eq!(error.kind, ScriptErrorKind::Timeout),
+    Outcome::Ok { .. } => panic!("expected timeout"),
+  }
+  assert!(timed.poisoned, "a backstop fire must poison the session");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn finished_call_deadline_does_not_halt_later_vm_entry() {
+  let (_tmp, ctx) = make_ctx();
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+
+  let quick = session
+    .execute(
+      "return 1;",
+      &[],
+      RunOptions {
+        timeout: Some(Duration::from_millis(100)),
+        ..RunOptions::default()
+      },
+      &ctx,
+    )
+    .await;
+  assert!(matches!(quick.result.outcome, Outcome::Ok { .. }));
+  assert!(!quick.poisoned);
+
+  tokio::time::sleep(Duration::from_millis(250)).await;
+
+  // Route / exposeFunction / screencast dispatch re-enters the VM
+  // between calls via the session AsyncContext. An armed deadline left
+  // over from the finished call would force-halt this entry.
+  let actx = session.async_context();
+  let entered: Result<f64, rquickjs::Error> = rquickjs::async_with!(actx => |c| {
+    c.eval::<f64, _>("let s = 0; for (let i = 0; i < 1e6; i++) s += i; s")
+  })
+  .await;
+  assert!(
+    entered.is_ok(),
+    "between-call VM entry must not be halted by the previous call's deadline: {entered:?}"
+  );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -824,7 +903,13 @@ async fn binding_from(src: &str) -> (tempfile::TempDir, Result<PluginBinding, St
     return (tmp, Err(e.message));
   }
   let cp = compiled.into_iter().next().expect("one compiled plugin");
-  (tmp, Ok(PluginBinding { bytecode: cp.bytecode }))
+  (
+    tmp,
+    Ok(PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    }),
+  )
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -871,7 +956,6 @@ async fn per_tool_timeout_ms_is_enforced_for_every_caller() {
     request: None,
     browser: None,
     plugins: vec![binding],
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -904,5 +988,136 @@ async fn per_tool_timeout_ms_is_enforced_for_every_caller() {
   match fast.result.outcome {
     Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("quick")),
     Outcome::Error { error } => panic!("fast tool within its timeout must resolve: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_top_level_await_registers_tools_in_session() {
+  // `install_plugins` must drive the module's eval promise to
+  // completion: a tool registered after a top-level `await` is in the
+  // extracted manifest (extraction awaits), so the session binding must
+  // exist too — otherwise the manifest advertises a tool the VM lacks.
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let path = tmp.path().join("late.js");
+  std::fs::write(
+    &path,
+    "const v = await Promise.resolve('deferred');\n\
+     defineTool({ name: 'late', handler: async () => v });\n",
+  )
+  .expect("write plugin");
+  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let cp = compiled.into_iter().next().expect("one compiled plugin");
+
+  let sb_tmp = tempfile::tempdir().expect("tempdir");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: vec![PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    }],
+    host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+  let r = session
+    .execute("return await tools['late']();", &[], RunOptions::default(), &ctx)
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("deferred")),
+    Outcome::Error { error } => panic!("top-level-await plugin tool must be callable: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn broken_plugin_is_skipped_without_killing_the_session() {
+  // Session-time install must isolate per file like startup does: one
+  // plugin whose top-level throws (here: only under the script host, so
+  // it passes manifest extraction, which runs as host 'mcp') must not
+  // take down the whole VM — the healthy plugin's tool stays callable.
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let bad = tmp.path().join("bad.js");
+  std::fs::write(
+    &bad,
+    "if (globalThis.ferridriver?.host === 'script') { throw new Error('boom'); }\n\
+     defineTool({ name: 'bad', handler: async () => 'never' });\n",
+  )
+  .expect("write bad plugin");
+  let good = tmp.path().join("good.js");
+  std::fs::write(&good, "defineTool({ name: 'good', handler: async () => 'fine' });\n").expect("write good plugin");
+  let (compiled, failures) = compile_and_extract_plugins(&[bad, good]).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let plugins: Vec<PluginBinding> = compiled
+    .into_iter()
+    .map(|cp| PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    })
+    .collect();
+  assert_eq!(plugins.len(), 2);
+
+  let sb_tmp = tempfile::tempdir().expect("tempdir");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins,
+    host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("one broken plugin must not fail session create");
+  let r = session
+    .execute("return await tools['good']();", &[], RunOptions::default(), &ctx)
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("fine")),
+    Outcome::Error { error } => panic!("healthy plugin must survive a sibling's failure: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assertion_failures_throw_a_named_assertion_error() {
+  // Binding-level failures must be real `Error` instances with a
+  // semantic `name` (here AssertionError), not the TypeError-with-
+  // mangled-message that `Error::new_from_js_message` produces —
+  // user scripts branch on `e.name` exactly like with core errors.
+  let (_tmp, ctx) = make_ctx();
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+  let r = session
+    .execute(
+      "try { expect(1).toBe(2); return 'no-throw'; } \
+       catch (e) { return { name: e.name, isError: e instanceof Error }; }",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => {
+      assert_eq!(
+        success.value["name"],
+        serde_json::json!("AssertionError"),
+        "{:?}",
+        success.value
+      );
+      assert_eq!(success.value["isError"], serde_json::json!(true), "{:?}", success.value);
+    },
+    Outcome::Error { error } => panic!("expect failure must be catchable in JS: {error:?}"),
   }
 }

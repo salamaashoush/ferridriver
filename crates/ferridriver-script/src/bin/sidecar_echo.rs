@@ -1,8 +1,9 @@
 //! Test fixture: a minimal sidecar speaking the fd 3/4 NUL-delimited JSON
 //! protocol. Reads requests on fd 3, writes responses on fd 4. Answers
 //! `ping` with `{ok:true}`, `echo` by reflecting `params`, `emit` by pushing
-//! an id-less event frame `{method, params}` before acking, and anything else
-//! with an `{error}`. Used only by the sidecar transport/binding tests
+//! an id-less event frame `{method, params}` before acking, `exit` by acking
+//! then quitting, and anything else with an `{error}`. Used only by the
+//! sidecar transport/binding tests
 //! (`env!("CARGO_BIN_EXE_sidecar_echo")`).
 
 #[cfg(unix)]
@@ -52,6 +53,17 @@ fn main() {
             let _ = tx.flush();
           }
           serde_json::json!({ "id": id, "result": { "ok": true } })
+        },
+        "exit" => {
+          // Ack, then quit — lets tests observe the parent-side EOF path
+          // (read loop exit marking the transport closed).
+          let resp = serde_json::json!({ "id": id, "result": { "ok": true } });
+          if let Ok(mut out) = serde_json::to_vec(&resp) {
+            out.push(0);
+            let _ = tx.write_all(&out);
+            let _ = tx.flush();
+          }
+          return;
         },
         other => {
           serde_json::json!({ "id": id, "error": { "code": -1, "message": format!("unknown method: {other}") } })

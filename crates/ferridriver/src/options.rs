@@ -260,7 +260,8 @@ pub struct FilterOptions {
 }
 
 /// Options for waiting operations.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct WaitOptions {
   /// "visible", "hidden", "attached", "stable"
   pub state: Option<String>,
@@ -397,7 +398,7 @@ pub struct BoundingBox {
 /// [`DragAndDropOptions::target_position`]), or in viewport coordinates in
 /// other contexts. Used by `sourcePosition`, `targetPosition`, and click
 /// `position`.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Deserialize)]
 pub struct Point {
   pub x: f64,
   pub y: f64,
@@ -414,6 +415,13 @@ pub enum MouseButton {
   Right,
   /// Scroll wheel button.
   Middle,
+}
+
+impl<'de> serde::Deserialize<'de> for MouseButton {
+  fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    let s = String::deserialize(d)?;
+    Self::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("Unknown mouse button: {s}")))
+  }
 }
 
 impl MouseButton {
@@ -478,6 +486,13 @@ pub enum Modifier {
   ControlOrMeta,
   Meta,
   Shift,
+}
+
+impl<'de> serde::Deserialize<'de> for Modifier {
+  fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    let s = String::deserialize(d)?;
+    Self::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("Unknown modifier: {s}")))
+  }
 }
 
 impl Modifier {
@@ -573,7 +588,8 @@ pub fn modifiers_bitmask(mods: &[Modifier]) -> u32 {
 /// Every option is `Option<T>`: callers omit fields and the backend
 /// applies the documented defaults (`button: Left`, `click_count: 1`,
 /// `delay: 0`, `steps: 1`, etc.).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct ClickOptions {
   /// Mouse button. Default: [`MouseButton::Left`].
   pub button: Option<MouseButton>,
@@ -645,7 +661,8 @@ impl ClickOptions {
 /// Options for `fill` (set an input's value). Three fields.
 /// `no_wait_after` is accepted for signature parity; `force` skips the
 /// fillable / editable actionability check.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct FillOptions {
   pub force: Option<bool>,
   pub no_wait_after: Option<bool>,
@@ -661,7 +678,8 @@ impl FillOptions {
 
 /// Options for `press` (single key press).
 /// `LocatorPressOptions` — three fields.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct PressOptions {
   /// Milliseconds to hold the key down between `keydown` and `keyup`.
   pub delay: Option<u64>,
@@ -678,7 +696,8 @@ impl PressOptions {
 
 /// Options for `type` / `press_sequentially` (type text character-by-
 /// character). `LocatorTypeOptions` — three fields.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct TypeOptions {
   /// Milliseconds between consecutive `keydown` + `keyup` pairs.
   pub delay: Option<u64>,
@@ -698,7 +717,8 @@ impl TypeOptions {
 /// Internally a check is a click on a checkbox/radio; these options
 /// mirror [`ClickOptions`] minus `button`, `click_count`, `delay`,
 /// `modifiers`, `steps`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct CheckOptions {
   pub force: Option<bool>,
   pub no_wait_after: Option<bool>,
@@ -741,7 +761,8 @@ impl CheckOptions {
 /// A single descriptor used by `selectOption`. At least one of `value`,
 /// `label`, or `index` must be set. An array of these descriptors
 /// selects every `<option>` matching any descriptor (multi-select).
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SelectOptionValue {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub value: Option<String>,
@@ -783,7 +804,8 @@ impl SelectOptionValue {
 
 /// Options for `selectOption`.
 /// `LocatorSelectOptionOptions` — three fields.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct SelectOptionOptions {
   pub force: Option<bool>,
   pub no_wait_after: Option<bool>,
@@ -792,7 +814,8 @@ pub struct SelectOptionOptions {
 
 /// Options for `setInputFiles`.
 /// `LocatorSetInputFilesOptions` — two fields.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct SetInputFilesOptions {
   pub no_wait_after: Option<bool>,
   pub timeout: Option<u64>,
@@ -801,7 +824,8 @@ pub struct SetInputFilesOptions {
 /// File payload for `setInputFiles`.
 /// `FilePayload` — caller supplies raw bytes plus the filename and MIME
 /// type that the page should see, avoiding any on-disk write.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FilePayload {
   pub name: String,
   pub mime_type: String,
@@ -821,7 +845,8 @@ pub enum InputFiles {
 
 /// Options for `dispatchEvent`.
 /// `LocatorDispatchEventOptions` — single field (`timeout`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct DispatchEventOptions {
   pub timeout: Option<u64>,
 }
@@ -829,7 +854,8 @@ pub struct DispatchEventOptions {
 /// Options for hover actions. Shape is [`ClickOptions`] minus `button`,
 /// `click_count`, `delay` (no press/release — just a `mousemove` at the
 /// target).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct HoverOptions {
   pub force: Option<bool>,
   pub modifiers: Vec<Modifier>,
@@ -856,7 +882,8 @@ impl HoverOptions {
 /// Options for tap actions (touch input). Distinct from [`HoverOptions`]
 /// so future tap-only divergence (e.g. native touch options) has a stable
 /// home.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct TapOptions {
   pub force: Option<bool>,
   pub modifiers: Vec<Modifier>,
@@ -882,7 +909,8 @@ impl TapOptions {
 
 /// Options for double-click actions. Identical to [`ClickOptions`] minus
 /// `click_count` (which is forced to `2` at dispatch time).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct DblClickOptions {
   pub button: Option<MouseButton>,
   pub delay: Option<u64>,
@@ -924,7 +952,8 @@ impl DblClickOptions {
 /// because the source locator already carries its own strict flag.
 ///
 /// `no_wait_after` is accepted for signature parity but has no effect.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct DragAndDropOptions {
   /// Bypass actionability checks.
   pub force: Option<bool>,
@@ -955,7 +984,8 @@ pub struct DragAndDropOptions {
 /// `streams`, `data`, `force`, and `trial` (those are folded into the
 /// `DropPayload` or are unsupported), leaving the actionability +
 /// positioning fields shared with the other pointer actions.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct DropOptions {
   /// Modifier keys held during the drop's pointer events.
   pub modifiers: Vec<Modifier>,
@@ -1207,7 +1237,8 @@ pub fn pdf_paper_format_size(format: &str) -> Option<(f64, f64)> {
 
 /// Options for [`crate::page::Page::close`].
 /// `page.close({ runBeforeUnload, reason })`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct PageCloseOptions {
   /// When `true`, the page's `beforeunload` handlers fire before close.
   /// Chromium mapping: switches the CDP method from `Target.closeTarget`
@@ -1242,7 +1273,8 @@ pub enum UnrouteBehavior {
 
 /// Options for [`crate::browser::Browser::close`].
 /// `browser.close({ reason })`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct BrowserCloseOptions {
   /// Human-readable reason surfaced to `TargetClosed` errors emitted by any
   /// in-flight operation on pages/contexts from this browser.
@@ -1250,7 +1282,8 @@ pub struct BrowserCloseOptions {
 }
 
 /// Navigation options for goto/reload/goBack/goForward.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct GotoOptions {
   /// When to consider navigation complete:
   /// "load" (default), "domcontentloaded", "networkidle", "commit"

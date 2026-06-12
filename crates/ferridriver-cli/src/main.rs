@@ -19,10 +19,6 @@ use clap::Parser;
 use ferridriver_config::FerridriverConfig;
 use ferridriver_mcp::McpServer;
 
-/// Default sidecar startup timeout when a `[[sidecars]]` entry omits
-/// `startupTimeoutMs`.
-const DEFAULT_SIDECAR_STARTUP_TIMEOUT_MS: u64 = 5000;
-
 /// Discover + compile extension files into plugin bindings for the `run`
 /// path. `roots` are files or directories (directories are scanned shallowly
 /// for `.js`/`.mjs`/`.ts`/`.mts`). Discovery / compile failures are logged
@@ -58,7 +54,10 @@ async fn load_run_plugins(roots: &[String]) -> Vec<ferridriver_script::PluginBin
   }
   compiled
     .into_iter()
-    .map(|cp| ferridriver_script::PluginBinding { bytecode: cp.bytecode })
+    .map(|cp| ferridriver_script::PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    })
     .collect()
 }
 
@@ -78,9 +77,24 @@ fn sidecar_specs(config: &FerridriverConfig) -> Vec<ferridriver_script::sidecar:
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default(),
       cwd: s.cwd.clone(),
-      startup_timeout_ms: s.startup_timeout_ms.unwrap_or(DEFAULT_SIDECAR_STARTUP_TIMEOUT_MS),
     })
     .collect()
+}
+
+/// Install the config's `[bundler]` shims (import aliases + virtual
+/// modules) into the process-global slot every bundle path reads.
+/// Relative alias targets resolve against the config file's directory,
+/// falling back to the cwd for a default/in-memory config.
+fn install_bundler_shims(config: &FerridriverConfig) {
+  let base = config
+    .source_dir
+    .clone()
+    .or_else(|| std::env::current_dir().ok())
+    .unwrap_or_else(|| std::path::PathBuf::from("."));
+  ferridriver_script::bundle::set_bundler_shims(ferridriver_script::bundle::BundlerShims::from_config(
+    &config.bundler,
+    &base,
+  ));
 }
 
 #[tokio::main]
@@ -92,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
   // Load the unified config exactly once. Each subcommand reads the
   // section it cares about from this single document.
   let config = FerridriverConfig::load(args.config.as_deref())?;
+  install_bundler_shims(&config);
 
   match args.command {
     cli::Command::Mcp(mcp_args) => Box::pin(run_mcp(config, mcp_args)).await,
@@ -351,6 +366,7 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
   // `ferridriver run` honours a ferridriver.toml in scope for the
   // scripting sandbox env allow-list and declared sidecars.
   let file_config = FerridriverConfig::load(None).unwrap_or_default();
+  install_bundler_shims(&file_config);
   let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
     &file_config.scripting.allow_env,
     file_config.scripting.allow.commands.clone(),
@@ -372,7 +388,6 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
     request: None,
     browser: None,
     plugins,
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps,
   };
