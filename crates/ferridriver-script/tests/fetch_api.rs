@@ -99,7 +99,6 @@ async fn run(src: &str) -> Outcome {
     request: None,
     browser: None,
     plugins: Vec::new(),
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -780,7 +779,6 @@ async fn json_arg_proto_key_does_not_pollute() {
     request: None,
     browser: None,
     plugins: Vec::new(),
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };

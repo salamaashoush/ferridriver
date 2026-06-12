@@ -674,6 +674,7 @@ impl McpServer {
       .iter()
       .map(|f| ferridriver_script::PluginBinding {
         bytecode: f.bytecode.clone(),
+        name: f.path.display().to_string(),
       })
       .collect()
   }
@@ -709,7 +710,6 @@ impl McpServer {
       request: Some(request),
       browser: Some(browser),
       plugins: self.plugin_bindings(),
-      trusted_modules: false,
       host: ferridriver_script::ExtensionHost::Mcp,
       caps: self.script_caps.clone(),
     })

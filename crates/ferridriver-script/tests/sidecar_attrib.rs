@@ -55,7 +55,6 @@ fn bench_spec() -> SidecarSpec {
     command: bench_command(),
     env: vec![],
     cwd: None,
-    startup_timeout_ms: 10_000,
   }
 }
 
@@ -279,7 +278,6 @@ async fn profile_concurrent_quickjs() {
     request: None,
     browser: None,
     plugins: Vec::new(),
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -366,7 +364,6 @@ async fn bench_batching() {
     request: None,
     browser: None,
     plugins: Vec::new(),
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };

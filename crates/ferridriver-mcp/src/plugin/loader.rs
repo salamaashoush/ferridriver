@@ -5,16 +5,12 @@
 //! tree-shaken), compiled to `QuickJS` bytecode, and its manifests
 //! extracted — all in a single throwaway runtime for the whole batch
 //! (`ferridriver_script::compile_and_extract_plugins`), not one engine
-//! per file. The plugin must assign its manifest(s) to
-//! `globalThis.exports`. Three shapes are accepted:
-//!
-//! 1. **Multiple tools, with shared metadata** -- `globalThis.exports = {
-//!    tools: [ {...}, {...} ] }`.
-//! 2. **Multiple tools, plain array** -- `globalThis.exports = [ {...},
-//!    {...} ]`.
-//! 3. **Single tool** -- `globalThis.exports = { name, description,
-//!    inputSchema, allow, exposeAsMcpTool, handler }`. Treated as
-//!    `tools: [exports]`.
+//! per file. A plugin registers its tools by calling the native
+//! `defineTool({ name, description, inputSchema, allow,
+//! exposeAsMcpTool, handler })` / `tool(...)` contribution points at
+//! the module's top level; evaluating the compiled bytecode runs those
+//! calls against the Rust `ExtensionRegistry`, and the manifests are
+//! read straight off that registry.
 //!
 //! Each manifest's `handler` is stripped during extraction (functions
 //! are not JSON-serialisable and only make sense inside a live VM); the
@@ -77,15 +73,13 @@ impl std::fmt::Display for PluginLoadError {
 impl std::error::Error for PluginLoadError {}
 
 /// Bundle + compile + extract every discovered plugin file in one batch.
-/// Returns the successfully loaded plugins (with contiguous registry
-/// indices baked into their bytecode) and a per-file error list so the
-/// caller can log and skip broken files without aborting startup.
+/// Returns the successfully loaded plugins and a per-file error list so
+/// the caller can log and skip broken files without aborting startup.
 ///
-/// The returned `LoadedPlugin`s are in the same order
-/// `compile_and_extract_plugins` assigned indices, which the server
-/// preserves when building `PluginBinding`s — so a tool's `(fileIndex,
-/// toolIndex)` always matches the bytecode's `__ferri_plugin_files`
-/// slot.
+/// The returned `LoadedPlugin`s preserve input file order, which the
+/// server keeps when building `PluginBinding`s — sessions evaluate the
+/// files in the same order the manifests were extracted, so registry
+/// tool order matches the manifest order.
 pub async fn load_all(files: &[PathBuf]) -> (Vec<LoadedPlugin>, Vec<PluginLoadError>) {
   let (compiled, bundle_failures) = compile_and_extract_plugins(files).await;
 

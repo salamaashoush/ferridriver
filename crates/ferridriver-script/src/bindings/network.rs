@@ -388,20 +388,15 @@ impl WebSocketJs {
     event: String,
     timeout_ms: Option<f64>,
   ) -> rquickjs::Result<Value<'js>> {
-    let timeout = std::time::Duration::from_millis(
-      #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-      {
-        timeout_ms.unwrap_or(30000.0) as u64
-      },
-    );
+    let timeout = std::time::Duration::from_millis(timeout_ms.map_or(30_000, crate::bindings::convert::ms_f64_to_u64));
     let mut rx = self.inner.subscribe();
     let event_lc = event.to_ascii_lowercase();
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
       let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
       if remaining.is_zero() {
-        return Err(rquickjs::Error::new_from_js_message(
-          "WebSocket.waitForEvent",
+        return Err(crate::bindings::convert::throw_named(
+          &ctx,
           "TimeoutError",
           format!(
             "Timeout {}ms exceeded while waiting for WebSocket event {event:?}",
@@ -415,16 +410,20 @@ impl WebSocketJs {
             return Ok(v);
           }
         },
-        Ok(Err(_)) => {
-          return Err(rquickjs::Error::new_from_js_message(
-            "WebSocket.waitForEvent",
+        // A burst overran the broadcast buffer: skip the missed events
+        // and keep waiting — treating Lagged as fatal would silently
+        // turn an event storm into a bogus "channel closed" failure.
+        Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {},
+        Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+          return Err(crate::bindings::convert::throw_named(
+            &ctx,
             "Error",
-            "WebSocket channel closed".to_string(),
+            "WebSocket channel closed",
           ));
         },
         Err(_) => {
-          return Err(rquickjs::Error::new_from_js_message(
-            "WebSocket.waitForEvent",
+          return Err(crate::bindings::convert::throw_named(
+            &ctx,
             "TimeoutError",
             format!(
               "Timeout {}ms exceeded while waiting for WebSocket event {event:?}",

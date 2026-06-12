@@ -321,6 +321,89 @@ fn test_network_request_failure_via_refused_port(c: &mut McpClient) {
   });
 }
 
+/// Two pages routing the same pattern must keep their own handlers: route
+/// ids live in the session-shared callbacks registry, and every wrapper
+/// minted for a page must draw from the registry-global counter — a
+/// per-wrapper counter restarting at 0 would let the second page's
+/// registration overwrite the first page's handler. Each page fulfills
+/// `/api/users` with its own sentinel; both must observe their own.
+/// WebKit skipped: same evaluate world-isolation limit as
+/// `test_route_disposable`.
+pub fn test_route_two_pages_keep_their_own_handlers(c: &mut McpClient) {
+  if c.backend == "webkit" {
+    return;
+  }
+  with_stub_server(|base| {
+    c.nav_url(&format!("{base}/landed"));
+    let script = format!(
+      r#"
+      const page2 = await context.newPage();
+      try {{
+        await page.route('**/api/users', (route) => {{
+          route.fulfill({{ status: 200, contentType: 'application/json', body: '"first-page"' }});
+        }});
+        await page2.route('**/api/users', (route) => {{
+          route.fulfill({{ status: 200, contentType: 'application/json', body: '"second-page"' }});
+        }});
+        await page2.goto('{base}/landed');
+        const fromFirst = await page.evaluate("fetch('/api/users').then(r => r.text())");
+        const fromSecond = await page2.evaluate("fetch('/api/users').then(r => r.text())");
+        return {{ fromFirst, fromSecond }};
+      }} finally {{
+        await page.unrouteAll();
+        await page2.close();
+      }}
+      "#
+    );
+    let v = c.script_value(&script);
+    assert_eq!(
+      v["fromFirst"].as_str(),
+      Some("\"first-page\""),
+      "first page must keep its own route handler: {v}",
+    );
+    assert_eq!(
+      v["fromSecond"].as_str(),
+      Some("\"second-page\""),
+      "second page must keep its own route handler: {v}",
+    );
+  });
+}
+
+/// `unroute(fn)` must work from ANY wrapper of the page, not only the one
+/// `route` was called on — wrappers are minted freely (`mainFrame().page()`,
+/// `locator.page()`), and the matcher table they consult is keyed in the
+/// session-shared registry. WebKit skipped: same evaluate world-isolation
+/// limit as `test_route_disposable`.
+pub fn test_unroute_predicate_from_other_wrapper(c: &mut McpClient) {
+  if c.backend == "webkit" {
+    return;
+  }
+  with_stub_server(|base| {
+    c.nav_url(&format!("{base}/landed"));
+    let script = r#"
+      const pred = (url) => url.pathname === '/api/users';
+      await page.route(pred, (route) => {
+        route.fulfill({ status: 200, contentType: 'application/json', body: '"routed"' });
+      });
+      const before = await page.evaluate("fetch('/api/users').then(r => r.text())");
+      const otherWrapper = page.mainFrame().page();
+      await otherWrapper.unroute(pred);
+      const after = await page.evaluate("fetch('/api/users').then(r => r.text())");
+      return { before, after };
+      "#;
+    let v = c.script_value(script);
+    assert_eq!(
+      v["before"].as_str(),
+      Some("\"routed\""),
+      "predicate route must intercept before unroute: {v}",
+    );
+    assert!(
+      v["after"].as_str().is_some_and(|s| s.contains("alice")),
+      "unroute from a sibling wrapper must drop the core route (request falls through): {v}",
+    );
+  });
+}
+
 // ── 2b. Route Disposable (page.route returns a DisposableStub) ───────────
 
 /// Playwright parity: `page.route(url, handler)` returns a `DisposableStub`

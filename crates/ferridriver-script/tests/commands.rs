@@ -19,10 +19,12 @@ async fn binding(src: &str) -> (tempfile::TempDir, PluginBinding) {
   std::fs::write(&path, src).expect("write");
   let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let cp = compiled.into_iter().next().expect("one");
   (
     tmp,
     PluginBinding {
-      bytecode: compiled.into_iter().next().expect("one").bytecode,
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
     },
   )
 }
@@ -37,7 +39,6 @@ fn ctx(sandbox_tmp: &std::path::Path, b: PluginBinding) -> RunContext {
     request: None,
     browser: None,
     plugins: vec![b],
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Mcp,
     caps: ferridriver_script::ScriptCaps::default(),
   }

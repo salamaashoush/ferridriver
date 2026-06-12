@@ -11,10 +11,11 @@
 //! Pushed events (id-less `{method, params}` frames the child writes) are
 //! dispatched to JS listeners by ONE pump task per connected handle. The
 //! pump is spawned onto the QuickJS runtime's OWN executor via
-//! [`rquickjs::Ctx::spawn`] (the same mechanism `setInterval` uses), so every
-//! VM access stays on the single interpreter thread — driving JS from a
-//! separate OS thread (`tokio::spawn` + `async_with`) races the interpreter
-//! and is unsound under a multi-threaded runtime. The pump owns a
+//! [`rquickjs::Ctx::spawn`] (the same mechanism `setInterval` uses), so it
+//! is only polled by whichever future holds the runtime lock — a long-lived
+//! `tokio::spawn` + per-event `async_with` loop is the shape that crashed
+//! here historically (see the canonical re-entry discipline on
+//! `bindings::page::PageEventPumpUd`). The pump owns a
 //! `broadcast::Receiver`; for each event it restores the matching listeners
 //! (`Persistent<Function>` in context userdata, keyed by handle/event) and
 //! calls them. The channel is bounded (1024); if a listener falls far enough
@@ -64,7 +65,9 @@ pub struct SidecarsJs {
 impl SidecarsJs {
   /// `sidecars.connect(name)` → `Promise<Sidecar>`. Spawns on first connect;
   /// later calls for the same name return the warm transport (each call still
-  /// yields a fresh handle with its own listeners).
+  /// yields a fresh handle with its own listeners). A dead cached transport
+  /// (child died, or some handle `close()`d it) is evicted and respawned —
+  /// never handed back as a corpse whose every `send` fails `Closed`.
   #[qjs(rename = "connect")]
   pub async fn connect<'js>(&self, ctx: Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
     let Some(spec) = self.specs.get(&name).cloned() else {
@@ -75,12 +78,13 @@ impl SidecarsJs {
     };
     let inner = {
       let mut live = self.live.lock().await;
-      if let Some(existing) = live.get(&name) {
-        existing.clone()
-      } else {
-        let s = Sidecar::connect(&spec).await.map_err(|e| throw(&ctx, &e.to_string()))?;
-        live.insert(name, s.clone());
-        s
+      match live.get(&name) {
+        Some(existing) if !existing.is_closed() => existing.clone(),
+        _ => {
+          let s = Sidecar::connect(&spec).await.map_err(|e| throw(&ctx, &e.to_string()))?;
+          live.insert(name, s.clone());
+          s
+        },
       }
     };
     let wrapper = SidecarJs {
@@ -88,6 +92,7 @@ impl SidecarsJs {
       default_timeout_ms: DEFAULT_SEND_TIMEOUT_MS,
       handle_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
       pump: Arc::new(StdMutex::new(None)),
+      live: self.live.clone(),
     };
     let instance = Class::instance(ctx.clone(), wrapper)?;
     IntoJs::into_js(instance, &ctx)
@@ -147,6 +152,11 @@ pub struct SidecarJs {
   /// the VM tears down.
   #[qjs(skip_trace)]
   pump: Arc<StdMutex<Option<Arc<Notify>>>>,
+  /// The session connection cache this handle's transport lives in, so
+  /// `close()` can evict the now-dead entry (the next `connect` then
+  /// respawns instead of returning the corpse).
+  #[qjs(skip_trace)]
+  live: Arc<Mutex<FxHashMap<String, Arc<Sidecar>>>>,
 }
 
 impl Drop for SidecarJs {
@@ -359,7 +369,12 @@ impl SidecarJs {
   }
 
   /// `close()` → `Promise<void>`. Stops the event pump, closes the
-  /// transport and reaps the child.
+  /// transport and reaps the child (and its process group).
+  ///
+  /// Close is TRANSPORT-scoped, not handle-scoped: every handle from
+  /// `connect(name)` shares one child process, so closing any of them
+  /// closes it for all. The cache entry is evicted, so a later
+  /// `connect(name)` spawns a fresh child.
   #[qjs(rename = "close")]
   pub async fn close(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     if let Some(stop) = self
@@ -373,6 +388,14 @@ impl SidecarJs {
     with_sidecar_listeners(&ctx, |r| {
       r.by_handle.remove(&self.handle_id);
     });
+    {
+      let mut live = self.live.lock().await;
+      // Guard with pointer identity: if the cache already holds a
+      // respawned transport under this name, leave it alone.
+      if live.get(self.inner.name()).is_some_and(|s| Arc::ptr_eq(s, &self.inner)) {
+        live.remove(self.inner.name());
+      }
+    }
     self.inner.close().await.map_err(|e| throw(&ctx, &e.to_string()))
   }
 

@@ -48,7 +48,6 @@ fn bench_spec() -> SidecarSpec {
     command,
     env: vec![],
     cwd: None,
-    startup_timeout_ms: 10_000,
   }
 }
 
@@ -62,7 +61,6 @@ fn ctx(tmp: &tempfile::TempDir) -> RunContext {
     request: None,
     browser: None,
     plugins: Vec::new(),
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   }

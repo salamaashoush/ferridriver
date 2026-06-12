@@ -230,7 +230,6 @@ impl JsBddSession {
       request: None,
       browser: None,
       plugins: Vec::new(),
-      trusted_modules: false,
       host: ferridriver_script::ExtensionHost::Bdd,
       // `[scripting]` caps threaded from resolved config by the
       // `ferridriver bdd` entry (`set_bdd_script_caps`), exactly like
@@ -316,7 +315,7 @@ impl JsBddSession {
       .filter(|(_, k, _)| k == kind)
       .map(|(i, _, te)| (*i, te.as_ref()))
       .collect();
-    if kind == "After" || kind == "AfterAll" {
+    if kind == "After" || kind == "AfterAll" || kind == "AfterStep" {
       hooks.reverse();
     }
     for (idx, te) in hooks {
@@ -413,6 +412,23 @@ impl JsBddSession {
           continue;
         }
         let started = Instant::now();
+
+        // BeforeStep hooks — mirror the Rust executor: a failing
+        // step-scoped hook warns but never fails the step itself, and
+        // skipped steps (after a failure) get no step hooks at all.
+        let step_hook_arg = HookArg {
+          name: scenario.name.clone(),
+          tags: scenario.tags.clone(),
+          status: "PENDING".to_string(),
+          message: None,
+        };
+        if let Err(msg) = self
+          .run_hooks("BeforeStep", Some(&scenario.tags), Some(&step_hook_arg))
+          .await
+        {
+          tracing::warn!(step = %step.text, "BeforeStep hook failed: {msg}");
+        }
+
         let status = match self.registry.find_match(&step.text) {
           Err(e) => {
             failed = true;
@@ -440,6 +456,29 @@ impl JsBddSession {
             }
           },
         };
+        // AfterStep hooks — always run for an executed step (even on
+        // failure), reverse registration order, warn-only on error.
+        let after_step_arg = HookArg {
+          name: scenario.name.clone(),
+          tags: scenario.tags.clone(),
+          status: match &status {
+            JsStepStatus::Passed => "PASSED".to_string(),
+            JsStepStatus::Pending => "PENDING".to_string(),
+            JsStepStatus::Skipped => "SKIPPED".to_string(),
+            JsStepStatus::Failed(_) | JsStepStatus::Undefined(_) => "FAILED".to_string(),
+          },
+          message: match &status {
+            JsStepStatus::Failed(m) | JsStepStatus::Undefined(m) => Some(m.clone()),
+            _ => None,
+          },
+        };
+        if let Err(msg) = self
+          .run_hooks("AfterStep", Some(&scenario.tags), Some(&after_step_arg))
+          .await
+        {
+          tracing::warn!(step = %step.text, "AfterStep hook failed: {msg}");
+        }
+
         steps.push(JsStepResult {
           keyword: step.keyword.clone(),
           text: step.text.clone(),

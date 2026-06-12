@@ -57,6 +57,11 @@ rolldown_common = "1"
 rolldown_plugin = "1"
 # Remap QuickJS error line:col (bundled output) back to original .ts/.js.
 sourcemap = "9"
+getrandom = "0.3"
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2"
 
 [dev-dependencies]
 tempfile = "3"

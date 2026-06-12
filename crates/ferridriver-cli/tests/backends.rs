@@ -259,6 +259,14 @@ fn register_events_network(set: &mut TestSet<'_>) {
   run!(set, backends_support::network::test_network_redirect_chain);
   run!(set, backends_support::network::test_network_request_failure);
   run!(set, backends_support::network::test_route_disposable);
+  run!(
+    set,
+    backends_support::network::test_route_two_pages_keep_their_own_handlers
+  );
+  run!(
+    set,
+    backends_support::network::test_unroute_predicate_from_other_wrapper
+  );
   run!(set, backends_support::network::test_route_from_har);
   run!(set, backends_support::network::test_network_response_body);
   run!(set, backends_support::network::test_network_post_data);

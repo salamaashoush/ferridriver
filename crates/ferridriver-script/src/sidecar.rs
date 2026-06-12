@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -53,7 +53,6 @@ pub struct SidecarSpec {
   pub command: Vec<String>,
   pub env: Vec<(String, String)>,
   pub cwd: Option<String>,
-  pub startup_timeout_ms: u64,
 }
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, SidecarError>>>>>;
@@ -68,11 +67,23 @@ pub struct Sidecar {
   pending: Pending,
   events: broadcast::Sender<(String, Value)>,
   reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
+  /// Set when the transport is dead — explicit [`Self::close`] or the
+  /// read loop exiting (child died / EOF / oversize frame). Lets a
+  /// connection cache detect a corpse and respawn instead of handing
+  /// out a transport whose every `send` fails `Closed`.
+  closed: Arc<AtomicBool>,
 }
 
 impl Sidecar {
   pub fn name(&self) -> &str {
     &self.name
+  }
+
+  /// Whether the transport can no longer carry requests (closed
+  /// explicitly, or the child died and the read loop exited).
+  #[must_use]
+  pub fn is_closed(&self) -> bool {
+    self.closed.load(Ordering::Relaxed)
   }
 
   /// Subscribe to events the child pushes (frames with no `id`). Each
@@ -104,6 +115,7 @@ impl Sidecar {
     // stream rather than `io::split` (whose half-drops can shut the socket).
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let (events, _) = broadcast::channel(1024);
+    let closed = Arc::new(AtomicBool::new(false));
 
     let sidecar = Arc::new(Self {
       name: spec.name.clone(),
@@ -113,9 +125,10 @@ impl Sidecar {
       pending: pending.clone(),
       events: events.clone(),
       reader: Mutex::new(None),
+      closed: closed.clone(),
     });
 
-    let task = tokio::spawn(read_loop(parent_out, pending, events));
+    let task = tokio::spawn(read_loop(parent_out, pending, events, closed));
     *sidecar.reader.lock().await = Some(task);
     Ok(sidecar)
   }
@@ -242,8 +255,10 @@ impl Sidecar {
     }
   }
 
-  /// Close the request socket and reap the child. Idempotent.
+  /// Close the request socket and reap the child (and, via the child's
+  /// process group, anything it spawned). Idempotent.
   pub async fn close(&self) -> Result<(), SidecarError> {
+    self.closed.store(true, Ordering::Relaxed);
     // Dropping the writer's stream closes fd 3 for the child -> it sees EOF
     // and should exit. Then reap.
     {
@@ -254,6 +269,16 @@ impl Sidecar {
       task.abort();
     }
     let mut child = self.child.lock().await;
+    // The child is a session leader (`setsid` in `spawn_child`), so
+    // killing its process group reaps grandchildren too — `start_kill`
+    // alone would orphan anything the sidecar spawned.
+    #[cfg(unix)]
+    if let Some(pid) = child.id().and_then(|p| i32::try_from(p).ok()) {
+      #[allow(unsafe_code)]
+      unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+      }
+    }
     let _ = child.start_kill();
     let _ = child.wait().await;
     // Fail any stragglers.
@@ -281,12 +306,16 @@ fn spawn_child(spec: &SidecarSpec, child_in: &UnixStream, child_out: &UnixStream
 
   let read_fd = child_in.as_raw_fd();
   let write_fd = child_out.as_raw_fd();
-  // SAFETY: post-fork, single-threaded child; dup the child's ends onto the
-  // conventional fd 3 (read) / fd 4 (write) and clear CLOEXEC so they
-  // survive exec. Mirrors the WebKit launcher's `pre_exec_setup_fds`.
+  // SAFETY: post-fork, single-threaded child; only async-signal-safe
+  // calls. `setsid` makes the child a session/process-group leader so
+  // `close` can `kill(-pid)` the whole tree (same hygiene as
+  // `session_procs`). Then dup the child's ends onto the conventional
+  // fd 3 (read) / fd 4 (write) and clear CLOEXEC so they survive exec —
+  // mirrors the WebKit launcher's `pre_exec_setup_fds`.
   #[allow(unsafe_code)]
   unsafe {
     cmd.pre_exec(move || {
+      libc::setsid();
       if libc::dup2(read_fd, 3) == -1 {
         return Err(std::io::Error::last_os_error());
       }
@@ -324,7 +353,12 @@ fn spawn_child(_spec: &SidecarSpec, _child_in: &UnixStream, _child_out: &UnixStr
 /// Read NUL-delimited JSON frames from the child, routing `{id,...}` to the
 /// pending request and id-less frames to the event channel. Exits on EOF
 /// (child gone) or a fatal protocol error, failing all pending requests.
-async fn read_loop(mut reader: UnixStream, pending: Pending, events: broadcast::Sender<(String, Value)>) {
+async fn read_loop(
+  mut reader: UnixStream,
+  pending: Pending,
+  events: broadcast::Sender<(String, Value)>,
+  closed: Arc<AtomicBool>,
+) {
   let mut buf: Vec<u8> = Vec::with_capacity(8192);
   let mut chunk = [0u8; 8192];
   loop {
@@ -334,6 +368,11 @@ async fn read_loop(mut reader: UnixStream, pending: Pending, events: broadcast::
     };
     buf.extend_from_slice(&chunk[..n]);
     if buf.len() > MAX_FRAME_BYTES {
+      tracing::warn!(
+        limit = MAX_FRAME_BYTES,
+        buffered = buf.len(),
+        "sidecar frame exceeded the size limit; failing the connection"
+      );
       break;
     }
     while let Some(pos) = buf.iter().position(|&b| b == 0) {
@@ -348,7 +387,9 @@ async fn read_loop(mut reader: UnixStream, pending: Pending, events: broadcast::
       }
     }
   }
-  // Connection gone: fail every outstanding request.
+  // Connection gone: mark the transport dead so a connection cache can
+  // respawn, then fail every outstanding request.
+  closed.store(true, Ordering::Relaxed);
   let mut p = pending.lock().await;
   for (_, tx) in p.drain() {
     let _ = tx.send(Err(SidecarError::Closed));

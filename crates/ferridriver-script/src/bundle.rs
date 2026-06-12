@@ -23,11 +23,90 @@ use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Module, WriteOptions,
 use crate::engine::caught_to_script_error;
 use crate::error::ScriptError;
 
-const VIRTUAL_FERRIDRIVER_ID: &str = "\0ferridriver-runtime";
-const VIRTUAL_CUCUMBER_ID: &str = "\0ferridriver-cucumber";
+/// Id prefix for operator-declared virtual modules (`[bundler.virtualModules]`).
+const VIRTUAL_USER_PREFIX: &str = "\0fd-virtual:";
+
+/// Operator-facing bundler options (`[bundler]` in the unified config):
+/// import-specifier aliases to shim files plus inline virtual modules.
+/// Applied by `FerridriverRuntimePlugin` to EVERY bundle ferridriver
+/// produces — BDD step files, extensions, `ferridriver run` scripts.
+#[derive(Debug, Default, Clone)]
+pub struct BundlerShims {
+  /// `specifier -> absolute shim file path`. The shim is bundled and
+  /// transpiled like any other source (so `.ts` works) and lands in the
+  /// source map, which keeps the disk-cache freshness check covering it.
+  pub alias: Vec<(String, PathBuf)>,
+  /// `specifier -> inline ES-module source` (never touches the fs).
+  pub virtual_modules: Vec<(String, String)>,
+}
+
+impl BundlerShims {
+  /// Build from the unified config section, resolving relative alias
+  /// targets against `base` (the config file's directory, or cwd).
+  #[must_use]
+  pub fn from_config(cfg: &ferridriver_config::BundlerConfig, base: &Path) -> Self {
+    let alias = cfg
+      .alias
+      .iter()
+      .map(|(spec, target)| {
+        let p = Path::new(target);
+        let abs = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
+        (spec.clone(), abs)
+      })
+      .collect();
+    let virtual_modules = cfg
+      .virtual_modules
+      .iter()
+      .map(|(k, v)| (k.clone(), v.clone()))
+      .collect();
+    Self { alias, virtual_modules }
+  }
+
+  /// Stable content fingerprint, folded into every bundle cache key so
+  /// editing an alias mapping or a virtual module's source invalidates
+  /// cached bytecode. (Alias *target file* content is already covered by
+  /// the transitive source-map input hashes; this covers the mapping
+  /// itself and the inline sources, which never appear as files.)
+  #[must_use]
+  pub fn fingerprint(&self) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (spec, path) in &self.alias {
+      spec.hash(&mut h);
+      path.hash(&mut h);
+    }
+    for (spec, src) in &self.virtual_modules {
+      spec.hash(&mut h);
+      src.hash(&mut h);
+    }
+    h.finish()
+  }
+}
+
+/// Process-global bundler shims, installed once by the host (CLI / MCP
+/// server) from the loaded config before any bundling happens. A global
+/// (rather than a parameter threaded through every bundle entry point)
+/// because the config is process-wide and the bundle paths are reached
+/// from five call sites across three crates — same pattern as
+/// `set_bdd_script_caps`.
+static BUNDLER_SHIMS: std::sync::RwLock<Option<Arc<BundlerShims>>> = std::sync::RwLock::new(None);
+
+pub fn set_bundler_shims(shims: BundlerShims) {
+  *BUNDLER_SHIMS.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(shims));
+}
+
+pub(crate) fn bundler_shims() -> Arc<BundlerShims> {
+  BUNDLER_SHIMS
+    .read()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone()
+    .unwrap_or_default()
+}
 
 #[derive(Debug)]
-struct FerridriverRuntimePlugin;
+struct FerridriverRuntimePlugin {
+  shims: Arc<BundlerShims>,
+}
 
 impl Plugin for FerridriverRuntimePlugin {
   fn name(&self) -> Cow<'static, str> {
@@ -35,21 +114,49 @@ impl Plugin for FerridriverRuntimePlugin {
   }
 
   async fn resolve_id(&self, _ctx: &PluginContext, args: &HookResolveIdArgs<'_>) -> HookResolveIdReturn {
-    match args.specifier {
-      "ferridriver" => Ok(Some(HookResolveIdOutput::from_id(VIRTUAL_FERRIDRIVER_ID))),
-      "@cucumber/cucumber" => Ok(Some(HookResolveIdOutput::from_id(VIRTUAL_CUCUMBER_ID))),
-      _ => Ok(None),
+    // Native modules stay EXTERNAL: the emitted chunk keeps the bare
+    // import and the bytecode re-links by name against the loading
+    // runtime's ModuleDefs (`bindings::native_modules`). Checked first
+    // so an operator alias can never hijack the framework surface.
+    if crate::bindings::native_modules::NATIVE_MODULE_NAMES.contains(&args.specifier) {
+      return Ok(Some(HookResolveIdOutput {
+        id: args.specifier.into(),
+        external: Some(rolldown_common::ResolvedExternal::Bool(true)),
+        ..Default::default()
+      }));
     }
+    if self
+      .shims
+      .virtual_modules
+      .iter()
+      .any(|(spec, _)| spec == args.specifier)
+    {
+      return Ok(Some(HookResolveIdOutput::from_id(format!(
+        "{VIRTUAL_USER_PREFIX}{}",
+        args.specifier
+      ))));
+    }
+    if let Some((_, target)) = self.shims.alias.iter().find(|(spec, _)| spec == args.specifier) {
+      // Resolved to a concrete file: rolldown's default fs loader reads
+      // it and transpiles by extension, so `.ts` shims work.
+      return Ok(Some(HookResolveIdOutput::from_id(
+        target.to_string_lossy().into_owned(),
+      )));
+    }
+    Ok(None)
   }
 
   async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
-    let code = match args.id {
-      VIRTUAL_FERRIDRIVER_ID => Some(crate::runtime_modules::FERRIDRIVER_MODULE),
-      VIRTUAL_CUCUMBER_ID => Some(crate::runtime_modules::CUCUMBER_MODULE),
-      _ => None,
-    };
+    let code: Option<Cow<'_, str>> = args.id.strip_prefix(VIRTUAL_USER_PREFIX).and_then(|spec| {
+      self
+        .shims
+        .virtual_modules
+        .iter()
+        .find(|(s, _)| s == spec)
+        .map(|(_, src)| Cow::Owned(src.clone()))
+    });
     Ok(code.map(|code| HookLoadOutput {
-      code: code.into(),
+      code: code.into_owned().into(),
       module_type: Some(ModuleType::Js),
       ..Default::default()
     }))
@@ -98,8 +205,11 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<(Strin
     ..Default::default()
   };
 
-  let mut bundler = Bundler::with_plugins(options, vec![Arc::new(FerridriverRuntimePlugin)])
-    .map_err(|e| ScriptError::internal(format!("rolldown init: {e:?}")))?;
+  let mut bundler = Bundler::with_plugins(
+    options,
+    vec![Arc::new(FerridriverRuntimePlugin { shims: bundler_shims() })],
+  )
+  .map_err(|e| ScriptError::internal(format!("rolldown init: {e:?}")))?;
   // rolldown's generate future is large; box it so it doesn't bloat the
   // enclosing future.
   let out = Box::pin(bundler.generate())
@@ -128,7 +238,7 @@ pub async fn bundle_and_compile(entry_paths: &[PathBuf], cwd: &Path) -> Result<C
 
   // Disk cache: an unchanged source tree skips rolldown AND the QuickJS
   // compile. Validated against every transitive input's content hash.
-  let cache_key = crate::bytecode_cache::entry_key(entry_paths);
+  let cache_key = crate::bytecode_cache::entry_key("bundle", entry_paths, bundler_shims().fingerprint());
   if let Some(hit) = crate::bytecode_cache::load(cache_key) {
     let source_map = hit
       .source_map_json
@@ -144,12 +254,24 @@ pub async fn bundle_and_compile(entry_paths: &[PathBuf], cwd: &Path) -> Result<C
 
   let name = module_name.clone();
   let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("bytecode runtime: {e}")))?;
+  // QuickJS resolves the module graph EAGERLY at declare, and the
+  // bundle keeps native specifiers external — so even this throwaway
+  // compile runtime needs the native resolver/loader. The written
+  // bytecode stores the dependency by NAME and re-links against the
+  // loading runtime's own ModuleDefs (covered by
+  // tests/node_compat_modules.rs end-to-end).
+  runtime
+    .set_loader(
+      crate::bindings::native_modules::resolver(),
+      crate::bindings::native_modules::loader(),
+    )
+    .await;
   let ctx = AsyncContext::full(&runtime)
     .await
     .map_err(|e| ScriptError::internal(format!("bytecode context: {e}")))?;
   let bytecode: Vec<u8> = async_with!(ctx => |ctx| {
-    // Bundled module has no remaining imports — `declare` (parse only,
-    // no execution) + `write` needs no resolver.
+    // The bundle's only remaining imports are the external native
+    // specifiers, resolved by the loader installed above.
     let module = Module::declare(ctx.clone(), name.into_bytes(), code.into_bytes())
       .catch(&ctx)
       .map_err(|e| caught_to_script_error(e, ""))?;
@@ -179,9 +301,12 @@ pub async fn eval_bundle(actx: &AsyncContext, bundle: &CompiledBundle) -> Result
   let bytecode = Arc::clone(&bundle.bytecode);
   let label = bundle.module_name.clone();
   async_with!(actx => |ctx| {
-    // SAFETY: produced by `Module::write` in THIS process and
-    // rquickjs/QuickJS build with native endianness, never persisted —
-    // the precondition `Module::load` documents.
+    // SAFETY: produced by `Module::write` by this exact rquickjs/QuickJS
+    // build with native endianness — either in this process or restored
+    // from the bytecode disk cache, whose ABI tag (QuickJS version, arch,
+    // endianness, pointer width) + transitive input hashes guarantee an
+    // ABI-identical toolchain wrote it. That satisfies the precondition
+    // `Module::load` documents.
     #[allow(unsafe_code)]
     let module = match (unsafe { Module::load(ctx.clone(), &bytecode) }).catch(&ctx) {
       Ok(m) => m,
@@ -289,10 +414,11 @@ pub struct CompiledPlugin {
 /// of distinct plugin files a process ever loads (tiny) so no eviction
 /// is needed.
 ///
-/// In-memory only and never serialised: the cached bytecode never
-/// crosses a process or interpreter boundary, which is exactly the
-/// precondition the `unsafe Module::load` paths rely on (a disk cache
-/// would violate it — see `docs/plugin-architecture.md`).
+/// This is the hot in-process tier; `compile_and_extract_plugins` also
+/// consults the cross-process disk tier ([`crate::bytecode_cache`]),
+/// whose ABI tag (QuickJS version, arch, endianness, pointer width) +
+/// transitive input hashes are what keep the `unsafe Module::load`
+/// paths sound for bytecode another process wrote.
 type PluginCache = std::sync::Mutex<rustc_hash::FxHashMap<u64, (Arc<[u8]>, String)>>;
 static PLUGIN_BYTECODE_CACHE: std::sync::OnceLock<PluginCache> = std::sync::OnceLock::new();
 
@@ -301,15 +427,18 @@ fn plugin_cache() -> &'static PluginCache {
 }
 
 /// Cache key: the file's canonical path (rolldown resolution + relative
-/// imports depend on it) plus its byte content. SipHash via the std
-/// default hasher — adequate for an in-process content cache, no dep.
-fn cache_key(path: &Path, bytes: &[u8]) -> u64 {
+/// imports depend on it) plus its byte content, plus the bundler-shims
+/// fingerprint (an alias/virtual-module edit changes the output for the
+/// same input bytes). SipHash via the std default hasher — adequate for
+/// an in-process content cache, no dep.
+fn cache_key(path: &Path, bytes: &[u8], shims_fp: u64) -> u64 {
   use std::hash::{Hash, Hasher};
   let mut h = std::collections::hash_map::DefaultHasher::new();
   std::fs::canonicalize(path)
     .unwrap_or_else(|_| path.to_path_buf())
     .hash(&mut h);
   bytes.hash(&mut h);
+  shims_fp.hash(&mut h);
   h.finish()
 }
 
@@ -334,14 +463,15 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
     Failed(ScriptError),
   }
 
+  let shims_fp = bundler_shims().fingerprint();
   let mut bytes: Vec<Vec<u8>> = Vec::with_capacity(files.len());
   let mut slots: Vec<Slot> = Vec::with_capacity(files.len());
   for path in files {
     match std::fs::read(path) {
       Ok(b) => {
-        let inmem_key = cache_key(path, &b);
+        let inmem_key = cache_key(path, &b, shims_fp);
         let cached = plugin_cache().lock().ok().and_then(|c| c.get(&inmem_key).cloned());
-        let disk_key = crate::bytecode_cache::entry_key(std::slice::from_ref(path));
+        let disk_key = crate::bytecode_cache::entry_key("plugin", std::slice::from_ref(path), shims_fp);
         match cached {
           // 1. In-memory (same process).
           Some((bc, mj)) => slots.push(Slot::Hit(bc, mj)),
@@ -403,18 +533,27 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
   }
 
   // One throwaway runtime/context compiles + extracts every missed file.
+  // Native resolver/loader for the same reason as `bundle_and_compile`:
+  // declare-time resolution of the external native specifiers.
   let runtime_ctx = match AsyncRuntime::new() {
-    Ok(r) => match AsyncContext::full(&r).await {
-      Ok(c) => Some((r, c)),
-      Err(e) => {
-        let err = ScriptError::internal(format!("plugin bytecode context: {e}"));
-        for s in &mut slots {
-          if matches!(s, Slot::Miss { .. }) {
-            *s = Slot::Failed(err.clone());
+    Ok(r) => {
+      r.set_loader(
+        crate::bindings::native_modules::resolver(),
+        crate::bindings::native_modules::loader(),
+      )
+      .await;
+      match AsyncContext::full(&r).await {
+        Ok(c) => Some((r, c)),
+        Err(e) => {
+          let err = ScriptError::internal(format!("plugin bytecode context: {e}"));
+          for s in &mut slots {
+            if matches!(s, Slot::Miss { .. }) {
+              *s = Slot::Failed(err.clone());
+            }
           }
-        }
-        None
-      },
+          None
+        },
+      }
     },
     Err(e) => {
       let err = ScriptError::internal(format!("plugin bytecode runtime: {e}"));
@@ -528,9 +667,10 @@ async fn compile_extract_one(
     let before = crate::bindings::tools_len(&ctx)?;
 
     // SAFETY: `bytecode` was just produced by `Module::write` in THIS
-    // process and rquickjs/QuickJS build with native endianness and is
-    // not persisted — the precondition `Module::load` documents. This is
-    // the same contract `eval_bundle` and `install_plugins` rely on.
+    // process and rquickjs/QuickJS build with native endianness — the
+    // precondition `Module::load` documents. (When it is later stored in
+    // the disk cache, the cache's ABI tag + input hashes preserve that
+    // precondition for the process that loads it back.)
     #[allow(unsafe_code)]
     let loaded = (unsafe { Module::load(ctx.clone(), &bytecode) })
       .catch(&ctx)

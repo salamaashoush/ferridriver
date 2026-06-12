@@ -200,15 +200,16 @@ impl ExpectJs {
   }
 }
 
-fn assertion_to_rq(err: AssertionFailure) -> rquickjs::Error {
+fn assertion_to_rq(ctx: &Ctx<'_>, err: AssertionFailure) -> rquickjs::Error {
   // Concatenate title + body for the JS-thrown message so the JS stack
   // shows the full failure on one Error. The JS stack itself comes from
-  // QuickJS and is added to the Error automatically.
+  // QuickJS and is added to the Error automatically. Thrown as a real
+  // `Error` with `name = "AssertionError"` so `e.name` checks match.
   let full = match err.diff.as_deref() {
     Some(body) if !body.is_empty() => format!("{}\n\n{body}", err.message),
     _ => err.message,
   };
-  rquickjs::Error::new_from_js_message("expect", "AssertionError", full)
+  crate::bindings::convert::throw_named(ctx, "AssertionError", full)
 }
 
 fn parse_string_or_regex<'js>(_ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<StringOrRegex> {
@@ -273,13 +274,19 @@ impl ExpectJs {
   #[qjs(rename = "toBe")]
   pub fn to_be<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
     let exp: JsonValue = serde_from_js(&ctx, expected)?;
-    self.build_value_expect()?.to_be(&exp).map_err(assertion_to_rq)
+    self
+      .build_value_expect()?
+      .to_be(&exp)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toEqual")]
   pub fn to_equal<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
     let exp: JsonValue = serde_from_js(&ctx, expected)?;
-    self.build_value_expect()?.to_equal(&exp).map_err(assertion_to_rq)
+    self
+      .build_value_expect()?
+      .to_equal(&exp)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toStrictEqual")]
@@ -288,83 +295,104 @@ impl ExpectJs {
     self
       .build_value_expect()?
       .to_strict_equal(&exp)
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeNull")]
-  pub fn to_be_null(&self) -> rquickjs::Result<()> {
-    self.build_value_expect()?.to_be_null().map_err(assertion_to_rq)
+  pub fn to_be_null(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    self
+      .build_value_expect()?
+      .to_be_null()
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeUndefined")]
-  pub fn to_be_undefined(&self) -> rquickjs::Result<()> {
-    self.build_value_expect()?.to_be_undefined().map_err(assertion_to_rq)
+  pub fn to_be_undefined(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    self
+      .build_value_expect()?
+      .to_be_undefined()
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeDefined")]
-  pub fn to_be_defined(&self) -> rquickjs::Result<()> {
-    self.build_value_expect()?.to_be_defined().map_err(assertion_to_rq)
+  pub fn to_be_defined(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    self
+      .build_value_expect()?
+      .to_be_defined()
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeTruthy")]
-  pub fn to_be_truthy(&self) -> rquickjs::Result<()> {
-    self.build_value_expect()?.to_be_truthy().map_err(assertion_to_rq)
+  pub fn to_be_truthy(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    self
+      .build_value_expect()?
+      .to_be_truthy()
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeFalsy")]
-  pub fn to_be_falsy(&self) -> rquickjs::Result<()> {
-    self.build_value_expect()?.to_be_falsy().map_err(assertion_to_rq)
+  pub fn to_be_falsy(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    self
+      .build_value_expect()?
+      .to_be_falsy()
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeNaN")]
-  pub fn to_be_nan(&self) -> rquickjs::Result<()> {
-    self.build_value_expect()?.to_be_nan().map_err(assertion_to_rq)
+  pub fn to_be_nan(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    self
+      .build_value_expect()?
+      .to_be_nan()
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeCloseTo")]
-  pub fn to_be_close_to(&self, expected: f64, digits: Opt<u8>) -> rquickjs::Result<()> {
+  pub fn to_be_close_to(&self, ctx: Ctx<'_>, expected: f64, digits: Opt<u8>) -> rquickjs::Result<()> {
     self
       .build_value_expect()?
       .to_be_close_to(expected, digits.0)
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeGreaterThan")]
-  pub fn to_be_greater_than(&self, expected: f64) -> rquickjs::Result<()> {
+  pub fn to_be_greater_than(&self, ctx: Ctx<'_>, expected: f64) -> rquickjs::Result<()> {
     self
       .build_value_expect()?
       .to_be_greater_than(expected)
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeGreaterThanOrEqual")]
-  pub fn to_be_greater_than_or_equal(&self, expected: f64) -> rquickjs::Result<()> {
+  pub fn to_be_greater_than_or_equal(&self, ctx: Ctx<'_>, expected: f64) -> rquickjs::Result<()> {
     self
       .build_value_expect()?
       .to_be_greater_than_or_equal(expected)
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeLessThan")]
-  pub fn to_be_less_than(&self, expected: f64) -> rquickjs::Result<()> {
+  pub fn to_be_less_than(&self, ctx: Ctx<'_>, expected: f64) -> rquickjs::Result<()> {
     self
       .build_value_expect()?
       .to_be_less_than(expected)
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeLessThanOrEqual")]
-  pub fn to_be_less_than_or_equal(&self, expected: f64) -> rquickjs::Result<()> {
+  pub fn to_be_less_than_or_equal(&self, ctx: Ctx<'_>, expected: f64) -> rquickjs::Result<()> {
     self
       .build_value_expect()?
       .to_be_less_than_or_equal(expected)
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toContain")]
   pub fn to_contain<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
     let exp: JsonValue = serde_from_js(&ctx, expected)?;
-    self.build_value_expect()?.to_contain(&exp).map_err(assertion_to_rq)
+    self
+      .build_value_expect()?
+      .to_contain(&exp)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toContainEqual")]
@@ -372,15 +400,15 @@ impl ExpectJs {
     self
       .build_value_expect()?
       .to_contain_equal(&serde_from_js(&ctx, expected)?)
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toHaveLength")]
-  pub fn to_have_length(&self, expected: u32) -> rquickjs::Result<()> {
+  pub fn to_have_length(&self, ctx: Ctx<'_>, expected: u32) -> rquickjs::Result<()> {
     self
       .build_value_expect()?
       .to_have_length(expected as usize)
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toHaveProperty")]
@@ -398,13 +426,16 @@ impl ExpectJs {
     self
       .build_value_expect()?
       .to_have_property(&path_v, exp.as_ref())
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toMatch")]
   pub fn to_match<'js>(&self, ctx: Ctx<'js>, pattern: Value<'js>) -> rquickjs::Result<()> {
     let pat = parse_string_or_regex(&ctx, &pattern)?;
-    self.build_value_expect()?.to_match(&pat).map_err(assertion_to_rq)
+    self
+      .build_value_expect()?
+      .to_match(&pat)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toMatchObject")]
@@ -413,11 +444,11 @@ impl ExpectJs {
     self
       .build_value_expect()?
       .to_match_object(&sub)
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeInstanceOf")]
-  pub fn to_be_instance_of<'js>(&self, _ctx: Ctx<'js>, ctor: Value<'js>) -> rquickjs::Result<()> {
+  pub fn to_be_instance_of<'js>(&self, ctx: Ctx<'js>, ctor: Value<'js>) -> rquickjs::Result<()> {
     let ctor_name = ctor
       .as_function()
       .and_then(|f| f.get::<_, rquickjs::Value<'js>>("name").ok())
@@ -428,7 +459,8 @@ impl ExpectJs {
     if self.is_not {
       ev = ev.not();
     }
-    ev.to_be_instance_of(&ctor_name, target_ctor).map_err(assertion_to_rq)
+    ev.to_be_instance_of(&ctor_name, target_ctor)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toThrow")]
@@ -470,81 +502,81 @@ impl ExpectJs {
     if let Some(m) = &self.message {
       ef = ef.with_message(m.clone());
     }
-    ef.to_throw(matcher.as_ref()).map_err(assertion_to_rq)
+    ef.to_throw(matcher.as_ref()).map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   // ── Locator web-first matchers (delegated to ferridriver-expect) ──
 
   #[qjs(rename = "toBeVisible")]
-  pub async fn to_be_visible(&self) -> rquickjs::Result<()> {
+  pub async fn to_be_visible(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     self
       .build_locator_expect()?
       .to_be_visible()
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeHidden")]
-  pub async fn to_be_hidden(&self) -> rquickjs::Result<()> {
+  pub async fn to_be_hidden(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     self
       .build_locator_expect()?
       .to_be_hidden()
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeEnabled")]
-  pub async fn to_be_enabled(&self) -> rquickjs::Result<()> {
+  pub async fn to_be_enabled(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     self
       .build_locator_expect()?
       .to_be_enabled()
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeDisabled")]
-  pub async fn to_be_disabled(&self) -> rquickjs::Result<()> {
+  pub async fn to_be_disabled(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     self
       .build_locator_expect()?
       .to_be_disabled()
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeChecked")]
-  pub async fn to_be_checked(&self) -> rquickjs::Result<()> {
+  pub async fn to_be_checked(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     self
       .build_locator_expect()?
       .to_be_checked()
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeEditable")]
-  pub async fn to_be_editable(&self) -> rquickjs::Result<()> {
+  pub async fn to_be_editable(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     self
       .build_locator_expect()?
       .to_be_editable()
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeAttached")]
-  pub async fn to_be_attached(&self) -> rquickjs::Result<()> {
+  pub async fn to_be_attached(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     self
       .build_locator_expect()?
       .to_be_attached()
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toBeEmpty")]
-  pub async fn to_be_empty(&self) -> rquickjs::Result<()> {
+  pub async fn to_be_empty(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     self
       .build_locator_expect()?
       .to_be_empty()
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toHaveText")]
@@ -554,16 +586,16 @@ impl ExpectJs {
       .build_locator_expect()?
       .to_have_text(exp)
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toContainText")]
-  pub async fn to_contain_text(&self, expected: String) -> rquickjs::Result<()> {
+  pub async fn to_contain_text(&self, ctx: Ctx<'_>, expected: String) -> rquickjs::Result<()> {
     self
       .build_locator_expect()?
       .to_contain_text(StringOrRegex::String(expected))
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toHaveValue")]
@@ -573,16 +605,16 @@ impl ExpectJs {
       .build_locator_expect()?
       .to_have_value(exp)
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toHaveCount")]
-  pub async fn to_have_count(&self, expected: u32) -> rquickjs::Result<()> {
+  pub async fn to_have_count(&self, ctx: Ctx<'_>, expected: u32) -> rquickjs::Result<()> {
     self
       .build_locator_expect()?
       .to_have_count(expected as usize)
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toHaveAttribute")]
@@ -600,7 +632,7 @@ impl ExpectJs {
       },
       _ => e.to_have_attribute_exists(&name).await,
     }
-    .map_err(assertion_to_rq)
+    .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   // ── Page web-first matchers (delegated) ───────────────────────────
@@ -612,7 +644,7 @@ impl ExpectJs {
       .build_page_expect()?
       .to_have_title(exp)
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   #[qjs(rename = "toHaveURL")]
@@ -622,14 +654,17 @@ impl ExpectJs {
       .build_page_expect()?
       .to_have_url(exp)
       .await
-      .map_err(assertion_to_rq)
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   // ── APIResponse matcher (delegated) ──────────────────────────────
 
   #[qjs(rename = "toBeOK")]
-  pub fn to_be_ok(&self) -> rquickjs::Result<()> {
-    self.build_api_response_expect()?.to_be_ok().map_err(assertion_to_rq)
+  pub fn to_be_ok(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    self
+      .build_api_response_expect()?
+      .to_be_ok()
+      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 }
 
@@ -763,13 +798,16 @@ impl ExpectPollJs {
       tokio::time::sleep(sleep_dur).await;
     };
     let last = final_dbg.as_str();
-    Err(assertion_to_rq(AssertionFailure::new(
-      format!(
-        "expect.poll().toSatisfy() timed out after {}ms; last value was {last}",
-        self.timeout.as_millis()
+    Err(assertion_to_rq(
+      &ctx,
+      AssertionFailure::new(
+        format!(
+          "expect.poll().toSatisfy() timed out after {}ms; last value was {last}",
+          self.timeout.as_millis()
+        ),
+        None,
       ),
-      None,
-    )))
+    ))
   }
 }
 
@@ -797,15 +835,18 @@ impl ExpectPollJs {
       }
       tokio::time::sleep(sleep_dur).await;
     };
-    Err(assertion_to_rq(AssertionFailure::new(
-      format!(
-        "expect.poll().{method}() timed out after {}ms\n\nExpected: {}\nReceived: {}",
-        self.timeout.as_millis(),
-        ferridriver_expect::asymmetric::json_short(expected),
-        ferridriver_expect::asymmetric::json_short(&last)
+    Err(assertion_to_rq(
+      ctx,
+      AssertionFailure::new(
+        format!(
+          "expect.poll().{method}() timed out after {}ms\n\nExpected: {}\nReceived: {}",
+          self.timeout.as_millis(),
+          ferridriver_expect::asymmetric::json_short(expected),
+          ferridriver_expect::asymmetric::json_short(&last)
+        ),
+        None,
       ),
-      None,
-    )))
+    ))
   }
 }
 

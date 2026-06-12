@@ -51,7 +51,6 @@ pub mod error;
 pub mod fs;
 pub mod modules;
 pub mod result;
-pub mod runtime_modules;
 pub mod session_procs;
 pub mod session_table;
 pub mod sidecar;

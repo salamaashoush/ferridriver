@@ -54,7 +54,6 @@ fn ctx_for(vars: Arc<InMemoryVars>, sandbox: Arc<PathSandbox>, page: Option<Arc<
     request: None,
     browser: None,
     plugins: Vec::new(),
-    trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Mcp,
     caps: ferridriver_script::ScriptCaps::default(),
   }

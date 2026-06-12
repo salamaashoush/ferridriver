@@ -312,7 +312,6 @@ mod tests {
       request: None,
       browser: None,
       plugins: Vec::new(),
-      trusted_modules: false,
       host: crate::engine::ExtensionHost::Script,
       caps: crate::engine::ScriptCaps::default(),
     };
