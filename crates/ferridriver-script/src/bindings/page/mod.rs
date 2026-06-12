@@ -1954,7 +1954,7 @@ impl PageJs {
   /// thread — NOT `tokio::spawn` + `async_with`: a long-lived loop
   /// resolving a plain JS callback from a second thread is exactly the
   /// pump shape that crashed the event listeners (see the module-level
-  /// re-entry discipline notes on [`PageEventPumpUd`]). The pump only
+  /// re-entry discipline notes on `PageEventPumpUd`). The pump only
   /// runs while the VM is driven; frames arriving while the VM idles
   /// are coalesced to the newest one (a screencast consumer wants the
   /// latest frame, and the core channel is unbounded).

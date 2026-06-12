@@ -28,7 +28,7 @@ const VIRTUAL_USER_PREFIX: &str = "\0fd-virtual:";
 
 /// Operator-facing bundler options (`[bundler]` in the unified config):
 /// import-specifier aliases to shim files plus inline virtual modules.
-/// Applied by [`FerridriverRuntimePlugin`] to EVERY bundle ferridriver
+/// Applied by `FerridriverRuntimePlugin` to EVERY bundle ferridriver
 /// produces — BDD step files, extensions, `ferridriver run` scripts.
 #[derive(Debug, Default, Clone)]
 pub struct BundlerShims {
