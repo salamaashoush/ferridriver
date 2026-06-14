@@ -1,7 +1,7 @@
 #![allow(clippy::doc_markdown)]
 //! ferridriver -- single-binary CLI for browser automation.
 //!
-//! Subcommands: `mcp`, `bdd`, `test`, `run`, `install`, `codegen`.
+//! Subcommands: `mcp`, `bdd`, `test`, `run`, `install`, `codegen`, `session`.
 //!
 //! The unified `FerridriverConfig` is loaded exactly once per invocation and
 //! its sections are passed to the selected subcommand.
@@ -12,6 +12,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod cli;
+mod session_cmd;
 
 use std::sync::Arc;
 
@@ -115,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
     cli::Command::Run(run_args) => Box::pin(run_script_cli(run_args)).await,
     cli::Command::Install(install_args) => Box::pin(run_install(install_args)).await,
     cli::Command::Codegen(codegen_args) => Box::pin(run_codegen(codegen_args)).await,
+    cli::Command::Session(session_args) => Box::pin(session_cmd::run(session_args)).await,
   }
 }
 

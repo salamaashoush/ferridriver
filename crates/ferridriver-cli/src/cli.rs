@@ -56,6 +56,131 @@ pub enum Command {
 
   /// Generate test scaffolding from recorded interactions.
   Codegen(CodegenArgs),
+
+  /// Manage and drive named browser sessions (bind / attach / list / close).
+  Session(SessionArgs),
+}
+
+// ── session subcommand ──────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct SessionArgs {
+  #[command(subcommand)]
+  pub command: SessionCommand,
+}
+
+#[derive(Subcommand)]
+pub enum SessionCommand {
+  /// Launch a browser, bind it under `id`, and serve it in the background.
+  /// Spawns a detached host process and returns once the session is live.
+  Open(SessionOpenArgs),
+
+  /// Internal: run the long-lived session host in the foreground (launch +
+  /// bind + serve until killed). `open` spawns this detached; not meant to be
+  /// invoked directly.
+  #[command(hide = true)]
+  Host(SessionHostArgs),
+
+  /// Attach to a live session: connect and print its current snapshot.
+  Attach(SessionTargetArgs),
+
+  /// List all live sessions discoverable in the registry.
+  List(SessionListArgs),
+
+  /// Run a single verb against a live session and print the result.
+  Exec(SessionExecArgs),
+
+  /// Close a session: prune its registry entry (and stop its server if this
+  /// process owns it).
+  Close(SessionTargetArgs),
+
+  /// Close every live session.
+  CloseAll,
+}
+
+#[derive(Args)]
+pub struct SessionOpenArgs {
+  /// Session id to publish the browser under.
+  pub id: String,
+
+  /// URL to open in the session's first page (defaults to `about:blank`).
+  pub url: Option<String>,
+
+  #[command(flatten)]
+  pub browser: BrowserArgs,
+}
+
+#[derive(Args)]
+pub struct SessionHostArgs {
+  /// Session id to publish the browser under.
+  pub id: String,
+
+  /// URL to open in the session's first page.
+  pub url: Option<String>,
+
+  #[command(flatten)]
+  pub browser: BrowserArgs,
+}
+
+#[derive(Args)]
+pub struct SessionTargetArgs {
+  /// Session id.
+  pub id: String,
+}
+
+#[derive(Args)]
+pub struct SessionListArgs {
+  /// Emit JSON instead of a human-readable table.
+  #[arg(long)]
+  pub json: bool,
+}
+
+#[derive(Args)]
+pub struct SessionExecArgs {
+  /// Session id.
+  pub id: String,
+
+  /// Verb to run (snapshot, goto, click, fill, press, hover, eval,
+  /// screenshot, title, url, run-script, ...).
+  pub verb: String,
+
+  /// Browser context within the session (the `:context` half of a session
+  /// key). Defaults to the session's default context.
+  #[arg(long)]
+  pub context: Option<String>,
+
+  /// CSS selector for element verbs (click / fill / hover / press).
+  #[arg(long)]
+  pub selector: Option<String>,
+
+  /// Ref from the last snapshot for element verbs (alternative to selector).
+  #[arg(long = "ref")]
+  pub r#ref: Option<String>,
+
+  /// Value for `fill`.
+  #[arg(long)]
+  pub value: Option<String>,
+
+  /// Key for `press` (e.g. `Enter`, `Control+a`).
+  #[arg(long)]
+  pub key: Option<String>,
+
+  /// URL for `goto`.
+  #[arg(long)]
+  pub url: Option<String>,
+
+  /// Expression for `eval`.
+  #[arg(long)]
+  pub expression: Option<String>,
+
+  /// Script source for `run-script` (or `-` to read from stdin).
+  #[arg(long)]
+  pub source: Option<String>,
+
+  /// Write binary results (screenshot) to this file instead of printing a
+  /// base64 blob.
+  #[arg(long)]
+  pub output: Option<PathBuf>,
 }
 
 // ── mcp subcommand ──────────────────────────────────────────────────────
