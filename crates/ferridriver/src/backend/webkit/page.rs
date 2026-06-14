@@ -1214,10 +1214,24 @@ impl WebKitPage {
 
   // ── Cookies ───────────────────────────────────────────────────────────
 
+  /// Browser-context-wide cookie params for the `Playwright.*Cookies`
+  /// browser-session commands. The page always carries a concrete
+  /// `browserContextId` (the minted default context when the caller didn't
+  /// name one), so the cookie store is always scoped to the right context.
+  fn cookie_ctx_params(&self) -> Value {
+    match &self.context_id {
+      Some(ctx) => json!({ "browserContextId": ctx.to_string() }),
+      None => json!({}),
+    }
+  }
+
   pub async fn get_cookies(&self) -> Result<Vec<CookieData>> {
+    // Context-wide store via the root browser session (mirrors Playwright's
+    // `Playwright.getAllCookies`); `Page.getCookies` only returns cookies the
+    // current page's origin can see, which breaks context-level reads.
     let resp = self
-      .target_session()
-      .send("Page.getCookies", json!({}))
+      .browser
+      .send(super::protocol::PLAYWRIGHT_GET_ALL_COOKIES, self.cookie_ctx_params())
       .await
       .map_err(conn_err)?;
     let arr = resp
@@ -1229,26 +1243,52 @@ impl WebKitPage {
   }
 
   pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
-    super::events::set_cookie(&self.target_session(), cookie).await
-  }
-
-  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
-    let mut params = json!({ "cookieName": name });
-    if let Some(d) = domain {
-      params["url"] = json!(format!("http://{d}/"));
-    }
+    let mut params = self.cookie_ctx_params();
+    params["cookies"] = json!([super::events::webkit_set_cookie_param(&cookie)]);
     self
-      .target_session()
-      .send("Page.deleteCookie", params)
+      .browser
+      .send(super::protocol::PLAYWRIGHT_SET_COOKIES, params)
       .await
       .map_err(conn_err)?;
     Ok(())
   }
 
+  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
+    // WebKit's browser session exposes only `deleteAllCookies`; to drop a
+    // single cookie, re-seed the context with every other cookie. Matches the
+    // observable effect of Playwright's per-cookie clear path.
+    let remaining: Vec<CookieData> = self
+      .get_cookies()
+      .await?
+      .into_iter()
+      .filter(|c| !(c.name == name && domain.is_none_or(|d| c.domain == d)))
+      .collect();
+    self.replace_all_cookies(remaining).await
+  }
+
   pub async fn clear_cookies(&self) -> Result<()> {
-    for c in self.get_cookies().await? {
-      let _ = self.delete_cookie(&c.name, Some(&c.domain)).await;
+    self
+      .browser
+      .send(super::protocol::PLAYWRIGHT_DELETE_ALL_COOKIES, self.cookie_ctx_params())
+      .await
+      .map_err(conn_err)?;
+    Ok(())
+  }
+
+  /// Clear the context's cookies and set `cookies` as the new full set.
+  async fn replace_all_cookies(&self, cookies: Vec<CookieData>) -> Result<()> {
+    self.clear_cookies().await?;
+    if cookies.is_empty() {
+      return Ok(());
     }
+    let params_array: Vec<Value> = cookies.iter().map(super::events::webkit_set_cookie_param).collect();
+    let mut params = self.cookie_ctx_params();
+    params["cookies"] = json!(params_array);
+    self
+      .browser
+      .send(super::protocol::PLAYWRIGHT_SET_COOKIES, params)
+      .await
+      .map_err(conn_err)?;
     Ok(())
   }
 

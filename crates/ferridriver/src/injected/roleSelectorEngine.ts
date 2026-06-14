@@ -17,7 +17,7 @@
 import { parseAttributeSelector } from '@isomorphic/selectorParser';
 import { normalizeWhiteSpace } from '@isomorphic/stringUtils';
 
-import { beginAriaCaches, endAriaCaches, getAriaChecked, getAriaDisabled, getAriaExpanded, getAriaLevel, getAriaPressed, getAriaRole, getAriaSelected, getElementAccessibleName, isElementHiddenForAria, kAriaCheckedRoles, kAriaExpandedRoles, kAriaLevelRoles, kAriaPressedRoles, kAriaSelectedRoles } from './roleUtils';
+import { beginAriaCaches, endAriaCaches, getAriaChecked, getAriaDisabled, getAriaExpanded, getAriaLevel, getAriaPressed, getAriaRole, getAriaSelected, getElementAccessibleDescription, getElementAccessibleName, isElementHiddenForAria, kAriaCheckedRoles, kAriaExpandedRoles, kAriaLevelRoles, kAriaPressedRoles, kAriaSelectedRoles } from './roleUtils';
 import { matchesAttributePart } from './selectorUtils';
 
 import type { AttributeSelectorOperator, AttributeSelectorPart } from '@isomorphic/selectorParser';
@@ -28,6 +28,9 @@ type RoleEngineOptions = {
   name?: string | RegExp;
   nameOp?: '='|'*='|'|='|'^='|'$='|'~=';
   exact?: boolean;
+  description?: string | RegExp;
+  descriptionOp?: '='|'*='|'|='|'^='|'$='|'~=';
+  descriptionExact?: boolean;
   checked?: boolean | 'mixed';
   pressed?: boolean | 'mixed';
   selected?: boolean;
@@ -37,7 +40,7 @@ type RoleEngineOptions = {
   includeHidden?: boolean;
 };
 
-const kSupportedAttributes = ['selected', 'checked', 'pressed', 'expanded', 'level', 'disabled', 'name', 'include-hidden'];
+const kSupportedAttributes = ['selected', 'checked', 'pressed', 'expanded', 'level', 'disabled', 'name', 'description', 'include-hidden'];
 kSupportedAttributes.sort();
 
 function validateSupportedRole(attr: string, roles: string[], role: string) {
@@ -113,6 +116,16 @@ function validateAttributes(attrs: AttributeSelectorPart[], role: string): RoleE
         options.exact = attr.caseSensitive;
         break;
       }
+      case 'description': {
+        if (attr.op === '<truthy>')
+          throw new Error(`"description" attribute must have a value`);
+        if (typeof attr.value !== 'string' && !(attr.value instanceof RegExp))
+          throw new Error(`"description" attribute must be a string or a regular expression`);
+        options.description = attr.value;
+        options.descriptionOp = attr.op;
+        options.descriptionExact = attr.caseSensitive;
+        break;
+      }
       case 'include-hidden': {
         validateSupportedValues(attr, [true, false]);
         validateSupportedOp(attr, ['<truthy>', '=']);
@@ -158,6 +171,17 @@ function queryRole(scope: SelectorRoot, options: RoleEngineOptions, internal: bo
       if (internal && !options.exact && options.nameOp === '=')
         options.nameOp = '*=';
       if (!matchesAttributePart(accessibleName, { name: '', jsonPath: [], op: options.nameOp || '=', value: options.name, caseSensitive: !!options.exact }))
+        return;
+    }
+    if (options.description !== undefined) {
+      // Always normalize whitespace in the accessible description.
+      const accessibleDescription = normalizeWhiteSpace(getElementAccessibleDescription(element, !!options.includeHidden));
+      if (typeof options.description === 'string')
+        options.description = normalizeWhiteSpace(options.description);
+      // internal:role assumes that [description="foo"i] also means substring.
+      if (internal && !options.descriptionExact && options.descriptionOp === '=')
+        options.descriptionOp = '*=';
+      if (!matchesAttributePart(accessibleDescription, { name: '', jsonPath: [], op: options.descriptionOp || '=', value: options.description, caseSensitive: !!options.descriptionExact }))
         return;
     }
     result.push(element);

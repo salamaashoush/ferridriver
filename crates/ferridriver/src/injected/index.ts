@@ -555,12 +555,13 @@ if (!window.__fd) {
     // the parent's `- iframe [ref=...]` line is unique and resolvable.
     incrementalAriaSnapshot: (
       node: Node,
-      options?: { mode?: 'ai' | 'default'; depth?: number; refPrefix?: string },
+      options?: { mode?: 'ai' | 'default'; depth?: number; refPrefix?: string; boxes?: boolean },
     ) =>
       injected.incrementalAriaSnapshot(node, {
         mode: options?.mode || 'default',
         depth: options?.depth,
         refPrefix: options?.refPrefix,
+        boxes: options?.boxes,
       }),
     // Tag the iframe/frame element that the renderer assigned `ref` to
     // with `attr=ref`, so the host can re-resolve it through the normal

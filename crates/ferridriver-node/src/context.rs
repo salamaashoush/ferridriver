@@ -108,6 +108,17 @@ impl BrowserContext {
     Ok(NapiStorageState::from(state))
   }
 
+  /// Playwright: `context.setStorageState(storageState: string |
+  /// SetStorageState): Promise<void>` (Playwright 1.59). Clears existing
+  /// cookies + localStorage, then applies `storageState`. A string is read as
+  /// a path to a JSON file written by `storageState({ path })`; an object is
+  /// the inline `{ cookies, origins }` shape.
+  #[napi(ts_args_type = "storageState: string | { cookies?: any[]; origins?: any[] }")]
+  pub async fn set_storage_state(&self, storage_state: serde_json::Value) -> Result<()> {
+    let state = resolve_storage_state_input(storage_state).map_err(napi::Error::from_reason)?;
+    self.inner.set_storage_state(&state).await.into_napi()
+  }
+
   // ── Timeouts ──
 
   #[napi]
@@ -903,4 +914,17 @@ fn build_context_event_callback(
       );
     },
   }))
+}
+
+/// Resolve a `setStorageState` argument into the inline state JSON. A JSON
+/// string is treated as a path to a state file written by `storageState({
+/// path })`; any other value is the inline `{ cookies, origins }` object.
+fn resolve_storage_state_input(input: serde_json::Value) -> std::result::Result<serde_json::Value, String> {
+  match input {
+    serde_json::Value::String(path) => {
+      let text = std::fs::read_to_string(&path).map_err(|e| format!("setStorageState: read {path}: {e}"))?;
+      serde_json::from_str(&text).map_err(|e| format!("setStorageState: parse JSON from {path}: {e}"))
+    },
+    other => Ok(other),
+  }
 }

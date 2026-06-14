@@ -46,6 +46,9 @@ pub const PLAYWRIGHT_DELETE_CONTEXT: &str = "Playwright.deleteContext";
 pub const PLAYWRIGHT_CREATE_PAGE: &str = "Playwright.createPage";
 pub const PLAYWRIGHT_NAVIGATE: &str = "Playwright.navigate";
 pub const PLAYWRIGHT_TAKE_SCREENSHOT: &str = "Playwright.takePageScreenshot";
+pub const PLAYWRIGHT_GET_ALL_COOKIES: &str = "Playwright.getAllCookies";
+pub const PLAYWRIGHT_SET_COOKIES: &str = "Playwright.setCookies";
+pub const PLAYWRIGHT_DELETE_ALL_COOKIES: &str = "Playwright.deleteAllCookies";
 
 // ── Browser-session events ─────────────────────────────────────────────
 

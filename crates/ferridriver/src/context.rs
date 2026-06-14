@@ -588,6 +588,39 @@ impl ContextRef {
     Ok(state)
   }
 
+  /// Replace this context's storage state with `state`, clearing existing
+  /// cookies and localStorage first. Mirrors Playwright 1.59's
+  /// `browserContext.setStorageState(state)` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts`.
+  ///
+  /// `state` accepts a JSON value in Playwright's storage-state shape
+  /// (`{ cookies, origins }`). The cookies are cleared and re-seeded; each
+  /// origin's localStorage is cleared on any live page for that origin before
+  /// the new items are applied via [`Page::set_storage_state`].
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the context has no page to act through, or if
+  /// clearing / applying cookies or localStorage fails.
+  pub async fn set_storage_state(&self, state: &serde_json::Value) -> Result<()> {
+    // Clear current cookies for the whole context.
+    self.clear_cookies().await?;
+
+    // Clear localStorage on every live page (each in its own origin scope).
+    let pages = self.pages().await?;
+    for page in &pages {
+      let _ = page.inner.evaluate("localStorage.clear()").await;
+    }
+
+    // Apply the new state through a page (Playwright applies cookies +
+    // per-origin localStorage). Reuse an existing page or open one.
+    let page = match pages.into_iter().next() {
+      Some(p) => p,
+      None => Box::pin(self.new_page()).await?,
+    };
+    page.set_storage_state(state).await
+  }
+
   /// Add cookies to this context.
   ///
   /// # Errors
