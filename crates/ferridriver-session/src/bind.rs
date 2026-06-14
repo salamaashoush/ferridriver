@@ -10,7 +10,8 @@
 //! `Browser.bind(title, options)` / `Browser.unbind()` surface exposed by the
 //! `NAPI` and `QuickJS` bindings — they call straight into here.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ferridriver::Browser;
 
@@ -19,6 +20,55 @@ use crate::browser_dispatch::{BrowserDispatcher, browser_name_for, dispatcher_fo
 use crate::dispatch::ScriptHook;
 use crate::registry::{Registry, SessionDescriptor};
 use crate::server::{Endpoint, SessionServer};
+
+/// Process-wide table of live bindings, keyed by session id.
+///
+/// A binding is owned by the process that created it, not by the `JS` handle
+/// that called `bind` — the `QuickJS` `Browser` wrapper is rebuilt on every
+/// `run_script` call, so a per-handle slot would drop the server the moment
+/// the script returns. Parking the [`BoundSession`] here keeps it serving
+/// until an explicit `unbind` (or process exit), and lets `unbind` find the
+/// session by id from any handle.
+fn live_sessions() -> &'static Mutex<HashMap<String, BoundSession>> {
+  static SESSIONS: OnceLock<Mutex<HashMap<String, BoundSession>>> = OnceLock::new();
+  SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Maps a browser's stable identity (the `Arc<RwLock<BrowserState>>` pointer)
+/// to the session id it is currently bound under. Lets `browser.unbind()`
+/// take no argument (Playwright parity) by recovering the id from the browser
+/// even after its JS wrapper has been rebuilt.
+fn browser_bindings() -> &'static Mutex<HashMap<usize, String>> {
+  static MAP: OnceLock<Mutex<HashMap<usize, String>>> = OnceLock::new();
+  MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A stable per-process identity for a browser handle: the address of its
+/// shared state `Arc`. Two `Browser` values backed by the same state (e.g. a
+/// rebuilt JS wrapper) share this id.
+fn browser_identity(browser: &Browser) -> usize {
+  Arc::as_ptr(browser.state()).cast::<()>() as usize
+}
+
+/// Park a binding in the process-global table, replacing (and tearing down)
+/// any previous binding under the same id.
+fn store_live(session: BoundSession) {
+  let id = session.id().to_string();
+  let mut table = live_sessions()
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
+  table.insert(id, session);
+}
+
+/// Stop and remove the process-global binding for `id`, if one exists.
+/// Returns `true` when a binding was found and torn down.
+#[must_use]
+fn take_live(id: &str) -> bool {
+  let mut table = live_sessions()
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
+  table.remove(id).is_some()
+}
 
 /// Options for [`bind`], mirroring Playwright's `Browser.bind` option bag.
 #[derive(Debug, Clone, Default)]
@@ -104,6 +154,67 @@ pub async fn bind(
 ) -> Result<BoundSession> {
   let registry = Registry::open()?;
   bind_in(&registry, browser, id, options, script_hook).await
+}
+
+/// Bind `browser` under `id` and park the binding in the process-global table,
+/// returning only the endpoint string. This is the entry point the `NAPI` and
+/// `QuickJS` `browser.bind()` methods use: the binding outlives the `JS` handle
+/// that created it and is torn down by [`unbind`] / [`unbind_browser`].
+///
+/// # Errors
+///
+/// Returns [`SessionError::Io`](crate::SessionError::Io) if the server cannot
+/// bind its endpoint or the descriptor cannot be written.
+pub async fn bind_global(
+  browser: &Browser,
+  id: &str,
+  options: BindOptions,
+  script_hook: Option<Arc<dyn ScriptHook>>,
+) -> Result<String> {
+  let session = bind(browser, id, options, script_hook).await?;
+  let endpoint = session.endpoint().to_string();
+  browser_bindings()
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .insert(browser_identity(browser), id.to_string());
+  store_live(session);
+  Ok(endpoint)
+}
+
+/// Tear down a process-global binding by id. Removes the registry descriptor
+/// too. A no-op if `id` was never bound.
+///
+/// # Errors
+///
+/// Returns [`SessionError::Io`](crate::SessionError::Io) if the descriptor
+/// cannot be removed.
+pub fn unbind(id: &str) -> Result<()> {
+  // Dropping the BoundSession aborts the serve task and removes the
+  // descriptor; if it was already gone, prune the descriptor directly so a
+  // crashed-owner entry still clears.
+  if take_live(id) {
+    return Ok(());
+  }
+  let registry = Registry::open()?;
+  registry.remove(id)
+}
+
+/// Tear down whatever binding `browser` currently holds (the no-argument
+/// `browser.unbind()` path). A no-op if this browser was never bound.
+///
+/// # Errors
+///
+/// Returns [`SessionError::Io`](crate::SessionError::Io) if the descriptor
+/// cannot be removed.
+pub fn unbind_browser(browser: &Browser) -> Result<()> {
+  let id = browser_bindings()
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .remove(&browser_identity(browser));
+  match id {
+    Some(id) => unbind(&id),
+    None => Ok(()),
+  }
 }
 
 /// Like [`bind`], but publishes into an explicit registry (used by tests and

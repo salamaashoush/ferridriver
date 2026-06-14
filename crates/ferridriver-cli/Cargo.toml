@@ -26,6 +26,7 @@ ferridriver-script = { workspace = true }
 ferridriver-config = { workspace = true }
 ferridriver-test = { workspace = true }
 ferridriver-bdd = { workspace = true }
+ferridriver-session = { workspace = true }
 ferridriver = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

@@ -17,6 +17,7 @@ workspace = true
 ferridriver = { workspace = true }
 ferridriver-config = { workspace = true }
 ferridriver-expect = { workspace = true }
+ferridriver-session = { workspace = true }
 
 tokio = { workspace = true }
 futures = { workspace = true }

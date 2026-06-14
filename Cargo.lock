@@ -1436,6 +1436,7 @@ dependencies = [
  "ferridriver-config",
  "ferridriver-mcp",
  "ferridriver-script",
+ "ferridriver-session",
  "ferridriver-test",
  "futures",
  "libc",
@@ -1511,6 +1512,7 @@ version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "ferridriver",
+ "ferridriver-session",
  "mimalloc",
  "napi",
  "napi-build",
@@ -1531,6 +1533,7 @@ dependencies = [
  "ferridriver",
  "ferridriver-config",
  "ferridriver-expect",
+ "ferridriver-session",
  "futures",
  "getrandom 0.3.4",
  "hmac",

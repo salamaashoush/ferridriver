@@ -140,4 +140,65 @@ impl Browser {
   pub fn is_connected(&self) -> bool {
     self.inner.is_connected()
   }
+
+  /// Publish this browser under a named session so other processes (the
+  /// `ferridriver` CLI, another agent) can attach to it. Mirrors Playwright's
+  /// `browser.bind(title, options): Promise<{ endpoint }>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/browser.ts:132`).
+  ///
+  /// `title` is the session id. `host`/`port` bind over TCP (`ws://`
+  /// endpoint); otherwise a Unix-domain socket is used. Returns the resolved
+  /// endpoint clients connect to.
+  #[napi(
+    ts_args_type = "title: string, options?: {
+    workspaceDir?: string;
+    metadata?: Record<string, any>;
+    host?: string;
+    port?: number;
+  }",
+    ts_return_type = "Promise<{ endpoint: string }>"
+  )]
+  pub async fn bind(&self, title: String, options: Option<NapiBindOptions>) -> Result<BindResult> {
+    let opts = options.unwrap_or_default();
+    let endpoint = ferridriver_session::bind_global(&self.inner, &title, opts.into_core(), None)
+      .await
+      .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    Ok(BindResult { endpoint })
+  }
+
+  /// Stop accepting new connections for the bound session and remove its
+  /// registry entry. Mirrors Playwright's `browser.unbind(): Promise<void>`.
+  /// A no-op if the browser was never bound.
+  #[napi]
+  #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // NAPI requires async to surface a JS Promise (Playwright parity)
+  pub async fn unbind(&self) -> Result<()> {
+    ferridriver_session::unbind_browser(&self.inner).map_err(|e| napi::Error::from_reason(e.to_string()))
+  }
+}
+
+/// Options for [`Browser::bind`]. Field names mirror Playwright's option bag.
+#[napi(object)]
+#[derive(Default)]
+pub struct NapiBindOptions {
+  pub workspace_dir: Option<String>,
+  pub metadata: Option<serde_json::Value>,
+  pub host: Option<String>,
+  pub port: Option<u32>,
+}
+
+impl NapiBindOptions {
+  fn into_core(self) -> ferridriver_session::BindOptions {
+    ferridriver_session::BindOptions {
+      workspace_dir: self.workspace_dir,
+      metadata: self.metadata,
+      host: self.host,
+      port: self.port.and_then(|p| u16::try_from(p).ok()),
+    }
+  }
+}
+
+/// The `{ endpoint }` object returned by [`Browser::bind`].
+#[napi(object)]
+pub struct BindResult {
+  pub endpoint: String,
 }
