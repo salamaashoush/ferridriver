@@ -19,6 +19,8 @@
 //! the CLI, the NAPI/QuickJS bindings) supplies a [`Dispatcher`] that maps
 //! command verbs onto live browser state.
 
+pub mod bind;
+pub mod browser_dispatch;
 pub mod client;
 pub mod dispatch;
 pub mod protocol;
@@ -26,11 +28,13 @@ pub mod registry;
 pub mod server;
 pub mod transport;
 
+pub use bind::{BindOptions, BoundSession, bind, bind_dispatcher, bind_in, unbind_id};
+pub use browser_dispatch::{BROWSER_VERBS, BrowserDispatcher, browser_name_for, dispatcher_for, parse_session_key};
 pub use client::SessionClient;
-pub use dispatch::Dispatcher;
+pub use dispatch::{Dispatcher, ScriptHook};
 pub use protocol::{Command, Response};
 pub use registry::{Registry, SessionDescriptor};
-pub use server::SessionServer;
+pub use server::{Endpoint, SessionServer};
 
 use thiserror::Error;
 
