@@ -37,6 +37,27 @@ pub trait Dispatcher: Send + Sync + 'static {
   }
 }
 
+/// A handler for the `run_script` verb, supplied by a higher crate that owns
+/// the `QuickJS` engine (`ferridriver-script` / `ferridriver-mcp`).
+///
+/// The session crate stays below the scripting layer, so it cannot run JS
+/// itself. A host that wants `ferridriver -s <id> run-script <file>` to work
+/// registers a hook via [`crate::browser_dispatch::BrowserDispatcher::with_script_hook`];
+/// without one, the `run_script` verb returns a "scripting not available"
+/// error.
+#[async_trait]
+pub trait ScriptHook: Send + Sync + 'static {
+  /// Run `source` against the named `context` of the bound browser with the
+  /// given positional `args`. `Ok(text)` is the rendered result; `Err(msg)`
+  /// is a script failure surfaced to the client as a failed response.
+  async fn run_script(
+    &self,
+    context: &str,
+    source: &str,
+    args: &[serde_json::Value],
+  ) -> std::result::Result<String, String>;
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
   use super::*;
