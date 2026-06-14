@@ -475,6 +475,13 @@ impl LocatorJs {
     LocatorJs::new(self.inner.describe(&description))
   }
 
+  /// Playwright: `locator.description(): string | null`. rquickjs maps `None`
+  /// to JS `undefined`; callers should compare with `== null` to catch both.
+  #[qjs(rename = "description")]
+  pub fn description(&self) -> Option<String> {
+    self.inner.description()
+  }
+
   #[qjs(rename = "first")]
   pub fn first(&self) -> LocatorJs {
     LocatorJs::new(self.inner.first())
@@ -810,12 +817,14 @@ impl LocatorJs {
         struct JsAria {
           mode: Option<String>,
           depth: Option<i32>,
+          boxes: Option<bool>,
           timeout: Option<u64>,
         }
         let p: JsAria = crate::bindings::convert::serde_from_js(&ctx, v)?;
         ferridriver::options::AriaSnapshotOptions {
           mode: Some(ferridriver::options::AriaSnapshotMode::from_opt_str(p.mode.as_deref())),
           depth: p.depth,
+          boxes: p.boxes,
           timeout: p.timeout,
         }
       },

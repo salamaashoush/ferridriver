@@ -12,7 +12,6 @@ use super::page::WebKitPage;
 use crate::backend::{AxNodeData, AxProperty, CookieData, SameSite};
 use crate::console_message::{ConsoleMessage, ConsoleMessageLocation};
 use crate::context::DialogEvent;
-use crate::error::{FerriError, Result};
 use crate::network::{
   BodyFn, Headers, RemoteAddr, Request as NetworkRequest, RequestInit, Response, ResponseInit, SecurityDetails,
   WebSocket, WebSocketPayload,
@@ -92,30 +91,26 @@ pub fn parse_cookie(c: &Value) -> CookieData {
   }
 }
 
-/// `Page.setCookie` for the PW `WebKit` backend.
-pub async fn set_cookie(target: &Session, cookie: CookieData) -> Result<()> {
+/// Build a `Playwright.setCookies` `SetCookieParam` (browser-context-wide, no
+/// `url` field — domain/path/secure carry the scope). Mirrors Playwright's
+/// `wkBrowser.ts::addCookies` mapping. Cookies are set through the root
+/// browser session so they populate the whole context's store, not just the
+/// current page's reachable origin.
+pub fn webkit_set_cookie_param(cookie: &CookieData) -> Value {
   let mut obj = json!({
     "name": cookie.name,
     "value": cookie.value,
     "domain": cookie.domain,
-    "path": if cookie.path.is_empty() { "/".to_string() } else { cookie.path },
+    "path": if cookie.path.is_empty() { "/".to_string() } else { cookie.path.clone() },
     "secure": cookie.secure,
     "httpOnly": cookie.http_only,
     "session": cookie.expires.is_none(),
+    "sameSite": cookie.same_site.map_or("None", SameSite::as_str),
   });
   if let Some(exp) = cookie.expires {
     obj["expires"] = json!(exp);
   }
-  obj["sameSite"] = json!(cookie.same_site.map_or("None", SameSite::as_str));
-  // PW WebKit `Page.setCookie` derives the URL from domain+path+secure
-  // when no explicit url is given.
-  let scheme = if cookie.secure { "https" } else { "http" };
-  obj["url"] = json!(format!("{scheme}://{}", obj["domain"].as_str().unwrap_or("")));
-  target
-    .send("Page.setCookie", json!({ "cookie": obj }))
-    .await
-    .map_err(|e| FerriError::backend(format!("webkit set_cookie: {e}")))?;
-  Ok(())
+  obj
 }
 
 /// Spawn the always-on per-page listener loop. Translates `Console.*` /

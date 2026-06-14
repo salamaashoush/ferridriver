@@ -29,6 +29,7 @@ pub mod navigation_response;
 pub mod network;
 pub mod observation;
 pub mod page_api;
+pub mod pw_158_160;
 pub mod script_emul_storage;
 pub mod script_handles_local;
 pub mod script_input;

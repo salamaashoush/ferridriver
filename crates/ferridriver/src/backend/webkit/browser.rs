@@ -293,7 +293,11 @@ impl WebKitBrowser {
     viewport: Option<&crate::options::ViewportConfig>,
   ) -> Result<AnyPage> {
     let proxy = self.create_page(browser_context_id).await?;
-    let page = WebKitPage::attach(self, proxy, browser_context_id.map(str::to_string)).await?;
+    // Resolve to a concrete browserContextId (the minted default context when
+    // the caller didn't name one) so the page can drive context-wide
+    // browser-session commands like `Playwright.getAllCookies`.
+    let resolved_ctx = browser_context_id.unwrap_or(&self.default_context).to_string();
+    let page = WebKitPage::attach(self, proxy, Some(resolved_ctx)).await?;
     if let Some(vp) = viewport {
       page.emulate_viewport(vp).await?;
     }

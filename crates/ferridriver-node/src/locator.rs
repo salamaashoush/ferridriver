@@ -184,6 +184,13 @@ impl Locator {
     Self::wrap(self.inner.describe(&description))
   }
 
+  /// Playwright: `locator.description(): string | null`. The description set
+  /// by `describe`, or `null` if none.
+  #[napi(ts_return_type = "string | null")]
+  pub fn description(&self) -> Option<String> {
+    self.inner.description()
+  }
+
   #[napi]
   pub fn first(&self) -> Locator {
     Self::wrap(self.inner.first())
@@ -397,7 +404,7 @@ impl Locator {
   /// Playwright `InjectedScript` — byte-for-byte Playwright YAML.
   #[napi(
     js_name = "ariaSnapshot",
-    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, timeout?: number }",
+    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, boxes?: boolean, timeout?: number }",
     ts_return_type = "Promise<string>"
   )]
   pub async fn aria_snapshot(&self, options: Option<crate::types::AriaSnapshotOptions>) -> Result<String> {

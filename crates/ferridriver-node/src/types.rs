@@ -45,6 +45,11 @@ pub struct RoleOptions {
   /// still works. No `{ source, flags }` wire shape is exposed.
   #[napi(ts_type = "string | RegExp")]
   pub name: Option<napi::Either<String, JsRegExpLike>>,
+  /// Playwright: `description?: string | RegExp` — the accessible-description
+  /// matcher (Playwright 1.60). Same prototype-chain `RegExp` handling as
+  /// `name`; `exact` applies to both.
+  #[napi(ts_type = "string | RegExp")]
+  pub description: Option<napi::Either<String, JsRegExpLike>>,
   pub exact: Option<bool>,
   pub checked: Option<bool>,
   pub disabled: Option<bool>,
@@ -1183,6 +1188,7 @@ impl From<RoleOptions> for ferridriver::options::RoleOptions {
   fn from(o: RoleOptions) -> Self {
     Self {
       name: o.name.map(getby_input_to_rust),
+      description: o.description.map(getby_input_to_rust),
       exact: o.exact,
       checked: o.checked,
       disabled: o.disabled,
@@ -1605,6 +1611,9 @@ pub struct AriaSnapshotOptions {
   pub mode: Option<String>,
   /// Subtree depth limit. `None` = unlimited.
   pub depth: Option<i32>,
+  /// Append each element's bounding box as `[box=x,y,width,height]`
+  /// (Playwright 1.60).
+  pub boxes: Option<bool>,
   /// Resolution/actionability timeout in ms. `None` = page default.
   pub timeout: Option<f64>,
 }
@@ -1614,6 +1623,7 @@ impl From<AriaSnapshotOptions> for ferridriver::options::AriaSnapshotOptions {
     Self {
       mode: Some(ferridriver::options::AriaSnapshotMode::from_opt_str(o.mode.as_deref())),
       depth: o.depth,
+      boxes: o.boxes,
       timeout: o.timeout.map(crate::types::f64_to_u64),
     }
   }

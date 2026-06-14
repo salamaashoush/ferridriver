@@ -326,6 +326,18 @@ impl Locator {
     self.chain(&format!("internal:describe={}", json_quote(description)))
   }
 
+  /// The custom description previously set with [`Self::describe`], or `None`
+  /// if this locator has none. Mirrors Playwright's `locator.description():
+  /// string | null` — only the LAST selector part counts (a `describe` that
+  /// isn't the final chained step is shadowed by later steps), matching
+  /// `locatorCustomDescription` in `packages/isomorphic/locatorGenerators.ts`.
+  #[must_use]
+  pub fn description(&self) -> Option<String> {
+    let last = self.selector.rsplit(" >> ").next().unwrap_or(&self.selector).trim();
+    let body = last.strip_prefix("internal:describe=")?;
+    serde_json::from_str::<String>(body).ok()
+  }
+
   /// First element. Opts out of strict mode because the selector explicitly
   /// narrows to a single match.
   #[must_use]
@@ -1056,7 +1068,7 @@ impl Locator {
     let (root_frame, _sel) = self.resolved().await?;
     let mode = options.mode.unwrap_or_default().as_str();
     let depth = options.depth;
-    let opts_json = aria_opts_json(mode, depth, "");
+    let opts_json = aria_opts_json(mode, depth, "", options.boxes);
     let root_js =
       format!("function() {{ return JSON.stringify(window.__fd.incrementalAriaSnapshot(this, {opts_json})); }}");
     retry_resolve!(self, options.timeout, "ariaSnapshot", |el, _page| async {
@@ -1067,7 +1079,7 @@ impl Locator {
         .unwrap_or_default();
       let raw = parse_aria_raw(&raw_s)?;
       let seq = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-      let lines = aria_stitch_frame(root_frame.clone(), raw, mode.to_string(), depth, seq).await?;
+      let lines = aria_stitch_frame(root_frame.clone(), raw, mode.to_string(), depth, options.boxes, seq).await?;
       Ok::<String, crate::error::FerriError>(lines.join("\n"))
     })
   }
@@ -2309,6 +2321,10 @@ pub(crate) fn build_role_selector(role: &str, opts: &RoleOptions) -> String {
     let escaped = escape_for_attribute_selector(name, opts.exact == Some(true));
     let _ = write!(sel, "[name={escaped}]");
   }
+  if let Some(description) = &opts.description {
+    let escaped = escape_for_attribute_selector(description, opts.exact == Some(true));
+    let _ = write!(sel, "[description={escaped}]");
+  }
   if let Some(checked) = opts.checked {
     let _ = write!(sel, "[checked={checked}]");
   }
@@ -2449,7 +2465,7 @@ struct AriaRaw {
 /// Build the `AriaTreeOptions` JSON for the injected call. `refPrefix`
 /// is omitted when empty (top frame) — the vendored injected treats
 /// missing and `''` identically (`options.refPrefix ?? ''`).
-fn aria_opts_json(mode: &str, depth: Option<i32>, ref_prefix: &str) -> String {
+fn aria_opts_json(mode: &str, depth: Option<i32>, ref_prefix: &str, boxes: Option<bool>) -> String {
   let mut m = serde_json::Map::new();
   m.insert("mode".into(), serde_json::Value::String(mode.to_string()));
   if let Some(d) = depth {
@@ -2457,6 +2473,9 @@ fn aria_opts_json(mode: &str, depth: Option<i32>, ref_prefix: &str) -> String {
   }
   if !ref_prefix.is_empty() {
     m.insert("refPrefix".into(), serde_json::Value::String(ref_prefix.to_string()));
+  }
+  if boxes == Some(true) {
+    m.insert("boxes".into(), serde_json::Value::Bool(true));
   }
   serde_json::Value::Object(m).to_string()
 }
@@ -2483,6 +2502,7 @@ fn aria_stitch_frame(
   raw: AriaRaw,
   mode: String,
   depth: Option<i32>,
+  boxes: Option<bool>,
   seq: Arc<std::sync::atomic::AtomicU32>,
 ) -> futures::future::BoxFuture<'static, Result<Vec<String>>> {
   Box::pin(async move {
@@ -2498,7 +2518,7 @@ fn aria_stitch_frame(
 
     let mut child_snaps: Vec<Vec<String>> = Vec::with_capacity(rendered.len());
     for refv in &rendered {
-      child_snaps.push(aria_child_snapshot(&frame, refv, &mode, depth, &raw.iframe_depths, &seq).await?);
+      child_snaps.push(aria_child_snapshot(&frame, refv, &mode, depth, boxes, &raw.iframe_depths, &seq).await?);
     }
 
     let re = IFRAME_REF_RE
@@ -2537,6 +2557,7 @@ async fn aria_child_snapshot(
   refv: &str,
   mode: &str,
   depth: Option<i32>,
+  boxes: Option<bool>,
   depths: &std::collections::HashMap<String, i32>,
   seq: &Arc<std::sync::atomic::AtomicU32>,
 ) -> Result<Vec<String>> {
@@ -2580,7 +2601,7 @@ async fn aria_child_snapshot(
   // frames (Playwright uses `frame.seq`; we just need uniqueness).
   let n = seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
   let prefix = format!("f{n}");
-  let copts = aria_opts_json(mode, child_depth, &prefix);
+  let copts = aria_opts_json(mode, child_depth, &prefix, boxes);
   let body_js = format!("() => JSON.stringify(window.__fd.incrementalAriaSnapshot(document.body, {copts}))");
   let raw_s = child_frame
     .evaluate(&body_js, crate::protocol::SerializedArgument::default(), Some(true))
@@ -2592,5 +2613,13 @@ async fn aria_child_snapshot(
     return Ok(Vec::new());
   }
   let child_raw = parse_aria_raw(&raw_s)?;
-  aria_stitch_frame(child_frame, child_raw, mode.to_string(), child_depth, Arc::clone(seq)).await
+  aria_stitch_frame(
+    child_frame,
+    child_raw,
+    mode.to_string(),
+    child_depth,
+    boxes,
+    Arc::clone(seq),
+  )
+  .await
 }

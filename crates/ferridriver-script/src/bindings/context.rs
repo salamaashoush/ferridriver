@@ -133,6 +133,32 @@ impl BrowserContextJs {
     serde_to_js(&ctx, &state)
   }
 
+  /// Playwright: `setStorageState(storageState: string | SetStorageState):
+  /// Promise<void>` (1.59). Clears existing cookies + localStorage then
+  /// applies `storageState`. A string is a path to a state file; an object is
+  /// the inline `{ cookies, origins }` shape.
+  #[qjs(rename = "setStorageState")]
+  pub async fn set_storage_state<'js>(&self, ctx: Ctx<'js>, storage_state: Value<'js>) -> rquickjs::Result<()> {
+    let input: serde_json::Value = serde_from_js(&ctx, storage_state)?;
+    let state = match input {
+      serde_json::Value::String(path) => {
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+          crate::bindings::convert::throw_named(&ctx, "Error", format!("setStorageState: read {path}: {e}"))
+        })?;
+        serde_json::from_str(&text).map_err(|e| {
+          crate::bindings::convert::throw_named(&ctx, "Error", format!("setStorageState: parse {path}: {e}"))
+        })?
+      },
+      other => other,
+    };
+    self
+      .inner
+      .set_storage_state(&state)
+      .await
+      .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
+    Ok(())
+  }
+
   // ── Permissions ───────────────────────────────────────────────────────────
 
   /// Grant a set of permissions (e.g. `['geolocation', 'notifications']`),

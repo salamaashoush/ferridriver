@@ -423,6 +423,11 @@ pub(crate) fn parse_role_options<'js>(
     Some(val) if !val.is_undefined() && !val.is_null() => Some(string_or_regex_from_js(val)?),
     _ => None,
   };
+  let description_val: Option<rquickjs::Value<'js>> = obj.get("description").ok();
+  let description = match description_val {
+    Some(val) if !val.is_undefined() && !val.is_null() => Some(string_or_regex_from_js(val)?),
+    _ => None,
+  };
   let exact: Option<bool> = obj.get("exact").ok();
   let checked: Option<bool> = obj.get("checked").ok();
   let disabled: Option<bool> = obj.get("disabled").ok();
@@ -433,6 +438,7 @@ pub(crate) fn parse_role_options<'js>(
   let include_hidden: Option<bool> = obj.get("includeHidden").ok();
   Ok(ferridriver::options::RoleOptions {
     name,
+    description,
     exact,
     checked,
     disabled,

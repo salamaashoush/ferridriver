@@ -507,6 +507,10 @@ fn register_session_bind(set: &mut TestSet<'_>) {
   backends_support::session_bind::register(set);
 }
 
+fn register_pw_158_160(set: &mut TestSet<'_>) {
+  backends_support::pw_158_160::register(set);
+}
+
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
 // 17 categories × 4 backends = 68 `#[test]`s grouped into one module
@@ -598,6 +602,10 @@ macro_rules! backend_module {
       #[test]
       fn session_bind() {
         run_category($backend, register_session_bind);
+      }
+      #[test]
+      fn pw_158_160() {
+        run_category($backend, register_pw_158_160);
       }
     }
   };

@@ -57,6 +57,9 @@ impl From<String> for StringOrRegex {
 pub struct RoleOptions {
   /// `string | RegExp` — matches the element's accessible name.
   pub name: Option<StringOrRegex>,
+  /// `string | RegExp` — matches the element's accessible description
+  /// (Playwright 1.60). `exact` applies to both name and description.
+  pub description: Option<StringOrRegex>,
   pub exact: Option<bool>,
   pub checked: Option<bool>,
   pub disabled: Option<bool>,
@@ -309,15 +312,16 @@ impl AriaSnapshotMode {
 }
 
 /// Options for `locator.ariaSnapshot(options?)`. Mirrors Playwright's
-/// `TimeoutOptions & { mode?: 'ai' | 'default', depth?: number }`
-/// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:327`;
-/// the vendored injected `AriaTreeOptions` has no `boxes`, so it is not
-/// exposed — it would be a silent no-op).
+/// `TimeoutOptions & { mode?: 'ai' | 'default', depth?: number, boxes?: boolean }`
+/// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:327`).
 #[derive(Debug, Clone, Default)]
 pub struct AriaSnapshotOptions {
   pub mode: Option<AriaSnapshotMode>,
   /// Subtree depth limit passed to the injected `generateAriaTree`.
   pub depth: Option<i32>,
+  /// Append each element's bounding box as `[box=x,y,width,height]`
+  /// (Playwright 1.60) — useful for AI consumption.
+  pub boxes: Option<bool>,
   /// Actionability/resolution timeout (ms). `None` = page default.
   pub timeout: Option<u64>,
 }
