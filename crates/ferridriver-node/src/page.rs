@@ -1365,6 +1365,7 @@ impl Page {
   /// `since-navigation`, i.e. only messages logged after the last
   /// main-frame navigation.
   #[napi]
+  #[allow(clippy::unused_async_trait_impl)] // NAPI requires async to surface a JS Promise
   pub async fn console_messages(
     &self,
     options: Option<crate::types::ObservedFilterOptions>,
@@ -1389,6 +1390,7 @@ impl Page {
   /// as a native JS `Error` (name / message / stack populated from the
   /// page-side exception).
   #[napi(ts_return_type = "Promise<Array<Error>>")]
+  #[allow(clippy::unused_async_trait_impl)] // NAPI requires async to surface a JS Promise
   pub async fn page_errors(
     &self,
     options: Option<crate::types::ObservedFilterOptions>,

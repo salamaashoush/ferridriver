@@ -113,6 +113,7 @@ impl Plugin for FerridriverRuntimePlugin {
     "ferridriver-runtime".into()
   }
 
+  #[allow(clippy::unused_async_trait_impl)] // rolldown Plugin trait requires async
   async fn resolve_id(&self, _ctx: &PluginContext, args: &HookResolveIdArgs<'_>) -> HookResolveIdReturn {
     // Native modules stay EXTERNAL: the emitted chunk keeps the bare
     // import and the bytecode re-links by name against the loading
@@ -146,6 +147,7 @@ impl Plugin for FerridriverRuntimePlugin {
     Ok(None)
   }
 
+  #[allow(clippy::unused_async_trait_impl)] // rolldown Plugin trait requires async
   async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
     let code: Option<Cow<'_, str>> = args.id.strip_prefix(VIRTUAL_USER_PREFIX).and_then(|spec| {
       self

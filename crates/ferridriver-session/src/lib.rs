@@ -28,7 +28,9 @@ pub mod registry;
 pub mod server;
 pub mod transport;
 
-pub use bind::{BindOptions, BoundSession, bind, bind_dispatcher, bind_in, unbind_id};
+pub use bind::{
+  BindOptions, BoundSession, bind, bind_dispatcher, bind_global, bind_in, unbind, unbind_browser, unbind_id,
+};
 pub use browser_dispatch::{BROWSER_VERBS, BrowserDispatcher, browser_name_for, dispatcher_for, parse_session_key};
 pub use client::SessionClient;
 pub use dispatch::{Dispatcher, ScriptHook};

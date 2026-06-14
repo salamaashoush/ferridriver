@@ -508,6 +508,7 @@ impl TestInfo {
   ///
   /// Returns a `StepHandle` that must be completed via `handle.end()`.
   /// Emits `ReporterEvent::StepStarted` immediately if an event bus is available.
+  #[allow(clippy::unused_async_trait_impl)] // async signature held for the awaiting reporter API
   pub async fn begin_step(&self, title: impl Into<String>, category: StepCategory) -> StepHandle {
     let title = title.into();
     let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
@@ -538,6 +539,7 @@ impl TestInfo {
   }
 
   /// Begin a nested step (child of a parent step).
+  #[allow(clippy::unused_async_trait_impl)] // async signature held for the awaiting reporter API
   pub async fn begin_child_step(
     &self,
     title: impl Into<String>,

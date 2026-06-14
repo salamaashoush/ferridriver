@@ -503,6 +503,10 @@ fn register_multi_page(set: &mut TestSet<'_>) {
   backends_support::multi_page::register(set);
 }
 
+fn register_session_bind(set: &mut TestSet<'_>) {
+  backends_support::session_bind::register(set);
+}
+
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
 // 17 categories × 4 backends = 68 `#[test]`s grouped into one module
@@ -590,6 +594,10 @@ macro_rules! backend_module {
       #[test]
       fn page_api() {
         run_category($backend, register_page_api);
+      }
+      #[test]
+      fn session_bind() {
+        run_category($backend, register_session_bind);
       }
     }
   };

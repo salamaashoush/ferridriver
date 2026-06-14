@@ -115,6 +115,64 @@ impl BrowserJs {
     let instance = Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
   }
+
+  /// Playwright: `browser.bind(title, options?): Promise<{ endpoint }>` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browser.ts:132`.
+  /// Publishes this browser under session `title` and returns the endpoint
+  /// clients connect to. `host`/`port` bind over TCP; otherwise a Unix socket.
+  #[qjs(rename = "bind")]
+  pub async fn bind<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    title: String,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<Value<'js>> {
+    let opts = match options.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => {
+        let parsed: JsBindOptions = serde_from_js(&ctx, v)?;
+        parsed.into_core()
+      },
+      _ => ferridriver_session::BindOptions::default(),
+    };
+    let endpoint = ferridriver_session::bind_global(&self.inner, &title, opts, None)
+      .await
+      .map_err(|e| crate::bindings::convert::throw_named(&ctx, "Error", e.to_string()))?;
+    let result = rquickjs::Object::new(ctx.clone())?;
+    result.set("endpoint", endpoint)?;
+    rquickjs::IntoJs::into_js(result, &ctx)
+  }
+
+  /// Playwright: `browser.unbind(): Promise<void>`. Stops the session server
+  /// and removes the registry entry for whatever this browser is bound under.
+  /// A no-op if never bound.
+  #[qjs(rename = "unbind")]
+  #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // QuickJS method must be async to return a JS Promise
+  pub async fn unbind(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    ferridriver_session::unbind_browser(&self.inner)
+      .map_err(|e| crate::bindings::convert::throw_named(&ctx, "Error", e.to_string()))?;
+    Ok(())
+  }
+}
+
+/// JS-side shape for [`BrowserJs::bind`]'s option bag.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsBindOptions {
+  workspace_dir: Option<String>,
+  metadata: Option<serde_json::Value>,
+  host: Option<String>,
+  port: Option<u16>,
+}
+
+impl JsBindOptions {
+  fn into_core(self) -> ferridriver_session::BindOptions {
+    ferridriver_session::BindOptions {
+      workspace_dir: self.workspace_dir,
+      metadata: self.metadata,
+      host: self.host,
+      port: self.port,
+    }
+  }
 }
 
 /// JS-side shape for the options bag. Deserialised via serde-through-JSON

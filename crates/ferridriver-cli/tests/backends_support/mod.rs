@@ -34,5 +34,6 @@ pub mod script_handles_local;
 pub mod script_input;
 pub mod script_locators;
 pub mod script_sessions;
+pub mod session_bind;
 pub mod video;
 pub mod web_error;
