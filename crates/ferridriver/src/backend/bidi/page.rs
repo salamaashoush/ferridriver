@@ -1214,7 +1214,7 @@ impl BidiPage {
   /// only. Playwright's own `BiDi` backend leaves `tap` unimplemented
   /// for the same reason. Returns a typed `unsupported:` error that
   /// the caller surfaces as [`crate::error::FerriError::Unsupported`].
-  #[allow(clippy::unused_async, clippy::unused_self)]
+  #[allow(clippy::unused_async, clippy::unused_async_trait_impl, clippy::unused_self)]
   pub async fn tap_at_with(&self, _x: f64, _y: f64, _args: &super::super::BackendTapArgs) -> Result<()> {
     Err(FerriError::unsupported(
       "tap is not available on the BiDi backend — WebDriver BiDi's input.performActions \

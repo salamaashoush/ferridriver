@@ -355,7 +355,7 @@ impl BrowserInstaller {
   /// # Errors
   ///
   /// Returns an error if the Linux distribution is unsupported or `apt-get`/`pacman` fails.
-  #[allow(clippy::unused_async)] // async needed on linux cfg, not on macOS/Windows
+  #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // async needed on linux cfg, not on macOS/Windows
   pub async fn install_system_deps<F>(&self, progress: F) -> Result<()>
   where
     F: Fn(InstallProgress),
