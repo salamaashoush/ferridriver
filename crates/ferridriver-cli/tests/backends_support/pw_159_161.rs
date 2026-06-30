@@ -6,6 +6,7 @@
 //! - `webError.location()` (1.60): source location of an unhandled error.
 //! - `request.existingResponse()` (1.59): already-received response, no wait.
 //! - `page.localStorage` / `page.sessionStorage` WebStorage (1.61).
+//! - `apiResponse.serverAddr()` (1.61): resolved peer address.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::needless_pass_by_value)]
 
@@ -190,6 +191,34 @@ pub fn test_web_storage(c: &mut McpClient) {
   assert_eq!(v["afterClearLen"].as_i64(), Some(0), "clear must empty the store: {v}");
 }
 
+/// `apiResponse.serverAddr()` reports the resolved peer address. Fetch
+/// the localhost server and assert the loopback ip + the server's port.
+pub fn test_api_response_server_addr(c: &mut McpClient) {
+  let port = spawn_html_server();
+  let v = c.script_value_with_args(
+    r"
+    const [url, expectedPort] = args;
+    const resp = await request.get(url);
+    const addr = resp.serverAddr();
+    return {
+      status: resp.status(),
+      hasAddr: addr != null,
+      ip: addr ? addr.ipAddress : null,
+      portMatches: addr ? addr.port === expectedPort : false,
+    };
+    ",
+    serde_json::json!([format!("http://127.0.0.1:{port}/api"), port]),
+  );
+  assert_eq!(v["status"].as_i64(), Some(200), "{v}");
+  assert_eq!(v["hasAddr"].as_bool(), Some(true), "serverAddr must be present: {v}");
+  assert_eq!(v["ip"].as_str(), Some("127.0.0.1"), "loopback ip expected: {v}");
+  assert_eq!(
+    v["portMatches"].as_bool(),
+    Some(true),
+    "serverAddr.port must match server: {v}"
+  );
+}
+
 pub fn register(set: &mut super::super::TestSet<'_>) {
   set.run(
     "backends_support::pw_159_161::test_web_error_location",
@@ -200,4 +229,8 @@ pub fn register(set: &mut super::super::TestSet<'_>) {
     test_request_existing_response,
   );
   set.run("backends_support::pw_159_161::test_web_storage", test_web_storage);
+  set.run(
+    "backends_support::pw_159_161::test_api_response_server_addr",
+    test_api_response_server_addr,
+  );
 }

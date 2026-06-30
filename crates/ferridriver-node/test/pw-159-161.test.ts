@@ -3,7 +3,7 @@
 // page.localStorage / page.sessionStorage WebStorage (1.61).
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { type Browser, type Page } from "../index.js";
+import { type Browser, type Page, HttpClient } from "../index.js";
 import { launchForBackend } from "./_helpers.js";
 
 const BACKENDS: string[] = process.env.FERRIDRIVER_BACKEND
@@ -47,6 +47,21 @@ for (const backend of BACKENDS) {
       expect(typeof loc.url).toBe("string");
       expect(typeof loc.line).toBe("number");
       expect(typeof loc.column).toBe("number");
+    });
+
+    it("apiResponse.serverAddr() reports the resolved peer address", async () => {
+      const server = Bun.serve({ port: 0, fetch: () => new Response("ok") });
+      try {
+        const client = HttpClient.create();
+        const resp = await client.get(`http://127.0.0.1:${server.port}/api`);
+        expect(resp.status).toBe(200);
+        const addr = resp.serverAddr();
+        expect(addr).not.toBeNull();
+        expect(addr!.ipAddress).toBe("127.0.0.1");
+        expect(addr!.port).toBe(server.port);
+      } finally {
+        server.stop(true);
+      }
     });
 
     it("page.localStorage / sessionStorage round-trip against real storage", async () => {
