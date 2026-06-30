@@ -7,6 +7,8 @@
 //! - `request.existingResponse()` (1.59): already-received response, no wait.
 //! - `page.localStorage` / `page.sessionStorage` WebStorage (1.61).
 //! - `apiResponse.serverAddr()` (1.61): resolved peer address.
+//! - BrowserContext lifecycle-mirror events (1.60): `framenavigated`,
+//!   `frameattached`, `pageload`, `pageclose`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::needless_pass_by_value)]
 
@@ -219,6 +221,96 @@ pub fn test_api_response_server_addr(c: &mut McpClient) {
   );
 }
 
+/// Context `'framenavigated'` mirror event resolves with a `Frame` for
+/// the navigated main frame. Only fires once the page→context bridge
+/// forwards the page-level frame event.
+pub fn test_context_framenavigated(c: &mut McpClient) {
+  c.nav("<body>ctx-frame</body>");
+  let v = c.script_value(
+    r"
+    const [frame] = await Promise.all([
+      context.waitForEvent('framenavigated', 5000),
+      page.goto('data:text/html,<title>navmark</title>'),
+    ]);
+    return { url: frame.url(), hasUrlFn: typeof frame.url === 'function' };
+    ",
+  );
+  assert_eq!(v["hasUrlFn"].as_bool(), Some(true), "must resolve a Frame: {v}");
+  let url = v["url"].as_str().unwrap_or_default();
+  assert!(
+    url.starts_with("data:") && url.contains("navmark"),
+    "frame.url() wrong: {url}"
+  );
+}
+
+/// Context `'frameattached'` resolves with the newly-attached child
+/// `Frame` after an iframe is appended.
+pub fn test_context_frameattached(c: &mut McpClient) {
+  c.nav("<body><div id=host></div></body>");
+  let v = c.script_value(
+    r"
+    const [frame] = await Promise.all([
+      context.waitForEvent('frameattached', 5000),
+      page.evaluate(() => {
+        const f = document.createElement('iframe');
+        f.src = 'data:text/html,<p>child</p>';
+        document.getElementById('host').appendChild(f);
+      }),
+    ]);
+    return { hasUrlFn: typeof frame.url === 'function', isMain: frame === page.mainFrame() };
+    ",
+  );
+  assert_eq!(
+    v["hasUrlFn"].as_bool(),
+    Some(true),
+    "frameattached must resolve a Frame: {v}"
+  );
+}
+
+/// Context `'pageload'` resolves with the `Page` that fired `load`.
+pub fn test_context_pageload(c: &mut McpClient) {
+  c.nav("<body>ctx-load</body>");
+  let v = c.script_value(
+    r"
+    const [p] = await Promise.all([
+      context.waitForEvent('pageload', 5000),
+      page.goto('data:text/html,<title>loadmark</title>'),
+    ]);
+    return { url: p.url(), hasUrlFn: typeof p.url === 'function' };
+    ",
+  );
+  assert_eq!(v["hasUrlFn"].as_bool(), Some(true), "pageload must resolve a Page: {v}");
+  assert!(
+    v["url"].as_str().unwrap_or_default().contains("loadmark"),
+    "page.url() wrong: {v}"
+  );
+}
+
+/// Context `'pageclose'` resolves with the closed `Page`.
+pub fn test_context_pageclose(c: &mut McpClient) {
+  c.nav("<body>ctx-close</body>");
+  let v = c.script_value(
+    r"
+    const newPage = await context.newPage();
+    const [closed] = await Promise.all([
+      context.waitForEvent('pageclose', 5000),
+      newPage.close(),
+    ]);
+    return { isClosed: closed.isClosed(), hasIsClosedFn: typeof closed.isClosed === 'function' };
+    ",
+  );
+  assert_eq!(
+    v["hasIsClosedFn"].as_bool(),
+    Some(true),
+    "pageclose must resolve a Page: {v}"
+  );
+  assert_eq!(
+    v["isClosed"].as_bool(),
+    Some(true),
+    "closed page should report isClosed: {v}"
+  );
+}
+
 pub fn register(set: &mut super::super::TestSet<'_>) {
   set.run(
     "backends_support::pw_159_161::test_web_error_location",
@@ -232,5 +324,21 @@ pub fn register(set: &mut super::super::TestSet<'_>) {
   set.run(
     "backends_support::pw_159_161::test_api_response_server_addr",
     test_api_response_server_addr,
+  );
+  set.run(
+    "backends_support::pw_159_161::test_context_framenavigated",
+    test_context_framenavigated,
+  );
+  set.run(
+    "backends_support::pw_159_161::test_context_frameattached",
+    test_context_frameattached,
+  );
+  set.run(
+    "backends_support::pw_159_161::test_context_pageload",
+    test_context_pageload,
+  );
+  set.run(
+    "backends_support::pw_159_161::test_context_pageclose",
+    test_context_pageclose,
   );
 }

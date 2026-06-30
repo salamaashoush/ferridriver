@@ -543,23 +543,58 @@ impl Default for EventEmitter {
 // ── Context-level event system ─────────────────────────────────────────
 
 /// Events emitted by browser contexts. Mirrors the subset of
-/// Playwright's `BrowserContextEventMap` that ferridriver currently
-/// supports. Today only `'weberror'` — extensible to `'page'`,
-/// `'request'`, `'response'`, etc. under §6.14 without touching the
-/// emitter implementation below.
+/// Playwright's `BrowserContextEventMap` that ferridriver supports:
+/// `'weberror'` plus the page-lifecycle mirror events added in
+/// Playwright 1.60 (`'download'`, `'frameattached'`, `'framedetached'`,
+/// `'framenavigated'`, `'pageclose'`, `'pageload'`).
 #[derive(Debug, Clone)]
 pub enum ContextEvent {
   /// Unhandled error / rejection in any page in this context. Mirrors
   /// Playwright's `browserContext.on('weberror', (webError: WebError) => ...)`
   /// from `server/browserContext.ts:54`.
   WebError(crate::web_error::WebError),
+  /// Browser-initiated download on any page in this context. Mirrors
+  /// `browserContext.on('download', (download: Download) => ...)`.
+  Download(Download),
+  /// A frame attached on a page in this context. Carries the owning
+  /// page so the binding can mint a live `Frame` for `frame_id`.
+  /// Mirrors `browserContext.on('frameattached', (frame: Frame) => ...)`.
+  FrameAttached {
+    page: Arc<crate::page::Page>,
+    frame_id: String,
+  },
+  /// A frame detached. `browserContext.on('framedetached', ...)`.
+  FrameDetached {
+    page: Arc<crate::page::Page>,
+    frame_id: String,
+  },
+  /// A frame navigated. `browserContext.on('framenavigated', ...)`.
+  FrameNavigated {
+    page: Arc<crate::page::Page>,
+    frame_id: String,
+  },
+  /// A page in this context was closed.
+  /// `browserContext.on('pageclose', (page: Page) => ...)`.
+  PageClose(Arc<crate::page::Page>),
+  /// A page in this context fired `load`.
+  /// `browserContext.on('pageload', (page: Page) => ...)`.
+  PageLoad(Arc<crate::page::Page>),
 }
 
 /// Callback type for context-level event listeners.
 pub type ContextEventCallback = Arc<dyn Fn(ContextEvent) + Send + Sync>;
 
 fn context_event_name_matches(name: &str, event: &ContextEvent) -> bool {
-  matches!((name, event), ("weberror", ContextEvent::WebError(_)))
+  matches!(
+    (name, event),
+    ("weberror", ContextEvent::WebError(_))
+      | ("download", ContextEvent::Download(_))
+      | ("frameattached", ContextEvent::FrameAttached { .. })
+      | ("framedetached", ContextEvent::FrameDetached { .. })
+      | ("framenavigated", ContextEvent::FrameNavigated { .. })
+      | ("pageclose", ContextEvent::PageClose(_))
+      | ("pageload", ContextEvent::PageLoad(_))
+  )
 }
 
 /// Broadcast-based context-event emitter. Mirrors [`EventEmitter`] but

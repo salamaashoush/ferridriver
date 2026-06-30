@@ -407,19 +407,17 @@ impl BrowserContext {
 
   // ── Context-level events ──
 
-  /// Register a context-level event listener. Currently supports
-  /// `'weberror'` — unhandled errors / rejections from any page in
-  /// this context. Playwright:
-  /// `browserContext.on('weberror', (webError: WebError) => …)` —
-  /// callback receives a live [`crate::web_error::WebError`] class
-  /// instance (not a snapshot). Returns a numeric listener id for
-  /// removal via [`Self::off`].
-  #[napi(ts_args_type = "event: 'weberror', listener: (webError: WebError) => void")]
-  pub fn on(
-    &self,
-    event: String,
-    listener: napi::bindgen_prelude::Function<'_, crate::web_error::WebErrorArg, ()>,
-  ) -> Result<f64> {
+  /// Register a context-level event listener. Supports `'weberror'`
+  /// plus the page-lifecycle mirror events (`'download'`,
+  /// `'frameattached'`, `'framedetached'`, `'framenavigated'`,
+  /// `'pageclose'`, `'pageload'`). Playwright:
+  /// `browserContext.on(event, listener)` — the callback receives a
+  /// live class instance (WebError / Download / Frame / Page). Returns a
+  /// numeric listener id for removal via [`Self::off`].
+  #[napi(
+    ts_args_type = "event: 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void"
+  )]
+  pub fn on(&self, event: String, listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>) -> Result<f64> {
     let callback = build_context_event_callback(listener)?;
     let id = self.inner.on(&event, callback);
     #[allow(clippy::cast_precision_loss)]
@@ -427,12 +425,10 @@ impl BrowserContext {
   }
 
   /// One-shot variant of [`Self::on`]. Auto-removed after first match.
-  #[napi(ts_args_type = "event: 'weberror', listener: (webError: WebError) => void")]
-  pub fn once(
-    &self,
-    event: String,
-    listener: napi::bindgen_prelude::Function<'_, crate::web_error::WebErrorArg, ()>,
-  ) -> Result<f64> {
+  #[napi(
+    ts_args_type = "event: 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void"
+  )]
+  pub fn once(&self, event: String, listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>) -> Result<f64> {
     let callback = build_context_event_callback(listener)?;
     let id = self.inner.once(&event, callback);
     #[allow(clippy::cast_precision_loss)]
@@ -448,19 +444,17 @@ impl BrowserContext {
   }
 
   /// Wait for a context-level event. Playwright:
-  /// `browserContext.waitForEvent(event, options?)`. Currently
-  /// supports `'weberror'` — returns the live [`crate::web_error::WebError`]
-  /// handle.
+  /// `browserContext.waitForEvent(event, options?)`. Supports
+  /// `'weberror'` plus the page-lifecycle mirror events; resolves with
+  /// the matching live class instance.
   #[napi(
-    ts_args_type = "event: 'weberror', timeoutMs?: number",
-    ts_return_type = "Promise<WebError>"
+    ts_args_type = "event: 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', timeoutMs?: number",
+    ts_return_type = "Promise<WebError | Download | Frame | Page>"
   )]
-  pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<crate::web_error::WebError> {
+  pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<ContextEventArg> {
     let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
     let ev = self.inner.wait_for_event(&event, timeout).await.into_napi()?;
-    match ev {
-      ferridriver::events::ContextEvent::WebError(err) => Ok(crate::web_error::WebError::from_core(err)),
-    }
+    Ok(ContextEventArg::from_event(ev))
   }
 
   // ── Exposed bindings / functions ──
@@ -897,8 +891,60 @@ impl NapiBrowserContextOptions {
   }
 }
 
+/// Cross-thread dispatch arg for context-level `on`/`once` callbacks.
+/// Carries the live core payload across the tokio→napi boundary; the
+/// `ToNapiValue` conversion (run on the JS thread) wraps it in the
+/// Playwright-shaped class instance per variant. Mirrors the page
+/// binding's `live_event_arg` fan-out.
+pub enum ContextEventArg {
+  WebError(ferridriver::web_error::WebError),
+  Download(ferridriver::download::Download),
+  Frame {
+    page: std::sync::Arc<ferridriver::Page>,
+    frame_id: String,
+  },
+  Page(std::sync::Arc<ferridriver::Page>),
+}
+
+impl napi::bindgen_prelude::ToNapiValue for ContextEventArg {
+  unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
+    match val {
+      ContextEventArg::WebError(err) => unsafe {
+        crate::web_error::WebErrorArg::to_napi_value(env, crate::web_error::WebErrorArg(err))
+      },
+      ContextEventArg::Download(d) => {
+        let wrapper = crate::download::Download::from_core(d);
+        unsafe { crate::download::Download::to_napi_value(env, wrapper) }
+      },
+      ContextEventArg::Frame { page, frame_id } => {
+        let wrapper = crate::frame::Frame::wrap(page.frame_for_id(&frame_id));
+        unsafe { crate::frame::Frame::to_napi_value(env, wrapper) }
+      },
+      ContextEventArg::Page(page) => {
+        let wrapper = crate::page::Page::wrap(page);
+        unsafe { crate::page::Page::to_napi_value(env, wrapper) }
+      },
+    }
+  }
+}
+
+impl ContextEventArg {
+  /// Lower a core [`ContextEvent`] into the matching cross-thread arg.
+  fn from_event(ev: ferridriver::events::ContextEvent) -> Self {
+    use ferridriver::events::ContextEvent;
+    match ev {
+      ContextEvent::WebError(err) => Self::WebError(err),
+      ContextEvent::Download(d) => Self::Download(d),
+      ContextEvent::FrameAttached { page, frame_id }
+      | ContextEvent::FrameDetached { page, frame_id }
+      | ContextEvent::FrameNavigated { page, frame_id } => Self::Frame { page, frame_id },
+      ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => Self::Page(page),
+    }
+  }
+}
+
 fn build_context_event_callback(
-  listener: napi::bindgen_prelude::Function<'_, crate::web_error::WebErrorArg, ()>,
+  listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
 ) -> Result<ferridriver::events::ContextEventCallback> {
   let tsfn = listener
     .build_threadsafe_function()
@@ -906,13 +952,11 @@ fn build_context_event_callback(
     .weak::<true>()
     .max_queue_size::<0>()
     .build()?;
-  Ok(std::sync::Arc::new(move |ev| match ev {
-    ferridriver::events::ContextEvent::WebError(err) => {
-      tsfn.call(
-        crate::web_error::WebErrorArg(err),
-        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
-      );
-    },
+  Ok(std::sync::Arc::new(move |ev| {
+    tsfn.call(
+      ContextEventArg::from_event(ev),
+      napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+    );
   }))
 }
 

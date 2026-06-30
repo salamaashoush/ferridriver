@@ -802,10 +802,50 @@ impl BrowserState {
     // lifetime — forwards as long as the backend's broadcast
     // channel stays open (i.e. the page is alive).
     let mut rx = page.events().subscribe();
+    let bridge_page = page.clone();
     tokio::spawn(async move {
+      use crate::events::{ContextEvent, PageEvent};
       while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
-        if let crate::events::PageEvent::PageError(err) = event {
-          context_events.emit(crate::events::ContextEvent::WebError(err));
+        // Frame- and page-lifecycle mirror events need the public
+        // wrapper `Arc<Page>` so the binding can mint a `Frame` /
+        // deliver a `Page`. Upgrade lazily; skip if every wrapper has
+        // been dropped (page is going away).
+        let upgrade = || bridge_page.upgrade_page_backref();
+        match event {
+          PageEvent::PageError(err) => context_events.emit(ContextEvent::WebError(err)),
+          PageEvent::Download(d) => context_events.emit(ContextEvent::Download(d)),
+          PageEvent::FrameAttached(info) => {
+            if let Some(page) = upgrade() {
+              context_events.emit(ContextEvent::FrameAttached {
+                page,
+                frame_id: info.frame_id,
+              });
+            }
+          },
+          PageEvent::FrameDetached { frame_id } => {
+            if let Some(page) = upgrade() {
+              context_events.emit(ContextEvent::FrameDetached { page, frame_id });
+            }
+          },
+          PageEvent::FrameNavigated(info) => {
+            if let Some(page) = upgrade() {
+              context_events.emit(ContextEvent::FrameNavigated {
+                page,
+                frame_id: info.frame_id,
+              });
+            }
+          },
+          PageEvent::Close => {
+            if let Some(page) = upgrade() {
+              context_events.emit(ContextEvent::PageClose(page));
+            }
+          },
+          PageEvent::Load => {
+            if let Some(page) = upgrade() {
+              context_events.emit(ContextEvent::PageLoad(page));
+            }
+          },
+          _ => {},
         }
       }
     });
