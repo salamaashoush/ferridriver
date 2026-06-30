@@ -47,7 +47,7 @@ pub struct StartHarOptions {
 
 /// Live recorder state, stored per-context on [`crate::state::BrowserState`]
 /// between `start_har` and `stop_har`.
-pub(crate) struct HarRecorder {
+pub struct HarRecorder {
   pub path: PathBuf,
   pub content: HarContentPolicy,
   pub mode: HarMode,
