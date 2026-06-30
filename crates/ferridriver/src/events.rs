@@ -760,3 +760,166 @@ impl Default for ContextEventEmitter {
     Self::new()
   }
 }
+
+// ── Browser-level event system ─────────────────────────────────────────
+
+/// Events emitted by a `Browser`. Mirrors the subset of Playwright's
+/// `BrowserEventMap` that ferridriver supports — `'context'`, fired when
+/// a new browser context is created (`browser.on('context', ...)`,
+/// added in Playwright 1.60).
+#[derive(Clone)]
+pub enum BrowserEvent {
+  /// A new browser context was created on this browser. Carries the
+  /// live [`crate::context::ContextRef`]. Mirrors
+  /// `browser.on('context', (context: BrowserContext) => ...)`.
+  Context(crate::context::ContextRef),
+}
+
+/// Callback type for browser-level event listeners.
+pub type BrowserEventCallback = Arc<dyn Fn(BrowserEvent) + Send + Sync>;
+
+fn browser_event_name_matches(name: &str, event: &BrowserEvent) -> bool {
+  matches!((name, event), ("context", BrowserEvent::Context(_)))
+}
+
+/// Broadcast-based browser-event emitter. Mirrors [`ContextEventEmitter`]
+/// but for [`BrowserEvent`]. Cheap to clone (Arc'd internally).
+#[derive(Clone)]
+pub struct BrowserEventEmitter {
+  tx: broadcast::Sender<BrowserEvent>,
+  listeners: Arc<std::sync::Mutex<rustc_hash::FxHashMap<u64, ContextListenerEntry>>>,
+  next_listener_id: Arc<std::sync::atomic::AtomicU64>,
+  runtime_handle: Arc<std::sync::Mutex<Option<tokio::runtime::Handle>>>,
+}
+
+impl BrowserEventEmitter {
+  #[must_use]
+  pub fn new() -> Self {
+    let (tx, _) = broadcast::channel(256);
+    let handle = tokio::runtime::Handle::try_current().ok();
+    Self {
+      tx,
+      listeners: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+      next_listener_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+      runtime_handle: Arc::new(std::sync::Mutex::new(handle)),
+    }
+  }
+
+  fn spawn_listener(&self, future: impl std::future::Future<Output = ()> + Send + 'static) -> tokio::task::AbortHandle {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+      return handle.spawn(future).abort_handle();
+    }
+    if let Ok(guard) = self.runtime_handle.lock() {
+      if let Some(handle) = guard.as_ref() {
+        return handle.spawn(future).abort_handle();
+      }
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+      let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        return;
+      };
+      let handle = rt.spawn(future);
+      let _ = tx.send(handle.abort_handle());
+      rt.block_on(handle).ok();
+    });
+    rx.recv()
+      .unwrap_or_else(|_| tokio::runtime::Handle::current().spawn(async {}).abort_handle())
+  }
+
+  /// Emit a browser event to all current subscribers.
+  pub fn emit(&self, event: BrowserEvent) {
+    let _ = self.tx.send(event);
+  }
+
+  /// Wait for the next event matching `event_name`, with timeout.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the timeout elapses or the channel is closed.
+  pub async fn wait_for_event(&self, event_name: &str, timeout_ms: u64) -> crate::error::Result<BrowserEvent> {
+    let mut rx = self.tx.subscribe();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let name = event_name.to_string();
+    loop {
+      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+      if remaining.is_zero() {
+        return Err(crate::error::FerriError::timeout(
+          "waiting for browser event",
+          timeout_ms,
+        ));
+      }
+      match tokio::time::timeout(remaining, rx.recv()).await {
+        Ok(Ok(event)) if browser_event_name_matches(&name, &event) => return Ok(event),
+        Ok(Ok(_)) => {},
+        Ok(Err(_)) => {
+          return Err(crate::error::FerriError::target_closed(Some(
+            "browser event channel closed".into(),
+          )));
+        },
+        Err(_) => {
+          return Err(crate::error::FerriError::timeout(
+            "waiting for browser event",
+            timeout_ms,
+          ));
+        },
+      }
+    }
+  }
+
+  /// Register a browser-level event listener. Returns a [`ListenerId`].
+  pub fn on(&self, event_name: &str, callback: BrowserEventCallback) -> ListenerId {
+    let id = self.next_listener_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut rx = self.tx.subscribe();
+    let filter_name = event_name.to_string();
+    let abort_handle = self.spawn_listener(async move {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+        if browser_event_name_matches(&filter_name, &event) {
+          callback(event);
+        }
+      }
+    });
+    if let Ok(mut guard) = self.listeners.lock() {
+      guard.insert(id, ContextListenerEntry { abort: abort_handle });
+    }
+    ListenerId(id)
+  }
+
+  /// Register a single-shot browser-level event listener.
+  pub fn once(&self, event_name: &str, callback: BrowserEventCallback) -> ListenerId {
+    let listeners = self.listeners.clone();
+    let id = self.next_listener_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut rx = self.tx.subscribe();
+    let filter_name = event_name.to_string();
+    let abort_handle = self.spawn_listener(async move {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+        if browser_event_name_matches(&filter_name, &event) {
+          callback(event);
+          if let Ok(mut guard) = listeners.lock() {
+            guard.remove(&id);
+          }
+          break;
+        }
+      }
+    });
+    if let Ok(mut guard) = self.listeners.lock() {
+      guard.insert(id, ContextListenerEntry { abort: abort_handle });
+    }
+    ListenerId(id)
+  }
+
+  /// Remove a browser-level listener by id.
+  pub fn off(&self, id: ListenerId) {
+    if let Ok(mut guard) = self.listeners.lock() {
+      if let Some(entry) = guard.remove(&id.0) {
+        entry.abort.abort();
+      }
+    }
+  }
+}
+
+impl Default for BrowserEventEmitter {
+  fn default() -> Self {
+    Self::new()
+  }
+}

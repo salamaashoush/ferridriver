@@ -84,6 +84,27 @@ impl BrowserJs {
     Ok(())
   }
 
+  /// Playwright: `browser.waitForEvent(event, options?)`. Supports
+  /// `'context'` — resolves with the live `BrowserContext` created by
+  /// the next `browser.newContext(...)`.
+  #[qjs(rename = "waitForEvent")]
+  pub async fn wait_for_event<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    event: String,
+    timeout_ms: Opt<f64>,
+  ) -> rquickjs::Result<Value<'js>> {
+    let timeout = timeout_ms.0.map_or(30000, crate::bindings::convert::ms_f64_to_u64);
+    let ev = self.inner.wait_for_event(&event, timeout).await.into_js_with(&ctx)?;
+    match ev {
+      ferridriver::events::BrowserEvent::Context(ctx_ref) => {
+        let wrapper = BrowserContextJs::new(Arc::new(ctx_ref));
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      },
+    }
+  }
+
   /// Playwright: `browser.contexts()`. Returns the list of contexts as
   /// JS handles.
   #[qjs(rename = "contexts")]

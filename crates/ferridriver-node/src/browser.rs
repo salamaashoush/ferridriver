@@ -25,6 +25,38 @@ impl Browser {
   }
 }
 
+/// Cross-thread dispatch arg for `browser.on('context')` — carries the
+/// live [`ferridriver::ContextRef`] across the tokio→napi boundary; the
+/// `ToNapiValue` conversion (run on the JS thread) wraps it into the
+/// [`crate::context::BrowserContext`] class instance.
+pub struct BrowserContextArg(ferridriver::ContextRef);
+
+impl napi::bindgen_prelude::ToNapiValue for BrowserContextArg {
+  unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
+    let wrapper = crate::context::BrowserContext::wrap(val.0);
+    unsafe { crate::context::BrowserContext::to_napi_value(env, wrapper) }
+  }
+}
+
+fn build_browser_event_callback(
+  listener: napi::bindgen_prelude::Function<'_, BrowserContextArg, ()>,
+) -> Result<ferridriver::events::BrowserEventCallback> {
+  let tsfn = listener
+    .build_threadsafe_function()
+    .callee_handled::<false>()
+    .weak::<true>()
+    .max_queue_size::<0>()
+    .build()?;
+  Ok(std::sync::Arc::new(move |ev| match ev {
+    ferridriver::events::BrowserEvent::Context(ctx) => {
+      tsfn.call(
+        BrowserContextArg(ctx),
+        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+      );
+    },
+  }))
+}
+
 #[napi]
 impl Browser {
   /// Create a new page (tab).
@@ -105,6 +137,53 @@ impl Browser {
   #[napi]
   pub fn default_context(&self) -> crate::context::BrowserContext {
     crate::context::BrowserContext::wrap(self.inner.default_context())
+  }
+
+  /// Register a browser-level event listener. Supports `'context'` —
+  /// fired when a new context is created via [`Self::new_context`].
+  /// Playwright: `browser.on('context', (context: BrowserContext) => …)`.
+  /// Returns a numeric listener id for [`Self::off`].
+  #[napi(ts_args_type = "event: 'context', listener: (context: BrowserContext) => void")]
+  pub fn on(&self, event: String, listener: napi::bindgen_prelude::Function<'_, BrowserContextArg, ()>) -> Result<f64> {
+    let callback = build_browser_event_callback(listener)?;
+    let id = self.inner.on(&event, callback);
+    #[allow(clippy::cast_precision_loss)]
+    Ok(id.0 as f64)
+  }
+
+  /// One-shot variant of [`Self::on`].
+  #[napi(ts_args_type = "event: 'context', listener: (context: BrowserContext) => void")]
+  pub fn once(
+    &self,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, BrowserContextArg, ()>,
+  ) -> Result<f64> {
+    let callback = build_browser_event_callback(listener)?;
+    let id = self.inner.once(&event, callback);
+    #[allow(clippy::cast_precision_loss)]
+    Ok(id.0 as f64)
+  }
+
+  /// Remove a browser-level listener by id.
+  #[napi]
+  pub fn off(&self, listener_id: f64) {
+    self
+      .inner
+      .off(ferridriver::events::ListenerId(crate::types::f64_to_u64(listener_id)));
+  }
+
+  /// Wait for a browser-level event. Playwright:
+  /// `browser.waitForEvent(event, options?)`. Supports `'context'`.
+  #[napi(
+    ts_args_type = "event: 'context', timeoutMs?: number",
+    ts_return_type = "Promise<BrowserContext>"
+  )]
+  pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<crate::context::BrowserContext> {
+    let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
+    let ev = self.inner.wait_for_event(&event, timeout).await.into_napi()?;
+    match ev {
+      ferridriver::events::BrowserEvent::Context(ctx) => Ok(crate::context::BrowserContext::wrap(ctx)),
+    }
   }
 
   /// Close the browser. Accepts Playwright's `{ reason? }` options shape;

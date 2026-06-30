@@ -9,6 +9,7 @@
 //! - `apiResponse.serverAddr()` (1.61): resolved peer address.
 //! - BrowserContext lifecycle-mirror events (1.60): `framenavigated`,
 //!   `frameattached`, `pageload`, `pageclose`.
+//! - `browser.on('context')` (1.60): fired on `browser.newContext()`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::needless_pass_by_value)]
 
@@ -311,6 +312,31 @@ pub fn test_context_pageclose(c: &mut McpClient) {
   );
 }
 
+/// `browser.on('context')` (via waitForEvent) fires when a new context
+/// is created, resolving with the live `BrowserContext`. Times out (and
+/// fails) if the event is never delivered.
+pub fn test_browser_context_event(c: &mut McpClient) {
+  c.nav("<body>browser-ctx-event</body>");
+  let v = c.script_value(
+    r"
+    const [bcx] = await Promise.all([
+      browser.waitForEvent('context', 5000),
+      browser.newContext(),
+    ]);
+    return {
+      hasNewPageFn: typeof bcx.newPage === 'function',
+      hasCookiesFn: typeof bcx.cookies === 'function',
+    };
+    ",
+  );
+  assert_eq!(
+    v["hasNewPageFn"].as_bool(),
+    Some(true),
+    "context event must resolve a BrowserContext: {v}"
+  );
+  assert_eq!(v["hasCookiesFn"].as_bool(), Some(true), "{v}");
+}
+
 pub fn register(set: &mut super::super::TestSet<'_>) {
   set.run(
     "backends_support::pw_159_161::test_web_error_location",
@@ -340,5 +366,9 @@ pub fn register(set: &mut super::super::TestSet<'_>) {
   set.run(
     "backends_support::pw_159_161::test_context_pageclose",
     test_context_pageclose,
+  );
+  set.run(
+    "backends_support::pw_159_161::test_browser_context_event",
+    test_browser_context_event,
   );
 }

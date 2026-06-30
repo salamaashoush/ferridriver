@@ -105,6 +105,27 @@ for (const backend of BACKENDS) {
       expect((closed as any).isClosed()).toBe(true);
     });
 
+    it("browser.waitForEvent('context') resolves the new BrowserContext", async () => {
+      // newContext() is synchronous, so arm the wait and let it subscribe
+      // (a real async tick) before triggering — otherwise the emit can
+      // outrun the lazily-polled waitForEvent future on a multi-thread
+      // runtime.
+      const waitP = browser.waitForEvent("context", 5000);
+      await page.evaluate(() => 1);
+      browser.newContext();
+      const bcx = await waitP;
+      expect(typeof (bcx as any).newPage).toBe("function");
+      expect(typeof (bcx as any).cookies).toBe("function");
+    });
+
+    it("browser.once('context') delivers the context to the listener", async () => {
+      const got = new Promise<boolean>((resolve) => {
+        browser.once("context", (bcx: any) => resolve(typeof bcx.newPage === "function"));
+      });
+      browser.newContext();
+      expect(await got).toBe(true);
+    });
+
     it("page.localStorage / sessionStorage round-trip against real storage", async () => {
       const server = Bun.serve({
         port: 0,
