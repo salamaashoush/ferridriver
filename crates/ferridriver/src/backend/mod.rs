@@ -816,6 +816,23 @@ impl AnyPage {
     slot.set(weak);
   }
 
+  /// Upgrade the page back-reference to the public wrapper `Arc<Page>`,
+  /// if one is currently alive. Used by the per-page → per-context
+  /// event bridge to deliver a `Page` to context-level
+  /// `'pageclose'`/`'pageload'` and to resolve a `Frame` for the
+  /// frame-lifecycle mirror events. Returns `None` if every wrapper has
+  /// been dropped (matches Playwright's weak `createHandle` guard).
+  #[must_use]
+  pub fn upgrade_page_backref(&self) -> Option<std::sync::Arc<crate::page::Page>> {
+    let slot = match self {
+      AnyPage::CdpPipe(p) => &p.page_backref,
+      AnyPage::CdpRaw(p) => &p.page_backref,
+      AnyPage::WebKit(p) => &p.page_backref,
+      AnyPage::Bidi(p) => &p.page_backref,
+    };
+    slot.upgrade()
+  }
+
   /// Backend-owned frame cache shared across `Arc<crate::page::Page>`
   /// wrappers. MCP tool handlers construct a fresh wrapper per call,
   /// so storing the cache on the wrapper would reset it between

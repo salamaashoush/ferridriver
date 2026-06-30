@@ -1,6 +1,8 @@
 // NAPI coverage for Playwright 1.59-1.61 gap fills:
 // webError.location() (1.60), request.existingResponse() (1.59),
-// page.localStorage / page.sessionStorage WebStorage (1.61).
+// page.localStorage / page.sessionStorage WebStorage (1.61),
+// apiResponse.serverAddr() (1.61), BrowserContext lifecycle-mirror
+// events (1.60): framenavigated / pageload / pageclose via on + waitForEvent.
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { type Browser, type Page, HttpClient } from "../index.js";
@@ -62,6 +64,45 @@ for (const backend of BACKENDS) {
       } finally {
         server.stop(true);
       }
+    });
+
+    it("context.waitForEvent('framenavigated') resolves a Frame", async () => {
+      const context = browser.defaultContext();
+      const [frame] = await Promise.all([
+        context.waitForEvent("framenavigated", 5000),
+        page.goto("data:text/html,<title>ctx-navmark</title>"),
+      ]);
+      expect(typeof (frame as any).url).toBe("function");
+      expect((frame as any).url()).toContain("ctx-navmark");
+    });
+
+    it("context.waitForEvent('pageload') resolves a Page", async () => {
+      const context = browser.defaultContext();
+      const [p] = await Promise.all([
+        context.waitForEvent("pageload", 5000),
+        page.goto("data:text/html,<title>ctx-loadmark</title>"),
+      ]);
+      expect(typeof (p as any).url).toBe("function");
+      expect((p as any).url()).toContain("ctx-loadmark");
+    });
+
+    it("context.once('framenavigated') delivers a Frame to the listener", async () => {
+      const context = browser.defaultContext();
+      const got = new Promise<string>((resolve) => {
+        context.once("framenavigated", (frame: any) => resolve(frame.url()));
+      });
+      await page.goto("data:text/html,<title>once-nav</title>");
+      expect(await got).toContain("once-nav");
+    });
+
+    it("context.waitForEvent('pageclose') resolves the closed Page", async () => {
+      const context = browser.defaultContext();
+      const newPage = await context.newPage();
+      const [closed] = await Promise.all([
+        context.waitForEvent("pageclose", 5000),
+        newPage.close(),
+      ]);
+      expect((closed as any).isClosed()).toBe(true);
     });
 
     it("page.localStorage / sessionStorage round-trip against real storage", async () => {

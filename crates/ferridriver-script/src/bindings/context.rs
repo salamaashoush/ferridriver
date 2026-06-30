@@ -546,9 +546,11 @@ impl BrowserContextJs {
 
   // ── Context-level events ───────────────────────────────────────────────
 
-  /// Wait for the next context-scoped event. Currently supports
-  /// `'weberror'` — returns a live [`crate::bindings::web_error::WebErrorJs`].
-  /// Playwright: `browserContext.waitForEvent(event, options?)`.
+  /// Wait for the next context-scoped event. Supports `'weberror'` plus
+  /// the page-lifecycle mirror events (`'download'`, `'frameattached'`,
+  /// `'framedetached'`, `'framenavigated'`, `'pageclose'`, `'pageload'`),
+  /// resolving with the matching live class instance. Playwright:
+  /// `browserContext.waitForEvent(event, options?)`.
   #[qjs(rename = "waitForEvent")]
   pub async fn wait_for_event<'js>(
     &self,
@@ -556,16 +558,29 @@ impl BrowserContextJs {
     event: String,
     timeout_ms: Opt<f64>,
   ) -> rquickjs::Result<Value<'js>> {
+    use ferridriver::events::ContextEvent;
+    use rquickjs::IntoJs;
     use rquickjs::class::Class;
     let timeout = timeout_ms
       .0
       .map_or_else(|| self.inner.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
     let ev = self.inner.wait_for_event(&event, timeout).await.into_js_with(&ctx)?;
     match ev {
-      ferridriver::events::ContextEvent::WebError(err) => {
-        let wrapper = crate::bindings::web_error::WebErrorJs::new(err);
-        let instance = Class::instance(ctx.clone(), wrapper)?;
-        rquickjs::IntoJs::into_js(instance, &ctx)
+      ContextEvent::WebError(err) => {
+        Class::instance(ctx.clone(), crate::bindings::web_error::WebErrorJs::new(err))?.into_js(&ctx)
+      },
+      ContextEvent::Download(d) => {
+        Class::instance(ctx.clone(), crate::bindings::download::DownloadJs::new(d))?.into_js(&ctx)
+      },
+      ContextEvent::FrameAttached { page, frame_id }
+      | ContextEvent::FrameDetached { page, frame_id }
+      | ContextEvent::FrameNavigated { page, frame_id } => Class::instance(
+        ctx.clone(),
+        crate::bindings::frame::FrameJs::new(page.frame_for_id(&frame_id)),
+      )?
+      .into_js(&ctx),
+      ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => {
+        Class::instance(ctx.clone(), crate::bindings::page::pagejs_for_ctx(&ctx, page))?.into_js(&ctx)
       },
     }
   }
