@@ -493,6 +493,38 @@ impl ContextRef {
     Ok(pages)
   }
 
+  /// `context.tracing` handle. Playwright: `browserContext.tracing`.
+  #[must_use]
+  pub fn tracing(&self) -> crate::tracing::Tracing {
+    crate::tracing::Tracing::new(self.clone())
+  }
+
+  /// Composite session key (`instance:context`) identifying this context.
+  #[must_use]
+  pub fn composite(&self) -> String {
+    self.key.to_composite()
+  }
+
+  /// Shared per-state HAR-recorder registry (used by [`crate::tracing::Tracing`]).
+  pub(crate) async fn har_recorders(
+    &self,
+  ) -> Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::tracing::HarRecorder>>> {
+    self.state.read().await.har_recorders.clone()
+  }
+
+  /// Handle to this context's accumulated network-request log, if the
+  /// context exists. Used by HAR recording to slice the requests seen
+  /// during a `startHar`/`stopHar` window.
+  pub(crate) async fn network_log_handle(&self) -> Option<Arc<RwLock<Vec<Request>>>> {
+    self
+      .state
+      .read()
+      .await
+      .context(&self.name)
+      .ok()
+      .map(|c| c.network_log.clone())
+  }
+
   /// Get all cookies in this context.
   ///
   /// # Errors

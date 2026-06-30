@@ -52,6 +52,7 @@ pub mod process;
 pub mod runtime;
 pub mod sidecars;
 pub mod streams;
+pub mod tracing;
 pub mod video;
 pub mod web_error;
 pub mod web_storage;

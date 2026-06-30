@@ -37,6 +37,12 @@ impl BrowserContext {
     self.inner.name().to_string()
   }
 
+  /// Playwright: `browserContext.tracing` — the Tracing controller.
+  #[napi(getter)]
+  pub fn tracing(&self) -> crate::tracing::Tracing {
+    crate::tracing::Tracing::wrap(self.inner.clone())
+  }
+
   /// Create a new page in this context.
   #[napi]
   pub async fn new_page(&self) -> Result<Page> {

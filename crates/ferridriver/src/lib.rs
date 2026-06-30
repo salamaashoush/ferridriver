@@ -69,6 +69,7 @@ pub mod backend;
 pub mod route;
 pub mod snapshot;
 pub mod state;
+pub mod tracing;
 
 // ── Browser installation ──
 pub mod install;

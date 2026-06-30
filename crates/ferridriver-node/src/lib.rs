@@ -73,6 +73,7 @@ mod network;
 mod page;
 mod route;
 mod serialize_out;
+mod tracing;
 mod types;
 mod video;
 mod web_error;

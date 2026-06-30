@@ -37,6 +37,13 @@ impl BrowserContextJs {
 
 #[rquickjs::methods]
 impl BrowserContextJs {
+  /// `context.tracing` — Playwright's `Tracing` controller. Exposed as a
+  /// JS property.
+  #[qjs(get, rename = "tracing")]
+  pub fn tracing(&self) -> crate::bindings::tracing::TracingJs {
+    crate::bindings::tracing::TracingJs::new(self.inner.clone())
+  }
+
   // ── Cookies ───────────────────────────────────────────────────────────────
 
   /// All cookies visible in this context.

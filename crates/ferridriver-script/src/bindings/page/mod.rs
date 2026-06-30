@@ -6,7 +6,7 @@
 
 mod callbacks;
 mod events;
-mod options;
+pub(crate) mod options;
 
 pub(crate) use callbacks::*;
 pub(crate) use events::*;
