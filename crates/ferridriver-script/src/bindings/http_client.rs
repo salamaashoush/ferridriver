@@ -291,6 +291,21 @@ impl HttpResponseJs {
     self.inner.ok()
   }
 
+  /// Playwright: `apiResponse.serverAddr(): Promise<{ ipAddress, port } | null>`.
+  /// Resolved peer address, or `null` when the transport didn't surface one.
+  #[qjs(rename = "serverAddr")]
+  pub fn server_addr<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    match self.inner.server_addr() {
+      Some(addr) => {
+        let obj = rquickjs::Object::new(ctx.clone())?;
+        obj.set("ipAddress", addr.ip_address.clone())?;
+        obj.set("port", addr.port)?;
+        Ok(obj.into_value())
+      },
+      None => Ok(Value::new_null(ctx)),
+    }
+  }
+
   /// All response headers as an array of `{name, value}` tuples (Playwright's
   /// `headersArray` shape).
   #[qjs(rename = "headersArray")]

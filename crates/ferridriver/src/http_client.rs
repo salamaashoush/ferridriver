@@ -283,6 +283,16 @@ pub struct RequestOptions {
   pub net_guard: Option<NetGuard>,
 }
 
+/// Resolved peer address of a response. Mirrors Playwright's
+/// `RemoteAddr` (`{ ipAddress, port }`) returned by
+/// `apiResponse.serverAddr()` / `response.serverAddr()`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteAddr {
+  #[serde(rename = "ipAddress")]
+  pub ip_address: String,
+  pub port: u16,
+}
+
 /// An HTTP response.
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
@@ -291,6 +301,7 @@ pub struct HttpResponse {
   response_url: String,
   response_headers: Vec<(String, String)>,
   body_bytes: bytes::Bytes,
+  server_addr: Option<RemoteAddr>,
 }
 
 impl HttpResponse {
@@ -360,6 +371,13 @@ impl HttpResponse {
   /// Raw response body bytes.
   pub fn body(&self) -> &[u8] {
     &self.body_bytes
+  }
+
+  /// Resolved peer address (`{ ipAddress, port }`), or `None` when the
+  /// transport didn't surface one. Playwright:
+  /// `apiResponse.serverAddr(): Promise<RemoteAddr | null>`.
+  pub fn server_addr(&self) -> Option<&RemoteAddr> {
+    self.server_addr.as_ref()
   }
 
   /// Consume the response (Playwright compat, no-op in Rust since we own the bytes).
@@ -688,6 +706,10 @@ impl HttpClient {
     let status_code = response.status().as_u16();
     let status_text = response.status().canonical_reason().unwrap_or("Unknown").to_string();
     let response_url = response.url().to_string();
+    let server_addr = response.remote_addr().map(|addr| RemoteAddr {
+      ip_address: addr.ip().to_string(),
+      port: addr.port(),
+    });
     let response_headers: Vec<(String, String)> = response
       .headers()
       .iter()
@@ -702,6 +724,7 @@ impl HttpClient {
       response_url,
       response_headers,
       body_bytes,
+      server_addr,
     };
 
     if opts.fail_on_status_code.unwrap_or(false) && !api_response.ok() {

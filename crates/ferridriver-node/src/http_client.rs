@@ -120,6 +120,17 @@ impl HttpResponse {
     self.inner.ok()
   }
 
+  /// Playwright: `apiResponse.serverAddr(): Promise<RemoteAddr | null>`.
+  /// Resolved peer address, or `null` when the transport didn't surface
+  /// one.
+  #[napi(ts_return_type = "{ ipAddress: string, port: number } | null")]
+  pub fn server_addr(&self) -> Option<crate::network::RemoteAddr> {
+    self.inner.server_addr().map(|a| crate::network::RemoteAddr {
+      ip_address: a.ip_address.clone(),
+      port: u32::from(a.port),
+    })
+  }
+
   /// Response headers as a JSON object.
   #[napi]
   pub fn headers(&self) -> serde_json::Value {
