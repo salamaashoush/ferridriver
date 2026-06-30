@@ -5,6 +5,9 @@
 // events (1.60): framenavigated / pageload / pageclose via on + waitForEvent.
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { tmpdir } from "os";
+import { join } from "path";
+import { readFileSync, rmSync } from "fs";
 import { type Browser, type Page, HttpClient } from "../index.js";
 import { launchForBackend } from "./_helpers.js";
 
@@ -124,6 +127,32 @@ for (const backend of BACKENDS) {
       });
       browser.newContext();
       expect(await got).toBe(true);
+    });
+
+    it("context.tracing.startHar/stopHar records network into a HAR file", async () => {
+      const server = Bun.serve({
+        port: 0,
+        fetch: () => new Response("<!doctype html><body>har</body>", { headers: { "content-type": "text/html" } }),
+      });
+      const harPath = join(tmpdir(), `ferri-har-napi-${backend}-${server.port}.har`);
+      try {
+        const url = `http://127.0.0.1:${server.port}/page`;
+        await page.context().tracing.startHar(harPath);
+        await page.goto(url);
+        await page.goto(`${url}?second`);
+        await page.context().tracing.stopHar();
+
+        const har = JSON.parse(readFileSync(harPath, "utf8"));
+        const urls: string[] = har.log.entries.map((e: any) => e.request.url);
+        expect(urls.some((u) => u.includes(`127.0.0.1:${server.port}`))).toBe(true);
+        expect(har.log.entries.some((e: any) => e.response.status === 200)).toBe(true);
+
+        // trace .zip recorder is not implemented.
+        await expect(page.context().tracing.start()).rejects.toThrow();
+      } finally {
+        server.stop(true);
+        rmSync(harPath, { force: true });
+      }
     });
 
     it("page.localStorage / sessionStorage round-trip against real storage", async () => {

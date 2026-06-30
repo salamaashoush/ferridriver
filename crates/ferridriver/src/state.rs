@@ -220,6 +220,11 @@ pub struct BrowserState {
   /// every fresh page. Sync mutex so non-async construction paths
   /// can write without owning a tokio guard.
   pub context_options: Arc<std::sync::Mutex<HashMap<String, crate::options::BrowserContextOptions>>>,
+  /// Per-context active HAR recorder registry (`tracing.startHar` →
+  /// `stopHar`). Keyed by composite session key; an entry exists only
+  /// while a recording is in flight. Sync mutex so the start/stop paths
+  /// can register/take without owning the tokio `RwLock` guard.
+  pub har_recorders: Arc<std::sync::Mutex<HashMap<String, crate::tracing::HarRecorder>>>,
   /// Per-context binding registry — `exposeBinding` / `exposeFunction`
   /// callbacks registered on a [`crate::ContextRef`]. Keyed by composite
   /// session key, then by binding name so a context-level binding
@@ -309,6 +314,7 @@ impl BrowserState {
       context_closed: Arc::new(std::sync::Mutex::new(HashMap::default())),
       record_video: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_options: Arc::new(std::sync::Mutex::new(HashMap::default())),
+      har_recorders: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_bindings: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
