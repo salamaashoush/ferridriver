@@ -1086,8 +1086,15 @@ async fn dispatch_console(
     };
     let stack = build_stack(&raw, message.get("stackTrace"));
     let err = crate::web_error::ErrorDetails::new(name, msg_body, stack);
+    // `wkPage.ts:549`: location is the message-level `url`/`line`/`column`
+    // (1-based, converted to 0-based via `(v || 1) - 1`), not the stack.
+    let location = crate::console_message::ConsoleMessageLocation {
+      url: message.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
+      line_number: (message.get("line").and_then(Value::as_u64).unwrap_or(1).max(1) - 1) as u32,
+      column_number: (message.get("column").and_then(Value::as_u64).unwrap_or(1).max(1) - 1) as u32,
+    };
     emitter.emit(crate::events::PageEvent::PageError(crate::web_error::WebError::new(
-      &page, err,
+      &page, err, location,
     )));
     return;
   }

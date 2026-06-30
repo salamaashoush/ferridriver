@@ -1410,6 +1410,20 @@ impl Page {
     self.inner.clear_page_errors();
   }
 
+  /// Playwright: `page.localStorage: WebStorage` — the `localStorage`
+  /// area for the page's current origin.
+  #[napi(getter)]
+  pub fn local_storage(&self) -> crate::web_storage::WebStorage {
+    crate::web_storage::WebStorage::new(self.inner.clone(), ferridriver::options::WebStorageKind::Local)
+  }
+
+  /// Playwright: `page.sessionStorage: WebStorage` — the `sessionStorage`
+  /// area for the page's current origin.
+  #[napi(getter)]
+  pub fn session_storage(&self) -> crate::web_storage::WebStorage {
+    crate::web_storage::WebStorage::new(self.inner.clone(), ferridriver::options::WebStorageKind::Session)
+  }
+
   /// Close the page. Accepts the Playwright-identical
   /// `{ runBeforeUnload?, reason? }` options shape.
   #[napi]

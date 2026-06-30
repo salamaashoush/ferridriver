@@ -293,6 +293,16 @@ impl Request {
       .map_err(|e| napi::Error::from_reason(e.to_string()))
   }
 
+  /// Mirrors Playwright `request.existingResponse(): Response | null` —
+  /// the already-received response, without waiting for one.
+  #[napi(ts_return_type = "Promise<Response | null>")]
+  pub async fn existing_response(&self) -> Option<Response> {
+    self.inner.existing_response().await.map(|r| match self.page.as_ref() {
+      Some(page) => Response::from_core_with_page(r, page.clone()),
+      None => Response::from_core(r),
+    })
+  }
+
   /// Mirrors Playwright `request.frame(): Frame`. Resolves the
   /// initiating frame_id through the owning page's frame cache. Returns
   /// `null` when the request was emitted without a frame context (e.g.

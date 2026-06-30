@@ -2014,6 +2014,108 @@ impl Page {
     }
   }
 
+  /// Read every entry of the page's `localStorage` / `sessionStorage`
+  /// for the current origin. Playwright: `webStorage.items()`
+  /// (`server/page.ts::webStorageItems`) — evaluated against the live
+  /// storage object on the main frame.
+  ///
+  /// # Errors
+  ///
+  /// Page-side exception or protocol failure (e.g. storage access
+  /// denied on an opaque origin).
+  pub async fn web_storage_items(
+    self: &Arc<Self>,
+    kind: crate::options::WebStorageKind,
+  ) -> Result<Vec<crate::options::NameValue>> {
+    let storage = web_storage_global(kind);
+    let expr = format!(
+      "(() => {{ const result = []; for (let i = 0; i < {storage}.length; i++) {{ const name = {storage}.key(i); if (name !== null) result.push({{ name, value: {storage}.getItem(name) ?? '' }}); }} return result; }})()"
+    );
+    let value = self
+      .evaluate(&expr, crate::protocol::SerializedArgument::default(), Some(false))
+      .await?;
+    let json = value.to_json_like().unwrap_or(serde_json::Value::Array(Vec::new()));
+    Ok(serde_json::from_value(json).unwrap_or_default())
+  }
+
+  /// Read a single entry; `None` when the key is absent. Playwright:
+  /// `webStorage.getItem(name)`.
+  ///
+  /// # Errors
+  ///
+  /// Page-side exception or protocol failure.
+  pub async fn web_storage_get_item(
+    self: &Arc<Self>,
+    kind: crate::options::WebStorageKind,
+    name: &str,
+  ) -> Result<Option<String>> {
+    let storage = web_storage_global(kind);
+    let expr = format!("{storage}.getItem({})", web_storage_js_string(name));
+    let value = self
+      .evaluate(&expr, crate::protocol::SerializedArgument::default(), Some(false))
+      .await?;
+    Ok(match value.to_json_like() {
+      Some(serde_json::Value::String(s)) => Some(s),
+      _ => None,
+    })
+  }
+
+  /// Write a single entry. Playwright: `webStorage.setItem(name, value)`.
+  ///
+  /// # Errors
+  ///
+  /// Page-side exception (e.g. quota exceeded) or protocol failure.
+  pub async fn web_storage_set_item(
+    self: &Arc<Self>,
+    kind: crate::options::WebStorageKind,
+    name: &str,
+    value: &str,
+  ) -> Result<()> {
+    let storage = web_storage_global(kind);
+    let expr = format!(
+      "{storage}.setItem({}, {})",
+      web_storage_js_string(name),
+      web_storage_js_string(value)
+    );
+    self
+      .evaluate(&expr, crate::protocol::SerializedArgument::default(), Some(false))
+      .await?;
+    Ok(())
+  }
+
+  /// Remove a single entry. Playwright: `webStorage.removeItem(name)`.
+  ///
+  /// # Errors
+  ///
+  /// Page-side exception or protocol failure.
+  pub async fn web_storage_remove_item(
+    self: &Arc<Self>,
+    kind: crate::options::WebStorageKind,
+    name: &str,
+  ) -> Result<()> {
+    let storage = web_storage_global(kind);
+    let expr = format!("{storage}.removeItem({})", web_storage_js_string(name));
+    self
+      .evaluate(&expr, crate::protocol::SerializedArgument::default(), Some(false))
+      .await?;
+    Ok(())
+  }
+
+  /// Clear all entries for the current origin. Playwright:
+  /// `webStorage.clear()`.
+  ///
+  /// # Errors
+  ///
+  /// Page-side exception or protocol failure.
+  pub async fn web_storage_clear(self: &Arc<Self>, kind: crate::options::WebStorageKind) -> Result<()> {
+    let storage = web_storage_global(kind);
+    let expr = format!("{storage}.clear()");
+    self
+      .evaluate(&expr, crate::protocol::SerializedArgument::default(), Some(false))
+      .await?;
+    Ok(())
+  }
+
   /// Force a garbage-collection pass in the page's JS engine.
   /// Playwright: `page.requestGC(): Promise<void>`. Supported on every
   /// CDP backend (`HeapProfiler.collectGarbage`) and `WebKit`
@@ -3218,6 +3320,21 @@ impl Touchscreen<'_> {
 ///
 /// Other backend errors (protocol detach, target closed, invalid
 /// selector) bubble up unmodified.
+/// JS global backing a [`crate::options::WebStorageKind`]:
+/// `localStorage` / `sessionStorage`.
+fn web_storage_global(kind: crate::options::WebStorageKind) -> &'static str {
+  match kind {
+    crate::options::WebStorageKind::Local => "localStorage",
+    crate::options::WebStorageKind::Session => "sessionStorage",
+  }
+}
+
+/// Encode a Rust string as a JS string literal for safe interpolation
+/// into an evaluated expression — equivalent to `JSON.stringify(s)`.
+fn web_storage_js_string(s: &str) -> String {
+  serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 fn is_element_not_found(err: &crate::error::FerriError) -> bool {
   if let crate::error::FerriError::InvalidSelector { .. } = err {
     return true;

@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 
+use crate::console_message::ConsoleMessageLocation;
 use crate::page::Page;
 
 /// JS `Error`-shaped payload: `name` (`'Error'`, `'TypeError'`, etc.),
@@ -62,6 +63,11 @@ pub struct WebError {
 
 struct WebErrorState {
   error: ErrorDetails,
+  /// Source location of the error, taken from the top stack frame.
+  /// Playwright's `WebError.location()` returns `{ url, line, column }`,
+  /// defaulting to `{ "", 0, 0 }` when no stack frame is available
+  /// (`crProtocolHelper.ts::stackTraceToLocation`).
+  location: ConsoleMessageLocation,
   /// Weak back-reference to the owning page. `WebError::page` upgrades
   /// it; returns `None` if the page has been dropped or the backend
   /// emitter pre-dates the outer `Arc<Page>` (matches Playwright's
@@ -74,10 +80,11 @@ impl WebError {
   /// backend listeners that hold the upgraded `Arc<Page>` at event
   /// build time.
   #[must_use]
-  pub fn new(page: &Arc<Page>, error: ErrorDetails) -> Self {
+  pub fn new(page: &Arc<Page>, error: ErrorDetails, location: ConsoleMessageLocation) -> Self {
     Self {
       inner: Arc::new(WebErrorState {
         error,
+        location,
         page: Arc::downgrade(page),
       }),
     }
@@ -88,10 +95,11 @@ impl WebError {
   /// (`CDP` / `BiDi` race window, `WebKit` pre-registration drain).
   /// `page()` returns `None`.
   #[must_use]
-  pub fn new_detached(error: ErrorDetails) -> Self {
+  pub fn new_detached(error: ErrorDetails, location: ConsoleMessageLocation) -> Self {
     Self {
       inner: Arc::new(WebErrorState {
         error,
+        location,
         page: std::sync::Weak::new(),
       }),
     }
@@ -108,6 +116,13 @@ impl WebError {
   #[must_use]
   pub fn error(&self) -> &ErrorDetails {
     &self.inner.error
+  }
+
+  /// Source location of the error. Playwright:
+  /// `webError.location(): { url, lineNumber, columnNumber }`.
+  #[must_use]
+  pub fn location(&self) -> &ConsoleMessageLocation {
+    &self.inner.location
   }
 }
 

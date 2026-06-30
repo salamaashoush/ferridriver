@@ -1760,6 +1760,15 @@ pub struct NameValue {
   pub value: String,
 }
 
+/// Which web-storage area a [`crate::page::Page`] `WebStorage` accessor
+/// targets. Mirrors Playwright's `WebStorage` `kind: 'local' | 'session'`
+/// (`client/webStorage.ts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebStorageKind {
+  Local,
+  Session,
+}
+
 /// Per-origin storage snapshot — `{ origin, localStorage }`.
 /// Mirrors Playwright's `OriginStorage` (protocol channels.d.ts:5158),
 /// minus `indexedDB` (not yet collected — see [`StorageState`]).

@@ -511,6 +511,10 @@ fn register_pw_158_160(set: &mut TestSet<'_>) {
   backends_support::pw_158_160::register(set);
 }
 
+fn register_pw_159_161(set: &mut TestSet<'_>) {
+  backends_support::pw_159_161::register(set);
+}
+
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
 // 17 categories × 4 backends = 68 `#[test]`s grouped into one module
@@ -606,6 +610,10 @@ macro_rules! backend_module {
       #[test]
       fn pw_158_160() {
         run_category($backend, register_pw_158_160);
+      }
+      #[test]
+      fn pw_159_161() {
+        run_category($backend, register_pw_159_161);
       }
     }
   };
