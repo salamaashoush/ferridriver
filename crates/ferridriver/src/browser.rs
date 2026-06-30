@@ -59,6 +59,11 @@ pub struct Browser {
   /// Shared handle to [`BrowserState::connected`] so `is_connected()`
   /// stays sync like Playwright's `browser.isConnected(): boolean`.
   connected: Arc<std::sync::atomic::AtomicBool>,
+  /// Browser-level event emitter. Today fires only `'context'` when
+  /// [`Self::new_context`] creates a context
+  /// (`browser.on('context', ...)`). Cheap to clone (Arc-shared) so
+  /// every `Browser::clone` observes the same listeners.
+  browser_events: crate::events::BrowserEventEmitter,
 }
 
 fn default_context_registry() -> Arc<std::sync::Mutex<Vec<String>>> {
@@ -89,6 +94,7 @@ impl Browser {
       record_video,
       connected,
       context_names: default_context_registry(),
+      browser_events: crate::events::BrowserEventEmitter::new(),
     }
   }
 
@@ -168,6 +174,7 @@ impl Browser {
       record_video,
       connected,
       context_names: default_context_registry(),
+      browser_events: crate::events::BrowserEventEmitter::new(),
     }
   }
 
@@ -215,7 +222,61 @@ impl Browser {
       };
       map.insert(composite, opts);
     }
+    // Playwright fires `browser.on('context')` for explicitly-created
+    // contexts (not the default one). `browserContext.ts` emits from
+    // `_browser._didCreateContext`; `new_context` is the equivalent
+    // choke point — `default_context()` deliberately does not emit.
+    //
+    // Emit on the next runtime tick rather than inline: `new_context` is
+    // synchronous, so a caller using the Playwright idiom
+    // `Promise.all([browser.waitForEvent('context'), browser.newContext()])`
+    // hasn't armed its (lazily-polled) waitForEvent subscription yet when
+    // this returns. Deferring lets that subscription land first, matching
+    // Playwright where newContext is async and the event fires after an
+    // await point. Listeners registered synchronously via `on`/`once`
+    // (which subscribe eagerly) still receive it.
+    let event = crate::events::BrowserEvent::Context(ctx.clone());
+    match tokio::runtime::Handle::try_current() {
+      Ok(handle) => {
+        let emitter = self.browser_events.clone();
+        handle.spawn(async move { emitter.emit(event) });
+      },
+      Err(_) => self.browser_events.emit(event),
+    }
     ctx
+  }
+
+  /// Browser-level event emitter (`browser.on('context', ...)`). Cheap
+  /// to clone; shared across every `Browser::clone`.
+  #[must_use]
+  pub fn events(&self) -> &crate::events::BrowserEventEmitter {
+    &self.browser_events
+  }
+
+  /// Register a browser-level event listener (`'context'`). Playwright:
+  /// `browser.on(event, listener)`. Returns a [`crate::events::ListenerId`].
+  pub fn on(&self, event_name: &str, callback: crate::events::BrowserEventCallback) -> crate::events::ListenerId {
+    self.browser_events.on(event_name, callback)
+  }
+
+  /// Single-shot variant of [`Self::on`].
+  pub fn once(&self, event_name: &str, callback: crate::events::BrowserEventCallback) -> crate::events::ListenerId {
+    self.browser_events.once(event_name, callback)
+  }
+
+  /// Remove a browser-level listener by id.
+  pub fn off(&self, id: crate::events::ListenerId) {
+    self.browser_events.off(id);
+  }
+
+  /// Wait for the next browser-level event matching `event_name`.
+  /// Playwright: `browser.waitForEvent(event, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the timeout elapses or the browser closes.
+  pub async fn wait_for_event(&self, event_name: &str, timeout_ms: u64) -> Result<crate::events::BrowserEvent> {
+    self.browser_events.wait_for_event(event_name, timeout_ms).await
   }
 
   /// Get the default browser context.
