@@ -1963,6 +1963,39 @@ impl Page {
     .build(env)
   }
 
+  /// Playwright: `page.routeWebSocket(url, handler)`. Intercepts
+  /// WebSocket connections matching `url` (glob string or `RegExp`); the
+  /// handler receives a live `WebSocketRoute`.
+  #[napi(
+    ts_args_type = "url: string | RegExp, handler: (ws: WebSocketRoute) => void",
+    ts_return_type = "Promise<void>"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn route_web_socket(
+    &self,
+    env: &napi::Env,
+    url: napi::bindgen_prelude::Either<String, crate::types::JsRegExpLike>,
+    handler: napi::bindgen_prelude::Function<'_, crate::web_socket_route::WebSocketRouteArg, ()>,
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
+    use napi::bindgen_prelude::Either;
+    let matcher = match url {
+      Either::A(glob) => ferridriver::url_matcher::UrlMatcher::glob(glob).map_err(crate::error::to_napi)?,
+      Either::B(re) => {
+        ferridriver::url_matcher::UrlMatcher::regex_from_source(&re.source, re.flags.as_deref().unwrap_or(""))
+          .map_err(crate::error::to_napi)?
+      },
+    };
+    let rust_handler = crate::web_socket_route::build_ws_handler(handler)?;
+    let inner = Arc::clone(&self.inner);
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      inner
+        .route_web_socket(matcher, rust_handler)
+        .await
+        .map_err(crate::error::to_napi)
+    })
+    .build(env)
+  }
+
   /// `page.unroute(string | RegExp | ((url: URL) => boolean))`. A
   /// predicate is matched by `===` against the function passed to
   /// `route`, dropping its always-true core matcher by `Arc` identity.

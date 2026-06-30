@@ -64,3 +64,4 @@ await build('./index.ts', './dist/engine.min.js', output => `(function(){if(wind
 await build('./recorderSupport.ts', './dist/recorder-support.min.js', output => output);
 await build('./mcpSupport.ts', './dist/mcp-support.min.js', output => output);
 await build('./axSupport.ts', './dist/ax-support.min.js', output => output);
+await build('./webSocketMockEntry.ts', './dist/websocket-mock.min.js', output => output);
