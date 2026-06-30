@@ -39,6 +39,19 @@ impl WebErrorJs {
   pub fn error<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     build_native_error(&ctx, self.inner.error())
   }
+
+  /// Playwright: `webError.location(): { url, line, column }` (0-based
+  /// `line` / `column`, distinct from `ConsoleMessage.location()`'s
+  /// `lineNumber` / `columnNumber`).
+  #[qjs(rename = "location")]
+  pub fn location<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let loc = self.inner.location();
+    let obj = rquickjs::Object::new(ctx.clone())?;
+    obj.set("url", loc.url.clone())?;
+    obj.set("line", loc.line_number)?;
+    obj.set("column", loc.column_number)?;
+    Ok(obj.into_value())
+  }
 }
 
 /// Shared helper: construct a native JS `Error` from an [`ErrorDetails`]

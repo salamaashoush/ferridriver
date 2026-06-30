@@ -161,6 +161,16 @@ impl RequestJs {
     }))
   }
 
+  /// Mirrors Playwright `request.existingResponse(): Response | null` —
+  /// the already-received response without waiting.
+  #[qjs(rename = "existingResponse")]
+  pub async fn existing_response(&self) -> Option<ResponseJs> {
+    self.inner.existing_response().await.map(|r| match self.page.as_ref() {
+      Some(page) => ResponseJs::new_with_page(r, page.clone()),
+      None => ResponseJs::new(r),
+    })
+  }
+
   /// Mirrors Playwright `request.frame(): Frame`. Resolves the
   /// initiating frame_id via the owning page's frame cache. Returns
   /// `null` when no frame context is attached.

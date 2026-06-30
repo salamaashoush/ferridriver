@@ -54,6 +54,7 @@ pub mod sidecars;
 pub mod streams;
 pub mod video;
 pub mod web_error;
+pub mod web_storage;
 pub mod webapi;
 
 pub use artifacts::ArtifactsJs;

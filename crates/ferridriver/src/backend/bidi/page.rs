@@ -135,6 +135,32 @@ fn split_error_text(text: &str) -> (String, String) {
 /// line per `stackTrace.callFrames` entry. `BiDi` line / column
 /// numbers are 0-based; Playwright adds `+ 1` to match the user-facing
 /// 1-based JS convention.
+/// Source location for a BiDi page error: the top `callFrames` entry,
+/// used raw (BiDi line/column are 0-based and `bidiPage.ts` does NOT
+/// add `+ 1` here — only the stack-string path does). Falls back to
+/// `{ "", 1, 1 }`, matching Playwright's `bidiPage.ts:289`.
+fn bidi_stack_to_location(stack: Option<&serde_json::Value>) -> crate::console_message::ConsoleMessageLocation {
+  let frame = stack
+    .and_then(|s| s.get("callFrames"))
+    .and_then(|v| v.as_array())
+    .and_then(|frames| frames.first());
+  match frame {
+    Some(frame) => crate::console_message::ConsoleMessageLocation {
+      url: frame.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+      line_number: frame.get("lineNumber").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32,
+      column_number: frame
+        .get("columnNumber")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as u32,
+    },
+    None => crate::console_message::ConsoleMessageLocation {
+      url: String::new(),
+      line_number: 1,
+      column_number: 1,
+    },
+  }
+}
+
 fn build_bidi_stack(text: &str, stack: Option<&serde_json::Value>) -> String {
   use std::fmt::Write as _;
   let mut out = text.to_string();
@@ -1992,9 +2018,10 @@ impl BidiPage {
               let (name, message) = split_error_text(&text);
               let stack = build_bidi_stack(&text, event.params.get("stackTrace"));
               let details = crate::web_error::ErrorDetails { name, message, stack };
+              let location = bidi_stack_to_location(event.params.get("stackTrace"));
               let web_err = match page_backref.upgrade() {
-                Some(page) => crate::web_error::WebError::new(&page, details),
-                None => crate::web_error::WebError::new_detached(details),
+                Some(page) => crate::web_error::WebError::new(&page, details, location),
+                None => crate::web_error::WebError::new_detached(details, location),
               };
               emitter.emit(PageEvent::PageError(web_err));
               continue;

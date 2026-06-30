@@ -55,6 +55,28 @@ impl WebError {
       stack: d.stack.clone(),
     }
   }
+
+  /// Playwright: `webError.location(): { url, line, column }`. Note the
+  /// `line` / `column` field names (0-based), distinct from
+  /// `ConsoleMessage.location()`'s `lineNumber` / `columnNumber`.
+  #[napi]
+  pub fn location(&self) -> WebErrorLocation {
+    let loc = self.inner.location();
+    WebErrorLocation {
+      url: loc.url.clone(),
+      line: loc.line_number,
+      column: loc.column_number,
+    }
+  }
+}
+
+/// `{ url, line, column }` source location for a [`WebError`]. Field
+/// names mirror Playwright's `WebError.location()` (`types.d.ts:21696`).
+#[napi(object)]
+pub struct WebErrorLocation {
+  pub url: String,
+  pub line: u32,
+  pub column: u32,
 }
 
 /// Rust-side wrapper for a JS `Error`-shaped payload. Implements

@@ -76,3 +76,4 @@ mod serialize_out;
 mod types;
 mod video;
 mod web_error;
+mod web_storage;

@@ -775,6 +775,20 @@ impl PageJs {
     KeyboardJs::new(self.inner.clone())
   }
 
+  /// `page.localStorage` — the `localStorage` area for the page's
+  /// current origin. Exposed as a JS property, matching Playwright.
+  #[qjs(get, rename = "localStorage")]
+  pub fn local_storage(&self) -> crate::bindings::web_storage::WebStorageJs {
+    crate::bindings::web_storage::WebStorageJs::new(self.inner.clone(), ferridriver::options::WebStorageKind::Local)
+  }
+
+  /// `page.sessionStorage` — the `sessionStorage` area for the page's
+  /// current origin. Exposed as a JS property, matching Playwright.
+  #[qjs(get, rename = "sessionStorage")]
+  pub fn session_storage(&self) -> crate::bindings::web_storage::WebStorageJs {
+    crate::bindings::web_storage::WebStorageJs::new(self.inner.clone(), ferridriver::options::WebStorageKind::Session)
+  }
+
   // ── Event emitter (Playwright parity) ────────────────────────────────────
 
   /// `page.on(event, listener)`. Registers a persistent listener for a

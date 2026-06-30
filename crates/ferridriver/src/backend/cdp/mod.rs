@@ -900,6 +900,28 @@ fn cdp_exception_to_error_details(exception_details: &serde_json::Value) -> crat
   }
 }
 
+/// Source location for a CDP `Runtime.ExceptionDetails`. Mirrors
+/// `crProtocolHelper.ts::stackTraceToLocation`: take the top
+/// `stackTrace.callFrames` entry, falling back to `{ "", 0, 0 }`.
+fn cdp_exception_to_location(exception_details: &serde_json::Value) -> crate::console_message::ConsoleMessageLocation {
+  let frame = exception_details
+    .get("stackTrace")
+    .and_then(|s| s.get("callFrames"))
+    .and_then(|f| f.as_array())
+    .and_then(|frames| frames.first());
+  match frame {
+    Some(frame) => crate::console_message::ConsoleMessageLocation {
+      url: frame.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+      line_number: frame.get("lineNumber").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32,
+      column_number: frame
+        .get("columnNumber")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as u32,
+    },
+    None => crate::console_message::ConsoleMessageLocation::default(),
+  }
+}
+
 /// Build the combined `description + stack` message for a CDP
 /// `Runtime.ExceptionDetails` payload. Mirrors
 /// `crProtocolHelper.ts::getExceptionMessage` byte-for-byte.
@@ -4152,9 +4174,10 @@ impl<T: CdpWrap> CdpPage<T> {
           continue;
         };
         let details = cdp_exception_to_error_details(exception_details);
+        let location = cdp_exception_to_location(exception_details);
         let web_err = match page_backref.upgrade() {
-          Some(page) => crate::web_error::WebError::new(&page, details),
-          None => crate::web_error::WebError::new_detached(details),
+          Some(page) => crate::web_error::WebError::new(&page, details, location),
+          None => crate::web_error::WebError::new_detached(details, location),
         };
         emitter.emit(crate::events::PageEvent::PageError(web_err));
       }
