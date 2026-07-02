@@ -158,6 +158,10 @@ pub type InstanceArgsFn = Box<dyn Fn(&str) -> Vec<String> + Send + Sync>;
 /// Return `None` to fall through to the default `connect_mode`.
 pub type InstanceResolverFn = Box<dyn Fn(&str) -> Option<ConnectMode> + Send + Sync>;
 
+/// Per-context WebSocket-route registry map: composite session key →
+/// `context.routeWebSocket` handlers in registration order.
+pub type ContextWsRoutes = HashMap<String, Vec<(crate::url_matcher::UrlMatcher, crate::web_socket_route::WsHandler)>>;
+
 /// All browser state -- manages multiple Chrome instances, each with contexts and pages.
 pub struct BrowserState {
   instances: HashMap<String, BrowserInstance>,
@@ -240,9 +244,7 @@ pub struct BrowserState {
   /// Consumed by `ContextRef::new_page` so a context-level WS route
   /// applies to every page in the context (current + future), matching
   /// Playwright's context-scoped interception patterns.
-  pub context_ws_routes: Arc<
-    tokio::sync::RwLock<HashMap<String, Vec<(crate::url_matcher::UrlMatcher, crate::web_socket_route::WsHandler)>>>,
-  >,
+  pub context_ws_routes: Arc<tokio::sync::RwLock<ContextWsRoutes>>,
   /// Sync-readable connection flag mirroring `!instances.is_empty()`.
   /// Set true when an instance is ensured, false on `shutdown`, so
   /// `Browser::is_connected()` stays sync like Playwright's.
@@ -413,11 +415,7 @@ impl BrowserState {
   /// `ContextRef::new_page` to apply context-level routes onto a fresh
   /// page.
   #[must_use]
-  pub fn context_ws_routes_handle(
-    &self,
-  ) -> Arc<
-    tokio::sync::RwLock<HashMap<String, Vec<(crate::url_matcher::UrlMatcher, crate::web_socket_route::WsHandler)>>>,
-  > {
+  pub fn context_ws_routes_handle(&self) -> Arc<tokio::sync::RwLock<ContextWsRoutes>> {
     self.context_ws_routes.clone()
   }
 

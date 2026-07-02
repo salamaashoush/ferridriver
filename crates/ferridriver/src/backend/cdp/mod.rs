@@ -4722,32 +4722,35 @@ impl<T: CdpWrap> CdpPage<T> {
               });
             }
           },
-          "Page.frameNavigated" => {
-            if let Some(frame) = event.get("params").and_then(|p| p.get("frame")) {
-              // Note: we previously called `injected_script.reset()`
-              // on main-frame navigation. That was wrong:
-              // `Page.addScriptToEvaluateOnNewDocument` registers the
-              // source for ALL future documents on this target, so
-              // every post-navigation document already runs the
-              // self-guarded `window.__fd` IIFE on its own. Resetting
-              // forced a redundant `addScriptToEvaluateOnNewDocument`
-              // RTT on every navigation — the bench's 100×nav workload
-              // was paying ~5ms per test for nothing.
-              emitter.emit(crate::events::PageEvent::FrameNavigated(super::FrameInfo {
-                frame_id: frame.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                parent_frame_id: frame
-                  .get("parentId")
-                  .and_then(|v| v.as_str())
-                  .map(std::string::ToString::to_string),
-                name: frame.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                url: frame.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-              }));
-            }
-          },
+          "Page.frameNavigated" => Self::emit_frame_navigated(&event, &emitter),
           _ => {},
         }
       }
     });
+  }
+
+  /// Emit [`crate::events::PageEvent::FrameNavigated`] for a
+  /// `Page.frameNavigated` event.
+  ///
+  /// Note: we previously called `injected_script.reset()` on main-frame
+  /// navigation. That was wrong: `Page.addScriptToEvaluateOnNewDocument`
+  /// registers the source for ALL future documents on this target, so
+  /// every post-navigation document already runs the self-guarded
+  /// `window.__fd` IIFE on its own. Resetting forced a redundant
+  /// `addScriptToEvaluateOnNewDocument` RTT on every navigation — the
+  /// bench's 100×nav workload was paying ~5ms per test for nothing.
+  fn emit_frame_navigated(event: &serde_json::Value, emitter: &crate::events::EventEmitter) {
+    if let Some(frame) = event.get("params").and_then(|p| p.get("frame")) {
+      emitter.emit(crate::events::PageEvent::FrameNavigated(super::FrameInfo {
+        frame_id: frame.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        parent_frame_id: frame
+          .get("parentId")
+          .and_then(|v| v.as_str())
+          .map(std::string::ToString::to_string),
+        name: frame.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        url: frame.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+      }));
+    }
   }
 
   // ---- Init Scripts ----

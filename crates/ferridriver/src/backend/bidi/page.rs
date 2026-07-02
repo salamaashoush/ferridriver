@@ -27,6 +27,12 @@ use crate::network::{
 };
 use crate::state::DialogEvent;
 
+/// `BiDi` channel name the exposed-binding shim sends its payloads
+/// through (`script.addPreloadScript` channel argument →
+/// `script.message` events). Playwright's analogue is
+/// `kPlaywrightBindingChannel` in `bidiPage.ts`.
+const BINDING_CHANNEL: &str = "ferridriverBindingChannel";
+
 /// Convert a raw `BiDi` `Script.RemoteValue` JSON payload into a
 /// [`crate::js_handle::JSHandleBacking`]. DOM nodes become
 /// remote-backed via their `sharedId`; other object-like types
@@ -2022,6 +2028,78 @@ impl BidiPage {
             // time any frame fired a lifecycle event (Residual 2).
             injected_script.reset_context(event_ctx);
           },
+          "script.message" => {
+            // Exposed-binding dispatch. The shim installed by
+            // `expose_binding` sends `JSON.stringify({name, id, args})`
+            // through the `BINDING_CHANNEL` channel; the payload
+            // arrives as a string RemoteValue in `data` and
+            // `source.context` names the calling frame (an iframe
+            // caller surfaces its own frame, and the promise resolve
+            // below must target that same context). Mirrors
+            // Playwright's `bidiPage.ts::_onScriptMessage`.
+            if event.params.get("channel").and_then(|v| v.as_str()) != Some(BINDING_CHANNEL) {
+              continue;
+            }
+            let Some(text) = event
+              .params
+              .get("data")
+              .and_then(|d| d.get("value"))
+              .and_then(|v| v.as_str())
+            else {
+              continue;
+            };
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(text) else {
+              continue;
+            };
+            let fn_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let args: Vec<serde_json::Value> = payload
+              .get("args")
+              .and_then(|v| v.as_array())
+              .cloned()
+              .unwrap_or_default();
+            let call_ctx = event
+              .params
+              .get("source")
+              .and_then(|s| s.get("context"))
+              .and_then(|v| v.as_str())
+              .unwrap_or(&exposed_ctx)
+              .to_string();
+            // `script.message` has no top-level `context`, so the page
+            // filter above can't scope it — every page's listener on
+            // this session sees every envelope. Only dispatch calls
+            // originating in THIS page's frame tree; otherwise a
+            // same-named binding on another page would double-fire.
+            if call_ctx != *ctx && !child_frames.contains(&call_ctx) {
+              continue;
+            }
+            let source = crate::events::BindingSource {
+              context: String::new(),
+              page: (*exposed_ctx).to_string(),
+              frame: call_ctx.clone(),
+            };
+            let maybe_fn = exposed_fns.read().await.get(&fn_name).cloned();
+            if let Some(callback) = maybe_fn {
+              let result = callback(source, args).await;
+              let result_js = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
+              let escaped_id = id.replace('\\', r"\\").replace('\'', r"\'");
+              let resolve_js = format!(
+                "(() => {{ const f = window.__ferri_exposed && window.__ferri_exposed['{escaped_id}']; if (f) {{ delete window.__ferri_exposed['{escaped_id}']; f({result_js}); }} }})()"
+              );
+              let _ = exposed_session
+                .transport
+                .send_command(
+                  "script.callFunction",
+                  json!({
+                    "functionDeclaration": format!("() => {{ {resolve_js} }}"),
+                    "target": {"context": call_ctx},
+                    "awaitPromise": false,
+                    "resultOwnership": "none"
+                  }),
+                )
+                .await;
+            }
+          },
           "log.entryAdded" => {
             // Mirrors Playwright's `bidiPage.ts::_onLogEntryAdded`.
             // Routes `type: 'javascript'` + `level: 'error'` entries to
@@ -2054,90 +2132,6 @@ impl BidiPage {
             }
             if entry_type != "console" {
               continue;
-            }
-
-            // Exposed-function dispatch path. The JS shim installed
-            // by `expose_function` calls
-            // `console.log(JSON.stringify({__ferri_call, id, args}))`
-            // and parks on a Promise stored in `window.__ferri_exposed[id]`.
-            // Intercept those entries here, run the Rust callback,
-            // and resolve the promise via a follow-up `script.evaluate`.
-            // BiDi has no `Runtime.bindingCalled` analogue, so this
-            // console-side channel is the available transport.
-            if let Some(text_arg) = event
-              .params
-              .get("args")
-              .and_then(|v| v.as_array())
-              .and_then(|arr| arr.first())
-              .and_then(|a| a.get("value"))
-              .and_then(|v| v.as_str())
-            {
-              if text_arg.starts_with(r#"{"__ferri_call":"#) {
-                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(text_arg) {
-                  let fn_name = payload
-                    .get("__ferri_call")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                  let id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                  let args: Vec<serde_json::Value> = payload
-                    .get("args")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                  // The log entry's `source.context` is the browsing
-                  // context (== frame id) the shim ran in — iframe
-                  // callers surface their own frame in the
-                  // `BindingSource`, and the promise resolve below must
-                  // target that same context.
-                  let call_ctx = event
-                    .params
-                    .get("source")
-                    .and_then(|s| s.get("context"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&exposed_ctx)
-                    .to_string();
-                  // `log.entryAdded` has no top-level `context`, so the
-                  // page filter above can't scope it — every page's
-                  // listener on this session sees every binding
-                  // envelope. Only dispatch calls originating in THIS
-                  // page's frame tree; otherwise a same-named binding on
-                  // another page would double-fire.
-                  if call_ctx != *ctx && !child_frames.contains(&call_ctx) {
-                    continue;
-                  }
-                  let source = crate::events::BindingSource {
-                    context: String::new(),
-                    page: (*exposed_ctx).to_string(),
-                    frame: call_ctx.clone(),
-                  };
-                  let maybe_fn = exposed_fns.read().await.get(&fn_name).cloned();
-                  if let Some(callback) = maybe_fn {
-                    let result = callback(source, args).await;
-                    let result_js = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
-                    let escaped_id = id.replace('\\', r"\\").replace('\'', r"\'");
-                    let resolve_js = format!(
-                      "(() => {{ const f = window.__ferri_exposed && window.__ferri_exposed['{escaped_id}']; if (f) {{ delete window.__ferri_exposed['{escaped_id}']; f({result_js}); }} }})()"
-                    );
-                    let _ = exposed_session
-                      .transport
-                      .send_command(
-                        "script.callFunction",
-                        json!({
-                          "functionDeclaration": format!("() => {{ {resolve_js} }}"),
-                          "target": {"context": call_ctx},
-                          "awaitPromise": false,
-                          "resultOwnership": "none"
-                        }),
-                      )
-                      .await;
-                  }
-                  // Don't surface the dispatch envelope as a regular
-                  // console.log — Playwright hides bindings from the
-                  // user's `page.on('console')` stream.
-                  continue;
-                }
-              }
             }
 
             let Some(page) = page_backref.upgrade() else {
@@ -3135,36 +3129,50 @@ impl BidiPage {
   // ── Exposed Functions ───────────────────────────────────────────────────
 
   pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
-    // Inject a global function that sends messages via BiDi channel
+    // The shim receives a BiDi channel as its argument and sends
+    // `JSON.stringify({name, id, args})` through it — the driver gets a
+    // `script.message` event carrying the payload plus the calling
+    // frame in `source.context`. Same shape as Playwright's BiDi
+    // binding (`bidiBrowser.ts::doExposePlaywrightBinding` +
+    // `bidiPage.ts::_onScriptMessage`); the return value is delivered
+    // by resolving the parked promise via a `script.callFunction` into
+    // the calling context.
     let js = format!(
-      r"() => {{
+      r"(channel) => {{
         window['{name}'] = (...args) => {{
           return new Promise((resolve) => {{
             const id = Math.random().toString(36);
             window.__ferri_exposed = window.__ferri_exposed || {{}};
             window.__ferri_exposed[id] = resolve;
-            console.log(JSON.stringify({{__ferri_call: '{name}', id, args}}));
+            channel(JSON.stringify({{name: '{name}', id, args}}));
           }});
         }};
       }}"
     );
+    let channel_arg = json!([{
+      "type": "channel",
+      "value": { "channel": BINDING_CHANNEL },
+    }]);
 
     self
       .cmd(
         "script.addPreloadScript",
         json!({
           "functionDeclaration": js,
+          "arguments": channel_arg,
           "contexts": [&*self.context_id]
         }),
       )
       .await?;
 
-    // Also execute it now for the current page
+    // Also execute it now for the current page (Playwright does the
+    // same for already-live realms, with the same channel argument).
     let _ = self
       .cmd(
         "script.callFunction",
         json!({
           "functionDeclaration": js,
+          "arguments": channel_arg,
           "target": {"context": &*self.context_id},
           "awaitPromise": false,
           "resultOwnership": "none"

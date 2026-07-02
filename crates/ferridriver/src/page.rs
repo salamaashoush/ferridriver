@@ -352,7 +352,16 @@ impl Page {
     tracing::debug!(target: "ferridriver::action", action = "goto", url = %resolved, "page.goto");
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let referer = opts.as_ref().and_then(|o| o.referer.as_deref());
+    let pre_nav = self.observed_lens();
     let result = self.inner.goto(&resolved, lifecycle, timeout, referer).await;
+    // A goto that returned a document Response committed a NEW document
+    // — deterministically advance the observed since-navigation window
+    // past pre-nav entries even if the listener's `FrameNavigated` mark
+    // was dropped by a lagged broadcast receiver. Same-document
+    // navigations (fragment-only, `Response` = None) keep their window.
+    if matches!(result, Ok(Some(_))) {
+      self.raise_observed_nav_marks(pre_nav);
+    }
     // PERF_AUDIT.md §M.4 — bootstrap no longer fetches `Page.getFrameTree`,
     // so the wrapper's frame cache is empty on a fresh page until the
     // first navigation event lands. The CDP backend captures the
@@ -450,7 +459,31 @@ impl Page {
   /// Returns an error if the reload fails or the wait condition times out.
   pub async fn reload(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
-    self.inner.reload(lifecycle, timeout).await
+    let pre_nav = self.observed_lens();
+    let result = self.inner.reload(lifecycle, timeout).await;
+    // A successful reload ALWAYS commits a new document — advance the
+    // observed since-navigation window even when the listener's
+    // `FrameNavigated` mark was dropped (lagged broadcast receiver).
+    if result.is_ok() {
+      self.raise_observed_nav_marks(pre_nav);
+    }
+    result
+  }
+
+  /// Snapshot the observed console/error buffer lengths for the
+  /// navigation-window raise on the API nav path.
+  fn observed_lens(&self) -> (usize, usize) {
+    match self.inner.observed().lock() {
+      Ok(o) => o.lens(),
+      Err(poisoned) => poisoned.into_inner().lens(),
+    }
+  }
+
+  fn raise_observed_nav_marks(&self, pre_nav: (usize, usize)) {
+    match self.inner.observed().lock() {
+      Ok(mut o) => o.raise_nav_marks(pre_nav),
+      Err(poisoned) => poisoned.into_inner().raise_nav_marks(pre_nav),
+    }
   }
 
   /// Parse `GotoOptions` into backend `NavLifecycle` + timeout.
