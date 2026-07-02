@@ -387,6 +387,19 @@ jobs:
             echo "$output"; exit 1
           fi
 
+      # ferridriver-session depends on ferridriver — must publish before
+      # ferridriver-script (which depends on -session).
+      - name: Publish ferridriver-session
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          output=$(cargo publish -p ferridriver-session 2>&1) && exit 0
+          if echo "$output" | grep -qE "already exists|already uploaded"; then
+            echo "ferridriver-session already published, skipping"
+          else
+            echo "$output"; exit 1
+          fi
+
       - name: Wait for crates.io index
         run: sleep 30
 
