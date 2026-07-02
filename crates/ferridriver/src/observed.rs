@@ -67,6 +67,10 @@ impl<T: Clone> Buffer<T> {
     self.nav_mark = self.entries.len();
   }
 
+  fn raise_nav_mark(&mut self, floor: usize) {
+    self.nav_mark = self.nav_mark.max(floor.min(self.entries.len()));
+  }
+
   fn snapshot(&self, filter: ObservedFilter) -> Vec<T> {
     match filter {
       ObservedFilter::All => self.entries.clone(),
@@ -99,6 +103,27 @@ impl ObservedBuffers {
   pub(crate) fn mark_navigation(&mut self) {
     self.console.mark_navigation();
     self.errors.mark_navigation();
+  }
+
+  /// Buffer lengths at a point in time — captured by the API navigation
+  /// path BEFORE issuing the backend nav, then passed to
+  /// [`Self::raise_nav_marks`] on success.
+  pub(crate) fn lens(&self) -> (usize, usize) {
+    (self.console.entries.len(), self.errors.entries.len())
+  }
+
+  /// Raise the since-navigation watermarks to at least the pre-nav
+  /// buffer lengths. The event-driven [`Self::mark_navigation`] (from
+  /// the page-event listener's `FrameNavigated`) is the primary path,
+  /// but broadcast delivery can lag or drop under load — an API-driven
+  /// navigation that returned successfully is PROOF a new document
+  /// committed, so entries recorded before the call must leave the
+  /// window. `max` semantics keep this idempotent with the event mark
+  /// and never evict entries pushed after the commit (e.g. the new
+  /// document's inline-script logs).
+  pub(crate) fn raise_nav_marks(&mut self, pre_nav: (usize, usize)) {
+    self.console.raise_nav_mark(pre_nav.0);
+    self.errors.raise_nav_mark(pre_nav.1);
   }
 
   pub(crate) fn console_messages(&self, filter: ObservedFilter) -> Vec<ConsoleMessage> {

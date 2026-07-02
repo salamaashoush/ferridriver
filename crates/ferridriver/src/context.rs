@@ -1248,20 +1248,13 @@ impl ContextRef {
   }
 }
 
-/// Bind a [`crate::events::ExposedBinding`] to a concrete page by
-/// capturing the per-call [`crate::events::BindingSource`]. The backend
-/// binding dispatch (`page.expose_function`) only forwards the page-side
-/// call args, so the `{ context, page, frame }` identity is captured
-/// here at apply time. `page`/`frame` use the page's main-frame id
-/// (the stable per-page identifier reachable without an extra RTT);
-/// `context` is the composite session key.
 /// Stamp the context's composite key onto the [`crate::events::BindingSource`]
 /// the backend built for each call. The backend fills `page` / `frame`
 /// (the real calling frame — an iframe caller surfaces its own frame id);
 /// only the context key is unknown at that layer.
 fn bind_source(binding: crate::events::ExposedBinding, context_key: String) -> crate::events::ExposedBinding {
   Arc::new(move |mut source, args| {
-    source.context = context_key.clone();
+    source.context.clone_from(&context_key);
     binding(source, args)
   })
 }
