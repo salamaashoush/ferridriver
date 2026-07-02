@@ -678,13 +678,14 @@ async fn finished_call_deadline_does_not_halt_later_vm_entry() {
   tokio::time::sleep(Duration::from_millis(250)).await;
 
   // Route / exposeFunction / screencast dispatch re-enters the VM
-  // between calls via the session AsyncContext. An armed deadline left
-  // over from the finished call would force-halt this entry.
-  let actx = session.async_context();
-  let entered: Result<f64, rquickjs::Error> = rquickjs::async_with!(actx => |c| {
+  // between calls via the session's VM event loop. An armed deadline
+  // left over from the finished call would force-halt this entry.
+  let vm = session.vm_handle();
+  let entered = ferridriver_script::vm_with!(vm => |c| {
     c.eval::<f64, _>("let s = 0; for (let i = 0; i < 1e6; i++) s += i; s")
   })
-  .await;
+  .await
+  .expect("VM loop gone");
   assert!(
     entered.is_ok(),
     "between-call VM entry must not be halted by the previous call's deadline: {entered:?}"

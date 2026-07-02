@@ -276,13 +276,13 @@ impl BrowserContextJs {
     options: rquickjs::function::Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
     let times = crate::bindings::page::parse_route_times(&options)?;
-    let async_ctx = match ctx.userdata::<crate::engine::SessionAsyncCtx>() {
+    let vm = match ctx.userdata::<crate::engine::SessionVm>() {
       Some(ud) => ud.0.clone(),
       None => {
         return Err(rquickjs::Error::new_from_js_message(
           "context.route",
           "Error",
-          "context.route requires the script engine's AsyncContext".to_string(),
+          "context.route requires the script engine's VM handle".to_string(),
         ));
       },
     };
@@ -302,10 +302,10 @@ impl BrowserContextJs {
     })?;
 
     let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
-      let async_ctx = async_ctx.clone();
+      let vm = vm.clone();
       tokio::spawn(async move {
         use rquickjs::class::Class;
-        let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
+        let _: Result<rquickjs::Result<()>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
           if has_predicate {
             let pred = with_page_callbacks(&ctx, |r| r.get_route_pred(id))?
               .ok_or_else(|| rquickjs::Error::new_from_js_message("context.route", "Error", "route predicate gone".to_string()))?
@@ -334,6 +334,40 @@ impl BrowserContextJs {
       .await
       .into_js_with(&ctx)?;
     Ok(())
+  }
+
+  /// Playwright: `browserContext.routeWebSocket(url, handler)`. Intercepts
+  /// WebSocket connections matching `url` (glob string or `RegExp`) on every
+  /// page in this context; the handler receives a live `WebSocketRoute`.
+  /// One-shot create dispatch is shared with `page.routeWebSocket` via
+  /// `build_ws_route_handler`; `onMessage`/`onClose` use the WS pump.
+  #[qjs(rename = "routeWebSocket")]
+  pub async fn route_web_socket<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    url: Value<'js>,
+    handler: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<()> {
+    let vm = match ctx.userdata::<crate::engine::SessionVm>() {
+      Some(ud) => ud.0.clone(),
+      None => {
+        return Err(rquickjs::Error::new_from_js_message(
+          "context.routeWebSocket",
+          "Error",
+          "context.routeWebSocket requires the script engine's VM handle".to_string(),
+        ));
+      },
+    };
+    let matcher = url_value_to_matcher(&ctx, url)?;
+    let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
+    let saved = rquickjs::Persistent::save(&ctx, handler);
+    with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, saved))?;
+    let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id);
+    self
+      .inner
+      .route_web_socket(matcher, rust_handler)
+      .await
+      .into_js_with(&ctx)
   }
 
   /// Playwright: `browserContext.routeFromHAR(har, options?)`. Replay-only.
@@ -607,13 +641,13 @@ impl BrowserContextJs {
     callback: rquickjs::Function<'js>,
     with_source: bool,
   ) -> rquickjs::Result<ferridriver::ExposedBinding> {
-    let async_ctx = match ctx.userdata::<crate::engine::SessionAsyncCtx>() {
+    let vm = match ctx.userdata::<crate::engine::SessionVm>() {
       Some(ud) => ud.0.clone(),
       None => {
         return Err(rquickjs::Error::new_from_js_message(
           "BrowserContext.exposeBinding",
           "Error",
-          "exposeBinding requires the script engine's AsyncContext".to_string(),
+          "exposeBinding requires the script engine's VM handle".to_string(),
         ));
       },
     };
@@ -622,10 +656,10 @@ impl BrowserContextJs {
 
     let name = name.to_string();
     let binding: ferridriver::ExposedBinding = Arc::new(move |source, args| {
-      let async_ctx = async_ctx.clone();
+      let vm = vm.clone();
       let name = name.clone();
       Box::pin(async move {
-        let out: rquickjs::Result<serde_json::Value> = rquickjs::async_with!(async_ctx => |ctx| {
+        let out: Result<rquickjs::Result<serde_json::Value>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
           let f = crate::bindings::page::get_exposed_callback(&ctx, &name)?
             .ok_or_else(|| {
               rquickjs::Error::new_from_js_message(
@@ -661,7 +695,9 @@ impl BrowserContextJs {
           Ok(json)
         })
         .await;
-        out.unwrap_or(serde_json::Value::Null)
+        out.map_or(serde_json::Value::Null, |inner| {
+          inner.unwrap_or(serde_json::Value::Null)
+        })
       })
     });
     Ok(binding)

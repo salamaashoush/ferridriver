@@ -45,7 +45,7 @@ async fn this_attach_and_log_reach_drain_attachments() {
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
     .expect("session");
-  let actx = session.async_context();
+  let actx = session.vm_handle();
   eval_bundle(&actx, &bundle).await.expect("eval bundle");
 
   let reg = collect_registry(&actx).await.expect("collect");
@@ -114,7 +114,7 @@ async fn after_hook_receives_cucumber_result_arg() {
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
     .expect("session");
-  let actx = session.async_context();
+  let actx = session.vm_handle();
   eval_bundle(&actx, &bundle).await.expect("eval");
   let reg = collect_registry(&actx).await.expect("collect");
   assert_eq!(reg.hooks.len(), 1, "one After hook");
@@ -170,7 +170,7 @@ async fn define_parameter_type_transformer_yields_typed_arg() {
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
     .expect("session");
-  let actx = session.async_context();
+  let actx = session.vm_handle();
   eval_bundle(&actx, &bundle).await.expect("eval");
   let reg = collect_registry(&actx).await.expect("collect");
   assert_eq!(reg.steps.len(), 1);
@@ -232,7 +232,7 @@ async fn set_definition_function_wrapper_wraps_steps() {
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
     .expect("session");
-  let actx = session.async_context();
+  let actx = session.vm_handle();
   eval_bundle(&actx, &bundle).await.expect("eval");
   set_scenario_world(&actx, &ScenarioWorld::default())
     .await
@@ -279,7 +279,7 @@ async fn per_step_timeout_option_is_enforced() {
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
     .expect("session");
-  let actx = session.async_context();
+  let actx = session.vm_handle();
   eval_bundle(&actx, &bundle).await.expect("eval");
   set_scenario_world(&actx, &ScenarioWorld::default())
     .await
@@ -317,7 +317,7 @@ async fn world_parameters_are_exposed_as_this_parameters() {
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
     .expect("session");
-  let actx = session.async_context();
+  let actx = session.vm_handle();
   eval_bundle(&actx, &bundle).await.expect("eval");
   let sw = ScenarioWorld {
     parameters: Some(serde_json::json!({ "env": "staging", "n": 3 })),
@@ -365,7 +365,7 @@ async fn this_skip_marks_step_skipped() {
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
     .expect("session");
-  let actx = session.async_context();
+  let actx = session.vm_handle();
   eval_bundle(&actx, &bundle).await.expect("eval");
   set_scenario_world(&actx, &ScenarioWorld::default())
     .await

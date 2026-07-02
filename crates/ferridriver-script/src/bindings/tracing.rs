@@ -39,32 +39,32 @@ impl TracingJs {
 
   /// Playwright: `tracing.stopHar()`.
   #[qjs(rename = "stopHar")]
-  pub async fn stop_har<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<()> {
+  pub async fn stop_har(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     self.ctx.tracing().stop_har().await.into_js_with(&ctx)
   }
 
   /// Playwright: `tracing.start(options?)`. Not implemented (trace .zip).
   #[qjs(rename = "start")]
-  pub fn start(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-    self.ctx.tracing().start().into_js_with(&ctx)
+  pub async fn start(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    self.ctx.tracing().start().await.into_js_with(&ctx)
   }
 
   /// Playwright: `tracing.startChunk(options?)`. Not implemented.
   #[qjs(rename = "startChunk")]
-  pub fn start_chunk(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-    self.ctx.tracing().start_chunk().into_js_with(&ctx)
+  pub async fn start_chunk(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    self.ctx.tracing().start_chunk().await.into_js_with(&ctx)
   }
 
   /// Playwright: `tracing.stopChunk(options?)`. Not implemented.
   #[qjs(rename = "stopChunk")]
-  pub fn stop_chunk(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-    self.ctx.tracing().stop_chunk().into_js_with(&ctx)
+  pub async fn stop_chunk(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    self.ctx.tracing().stop_chunk().await.into_js_with(&ctx)
   }
 
   /// Playwright: `tracing.stop(options?)`. Not implemented.
   #[qjs(rename = "stop")]
-  pub fn stop(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-    self.ctx.tracing().stop().into_js_with(&ctx)
+  pub async fn stop(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    self.ctx.tracing().stop().await.into_js_with(&ctx)
   }
 }
 
@@ -72,7 +72,7 @@ fn parse_start_har_options<'js>(ctx: &Ctx<'js>, options: Opt<Value<'js>>) -> rqu
   let Some(obj) = options
     .0
     .filter(|v| !v.is_undefined() && !v.is_null())
-    .and_then(|v| v.into_object())
+    .and_then(rquickjs::Value::into_object)
   else {
     return Ok(StartHarOptions::default());
   };

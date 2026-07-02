@@ -71,7 +71,7 @@ pub struct WebKitPage {
   /// Exposed-function callback registry. Keyed by the JS-side function
   /// name; the listener task dispatches `Runtime.bindingCalled` events
   /// back through these callbacks.
-  exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedFn>>>,
+  pub(crate) exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedFn>>>,
   /// Idempotent latch for the `Runtime.addBinding` + listener setup.
   binding_initialized: Arc<AtomicBool>,
   /// Ordered list of `(identifier, source)` bootstrap-script fragments.
@@ -1759,18 +1759,16 @@ impl WebKitPage {
     Ok(())
   }
 
-  /// Install `__fd_binding__` binding + `__fd_bc` controller JS on
-  /// first use, then spawn the listener task that dispatches
-  /// `Runtime.bindingCalled` events back through registered callbacks.
+  /// Install the `__fd_binding__` binding + `__fd_bc` controller JS on
+  /// first use. `Runtime.bindingCalled` is dispatched by the page's main
+  /// target listener (`events::handle_binding_called`), which follows
+  /// cross-process target swaps — so exposed functions keep working after
+  /// a navigation into a fresh process. `replay_binding_channel` re-arms
+  /// the protocol side (`addBinding` + controller) on the swapped target.
   async fn ensure_binding_channel(&self) -> Result<()> {
     if self.binding_initialized.swap(true, Ordering::SeqCst) {
       return Ok(());
     }
-    // Subscribe BEFORE evaluating the controller. User JS that calls
-    // the binding can run as soon as `add_init_script` lands, so the
-    // listener must already be live by then.
-    let target = self.target_session();
-    let mut rx = target.events();
     self
       .target_session()
       .send("Runtime.addBinding", json!({ "name": "__fd_binding__" }))
@@ -1785,47 +1783,48 @@ impl WebKitPage {
         true,
       )
       .await?;
-
-    let fns = self.exposed_fns.clone();
-    tokio::spawn(async move {
-      loop {
-        let env = match rx.recv().await {
-          Ok(e) => e,
-          Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-          Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-        };
-        if env.method.as_deref() != Some("Runtime.bindingCalled") {
-          continue;
-        }
-        if env.params.get("name").and_then(Value::as_str) != Some("__fd_binding__") {
-          continue;
-        }
-        let payload_str = env.params.get("argument").and_then(Value::as_str).unwrap_or("{}");
-        let payload: Value = serde_json::from_str(payload_str).unwrap_or_default();
-        let fn_name = payload.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-        let seq = payload.get("seq").and_then(Value::as_u64).unwrap_or(0);
-        let args: Vec<Value> = payload
-          .get("args")
-          .and_then(Value::as_array)
-          .cloned()
-          .unwrap_or_default();
-        let maybe_fn = fns.read().await.get(&fn_name).cloned();
-        let deliver_js = if let Some(callback) = maybe_fn {
-          let result = callback(args).await;
-          format!(
-            "globalThis.__fd_bc.resolve({}, {})",
-            seq,
-            serde_json::to_string(&result).unwrap_or_else(|_| "null".into())
-          )
-        } else {
-          format!("globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')")
-        };
-        let _ = target
-          .send(protocol::RUNTIME_EVALUATE, json!({ "expression": deliver_js }))
-          .await;
-      }
-    });
     Ok(())
+  }
+
+  /// Whether the exposed-function binding channel has been initialised.
+  /// Read by the provisional-target handler to decide whether to re-arm
+  /// `Runtime.addBinding` on a freshly-swapped target.
+  pub(crate) fn binding_channel_active(&self) -> bool {
+    self.binding_initialized.load(Ordering::SeqCst)
+  }
+
+  /// Re-issue `Runtime.addBinding('__fd_binding__')` on `target` (a freshly
+  /// created provisional target). `WebKit` gives the new process a clean
+  /// protocol surface, so without this the page-side binding shim would have
+  /// no native binding to call and every exposed function (and
+  /// `routeWebSocket`) would silently no-op after a cross-process
+  /// navigation. The `__fd_bc` controller itself is re-installed via the
+  /// replayed bootstrap script, which runs at document start.
+  pub(crate) async fn replay_binding_channel(&self, target: &super::connection::Session) {
+    if !self.binding_channel_active() {
+      return;
+    }
+    let _ = target
+      .send("Runtime.addBinding", json!({ "name": "__fd_binding__" }))
+      .await;
+  }
+
+  /// Re-send `Page.setBootstrapScript` (the joined init scripts) to
+  /// `target`. `WebKit` drops bootstrap scripts on a cross-process target
+  /// swap, so without replaying them the document in the new process would
+  /// load without any registered init script (the WebSocket mock, user
+  /// `addInitScript`s, etc.).
+  pub(crate) async fn replay_bootstrap_script(&self, target: &super::connection::Session) {
+    let joined = {
+      let scripts = self.init_scripts.lock().await;
+      std::iter::once(CONTEXT_MENU_SUPPRESSOR)
+        .chain(scripts.iter().map(|(_, src)| src.as_str()))
+        .collect::<Vec<_>>()
+        .join(";\n")
+    };
+    let _ = target
+      .send("Page.setBootstrapScript", json!({ "source": joined }))
+      .await;
   }
 
   pub async fn add_init_script(&self, source: &str) -> Result<String> {

@@ -60,12 +60,6 @@ pub struct Page {
   /// Registered `addLocatorHandler` callbacks. Consulted before every
   /// actionability retry (see [`crate::locator_handler::perform_checkpoint`]).
   locator_handlers: crate::locator_handler::LocatorHandlerRegistry,
-  /// Per-page WebSocket-route registry (`routeWebSocket`). Lazily built
-  /// on the first `route_web_socket` call; the exposed
-  /// `__pwWebSocketBinding` dispatcher closure holds its own `Arc` clone,
-  /// so it stays alive for the page even though `Page` wrappers are
-  /// short-lived.
-  ws_router: Mutex<Option<Arc<crate::web_socket_route::PageWsRouter>>>,
 }
 
 impl Page {
@@ -96,7 +90,6 @@ impl Page {
       frame_cache,
       video: Mutex::new(None),
       locator_handlers: crate::locator_handler::LocatorHandlerRegistry::default(),
-      ws_router: Mutex::new(None),
     });
     // Wire the backend's weak back-reference before the frame cache
     // starts seeding — the file-chooser listener (spawned in
@@ -124,7 +117,6 @@ impl Page {
       frame_cache,
       video: Mutex::new(None),
       locator_handlers: crate::locator_handler::LocatorHandlerRegistry::default(),
-      ws_router: Mutex::new(None),
     });
     page.inner.set_page_backref(Arc::downgrade(&page));
     page.seed_frame_cache();
@@ -2545,19 +2537,14 @@ impl Page {
     handler: crate::web_socket_route::WsHandler,
   ) -> Result<()> {
     use crate::web_socket_route as wsr;
-    let router = {
-      let mut guard = self.ws_router.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-      guard
-        .get_or_insert_with(|| wsr::PageWsRouter::new(self.inner.clone()))
-        .clone()
-    };
+    let router = wsr::router_for_page(self.backend_page_id(), self.inner.clone());
     let first = router.add_route(matcher, handler);
     if first {
       self
         .inner
         .expose_function(wsr::WS_BINDING_NAME, wsr::binding_callback(router))
         .await?;
-      let source = crate::options::evaluation_script(wsr::mock_init_script()?, None)?;
+      let source = crate::options::evaluation_script(wsr::mock_init_script(), None)?;
       self.inner.add_init_script(&source).await?;
     }
     Ok(())

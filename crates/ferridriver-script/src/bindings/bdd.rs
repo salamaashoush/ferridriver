@@ -23,10 +23,7 @@ use std::sync::Arc;
 
 use rquickjs::class::{Class, Trace};
 use rquickjs::function::{Args, Constructor, Opt, Rest};
-use rquickjs::{
-  ArrayBuffer, AsyncContext, CatchResultExt, Ctx, Function, JsLifetime, Object, Persistent, TypedArray, Value,
-  async_with,
-};
+use rquickjs::{ArrayBuffer, CatchResultExt, Ctx, Function, JsLifetime, Object, Persistent, TypedArray, Value};
 
 use crate::bindings::convert::{serde_from_js, serde_to_js};
 use crate::bindings::{install_browser_context_on, install_browser_on, install_page_on, install_request_on};
@@ -417,11 +414,11 @@ fn register_attachment(args: &[Value<'_>], is_log: bool) -> rquickjs::Result<()>
 /// Drain the scenario's queued attachments (and clear the queue). The
 /// BDD layer calls this after each scenario and forwards them into the
 /// test result so the reporters surface them.
-pub async fn drain_attachments(actx: &AsyncContext) -> Result<Vec<ScriptAttachment>, ScriptError> {
-  async_with!(actx => |ctx| {
+pub async fn drain_attachments(vm: &crate::vm::VmHandle) -> Result<Vec<ScriptAttachment>, ScriptError> {
+  crate::vm_with!(vm => |ctx| {
     with_registry(&ctx, |reg| std::mem::take(&mut reg.attachments))
   })
-  .await
+  .await?
 }
 
 /// Register one MCP tool from a manifest object + handler function.
@@ -678,8 +675,8 @@ pub struct CollectedRegistry {
 }
 
 /// Snapshot the registry after the step `.js` files evaluated.
-pub async fn collect_registry(actx: &AsyncContext) -> Result<CollectedRegistry, ScriptError> {
-  async_with!(actx => |ctx| {
+pub async fn collect_registry(vm: &crate::vm::VmHandle) -> Result<CollectedRegistry, ScriptError> {
+  crate::vm_with!(vm => |ctx| {
     with_registry(&ctx, |reg| CollectedRegistry {
       default_timeout_ms: reg.default_timeout_ms,
       steps: reg
@@ -709,7 +706,7 @@ pub async fn collect_registry(actx: &AsyncContext) -> Result<CollectedRegistry, 
         .collect(),
     })
   })
-  .await
+  .await?
 }
 
 /// Capability allow-list snapshot. Serialises to the exact JSON the MCP
@@ -825,10 +822,10 @@ pub struct ScenarioWorld {
 /// Build the per-scenario World and make it the `this` steps run
 /// against. If `setWorldConstructor` was used, that class is
 /// constructed and the fixtures are augmented onto the instance.
-pub async fn set_scenario_world(actx: &AsyncContext, world: &ScenarioWorld) -> Result<(), ScriptError> {
+pub async fn set_scenario_world(vm: &crate::vm::VmHandle, world: &ScenarioWorld) -> Result<(), ScriptError> {
   let world = world.clone();
-  let route_ctx = actx.clone();
-  async_with!(actx => |ctx| {
+  let route_vm = vm.clone();
+  crate::vm_with!(vm => |ctx| {
     let ctor = with_registry(&ctx, |reg| reg.world_ctor.clone())?;
 
     // `this.parameters` (cucumber `--world-parameters`). Built once;
@@ -874,7 +871,7 @@ pub async fn set_scenario_world(actx: &AsyncContext, world: &ScenarioWorld) -> R
     obj.set("skip", skip).map_err(|e| ScriptError::internal(e.to_string()))?;
 
     if let Some(page) = world.page {
-      install_page_on(&ctx, &obj, page, route_ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
+      install_page_on(&ctx, &obj, page, route_vm.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
     }
     if let Some(c) = world.context {
       install_browser_context_on(&ctx, &obj, c).map_err(|e| ScriptError::internal(e.to_string()))?;
@@ -889,19 +886,19 @@ pub async fn set_scenario_world(actx: &AsyncContext, world: &ScenarioWorld) -> R
     let saved = Persistent::save(&ctx, obj);
     with_registry(&ctx, |reg| reg.current_world = Some(saved))
   })
-  .await
+  .await?
 }
 
 /// Drop the per-scenario World (cucumber builds a fresh one per
 /// scenario). The next [`set_scenario_world`] installs a new one.
-pub async fn reset_world(actx: &AsyncContext) -> Result<(), ScriptError> {
-  async_with!(actx => |ctx| {
+pub async fn reset_world(vm: &crate::vm::VmHandle) -> Result<(), ScriptError> {
+  crate::vm_with!(vm => |ctx| {
     with_registry(&ctx, |reg| {
       reg.current_world = None;
       reg.attachments.clear();
     })
   })
-  .await
+  .await?
 }
 
 /// A cucumber-extracted step argument, lowered directly to a JS value
@@ -936,7 +933,7 @@ pub enum StepOutcome {
 /// table and doc string, against the current World. A thrown JS error
 /// becomes a [`ScriptError`] carrying the `.js` location.
 pub async fn invoke_step(
-  actx: &AsyncContext,
+  vm: &crate::vm::VmHandle,
   idx: usize,
   params: &[JsArg],
   data_table: Option<&[Vec<String>]>,
@@ -948,7 +945,7 @@ pub async fn invoke_step(
   let doc_string = doc_string.map(str::to_string);
   let source = source.to_string();
 
-  async_with!(actx => |ctx| {
+  crate::vm_with!(vm => |ctx| {
     let (func, world, wrapper, timeout_ms) = with_registry(&ctx, |reg| {
       let step = reg
         .steps
@@ -1066,19 +1063,19 @@ pub async fn invoke_step(
       _ => StepOutcome::Passed,
     })
   })
-  .await
+  .await?
 }
 
 /// Invoke hook `idx`. Same bridge as [`invoke_step`].
 pub async fn invoke_hook(
-  actx: &AsyncContext,
+  vm: &crate::vm::VmHandle,
   idx: usize,
   arg: Option<&HookArg>,
   source: &str,
 ) -> Result<StepOutcome, ScriptError> {
   let source = source.to_string();
   let arg = arg.cloned();
-  async_with!(actx => |ctx| {
+  crate::vm_with!(vm => |ctx| {
     let (func, world, timeout_ms) = with_registry(&ctx, |reg| {
       let hook = reg
         .hooks
@@ -1141,5 +1138,5 @@ pub async fn invoke_hook(
     }
     Ok(StepOutcome::Passed)
   })
-  .await
+  .await?
 }

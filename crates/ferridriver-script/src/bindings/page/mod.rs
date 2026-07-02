@@ -4,7 +4,7 @@
 //! small delegation that converts `FerriError` into `rquickjs::Error` at the
 //! boundary via [`super::convert::FerriResultExt`].
 
-mod callbacks;
+pub(crate) mod callbacks;
 mod events;
 pub(crate) mod options;
 
@@ -41,13 +41,13 @@ pub struct PageJs {
   // `#[qjs(skip_trace)]` so the macro skips tracing this field.
   #[qjs(skip_trace)]
   inner: Arc<Page>,
-  /// `AsyncContext` used by `page.route` to dispatch JS callbacks
+  /// VM-loop handle used by `page.route` to dispatch JS callbacks
   /// from a separate tokio task back into the script's JS context.
   /// `None` only when the wrapper was constructed directly (e.g. by
   /// tests); the engine always installs PageJs via
   /// `install_page` which sets this field.
   #[qjs(skip_trace)]
-  async_ctx: Option<rquickjs::AsyncContext>,
+  vm: Option<crate::vm::VmHandle>,
   /// Maps a handler locator's selector to the persisted-callback ids so
   /// `removeLocatorHandler` can drop them. (QuickJS `addLocatorHandler`
   /// itself is Unsupported -- see its binding -- so this normally stays empty.)
@@ -60,16 +60,16 @@ impl PageJs {
   pub fn new(inner: Arc<Page>) -> Self {
     Self {
       inner,
-      async_ctx: None,
+      vm: None,
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
     }
   }
 
   #[must_use]
-  pub fn new_with_async_ctx(inner: Arc<Page>, async_ctx: rquickjs::AsyncContext) -> Self {
+  pub fn new_with_vm(inner: Arc<Page>, vm: crate::vm::VmHandle) -> Self {
     Self {
       inner,
-      async_ctx: Some(async_ctx),
+      vm: Some(vm),
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
     }
   }
@@ -139,13 +139,13 @@ impl PageJs {
 }
 
 /// Build a `PageJs` for a page minted from script (`newPage`,
-/// `locator.page()`, `frame.page()`), threading the session's
-/// `AsyncContext` (stashed as userdata at `Session::create`) so
-/// `page.route` / `page.exposeFunction` cross-task dispatch works on
-/// script-launched browsers — not just the MCP-prebound page.
+/// `locator.page()`, `frame.page()`), threading the session's VM-loop
+/// handle (stashed as userdata at `Session::create`) so `page.route` /
+/// `page.exposeFunction` cross-task dispatch works on script-launched
+/// browsers — not just the MCP-prebound page.
 pub(crate) fn pagejs_for_ctx(ctx: &rquickjs::Ctx<'_>, page: Arc<Page>) -> PageJs {
-  match ctx.userdata::<crate::engine::SessionAsyncCtx>() {
-    Some(ud) => PageJs::new_with_async_ctx(page, ud.0.clone()),
+  match ctx.userdata::<crate::engine::SessionVm>() {
+    Some(ud) => PageJs::new_with_vm(page, ud.0.clone()),
     None => PageJs::new(page),
   }
 }
@@ -1268,11 +1268,11 @@ impl PageJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     let times = parse_route_times(&options)?;
-    let async_ctx = self.async_ctx.clone().ok_or_else(|| {
+    let vm = self.vm.clone().ok_or_else(|| {
       rquickjs::Error::new_from_js_message(
         "page.route",
         "Error",
-        "page.route requires the script engine's AsyncContext (install_page)".to_string(),
+        "page.route requires the script engine's VM handle (install_page)".to_string(),
       )
     })?;
     let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
@@ -1306,17 +1306,16 @@ impl PageJs {
     // when the page closes. Fully reconciling it needs a cross-backend
     // "unroute all" on VM discard — tracked, not yet implemented.
     let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
-      let async_ctx = async_ctx.clone();
-      // One-shot cross-task dispatch (rule 2 of the re-entry discipline
-      // on `PageEventPumpUd`): `async_with` serializes against the
-      // script's execute via the runtime lock and — unlike a ctx.spawn
-      // pump — also runs while the VM idles, which routes require (a
-      // page request can arrive between executes). Errors are swallowed
-      // because the route's own `Drop` (fail-open continue) covers the
-      // case where dispatch can't reach JS.
+      let vm = vm.clone();
+      // Cross-task dispatch: submit a job to the session's VM event
+      // loop (rule 2 of the re-entry discipline on `PageEventPumpUd`).
+      // The loop is always alive, so this works while the VM idles
+      // between executes AND while a script is parked on a host await.
+      // Errors are swallowed because the route's own `Drop` (fail-open
+      // continue) covers the case where dispatch can't reach JS.
       tokio::spawn(async move {
         use rquickjs::class::Class;
-        let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
+        let _: Result<rquickjs::Result<()>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
           if has_predicate {
             let pred = with_page_callbacks(&ctx, |r| r.get_route_pred(id))?
               .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route predicate gone".to_string()))?
@@ -1347,6 +1346,38 @@ impl PageJs {
     let instance =
       rquickjs::class::Class::instance(ctx.clone(), crate::bindings::disposable::DisposableJs::new(disposable))?;
     rquickjs::IntoJs::into_js(instance, &ctx)
+  }
+
+  /// Playwright: `page.routeWebSocket(url, handler)`. Intercepts
+  /// WebSocket connections matching `url` (glob string or `RegExp`); the
+  /// handler receives a live `WebSocketRoute`. Cross-task dispatch mirrors
+  /// `page.route` — the handler is restored + invoked inside `async_with!`,
+  /// awaited so the driver observes `connectToServer()` before opening.
+  #[qjs(rename = "routeWebSocket")]
+  pub async fn route_web_socket<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    url: rquickjs::Value<'js>,
+    handler: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<()> {
+    let vm = self.vm.clone().ok_or_else(|| {
+      rquickjs::Error::new_from_js_message(
+        "page.routeWebSocket",
+        "Error",
+        "page.routeWebSocket requires the script engine's VM handle (install_page)".to_string(),
+      )
+    })?;
+    let matcher = url_value_to_matcher(&ctx, url)?;
+    let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
+    let saved = rquickjs::Persistent::save(&ctx, handler);
+    with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, saved))?;
+
+    let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id);
+    self
+      .inner
+      .route_web_socket(matcher, rust_handler)
+      .await
+      .into_js_with(&ctx)
   }
 
   /// Playwright: `page.routeFromHAR(har, options?)`. Replay-only.
@@ -1890,69 +1921,73 @@ impl PageJs {
     name: String,
     callback: rquickjs::Function<'js>,
   ) -> rquickjs::Result<()> {
-    let async_ctx = self.async_ctx.clone().ok_or_else(|| {
+    let vm = self.vm.clone().ok_or_else(|| {
       rquickjs::Error::new_from_js_message(
         "page.exposeFunction",
         "Error",
-        "page.exposeFunction requires the script engine's AsyncContext (install_page)".to_string(),
+        "page.exposeFunction requires the script engine's VM handle (install_page)".to_string(),
       )
     })?;
     // Stash the JS callback in the native page-callbacks registry keyed
     // by binding name — cross-task dispatch (the Rust `ExposedFn` runs
-    // outside the QuickJS context) restores it by name via `async_with!`.
+    // outside the QuickJS context) restores it by name inside a VM-loop
+    // job.
     let saved = rquickjs::Persistent::save(&ctx, callback);
     with_page_callbacks(&ctx, |r| r.exposed.insert(name.clone(), saved))?;
 
     let cb: ferridriver::events::ExposedFn = std::sync::Arc::new({
       let name = name.clone();
       move |args: Vec<serde_json::Value>| {
-        let async_ctx = async_ctx.clone();
+        let vm = vm.clone();
         let name = name.clone();
         // Playwright delivers the callback's return value (awaiting a
         // returned Promise) to the page-side caller. Run the JS
-        // callback on the engine context via `async_with`, await it if
-        // it returns a thenable, convert to JSON and hand it back so
-        // the backend resolves the page binding with the REAL value —
-        // not `null` (the previous fire-and-forget behaviour was a
-        // Playwright incompatibility).
+        // callback as a VM-loop job, await it if it returns a
+        // thenable, convert to JSON and hand it back so the backend
+        // resolves the page binding with the REAL value — not `null`
+        // (the previous fire-and-forget behaviour was a Playwright
+        // incompatibility).
         Box::pin(async move {
-          let out: rquickjs::Result<serde_json::Value> = rquickjs::async_with!(async_ctx => |ctx| {
-            let f = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?
-              .ok_or_else(|| {
-                rquickjs::Error::new_from_js_message(
-                  "page.exposeFunction",
-                  "Error",
-                  "exposed callback gone".to_string(),
-                )
-              })?
-              .restore(&ctx)?;
-            // Playwright spreads the page-side call arguments into the
-            // callback: `window.fn(a, b)` -> `callback(a, b)` (see
-            // playwright-core client/page.ts `(...args) => callback(...args)`).
-            // Build a spread arg list, not a single array.
-            let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
-            for v in args {
-              // `json_to_js` (NOT `serde_to_js`): a transitive dep
-              // force-enables `serde_json/arbitrary_precision`, under
-              // which rquickjs-serde turns every number into a
-              // `{$serde_json::private::Number}` object. The AP-safe
-              // walker keeps numbers as JS numbers.
-              call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;
-            }
-            let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
-            let res = mp.into_future::<rquickjs::Value<'_>>().await?;
-            // Round-trip through QuickJS `JSON.stringify` + serde_json's
-            // own parser — AP-safe both ways (a non-serde_json
-            // deserializer mis-handles numbers under
-            // `arbitrary_precision`). `undefined`/function -> null.
-            let json = match ctx.json_stringify(res)? {
-              Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),
-              None => serde_json::Value::Null,
-            };
-            Ok(json)
+          let out: Result<rquickjs::Result<serde_json::Value>, crate::error::ScriptError> =
+            crate::vm_with!(vm => |ctx| {
+              let f = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?
+                .ok_or_else(|| {
+                  rquickjs::Error::new_from_js_message(
+                    "page.exposeFunction",
+                    "Error",
+                    "exposed callback gone".to_string(),
+                  )
+                })?
+                .restore(&ctx)?;
+              // Playwright spreads the page-side call arguments into the
+              // callback: `window.fn(a, b)` -> `callback(a, b)` (see
+              // playwright-core client/page.ts `(...args) => callback(...args)`).
+              // Build a spread arg list, not a single array.
+              let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
+              for v in args {
+                // `json_to_js` (NOT `serde_to_js`): a transitive dep
+                // force-enables `serde_json/arbitrary_precision`, under
+                // which rquickjs-serde turns every number into a
+                // `{$serde_json::private::Number}` object. The AP-safe
+                // walker keeps numbers as JS numbers.
+                call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;
+              }
+              let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
+              let res = mp.into_future::<rquickjs::Value<'_>>().await?;
+              // Round-trip through QuickJS `JSON.stringify` + serde_json's
+              // own parser — AP-safe both ways (a non-serde_json
+              // deserializer mis-handles numbers under
+              // `arbitrary_precision`). `undefined`/function -> null.
+              let json = match ctx.json_stringify(res)? {
+                Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),
+                None => serde_json::Value::Null,
+              };
+              Ok(json)
+            })
+            .await;
+          out.map_or(serde_json::Value::Null, |inner| {
+            inner.unwrap_or(serde_json::Value::Null)
           })
-          .await;
-          out.unwrap_or(serde_json::Value::Null)
         })
       }
     });

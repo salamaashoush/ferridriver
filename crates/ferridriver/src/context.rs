@@ -1049,6 +1049,30 @@ impl ContextRef {
     }))
   }
 
+  /// Playwright: `browserContext.routeWebSocket(url, handler)`. Intercepts
+  /// WebSocket connections matching `matcher` on every page in this context;
+  /// the handler receives a live [`crate::web_socket_route::WebSocketRoute`].
+  ///
+  /// Like [`Self::route`], this applies to pages open at call time; pages
+  /// opened afterwards are not retro-fitted (the same documented limitation
+  /// the HTTP `route` fan-out carries).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the context does not exist or installing the page
+  /// mock / binding fails on any page.
+  pub async fn route_web_socket(
+    &self,
+    matcher: crate::url_matcher::UrlMatcher,
+    handler: crate::web_socket_route::WsHandler,
+  ) -> Result<()> {
+    let pages = self.pages().await?;
+    for page in pages {
+      page.route_web_socket(matcher.clone(), handler.clone()).await?;
+    }
+    Ok(())
+  }
+
   /// Playwright: `browserContext.routeFromHAR(har, options?)`. Replays a HAR
   /// file across every page in this context. Replay-only; recording
   /// (`update: true`) is unsupported.

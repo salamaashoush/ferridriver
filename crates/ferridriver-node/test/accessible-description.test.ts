@@ -1,6 +1,6 @@
-// NAPI coverage for the Playwright 1.58-1.60 API subset:
-// locator.description() (1.58), getByRole({ description }) (1.60),
-// context.setStorageState() (1.59), locator.ariaSnapshot({ boxes }) (1.60).
+// NAPI coverage for accessible-description handling:
+// locator.describe()/description() (Playwright 1.58) and
+// getByRole(role, { description }) (Playwright 1.60).
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { type Browser, type Page } from "../index.js";
@@ -11,7 +11,7 @@ const BACKENDS: string[] = process.env.FERRIDRIVER_BACKEND
   : ["cdp-pipe"];
 
 for (const backend of BACKENDS) {
-  describe(`pw 1.58-1.60 [${backend}]`, () => {
+  describe(`accessible description [${backend}]`, () => {
     let browser: Browser;
     let page: Page;
 
@@ -38,28 +38,6 @@ for (const backend of BACKENDS) {
       const primary = page.getByRole("button", { description: "primary action" });
       expect(await primary.count()).toBe(1);
       expect(await primary.textContent()).toBe("Save");
-    });
-
-    it("ariaSnapshot({ boxes }) annotates boxes; default does not", async () => {
-      await page.setContent("<button>Boxed</button>");
-      const withBoxes = await page.locator("body").ariaSnapshot({ boxes: true });
-      const without = await page.locator("body").ariaSnapshot();
-      expect(withBoxes).toContain("[box=");
-      expect(without).not.toContain("[box=");
-    });
-
-    it("context.setStorageState clears existing and applies new cookies", async () => {
-      const context = browser.defaultContext();
-      await context.addCookies([
-        { name: "stale", value: "yes", domain: "example.com", path: "/", secure: false, httpOnly: false },
-      ]);
-      await context.setStorageState({
-        cookies: [{ name: "seeded", value: "fromState", domain: "example.com", path: "/" }],
-        origins: [],
-      });
-      const names = (await context.cookies()).map((c) => c.name);
-      expect(names).not.toContain("stale");
-      expect(names).toContain("seeded");
     });
   });
 }

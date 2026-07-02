@@ -1060,22 +1060,17 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   )?;
 
   // expect.not.<asym>(...) — wraps an asymmetric matcher in a NOT
-  // tag. Mirrors Jest's `expect.not.objectContaining` etc.
+  // tag. Mirrors Jest's `expect.not.objectContaining` etc. The wrappers
+  // resolve `expect.<name>` from globals at call time (see the no-capture
+  // rule below).
   let not_obj = Object::new(ctx.clone())?;
-  let any_fn_n = any_fn.clone();
-  let anything_fn_n = anything_fn.clone();
-  let array_containing_fn_n = array_containing_fn.clone();
-  let object_containing_fn_n = object_containing_fn.clone();
-  let string_containing_fn_n = string_containing_fn.clone();
-  let string_matching_fn_n = string_matching_fn.clone();
-  let close_to_fn_n = close_to_fn.clone();
-  install_not_asym(ctx, &not_obj, "any", any_fn_n)?;
-  install_not_asym(ctx, &not_obj, "anything", anything_fn_n)?;
-  install_not_asym(ctx, &not_obj, "arrayContaining", array_containing_fn_n)?;
-  install_not_asym(ctx, &not_obj, "objectContaining", object_containing_fn_n)?;
-  install_not_asym(ctx, &not_obj, "stringContaining", string_containing_fn_n)?;
-  install_not_asym(ctx, &not_obj, "stringMatching", string_matching_fn_n)?;
-  install_not_asym(ctx, &not_obj, "closeTo", close_to_fn_n)?;
+  install_not_asym(ctx, &not_obj, "any")?;
+  install_not_asym(ctx, &not_obj, "anything")?;
+  install_not_asym(ctx, &not_obj, "arrayContaining")?;
+  install_not_asym(ctx, &not_obj, "objectContaining")?;
+  install_not_asym(ctx, &not_obj, "stringContaining")?;
+  install_not_asym(ctx, &not_obj, "stringMatching")?;
+  install_not_asym(ctx, &not_obj, "closeTo")?;
 
   // Attach the helpers to expect()'s own properties.
   let expect_obj = expect_fn.as_object().ok_or_else(|| {
@@ -1097,15 +1092,21 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   Ok(())
 }
 
-fn install_not_asym<'js>(
-  ctx: &Ctx<'js>,
-  not_obj: &Object<'js>,
-  name: &str,
-  inner: Function<'js>,
-) -> rquickjs::Result<()> {
+// A native closure must NEVER capture a live JS value (`Function`,
+// `Object`, `Value`, or a `Persistent` of one): the value owns a `Ctx`
+// (a JSContext refcount), so a JS object holding such a closure forms a
+// cross-language reference cycle QuickJS's GC cannot trace. The cycle
+// survives until `JS_FreeRuntime`, which then aborts on its
+// `gc_obj_list` assertion when the session VM is dropped. Closures here
+// re-resolve what they need at call time instead (globals lookup /
+// `This`).
+
+fn install_not_asym<'js>(ctx: &Ctx<'js>, not_obj: &Object<'js>, name: &'static str) -> rquickjs::Result<()> {
   let wrapped = Function::new(
     ctx.clone(),
     move |ctx: Ctx<'js>, args: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<Object<'js>> {
+      let expect_obj: Object<'js> = ctx.globals().get("expect")?;
+      let inner: Function<'js> = expect_obj.get(name)?;
       let inner_obj: Object<'js> = inner.call((rquickjs::function::Rest(args.0),))?;
       let wrapper = Object::new(ctx.clone())?;
       wrapper.set("inner", inner_obj)?;
@@ -1120,18 +1121,21 @@ fn install_not_asym<'js>(
 /// `Object.defineProperty` — avoids a JS `Proxy` wrapper (which would
 /// break the `#[qjs] fn (&self, ...)` receiver translation when the
 /// matcher is called) and matches Jest's `.not.toBe(...)` chain shape.
+/// The getter reads the instance from `this` rather than capturing it.
 fn install_not_getter<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs::Result<()> {
   let object_global: Object<'js> = ctx.globals().get("Object")?;
   let define_property: Function<'js> = object_global.get("defineProperty")?;
-  let inst_clone = instance.clone();
-  let getter = Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<Value<'js>> {
-    let class = Class::<ExpectJs>::from_value(&inst_clone)?;
-    let inverted = class.borrow().not_inner();
-    let new_class = Class::instance(ctx.clone(), inverted)?;
-    let new_val = new_class.into_value();
-    install_not_getter(&ctx, &new_val)?;
-    Ok(new_val)
-  })?;
+  let getter = Function::new(
+    ctx.clone(),
+    move |ctx: Ctx<'js>, this: rquickjs::function::This<Value<'js>>| -> rquickjs::Result<Value<'js>> {
+      let class = Class::<ExpectJs>::from_value(&this.0)?;
+      let inverted = class.borrow().not_inner();
+      let new_class = Class::instance(ctx.clone(), inverted)?;
+      let new_val = new_class.into_value();
+      install_not_getter(&ctx, &new_val)?;
+      Ok(new_val)
+    },
+  )?;
   let descriptor = Object::new(ctx.clone())?;
   descriptor.set("get", getter)?;
   descriptor.set("configurable", true)?;
@@ -1142,15 +1146,17 @@ fn install_not_getter<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs::R
 fn install_poll_not_getter<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs::Result<()> {
   let object_global: Object<'js> = ctx.globals().get("Object")?;
   let define_property: Function<'js> = object_global.get("defineProperty")?;
-  let inst_clone = instance.clone();
-  let getter = Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<Value<'js>> {
-    let class = Class::<ExpectPollJs>::from_value(&inst_clone)?;
-    let inverted = class.borrow().not_inner();
-    let new_class = Class::instance(ctx.clone(), inverted)?;
-    let new_val = new_class.into_value();
-    install_poll_not_getter(&ctx, &new_val)?;
-    Ok(new_val)
-  })?;
+  let getter = Function::new(
+    ctx.clone(),
+    move |ctx: Ctx<'js>, this: rquickjs::function::This<Value<'js>>| -> rquickjs::Result<Value<'js>> {
+      let class = Class::<ExpectPollJs>::from_value(&this.0)?;
+      let inverted = class.borrow().not_inner();
+      let new_class = Class::instance(ctx.clone(), inverted)?;
+      let new_val = new_class.into_value();
+      install_poll_not_getter(&ctx, &new_val)?;
+      Ok(new_val)
+    },
+  )?;
   let descriptor = Object::new(ctx.clone())?;
   descriptor.set("get", getter)?;
   descriptor.set("configurable", true)?;

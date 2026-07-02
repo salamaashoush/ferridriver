@@ -42,6 +42,11 @@ pub(crate) struct PageCallbacks {
   /// the persisted function by id and invokes it with the live event
   /// object.
   event_listeners: rustc_hash::FxHashMap<u64, EventListenerEntry>,
+  /// `routeWebSocket` handlers + per-route `onMessage`/`onClose` JS
+  /// callbacks, keyed by a registry-global id. Restored by id inside
+  /// `async_with` from the cross-task WS dispatch (never moved across
+  /// threads — same discipline as `routes`).
+  ws_callbacks: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
 }
 
 /// Identity of the object a route was registered through, so
@@ -101,6 +106,16 @@ impl PageCallbacks {
 
   pub(crate) fn get_route_handler(&self, id: u64) -> Option<rquickjs::Persistent<rquickjs::Function<'static>>> {
     self.routes.get(&id).map(|e| e.handler.clone())
+  }
+
+  /// Store a `routeWebSocket` handler / `onMessage` / `onClose` callback.
+  pub(crate) fn insert_ws_callback(&mut self, id: u64, cb: rquickjs::Persistent<rquickjs::Function<'static>>) {
+    self.ws_callbacks.insert(id, cb);
+  }
+
+  /// Restore a WS callback by id (inside `async_with`).
+  pub(crate) fn get_ws_callback(&self, id: u64) -> Option<rquickjs::Persistent<rquickjs::Function<'static>>> {
+    self.ws_callbacks.get(&id).cloned()
   }
 
   pub(crate) fn get_route_pred(&self, id: u64) -> Option<rquickjs::Persistent<rquickjs::Function<'static>>> {
@@ -237,13 +252,12 @@ unsafe impl rquickjs::JsLifetime<'_> for PageCallbacksUd {
 /// `EventCallback` (backend task) to the context's event pump.
 pub(crate) type PageEventMsg = (u64, bool, Arc<Page>, ferridriver::events::PageEvent);
 
-/// Capacity of the page-event pump channel. The pump is only polled
-/// while the runtime is being driven, and session VMs persist between
-/// `run_script` calls — so a chatty page with a registered listener
-/// buffers events here while the VM idles. The bound turns that from
-/// unbounded memory growth into bounded loss: when full, the newest
-/// event is dropped with a warning (matching the broadcast `Lagged`
-/// policy elsewhere).
+/// Capacity of the page-event pump channel. The session's VM event loop
+/// drains the pump even between `run_script` calls, but a chatty page
+/// with a registered listener can still outrun it. The bound turns that
+/// from unbounded memory growth into bounded loss: when full, the
+/// newest event is dropped with a warning (matching the broadcast
+/// `Lagged` policy elsewhere).
 pub(crate) const PAGE_EVENT_PUMP_CAPACITY: usize = 1024;
 
 /// Per-context sender feeding the single `page.on` event pump.
@@ -255,20 +269,22 @@ pub(crate) const PAGE_EVENT_PUMP_CAPACITY: usize = 1024;
 ///
 /// 1. **`ctx.spawn` pump** (this type; sidecars; screencast): for a
 ///    LONG-LIVED loop that calls plain JS callbacks. The pump future
-///    lives on the runtime's own schedular, so it is only ever polled
-///    by whichever `WithFuture` currently holds the runtime lock — it
-///    stays on the interpreter's execution context by construction.
-///    Trade-off: it only runs while something drives the runtime, so
-///    deliveries buffer while the VM idles.
-/// 2. **`tokio::spawn` + `async_with!`** (route dispatch,
-///    `exposeFunction`/`exposeBinding` calls): for ONE-SHOT dispatch
-///    that completes a flow the page/backend is awaiting. rquickjs's
-///    `WithFuture` (under the `parallel` feature) acquires the
-///    runtime's `async_lock::Mutex<InnerRuntime>` on every poll, so
-///    polls are serialized against the script's own execute; and
-///    because `WithFuture` drives the runtime itself, this is the ONLY
-///    shape that also works while the VM is idle between executes —
-///    which routes require (a page request can arrive at any time).
+///    lives on the runtime's own schedular, which only the session's
+///    single VM event loop (`crate::vm`) ever polls — it stays on the
+///    interpreter's execution context by construction. The loop keeps
+///    pumps advancing while the VM idles between executes AND while a
+///    script execute is parked on a host await (the shape that lets a
+///    single awaited `page.evaluate` observe a driver→page dispatch).
+/// 2. **`VmHandle` job** (route dispatch, `exposeFunction` /
+///    `exposeBinding` calls, script executes themselves): for anything
+///    that must re-enter the VM from another task. `vm_with!` submits
+///    the closure to the event loop, which `ctx.spawn`s it — so jobs
+///    interleave with each other and with parked executes. Never create
+///    an `async_with!` against a session runtime: a transient
+///    `WithFuture` polls the schedular, steals its single wake-queue
+///    waker slot, and dies with it — every later schedular-task wake
+///    (backend response resolving an awaited `page.evaluate`, a pump
+///    message) is then silently lost.
 /// 3. **Touching `Ctx` / restoring a `Persistent` directly from a
 ///    backend thread**: never. Core event callbacks fire on backend
 ///    tokio threads concurrently with the script's execute; they may
@@ -291,10 +307,9 @@ unsafe impl rquickjs::JsLifetime<'_> for PageEventPumpUd {
 }
 
 /// Get (or lazily start) this context's page-event pump and return its
-/// sender. The pump future lives on the QuickJS runtime executor: it is
-/// only polled while the runtime is driven (during a script execute /
-/// its awaits), so events buffer until the next VM activity — which is
-/// also when a listener could observe them.
+/// sender. The pump future lives on the QuickJS runtime executor,
+/// polled by the session's VM event loop — so events keep flowing while
+/// a script is parked on an await and between executes.
 pub(crate) fn ensure_event_pump(ctx: &rquickjs::Ctx<'_>) -> tokio::sync::mpsc::Sender<PageEventMsg> {
   if let Some(ud) = ctx.userdata::<PageEventPumpUd>() {
     return ud.0.clone();

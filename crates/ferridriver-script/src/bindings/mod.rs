@@ -55,6 +55,7 @@ pub mod streams;
 pub mod tracing;
 pub mod video;
 pub mod web_error;
+pub mod web_socket_route;
 pub mod web_storage;
 pub mod webapi;
 
@@ -87,7 +88,7 @@ pub use sidecars::{SidecarJs, SidecarsJs, install_sidecars};
 pub use video::VideoJs;
 pub use web_error::WebErrorJs;
 
-use rquickjs::{AsyncContext, Ctx, class::Class};
+use rquickjs::{Ctx, class::Class};
 use std::sync::Arc;
 
 /// Register every class prototype scripts can encounter so rquickjs knows how
@@ -144,16 +145,15 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
 
 /// Install the `page` global when a page is available on the run context.
 ///
-/// `async_ctx` is the `AsyncContext` driving the script — `PageJs`
-/// captures a clone so `page.route(matcher, fn)` can dispatch the JS
-/// callback back into the same context from a backend route handler
-/// (which runs on a separate tokio task, outside the script's
-/// `async_with` block).
+/// `vm` is the session's VM-loop handle — `PageJs` captures a clone so
+/// `page.route(matcher, fn)` can dispatch the JS callback back into the
+/// VM from a backend route handler (which runs on a separate tokio
+/// task, outside the VM event loop).
 ///
 /// Scripts that do not need browser interaction can run with
 /// `RunContext.page = None` and simply have no `page` binding.
-pub fn install_page(ctx: &Ctx<'_>, page: Arc<ferridriver::Page>, async_ctx: AsyncContext) -> rquickjs::Result<()> {
-  install_page_on(ctx, &ctx.globals(), page, async_ctx)?;
+pub fn install_page(ctx: &Ctx<'_>, page: Arc<ferridriver::Page>, vm: crate::vm::VmHandle) -> rquickjs::Result<()> {
+  install_page_on(ctx, &ctx.globals(), page, vm)?;
   crate::bindings::runtime::mirror_global(ctx, "page")
 }
 
@@ -168,9 +168,9 @@ pub fn install_page_on<'js>(
   ctx: &Ctx<'js>,
   target: &rquickjs::Object<'js>,
   page: Arc<ferridriver::Page>,
-  async_ctx: AsyncContext,
+  vm: crate::vm::VmHandle,
 ) -> rquickjs::Result<()> {
-  let js_page = Class::instance(ctx.clone(), PageJs::new_with_async_ctx(page, async_ctx))?;
+  let js_page = Class::instance(ctx.clone(), PageJs::new_with_vm(page, vm))?;
   target.set("page", js_page)?;
   // Native page-callbacks registry (context userdata): route handlers,
   // exposeFunction callbacks, screencast — all cross-task dispatched.

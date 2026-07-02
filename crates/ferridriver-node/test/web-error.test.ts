@@ -140,5 +140,21 @@ for (const backend of BACKENDS) {
       const p = webErr.page();
       expect(p).not.toBeNull();
     });
+
+    it("WebError.location() exposes { url, line, column } (1.60)", async () => {
+      const [werr] = await Promise.all([
+        context.waitForEvent("weberror", 5000),
+        page.evaluate(() => {
+          setTimeout(() => {
+            throw new Error("boom-loc");
+          }, 10);
+        }),
+      ]);
+      expect(werr.error().message).toBe("boom-loc");
+      const loc = werr.location();
+      expect(typeof loc.url).toBe("string");
+      expect(typeof loc.line).toBe("number");
+      expect(typeof loc.column).toBe("number");
+    });
   });
 }

@@ -156,6 +156,7 @@ pub fn attach_listeners(page: &WebKitPage) {
     network_log: Arc::clone(&page.network_log),
     lifecycle: Arc::clone(&page.lifecycle),
     main_frame_id_cache: Arc::clone(&page.main_frame_id_cache),
+    exposed_fns: page.exposed_fns.clone(),
   };
   let dialog_log = Arc::clone(&page.dialog_log);
   // Provisional-target slot. Populated on `Target.targetCreated` with
@@ -263,6 +264,14 @@ async fn handle_provisional_target_created(params: &Value, page: &WebKitPage, pr
       json!({ "name": super::page::UTILITY_WORLD_NAME }),
     )
     .await;
+  // Replay page-side bootstrap + the exposed-function binding channel on the
+  // new process. WebKit gives the committed target a clean protocol surface,
+  // so without this every registered init script (the WebSocket mock, user
+  // addInitScripts) and every exposed function / `routeWebSocket` would go
+  // silent after a cross-process navigation. Mirrors Playwright's
+  // `WKProvisionalPage` re-applying bootstrap + bindings.
+  page.replay_bootstrap_script(&new_target).await;
+  page.replay_binding_channel(&new_target).await;
   // Stash before resuming — a fast commit could fire before `await`
   // releases here, and the swap reader needs to find the session.
   {
@@ -326,6 +335,11 @@ struct TargetListenerCtx {
   network_log: Arc<arc_swap::ArcSwap<RwLock<Vec<NetworkRequest>>>>,
   lifecycle: Arc<super::page::LifecycleSignals>,
   main_frame_id_cache: Arc<std::sync::Mutex<Option<String>>>,
+  /// Exposed-function registry, shared with the page. `Runtime.bindingCalled`
+  /// is dispatched here (not from a separate task pinned to one target
+  /// session) so exposed functions keep working after a cross-process
+  /// navigation swaps the live target — the main listener follows the swap.
+  exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedFn>>>,
 }
 
 impl TargetListenerCtx {
@@ -334,8 +348,46 @@ impl TargetListenerCtx {
   }
 }
 
+/// Dispatch a `Runtime.bindingCalled` for `__fd_binding__`: look up the
+/// exposed function by name, invoke it, and resolve/reject the page-side
+/// `__fd_bc` promise via a `Runtime.evaluate` on the live (swap-following)
+/// target session. Mirrors the controller protocol set up in
+/// `WebKitPage::ensure_binding_channel`.
+async fn handle_binding_called(ctx: &TargetListenerCtx, params: &Value) {
+  if params.get("name").and_then(Value::as_str) != Some("__fd_binding__") {
+    return;
+  }
+  let payload_str = params.get("argument").and_then(Value::as_str).unwrap_or("{}");
+  let payload: Value = serde_json::from_str(payload_str).unwrap_or_default();
+  let fn_name = payload.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+  let seq = payload.get("seq").and_then(Value::as_u64).unwrap_or(0);
+  let args: Vec<Value> = payload
+    .get("args")
+    .and_then(Value::as_array)
+    .cloned()
+    .unwrap_or_default();
+  let maybe_fn = ctx.exposed_fns.read().await.get(&fn_name).cloned();
+  let deliver_js = if let Some(callback) = maybe_fn {
+    let result = callback(args).await;
+    format!(
+      "globalThis.__fd_bc.resolve({}, {})",
+      seq,
+      serde_json::to_string(&result).unwrap_or_else(|_| "null".into())
+    )
+  } else {
+    format!("globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')")
+  };
+  let _ = ctx
+    .target()
+    .send(super::protocol::RUNTIME_EVALUATE, json!({ "expression": deliver_js }))
+    .await;
+}
+
 async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::Envelope) {
   match env.method.as_deref() {
+    Some("Runtime.bindingCalled") => {
+      handle_binding_called(ctx, &env.params).await;
+    },
     Some("Console.messageAdded") => {
       let log = arc_swap::Guard::into_inner(ctx.console_log.load());
       dispatch_console(&env.params, &log, &ctx.emitter, &ctx.page_backref).await;
@@ -1090,8 +1142,10 @@ async fn dispatch_console(
     // (1-based, converted to 0-based via `(v || 1) - 1`), not the stack.
     let location = crate::console_message::ConsoleMessageLocation {
       url: message.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
-      line_number: (message.get("line").and_then(Value::as_u64).unwrap_or(1).max(1) - 1) as u32,
-      column_number: (message.get("column").and_then(Value::as_u64).unwrap_or(1).max(1) - 1) as u32,
+      line_number: u32::try_from(message.get("line").and_then(Value::as_u64).unwrap_or(1).max(1) - 1)
+        .unwrap_or(u32::MAX),
+      column_number: u32::try_from(message.get("column").and_then(Value::as_u64).unwrap_or(1).max(1) - 1)
+        .unwrap_or(u32::MAX),
     };
     emitter.emit(crate::events::PageEvent::PageError(crate::web_error::WebError::new(
       &page, err, location,

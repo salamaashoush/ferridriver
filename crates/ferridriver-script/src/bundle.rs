@@ -299,10 +299,10 @@ pub async fn bundle_and_compile(entry_paths: &[PathBuf], cwd: &Path) -> Result<C
 
 /// Link + evaluate the bundled step module from precompiled bytecode in
 /// the given session. Top-level `Given`/`When`/`Then` run here.
-pub async fn eval_bundle(actx: &AsyncContext, bundle: &CompiledBundle) -> Result<(), ScriptError> {
+pub async fn eval_bundle(vm: &crate::vm::VmHandle, bundle: &CompiledBundle) -> Result<(), ScriptError> {
   let bytecode = Arc::clone(&bundle.bytecode);
   let label = bundle.module_name.clone();
-  async_with!(actx => |ctx| {
+  crate::vm_with!(vm => |ctx| {
     // SAFETY: produced by `Module::write` by this exact rquickjs/QuickJS
     // build with native endianness — either in this process or restored
     // from the bytecode disk cache, whose ABI tag (QuickJS version, arch,
@@ -323,7 +323,7 @@ pub async fn eval_bundle(actx: &AsyncContext, bundle: &CompiledBundle) -> Result
       Err(e) => Err(caught_to_script_error(e, &label)),
     }
   })
-  .await
+  .await?
 }
 
 impl CompiledBundle {
