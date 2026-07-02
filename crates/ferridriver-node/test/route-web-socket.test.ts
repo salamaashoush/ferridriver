@@ -135,6 +135,54 @@ for (const backend of BACKENDS) {
       expect(got).toBe("frame:hi");
     });
 
+    it("context.routeWebSocket applies to a page opened AFTER registration", async () => {
+      const ctx = await browser.newContext();
+      try {
+        await ctx.routeWebSocket(`ws://${base}/future`, (ws) => {
+          ws.onMessage((m: any) => ws.send(`future:${m}`));
+        });
+        const p = await ctx.newPage();
+        await p.goto(`http://${base}/`);
+        const got = await p.evaluate(
+          (url) =>
+            new Promise<string>((resolve, reject) => {
+              const ws = new WebSocket(url as string);
+              ws.onopen = () => ws.send("hi");
+              ws.onmessage = (e) => resolve(e.data as string);
+              ws.onerror = () => reject(new Error("ws error"));
+            }),
+          `ws://${base}/future`,
+        );
+        expect(got).toBe("future:hi");
+      } finally {
+        await ctx.close();
+      }
+    });
+
+    it("page routes beat context routes; newest page route wins", async () => {
+      await page.context().routeWebSocket(`ws://${base}/prec`, (ws) => {
+        ws.onMessage((m: any) => ws.send(`ctx:${m}`));
+      });
+      await page.routeWebSocket(`ws://${base}/prec`, (ws) => {
+        ws.onMessage((m: any) => ws.send(`page-old:${m}`));
+      });
+      await page.routeWebSocket(`ws://${base}/prec`, (ws) => {
+        ws.onMessage((m: any) => ws.send(`page-new:${m}`));
+      });
+      await page.goto(`http://${base}/`);
+      const got = await page.evaluate(
+        (url) =>
+          new Promise<string>((resolve, reject) => {
+            const ws = new WebSocket(url as string);
+            ws.onopen = () => ws.send("hi");
+            ws.onmessage = (e) => resolve(e.data as string);
+            ws.onerror = () => reject(new Error("ws error"));
+          }),
+        `ws://${base}/prec`,
+      );
+      expect(got).toBe("page-new:hi");
+    });
+
     it("onClose handler receives (code, reason) as two positional args", async () => {
       const received: Array<{ code?: number; reason?: string; codeType: string; reasonType: string }> = [];
       await page.routeWebSocket(`ws://${base}/closer`, (ws) => {

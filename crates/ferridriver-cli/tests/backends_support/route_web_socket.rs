@@ -136,6 +136,74 @@ pub fn test_page_route_web_socket_in_iframe(c: &mut McpClient) {
   );
 }
 
+/// `context.routeWebSocket` must apply to pages opened AFTER the route
+/// was registered — Playwright registers context-scoped interception
+/// patterns, not a snapshot fan-out. A fresh `context.newPage()` gets
+/// the mock + binding re-applied from the per-context registry.
+pub fn test_context_route_web_socket_future_page(c: &mut McpClient) {
+  let port = super::spawn_html_server();
+  let got = c.script_value_with_args(
+    r"
+    const [pageUrl, wsUrl] = args;
+    const ctx = await browser.newContext();
+    try {
+      await ctx.routeWebSocket(wsUrl, (ws) => {
+        ws.onMessage((m) => ws.send('future:' + m));
+      });
+      const p = await ctx.newPage();
+      await p.goto(pageUrl);
+      return await p.evaluate((u) => new Promise((resolve) => {
+        const ws = new WebSocket(u);
+        ws.onopen = () => ws.send('hi');
+        ws.onmessage = (e) => resolve(e.data);
+      }), wsUrl);
+    } finally {
+      await ctx.close();
+    }
+    ",
+    serde_json::json!([format!("http://127.0.0.1:{port}/fp"), "ws://ferri.invalid/future"]),
+  );
+  assert_eq!(
+    got.as_str(),
+    Some("future:hi"),
+    "context.routeWebSocket must intercept sockets on a page opened after registration"
+  );
+}
+
+/// Page-scope routes beat context-scope routes for the same URL, and
+/// within page scope the newest registration wins — Playwright's
+/// page._onWebSocketRoute falls through to the context handler list,
+/// each searched newest-first over an unshifted array.
+pub fn test_route_web_socket_scope_precedence(c: &mut McpClient) {
+  let port = super::spawn_html_server();
+  let got = c.script_value_with_args(
+    r"
+    const [pageUrl, wsUrl] = args;
+    await context.routeWebSocket(wsUrl, (ws) => {
+      ws.onMessage((m) => ws.send('ctx:' + m));
+    });
+    await page.routeWebSocket(wsUrl, (ws) => {
+      ws.onMessage((m) => ws.send('page-old:' + m));
+    });
+    await page.routeWebSocket(wsUrl, (ws) => {
+      ws.onMessage((m) => ws.send('page-new:' + m));
+    });
+    await page.goto(pageUrl);
+    return await page.evaluate((u) => new Promise((resolve) => {
+      const ws = new WebSocket(u);
+      ws.onopen = () => ws.send('hi');
+      ws.onmessage = (e) => resolve(e.data);
+    }), wsUrl);
+    ",
+    serde_json::json!([format!("http://127.0.0.1:{port}/prec"), "ws://ferri.invalid/prec"]),
+  );
+  assert_eq!(
+    got.as_str(),
+    Some("page-new:hi"),
+    "page-scope routes beat context-scope; newest page route wins"
+  );
+}
+
 pub fn register(set: &mut super::super::TestSet<'_>) {
   set.run(
     "backends_support::route_web_socket::test_page_route_web_socket",
@@ -148,5 +216,13 @@ pub fn register(set: &mut super::super::TestSet<'_>) {
   set.run(
     "backends_support::route_web_socket::test_page_route_web_socket_in_iframe",
     test_page_route_web_socket_in_iframe,
+  );
+  set.run(
+    "backends_support::route_web_socket::test_context_route_web_socket_future_page",
+    test_context_route_web_socket_future_page,
+  );
+  set.run(
+    "backends_support::route_web_socket::test_route_web_socket_scope_precedence",
+    test_route_web_socket_scope_precedence,
   );
 }

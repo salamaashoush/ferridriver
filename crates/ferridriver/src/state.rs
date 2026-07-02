@@ -235,6 +235,14 @@ pub struct BrowserState {
   /// [`crate::events::ExposedBinding`] is invoked across `.await`
   /// points and read during async page-open.
   pub context_bindings: Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, crate::events::ExposedBinding>>>>,
+  /// Per-context WebSocket-route registry — `context.routeWebSocket`
+  /// handlers keyed by composite session key, in registration order.
+  /// Consumed by `ContextRef::new_page` so a context-level WS route
+  /// applies to every page in the context (current + future), matching
+  /// Playwright's context-scoped interception patterns.
+  pub context_ws_routes: Arc<
+    tokio::sync::RwLock<HashMap<String, Vec<(crate::url_matcher::UrlMatcher, crate::web_socket_route::WsHandler)>>>,
+  >,
   /// Sync-readable connection flag mirroring `!instances.is_empty()`.
   /// Set true when an instance is ensured, false on `shutdown`, so
   /// `Browser::is_connected()` stays sync like Playwright's.
@@ -316,6 +324,7 @@ impl BrowserState {
       context_options: Arc::new(std::sync::Mutex::new(HashMap::default())),
       har_recorders: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_bindings: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
+      context_ws_routes: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       persistent_context: false,
@@ -397,6 +406,19 @@ impl BrowserState {
     &self,
   ) -> Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, crate::events::ExposedBinding>>>> {
     self.context_bindings.clone()
+  }
+
+  /// Shared handle to the per-context WebSocket-route registry. Used by
+  /// `ContextRef::route_web_socket` to register and by
+  /// `ContextRef::new_page` to apply context-level routes onto a fresh
+  /// page.
+  #[must_use]
+  pub fn context_ws_routes_handle(
+    &self,
+  ) -> Arc<
+    tokio::sync::RwLock<HashMap<String, Vec<(crate::url_matcher::UrlMatcher, crate::web_socket_route::WsHandler)>>>,
+  > {
+    self.context_ws_routes.clone()
   }
 
   /// Look up (or lazily create) the `ContextEventEmitter` for a
