@@ -384,5 +384,13 @@ for (const backend of BACKENDS) {
       const picked = await pending;
       expect(await picked.textContent()).toBe("PickMe");
     });
+
+    it("request.existingResponse() returns the received response without waiting (1.59)", async () => {
+      const resp = await page.goto("data:text/html,<title>existing</title>");
+      const req = resp!.request();
+      const existing = await req.existingResponse();
+      expect(existing).not.toBeNull();
+      expect(existing!.url()).toBe(resp!.url());
+    });
   });
 }

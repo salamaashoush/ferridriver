@@ -166,3 +166,44 @@ pub fn test_context_weberror_is_webbed_error_class(c: &mut McpClient) {
     "webError.error().message should contain 'ctx-forwarded': {v}"
   );
 }
+
+/// `webError.location()` (Playwright 1.60) returns a `{ url, line, column }`
+/// captured from the error's top stack frame. Before this landed,
+/// `location` was undefined.
+pub fn test_web_error_location(c: &mut McpClient) {
+  c.nav("<body>weberror</body>");
+  let v = c.script_value(
+    r"
+    const [werr] = await Promise.all([
+      context.waitForEvent('weberror', 5000),
+      page.evaluate(() => { setTimeout(() => { throw new Error('boom-loc'); }, 10); }),
+    ]);
+    const loc = werr.location();
+    return {
+      name: werr.error().name,
+      message: werr.error().message,
+      url: loc.url,
+      lineType: typeof loc.line,
+      columnType: typeof loc.column,
+      urlType: typeof loc.url,
+    };
+    ",
+  );
+  assert_eq!(v["message"].as_str(), Some("boom-loc"), "{v}");
+  assert_eq!(v["name"].as_str(), Some("Error"), "{v}");
+  assert_eq!(
+    v["lineType"].as_str(),
+    Some("number"),
+    "location.line must be numeric: {v}"
+  );
+  assert_eq!(
+    v["columnType"].as_str(),
+    Some("number"),
+    "location.column must be numeric: {v}"
+  );
+  assert_eq!(
+    v["urlType"].as_str(),
+    Some("string"),
+    "location.url must be a string: {v}"
+  );
+}

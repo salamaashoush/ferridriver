@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rquickjs::function::{Async, Func};
-use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx, Module, Object, Value, async_with};
+use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx, Module, Object, Value};
+
+use crate::vm_with;
 
 use crate::console::{ConsoleCapture, strip_ansi};
 use crate::error::{ScriptError, ScriptErrorKind};
@@ -227,18 +229,19 @@ impl ScriptCaps {
   }
 }
 
-/// The session's owning [`AsyncContext`], stashed as rquickjs userdata
-/// at [`Session::create`] so bindings that mint a `Page` from script
+/// The session's VM-loop handle, stashed as rquickjs userdata at
+/// [`Session::create`] so bindings that mint a `Page` from script
 /// (`browser.newContext().newPage()`, `locator.page()`, `frame.page()`)
 /// can thread it into `PageJs` — without it, `page.route` /
-/// `page.exposeFunction` cross-task dispatch has no context to re-enter.
-pub(crate) struct SessionAsyncCtx(pub(crate) AsyncContext);
+/// `page.exposeFunction` cross-task dispatch has no way back into the
+/// VM event loop.
+pub(crate) struct SessionVm(pub(crate) crate::vm::VmHandle);
 
-// SAFETY: holds only an owned `AsyncContext` (`'static`; no borrowed
+// SAFETY: holds only an owned channel handle (`'static`; no borrowed
 // JS values), so re-stating the unused `'js` lifetime is sound.
 #[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for SessionAsyncCtx {
-  type Changed<'to> = SessionAsyncCtx;
+unsafe impl rquickjs::JsLifetime<'_> for SessionVm {
+  type Changed<'to> = SessionVm;
 }
 
 /// The session's durable persistent-process registry, stashed as
@@ -319,7 +322,17 @@ pub struct SessionRun {
 /// [`execute`]: Session::execute
 pub struct Session {
   runtime: AsyncRuntime,
-  ctx: AsyncContext,
+  /// Submission handle to the session's single VM event loop (see
+  /// `crate::vm`): one persistent `async_with` owns the runtime's
+  /// schedular for the VM's whole life; every execute and every
+  /// cross-task dispatch runs as a job `ctx.spawn`ed by that loop.
+  /// Nothing else may create an `async_with` against this runtime — a
+  /// transient one steals the schedular's single wake-queue slot and
+  /// dies with it, silently losing every later external wake.
+  vm: crate::vm::VmHandle,
+  /// Dropping this with the session ends the VM event loop, which
+  /// releases the runtime on the loop's own task.
+  _vm_shutdown: crate::vm::VmShutdown,
   config: ScriptEngineConfig,
   default_request: Arc<ferridriver::http_client::HttpClient>,
   caps: ScriptCaps,
@@ -446,6 +459,8 @@ impl Session {
       .await
       .map_err(|e| ScriptError::internal(format!("rquickjs context init: {e}")))?;
 
+    let (vm, vm_shutdown) = crate::vm::spawn_vm_loop(&ctx);
+
     // Plugin bindings are server-global and immutable post-load, so they
     // install exactly once. The per-tool wrappers dereference
     // `globalThis.page` / `context` / `request` lazily at invocation,
@@ -461,13 +476,13 @@ impl Session {
     let caps = context.caps.clone();
     let caps_for_session = caps.clone();
     let sidecars = config.sidecars.clone();
-    let ud_ctx = ctx.clone();
-    let install: Result<(), ScriptError> = async_with!(ctx => |ctx| {
-      // Stash the session's AsyncContext so script-minted pages can
+    let ud_vm = vm.clone();
+    let install: Result<Result<(), ScriptError>, ScriptError> = vm_with!(vm => |ctx| {
+      // Stash the session's VM-loop handle so script-minted pages can
       // thread it into PageJs (route/exposeFunction cross-task
-      // dispatch). A failure here only degrades those to "no async
-      // ctx" (same as before this fix) — never a correctness break.
-      let _ = ctx.store_userdata(SessionAsyncCtx(ud_ctx));
+      // dispatch). A failure here only degrades those to "no VM
+      // handle" — never a correctness break.
+      let _ = ctx.store_userdata(SessionVm(ud_vm));
       // The active-tool net allow-list cell `fetch` reads (resting state
       // = unrestricted). Stored once per VM so it survives rebuilds and
       // is present even when no tool runs; `plugins::dispatch_tool`
@@ -531,7 +546,7 @@ impl Session {
         .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")))
     })
     .await;
-    install?;
+    install??;
 
     let applied = AppliedLimits {
       memory: AtomicUsize::new(config.default_memory_limit),
@@ -540,7 +555,8 @@ impl Session {
     };
     Ok(Self {
       runtime,
-      ctx,
+      vm,
+      _vm_shutdown: vm_shutdown,
       config,
       default_request: Arc::new(ferridriver::http_client::HttpClient::new(
         ferridriver::http_client::HttpClientOptions::default(),
@@ -551,12 +567,12 @@ impl Session {
     })
   }
 
-  /// The session's owning [`AsyncContext`]. The BDD core clones this to
-  /// drive registered JS step functions back over the async bridge
-  /// (same mechanism as `page.route` cross-task dispatch).
+  /// The session's VM-loop handle. The BDD core clones this to drive
+  /// registered JS step functions back over the async bridge (same
+  /// mechanism as `page.route` cross-task dispatch).
   #[must_use]
-  pub fn async_context(&self) -> AsyncContext {
-    self.ctx.clone()
+  pub fn vm_handle(&self) -> crate::vm::VmHandle {
+    self.vm.clone()
   }
 
   /// Stash the session's persistent-process registry into VM userdata
@@ -565,7 +581,7 @@ impl Session {
   /// durable session state, the VM is not).
   pub async fn install_session_procs(&self, procs: std::sync::Arc<crate::session_procs::SessionProcs>) {
     let caps = self.caps.clone();
-    async_with!(self.ctx => |ctx| {
+    let _ = vm_with!(self.vm => |ctx| {
       let _ = ctx.store_userdata(SessionProcsUd(procs));
       let procs = ctx.userdata::<SessionProcsUd>().map(|u| u.0.clone());
       let _ = install_commands(&ctx, &caps, procs);
@@ -606,7 +622,7 @@ impl Session {
       request: context.request.clone(),
       default_request: self.default_request.clone(),
       browser: context.browser.clone(),
-      async_ctx: self.ctx.clone(),
+      vm: self.vm.clone(),
     }
   }
 
@@ -694,9 +710,10 @@ impl Session {
     self.timeout.arm(started + timeout);
     let install = self.globals_install(context, &console);
     let source_owned = source.to_string();
+    let args = args.to_vec();
 
-    let eval_fut = async_with!(self.ctx => |ctx| {
-      if let Err(e) = install_call_globals(&ctx, args, install) {
+    let eval_fut = vm_with!(self.vm => |ctx| {
+      if let Err(e) = install_call_globals(&ctx, &args, install) {
         return Err(ScriptError::internal(format!("failed to install globals: {e}")));
       }
 
@@ -717,7 +734,7 @@ impl Session {
 
     let backstop = timeout.saturating_add(TIMEOUT_BACKSTOP_GRACE);
     let eval_result: Result<serde_json::Value, ScriptError> = match tokio::time::timeout(backstop, eval_fut).await {
-      Ok(r) => r,
+      Ok(r) => r.and_then(|inner| inner),
       Err(_) => return self.finish_backstop(started, &console, timeout),
     };
 
@@ -747,9 +764,10 @@ impl Session {
     let install = self.globals_install(context, &console);
     let bytecode = Arc::clone(&bundle.bytecode);
     let label = bundle.module_name.clone();
+    let args = args.to_vec();
 
-    let eval_fut = async_with!(self.ctx => |ctx| {
-      if let Err(e) = install_call_globals(&ctx, args, install) {
+    let eval_fut = vm_with!(self.vm => |ctx| {
+      if let Err(e) = install_call_globals(&ctx, &args, install) {
         return Err(ScriptError::internal(format!("failed to install globals: {e}")));
       }
 
@@ -781,7 +799,7 @@ impl Session {
 
     let backstop = timeout.saturating_add(TIMEOUT_BACKSTOP_GRACE);
     let eval_result: Result<serde_json::Value, ScriptError> = match tokio::time::timeout(backstop, eval_fut).await {
-      Ok(r) => r,
+      Ok(r) => r.and_then(|inner| inner),
       Err(_) => return self.finish_backstop(started, &console, timeout),
     };
 
@@ -823,10 +841,10 @@ struct GlobalsInstall {
   request: Option<Arc<ferridriver::http_client::HttpClient>>,
   default_request: Arc<ferridriver::http_client::HttpClient>,
   browser: Option<Arc<ferridriver::Browser>>,
-  /// `AsyncContext` driving the script — passed to `install_page` so
-  /// `page.route` callbacks can dispatch back into JS from a separate
-  /// tokio task. Always present (cloned from the session's context).
-  async_ctx: AsyncContext,
+  /// VM-loop handle — passed to `install_page` so `page.route`
+  /// callbacks can dispatch back into JS from a separate tokio task.
+  /// Always present (cloned from the session's handle).
+  vm: crate::vm::VmHandle,
 }
 
 /// Reinstall ONLY the per-call-variant globals: `args`, `console`, and
@@ -850,7 +868,7 @@ fn install_call_globals(ctx: &Ctx<'_>, args: &[serde_json::Value], inst: Globals
   install_console(ctx, inst.console)?;
 
   if let Some(page) = inst.page {
-    crate::bindings::install_page(ctx, page, inst.async_ctx.clone())?;
+    crate::bindings::install_page(ctx, page, inst.vm.clone())?;
   }
   if let Some(bcx) = inst.browser_context {
     crate::bindings::install_browser_context(ctx, bcx)?;

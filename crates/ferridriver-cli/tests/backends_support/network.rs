@@ -854,6 +854,33 @@ pub fn test_route_fallback_applies_overrides(c: &mut McpClient) {
   });
 }
 
+/// `request.existingResponse()` (Playwright 1.59) returns the response
+/// already received for a completed navigation, without awaiting, matching
+/// `request.response()`.
+pub fn test_request_existing_response(c: &mut McpClient) {
+  c.nav("<body>existing</body>");
+  let v = c.script_value(
+    r"
+    const resp = await page.goto('data:text/html,<title>existing-response</title>');
+    const req = resp.request();
+    const existing = await req.existingResponse();
+    const viaWait = await req.response();
+    return {
+      hasExisting: existing != null,
+      matchesUrl: existing != null && existing.url() === resp.url(),
+      matchesStatus: existing != null && viaWait != null && existing.status() === viaWait.status(),
+    };
+    ",
+  );
+  assert_eq!(
+    v["hasExisting"].as_bool(),
+    Some(true),
+    "existingResponse should be present after navigation: {v}"
+  );
+  assert_eq!(v["matchesUrl"].as_bool(), Some(true), "{v}");
+  assert_eq!(v["matchesStatus"].as_bool(), Some(true), "{v}");
+}
+
 /// Spawn a tiny HTTP server that responds 200 OK to any request.
 /// Used to give the test page a real http origin so Private Network
 /// Access doesn't block subsequent loopback WebSocket connections.

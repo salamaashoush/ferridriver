@@ -245,10 +245,14 @@ fn register_script_handles(set: &mut TestSet<'_>) {
 
 fn register_script_locators(set: &mut TestSet<'_>) {
   backends_support::script_locators::register(set);
+  backends_support::accessible_description::register(set);
+  backends_support::aria_snapshot::register(set);
 }
 
 fn register_script_emulation_storage(set: &mut TestSet<'_>) {
   backends_support::script_emul_storage::register(set);
+  backends_support::storage_state::register(set);
+  backends_support::web_storage::register(set);
 }
 
 fn register_script_sessions(set: &mut TestSet<'_>) {
@@ -275,6 +279,9 @@ fn register_events_network(set: &mut TestSet<'_>) {
   run!(set, backends_support::network::test_network_http_version);
   run!(set, backends_support::network::test_network_websocket);
   run!(set, backends_support::network::test_route_fallback_applies_overrides);
+  run!(set, backends_support::network::test_request_existing_response);
+  backends_support::api_response::register(set);
+  backends_support::route_web_socket::register(set);
   run!(set, backends_support::navigation_response::test_goto_returns_response);
   run!(set, backends_support::navigation_response::test_goto_follows_redirects);
   run!(set, backends_support::navigation_response::test_goto_network_failure);
@@ -330,6 +337,9 @@ fn register_events_metadata(set: &mut TestSet<'_>) {
     set,
     backends_support::web_error::test_context_weberror_is_webbed_error_class
   );
+  run!(set, backends_support::web_error::test_web_error_location);
+  backends_support::context_events::register(set);
+  backends_support::tracing_har::register(set);
   run!(set, backends_support::video::test_video_null_without_recording);
   run!(set, backends_support::video::test_video_recording_lifecycle);
 }
@@ -507,14 +517,6 @@ fn register_session_bind(set: &mut TestSet<'_>) {
   backends_support::session_bind::register(set);
 }
 
-fn register_pw_158_160(set: &mut TestSet<'_>) {
-  backends_support::pw_158_160::register(set);
-}
-
-fn register_pw_159_161(set: &mut TestSet<'_>) {
-  backends_support::pw_159_161::register(set);
-}
-
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
 // 17 categories × 4 backends = 68 `#[test]`s grouped into one module
@@ -606,14 +608,6 @@ macro_rules! backend_module {
       #[test]
       fn session_bind() {
         run_category($backend, register_session_bind);
-      }
-      #[test]
-      fn pw_158_160() {
-        run_category($backend, register_pw_158_160);
-      }
-      #[test]
-      fn pw_159_161() {
-        run_category($backend, register_pw_159_161);
       }
     }
   };

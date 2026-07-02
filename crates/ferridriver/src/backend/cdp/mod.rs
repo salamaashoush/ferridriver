@@ -912,11 +912,15 @@ fn cdp_exception_to_location(exception_details: &serde_json::Value) -> crate::co
   match frame {
     Some(frame) => crate::console_message::ConsoleMessageLocation {
       url: frame.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-      line_number: frame.get("lineNumber").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32,
-      column_number: frame
-        .get("columnNumber")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0) as u32,
+      line_number: u32::try_from(frame.get("lineNumber").and_then(serde_json::Value::as_u64).unwrap_or(0))
+        .unwrap_or(u32::MAX),
+      column_number: u32::try_from(
+        frame
+          .get("columnNumber")
+          .and_then(serde_json::Value::as_u64)
+          .unwrap_or(0),
+      )
+      .unwrap_or(u32::MAX),
     },
     None => crate::console_message::ConsoleMessageLocation::default(),
   }

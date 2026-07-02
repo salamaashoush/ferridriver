@@ -22,9 +22,9 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use ferridriver_script::{
-  AsyncContext, CompiledBundle, HookArg, InMemoryVars, JsArg, PathSandbox, RunContext, ScenarioWorld, ScriptAttachment,
-  ScriptEngineConfig, Session, StepOutcome, bundle_and_compile, collect_registry, drain_attachments, eval_bundle,
-  invoke_hook, invoke_step, is_source_file, reset_world, set_scenario_world, walk_source_files,
+  CompiledBundle, HookArg, InMemoryVars, JsArg, PathSandbox, RunContext, ScenarioWorld, ScriptAttachment,
+  ScriptEngineConfig, Session, StepOutcome, VmHandle, bundle_and_compile, collect_registry, drain_attachments,
+  eval_bundle, invoke_hook, invoke_step, is_source_file, reset_world, set_scenario_world, walk_source_files,
 };
 use ferridriver_test::FixturePool;
 use ferridriver_test::model::{AttachmentBody, StepCategory, TestInfo};
@@ -197,9 +197,7 @@ impl JsBddSession {
   /// Drain attachments queued by `this.attach`/`this.log` during the
   /// just-run scenario (clears the queue for the next scenario).
   pub async fn drain_attachments(&self) -> Vec<ScriptAttachment> {
-    drain_attachments(&self.session.async_context())
-      .await
-      .unwrap_or_default()
+    drain_attachments(&self.session.vm_handle()).await.unwrap_or_default()
   }
 
   /// Discover, bundle and load step files in one call (convenience for
@@ -247,11 +245,11 @@ impl JsBddSession {
       .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
 
     // Link the single bundled module (top-level Given/When/Then run).
-    let actx = session.async_context();
-    eval_bundle(&actx, &bundle)
+    let vm = session.vm_handle();
+    eval_bundle(&vm, &bundle)
       .await
       .map_err(|e| anyhow::anyhow!("step bundle failed to load: {}", fmt_script_error(&bundle, &e)))?;
-    let snapshot = collect_registry(&actx)
+    let snapshot = collect_registry(&vm)
       .await
       .map_err(|e| anyhow::anyhow!("collect registry: {}", e.message))?;
 
@@ -270,7 +268,7 @@ impl JsBddSession {
         "Then" => StepKind::Then,
         _ => StepKind::Step,
       };
-      let handler = js_step_handler(actx.clone(), idx, Arc::clone(&bundle));
+      let handler = js_step_handler(vm.clone(), idx, Arc::clone(&bundle));
       let loc = StepLocation {
         file: JS_STEP_LOCATION,
         line: 0,
@@ -308,7 +306,7 @@ impl JsBddSession {
   }
 
   async fn run_hooks(&self, kind: &str, tags: Option<&[String]>, arg: Option<&HookArg>) -> Result<(), String> {
-    let actx = self.session.async_context();
+    let vm = self.session.vm_handle();
     let mut hooks: Vec<(usize, Option<&TagExpression>)> = self
       .hooks
       .iter()
@@ -327,7 +325,7 @@ impl JsBddSession {
       if !applies {
         continue;
       }
-      if let Err(e) = invoke_hook(&actx, idx, arg, &self.bundle.module_name).await {
+      if let Err(e) = invoke_hook(&vm, idx, arg, &self.bundle.module_name).await {
         return Err(fmt_script_error(&self.bundle, &e));
       }
     }
@@ -342,7 +340,7 @@ impl JsBddSession {
   /// Execute one expanded scenario: bind its World from the fixtures,
   /// run `Before` hooks, the steps, then `After` hooks.
   pub async fn run_scenario(&self, scenario: &ScenarioExecution, world: &mut BrowserWorld) -> JsScenarioResult {
-    let actx = self.session.async_context();
+    let vm = self.session.vm_handle();
 
     // Mirror the Rust executor: scope `world.resolve_fixture_path(...)`
     // to the feature file's directory so steps like
@@ -363,8 +361,8 @@ impl JsBddSession {
       parameters: Some(self.world_parameters.clone()),
     };
 
-    let _ = reset_world(&actx).await;
-    if let Err(e) = set_scenario_world(&actx, &sw).await {
+    let _ = reset_world(&vm).await;
+    if let Err(e) = set_scenario_world(&vm, &sw).await {
       return JsScenarioResult {
         name: scenario.name.clone(),
         tags: scenario.tags.clone(),
@@ -523,16 +521,16 @@ impl JsBddSession {
   }
 }
 
-fn js_step_handler(actx: AsyncContext, idx: usize, bundle: Arc<CompiledBundle>) -> StepHandler {
+fn js_step_handler(vm: VmHandle, idx: usize, bundle: Arc<CompiledBundle>) -> StepHandler {
   Arc::new(move |_world, params, table, doc| {
-    let actx = actx.clone();
+    let vm = vm.clone();
     let bundle = Arc::clone(&bundle);
     let params_json: Vec<JsArg> = params.iter().map(step_param_to_jsarg).collect();
     let data_table: Option<Vec<Vec<String>>> = table.map(|t| t.raw().to_vec());
     let doc_string: Option<String> = doc.map(str::to_string);
     Box::pin(async move {
       match invoke_step(
-        &actx,
+        &vm,
         idx,
         &params_json,
         data_table.as_deref(),

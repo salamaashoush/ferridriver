@@ -58,25 +58,25 @@ impl Tracing {
   /// implemented (returns the core Unsupported error).
   #[napi]
   pub async fn start(&self) -> Result<()> {
-    self.inner.tracing().start().into_napi()
+    self.inner.tracing().start().await.into_napi()
   }
 
   /// Playwright: `tracing.startChunk(options?)`. Not implemented.
   #[napi]
   pub async fn start_chunk(&self) -> Result<()> {
-    self.inner.tracing().start_chunk().into_napi()
+    self.inner.tracing().start_chunk().await.into_napi()
   }
 
   /// Playwright: `tracing.stopChunk(options?)`. Not implemented.
   #[napi]
   pub async fn stop_chunk(&self) -> Result<()> {
-    self.inner.tracing().stop_chunk().into_napi()
+    self.inner.tracing().stop_chunk().await.into_napi()
   }
 
   /// Playwright: `tracing.stop(options?)`. Not implemented.
   #[napi]
   pub async fn stop(&self) -> Result<()> {
-    self.inner.tracing().stop().into_napi()
+    self.inner.tracing().stop().await.into_napi()
   }
 }
 

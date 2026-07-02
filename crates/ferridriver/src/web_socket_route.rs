@@ -12,13 +12,12 @@
 //! (`client/network.ts`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use base64::Engine;
 use serde_json::{Value, json};
 
 use crate::backend::AnyPage;
-use crate::error::Result;
 use crate::url_matcher::UrlMatcher;
 
 /// Binding name the mock calls to notify the driver of WS events. Must
@@ -52,7 +51,10 @@ impl WsMessage {
     if is_base64 {
       let bytes = base64::engine::general_purpose::STANDARD
         .decode(raw)
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+          tracing::warn!(error = %e, "WS binary frame: malformed base64 from page mock; treating as empty");
+          Vec::new()
+        });
       WsMessage::Binary(bytes)
     } else {
       WsMessage::Text(raw.to_string())
@@ -74,10 +76,10 @@ type WsCloseCb = Arc<dyn Fn(Option<u32>, Option<String>) + Send + Sync>;
 
 #[derive(Default)]
 struct WsCallbacks {
-  on_page_message: Option<WsMsgCb>,
-  on_page_close: Option<WsCloseCb>,
-  on_server_message: Option<WsMsgCb>,
-  on_server_close: Option<WsCloseCb>,
+  page_message: Option<WsMsgCb>,
+  page_close: Option<WsCloseCb>,
+  server_message: Option<WsMsgCb>,
+  server_close: Option<WsCloseCb>,
 }
 
 struct WsRouteState {
@@ -91,11 +93,23 @@ struct WsRouteState {
 
 impl WsRouteState {
   async fn dispatch(&self, request: Value) {
-    let expr = format!(
-      "globalThis.__pwWebSocketDispatch && globalThis.__pwWebSocketDispatch({})",
+    // Drive the page-side mock through the SAME main-world-anchored eval
+    // path the socket was created on (`call_utility_evaluate`, frame_id =
+    // None → main frame's main world), not a bare `Runtime.evaluate`. On
+    // WebKit a bare evaluate targets the target's ambiguous default context,
+    // which — during the transient dual-context window right after a
+    // cross-process navigation commit — can differ from the context that
+    // holds the mock's `idToWebSocket` map, silently dropping the dispatch.
+    // Anchoring on the main world (as Playwright's `frame.evaluateExpression`
+    // does) keeps the dispatch and the socket in the same realm.
+    let fn_source = format!(
+      "() => {{ globalThis.__pwWebSocketDispatch && globalThis.__pwWebSocketDispatch({}); }}",
       serde_json::to_string(&request).unwrap_or_else(|_| "null".to_string())
     );
-    let _ = self.page.evaluate(&expr).await;
+    let _ = self
+      .page
+      .call_utility_evaluate(&fn_source, &[], &[], None, Some(true), true)
+      .await;
   }
 }
 
@@ -158,12 +172,12 @@ impl WebSocketRoute {
   /// `webSocketRoute.onMessage(handler)`. When set, page messages are
   /// delivered here instead of auto-forwarded to the server.
   pub fn on_message(&self, cb: WsMsgCb) {
-    self.lock().on_page_message = Some(cb);
+    self.lock().page_message = Some(cb);
   }
 
   /// Register a page-close handler. Playwright: `webSocketRoute.onClose`.
   pub fn on_close(&self, cb: WsCloseCb) {
-    self.lock().on_page_close = Some(cb);
+    self.lock().page_close = Some(cb);
   }
 
   /// Connect to the real upstream server and return the server-side
@@ -209,7 +223,7 @@ impl WebSocketRoute {
   // --- driver-side event delivery (called by the binding dispatcher) ---
 
   async fn on_message_from_page(&self, data: &Value) {
-    let cb = self.lock().on_page_message.clone();
+    let cb = self.lock().page_message.clone();
     if let Some(cb) = cb {
       cb(WsMessage::from_wsdata(data));
     } else if self.is_connected() {
@@ -221,7 +235,7 @@ impl WebSocketRoute {
   }
 
   async fn on_message_from_server(&self, data: &Value) {
-    let cb = self.lock().on_server_message.clone();
+    let cb = self.lock().server_message.clone();
     if let Some(cb) = cb {
       cb(WsMessage::from_wsdata(data));
     } else {
@@ -233,7 +247,7 @@ impl WebSocketRoute {
   }
 
   async fn on_close_page(&self, code: Option<u32>, reason: Option<String>, was_clean: bool) {
-    let cb = self.lock().on_page_close.clone();
+    let cb = self.lock().page_close.clone();
     if let Some(cb) = cb {
       cb(code, reason);
     } else {
@@ -248,7 +262,7 @@ impl WebSocketRoute {
   }
 
   async fn on_close_server(&self, code: Option<u32>, reason: Option<String>, was_clean: bool) {
-    let cb = self.lock().on_server_close.clone();
+    let cb = self.lock().server_close.clone();
     if let Some(cb) = cb {
       cb(code, reason);
     } else {
@@ -303,7 +317,7 @@ impl WebSocketRouteServer {
       .callbacks
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .on_server_message = Some(cb);
+      .server_message = Some(cb);
   }
 
   /// Register a server-close handler. Playwright: server `onClose`.
@@ -313,7 +327,7 @@ impl WebSocketRouteServer {
       .callbacks
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .on_server_close = Some(cb);
+      .server_close = Some(cb);
   }
 }
 
@@ -427,8 +441,36 @@ impl PageWsRouter {
   }
 }
 
+/// Live WS routers keyed by backend page id. Shared per backend page (not
+/// per `Page` wrapper) so `page.routeWebSocket` and `context.routeWebSocket`
+/// — which re-wraps its pages into fresh `Page` handles — install a single
+/// `__pwWebSocketBinding` + mock init script instead of competing copies
+/// that would overwrite each other's binding. The durable owner is the
+/// exposed-binding closure ([`binding_callback`]); the map holds only a
+/// `Weak`, so a closed page's entry upgrades to `None` and self-heals.
+static WS_ROUTERS: OnceLock<Mutex<rustc_hash::FxHashMap<usize, Weak<PageWsRouter>>>> = OnceLock::new();
+
+/// Resolve the shared [`PageWsRouter`] for `page_id`, creating one bound to
+/// `page` if none is currently live. The caller installs the binding + init
+/// script only when [`PageWsRouter::add_route`] reports it registered the
+/// first route (which is exactly the first time a router is created here).
+#[must_use]
+pub fn router_for_page(page_id: usize, page: AnyPage) -> Arc<PageWsRouter> {
+  let map = WS_ROUTERS.get_or_init(|| Mutex::new(rustc_hash::FxHashMap::default()));
+  let mut guard = map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+  if let Some(existing) = guard.get(&page_id).and_then(Weak::upgrade) {
+    return existing;
+  }
+  let router = PageWsRouter::new(page);
+  guard.insert(page_id, Arc::downgrade(&router));
+  router
+}
+
 fn close_code(payload: &Value) -> Option<u32> {
-  payload.get("code").and_then(Value::as_u64).map(|c| c as u32)
+  payload
+    .get("code")
+    .and_then(Value::as_u64)
+    .and_then(|c| u32::try_from(c).ok())
 }
 
 fn close_reason(payload: &Value) -> Option<String> {
@@ -456,6 +498,6 @@ pub fn binding_callback(router: Arc<PageWsRouter>) -> crate::events::ExposedFn {
 
 /// The init-script source that installs the WebSocket mock.
 #[must_use]
-pub fn mock_init_script() -> Result<crate::options::InitScriptSource> {
-  Ok(crate::options::InitScriptSource::Source(WS_MOCK_SOURCE.to_string()))
+pub fn mock_init_script() -> crate::options::InitScriptSource {
+  crate::options::InitScriptSource::Source(WS_MOCK_SOURCE.to_string())
 }

@@ -55,6 +55,7 @@ pub mod session_procs;
 pub mod session_table;
 pub mod sidecar;
 pub mod vars;
+pub mod vm;
 
 pub use bindings::{
   ArtifactsJs, BrowserContextJs, CollectedRegistry, HookArg, HttpClientJs, HttpResponseJs, JsArg, KeyboardJs,
@@ -72,12 +73,9 @@ pub use engine::{
   ExtensionHost, RunContext, RunOptions, ScriptCaps, ScriptEngine, ScriptEngineConfig, Session, SessionRun,
 };
 pub use error::{ScriptError, ScriptErrorKind};
-// Re-export so the BDD core can name the session's async context (the
-// bridge it drives JS step functions through) without a duplicate
-// rquickjs dependency/version.
 pub use fs::PathSandbox;
 pub use result::{ConsoleEntry, ConsoleLevel, Outcome, ScriptResult, ScriptSuccess};
-pub use rquickjs::AsyncContext;
 pub use session_procs::SessionProcs;
 pub use session_table::{BrowserSession, SessionTable};
 pub use vars::{InMemoryVars, VarsStore};
+pub use vm::VmHandle;

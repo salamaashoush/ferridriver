@@ -43,7 +43,7 @@ impl WebStorageJs {
 
   /// Playwright: `webStorage.getItem(name): Promise<string | null>`.
   #[qjs(rename = "getItem")]
-  pub async fn get_item<'js>(&self, ctx: rquickjs::Ctx<'js>, name: String) -> rquickjs::Result<Option<String>> {
+  pub async fn get_item(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Option<String>> {
     self
       .page
       .web_storage_get_item(self.kind, &name)
@@ -53,7 +53,7 @@ impl WebStorageJs {
 
   /// Playwright: `webStorage.setItem(name, value): Promise<void>`.
   #[qjs(rename = "setItem")]
-  pub async fn set_item<'js>(&self, ctx: rquickjs::Ctx<'js>, name: String, value: String) -> rquickjs::Result<()> {
+  pub async fn set_item(&self, ctx: rquickjs::Ctx<'_>, name: String, value: String) -> rquickjs::Result<()> {
     self
       .page
       .web_storage_set_item(self.kind, &name, &value)
@@ -63,7 +63,7 @@ impl WebStorageJs {
 
   /// Playwright: `webStorage.removeItem(name): Promise<void>`.
   #[qjs(rename = "removeItem")]
-  pub async fn remove_item<'js>(&self, ctx: rquickjs::Ctx<'js>, name: String) -> rquickjs::Result<()> {
+  pub async fn remove_item(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<()> {
     self
       .page
       .web_storage_remove_item(self.kind, &name)
@@ -73,7 +73,7 @@ impl WebStorageJs {
 
   /// Playwright: `webStorage.clear(): Promise<void>`.
   #[qjs(rename = "clear")]
-  pub async fn clear<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<()> {
+  pub async fn clear(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     self.page.web_storage_clear(self.kind).await.into_js_with(&ctx)
   }
 }

@@ -63,7 +63,7 @@ pub struct Browser {
   /// [`Self::new_context`] creates a context
   /// (`browser.on('context', ...)`). Cheap to clone (Arc-shared) so
   /// every `Browser::clone` observes the same listeners.
-  browser_events: crate::events::BrowserEventEmitter,
+  events: crate::events::BrowserEventEmitter,
 }
 
 fn default_context_registry() -> Arc<std::sync::Mutex<Vec<String>>> {
@@ -94,7 +94,7 @@ impl Browser {
       record_video,
       connected,
       context_names: default_context_registry(),
-      browser_events: crate::events::BrowserEventEmitter::new(),
+      events: crate::events::BrowserEventEmitter::new(),
     }
   }
 
@@ -174,7 +174,7 @@ impl Browser {
       record_video,
       connected,
       context_names: default_context_registry(),
-      browser_events: crate::events::BrowserEventEmitter::new(),
+      events: crate::events::BrowserEventEmitter::new(),
     }
   }
 
@@ -238,10 +238,10 @@ impl Browser {
     let event = crate::events::BrowserEvent::Context(ctx.clone());
     match tokio::runtime::Handle::try_current() {
       Ok(handle) => {
-        let emitter = self.browser_events.clone();
+        let emitter = self.events.clone();
         handle.spawn(async move { emitter.emit(event) });
       },
-      Err(_) => self.browser_events.emit(event),
+      Err(_) => self.events.emit(event),
     }
     ctx
   }
@@ -250,23 +250,23 @@ impl Browser {
   /// to clone; shared across every `Browser::clone`.
   #[must_use]
   pub fn events(&self) -> &crate::events::BrowserEventEmitter {
-    &self.browser_events
+    &self.events
   }
 
   /// Register a browser-level event listener (`'context'`). Playwright:
   /// `browser.on(event, listener)`. Returns a [`crate::events::ListenerId`].
   pub fn on(&self, event_name: &str, callback: crate::events::BrowserEventCallback) -> crate::events::ListenerId {
-    self.browser_events.on(event_name, callback)
+    self.events.on(event_name, callback)
   }
 
   /// Single-shot variant of [`Self::on`].
   pub fn once(&self, event_name: &str, callback: crate::events::BrowserEventCallback) -> crate::events::ListenerId {
-    self.browser_events.once(event_name, callback)
+    self.events.once(event_name, callback)
   }
 
   /// Remove a browser-level listener by id.
   pub fn off(&self, id: crate::events::ListenerId) {
-    self.browser_events.off(id);
+    self.events.off(id);
   }
 
   /// Wait for the next browser-level event matching `event_name`.
@@ -276,7 +276,7 @@ impl Browser {
   ///
   /// Returns an error if the timeout elapses or the browser closes.
   pub async fn wait_for_event(&self, event_name: &str, timeout_ms: u64) -> Result<crate::events::BrowserEvent> {
-    self.browser_events.wait_for_event(event_name, timeout_ms).await
+    self.events.wait_for_event(event_name, timeout_ms).await
   }
 
   /// Get the default browser context.

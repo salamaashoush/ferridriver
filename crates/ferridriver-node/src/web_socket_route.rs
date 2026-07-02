@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use ferridriver::web_socket_route::{WebSocketRoute as CoreRoute, WebSocketRouteServer as CoreServer, WsMessage};
-use napi::bindgen_prelude::{Buffer, Either, Function, ToNapiValue};
+use napi::bindgen_prelude::{Buffer, Either, FnArgs, Function, ToNapiValue};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 
@@ -32,33 +32,11 @@ impl ToNapiValue for WsMessageArg {
 }
 
 type MessageTsfn = ThreadsafeFunction<WsMessageArg, (), WsMessageArg, napi::Status, false, true, 0>;
-type CloseTsfn = ThreadsafeFunction<WsCloseArg, (), WsCloseArg, napi::Status, false, true, 0>;
-
-/// Cross-thread arg for close handlers: `(code?, reason?)`.
-pub struct WsCloseArg {
-  code: Option<u32>,
-  reason: Option<String>,
-}
-
-#[napi(object)]
-pub struct WsCloseInfo {
-  pub code: Option<u32>,
-  pub reason: Option<String>,
-}
-
-impl ToNapiValue for WsCloseArg {
-  unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
-    unsafe {
-      WsCloseInfo::to_napi_value(
-        env,
-        WsCloseInfo {
-          code: val.code,
-          reason: val.reason,
-        },
-      )
-    }
-  }
-}
+/// Close handler called as `(code?, reason?)` — two positional args, matching
+/// Playwright's `onClose(handler: (code, reason) => any)`. `FnArgs` is what
+/// makes napi spread the tuple into separate JS positional arguments.
+type CloseArgs = FnArgs<(Option<u32>, Option<String>)>;
+type CloseTsfn = ThreadsafeFunction<CloseArgs, (), CloseArgs, napi::Status, false, true, 0>;
 
 fn to_ws_message(message: Either<String, Buffer>) -> WsMessage {
   match message {
@@ -110,11 +88,12 @@ impl WebSocketRoute {
   }
 
   /// Playwright: `webSocketRoute.onClose(handler)`.
-  #[napi(ts_args_type = "handler: (info: { code?: number, reason?: string }) => void")]
+  #[napi(ts_args_type = "handler: (code: number | undefined, reason: string | undefined) => void")]
   pub fn on_close(&self, handler: CloseTsfn) {
     let tsfn = Arc::new(handler);
     self.inner.on_close(Arc::new(move |code, reason| {
-      tsfn.call(WsCloseArg { code, reason }, ThreadsafeFunctionCallMode::NonBlocking);
+      let arg: CloseArgs = (code, reason).into();
+      tsfn.call(arg, ThreadsafeFunctionCallMode::NonBlocking);
     }));
   }
 
@@ -164,11 +143,12 @@ impl WebSocketRouteServer {
   }
 
   /// Server-side `onClose(handler)`.
-  #[napi(ts_args_type = "handler: (info: { code?: number, reason?: string }) => void")]
+  #[napi(ts_args_type = "handler: (code: number | undefined, reason: string | undefined) => void")]
   pub fn on_close(&self, handler: CloseTsfn) {
     let tsfn = Arc::new(handler);
     self.inner.on_close(Arc::new(move |code, reason| {
-      tsfn.call(WsCloseArg { code, reason }, ThreadsafeFunctionCallMode::NonBlocking);
+      let arg: CloseArgs = (code, reason).into();
+      tsfn.call(arg, ThreadsafeFunctionCallMode::NonBlocking);
     }));
   }
 }

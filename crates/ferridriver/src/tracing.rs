@@ -151,8 +151,8 @@ impl Tracing {
   /// # Errors
   ///
   /// Always [`FerriError::Unsupported`].
-  pub fn start(&self) -> Result<()> {
-    Err(trace_zip_unsupported())
+  pub async fn start(&self) -> Result<()> {
+    Err(self.trace_zip_unsupported().await)
   }
 
   /// Playwright: `tracing.startChunk(options?)`.
@@ -160,8 +160,8 @@ impl Tracing {
   /// # Errors
   ///
   /// Always [`FerriError::Unsupported`].
-  pub fn start_chunk(&self) -> Result<()> {
-    Err(trace_zip_unsupported())
+  pub async fn start_chunk(&self) -> Result<()> {
+    Err(self.trace_zip_unsupported().await)
   }
 
   /// Playwright: `tracing.stopChunk(options?)`.
@@ -169,8 +169,8 @@ impl Tracing {
   /// # Errors
   ///
   /// Always [`FerriError::Unsupported`].
-  pub fn stop_chunk(&self) -> Result<()> {
-    Err(trace_zip_unsupported())
+  pub async fn stop_chunk(&self) -> Result<()> {
+    Err(self.trace_zip_unsupported().await)
   }
 
   /// Playwright: `tracing.stop(options?)`.
@@ -178,16 +178,25 @@ impl Tracing {
   /// # Errors
   ///
   /// Always [`FerriError::Unsupported`].
-  pub fn stop(&self) -> Result<()> {
-    Err(trace_zip_unsupported())
+  pub async fn stop(&self) -> Result<()> {
+    Err(self.trace_zip_unsupported().await)
   }
-}
 
-fn trace_zip_unsupported() -> FerriError {
-  FerriError::unsupported(
-    "trace.zip recording (start/stop/startChunk/stopChunk) is not implemented; \
-     use startHar/stopHar for network capture",
-  )
+  async fn trace_zip_unsupported(&self) -> FerriError {
+    let har_active = {
+      let recorders = self.ctx.har_recorders().await;
+      let guard = recorders.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      guard.contains_key(&self.ctx.composite())
+    };
+    let hint = if har_active {
+      "a HAR recording is active on this context"
+    } else {
+      "use startHar/stopHar for network capture"
+    };
+    FerriError::unsupported(format!(
+      "trace.zip recording (start/stop/startChunk/stopChunk) is not implemented; {hint}"
+    ))
+  }
 }
 
 async fn build_har(requests: &[Request], recorder: &HarRecorder) -> HarArchive {
@@ -285,23 +294,22 @@ async fn build_content(resp: &crate::network::Response, mime_type: &str, policy:
   }
   match resp.body().await {
     Ok(bytes) => {
-      let size = bytes.len() as i64;
-      match String::from_utf8(bytes.clone()) {
-        Ok(text) => HarContentOut {
+      let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
+      if let Ok(text) = std::str::from_utf8(&bytes) {
+        HarContentOut {
           size,
           mime_type: mime_type.to_string(),
-          text: Some(text),
+          text: Some(text.to_string()),
           encoding: None,
-        },
-        Err(_) => {
-          use base64::Engine;
-          HarContentOut {
-            size,
-            mime_type: mime_type.to_string(),
-            text: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
-            encoding: Some("base64".to_string()),
-          }
-        },
+        }
+      } else {
+        use base64::Engine;
+        HarContentOut {
+          size,
+          mime_type: mime_type.to_string(),
+          text: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+          encoding: Some("base64".to_string()),
+        }
       }
     },
     Err(_) => HarContentOut {
@@ -330,7 +338,7 @@ fn now_iso8601() -> String {
   let now = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap_or_default();
-  let total_ms = now.as_millis() as i64;
+  let total_ms = i64::try_from(now.as_millis()).unwrap_or(i64::MAX);
   let secs = total_ms.div_euclid(1000);
   let ms = total_ms.rem_euclid(1000);
   let days = secs.div_euclid(86_400);
@@ -350,8 +358,8 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
   let y = yoe + era * 400;
   let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
   let mp = (5 * doy + 2) / 153;
-  let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-  let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+  let d = u32::try_from(doy - (153 * mp + 2) / 5 + 1).unwrap_or(1);
+  let m = u32::try_from(if mp < 10 { mp + 3 } else { mp - 9 }).unwrap_or(1);
   (if m <= 2 { y + 1 } else { y }, m, d)
 }
 

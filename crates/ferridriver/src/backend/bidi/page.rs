@@ -135,8 +135,8 @@ fn split_error_text(text: &str) -> (String, String) {
 /// line per `stackTrace.callFrames` entry. `BiDi` line / column
 /// numbers are 0-based; Playwright adds `+ 1` to match the user-facing
 /// 1-based JS convention.
-/// Source location for a BiDi page error: the top `callFrames` entry,
-/// used raw (BiDi line/column are 0-based and `bidiPage.ts` does NOT
+/// Source location for a `BiDi` page error: the top `callFrames` entry,
+/// used raw (`BiDi` line/column are 0-based and `bidiPage.ts` does NOT
 /// add `+ 1` here — only the stack-string path does). Falls back to
 /// `{ "", 1, 1 }`, matching Playwright's `bidiPage.ts:289`.
 fn bidi_stack_to_location(stack: Option<&serde_json::Value>) -> crate::console_message::ConsoleMessageLocation {
@@ -147,11 +147,15 @@ fn bidi_stack_to_location(stack: Option<&serde_json::Value>) -> crate::console_m
   match frame {
     Some(frame) => crate::console_message::ConsoleMessageLocation {
       url: frame.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-      line_number: frame.get("lineNumber").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32,
-      column_number: frame
-        .get("columnNumber")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0) as u32,
+      line_number: u32::try_from(frame.get("lineNumber").and_then(serde_json::Value::as_u64).unwrap_or(0))
+        .unwrap_or(u32::MAX),
+      column_number: u32::try_from(
+        frame
+          .get("columnNumber")
+          .and_then(serde_json::Value::as_u64)
+          .unwrap_or(0),
+      )
+      .unwrap_or(u32::MAX),
     },
     None => crate::console_message::ConsoleMessageLocation {
       url: String::new(),

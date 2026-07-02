@@ -176,5 +176,24 @@ for (const backend of BACKENDS) {
         await restored.close();
       }
     });
+
+    it("setStorageState clears existing cookies and applies new ones (1.59)", async () => {
+      const ctx = browser.newContext();
+      try {
+        await ctx.newPage();
+        await ctx.addCookies([
+          { name: "stale", value: "yes", domain: "example.com", path: "/", secure: false, httpOnly: false },
+        ]);
+        await ctx.setStorageState({
+          cookies: [{ name: "seeded", value: "fromState", domain: "example.com", path: "/" }],
+          origins: [],
+        });
+        const names = (await ctx.cookies()).map((c) => c.name);
+        expect(names).not.toContain("stale");
+        expect(names).toContain("seeded");
+      } finally {
+        await ctx.close();
+      }
+    });
   });
 }
