@@ -452,7 +452,28 @@ impl ContextRef {
     // just like pages opened before the binding was registered.
     self.apply_context_bindings(page.inner()).await?;
 
+    // Re-apply every context-level WebSocket route so sockets created
+    // in the fresh page are intercepted just like on pages that were
+    // open when `context.routeWebSocket` was called.
+    self.apply_context_ws_routes(&page).await?;
+
     Ok(page)
+  }
+
+  /// Install every registered context-level WebSocket route onto a
+  /// fresh page (context scope — page-level routes keep precedence).
+  async fn apply_context_ws_routes(&self, page: &Arc<Page>) -> Result<()> {
+    let routes = {
+      let registry = self.state.read().await.context_ws_routes_handle();
+      let guard = registry.read().await;
+      guard.get(&self.key.to_composite()).cloned().unwrap_or_default()
+    };
+    for (matcher, handler) in routes {
+      page
+        .route_web_socket_scoped(matcher, handler, crate::web_socket_route::WsRouteScope::Context)
+        .await?;
+    }
+    Ok(())
   }
 
   /// Inject every registered context-level binding onto `page`.
@@ -1050,12 +1071,12 @@ impl ContextRef {
   }
 
   /// Playwright: `browserContext.routeWebSocket(url, handler)`. Intercepts
-  /// WebSocket connections matching `matcher` on every page in this context;
-  /// the handler receives a live [`crate::web_socket_route::WebSocketRoute`].
-  ///
-  /// Like [`Self::route`], this applies to pages open at call time; pages
-  /// opened afterwards are not retro-fitted (the same documented limitation
-  /// the HTTP `route` fan-out carries).
+  /// WebSocket connections matching `matcher` on every page in this
+  /// context — current AND future (the route is registered in the
+  /// per-context registry and re-applied by [`Self::new_page`], matching
+  /// Playwright's context-scoped interception patterns). Page-level
+  /// routes take precedence over context-level routes at socket
+  /// creation.
   ///
   /// # Errors
   ///
@@ -1066,9 +1087,31 @@ impl ContextRef {
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::web_socket_route::WsHandler,
   ) -> Result<()> {
-    let pages = self.pages().await?;
-    for page in pages {
-      page.route_web_socket(matcher.clone(), handler.clone()).await?;
+    {
+      let registry = self.state.read().await.context_ws_routes_handle();
+      let mut guard = registry.write().await;
+      guard
+        .entry(self.key.to_composite())
+        .or_default()
+        .push((matcher.clone(), handler.clone()));
+    }
+    // A context with no pages yet isn't registered in state (it
+    // materialises on first `new_page`) — the registry entry above is
+    // all that's needed; `new_page` re-applies it. Same tolerance as
+    // `expose_binding`.
+    let inner_pages = {
+      let state = self.state.read().await;
+      state.context(&self.name).map(|c| c.pages.clone()).unwrap_or_default()
+    };
+    for inner in inner_pages {
+      let page = Page::with_context(inner, self.clone());
+      page
+        .route_web_socket_scoped(
+          matcher.clone(),
+          handler.clone(),
+          crate::web_socket_route::WsRouteScope::Context,
+        )
+        .await?;
     }
     Ok(())
   }

@@ -2536,9 +2536,25 @@ impl Page {
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::web_socket_route::WsHandler,
   ) -> Result<()> {
+    self
+      .route_web_socket_scoped(matcher, handler, crate::web_socket_route::WsRouteScope::Page)
+      .await
+  }
+
+  /// Install a WebSocket route at the given scope. `Page` scope routes
+  /// are matched before `Context` scope routes at socket creation
+  /// (Playwright's page-dispatcher-before-context-dispatcher order);
+  /// the context layer uses `Context` scope both for its immediate
+  /// fan-out and when re-applying registered routes to a fresh page.
+  pub(crate) async fn route_web_socket_scoped(
+    self: &Arc<Self>,
+    matcher: crate::url_matcher::UrlMatcher,
+    handler: crate::web_socket_route::WsHandler,
+    scope: crate::web_socket_route::WsRouteScope,
+  ) -> Result<()> {
     use crate::web_socket_route as wsr;
     let router = wsr::router_for_page(self.backend_page_id(), self.inner.clone());
-    let first = router.add_route(matcher, handler);
+    let first = router.add_route(matcher, handler, scope);
     if first {
       self
         .inner

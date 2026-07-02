@@ -361,12 +361,25 @@ impl WebSocketRouteServer {
   }
 }
 
+/// Which layer registered a WebSocket route. Mirrors Playwright's
+/// page-dispatcher-before-context-dispatcher scope selection at
+/// `onCreate`: page-level routes are consulted first, context-level
+/// routes only when no page route matches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WsRouteScope {
+  Page,
+  Context,
+}
+
 /// Per-page WebSocket-route registry. Holds the registered matchers +
-/// handlers and the live `id -> WebSocketRoute` map. Shared (Arc) between
+/// handlers (page scope before context scope, newest first within a
+/// scope — Playwright `unshift`s new handlers and takes the first
+/// match) and the live `id -> WebSocketRoute` map. Shared (Arc) between
 /// the owning page and the exposed-binding dispatcher closure.
 pub struct PageWsRouter {
   page: AnyPage,
-  routes: Mutex<Vec<(UrlMatcher, WsHandler)>>,
+  page_routes: Mutex<Vec<(UrlMatcher, WsHandler)>>,
+  context_routes: Mutex<Vec<(UrlMatcher, WsHandler)>>,
   active: Mutex<rustc_hash::FxHashMap<String, WebSocketRoute>>,
   installed: AtomicBool,
 }
@@ -376,7 +389,8 @@ impl PageWsRouter {
   pub fn new(page: AnyPage) -> Arc<Self> {
     let router = Arc::new(Self {
       page,
-      routes: Mutex::new(Vec::new()),
+      page_routes: Mutex::new(Vec::new()),
+      context_routes: Mutex::new(Vec::new()),
       active: Mutex::new(rustc_hash::FxHashMap::default()),
       installed: AtomicBool::new(false),
     });
@@ -440,14 +454,19 @@ impl PageWsRouter {
     }
   }
 
-  /// Register a new route. Returns `true` the first time (caller must
-  /// then install the binding + init script).
-  pub fn add_route(&self, matcher: UrlMatcher, handler: WsHandler) -> bool {
-    self
-      .routes
+  /// Register a new route in `scope`. Newest routes are matched first
+  /// within their scope (Playwright `unshift`s handlers). Returns
+  /// `true` the first time any route registers (caller must then
+  /// install the binding + init script).
+  pub fn add_route(&self, matcher: UrlMatcher, handler: WsHandler, scope: WsRouteScope) -> bool {
+    let list = match scope {
+      WsRouteScope::Page => &self.page_routes,
+      WsRouteScope::Context => &self.context_routes,
+    };
+    list
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .push((matcher, handler));
+      .insert(0, (matcher, handler));
     !self.installed.swap(true, Ordering::SeqCst)
   }
 
@@ -505,10 +524,27 @@ impl PageWsRouter {
       .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
       .unwrap_or_default();
 
+    // Page-scope routes win over context-scope routes; within a scope
+    // the newest registration wins — mirrors Playwright's
+    // page._onWebSocketRoute falling through to the context handler
+    // list, each searched with `find` over an `unshift`ed array.
     let handler = {
-      let routes = self.routes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-      routes.iter().find(|(m, _)| m.matches(&url)).map(|(_, h)| h.clone())
-    };
+      let page_routes = self
+        .page_routes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      page_routes
+        .iter()
+        .find(|(m, _)| m.matches(&url))
+        .map(|(_, h)| h.clone())
+    }
+    .or_else(|| {
+      let ctx_routes = self
+        .context_routes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      ctx_routes.iter().find(|(m, _)| m.matches(&url)).map(|(_, h)| h.clone())
+    });
 
     let Some(handler) = handler else {
       // No route matched — let the mock connect straight through, in
