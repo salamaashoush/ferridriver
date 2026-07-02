@@ -288,7 +288,7 @@ fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> std::result::Result<&'
 }
 
 /// Resolve the browser-engine name for a [`SessionKey`]'s instance from a
-/// backend kind. Used by [`crate::bind`] to fill the registry descriptor.
+/// backend kind. Used by [`crate::bind()`] to fill the registry descriptor.
 #[must_use]
 pub fn browser_name_for(backend: BackendKind) -> &'static str {
   match backend {

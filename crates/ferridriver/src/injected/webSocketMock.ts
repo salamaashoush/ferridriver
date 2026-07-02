@@ -288,7 +288,7 @@ export function inject(globalThis: GlobalThis) {
       };
 
       this._ws.onerror = () => {
-        // We do not expose errors in the API, so short-curcuit the error event.
+        // We do not expose errors in the API, so short-circuit the error event.
         const event = new Event('error', { cancelable: true });
         this.dispatchEvent(event);
       };
@@ -303,7 +303,7 @@ export function inject(globalThis: GlobalThis) {
 
     _apiCloseServer(code: number | undefined, reason: string | undefined, wasClean: boolean) {
       if (!this._ws) {
-        // Short-curcuit when there is no server.
+        // Short-circuit when there is no server.
         this._onWSClose(code, reason, wasClean);
         return;
       }
