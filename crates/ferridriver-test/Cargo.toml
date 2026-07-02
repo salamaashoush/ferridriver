@@ -40,7 +40,6 @@ rustc-hash = "2"
 toml = "1.1"
 glob = "0.3"
 console = "0.16"
-quick-xml = "0.39"
 similar = "3"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
