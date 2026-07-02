@@ -1126,8 +1126,9 @@ pub struct CdpPage<T: CdpTransport> {
   pub events: crate::events::EventEmitter,
   /// Frame ID -> execution context ID mapping for frame-scoped evaluation.
   frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
-  /// Registered exposed function callbacks.
-  pub exposed_fns: Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedFn>>>,
+  /// Registered exposed binding callbacks (source-aware; plain exposed
+  /// functions are wrapped by `AnyPage::expose_function`).
+  pub exposed_fns: Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
   /// Whether the binding channel has been initialized.
   binding_initialized: Arc<std::sync::atomic::AtomicBool>,
   /// Whether this page has been closed.
@@ -1802,6 +1803,26 @@ impl<T: CdpWrap> CdpPage<T> {
   /// Returns a String error on protocol failure, `exceptionDetails`
   /// from the page, or backend/handle mismatch.
   #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+  /// Resolve the execution-context id for `frame_id`, waiting briefly
+  /// for the frame-context tracker to observe the context. The tracker
+  /// consumes `Runtime.executionContextCreated` on its own task, so a
+  /// frame-scoped call issued right after a navigation (or right after
+  /// the frame cache learned about the frame via `Page.getFrameTree`)
+  /// can race the map update. Erroring instead of falling back keeps a
+  /// frame-scoped evaluate from silently running in the MAIN frame —
+  /// wrong-realm results are far worse than a typed failure.
+  async fn resolve_frame_context(&self, frame_id: &str) -> Result<i64> {
+    for _ in 0..200u32 {
+      if let Some(id) = self.frame_contexts.read().await.get(frame_id).copied() {
+        return Ok(id);
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Err(FerriError::Backend(format!(
+      "No execution context found for frame '{frame_id}'. Frame may not be loaded yet."
+    )))
+  }
+
   pub async fn call_utility_evaluate(
     &self,
     fn_source: &str,
@@ -1814,7 +1835,7 @@ impl<T: CdpWrap> CdpPage<T> {
     self.ensure_engine_injected().await?;
 
     let context_id = match frame_id {
-      Some(fid) => self.frame_contexts.read().await.get(fid).copied(),
+      Some(fid) => Some(self.resolve_frame_context(fid).await?),
       None => None,
     };
 
@@ -2081,37 +2102,27 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>> {
-    let context_id = {
-      let contexts = self.frame_contexts.read().await;
-      contexts.get(frame_id).copied()
-    };
+    let ctx_id = self.resolve_frame_context(frame_id).await?;
+    let result = self
+      .cmd(
+        "Runtime.evaluate",
+        serde_json::json!({
+            "expression": expression,
+            "contextId": ctx_id,
+            "returnByValue": true,
+            "awaitPromise": true,
+        }),
+      )
+      .await?;
 
-    if let Some(ctx_id) = context_id {
-      let result = self
-        .cmd(
-          "Runtime.evaluate",
-          serde_json::json!({
-              "expression": expression,
-              "contextId": ctx_id,
-              "returnByValue": true,
-              "awaitPromise": true,
-          }),
-        )
-        .await?;
-
-      if let Some(exception) = result.get("exceptionDetails") {
-        let text = exception
-          .get("text")
-          .and_then(|v| v.as_str())
-          .unwrap_or("Evaluation error");
-        return Err(FerriError::Backend(text.to_string()));
-      }
-      Ok(result.get("result").and_then(|r| r.get("value")).cloned())
-    } else {
-      Err(FerriError::Backend(format!(
-        "No execution context found for frame '{frame_id}'. Frame may not be loaded yet."
-      )))
+    if let Some(exception) = result.get("exceptionDetails") {
+      let text = exception
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Evaluation error");
+      return Err(FerriError::Backend(text.to_string()));
     }
+    Ok(result.get("result").and_then(|r| r.get("value")).cloned())
   }
 
   // ---- Elements ----
@@ -4047,6 +4058,8 @@ impl<T: CdpWrap> CdpPage<T> {
       self.session_id.clone(),
       self.frame_contexts.clone(),
       self.events.clone(),
+      self.exposed_fns.clone(),
+      self.target_id.clone(),
     );
   }
 
@@ -4610,6 +4623,8 @@ impl<T: CdpWrap> CdpPage<T> {
     session_id: Option<Arc<str>>,
     frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
     emitter: crate::events::EventEmitter,
+    exposed_fns: Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
+    target_id: Arc<str>,
   ) {
     tokio::spawn(async move {
       let mut runtime_rx = transport.subscribe_event_domain("Runtime");
@@ -4668,6 +4683,19 @@ impl<T: CdpWrap> CdpPage<T> {
             // survive context clears (which happen on every navigation
             // in Chrome). Resetting here forced a redundant
             // re-registration RTT on every page navigation.
+          },
+          "Runtime.bindingCalled" => {
+            if let Some(params) = event.get("params") {
+              let contexts = frame_contexts.read().await;
+              Self::dispatch_binding_called(
+                params,
+                &contexts,
+                &exposed_fns,
+                &target_id,
+                &transport,
+                session_id.as_ref(),
+              );
+            }
           },
           "Page.frameAttached" => {
             if let Some(params) = event.get("params") {
@@ -4771,6 +4799,13 @@ bc.resolve=function(seq,val){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.r(val)
 bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new Error(err))}};
 })()";
 
+  /// Arm the page-side binding channel (`Runtime.addBinding` + the
+  /// `__fd_bc` controller). `Runtime.bindingCalled` events are handled
+  /// by the frame-context tracker task — the SAME ordered consumer that
+  /// applies `executionContextCreated`/`Destroyed` — so a binding call
+  /// never resolves its calling frame against a map that hasn't caught
+  /// up yet (a separate subscription raced the tracker and misrouted
+  /// iframe callers to the main frame).
   async fn ensure_binding_channel(&self) -> Result<()> {
     if self.binding_initialized.swap(true, std::sync::atomic::Ordering::SeqCst) {
       return Ok(());
@@ -4780,69 +4815,81 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       .await?;
     self.add_init_script(Self::BINDING_CONTROLLER_JS).await?;
     self.evaluate(Self::BINDING_CONTROLLER_JS).await?;
-
-    let t = self.transport.clone();
-    let sid = self.session_id.clone();
-    let fns = self.exposed_fns.clone();
-    tokio::spawn(async move {
-      let mut rx = t.subscribe_event_method("Runtime.bindingCalled");
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
-        if let Some(ref expected_sid) = sid {
-          let event_sid = event.get("sessionId").and_then(|v| v.as_str());
-          if event_sid != Some(&**expected_sid) {
-            continue;
-          }
-        }
-        if let Some(params) = event.get("params") {
-          let binding_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-          if binding_name != "__fd_binding__" {
-            continue;
-          }
-
-          let payload_str = params.get("payload").and_then(|v| v.as_str()).unwrap_or("{}");
-          let payload: serde_json::Value = serde_json::from_str(payload_str).unwrap_or_default();
-          let fn_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-          let seq = payload.get("seq").and_then(serde_json::Value::as_u64).unwrap_or(0);
-          let args: Vec<serde_json::Value> = payload
-            .get("args")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-          let maybe_fn = fns.read().await.get(&fn_name).cloned();
-          if let Some(callback) = maybe_fn {
-            let result = callback(args).await;
-            let deliver_js = format!(
-              "globalThis.__fd_bc.resolve({}, {})",
-              seq,
-              serde_json::to_string(&result).unwrap_or_else(|_| "null".into())
-            );
-            let _ = t
-              .send_command(
-                sid.as_deref(),
-                "Runtime.evaluate",
-                &serde_json::json!({"expression": deliver_js}),
-              )
-              .await;
-          } else {
-            let deliver_js = format!("globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')");
-            let _ = t
-              .send_command(
-                sid.as_deref(),
-                "Runtime.evaluate",
-                &serde_json::json!({"expression": deliver_js}),
-              )
-              .await;
-          }
-        }
-      }
-    });
     Ok(())
   }
 
-  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
+  /// Handle one `Runtime.bindingCalled` from the tracker loop. The
+  /// frame resolution runs inline (ordered against context events); the
+  /// user callback + result delivery are spawned so a slow binding
+  /// (e.g. a WebSocket route handler doing its own evaluates) never
+  /// stalls frame-context tracking.
+  fn dispatch_binding_called(
+    params: &serde_json::Value,
+    frame_contexts: &FxHashMap<String, i64>,
+    fns: &Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
+    main_frame_id: &Arc<str>,
+    transport: &Arc<T>,
+    session_id: Option<&Arc<str>>,
+  ) {
+    if params.get("name").and_then(|v| v.as_str()) != Some("__fd_binding__") {
+      return;
+    }
+    let payload_str = params.get("payload").and_then(|v| v.as_str()).unwrap_or("{}");
+    let payload: serde_json::Value = serde_json::from_str(payload_str).unwrap_or_default();
+    let fn_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let seq = payload.get("seq").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let args: Vec<serde_json::Value> = payload
+      .get("args")
+      .and_then(|v| v.as_array())
+      .cloned()
+      .unwrap_or_default();
+
+    // Resolve the calling frame from the event's execution context:
+    // iframe callers arrive on their own (default) context. Unmapped
+    // contexts (isolated worlds, workers) fall back to the main frame.
+    let ctx_id = params.get("executionContextId").and_then(serde_json::Value::as_i64);
+    let source_frame = ctx_id
+      .and_then(|id| {
+        frame_contexts
+          .iter()
+          .find_map(|(fid, &cid)| (cid == id).then(|| fid.clone()))
+      })
+      .unwrap_or_else(|| main_frame_id.to_string());
+    let source = crate::events::BindingSource {
+      context: String::new(),
+      page: main_frame_id.to_string(),
+      frame: source_frame,
+    };
+
+    let fns = fns.clone();
+    let t = transport.clone();
+    let sid = session_id.cloned();
+    tokio::spawn(async move {
+      let maybe_fn = fns.read().await.get(&fn_name).cloned();
+      let deliver_js = if let Some(callback) = maybe_fn {
+        let result = callback(source, args).await;
+        format!(
+          "globalThis.__fd_bc.resolve({}, {})",
+          seq,
+          serde_json::to_string(&result).unwrap_or_else(|_| "null".into())
+        )
+      } else {
+        format!("globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')")
+      };
+      // Resolve in the CALLING context — each frame has its own
+      // `__fd_bc` controller; delivering to the main frame's default
+      // context would leave an iframe caller's promise pending forever.
+      let mut eval_params = serde_json::json!({"expression": deliver_js});
+      if let Some(id) = ctx_id {
+        eval_params["contextId"] = serde_json::json!(id);
+      }
+      let _ = t.send_command(sid.as_deref(), "Runtime.evaluate", &eval_params).await;
+    });
+  }
+
+  pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
     self.ensure_binding_channel().await?;
-    self.exposed_fns.write().await.insert(name.to_string(), func);
+    self.exposed_fns.write().await.insert(name.to_string(), binding);
     let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
     self.add_init_script(&register_js).await?;
     self.evaluate(&register_js).await?;

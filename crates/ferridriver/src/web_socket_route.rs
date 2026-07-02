@@ -87,6 +87,11 @@ struct WsRouteState {
   url: String,
   protocols: Vec<String>,
   page: AnyPage,
+  /// Frame the socket was created in (from the binding call's
+  /// `BindingSource`); `None` means the backend could not resolve the
+  /// calling frame and dispatch falls back to the main frame. Mirrors
+  /// Playwright's `WebSocketRouteDispatcher._frame`.
+  frame_id: Option<String>,
   callbacks: Mutex<WsCallbacks>,
   connected: AtomicBool,
 }
@@ -94,21 +99,23 @@ struct WsRouteState {
 impl WsRouteState {
   async fn dispatch(&self, request: Value) {
     // Drive the page-side mock through the SAME main-world-anchored eval
-    // path the socket was created on (`call_utility_evaluate`, frame_id =
-    // None → main frame's main world), not a bare `Runtime.evaluate`. On
-    // WebKit a bare evaluate targets the target's ambiguous default context,
+    // path the socket was created on (`call_utility_evaluate` in the
+    // socket's own frame — an iframe socket has its own mock +
+    // `idToWebSocket` map), not a bare `Runtime.evaluate`. On WebKit a
+    // bare evaluate targets the target's ambiguous default context,
     // which — during the transient dual-context window right after a
     // cross-process navigation commit — can differ from the context that
     // holds the mock's `idToWebSocket` map, silently dropping the dispatch.
-    // Anchoring on the main world (as Playwright's `frame.evaluateExpression`
-    // does) keeps the dispatch and the socket in the same realm.
+    // Anchoring on the frame's main world (as Playwright's
+    // `frame.evaluateExpression` does) keeps the dispatch and the socket
+    // in the same realm.
     let fn_source = format!(
       "() => {{ globalThis.__pwWebSocketDispatch && globalThis.__pwWebSocketDispatch({}); }}",
       serde_json::to_string(&request).unwrap_or_else(|_| "null".to_string())
     );
     let _ = self
       .page
-      .call_utility_evaluate(&fn_source, &[], &[], None, Some(true), true)
+      .call_utility_evaluate(&fn_source, &[], &[], self.frame_id.as_deref(), Some(true), true)
       .await;
   }
 }
@@ -122,13 +129,14 @@ pub struct WebSocketRoute {
 }
 
 impl WebSocketRoute {
-  fn new(id: String, url: String, protocols: Vec<String>, page: AnyPage) -> Self {
+  fn new(id: String, url: String, protocols: Vec<String>, page: AnyPage, frame_id: Option<String>) -> Self {
     Self {
       inner: Arc::new(WsRouteState {
         id,
         url,
         protocols,
         page,
+        frame_id,
         callbacks: Mutex::new(WsCallbacks::default()),
         connected: AtomicBool::new(false),
       }),
@@ -275,6 +283,28 @@ impl WebSocketRoute {
         .await;
     }
   }
+
+  /// The socket's frame navigated away, detached, or the page closed —
+  /// no more communication from the page-side mock is possible, so
+  /// pretend the socket closed cleanly on both sides. Mirrors
+  /// Playwright's `WebSocketRouteDispatcher._executionContextGone`:
+  /// only the user-facing close callbacks fire; the default
+  /// forward-to-page dispatches are skipped because the frame's mock is
+  /// gone (Playwright sends them into the dead frame and swallows the
+  /// instant rejection — same observable effect). Synchronous so the
+  /// router's lifecycle listener never blocks behind a teardown.
+  fn execution_context_gone(&self) {
+    let (page_cb, server_cb) = {
+      let cbs = self.lock();
+      (cbs.page_close.clone(), cbs.server_close.clone())
+    };
+    if let Some(cb) = page_cb {
+      cb(None, None);
+    }
+    if let Some(cb) = server_cb {
+      cb(None, None);
+    }
+  }
 }
 
 /// Server-side handle returned by [`WebSocketRoute::connect_to_server`].
@@ -344,12 +374,70 @@ pub struct PageWsRouter {
 impl PageWsRouter {
   #[must_use]
   pub fn new(page: AnyPage) -> Arc<Self> {
-    Arc::new(Self {
+    let router = Arc::new(Self {
       page,
       routes: Mutex::new(Vec::new()),
       active: Mutex::new(rustc_hash::FxHashMap::default()),
       installed: AtomicBool::new(false),
-    })
+    });
+    Self::spawn_lifecycle_listener(&router);
+    router
+  }
+
+  /// Mirror Playwright's `WebSocketRouteDispatcher` frame listeners:
+  /// when a route's frame navigates to a new document or detaches — or
+  /// the page closes — the page-side mock is gone, so close the route's
+  /// user-facing side cleanly and drop it from the active map. Holds a
+  /// `Weak` so the listener never extends the router's life (the durable
+  /// owner stays the exposed-binding closure). Every event is handled
+  /// synchronously — a blocked listener would process a navigation event
+  /// late and tear down a route the NEW document just created.
+  fn spawn_lifecycle_listener(router: &Arc<Self>) {
+    let mut rx = router.page.events().subscribe();
+    let weak = Arc::downgrade(router);
+    tokio::spawn(async move {
+      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+        let Some(router) = weak.upgrade() else { break };
+        match event {
+          crate::events::PageEvent::FrameNavigated(info) => {
+            router.frame_context_gone(&info.frame_id);
+          },
+          crate::events::PageEvent::FrameDetached { frame_id } => {
+            router.frame_context_gone(&frame_id);
+          },
+          crate::events::PageEvent::Close => {
+            router.all_contexts_gone();
+            break;
+          },
+          _ => {},
+        }
+      }
+    });
+  }
+
+  fn frame_context_gone(&self, frame_id: &str) {
+    let gone: Vec<WebSocketRoute> = {
+      let mut active = self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      let ids: Vec<String> = active
+        .iter()
+        .filter(|(_, r)| r.inner.frame_id.as_deref() == Some(frame_id))
+        .map(|(id, _)| id.clone())
+        .collect();
+      ids.iter().filter_map(|id| active.remove(id)).collect()
+    };
+    for route in gone {
+      route.execution_context_gone();
+    }
+  }
+
+  fn all_contexts_gone(&self) {
+    let gone: Vec<WebSocketRoute> = {
+      let mut active = self.active.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      active.drain().map(|(_, r)| r).collect()
+    };
+    for route in gone {
+      route.execution_context_gone();
+    }
   }
 
   /// Register a new route. Returns `true` the first time (caller must
@@ -364,10 +452,13 @@ impl PageWsRouter {
   }
 
   /// Handle one `__pwWebSocketBinding` payload from the page.
-  pub async fn handle_binding(self: &Arc<Self>, payload: &Value) {
+  /// `source_frame` is the calling frame from the binding's
+  /// `BindingSource` — an iframe-created socket dispatches back into
+  /// that same frame (Playwright stores `source.frame` at `onCreate`).
+  pub async fn handle_binding(self: &Arc<Self>, payload: &Value, source_frame: Option<&str>) {
     let kind = payload.get("type").and_then(Value::as_str).unwrap_or("");
     if kind == "onCreate" {
-      self.handle_create(payload).await;
+      self.handle_create(payload, source_frame).await;
       return;
     }
     let Some(id) = payload.get("id").and_then(Value::as_str) else {
@@ -405,7 +496,7 @@ impl PageWsRouter {
     }
   }
 
-  async fn handle_create(self: &Arc<Self>, payload: &Value) {
+  async fn handle_create(self: &Arc<Self>, payload: &Value, source_frame: Option<&str>) {
     let id = payload.get("id").and_then(Value::as_str).unwrap_or("").to_string();
     let url = payload.get("url").and_then(Value::as_str).unwrap_or("").to_string();
     let protocols = payload
@@ -420,17 +511,28 @@ impl PageWsRouter {
     };
 
     let Some(handler) = handler else {
-      // No route matched — let the mock connect straight through.
+      // No route matched — let the mock connect straight through, in
+      // the frame the socket was created in (Playwright:
+      // `source.frame.evaluateExpression` on the passthrough path).
       let req = json!({ "id": id, "type": "passthrough" });
-      let expr = format!(
-        "globalThis.__pwWebSocketDispatch && globalThis.__pwWebSocketDispatch({})",
+      let fn_source = format!(
+        "() => {{ globalThis.__pwWebSocketDispatch && globalThis.__pwWebSocketDispatch({}); }}",
         serde_json::to_string(&req).unwrap_or_else(|_| "null".to_string())
       );
-      let _ = self.page.evaluate(&expr).await;
+      let _ = self
+        .page
+        .call_utility_evaluate(&fn_source, &[], &[], source_frame, Some(true), true)
+        .await;
       return;
     };
 
-    let route = WebSocketRoute::new(id.clone(), url, protocols, self.page.clone());
+    let route = WebSocketRoute::new(
+      id.clone(),
+      url,
+      protocols,
+      self.page.clone(),
+      source_frame.map(String::from),
+    );
     self
       .active
       .lock()
@@ -481,15 +583,19 @@ fn was_clean(payload: &Value) -> bool {
   payload.get("wasClean").and_then(Value::as_bool).unwrap_or(false)
 }
 
-/// Build the [`crate::events::ExposedFn`] that backs `__pwWebSocketBinding`
-/// for a page router. Spreads the single payload arg into `handle_binding`.
+/// Build the [`crate::events::ExposedBinding`] that backs
+/// `__pwWebSocketBinding` for a page router. Spreads the single payload
+/// arg into `handle_binding`, threading the calling frame from the
+/// `BindingSource` so iframe-created sockets dispatch back into their
+/// own frame.
 #[must_use]
-pub fn binding_callback(router: Arc<PageWsRouter>) -> crate::events::ExposedFn {
-  Arc::new(move |args: Vec<Value>| {
+pub fn binding_callback(router: Arc<PageWsRouter>) -> crate::events::ExposedBinding {
+  Arc::new(move |source: crate::events::BindingSource, args: Vec<Value>| {
     let router = router.clone();
     Box::pin(async move {
       if let Some(payload) = args.into_iter().next() {
-        router.handle_binding(&payload).await;
+        let frame = (!source.frame.is_empty()).then_some(source.frame.as_str());
+        router.handle_binding(&payload, frame).await;
       }
       Value::Null
     })

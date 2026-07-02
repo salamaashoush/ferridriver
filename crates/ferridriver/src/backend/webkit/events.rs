@@ -335,11 +335,11 @@ struct TargetListenerCtx {
   network_log: Arc<arc_swap::ArcSwap<RwLock<Vec<NetworkRequest>>>>,
   lifecycle: Arc<super::page::LifecycleSignals>,
   main_frame_id_cache: Arc<std::sync::Mutex<Option<String>>>,
-  /// Exposed-function registry, shared with the page. `Runtime.bindingCalled`
+  /// Exposed-binding registry, shared with the page. `Runtime.bindingCalled`
   /// is dispatched here (not from a separate task pinned to one target
   /// session) so exposed functions keep working after a cross-process
   /// navigation swaps the live target — the main listener follows the swap.
-  exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedFn>>>,
+  exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedBinding>>>,
 }
 
 impl TargetListenerCtx {
@@ -366,9 +366,37 @@ async fn handle_binding_called(ctx: &TargetListenerCtx, params: &Value) {
     .and_then(Value::as_array)
     .cloned()
     .unwrap_or_default();
+
+  // WebKit's `bindingCalled` carries the calling execution context id;
+  // reverse it through the frame-context map so iframe callers surface
+  // their own frame in the `BindingSource` (unmapped contexts fall back
+  // to the main frame).
+  let ctx_id = params.get("contextId").and_then(Value::as_i64);
+  let main_frame = ctx
+    .main_frame_id_cache
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone()
+    .unwrap_or_default();
+  let source_frame = match ctx_id {
+    Some(id) => ctx
+      .frame_contexts
+      .read()
+      .await
+      .iter()
+      .find_map(|(fid, &cid)| (cid == id).then(|| fid.clone()))
+      .unwrap_or_else(|| main_frame.clone()),
+    None => main_frame.clone(),
+  };
+  let source = crate::events::BindingSource {
+    context: String::new(),
+    page: main_frame,
+    frame: source_frame,
+  };
+
   let maybe_fn = ctx.exposed_fns.read().await.get(&fn_name).cloned();
   let deliver_js = if let Some(callback) = maybe_fn {
-    let result = callback(args).await;
+    let result = callback(source, args).await;
     format!(
       "globalThis.__fd_bc.resolve({}, {})",
       seq,
@@ -377,10 +405,14 @@ async fn handle_binding_called(ctx: &TargetListenerCtx, params: &Value) {
   } else {
     format!("globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')")
   };
-  let _ = ctx
-    .target()
-    .send(super::protocol::RUNTIME_EVALUATE, json!({ "expression": deliver_js }))
-    .await;
+  // Resolve in the calling context — each frame has its own `__fd_bc`
+  // controller, so a default-context evaluate would strand an iframe
+  // caller's promise.
+  let mut eval_params = json!({ "expression": deliver_js });
+  if let Some(id) = ctx_id {
+    eval_params["contextId"] = json!(id);
+  }
+  let _ = ctx.target().send(super::protocol::RUNTIME_EVALUATE, eval_params).await;
 }
 
 async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::Envelope) {
@@ -746,6 +778,15 @@ async fn handle_exec_context_created(params: &Value, frame_contexts: &FrameConte
   let Some(ctx) = params.get("context") else {
     return;
   };
+  // Track only the frame's normal (main-world) context — mirrors the CDP
+  // tracker's `isDefault` filter. WebKit announces the utility world
+  // (`__playwright_utility_world__`, type "user") right after the normal
+  // one for the same frameId; letting it overwrite the entry anchored
+  // frame-scoped evaluates in the utility world, where page-visible
+  // globals (e.g. the WebSocket mock's dispatch hook) don't exist.
+  if ctx.get("type").and_then(Value::as_str) != Some("normal") {
+    return;
+  }
   let Some(frame_id) = ctx.get("frameId").and_then(Value::as_str) else {
     return;
   };

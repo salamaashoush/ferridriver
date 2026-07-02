@@ -88,6 +88,54 @@ pub fn test_context_route_web_socket(c: &mut McpClient) {
   );
 }
 
+/// A socket created INSIDE a same-origin iframe: the `onCreate` binding
+/// call carries the iframe as its `BindingSource.frame`, and every
+/// driver→page dispatch (`ensureOpened`, `send`) must evaluate in THAT
+/// frame — the iframe realm has its own `WebSocket` mock and
+/// `idToWebSocket` map, so a main-frame dispatch silently strands the
+/// socket. Mirrors Playwright's `source.frame.evaluateExpression`
+/// anchoring in `webSocketRouteDispatcher.ts`. The echo is observed via
+/// a single awaited `frame.evaluate`.
+pub fn test_page_route_web_socket_in_iframe(c: &mut McpClient) {
+  let port = super::spawn_html_server();
+  c.script_value(
+    r"
+    await page.routeWebSocket('ws://ferri.invalid/frame-mock', (ws) => {
+      ws.onMessage((m) => ws.send('frame:' + m));
+    });
+    return true;
+    ",
+  );
+  let got = c.script_value_with_args(
+    r"
+    const [pageUrl, wsUrl] = args;
+    await page.goto(pageUrl);
+    await page.waitForSelector('iframe');
+    let frame = null;
+    for (let i = 0; i < 50; i++) {
+      const fs = page.frames();
+      if (fs.length > 1) { frame = fs[1]; break; }
+      await page.waitForTimeout(100);
+    }
+    if (!frame) throw new Error('iframe never appeared in page.frames()');
+    return await frame.evaluate((u) => new Promise((resolve) => {
+      const ws = new WebSocket(u);
+      ws.onopen = () => ws.send('hi');
+      ws.onmessage = (e) => resolve(e.data);
+    }), wsUrl);
+    ",
+    serde_json::json!([
+      format!("http://127.0.0.1:{port}/iframe"),
+      "ws://ferri.invalid/frame-mock"
+    ]),
+  );
+  assert_eq!(
+    got.as_str(),
+    Some("frame:hi"),
+    "routeWebSocket must intercept a socket created inside an iframe and dispatch the mocked reply back into that frame"
+  );
+}
+
 pub fn register(set: &mut super::super::TestSet<'_>) {
   set.run(
     "backends_support::route_web_socket::test_page_route_web_socket",
@@ -96,5 +144,9 @@ pub fn register(set: &mut super::super::TestSet<'_>) {
   set.run(
     "backends_support::route_web_socket::test_context_route_web_socket",
     test_context_route_web_socket,
+  );
+  set.run(
+    "backends_support::route_web_socket::test_page_route_web_socket_in_iframe",
+    test_page_route_web_socket_in_iframe,
   );
 }

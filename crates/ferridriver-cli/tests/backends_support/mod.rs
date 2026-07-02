@@ -54,29 +54,55 @@ use std::thread;
 /// for every request. Returns the bound port. `http://localhost` is a
 /// secure, non-opaque origin where `localStorage` is available (unlike
 /// `data:` / `about:blank`), and gives the HTTP client a real peer address.
+///
+/// Paths starting with `/iframe` serve a page embedding a same-origin
+/// `<iframe src="/inner">`; every other path serves the flat test page.
+///
+/// Each connection is served on its own thread. Browsers (WebKit in
+/// particular) open speculative preconnections that carry no request for
+/// up to ~60s; a single-threaded accept loop blocks reading that idle
+/// socket while the real request starves — observed as a full 30s MCP
+/// timeout on `goto`. `Connection: close` keeps clients from parking
+/// keep-alive reuse on a socket this server has already dropped.
 pub fn spawn_html_server() -> u16 {
   let listener = TcpListener::bind("127.0.0.1:0").expect("bind html server");
   let port = listener.local_addr().expect("addr").port();
   thread::spawn(move || {
-    while let Ok((mut stream, _)) = listener.accept() {
-      let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-      loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-          break;
-        }
-        if line == "\r\n" || line == "\n" {
-          break;
-        }
-      }
-      let body = "<!doctype html><body>backend-test</body>";
-      let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
-        body.len(),
-        body
-      );
-      let _ = stream.write_all(resp.as_bytes());
+    while let Ok((stream, _)) = listener.accept() {
+      thread::spawn(move || serve_connection(stream));
     }
   });
   port
+}
+
+fn serve_connection(mut stream: std::net::TcpStream) {
+  let mut reader = BufReader::new(match stream.try_clone() {
+    Ok(s) => s,
+    Err(_) => return,
+  });
+  let mut request_line = String::new();
+  if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+    return;
+  }
+  loop {
+    let mut line = String::new();
+    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+      return;
+    }
+    if line == "\r\n" || line == "\n" {
+      break;
+    }
+  }
+  let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+  let body = if path.starts_with("/iframe") {
+    "<!doctype html><body>outer<iframe src=\"/inner\"></iframe></body>"
+  } else {
+    "<!doctype html><body>backend-test</body>"
+  };
+  let resp = format!(
+    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+    body.len(),
+    body
+  );
+  let _ = stream.write_all(resp.as_bytes());
 }

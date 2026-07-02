@@ -223,7 +223,7 @@ pub struct BidiPage {
   intercept_ids: Arc<RwLock<Vec<String>>>,
   closed: Arc<AtomicBool>,
   preload_scripts: Arc<RwLock<FxHashMap<String, String>>>,
-  exposed_fns: Arc<RwLock<FxHashMap<String, crate::events::ExposedFn>>>,
+  exposed_fns: Arc<RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
   /// Manager for lazy engine injection.
   injected_script: Arc<InjectedScriptManager>,
   /// Most recent main-document `Request` observed by the `BiDi` network
@@ -1869,6 +1869,11 @@ impl BidiPage {
     ));
 
     tokio::spawn(async move {
+      // Child browsing contexts (iframes) of this page, tracked from
+      // `contextCreated` / `contextDestroyed`. Used to scope events that
+      // only carry a `source.context` (exposed-binding dispatch via
+      // `log.entryAdded`) to this page's frame tree.
+      let mut child_frames: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
       while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         // Filter events for this context. Accepts events targeting this
         // top-level context directly, events with no `context` field
@@ -1878,7 +1883,7 @@ impl BidiPage {
         let event_ctx = event.params.get("context").and_then(|v| v.as_str()).unwrap_or("");
         let event_parent = event.params.get("parent").and_then(|v| v.as_str()).unwrap_or("");
         let child_of_this = !event_parent.is_empty() && event_parent == &*ctx;
-        if event_ctx != &*ctx && !event_ctx.is_empty() && !child_of_this {
+        if event_ctx != &*ctx && !event_ctx.is_empty() && !child_of_this && !child_frames.contains(event_ctx) {
           continue;
         }
 
@@ -1894,6 +1899,7 @@ impl BidiPage {
         // `browsingContext.getTree` to enrich the cache record with
         // name + final url once Firefox has wired the iframe up.
         if event.method == "browsingContext.contextCreated" && child_of_this {
+          child_frames.insert(event_ctx.to_string());
           let frame_id = event_ctx.to_string();
           let url = event
             .params
@@ -1983,6 +1989,22 @@ impl BidiPage {
                 name: String::new(),
                 url,
               }));
+            } else if event.method == "browsingContext.navigationStarted" && child_frames.contains(event_ctx) {
+              // Child-iframe cross-document navigation — surface it like
+              // CDP's per-frame `Page.frameNavigated` so frame-scoped
+              // consumers (e.g. WebSocket-route teardown) observe it.
+              let url = event
+                .params
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+              emitter.emit(PageEvent::FrameNavigated(crate::backend::FrameInfo {
+                frame_id: event_ctx.to_string(),
+                parent_frame_id: Some((*ctx).to_string()),
+                name: String::new(),
+                url,
+              }));
             }
             // Surface the main frame's lifecycle on the page emitter so
             // `page.on('load' | 'domcontentloaded')` observes it.
@@ -2063,9 +2085,35 @@ impl BidiPage {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                  // The log entry's `source.context` is the browsing
+                  // context (== frame id) the shim ran in — iframe
+                  // callers surface their own frame in the
+                  // `BindingSource`, and the promise resolve below must
+                  // target that same context.
+                  let call_ctx = event
+                    .params
+                    .get("source")
+                    .and_then(|s| s.get("context"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&exposed_ctx)
+                    .to_string();
+                  // `log.entryAdded` has no top-level `context`, so the
+                  // page filter above can't scope it — every page's
+                  // listener on this session sees every binding
+                  // envelope. Only dispatch calls originating in THIS
+                  // page's frame tree; otherwise a same-named binding on
+                  // another page would double-fire.
+                  if call_ctx != *ctx && !child_frames.contains(&call_ctx) {
+                    continue;
+                  }
+                  let source = crate::events::BindingSource {
+                    context: String::new(),
+                    page: (*exposed_ctx).to_string(),
+                    frame: call_ctx.clone(),
+                  };
                   let maybe_fn = exposed_fns.read().await.get(&fn_name).cloned();
                   if let Some(callback) = maybe_fn {
-                    let result = callback(args).await;
+                    let result = callback(source, args).await;
                     let result_js = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
                     let escaped_id = id.replace('\\', r"\\").replace('\'', r"\'");
                     let resolve_js = format!(
@@ -2077,7 +2125,7 @@ impl BidiPage {
                         "script.callFunction",
                         json!({
                           "functionDeclaration": format!("() => {{ {resolve_js} }}"),
-                          "target": {"context": &*exposed_ctx},
+                          "target": {"context": call_ctx},
                           "awaitPromise": false,
                           "resultOwnership": "none"
                         }),
@@ -2223,8 +2271,18 @@ impl BidiPage {
             );
           },
           "browsingContext.contextDestroyed" => {
-            closed.store(true, Ordering::Relaxed);
-            emitter.emit(PageEvent::Close);
+            if event_ctx == &*ctx {
+              closed.store(true, Ordering::Relaxed);
+              emitter.emit(PageEvent::Close);
+            } else {
+              // A child iframe was removed — that's a frame detach, not
+              // a page close (treating it as Close bricked the page and
+              // tore down every page-scoped consumer).
+              child_frames.remove(event_ctx);
+              emitter.emit(PageEvent::FrameDetached {
+                frame_id: event_ctx.to_string(),
+              });
+            }
           },
           "input.fileDialogOpened" => {
             // BiDi event shape:
@@ -3076,7 +3134,7 @@ impl BidiPage {
 
   // ── Exposed Functions ───────────────────────────────────────────────────
 
-  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
+  pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
     // Inject a global function that sends messages via BiDi channel
     let js = format!(
       r"() => {{
@@ -3114,7 +3172,7 @@ impl BidiPage {
       )
       .await;
 
-    self.exposed_fns.write().await.insert(name.to_string(), func);
+    self.exposed_fns.write().await.insert(name.to_string(), binding);
     Ok(())
   }
 

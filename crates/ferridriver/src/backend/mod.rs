@@ -1387,8 +1387,18 @@ impl AnyPage {
 
   // ── Exposed Functions ──
 
+  /// Register a page binding whose callback receives the
+  /// [`crate::events::BindingSource`] of the calling frame. The backend
+  /// fills `source.page` (main frame id) and `source.frame` (the frame
+  /// the page-side call originated from); `source.context` is filled by
+  /// the context layer, which knows the composite session key.
+  pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    page_dispatch!(self, expose_binding(name, binding))
+  }
+
   pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
-    page_dispatch!(self, expose_function(name, func))
+    let binding: crate::events::ExposedBinding = std::sync::Arc::new(move |_source, args| func(args));
+    self.expose_binding(name, binding).await
   }
 
   pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
