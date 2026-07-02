@@ -69,6 +69,13 @@ pub fn parse_ax_nodes(arr: &[Value]) -> Vec<AxNodeData> {
   nodes
 }
 
+/// `-1` is the "session cookie" sentinel on the wire — an exact literal,
+/// never a computed float, so the comparison is by fixed margin only to
+/// satisfy `float_cmp`.
+fn is_session_sentinel(expires: f64) -> bool {
+  (expires + 1.0).abs() < f64::EPSILON
+}
+
 /// Parse one `Page.Cookie` JSON object into [`CookieData`].
 #[must_use]
 pub fn parse_cookie(c: &Value) -> CookieData {
@@ -85,7 +92,13 @@ pub fn parse_cookie(c: &Value) -> CookieData {
     path: c.get("path").and_then(Value::as_str).unwrap_or("/").to_string(),
     secure: c.get("secure").and_then(Value::as_bool).unwrap_or(false),
     http_only: c.get("httpOnly").and_then(Value::as_bool).unwrap_or(false),
-    expires: c.get("expires").and_then(Value::as_f64),
+    // WebKit reports `expires` in MILLISECONDS; the user-facing value is
+    // unix seconds. Playwright: `expires === -1 ? -1 : expires / 1000`
+    // (wkBrowser.ts::cookies).
+    expires: c
+      .get("expires")
+      .and_then(Value::as_f64)
+      .map(|e| if is_session_sentinel(e) { e } else { e / 1000.0 }),
     same_site,
     url: None,
   }
@@ -96,6 +109,7 @@ pub fn parse_cookie(c: &Value) -> CookieData {
 /// `wkBrowser.ts::addCookies` mapping. Cookies are set through the root
 /// browser session so they populate the whole context's store, not just the
 /// current page's reachable origin.
+#[must_use]
 pub fn webkit_set_cookie_param(cookie: &CookieData) -> Value {
   let mut obj = json!({
     "name": cookie.name,
@@ -104,11 +118,24 @@ pub fn webkit_set_cookie_param(cookie: &CookieData) -> Value {
     "path": if cookie.path.is_empty() { "/".to_string() } else { cookie.path.clone() },
     "secure": cookie.secure,
     "httpOnly": cookie.http_only,
-    "session": cookie.expires.is_none(),
-    "sameSite": cookie.same_site.map_or("None", SameSite::as_str),
+    "session": cookie.expires.is_none_or(is_session_sentinel),
   });
+  // WebKit's `SetCookieParam.expires` is MILLISECONDS; the user-facing
+  // value is unix seconds. Playwright: `expires && expires !== -1 ?
+  // expires * 1000 : expires` (wkBrowser.ts::addCookies).
   if let Some(exp) = cookie.expires {
-    obj["expires"] = json!(exp);
+    obj["expires"] = if is_session_sentinel(exp) {
+      json!(exp)
+    } else {
+      json!(exp * 1000.0)
+    };
+  }
+  // Omit `sameSite` when unset (Playwright passes it through as
+  // undefined). Forcing "None" broke cookie writes on Linux WebKit:
+  // libsoup rejects `SameSite=None` without `Secure`, while macOS
+  // CFNetwork accepts it — the Linux CI run stored no cookies at all.
+  if let Some(ss) = cookie.same_site {
+    obj["sameSite"] = json!(ss.as_str());
   }
   obj
 }
