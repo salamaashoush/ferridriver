@@ -53,7 +53,7 @@ impl Registry {
   ///
   /// # Errors
   ///
-  /// Returns [`SessionError::Io`] if the directory cannot be created.
+  /// Returns [`crate::SessionError::Io`] if the directory cannot be created.
   pub fn open() -> Result<Self> {
     let dir = match std::env::var_os("FERRIDRIVER_SESSION_DIR") {
       Some(custom) => PathBuf::from(custom),
@@ -66,7 +66,7 @@ impl Registry {
   ///
   /// # Errors
   ///
-  /// Returns [`SessionError::Io`] if the directory cannot be created.
+  /// Returns [`crate::SessionError::Io`] if the directory cannot be created.
   pub fn open_at(dir: impl Into<PathBuf>) -> Result<Self> {
     let dir = dir.into();
     std::fs::create_dir_all(&dir)?;
@@ -87,8 +87,8 @@ impl Registry {
   ///
   /// # Errors
   ///
-  /// Returns [`SessionError::Json`] if the descriptor fails to serialize or
-  /// [`SessionError::Io`] on a write/rename failure.
+  /// Returns [`crate::SessionError::Json`] if the descriptor fails to serialize or
+  /// [`crate::SessionError::Io`] on a write/rename failure.
   pub fn put(&self, descriptor: &SessionDescriptor) -> Result<()> {
     let path = self.path_for(&descriptor.id);
     let json = serde_json::to_vec_pretty(descriptor)?;
@@ -104,8 +104,8 @@ impl Registry {
   ///
   /// # Errors
   ///
-  /// Returns [`SessionError::Json`] if the file is malformed or
-  /// [`SessionError::Io`] on a read failure other than "not found".
+  /// Returns [`crate::SessionError::Json`] if the file is malformed or
+  /// [`crate::SessionError::Io`] on a read failure other than "not found".
   pub fn get(&self, id: &str) -> Result<Option<SessionDescriptor>> {
     let path = self.path_for(id);
     match std::fs::read(&path) {
@@ -120,7 +120,7 @@ impl Registry {
   ///
   /// # Errors
   ///
-  /// Returns [`SessionError::Io`] on a delete failure other than "not found".
+  /// Returns [`crate::SessionError::Io`] on a delete failure other than "not found".
   pub fn remove(&self, id: &str) -> Result<()> {
     match std::fs::remove_file(self.path_for(id)) {
       Ok(()) => Ok(()),
@@ -135,7 +135,7 @@ impl Registry {
   ///
   /// # Errors
   ///
-  /// Returns [`SessionError::Io`] if the registry directory cannot be read
+  /// Returns [`crate::SessionError::Io`] if the registry directory cannot be read
   /// (a missing directory yields an empty list, not an error).
   pub fn list(&self) -> Result<Vec<SessionDescriptor>> {
     let mut out = Vec::new();

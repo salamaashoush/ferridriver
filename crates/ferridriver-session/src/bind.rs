@@ -122,7 +122,7 @@ impl BoundSession {
   ///
   /// # Errors
   ///
-  /// Returns [`SessionError::Io`] if the descriptor cannot be removed.
+  /// Returns [`crate::SessionError::Io`] if the descriptor cannot be removed.
   pub fn unbind(&self) -> Result<()> {
     self.serve_task.abort();
     self.registry.remove(&self.id)
@@ -144,7 +144,7 @@ impl Drop for BoundSession {
 ///
 /// # Errors
 ///
-/// Returns [`SessionError::Io`] if the server cannot bind its endpoint or the
+/// Returns [`crate::SessionError::Io`] if the server cannot bind its endpoint or the
 /// descriptor cannot be written.
 pub async fn bind(
   browser: &Browser,
@@ -163,7 +163,7 @@ pub async fn bind(
 ///
 /// # Errors
 ///
-/// Returns [`SessionError::Io`](crate::SessionError::Io) if the server cannot
+/// Returns [`crate::SessionError::Io`] if the server cannot
 /// bind its endpoint or the descriptor cannot be written.
 pub async fn bind_global(
   browser: &Browser,
@@ -186,7 +186,7 @@ pub async fn bind_global(
 ///
 /// # Errors
 ///
-/// Returns [`SessionError::Io`](crate::SessionError::Io) if the descriptor
+/// Returns [`crate::SessionError::Io`] if the descriptor
 /// cannot be removed.
 pub fn unbind(id: &str) -> Result<()> {
   // Dropping the BoundSession aborts the serve task and removes the
@@ -204,7 +204,7 @@ pub fn unbind(id: &str) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns [`SessionError::Io`](crate::SessionError::Io) if the descriptor
+/// Returns [`crate::SessionError::Io`] if the descriptor
 /// cannot be removed.
 pub fn unbind_browser(browser: &Browser) -> Result<()> {
   let id = browser_bindings()
@@ -239,11 +239,11 @@ pub async fn bind_in(
 }
 
 /// The construction core shared by [`bind_in`] and tests: bind a server over
-/// any [`Dispatcher`], publish the descriptor, and spawn the serve task.
+/// any [`crate::Dispatcher`], publish the descriptor, and spawn the serve task.
 ///
 /// # Errors
 ///
-/// Returns [`SessionError::Io`](crate::SessionError::Io) if the server cannot
+/// Returns [`crate::SessionError::Io`] if the server cannot
 /// bind its endpoint or the descriptor cannot be written.
 pub async fn bind_dispatcher(
   registry: &Registry,
@@ -295,7 +295,7 @@ pub async fn bind_dispatcher(
 ///
 /// # Errors
 ///
-/// Returns [`SessionError::Io`] if the descriptor cannot be removed.
+/// Returns [`crate::SessionError::Io`] if the descriptor cannot be removed.
 pub fn unbind_id(registry: &Registry, id: &str) -> Result<()> {
   registry.remove(id)
 }
