@@ -2542,7 +2542,7 @@ impl Page {
     if first {
       self
         .inner
-        .expose_function(wsr::WS_BINDING_NAME, wsr::binding_callback(router))
+        .expose_binding(wsr::WS_BINDING_NAME, wsr::binding_callback(router))
         .await?;
       let source = crate::options::evaluation_script(wsr::mock_init_script(), None)?;
       self.inner.add_init_script(&source).await?;

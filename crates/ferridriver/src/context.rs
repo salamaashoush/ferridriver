@@ -469,8 +469,8 @@ impl ContextRef {
         .unwrap_or_default()
     };
     for (name, binding) in bindings {
-      let fn_for_page = bind_source(binding, composite.clone(), page);
-      page.expose_function(&name, fn_for_page).await?;
+      let binding_for_page = bind_source(binding, composite.clone());
+      page.expose_binding(&name, binding_for_page).await?;
     }
     Ok(())
   }
@@ -1145,8 +1145,8 @@ impl ContextRef {
     };
     let composite = self.key.to_composite();
     for page in &pages {
-      let fn_for_page = bind_source(callback.clone(), composite.clone(), page);
-      page.expose_function(name, fn_for_page).await?;
+      let binding_for_page = bind_source(callback.clone(), composite.clone());
+      page.expose_binding(name, binding_for_page).await?;
     }
     Ok(crate::disposable::Disposable::new({
       let this = self.clone();
@@ -1212,18 +1212,13 @@ impl ContextRef {
 /// here at apply time. `page`/`frame` use the page's main-frame id
 /// (the stable per-page identifier reachable without an extra RTT);
 /// `context` is the composite session key.
-fn bind_source(
-  binding: crate::events::ExposedBinding,
-  context_key: String,
-  page: &AnyPage,
-) -> crate::events::ExposedFn {
-  let frame_id = page.peek_main_frame_id().unwrap_or_default();
-  Arc::new(move |args| {
-    let source = crate::events::BindingSource {
-      context: context_key.clone(),
-      page: frame_id.clone(),
-      frame: frame_id.clone(),
-    };
+/// Stamp the context's composite key onto the [`crate::events::BindingSource`]
+/// the backend built for each call. The backend fills `page` / `frame`
+/// (the real calling frame — an iframe caller surfaces its own frame id);
+/// only the context key is unknown at that layer.
+fn bind_source(binding: crate::events::ExposedBinding, context_key: String) -> crate::events::ExposedBinding {
+  Arc::new(move |mut source, args| {
+    source.context = context_key.clone();
     binding(source, args)
   })
 }

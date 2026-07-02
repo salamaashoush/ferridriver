@@ -40,9 +40,10 @@ fn last_api_response(world: &BrowserWorld) -> Result<&HttpResponse, StepError> {
 
 #[when("I send a GET request to {string}")]
 async fn send_get(world: &mut BrowserWorld, url: String) {
+  let url_resolved = super::resolve_url(&url);
   let ctx = get_or_create_ctx(world);
   let resp = ctx
-    .get(&url, None)
+    .get(&url_resolved, None)
     .await
     .map_err(|e| StepError::wrap(format!("GET {url}"), e))?;
   world.set_state(LastHttpResponse(resp));
@@ -50,9 +51,10 @@ async fn send_get(world: &mut BrowserWorld, url: String) {
 
 #[when("I send a POST request to {string}")]
 async fn send_post_no_body(world: &mut BrowserWorld, url: String) {
+  let url_resolved = super::resolve_url(&url);
   let ctx = get_or_create_ctx(world);
   let resp = ctx
-    .post(&url, None)
+    .post(&url_resolved, None)
     .await
     .map_err(|e| StepError::wrap(format!("POST {url}"), e))?;
   world.set_state(LastHttpResponse(resp));
@@ -60,6 +62,7 @@ async fn send_post_no_body(world: &mut BrowserWorld, url: String) {
 
 #[when("I send a POST request to {string} with body:")]
 async fn send_post_with_body(world: &mut BrowserWorld, url: String, docstring: Option<&str>) {
+  let url_resolved = super::resolve_url(&url);
   let body = docstring.unwrap_or("").to_string();
   let ctx = get_or_create_ctx(world);
   let opts = RequestOptions {
@@ -72,7 +75,7 @@ async fn send_post_with_body(world: &mut BrowserWorld, url: String, docstring: O
     ..Default::default()
   };
   let resp = ctx
-    .post(&url, Some(opts))
+    .post(&url_resolved, Some(opts))
     .await
     .map_err(|e| StepError::wrap(format!("POST {url}"), e))?;
   world.set_state(LastHttpResponse(resp));
@@ -80,6 +83,7 @@ async fn send_post_with_body(world: &mut BrowserWorld, url: String, docstring: O
 
 #[when("I send a PUT request to {string} with body:")]
 async fn send_put_with_body(world: &mut BrowserWorld, url: String, docstring: Option<&str>) {
+  let url_resolved = super::resolve_url(&url);
   let body = docstring.unwrap_or("").to_string();
   let ctx = get_or_create_ctx(world);
   let opts = RequestOptions {
@@ -92,7 +96,7 @@ async fn send_put_with_body(world: &mut BrowserWorld, url: String, docstring: Op
     ..Default::default()
   };
   let resp = ctx
-    .put(&url, Some(opts))
+    .put(&url_resolved, Some(opts))
     .await
     .map_err(|e| StepError::wrap(format!("PUT {url}"), e))?;
   world.set_state(LastHttpResponse(resp));
@@ -100,9 +104,10 @@ async fn send_put_with_body(world: &mut BrowserWorld, url: String, docstring: Op
 
 #[when("I send a DELETE request to {string}")]
 async fn send_delete(world: &mut BrowserWorld, url: String) {
+  let url_resolved = super::resolve_url(&url);
   let ctx = get_or_create_ctx(world);
   let resp = ctx
-    .delete(&url, None)
+    .delete(&url_resolved, None)
     .await
     .map_err(|e| StepError::wrap(format!("DELETE {url}"), e))?;
   world.set_state(LastHttpResponse(resp));
@@ -110,6 +115,7 @@ async fn send_delete(world: &mut BrowserWorld, url: String) {
 
 #[when("I send a PATCH request to {string} with body:")]
 async fn send_patch_with_body(world: &mut BrowserWorld, url: String, docstring: Option<&str>) {
+  let url_resolved = super::resolve_url(&url);
   let body = docstring.unwrap_or("").to_string();
   let ctx = get_or_create_ctx(world);
   let opts = RequestOptions {
@@ -122,7 +128,7 @@ async fn send_patch_with_body(world: &mut BrowserWorld, url: String, docstring: 
     ..Default::default()
   };
   let resp = ctx
-    .patch(&url, Some(opts))
+    .patch(&url_resolved, Some(opts))
     .await
     .map_err(|e| StepError::wrap(format!("PATCH {url}"), e))?;
   world.set_state(LastHttpResponse(resp));

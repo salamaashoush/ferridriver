@@ -251,9 +251,36 @@ async fn handle_request(
   state.requests.write().await.push(RecordedRequest {
     path: request_path.clone(),
     method: method.to_string(),
-    headers: header_map,
+    headers: header_map.clone(),
     body: body.to_vec(),
   });
+
+  // Built-in echo endpoints under `/_api/` — an httpbin-shaped JSON echo
+  // of the request (url, method, headers, raw body, parsed JSON body) so
+  // HTTP-client fixtures can assert round-trips without depending on an
+  // external service being up.
+  if request_path.starts_with("/_api/") {
+    let body_text = String::from_utf8_lossy(&body).to_string();
+    let parsed_json: serde_json::Value = serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
+    let echo = serde_json::json!({
+      "url": request_path,
+      "method": method.to_string(),
+      "headers": header_map,
+      "data": body_text,
+      "json": parsed_json,
+    });
+    return Response::builder()
+      .status(200)
+      .header("content-type", "application/json")
+      .header("access-control-allow-origin", "*")
+      .body(Body::from(echo.to_string()))
+      .unwrap_or_else(|_| {
+        Response::builder()
+          .status(500)
+          .body(Body::empty())
+          .expect("empty 500 response")
+      });
+  }
 
   // Check programmatic routes.
   let routes = state.routes.read().await;

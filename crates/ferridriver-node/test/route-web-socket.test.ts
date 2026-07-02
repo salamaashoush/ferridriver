@@ -27,6 +27,12 @@ for (const backend of BACKENDS) {
             if (srv.upgrade(req)) return;
             return new Response("upgrade failed", { status: 400 });
           }
+          const url = new URL(req.url);
+          if (url.pathname.startsWith("/iframe")) {
+            return new Response('<!doctype html><body>outer<iframe src="/inner"></iframe></body>', {
+              headers: { "content-type": "text/html" },
+            });
+          }
           return new Response("<!doctype html><body>ws</body>", { headers: { "content-type": "text/html" } });
         },
         websocket: {
@@ -94,6 +100,39 @@ for (const backend of BACKENDS) {
         `ws://${base}/ctxmock`,
       );
       expect(got).toBe("ctx:hi");
+    });
+
+    it("socket created inside a same-origin iframe: mocked echo dispatches into that frame", async () => {
+      // The iframe realm has its own WebSocket mock + idToWebSocket map;
+      // the driver->page dispatch (ensureOpened / send) must evaluate in
+      // the socket's own frame or the reply never arrives (Playwright
+      // anchors on source.frame in webSocketRouteDispatcher.ts).
+      await page.routeWebSocket(`ws://${base}/frame-mock`, (ws) => {
+        ws.onMessage((m: any) => ws.send(`frame:${m}`));
+      });
+      await page.goto(`http://${base}/iframe`);
+      await page.waitForSelector("iframe");
+      let frame = null;
+      for (let i = 0; i < 50; i++) {
+        const fs = page.frames();
+        if (fs.length > 1) {
+          frame = fs[1];
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      if (!frame) throw new Error("iframe never appeared in page.frames()");
+      const got = await frame.evaluate(
+        (url) =>
+          new Promise<string>((resolve, reject) => {
+            const ws = new WebSocket(url as string);
+            ws.onopen = () => ws.send("hi");
+            ws.onmessage = (e) => resolve(e.data as string);
+            ws.onerror = () => reject(new Error("ws error"));
+          }),
+        `ws://${base}/frame-mock`,
+      );
+      expect(got).toBe("frame:hi");
     });
 
     it("onClose handler receives (code, reason) as two positional args", async () => {

@@ -68,10 +68,12 @@ pub struct WebKitPage {
   /// Cleared on navigation — a new document means a new global.
   /// Mirrors `WKExecutionContext._contextGlobalObjectId`.
   global_object_id: Arc<std::sync::Mutex<Option<String>>>,
-  /// Exposed-function callback registry. Keyed by the JS-side function
+  /// Exposed-binding callback registry. Keyed by the JS-side function
   /// name; the listener task dispatches `Runtime.bindingCalled` events
-  /// back through these callbacks.
-  pub(crate) exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedFn>>>,
+  /// back through these callbacks with the calling frame's
+  /// `BindingSource` (plain exposed functions are wrapped source-less
+  /// by `AnyPage::expose_function`).
+  pub(crate) exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedBinding>>>,
   /// Idempotent latch for the `Runtime.addBinding` + listener setup.
   binding_initialized: Arc<AtomicBool>,
   /// Ordered list of `(identifier, source)` bootstrap-script fragments.
@@ -524,6 +526,46 @@ impl WebKitPage {
     Ok(id)
   }
 
+  /// Resolve the execution-context id for `frame_id`, waiting briefly for
+  /// the target listener to observe the frame's normal-world context
+  /// (`Runtime.executionContextCreated` is consumed on the listener task,
+  /// so a frame-scoped call issued right after a navigation can race the
+  /// map update; cross-process swaps re-announce contexts with fresh
+  /// ids). Erroring instead of falling back keeps a frame-scoped
+  /// evaluate from silently running in the main frame.
+  async fn resolve_frame_context(&self, frame_id: &str) -> Result<i64> {
+    for _ in 0..200u32 {
+      if let Some(id) = self.frame_contexts.read().await.get(frame_id).copied() {
+        return Ok(id);
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Err(FerriError::backend(format!(
+      "webkit: no execution context found for frame '{frame_id}'. Frame may not be loaded yet."
+    )))
+  }
+
+  /// `this` objectId in a specific execution context — the frame-scoped
+  /// analogue of [`Self::global_anchor`]. Not cached: the context dies on
+  /// every navigation of its frame and utility evals into child frames
+  /// are rare.
+  async fn anchor_in_context(&self, ctx_id: i64) -> Result<String> {
+    let resp = self
+      .target_session()
+      .send(
+        protocol::RUNTIME_EVALUATE,
+        json!({ "expression": "this", "returnByValue": false, "contextId": ctx_id }),
+      )
+      .await
+      .map_err(conn_err)?;
+    resp
+      .get("result")
+      .and_then(|r| r.get("objectId"))
+      .and_then(Value::as_str)
+      .map(std::string::ToString::to_string)
+      .ok_or_else(|| FerriError::protocol("Runtime.evaluate", "frame anchor: no objectId"))
+  }
+
   fn ensure_open(&self) -> Result<()> {
     if self.closed.load(Ordering::Relaxed) {
       return Err(FerriError::backend("webkit: page is closed"));
@@ -556,21 +598,16 @@ impl WebKitPage {
   }
 
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<Value>> {
-    let ctx_id = self.frame_contexts.read().await.get(frame_id).copied();
+    let ctx_id = self.resolve_frame_context(frame_id).await?;
     // Selector-engine calls reach a child frame's realm through
     // `contextId`. `window.__fd` only lives in whichever realm the
     // engine was injected into, so inject it into THIS context first
     // when the expression depends on it — otherwise the child realm
     // throws `__fd is undefined` on every poll and the wait wedges.
-    if let Some(id) = ctx_id
-      && expression.contains("window.__fd")
-    {
-      self.ensure_engine_in_context(id).await?;
+    if expression.contains("window.__fd") {
+      self.ensure_engine_in_context(ctx_id).await?;
     }
-    let mut params = json!({ "expression": expression, "returnByValue": true });
-    if let Some(id) = ctx_id {
-      params["contextId"] = json!(id);
-    }
+    let params = json!({ "expression": expression, "returnByValue": true, "contextId": ctx_id });
     let resp = self
       .target_session()
       .send(protocol::RUNTIME_EVALUATE, params)
@@ -1740,9 +1777,9 @@ impl WebKitPage {
 
   // ── Exposed functions / init scripts ──────────────────────────────────
 
-  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
+  pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
     self.ensure_binding_channel().await?;
-    self.exposed_fns.write().await.insert(name.to_string(), func);
+    self.exposed_fns.write().await.insert(name.to_string(), binding);
     let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
     self.add_init_script(&register_js).await?;
     self.runtime_evaluate(&register_js, true).await?;
@@ -1879,11 +1916,19 @@ impl WebKitPage {
     fn_source: &str,
     args: &[crate::protocol::SerializedValue],
     handles: &[crate::protocol::HandleId],
-    _frame_id: Option<&str>,
+    frame_id: Option<&str>,
     is_function: Option<bool>,
     return_by_value: bool,
   ) -> Result<crate::js_handle::EvaluateResult> {
     self.ensure_engine_injected().await?;
+
+    // Frame-scoped evaluate: resolve the frame's execution context and
+    // anchor the wrapper there via a per-context `this` objectId (the
+    // cached `global_anchor` is main-frame-only).
+    let frame_ctx_id = match frame_id {
+      Some(fid) => Some(self.resolve_frame_context(fid).await?),
+      None => None,
+    };
 
     let args_json = serde_json::to_string(args)?;
     let is_fn: Value = match is_function {
@@ -1929,7 +1974,13 @@ impl WebKitPage {
         }
         a
       },
-      None => self.global_anchor().await?,
+      None => match frame_ctx_id {
+        Some(ctx_id) => {
+          self.ensure_engine_in_context(ctx_id).await?;
+          self.anchor_in_context(ctx_id).await?
+        },
+        None => self.global_anchor().await?,
+      },
     };
     let resp = self
       .target_session()
