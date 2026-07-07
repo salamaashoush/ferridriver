@@ -1261,3 +1261,56 @@ async fn quick_wins_tests() {
   browser.close(None).await.unwrap();
   assert!(!browser.is_connected(), "browser should be disconnected after close");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_storm_is_lossless() {
+  // Regression guard for two independent failure modes:
+  // 1. Chrome's piped stderr must be drained continuously — every
+  //    console.log writes an INFO:CONSOLE line to stderr, and past 64KB
+  //    (~1000 messages) an undrained pipe blocks the browser process in
+  //    write(2), freezing ALL CDP traffic (Runtime.evaluate never
+  //    returns). 3000 messages sits far above that threshold.
+  // 2. The event path (transport tap -> console listener -> emitter ->
+  //    listener callback) must deliver every message; the pre-rewrite
+  //    broadcast emitter dropped events past its 512-slot capacity.
+  use std::sync::atomic::{AtomicU64, Ordering};
+
+  const STORM: u64 = 3_000;
+
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
+  let page = browser.page().await.expect("get page");
+  page.goto(&data_url("<title>storm</title>"), None).await.expect("goto");
+
+  let received = std::sync::Arc::new(AtomicU64::new(0));
+  let counter = std::sync::Arc::clone(&received);
+  page.events().on(
+    "console",
+    std::sync::Arc::new(move |_| {
+      counter.fetch_add(1, Ordering::AcqRel);
+    }),
+  );
+
+  page
+    .evaluate(
+      &format!("for (let i = 0; i < {STORM}; i++) console.log('storm-' + i);"),
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
+    .await
+    .expect("console storm evaluate must not wedge");
+
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+  while received.load(Ordering::Acquire) < STORM && tokio::time::Instant::now() < deadline {
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+  }
+  assert_eq!(
+    received.load(Ordering::Acquire),
+    STORM,
+    "every console event must be delivered"
+  );
+
+  browser.close(None).await.unwrap();
+}

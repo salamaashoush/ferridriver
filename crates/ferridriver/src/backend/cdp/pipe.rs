@@ -43,7 +43,8 @@ impl PipeTransport {
       .stderr(std::process::Stdio::piped())
       .kill_on_drop(true);
 
-    let (child, reader, writer) = spawn_with_pipes(&mut command, chromium_path)?;
+    let (mut child, reader, writer) = spawn_with_pipes(&mut command, chromium_path)?;
+    crate::backend::process::drain_child_stderr(&mut child);
 
     let dispatcher = Arc::new(CdpDispatcher::new());
 
@@ -201,11 +202,17 @@ fn spawn_with_pipes(
   command: &mut tokio::process::Command,
   _chromium_path: &str,
 ) -> Result<(tokio::process::Child, BoxReader, BoxWriter)> {
-  use std::os::unix::io::IntoRawFd;
+  use std::os::unix::io::AsRawFd;
 
   let (parent_sock, child_sock) =
     std::os::unix::net::UnixStream::pair().map_err(|e| FerriError::Backend(format!("socketpair: {e}")))?;
-  let child_fd = child_sock.into_raw_fd();
+  // Borrow the raw fd for `pre_exec`; ownership stays with `child_sock`
+  // so the parent's copy is CLOSED (via Drop) right after `spawn()`.
+  // Holding it open meant the reader could never see EOF when Chrome
+  // died — a live in-process fd to the child end kept the socketpair
+  // open, `fail_all_pending` never fired, and every in-flight command
+  // ate the full 30s timeout instead of failing fast.
+  let child_fd = child_sock.as_raw_fd();
 
   #[allow(unsafe_code)]
   unsafe {
@@ -234,6 +241,7 @@ fn spawn_with_pipes(
   let child = command
     .spawn()
     .map_err(|e| FerriError::Backend(format!("Failed to launch Chrome with --remote-debugging-pipe: {e}")))?;
+  drop(child_sock);
 
   parent_sock
     .set_nonblocking(true)
