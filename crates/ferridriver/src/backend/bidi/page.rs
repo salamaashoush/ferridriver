@@ -1870,7 +1870,7 @@ impl BidiPage {
       });
     }
 
-    let mut rx = self.session.transport.subscribe_events();
+    let mut rx = self.session.transport.tap_events();
     let ctx = self.context_id.clone();
     let session = self.session.clone();
     let dialog_manager = self.dialog_manager.clone();
@@ -1895,7 +1895,7 @@ impl BidiPage {
       // only carry a `source.context` (exposed-binding dispatch via
       // `log.entryAdded`) to this page's frame tree.
       let mut child_frames: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      while let Some(event) = rx.recv().await {
         // Filter events for this context. Accepts events targeting this
         // top-level context directly, events with no `context` field
         // (session-wide), and events whose `parent` matches us — the
@@ -2678,13 +2678,13 @@ impl BidiPage {
     {
       return;
     }
-    let mut rx = self.session.transport.subscribe_events();
+    let mut rx = self.session.transport.tap_events();
     let ctx = self.context_id.clone();
     let session = self.session.clone();
     let routes = self.routes.clone();
 
     let route_listener = tokio::spawn(async move {
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      while let Some(event) = rx.recv().await {
         if event.method != "network.beforeRequestSent" {
           continue;
         }

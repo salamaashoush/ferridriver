@@ -57,6 +57,11 @@ pub(crate) struct BidiTransport {
   pending: Arc<PendingMap>,
   write_tx: mpsc::Sender<Message>,
   event_tx: broadcast::Sender<BidiEvent>,
+  /// Lossless taps fed by the reader in wire order before the broadcast
+  /// fanout. State-mutating consumers (frame cache, network tracker,
+  /// route interception) use these; a broadcast `Lagged` drop there
+  /// corrupts tracker state, see the CDP dispatcher's tap rationale.
+  event_taps: Arc<std::sync::Mutex<Vec<mpsc::UnboundedSender<BidiEvent>>>>,
 }
 
 impl BidiTransport {
@@ -90,6 +95,9 @@ impl BidiTransport {
     // rationale.
     let (event_tx, _) = broadcast::channel::<BidiEvent>(4096);
     let event_tx2 = event_tx.clone();
+    let event_taps: Arc<std::sync::Mutex<Vec<mpsc::UnboundedSender<BidiEvent>>>> =
+      Arc::new(std::sync::Mutex::new(Vec::new()));
+    let event_taps2 = Arc::clone(&event_taps);
 
     // Reader task -- hot path uses json_scan for zero-alloc field extraction
     let pending2 = pending.clone();
@@ -131,7 +139,14 @@ impl BidiTransport {
             Ok(parsed) => {
               let params = parsed.get("params").cloned().unwrap_or(serde_json::Value::Null);
               trace!("BiDi event: {method}");
-              let _ = event_tx2.send(BidiEvent { method, params });
+              let event = BidiEvent { method, params };
+              // Taps first: lossless state trackers must observe the
+              // event before best-effort broadcast consumers.
+              {
+                let mut taps = event_taps2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                taps.retain(|tap| tap.send(event.clone()).is_ok());
+              }
+              let _ = event_tx2.send(event);
             },
             Err(e) => {
               warn!("BiDi event parse error: {e}");
@@ -163,6 +178,7 @@ impl BidiTransport {
       pending,
       write_tx,
       event_tx,
+      event_taps,
     })
   }
 
@@ -199,6 +215,19 @@ impl BidiTransport {
   /// Receivers filter by event method at the receive site.
   pub fn subscribe_events(&self) -> broadcast::Receiver<BidiEvent> {
     self.event_tx.subscribe()
+  }
+
+  /// Lossless, wire-ordered event tap. Never drops; consumers filter by
+  /// method at the receive site. State-mutating consumers MUST use this
+  /// instead of [`Self::subscribe_events`].
+  pub fn tap_events(&self) -> mpsc::UnboundedReceiver<BidiEvent> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    self
+      .event_taps
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(tx);
+    rx
   }
 }
 
