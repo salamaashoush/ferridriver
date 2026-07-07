@@ -4118,16 +4118,8 @@ impl<T: CdpWrap> CdpPage<T> {
     page_backref: crate::backend::PageBackref,
   ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
-      let mut rx = transport.subscribe_event_method("Runtime.consoleAPICalled");
-      loop {
-        // Tolerate broadcast `Lagged` so the console listener stays
-        // alive after a busy session — exit-on-Lagged silently dropped
-        // every future `console.*` event.
-        let event = match rx.recv().await {
-          Ok(e) => e,
-          Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-          Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-        };
+      let mut rx = transport.tap_event_methods(&["Runtime.consoleAPICalled"], session_id.as_deref());
+      while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
@@ -4199,30 +4191,31 @@ impl<T: CdpWrap> CdpPage<T> {
     session_id: Option<&Arc<str>>,
     emitter: &crate::events::EventEmitter,
   ) -> Vec<tokio::task::AbortHandle> {
-    let mut handles = Vec::with_capacity(2);
-    for (method, ev) in [
-      ("Page.loadEventFired", crate::events::PageEvent::Load),
-      ("Page.domContentEventFired", crate::events::PageEvent::DomContentLoaded),
-    ] {
-      let transport = transport.clone();
-      let session_id = session_id.cloned();
-      let emitter = emitter.clone();
-      handles.push(
-        tokio::spawn(async move {
-          let mut rx = transport.subscribe_event_method(method);
-          while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
-            if let Some(ref expected_sid) = session_id {
-              if event.get("sessionId").and_then(|v| v.as_str()) != Some(&**expected_sid) {
-                continue;
-              }
+    let transport = transport.clone();
+    let session_id = session_id.cloned();
+    let emitter = emitter.clone();
+    vec![
+      tokio::spawn(async move {
+        let mut rx = transport.tap_event_methods(
+          &["Page.loadEventFired", "Page.domContentEventFired"],
+          session_id.as_deref(),
+        );
+        while let Some(event) = rx.recv().await {
+          if let Some(ref expected_sid) = session_id {
+            if event.get("sessionId").and_then(|v| v.as_str()) != Some(&**expected_sid) {
+              continue;
             }
-            emitter.emit(ev.clone());
           }
-        })
-        .abort_handle(),
-      );
-    }
-    handles
+          let ev = match event.get("method").and_then(|m| m.as_str()) {
+            Some("Page.loadEventFired") => crate::events::PageEvent::Load,
+            Some("Page.domContentEventFired") => crate::events::PageEvent::DomContentLoaded,
+            _ => continue,
+          };
+          emitter.emit(ev);
+        }
+      })
+      .abort_handle(),
+    ]
   }
 
   fn spawn_web_error_listener(
@@ -4232,8 +4225,8 @@ impl<T: CdpWrap> CdpPage<T> {
     page_backref: crate::backend::PageBackref,
   ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
-      let mut rx = transport.subscribe_event_method("Runtime.exceptionThrown");
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      let mut rx = transport.tap_event_methods(&["Runtime.exceptionThrown"], session_id.as_deref());
+      while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
@@ -4268,8 +4261,8 @@ impl<T: CdpWrap> CdpPage<T> {
       nav_request_slot,
     ));
     tokio::spawn(async move {
-      let mut rx = transport.subscribe_event_domain("Network");
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      let mut rx = transport.tap_event_domains(&["Network"], session_id.as_deref());
+      while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
@@ -4350,8 +4343,8 @@ impl<T: CdpWrap> CdpPage<T> {
     page_backref: crate::backend::PageBackref,
   ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
-      let mut rx = transport.subscribe_event_method("Page.javascriptDialogOpening");
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      let mut rx = transport.tap_event_methods(&["Page.javascriptDialogOpening"], session_id.as_deref());
+      while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
@@ -4472,9 +4465,9 @@ impl<T: CdpWrap> CdpPage<T> {
       // `update_file_chooser_intercept` from the page's
       // `on('filechooser', ...)` registration path. Saves one RTT per
       // newly-opened page (~5ms) when no test uses file pickers.
-      let mut rx = transport.subscribe_event_method("Page.fileChooserOpened");
+      let mut rx = transport.tap_event_methods(&["Page.fileChooserOpened"], session_id.as_deref());
 
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
@@ -4575,9 +4568,9 @@ impl<T: CdpWrap> CdpPage<T> {
       // explicitly set, so opt-in callers keep working.
       let _ = browser_context_id;
       let _ = downloads_dir;
-      let mut rx = transport.subscribe_event_domain("Browser");
+      let mut rx = transport.tap_event_domains(&["Browser"], session_id.as_deref());
 
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      while let Some(event) = rx.recv().await {
         // `Browser.downloadWillBegin` / `Browser.downloadProgress` fire
         // on the root browser session (no `sessionId`) when
         // `eventsEnabled: true`. Events with a `sessionId` come from
@@ -4686,21 +4679,12 @@ impl<T: CdpWrap> CdpPage<T> {
     target_id: Arc<str>,
   ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
-      let mut runtime_rx = transport.subscribe_event_domain("Runtime");
-      let mut page_rx = transport.subscribe_event_domain("Page");
-      loop {
-        let event = tokio::select! {
-          ev = runtime_rx.recv() => match ev {
-            Ok(event) => event,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-          },
-          ev = page_rx.recv() => match ev {
-            Ok(event) => event,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-          },
-        };
+      // One tap across both domains: `Runtime.bindingCalled` stays
+      // ordered against `Runtime.executionContextCreated/Destroyed`
+      // AND `Page.frameNavigated/Detached` exactly as they arrived on
+      // the wire, and nothing is ever dropped.
+      let mut rx = transport.tap_event_domains(&["Runtime", "Page"], session_id.as_deref());
+      while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
@@ -5081,17 +5065,11 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       }
       Some(format!("{scheme}://{host_and_port}"))
     }
-    let mut rx = transport.subscribe_event_domain("Fetch");
-    loop {
-      // Tolerate broadcast `Lagged` (slow-consumer overflow) so the
-      // Fetch interceptor stays alive after a busy session — previously
-      // a single overflow killed the listener, future requests dropped
-      // through to the network and a routed URL hit `ERR_NAME_NOT_RESOLVED`.
-      let event = match rx.recv().await {
-        Ok(e) => e,
-        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-      };
+    // Lossless tap: a dropped `Fetch.requestPaused` is a request Chrome
+    // holds paused forever (page hang), so the interceptor must never
+    // miss one.
+    let mut rx = transport.tap_event_domains(&["Fetch"], session_id.as_deref());
+    while let Some(event) = rx.recv().await {
       if let Some(ref expected_sid) = session_id {
         let event_sid = event.get("sessionId").and_then(|v| v.as_str());
         if event_sid != Some(&**expected_sid) {
