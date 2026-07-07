@@ -254,9 +254,9 @@ impl BidiBrowser {
   /// the `CdpBrowser::close` fast-path.
   pub async fn close(&mut self) -> Result<()> {
     if let Some(mut group) = self.child.lock().await.take() {
-      // `ChildGroup::drop` takes down every helper subprocess in the
-      // group; `kill().await` reaps the parent (waitpid) so no zombie.
-      let _ = group.inner_mut().kill().await;
+      // Group kill first (helpers die with the parent), then reap so
+      // the enclosing runtime carries no zombie.
+      group.shutdown().await;
     }
     Ok(())
   }

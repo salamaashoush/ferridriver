@@ -592,10 +592,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// letting chrome flush its `IndexedDB` / profile state on exit.
   pub async fn close(&mut self) -> Result<()> {
     if let Some(mut group) = self.child.lock().await.take() {
-      // `ChildGroup::drop` also kills every helper subprocess in the
-      // group, but calling `kill().await` here reaps the parent
-      // (waitpid) so the enclosing runtime doesn't carry a zombie.
-      let _ = group.inner_mut().kill().await;
+      // Group kill first (helpers die with the parent), then reap so
+      // the enclosing runtime doesn't carry a zombie.
+      group.shutdown().await;
     }
     Ok(())
   }
