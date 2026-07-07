@@ -3,14 +3,14 @@
 //!
 //! These are real `#[rquickjs::class]` bindings (Rust is the source of
 //! truth), not JS shims dispatching to hidden `__ferri*` helpers.
-//! `URL` is backed by the `url` crate; `URLSearchParams` comes from
-//! `rquickjs-extra-url` (installed separately) and is instantiated here
-//! via its registered global constructor — no string `eval`.
+//! `URL` is backed by the `url` crate; `URLSearchParams` is the native
+//! class in [`crate::bindings::url_search_params`] (installed
+//! separately), constructed here directly from the query string.
 
 use base64::Engine as _;
 use base64::engine::GeneralPurpose;
 use base64::engine::general_purpose::GeneralPurposeConfig;
-use rquickjs::function::{Constructor, Func, Opt};
+use rquickjs::function::{Func, Opt};
 use rquickjs::{Class, Ctx, Function, JsLifetime, TypedArray, Value, class::Trace};
 
 /// TextEncoder — UTF-8 only, matching the WHATWG default.
@@ -249,13 +249,12 @@ impl Url {
     self.inner.set_fragment(if f.is_empty() { None } else { Some(f) });
   }
 
-  /// Live-ish `URLSearchParams` over this URL's query, built through the
-  /// `URLSearchParams` global constructor (from `rquickjs-extra-url`).
+  /// Live-ish `URLSearchParams` over this URL's query (a snapshot —
+  /// mutations do not write back to the URL).
   #[qjs(get, rename = "searchParams")]
   pub fn search_params<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let query = self.inner.query().unwrap_or("");
-    let ctor: Constructor<'js> = ctx.globals().get("URLSearchParams")?;
-    ctor.construct((query.to_string(),))
+    let params = crate::bindings::url_search_params::UrlSearchParams::from_query(self.inner.query().unwrap_or(""));
+    Ok(Class::instance(ctx, params)?.into_value())
   }
 
   #[qjs(rename = "toString")]

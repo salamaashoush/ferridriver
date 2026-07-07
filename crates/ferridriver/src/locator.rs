@@ -908,7 +908,8 @@ impl Locator {
         // the per-upload subdirs share that root, so we don't leak
         // indefinitely across a test run.
         let tmp_root = std::env::temp_dir().join(format!("ferridriver-files-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp_root)
+        tokio::fs::create_dir_all(&tmp_root)
+          .await
           .map_err(|e| crate::error::FerriError::Backend(format!("failed to create upload temp dir: {e}")))?;
         let upload_id = std::time::SystemTime::now()
           .duration_since(std::time::UNIX_EPOCH)
@@ -916,11 +917,13 @@ impl Locator {
         let mut paths: Vec<String> = Vec::new();
         for (i, p) in payloads.iter().enumerate() {
           let sub = tmp_root.join(format!("{upload_id}-{i}"));
-          std::fs::create_dir_all(&sub)
+          tokio::fs::create_dir_all(&sub)
+            .await
             .map_err(|e| crate::error::FerriError::Backend(format!("failed to create payload subdir: {e}")))?;
           let safe_name = p.name.replace(['/', '\\', '\0'], "_");
           let path = sub.join(&safe_name);
-          std::fs::write(&path, &p.buffer)
+          tokio::fs::write(&path, &p.buffer)
+            .await
             .map_err(|e| crate::error::FerriError::Backend(format!("failed to write upload payload: {e}")))?;
           paths.push(path.display().to_string());
         }

@@ -18,7 +18,7 @@ use rolldown_plugin::{
   HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookUsage,
   Plugin, PluginContext, SharedLoadPluginContext,
 };
-use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Module, WriteOptions, WriteOptionsEndianness, async_with};
+use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Module, WriteOptions, WriteOptionsEndianness};
 
 use crate::engine::caught_to_script_error;
 use crate::error::ScriptError;
@@ -271,20 +271,21 @@ pub async fn bundle_and_compile(entry_paths: &[PathBuf], cwd: &Path) -> Result<C
   let ctx = AsyncContext::full(&runtime)
     .await
     .map_err(|e| ScriptError::internal(format!("bytecode context: {e}")))?;
-  let bytecode: Vec<u8> = async_with!(ctx => |ctx| {
-    // The bundle's only remaining imports are the external native
-    // specifiers, resolved by the loader installed above.
-    let module = Module::declare(ctx.clone(), name.into_bytes(), code.into_bytes())
-      .catch(&ctx)
-      .map_err(|e| caught_to_script_error(e, ""))?;
-    module
-      .write(WriteOptions {
-        endianness: WriteOptionsEndianness::Native,
-        ..Default::default()
-      })
-      .map_err(|e| ScriptError::internal(format!("module write: {e}")))
-  })
-  .await?;
+  let bytecode: Vec<u8> = ctx
+    .async_with(async |ctx| {
+      // The bundle's only remaining imports are the external native
+      // specifiers, resolved by the loader installed above.
+      let module = Module::declare(ctx.clone(), name.into_bytes(), code.into_bytes())
+        .catch(&ctx)
+        .map_err(|e| caught_to_script_error(e, ""))?;
+      module
+        .write(WriteOptions {
+          endianness: WriteOptionsEndianness::Native,
+          ..Default::default()
+        })
+        .map_err(|e| ScriptError::internal(format!("module write: {e}")))
+    })
+    .await?;
 
   let inputs = crate::bytecode_cache::collect_inputs(entry_paths, map_json.as_deref(), cwd);
   crate::bytecode_cache::store(cache_key, &bytecode, &module_name, map_json.as_deref(), None, &inputs);
@@ -633,68 +634,69 @@ async fn compile_extract_one(
   let name = module_name.to_string();
   let code = code.to_string();
   let label = module_name.to_string();
-  async_with!(actx => |ctx| {
-    // Registry + native `defineTool`/cucumber surface. Idempotent — the
-    // shared extraction context installs it once for the whole batch.
-    crate::bindings::install_bdd(&ctx)
-      .map_err(|e| ScriptError::internal(format!("install extension registry: {e}")))?;
-    // Manifest extraction is the MCP tool path: expose
-    // `ferridriver.host = 'mcp'` so an extension's host-gated
-    // `defineTool` runs and its manifest is captured (mirrors what the
-    // mcp session does).
-    {
-      let fd = rquickjs::Object::new(ctx.clone())
-        .map_err(|e| ScriptError::internal(format!("ferridriver global: {e}")))?;
-      fd.set("host", "mcp")
-        .map_err(|e| ScriptError::internal(format!("ferridriver.host: {e}")))?;
-      ctx
-        .globals()
-        .set("ferridriver", fd)
-        .map_err(|e| ScriptError::internal(format!("install ferridriver global: {e}")))?;
-    }
+  actx
+    .async_with(async |ctx| {
+      // Registry + native `defineTool`/cucumber surface. Idempotent — the
+      // shared extraction context installs it once for the whole batch.
+      crate::bindings::install_bdd(&ctx)
+        .map_err(|e| ScriptError::internal(format!("install extension registry: {e}")))?;
+      // Manifest extraction is the MCP tool path: expose
+      // `ferridriver.host = 'mcp'` so an extension's host-gated
+      // `defineTool` runs and its manifest is captured (mirrors what the
+      // mcp session does).
+      {
+        let fd =
+          rquickjs::Object::new(ctx.clone()).map_err(|e| ScriptError::internal(format!("ferridriver global: {e}")))?;
+        fd.set("host", "mcp")
+          .map_err(|e| ScriptError::internal(format!("ferridriver.host: {e}")))?;
+        ctx
+          .globals()
+          .set("ferridriver", fd)
+          .map_err(|e| ScriptError::internal(format!("install ferridriver global: {e}")))?;
+      }
 
-    // Bundled module has no remaining imports — `declare` (parse only)
-    // needs no resolver; mirrors `bundle_and_compile`.
-    let module = Module::declare(ctx.clone(), name.clone().into_bytes(), code.into_bytes())
-      .catch(&ctx)
-      .map_err(|e| caught_to_script_error(e, &label))?;
-    let bytecode = module
-      .write(WriteOptions {
-        // Same process + interpreter that will `load` it.
-        endianness: WriteOptionsEndianness::Native,
-        ..Default::default()
-      })
-      .map_err(|e| ScriptError::internal(format!("plugin module write: {e}")))?;
+      // Bundled module has no remaining imports — `declare` (parse only)
+      // needs no resolver; mirrors `bundle_and_compile`.
+      let module = Module::declare(ctx.clone(), name.clone().into_bytes(), code.into_bytes())
+        .catch(&ctx)
+        .map_err(|e| caught_to_script_error(e, &label))?;
+      let bytecode = module
+        .write(WriteOptions {
+          // Same process + interpreter that will `load` it.
+          endianness: WriteOptionsEndianness::Native,
+          ..Default::default()
+        })
+        .map_err(|e| ScriptError::internal(format!("plugin module write: {e}")))?;
 
-    let before = crate::bindings::tools_len(&ctx)?;
+      let before = crate::bindings::tools_len(&ctx)?;
 
-    // SAFETY: `bytecode` was just produced by `Module::write` in THIS
-    // process and rquickjs/QuickJS build with native endianness — the
-    // precondition `Module::load` documents. (When it is later stored in
-    // the disk cache, the cache's ABI tag + input hashes preserve that
-    // precondition for the process that loads it back.)
-    #[allow(unsafe_code)]
-    let loaded = (unsafe { Module::load(ctx.clone(), &bytecode) })
-      .catch(&ctx)
-      .map_err(|e| caught_to_script_error(e, &label))?;
-    let promise = loaded
-      .eval()
-      .catch(&ctx)
-      .map_err(|e| caught_to_script_error(e, &label))?
-      .1;
-    promise
-      .into_future::<()>()
-      .await
-      .catch(&ctx)
-      .map_err(|e| caught_to_script_error(e, &label))?;
+      // SAFETY: `bytecode` was just produced by `Module::write` in THIS
+      // process and rquickjs/QuickJS build with native endianness — the
+      // precondition `Module::load` documents. (When it is later stored in
+      // the disk cache, the cache's ABI tag + input hashes preserve that
+      // precondition for the process that loads it back.)
+      #[allow(unsafe_code)]
+      let loaded = (unsafe { Module::load(ctx.clone(), &bytecode) })
+        .catch(&ctx)
+        .map_err(|e| caught_to_script_error(e, &label))?;
+      let promise = loaded
+        .eval()
+        .catch(&ctx)
+        .map_err(|e| caught_to_script_error(e, &label))?
+        .1;
+      promise
+        .into_future::<()>()
+        .await
+        .catch(&ctx)
+        .map_err(|e| caught_to_script_error(e, &label))?;
 
-    // Tools registered via the file's top-level `defineTool(...)` calls
-    // during eval — slice off the ones THIS file added.
-    let all = crate::bindings::tools_snapshot(&ctx)?;
-    let slice = all.get(before..).unwrap_or(&[]);
-    let manifests_json =
-      serde_json::to_string(slice).map_err(|e| ScriptError::internal(format!("serialise manifests: {e}")))?;
-    Ok((bytecode, manifests_json))
-  })
-  .await
+      // Tools registered via the file's top-level `defineTool(...)` calls
+      // during eval — slice off the ones THIS file added.
+      let all = crate::bindings::tools_snapshot(&ctx)?;
+      let slice = all.get(before..).unwrap_or(&[]);
+      let manifests_json =
+        serde_json::to_string(slice).map_err(|e| ScriptError::internal(format!("serialise manifests: {e}")))?;
+      Ok((bytecode, manifests_json))
+    })
+    .await
 }

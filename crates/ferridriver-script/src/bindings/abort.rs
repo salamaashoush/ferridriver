@@ -10,11 +10,41 @@
 //! future and drop it (the spec's "abort the fetch").
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rquickjs::class::Trace;
 use rquickjs::function::Opt;
 use rquickjs::{Class, Ctx, Function, Object, Value};
+
+/// Registry keeping each `AbortSignal.any` combined signal reachable for
+/// its source listeners WITHOUT capturing the live `Class` in the native
+/// listener closure. A captured JS value is invisible to QuickJS's GC
+/// (the closure is stored in another signal's traced `listeners` field),
+/// which is the untraceable cross-language cycle that aborts
+/// `JS_FreeRuntime` at teardown. Listeners capture only the `u64` key
+/// and restore the class from here at fire time — the same
+/// `Persistent`-in-userdata discipline as `PageCallbacks`.
+struct AbortAnyUd(
+  std::cell::RefCell<rustc_hash::FxHashMap<u64, rquickjs::Persistent<Class<'static, AbortSignalJs<'static>>>>>,
+);
+
+// SAFETY: holds only `Persistent` values (already `'static`-projected),
+// so re-stating the unused `'js` lifetime is sound — identical rationale
+// to `PageCallbacksUd`.
+#[allow(unsafe_code)]
+unsafe impl rquickjs::JsLifetime<'_> for AbortAnyUd {
+  type Changed<'to> = AbortAnyUd;
+}
+
+static NEXT_ANY_ID: AtomicU64 = AtomicU64::new(1);
+
+fn with_any_registry<R>(
+  ctx: &Ctx<'_>,
+  f: impl FnOnce(&mut rustc_hash::FxHashMap<u64, rquickjs::Persistent<Class<'static, AbortSignalJs<'static>>>>) -> R,
+) -> Option<R> {
+  let ud = ctx.userdata::<AbortAnyUd>()?;
+  Some(f(&mut ud.0.borrow_mut()))
+}
 
 /// Native, thread-safe side of a signal: lets a `fetch` request future
 /// observe an abort that happens on the JS thread and cancel itself.
@@ -246,10 +276,26 @@ impl<'js> AbortSignalJs<'js> {
         return Ok(combined);
       }
     }
+    if ctx.userdata::<AbortAnyUd>().is_none() {
+      let _ = ctx.store_userdata(AbortAnyUd(std::cell::RefCell::new(rustc_hash::FxHashMap::default())));
+    }
+    let key = NEXT_ANY_ID.fetch_add(1, Ordering::Relaxed);
+    let saved = rquickjs::Persistent::save(&ctx, combined.clone());
+    with_any_registry(&ctx, |r| {
+      r.insert(key, saved);
+    });
     for s in &signals {
-      let combined2 = combined.clone();
-      let cb = Function::new(ctx.clone(), move |reason: Value<'js>| {
-        AbortSignalJs::run_abort(&combined2, reason);
+      // The first source to abort removes the entry (a combined signal
+      // aborts at most once); the other sources' listeners then no-op.
+      // If no source ever aborts, the entry lives until context
+      // teardown — bounded, and GC-safe unlike a captured Class.
+      let cb = Function::new(ctx.clone(), move |ctx: Ctx<'js>, reason: Value<'js>| {
+        let Some(Some(saved)) = with_any_registry(&ctx, |r| r.remove(&key)) else {
+          return;
+        };
+        if let Ok(combined) = saved.restore(&ctx) {
+          AbortSignalJs::run_abort(&combined, reason);
+        }
       })?;
       s.borrow_mut().listeners.push(cb);
     }

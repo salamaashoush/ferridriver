@@ -276,6 +276,14 @@ pub struct BidiPage {
   /// re-spawn it — a second listener would double-dispatch `continueRequest`
   /// for every blocked request.
   pub(crate) route_listener_started: Arc<AtomicBool>,
+  /// Abort handles for this page's long-lived listener tasks (the
+  /// main event listener, the route listener, the screencast
+  /// navigation tap). They subscribe to the SESSION-wide event
+  /// channel, which stays open for the browser's whole life — without
+  /// an abort in [`Self::close_page`] every closed page keeps waking
+  /// on all future `BiDi` events and pins its managers/emitter until
+  /// the browser exits.
+  listener_tasks: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
   /// Maps a retained `BiDi` reference (a `handle` UUID or a node
   /// `sharedId`) to the browsing context whose realm it was created in.
   ///
@@ -394,8 +402,15 @@ impl BidiPage {
       frame_listener_started: Arc::new(AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       route_listener_started: Arc::new(AtomicBool::new(false)),
+      listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       handle_realms: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
     })
+  }
+
+  fn track_listener(&self, handle: tokio::task::AbortHandle) {
+    if let Ok(mut guard) = self.listener_tasks.lock() {
+      guard.push(handle);
+    }
   }
 
   /// Record that the `BiDi` reference `key` (a `handle` UUID or node
@@ -1874,7 +1889,7 @@ impl BidiPage {
       self.nav_request_slot.clone(),
     ));
 
-    tokio::spawn(async move {
+    let main_listener = tokio::spawn(async move {
       // Child browsing contexts (iframes) of this page, tracked from
       // `contextCreated` / `contextDestroyed`. Used to scope events that
       // only carry a `source.context` (exposed-binding dispatch via
@@ -2266,17 +2281,22 @@ impl BidiPage {
           },
           "browsingContext.contextDestroyed" => {
             if event_ctx == &*ctx {
-              closed.store(true, Ordering::Relaxed);
-              emitter.emit(PageEvent::Close);
-            } else {
-              // A child iframe was removed — that's a frame detach, not
-              // a page close (treating it as Close bricked the page and
-              // tore down every page-scoped consumer).
-              child_frames.remove(event_ctx);
-              emitter.emit(PageEvent::FrameDetached {
-                frame_id: event_ctx.to_string(),
-              });
+              // `swap` dedupes against `close_page`, which also emits
+              // `Close` (it can't rely on this event still being
+              // routed once the listener is aborted).
+              if !closed.swap(true, Ordering::SeqCst) {
+                emitter.emit(PageEvent::Close);
+              }
+              // This page is gone — stop consuming session-wide events.
+              break;
             }
+            // A child iframe was removed — that's a frame detach, not
+            // a page close (treating it as Close bricked the page and
+            // tore down every page-scoped consumer).
+            child_frames.remove(event_ctx);
+            emitter.emit(PageEvent::FrameDetached {
+              frame_id: event_ctx.to_string(),
+            });
           },
           "input.fileDialogOpened" => {
             // BiDi event shape:
@@ -2400,6 +2420,7 @@ impl BidiPage {
         }
       }
     });
+    self.track_listener(main_listener.abort_handle());
   }
 
   // ── Element screenshot ──────────────────────────────────────────────────
@@ -2497,7 +2518,10 @@ impl BidiPage {
     let event_notify2 = event_notify.clone();
     let event_ctx = self.context_id.clone();
 
-    tokio::spawn(async move {
+    // Tracked in `listener_tasks` (below) so page close reclaims it —
+    // the session-wide subscription otherwise keeps this tap alive
+    // long after the recording stopped.
+    let nav_tap = tokio::spawn(async move {
       while let Some(event) = crate::events::recv_tolerant(&mut event_rx).await {
         let is_relevant = matches!(
           event.method.as_str(),
@@ -2512,6 +2536,7 @@ impl BidiPage {
         }
       }
     });
+    self.track_listener(nav_tap.abort_handle());
 
     tokio::spawn(async move {
       let target_interval = std::time::Duration::from_millis(66); // ~15 fps
@@ -2658,7 +2683,7 @@ impl BidiPage {
     let session = self.session.clone();
     let routes = self.routes.clone();
 
-    tokio::spawn(async move {
+    let route_listener = tokio::spawn(async move {
       while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
         if event.method != "network.beforeRequestSent" {
           continue;
@@ -2717,21 +2742,43 @@ impl BidiPage {
             resource_type: String::new(),
           };
 
-          let (tx, action_rx) = tokio::sync::oneshot::channel();
-          let route = crate::route::Route::new(intercepted, tx);
-          handler(route);
-          let action = action_rx.await.unwrap_or(crate::route::RouteAction::Continue(
-            crate::route::ContinueOverrides::default(),
-          ));
-          execute_bidi_route_action(&session.transport, request_id, action, &orig_method, &orig_headers).await;
-        } else {
-          let _ = session
-            .transport
-            .send_command("network.continueRequest", json!({"request": request_id}))
+          // Resolve each blocked request on its own task — running the
+          // user handler + resolution round-trip inline serialized all
+          // intercepted requests behind the slowest handler and, once
+          // the broadcast lapped, dropped `beforeRequestSent` events
+          // whose requests then hung blocked forever. Same shape as
+          // the CDP Fetch listener.
+          let session2 = session.clone();
+          let request_id_owned = request_id.to_string();
+          tokio::spawn(async move {
+            let (tx, action_rx) = tokio::sync::oneshot::channel();
+            let route = crate::route::Route::new(intercepted, tx);
+            handler(route);
+            let action = action_rx.await.unwrap_or(crate::route::RouteAction::Continue(
+              crate::route::ContinueOverrides::default(),
+            ));
+            execute_bidi_route_action(
+              &session2.transport,
+              &request_id_owned,
+              action,
+              &orig_method,
+              &orig_headers,
+            )
             .await;
+          });
+        } else {
+          let session2 = session.clone();
+          let request_id_owned = request_id.to_string();
+          tokio::spawn(async move {
+            let _ = session2
+              .transport
+              .send_command("network.continueRequest", json!({"request": request_id_owned}))
+              .await;
+          });
         }
       }
     });
+    self.track_listener(route_listener.abort_handle());
   }
 
   pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
@@ -2773,7 +2820,21 @@ impl BidiPage {
         }),
       )
       .await?;
-    self.closed.store(true, Ordering::Relaxed);
+    // `swap` dedupes against the main listener's `contextDestroyed`
+    // branch, which also emits `Close` when Firefox tears the context
+    // down on its own.
+    if !self.closed.swap(true, Ordering::SeqCst) {
+      self.events.emit(crate::events::PageEvent::Close);
+    }
+    // The listeners subscribe to the session-wide event channel, which
+    // outlives this page — abort them so a closed page stops waking on
+    // every future BiDi event. The `Close` emitted above already sits
+    // in the page emitter's ring for its subscribers.
+    if let Ok(mut guard) = self.listener_tasks.lock() {
+      for handle in guard.drain(..) {
+        handle.abort();
+      }
+    }
     Ok(())
   }
 

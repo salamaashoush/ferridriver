@@ -195,46 +195,6 @@ impl BidiTransport {
     }
   }
 
-  /// Send multiple commands in parallel and await all responses.
-  #[allow(dead_code)]
-  /// Commands are written to the channel sequentially (they batch naturally),
-  /// then all responses are awaited concurrently.
-  pub async fn send_batch(&self, commands: &[(&str, serde_json::Value)]) -> Vec<Result<serde_json::Value>> {
-    let mut receivers = Vec::with_capacity(commands.len());
-
-    for (method, params) in commands {
-      let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-      let (tx, rx) = oneshot::channel();
-
-      self.pending.insert(id, tx);
-
-      let params_str = serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string());
-      let cmd = format!(r#"{{"id":{id},"method":"{method}","params":{params_str}}}"#);
-      trace!("BiDi batch send id={id}: {method}");
-
-      if self.write_tx.send(Message::Text(cmd.into())).await.is_err() {
-        receivers.push(Err(FerriError::backend("BiDi WebSocket connection closed")));
-        continue;
-      }
-
-      receivers.push(Ok((method.to_string(), rx)));
-    }
-
-    let mut results = Vec::with_capacity(receivers.len());
-    for recv in receivers {
-      match recv {
-        Ok((m, rx)) => match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-          Ok(Ok(result)) => results.push(result.map_err(|e| FerriError::protocol(m.clone(), e.to_string()))),
-          Ok(Err(_)) => results.push(Err(FerriError::backend("BiDi batch response channel dropped"))),
-          Err(_) => results.push(Err(FerriError::timeout(format!("BiDi batch command '{m}'"), 60_000))),
-        },
-        Err(e) => results.push(Err(e)),
-      }
-    }
-
-    results
-  }
-
   /// Subscribe to `BiDi` events. Returns a broadcast receiver.
   /// Receivers filter by event method at the receive site.
   pub fn subscribe_events(&self) -> broadcast::Receiver<BidiEvent> {

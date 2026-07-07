@@ -9,7 +9,6 @@
 
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::sync::Mutex;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -40,23 +39,26 @@ impl ReaderHandle {
   }
 }
 
-/// Write half of the pipe transport. Send is synchronous because the
-/// underlying pipe write is non-blocking in practice (the child reads
-/// fd 3 promptly) and we want to avoid yet another worker thread.
+/// Write half of the pipe transport. `send` only serializes and queues
+/// the frame — a dedicated writer thread performs the blocking pipe
+/// write. Writing inline on the calling task looked safe ("the child
+/// reads fd 3 promptly") but was a latent stall: a child that pauses
+/// reading fills the pipe buffer, `write_all` then blocks a tokio
+/// worker thread, and every other sender serializes behind the mutex.
+/// CDP and `BiDi` route outbound bytes through a writer task for the
+/// same reason.
 pub struct WriterHandle {
-  inner: Mutex<Box<dyn Write + Send>>,
+  tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 impl WriterHandle {
-  /// Serialize `value` and write it followed by a NUL byte. Errors on
-  /// IO failure or JSON encoding failure.
+  /// Serialize `value` and queue it (with its NUL terminator) for the
+  /// writer thread. Errors on JSON encoding failure or when the
+  /// writer thread has exited (pipe closed).
   pub fn send(&self, value: &Value) -> Result<(), TransportError> {
-    let payload = serde_json::to_vec(value)?;
-    let mut guard = self.inner.lock().map_err(|_| TransportError::Closed)?;
-    guard.write_all(&payload)?;
-    guard.write_all(b"\0")?;
-    guard.flush()?;
-    Ok(())
+    let mut payload = serde_json::to_vec(value)?;
+    payload.push(0);
+    self.tx.send(payload).map_err(|_| TransportError::Closed)
   }
 }
 
@@ -72,12 +74,14 @@ pub struct Transport {
 impl Transport {
   /// Construct a transport from raw blocking read + write halves.
   /// Usually called with the `Stdio::piped()` fds 3/4 of a spawned
-  /// `pw_run.sh` child. The reader thread is named so it shows up as
-  /// `webkit-reader` in `tokio-console` / `ps`.
+  /// `pw_run.sh` child. The reader/writer threads are named so they
+  /// show up as `webkit-reader` / `webkit-writer` in `tokio-console` /
+  /// `ps`.
   /// # Panics
   ///
-  /// Panics if the OS refuses to spawn the reader thread (vanishingly
-  /// rare — would also block almost everything else in tokio).
+  /// Panics if the OS refuses to spawn the reader or writer thread
+  /// (vanishingly rare — would also block almost everything else in
+  /// tokio).
   pub fn new<R, W>(read: R, write: W) -> Self
   where
     R: Read + Send + 'static,
@@ -88,11 +92,24 @@ impl Transport {
       .name("webkit-reader".into())
       .spawn(move || drain_reader(read, &tx))
       .unwrap_or_else(|e| panic!("spawn webkit-reader: {e}"));
+    let (wtx, wrx) = mpsc::unbounded_channel::<Vec<u8>>();
+    std::thread::Builder::new()
+      .name("webkit-writer".into())
+      .spawn(move || drain_writer(write, wrx))
+      .unwrap_or_else(|e| panic!("spawn webkit-writer: {e}"));
     Transport {
       reader: ReaderHandle { rx },
-      writer: WriterHandle {
-        inner: Mutex::new(Box::new(write)),
-      },
+      writer: WriterHandle { tx: wtx },
+    }
+  }
+}
+
+fn drain_writer<W: Write>(mut write: W, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
+  while let Some(frame) = rx.blocking_recv() {
+    if write.write_all(&frame).is_err() || write.flush().is_err() {
+      // Pipe gone — the reader thread sees EOF and fails pending
+      // callbacks; nothing to report from here.
+      break;
     }
   }
 }
@@ -130,7 +147,7 @@ fn drain_reader<R: Read>(read: R, tx: &mpsc::UnboundedSender<Result<Value, Trans
 mod tests {
   use super::*;
   use std::io::Cursor;
-  use std::sync::Arc;
+  use std::sync::{Arc, Mutex};
 
   struct WriterRef(Arc<Mutex<Vec<u8>>>);
   impl Write for WriterRef {
@@ -159,7 +176,18 @@ mod tests {
     let buf_handle = Arc::new(Mutex::new(Vec::<u8>::new()));
     let transport = Transport::new(Cursor::new(Vec::<u8>::new()), WriterRef(buf_handle.clone()));
     transport.writer.send(&serde_json::json!({"id": 42})).unwrap();
-    let buf = buf_handle.lock().unwrap();
-    assert_eq!(&buf[..], b"{\"id\":42}\0");
+    // The write happens on the webkit-writer thread — wait for it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+      {
+        let buf = buf_handle.lock().unwrap();
+        if !buf.is_empty() {
+          assert_eq!(&buf[..], b"{\"id\":42}\0");
+          break;
+        }
+      }
+      assert!(std::time::Instant::now() < deadline, "writer thread never flushed");
+      tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
   }
 }

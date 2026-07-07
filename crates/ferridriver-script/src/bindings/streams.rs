@@ -28,6 +28,14 @@ use rquickjs::function::{Opt, This};
 use rquickjs::{Class, Ctx, Object, TypedArray, Value, class::Trace};
 use tokio::sync::Mutex as AsyncMutex;
 
+/// Wall-clock bound on a single Net `read()` chunk. Mirrors
+/// `fetch.rs::FETCH_BODY_DRAIN_TIMEOUT` for the buffered `text()` /
+/// `json()` paths: the per-script interrupt handler cannot fire while
+/// a native await is pending, so an unbounded `chunk().await` against
+/// a stalled (slow-loris) server would pin the session until the
+/// execute-level backstop poisons the whole VM.
+const NET_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 #[derive(Default)]
 struct BufState {
   chunks: VecDeque<Vec<u8>>,
@@ -103,15 +111,22 @@ async fn pull<'js>(ctx: &Ctx<'js>, source: &StreamSource) -> rquickjs::Result<Ob
       let Some(r) = guard.as_mut() else {
         return result_obj(ctx, Value::new_undefined(ctx.clone()), true);
       };
-      match r.chunk().await {
-        Ok(Some(bytes)) => chunk_result(ctx, bytes.to_vec()),
-        Ok(None) => {
+      match tokio::time::timeout(NET_CHUNK_TIMEOUT, r.chunk()).await {
+        Ok(Ok(Some(bytes))) => chunk_result(ctx, bytes.to_vec()),
+        Ok(Ok(None)) => {
           *guard = None;
           result_obj(ctx, Value::new_undefined(ctx.clone()), true)
         },
-        Err(e) => {
+        Ok(Err(e)) => {
           *guard = None;
           Err(rquickjs::Exception::throw_type(ctx, &e.to_string()))
+        },
+        Err(_) => {
+          *guard = None;
+          Err(rquickjs::Exception::throw_type(
+            ctx,
+            "body read timed out: no chunk within 120s",
+          ))
         },
       }
     },

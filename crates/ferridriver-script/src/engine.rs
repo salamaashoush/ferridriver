@@ -889,18 +889,312 @@ fn install_call_globals(ctx: &Ctx<'_>, args: &[serde_json::Value], inst: Globals
   Ok(())
 }
 
+/// Node-ish console value renderer: top-level strings unquoted (quoted
+/// with `'` inside containers, like `util.inspect`), arrays as
+/// `[ 1, 2 ]`, objects as `{ a: 1, b: 2 }`, `Map(n) { k => v }`,
+/// `Set(n) { v }`, Dates as ISO strings, RegExp as `/src/flags`,
+/// `[Function: name]`, `Symbol(desc)`, `123n` bigints, `name: message`
+/// (+ stack) for Error values, and `[Array]` / `[Object]` past
+/// `max_depth` nesting.
+#[allow(clippy::too_many_lines)]
+fn format_console_value(out: &mut String, value: &Value<'_>, depth: usize, max_depth: usize) -> rquickjs::Result<()> {
+  use std::fmt::Write as _;
+
+  use rquickjs::Type;
+
+  match value.type_of() {
+    Type::String => {
+      if let Some(s) = value.as_string() {
+        let s = s.to_string()?;
+        if depth == 0 {
+          let _ = out.write_str(&s);
+        } else {
+          // Inside containers Node quotes strings.
+          let _ = write!(out, "'{s}'");
+        }
+      }
+    },
+    Type::Int => {
+      let _ = write!(out, "{}", value.as_int().unwrap_or_default());
+    },
+    Type::Bool => {
+      let _ = write!(out, "{}", value.as_bool().unwrap_or_default());
+    },
+    Type::Float => {
+      let _ = write!(out, "{}", value.as_float().unwrap_or_default());
+    },
+    Type::BigInt => {
+      if let Some(b) = value.clone().into_big_int() {
+        let _ = write!(out, "{}n", b.clone().to_i64()?);
+      }
+    },
+    Type::Array => {
+      let Some(array) = value.as_array() else { return Ok(()) };
+      if depth > max_depth {
+        let _ = out.write_str("[Array]");
+        return Ok(());
+      }
+      if array.is_empty() {
+        let _ = out.write_str("[]");
+        return Ok(());
+      }
+      let _ = out.write_str("[ ");
+      for (i, element) in array.iter::<Value<'_>>().enumerate() {
+        if i > 0 {
+          let _ = out.write_str(", ");
+        }
+        format_console_value(out, &element?, depth + 1, max_depth)?;
+      }
+      let _ = out.write_str(" ]");
+    },
+    Type::Exception => {
+      if let Some(ex) = value.as_exception() {
+        let name = ex.get::<_, String>("name").unwrap_or_else(|_| "Error".to_string());
+        let _ = out.write_str(&name);
+        if let Some(message) = ex.message() {
+          let _ = write!(out, ": {message}");
+        }
+        // Node prints the stack under the message; keep it at top level
+        // only so nested Errors don't explode container output.
+        if depth == 0 {
+          if let Some(stack) = ex.stack().filter(|s| !s.is_empty()) {
+            let _ = write!(out, "\n{stack}");
+          }
+        }
+      }
+    },
+    Type::Object => {
+      if depth > max_depth {
+        let _ = out.write_str("[Object]");
+        return Ok(());
+      }
+      let Some(object) = value.as_object() else { return Ok(()) };
+      if format_special_object(out, object, depth, max_depth)? {
+        return Ok(());
+      }
+      let mut wrote_any = false;
+      for (i, prop) in object.props::<String, Value<'_>>().enumerate() {
+        let (key, val) = prop?;
+        if i == 0 {
+          let _ = out.write_str("{ ");
+          wrote_any = true;
+        } else {
+          let _ = out.write_str(", ");
+        }
+        let _ = out.write_str(&key);
+        let _ = out.write_str(": ");
+        format_console_value(out, &val, depth + 1, max_depth)?;
+      }
+      let _ = out.write_str(if wrote_any { " }" } else { "{}" });
+    },
+    Type::Symbol => {
+      if let Some(symbol) = value.as_symbol() {
+        let description = symbol
+          .description()?
+          .as_string()
+          .map(rquickjs::String::to_string)
+          .transpose()?
+          .unwrap_or_default();
+        let _ = write!(out, "Symbol({description})");
+      }
+    },
+    Type::Function | Type::Constructor => {
+      let name = value
+        .as_object()
+        .and_then(|f| f.get::<_, String>("name").ok())
+        .filter(|n| !n.is_empty());
+      match name {
+        Some(name) => {
+          let _ = write!(out, "[Function: {name}]");
+        },
+        None => {
+          let _ = out.write_str("[Function (anonymous)]");
+        },
+      }
+    },
+    Type::Null => {
+      let _ = out.write_str("null");
+    },
+    Type::Undefined | Type::Uninitialized => {
+      let _ = out.write_str("undefined");
+    },
+    _ => {},
+  }
+  Ok(())
+}
+
+/// Render Date / RegExp / Map / Set the way Node's `util.inspect` does
+/// (`2026-01-01T00:00:00.000Z`, `/ab+c/i`, `Map(1) { 'a' => 1 }`,
+/// `Set(2) { 1, 2 }`). Returns `false` when `object` is none of those
+/// so the caller falls through to plain-object rendering. Detection is
+/// by constructor name — cheap, and correct for anything built from
+/// the real globals.
+fn format_special_object(
+  out: &mut String,
+  object: &Object<'_>,
+  depth: usize,
+  max_depth: usize,
+) -> rquickjs::Result<bool> {
+  use std::fmt::Write as _;
+
+  let ctor_name: String = object
+    .get::<_, Object<'_>>("constructor")
+    .and_then(|c| c.get::<_, String>("name"))
+    .unwrap_or_default();
+  match ctor_name.as_str() {
+    "Date" => {
+      // toISOString throws on Invalid Date — match Node's rendering.
+      let iso = object
+        .get::<_, rquickjs::Function<'_>>("toISOString")
+        .and_then(|f| f.call::<_, String>((rquickjs::function::This(object.clone()),)));
+      match iso {
+        Ok(s) => {
+          let _ = out.write_str(&s);
+        },
+        Err(_) => {
+          let _ = out.write_str("Invalid Date");
+        },
+      }
+      Ok(true)
+    },
+    "RegExp" => {
+      let source: String = object.get("source").unwrap_or_default();
+      let flags: String = object.get("flags").unwrap_or_default();
+      let _ = write!(out, "/{source}/{flags}");
+      Ok(true)
+    },
+    kind @ ("Map" | "Set") => {
+      let size: usize = object.get("size").unwrap_or_default();
+      let _ = write!(out, "{kind}({size})");
+      if size == 0 {
+        let _ = out.write_str(" {}");
+        return Ok(true);
+      }
+      if depth > max_depth {
+        return Ok(true);
+      }
+      // Drive the JS iterator so insertion order is preserved.
+      let entries: rquickjs::Result<rquickjs::Function<'_>> = object.get("entries");
+      let values: rquickjs::Result<rquickjs::Function<'_>> = object.get("values");
+      let iter_fn = if kind == "Map" { entries } else { values };
+      let Ok(iter_fn) = iter_fn else { return Ok(true) };
+      let iterator: Object<'_> = iter_fn.call((rquickjs::function::This(object.clone()),))?;
+      let next_fn: rquickjs::Function<'_> = iterator.get("next")?;
+      let _ = out.write_str(" { ");
+      let mut first = true;
+      loop {
+        let step: Object<'_> = next_fn.call((rquickjs::function::This(iterator.clone()),))?;
+        if step.get::<_, bool>("done").unwrap_or(true) {
+          break;
+        }
+        if !first {
+          let _ = out.write_str(", ");
+        }
+        first = false;
+        let entry: Value<'_> = step.get("value")?;
+        if kind == "Map" {
+          let Some(pair) = entry.as_array() else { continue };
+          format_console_value(out, &pair.get::<Value<'_>>(0)?, depth + 1, max_depth)?;
+          let _ = out.write_str(" => ");
+          format_console_value(out, &pair.get::<Value<'_>>(1)?, depth + 1, max_depth)?;
+        } else {
+          format_console_value(out, &entry, depth + 1, max_depth)?;
+        }
+      }
+      let _ = out.write_str(" }");
+      Ok(true)
+    },
+    _ => Ok(false),
+  }
+}
+
+/// Node's `util.format` core: when the first argument is a string,
+/// `%s` / `%d` / `%i` / `%f` / `%j` / `%o` / `%O` / `%c` / `%%`
+/// consume the following arguments; leftovers are appended
+/// space-separated. Returns how many arguments were consumed
+/// (including the format string itself).
+fn format_console_printf(out: &mut String, fmt: &str, args: &[Value<'_>], max_depth: usize) -> rquickjs::Result<usize> {
+  use std::fmt::Write as _;
+
+  let mut consumed = 0usize;
+  let mut chars = fmt.chars().peekable();
+  while let Some(c) = chars.next() {
+    if c != '%' {
+      let _ = out.write_char(c);
+      continue;
+    }
+    let Some(&spec) = chars.peek() else {
+      let _ = out.write_char('%');
+      break;
+    };
+    if spec == '%' {
+      chars.next();
+      let _ = out.write_char('%');
+      continue;
+    }
+    if !matches!(spec, 's' | 'd' | 'i' | 'f' | 'j' | 'o' | 'O' | 'c') {
+      let _ = out.write_char('%');
+      continue;
+    }
+    let Some(arg) = args.get(consumed) else {
+      // More specifiers than arguments — Node leaves them literal.
+      let _ = out.write_char('%');
+      continue;
+    };
+    chars.next();
+    consumed += 1;
+    match spec {
+      's' => {
+        if let Some(s) = arg.as_string() {
+          let _ = out.write_str(&s.to_string()?);
+        } else {
+          format_console_value(out, arg, 1, max_depth)?;
+        }
+      },
+      'd' | 'i' => match arg.as_number() {
+        Some(n) if spec == 'i' => {
+          let _ = write!(out, "{}", n.trunc());
+        },
+        Some(n) => {
+          let _ = write!(out, "{n}");
+        },
+        None => {
+          let _ = out.write_str("NaN");
+        },
+      },
+      'f' => match arg.as_number() {
+        Some(n) => {
+          let _ = write!(out, "{n}");
+        },
+        None => {
+          let _ = out.write_str("NaN");
+        },
+      },
+      'j' => {
+        let json: rquickjs::Result<Option<String>> = arg
+          .ctx()
+          .json_stringify(arg.clone())
+          .map(|s| s.map(|s| s.to_string().unwrap_or_default()));
+        let _ = out.write_str(&json?.unwrap_or_else(|| "undefined".into()));
+      },
+      'o' | 'O' => format_console_value(out, arg, 1, max_depth)?,
+      // %c consumes a CSS argument and renders nothing in a terminal;
+      // the guard above filters everything else out.
+      _ => {},
+    }
+  }
+  Ok(consumed + 1)
+}
+
 fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs::Result<()> {
   use std::fmt::Write as _;
 
   use rquickjs::function::Rest;
 
-  // Reuse rquickjs-extra-console's Node-style value renderer (handles
-  // `%s`/`%d` substitution, arrays, objects, `[Function: name]`, Symbol,
-  // bounded depth) — but route the rendered line into our
-  // `ConsoleCapture` sink instead of the `log` crate, so it still
-  // surfaces in `ScriptResult.console[]` for the MCP caller. The
-  // formatter is stateless (`max_depth` only), cheap to clone per level.
-  let formatter = rquickjs_extra_console::Formatter::builder().max_depth(3).build();
+  // Render each argument Node-style (arrays/objects structurally,
+  // strings unquoted, bounded depth) into our `ConsoleCapture` sink so
+  // it surfaces in `ScriptResult.console[]` for the MCP caller.
+  const MAX_DEPTH: usize = 3;
   let console = Object::new(ctx.clone())?;
 
   for (name, level) in [
@@ -911,16 +1205,27 @@ fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs::Res
     ("debug", ConsoleLevel::Debug),
   ] {
     let cap = capture.clone();
-    let fmt = formatter.clone();
     console.set(
       name,
       Func::from(move |args: Rest<Value<'_>>| -> rquickjs::Result<()> {
         let mut msg = String::new();
-        for (i, v) in args.0.into_iter().enumerate() {
-          if i > 0 {
+        // Node's util.format: a leading string with %-specifiers
+        // consumes the following arguments; everything left over is
+        // appended space-separated.
+        let mut start = 0usize;
+        if let Some(first) = args.0.first() {
+          if let Some(fmt) = first.as_string() {
+            let fmt = fmt.to_string()?;
+            if fmt.contains('%') {
+              start = format_console_printf(&mut msg, &fmt, &args.0[1..], MAX_DEPTH)?;
+            }
+          }
+        }
+        for (i, v) in args.0.iter().enumerate().skip(start) {
+          if i > 0 || start > 0 {
             let _ = msg.write_char(' ');
           }
-          fmt.format(&mut msg, v)?;
+          format_console_value(&mut msg, v, 0, MAX_DEPTH)?;
         }
         cap.push(level, strip_ansi(&msg));
         Ok(())
@@ -943,8 +1248,8 @@ fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs::Res
 fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   // Native timers (setTimeout/Interval, ctx.spawn-backed) and the
   // URLSearchParams class.
-  rquickjs_extra_timers::init(ctx)?;
-  rquickjs_extra_url::init(ctx)?;
+  crate::bindings::timers::install(ctx)?;
+  crate::bindings::url_search_params::install(ctx)?;
   // Native TextEncoder/TextDecoder/URL classes + queueMicrotask/btoa/
   // atob — all real #[rquickjs::class]/Func bindings, no JS glue.
   crate::bindings::webapi::install(ctx)?;

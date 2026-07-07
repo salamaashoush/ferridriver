@@ -362,6 +362,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         browser_context_id: None,
         events: crate::events::EventEmitter::new(),
         frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+        frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
         exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
         binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -381,16 +382,12 @@ impl<T: CdpWrap> CdpBrowser<T> {
         file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         download_manager: crate::download::DownloadManager::new(),
         download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        downloads_dir: Arc::new(
-          tempfile::Builder::new()
-            .prefix("ferridriver-downloads-")
-            .tempdir()
-            .map_err(|e| FerriError::Backend(format!("downloads tempdir: {e}")))?,
-        ),
+        downloads_dir: new_downloads_dir()?,
         page_backref: crate::backend::PageBackref::new(),
         frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
         frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
+        listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       }));
     }
     Ok(pages)
@@ -530,6 +527,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       browser_context_id: browser_context_id.map(Arc::from),
       events: crate::events::EventEmitter::new(),
       frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+      frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
       binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -553,16 +551,12 @@ impl<T: CdpWrap> CdpBrowser<T> {
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       download_manager: crate::download::DownloadManager::new(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      downloads_dir: Arc::new(
-        tempfile::Builder::new()
-          .prefix("ferridriver-downloads-")
-          .tempdir()
-          .map_err(|e| FerriError::Backend(format!("downloads tempdir: {e}")))?,
-      ),
+      downloads_dir: new_downloads_dir()?,
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
+      listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
 
     // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
@@ -1063,6 +1057,17 @@ pub struct LifecycleState {
   pub crashed: bool,
 }
 
+/// Per-page temp directory Chrome writes downloads into. Shared by the
+/// two `CdpPage` construction sites (attach-to-existing and `new_page`).
+fn new_downloads_dir() -> Result<Arc<tempfile::TempDir>> {
+  Ok(Arc::new(
+    tempfile::Builder::new()
+      .prefix("ferridriver-downloads-")
+      .tempdir()
+      .map_err(|e| FerriError::Backend(format!("downloads tempdir: {e}")))?,
+  ))
+}
+
 impl LifecycleState {
   fn new() -> Self {
     Self {
@@ -1126,6 +1131,10 @@ pub struct CdpPage<T: CdpTransport> {
   pub events: crate::events::EventEmitter,
   /// Frame ID -> execution context ID mapping for frame-scoped evaluation.
   frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
+  /// Notified by the frame-context tracker after each map insert so
+  /// [`Self::resolve_frame_context`] wakes on the exact event instead
+  /// of polling on a 10ms tick.
+  frame_contexts_notify: Arc<tokio::sync::Notify>,
   /// Registered exposed binding callbacks (source-aware; plain exposed
   /// functions are wrapped by `AnyPage::expose_function`).
   pub exposed_fns: Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
@@ -1261,6 +1270,14 @@ pub struct CdpPage<T: CdpTransport> {
   /// [`Self::frame_cache`]) so successive `crate::Page` wrappers share
   /// one history; filled by the same listener task.
   pub(crate) observed: Arc<std::sync::Mutex<crate::observed::ObservedBuffers>>,
+  /// Abort handles for every per-page listener task
+  /// (`attach_listeners`, the Fetch interceptor). The listeners
+  /// subscribe to TRANSPORT event channels, which stay open for the
+  /// browser's whole life — without an explicit abort in
+  /// [`Self::close_page`] each closed page leaves ~10 live tasks that
+  /// wake on every subsequent CDP event and pin the page's state
+  /// (emitter, managers, logs) until the browser exits.
+  listener_tasks: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
 }
 
 pub struct InjectedScriptManager {
@@ -1318,6 +1335,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       browser_context_id: self.browser_context_id.clone(),
       events: self.events.clone(),
       frame_contexts: self.frame_contexts.clone(),
+      frame_contexts_notify: self.frame_contexts_notify.clone(),
       exposed_fns: self.exposed_fns.clone(),
       binding_initialized: self.binding_initialized.clone(),
       closed: self.closed.clone(),
@@ -1342,6 +1360,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       frame_cache: self.frame_cache.clone(),
       frame_listener_started: self.frame_listener_started.clone(),
       observed: self.observed.clone(),
+      listener_tasks: self.listener_tasks.clone(),
     }
   }
 }
@@ -1812,15 +1831,23 @@ impl<T: CdpWrap> CdpPage<T> {
   /// frame-scoped evaluate from silently running in the MAIN frame —
   /// wrong-realm results are far worse than a typed failure.
   async fn resolve_frame_context(&self, frame_id: &str) -> Result<i64> {
-    for _ in 0..200u32 {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+      // Register the waiter BEFORE checking the map (pin + enable, same
+      // idiom as `settle_navigation`) so an insert landing between the
+      // check and the await still wakes us.
+      let notified = self.frame_contexts_notify.notified();
+      tokio::pin!(notified);
+      notified.as_mut().enable();
       if let Some(id) = self.frame_contexts.read().await.get(frame_id).copied() {
         return Ok(id);
       }
-      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+      if tokio::time::timeout_at(deadline, notified).await.is_err() {
+        return Err(FerriError::Backend(format!(
+          "No execution context found for frame '{frame_id}'. Frame may not be loaded yet."
+        )));
+      }
     }
-    Err(FerriError::Backend(format!(
-      "No execution context found for frame '{frame_id}'. Frame may not be loaded yet."
-    )))
   }
 
   pub async fn call_utility_evaluate(
@@ -2557,7 +2584,11 @@ impl<T: CdpWrap> CdpPage<T> {
           biased;
           ev = rx.recv() => match ev {
             Ok(ev) => ev,
-            Err(_) => break,
+            // Screencast frames arrive fast enough to lap the
+            // subscription; the lapped frames are lost but exiting
+            // here would silently end the whole recording.
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
           },
           _ = &mut shutdown_rx => {
             // Drain any events already buffered in the broadcast
@@ -2565,8 +2596,14 @@ impl<T: CdpWrap> CdpPage<T> {
             // before `Page.stopScreencast` returned. Once the
             // subscription is empty, drop `frame_tx` so the consumer
             // sees end-of-stream.
-            while let Ok(ev) = rx.try_recv() {
-              Self::process_screencast_event(&ev, &session_id, &transport, &frame_tx);
+            loop {
+              match rx.try_recv() {
+                Ok(ev) => Self::process_screencast_event(&ev, &session_id, &transport, &frame_tx),
+                // Lagged only reports the overwritten frames — newer
+                // ones are still buffered behind it, keep draining.
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {},
+                Err(_) => break,
+              }
             }
             break;
           },
@@ -3994,28 +4031,33 @@ impl<T: CdpWrap> CdpPage<T> {
     let emitter1 = self.events.clone();
     let emitter2 = self.events.clone();
     let emitter3 = self.events.clone();
+    let mut tasks: Vec<tokio::task::AbortHandle> = Vec::with_capacity(9);
 
-    Self::spawn_console_listener(
+    tasks.push(Self::spawn_console_listener(
       transport.clone(),
       session_id.clone(),
       console_log,
       emitter1,
       self.page_backref.clone(),
-    );
-    Self::spawn_web_error_listener(
+    ));
+    tasks.push(Self::spawn_web_error_listener(
       transport.clone(),
       session_id.clone(),
       self.events.clone(),
       self.page_backref.clone(),
-    );
-    Self::spawn_lifecycle_event_listener(&transport, session_id.as_ref(), &self.events);
-    Self::spawn_network_listener(
+    ));
+    tasks.extend(Self::spawn_lifecycle_event_listener(
+      &transport,
+      session_id.as_ref(),
+      &self.events,
+    ));
+    tasks.push(Self::spawn_network_listener(
       transport.clone(),
       session_id.clone(),
       network_log,
       emitter2,
       self.nav_request_slot.clone(),
-    );
+    ));
     // Register the emitter-bridge: `page.events().on("dialog", cb)`
     // keeps working because the bridge handler — installed here for
     // the page's lifetime — synchronously claims dialogs on behalf
@@ -4031,36 +4073,41 @@ impl<T: CdpWrap> CdpPage<T> {
     // bridge, same claim-on-open pattern as dialog / file-chooser.
     let _ = self.download_manager.register_emitter_bridge(self.events.clone());
 
-    Self::spawn_dialog_listener(
+    tasks.push(Self::spawn_dialog_listener(
       self.transport.clone(),
       self.session_id.clone(),
       dialog_log,
       emitter3,
       self.dialog_manager.clone(),
       self.page_backref.clone(),
-    );
-    Self::spawn_file_chooser_listener(
+    ));
+    tasks.push(Self::spawn_file_chooser_listener(
       self.transport.clone(),
       self.session_id.clone(),
       self.file_chooser_manager.clone(),
       self.page_backref.clone(),
-    );
-    Self::spawn_download_listener(
+    ));
+    tasks.push(Self::spawn_download_listener(
       self.transport.clone(),
       self.session_id.clone(),
       self.browser_context_id.clone(),
       self.download_manager.clone(),
       self.downloads_dir.clone(),
       self.page_backref.clone(),
-    );
-    Self::spawn_frame_context_tracker(
+    ));
+    tasks.push(Self::spawn_frame_context_tracker(
       self.transport.clone(),
       self.session_id.clone(),
       self.frame_contexts.clone(),
+      self.frame_contexts_notify.clone(),
       self.events.clone(),
       self.exposed_fns.clone(),
       self.target_id.clone(),
-    );
+    ));
+
+    if let Ok(mut guard) = self.listener_tasks.lock() {
+      guard.extend(tasks);
+    }
   }
 
   fn spawn_console_listener(
@@ -4069,7 +4116,7 @@ impl<T: CdpWrap> CdpPage<T> {
     console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
     emitter: crate::events::EventEmitter,
     page_backref: crate::backend::PageBackref,
-  ) {
+  ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_event_method("Runtime.consoleAPICalled");
       loop {
@@ -4125,7 +4172,8 @@ impl<T: CdpWrap> CdpPage<T> {
         );
         emitter.emit(crate::events::PageEvent::Console(msg));
       }
-    });
+    })
+    .abort_handle()
   }
 
   /// Listen for `Runtime.exceptionThrown` and emit
@@ -4150,7 +4198,8 @@ impl<T: CdpWrap> CdpPage<T> {
     transport: &Arc<T>,
     session_id: Option<&Arc<str>>,
     emitter: &crate::events::EventEmitter,
-  ) {
+  ) -> Vec<tokio::task::AbortHandle> {
+    let mut handles = Vec::with_capacity(2);
     for (method, ev) in [
       ("Page.loadEventFired", crate::events::PageEvent::Load),
       ("Page.domContentEventFired", crate::events::PageEvent::DomContentLoaded),
@@ -4158,18 +4207,22 @@ impl<T: CdpWrap> CdpPage<T> {
       let transport = transport.clone();
       let session_id = session_id.cloned();
       let emitter = emitter.clone();
-      tokio::spawn(async move {
-        let mut rx = transport.subscribe_event_method(method);
-        while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
-          if let Some(ref expected_sid) = session_id {
-            if event.get("sessionId").and_then(|v| v.as_str()) != Some(&**expected_sid) {
-              continue;
+      handles.push(
+        tokio::spawn(async move {
+          let mut rx = transport.subscribe_event_method(method);
+          while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+            if let Some(ref expected_sid) = session_id {
+              if event.get("sessionId").and_then(|v| v.as_str()) != Some(&**expected_sid) {
+                continue;
+              }
             }
+            emitter.emit(ev.clone());
           }
-          emitter.emit(ev.clone());
-        }
-      });
+        })
+        .abort_handle(),
+      );
     }
+    handles
   }
 
   fn spawn_web_error_listener(
@@ -4177,7 +4230,7 @@ impl<T: CdpWrap> CdpPage<T> {
     session_id: Option<Arc<str>>,
     emitter: crate::events::EventEmitter,
     page_backref: crate::backend::PageBackref,
-  ) {
+  ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_event_method("Runtime.exceptionThrown");
       while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
@@ -4198,7 +4251,8 @@ impl<T: CdpWrap> CdpPage<T> {
         };
         emitter.emit(crate::events::PageEvent::PageError(web_err));
       }
-    });
+    })
+    .abort_handle()
   }
 
   fn spawn_network_listener(
@@ -4207,7 +4261,7 @@ impl<T: CdpWrap> CdpPage<T> {
     network_log: Arc<RwLock<Vec<NetworkRequest>>>,
     emitter: crate::events::EventEmitter,
     nav_request_slot: crate::network::NavRequestSlot,
-  ) {
+  ) -> tokio::task::AbortHandle {
     let tracker: Arc<NetworkTracker<T>> = Arc::new(NetworkTracker::new(
       transport.clone(),
       session_id.clone(),
@@ -4283,7 +4337,8 @@ impl<T: CdpWrap> CdpPage<T> {
           _ => {},
         }
       }
-    });
+    })
+    .abort_handle()
   }
 
   fn spawn_dialog_listener(
@@ -4293,7 +4348,7 @@ impl<T: CdpWrap> CdpPage<T> {
     _emitter: crate::events::EventEmitter,
     dialog_manager: crate::dialog::DialogManager,
     page_backref: crate::backend::PageBackref,
-  ) {
+  ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_event_method("Page.javascriptDialogOpening");
       while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
@@ -4373,7 +4428,8 @@ impl<T: CdpWrap> CdpPage<T> {
           crate::state::DIALOG_LOG_CAP,
         );
       }
-    });
+    })
+    .abort_handle()
   }
 
   /// Listen for `Page.fileChooserOpened` and dispatch a live
@@ -4401,7 +4457,7 @@ impl<T: CdpWrap> CdpPage<T> {
     session_id: Option<Arc<str>>,
     file_chooser_manager: crate::file_chooser::FileChooserManager,
     page_backref: crate::backend::PageBackref,
-  ) {
+  ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
       // Subscribe FIRST so we don't race: routed subscriptions only
       // deliver events published AFTER subscription, and a fast
@@ -4468,7 +4524,8 @@ impl<T: CdpWrap> CdpPage<T> {
           manager_clone.did_open(&chooser);
         });
       }
-    });
+    })
+    .abort_handle()
   }
 
   /// Listen for `Browser.downloadWillBegin` / `Browser.downloadProgress`
@@ -4505,7 +4562,7 @@ impl<T: CdpWrap> CdpPage<T> {
     download_manager: crate::download::DownloadManager,
     downloads_dir: Arc<tempfile::TempDir>,
     page_backref: crate::backend::PageBackref,
-  ) {
+  ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
       // Subscribe FIRST to avoid racing any future enable reply.
       // We do NOT fire `Browser.setDownloadBehavior` here. Mirrors
@@ -4615,17 +4672,19 @@ impl<T: CdpWrap> CdpPage<T> {
           _ => {},
         }
       }
-    });
+    })
+    .abort_handle()
   }
 
   fn spawn_frame_context_tracker(
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
     frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
+    contexts_notify: Arc<tokio::sync::Notify>,
     emitter: crate::events::EventEmitter,
     exposed_fns: Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
     target_id: Arc<str>,
-  ) {
+  ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
       let mut runtime_rx = transport.subscribe_event_domain("Runtime");
       let mut page_rx = transport.subscribe_event_domain("Page");
@@ -4662,6 +4721,7 @@ impl<T: CdpWrap> CdpPage<T> {
                   .unwrap_or(false);
                 if is_default && !frame_id.is_empty() {
                   frame_contexts.write().await.insert(frame_id.to_string(), ctx_id);
+                  contexts_notify.notify_waiters();
                 }
               }
             }
@@ -4726,7 +4786,8 @@ impl<T: CdpWrap> CdpPage<T> {
           _ => {},
         }
       }
-    });
+    })
+    .abort_handle()
   }
 
   /// Emit [`crate::events::PageEvent::FrameNavigated`] for a
@@ -4938,6 +4999,17 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         .await;
     }
     self.events.emit(crate::events::PageEvent::Close);
+    // The per-page listeners subscribe to transport-wide event
+    // channels that outlive this page — abort them so a closed page
+    // stops waking on every future CDP event and releases the state
+    // its tasks pin (emitter senders, managers, logs). The `Close`
+    // emitted above already sits in the broadcast ring, so page-event
+    // subscribers (frame cache, page→context bridge) still observe it.
+    if let Ok(mut guard) = self.listener_tasks.lock() {
+      for handle in guard.drain(..) {
+        handle.abort();
+      }
+    }
     Ok(())
   }
 
@@ -4980,9 +5052,13 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     let sid = self.session_id.clone();
     let routes = self.routes.clone();
     let creds = self.http_credentials.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
       Self::handle_fetch_events(t, sid, routes, creds).await;
-    });
+    })
+    .abort_handle();
+    if let Ok(mut guard) = self.listener_tasks.lock() {
+      guard.push(handle);
+    }
     Ok(())
   }
 
@@ -5067,9 +5143,17 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
             "authChallengeResponse": { "response": "CancelAuth" }
           })
         };
-        let _ = transport
-          .send_command(session_id.as_deref(), "Fetch.continueWithAuth", &response)
-          .await;
+        // Spawned so the auth round-trip never stalls the loop —
+        // while this listener is blocked the broadcast buffer fills,
+        // and a lapped `Fetch.requestPaused` is a request Chrome
+        // holds paused forever.
+        let transport2 = Arc::clone(&transport);
+        let sid2 = session_id.clone();
+        tokio::spawn(async move {
+          let _ = transport2
+            .send_command(sid2.as_deref(), "Fetch.continueWithAuth", &response)
+            .await;
+        });
         continue;
       }
 
@@ -5122,22 +5206,43 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           resource_type: resource_type.to_string(),
         };
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let route = crate::route::Route::new(intercepted, tx);
-        handler(route);
-        let action = rx.await.unwrap_or(crate::route::RouteAction::Continue(
-          crate::route::ContinueOverrides::default(),
-        ));
-        Self::execute_route_action(&transport, session_id.as_deref(), request_id, Some(action)).await;
+        // Each paused request is resolved on its own task. Running the
+        // user handler + resolution round-trip inline serialized every
+        // intercepted request behind the slowest handler AND stalled
+        // this listener — once the broadcast buffer lapped, a dropped
+        // `Fetch.requestPaused` was a request that never continued
+        // (permanent page hang). The `times` budget stays correct
+        // because `take_matching_handler` already ran under the write
+        // lock above. WebKit's interception listener spawns the same
+        // way (`webkit/events.rs::handle_request_intercepted`).
+        let transport2 = Arc::clone(&transport);
+        let sid2 = session_id.clone();
+        let request_id_owned = request_id.to_string();
+        tokio::spawn(async move {
+          let (tx, rx) = tokio::sync::oneshot::channel();
+          let route = crate::route::Route::new(intercepted, tx);
+          handler(route);
+          let action = rx.await.unwrap_or(crate::route::RouteAction::Continue(
+            crate::route::ContinueOverrides::default(),
+          ));
+          Self::execute_route_action(&transport2, sid2.as_deref(), &request_id_owned, Some(action)).await;
+        });
       } else {
-        // No matching route — continue with zero allocation beyond the CDP command.
-        let _ = transport
-          .send_command(
-            session_id.as_deref(),
-            "Fetch.continueRequest",
-            &serde_json::json!({"requestId": request_id}),
-          )
-          .await;
+        // No matching route — continue on a spawned task so even the
+        // plain-continue round-trip can't back the listener up under
+        // a request burst.
+        let transport2 = Arc::clone(&transport);
+        let sid2 = session_id.clone();
+        let request_id_owned = request_id.to_string();
+        tokio::spawn(async move {
+          let _ = transport2
+            .send_command(
+              sid2.as_deref(),
+              "Fetch.continueRequest",
+              &serde_json::json!({"requestId": request_id_owned}),
+            )
+            .await;
+        });
       }
     }
   }

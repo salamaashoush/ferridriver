@@ -135,16 +135,18 @@ impl super::transport::CdpTransport for PipeTransport {
     method: &str,
     params: &serde_json::Value,
   ) -> Result<serde_json::Value> {
-    let (data, rx) = self.dispatcher.build_command(session_id, method, params)?;
-    self
-      .write_tx
-      .send(data)
-      .await
-      .map_err(|_| FerriError::target_closed(Some("Pipe writer closed".into())))?;
+    let (id, data, rx) = self.dispatcher.build_command(session_id, method, params)?;
+    if self.write_tx.send(data).await.is_err() {
+      self.dispatcher.forget_pending(id);
+      return Err(FerriError::target_closed(Some("Pipe writer closed".into())));
+    }
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) => Err(FerriError::Backend(format!("Response channel dropped for {method}"))),
-      Err(_) => Err(FerriError::timeout(format!("waiting for {method} response"), 30_000)),
+      Err(_) => {
+        self.dispatcher.forget_pending(id);
+        Err(FerriError::timeout(format!("waiting for {method} response"), 30_000))
+      },
     }
   }
 

@@ -628,12 +628,13 @@ impl ContextRef {
           .map_err(|e| crate::error::FerriError::Backend(format!("storageState: serialize JSON: {e}")))?;
         if let Some(parent) = path.parent() {
           if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
               crate::error::FerriError::Backend(format!("storageState: mkdir {}: {e}", parent.display()))
             })?;
           }
         }
-        std::fs::write(&path, json)
+        tokio::fs::write(&path, json)
+          .await
           .map_err(|e| crate::error::FerriError::Backend(format!("storageState: write {}: {e}", path.display())))?;
       }
     }

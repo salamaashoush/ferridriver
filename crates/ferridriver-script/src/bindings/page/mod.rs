@@ -1213,6 +1213,8 @@ impl PageJs {
     let page_key = self.inner.backend_page_id();
     let ids = with_page_callbacks(&ctx, |r| {
       r.remove_routes_for_owner(&RouteOwner::Page(page_key));
+      r.remove_ws_callbacks_for_owner(&RouteOwner::Page(page_key));
+      r.remove_exposed_for_page(page_key);
       r.remove_event_listeners_for_page(page_key)
     })?;
     for id in ids {
@@ -1369,10 +1371,11 @@ impl PageJs {
     })?;
     let matcher = url_value_to_matcher(&ctx, url)?;
     let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
+    let owner = RouteOwner::Page(self.inner.backend_page_id());
     let saved = rquickjs::Persistent::save(&ctx, handler);
-    with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, saved))?;
+    with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, owner.clone(), saved))?;
 
-    let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id);
+    let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id, owner);
     self
       .inner
       .route_web_socket(matcher, rust_handler)
@@ -1933,7 +1936,14 @@ impl PageJs {
     // outside the QuickJS context) restores it by name inside a VM-loop
     // job.
     let saved = rquickjs::Persistent::save(&ctx, callback);
-    with_page_callbacks(&ctx, |r| r.exposed.insert(name.clone(), saved))?;
+    let page_key = self.inner.backend_page_id();
+    with_page_callbacks(&ctx, |r| {
+      r.exposed.insert(name.clone(), saved);
+      // Tracked so page close releases the Persistent — exposeFunction
+      // has no dispose in Playwright, and the session VM outlives the
+      // page.
+      r.track_exposed_owner(page_key, name.clone());
+    })?;
 
     let cb: ferridriver::events::ExposedFn = std::sync::Arc::new({
       let name = name.clone();

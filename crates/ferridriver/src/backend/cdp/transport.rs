@@ -366,13 +366,21 @@ impl CdpDispatcher {
     }
   }
 
+  /// Drop the in-flight entry for `id` after a send failure or response
+  /// timeout. Without this the entry lives in the map until transport
+  /// teardown — a browser that stops responding but keeps the pipe open
+  /// grows the map by one entry per retried command.
+  pub fn forget_pending(&self, id: u64) {
+    self.pending.remove(&id);
+  }
+
   /// Build a CDP command as NUL-terminated JSON bytes and register a response receiver.
   pub fn build_command(
     &self,
     session_id: Option<&str>,
     method: &str,
     params: &serde_json::Value,
-  ) -> Result<(Vec<u8>, oneshot::Receiver<CdpResult>)> {
+  ) -> Result<(u64, Vec<u8>, oneshot::Receiver<CdpResult>)> {
     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
     let params_str = serde_json::to_string(params).map_err(|e| FerriError::Backend(format!("Serialize: {e}")))?;
     let mut data = if let Some(sid) = session_id {
@@ -405,7 +413,7 @@ impl CdpDispatcher {
       send_at: stats_enabled.then(Instant::now),
     };
     self.pending.insert(id, entry);
-    Ok((data, rx))
+    Ok((id, data, rx))
   }
 
   /// Dispatch a raw CDP message (response or event). Called by the reader task.
@@ -714,10 +722,10 @@ mod tests {
     // Two builds from the same static reference: identical params shape,
     // monotonically increasing ids, and no per-call clone of the map
     // (the reference is what reaches `build_command`).
-    let (data1, _rx1) = dispatcher
+    let (_id1, data1, _rx1) = dispatcher
       .build_command(Some("sess-1"), "Page.enable", empty)
       .expect("build with session");
-    let (data2, _rx2) = dispatcher
+    let (_id2, data2, _rx2) = dispatcher
       .build_command(None, "Runtime.enable", empty)
       .expect("build without session");
 

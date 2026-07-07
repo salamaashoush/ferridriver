@@ -244,7 +244,13 @@ where
     match tokio::time::timeout(remaining, rx.recv()).await {
       Ok(Ok(event)) if predicate(&event) => return Ok(event),
       Ok(Ok(_)) => {},
-      Ok(Err(_)) => {
+      // A lapped receiver lost old events but the one being waited on
+      // may still arrive — keep draining instead of reporting the
+      // channel closed.
+      Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+        tracing::warn!(dropped = n, "drain_until lagged; dropped {n} event(s)");
+      },
+      Ok(Err(broadcast::error::RecvError::Closed)) => {
         return Err(crate::error::FerriError::target_closed(Some(
           "event channel closed".into(),
         )));
@@ -679,7 +685,10 @@ impl ContextEventEmitter {
       match tokio::time::timeout(remaining, rx.recv()).await {
         Ok(Ok(event)) if context_event_name_matches(&name, &event) => return Ok(event),
         Ok(Ok(_)) => {},
-        Ok(Err(_)) => {
+        Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+          tracing::warn!(dropped = n, "context wait_for_event lagged; dropped {n} event(s)");
+        },
+        Ok(Err(broadcast::error::RecvError::Closed)) => {
           return Err(crate::error::FerriError::target_closed(Some(
             "context event channel closed".into(),
           )));
@@ -852,7 +861,10 @@ impl BrowserEventEmitter {
       match tokio::time::timeout(remaining, rx.recv()).await {
         Ok(Ok(event)) if browser_event_name_matches(&name, &event) => return Ok(event),
         Ok(Ok(_)) => {},
-        Ok(Err(_)) => {
+        Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+          tracing::warn!(dropped = n, "browser wait_for_event lagged; dropped {n} event(s)");
+        },
+        Ok(Err(broadcast::error::RecvError::Closed)) => {
           return Err(crate::error::FerriError::target_closed(Some(
             "browser event channel closed".into(),
           )));

@@ -2029,6 +2029,11 @@ impl WebKitPage {
     let conn = self.proxy.connection_handle();
     conn.close_route(Some(&self.proxy_id), Some(&target_id));
     conn.close_route(Some(&self.proxy_id), None);
+    // CDP and BiDi both emit `Close` on their page emitter here —
+    // without it `page.waitForEvent('close')`, the frame-cache
+    // listener's exit, and the context-level `PageClose` bridge never
+    // fire on WebKit.
+    self.events.emit(crate::events::PageEvent::Close);
     Ok(())
   }
 

@@ -60,7 +60,13 @@ impl SandboxResolver {
 }
 
 impl Resolver for SandboxResolver {
-  fn resolve(&mut self, _ctx: &Ctx<'_>, base: &str, name: &str) -> Result<String> {
+  fn resolve<'js>(
+    &mut self,
+    _ctx: &Ctx<'js>,
+    base: &str,
+    name: &str,
+    _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
+  ) -> Result<String> {
     // Reject bare specifiers up front — we don't support node_modules or
     // package resolution. Only relative (`./x`, `../x`) and explicit absolute
     // paths inside the sandbox are allowed; the latter is still rejected
@@ -110,7 +116,12 @@ impl SandboxLoader {
 }
 
 impl Loader for SandboxLoader {
-  fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str) -> Result<Module<'js, Declared>> {
+  fn load<'js>(
+    &mut self,
+    ctx: &Ctx<'js>,
+    name: &str,
+    _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
+  ) -> Result<Module<'js, Declared>> {
     // Defensive check: the resolver should have returned a path inside the
     // sandbox, but verify before reading from disk.
     let path = Path::new(name);
@@ -150,7 +161,7 @@ mod tests {
     let rt = rquickjs::Runtime::new().expect("runtime");
     let cx = rquickjs::Context::full(&rt).expect("context");
     cx.with(|ctx| {
-      let err = r.resolve(&ctx, "", "lodash").unwrap_err();
+      let err = r.resolve(&ctx, "", "lodash", None).unwrap_err();
       assert!(err.to_string().contains("bare module"));
     });
   }
@@ -162,7 +173,7 @@ mod tests {
     let rt = rquickjs::Runtime::new().expect("runtime");
     let cx = rquickjs::Context::full(&rt).expect("context");
     cx.with(|ctx| {
-      let err = r.resolve(&ctx, "", "../escape.js").unwrap_err();
+      let err = r.resolve(&ctx, "", "../escape.js", None).unwrap_err();
       assert!(err.is_loading());
     });
   }
@@ -175,7 +186,7 @@ mod tests {
     let rt = rquickjs::Runtime::new().expect("runtime");
     let cx = rquickjs::Context::full(&rt).expect("context");
     cx.with(|ctx| {
-      let resolved = r.resolve(&ctx, "", "./helper.js").expect("resolve");
+      let resolved = r.resolve(&ctx, "", "./helper.js", None).expect("resolve");
       assert!(resolved.ends_with("helper.js"));
     });
   }

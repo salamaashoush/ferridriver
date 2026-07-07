@@ -129,21 +129,29 @@ impl super::transport::CdpTransport for WsTransport {
     method: &str,
     params: &serde_json::Value,
   ) -> Result<serde_json::Value> {
-    let (mut data, rx) = self.dispatcher.build_command(session_id, method, params)?;
+    let (id, mut data, rx) = self.dispatcher.build_command(session_id, method, params)?;
     // Remove NUL terminator — WebSocket doesn't need it
     if data.last() == Some(&0) {
       data.pop();
     }
-    let text = String::from_utf8(data).map_err(|e| FerriError::Backend(format!("UTF-8: {e}")))?;
-    self
-      .write_tx
-      .send(Message::Text(text.into()))
-      .await
-      .map_err(|_| FerriError::backend("WS writer closed"))?;
+    let text = match String::from_utf8(data) {
+      Ok(t) => t,
+      Err(e) => {
+        self.dispatcher.forget_pending(id);
+        return Err(FerriError::Backend(format!("UTF-8: {e}")));
+      },
+    };
+    if self.write_tx.send(Message::Text(text.into())).await.is_err() {
+      self.dispatcher.forget_pending(id);
+      return Err(FerriError::backend("WS writer closed"));
+    }
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) => Err(FerriError::Backend(format!("Response channel dropped for {method}"))),
-      Err(_) => Err(FerriError::timeout(format!("waiting for {method} response"), 30_000)),
+      Err(_) => {
+        self.dispatcher.forget_pending(id);
+        Err(FerriError::timeout(format!("waiting for {method} response"), 30_000))
+      },
     }
   }
 
