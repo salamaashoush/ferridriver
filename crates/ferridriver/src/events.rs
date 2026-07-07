@@ -281,6 +281,7 @@ struct ListenerSlot<E> {
 }
 
 struct SubscriberSlot<E> {
+  id: u64,
   tx: mpsc::UnboundedSender<E>,
 }
 
@@ -311,25 +312,53 @@ fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 async fn dispatch_loop<E: EmitterEvent>(shared: Arc<EmitterShared<E>>, mut rx: mpsc::UnboundedReceiver<E>) {
   let mut fired: Vec<Arc<dyn Fn(E) + Send + Sync>> = Vec::new();
-  while let Some(event) = rx.recv().await {
-    {
-      let mut listeners = lock_or_recover(&shared.listeners);
-      // Collect matching callbacks in registration order and drop
-      // `once` slots before invoking, so a recursive emit from inside
-      // a callback can never re-fire them.
-      listeners.retain(|slot| {
-        if E::matches_name(&slot.name, &event) {
-          fired.push(Arc::clone(&slot.callback));
-          !slot.once
-        } else {
-          true
-        }
-      });
+  let mut batch: Vec<E> = Vec::new();
+  // Batch drain: one task wakeup services everything queued, instead of
+  // one wakeup per event — the dominant dispatcher cost under storm.
+  while rx.recv_many(&mut batch, 128).await > 0 {
+    for event in batch.drain(..) {
+      dispatch_event(&shared, event, &mut fired);
     }
+  }
+}
+
+fn dispatch_event<E: EmitterEvent>(shared: &EmitterShared<E>, event: E, fired: &mut Vec<Arc<dyn Fn(E) + Send + Sync>>) {
+  {
+    let mut listeners = lock_or_recover(&shared.listeners);
+    // Collect matching callbacks in registration order and drop
+    // `once` slots before invoking, so a recursive emit from inside
+    // a callback can never re-fire them.
+    listeners.retain(|slot| {
+      if E::matches_name(&slot.name, &event) {
+        fired.push(Arc::clone(&slot.callback));
+        !slot.once
+      } else {
+        true
+      }
+    });
+  }
+  // No lock held while invoking callbacks — they may reenter the
+  // emitter (on/off/subscribe/emit).
+  if lock_or_recover(&shared.subscribers).is_empty() {
+    // No raw subscribers: the last listener takes the event by move.
+    let last = fired.pop();
     for cb in fired.drain(..) {
       cb(event.clone());
     }
-    let mut subscribers = lock_or_recover(&shared.subscribers);
+    if let Some(cb) = last {
+      cb(event);
+    }
+    return;
+  }
+  for cb in fired.drain(..) {
+    cb(event.clone());
+  }
+  let mut subscribers = lock_or_recover(&shared.subscribers);
+  if subscribers.len() == 1 {
+    if subscribers[0].tx.send(event).is_err() {
+      subscribers.clear();
+    }
+  } else {
     subscribers.retain(|slot| slot.tx.send(event.clone()).is_ok());
   }
 }
@@ -438,13 +467,19 @@ impl<E: EmitterEvent> Emitter<E> {
 
   /// Subscribe to the raw ordered event stream. The subscription is
   /// lossless — events queue until received — and closes when the
-  /// emitter is dropped.
+  /// emitter is dropped. Dropping the subscription unregisters its
+  /// slot immediately.
   #[must_use]
   pub fn subscribe(&self) -> EventSubscription<E> {
     self.ensure_dispatcher();
+    let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::unbounded_channel();
-    lock_or_recover(&self.inner.shared.subscribers).push(SubscriberSlot { tx });
-    EventSubscription { rx }
+    lock_or_recover(&self.inner.shared.subscribers).push(SubscriberSlot { id, tx });
+    EventSubscription {
+      rx,
+      id,
+      shared: Arc::downgrade(&self.inner.shared),
+    }
   }
 
   /// Wait for an event matching a predicate, with timeout.
@@ -524,9 +559,20 @@ impl<E: EmitterEvent> Emitter<E> {
 
 /// Lossless ordered subscription to an [`Emitter`]'s event stream.
 /// Returned by [`Emitter::subscribe`]; used by `waitForEvent`-style
-/// waiters that need a synchronous subscription point.
+/// waiters that need a synchronous subscription point. Unregisters
+/// itself from the emitter on drop.
 pub struct EventSubscription<E> {
   rx: mpsc::UnboundedReceiver<E>,
+  id: u64,
+  shared: std::sync::Weak<EmitterShared<E>>,
+}
+
+impl<E> Drop for EventSubscription<E> {
+  fn drop(&mut self) {
+    if let Some(shared) = self.shared.upgrade() {
+      lock_or_recover(&shared.subscribers).retain(|slot| slot.id != self.id);
+    }
+  }
 }
 
 impl<E: EmitterEvent> EventSubscription<E> {
