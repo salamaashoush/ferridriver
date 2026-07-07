@@ -650,11 +650,12 @@ impl BidiPage {
   }
 
   pub async fn wait_for_navigation(&self) -> Result<()> {
-    // Subscribe to load event for this context and wait for it
-    let mut rx = self.session.transport.subscribe_events();
+    // Tap the load event for this context and wait for it — a missed
+    // event here is a 30s hang, so the wait must be lossless.
+    let mut rx = self.session.transport.tap_events();
     let ctx = self.context_id.clone();
     let timeout = tokio::time::timeout(std::time::Duration::from_secs(30), async move {
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      while let Some(event) = rx.recv().await {
         if event.method == "browsingContext.load" {
           if let Some(c) = event.params.get("context").and_then(|v| v.as_str()) {
             if c == &*ctx {
@@ -813,10 +814,10 @@ impl BidiPage {
     // Slow path: the child is still parsing — wait for its own
     // domContentLoaded/load event (BiDi reports child events with
     // `context` == the child id).
-    let mut rx = self.session.transport.subscribe_events();
+    let mut rx = self.session.transport.tap_events();
     let target = ctx.to_string();
     let waited = tokio::time::timeout(std::time::Duration::from_secs(30), async move {
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      while let Some(event) = rx.recv().await {
         if matches!(
           event.method.as_str(),
           "browsingContext.domContentLoaded" | "browsingContext.load"

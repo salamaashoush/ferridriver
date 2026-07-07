@@ -441,8 +441,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
     browser_context_id: Option<&str>,
     viewport: Option<&crate::options::ViewportConfig>,
   ) -> Result<AnyPage> {
-    // Subscribe to events BEFORE createTarget so we don't miss the auto-attach.
-    let mut event_rx = self.transport.subscribe_event_method("Target.attachedToTarget");
+    // Tap BEFORE createTarget so we can't miss the auto-attach; a
+    // broadcast drop here was a 30s new_page hang.
+    let mut event_rx = self.transport.tap_event_methods(&["Target.attachedToTarget"], None);
 
     let create_params = if let Some(ctx_id) = browser_context_id {
       serde_json::json!({"url": "about:blank", "browserContextId": ctx_id})
@@ -465,7 +466,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // The target is paused (waitForDebuggerOnStart) so we can set up everything.
     let tid = target_id.clone();
     let sid = tokio::time::timeout(Duration::from_secs(30), async move {
-      while let Some(event) = crate::events::recv_tolerant(&mut event_rx).await {
+      while let Some(event) = event_rx.recv().await {
         if event.get("method").and_then(|m| m.as_str()) == Some("Target.attachedToTarget") {
           if let Some(params) = event.get("params") {
             let event_tid = params
