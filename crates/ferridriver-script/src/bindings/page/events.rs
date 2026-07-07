@@ -1,4 +1,4 @@
-//! Page-event plumbing: name matching, broadcast draining, event →
+//! Page-event plumbing: name matching, subscription draining, event →
 //! live JS object conversion, and the predicate wait loops.
 
 use std::sync::Arc;
@@ -9,36 +9,17 @@ use ferridriver::Page;
 use super::*;
 
 pub(crate) fn match_event_name(name: &str, ev: &ferridriver::events::PageEvent) -> bool {
-  use ferridriver::events::PageEvent;
-  matches!(
-    (name, ev),
-    ("console", PageEvent::Console(_))
-      | ("request", PageEvent::Request(_))
-      | ("response", PageEvent::Response(_))
-      | ("requestfinished", PageEvent::RequestFinished(_))
-      | ("requestfailed", PageEvent::RequestFailed(_))
-      | ("websocket", PageEvent::WebSocket(_))
-      | ("dialog", PageEvent::Dialog(_))
-      | ("filechooser", PageEvent::FileChooser(_))
-      | ("frameattached", PageEvent::FrameAttached(_))
-      | ("framedetached", PageEvent::FrameDetached { .. })
-      | ("framenavigated", PageEvent::FrameNavigated(_))
-      | ("load", PageEvent::Load)
-      | ("domcontentloaded", PageEvent::DomContentLoaded)
-      | ("close", PageEvent::Close)
-      | ("pageerror", PageEvent::PageError(_))
-      | ("download", PageEvent::Download(_))
-  )
+  ferridriver::events::event_name_matches(name, ev)
 }
 
-/// Receive the next broadcast event matching `event_lc`, skipping
-/// non-matching events and lagged gaps. `None` once the channel closes.
+/// Receive the next subscribed event matching `event_lc`, skipping
+/// non-matching events. `None` once the emitter is dropped.
 pub(crate) async fn recv_matching(
-  rx: &mut tokio::sync::broadcast::Receiver<ferridriver::events::PageEvent>,
+  rx: &mut ferridriver::EventSubscription<ferridriver::events::PageEvent>,
   event_lc: &str,
 ) -> Option<ferridriver::events::PageEvent> {
   loop {
-    let ev = ferridriver::events::recv_tolerant(rx).await?;
+    let ev = rx.recv().await?;
     if match_event_name(event_lc, &ev) {
       return Some(ev);
     }
@@ -154,15 +135,15 @@ pub(crate) async fn wait_request_predicate<'js>(
       ));
     }
     match tokio::time::timeout(remaining, rx.recv()).await {
-      Ok(Ok(PageEvent::Request(req))) => {
+      Ok(Some(PageEvent::Request(req))) => {
         let probe = crate::bindings::network::RequestJs::new_with_page(req.clone(), page.clone());
         let inst = Class::instance(ctx.clone(), probe)?;
         if call_predicate_truthy(&pred, inst, &ctx).await? {
           return Ok(crate::bindings::network::RequestJs::new_with_page(req, page.clone()));
         }
       },
-      Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {},
-      Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+      Ok(Some(_)) => {},
+      Ok(None) => {
         return Err(crate::bindings::convert::throw_named(
           &ctx,
           "Error",
@@ -201,15 +182,15 @@ pub(crate) async fn wait_response_predicate<'js>(
       ));
     }
     match tokio::time::timeout(remaining, rx.recv()).await {
-      Ok(Ok(PageEvent::Response(resp))) => {
+      Ok(Some(PageEvent::Response(resp))) => {
         let probe = crate::bindings::network::ResponseJs::new_with_page(resp.clone(), page.clone());
         let inst = Class::instance(ctx.clone(), probe)?;
         if call_predicate_truthy(&pred, inst, &ctx).await? {
           return Ok(crate::bindings::network::ResponseJs::new_with_page(resp, page.clone()));
         }
       },
-      Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {},
-      Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+      Ok(Some(_)) => {},
+      Ok(None) => {
         return Err(crate::bindings::convert::throw_named(
           &ctx,
           "Error",

@@ -140,7 +140,7 @@ impl Page {
   /// skip the spawn so we don't end up with N listeners all writing
   /// the same cache. The listener task holds `Arc` clones of the
   /// cache + event emitter, so it lives until the backend page is
-  /// dropped (broadcast sender drops → recv returns Err → task
+  /// dropped (emitter drops → the lossless subscription closes → task
   /// exits).
   fn seed_frame_cache(self: &Arc<Self>) {
     if self
@@ -154,15 +154,7 @@ impl Page {
     let observed = Arc::clone(self.inner.observed());
     let mut rx = self.inner.events().subscribe();
     tokio::spawn(async move {
-      loop {
-        let event = match rx.recv().await {
-          Ok(e) => e,
-          // Tolerate a lapped receiver during event storms — exiting
-          // here would freeze the frame cache (and the console /
-          // page-error history) for the rest of the page's life.
-          Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-          Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-        };
+      while let Some(event) = rx.recv().await {
         match event {
           PageEvent::FrameAttached(info) => {
             if let Ok(mut g) = cache.lock() {
