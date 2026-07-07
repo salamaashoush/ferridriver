@@ -233,6 +233,28 @@ pub trait CdpTransport: Send + Sync + 'static {
 
   fn subscribe_event_domain(&self, domain: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>>;
 
+  /// Lossless, wire-ordered event tap for the given exact CDP methods,
+  /// optionally filtered to one session. Unlike the broadcast
+  /// subscriptions above, a tap never drops events — state-mutating
+  /// consumers (frame/context maps, network correlation, dialog /
+  /// download / file-chooser registries, Fetch interception) MUST use
+  /// taps; a dropped event there corrupts the map or hangs the page.
+  fn tap_event_methods(
+    &self,
+    methods: &'static [&'static str],
+    session_id: Option<&str>,
+  ) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>>;
+
+  /// Lossless, wire-ordered event tap for whole CDP domains
+  /// (`Network`, `Runtime`, ...). Registering several domains on one
+  /// tap yields a single stream ordered across those domains exactly
+  /// as the events arrived on the wire.
+  fn tap_event_domains(
+    &self,
+    domains: &'static [&'static str],
+    session_id: Option<&str>,
+  ) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>>;
+
   fn register_lifecycle_tracker(
     &self,
     session_id: &str,
@@ -269,6 +291,13 @@ pub(crate) struct CdpDispatcher {
   /// `Runtime`, ...), for listeners that legitimately consume many
   /// methods in one domain but should not receive the rest of CDP.
   domain_event_txs: Arc<DashMap<&'static str, broadcast::Sender<Arc<serde_json::Value>>>>,
+  /// Lossless per-consumer taps keyed by exact CDP method. Fed
+  /// synchronously by the reader task in wire order; the unbounded
+  /// senders never drop, so tap consumers are structurally immune to
+  /// the `Lagged` loss that broadcast subscribers tolerate.
+  method_taps: Arc<DashMap<&'static str, Vec<EventTap>>>,
+  /// Lossless per-consumer taps keyed by CDP domain.
+  domain_taps: Arc<DashMap<&'static str, Vec<EventTap>>>,
   /// Per-method RTT statistics. Only populated when
   /// `FERRIDRIVER_RTT_STATS=1` is set; otherwise the entry insert /
   /// remove path skips the bookkeeping for zero-cost-when-unused.
@@ -281,6 +310,34 @@ pub(crate) struct CdpDispatcher {
 /// In the CDP dispatcher this is non-fatal -- we recover the inner data and continue.
 fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
   m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// One registered lossless tap: an unbounded sender plus the session it
+/// is scoped to (`None` = every session).
+pub(crate) struct EventTap {
+  session: Option<String>,
+  tx: tokio::sync::mpsc::UnboundedSender<Arc<serde_json::Value>>,
+}
+
+impl EventTap {
+  /// Whether an event carrying `sid` (empty when the event is
+  /// browser-scoped) belongs to this tap. Browser-scoped events pass
+  /// every session filter — per-page consumers of browser-level
+  /// domains (`Browser.download*`) decide relevance themselves.
+  fn matches_session(&self, sid: &str) -> bool {
+    self.session.as_deref().is_none_or(|s| sid.is_empty() || sid == s)
+  }
+}
+
+/// Deliver `msg` to every matching tap in `taps`, pruning taps whose
+/// receiver was dropped.
+fn send_to_taps(taps: &mut Vec<EventTap>, sid: &str, msg: &Arc<serde_json::Value>) {
+  taps.retain(|tap| {
+    if !tap.matches_session(sid) {
+      return true;
+    }
+    tap.tx.send(Arc::clone(msg)).is_ok()
+  });
 }
 
 /// Broadcast capacity for the per-transport event channel.
@@ -312,8 +369,40 @@ impl CdpDispatcher {
       event_tx,
       method_event_txs: Arc::new(DashMap::default()),
       domain_event_txs: Arc::new(DashMap::default()),
+      method_taps: Arc::new(DashMap::default()),
+      domain_taps: Arc::new(DashMap::default()),
       rtt_stats: Arc::new(std::sync::Mutex::new(RttStats::default())),
     }
+  }
+
+  pub fn tap_event_methods(
+    &self,
+    methods: &'static [&'static str],
+    session_id: Option<&str>,
+  ) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    for method in methods {
+      self.method_taps.entry(method).or_default().push(EventTap {
+        session: session_id.map(str::to_string),
+        tx: tx.clone(),
+      });
+    }
+    rx
+  }
+
+  pub fn tap_event_domains(
+    &self,
+    domains: &'static [&'static str],
+    session_id: Option<&str>,
+  ) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    for domain in domains {
+      self.domain_taps.entry(domain).or_default().push(EventTap {
+        session: session_id.map(str::to_string),
+        tx: tx.clone(),
+      });
+    }
+    rx
   }
 
   pub fn register_lifecycle_tracker(
@@ -474,18 +563,30 @@ impl CdpDispatcher {
         "CDP << event",
       );
 
+      let domain = method_str.split_once('.').map(|(domain, _)| domain);
       let method_tx = self.method_event_txs.get(method_str).map(|entry| entry.clone());
-      let domain_tx = method_str
-        .split_once('.')
-        .and_then(|(domain, _)| self.domain_event_txs.get(domain).map(|entry| entry.clone()));
+      let domain_tx = domain.and_then(|d| self.domain_event_txs.get(d).map(|entry| entry.clone()));
       let needs_global = self.event_tx.receiver_count() > 0;
       let needs_method = method_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
       let needs_domain = domain_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
+      let has_method_taps = self.method_taps.get(method_str).is_some_and(|taps| !taps.is_empty());
+      let has_domain_taps = domain.is_some_and(|d| self.domain_taps.get(d).is_some_and(|taps| !taps.is_empty()));
 
-      if (needs_global || needs_method || needs_domain)
+      if (needs_global || needs_method || needs_domain || has_method_taps || has_domain_taps)
         && let Ok(msg) = serde_json::from_slice::<serde_json::Value>(raw)
       {
         let msg = Arc::new(msg);
+        // Taps first: state trackers must see the event before any
+        // best-effort broadcast consumer can react to it.
+        if has_method_taps && let Some(mut taps) = self.method_taps.get_mut(method_str) {
+          send_to_taps(&mut taps, sid_str, &msg);
+        }
+        if has_domain_taps
+          && let Some(d) = domain
+          && let Some(mut taps) = self.domain_taps.get_mut(d)
+        {
+          send_to_taps(&mut taps, sid_str, &msg);
+        }
         if needs_global {
           let _ = self.event_tx.send(msg.clone());
         }
@@ -825,5 +926,75 @@ mod tests {
 
     dispatcher.dispatch_message(br#"{"method":"Inspector.targetCrashed","sessionId":"s1","params":{}}"#);
     assert!(lock_or_recover(&state).crashed);
+  }
+
+  #[test]
+  fn tap_is_lossless_and_wire_ordered_across_domains() {
+    let dispatcher = CdpDispatcher::new();
+    let mut rx = dispatcher.tap_event_domains(&["Runtime", "Page"], Some("s1"));
+
+    for i in 0..5000 {
+      let (method, sid) = match i % 3 {
+        0 => ("Runtime.executionContextCreated", "s1"),
+        1 => ("Page.frameNavigated", "s1"),
+        // Other-session traffic must be filtered out.
+        _ => ("Runtime.executionContextCreated", "s2"),
+      };
+      dispatcher
+        .dispatch_message(format!(r#"{{"method":"{method}","sessionId":"{sid}","params":{{"seq":{i}}}}}"#).as_bytes());
+    }
+
+    let mut seqs = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+      assert_eq!(msg.get("sessionId").and_then(|v| v.as_str()), Some("s1"));
+      seqs.push(
+        msg
+          .get("params")
+          .and_then(|p| p.get("seq"))
+          .and_then(serde_json::Value::as_i64)
+          .unwrap_or(-1),
+      );
+    }
+    let expected: Vec<i64> = (0..5000).filter(|i| i % 3 != 2).collect();
+    assert_eq!(
+      seqs, expected,
+      "every own-session event delivered, in wire order, none dropped"
+    );
+  }
+
+  #[test]
+  fn tap_method_filter_and_browser_scoped_passthrough() {
+    let dispatcher = CdpDispatcher::new();
+    let mut rx = dispatcher.tap_event_methods(&["Browser.downloadWillBegin"], Some("s1"));
+
+    // Browser-scoped event without sessionId passes a session-scoped tap.
+    dispatcher.dispatch_message(br#"{"method":"Browser.downloadWillBegin","params":{"guid":"g1"}}"#);
+    // Matching session passes; foreign session and foreign method do not.
+    dispatcher.dispatch_message(br#"{"method":"Browser.downloadWillBegin","sessionId":"s1","params":{"guid":"g2"}}"#);
+    dispatcher.dispatch_message(br#"{"method":"Browser.downloadWillBegin","sessionId":"s2","params":{"guid":"g3"}}"#);
+    dispatcher.dispatch_message(br#"{"method":"Browser.downloadProgress","sessionId":"s1","params":{"guid":"g4"}}"#);
+
+    let mut guids = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+      guids.push(
+        msg
+          .get("params")
+          .and_then(|p| p.get("guid"))
+          .and_then(|v| v.as_str())
+          .unwrap_or("")
+          .to_string(),
+      );
+    }
+    assert_eq!(guids, ["g1", "g2"]);
+  }
+
+  #[test]
+  fn tap_pruned_after_receiver_drop() {
+    let dispatcher = CdpDispatcher::new();
+    let rx = dispatcher.tap_event_domains(&["Network"], None);
+    drop(rx);
+    dispatcher.dispatch_message(br#"{"method":"Network.requestWillBeSent","sessionId":"s1","params":{}}"#);
+    let empty = dispatcher.domain_taps.get("Network").is_none_or(|taps| taps.is_empty());
+    assert!(empty, "dead tap must be pruned on next dispatch");
   }
 }
