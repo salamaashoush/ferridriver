@@ -361,13 +361,7 @@ impl WebKitBrowser {
 fn spawn_download_listener(root: &Session, pages: Arc<Mutex<Vec<WebKitPage>>>, downloads_dir: Arc<std::path::PathBuf>) {
   let mut rx = root.events();
   tokio::spawn(async move {
-    use tokio::sync::broadcast::error::RecvError;
-    loop {
-      let env = match rx.recv().await {
-        Ok(e) => e,
-        Err(RecvError::Lagged(_)) => continue,
-        Err(RecvError::Closed) => break,
-      };
+    while let Some(env) = rx.recv().await {
       match env.method.as_deref() {
         Some("Playwright.downloadCreated") => {
           let Some(page_proxy_id) = env.params.get("pageProxyId").and_then(serde_json::Value::as_str) else {

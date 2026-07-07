@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use arc_swap::ArcSwap;
 use base64::Engine as _;
 use serde_json::{Value, json};
-use tokio::sync::broadcast::error::RecvError;
 
 use super::browser::{BrowserError, WebKitBrowser};
 use super::connection::Session;
@@ -1672,12 +1671,7 @@ impl WebKitPage {
       .map_err(conn_err)?;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, f64)>();
     tokio::spawn(async move {
-      loop {
-        let env = match events.recv().await {
-          Ok(e) => e,
-          Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-          Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-        };
+      while let Some(env) = events.recv().await {
         if env.method.as_deref() != Some("Screencast.screencastFrame") {
           continue;
         }
@@ -2103,19 +2097,12 @@ async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crat
 /// `page` on the proxy session.
 async fn wait_for_first_page_target(proxy: &Session) -> std::result::Result<String, BrowserError> {
   let mut rx = proxy.events();
-  loop {
-    match rx.recv().await {
-      Ok(env) => {
-        if let Some(id) = page_target_id(&env) {
-          return Ok(id);
-        }
-      },
-      Err(RecvError::Lagged(_)) => {},
-      Err(RecvError::Closed) => {
-        return Err(BrowserError::Protocol("page proxy closed before target".into()));
-      },
+  while let Some(env) = rx.recv().await {
+    if let Some(id) = page_target_id(&env) {
+      return Ok(id);
     }
   }
+  Err(BrowserError::Protocol("page proxy closed before target".into()))
 }
 
 fn page_target_id(env: &Envelope) -> Option<String> {

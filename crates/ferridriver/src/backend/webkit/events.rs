@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
-use tokio::sync::broadcast::error::RecvError;
 
 use super::connection::Session;
 use super::page::WebKitPage;
@@ -195,12 +194,11 @@ pub fn attach_listeners(page: &WebKitPage) {
     loop {
       tokio::select! {
         ev = target_rx.recv() => match ev {
-          Ok(env) => dispatch_target_event(&ctx, env).await,
-          Err(RecvError::Lagged(_)) => {},
-          Err(RecvError::Closed) => break,
+          Some(env) => dispatch_target_event(&ctx, env).await,
+          None => break,
         },
         ev = proxy_rx.recv() => match ev {
-          Ok(env) => match env.method.as_deref() {
+          Some(env) => match env.method.as_deref() {
             Some("Dialog.javascriptDialogOpening") => {
               let log = arc_swap::Guard::into_inner(dialog_log.load());
               dispatch_dialog(&proxy, &env.params, &dialog_manager, &log, page.page_backref.weak()).await;
@@ -217,8 +215,7 @@ pub fn attach_listeners(page: &WebKitPage) {
             },
             _ => {},
           },
-          Err(RecvError::Lagged(_)) => {},
-          Err(RecvError::Closed) => break,
+          None => break,
         },
       }
     }
@@ -321,7 +318,7 @@ async fn handle_committed_provisional_target(
   params: &Value,
   page: &WebKitPage,
   provisional: ProvisionalSlot,
-) -> Option<tokio::sync::broadcast::Receiver<super::protocol::Envelope>> {
+) -> Option<tokio::sync::mpsc::UnboundedReceiver<super::protocol::Envelope>> {
   let new_target_id = params.get("newTargetId").and_then(Value::as_str)?.to_string();
   let (new_session, stashed_id) = provisional.lock().await.take()?;
   if &*stashed_id != new_target_id.as_str() {
