@@ -55,7 +55,8 @@ pub use disposable::Disposable;
 pub use element_handle::{BoundingBox, ElementHandle, ElementState};
 pub use error::{FerriError, Result};
 pub use events::{
-  BindingSource, ContextEvent, ContextEventEmitter, EventEmitter, ExposedBinding, ExposedFn, PageEvent,
+  BindingSource, ContextEvent, ContextEventEmitter, Emitter, EmitterEvent, EventEmitter, EventSubscription,
+  ExposedBinding, ExposedFn, PageEvent,
 };
 pub use frame::Frame;
 pub use js_handle::{HandleRemote, JSHandle};

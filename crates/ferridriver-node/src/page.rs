@@ -807,7 +807,7 @@ impl Page {
           return Err(napi::Error::from_reason("Timeout while waiting for response"));
         }
         match tokio::time::timeout(remaining, rx.recv()).await {
-          Ok(Ok(ferridriver::events::PageEvent::Response(r))) => {
+          Ok(Some(ferridriver::events::PageEvent::Response(r))) => {
             let hit = if let Some(m) = &matcher {
               m.matches(r.url())
             } else if let Some(tsfn) = &predicate {
@@ -824,8 +824,8 @@ impl Page {
               return Ok(crate::network::Response::from_core_with_page(r, page));
             }
           },
-          Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {},
-          Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+          Ok(Some(_)) => {},
+          Ok(None) => {
             return Err(napi::Error::from_reason("page closed while waiting for response"));
           },
           Err(_) => return Err(napi::Error::from_reason("Timeout while waiting for response")),
@@ -1799,7 +1799,7 @@ impl Page {
           return Err(napi::Error::from_reason("Timeout while waiting for request"));
         }
         match tokio::time::timeout(remaining, rx.recv()).await {
-          Ok(Ok(ferridriver::events::PageEvent::Request(r))) => {
+          Ok(Some(ferridriver::events::PageEvent::Request(r))) => {
             let hit = if let Some(m) = &matcher {
               m.matches(r.url())
             } else if let Some(tsfn) = &predicate {
@@ -1816,8 +1816,8 @@ impl Page {
               return Ok(crate::network::Request::from_core_with_page(r, page));
             }
           },
-          Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {},
-          Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+          Ok(Some(_)) => {},
+          Ok(None) => {
             return Err(napi::Error::from_reason("page closed while waiting for request"));
           },
           Err(_) => return Err(napi::Error::from_reason("Timeout while waiting for request")),

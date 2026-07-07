@@ -410,7 +410,7 @@ impl PageWsRouter {
     let mut rx = router.page.events().subscribe();
     let weak = Arc::downgrade(router);
     tokio::spawn(async move {
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      while let Some(event) = rx.recv().await {
         let Some(router) = weak.upgrade() else { break };
         match event {
           crate::events::PageEvent::FrameNavigated(info) => {

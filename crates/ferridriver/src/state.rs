@@ -825,18 +825,17 @@ impl BrowserState {
 
     // Spawn the page→context bridge exactly once per registered page.
     // Runs independently of any `ContextRef` or `Page` wrapper
-    // lifetime — forwards as long as the backend's broadcast
-    // channel stays open (i.e. the page is alive). Holds only the
-    // broadcast receiver and the weak backref slot: a strong `AnyPage`
-    // clone here would pin the page's `EventEmitter` sender, so this
-    // task's own `recv` could never return `Closed` and the whole
-    // backend page (CDP session, managers, listener tasks) leaked per
-    // open/close cycle.
+    // lifetime — forwards as long as the page's emitter stays alive.
+    // Holds only the subscription and the weak backref slot: a strong
+    // `AnyPage` clone here would pin the page's `EventEmitter`, so
+    // this task's own `recv` could never observe the close and the
+    // whole backend page (CDP session, managers, listener tasks)
+    // leaked per open/close cycle.
     let mut rx = page.events().subscribe();
     let backref = page.page_backref_handle();
     tokio::spawn(async move {
       use crate::events::{ContextEvent, PageEvent};
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      while let Some(event) = rx.recv().await {
         // Frame- and page-lifecycle mirror events need the public
         // wrapper `Arc<Page>` so the binding can mint a `Frame` /
         // deliver a `Page`. Upgrade lazily; skip if every wrapper has
