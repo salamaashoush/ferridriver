@@ -35,20 +35,15 @@ url = "2"
 # Direct serde <-> rquickjs::Value (no serde_json::Value middle-hop).
 # Correct number coercion (integral float -> int via serde visitors),
 # undefined/function drop parity, Proxy + cycle handling.
-rquickjs-serde = "0.5"
+rquickjs-serde = "0.6"
 
 # `full-async` does NOT imply `parallel`; without it the AsyncRuntime is
 # !Send/!Sync and the cross-task route/exposeFunction closures (which
 # must be `Arc<dyn Fn + Send + Sync>`) fail to compile. Keep `parallel`.
-rquickjs = { version = "0.11", features = ["full-async", "parallel", "macro", "loader", "array-buffer"] }
-
-# Sandbox-safe extras only: timers (setTimeout/Interval), URL/URLSearchParams,
-# and the console Formatter (we reuse only its Node-style renderer, not its
-# log sink). Deliberately NOT pulling os/sqlite (filesystem/db escape the
-# scripting sandbox) — see the rquickjs-extra audit.
-rquickjs-extra-timers = "0.2"
-rquickjs-extra-url = "0.2"
-rquickjs-extra-console = "0.2"
+# Timers / URLSearchParams / the console renderer are native modules in
+# `bindings/` (formerly the rquickjs-extra crates, which capped rquickjs
+# at <0.12).
+rquickjs = { version = "0.12", features = ["full-async", "parallel", "macro", "loader", "array-buffer"] }
 
 # Step-file front-end: rolldown bundles + tree-shakes + transpiles TS to
 # one ESM module (resolving node_modules), which is compiled to QuickJS
@@ -58,10 +53,10 @@ rolldown_common = "1"
 rolldown_plugin = "1"
 # Remap QuickJS error line:col (bundled output) back to original .ts/.js.
 sourcemap = "9"
-getrandom = "0.3"
-sha1 = "0.10"
-sha2 = "0.10"
-hmac = "0.12"
+getrandom = "0.4"
+sha1 = "0.11"
+sha2 = "0.11"
+hmac = "0.13"
 subtle = "2"
 
 [dev-dependencies]
@@ -70,4 +65,4 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 # Convert round-trip test drives rquickjs directly; it is a runtime dep
 # but integration tests are separate crates and cannot name a lib-only
 # dependency, so it is mirrored here.
-rquickjs = { version = "0.11", features = ["full-async", "parallel", "macro", "loader", "array-buffer"] }
+rquickjs = { version = "0.12", features = ["full-async", "parallel", "macro", "loader", "array-buffer"] }

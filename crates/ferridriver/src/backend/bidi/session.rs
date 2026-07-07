@@ -257,6 +257,10 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
             "Firefox exited during startup with status: {status}"
           )));
         }
+        // stderr closed but the process is still alive — read_line
+        // returns 0 immediately from here on, so pace the exit checks
+        // instead of hot-spinning until the deadline.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
       },
       Ok(Ok(_)) => {
         // Look for the BiDi WebSocket URL

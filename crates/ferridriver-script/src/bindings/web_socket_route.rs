@@ -16,7 +16,7 @@ use ferridriver::web_socket_route::{WebSocketRoute as CoreRoute, WebSocketRouteS
 use rquickjs::function::Opt;
 use rquickjs::{Ctx, Function, IntoJs, JsLifetime, Value, class::Trace};
 
-use crate::bindings::page::callbacks::{PageCallbacks, with_page_callbacks};
+use crate::bindings::page::callbacks::{PageCallbacks, RouteOwner, with_page_callbacks};
 
 /// Bound mirroring `PAGE_EVENT_PUMP_CAPACITY`: the session's VM event
 /// loop drains the pump even between executes, but a burst can still
@@ -97,15 +97,17 @@ fn ensure_ws_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<WsPumpMsg> {
 pub(crate) fn build_ws_route_handler(
   vm: crate::vm::VmHandle,
   handler_id: u64,
+  owner: RouteOwner,
 ) -> ferridriver::web_socket_route::WsHandler {
   Arc::new(move |route| {
     let vm = vm.clone();
+    let owner = owner.clone();
     Box::pin(async move {
       let _: Result<rquickjs::Result<()>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
         use rquickjs::class::Class;
         if let Some(saved) = with_page_callbacks(&ctx, |r| r.get_ws_callback(handler_id))? {
           let f = saved.restore(&ctx)?;
-          let route_class = Class::instance(ctx.clone(), WebSocketRouteJs::new(route))?;
+          let route_class = Class::instance(ctx.clone(), WebSocketRouteJs::new(route, owner))?;
           let ret: Value<'_> = f.call((route_class,))?;
           // Await an async route handler so `connectToServer()` /
           // `onMessage` set up inside it are observed before `after_handle`
@@ -159,10 +161,14 @@ fn parse_close(options: &Opt<Value<'_>>) -> (Option<u32>, Option<String>) {
 /// Stash a JS message callback and return a core handler that forwards
 /// each message to the interpreter-thread pump (never touches the VM from
 /// the backend thread — rule 3 of the re-entry discipline).
-fn make_msg_cb<'js>(ctx: &Ctx<'js>, cb: Function<'js>) -> rquickjs::Result<Arc<dyn Fn(WsMessage) + Send + Sync>> {
+fn make_msg_cb<'js>(
+  ctx: &Ctx<'js>,
+  cb: Function<'js>,
+  owner: RouteOwner,
+) -> rquickjs::Result<Arc<dyn Fn(WsMessage) + Send + Sync>> {
   let id = with_page_callbacks(ctx, PageCallbacks::next_route_id)?;
   let saved = rquickjs::Persistent::save(ctx, cb);
-  with_page_callbacks(ctx, |r| r.insert_ws_callback(id, saved))?;
+  with_page_callbacks(ctx, |r| r.insert_ws_callback(id, owner, saved))?;
   let tx = ensure_ws_pump(ctx);
   Ok(Arc::new(move |msg: WsMessage| {
     if tx.try_send((id, WsPumpEvent::Message(msg))).is_err() {
@@ -175,10 +181,10 @@ type WsCloseCallback = Arc<dyn Fn(Option<u32>, Option<String>) + Send + Sync>;
 
 /// Stash a JS close callback `(code?, reason?) => ...` (matches
 /// Playwright's two-argument `onClose` handler).
-fn make_close_cb<'js>(ctx: &Ctx<'js>, cb: Function<'js>) -> rquickjs::Result<WsCloseCallback> {
+fn make_close_cb<'js>(ctx: &Ctx<'js>, cb: Function<'js>, owner: RouteOwner) -> rquickjs::Result<WsCloseCallback> {
   let id = with_page_callbacks(ctx, PageCallbacks::next_route_id)?;
   let saved = rquickjs::Persistent::save(ctx, cb);
-  with_page_callbacks(ctx, |r| r.insert_ws_callback(id, saved))?;
+  with_page_callbacks(ctx, |r| r.insert_ws_callback(id, owner, saved))?;
   let tx = ensure_ws_pump(ctx);
   Ok(Arc::new(move |code: Option<u32>, reason: Option<String>| {
     if tx.try_send((id, WsPumpEvent::Close(code, reason))).is_err() {
@@ -192,12 +198,17 @@ fn make_close_cb<'js>(ctx: &Ctx<'js>, cb: Function<'js>) -> rquickjs::Result<WsC
 pub struct WebSocketRouteJs {
   #[qjs(skip_trace)]
   inner: CoreRoute,
+  /// Owning page/context of the route registration — `onMessage` /
+  /// `onClose` callbacks registered through this route are stored
+  /// under it so close-time cleanup releases them.
+  #[qjs(skip_trace)]
+  owner: RouteOwner,
 }
 
 impl WebSocketRouteJs {
   #[must_use]
-  pub fn new(inner: CoreRoute) -> Self {
-    Self { inner }
+  pub(crate) fn new(inner: CoreRoute, owner: RouteOwner) -> Self {
+    Self { inner, owner }
   }
 }
 
@@ -228,14 +239,14 @@ impl WebSocketRouteJs {
 
   #[qjs(rename = "onMessage")]
   pub fn on_message<'js>(&self, ctx: Ctx<'js>, handler: Function<'js>) -> rquickjs::Result<()> {
-    let cb = make_msg_cb(&ctx, handler)?;
+    let cb = make_msg_cb(&ctx, handler, self.owner.clone())?;
     self.inner.on_message(cb);
     Ok(())
   }
 
   #[qjs(rename = "onClose")]
   pub fn on_close<'js>(&self, ctx: Ctx<'js>, handler: Function<'js>) -> rquickjs::Result<()> {
-    let cb = make_close_cb(&ctx, handler)?;
+    let cb = make_close_cb(&ctx, handler, self.owner.clone())?;
     self.inner.on_close(cb);
     Ok(())
   }
@@ -244,6 +255,7 @@ impl WebSocketRouteJs {
   pub fn connect_to_server(&self) -> WebSocketRouteServerJs {
     WebSocketRouteServerJs {
       inner: self.inner.connect_to_server(),
+      owner: self.owner.clone(),
     }
   }
 }
@@ -253,6 +265,8 @@ impl WebSocketRouteJs {
 pub struct WebSocketRouteServerJs {
   #[qjs(skip_trace)]
   inner: CoreServer,
+  #[qjs(skip_trace)]
+  owner: RouteOwner,
 }
 
 #[rquickjs::methods]
@@ -277,14 +291,14 @@ impl WebSocketRouteServerJs {
 
   #[qjs(rename = "onMessage")]
   pub fn on_message<'js>(&self, ctx: Ctx<'js>, handler: Function<'js>) -> rquickjs::Result<()> {
-    let cb = make_msg_cb(&ctx, handler)?;
+    let cb = make_msg_cb(&ctx, handler, self.owner.clone())?;
     self.inner.on_message(cb);
     Ok(())
   }
 
   #[qjs(rename = "onClose")]
   pub fn on_close<'js>(&self, ctx: Ctx<'js>, handler: Function<'js>) -> rquickjs::Result<()> {
-    let cb = make_close_cb(&ctx, handler)?;
+    let cb = make_close_cb(&ctx, handler, self.owner.clone())?;
     self.inner.on_close(cb);
     Ok(())
   }

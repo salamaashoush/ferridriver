@@ -75,7 +75,12 @@ pub fn loader() -> NativeModuleLoader {
 }
 
 impl Loader for NativeModuleLoader {
-  fn load<'js>(&mut self, ctx: &Ctx<'js>, path: &str) -> rquickjs::Result<Module<'js>> {
+  fn load<'js>(
+    &mut self,
+    ctx: &Ctx<'js>,
+    path: &str,
+    _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
+  ) -> rquickjs::Result<Module<'js>> {
     let declare = self
       .modules
       .iter()

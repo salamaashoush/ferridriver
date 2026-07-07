@@ -16,7 +16,6 @@ use rmcp::{
     Annotated, CallToolResult, Content, GetPromptRequestParams, GetPromptResult, ListPromptsResult,
     ListResourcesResult, PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, PromptMessageRole, RawResource,
     ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo,
-    SetLevelRequestParams,
   },
   service::RequestContext,
   tool_handler,
@@ -1074,22 +1073,16 @@ fn validate_plugin_args(plugin: &str, schema: &serde_json::Value, args: &serde_j
 impl ServerHandler for McpServer {
   fn get_info(&self) -> ServerInfo {
     ServerInfo::new(
+      // Logging capability dropped: deprecated by MCP SEP-2577 (rmcp
+      // deprecates `enable_logging` and will remove it); the server
+      // never emitted `notifications/message` anyway.
       ServerCapabilities::builder()
         .enable_tools()
         .enable_resources()
         .enable_prompts()
-        .enable_logging()
         .build(),
     )
     .with_instructions(self.config.server_instructions().to_string())
-  }
-
-  fn set_level(
-    &self,
-    _request: SetLevelRequestParams,
-    _context: RequestContext<RoleServer>,
-  ) -> impl std::future::Future<Output = Result<(), ErrorData>> + Send + '_ {
-    std::future::ready(Ok(()))
   }
 
   async fn list_resources(

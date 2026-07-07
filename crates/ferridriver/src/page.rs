@@ -196,6 +196,9 @@ impl Page {
               o.push_error(err);
             }
           },
+          // The page is gone — exit rather than waiting for every
+          // emitter sender (backend listener tasks) to drop.
+          PageEvent::Close => break,
           _ => {},
         }
       }
@@ -1196,9 +1199,12 @@ impl Page {
     };
     if let Some(ref path) = opts.path {
       if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if !parent.as_os_str().is_empty() {
+          let _ = tokio::fs::create_dir_all(parent).await;
+        }
       }
-      std::fs::write(path, &bytes)
+      tokio::fs::write(path, &bytes)
+        .await
         .map_err(|e| crate::error::FerriError::Backend(format!("screenshot write {}: {e}", path.display())))?;
     }
     Ok(bytes)
@@ -2719,10 +2725,10 @@ impl Page {
         Err(p) => p.into_inner(),
       };
       match guard.take() {
-        Some(sender) => {
-          let _ = sender.send(dialog.clone());
-          true
-        },
+        // A failed send means the waiter already timed out and dropped
+        // the receiver — report unclaimed so the manager's auto-close
+        // path still runs instead of leaving the dialog open.
+        Some(sender) => sender.send(dialog.clone()).is_ok(),
         None => false,
       }
     }));
@@ -2788,10 +2794,9 @@ impl Page {
         Err(p) => p.into_inner(),
       };
       match guard.take() {
-        Some(sender) => {
-          let _ = sender.send(chooser.clone());
-          true
-        },
+        // Failed send = waiter already timed out; report unclaimed so
+        // the manager's no-listener disposal path still runs.
+        Some(sender) => sender.send(chooser.clone()).is_ok(),
         None => false,
       }
     }));
@@ -2855,10 +2860,9 @@ impl Page {
         Err(p) => p.into_inner(),
       };
       match guard.take() {
-        Some(sender) => {
-          let _ = sender.send(download.clone());
-          true
-        },
+        // Failed send = waiter already timed out; report unclaimed so
+        // other handlers / the manager fallback can still take it.
+        Some(sender) => sender.send(download.clone()).is_ok(),
         None => false,
       }
     }));

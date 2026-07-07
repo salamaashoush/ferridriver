@@ -826,9 +826,14 @@ impl BrowserState {
     // Spawn the page→context bridge exactly once per registered page.
     // Runs independently of any `ContextRef` or `Page` wrapper
     // lifetime — forwards as long as the backend's broadcast
-    // channel stays open (i.e. the page is alive).
+    // channel stays open (i.e. the page is alive). Holds only the
+    // broadcast receiver and the weak backref slot: a strong `AnyPage`
+    // clone here would pin the page's `EventEmitter` sender, so this
+    // task's own `recv` could never return `Closed` and the whole
+    // backend page (CDP session, managers, listener tasks) leaked per
+    // open/close cycle.
     let mut rx = page.events().subscribe();
-    let bridge_page = page.clone();
+    let backref = page.page_backref_handle();
     tokio::spawn(async move {
       use crate::events::{ContextEvent, PageEvent};
       while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
@@ -836,7 +841,7 @@ impl BrowserState {
         // wrapper `Arc<Page>` so the binding can mint a `Frame` /
         // deliver a `Page`. Upgrade lazily; skip if every wrapper has
         // been dropped (page is going away).
-        let upgrade = || bridge_page.upgrade_page_backref();
+        let upgrade = || backref.upgrade();
         match event {
           PageEvent::PageError(err) => context_events.emit(ContextEvent::WebError(err)),
           PageEvent::Download(d) => context_events.emit(ContextEvent::Download(d)),
@@ -865,6 +870,9 @@ impl BrowserState {
             if let Some(page) = upgrade() {
               context_events.emit(ContextEvent::PageClose(page));
             }
+            // The page is gone — exit instead of waiting on a channel
+            // whose senders (backend listener tasks) may outlive it.
+            break;
           },
           PageEvent::Load => {
             if let Some(page) = upgrade() {

@@ -824,13 +824,22 @@ impl AnyPage {
   /// been dropped (matches Playwright's weak `createHandle` guard).
   #[must_use]
   pub fn upgrade_page_backref(&self) -> Option<std::sync::Arc<crate::page::Page>> {
-    let slot = match self {
-      AnyPage::CdpPipe(p) => &p.page_backref,
-      AnyPage::CdpRaw(p) => &p.page_backref,
-      AnyPage::WebKit(p) => &p.page_backref,
-      AnyPage::Bidi(p) => &p.page_backref,
-    };
-    slot.upgrade()
+    self.page_backref_handle().upgrade()
+  }
+
+  /// Clone of the shared [`PageBackref`] slot. Lets long-lived
+  /// listeners (the page→context event bridge) resolve the current
+  /// wrapper per event WITHOUT holding a strong `AnyPage` — a strong
+  /// clone pins the page's `EventEmitter` sender, so the listener's
+  /// own subscription can never observe `Closed`.
+  #[must_use]
+  pub(crate) fn page_backref_handle(&self) -> PageBackref {
+    match self {
+      AnyPage::CdpPipe(p) => p.page_backref.clone(),
+      AnyPage::CdpRaw(p) => p.page_backref.clone(),
+      AnyPage::WebKit(p) => p.page_backref.clone(),
+      AnyPage::Bidi(p) => p.page_backref.clone(),
+    }
   }
 
   /// Backend-owned frame cache shared across `Arc<crate::page::Page>`

@@ -149,7 +149,10 @@ impl BrowserContextJs {
     let input: serde_json::Value = serde_from_js(&ctx, storage_state)?;
     let state = match input {
       serde_json::Value::String(path) => {
-        let text = std::fs::read_to_string(&path).map_err(|e| {
+        // Async read — this job runs on the single VM event loop, so a
+        // blocking `std::fs` read would stall every pump and any
+        // concurrent script on the session.
+        let text = tokio::fs::read_to_string(&path).await.map_err(|e| {
           crate::bindings::convert::throw_named(&ctx, "Error", format!("setStorageState: read {path}: {e}"))
         })?;
         serde_json::from_str(&text).map_err(|e| {
@@ -360,9 +363,10 @@ impl BrowserContextJs {
     };
     let matcher = url_value_to_matcher(&ctx, url)?;
     let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
+    let owner = RouteOwner::Context(self.inner.name().to_string());
     let saved = rquickjs::Persistent::save(&ctx, handler);
-    with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, saved))?;
-    let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id);
+    with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, owner.clone(), saved))?;
+    let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id, owner);
     self
       .inner
       .route_web_socket(matcher, rust_handler)
@@ -491,7 +495,16 @@ impl BrowserContextJs {
   /// Close the context (tears down the underlying browser state).
   #[qjs(rename = "close")]
   pub async fn close(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-    self.inner.close().await.into_js_with(&ctx)
+    self.inner.close().await.into_js_with(&ctx)?;
+    // Release this context's persisted route / WS handlers — the
+    // session VM outlives the context, so without this each closed
+    // context leaks its `Persistent`s for the VM's remaining life.
+    let owner = RouteOwner::Context(self.inner.name().to_string());
+    with_page_callbacks(&ctx, |r| {
+      r.remove_routes_for_owner(&owner);
+      r.remove_ws_callbacks_for_owner(&owner);
+    })?;
+    Ok(())
   }
 
   // ── Page creation ──────────────────────────────────────────────────────

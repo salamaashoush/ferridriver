@@ -851,10 +851,11 @@ async fn console_uses_node_style_formatter_and_is_captured() {
   let line0 = &console[0].message;
   assert!(line0.starts_with("n = 42 "), "got: {line0}");
   assert!(line0.contains("a: 1"), "object Node-style, got: {line0}");
-  // Arrays render structurally (`[ x, y ]`) rather than via
-  // JSON.stringify (`["x","y"]`) — the Node-ish renderer.
+  // Arrays render structurally with strings quoted (`[ 'x', 'y' ]`,
+  // Node's util.inspect shape) rather than via JSON.stringify
+  // (`["x","y"]`).
   assert!(
-    console[1].message.contains("[ x, y ]"),
+    console[1].message.contains("[ 'x', 'y' ]"),
     "array rendered structurally, got: {}",
     console[1].message
   );
@@ -1121,4 +1122,92 @@ async fn assertion_failures_throw_a_named_assertion_error() {
     },
     Outcome::Error { error } => panic!("expect failure must be catchable in JS: {error:?}"),
   }
+}
+
+// ── Node-compat details of the native timers / URLSearchParams / console ──
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_timeout_passes_extra_args_and_clear_tolerates_garbage() {
+  let (_tmp, ctx) = make_ctx();
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+  let r = session
+    .execute(
+      "clearTimeout(undefined); clearTimeout(null); clearTimeout(42); clearInterval();\n\
+       return await new Promise((resolve) => setTimeout((a, b) => resolve(a + b), 10, 'x', 'y'));",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("xy")),
+    Outcome::Error { error } => panic!("timer args/clear tolerance failed: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn url_search_params_node_semantics() {
+  let (_tmp, ctx) = make_ctx();
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+  let r = session
+    .execute(
+      "const fromNull = new URLSearchParams(null).toString();\n\
+       const enc = new URLSearchParams('a=1 2&b=%C3%A9');\n\
+       const encoded = enc.toString();\n\
+       const decoded = enc.get('b');\n\
+       const live = new URLSearchParams('a=1&b=2&c=3');\n\
+       for (const [k] of live) { live.delete(k); }\n\
+       const empty = new URLSearchParams('').size;\n\
+       const s = new URLSearchParams('b=2&a=1&a=0'); s.sort();\n\
+       return [fromNull, encoded, decoded, live.size, empty, s.toString()];",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => {
+      assert_eq!(
+        success.value,
+        // Live-iterator deletion skips every other entry (index-based,
+        // exactly like Node/WHATWG): a and c deleted, b survives.
+        serde_json::json!(["null=", "a=1+2&b=%C3%A9", "\u{e9}", 1, 0, "a=1&a=0&b=2"]),
+        "{:?}",
+        success.value
+      );
+    },
+    Outcome::Error { error } => panic!("URLSearchParams node semantics failed: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn console_printf_and_inspect_rendering() {
+  let (_tmp, ctx) = make_ctx();
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+  let r = session
+    .execute(
+      "console.log('%s scored %d%%', 'amy', 97, 'extra');\n\
+       console.log(['x', 1]);\n\
+       console.log(new Map([['a', 1]]));\n\
+       console.log(new Set([1, 2]));\n\
+       console.log(/ab+c/gi);\n\
+       return null;",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  assert!(r.result.is_ok(), "{:?}", r.result);
+  let console = &r.result.console;
+  assert_eq!(console[0].message, "amy scored 97% extra", "{:?}", console[0]);
+  assert_eq!(console[1].message, "[ 'x', 1 ]", "{:?}", console[1]);
+  assert_eq!(console[2].message, "Map(1) { 'a' => 1 }", "{:?}", console[2]);
+  assert_eq!(console[3].message, "Set(2) { 1, 2 }", "{:?}", console[3]);
+  assert_eq!(console[4].message, "/ab+c/gi", "{:?}", console[4]);
 }

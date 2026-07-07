@@ -47,6 +47,13 @@ pub(crate) struct PageCallbacks {
   /// `async_with` from the cross-task WS dispatch (never moved across
   /// threads — same discipline as `routes`).
   ws_callbacks: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
+  /// Owner of each `ws_callbacks` entry, so a closing page/context can
+  /// release its persisted WS handlers — the session VM outlives both.
+  ws_owners: rustc_hash::FxHashMap<u64, RouteOwner>,
+  /// Names registered via `page.exposeFunction`, per backend page id.
+  /// `page.exposeFunction` has no dispose in Playwright, so page close
+  /// is the only hook that can release the persisted callbacks.
+  exposed_by_page: rustc_hash::FxHashMap<usize, Vec<String>>,
 }
 
 /// Identity of the object a route was registered through, so
@@ -108,9 +115,45 @@ impl PageCallbacks {
     self.routes.get(&id).map(|e| e.handler.clone())
   }
 
-  /// Store a `routeWebSocket` handler / `onMessage` / `onClose` callback.
-  pub(crate) fn insert_ws_callback(&mut self, id: u64, cb: rquickjs::Persistent<rquickjs::Function<'static>>) {
+  /// Store a `routeWebSocket` handler / `onMessage` / `onClose`
+  /// callback under its owning page/context, so close-time cleanup can
+  /// release it.
+  pub(crate) fn insert_ws_callback(
+    &mut self,
+    id: u64,
+    owner: RouteOwner,
+    cb: rquickjs::Persistent<rquickjs::Function<'static>>,
+  ) {
+    self.ws_owners.insert(id, owner);
     self.ws_callbacks.insert(id, cb);
+  }
+
+  /// Release every WS callback registered through `owner`.
+  pub(crate) fn remove_ws_callbacks_for_owner(&mut self, owner: &RouteOwner) {
+    let ids: Vec<u64> = self
+      .ws_owners
+      .iter()
+      .filter(|(_, o)| *o == owner)
+      .map(|(id, _)| *id)
+      .collect();
+    for id in ids {
+      self.ws_owners.remove(&id);
+      self.ws_callbacks.remove(&id);
+    }
+  }
+
+  /// Record that `page_key` registered `name` via `page.exposeFunction`.
+  pub(crate) fn track_exposed_owner(&mut self, page_key: usize, name: String) {
+    self.exposed_by_page.entry(page_key).or_default().push(name);
+  }
+
+  /// Release every `page.exposeFunction` callback `page_key` registered.
+  pub(crate) fn remove_exposed_for_page(&mut self, page_key: usize) {
+    if let Some(names) = self.exposed_by_page.remove(&page_key) {
+      for name in names {
+        self.exposed.remove(&name);
+      }
+    }
   }
 
   /// Restore a WS callback by id (inside `async_with`).

@@ -87,18 +87,19 @@ pub fn spawn_vm_loop(ctx: &AsyncContext) -> (VmHandle, VmShutdown) {
   let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
   let loop_ctx = ctx.clone();
   tokio::spawn(async move {
-    rquickjs::async_with!(loop_ctx => |ctx| {
-      loop {
-        tokio::select! {
-          job = rx.recv() => match job {
-            Some(job) => ctx.spawn(job(ctx.clone())),
-            None => break,
-          },
-          _ = &mut shutdown_rx => break,
+    loop_ctx
+      .async_with(async |ctx| {
+        loop {
+          tokio::select! {
+            job = rx.recv() => match job {
+              Some(job) => ctx.spawn(job(ctx.clone())),
+              None => break,
+            },
+            _ = &mut shutdown_rx => break,
+          }
         }
-      }
-    })
-    .await;
+      })
+      .await;
   });
   (VmHandle { tx }, VmShutdown { _tx: shutdown_tx })
 }

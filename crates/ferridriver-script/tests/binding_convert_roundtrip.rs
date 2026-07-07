@@ -17,7 +17,7 @@ use ferridriver::protocol::{
   PropertyEntry, RegExpValue, SerializationContext, SerializedValue, SpecialValue, TypedArrayKind, TypedArrayValue,
 };
 use ferridriver_script::bindings::convert::{quickjs_arg_to_serialized, serialized_value_to_quickjs};
-use rquickjs::{AsyncContext, AsyncRuntime, async_with};
+use rquickjs::{AsyncContext, AsyncRuntime};
 
 /// Install the native `URL` class the way the engine does so the rich-type
 /// probe sees the same global it would at runtime (`webapi::install`
@@ -52,10 +52,11 @@ where
 {
   let rt = AsyncRuntime::new().expect("runtime");
   let ctx = AsyncContext::full(&rt).await.expect("context");
-  async_with!(ctx => |ctx| {
-    f(&ctx);
-  })
-  .await;
+  ctx
+    .async_with(async |ctx| {
+      f(&ctx);
+    })
+    .await;
 }
 
 #[tokio::test]

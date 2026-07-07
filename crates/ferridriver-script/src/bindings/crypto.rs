@@ -59,7 +59,8 @@ impl HashAlgo {
 
   fn hmac(self, key: &[u8], data: &[u8]) -> Vec<u8> {
     fn mac<M: Mac + hmac::digest::KeyInit>(key: &[u8], data: &[u8]) -> Vec<u8> {
-      let mut m = <M as Mac>::new_from_slice(key).unwrap_or_else(|_| unreachable!("HMAC accepts any key length"));
+      let mut m = <M as hmac::digest::KeyInit>::new_from_slice(key)
+        .unwrap_or_else(|_| unreachable!("HMAC accepts any key length"));
       m.update(data);
       m.finalize().into_bytes().to_vec()
     }

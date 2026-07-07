@@ -2,5 +2,8 @@
 testMatch = ["tests/**/*.spec.ts", "tests/**/*.test.ts", "tests/**/*.feature"]
 steps = ["tests/steps/**/*.ts"]
 
+[test.browser]
+headless = true
+
 [[test.webServer]]
 staticDir = "tests/assets"

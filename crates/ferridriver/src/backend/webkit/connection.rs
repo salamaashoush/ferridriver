@@ -51,14 +51,20 @@ pub enum ConnectionError {
   Protocol(String),
   #[error("connection closed before reply for {method:?}")]
   Closed { method: String },
+  #[error("timed out after {ms}ms waiting for reply to {method:?}")]
+  Timeout { method: String, ms: u64 },
   #[error("json: {0}")]
   Json(#[from] serde_json::Error),
 }
 
 impl From<ConnectionError> for crate::error::FerriError {
   fn from(e: ConnectionError) -> Self {
-    let msg = e.to_string();
-    crate::error::FerriError::backend(format!("webkit: {msg}"))
+    match e {
+      ConnectionError::Timeout { method, ms } => {
+        crate::error::FerriError::timeout(format!("webkit: waiting for {method} reply"), ms)
+      },
+      other => crate::error::FerriError::backend(format!("webkit: {other}")),
+    }
   }
 }
 
@@ -93,6 +99,7 @@ pub struct Connection {
 
 impl Connection {
   /// Spawn the reader task and return a shared connection handle.
+  #[must_use]
   pub fn spawn(transport: Transport) -> Arc<Self> {
     let Transport { reader, writer } = transport;
     let conn = Arc::new(Connection {
@@ -187,6 +194,16 @@ impl Connection {
       .unwrap_or_else(PoisonError::into_inner)
       .insert(id, (key, tx));
     (id, rx)
+  }
+
+  /// Drop a callback slot after a send failure or reply timeout so the
+  /// entry doesn't sit in the table until the whole route closes.
+  fn forget_callback(&self, id: i64) {
+    self
+      .callbacks
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .remove(&id);
   }
 
   fn complete(&self, id: i64, result: Result<Value, ErrorPayload>) {
@@ -294,7 +311,7 @@ fn dispatch(conn: &Connection, env: Envelope) {
     return;
   }
   if let Some(id) = env.id {
-    conn.complete(id, response_of(&env));
+    conn.complete(id, response_of(env));
     return;
   }
   let Some(method) = env.method.as_deref() else {
@@ -322,16 +339,19 @@ fn unwrap_target_message(env: &Envelope) -> Option<(String, Envelope)> {
 
 fn route_target_inner(conn: &Connection, target_id: &str, env: Envelope) {
   if let Some(id) = env.id {
-    conn.complete(id, response_of(&env));
+    conn.complete(id, response_of(env));
   } else if env.method.is_some() {
     conn.route_event(RouteKey::Target(target_id.to_string()), env);
   }
 }
 
-fn response_of(env: &Envelope) -> Result<Value, ErrorPayload> {
-  match env.error.clone() {
+/// Consumes the envelope so large result payloads (screenshot base64,
+/// resource bodies) move into the caller's oneshot instead of being
+/// deep-cloned.
+fn response_of(env: Envelope) -> Result<Value, ErrorPayload> {
+  match env.error {
     Some(err) => Err(err),
-    None => Ok(env.result.clone().unwrap_or(Value::Null)),
+    None => Ok(env.result.unwrap_or(Value::Null)),
   }
 }
 
@@ -384,18 +404,25 @@ impl Session {
     match &self.kind {
       SessionKind::Browser => {
         let (id, rx) = self.conn.alloc_callback(RouteKey::Browser);
-        self
+        if let Err(e) = self
           .conn
           .writer
-          .send(&json!({ "id": id, "method": method, "params": params }))?;
-        wait_for(rx, method).await
+          .send(&json!({ "id": id, "method": method, "params": params }))
+        {
+          self.conn.forget_callback(id);
+          return Err(e.into());
+        }
+        wait_for(&self.conn, id, rx, method).await
       },
       SessionKind::PageProxy { page_proxy_id } => {
         let (id, rx) = self.conn.alloc_callback(RouteKey::PageProxy(page_proxy_id.clone()));
-        self.conn.writer.send(&json!({
+        if let Err(e) = self.conn.writer.send(&json!({
           "id": id, "method": method, "params": params, "pageProxyId": page_proxy_id,
-        }))?;
-        wait_for(rx, method).await
+        })) {
+          self.conn.forget_callback(id);
+          return Err(e.into());
+        }
+        wait_for(&self.conn, id, rx, method).await
       },
       SessionKind::Target {
         page_proxy_id,
@@ -408,16 +435,32 @@ impl Session {
         // wrapper-level rejection (target gone) surfaces instead of
         // hanging on the inner reply.
         let (id, rx) = self.conn.alloc_callback(RouteKey::Target(target_id.clone()));
-        let inner = serde_json::to_string(&json!({ "id": id, "method": method, "params": params }))?;
+        let inner = match serde_json::to_string(&json!({ "id": id, "method": method, "params": params })) {
+          Ok(s) => s,
+          Err(e) => {
+            self.conn.forget_callback(id);
+            return Err(e.into());
+          },
+        };
         let (wrap_id, wrap_rx) = self.conn.alloc_callback(RouteKey::PageProxy(page_proxy_id.clone()));
-        self.conn.writer.send(&json!({
+        if let Err(e) = self.conn.writer.send(&json!({
           "id": wrap_id,
           "method": "Target.sendMessageToTarget",
           "params": { "message": inner, "targetId": target_id },
           "pageProxyId": page_proxy_id,
-        }))?;
-        wait_for(wrap_rx, "Target.sendMessageToTarget").await?;
-        wait_for(rx, method).await
+        })) {
+          self.conn.forget_callback(id);
+          self.conn.forget_callback(wrap_id);
+          return Err(e.into());
+        }
+        if let Err(e) = wait_for(&self.conn, wrap_id, wrap_rx, "Target.sendMessageToTarget").await {
+          // The inner reply will never arrive once the wrapper is
+          // rejected — drop its slot instead of waiting for the
+          // route to close.
+          self.conn.forget_callback(id);
+          return Err(e);
+        }
+        wait_for(&self.conn, id, rx, method).await
       },
     }
   }
@@ -437,10 +480,29 @@ impl Session {
   }
 }
 
-async fn wait_for(rx: oneshot::Receiver<Result<Value, ErrorPayload>>, method: &str) -> Result<Value, ConnectionError> {
-  match rx.await {
-    Ok(Ok(v)) => Ok(v),
-    Ok(Err(err)) => Err(ConnectionError::Protocol(err.message)),
-    Err(_) => Err(ConnectionError::Closed { method: method.into() }),
+/// Reply timeout for a single protocol call. Matches the CDP
+/// transport's 30s cap — without it a wedged (alive but unresponsive)
+/// child hangs the caller forever, since `drain_all` only fires on
+/// pipe EOF.
+const REPLY_TIMEOUT_MS: u64 = 30_000;
+const REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(REPLY_TIMEOUT_MS);
+
+async fn wait_for(
+  conn: &Connection,
+  id: i64,
+  rx: oneshot::Receiver<Result<Value, ErrorPayload>>,
+  method: &str,
+) -> Result<Value, ConnectionError> {
+  match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
+    Ok(Ok(Ok(v))) => Ok(v),
+    Ok(Ok(Err(err))) => Err(ConnectionError::Protocol(err.message)),
+    Ok(Err(_)) => Err(ConnectionError::Closed { method: method.into() }),
+    Err(_) => {
+      conn.forget_callback(id);
+      Err(ConnectionError::Timeout {
+        method: method.into(),
+        ms: REPLY_TIMEOUT_MS,
+      })
+    },
   }
 }
