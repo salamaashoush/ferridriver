@@ -22,9 +22,13 @@ check:
   cargo check --all-targets
 
 # Run all tests: build CLI binary, run all Rust crates (incl. all backends), BDD features
+# Backend integration tests run serially: under bare `cargo test`
+# parallelism, dozens of concurrent browsers starve each other and
+# Firefox dies mid-startup (~20/81 cascade failures at any commit).
 test:
   cargo build --bin ferridriver
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --workspace --exclude ferridriver-cli
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli -- --test-threads=1
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo run --bin ferridriver -- bdd tests/features/
 
 # Run all tests with maximum parallelism

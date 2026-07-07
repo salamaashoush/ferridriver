@@ -47,6 +47,12 @@ impl ReaderHandle {
 /// worker thread, and every other sender serializes behind the mutex.
 /// CDP and `BiDi` route outbound bytes through a writer task for the
 /// same reason.
+///
+/// The queue is deliberately unbounded: every producer is a
+/// request/response caller that awaits its reply (bounding in-flight
+/// volume by concurrent callers), or an event-bounded fire-and-forget
+/// ack — there is no producer that can outrun a stalled child without
+/// first blocking on it.
 pub struct WriterHandle {
   tx: mpsc::UnboundedSender<Vec<u8>>,
 }
