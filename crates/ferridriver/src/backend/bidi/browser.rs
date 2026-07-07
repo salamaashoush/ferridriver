@@ -36,9 +36,9 @@ impl BidiBrowser {
   }
 
   async fn wait_for_context_event(&self, method: &str, context_id: &str, timeout: std::time::Duration) -> Result<()> {
-    let mut rx = self.session.transport.subscribe_events();
+    let mut rx = self.session.transport.tap_events();
     let wait_for_event = async {
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      while let Some(event) = rx.recv().await {
         if event.method != method {
           continue;
         }
@@ -205,7 +205,7 @@ impl BidiBrowser {
     if let Some(user_context_id) = user_context_id {
       params["userContext"] = json!(user_context_id);
     }
-    let mut rx = self.session.transport.subscribe_events();
+    let mut rx = self.session.transport.tap_events();
     let result = self
       .session
       .transport
@@ -218,7 +218,7 @@ impl BidiBrowser {
       .to_string();
 
     let wait_for_created = async {
-      while let Some(event) = crate::events::recv_tolerant(&mut rx).await {
+      while let Some(event) = rx.recv().await {
         if event.method != "browsingContext.contextCreated" {
           continue;
         }
