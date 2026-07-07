@@ -46,6 +46,31 @@ pub fn setsid_pre_exec() -> impl FnMut() -> std::io::Result<()> + Send + Sync + 
   }
 }
 
+/// Continuously drain a spawned browser's piped stderr into tracing.
+///
+/// A browser launched with `Stdio::piped()` stderr MUST have that pipe
+/// read for its whole life: Chrome logs every renderer console message
+/// to stderr (`INFO:CONSOLE` lines), and once the 64KB kernel pipe
+/// buffer fills, the browser process blocks in `write(2)` on the same
+/// thread that routes `DevTools` traffic — every CDP command and event
+/// freezes until the pipe is drained (observed as `Runtime.evaluate`
+/// 30s timeouts after ~1000 console.log calls). Playwright drains the
+/// stream unconditionally for the same reason
+/// (`packages/utils/processLauncher.ts` — stderr piped into the
+/// `pw:browser` debug channel).
+pub fn drain_child_stderr(child: &mut tokio::process::Child) {
+  let Some(stderr) = child.stderr.take() else {
+    return;
+  };
+  tokio::spawn(async move {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = tokio::io::BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+      tracing::debug!(target: "ferridriver::browser::stderr", "{line}");
+    }
+  });
+}
+
 /// Send `SIGKILL` to every process in the given pid's process group.
 ///
 /// Assumes the target was spawned with [`setsid_pre_exec`], so its

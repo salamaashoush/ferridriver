@@ -112,6 +112,7 @@ impl WsTransport {
     let mut child = command
       .spawn()
       .map_err(|e| FerriError::Backend(format!("Chrome launch: {e}")))?;
+    crate::backend::process::drain_child_stderr(&mut child);
 
     let port_file = user_data_dir.join("DevToolsActivePort");
     let ws_url = discover_ws_url(&port_file, &mut child).await?;
