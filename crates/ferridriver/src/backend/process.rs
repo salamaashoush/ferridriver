@@ -74,9 +74,15 @@ pub fn drain_child_stderr(child: &mut tokio::process::Child) {
 /// Send `SIGKILL` to every process in the given pid's process group.
 ///
 /// Assumes the target was spawned with [`setsid_pre_exec`], so its
-/// `pgid == pid`. Failures are logged at `debug` level and ignored —
-/// the common cases are ESRCH (group already dead) and EPERM (we don't
-/// own the group), neither of which is actionable.
+/// `pgid == pid`. Failures are ignored — ESRCH (group already dead)
+/// and EPERM are the common cases.
+///
+/// Callers MUST only pass the pid of a child that has NOT been reaped
+/// yet: the kernel keeps an unreaped pid reserved, so the group is
+/// guaranteed to still be ours. A reaped pid may already be recycled
+/// by an unrelated same-UID process (which `killpg` WILL kill —
+/// think a parallel test run's freshly-launched Firefox dying
+/// mid-startup). [`ChildGroup`] enforces this with a `try_wait` gate.
 #[cfg(unix)]
 #[allow(unsafe_code)]
 pub fn kill_process_group(pid: u32) {
@@ -84,9 +90,7 @@ pub fn kill_process_group(pid: u32) {
   #[allow(clippy::cast_possible_wrap)]
   let group_id = pid as i32;
   // SAFETY: `killpg` is async-signal-safe. `SIGKILL` is always
-  // deliverable. Even if `group_id` is stale (reused by another
-  // process), the worst case is we no-op because we don't own the
-  // new group.
+  // deliverable.
   unsafe {
     libc::killpg(group_id, libc::SIGKILL);
   }
@@ -124,16 +128,25 @@ impl ChildGroup {
     Self { pid, child }
   }
 
-  /// Access the underlying child for `kill().await`, `wait().await`,
-  /// or `try_wait()`. Group kill still fires on drop regardless.
-  pub fn inner_mut(&mut self) -> &mut tokio::process::Child {
-    &mut self.child
+  /// Kill the whole process group, then reap the parent. The group
+  /// kill happens BEFORE reaping: an unreaped child's pid cannot be
+  /// recycled by the kernel, so the `killpg` target is guaranteed to
+  /// still be our group. Reaping afterwards means the enclosing
+  /// runtime carries no zombie.
+  pub async fn shutdown(&mut self) {
+    if self.pid != 0 && matches!(self.child.try_wait(), Ok(None)) {
+      kill_process_group(self.pid);
+    }
+    let _ = self.child.kill().await;
   }
 }
 
 impl Drop for ChildGroup {
   fn drop(&mut self) {
-    if self.pid != 0 {
+    // Gate on "not yet reaped": once reaped, the pid may belong to an
+    // unrelated process group (see kill_process_group docs). Unreaped
+    // (running or zombie) pids are still reserved, so killpg is safe.
+    if self.pid != 0 && matches!(self.child.try_wait(), Ok(None)) {
       kill_process_group(self.pid);
     }
   }
