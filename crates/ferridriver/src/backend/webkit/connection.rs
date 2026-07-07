@@ -25,23 +25,11 @@ use std::collections::hash_map::Entry;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use thiserror::Error;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 /// Sentinel id `Playwright.close` is sent with — the child never
 /// answers it, so inbound frames carrying it are dropped.
 const BROWSER_CLOSE_ID: i64 = -9999;
-/// Broadcast capacity for each route's event ring buffer. Sized large
-/// enough to absorb the burst PW `WebKit` generates during a busy page
-/// load (request + response + loading-finished for every subresource,
-/// frame attached/navigated/detached, console messages, plus
-/// `Network.requestIntercepted` for every subresource when interception
-/// is on). 256 -- the prior cap -- was small enough that any subscriber
-/// taking a single async lock during the burst would fall behind and
-/// hit `RecvError::Lagged`, silently dropping lifecycle events
-/// (`Page.loadEventFired`, `Page.domContentEventFired`,
-/// `Page.frameNavigated`) and wedging `wait_for_lifecycle` for the
-/// full 30s timeout.
-const EVENT_CHANNEL_CAP: usize = 8192;
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {
@@ -84,10 +72,14 @@ enum RouteKey {
 /// events (`Target.targetCreated`) before our code subscribes; the
 /// reader auto-creates the entry and stashes them. The first
 /// [`Connection::subscribe`] flips it `Live` and replays the buffer
-/// through the channel.
+/// into that subscriber's queue. Subscribers get unbounded lossless
+/// queues: state-mutating consumers (frame cache, network correlation,
+/// lifecycle signals) ride these streams, and a dropped
+/// `Page.loadEventFired` / `Page.frameNavigated` wedges
+/// `wait_for_lifecycle` or leaves the frame cache stale.
 enum Route {
   Buffering(Vec<Envelope>),
-  Live(broadcast::Sender<Envelope>),
+  Live(Vec<mpsc::UnboundedSender<Envelope>>),
 }
 
 pub struct Connection {
@@ -229,36 +221,34 @@ impl Connection {
       .or_insert_with(|| Route::Buffering(Vec::new()))
     {
       Route::Buffering(buf) => buf.push(env),
-      Route::Live(tx) => {
-        let _ = tx.send(env);
+      Route::Live(txs) => {
+        txs.retain(|tx| tx.send(env.clone()).is_ok());
       },
     }
   }
 
   /// Subscribe to a route's events. The first subscriber flips the
   /// route `Live` and replays whatever the reader buffered before the
-  /// route had an owner.
-  fn subscribe(&self, key: RouteKey) -> broadcast::Receiver<Envelope> {
+  /// route had an owner. The stream is lossless — events queue
+  /// unbounded until received.
+  fn subscribe(&self, key: RouteKey) -> mpsc::UnboundedReceiver<Envelope> {
     let mut routes = self.routes.lock().unwrap_or_else(PoisonError::into_inner);
+    let (tx, rx) = mpsc::unbounded_channel();
     match routes.entry(key) {
       Entry::Occupied(mut e) => match e.get_mut() {
-        Route::Live(tx) => tx.subscribe(),
+        Route::Live(txs) => txs.push(tx),
         Route::Buffering(buf) => {
-          let buffered = std::mem::take(buf);
-          let (tx, rx) = broadcast::channel(EVENT_CHANNEL_CAP);
-          for env in buffered {
+          for env in std::mem::take(buf) {
             let _ = tx.send(env);
           }
-          e.insert(Route::Live(tx));
-          rx
+          e.insert(Route::Live(vec![tx]));
         },
       },
       Entry::Vacant(e) => {
-        let (tx, rx) = broadcast::channel(EVENT_CHANNEL_CAP);
-        e.insert(Route::Live(tx));
-        rx
+        e.insert(Route::Live(vec![tx]));
       },
     }
+    rx
   }
 
   /// Reject every pending call. Invoked on transport EOF.
@@ -467,7 +457,7 @@ impl Session {
 
   /// Subscribe to this session's events.
   #[must_use]
-  pub fn events(&self) -> broadcast::Receiver<Envelope> {
+  pub fn events(&self) -> mpsc::UnboundedReceiver<Envelope> {
     self.conn.subscribe(self.route_key())
   }
 
