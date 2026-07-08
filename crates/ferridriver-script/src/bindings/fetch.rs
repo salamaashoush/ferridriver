@@ -35,7 +35,7 @@
 //! tool's `request` wraps, so the `allow.net` allow-list must bind here
 //! too — otherwise a tool restricted to host X could reach anywhere via
 //! the global `fetch`. The per-tool allow-list lives in `NetPolicyUd`
-//! (VM userdata); `plugins::dispatch_tool` brackets each handler poll so
+//! (VM userdata); `extensions::dispatch_tool` brackets each handler poll so
 //! the policy in effect is whichever tool's continuation is running, and
 //! `fetch` snapshots it synchronously at call time (before any I/O).
 
@@ -67,7 +67,7 @@ const FETCH_BODY_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
 /// unrestricted; `Some(list)` means default-deny against `list`.
 ///
 /// One cell per session VM, stored as rquickjs userdata at
-/// [`crate::engine::Session::create`]. `plugins::dispatch_tool` swaps the
+/// [`crate::engine::Session::create`]. `extensions::dispatch_tool` swaps the
 /// active policy in/out around every poll of a tool handler's future so
 /// nested and concurrently-interleaved tool calls each see their own
 /// declared `allow.net` — the swap is synchronous and the `fetch` guard
@@ -135,7 +135,7 @@ pub(crate) fn call_with_net<R>(ctx: &Ctx<'_>, net: Option<&Arc<[String]>>, f: im
 /// otherwise — correct under nesting and concurrent interleaving because
 /// the swap and the synchronous `fetch`/`request` guards both run within
 /// a single poll on the single QuickJS thread. The async analogue of
-/// [`call_with_net`]; `plugins::dispatch_tool` and awaited callback
+/// [`call_with_net`]; `extensions::dispatch_tool` and awaited callback
 /// dispatches share this one implementation.
 pub(crate) async fn bracket_net<F: std::future::Future>(
   cell: Option<NetPolicy>,
@@ -1052,7 +1052,7 @@ pub fn install(ctx: &Ctx<'_>, cx: Arc<HttpClient>) -> rquickjs::Result<()> {
   // Forward into a generic fn so `Ctx`/`Value`/return share one `'js`
   // (an inline closure gives each arg its own lifetime and the returned
   // promise Value cannot be proven to outlive them) — same pattern as
-  // the plugin dispatch closure.
+  // the extension dispatch closure.
   let f = rquickjs::Function::new(ctx.clone(), move |ctx, input, init| {
     do_fetch(ctx, input, init, cx.clone())
   })?;

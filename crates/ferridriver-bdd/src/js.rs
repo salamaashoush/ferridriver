@@ -227,7 +227,7 @@ impl JsBddSession {
       browser_context: None,
       request: None,
       browser: None,
-      plugins: Vec::new(),
+      extensions: Vec::new(),
       host: ferridriver_script::ExtensionHost::Bdd,
       // `[scripting]` caps threaded from resolved config by the
       // `ferridriver bdd` entry (`set_bdd_script_caps`), exactly like

@@ -6,7 +6,7 @@ lives at <https://salamaashoush.github.io/ferridriver/>
 
 ## Living
 
-- [`plugin-architecture.md`](./plugin-architecture.md) — the design notes
+- [`extension-architecture.md`](./extension-architecture.md) — the design notes
   behind the JS / TS extension system: how it compares against VS Code /
   Deno / WASM / Rollup, what we adopted, what we deferred and why.
 - [`extensions.md`](./extensions.md) — the authoring contract for JS / TS

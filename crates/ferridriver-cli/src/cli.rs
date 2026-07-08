@@ -313,8 +313,8 @@ pub struct RunArgs {
   /// Extension file(s), directory(ies), or ESM package specifiers to
   /// load, exposing their `tool` registrations to scripts as `tools.*`.
   /// Repeatable; merged with the `extensions` list from `ferridriver.toml`.
-  #[arg(long = "plugin")]
-  pub plugins: Vec<String>,
+  #[arg(long = "extension")]
+  pub extensions: Vec<String>,
 
   /// Positional args exposed to the script as the `args` global
   /// (strings). Pass after `--`.

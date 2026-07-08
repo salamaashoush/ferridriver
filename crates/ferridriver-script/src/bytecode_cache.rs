@@ -1,7 +1,7 @@
 //! Cross-process disk cache for compiled QuickJS bytecode.
 //!
 //! Compiling a rolldown bundle to bytecode (`bundle_and_compile`) or a
-//! plugin file (`compile_and_extract_plugins`) costs ~15 ms cold per
+//! extension file (`compile_and_extract_extensions`) costs ~15 ms cold per
 //! process. The in-memory cache only helps within one process; a fresh
 //! `ferridriver bdd` / MCP server start pays it again. This persists the
 //! bytecode (plus its source map / manifests) to disk so an unchanged
@@ -39,7 +39,7 @@ pub struct CacheEntry {
   pub bytecode: Vec<u8>,
   /// Source-map JSON (BDD bundle) — `None` when the bundle had no map.
   pub source_map_json: Option<String>,
-  /// Caller-specific sidecar (plugin manifests JSON) — `None` for BDD.
+  /// Caller-specific sidecar (extension manifests JSON) — `None` for BDD.
   pub aux: Option<String>,
 }
 
@@ -133,7 +133,7 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 /// The transitive content check on load is what actually guards freshness;
 /// this only needs to be collision-free across distinct bundle requests.
 ///
-/// `kind` namespaces the consumers: the same file compiled as a plugin
+/// `kind` namespaces the consumers: the same file compiled as a extension
 /// vs. as a BDD steps entry produces different bundles (different cwd,
 /// different aux payload), so they must not share one slot. `salt`
 /// carries extra pipeline state that changes the output without

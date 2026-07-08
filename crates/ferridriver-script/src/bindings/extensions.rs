@@ -1,6 +1,6 @@
-//! Native plugin surface.
+//! Native extension surface.
 //!
-//! A plugin/extension file is rolldown-bundled to `QuickJS` bytecode
+//! A extension/extension file is rolldown-bundled to `QuickJS` bytecode
 //! once at startup. Loading + evaluating that bytecode in a session runs
 //! its top-level `tool(...)` / `defineTool(...)` (and any `Given/When/Then`) calls,
 //! registering directly into the shared Rust `ExtensionRegistry`.
@@ -13,7 +13,7 @@
 //! commands }` with the Object API, applies the handler and returns its
 //! promise — the exact mechanism BDD steps use (`invoke_step`). The
 //! `commands` binding and the `allow.net` host guard are native Rust
-//! (`PluginCommandsJs`, `HttpClientJs::with_net`); the allow-list
+//! (`ExtensionCommandsJs`, `HttpClientJs::with_net`); the allow-list
 //! is checked in Rust before any shell/network I/O.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,22 +32,22 @@ use crate::engine::SessionProcsUd;
 use crate::error::ScriptError;
 use crate::session_procs::{self, SessionProcs};
 
-/// One plugin file handed to the engine at `install_plugins` time:
+/// One extension file handed to the engine at `install_extensions` time:
 /// its precompiled bytecode plus a display name for diagnostics. Tool
 /// names + capabilities are read from the manifest the module
 /// registers, not carried here.
 #[derive(Debug, Clone)]
-pub struct PluginBinding {
+pub struct ExtensionBinding {
   /// Precompiled `QuickJS` bytecode of the rolldown-bundled module,
   /// produced once at startup by
-  /// [`crate::bundle::compile_and_extract_plugins`]. `Module::load`ed
+  /// [`crate::bundle::compile_and_extract_extensions`]. `Module::load`ed
   /// per session — no per-session parse, no source retained.
   pub bytecode: Arc<[u8]>,
   /// Source identity (file path) used only in install-failure logs.
   pub name: String,
 }
 
-/// The `commands` object a plugin handler receives. Holds this tool's
+/// The `commands` object a extension handler receives. Holds this tool's
 /// declared command set (default-deny — a handler cannot reach a name
 /// its manifest did not declare, nor another tool's) plus the session's
 /// durable persistent-process registry.
@@ -58,15 +58,15 @@ pub struct PluginBinding {
 /// - `start(name, vars?)` / `status(name)` / `stop(name)` — persistent:
 ///   manage a long-running process whose lifetime is the session's.
 #[derive(JsLifetime, Trace)]
-#[rquickjs::class(rename = "PluginCommands")]
-pub struct PluginCommandsJs {
+#[rquickjs::class(rename = "ExtensionCommands")]
+pub struct ExtensionCommandsJs {
   #[qjs(skip_trace)]
   allowed: Arc<BTreeMap<String, CommandSpec>>,
   #[qjs(skip_trace)]
   procs: Option<Arc<SessionProcs>>,
 }
 
-impl PluginCommandsJs {
+impl ExtensionCommandsJs {
   pub(crate) fn new(allowed: Arc<BTreeMap<String, CommandSpec>>, procs: Option<Arc<SessionProcs>>) -> Self {
     Self { allowed, procs }
   }
@@ -100,7 +100,7 @@ impl PluginCommandsJs {
 }
 
 #[rquickjs::methods]
-impl PluginCommandsJs {
+impl ExtensionCommandsJs {
   /// One-shot: run to completion and return shaped stdout.
   #[qjs(rename = "run")]
   pub async fn run<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
@@ -152,20 +152,20 @@ impl PluginCommandsJs {
 }
 
 fn rq(e: &ScriptError) -> rquickjs::Error {
-  rquickjs::Error::new_from_js_message("plugins", "Error", e.message.clone())
+  rquickjs::Error::new_from_js_message("extensions", "Error", e.message.clone())
 }
 
-/// Install loaded plugins: load+evaluate each file's bytecode (which
+/// Install loaded extensions: load+evaluate each file's bytecode (which
 /// registers its tools into the shared registry, native or legacy
 /// shape), then expose every registered tool as a native
 /// `tools.<name>` callable.
 ///
-/// Per-file isolation mirrors startup (`load_all`): one plugin whose
+/// Per-file isolation mirrors startup (`load_all`): one extension whose
 /// top-level throws is logged and skipped — it must not take down the
 /// whole session VM (and with it every `run_script` for the session).
-pub async fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Result<()> {
+pub async fn install_extensions(ctx: &Ctx<'_>, files: &[ExtensionBinding]) -> rquickjs::Result<()> {
   for file in files {
-    if let Err(e) = install_one_plugin(ctx, file).await {
+    if let Err(e) = install_one_extension(ctx, file).await {
       let detail = match e {
         rquickjs::Error::Exception => ctx.catch().try_into_exception().map_or_else(
           |v| format!("{v:?}"),
@@ -173,7 +173,7 @@ pub async fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs
         ),
         other => other.to_string(),
       };
-      tracing::warn!(plugin = %file.name, error = %detail, "plugin install failed; skipping file");
+      tracing::warn!(extension = %file.name, error = %detail, "extension install failed; skipping file");
     }
   }
 
@@ -193,14 +193,14 @@ pub async fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs
   Ok(())
 }
 
-/// Load + fully evaluate one plugin module, including its top-level
+/// Load + fully evaluate one extension module, including its top-level
 /// `await` (the extraction pass awaits the eval promise the same way —
 /// `compile_extract_one` — so a tool registered after an async setup
 /// step is visible here too, not only in the manifest).
-async fn install_one_plugin(ctx: &Ctx<'_>, file: &PluginBinding) -> rquickjs::Result<()> {
+async fn install_one_extension(ctx: &Ctx<'_>, file: &ExtensionBinding) -> rquickjs::Result<()> {
   // SAFETY: `file.bytecode` was produced by `Module::write` by this
   // exact rquickjs/QuickJS build with native endianness — either in
-  // this process (`compile_and_extract_plugins`) or restored from the
+  // this process (`compile_and_extract_extensions`) or restored from the
   // bytecode disk cache, whose ABI tag (QuickJS version, arch,
   // endianness, pointer width) plus transitive input hashes guarantee
   // an ABI-identical toolchain wrote it. That satisfies the
@@ -284,7 +284,7 @@ fn is_js_identifier(part: &str) -> bool {
 /// `request`, both Rust-enforced), apply the handler and await its
 /// result. When the manifest declared `timeoutMs`, the handler is raced
 /// against that bound natively (same mechanism `invoke_step` uses) so
-/// every caller — promoted MCP tool, `invoke_plugin`, or another
+/// every caller — promoted MCP tool, `invoke_extension_tool`, or another
 /// extension calling `tools.<name>` — is covered, not just the MCP
 /// entry point. Returns a JS promise; the caller `await`s it. No
 /// synthesized JS.
@@ -298,7 +298,7 @@ fn dispatch_tool<'js>(
 
 /// Shared tool-invocation body behind both entry points: the JS-visible
 /// `tools.<name>` callable ([`dispatch_tool`]) and the host-side native
-/// invoke ([`invoke_tool_by_name`], which backs the MCP `invoke_plugin`
+/// invoke ([`invoke_tool_by_name`], which backs the MCP `invoke_extension_tool`
 /// path without synthesizing a script).
 async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>) -> rquickjs::Result<Value<'js>> {
   let d = tool_dispatch(&ctx, idx).map_err(|e| rq(&e))?;
@@ -341,7 +341,7 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
   arg.set("request", request_out)?;
 
   let procs = ctx.userdata::<SessionProcsUd>().map(|u| u.0.clone());
-  let commands = Class::instance(ctx.clone(), PluginCommandsJs::new(d.allowed_commands, procs))?;
+  let commands = Class::instance(ctx.clone(), ExtensionCommandsJs::new(d.allowed_commands, procs))?;
   arg.set("commands", commands)?;
 
   // The same `allow.net` must also bind the global `fetch` and the
@@ -362,7 +362,7 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
       Some(t) => match tokio::time::timeout(Duration::from_millis(t), fut).await {
         Ok(r) => r,
         Err(_) => Err(rquickjs::Error::new_from_js_message(
-          "plugins",
+          "extensions",
           "Error",
           format!("tool timed out after {t}ms"),
         )),
@@ -374,7 +374,7 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
 }
 
 /// Host-side native invocation of a registered tool by manifest name —
-/// what the MCP server's `invoke_plugin` / promoted-tool routes call.
+/// what the MCP server's `invoke_extension_tool` / promoted-tool routes call.
 /// Skips the script pipeline entirely (no synthesized one-liner, no
 /// compile): the exact `run_tool` body behind `tools.<name>` runs, so
 /// capability wrappers, `timeoutMs`, and the net-policy bracket apply

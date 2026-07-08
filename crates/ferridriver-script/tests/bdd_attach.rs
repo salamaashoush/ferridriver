@@ -38,7 +38,7 @@ async fn this_attach_and_log_reach_drain_attachments() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: Vec::new(),
+    extensions: Vec::new(),
     host: ExtensionHost::Bdd,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -107,7 +107,7 @@ async fn after_hook_receives_cucumber_result_arg() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: Vec::new(),
+    extensions: Vec::new(),
     host: ExtensionHost::Bdd,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -163,7 +163,7 @@ async fn define_parameter_type_transformer_yields_typed_arg() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: Vec::new(),
+    extensions: Vec::new(),
     host: ExtensionHost::Bdd,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -225,7 +225,7 @@ async fn set_definition_function_wrapper_wraps_steps() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: Vec::new(),
+    extensions: Vec::new(),
     host: ExtensionHost::Bdd,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -272,7 +272,7 @@ async fn per_step_timeout_option_is_enforced() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: Vec::new(),
+    extensions: Vec::new(),
     host: ExtensionHost::Bdd,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -310,7 +310,7 @@ async fn world_parameters_are_exposed_as_this_parameters() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: Vec::new(),
+    extensions: Vec::new(),
     host: ExtensionHost::Bdd,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -358,7 +358,7 @@ async fn this_skip_marks_step_skipped() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: Vec::new(),
+    extensions: Vec::new(),
     host: ExtensionHost::Bdd,
     caps: ferridriver_script::ScriptCaps::default(),
   };

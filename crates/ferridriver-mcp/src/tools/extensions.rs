@@ -40,7 +40,7 @@ impl McpServer {
     let include_schema = p.include_schema.unwrap_or(false);
 
     let files: Vec<serde_json::Value> = self
-      .plugins
+      .extensions
       .files()
       .iter()
       .map(|f| {
@@ -71,14 +71,14 @@ impl McpServer {
       .collect();
 
     let errors: Vec<serde_json::Value> = self
-      .plugins
+      .extensions
       .errors()
       .iter()
       .map(|(source, message)| serde_json::json!({ "source": source, "error": message }))
       .collect();
 
     let payload = serde_json::json!({
-      "count": self.plugins.tool_count(),
+      "count": self.extensions.tool_count(),
       "files": files,
       "errors": errors,
     });

@@ -13,7 +13,7 @@ to ferridriver at runtime. One file can contribute to three hosts:
 The same file can serve all three. It branches on the `ferridriver.host`
 global to decide what to contribute where.
 
-> Companion document: `docs/plugin-architecture.md` records *why* the
+> Companion document: `docs/extension-architecture.md` records *why* the
 > system is shaped this way (the comparison against VS Code / Deno / WASM /
 > Rollup and the decisions deferred). This document is the *how*: the
 > authoring contract and reference.
@@ -115,7 +115,7 @@ The handler receives one object:
 | `page`     | `Page` \| undefined   | The live browser page for the session. |
 | `context`  | `BrowserContext` \| undefined | The session's browser context. |
 | `request`  | `HttpClient` \| undefined | HTTP client. Net-restricted if `allow.net` is non-empty. |
-| `commands` | `PluginCommands`      | `.run(name, vars?)` — runs a declared shell template. |
+| `commands` | `ExtensionCommands`   | `.run(name, vars?)` — runs a declared shell template. |
 
 Return any JSON-serialisable value; it becomes the tool result.
 
@@ -338,7 +338,7 @@ The `ferridriver bdd` runner bundles discovered step files **and** the
 configured `extensions` into one module, so an extension's `Given/When/
 Then` are available to tests exactly like a step file's.
 
-Both discovery paths (MCP plugin loader and BDD runner) share one
+Both discovery paths (MCP extension loader and BDD runner) share one
 accepted-extension set and one recursive walk, so a `.tsx`/`.cts`
 extension is visible identically to both hosts.
 
@@ -463,7 +463,7 @@ What you can rely on between calls, when running under the MCP server.
 ### Two ways to keep state
 
 A *session* is identified by the `session` argument (`instance:context`,
-default `"default"`). All `run_script` calls and all plugin tool calls
+default `"default"`). All `run_script` calls and all extension tool calls
 that share a session also share state:
 
 - **`globalThis`** — anything you assign (`globalThis.cache = …`,
@@ -519,15 +519,15 @@ hooks.
 
 ### Imports
 
-No cross-file or cross-plugin shared state beyond what you `import`
+No cross-file or cross-extension shared state beyond what you `import`
 directly. Share helpers by importing them; there is no implicit
-cross-plugin channel by design.
+cross-extension channel by design.
 
 ---
 
 ## Reference
 
-### Manifest (`PluginManifest`)
+### Manifest (`ToolManifest`)
 
 | Field          | Wire (camelCase) | Default | Meaning |
 |----------------|------------------|---------|---------|
@@ -538,7 +538,7 @@ cross-plugin channel by design.
 | expose as tool | `exposeAsTool`   | `false` | Promote to a first-class MCP tool. |
 | timeout ms     | `timeoutMs`      | none    | Per-invocation handler timeout (ms); enforced for every caller. |
 
-### Capability manifest (`PluginAllow`)
+### Capability manifest (`ToolAllow`)
 
 | Field    | Wire        | Default | Meaning |
 |----------|-------------|---------|---------|

@@ -388,7 +388,7 @@ pub fn source_is_es_module(source: &str) -> bool {
   })
 }
 
-/// One plugin file: rolldown-bundled (TypeScript, plugin-local imports,
+/// One extension file: rolldown-bundled (TypeScript, extension-local imports,
 /// tree-shaking) and compiled to `QuickJS` bytecode, with its manifests
 /// extracted straight from the compiled module — no separate throwaway
 /// runtime per file.
@@ -399,34 +399,34 @@ pub fn source_is_es_module(source: &str) -> bool {
 /// `ExtensionRegistry`. `manifests_json` is read straight off that
 /// registry — no JS extraction expression. `index` is the file's
 /// position in the returned (file-order, contiguous over successes) vec.
-pub struct CompiledPlugin {
+pub struct CompiledExtension {
   pub path: PathBuf,
   pub index: usize,
   pub bytecode: Arc<[u8]>,
   /// JSON array (one object per tool, source order, `handler` stripped).
-  /// Deserialises into `Vec<PluginManifest>` on the MCP side without
-  /// ever re-running the plugin.
+  /// Deserialises into `Vec<ToolManifest>` on the MCP side without
+  /// ever re-running the extension.
   pub manifests_json: String,
 }
 
 /// Process-scoped content-hash cache: `hash(canonical path + bytes)` ->
-/// (bytecode, manifests JSON). A plugin file whose content+path is
+/// (bytecode, manifests JSON). A extension file whose content+path is
 /// unchanged skips rolldown + compile entirely on any later
-/// `compile_and_extract_plugins` call (reload, the same file discovered
+/// `compile_and_extract_extensions` call (reload, the same file discovered
 /// under two roots, repeated `box-craft setup`). Bounded by the number
-/// of distinct plugin files a process ever loads (tiny) so no eviction
+/// of distinct extension files a process ever loads (tiny) so no eviction
 /// is needed.
 ///
-/// This is the hot in-process tier; `compile_and_extract_plugins` also
+/// This is the hot in-process tier; `compile_and_extract_extensions` also
 /// consults the cross-process disk tier ([`crate::bytecode_cache`]),
 /// whose ABI tag (QuickJS version, arch, endianness, pointer width) +
 /// transitive input hashes are what keep the `unsafe Module::load`
 /// paths sound for bytecode another process wrote.
-type PluginCache = std::sync::Mutex<rustc_hash::FxHashMap<u64, (Arc<[u8]>, String)>>;
-static PLUGIN_BYTECODE_CACHE: std::sync::OnceLock<PluginCache> = std::sync::OnceLock::new();
+type ExtensionCache = std::sync::Mutex<rustc_hash::FxHashMap<u64, (Arc<[u8]>, String)>>;
+static EXTENSION_BYTECODE_CACHE: std::sync::OnceLock<ExtensionCache> = std::sync::OnceLock::new();
 
-fn plugin_cache() -> &'static PluginCache {
-  PLUGIN_BYTECODE_CACHE.get_or_init(|| std::sync::Mutex::new(rustc_hash::FxHashMap::default()))
+fn extension_cache() -> &'static ExtensionCache {
+  EXTENSION_BYTECODE_CACHE.get_or_init(|| std::sync::Mutex::new(rustc_hash::FxHashMap::default()))
 }
 
 /// Cache key: the file's canonical path (rolldown resolution + relative
@@ -445,7 +445,7 @@ fn cache_key(path: &Path, bytes: &[u8], shims_fp: u64) -> u64 {
   h.finish()
 }
 
-/// Bundle + compile + extract every plugin file. The expensive
+/// Bundle + compile + extract every extension file. The expensive
 /// per-file rolldown bundles run concurrently; bytecode compile +
 /// extraction share ONE throwaway runtime for the whole batch (the
 /// pre-migration path spun one full engine per file for extraction
@@ -454,8 +454,10 @@ fn cache_key(path: &Path, bytes: &[u8], shims_fp: u64) -> u64 {
 ///
 /// Per-file failures (bundle, compile, or extraction) are returned
 /// rather than aborting the batch. Output preserves input file order;
-/// surviving `CompiledPlugin`s carry contiguous `index` values.
-pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlugin>, Vec<(PathBuf, ScriptError)>) {
+/// surviving `CompiledExtension`s carry contiguous `index` values.
+pub async fn compile_and_extract_extensions(
+  files: &[PathBuf],
+) -> (Vec<CompiledExtension>, Vec<(PathBuf, ScriptError)>) {
   // Per original position: a cache hit (bytecode + manifests), or a
   // cache miss we must bundle, or an early failure. A miss carries both
   // the in-memory content key and the disk-cache key so the compile step
@@ -473,8 +475,8 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
     match std::fs::read(path) {
       Ok(b) => {
         let inmem_key = cache_key(path, &b, shims_fp);
-        let cached = plugin_cache().lock().ok().and_then(|c| c.get(&inmem_key).cloned());
-        let disk_key = crate::bytecode_cache::entry_key("plugin", std::slice::from_ref(path), shims_fp);
+        let cached = extension_cache().lock().ok().and_then(|c| c.get(&inmem_key).cloned());
+        let disk_key = crate::bytecode_cache::entry_key("extension", std::slice::from_ref(path), shims_fp);
         match cached {
           // 1. In-memory (same process).
           Some((bc, mj)) => slots.push(Slot::Hit(bc, mj)),
@@ -484,7 +486,7 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
             Some(entry) => {
               let bc: Arc<[u8]> = Arc::from(entry.bytecode.into_boxed_slice());
               let mj = entry.aux.unwrap_or_else(|| "[]".to_string());
-              if let Ok(mut cache) = plugin_cache().lock() {
+              if let Ok(mut cache) = extension_cache().lock() {
                 cache.insert(inmem_key, (bc.clone(), mj.clone()));
               }
               slots.push(Slot::Hit(bc, mj));
@@ -548,7 +550,7 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
       match AsyncContext::full(&r).await {
         Ok(c) => Some((r, c)),
         Err(e) => {
-          let err = ScriptError::internal(format!("plugin bytecode context: {e}"));
+          let err = ScriptError::internal(format!("extension bytecode context: {e}"));
           for s in &mut slots {
             if matches!(s, Slot::Miss { .. }) {
               *s = Slot::Failed(err.clone());
@@ -559,7 +561,7 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
       }
     },
     Err(e) => {
-      let err = ScriptError::internal(format!("plugin bytecode runtime: {e}"));
+      let err = ScriptError::internal(format!("extension bytecode runtime: {e}"));
       for s in &mut slots {
         if matches!(s, Slot::Miss { .. }) {
           *s = Slot::Failed(err.clone());
@@ -576,14 +578,14 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
         continue;
       };
       let Some(code) = bundled_code.get(&i) else { continue };
-      let module_name = format!("ferri_plugin_{i}.js");
+      let module_name = format!("ferri_extension_{i}.js");
       match compile_extract_one(&actx, &module_name, code).await {
         Ok((bc, mj)) => {
           let bc: Arc<[u8]> = Arc::from(bc.into_boxed_slice());
-          if let Ok(mut cache) = plugin_cache().lock() {
+          if let Ok(mut cache) = extension_cache().lock() {
             cache.insert(inmem_key, (bc.clone(), mj.clone()));
           }
-          // Persist for the next process. Inputs = this plugin file plus
+          // Persist for the next process. Inputs = this extension file plus
           // its transitive imports (from the source map), so an edited
           // helper invalidates the entry on the next load.
           let cwd = files[i].parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
@@ -597,11 +599,11 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
     }
   }
 
-  let mut survivors: Vec<CompiledPlugin> = Vec::new();
+  let mut survivors: Vec<CompiledExtension> = Vec::new();
   let mut failures: Vec<(PathBuf, ScriptError)> = Vec::new();
   for (i, slot) in slots.into_iter().enumerate() {
     match slot {
-      Slot::Hit(bytecode, manifests_json) => survivors.push(CompiledPlugin {
+      Slot::Hit(bytecode, manifests_json) => survivors.push(CompiledExtension {
         path: files[i].clone(),
         index: survivors.len(),
         bytecode,
@@ -613,7 +615,7 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
       // arm is unreachable but keeps the match total without a panic.
       Slot::Miss { .. } => failures.push((
         files[i].clone(),
-        ScriptError::internal("plugin compile produced no output".to_string()),
+        ScriptError::internal("extension compile produced no output".to_string()),
       )),
     }
   }
@@ -638,14 +640,14 @@ async fn compile_extract_one(
   actx
     .async_with(async |ctx| {
       // Extraction must evaluate the module in the SAME ambient
-      // environment a session VM provides, or a plugin whose top level
+      // environment a session VM provides, or a extension whose top level
       // uses a standard global (TextEncoder, setTimeout, crypto,
       // console, expect) is rejected at startup while working fine
       // in-session. Everything context-free that `Session::create`
-      // installs before `install_plugins` is installed here too; only
+      // installs before `install_extensions` is installed here too; only
       // session-scoped bindings (fs/vars/artifacts/commands/page/
       // request) are absent — those are per-session by definition and
-      // top-level plugin code must not depend on them. All idempotent —
+      // top-level extension code must not depend on them. All idempotent —
       // the shared extraction context installs once for the whole batch.
       crate::bindings::install_bdd(&ctx)
         .map_err(|e| ScriptError::internal(format!("install extension registry: {e}")))?;
@@ -654,7 +656,7 @@ async fn compile_extract_one(
         .map_err(|e| ScriptError::internal(format!("install runtime shims: {e}")))?;
       crate::bindings::expect::install_expect(&ctx)
         .map_err(|e| ScriptError::internal(format!("install expect: {e}")))?;
-      // Fresh capture per file: whatever the plugin's top level logs is
+      // Fresh capture per file: whatever the extension's top level logs is
       // forwarded to tracing under the module label after eval.
       let console = std::sync::Arc::new(crate::console::ConsoleCapture::new(
         cfg_default.max_console_entries,
@@ -681,7 +683,7 @@ async fn compile_extract_one(
           endianness: WriteOptionsEndianness::Native,
           ..Default::default()
         })
-        .map_err(|e| ScriptError::internal(format!("plugin module write: {e}")))?;
+        .map_err(|e| ScriptError::internal(format!("extension module write: {e}")))?;
 
       let before = crate::bindings::tools_len(&ctx)?;
 
@@ -701,7 +703,7 @@ async fn compile_extract_one(
         .1;
       let evaled = promise.into_future::<()>().await.catch(&ctx);
       for entry in console.drain() {
-        tracing::info!(target: "ferridriver::extensions", plugin = %label, "{}", entry.message);
+        tracing::info!(target: "ferridriver::extensions", extension = %label, "{}", entry.message);
       }
       evaled.map_err(|e| caught_to_script_error(e, &label))?;
 

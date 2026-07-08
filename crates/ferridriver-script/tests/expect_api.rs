@@ -27,7 +27,7 @@ fn make_engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: Vec::new(),
+    extensions: Vec::new(),
     host: ExtensionHost::Script,
     caps: ScriptCaps::default(),
   };

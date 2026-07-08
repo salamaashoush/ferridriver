@@ -1,6 +1,6 @@
 //! Canonical source-file discovery for extensions and BDD step files.
 //!
-//! Both hosts (the MCP server's plugin loader and the BDD runner's
+//! Both hosts (the MCP server's extension loader and the BDD runner's
 //! extension/step discovery) must agree on which file extensions count
 //! as loadable source and must walk directories the same way — otherwise
 //! a `.tsx` extension visible to the test runner is invisible to the MCP

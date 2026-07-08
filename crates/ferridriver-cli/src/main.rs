@@ -20,18 +20,18 @@ use clap::Parser;
 use ferridriver_config::FerridriverConfig;
 use ferridriver_mcp::McpServer;
 
-/// Discover + compile extension files into plugin bindings for the `run`
+/// Discover + compile extension files into extension bindings for the `run`
 /// path. `roots` are files or directories (directories are scanned shallowly
 /// for `.js`/`.mjs`/`.ts`/`.mts`). Discovery / compile failures are logged
 /// and skipped so a single bad extension never aborts the run.
-async fn load_run_plugins(roots: &[String]) -> Vec<ferridriver_script::PluginBinding> {
+async fn load_run_extensions(roots: &[String]) -> Vec<ferridriver_script::ExtensionBinding> {
   if roots.is_empty() {
     return Vec::new();
   }
   let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
   let (mut files, errors) = ferridriver_script::discover::resolve_extension_specs(roots, &cwd);
   for (spec, e) in errors {
-    tracing::warn!(extension = %spec, error = %e.message, "plugin discovery failed; skipping");
+    tracing::warn!(extension = %spec, error = %e.message, "extension discovery failed; skipping");
   }
   if files.is_empty() {
     return Vec::new();
@@ -44,18 +44,18 @@ async fn load_run_plugins(roots: &[String]) -> Vec<ferridriver_script::PluginBin
     .filter_map(|f| match std::fs::canonicalize(&f) {
       Ok(abs) => Some(abs),
       Err(e) => {
-        tracing::warn!(path = %f.display(), error = %e, "plugin path not found; skipping");
+        tracing::warn!(path = %f.display(), error = %e, "extension path not found; skipping");
         None
       },
     })
     .collect();
-  let (compiled, failures) = ferridriver_script::compile_and_extract_plugins(&files).await;
+  let (compiled, failures) = ferridriver_script::compile_and_extract_extensions(&files).await;
   for (path, err) in failures {
-    tracing::warn!(path = %path.display(), error = %err.message, "plugin compile failed; skipping");
+    tracing::warn!(path = %path.display(), error = %err.message, "extension compile failed; skipping");
   }
   compiled
     .into_iter()
-    .map(|cp| ferridriver_script::PluginBinding {
+    .map(|cp| ferridriver_script::ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     })
@@ -375,11 +375,11 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
   );
   let sidecars = sidecar_specs(&file_config);
 
-  // Extensions: config `extensions` plus any `--plugin` specs. Their
+  // Extensions: config `extensions` plus any `--extension` specs. Their
   // `tool` registrations become `tools.*` callables in the script.
-  let mut plugin_roots = file_config.extensions.clone();
-  plugin_roots.extend(args.plugins.iter().cloned());
-  let plugins = load_run_plugins(&plugin_roots).await;
+  let mut extension_roots = file_config.extensions.clone();
+  extension_roots.extend(args.extensions.iter().cloned());
+  let extensions = load_run_extensions(&extension_roots).await;
 
   let ctx = ferridriver_script::RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
@@ -389,7 +389,7 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
     browser_context: None,
     request: None,
     browser: None,
-    plugins,
+    extensions,
     host: ferridriver_script::ExtensionHost::Script,
     caps,
   };

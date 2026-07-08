@@ -1,6 +1,6 @@
-//! Shared registry of loaded plugins.
+//! Shared registry of loaded extensions.
 //!
-//! The registry owns the canonical list of plugin FILES after discovery.
+//! The registry owns the canonical list of extension FILES after discovery.
 //! Each file may declare one or more tools; the registry exposes
 //! tool-level views (lookup by name, iterate promoted tools) and
 //! file-level views (for binding installation, which needs the
@@ -10,14 +10,14 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use super::loader::LoadedPlugin;
-use super::manifest::PluginManifest;
+use super::loader::LoadedExtension;
+use super::manifest::ToolManifest;
 
-/// Read-only collection of loaded plugin files. Cheap to clone -- the
+/// Read-only collection of loaded extension files. Cheap to clone -- the
 /// inner `Vec` is wrapped in `Arc` so all consumers share the same data.
 #[derive(Default, Clone)]
-pub struct PluginRegistry {
-  files: Arc<Vec<LoadedPlugin>>,
+pub struct ExtensionRegistry {
+  files: Arc<Vec<LoadedExtension>>,
   /// Per-file/spec load failures recorded at startup (discovery,
   /// bundle/compile, manifest extraction). Kept so the
   /// `ferridriver_extensions` tool can report what failed to load —
@@ -30,7 +30,7 @@ pub struct PluginRegistry {
   validators: Arc<FxHashMap<String, Result<jsonschema::Validator, String>>>,
 }
 
-impl std::fmt::Debug for PluginRegistry {
+impl std::fmt::Debug for ExtensionRegistry {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     // `jsonschema::Validator` is not `Debug`; render the compile
     // outcome per tool instead of the validator itself.
@@ -39,7 +39,7 @@ impl std::fmt::Debug for PluginRegistry {
       .iter()
       .map(|(name, v)| (name.as_str(), v.as_ref().map(|_| "ok").map_err(String::as_str)))
       .collect();
-    f.debug_struct("PluginRegistry")
+    f.debug_struct("ExtensionRegistry")
       .field("files", &self.files)
       .field("errors", &self.errors)
       .field("validators", &validators)
@@ -47,16 +47,16 @@ impl std::fmt::Debug for PluginRegistry {
   }
 }
 
-impl PluginRegistry {
+impl ExtensionRegistry {
   #[must_use]
-  pub fn new(files: Vec<LoadedPlugin>, errors: Vec<(String, String)>) -> Self {
+  pub fn new(files: Vec<LoadedExtension>, errors: Vec<(String, String)>) -> Self {
     let validators = files
       .iter()
       .flat_map(|f| f.tools.iter())
       .filter_map(|t| {
         let schema = t.input_schema.as_ref()?;
-        let compiled =
-          jsonschema::validator_for(schema).map_err(|e| format!("plugin `{}` has an invalid inputSchema: {e}", t.name));
+        let compiled = jsonschema::validator_for(schema)
+          .map_err(|e| format!("extension `{}` has an invalid inputSchema: {e}", t.name));
         Some((t.name.clone(), compiled))
       })
       .collect();
@@ -82,26 +82,26 @@ impl PluginRegistry {
     self.validators.get(name)
   }
 
-  /// Loaded plugin files, one per discovered source file (any
+  /// Loaded extension files, one per discovered source file (any
   /// bundleable extension: `.js .cjs .mjs .jsx .ts .cts .mts .tsx`).
   #[must_use]
-  pub fn files(&self) -> &[LoadedPlugin] {
+  pub fn files(&self) -> &[LoadedExtension] {
     &self.files
   }
 
   /// Iterator over every tool across every file.
-  pub fn tools(&self) -> impl Iterator<Item = &PluginManifest> {
+  pub fn tools(&self) -> impl Iterator<Item = &ToolManifest> {
     self.files.iter().flat_map(|f| f.tools.iter())
   }
 
   /// Find a tool by manifest name (linear scan; tool counts are small).
   #[must_use]
-  pub fn get_tool(&self, name: &str) -> Option<&PluginManifest> {
+  pub fn get_tool(&self, name: &str) -> Option<&ToolManifest> {
     self.tools().find(|t| t.name == name)
   }
 
   /// Iterator over tools that opted into top-level MCP tool exposure.
-  pub fn promoted_tools(&self) -> impl Iterator<Item = &PluginManifest> {
+  pub fn promoted_tools(&self) -> impl Iterator<Item = &ToolManifest> {
     self.tools().filter(|t| t.is_tool())
   }
 

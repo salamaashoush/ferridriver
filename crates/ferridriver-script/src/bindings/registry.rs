@@ -4,7 +4,7 @@
 //! and the MCP-host read-back/dispatch views. Cucumber's contribution
 //! surface (`Given`/`When`/`Then`/hooks/param types) lives in
 //! [`super::bdd`]; the `tools.<name>` dispatch surface lives in
-//! [`super::plugins`]. Both operate on the registry defined here.
+//! [`super::extensions`]. Both operate on the registry defined here.
 
 use std::cell::RefCell;
 
@@ -18,7 +18,7 @@ use super::bdd::StepKind;
 
 /// One MCP tool contribution. The handler is kept as a `Persistent`
 /// function and called back natively by the `tools.<name>` dispatch in
-/// `plugins.rs` — exactly the mechanism BDD steps use, no synthesized
+/// `extensions.rs` — exactly the mechanism BDD steps use, no synthesized
 /// JS dispatch.
 pub(crate) struct ToolReg {
   pub(crate) name: String,
@@ -31,7 +31,7 @@ pub(crate) struct ToolReg {
   pub(crate) allowed_net: std::sync::Arc<[String]>,
   /// Per-tool handler timeout (ms) from the manifest `timeoutMs`. `None`
   /// ⇒ no independent bound (the session wall-clock still applies).
-  /// Enforced natively in `plugins::dispatch_tool`.
+  /// Enforced natively in `extensions::dispatch_tool`.
   pub(crate) timeout_ms: Option<u64>,
   pub(crate) handler: Persistent<Function<'static>>,
 }
@@ -52,7 +52,7 @@ pub struct ScriptAttachment {
 /// here while the user's bundled module evaluates. Hosts read back the
 /// kinds they care about (`collect_registry` for BDD, [`tools_snapshot`]
 /// for MCP) and dispatch handlers natively ([`invoke_step`], the
-/// `tools.<name>` dispatch in `plugins.rs`). No `globalThis.__*`, no
+/// `tools.<name>` dispatch in `extensions.rs`). No `globalThis.__*`, no
 /// synthesized JS.
 #[derive(Default)]
 pub(crate) struct ExtensionRegistry {
@@ -229,7 +229,7 @@ fn register_tool_args(args: &[Value<'_>]) -> rquickjs::Result<()> {
 }
 
 /// Capability allow-list snapshot. Serialises to the exact JSON the MCP
-/// `PluginAllow` deserialises (`commands` + `net`, camelCase) so the
+/// `ToolAllow` deserialises (`commands` + `net`, camelCase) so the
 /// loader needs no JS round-trip to recover manifests.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CollectedAllow {
@@ -238,8 +238,8 @@ pub struct CollectedAllow {
 }
 
 /// One registered tool's manifest, read straight off the Rust registry.
-/// Field layout + `camelCase` match MCP `PluginManifest` so a
-/// `serde_json` round-trip reconstructs it without re-running the plugin.
+/// Field layout + `camelCase` match MCP `ToolManifest` so a
+/// `serde_json` round-trip reconstructs it without re-running the extension.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CollectedTool {
@@ -291,7 +291,7 @@ pub fn tool_names(ctx: &Ctx<'_>) -> Result<Vec<String>, ScriptError> {
 
 /// A tool's restored handler + its capability allow-lists, looked up by
 /// registration index. Used by the native `tools.<name>` dispatch in
-/// `plugins.rs` — the analogue of `invoke_step`'s registry lookup.
+/// `extensions.rs` — the analogue of `invoke_step`'s registry lookup.
 pub(crate) struct ToolDispatch<'js> {
   pub handler: Function<'js>,
   pub allowed_commands: std::sync::Arc<std::collections::BTreeMap<String, crate::command_spec::CommandSpec>>,

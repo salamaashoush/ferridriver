@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, PluginBinding, RunContext, RunOptions, ScriptEngineConfig, ScriptErrorKind,
-  Session, compile_and_extract_plugins,
+  ExtensionBinding, InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, ScriptErrorKind,
+  Session, compile_and_extract_extensions,
 };
 
 /// A one-tool plugin whose handler bumps a `globalThis` counter so a
@@ -20,18 +20,18 @@ const BOX_PLUGIN: &str =
   "defineTool({ name: 'box.login', handler: async ({ args }) => ({ ok: true, user: args.user }) });";
 
 /// Bundle + compile the demo plugin through the production pipeline
-/// (rolldown -> bytecode) and wrap it as a `PluginBinding`.
-async fn demo_binding() -> (tempfile::TempDir, PluginBinding) {
+/// (rolldown -> bytecode) and wrap it as a `ExtensionBinding`.
+async fn demo_binding() -> (tempfile::TempDir, ExtensionBinding) {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("demo.js");
   std::fs::write(&path, DEMO_PLUGIN).expect("write plugin");
-  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
   assert!(!cp.bytecode.is_empty(), "compiled bytecode must be non-empty");
   (
     tmp,
-    PluginBinding {
+    ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     },
@@ -50,7 +50,7 @@ async fn run_demo_plugin_twice() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![binding],
+    extensions: vec![binding],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -92,7 +92,7 @@ async fn dotted_tool_names_are_projected_as_namespaces() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("box.js");
   std::fs::write(&path, BOX_PLUGIN).expect("write plugin");
-  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -105,7 +105,7 @@ async fn dotted_tool_names_are_projected_as_namespaces() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![PluginBinding {
+    extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     }],
@@ -164,7 +164,7 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
   )
   .expect("write plugin");
 
-  let (compiled, failures) = compile_and_extract_plugins(&[tmp.path().join("plug.ts")]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[tmp.path().join("plug.ts")]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -177,7 +177,7 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![PluginBinding {
+    extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     }],
@@ -208,7 +208,7 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("net.js");
   std::fs::write(&path, NET_PLUGIN).expect("write plugin");
-  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -224,7 +224,7 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
     browser_context: None,
     request: Some(request),
     browser: None,
-    plugins: vec![PluginBinding {
+    extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     }],
@@ -289,7 +289,7 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("netf.js");
   std::fs::write(&path, NET_PLUGIN).expect("write plugin");
-  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -305,7 +305,7 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
     browser_context: None,
     request: Some(request),
     browser: None,
-    plugins: vec![PluginBinding {
+    extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     }],
@@ -372,7 +372,7 @@ async fn fetch_net_policy_does_not_leak_between_concurrent_tools() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("leak.js");
   std::fs::write(&path, PLUGIN).expect("write plugin");
-  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -387,7 +387,7 @@ async fn fetch_net_policy_does_not_leak_between_concurrent_tools() {
       ferridriver::http_client::HttpClientOptions::default(),
     ))),
     browser: None,
-    plugins: vec![PluginBinding {
+    extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     }],
@@ -439,7 +439,7 @@ async fn extension_branches_on_ferridriver_host_flag() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("ext.js");
   std::fs::write(&path, EXT).expect("write ext");
-  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled");
 
@@ -453,7 +453,7 @@ async fn extension_branches_on_ferridriver_host_flag() {
       browser_context: None,
       request: None,
       browser: None,
-      plugins: vec![PluginBinding {
+      extensions: vec![ExtensionBinding {
         bytecode: cp.bytecode.clone(),
         name: cp.path.display().to_string(),
       }],
@@ -509,7 +509,7 @@ fn make_ctx() -> (tempfile::TempDir, RunContext) {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: Vec::new(),
+    extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -896,18 +896,18 @@ async fn native_url_class_parses_and_exposes_search_params() {
   }
 }
 
-async fn binding_from(src: &str) -> (tempfile::TempDir, Result<PluginBinding, String>) {
+async fn binding_from(src: &str) -> (tempfile::TempDir, Result<ExtensionBinding, String>) {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("ext.ts");
   std::fs::write(&path, src).expect("write plugin");
-  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   if let Some((_, e)) = failures.into_iter().next() {
     return (tmp, Err(e.message));
   }
   let cp = compiled.into_iter().next().expect("one compiled plugin");
   (
     tmp,
-    Ok(PluginBinding {
+    Ok(ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     }),
@@ -957,7 +957,7 @@ async fn per_tool_timeout_ms_is_enforced_for_every_caller() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![binding],
+    extensions: vec![binding],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -995,7 +995,7 @@ async fn per_tool_timeout_ms_is_enforced_for_every_caller() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn plugin_top_level_await_registers_tools_in_session() {
-  // `install_plugins` must drive the module's eval promise to
+  // `install_extensions` must drive the module's eval promise to
   // completion: a tool registered after a top-level `await` is in the
   // extracted manifest (extraction awaits), so the session binding must
   // exist too — otherwise the manifest advertises a tool the VM lacks.
@@ -1007,7 +1007,7 @@ async fn plugin_top_level_await_registers_tools_in_session() {
      defineTool({ name: 'late', handler: async () => v });\n",
   )
   .expect("write plugin");
-  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -1020,7 +1020,7 @@ async fn plugin_top_level_await_registers_tools_in_session() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![PluginBinding {
+    extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     }],
@@ -1055,16 +1055,16 @@ async fn broken_plugin_is_skipped_without_killing_the_session() {
   .expect("write bad plugin");
   let good = tmp.path().join("good.js");
   std::fs::write(&good, "defineTool({ name: 'good', handler: async () => 'fine' });\n").expect("write good plugin");
-  let (compiled, failures) = compile_and_extract_plugins(&[bad, good]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[bad, good]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
-  let plugins: Vec<PluginBinding> = compiled
+  let extensions: Vec<ExtensionBinding> = compiled
     .into_iter()
-    .map(|cp| PluginBinding {
+    .map(|cp| ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     })
     .collect();
-  assert_eq!(plugins.len(), 2);
+  assert_eq!(extensions.len(), 2);
 
   let sb_tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
@@ -1075,7 +1075,7 @@ async fn broken_plugin_is_skipped_without_killing_the_session() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins,
+    extensions,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -1225,7 +1225,7 @@ async fn allow_net_capability_binds_the_global_request_binding() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("netg.js");
   std::fs::write(&path, NET_PLUGIN).expect("write plugin");
-  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -1240,7 +1240,7 @@ async fn allow_net_capability_binds_the_global_request_binding() {
       ferridriver::http_client::HttpClientOptions::default(),
     ))),
     browser: None,
-    plugins: vec![PluginBinding {
+    extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     }],
@@ -1324,7 +1324,7 @@ async fn allow_net_follows_timer_callbacks_registered_by_a_restricted_tool() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("nett.js");
   std::fs::write(&path, NET_PLUGIN).expect("write plugin");
-  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -1339,7 +1339,7 @@ async fn allow_net_follows_timer_callbacks_registered_by_a_restricted_tool() {
       ferridriver::http_client::HttpClientOptions::default(),
     ))),
     browser: None,
-    plugins: vec![PluginBinding {
+    extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     }],
@@ -1409,7 +1409,7 @@ async fn extraction_environment_matches_session_for_top_level_globals() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("ambient.js");
   std::fs::write(&path, EXT).expect("write plugin");
-  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(
     failures.is_empty(),
     "top-level standard globals must not fail extraction: {failures:?}"
@@ -1430,7 +1430,7 @@ async fn extraction_environment_matches_session_for_top_level_globals() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![PluginBinding {
+    extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     }],
@@ -1453,7 +1453,7 @@ async fn extraction_environment_matches_session_for_top_level_globals() {
 }
 
 /// `Session::execute_tool` — the native path behind the MCP
-/// `invoke_plugin` / promoted-tool routes — must dispatch through the
+/// `invoke_extension_tool` / promoted-tool routes — must dispatch through the
 /// same registry body as `tools.<name>` (args delivered, value
 /// returned) without compiling a synthesized script, and must name the
 /// tool in the error when it is not installed in this session.
@@ -1469,7 +1469,7 @@ async fn execute_tool_invokes_natively_and_reports_missing_tools() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![binding],
+    extensions: vec![binding],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
@@ -1536,7 +1536,7 @@ async fn execute_tool_propagates_handler_failures_and_timeouts() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![binding],
+    extensions: vec![binding],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };
