@@ -65,19 +65,28 @@ fn ensure_ws_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<WsPumpMsg> {
       // The handler body is typically `(m) => ws.send(...)`, whose `send`
       // is an async method returning a promise; the pump awaits that
       // promise so sends dispatch in order and never linger as orphaned
-      // futures.
-      let ret: rquickjs::Result<Value<'_>> = match ev {
-        WsPumpEvent::Message(msg) => match ws_message_to_js(&pump_ctx, msg) {
-          Ok(arg) => f.call((arg,)),
-          Err(_) => continue,
-        },
-        WsPumpEvent::Close(code, reason) => f.call((code, reason)),
-      };
-      if let Ok(v) = ret {
-        if let Some(promise) = v.as_promise() {
-          let _ = promise.clone().into_future::<Value<'_>>().await;
+      // futures. The whole call + await runs under the callback's
+      // registration-time net policy.
+      let fut = async {
+        let ret: rquickjs::Result<Value<'_>> = match ev {
+          WsPumpEvent::Message(msg) => match ws_message_to_js(&pump_ctx, msg) {
+            Ok(arg) => f.call((arg,)),
+            Err(_) => return,
+          },
+          WsPumpEvent::Close(code, reason) => f.call((code, reason)),
+        };
+        if let Ok(v) = ret {
+          if let Some(promise) = v.as_promise() {
+            let _ = promise.clone().into_future::<Value<'_>>().await;
+          }
         }
-      }
+      };
+      crate::bindings::fetch::bracket_net(
+        crate::bindings::fetch::policy_cell(&pump_ctx),
+        saved.net().cloned(),
+        fut,
+      )
+      .await;
     }
   });
   let _ = ctx.store_userdata(WsEventPumpUd(tx.clone()));
@@ -108,13 +117,21 @@ pub(crate) fn build_ws_route_handler(
         if let Some(saved) = with_page_callbacks(&ctx, |r| r.get_ws_callback(handler_id))? {
           let f = saved.restore(&ctx)?;
           let route_class = Class::instance(ctx.clone(), WebSocketRouteJs::new(route, owner))?;
-          let ret: Value<'_> = f.call((route_class,))?;
-          // Await an async route handler so `connectToServer()` /
-          // `onMessage` set up inside it are observed before `after_handle`
-          // (mirrors Playwright awaiting the route handler).
-          if let Some(promise) = ret.as_promise() {
-            promise.clone().into_future::<Value<'_>>().await?;
-          }
+          crate::bindings::fetch::bracket_net(
+            crate::bindings::fetch::policy_cell(&ctx),
+            saved.net().cloned(),
+            async {
+              let ret: Value<'_> = f.call((route_class,))?;
+              // Await an async route handler so `connectToServer()` /
+              // `onMessage` set up inside it are observed before
+              // `after_handle` (mirrors Playwright awaiting the handler).
+              if let Some(promise) = ret.as_promise() {
+                promise.clone().into_future::<Value<'_>>().await?;
+              }
+              rquickjs::Result::Ok(())
+            },
+          )
+          .await?;
         }
         Ok(())
       })
@@ -167,7 +184,7 @@ fn make_msg_cb<'js>(
   owner: RouteOwner,
 ) -> rquickjs::Result<Arc<dyn Fn(WsMessage) + Send + Sync>> {
   let id = with_page_callbacks(ctx, PageCallbacks::next_route_id)?;
-  let saved = rquickjs::Persistent::save(ctx, cb);
+  let saved = crate::bindings::page::callbacks::SavedCallback::save(ctx, cb);
   with_page_callbacks(ctx, |r| r.insert_ws_callback(id, owner, saved))?;
   let tx = ensure_ws_pump(ctx);
   Ok(Arc::new(move |msg: WsMessage| {
@@ -183,7 +200,7 @@ type WsCloseCallback = Arc<dyn Fn(Option<u32>, Option<String>) + Send + Sync>;
 /// Playwright's two-argument `onClose` handler).
 fn make_close_cb<'js>(ctx: &Ctx<'js>, cb: Function<'js>, owner: RouteOwner) -> rquickjs::Result<WsCloseCallback> {
   let id = with_page_callbacks(ctx, PageCallbacks::next_route_id)?;
-  let saved = rquickjs::Persistent::save(ctx, cb);
+  let saved = crate::bindings::page::callbacks::SavedCallback::save(ctx, cb);
   with_page_callbacks(ctx, |r| r.insert_ws_callback(id, owner, saved))?;
   let tx = ensure_ws_pump(ctx);
   Ok(Arc::new(move |code: Option<u32>, reason: Option<String>| {

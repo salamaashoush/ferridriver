@@ -215,16 +215,24 @@ await commands.stop("dev");           // SIGKILLs the process group
 
 ### `allow.net`
 
-A host allow-list scoping the handler's HTTP — both the `request` client
-and the global `fetch` (they share one core, so the list binds both).
+A host allow-list scoping the handler's HTTP — the `request` client
+(both the handler's `request` arg and the global `request`) and the
+global `fetch` share one core, so the list binds all of them.
 
 - Empty / absent: HTTP is unrestricted (back-compat default).
-- Non-empty: the tool's `request` binding and `fetch` both flip to
-  **default-deny**. Each entry is an exact host (`api.box.com`) or a
-  leading-wildcard suffix (`*.box.com`, which also matches the bare apex
-  `box.com`). Any other host throws before the request is made. The
-  policy follows the running handler: a tool calling another tool, or
-  two tools running concurrently, each see only their own declared list.
+- Non-empty: the tool's HTTP entry points all flip to **default-deny**.
+  Each entry is an exact host (`api.box.com`) or a leading-wildcard
+  suffix (`*.box.com`, which also matches the bare apex `box.com`). Any
+  other host is rejected before the request is made. The policy follows
+  the running handler: a tool calling another tool, or two tools running
+  concurrently, each see only their own declared list.
+- Capability follows the registrar: a callback the handler schedules —
+  `setTimeout`/`setInterval`/`setImmediate`, `page.on` listeners,
+  `page.route`/`context.route` handlers, `exposeFunction`/
+  `exposeBinding` callbacks, WebSocket route handlers, screencast
+  frames — keeps the scheduling tool's `allow.net` when it later fires,
+  instead of falling back to the unrestricted resting policy. Callbacks
+  registered at top level (outside any tool) stay unrestricted.
 
 `allow.net` scopes HTTP (`request` + `fetch`) **only**. `page`/`context`
 browser navigation is a separate, deliberately ungated authority — an

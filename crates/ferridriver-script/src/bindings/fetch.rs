@@ -109,6 +109,54 @@ pub(crate) fn active_net(ctx: &Ctx<'_>) -> Option<Arc<[String]>> {
   ctx.userdata::<NetPolicyUd>().and_then(|u| u.0.current())
 }
 
+/// The session's policy cell, if the VM has one installed.
+pub(crate) fn policy_cell(ctx: &Ctx<'_>) -> Option<NetPolicy> {
+  ctx.userdata::<NetPolicyUd>().map(|u| u.0.clone())
+}
+
+/// Run `f` with `net` installed as the active allow-list, restoring the
+/// caller's policy after. For synchronous callback invocations (timers,
+/// event listeners, route handlers): a callback registered by a
+/// net-restricted tool keeps that tool's grant when it later fires from
+/// a pump or job, instead of falling back to the unrestricted resting
+/// state.
+pub(crate) fn call_with_net<R>(ctx: &Ctx<'_>, net: Option<&Arc<[String]>>, f: impl FnOnce() -> R) -> R {
+  let Some(cell) = policy_cell(ctx) else {
+    return f();
+  };
+  let prev = cell.swap(net.cloned());
+  let r = f();
+  cell.swap(prev);
+  r
+}
+
+/// Poll-bracket `fut` with `net` active: the cell holds `net` whenever
+/// `fut`'s continuation runs and is restored to the caller's value
+/// otherwise — correct under nesting and concurrent interleaving because
+/// the swap and the synchronous `fetch`/`request` guards both run within
+/// a single poll on the single QuickJS thread. The async analogue of
+/// [`call_with_net`]; `plugins::dispatch_tool` and awaited callback
+/// dispatches share this one implementation.
+pub(crate) async fn bracket_net<F: std::future::Future>(
+  cell: Option<NetPolicy>,
+  net: Option<Arc<[String]>>,
+  fut: F,
+) -> F::Output {
+  match cell {
+    None => fut.await,
+    Some(cell) => {
+      let mut fut = std::pin::pin!(fut);
+      std::future::poll_fn(move |cx| {
+        let prev = cell.swap(net.clone());
+        let r = fut.as_mut().poll(cx);
+        cell.swap(prev);
+        r
+      })
+      .await
+    },
+  }
+}
+
 /// WHATWG `Headers` (spec subset, no external deps): names are
 /// lowercased and RFC7230-validated, values are HTTP-whitespace
 /// normalized and validated, `append` combines same-name values with

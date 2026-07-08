@@ -17,7 +17,6 @@
 //! is checked in Rust before any shell/network I/O.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -338,18 +337,14 @@ fn dispatch_tool<'js>(
     let commands = Class::instance(ctx.clone(), PluginCommandsJs::new(Arc::new(d.allowed_commands), procs))?;
     arg.set("commands", commands)?;
 
-    // The same `allow.net` must also bind the global `fetch` (a facade
-    // over the same core). `fetch` reads the active policy from VM
-    // userdata; bracket every poll of THIS handler's future so the cell
-    // holds this tool's list whenever its continuation runs and is
-    // restored to the caller's value otherwise — correct under nesting
-    // (a tool calling `tools.other`) and concurrent interleaving
-    // (`Promise.all([tools.a(), tools.b()])`) because the swap and
-    // the synchronous `fetch` guard both run within a single poll on the
-    // single QuickJS thread.
-    let policy_cell = ctx
-      .userdata::<crate::bindings::fetch::NetPolicyUd>()
-      .map(|u| u.0.clone());
+    // The same `allow.net` must also bind the global `fetch` and the
+    // global `request` (facades over the same core). Both read the
+    // active policy from VM userdata; `bracket_net` swaps the cell
+    // around every poll of THIS handler's future so the list in effect
+    // is whichever tool's continuation is running — correct under
+    // nesting (a tool calling `tools.other`) and concurrent
+    // interleaving (`Promise.all([tools.a(), tools.b()])`).
+    let policy_cell = crate::bindings::fetch::policy_cell(&ctx);
 
     let handler = d.handler;
     let timeout_ms = d.timeout_ms;
@@ -368,19 +363,6 @@ fn dispatch_tool<'js>(
         None => fut.await,
       }
     };
-
-    match policy_cell {
-      None => inner.await,
-      Some(cell) => {
-        let mut inner = std::pin::pin!(inner);
-        std::future::poll_fn(move |cx2| {
-          let prev = cell.swap(net_policy.clone());
-          let r = inner.as_mut().poll(cx2);
-          cell.swap(prev);
-          r
-        })
-        .await
-      },
-    }
+    crate::bindings::fetch::bracket_net(policy_cell, net_policy, inner).await
   })
 }

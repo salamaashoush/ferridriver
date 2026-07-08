@@ -103,7 +103,7 @@ impl PageJs {
     listener: rquickjs::Function<'js>,
     once: bool,
   ) -> rquickjs::Result<f64> {
-    let saved = rquickjs::Persistent::save(ctx, listener);
+    let saved = SavedCallback::save(ctx, listener);
     let tx = ensure_event_pump(ctx);
     // Core assigns the `ListenerId` only after registration, but the
     // dispatch closure needs it to look the JS callback back up. Share it
@@ -1278,7 +1278,7 @@ impl PageJs {
       )
     })?;
     let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
-    let saved_handler = rquickjs::Persistent::save(&ctx, handler);
+    let saved_handler = SavedCallback::save(&ctx, handler);
 
     // A JS predicate is `!Send` and core matches on the CDP recv task,
     // so it can't ride `UrlMatcher::Predicate`. Register an always-true
@@ -1287,7 +1287,7 @@ impl PageJs {
     // dispatch bridge and continue the request unmodified on falsy.
     let has_predicate = url.as_function().is_some();
     let (matcher, saved_pred, registry_matcher) = if let Some(pred) = url.as_function() {
-      let saved_pred = rquickjs::Persistent::save(&ctx, pred.clone());
+      let saved_pred = SavedCallback::save(&ctx, pred.clone());
       let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
       (m.clone(), Some(saved_pred), Some(m))
     } else {
@@ -1319,21 +1319,26 @@ impl PageJs {
         use rquickjs::class::Class;
         let _: Result<rquickjs::Result<()>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
           if has_predicate {
-            let pred = with_page_callbacks(&ctx, |r| r.get_route_pred(id))?
-              .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route predicate gone".to_string()))?
-              .restore(&ctx)?;
+            let saved_pred = with_page_callbacks(&ctx, |r| r.get_route_pred(id))?
+              .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route predicate gone".to_string()))?;
+            let pred = saved_pred.restore(&ctx)?;
             let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
             let url_obj: rquickjs::Value<'_> = url_ctor.construct((route.request().url.clone(),))?;
-            if !call_predicate_truthy(&pred, url_obj, &ctx).await? {
+            let truthy = crate::bindings::fetch::bracket_net(
+              crate::bindings::fetch::policy_cell(&ctx),
+              saved_pred.net().cloned(),
+              call_predicate_truthy(&pred, url_obj, &ctx),
+            )
+            .await?;
+            if !truthy {
               route.continue_route(ferridriver::route::ContinueOverrides::default());
               return Ok(());
             }
           }
           let f = with_page_callbacks(&ctx, |r| r.get_route_handler(id))?
-            .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route handler gone".to_string()))?
-            .restore(&ctx)?;
+            .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route handler gone".to_string()))?;
           let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
-          let _: rquickjs::Value<'_> = f.call((route_class,))?;
+          let _: rquickjs::Value<'_> = f.call_bracketed(&ctx, (route_class,))?;
           Ok(())
         })
         .await;
@@ -1372,7 +1377,7 @@ impl PageJs {
     let matcher = url_value_to_matcher(&ctx, url)?;
     let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
     let owner = RouteOwner::Page(self.inner.backend_page_id());
-    let saved = rquickjs::Persistent::save(&ctx, handler);
+    let saved = SavedCallback::save(&ctx, handler);
     with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, owner.clone(), saved))?;
 
     let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id, owner);
@@ -1935,7 +1940,7 @@ impl PageJs {
     // by binding name — cross-task dispatch (the Rust `ExposedFn` runs
     // outside the QuickJS context) restores it by name inside a VM-loop
     // job.
-    let saved = rquickjs::Persistent::save(&ctx, callback);
+    let saved = SavedCallback::save(&ctx, callback);
     let page_key = self.inner.backend_page_id();
     with_page_callbacks(&ctx, |r| {
       r.exposed.insert(name.clone(), saved);
@@ -1960,15 +1965,15 @@ impl PageJs {
         Box::pin(async move {
           let out: Result<rquickjs::Result<serde_json::Value>, crate::error::ScriptError> =
             crate::vm_with!(vm => |ctx| {
-              let f = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?
+              let saved = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?
                 .ok_or_else(|| {
                   rquickjs::Error::new_from_js_message(
                     "page.exposeFunction",
                     "Error",
                     "exposed callback gone".to_string(),
                   )
-                })?
-                .restore(&ctx)?;
+                })?;
+              let f = saved.restore(&ctx)?;
               // Playwright spreads the page-side call arguments into the
               // callback: `window.fn(a, b)` -> `callback(a, b)` (see
               // playwright-core client/page.ts `(...args) => callback(...args)`).
@@ -1982,8 +1987,15 @@ impl PageJs {
                 // walker keeps numbers as JS numbers.
                 call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;
               }
-              let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
-              let res = mp.into_future::<rquickjs::Value<'_>>().await?;
+              let res = crate::bindings::fetch::bracket_net(
+                crate::bindings::fetch::policy_cell(&ctx),
+                saved.net().cloned(),
+                async {
+                  let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
+                  mp.into_future::<rquickjs::Value<'_>>().await
+                },
+              )
+              .await?;
               // Round-trip through QuickJS `JSON.stringify` + serde_json's
               // own parser — AP-safe both ways (a non-serde_json
               // deserializer mis-handles numbers under
@@ -2026,7 +2038,7 @@ impl PageJs {
     max_height: u32,
     callback: rquickjs::Function<'js>,
   ) -> rquickjs::Result<()> {
-    let saved = rquickjs::Persistent::save(&ctx, callback);
+    let saved = SavedCallback::save(&ctx, callback);
     with_page_callbacks(&ctx, |r| r.screencast = Some(saved))?;
     // `start_screencast` returns `(rx, shutdown_tx)`. The QuickJS
     // binding doesn't expose a stop hook here; the shutdown signal is
@@ -2054,7 +2066,8 @@ impl PageJs {
           let buf = rquickjs::TypedArray::<u8>::new(pump_ctx.clone(), bytes)?;
           payload.set("frame", buf)?;
           payload.set("timestamp", ts)?;
-          let _: rquickjs::Value<'_> = f.call((payload,))?;
+          let _: rquickjs::Value<'_> =
+            crate::bindings::fetch::call_with_net(&pump_ctx, saved.net(), || f.call((payload,)))?;
           Ok(())
         };
         // A throwing callback is swallowed so one bad frame handler

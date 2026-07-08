@@ -541,9 +541,25 @@ impl Session {
       crate::bindings::runtime::install_host(&ctx, host.as_str())
         .map_err(|e| ScriptError::internal(format!("install ferridriver.host: {e}")))?;
 
-      crate::bindings::install_plugins(&ctx, &plugins)
+      // Plugin top-level code runs during `install_plugins`, before any
+      // `execute` installs its per-call capture — give it a console that
+      // forwards to tracing so `console.log` at module scope works (the
+      // extraction pass provides the same; see `compile_extract_one`).
+      let install_console_capture = Arc::new(ConsoleCapture::new(
+        DEFAULT_MAX_CONSOLE_ENTRIES,
+        DEFAULT_MAX_CONSOLE_BYTES,
+        DEFAULT_MAX_CONSOLE_ENTRY_BYTES,
+      ));
+      install_console(&ctx, install_console_capture.clone())
+        .map_err(|e| ScriptError::internal(format!("failed to install console: {e}")))?;
+
+      let installed = crate::bindings::install_plugins(&ctx, &plugins)
         .await
-        .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")))
+        .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")));
+      for entry in install_console_capture.drain() {
+        tracing::info!(target: "ferridriver::extensions", "{}", entry.message);
+      }
+      installed
     })
     .await;
     install??;
@@ -1186,7 +1202,7 @@ fn format_console_printf(out: &mut String, fmt: &str, args: &[Value<'_>], max_de
   Ok(consumed + 1)
 }
 
-fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs::Result<()> {
+pub(crate) fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs::Result<()> {
   use std::fmt::Write as _;
 
   use rquickjs::function::Rest;
@@ -1245,7 +1261,7 @@ fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs::Res
 /// task `ctx.spawn`ed by the timers module, so no per-call teardown is
 /// needed. Sandbox-safe surface only — `os` / `sqlite` are deliberately
 /// excluded so scripts cannot escape the filesystem/db sandbox.
-fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+pub(crate) fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   // Native timers (setTimeout/Interval, ctx.spawn-backed) and the
   // URLSearchParams class.
   crate::bindings::timers::install(ctx)?;

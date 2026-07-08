@@ -9,6 +9,50 @@ use ferridriver::Page;
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// A persisted JS callback plus the `allow.net` policy that was active
+/// when it was registered. Every callback dispatched outside its
+/// registrar's own poll (event pump, route/exposeFunction jobs,
+/// screencast frames) is invoked under the registrar's grant —
+/// capability follows the code that installed the callback, instead of
+/// falling back to the unrestricted resting policy.
+#[derive(Clone)]
+pub(crate) struct SavedCallback {
+  fun: rquickjs::Persistent<rquickjs::Function<'static>>,
+  net: Option<Arc<[String]>>,
+}
+
+impl SavedCallback {
+  /// Persist `f` and capture the caller's active net policy.
+  pub(crate) fn save<'js>(ctx: &rquickjs::Ctx<'js>, f: rquickjs::Function<'js>) -> Self {
+    Self {
+      fun: rquickjs::Persistent::save(ctx, f),
+      net: crate::bindings::fetch::active_net(ctx),
+    }
+  }
+
+  /// Restore the bare function (identity comparisons, direct calls that
+  /// bracket separately).
+  pub(crate) fn restore<'js>(&self, ctx: &rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Function<'js>> {
+    self.fun.clone().restore(ctx)
+  }
+
+  /// The net policy captured at registration.
+  pub(crate) fn net(&self) -> Option<&Arc<[String]>> {
+    self.net.as_ref()
+  }
+
+  /// Restore and synchronously invoke with the registration-time policy
+  /// installed for the duration of the call.
+  pub(crate) fn call_bracketed<'js, A, R>(&self, ctx: &rquickjs::Ctx<'js>, args: A) -> rquickjs::Result<R>
+  where
+    A: rquickjs::function::IntoArgs<'js>,
+    R: rquickjs::FromJs<'js>,
+  {
+    let f = self.fun.clone().restore(ctx)?;
+    crate::bindings::fetch::call_with_net(ctx, self.net.as_ref(), || f.call(args))
+  }
+}
+
 /// Native registry for every page JS callback dispatched cross-task
 /// (outside the QuickJS context, from a backend tokio task): `page.route`
 /// handlers + URL predicates (keyed by registration id), `page.exposeFunction`
@@ -28,11 +72,11 @@ pub(crate) struct PageCallbacks {
   /// restart at 0 and silently overwrite another page's entry here.
   routes: rustc_hash::FxHashMap<u64, RouteEntry>,
   route_id_counter: u64,
-  pub(crate) exposed: rustc_hash::FxHashMap<String, rquickjs::Persistent<rquickjs::Function<'static>>>,
-  pub(crate) screencast: Option<rquickjs::Persistent<rquickjs::Function<'static>>>,
+  pub(crate) exposed: rustc_hash::FxHashMap<String, SavedCallback>,
+  pub(crate) screencast: Option<SavedCallback>,
   /// `addLocatorHandler` JS callbacks, keyed by core-registry uid so the
   /// cross-task dispatch bridge can restore the persisted function.
-  locator_handlers: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
+  locator_handlers: rustc_hash::FxHashMap<u64, SavedCallback>,
   /// `page.on` / `page.once` JS listeners, keyed by the core
   /// `ListenerId` and carrying the event name (so `off(event, fn)` can
   /// match by JS function identity) plus the backend-page identity (so
@@ -46,7 +90,7 @@ pub(crate) struct PageCallbacks {
   /// callbacks, keyed by a registry-global id. Restored by id inside
   /// `async_with` from the cross-task WS dispatch (never moved across
   /// threads — same discipline as `routes`).
-  ws_callbacks: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
+  ws_callbacks: rustc_hash::FxHashMap<u64, SavedCallback>,
   /// Owner of each `ws_callbacks` entry, so a closing page/context can
   /// release its persisted WS handlers — the session VM outlives both.
   ws_owners: rustc_hash::FxHashMap<u64, RouteOwner>,
@@ -73,10 +117,10 @@ pub(crate) enum RouteOwner {
 /// One `route(matcher, handler)` registration in [`PageCallbacks`].
 pub(crate) struct RouteEntry {
   owner: RouteOwner,
-  handler: rquickjs::Persistent<rquickjs::Function<'static>>,
+  handler: SavedCallback,
   /// JS URL predicate, when the route was registered with a function
   /// instead of a string/RegExp matcher.
-  pred: Option<rquickjs::Persistent<rquickjs::Function<'static>>>,
+  pred: Option<SavedCallback>,
   /// The always-true core matcher registered for a predicate route. Its
   /// `Arc` identity is what core `unroute` compares, so it must be kept
   /// here (shared across wrappers) for `unroute(fn)` to work from any
@@ -96,8 +140,8 @@ impl PageCallbacks {
     &mut self,
     id: u64,
     owner: RouteOwner,
-    handler: rquickjs::Persistent<rquickjs::Function<'static>>,
-    pred: Option<rquickjs::Persistent<rquickjs::Function<'static>>>,
+    handler: SavedCallback,
+    pred: Option<SavedCallback>,
     matcher: Option<ferridriver::url_matcher::UrlMatcher>,
   ) {
     self.routes.insert(
@@ -111,19 +155,14 @@ impl PageCallbacks {
     );
   }
 
-  pub(crate) fn get_route_handler(&self, id: u64) -> Option<rquickjs::Persistent<rquickjs::Function<'static>>> {
+  pub(crate) fn get_route_handler(&self, id: u64) -> Option<SavedCallback> {
     self.routes.get(&id).map(|e| e.handler.clone())
   }
 
   /// Store a `routeWebSocket` handler / `onMessage` / `onClose`
   /// callback under its owning page/context, so close-time cleanup can
   /// release it.
-  pub(crate) fn insert_ws_callback(
-    &mut self,
-    id: u64,
-    owner: RouteOwner,
-    cb: rquickjs::Persistent<rquickjs::Function<'static>>,
-  ) {
+  pub(crate) fn insert_ws_callback(&mut self, id: u64, owner: RouteOwner, cb: SavedCallback) {
     self.ws_owners.insert(id, owner);
     self.ws_callbacks.insert(id, cb);
   }
@@ -157,20 +196,17 @@ impl PageCallbacks {
   }
 
   /// Restore a WS callback by id (inside `async_with`).
-  pub(crate) fn get_ws_callback(&self, id: u64) -> Option<rquickjs::Persistent<rquickjs::Function<'static>>> {
+  pub(crate) fn get_ws_callback(&self, id: u64) -> Option<SavedCallback> {
     self.ws_callbacks.get(&id).cloned()
   }
 
-  pub(crate) fn get_route_pred(&self, id: u64) -> Option<rquickjs::Persistent<rquickjs::Function<'static>>> {
+  pub(crate) fn get_route_pred(&self, id: u64) -> Option<SavedCallback> {
     self.routes.get(&id).and_then(|e| e.pred.clone())
   }
 
   /// `(id, predicate)` pairs registered through `owner`, for
   /// `unroute(fn)` identity matching.
-  pub(crate) fn predicate_routes_for_owner(
-    &self,
-    owner: &RouteOwner,
-  ) -> Vec<(u64, rquickjs::Persistent<rquickjs::Function<'static>>)> {
+  pub(crate) fn predicate_routes_for_owner(&self, owner: &RouteOwner) -> Vec<(u64, SavedCallback)> {
     self
       .routes
       .iter()
@@ -196,13 +232,7 @@ impl PageCallbacks {
     self.locator_handlers.remove(&id);
   }
 
-  pub(crate) fn insert_event_listener(
-    &mut self,
-    id: u64,
-    event: String,
-    page_key: usize,
-    f: rquickjs::Persistent<rquickjs::Function<'static>>,
-  ) {
+  pub(crate) fn insert_event_listener(&mut self, id: u64, event: String, page_key: usize, f: SavedCallback) {
     self.event_listeners.insert(
       id,
       EventListenerEntry {
@@ -213,7 +243,7 @@ impl PageCallbacks {
     );
   }
 
-  pub(crate) fn get_event_listener(&self, id: u64) -> Option<rquickjs::Persistent<rquickjs::Function<'static>>> {
+  pub(crate) fn get_event_listener(&self, id: u64) -> Option<SavedCallback> {
     self.event_listeners.get(&id).map(|e| e.listener.clone())
   }
 
@@ -260,10 +290,7 @@ impl PageCallbacks {
   /// `(id, listener)` pairs registered for `event` — the `off(event,
   /// fn)` binding restores each and compares against the given function
   /// by JS identity.
-  pub(crate) fn event_listeners_named(
-    &self,
-    event: &str,
-  ) -> Vec<(u64, rquickjs::Persistent<rquickjs::Function<'static>>)> {
+  pub(crate) fn event_listeners_named(&self, event: &str) -> Vec<(u64, SavedCallback)> {
     self
       .event_listeners
       .iter()
@@ -278,7 +305,7 @@ pub(crate) struct EventListenerEntry {
   event: String,
   /// `ferridriver::Page::backend_page_id()` of the registering page.
   page_key: usize,
-  listener: rquickjs::Persistent<rquickjs::Function<'static>>,
+  listener: SavedCallback,
 }
 
 pub(crate) struct PageCallbacksUd(std::cell::RefCell<PageCallbacks>);
@@ -370,14 +397,14 @@ pub(crate) fn ensure_event_pump(ctx: &rquickjs::Ctx<'_>) -> tokio::sync::mpsc::S
       }) else {
         continue;
       };
-      // Already on the interpreter thread — restore + invoke directly. A
-      // throwing listener is swallowed so one bad callback can't kill the
-      // pump (matches the NAPI threadsafe-function listeners).
-      let Ok(func) = f.restore(&pump_ctx) else { continue };
+      // Already on the interpreter thread — restore + invoke directly,
+      // under the listener's registration-time net policy. A throwing
+      // listener is swallowed so one bad callback can't kill the pump
+      // (matches the NAPI threadsafe-function listeners).
       let Ok(arg) = page_event_to_js(&pump_ctx, &page, ev) else {
         continue;
       };
-      let _: rquickjs::Result<rquickjs::Value<'_>> = func.call((arg,));
+      let _: rquickjs::Result<rquickjs::Value<'_>> = f.call_bracketed(&pump_ctx, (arg,));
     }
   });
   let _ = ctx.store_userdata(PageEventPumpUd(tx.clone()));
@@ -413,17 +440,14 @@ pub(crate) fn with_page_callbacks<R>(
 pub(crate) fn insert_exposed_callback(
   ctx: &rquickjs::Ctx<'_>,
   name: String,
-  cb: rquickjs::Persistent<rquickjs::Function<'static>>,
+  cb: SavedCallback,
 ) -> rquickjs::Result<()> {
   with_page_callbacks(ctx, |r| r.exposed.insert(name, cb))?;
   Ok(())
 }
 
 /// Look up a previously stashed exposed-binding callback by name.
-pub(crate) fn get_exposed_callback(
-  ctx: &rquickjs::Ctx<'_>,
-  name: &str,
-) -> rquickjs::Result<Option<rquickjs::Persistent<rquickjs::Function<'static>>>> {
+pub(crate) fn get_exposed_callback(ctx: &rquickjs::Ctx<'_>, name: &str) -> rquickjs::Result<Option<SavedCallback>> {
   with_page_callbacks(ctx, |r| r.exposed.get(name).cloned())
 }
 
