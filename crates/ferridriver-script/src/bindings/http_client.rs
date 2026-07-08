@@ -67,7 +67,7 @@ fn parse_options<'js>(ctx: &Ctx<'js>, value: Opt<Value<'js>>) -> rquickjs::Resul
 pub struct HttpClientJs {
   #[qjs(skip_trace)]
   inner: Arc<HttpClient>,
-  /// Host allow-list (plugin `allow.net` capability). Empty =
+  /// Host allow-list (extension `allow.net` capability). Empty =
   /// unrestricted. Non-empty = default-deny: every request URL's host
   /// must match an entry (exact, or `*.suffix` which also matches the
   /// bare apex) or the call throws before any network I/O. Enforced
@@ -86,14 +86,14 @@ impl HttpClientJs {
   }
 
   /// Same underlying context, restricted to `net` hosts. Used to build
-  /// the per-tool `request` a plugin handler receives when its manifest
+  /// the per-tool `request` a extension handler receives when its manifest
   /// declares `allow.net`.
   #[must_use]
   pub fn with_net(inner: Arc<HttpClient>, net: Arc<[String]>) -> Self {
     Self { inner, net }
   }
 
-  /// The shared underlying context — lets the plugin dispatch wrap the
+  /// The shared underlying context — lets the extension dispatch wrap the
   /// session's `request` with a net allow-list without re-creating it.
   #[must_use]
   pub fn inner_arc(&self) -> Arc<HttpClient> {

@@ -58,12 +58,12 @@ pub mod vars;
 pub mod vm;
 
 pub use bindings::{
-  ArtifactsJs, BrowserContextJs, CollectedRegistry, HookArg, HttpClientJs, HttpResponseJs, JsArg, KeyboardJs,
-  LocatorJs, MouseJs, PageJs, PluginBinding, PluginCommandsJs, ScenarioWorld, ScriptAttachment, StepOutcome,
-  collect_registry, drain_attachments, install_plugins, invoke_hook, invoke_step, reset_world, set_scenario_world,
+  ArtifactsJs, BrowserContextJs, CollectedRegistry, ExtensionBinding, ExtensionCommandsJs, HookArg, HttpClientJs,
+  HttpResponseJs, JsArg, KeyboardJs, LocatorJs, MouseJs, PageJs, ScenarioWorld, ScriptAttachment, StepOutcome,
+  collect_registry, drain_attachments, install_extensions, invoke_hook, invoke_step, reset_world, set_scenario_world,
 };
 pub use bundle::{
-  CompiledBundle, CompiledPlugin, bundle_and_compile, bundle_source, compile_and_extract_plugins, eval_bundle,
+  CompiledBundle, CompiledExtension, bundle_and_compile, bundle_source, compile_and_extract_extensions, eval_bundle,
   is_typescript_path, source_is_es_module,
 };
 pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};

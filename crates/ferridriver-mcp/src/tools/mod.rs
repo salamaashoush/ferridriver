@@ -12,7 +12,7 @@
 //! - **script** — imperative scripting: `run_script` (the action path)
 //! - **bdd** — `run_bdd`: Gherkin features (inline or files) through the
 //!   same engine as the `ferridriver bdd` CLI (JS/TS steps included)
-//! - **extensions** — `ferridriver_extensions`: introspect loaded plugins
+//! - **extensions** — `ferridriver_extensions`: introspect loaded extensions
 //!
 //! Browser interaction flows through `run_script`, which exposes `page`,
 //! `context`, and `request` globals over the ferridriver core.

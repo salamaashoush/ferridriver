@@ -3,7 +3,7 @@
 //! the green gate; run explicitly for before/after numbers:
 //!
 //! ```text
-//! cargo test -p ferridriver-script --test plugin_bench -- --ignored --nocapture
+//! cargo test -p ferridriver-script --test extension_bench -- --ignored --nocapture
 //! ```
 //!
 //! Measures the three things the rolldown->bytecode migration changes:
@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, PluginBinding, RunContext, RunOptions, ScriptEngineConfig, Session,
-  compile_and_extract_plugins,
+  ExtensionBinding, InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session,
+  compile_and_extract_extensions,
 };
 
 /// Four representative extension files: a single tool, a multi-tool
@@ -61,10 +61,10 @@ struct Compiled {
   name: String,
 }
 
-fn bindings(compiled: &[Compiled]) -> Vec<PluginBinding> {
+fn bindings(compiled: &[Compiled]) -> Vec<ExtensionBinding> {
   compiled
     .iter()
-    .map(|c| PluginBinding {
+    .map(|c| ExtensionBinding {
       bytecode: c.bytecode.clone(),
       name: c.name.clone(),
     })
@@ -87,7 +87,7 @@ async fn plugin_path_bench() {
     })
     .collect();
   let cold = Instant::now();
-  let (cp, failures) = compile_and_extract_plugins(&paths).await;
+  let (cp, failures) = compile_and_extract_extensions(&paths).await;
   let cold_ms = cold.elapsed().as_secs_f64() * 1e3;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   assert_eq!(cp.len(), FILES.len(), "all files must compile");
@@ -95,7 +95,7 @@ async fn plugin_path_bench() {
   // Second call: every file is unchanged -> served from the content-hash
   // cache, no rolldown, no compile.
   let warm_cache = Instant::now();
-  let (cp2, _) = compile_and_extract_plugins(&paths).await;
+  let (cp2, _) = compile_and_extract_extensions(&paths).await;
   let warm_cache_ms = warm_cache.elapsed().as_secs_f64() * 1e3;
   assert_eq!(cp2.len(), FILES.len(), "cache hit must return all files");
   let compiled: Vec<Compiled> = cp
@@ -116,7 +116,7 @@ async fn plugin_path_bench() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: bindings(&compiled),
+    extensions: bindings(&compiled),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };

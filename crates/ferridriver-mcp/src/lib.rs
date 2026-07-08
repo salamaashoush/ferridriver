@@ -11,9 +11,9 @@
 
 pub mod bdd_engine;
 pub mod config;
+pub mod extension;
 pub mod mcp;
 pub mod params;
-pub mod plugin;
 pub mod server;
 pub mod tools;
 

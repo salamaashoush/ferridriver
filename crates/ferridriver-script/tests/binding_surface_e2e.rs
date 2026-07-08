@@ -98,7 +98,7 @@ async fn harness() -> H {
     browser_context: Some(bcx),
     request: None,
     browser: Some(browser.clone()),
-    plugins: Vec::new(),
+    extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
   };

@@ -1,7 +1,7 @@
 //! Persistent per-session script VMs, as one owned aggregate, with a
 //! crisp two-tier lifetime:
 //!
-//! - **The VM** (`globalThis`, compiled plugin bytecode, timers) is the
+//! - **The VM** (`globalThis`, compiled extension bytecode, timers) is the
 //!   heavy, disposable tier. It is rebuilt on poison (timeout/OOM), on a
 //!   browser-session swap (relaunch/reconnect under the same name), and
 //!   dropped under the warm-VM cap when another session needs a slot.
@@ -356,7 +356,7 @@ mod tests {
       browser_context: None,
       request: None,
       browser: None,
-      plugins: Vec::new(),
+      extensions: Vec::new(),
       host: crate::engine::ExtensionHost::Script,
       caps: crate::engine::ScriptCaps::default(),
     };

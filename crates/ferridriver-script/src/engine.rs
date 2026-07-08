@@ -177,7 +177,7 @@ pub struct RunContext {
   /// Playwright entry point that §4.1's options bag attaches to.
   pub browser: Option<Arc<ferridriver::Browser>>,
   /// Extension bindings to install on the `tools` global.
-  pub plugins: Vec<crate::bindings::PluginBinding>,
+  pub extensions: Vec<crate::bindings::ExtensionBinding>,
   /// Which host is driving this session — surfaced to JS as
   /// `ferridriver.host`. Defaults to [`ExtensionHost::Script`].
   pub host: ExtensionHost,
@@ -196,7 +196,7 @@ pub struct ScriptCaps {
   /// `process.env` is an empty object.
   pub env: std::collections::BTreeMap<String, String>,
   /// First-party command grants exposed as `commands` /
-  /// `ferridriver.commands` outside plugin handlers.
+  /// `ferridriver.commands` outside extension handlers.
   pub commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
 }
 
@@ -317,7 +317,7 @@ pub struct SessionRun {
 /// `globalThis` for continuity. Framework bindings (`page`, `context`,
 /// `request`, `browser`, `vars`, `fs`, `artifacts`, `console`, `args`)
 /// are reinstalled every call so they always reflect current session
-/// state. Plugin bindings are installed once at creation.
+/// state. Extension bindings are installed once at creation.
 ///
 /// [`execute`]: Session::execute
 pub struct Session {
@@ -401,7 +401,7 @@ impl TimeoutState {
 
 impl Session {
   /// Build the persistent VM: runtime, resource limits, sandbox-rooted
-  /// module loader, context, and one-time plugin install. The module
+  /// module loader, context, and one-time extension install. The module
   /// loader is bound to `context.sandbox` for the VM's lifetime, so a
   /// session must always be driven with the same `script_root`.
   pub async fn create(config: ScriptEngineConfig, context: &RunContext) -> Result<Self, ScriptError> {
@@ -461,11 +461,11 @@ impl Session {
 
     let (vm, vm_shutdown) = crate::vm::spawn_vm_loop(&ctx);
 
-    // Plugin bindings are server-global and immutable post-load, so they
+    // Extension bindings are server-global and immutable post-load, so they
     // install exactly once. The per-tool wrappers dereference
     // `globalThis.page` / `context` / `request` lazily at invocation,
     // by which point `execute` has refreshed those bindings.
-    let plugins = context.plugins.clone();
+    let extensions = context.extensions.clone();
     // Cloned out of `context` (a `&RunContext`) so the async_with future
     // owns them rather than borrowing across the await.
     let vars = context.vars.clone();
@@ -485,7 +485,7 @@ impl Session {
       let _ = ctx.store_userdata(SessionVm(ud_vm));
       // The active-tool net allow-list cell `fetch` reads (resting state
       // = unrestricted). Stored once per VM so it survives rebuilds and
-      // is present even when no tool runs; `plugins::dispatch_tool`
+      // is present even when no tool runs; `extensions::dispatch_tool`
       // swaps it around each net-restricted handler's poll.
       let _ = ctx.store_userdata(crate::bindings::fetch::NetPolicyUd(
         crate::bindings::fetch::NetPolicy::default(),
@@ -527,7 +527,7 @@ impl Session {
 
       // The unified extension registry (userdata) + native contribution
       // points (`Given`/`When`/`Then`/`defineTool`/...). Must precede
-      // `install_plugins`: evaluating an extension's bytecode registers
+      // `install_extensions`: evaluating an extension's bytecode registers
       // its tools/steps through this native surface (`defineTool` /
       // `Given`...), so the registry must already exist.
       crate::bindings::install_bdd(&ctx)
@@ -541,7 +541,7 @@ impl Session {
       crate::bindings::runtime::install_host(&ctx, host.as_str())
         .map_err(|e| ScriptError::internal(format!("install ferridriver.host: {e}")))?;
 
-      // Plugin top-level code runs during `install_plugins`, before any
+      // Extension top-level code runs during `install_extensions`, before any
       // `execute` installs its per-call capture — give it a console that
       // forwards to tracing so `console.log` at module scope works (the
       // extraction pass provides the same; see `compile_extract_one`).
@@ -553,9 +553,9 @@ impl Session {
       install_console(&ctx, install_console_capture.clone())
         .map_err(|e| ScriptError::internal(format!("failed to install console: {e}")))?;
 
-      let installed = crate::bindings::install_plugins(&ctx, &plugins)
+      let installed = crate::bindings::install_extensions(&ctx, &extensions)
         .await
-        .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")));
+        .map_err(|e| ScriptError::internal(format!("failed to install extensions: {e}")));
       for entry in install_console_capture.drain() {
         tracing::info!(target: "ferridriver::extensions", "{}", entry.message);
       }
@@ -592,7 +592,7 @@ impl Session {
   }
 
   /// Stash the session's persistent-process registry into VM userdata
-  /// so plugin `commands` start/status/stop reach it. Idempotent; the
+  /// so extension `commands` start/status/stop reach it. Idempotent; the
   /// same `Arc` is re-installed on each VM rebuild (the registry is
   /// durable session state, the VM is not).
   pub async fn install_session_procs(&self, procs: std::sync::Arc<crate::session_procs::SessionProcs>) {
@@ -791,7 +791,7 @@ impl Session {
       // rquickjs/QuickJS build with native endianness — either in this
       // process or restored from the bytecode disk cache, whose ABI tag +
       // transitive input hashes guarantee an ABI-identical toolchain
-      // wrote it. Same contract as `eval_bundle` / `install_plugins`.
+      // wrote it. Same contract as `eval_bundle` / `install_extensions`.
       #[allow(unsafe_code)]
       let module = match (unsafe { Module::load(ctx.clone(), &bytecode) }).catch(&ctx) {
         Ok(m) => m,
@@ -833,7 +833,7 @@ impl Session {
   }
 
   /// Invoke a registered extension tool by manifest name against the
-  /// persistent VM — the native path behind the MCP `invoke_plugin` /
+  /// persistent VM — the native path behind the MCP `invoke_extension_tool` /
   /// promoted-tool routes. Framework globals are refreshed exactly as
   /// for [`Self::execute`], but nothing is compiled: dispatch goes
   /// straight through the same body the `tools.<name>` binding uses, so
@@ -905,7 +905,7 @@ struct GlobalsInstall {
 /// whichever of `page` / `context` / `request` / `browser` the run
 /// context carries (their backend handles are re-resolved every call).
 /// `vars` / `fs` / `artifacts` / `browser_type` / class prototypes are
-/// session-stable and installed once at [`Session::create`]; plugin
+/// session-stable and installed once at [`Session::create`]; extension
 /// bindings likewise.
 fn install_call_globals(ctx: &Ctx<'_>, args: &[serde_json::Value], inst: GlobalsInstall) -> rquickjs::Result<()> {
   let globals = ctx.globals();
@@ -1360,7 +1360,7 @@ fn install_commands(
 ) -> rquickjs::Result<()> {
   let commands = rquickjs::class::Class::instance(
     ctx.clone(),
-    crate::bindings::PluginCommandsJs::new(Arc::new(caps.commands.clone()), procs),
+    crate::bindings::ExtensionCommandsJs::new(Arc::new(caps.commands.clone()), procs),
   )?;
   ctx.globals().set("commands", commands)?;
   crate::bindings::runtime::mirror_global(ctx, "commands")?;

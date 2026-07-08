@@ -324,8 +324,10 @@ pub struct McpServer {
   pub tool_router: ToolRouter<Self>,
   /// Configuration trait object for customizing server behavior.
   pub config: Arc<dyn McpServerConfig>,
-  /// Typed extension slot for consumer-specific state (e.g. Jira clients).
-  extensions: Arc<dyn std::any::Any + Send + Sync>,
+  /// Typed slot for consumer-specific state (e.g. Jira clients),
+  /// attached via [`Self::with_extension`]. Unrelated to the extension
+  /// (extension) system — this is host-embedding state.
+  custom_ext: Arc<dyn std::any::Any + Send + Sync>,
   /// `QuickJS` scripting engine -- fresh context per `run_script` invocation.
   pub(crate) script_engine: Arc<ferridriver_script::ScriptEngine>,
   /// Filesystem sandbox for scripts (`None` if the configured root could not
@@ -339,7 +341,7 @@ pub struct McpServer {
   /// All live script sessions: one persistent `QuickJS` VM + its
   /// session-scoped `vars` + the browser generation it was built
   /// against, per session name, behind one lock each. Shared by
-  /// `run_script` and plugin calls so `globalThis`/`vars` persist
+  /// `run_script` and extension calls so `globalThis`/`vars` persist
   /// REPL-style; a browser relaunch under the same name discards the VM
   /// (stale handles) but keeps `vars`.
   pub(crate) sessions: Arc<ferridriver_script::SessionTable>,
@@ -347,9 +349,9 @@ pub struct McpServer {
   /// compat). Default = locked down; set by [`McpServer::with_script_caps`]
   /// from the operator's `[scripting]` config.
   pub(crate) script_caps: ferridriver_script::ScriptCaps,
-  /// Plugins discovered + parsed at startup. Empty by default; populated
-  /// by [`McpServer::load_plugins`].
-  pub(crate) plugins: crate::plugin::PluginRegistry,
+  /// Extensions discovered + parsed at startup. Empty by default; populated
+  /// by [`McpServer::load_extensions`].
+  pub(crate) extensions: crate::extension::ExtensionRegistry,
   /// Resolved `[test]` config (feature/step globs, browser, workers,
   /// retries, reporters, ...). Default = `TestConfig::default()`; set by
   /// [`McpServer::with_test_config`] from the operator's `ferridriver.toml`.
@@ -480,13 +482,13 @@ impl McpServer {
       page_wrappers: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       tool_router: Self::tool_router(),
       config,
-      extensions: Arc::new(NoExtensions),
+      custom_ext: Arc::new(NoExtensions),
       script_engine,
       script_sandbox,
       artifacts_sandbox,
       sessions,
       script_caps: ferridriver_script::ScriptCaps::default(),
-      plugins: crate::plugin::PluginRegistry::default(),
+      extensions: crate::extension::ExtensionRegistry::default(),
       test_config: ferridriver_test::config::TestConfig::default(),
       extension_specs: Vec::new(),
       bdd_engine: Arc::new(Mutex::new(crate::bdd_engine::BddEngine::new())),
@@ -501,11 +503,11 @@ impl McpServer {
   ///
   /// Failed extensions are logged and skipped -- one broken file should
   /// not prevent the server from starting. Successfully loaded tools are
-  /// stored in `self.plugins` and become available as `run_script`
+  /// stored in `self.extensions` and become available as `run_script`
   /// bindings (and, when `exposeAsMcpTool`, as MCP tools).
   pub async fn load_extensions(&mut self, specs: &[String]) {
     // Record the specs so the BDD path can re-bundle them as step sources
-    // even though run_script consumes them as already-loaded plugins.
+    // even though run_script consumes them as already-loaded extensions.
     self.extension_specs = specs.to_vec();
     if specs.is_empty() {
       return;
@@ -513,46 +515,46 @@ impl McpServer {
 
     // Discover every file across all configured roots, then bundle +
     // compile + extract the whole set in ONE batch runtime (rolldown ->
-    // QuickJS bytecode; TypeScript and plugin-local imports resolved).
+    // QuickJS bytecode; TypeScript and extension-local imports resolved).
     // Failures are logged AND recorded on the registry so the
     // `ferridriver_extensions` tool can report them without a restart.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let (files, discovery_errors) = crate::plugin::discover_specs(specs, &cwd);
+    let (files, discovery_errors) = crate::extension::discover_specs(specs, &cwd);
     let mut failures: Vec<(String, String)> = Vec::new();
     for e in discovery_errors {
-      tracing::warn!(error = %e, "plugin discovery failed; skipping path");
+      tracing::warn!(error = %e, "extension discovery failed; skipping path");
       failures.push((e.source_label(), e.to_string()));
     }
 
     let (loaded, errors) = if files.is_empty() {
       (Vec::new(), Vec::new())
     } else {
-      crate::plugin::load_all(&files).await
+      crate::extension::load_all(&files).await
     };
     for e in errors {
-      tracing::warn!(error = %e, "plugin load failed; skipping");
+      tracing::warn!(error = %e, "extension load failed; skipping");
       failures.push((e.source_label(), e.to_string()));
     }
     for lp in &loaded {
       let tool_names: Vec<&str> = lp.tools.iter().map(|t| t.name.as_str()).collect();
-      tracing::info!(path = %lp.path.display(), tools = ?tool_names, "loaded plugin file");
+      tracing::info!(path = %lp.path.display(), tools = ?tool_names, "loaded extension file");
     }
 
-    self.plugins = crate::plugin::PluginRegistry::new(loaded, failures);
-    self.promote_plugins();
+    self.extensions = crate::extension::ExtensionRegistry::new(loaded, failures);
+    self.promote_extension_tools();
   }
 
-  /// Register a dynamic tool route for each plugin manifest that declares
+  /// Register a dynamic tool route for each extension manifest that declares
   /// `exposeAsMcpTool: true`. The tool's name, description, and `inputSchema`
   /// come from the manifest. The dispatcher synthesises a one-line script
   /// that awaits the matching binding (`await tools.<namespace>(args[0])`)
   /// so the tool path and the `run_script` binding path share one handler.
-  fn promote_plugins(&mut self) {
+  fn promote_extension_tools(&mut self) {
     use rmcp::handler::server::router::tool::ToolRoute;
     use rmcp::model::Tool;
 
     let promoted: Vec<_> = self
-      .plugins
+      .extensions
       .promoted_tools()
       .map(|t| {
         let name = t.name.clone();
@@ -588,61 +590,61 @@ impl McpServer {
 
     for (name, desc, schema_obj) in promoted {
       // register_tool already rejects duplicate names within a load
-      // batch; this guards the remaining collision: a plugin name that
+      // batch; this guards the remaining collision: a extension name that
       // shadows a built-in tool (or a name added by an earlier,
       // separately-loaded batch). Skip + warn rather than silently
       // letting `add_route` clobber a route.
       if self.tool_router.has_route(&name) {
-        tracing::warn!(name = %name, "plugin tool name collides with an existing tool; not promoting");
+        tracing::warn!(name = %name, "extension tool name collides with an existing tool; not promoting");
         continue;
       }
       let tool = Tool::new(name.clone(), desc, schema_obj);
-      let plugin_name = name.clone();
+      let tool_name = name.clone();
 
       let route = ToolRoute::<Self>::new_dyn(tool, move |ctx| {
-        let plugin_name = plugin_name.clone();
+        let tool_name = tool_name.clone();
         Box::pin(async move {
           let args_obj = ctx.arguments.clone().unwrap_or_default();
           let args_value = serde_json::Value::Object(args_obj);
-          ctx.service.invoke_plugin(&plugin_name, args_value).await
+          ctx.service.invoke_extension_tool(&tool_name, args_value).await
         })
       });
       self.tool_router.add_route(route);
-      tracing::info!(name = %name, "promoted plugin to MCP tool");
+      tracing::info!(name = %name, "promoted extension to MCP tool");
     }
   }
 
-  /// Invoke a plugin by manifest name with the given argument object.
+  /// Invoke a extension by manifest name with the given argument object.
   /// Backs both the `exposeAsMcpTool` registration and any direct caller
-  /// that wants to dispatch a plugin without writing JS by hand.
+  /// that wants to dispatch a extension without writing JS by hand.
   ///
   /// `args_obj` is wrapped into a single positional `args[0]` for the
-  /// underlying script run. The plugin's `session` argument (if present)
+  /// underlying script run. The extension's `session` argument (if present)
   /// is honoured for browser context selection.
   ///
   /// # Errors
   ///
-  /// Returns an [`ErrorData`] if the plugin name is unknown, scripting
+  /// Returns an [`ErrorData`] if the extension name is unknown, scripting
   /// is disabled (no usable script root), the underlying browser
   /// session cannot be established, or the final result fails to
   /// serialise.
-  pub async fn invoke_plugin(
+  pub async fn invoke_extension_tool(
     &self,
-    plugin_name: &str,
+    tool_name: &str,
     args_obj: serde_json::Value,
   ) -> Result<rmcp::model::CallToolResult, ErrorData> {
     use rmcp::model::{CallToolResult, Content};
 
-    if self.plugins.get_tool(plugin_name).is_none() {
-      return Err(Self::err(format!("unknown plugin: {plugin_name}")));
+    if self.extensions.get_tool(tool_name).is_none() {
+      return Err(Self::err(format!("unknown extension: {tool_name}")));
     }
     // Enforce the declared inputSchema before doing any work (browser
     // launch, session lock). A non-conforming call is the caller's bug,
     // surfaced as a tool error so the model can correct and retry. The
-    // validator was compiled once at load ([`crate::plugin::PluginRegistry::new`]);
-    // an invalid schema is the plugin author's bug and is surfaced
+    // validator was compiled once at load ([`crate::extension::ExtensionRegistry::new`]);
+    // an invalid schema is the extension author's bug and is surfaced
     // loudly rather than silently skipped.
-    if let Some(compiled) = self.plugins.validator(plugin_name) {
+    if let Some(compiled) = self.extensions.validator(tool_name) {
       match compiled {
         Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg.clone())])),
         Ok(validator) => {
@@ -659,7 +661,7 @@ impl McpServer {
             },
             other => std::borrow::Cow::Borrowed(other),
           };
-          if let Err(msg) = validate_plugin_args(plugin_name, validator, &validate_target) {
+          if let Err(msg) = validate_tool_args(tool_name, validator, &validate_target) {
             return Ok(CallToolResult::error(vec![Content::text(msg)]));
           }
         },
@@ -670,7 +672,7 @@ impl McpServer {
       .get("session")
       .and_then(|v| v.as_str())
       .map_or_else(|| "default".into(), str::to_string);
-    // Serialize per-session tool calls so concurrent run_script and plugin
+    // Serialize per-session tool calls so concurrent run_script and extension
     // invocations on the same session don't race against each other's
     // browser state (cookies, navigation, page identity). Matches the
     // pattern other tool routers use.
@@ -681,7 +683,7 @@ impl McpServer {
       .run_tool_on_session_vm(
         &session,
         &guard,
-        plugin_name,
+        tool_name,
         args_obj,
         ferridriver_script::RunOptions::default(),
         context,
@@ -690,7 +692,7 @@ impl McpServer {
 
     let json = serde_json::to_string_pretty(&result).map_err(|e| Self::err(format!("serialize result: {e}")))?;
     let mut contents = vec![Content::text(json)];
-    // A promoted plugin is a first-class named tool: a handler failure
+    // A promoted extension is a first-class named tool: a handler failure
     // must surface as an MCP error result (is_error) so the model can
     // distinguish it from success, not a "success" carrying an error
     // blob. (This deliberately differs from `run_script`, whose contract
@@ -703,25 +705,25 @@ impl McpServer {
     Ok(CallToolResult::success(contents))
   }
 
-  /// Snapshot the loaded plugin registry into the script-engine binding
-  /// shape. Shared by `run_script` and `invoke_plugin` so the mapping
+  /// Snapshot the loaded extension registry into the script-engine binding
+  /// shape. Shared by `run_script` and `invoke_extension_tool` so the mapping
   /// lives in exactly one place.
-  pub(crate) fn plugin_bindings(&self) -> Vec<ferridriver_script::PluginBinding> {
+  pub(crate) fn extension_bindings(&self) -> Vec<ferridriver_script::ExtensionBinding> {
     self
-      .plugins
+      .extensions
       .files()
       .iter()
-      .map(|f| ferridriver_script::PluginBinding {
+      .map(|f| ferridriver_script::ExtensionBinding {
         bytecode: f.bytecode.clone(),
         name: f.path.display().to_string(),
       })
       .collect()
   }
 
-  /// Assemble the `RunContext` an MCP script/plugin call needs: live
+  /// Assemble the `RunContext` an MCP script/extension call needs: live
   /// page/context/request/browser handles for `session`, the script and
-  /// artifacts sandboxes, and the loaded plugin bytecode. Shared by
-  /// `run_script` and `invoke_plugin` so the wiring lives in one place.
+  /// artifacts sandboxes, and the loaded extension bytecode. Shared by
+  /// `run_script` and `invoke_extension_tool` so the wiring lives in one place.
   ///
   /// `vars` is a throwaway here: a session's `vars` is the durable tier
   /// owned by the [`ferridriver_script::SessionTable`] entry (survives
@@ -748,7 +750,7 @@ impl McpServer {
       // connection pool live for the logical session, not one call).
       request: None,
       browser: Some(browser),
-      plugins: self.plugin_bindings(),
+      extensions: self.extension_bindings(),
       host: ferridriver_script::ExtensionHost::Mcp,
       caps: self.script_caps.clone(),
     })
@@ -822,7 +824,7 @@ impl McpServer {
 
   /// Like [`Self::run_on_session_vm`], but natively invokes a registered
   /// extension tool by manifest name — no synthesized one-liner, no
-  /// per-call compile. Backs `invoke_plugin` and the promoted-tool
+  /// per-call compile. Backs `invoke_extension_tool` and the promoted-tool
   /// routes.
   pub(crate) async fn run_tool_on_session_vm(
     &self,
@@ -903,14 +905,14 @@ impl McpServer {
   /// Attach custom state accessible from tool handlers via `extension()`.
   #[must_use]
   pub fn with_extension<T: Send + Sync + 'static>(mut self, ext: Arc<T>) -> Self {
-    self.extensions = ext;
+    self.custom_ext = ext;
     self
   }
 
   /// Access a typed extension stored on the server.
   #[must_use]
   pub fn extension<T: Send + Sync + 'static>(&self) -> Option<&T> {
-    self.extensions.downcast_ref::<T>()
+    self.custom_ext.downcast_ref::<T>()
   }
 
   pub fn err(msg: impl std::fmt::Display) -> ErrorData {
@@ -1107,11 +1109,11 @@ impl McpServer {
   }
 }
 
-/// Validate a plugin call's arguments against the tool's pre-compiled
+/// Validate a extension call's arguments against the tool's pre-compiled
 /// `inputSchema` validator (built once at load by
-/// [`crate::plugin::PluginRegistry::new`]).
-fn validate_plugin_args(
-  plugin: &str,
+/// [`crate::extension::ExtensionRegistry::new`]).
+fn validate_tool_args(
+  extension: &str,
   validator: &jsonschema::Validator,
   args: &serde_json::Value,
 ) -> Result<(), String> {
@@ -1133,7 +1135,7 @@ fn validate_plugin_args(
   messages.sort();
   messages.dedup();
   Err(format!(
-    "invalid arguments for `{plugin}` (does not match inputSchema):\n- {}",
+    "invalid arguments for `{extension}` (does not match inputSchema):\n- {}",
     messages.join("\n- ")
   ))
 }
@@ -1445,7 +1447,7 @@ impl ServerHandler for McpServer {
 
 #[cfg(test)]
 mod tests {
-  use super::validate_plugin_args;
+  use super::validate_tool_args;
 
   #[test]
   fn schema_validation_accepts_conforming_and_rejects_bad() {
@@ -1457,25 +1459,25 @@ mod tests {
     });
     let validator = jsonschema::validator_for(&schema).expect("valid schema");
 
-    assert!(validate_plugin_args("t", &validator, &serde_json::json!({ "user": "a", "n": 3 })).is_ok());
+    assert!(validate_tool_args("t", &validator, &serde_json::json!({ "user": "a", "n": 3 })).is_ok());
 
-    let missing = validate_plugin_args("t", &validator, &serde_json::json!({ "n": 3 })).unwrap_err();
+    let missing = validate_tool_args("t", &validator, &serde_json::json!({ "n": 3 })).unwrap_err();
     assert!(missing.contains("invalid arguments for `t`"), "{missing}");
 
-    let wrong_type = validate_plugin_args("t", &validator, &serde_json::json!({ "user": 1 })).unwrap_err();
+    let wrong_type = validate_tool_args("t", &validator, &serde_json::json!({ "user": 1 })).unwrap_err();
     assert!(wrong_type.contains("invalid arguments for `t`"), "{wrong_type}");
 
-    let extra = validate_plugin_args("t", &validator, &serde_json::json!({ "user": "a", "x": 1 })).unwrap_err();
+    let extra = validate_tool_args("t", &validator, &serde_json::json!({ "user": "a", "x": 1 })).unwrap_err();
     assert!(extra.contains("invalid arguments for `t`"), "{extra}");
   }
 
   #[test]
   fn an_invalid_schema_is_reported_by_the_registry_at_load() {
     // Compilation of the declared schema happens once, at
-    // `PluginRegistry::new`; the stored error is what `invoke_plugin`
+    // `ExtensionRegistry::new`; the stored error is what `invoke_extension_tool`
     // returns on every call to that tool.
-    let registry = crate::plugin::PluginRegistry::new(
-      vec![crate::plugin::LoadedPlugin {
+    let registry = crate::extension::ExtensionRegistry::new(
+      vec![crate::extension::LoadedExtension {
         tools: vec![
           serde_json::from_value(serde_json::json!({
             "name": "bad",

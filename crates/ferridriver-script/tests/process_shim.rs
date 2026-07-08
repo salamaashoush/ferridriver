@@ -18,7 +18,7 @@ async fn run(src: &str, caps: ScriptCaps) -> Outcome {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: Vec::new(),
+    extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps,
   };
@@ -116,7 +116,7 @@ async fn run_full(src: &str) -> ferridriver_script::ScriptResult {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: Vec::new(),
+    extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ScriptCaps::default(),
   };

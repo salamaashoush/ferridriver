@@ -9,27 +9,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, PluginBinding, RunContext, RunOptions, ScriptEngineConfig, ScriptResult,
-  SessionTable, compile_and_extract_plugins,
+  ExtensionBinding, InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, ScriptResult,
+  SessionTable, compile_and_extract_extensions,
 };
 
-async fn binding(src: &str) -> (tempfile::TempDir, PluginBinding) {
+async fn binding(src: &str) -> (tempfile::TempDir, ExtensionBinding) {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("ext.ts");
   std::fs::write(&path, src).expect("write");
-  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one");
   (
     tmp,
-    PluginBinding {
+    ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     },
   )
 }
 
-fn ctx(sandbox_tmp: &std::path::Path, b: PluginBinding) -> RunContext {
+fn ctx(sandbox_tmp: &std::path::Path, b: ExtensionBinding) -> RunContext {
   RunContext {
     vars: Arc::new(InMemoryVars::new()),
     sandbox: Arc::new(PathSandbox::new(sandbox_tmp).expect("sandbox")),
@@ -38,7 +38,7 @@ fn ctx(sandbox_tmp: &std::path::Path, b: PluginBinding) -> RunContext {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![b],
+    extensions: vec![b],
     host: ferridriver_script::ExtensionHost::Mcp,
     caps: ferridriver_script::ScriptCaps::default(),
   }

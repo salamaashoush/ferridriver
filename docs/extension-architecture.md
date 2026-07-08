@@ -1,10 +1,10 @@
-# Plugin architecture survey
+# Extension architecture survey
 
 Context: the ferridriver MCP extension system loads JS/TS files whose
 top-level `defineTool(...)` calls register into the Rust extension
 registry, and exposes each tool as a `tools.<name>(args)` binding
 (optionally promoted to an MCP tool). This
-note surveys mature plugin/extension systems for three concerns —
+note surveys mature extension systems for three concerns —
 compile-once-run-many, capability/permission models, API extensibility —
 and records what ferridriver adopts versus defers, with the tradeoff.
 
@@ -24,8 +24,8 @@ and records what ferridriver adopts versus defers, with the tradeoff.
 
 **Adopt now**
 
-1. **rolldown→QuickJS-bytecode, compile-once** (Deno/WASM): plugins join the
-   exact pipeline BDD steps use — bundle (TS + plugin-local imports + tree
+1. **rolldown→QuickJS-bytecode, compile-once** (Deno/WASM): extensions join the
+   exact pipeline BDD steps use — bundle (TS + extension-local imports + tree
    shake) once, compile to bytecode once, `Module::load` per session (no
    parse). Tradeoff: rolldown bundle cost moves to startup (one-time, ~ms
    per file) in exchange for zero per-session parse and free TS/imports.
@@ -36,12 +36,12 @@ and records what ferridriver adopts versus defers, with the tradeoff.
    already) and **net** (`allow.net`: host allow-list on the handler's
    `request` client; empty = unrestricted for back-compat, non-empty flips
    that binding to default-deny). `fs` is deliberately **not** a capability:
-   the plugin handler context (`{args,page,context,request,commands}`)
+   the extension handler context (`{args,page,context,request,commands}`)
    exposes no filesystem handle, so an `fs` scope would gate nothing — a
    stub, which the repo rules forbid. `net` is scoped precisely to the
    `request` HTTP client and documented as such; `page`/`context` browser
    navigation is a separate, deliberately ungated authority (an automation
-   plugin must navigate), so this is a *complete* boundary for what it
+   extension must navigate), so this is a *complete* boundary for what it
    covers, not a partial one giving false confidence. Tradeoff: a slightly
    larger manifest for an auditable, honestly-scoped sandbox.
 3. **Content-hash bytecode cache** (Deno): key compiled bytecode by source
@@ -57,17 +57,17 @@ without a consumer)
   a pipeline now is a hypothetical-future abstraction. Revisit when a real
   cross-cut (auth, tracing) appears — the capability boundary already gives a
   natural insertion point.
-- **Plugin-registered reusable bindings** (sharing helpers across files):
+- **Extension-registered reusable bindings** (sharing helpers across files):
   with rolldown, files import shared helpers directly (`import './util.ts'`),
-  which covers the real need without new API surface. Cross-*plugin* shared
+  which covers the real need without new API surface. Cross-*extension* shared
   state has no consumer.
-- **Plugin dependency/ordering** (`dependsOn`): the loader already sorts files
+- **Extension dependency/ordering** (`dependsOn`): the loader already sorts files
   deterministically by path and files are scope-isolated; no inter-file order
   dependency exists in the shipped bundle.
 - **Lifecycle hooks** (`onLoad`/`onActivate`/`onSessionStart`): module
   top-level code already *is* `onLoad` for free under ESM. A distinct
   per-session `onActivate` has no current consumer and adds parity surface
-  across the two JS layers; defer until a plugin needs per-session setup that
+  across the two JS layers; defer until an extension needs per-session setup that
   module-eval cannot express.
 
 Net: adopt the two ideas with immediate, concrete value (compile-once

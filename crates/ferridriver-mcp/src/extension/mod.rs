@@ -14,6 +14,6 @@ pub mod loader;
 pub mod manifest;
 pub mod registry;
 
-pub use loader::{LoadedPlugin, PluginLoadError, discover, discover_specs, load_all};
-pub use manifest::{PluginAllow, PluginManifest};
-pub use registry::PluginRegistry;
+pub use loader::{ExtensionLoadError, LoadedExtension, discover, discover_specs, load_all};
+pub use manifest::{ToolAllow, ToolManifest};
+pub use registry::ExtensionRegistry;

@@ -105,7 +105,7 @@ impl McpServer {
   )]
   async fn run_script(&self, Parameters(p): Parameters<RunScriptParams>) -> Result<CallToolResult, ErrorData> {
     let session = sess(p.session.as_ref()).to_string();
-    // Serialize per-session: a concurrent run_script / plugin / navigation
+    // Serialize per-session: a concurrent run_script / extension / navigation
     // call on the same session must not interleave browser state.
     let guard = self.session_guard(&session).await;
 
@@ -162,7 +162,7 @@ impl McpServer {
       },
     };
 
-    // Live page/context/request/browser handles + sandboxes + plugins.
+    // Live page/context/request/browser handles + sandboxes + extensions.
     // `mcp_run_context` launches/attaches the session's browser eagerly
     // (pure-compute scripts still work; they just pay the one-time cost).
     let context = self.mcp_run_context(&session).await?;
