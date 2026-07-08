@@ -550,14 +550,31 @@ impl McpServer {
       .promoted_tools()
       .map(|t| {
         let name = t.name.clone();
+        // Some MCP clients enforce tool-name patterns (commonly
+        // `[a-zA-Z0-9_-]`); a dotted namespace or exotic character may
+        // be rejected client-side even though the server accepts it.
+        if !name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')) {
+          tracing::warn!(
+            name = %name,
+            "promoted tool name contains characters outside [a-zA-Z0-9_-]; some MCP clients reject such names"
+          );
+        }
         let desc = t.description.clone().unwrap_or_default();
         let schema_value = t
           .input_schema
           .clone()
           .unwrap_or_else(|| serde_json::json!({"type":"object","properties":{}}));
-        let schema_obj = match schema_value {
-          serde_json::Value::Object(m) => m,
-          _ => serde_json::Map::new(),
+        let schema_obj = if let serde_json::Value::Object(m) = schema_value {
+          m
+        } else {
+          // tools/list would advertise `{}` while invocation validates
+          // against the real (non-object) schema — surface the
+          // divergence to the author instead of leaving it silent.
+          tracing::warn!(
+            name = %name,
+            "inputSchema is not a JSON object; advertising an empty schema (calls still validate against the declared one)"
+          );
+          serde_json::Map::new()
         };
         (name, desc, Arc::new(schema_obj))
       })
@@ -623,7 +640,20 @@ impl McpServer {
       match compiled {
         Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg.clone())])),
         Ok(validator) => {
-          if let Err(msg) = validate_plugin_args(plugin_name, validator, &args_obj) {
+          // `session` is the reserved routing key (browser-session
+          // selection), not part of the tool's declared contract —
+          // validate against the args without it so a strict schema
+          // (`additionalProperties: false`) does not reject session
+          // routing. The handler still receives the full object.
+          let validate_target = match &args_obj {
+            serde_json::Value::Object(m) if m.contains_key("session") => {
+              let mut m = m.clone();
+              m.remove("session");
+              std::borrow::Cow::Owned(serde_json::Value::Object(m))
+            },
+            other => std::borrow::Cow::Borrowed(other),
+          };
+          if let Err(msg) = validate_plugin_args(plugin_name, validator, &validate_target) {
             return Ok(CallToolResult::error(vec![Content::text(msg)]));
           }
         },

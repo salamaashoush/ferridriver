@@ -68,7 +68,8 @@ impl PluginRegistry {
     self.validators.get(name)
   }
 
-  /// Source files (one per `.js`/`.mjs` plugin loaded).
+  /// Loaded plugin files, one per discovered source file (any
+  /// bundleable extension: `.js .cjs .mjs .jsx .ts .cts .mts .tsx`).
   #[must_use]
   pub fn files(&self) -> &[LoadedPlugin] {
     &self.files

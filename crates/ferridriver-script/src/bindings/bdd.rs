@@ -84,8 +84,9 @@ struct ParamTypeReg {
 }
 
 /// One MCP tool contribution. The handler is kept as a `Persistent`
-/// function and called back natively by [`invoke_tool`] — exactly the
-/// mechanism BDD steps use, no synthesized JS dispatch.
+/// function and called back natively by the `tools.<name>` dispatch in
+/// `plugins.rs` — exactly the mechanism BDD steps use, no synthesized
+/// JS dispatch.
 struct ToolReg {
   name: String,
   description: Option<String>,
@@ -131,9 +132,10 @@ pub struct HookArg {
 /// every contribution kind lands in. Cucumber `Given`/`When`/`Then`/
 /// hooks/param-types AND MCP `defineTool`/legacy-`exports` tools register
 /// here while the user's bundled module evaluates. Hosts read back the
-/// kinds they care about (`collect_registry` for BDD, [`collect_tools`]
-/// for MCP) and dispatch handlers natively ([`invoke_step`],
-/// [`invoke_tool`]). No `globalThis.__*`, no synthesized JS.
+/// kinds they care about (`collect_registry` for BDD, [`tools_snapshot`]
+/// for MCP) and dispatch handlers natively ([`invoke_step`], the
+/// `tools.<name>` dispatch in `plugins.rs`). No `globalThis.__*`, no
+/// synthesized JS.
 #[derive(Default)]
 struct ExtensionRegistry {
   steps: Vec<StepReg>,
