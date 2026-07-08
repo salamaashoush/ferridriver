@@ -293,76 +293,109 @@ fn dispatch_tool<'js>(
   idx: usize,
   call_args: Opt<Value<'js>>,
 ) -> Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js> {
-  Promised::from(async move {
-    let d = tool_dispatch(&ctx, idx).map_err(|e| rq(&e))?;
+  Promised::from(run_tool(ctx, idx, call_args.0))
+}
 
-    let arg = Object::new(ctx.clone())?;
-    let undef = Value::new_undefined(ctx.clone());
-    arg.set("args", call_args.0.unwrap_or_else(|| undef.clone()))?;
+/// Shared tool-invocation body behind both entry points: the JS-visible
+/// `tools.<name>` callable ([`dispatch_tool`]) and the host-side native
+/// invoke ([`invoke_tool_by_name`], which backs the MCP `invoke_plugin`
+/// path without synthesizing a script).
+async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+  let d = tool_dispatch(&ctx, idx).map_err(|e| rq(&e))?;
 
-    let g = ctx.globals();
-    arg.set("page", g.get::<_, Value<'js>>("page").unwrap_or_else(|_| undef.clone()))?;
-    arg.set(
-      "context",
-      g.get::<_, Value<'js>>("context").unwrap_or_else(|_| undef.clone()),
-    )?;
+  let arg = Object::new(ctx.clone())?;
+  let undef = Value::new_undefined(ctx.clone());
+  arg.set("args", call_args.unwrap_or_else(|| undef.clone()))?;
 
-    // The tool's declared `allow.net` (empty ⇒ unrestricted). Used for
-    // BOTH the net-guarded `request` wrapper AND the `fetch` policy
-    // bracket below — one allow-list, both HTTP entry points.
-    let net_policy: Option<Arc<[String]>> = if d.allowed_net.is_empty() {
-      None
-    } else {
-      Some(Arc::from(d.allowed_net.as_slice()))
-    };
+  let g = ctx.globals();
+  arg.set("page", g.get::<_, Value<'js>>("page").unwrap_or_else(|_| undef.clone()))?;
+  arg.set(
+    "context",
+    g.get::<_, Value<'js>>("context").unwrap_or_else(|_| undef.clone()),
+  )?;
 
-    // `request`: pass through unless the tool declared `allow.net`, in
-    // which case hand it a net-restricted wrapper over the SAME underlying
-    // context (host check enforced natively in `HttpClientJs`).
-    let req_val: Value<'js> = g.get("request").unwrap_or_else(|_| undef.clone());
-    let request_out: Value<'js> = match net_policy.clone() {
-      Some(net) => match Class::<HttpClientJs>::from_value(&req_val) {
-        Ok(cls) => {
-          let inner = cls.borrow().inner_arc();
-          let guarded = Class::instance(ctx.clone(), HttpClientJs::with_net(inner, net))?;
-          guarded.into_js(&ctx)?
-        },
-        Err(_) => req_val,
+  // The tool's declared `allow.net` (empty ⇒ unrestricted). Used for
+  // BOTH the net-guarded `request` wrapper AND the `fetch` policy
+  // bracket below — one allow-list, both HTTP entry points.
+  let net_policy: Option<Arc<[String]>> = if d.allowed_net.is_empty() {
+    None
+  } else {
+    Some(d.allowed_net.clone())
+  };
+
+  // `request`: pass through unless the tool declared `allow.net`, in
+  // which case hand it a net-restricted wrapper over the SAME underlying
+  // context (host check enforced natively in `HttpClientJs`).
+  let req_val: Value<'js> = g.get("request").unwrap_or_else(|_| undef.clone());
+  let request_out: Value<'js> = match net_policy.clone() {
+    Some(net) => match Class::<HttpClientJs>::from_value(&req_val) {
+      Ok(cls) => {
+        let inner = cls.borrow().inner_arc();
+        let guarded = Class::instance(ctx.clone(), HttpClientJs::with_net(inner, net))?;
+        guarded.into_js(&ctx)?
       },
-      None => req_val,
-    };
-    arg.set("request", request_out)?;
+      Err(_) => req_val,
+    },
+    None => req_val,
+  };
+  arg.set("request", request_out)?;
 
-    let procs = ctx.userdata::<SessionProcsUd>().map(|u| u.0.clone());
-    let commands = Class::instance(ctx.clone(), PluginCommandsJs::new(Arc::new(d.allowed_commands), procs))?;
-    arg.set("commands", commands)?;
+  let procs = ctx.userdata::<SessionProcsUd>().map(|u| u.0.clone());
+  let commands = Class::instance(ctx.clone(), PluginCommandsJs::new(d.allowed_commands, procs))?;
+  arg.set("commands", commands)?;
 
-    // The same `allow.net` must also bind the global `fetch` and the
-    // global `request` (facades over the same core). Both read the
-    // active policy from VM userdata; `bracket_net` swaps the cell
-    // around every poll of THIS handler's future so the list in effect
-    // is whichever tool's continuation is running — correct under
-    // nesting (a tool calling `tools.other`) and concurrent
-    // interleaving (`Promise.all([tools.a(), tools.b()])`).
-    let policy_cell = crate::bindings::fetch::policy_cell(&ctx);
+  // The same `allow.net` must also bind the global `fetch` and the
+  // global `request` (facades over the same core). Both read the
+  // active policy from VM userdata; `bracket_net` swaps the cell
+  // around every poll of THIS handler's future so the list in effect
+  // is whichever tool's continuation is running — correct under
+  // nesting (a tool calling `tools.other`) and concurrent
+  // interleaving (`Promise.all([tools.a(), tools.b()])`).
+  let policy_cell = crate::bindings::fetch::policy_cell(&ctx);
 
-    let handler = d.handler;
-    let timeout_ms = d.timeout_ms;
-    let inner = async move {
-      let mp: MaybePromise<'js> = handler.call((arg,))?;
-      let fut = mp.into_future::<Value<'js>>();
-      match timeout_ms {
-        Some(t) => match tokio::time::timeout(Duration::from_millis(t), fut).await {
-          Ok(r) => r,
-          Err(_) => Err(rquickjs::Error::new_from_js_message(
-            "plugins",
-            "Error",
-            format!("tool timed out after {t}ms"),
-          )),
-        },
-        None => fut.await,
-      }
-    };
-    crate::bindings::fetch::bracket_net(policy_cell, net_policy, inner).await
-  })
+  let handler = d.handler;
+  let timeout_ms = d.timeout_ms;
+  let inner = async move {
+    let mp: MaybePromise<'js> = handler.call((arg,))?;
+    let fut = mp.into_future::<Value<'js>>();
+    match timeout_ms {
+      Some(t) => match tokio::time::timeout(Duration::from_millis(t), fut).await {
+        Ok(r) => r,
+        Err(_) => Err(rquickjs::Error::new_from_js_message(
+          "plugins",
+          "Error",
+          format!("tool timed out after {t}ms"),
+        )),
+      },
+      None => fut.await,
+    }
+  };
+  crate::bindings::fetch::bracket_net(policy_cell, net_policy, inner).await
+}
+
+/// Host-side native invocation of a registered tool by manifest name —
+/// what the MCP server's `invoke_plugin` / promoted-tool routes call.
+/// Skips the script pipeline entirely (no synthesized one-liner, no
+/// compile): the exact `run_tool` body behind `tools.<name>` runs, so
+/// capability wrappers, `timeoutMs`, and the net-policy bracket apply
+/// identically for every caller.
+pub async fn invoke_tool_by_name(
+  ctx: &Ctx<'_>,
+  name: &str,
+  args: &serde_json::Value,
+) -> Result<serde_json::Value, ScriptError> {
+  let Some(idx) = crate::bindings::bdd::tool_index_by_name(ctx, name)? else {
+    return Err(ScriptError::internal(format!(
+      "tool `{name}` is not installed in this session (its extension file may have failed to load — check the server log)"
+    )));
+  };
+  let arg = json_to_js(ctx, args).map_err(|e| convert_caught(ctx, e, name))?;
+  let value = run_tool(ctx.clone(), idx, Some(arg))
+    .await
+    .map_err(|e| convert_caught(ctx, e, name))?;
+  Ok(crate::engine::value_to_json(ctx, value).unwrap_or(serde_json::Value::Null))
+}
+
+fn convert_caught(ctx: &Ctx<'_>, e: rquickjs::Error, name: &str) -> ScriptError {
+  crate::engine::caught_to_script_error(rquickjs::CaughtError::from_error(ctx, e), name)
 }

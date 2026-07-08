@@ -1451,3 +1451,121 @@ async fn extraction_environment_matches_session_for_top_level_globals() {
     Outcome::Error { error } => panic!("ambient plugin tool failed: {error:?}"),
   }
 }
+
+/// `Session::execute_tool` — the native path behind the MCP
+/// `invoke_plugin` / promoted-tool routes — must dispatch through the
+/// same registry body as `tools.<name>` (args delivered, value
+/// returned) without compiling a synthesized script, and must name the
+/// tool in the error when it is not installed in this session.
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_tool_invokes_natively_and_reports_missing_tools() {
+  let (_plugin_tmp, binding) = demo_binding().await;
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: vec![binding],
+    host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+
+  let r1 = session
+    .execute_tool("demo", serde_json::json!({ "x": 1 }), RunOptions::default(), &ctx)
+    .await;
+  match r1.result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "n": 1, "got": { "x": 1 } })),
+    Outcome::Error { error } => panic!("native tool call failed: {error:?}"),
+  }
+
+  // Handler `globalThis` state persists across native invocations, and
+  // the native path and the JS `tools.demo(...)` binding share one
+  // registry entry (the counter keeps climbing across both).
+  let r2 = session
+    .execute(
+      "return await tools['demo']({ x: 2 });",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match r2.result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "n": 2, "got": { "x": 2 } })),
+    Outcome::Error { error } => panic!("JS tool call after native call failed: {error:?}"),
+  }
+
+  let missing = session
+    .execute_tool("nope", serde_json::json!({}), RunOptions::default(), &ctx)
+    .await;
+  match missing.result.outcome {
+    Outcome::Error { error } => assert!(
+      error.message.contains("`nope`") && error.message.contains("not installed"),
+      "missing tool must be named in the error, got: {}",
+      error.message
+    ),
+    Outcome::Ok { .. } => panic!("unknown tool must be an error"),
+  }
+}
+
+/// A handler rejection through the native path surfaces as a run error
+/// (the MCP layer turns it into `is_error`), and the per-tool `timeoutMs`
+/// bound holds exactly as it does for the JS entry point.
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_tool_propagates_handler_failures_and_timeouts() {
+  let (_tmp, binding) = binding_from(
+    "defineTool({ name: 'boom', handler: async () => { throw new Error('handler exploded'); } });\n\
+     defineTool({ name: 'slow', timeoutMs: 50, handler: async () => { \
+       await new Promise(r => setTimeout(r, 400)); return 'late'; } });\n",
+  )
+  .await;
+  let binding = binding.expect("compiles");
+
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: vec![binding],
+    host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+
+  let boom = session
+    .execute_tool("boom", serde_json::json!({}), RunOptions::default(), &ctx)
+    .await;
+  match boom.result.outcome {
+    Outcome::Error { error } => assert!(
+      error.message.contains("handler exploded"),
+      "handler throw must surface: {}",
+      error.message
+    ),
+    Outcome::Ok { .. } => panic!("throwing handler must be an error"),
+  }
+  assert!(!boom.poisoned, "a plain handler throw must not poison the VM");
+
+  let slow = session
+    .execute_tool("slow", serde_json::json!({}), RunOptions::default(), &ctx)
+    .await;
+  match slow.result.outcome {
+    Outcome::Error { error } => assert!(
+      error.message.contains("timed out after 50ms"),
+      "timeoutMs must bind the native path too: {}",
+      error.message
+    ),
+    Outcome::Ok { .. } => panic!("slow handler must hit its timeoutMs"),
+  }
+}
