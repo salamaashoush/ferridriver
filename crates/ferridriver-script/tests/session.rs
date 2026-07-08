@@ -1211,3 +1211,243 @@ async fn console_printf_and_inspect_rendering() {
   assert_eq!(console[3].message, "Set(2) { 1, 2 }", "{:?}", console[3]);
   assert_eq!(console[4].message, "/ab+c/gi", "{:?}", console[4]);
 }
+
+/// The `allow.net` capability must bind the GLOBAL `request` binding
+/// during a restricted handler, not only the guarded `request` arg —
+/// otherwise a tool could widen its grant by reaching for
+/// `globalThis.request`. Denied before I/O for a disallowed host;
+/// allowed host passes the guard (fails only on connection refused).
+#[tokio::test(flavor = "multi_thread")]
+async fn allow_net_capability_binds_the_global_request_binding() {
+  const NET_PLUGIN: &str = "defineTool({ name: 'netg', \
+    allow: { net: ['127.0.0.1'] }, \
+    handler: async ({ args }) => { await globalThis.request.get(args.url); return 'ok'; } });";
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let path = tmp.path().join("netg.js");
+  std::fs::write(&path, NET_PLUGIN).expect("write plugin");
+  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let cp = compiled.into_iter().next().expect("one compiled plugin");
+
+  let sb_tmp = tempfile::tempdir().expect("tempdir");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: Some(Arc::new(ferridriver::http_client::HttpClient::new(
+      ferridriver::http_client::HttpClientOptions::default(),
+    ))),
+    browser: None,
+    plugins: vec![PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    }],
+    host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+
+  let blocked = session
+    .execute(
+      "return await tools['netg']({ url: 'http://blocked.test/' });",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match blocked.result.outcome {
+    Outcome::Error { error } => assert!(
+      error.message.contains("not in allow.net") && error.message.contains("blocked.test"),
+      "global request must be denied by the active allow.net, got: {}",
+      error.message
+    ),
+    Outcome::Ok { .. } => panic!("global request to a disallowed host must be rejected"),
+  }
+
+  let allowed = session
+    .execute(
+      "return await tools['netg']({ url: 'http://127.0.0.1:1/' });",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match allowed.result.outcome {
+    Outcome::Error { error } => assert!(
+      !error.message.contains("allow.net"),
+      "allowed host must pass the guard: {}",
+      error.message
+    ),
+    Outcome::Ok { .. } => {},
+  }
+
+  // The restriction ends with the handler: a top-level script call on
+  // the SAME session sees the unrestricted resting policy again.
+  let after = session
+    .execute(
+      "try { await globalThis.request.get('http://blocked.test/'); return 'reached'; } \
+       catch (e) { return String(e.message || e); }",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match after.result.outcome {
+    Outcome::Ok { success } => {
+      let s = success.value.as_str().unwrap_or_default();
+      assert!(
+        !s.contains("allow.net"),
+        "top-level request must be unrestricted after the handler returned, got: {s}"
+      );
+    },
+    Outcome::Error { error } => panic!("top-level probe failed unexpectedly: {error:?}"),
+  }
+}
+
+/// Capability follows the registrar: a `setTimeout` callback armed
+/// inside a net-restricted handler keeps that tool's `allow.net` when
+/// it fires (previously it fell back to the unrestricted resting
+/// policy), while a timer armed at top level stays unrestricted.
+#[tokio::test(flavor = "multi_thread")]
+async fn allow_net_follows_timer_callbacks_registered_by_a_restricted_tool() {
+  const NET_PLUGIN: &str = "defineTool({ name: 'nett', \
+    allow: { net: ['127.0.0.1'] }, \
+    handler: ({ args }) => new Promise((resolve) => { \
+      setTimeout(async () => { \
+        try { await fetch(args.url); resolve('reached'); } \
+        catch (e) { resolve('denied:' + String(e.message || e)); } \
+      }, 10); }) });";
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let path = tmp.path().join("nett.js");
+  std::fs::write(&path, NET_PLUGIN).expect("write plugin");
+  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let cp = compiled.into_iter().next().expect("one compiled plugin");
+
+  let sb_tmp = tempfile::tempdir().expect("tempdir");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: Some(Arc::new(ferridriver::http_client::HttpClient::new(
+      ferridriver::http_client::HttpClientOptions::default(),
+    ))),
+    browser: None,
+    plugins: vec![PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    }],
+    host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+
+  let r = session
+    .execute(
+      "return await tools['nett']({ url: 'http://blocked.test/' });",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => {
+      let s = success.value.as_str().unwrap_or_default();
+      assert!(
+        s.contains("denied:") && s.contains("not in allow.net"),
+        "a timer armed inside a restricted handler must keep its allow.net, got: {s}"
+      );
+    },
+    Outcome::Error { error } => panic!("timer tool run failed: {error:?}"),
+  }
+
+  // Control: a top-level timer (no active tool) stays unrestricted —
+  // fetch reaches the client and fails only for a connection reason.
+  let control = session
+    .execute(
+      "return await new Promise((resolve) => setTimeout(async () => { \
+         try { await fetch('http://127.0.0.1:1/'); resolve('reached'); } \
+         catch (e) { resolve('err:' + String(e.message || e)); } }, 10));",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match control.result.outcome {
+    Outcome::Ok { success } => {
+      let s = success.value.as_str().unwrap_or_default();
+      assert!(
+        !s.contains("allow.net"),
+        "a top-level timer must stay unrestricted, got: {s}"
+      );
+    },
+    Outcome::Error { error } => panic!("control timer run failed: {error:?}"),
+  }
+}
+
+/// Startup manifest extraction must evaluate the module in the same
+/// ambient environment a session VM provides: a plugin whose top level
+/// uses standard globals (`TextEncoder`, `setTimeout`, `crypto`, `console`,
+/// `expect`) loads fine instead of failing extraction while working
+/// in-session.
+#[tokio::test(flavor = "multi_thread")]
+async fn extraction_environment_matches_session_for_top_level_globals() {
+  const EXT: &str = "console.log('extension booting');\n\
+    const enc = new TextEncoder().encode('hi');\n\
+    const id = crypto.randomUUID();\n\
+    expect(enc.length).toBe(2);\n\
+    await new Promise((r) => setTimeout(r, 5));\n\
+    defineTool({ name: 'ambient', handler: async () => ({ len: enc.length, hasId: id.length > 0 }) });\n";
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let path = tmp.path().join("ambient.js");
+  std::fs::write(&path, EXT).expect("write plugin");
+  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  assert!(
+    failures.is_empty(),
+    "top-level standard globals must not fail extraction: {failures:?}"
+  );
+  let cp = compiled.into_iter().next().expect("one compiled plugin");
+  assert!(
+    cp.manifests_json.contains("\"ambient\""),
+    "manifest extracted: {}",
+    cp.manifests_json
+  );
+
+  let sb_tmp = tempfile::tempdir().expect("tempdir");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: vec![PluginBinding {
+      bytecode: cp.bytecode,
+      name: cp.path.display().to_string(),
+    }],
+    host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+  let r = session
+    .execute("return await tools['ambient']();", &[], RunOptions::default(), &ctx)
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => {
+      assert_eq!(success.value["len"], serde_json::json!(2));
+      assert_eq!(success.value["hasId"], serde_json::json!(true));
+    },
+    Outcome::Error { error } => panic!("ambient plugin tool failed: {error:?}"),
+  }
+}

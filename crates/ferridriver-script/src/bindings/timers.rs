@@ -57,6 +57,11 @@ fn set_timeout_interval<'js>(
 
   let abort = Arc::new(Notify::new());
   let abort_ref = abort.clone();
+  // Capability follows the registrar: a timer armed by a net-restricted
+  // tool handler keeps that tool's `allow.net` when it later fires from
+  // the executor (where the resting policy would otherwise be
+  // unrestricted).
+  let net = crate::bindings::fetch::active_net(&ctx);
 
   ctx.spawn(async move {
     loop {
@@ -74,7 +79,8 @@ fn set_timeout_interval<'js>(
       let mut call_args = rquickjs::function::Args::new(cb.ctx().clone(), args.len());
       let ok = call_args.push_args(args.iter().cloned()).is_ok();
       if !ok || {
-        let res: rquickjs::Result<()> = cb.call_arg(call_args);
+        let res: rquickjs::Result<()> =
+          crate::bindings::fetch::call_with_net(cb.ctx(), net.as_ref(), || cb.call_arg(call_args));
         res
           .inspect_err(|err| tracing::warn!(target: "ferridriver::script", "timer callback threw: {err}"))
           .is_err()
@@ -115,11 +121,42 @@ fn split_delay_args(mut rest: Vec<Value<'_>>) -> (Option<f64>, Vec<Value<'_>>) {
 }
 
 /// `setImmediate(cb, ...args)` — deferred to the microtask-adjacent
-/// job queue, args passed through like Node.
-fn set_immediate<'js>(cb: Function<'js>, rest: Rest<Value<'js>>) -> rquickjs::Result<()> {
-  let mut args = rquickjs::function::Args::new(cb.ctx().clone(), rest.0.len());
-  args.push_args(rest.0)?;
-  cb.defer_arg(args)
+/// job queue, args passed through like Node. When the registrar has an
+/// active `allow.net`, the callback is wrapped in a native bracket so
+/// the deferred job runs under the registrar's grant (same rule as
+/// `setTimeout`).
+fn set_immediate<'js>(ctx: Ctx<'js>, cb: Function<'js>, rest: Rest<Value<'js>>) -> rquickjs::Result<()> {
+  match crate::bindings::fetch::active_net(&ctx) {
+    None => {
+      let mut args = rquickjs::function::Args::new(ctx, rest.0.len());
+      args.push_args(rest.0)?;
+      cb.defer_arg(args)
+    },
+    Some(list) => {
+      // The wrapper captures only plain data (`net`); the real callback
+      // rides the deferred args (a native closure must never capture a
+      // JS value or a `Persistent` — untraceable GC cycle at teardown).
+      // A `Rest`-only signature keeps every JS value on one `'js`.
+      let net = Some(list);
+      let wrapper = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| {
+        deferred_call_with_net(net.as_ref(), &args.0)
+      })?;
+      let mut args = rquickjs::function::Args::new(ctx, rest.0.len() + 1);
+      args.push_arg(cb)?;
+      args.push_args(rest.0)?;
+      wrapper.defer_arg(args)
+    },
+  }
+}
+
+fn deferred_call_with_net(net: Option<&Arc<[String]>>, args: &[Value<'_>]) -> rquickjs::Result<()> {
+  let inner = args.first().and_then(|v| v.as_function().cloned()).ok_or_else(|| {
+    rquickjs::Error::new_from_js_message("setImmediate", "Error", "deferred callback missing".to_string())
+  })?;
+  let ctx = inner.ctx().clone();
+  let mut call_args = rquickjs::function::Args::new(ctx.clone(), args.len().saturating_sub(1));
+  call_args.push_args(args.iter().skip(1).cloned())?;
+  crate::bindings::fetch::call_with_net(&ctx, net, || inner.call_arg(call_args))
 }
 
 pub fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {

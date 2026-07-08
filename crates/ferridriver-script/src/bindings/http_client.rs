@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use ferridriver::http_client::{HttpClient, HttpResponse, NetGuard, RequestOptions};
 use rquickjs::function::Opt;
+use rquickjs::promise::Promised;
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use serde::Deserialize;
 
@@ -99,26 +100,72 @@ impl HttpClientJs {
     self.inner.clone()
   }
 
-  /// The sandbox network policy for this binding: default-deny against
-  /// `self.net` when an `allow.net` list is present, and the cloud
-  /// instance-metadata endpoints blocked unconditionally (no automation
-  /// targets them). Enforced in core on the initial URL, every redirect
-  /// hop, and every resolved address.
-  pub(crate) fn net_guard(&self) -> NetGuard {
-    NetGuard {
-      allowlist: (!self.net.is_empty()).then(|| self.net.clone()),
-      block_metadata: true,
-      block_private: false,
+  /// The allow-list this binding enforces right now: an instance list
+  /// (a net-restricted tool's `request` arg carries its grant wherever
+  /// the object travels), else the session's *active* tool policy — so
+  /// the ungoverned global `request` is bound by `allow.net` exactly
+  /// like `fetch` is, and a restricted handler cannot widen its grant by
+  /// reaching for `globalThis.request` instead of its guarded arg.
+  fn effective_net(&self, ctx: &Ctx<'_>) -> Option<Arc<[String]>> {
+    if !self.net.is_empty() {
+      return Some(self.net.clone());
     }
+    crate::bindings::fetch::active_net(ctx)
   }
 
-  /// Synchronous fast-fail on the initial URL so an allow-list
-  /// violation throws before any I/O (the same check runs again in core
-  /// for redirect hops). `Ok(())` when no allow-list, or the host
-  /// matches; otherwise a JS-thrown error.
-  fn guard(&self, url: &str) -> rquickjs::Result<()> {
-    net_check(&self.net, url).map_err(|m| rquickjs::Error::new_from_js_message("request", "Error", m))
+  /// Shared body of every HTTP method. Snapshots the effective policy
+  /// NOW — synchronously, while this call is still on the caller's
+  /// stack — because an `async fn` method body first polls on the VM
+  /// executor, outside the dispatch bracket, where the resting policy
+  /// (unrestricted) would be read instead of the calling tool's. The
+  /// allow-list check itself runs inside the returned promise so a
+  /// violation is a rejection (not a synchronous throw), and core
+  /// re-enforces it on every redirect hop and resolved address via
+  /// [`NetGuard`]; the metadata endpoints are blocked unconditionally.
+  fn dispatch<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    verb: Verb,
+    url: String,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
+    let net = self.effective_net(&ctx);
+    let opts = parse_options(&ctx, options)?;
+    let inner = self.inner.clone();
+    Ok(Promised::from(async move {
+      if let Some(list) = net.as_deref() {
+        net_check(list, &url).map_err(|m| rquickjs::Error::new_from_js_message("request", "Error", m))?;
+      }
+      let guard = NetGuard {
+        allowlist: net,
+        block_metadata: true,
+        block_private: false,
+      };
+      let opts = Some(with_guard(opts, guard));
+      let resp = match verb {
+        Verb::Get => inner.get(&url, opts).await,
+        Verb::Post => inner.post(&url, opts).await,
+        Verb::Put => inner.put(&url, opts).await,
+        Verb::Delete => inner.delete(&url, opts).await,
+        Verb::Patch => inner.patch(&url, opts).await,
+        Verb::Head => inner.head(&url, opts).await,
+        Verb::Fetch => inner.fetch(&url, opts).await,
+      }
+      .into_js_with(&ctx)?;
+      Ok(HttpResponseJs::new(resp))
+    }))
   }
+}
+
+#[derive(Clone, Copy)]
+enum Verb {
+  Get,
+  Post,
+  Put,
+  Delete,
+  Patch,
+  Head,
+  Fetch,
 }
 
 /// Attach `g` to the per-request options (creating a default bag if the
@@ -151,97 +198,76 @@ pub(crate) fn net_check(net: &[String], url: &str) -> Result<(), String> {
 #[rquickjs::methods]
 impl HttpClientJs {
   #[qjs(rename = "get")]
-  pub async fn get<'js>(
+  pub fn get<'js>(
     &self,
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<HttpResponseJs> {
-    self.guard(&url)?;
-    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.get(&url, opts).await.into_js_with(&ctx)?;
-    Ok(HttpResponseJs::new(resp))
+  ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
+    self.dispatch(ctx, Verb::Get, url, options)
   }
 
   #[qjs(rename = "post")]
-  pub async fn post<'js>(
+  pub fn post<'js>(
     &self,
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<HttpResponseJs> {
-    self.guard(&url)?;
-    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.post(&url, opts).await.into_js_with(&ctx)?;
-    Ok(HttpResponseJs::new(resp))
+  ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
+    self.dispatch(ctx, Verb::Post, url, options)
   }
 
   #[qjs(rename = "put")]
-  pub async fn put<'js>(
+  pub fn put<'js>(
     &self,
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<HttpResponseJs> {
-    self.guard(&url)?;
-    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.put(&url, opts).await.into_js_with(&ctx)?;
-    Ok(HttpResponseJs::new(resp))
+  ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
+    self.dispatch(ctx, Verb::Put, url, options)
   }
 
   #[qjs(rename = "delete")]
-  pub async fn delete<'js>(
+  pub fn delete<'js>(
     &self,
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<HttpResponseJs> {
-    self.guard(&url)?;
-    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.delete(&url, opts).await.into_js_with(&ctx)?;
-    Ok(HttpResponseJs::new(resp))
+  ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
+    self.dispatch(ctx, Verb::Delete, url, options)
   }
 
   #[qjs(rename = "patch")]
-  pub async fn patch<'js>(
+  pub fn patch<'js>(
     &self,
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<HttpResponseJs> {
-    self.guard(&url)?;
-    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.patch(&url, opts).await.into_js_with(&ctx)?;
-    Ok(HttpResponseJs::new(resp))
+  ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
+    self.dispatch(ctx, Verb::Patch, url, options)
   }
 
   #[qjs(rename = "head")]
-  pub async fn head<'js>(
+  pub fn head<'js>(
     &self,
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<HttpResponseJs> {
-    self.guard(&url)?;
-    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.head(&url, opts).await.into_js_with(&ctx)?;
-    Ok(HttpResponseJs::new(resp))
+  ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
+    self.dispatch(ctx, Verb::Head, url, options)
   }
 
   /// Generic fetch — `options` may include `method` via `headers` only; this
   /// mirrors `RequestOptions` (no request overload for now — see the
   /// `PLAYWRIGHT_COMPAT.md` gap for `HttpClient.fetch(Request, ...)`).
   #[qjs(rename = "fetch")]
-  pub async fn fetch<'js>(
+  pub fn fetch<'js>(
     &self,
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<HttpResponseJs> {
-    self.guard(&url)?;
-    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
-    let resp = self.inner.fetch(&url, opts).await.into_js_with(&ctx)?;
-    Ok(HttpResponseJs::new(resp))
+  ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
+    self.dispatch(ctx, Verb::Fetch, url, options)
   }
 }
 

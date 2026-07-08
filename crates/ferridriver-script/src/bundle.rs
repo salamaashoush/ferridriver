@@ -634,26 +634,41 @@ async fn compile_extract_one(
   let name = module_name.to_string();
   let code = code.to_string();
   let label = module_name.to_string();
+  let cfg_default = crate::engine::ScriptEngineConfig::default();
   actx
     .async_with(async |ctx| {
-      // Registry + native `defineTool`/cucumber surface. Idempotent — the
-      // shared extraction context installs it once for the whole batch.
+      // Extraction must evaluate the module in the SAME ambient
+      // environment a session VM provides, or a plugin whose top level
+      // uses a standard global (TextEncoder, setTimeout, crypto,
+      // console, expect) is rejected at startup while working fine
+      // in-session. Everything context-free that `Session::create`
+      // installs before `install_plugins` is installed here too; only
+      // session-scoped bindings (fs/vars/artifacts/commands/page/
+      // request) are absent — those are per-session by definition and
+      // top-level plugin code must not depend on them. All idempotent —
+      // the shared extraction context installs once for the whole batch.
       crate::bindings::install_bdd(&ctx)
         .map_err(|e| ScriptError::internal(format!("install extension registry: {e}")))?;
+      crate::bindings::define_classes(&ctx).map_err(|e| ScriptError::internal(format!("install classes: {e}")))?;
+      crate::engine::install_runtime_shims(&ctx)
+        .map_err(|e| ScriptError::internal(format!("install runtime shims: {e}")))?;
+      crate::bindings::expect::install_expect(&ctx)
+        .map_err(|e| ScriptError::internal(format!("install expect: {e}")))?;
+      // Fresh capture per file: whatever the plugin's top level logs is
+      // forwarded to tracing under the module label after eval.
+      let console = std::sync::Arc::new(crate::console::ConsoleCapture::new(
+        cfg_default.max_console_entries,
+        cfg_default.max_console_bytes,
+        cfg_default.max_console_entry_bytes,
+      ));
+      crate::engine::install_console(&ctx, console.clone())
+        .map_err(|e| ScriptError::internal(format!("install console: {e}")))?;
       // Manifest extraction is the MCP tool path: expose
       // `ferridriver.host = 'mcp'` so an extension's host-gated
       // `defineTool` runs and its manifest is captured (mirrors what the
       // mcp session does).
-      {
-        let fd =
-          rquickjs::Object::new(ctx.clone()).map_err(|e| ScriptError::internal(format!("ferridriver global: {e}")))?;
-        fd.set("host", "mcp")
-          .map_err(|e| ScriptError::internal(format!("ferridriver.host: {e}")))?;
-        ctx
-          .globals()
-          .set("ferridriver", fd)
-          .map_err(|e| ScriptError::internal(format!("install ferridriver global: {e}")))?;
-      }
+      crate::bindings::runtime::install_host(&ctx, "mcp")
+        .map_err(|e| ScriptError::internal(format!("install ferridriver.host: {e}")))?;
 
       // Bundled module has no remaining imports — `declare` (parse only)
       // needs no resolver; mirrors `bundle_and_compile`.
@@ -684,11 +699,11 @@ async fn compile_extract_one(
         .catch(&ctx)
         .map_err(|e| caught_to_script_error(e, &label))?
         .1;
-      promise
-        .into_future::<()>()
-        .await
-        .catch(&ctx)
-        .map_err(|e| caught_to_script_error(e, &label))?;
+      let evaled = promise.into_future::<()>().await.catch(&ctx);
+      for entry in console.drain() {
+        tracing::info!(target: "ferridriver::extensions", plugin = %label, "{}", entry.message);
+      }
+      evaled.map_err(|e| caught_to_script_error(e, &label))?;
 
       // Tools registered via the file's top-level `defineTool(...)` calls
       // during eval — slice off the ones THIS file added.

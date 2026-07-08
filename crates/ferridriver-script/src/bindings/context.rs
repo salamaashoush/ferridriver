@@ -290,11 +290,11 @@ impl BrowserContextJs {
       },
     };
     let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
-    let saved_handler = rquickjs::Persistent::save(&ctx, handler);
+    let saved_handler = crate::bindings::page::SavedCallback::save(&ctx, handler);
 
     let has_predicate = url.as_function().is_some();
     let (matcher, saved_pred, registry_matcher) = if let Some(pred) = url.as_function() {
-      let saved_pred = rquickjs::Persistent::save(&ctx, pred.clone());
+      let saved_pred = crate::bindings::page::SavedCallback::save(&ctx, pred.clone());
       let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
       (m.clone(), Some(saved_pred), Some(m))
     } else {
@@ -310,21 +310,26 @@ impl BrowserContextJs {
         use rquickjs::class::Class;
         let _: Result<rquickjs::Result<()>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
           if has_predicate {
-            let pred = with_page_callbacks(&ctx, |r| r.get_route_pred(id))?
-              .ok_or_else(|| rquickjs::Error::new_from_js_message("context.route", "Error", "route predicate gone".to_string()))?
-              .restore(&ctx)?;
+            let saved_pred = with_page_callbacks(&ctx, |r| r.get_route_pred(id))?
+              .ok_or_else(|| rquickjs::Error::new_from_js_message("context.route", "Error", "route predicate gone".to_string()))?;
+            let pred = saved_pred.restore(&ctx)?;
             let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
             let url_obj: rquickjs::Value<'_> = url_ctor.construct((route.request().url.clone(),))?;
-            if !call_predicate_truthy(&pred, url_obj, &ctx).await? {
+            let truthy = crate::bindings::fetch::bracket_net(
+              crate::bindings::fetch::policy_cell(&ctx),
+              saved_pred.net().cloned(),
+              call_predicate_truthy(&pred, url_obj, &ctx),
+            )
+            .await?;
+            if !truthy {
               route.continue_route(ferridriver::route::ContinueOverrides::default());
               return Ok(());
             }
           }
           let f = with_page_callbacks(&ctx, |r| r.get_route_handler(id))?
-            .ok_or_else(|| rquickjs::Error::new_from_js_message("context.route", "Error", "route handler gone".to_string()))?
-            .restore(&ctx)?;
+            .ok_or_else(|| rquickjs::Error::new_from_js_message("context.route", "Error", "route handler gone".to_string()))?;
           let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
-          let _: rquickjs::Value<'_> = f.call((route_class,))?;
+          let _: rquickjs::Value<'_> = f.call_bracketed(&ctx, (route_class,))?;
           Ok(())
         })
         .await;
@@ -364,7 +369,7 @@ impl BrowserContextJs {
     let matcher = url_value_to_matcher(&ctx, url)?;
     let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
     let owner = RouteOwner::Context(self.inner.name().to_string());
-    let saved = rquickjs::Persistent::save(&ctx, handler);
+    let saved = crate::bindings::page::SavedCallback::save(&ctx, handler);
     with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, owner.clone(), saved))?;
     let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id, owner);
     self
@@ -664,7 +669,7 @@ impl BrowserContextJs {
         ));
       },
     };
-    let saved = rquickjs::Persistent::save(ctx, callback);
+    let saved = crate::bindings::page::SavedCallback::save(ctx, callback);
     crate::bindings::page::insert_exposed_callback(ctx, name.to_string(), saved)?;
 
     let name = name.to_string();
@@ -673,15 +678,15 @@ impl BrowserContextJs {
       let name = name.clone();
       Box::pin(async move {
         let out: Result<rquickjs::Result<serde_json::Value>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
-          let f = crate::bindings::page::get_exposed_callback(&ctx, &name)?
+          let saved = crate::bindings::page::get_exposed_callback(&ctx, &name)?
             .ok_or_else(|| {
               rquickjs::Error::new_from_js_message(
                 "BrowserContext.exposeBinding",
                 "Error",
                 "exposed callback gone".to_string(),
               )
-            })?
-            .restore(&ctx)?;
+            })?;
+          let f = saved.restore(&ctx)?;
           // Playwright spreads the page-side call args into the
           // callback. For exposeBinding the BindingSource object is the
           // first argument; for exposeFunction it is omitted.
@@ -699,8 +704,15 @@ impl BrowserContextJs {
             // path turns numbers into wrapper objects.
             call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, v)?)?;
           }
-          let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
-          let res = mp.into_future::<rquickjs::Value<'_>>().await?;
+          let res = crate::bindings::fetch::bracket_net(
+            crate::bindings::fetch::policy_cell(&ctx),
+            saved.net().cloned(),
+            async {
+              let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
+              mp.into_future::<rquickjs::Value<'_>>().await
+            },
+          )
+          .await?;
           let json = match ctx.json_stringify(res)? {
             Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),
             None => serde_json::Value::Null,
