@@ -514,25 +514,31 @@ impl McpServer {
     // Discover every file across all configured roots, then bundle +
     // compile + extract the whole set in ONE batch runtime (rolldown ->
     // QuickJS bytecode; TypeScript and plugin-local imports resolved).
+    // Failures are logged AND recorded on the registry so the
+    // `ferridriver_extensions` tool can report them without a restart.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let (files, discovery_errors) = crate::plugin::discover_specs(specs, &cwd);
+    let mut failures: Vec<(String, String)> = Vec::new();
     for e in discovery_errors {
       tracing::warn!(error = %e, "plugin discovery failed; skipping path");
-    }
-    if files.is_empty() {
-      return;
+      failures.push((e.source_label(), e.to_string()));
     }
 
-    let (loaded, errors) = crate::plugin::load_all(&files).await;
+    let (loaded, errors) = if files.is_empty() {
+      (Vec::new(), Vec::new())
+    } else {
+      crate::plugin::load_all(&files).await
+    };
     for e in errors {
       tracing::warn!(error = %e, "plugin load failed; skipping");
+      failures.push((e.source_label(), e.to_string()));
     }
     for lp in &loaded {
       let tool_names: Vec<&str> = lp.tools.iter().map(|t| t.name.as_str()).collect();
       tracing::info!(path = %lp.path.display(), tools = ?tool_names, "loaded plugin file");
     }
 
-    self.plugins = crate::plugin::PluginRegistry::new(loaded);
+    self.plugins = crate::plugin::PluginRegistry::new(loaded, failures);
     self.promote_plugins();
   }
 
@@ -1468,17 +1474,20 @@ mod tests {
     // Compilation of the declared schema happens once, at
     // `PluginRegistry::new`; the stored error is what `invoke_plugin`
     // returns on every call to that tool.
-    let registry = crate::plugin::PluginRegistry::new(vec![crate::plugin::LoadedPlugin {
-      tools: vec![
-        serde_json::from_value(serde_json::json!({
-          "name": "bad",
-          "inputSchema": { "type": "not-a-real-type" }
-        }))
-        .expect("manifest"),
-      ],
-      bytecode: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-      path: std::path::PathBuf::from("bad.js"),
-    }]);
+    let registry = crate::plugin::PluginRegistry::new(
+      vec![crate::plugin::LoadedPlugin {
+        tools: vec![
+          serde_json::from_value(serde_json::json!({
+            "name": "bad",
+            "inputSchema": { "type": "not-a-real-type" }
+          }))
+          .expect("manifest"),
+        ],
+        bytecode: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+        path: std::path::PathBuf::from("bad.js"),
+      }],
+      Vec::new(),
+    );
     let compiled = registry.validator("bad").expect("schema present");
     let err = compiled.as_ref().expect_err("schema must be invalid");
     assert!(err.contains("invalid inputSchema"), "{err}");

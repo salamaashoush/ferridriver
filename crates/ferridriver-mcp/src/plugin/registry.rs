@@ -18,6 +18,11 @@ use super::manifest::PluginManifest;
 #[derive(Default, Clone)]
 pub struct PluginRegistry {
   files: Arc<Vec<LoadedPlugin>>,
+  /// Per-file/spec load failures recorded at startup (discovery,
+  /// bundle/compile, manifest extraction). Kept so the
+  /// `ferridriver_extensions` tool can report what failed to load —
+  /// previously the only trace was a startup log line.
+  errors: Arc<Vec<(String, String)>>,
   /// Pre-compiled `inputSchema` validator per tool name, or the error
   /// message an invalid schema produces. Built once here so tool
   /// invocations look a validator up instead of recompiling the schema
@@ -36,6 +41,7 @@ impl std::fmt::Debug for PluginRegistry {
       .collect();
     f.debug_struct("PluginRegistry")
       .field("files", &self.files)
+      .field("errors", &self.errors)
       .field("validators", &validators)
       .finish()
   }
@@ -43,7 +49,7 @@ impl std::fmt::Debug for PluginRegistry {
 
 impl PluginRegistry {
   #[must_use]
-  pub fn new(files: Vec<LoadedPlugin>) -> Self {
+  pub fn new(files: Vec<LoadedPlugin>, errors: Vec<(String, String)>) -> Self {
     let validators = files
       .iter()
       .flat_map(|f| f.tools.iter())
@@ -56,8 +62,16 @@ impl PluginRegistry {
       .collect();
     Self {
       files: Arc::new(files),
+      errors: Arc::new(errors),
       validators: Arc::new(validators),
     }
+  }
+
+  /// `(source, message)` pairs for everything that failed to load at
+  /// startup.
+  #[must_use]
+  pub fn errors(&self) -> &[(String, String)] {
+    &self.errors
   }
 
   /// The pre-compiled validator for `name`'s `inputSchema` (`None` when

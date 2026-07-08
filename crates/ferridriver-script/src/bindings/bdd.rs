@@ -18,7 +18,6 @@
 //! No business logic here: matching, outline expansion, tag filtering
 //! and hook ordering all stay in the `ferridriver-bdd` core.
 
-use std::cell::RefCell;
 use std::sync::Arc;
 
 use rquickjs::class::{Class, Trace};
@@ -26,6 +25,7 @@ use rquickjs::function::{Args, Constructor, Opt, Rest};
 use rquickjs::{ArrayBuffer, CatchResultExt, Ctx, Function, JsLifetime, Object, Persistent, TypedArray, Value};
 
 use crate::bindings::convert::{serde_from_js, serde_to_js};
+use crate::bindings::registry::{HookReg, ParamTypeReg, ScriptAttachment, StepReg, as_function, rq, with_registry};
 use crate::bindings::{install_browser_context_on, install_browser_on, install_page_on, install_request_on};
 use crate::engine::caught_to_script_error;
 use crate::error::ScriptError;
@@ -56,63 +56,6 @@ impl StepKind {
   }
 }
 
-struct StepReg {
-  kind: StepKind,
-  pattern: String,
-  is_regex: bool,
-  func: Persistent<Function<'static>>,
-  /// Per-step `{ timeout }` (ms) from `Given(pat, { timeout }, fn)`.
-  /// `None` ⇒ the registry default. Enforced in [`invoke_step`].
-  timeout_ms: Option<u64>,
-}
-
-struct HookReg {
-  kind: String,
-  tags: Option<String>,
-  func: Persistent<Function<'static>>,
-  /// Per-hook `{ timeout }` (ms). `None` ⇒ registry default.
-  timeout_ms: Option<u64>,
-}
-
-struct ParamTypeReg {
-  name: String,
-  regexp: String,
-  /// Optional `transformer` fn from `defineParameterType`. Applied to
-  /// the matched text in [`invoke_step`] so the step receives a typed
-  /// value (cucumber-js parity).
-  transformer: Option<Persistent<Function<'static>>>,
-}
-
-/// One MCP tool contribution. The handler is kept as a `Persistent`
-/// function and called back natively by the `tools.<name>` dispatch in
-/// `plugins.rs` — exactly the mechanism BDD steps use, no synthesized
-/// JS dispatch.
-struct ToolReg {
-  name: String,
-  description: Option<String>,
-  input_schema: Option<serde_json::Value>,
-  expose_as_mcp_tool: bool,
-  /// `Arc` so per-call dispatch is a refcount bump, not a deep clone of
-  /// the command map / host list on every `tools.<name>()` invocation.
-  allowed_commands: std::sync::Arc<std::collections::BTreeMap<String, crate::command_spec::CommandSpec>>,
-  allowed_net: std::sync::Arc<[String]>,
-  /// Per-tool handler timeout (ms) from the manifest `timeoutMs`. `None`
-  /// ⇒ no independent bound (the session wall-clock still applies).
-  /// Enforced natively in `plugins::dispatch_tool`.
-  timeout_ms: Option<u64>,
-  handler: Persistent<Function<'static>>,
-}
-
-/// One Cucumber attachment produced by `this.attach(...)` /
-/// `this.log(...)` during a scenario. Drained by the BDD layer into the
-/// test result so the messages / HTML / Allure reporters surface it
-/// (screenshot- and text-on-failure).
-#[derive(Debug, Clone)]
-pub struct ScriptAttachment {
-  pub media_type: String,
-  pub bytes: Vec<u8>,
-}
-
 /// The argument cucumber-js passes to `Before`/`After` hooks. Built by
 /// the BDD layer and lowered to a JS object `{ pickle: { name, tags },
 /// result: { status, message? } }` in [`invoke_hook`] — enough for the
@@ -128,31 +71,6 @@ pub struct HookArg {
   pub message: Option<String>,
 }
 
-/// Rust-side **extension registry**: the single context-owned table that
-/// every contribution kind lands in. Cucumber `Given`/`When`/`Then`/
-/// hooks/param-types AND MCP `defineTool`/legacy-`exports` tools register
-/// here while the user's bundled module evaluates. Hosts read back the
-/// kinds they care about (`collect_registry` for BDD, [`tools_snapshot`]
-/// for MCP) and dispatch handlers natively ([`invoke_step`], the
-/// `tools.<name>` dispatch in `plugins.rs`). No `globalThis.__*`, no
-/// synthesized JS.
-#[derive(Default)]
-struct ExtensionRegistry {
-  steps: Vec<StepReg>,
-  hooks: Vec<HookReg>,
-  param_types: Vec<ParamTypeReg>,
-  tools: Vec<ToolReg>,
-  /// Attachments queued by the running scenario's `this.attach`/`log`.
-  /// Drained per scenario by the BDD layer; cleared by `reset_world`.
-  attachments: Vec<ScriptAttachment>,
-  default_timeout_ms: u64,
-  /// `setDefinitionFunctionWrapper(fn)` — wraps every step body
-  /// (cross-cut: retry/trace/log). Applied in [`invoke_step`].
-  def_fn_wrapper: Option<Persistent<Function<'static>>>,
-  world_ctor: Option<Persistent<Constructor<'static>>>,
-  current_world: Option<Persistent<Object<'static>>>,
-}
-
 /// Read an optional `{ timeout }` (milliseconds) off an options object
 /// arg, mirroring cucumber-js `Given(pat, { timeout }, fn)` /
 /// `Before({ timeout }, fn)`.
@@ -164,26 +82,6 @@ fn timeout_from_opts(args: &[Value<'_>]) -> Option<u64> {
     }
     o.get::<_, f64>("timeout").ok().map(|ms| ms.max(0.0) as u64)
   })
-}
-
-/// Context userdata holding the registry. Single-threaded VM ⇒
-/// `RefCell`, never `Arc`/`Mutex`.
-struct BddUserData(RefCell<ExtensionRegistry>);
-
-// SAFETY: holds only `'static` data (`Persistent<…>` handles and owned
-// values), so re-stating the unused `'js` lifetime is sound — same
-// rationale as `SessionAsyncCtx`.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for BddUserData {
-  type Changed<'to> = BddUserData;
-}
-
-fn with_registry<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut ExtensionRegistry) -> R) -> Result<R, ScriptError> {
-  let ud = ctx
-    .userdata::<BddUserData>()
-    .ok_or_else(|| ScriptError::internal("bdd registry not installed".to_string()))?;
-  let mut reg = ud.0.borrow_mut();
-  Ok(f(&mut reg))
 }
 
 /// A cucumber data table, passed to steps as the trailing argument.
@@ -256,10 +154,6 @@ impl DataTableJs {
   }
 }
 
-fn as_function<'js>(v: &Value<'js>) -> Option<Function<'js>> {
-  v.as_function().cloned()
-}
-
 fn pattern_of(a: &Value<'_>) -> Result<(String, bool), ScriptError> {
   if let Some(s) = a.as_string() {
     return Ok((s.to_string().map_err(|e| ScriptError::internal(e.to_string()))?, false));
@@ -272,10 +166,6 @@ fn pattern_of(a: &Value<'_>) -> Result<(String, bool), ScriptError> {
   Err(ScriptError::internal(
     "step pattern must be a string or RegExp".to_string(),
   ))
-}
-
-fn rq(e: &ScriptError) -> rquickjs::Error {
-  rquickjs::Error::new_from_js_message("bdd", "Error", e.message.clone())
 }
 
 fn ctx_of<'js>(args: &[Value<'js>]) -> Result<Ctx<'js>, rquickjs::Error> {
@@ -425,127 +315,17 @@ pub async fn drain_attachments(vm: &crate::vm::VmHandle) -> Result<Vec<ScriptAtt
   .await?
 }
 
-/// Register one MCP tool from a manifest object + handler function.
-/// The single tool-registration path, behind the native `tool` /
-/// `defineTool` contribution point.
-fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -> Result<(), ScriptError> {
-  let name: String = m
-    .get("name")
-    .map_err(|e| ScriptError::internal(format!("tool manifest missing string `name`: {e}")))?;
-  if name.trim().is_empty() {
-    return Err(ScriptError::internal(
-      "tool: `name` must be a non-empty string".to_string(),
-    ));
-  }
-  let description = m
-    .get::<_, Value<'_>>("description")
-    .ok()
-    .and_then(|v| v.as_string().and_then(|s| s.to_string().ok()));
-  let input_schema = match m.get::<_, Value<'_>>("inputSchema") {
-    Ok(v) if !v.is_undefined() && !v.is_null() => {
-      Some(serde_from_js::<serde_json::Value>(ctx, v).map_err(|e| ScriptError::internal(e.to_string()))?)
-    },
-    _ => None,
-  };
-  let expose_as_mcp_tool = m
-    .get::<_, bool>("exposeAsMcpTool")
-    .or_else(|_| m.get::<_, bool>("exposeAsTool"))
-    .unwrap_or(false);
-  let timeout_ms = m
-    .get::<_, f64>("timeoutMs")
-    .ok()
-    .map(|ms| ms.max(0.0) as u64)
-    .filter(|&v| v > 0);
-
-  let (allowed_commands, allowed_net) = match m.get::<_, Value<'_>>("allow") {
-    Ok(v) => {
-      if let Some(allow) = v.as_object() {
-        // `commands` is the canonical capability name; `exec` is a
-        // compatibility alias. Either populates the command allow-list.
-        let commands = ["commands", "exec"]
-          .into_iter()
-          .find_map(|k| match allow.get::<_, Value<'_>>(k) {
-            Ok(c) if c.is_object() => serde_from_js(ctx, c).ok(),
-            _ => None,
-          })
-          .unwrap_or_default();
-        let net = match allow.get::<_, Value<'_>>("net") {
-          Ok(n) if !n.is_undefined() && !n.is_null() => serde_from_js(ctx, n).unwrap_or_default(),
-          _ => Vec::new(),
-        };
-        (commands, net)
-      } else {
-        (std::collections::BTreeMap::new(), Vec::new())
-      }
-    },
-    Err(_) => (std::collections::BTreeMap::new(), Vec::new()),
-  };
-
-  let saved = Persistent::save(ctx, handler);
-  with_registry(ctx, |reg| {
-    if reg.tools.iter().any(|t| t.name == name) {
-      return Err(ScriptError::internal(format!(
-        "tool: duplicate tool name `{name}` — names must be unique across all loaded extensions"
-      )));
-    }
-    reg.tools.push(ToolReg {
-      name,
-      description,
-      input_schema,
-      expose_as_mcp_tool,
-      allowed_commands: std::sync::Arc::new(allowed_commands),
-      allowed_net: std::sync::Arc::from(allowed_net),
-      timeout_ms,
-      handler: saved,
-    });
-    Ok(())
-  })?
-}
-
-/// `tool(...)` / `defineTool(...)` argument adapter. Two equivalent
-/// native forms: `tool(tool)` where `tool` carries an inline `handler`,
-/// or `tool(manifest, handlerFn)`. Uses the same `Rest`-derived
-/// single-`'js` pattern `register_step`/`register_hook` use so the
-/// `Persistent::save` lifetimes unify. There is no `globalThis.exports`
-/// path.
-fn register_tool_args(args: &[Value<'_>]) -> rquickjs::Result<()> {
-  let ctx = ctx_of(args)?;
-  let manifest = args.first().and_then(Value::as_object).ok_or_else(|| {
-    rq(&ScriptError::internal(
-      "tool: first arg must be a tool/manifest object".to_string(),
-    ))
-  })?;
-  // Handler: an explicit 2nd-arg function wins; otherwise the tool
-  // object's own `handler` method.
-  let handler = args
-    .iter()
-    .skip(1)
-    .find_map(as_function)
-    .or_else(|| {
-      manifest
-        .get::<_, Value<'_>>("handler")
-        .ok()
-        .and_then(|v| v.as_function().cloned())
-    })
-    .ok_or_else(|| {
-      rq(&ScriptError::internal(
-        "tool: no handler — pass tool(manifest) with a `handler` method or tool(manifest, fn)".to_string(),
-      ))
-    })?;
-  register_tool(&ctx, manifest, handler).map_err(|e| rq(&e))
-}
-
 /// Install the native cucumber + MCP-tool surface and the shared
 /// extension registry as context userdata. Idempotent; called once at
 /// `Session::create`.
 pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-  if ctx.userdata::<BddUserData>().is_some() {
+  // Shared extension registry + native `defineTool`/`tool` contribution
+  // point. `None` back means it was already installed — the cucumber
+  // surface below is idempotent to re-set, but keep the early return so
+  // repeat calls stay cheap.
+  let Some(tool) = crate::bindings::registry::install(ctx, 5000)? else {
     return Ok(());
-  }
-  let _ = ctx.store_userdata(BddUserData(RefCell::new(ExtensionRegistry {
-    default_timeout_ms: 5000,
-    ..ExtensionRegistry::default()
-  })));
+  };
 
   let g = ctx.globals();
   let bdd = Object::new(ctx.clone())?;
@@ -635,12 +415,6 @@ pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   g.set("setParallelCanAssign", set_parallel_can_assign.clone())?;
   bdd.set("setParallelCanAssign", set_parallel_can_assign)?;
 
-  // MCP tool contribution point — the only tool-registration surface.
-  // `defineTool(tool)` (inline `handler`) or `defineTool(manifest, fn)`.
-  let tool = Function::new(ctx.clone(), |args: Rest<Value<'_>>| register_tool_args(&args.0))?;
-  g.set("defineTool", tool.clone())?;
-  g.set("tool", tool.clone())?;
-
   let fd = crate::bindings::runtime::ensure_ferridriver(ctx)?;
   fd.set("bdd", bdd)?;
   fd.set("tool", tool)?;
@@ -711,108 +485,6 @@ pub async fn collect_registry(vm: &crate::vm::VmHandle) -> Result<CollectedRegis
     })
   })
   .await?
-}
-
-/// Capability allow-list snapshot. Serialises to the exact JSON the MCP
-/// `PluginAllow` deserialises (`commands` + `net`, camelCase) so the
-/// loader needs no JS round-trip to recover manifests.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CollectedAllow {
-  pub commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
-  pub net: Vec<String>,
-}
-
-/// One registered tool's manifest, read straight off the Rust registry.
-/// Field layout + `camelCase` match MCP `PluginManifest` so a
-/// `serde_json` round-trip reconstructs it without re-running the plugin.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CollectedTool {
-  pub name: String,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub description: Option<String>,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub input_schema: Option<serde_json::Value>,
-  pub allow: CollectedAllow,
-  pub expose_as_mcp_tool: bool,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub timeout_ms: Option<u64>,
-}
-
-/// Snapshot every registered tool manifest, in registration order.
-/// Synchronous (`&Ctx`) so the bundle/extraction path can call it inside
-/// its own `async_with!` without a second context hop.
-pub fn tools_snapshot(ctx: &Ctx<'_>) -> Result<Vec<CollectedTool>, ScriptError> {
-  with_registry(ctx, |reg| {
-    reg
-      .tools
-      .iter()
-      .map(|t| CollectedTool {
-        name: t.name.clone(),
-        description: t.description.clone(),
-        input_schema: t.input_schema.clone(),
-        allow: CollectedAllow {
-          commands: (*t.allowed_commands).clone(),
-          net: t.allowed_net.to_vec(),
-        },
-        expose_as_mcp_tool: t.expose_as_mcp_tool,
-        timeout_ms: t.timeout_ms,
-      })
-      .collect()
-  })
-}
-
-/// Number of tools registered so far — lets the loader slice each
-/// bundled file's contributions out of the shared registry.
-pub fn tools_len(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
-  with_registry(ctx, |reg| reg.tools.len())
-}
-
-/// The ordered tool names — drives building the native `tools.<name>`
-/// surface.
-pub fn tool_names(ctx: &Ctx<'_>) -> Result<Vec<String>, ScriptError> {
-  with_registry(ctx, |reg| reg.tools.iter().map(|t| t.name.clone()).collect())
-}
-
-/// A tool's restored handler + its capability allow-lists, looked up by
-/// registration index. Used by the native `tools.<name>` dispatch in
-/// `plugins.rs` — the analogue of `invoke_step`'s registry lookup.
-pub(crate) struct ToolDispatch<'js> {
-  pub handler: Function<'js>,
-  pub allowed_commands: std::sync::Arc<std::collections::BTreeMap<String, crate::command_spec::CommandSpec>>,
-  pub allowed_net: std::sync::Arc<[String]>,
-  pub timeout_ms: Option<u64>,
-}
-
-/// Registration index of the tool named `name`, if that tool was
-/// registered in THIS session (a file that failed session install has
-/// no entry even when the startup manifest advertises it).
-pub(crate) fn tool_index_by_name(ctx: &Ctx<'_>, name: &str) -> Result<Option<usize>, ScriptError> {
-  with_registry(ctx, |reg| reg.tools.iter().position(|t| t.name == name))
-}
-
-pub(crate) fn tool_dispatch<'js>(ctx: &Ctx<'js>, idx: usize) -> Result<ToolDispatch<'js>, ScriptError> {
-  let (saved, allowed_commands, allowed_net, timeout_ms) = with_registry(ctx, |reg| {
-    reg
-      .tools
-      .get(idx)
-      .map(|t| {
-        (
-          t.handler.clone(),
-          t.allowed_commands.clone(),
-          t.allowed_net.clone(),
-          t.timeout_ms,
-        )
-      })
-      .ok_or_else(|| ScriptError::internal(format!("tool index {idx} out of range")))
-  })??;
-  let handler = saved.restore(ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
-  Ok(ToolDispatch {
-    handler,
-    allowed_commands,
-    allowed_net,
-    timeout_ms,
-  })
 }
 
 /// Per-scenario fixtures the BDD core threads onto the JS World — the

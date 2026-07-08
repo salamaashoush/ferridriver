@@ -24,8 +24,8 @@ use rquickjs::function::Opt;
 use rquickjs::promise::{MaybePromise, Promised};
 use rquickjs::{Ctx, Function, IntoJs, JsLifetime, Module, Object, Value, class::Class, class::Trace};
 
-use super::bdd::{tool_dispatch, tool_names};
 use super::http_client::HttpClientJs;
+use super::registry::{tool_dispatch, tool_names};
 use crate::bindings::convert::{json_to_js, serde_from_js};
 use crate::command_spec::CommandSpec;
 use crate::engine::SessionProcsUd;
@@ -384,7 +384,7 @@ pub async fn invoke_tool_by_name(
   name: &str,
   args: &serde_json::Value,
 ) -> Result<serde_json::Value, ScriptError> {
-  let Some(idx) = crate::bindings::bdd::tool_index_by_name(ctx, name)? else {
+  let Some(idx) = crate::bindings::registry::tool_index_by_name(ctx, name)? else {
     return Err(ScriptError::internal(format!(
       "tool `{name}` is not installed in this session (its extension file may have failed to load — check the server log)"
     )));
