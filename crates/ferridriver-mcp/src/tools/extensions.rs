@@ -29,8 +29,9 @@ impl McpServer {
     description = "List the extensions loaded at server startup: for each source file, \
     the tools it declares with their description, whether they are exposed as first-class MCP \
     tools, the per-tool timeout, and the declared capability allow-lists (exec command names, \
-    net host patterns). Use to discover available tools and audit what authority each \
-    one was granted."
+    net host patterns) — plus every file/spec that FAILED to load, with its error. Use to \
+    discover available tools, audit what authority each one was granted, and debug an \
+    extension that did not come up."
   )]
   async fn ferridriver_extensions(
     &self,
@@ -69,9 +70,17 @@ impl McpServer {
       })
       .collect();
 
+    let errors: Vec<serde_json::Value> = self
+      .plugins
+      .errors()
+      .iter()
+      .map(|(source, message)| serde_json::json!({ "source": source, "error": message }))
+      .collect();
+
     let payload = serde_json::json!({
       "count": self.plugins.tool_count(),
       "files": files,
+      "errors": errors,
     });
     let json =
       serde_json::to_string_pretty(&payload).map_err(|e| McpServer::err(format!("serialize extensions: {e}")))?;

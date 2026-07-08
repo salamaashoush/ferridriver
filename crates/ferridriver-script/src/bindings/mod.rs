@@ -49,6 +49,7 @@ pub mod node_compat;
 pub mod page;
 pub mod plugins;
 pub mod process;
+pub mod registry;
 pub mod runtime;
 pub mod sidecars;
 pub mod streams;
@@ -63,9 +64,8 @@ pub mod webapi;
 
 pub use artifacts::ArtifactsJs;
 pub use bdd::{
-  CollectedAllow, CollectedRegistry, CollectedTool, HookArg, JsArg, ScenarioWorld, ScriptAttachment, StepOutcome,
-  collect_registry, drain_attachments, install_bdd, invoke_hook, invoke_step, reset_world, set_scenario_world,
-  tools_len, tools_snapshot,
+  CollectedRegistry, HookArg, JsArg, ScenarioWorld, StepOutcome, collect_registry, drain_attachments, install_bdd,
+  invoke_hook, invoke_step, reset_world, set_scenario_world,
 };
 pub use browser::BrowserJs;
 pub use browser_type::{BrowserTypeJs, install_browser_type};
@@ -86,6 +86,7 @@ pub use mouse::MouseJs;
 pub use network::{RequestJs, ResponseJs, RouteJs, WebSocketJs};
 pub use page::PageJs;
 pub use plugins::{PluginBinding, PluginCommandsJs, install_plugins, invoke_tool_by_name};
+pub use registry::{CollectedAllow, CollectedTool, ScriptAttachment, tools_len, tools_snapshot};
 pub use sidecars::{SidecarJs, SidecarsJs, install_sidecars};
 pub use video::VideoJs;
 pub use web_error::WebErrorJs;

@@ -76,6 +76,20 @@ impl std::fmt::Display for PluginLoadError {
 
 impl std::error::Error for PluginLoadError {}
 
+impl PluginLoadError {
+  /// The failing source (file path or configured spec), for error
+  /// reporting keyed by origin.
+  #[must_use]
+  pub fn source_label(&self) -> String {
+    match self {
+      Self::Io { path, .. }
+      | Self::Bundle { path, .. }
+      | Self::ManifestInvalid { path, .. }
+      | Self::ManifestNoTools { path } => path.display().to_string(),
+    }
+  }
+}
+
 /// Bundle + compile + extract every discovered plugin file in one batch.
 /// Returns the successfully loaded plugins and a per-file error list so
 /// the caller can log and skip broken files without aborting startup.
