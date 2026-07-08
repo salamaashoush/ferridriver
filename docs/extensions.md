@@ -99,11 +99,11 @@ defineTool(manifest, async (ctx) => { ... });
 ### `exposeAsTool`
 
 - `false` (default): the tool is callable from other extension/script code
-  as `await plugins["name"](args)`, but is **not** advertised in the MCP
+  as `await tools["name"](args)`, but is **not** advertised in the MCP
   server's `tools/list`. Use for shared helpers.
 - `true`: additionally promoted to a first-class MCP tool. `name`,
   `description`, and `inputSchema` become the tool's contract. The tool
-  call and the `plugins[...]` binding route through the same handler.
+  call and the `tools[...]` binding route through the same handler.
 
 ### Handler context
 
@@ -125,13 +125,24 @@ Return any JSON-serialisable value; it becomes the tool result.
 > tool error and the handler is never entered. You still get the parsed
 > value as `args` — validation does not coerce, only gate.
 
+> `session` is a **reserved argument key** on promoted tools: the server
+> reads it to select the browser session (same `instance:context` format
+> as every other MCP tool) before dispatch. It is exempt from
+> `inputSchema` validation — a schema with
+> `additionalProperties: false` does not block session routing — but it
+> IS still present on the `args` object the handler receives. Do not
+> declare your own `session` property with different semantics.
+
 ---
 
 ## Capabilities
 
-`allow` is a declarative, default-deny capability manifest, enforced in
-Rust at the binding boundary. The handler source alone cannot grant itself
-authority it did not declare.
+`allow` is a declarative capability manifest, enforced in Rust at the
+binding boundary. The handler source alone cannot grant itself authority
+it did not declare. Defaults differ per capability: `commands` is
+default-deny (an absent map grants nothing), while `net` is default-open
+for back-compatibility (an absent list leaves HTTP unrestricted;
+declaring any host flips it to default-deny).
 
 ### `allow.commands` (alias: `allow.exec`)
 
@@ -563,8 +574,11 @@ What you can count on as an author:
    `run_script` is different: it always succeeds and you inspect its
    `status` field.)
 4. **`timeoutMs` is honoured for every caller** — whether the tool is
-   invoked as a promoted MCP tool or by another extension. Without it,
-   only the session-wide script timeout applies.
+   invoked as a promoted MCP tool or by another extension. The bound is
+   cooperative: it fires while the handler is awaiting; a handler
+   spinning the CPU without awaiting is halted by the session-wide
+   wall-clock interrupt instead. Without `timeoutMs`, only the
+   session-wide script timeout applies.
 5. **Discovery is recursive and uniform.** A configured directory is
    scanned recursively; `.js .cjs .mjs .jsx .ts .cts .mts .tsx` are all
    accepted, the same way for the MCP server and the test runner. A file

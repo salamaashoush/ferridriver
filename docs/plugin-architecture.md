@@ -1,8 +1,9 @@
 # Plugin architecture survey
 
-Context: the ferridriver MCP plugin system loads single JS files that set
-`globalThis.exports`, extracts a manifest, and exposes each tool as a
-`plugins.<name>(args)` binding (optionally promoted to an MCP tool). This
+Context: the ferridriver MCP extension system loads JS/TS files whose
+top-level `defineTool(...)` calls register into the Rust extension
+registry, and exposes each tool as a `tools.<name>(args)` binding
+(optionally promoted to an MCP tool). This
 note surveys mature plugin/extension systems for three concerns —
 compile-once-run-many, capability/permission models, API extensibility —
 and records what ferridriver adopts versus defers, with the tradeoff.

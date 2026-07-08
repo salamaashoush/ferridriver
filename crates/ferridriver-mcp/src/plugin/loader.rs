@@ -65,7 +65,11 @@ impl std::fmt::Display for PluginLoadError {
       Self::Io { path, error } => write!(f, "read {}: {error}", path.display()),
       Self::Bundle { path, message } => write!(f, "bundle {}: {message}", path.display()),
       Self::ManifestInvalid { path, error } => write!(f, "{}: manifest invalid: {error}", path.display()),
-      Self::ManifestNoTools { path } => write!(f, "{}: no tools declared in globalThis.exports", path.display()),
+      Self::ManifestNoTools { path } => write!(
+        f,
+        "{}: no tools declared — the file never called defineTool(...)",
+        path.display()
+      ),
     }
   }
 }

@@ -1,16 +1,18 @@
 //! Plugin manifest types -- the user-facing contract that plugin files declare.
 //!
-//! A plugin file sets `globalThis.exports = { ... }` whose JSON-shaped subset
-//! deserialises into [`PluginManifest`]. The `handler` field on the JS side
-//! is intentionally NOT part of this struct -- it carries an executable
-//! closure that only makes sense inside a live `QuickJS` context, so the
-//! loader strips it before extraction.
+//! An extension file registers each tool with a top-level
+//! `defineTool({ name, description, inputSchema, allow, exposeAsMcpTool,
+//! timeoutMs, handler })` call; the JSON-shaped subset of that object
+//! deserialises into [`PluginManifest`]. The `handler` field is
+//! intentionally NOT part of this struct -- it carries an executable
+//! closure that only makes sense inside a live `QuickJS` context, so
+//! manifest extraction serialises everything except it.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Manifest extracted from a plugin's `globalThis.exports` declaration.
+/// Manifest extracted from one top-level `defineTool(...)` registration.
 ///
 /// Field naming follows the JS convention (`camelCase`) since that's what
 /// plugin authors type. The Rust side stays `snake_case` via serde rename.
@@ -50,8 +52,10 @@ pub struct PluginManifest {
 
   /// Optional per-invocation handler timeout (milliseconds). Enforced
   /// natively for every caller in `plugins::dispatch_tool` (the handler
-  /// is raced against this bound). `None` ⇒ only the session wall-clock
-  /// applies.
+  /// is raced against this bound). Cooperative: the race can only win
+  /// while the handler is awaiting — a CPU-spinning handler is halted by
+  /// the session wall-clock interrupt, not this bound. `None` ⇒ only the
+  /// session wall-clock applies.
   #[serde(default)]
   pub timeout_ms: Option<u64>,
 }
@@ -61,8 +65,10 @@ pub struct PluginManifest {
 /// This is the plugin sandbox's opt-in authority list: each named
 /// capability is independently scoped and Rust-enforced at the binding
 /// boundary, so the handler source alone cannot grant itself a privilege
-/// it did not declare. Capabilities are additive and default to the
-/// least-privilege value, so an absent field is back-compatible.
+/// it did not declare. Defaults differ per capability: `commands` is
+/// default-deny (an absent map grants nothing), while `net` is
+/// default-open for back-compatibility (an absent list leaves HTTP
+/// unrestricted; declaring any host flips it to default-deny).
 ///
 /// Covered today:
 /// - **exec** (`commands`): named shell-command templates. Default-deny —
