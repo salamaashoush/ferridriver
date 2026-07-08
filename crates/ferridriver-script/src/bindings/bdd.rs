@@ -91,8 +91,10 @@ struct ToolReg {
   description: Option<String>,
   input_schema: Option<serde_json::Value>,
   expose_as_mcp_tool: bool,
-  allowed_commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
-  allowed_net: Vec<String>,
+  /// `Arc` so per-call dispatch is a refcount bump, not a deep clone of
+  /// the command map / host list on every `tools.<name>()` invocation.
+  allowed_commands: std::sync::Arc<std::collections::BTreeMap<String, crate::command_spec::CommandSpec>>,
+  allowed_net: std::sync::Arc<[String]>,
   /// Per-tool handler timeout (ms) from the manifest `timeoutMs`. `None`
   /// ⇒ no independent bound (the session wall-clock still applies).
   /// Enforced natively in `plugins::dispatch_tool`.
@@ -489,8 +491,8 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
       description,
       input_schema,
       expose_as_mcp_tool,
-      allowed_commands,
-      allowed_net,
+      allowed_commands: std::sync::Arc::new(allowed_commands),
+      allowed_net: std::sync::Arc::from(allowed_net),
       timeout_ms,
       handler: saved,
     });
@@ -748,8 +750,8 @@ pub fn tools_snapshot(ctx: &Ctx<'_>) -> Result<Vec<CollectedTool>, ScriptError> 
         description: t.description.clone(),
         input_schema: t.input_schema.clone(),
         allow: CollectedAllow {
-          commands: t.allowed_commands.clone(),
-          net: t.allowed_net.clone(),
+          commands: (*t.allowed_commands).clone(),
+          net: t.allowed_net.to_vec(),
         },
         expose_as_mcp_tool: t.expose_as_mcp_tool,
         timeout_ms: t.timeout_ms,
@@ -775,9 +777,16 @@ pub fn tool_names(ctx: &Ctx<'_>) -> Result<Vec<String>, ScriptError> {
 /// `plugins.rs` — the analogue of `invoke_step`'s registry lookup.
 pub(crate) struct ToolDispatch<'js> {
   pub handler: Function<'js>,
-  pub allowed_commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
-  pub allowed_net: Vec<String>,
+  pub allowed_commands: std::sync::Arc<std::collections::BTreeMap<String, crate::command_spec::CommandSpec>>,
+  pub allowed_net: std::sync::Arc<[String]>,
   pub timeout_ms: Option<u64>,
+}
+
+/// Registration index of the tool named `name`, if that tool was
+/// registered in THIS session (a file that failed session install has
+/// no entry even when the startup manifest advertises it).
+pub(crate) fn tool_index_by_name(ctx: &Ctx<'_>, name: &str) -> Result<Option<usize>, ScriptError> {
+  with_registry(ctx, |reg| reg.tools.iter().position(|t| t.name == name))
 }
 
 pub(crate) fn tool_dispatch<'js>(ctx: &Ctx<'js>, idx: usize) -> Result<ToolDispatch<'js>, ScriptError> {

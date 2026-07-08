@@ -43,6 +43,12 @@ pub struct BrowserSession {
   /// session. Durable tier alongside `vars`: survives VM rebuild;
   /// `Drop` (idle reap / close / shutdown) SIGKILLs every group.
   procs: Arc<crate::session_procs::SessionProcs>,
+  /// The session's HTTP client (`request` binding + `fetch` core).
+  /// Durable tier alongside `vars`: one reqwest client + cookie jar for
+  /// the logical session's lifetime, so connections/TLS sessions are
+  /// reused across calls and cookies persist like `vars` do — instead
+  /// of a fresh client (empty jar, cold pool) per tool call.
+  request: Arc<ferridriver::http_client::HttpClient>,
   last_used: Instant,
   /// Browser instance generation the live `vm` was built against.
   /// `None` until first build, or when no browser is bound.
@@ -55,6 +61,9 @@ impl BrowserSession {
       vm: None,
       vars: Arc::new(InMemoryVars::new()),
       procs: Arc::new(crate::session_procs::SessionProcs::default()),
+      request: Arc::new(ferridriver::http_client::HttpClient::new(
+        ferridriver::http_client::HttpClientOptions::default(),
+      )),
       last_used: Instant::now(),
       epoch: None,
     }
@@ -67,6 +76,14 @@ impl BrowserSession {
   #[must_use]
   pub fn vars(&self) -> Arc<InMemoryVars> {
     self.vars.clone()
+  }
+
+  /// The session-scoped HTTP client. Same durability contract as
+  /// [`Self::vars`]: survives VM rebuilds, released with the session
+  /// record. The caller threads this into the `RunContext`.
+  #[must_use]
+  pub fn request(&self) -> Arc<ferridriver::http_client::HttpClient> {
+    self.request.clone()
   }
 
   fn has_vm(&self) -> bool {
@@ -170,6 +187,34 @@ impl BrowserSession {
     };
     vm.install_session_procs(self.procs.clone()).await;
     let run = vm.execute_module(bundle, args, options, &context).await;
+    self.finish_run(run)
+  }
+
+  /// Like [`Self::run`], but natively invokes a registered extension
+  /// tool by manifest name (no synthesized script, no compile). Shares
+  /// VM lifecycle + poison handling with `run`.
+  pub async fn run_tool(
+    &mut self,
+    config: ScriptEngineConfig,
+    name: &str,
+    tool_args: serde_json::Value,
+    options: RunOptions,
+    context: RunContext,
+    epoch: Option<u64>,
+  ) -> ScriptResult {
+    if let Err(e) = self.ensure_vm(config, &context, epoch).await {
+      self.last_used = Instant::now();
+      return ScriptResult::err(e, 0, Vec::new());
+    }
+    let Some(vm) = self.vm.as_ref() else {
+      return ScriptResult::err(
+        ScriptError::internal("session vm unexpectedly absent".to_string()),
+        0,
+        Vec::new(),
+      );
+    };
+    vm.install_session_procs(self.procs.clone()).await;
+    let run = vm.execute_tool(name, tool_args, options, &context).await;
     self.finish_run(run)
   }
 }
@@ -409,6 +454,51 @@ mod tests {
     let _b = table.acquire("b"); // triggers reap sweep
     let present = (table.map.contains_key("a"), table.map.contains_key("b"));
     assert_eq!(present, (false, true), "idle session reaped whole; fresh kept");
+  }
+
+  #[tokio::test(flavor = "multi_thread")]
+  async fn request_client_is_durable_across_vm_rebuilds() {
+    let table = SessionTable::new(8, None);
+    let slot = table.acquire("s");
+    let before = {
+      let mut s = slot.lock().await;
+      let vars = s.vars();
+      let (_tmp, ctx) = ctx_with(vars);
+      let _ = s
+        .run(
+          ScriptEngineConfig::default(),
+          "return 1;",
+          &[],
+          RunOptions::default(),
+          ctx,
+          Some(1),
+        )
+        .await;
+      s.request()
+    };
+    // Epoch change rebuilds the VM; the session's HTTP client (cookie
+    // jar + connection pool) must be the same instance afterwards —
+    // durable tier, like `vars`.
+    let after = {
+      let mut s = slot.lock().await;
+      let vars = s.vars();
+      let (_tmp, ctx) = ctx_with(vars);
+      let _ = s
+        .run(
+          ScriptEngineConfig::default(),
+          "return 1;",
+          &[],
+          RunOptions::default(),
+          ctx,
+          Some(2),
+        )
+        .await;
+      s.request()
+    };
+    assert!(
+      Arc::ptr_eq(&before, &after),
+      "request client must survive the VM rebuild"
+    );
   }
 
   #[tokio::test(flavor = "multi_thread")]

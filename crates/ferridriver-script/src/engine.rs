@@ -831,6 +831,44 @@ impl Session {
 
     self.finish(eval_result, started, &console, timeout)
   }
+
+  /// Invoke a registered extension tool by manifest name against the
+  /// persistent VM — the native path behind the MCP `invoke_plugin` /
+  /// promoted-tool routes. Framework globals are refreshed exactly as
+  /// for [`Self::execute`], but nothing is compiled: dispatch goes
+  /// straight through the same body the `tools.<name>` binding uses, so
+  /// capability wrappers, `timeoutMs`, and the net-policy bracket apply
+  /// identically. `tool_args` becomes the handler's `args` value; the
+  /// run's result is the handler's resolved return value.
+  pub async fn execute_tool(
+    &self,
+    name: &str,
+    tool_args: serde_json::Value,
+    options: RunOptions,
+    context: &RunContext,
+  ) -> SessionRun {
+    let started = Instant::now();
+    let console = self.new_console();
+    let timeout = self.apply_call_limits(&options).await;
+    self.timeout.arm(started + timeout);
+    let install = self.globals_install(context, &console);
+    let name = name.to_string();
+
+    let eval_fut = vm_with!(self.vm => |ctx| {
+      if let Err(e) = install_call_globals(&ctx, &[], install) {
+        return Err(ScriptError::internal(format!("failed to install globals: {e}")));
+      }
+      crate::bindings::invoke_tool_by_name(&ctx, &name, &tool_args).await
+    });
+
+    let backstop = timeout.saturating_add(TIMEOUT_BACKSTOP_GRACE);
+    let eval_result: Result<serde_json::Value, ScriptError> = match tokio::time::timeout(backstop, eval_fut).await {
+      Ok(r) => r.and_then(|inner| inner),
+      Err(_) => return self.finish_backstop(started, &console, timeout),
+    };
+
+    self.finish(eval_result, started, &console, timeout)
+  }
 }
 
 /// Wrap user source in an async IIFE so `await` works at the top level and
@@ -1448,7 +1486,7 @@ fn to_rq_error(err: &ScriptError) -> rquickjs::Error {
 /// otherwise fail to convert and collapse to `null`. The intermediate's
 /// `Deserialize` is plain serde; the `serde_json::Value` is then built
 /// with explicit constructors, which are AP-correct.
-fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
+pub(crate) fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
   rquickjs_serde::from_value::<JsonInter>(value)
     .ok()
     .map(JsonInter::into_json)

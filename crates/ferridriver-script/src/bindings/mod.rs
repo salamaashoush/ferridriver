@@ -85,7 +85,7 @@ pub use locator::LocatorJs;
 pub use mouse::MouseJs;
 pub use network::{RequestJs, ResponseJs, RouteJs, WebSocketJs};
 pub use page::PageJs;
-pub use plugins::{PluginBinding, PluginCommandsJs, install_plugins};
+pub use plugins::{PluginBinding, PluginCommandsJs, install_plugins, invoke_tool_by_name};
 pub use sidecars::{SidecarJs, SidecarsJs, install_sidecars};
 pub use video::VideoJs;
 pub use web_error::WebErrorJs;

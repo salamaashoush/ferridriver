@@ -610,16 +610,24 @@ impl McpServer {
   ) -> Result<rmcp::model::CallToolResult, ErrorData> {
     use rmcp::model::{CallToolResult, Content};
 
-    let Some(manifest) = self.plugins.get_tool(plugin_name) else {
+    if self.plugins.get_tool(plugin_name).is_none() {
       return Err(Self::err(format!("unknown plugin: {plugin_name}")));
-    };
+    }
     // Enforce the declared inputSchema before doing any work (browser
     // launch, session lock). A non-conforming call is the caller's bug,
-    // surfaced as a tool error so the model can correct and retry.
-    if let Some(schema) = &manifest.input_schema
-      && let Err(msg) = validate_plugin_args(plugin_name, schema, &args_obj)
-    {
-      return Ok(CallToolResult::error(vec![Content::text(msg)]));
+    // surfaced as a tool error so the model can correct and retry. The
+    // validator was compiled once at load ([`crate::plugin::PluginRegistry::new`]);
+    // an invalid schema is the plugin author's bug and is surfaced
+    // loudly rather than silently skipped.
+    if let Some(compiled) = self.plugins.validator(plugin_name) {
+      match compiled {
+        Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg.clone())])),
+        Ok(validator) => {
+          if let Err(msg) = validate_plugin_args(plugin_name, validator, &args_obj) {
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+          }
+        },
+      }
     }
 
     let session = args_obj
@@ -633,16 +641,12 @@ impl McpServer {
     let guard = self.session_guard(&session).await;
     let context = self.mcp_run_context(&session).await?;
 
-    let name_literal = serde_json::to_string(plugin_name).unwrap_or_else(|_| "\"\"".into());
-    let source = format!("return await tools[{name_literal}](args[0]);");
-    let args = vec![args_obj];
-
     let result = self
-      .run_on_session_vm(
+      .run_tool_on_session_vm(
         &session,
         &guard,
-        &source,
-        &args,
+        plugin_name,
+        args_obj,
         ferridriver_script::RunOptions::default(),
         context,
       )
@@ -696,9 +700,6 @@ impl McpServer {
       ));
     };
     let (page, ctx_ref) = Box::pin(self.page_and_context(session)).await?;
-    let request = Arc::new(ferridriver::http_client::HttpClient::new(
-      ferridriver::http_client::HttpClientOptions::default(),
-    ));
     let browser = Arc::new(ferridriver::Browser::from_shared_state(self.state.state_arc()));
     Ok(ferridriver_script::RunContext {
       vars: Arc::new(ferridriver_script::InMemoryVars::new()),
@@ -706,7 +707,10 @@ impl McpServer {
       artifacts: self.artifacts_sandbox.clone(),
       page: Some(page),
       browser_context: Some(Arc::new(ctx_ref)),
-      request: Some(request),
+      // Placeholder like `vars`: the run_*_on_session_vm entry points
+      // swap in the session slot's durable client (cookie jar +
+      // connection pool live for the logical session, not one call).
+      request: None,
       browser: Some(browser),
       plugins: self.plugin_bindings(),
       host: ferridriver_script::ExtensionHost::Mcp,
@@ -739,6 +743,7 @@ impl McpServer {
     let slot = self.sessions.acquire(session);
     let mut bs = slot.lock().await;
     context.vars = bs.vars();
+    context.request = Some(bs.request());
     let epoch = self.state.instance_generation(session).await;
     bs.run(
       self.script_engine.config().clone(),
@@ -766,11 +771,41 @@ impl McpServer {
     let slot = self.sessions.acquire(session);
     let mut bs = slot.lock().await;
     context.vars = bs.vars();
+    context.request = Some(bs.request());
     let epoch = self.state.instance_generation(session).await;
     bs.run_module(
       self.script_engine.config().clone(),
       bundle,
       args,
+      options,
+      context,
+      epoch,
+    )
+    .await
+  }
+
+  /// Like [`Self::run_on_session_vm`], but natively invokes a registered
+  /// extension tool by manifest name — no synthesized one-liner, no
+  /// per-call compile. Backs `invoke_plugin` and the promoted-tool
+  /// routes.
+  pub(crate) async fn run_tool_on_session_vm(
+    &self,
+    session: &str,
+    _guard: &tokio::sync::OwnedMutexGuard<()>,
+    name: &str,
+    tool_args: serde_json::Value,
+    options: ferridriver_script::RunOptions,
+    mut context: ferridriver_script::RunContext,
+  ) -> ferridriver_script::ScriptResult {
+    let slot = self.sessions.acquire(session);
+    let mut bs = slot.lock().await;
+    context.vars = bs.vars();
+    context.request = Some(bs.request());
+    let epoch = self.state.instance_generation(session).await;
+    bs.run_tool(
+      self.script_engine.config().clone(),
+      name,
+      tool_args,
       options,
       context,
       epoch,
@@ -1036,13 +1071,14 @@ impl McpServer {
   }
 }
 
-/// Validate a plugin call's arguments against the manifest `inputSchema`.
-/// The validator is compiled per call — tool invocations are not a hot
-/// path and schemas are tiny. An invalid schema is the plugin author's
-/// bug and is surfaced loudly rather than silently skipped.
-fn validate_plugin_args(plugin: &str, schema: &serde_json::Value, args: &serde_json::Value) -> Result<(), String> {
-  let validator =
-    jsonschema::validator_for(schema).map_err(|e| format!("plugin `{plugin}` has an invalid inputSchema: {e}"))?;
+/// Validate a plugin call's arguments against the tool's pre-compiled
+/// `inputSchema` validator (built once at load by
+/// [`crate::plugin::PluginRegistry::new`]).
+fn validate_plugin_args(
+  plugin: &str,
+  validator: &jsonschema::Validator,
+  args: &serde_json::Value,
+) -> Result<(), String> {
   let mut messages: Vec<String> = validator
     .iter_errors(args)
     .map(|e| {
@@ -1383,23 +1419,38 @@ mod tests {
       "required": ["user"],
       "additionalProperties": false
     });
+    let validator = jsonschema::validator_for(&schema).expect("valid schema");
 
-    assert!(validate_plugin_args("t", &schema, &serde_json::json!({ "user": "a", "n": 3 })).is_ok());
+    assert!(validate_plugin_args("t", &validator, &serde_json::json!({ "user": "a", "n": 3 })).is_ok());
 
-    let missing = validate_plugin_args("t", &schema, &serde_json::json!({ "n": 3 })).unwrap_err();
+    let missing = validate_plugin_args("t", &validator, &serde_json::json!({ "n": 3 })).unwrap_err();
     assert!(missing.contains("invalid arguments for `t`"), "{missing}");
 
-    let wrong_type = validate_plugin_args("t", &schema, &serde_json::json!({ "user": 1 })).unwrap_err();
+    let wrong_type = validate_plugin_args("t", &validator, &serde_json::json!({ "user": 1 })).unwrap_err();
     assert!(wrong_type.contains("invalid arguments for `t`"), "{wrong_type}");
 
-    let extra = validate_plugin_args("t", &schema, &serde_json::json!({ "user": "a", "x": 1 })).unwrap_err();
+    let extra = validate_plugin_args("t", &validator, &serde_json::json!({ "user": "a", "x": 1 })).unwrap_err();
     assert!(extra.contains("invalid arguments for `t`"), "{extra}");
   }
 
   #[test]
-  fn an_invalid_schema_is_surfaced_loudly() {
-    let bad_schema = serde_json::json!({ "type": "not-a-real-type" });
-    let err = validate_plugin_args("t", &bad_schema, &serde_json::json!({})).unwrap_err();
+  fn an_invalid_schema_is_reported_by_the_registry_at_load() {
+    // Compilation of the declared schema happens once, at
+    // `PluginRegistry::new`; the stored error is what `invoke_plugin`
+    // returns on every call to that tool.
+    let registry = crate::plugin::PluginRegistry::new(vec![crate::plugin::LoadedPlugin {
+      tools: vec![
+        serde_json::from_value(serde_json::json!({
+          "name": "bad",
+          "inputSchema": { "type": "not-a-real-type" }
+        }))
+        .expect("manifest"),
+      ],
+      bytecode: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+      path: std::path::PathBuf::from("bad.js"),
+    }]);
+    let compiled = registry.validator("bad").expect("schema present");
+    let err = compiled.as_ref().expect_err("schema must be invalid");
     assert!(err.contains("invalid inputSchema"), "{err}");
   }
 }
