@@ -162,6 +162,12 @@ pub type InstanceResolverFn = Box<dyn Fn(&str) -> Option<ConnectMode> + Send + S
 /// `context.routeWebSocket` handlers in registration order.
 pub type ContextWsRoutes = HashMap<String, Vec<(crate::url_matcher::UrlMatcher, crate::web_socket_route::WsHandler)>>;
 
+/// Per-context route registry map: composite session key →
+/// `context.route` / `context.routeFromHAR` registrations in order.
+/// Entries are cloned onto every page of the context (clones share the
+/// `times` budget), so one context-wide counter governs all pages.
+pub type ContextRoutes = HashMap<String, Vec<crate::route::RegisteredRoute>>;
+
 /// All browser state -- manages multiple Chrome instances, each with contexts and pages.
 pub struct BrowserState {
   instances: HashMap<String, BrowserInstance>,
@@ -245,6 +251,12 @@ pub struct BrowserState {
   /// applies to every page in the context (current + future), matching
   /// Playwright's context-scoped interception patterns.
   pub context_ws_routes: Arc<tokio::sync::RwLock<ContextWsRoutes>>,
+  /// Per-context route registry — `context.route` / `context.routeFromHAR`
+  /// registrations keyed by composite session key. Consumed by
+  /// `ContextRef::new_page` so a context-level route applies to every
+  /// page in the context (current + future) with one shared `times`
+  /// budget, matching Playwright's context-scoped `_routes` list.
+  pub context_routes: Arc<tokio::sync::RwLock<ContextRoutes>>,
   /// Sync-readable connection flag mirroring `!instances.is_empty()`.
   /// Set true when an instance is ensured, false on `shutdown`, so
   /// `Browser::is_connected()` stays sync like Playwright's.
@@ -327,6 +339,7 @@ impl BrowserState {
       har_recorders: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_bindings: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       context_ws_routes: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
+      context_routes: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       persistent_context: false,
@@ -417,6 +430,15 @@ impl BrowserState {
   #[must_use]
   pub fn context_ws_routes_handle(&self) -> Arc<tokio::sync::RwLock<ContextWsRoutes>> {
     self.context_ws_routes.clone()
+  }
+
+  /// Shared handle to the per-context route registry. Used by
+  /// `ContextRef::route` / `route_from_har` to register and by
+  /// `ContextRef::new_page` to apply context-level routes onto a fresh
+  /// page.
+  #[must_use]
+  pub fn context_routes_handle(&self) -> Arc<tokio::sync::RwLock<ContextRoutes>> {
+    self.context_routes.clone()
   }
 
   /// Look up (or lazily create) the `ContextEventEmitter` for a

@@ -1360,21 +1360,20 @@ impl AnyPage {
 
   // ── Network Interception ──
 
-  pub async fn route(
+  pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {
+    page_dispatch!(self, route(route))
+  }
+
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher, scope: crate::route::RouteScope) -> Result<()> {
+    page_dispatch!(self, unroute(matcher, scope))
+  }
+
+  pub async fn unroute_all(
     &self,
-    matcher: crate::url_matcher::UrlMatcher,
-    handler: crate::route::RouteHandler,
-    times: Option<u32>,
+    behavior: crate::options::UnrouteBehavior,
+    scope: Option<crate::route::RouteScope>,
   ) -> Result<()> {
-    page_dispatch!(self, route(matcher, handler, times))
-  }
-
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
-    page_dispatch!(self, unroute(matcher))
-  }
-
-  pub async fn unroute_all(&self, behavior: crate::options::UnrouteBehavior) -> Result<()> {
-    page_dispatch!(self, unroute_all(behavior))
+    page_dispatch!(self, unroute_all(behavior, scope))
   }
 
   // ── Lifecycle ──

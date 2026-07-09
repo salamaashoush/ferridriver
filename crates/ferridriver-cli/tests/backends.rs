@@ -279,6 +279,10 @@ fn register_events_network(set: &mut TestSet<'_>) {
   run!(set, backends_support::network::test_network_http_version);
   run!(set, backends_support::network::test_network_websocket);
   run!(set, backends_support::network::test_route_fallback_applies_overrides);
+  run!(
+    set,
+    backends_support::network::test_route_fallback_chains_to_next_handler
+  );
   run!(set, backends_support::network::test_request_existing_response);
   backends_support::api_response::register(set);
   backends_support::route_web_socket::register(set);
@@ -412,6 +416,18 @@ fn register_context_options(set: &mut TestSet<'_>) {
   run!(
     set,
     backends_support::browser_context_options::test_context_route_and_unroute
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_route_times_shared_across_pages
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_route_applies_to_future_page
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_route_scope_precedence_and_unroute_all
   );
   run!(
     set,

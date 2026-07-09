@@ -457,6 +457,11 @@ impl ContextRef {
     // open when `context.routeWebSocket` was called.
     self.apply_context_ws_routes(&page).await?;
 
+    // Re-apply every context-level route (`context.route` /
+    // `context.routeFromHAR`) so requests from the fresh page are
+    // intercepted and consume the shared `times` budget.
+    self.apply_context_routes(&page).await?;
+
     Ok(page)
   }
 
@@ -1053,12 +1058,17 @@ impl ContextRef {
     Ok(())
   }
 
-  /// Register a route handler for all pages in this context.
+  /// Register a route handler for all pages in this context — current
+  /// AND future (the registration lives in the per-context registry and
+  /// is re-applied by [`Self::new_page`], matching Playwright's
+  /// context-scoped `_routes` list). The `times` budget is shared
+  /// context-wide: requests from any page of the context consume the
+  /// same counter.
   ///
   /// Returns a [`crate::disposable::Disposable`] whose `dispose()` removes the
-  /// handler from every page (equivalent to [`Self::unroute`]).
-  /// Mirrors Playwright `browserContext.route(...)` which returns a
-  /// `DisposableStub` (`client/browserContext.ts:377`).
+  /// handler from the registry and every page (equivalent to
+  /// [`Self::unroute`]). Mirrors Playwright `browserContext.route(...)`
+  /// which returns a `DisposableStub` (`client/browserContext.ts:377`).
   ///
   /// # Errors
   ///
@@ -1069,24 +1079,58 @@ impl ContextRef {
     handler: crate::route::RouteHandler,
     times: Option<u32>,
   ) -> Result<crate::disposable::Disposable> {
-    // NOTE: `times` is applied per-page here (each page tracks its own
-    // remaining count) rather than shared across the whole context. For the
-    // common single-page / times:1 case this matches Playwright; a strict
-    // context-shared counter across multiple pages is not yet implemented.
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    let mut undo = Vec::with_capacity(ctx.pages.len());
-    for page in &ctx.pages {
-      page.route(matcher.clone(), handler.clone(), times).await?;
-      undo.push(page.clone());
-    }
-    drop(state);
+    let registration = crate::route::RegisteredRoute::context_scoped(matcher.clone(), handler, times);
+    self.install_context_route(registration).await?;
+    let ctx = self.clone();
     Ok(crate::disposable::Disposable::new(move || async move {
-      for page in undo {
-        page.unroute(&matcher).await?;
-      }
-      Ok(())
+      ctx.unroute(&matcher).await
     }))
+  }
+
+  /// Register a context-scoped route: push into the per-context registry
+  /// and fan a clone (sharing the `times` budget) onto every open page.
+  async fn install_context_route(&self, registration: crate::route::RegisteredRoute) -> Result<()> {
+    {
+      let registry = self.state.read().await.context_routes_handle();
+      let mut guard = registry.write().await;
+      guard
+        .entry(self.key.to_composite())
+        .or_default()
+        .push(registration.clone());
+    }
+    // A context with no pages yet isn't registered in state (it
+    // materialises on first `new_page`) — the registry entry above is
+    // all that's needed; `new_page` re-applies it. Same tolerance as
+    // `expose_binding` / `route_web_socket`.
+    let inner_pages = {
+      let state = self.state.read().await;
+      state.context(&self.name).map(|c| c.pages.clone()).unwrap_or_default()
+    };
+    for page in inner_pages {
+      page.route(registration.clone()).await?;
+    }
+    Ok(())
+  }
+
+  /// Install every registered context-level route onto a fresh page.
+  /// Clones share the registry entry's `times` budget; entries whose
+  /// budget is already exhausted are pruned instead of copied.
+  async fn apply_context_routes(&self, page: &Arc<Page>) -> Result<()> {
+    let routes = {
+      let registry = self.state.read().await.context_routes_handle();
+      let mut guard = registry.write().await;
+      match guard.get_mut(&self.key.to_composite()) {
+        Some(entries) => {
+          entries.retain(crate::route::RegisteredRoute::live);
+          entries.clone()
+        },
+        None => return Ok(()),
+      }
+    };
+    for registration in routes {
+      page.inner().route(registration).await?;
+    }
+    Ok(())
   }
 
   /// Playwright: `browserContext.routeWebSocket(url, handler)`. Intercepts
@@ -1136,8 +1180,8 @@ impl ContextRef {
   }
 
   /// Playwright: `browserContext.routeFromHAR(har, options?)`. Replays a HAR
-  /// file across every page in this context. Replay-only; recording
-  /// (`update: true`) is unsupported.
+  /// file across every page in this context — current and future.
+  /// Replay-only; recording (`update: true`) is unsupported.
   ///
   /// # Errors
   ///
@@ -1159,24 +1203,62 @@ impl ContextRef {
   ) -> Result<()> {
     let handler = crate::har::route_handler_from_file(path, options.not_found)?;
     let matcher = options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any);
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    for page in &ctx.pages {
-      page.route(matcher.clone(), handler.clone(), None).await?;
-    }
-    Ok(())
+    self
+      .install_context_route(crate::route::RegisteredRoute::context_scoped(matcher, handler, None))
+      .await
   }
 
-  /// Remove route handlers matching the given matcher from all pages.
+  /// Remove context-scoped route handlers matching the given matcher
+  /// from the registry and from all pages. Page-scoped routes with the
+  /// same matcher stay active, matching Playwright where
+  /// `context.unroute` only touches `context._routes`.
   ///
   /// # Errors
   ///
   /// Returns an error if the context does not exist or route removal fails.
   pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    for page in &ctx.pages {
-      page.unroute(matcher).await?;
+    {
+      let registry = self.state.read().await.context_routes_handle();
+      let mut guard = registry.write().await;
+      if let Some(entries) = guard.get_mut(&self.key.to_composite()) {
+        entries.retain(|r| !r.matcher.equivalent(matcher));
+      }
+    }
+    let inner_pages = {
+      let state = self.state.read().await;
+      state.context(&self.name).map(|c| c.pages.clone()).unwrap_or_default()
+    };
+    for page in inner_pages {
+      page.unroute(matcher, crate::route::RouteScope::Context).await?;
+    }
+    Ok(())
+  }
+
+  /// Remove all context-scoped route handlers from the registry and
+  /// from every page. Page-scoped routes stay active. Mirrors
+  /// Playwright's
+  /// `browserContext.unrouteAll({ behavior?: 'wait' | 'ignoreErrors' | 'default' })`;
+  /// ferridriver route handlers resolve synchronously inside the
+  /// interception chain, so every `behavior` variant performs the same
+  /// teardown.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the underlying interception teardown fails.
+  pub async fn unroute_all(&self, behavior: Option<crate::options::UnrouteBehavior>) -> Result<()> {
+    {
+      let registry = self.state.read().await.context_routes_handle();
+      let mut guard = registry.write().await;
+      guard.remove(&self.key.to_composite());
+    }
+    let inner_pages = {
+      let state = self.state.read().await;
+      state.context(&self.name).map(|c| c.pages.clone()).unwrap_or_default()
+    };
+    for page in inner_pages {
+      page
+        .unroute_all(behavior.unwrap_or_default(), Some(crate::route::RouteScope::Context))
+        .await?;
     }
     Ok(())
   }

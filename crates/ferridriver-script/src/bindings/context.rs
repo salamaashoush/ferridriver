@@ -330,7 +330,7 @@ impl BrowserContextJs {
             )
             .await?;
             if !truthy {
-              route.continue_route(ferridriver::route::ContinueOverrides::default());
+              route.fallback(ferridriver::route::ContinueOverrides::default());
               return Ok(());
             }
           }
@@ -431,6 +431,25 @@ impl BrowserContextJs {
     }
     let matcher = url_value_to_matcher(&ctx, url)?;
     self.inner.unroute(&matcher).await.into_js_with(&ctx)
+  }
+
+  /// Playwright:
+  /// `browserContext.unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' })`.
+  /// Removes every route registered via `context.route` (page-scoped
+  /// routes stay active), clearing the script-side predicate/handler
+  /// tables for this context too.
+  #[qjs(rename = "unrouteAll")]
+  pub async fn unroute_all<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let behavior = match options.0.and_then(rquickjs::Value::into_object) {
+      Some(obj) => match obj.get::<_, Option<String>>("behavior")? {
+        Some(b) => Some(crate::bindings::page::options::parse_unroute_behavior(&b)?),
+        None => None,
+      },
+      None => None,
+    };
+    self.inner.unroute_all(behavior).await.into_js_with(&ctx)?;
+    with_page_callbacks(&ctx, |r| r.remove_routes_for_owner(&self.route_owner()))?;
+    Ok(())
   }
 
   // ── Init scripts ──────────────────────────────────────────────────────────

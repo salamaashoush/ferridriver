@@ -415,17 +415,18 @@ impl WebKitPage {
     self.target.store(Arc::new(new_session));
     self.target_id.store(Arc::new(new_target_id));
     // The committed target lives in a fresh process — any frame
-    // contexts / realm caches / interception state from the OLD process
-    // are invalid. The new target's listener events will reseed the
-    // caches as frames attach + navigate; the interception latch needs
-    // an explicit reset so `ensure_interception_enabled` re-issues the
-    // protocol calls on the new target.
+    // contexts / realm caches from the OLD process are invalid. The new
+    // target's listener events will reseed the caches as frames attach +
+    // navigate. The interception latch is NOT reset: when it is set, the
+    // provisional-target handler already re-armed
+    // `Network.setInterceptionEnabled` / `Network.addInterception` on the
+    // session being committed here, so the latch still reflects the new
+    // target's wire state.
     *self
       .global_object_id
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     self.engine_injected.store(false, Ordering::Relaxed);
-    self.intercept_enabled.store(false, Ordering::Relaxed);
     *self
       .frame_cache
       .lock()
@@ -442,6 +443,15 @@ impl WebKitPage {
       .main_frame_id_cache
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+  }
+
+  /// Whether request interception has been armed on this page. Read by
+  /// the provisional-target handler to replay
+  /// `Network.setInterceptionEnabled` / `Network.addInterception` onto
+  /// the new target session.
+  #[must_use]
+  pub(crate) fn interception_enabled(&self) -> bool {
+    self.intercept_enabled.load(Ordering::SeqCst)
   }
 
   #[must_use]
@@ -1711,18 +1721,9 @@ impl WebKitPage {
     Ok(())
   }
 
-  pub async fn route(
-    &self,
-    matcher: crate::url_matcher::UrlMatcher,
-    handler: crate::route::RouteHandler,
-    times: Option<u32>,
-  ) -> Result<()> {
+  pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {
     self.ensure_interception_enabled().await?;
-    self
-      .routes
-      .write()
-      .await
-      .push(crate::route::RegisteredRoute::new(matcher, handler, times));
+    self.routes.write().await.push(route);
     Ok(())
   }
 
@@ -1746,13 +1747,25 @@ impl WebKitPage {
     Ok(())
   }
 
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
-    self.routes.write().await.retain(|r| !r.matcher.equivalent(matcher));
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher, scope: crate::route::RouteScope) -> Result<()> {
+    self
+      .routes
+      .write()
+      .await
+      .retain(|r| r.scope != scope || !r.matcher.equivalent(matcher));
     Ok(())
   }
 
-  pub async fn unroute_all(&self, _behavior: crate::options::UnrouteBehavior) -> Result<()> {
-    self.routes.write().await.clear();
+  pub async fn unroute_all(
+    &self,
+    _behavior: crate::options::UnrouteBehavior,
+    scope: Option<crate::route::RouteScope>,
+  ) -> Result<()> {
+    let mut routes = self.routes.write().await;
+    match scope {
+      Some(scope) => routes.retain(|r| r.scope != scope),
+      None => routes.clear(),
+    }
     Ok(())
   }
 

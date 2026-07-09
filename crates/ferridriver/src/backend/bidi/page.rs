@@ -2620,12 +2620,7 @@ impl BidiPage {
 
   // ── Network Interception ────────────────────────────────────────────────
 
-  pub async fn route(
-    &self,
-    matcher: crate::url_matcher::UrlMatcher,
-    handler: crate::route::RouteHandler,
-    times: Option<u32>,
-  ) -> Result<()> {
+  pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {
     let needs_intercept = self.intercept_ids.read().await.is_empty();
     if needs_intercept {
       // Register a single intercept for ALL requests on this context (no urlPatterns).
@@ -2655,11 +2650,7 @@ impl BidiPage {
     // `intercept_ids` and removes the BiDi intercept) must NOT re-spawn it.
     self.start_route_listener();
 
-    self
-      .routes
-      .write()
-      .await
-      .push(crate::route::RegisteredRoute::new(matcher, handler, times));
+    self.routes.write().await.push(route);
 
     Ok(())
   }
@@ -2712,12 +2703,12 @@ impl BidiPage {
           .and_then(|v| v.as_str())
           .unwrap_or("");
 
-        let matched_handler = {
-          let mut guard = routes.write().await;
-          crate::route::take_matching_handler(&mut guard, url)
+        let has_match = {
+          let guard = routes.read().await;
+          crate::route::any_matching_route(&guard, url)
         };
 
-        if let Some(handler) = matched_handler {
+        if has_match {
           let method = req_obj
             .and_then(|r| r.get("method"))
             .and_then(|v| v.as_str())
@@ -2751,13 +2742,9 @@ impl BidiPage {
           // the CDP Fetch listener.
           let session2 = session.clone();
           let request_id_owned = request_id.to_string();
+          let routes2 = routes.clone();
           tokio::spawn(async move {
-            let (tx, action_rx) = tokio::sync::oneshot::channel();
-            let route = crate::route::Route::new(intercepted, tx);
-            handler(route);
-            let action = action_rx.await.unwrap_or(crate::route::RouteAction::Continue(
-              crate::route::ContinueOverrides::default(),
-            ));
+            let action = crate::route::run_route_chain(&routes2, intercepted).await;
             execute_bidi_route_action(
               &session2.transport,
               &request_id_owned,
@@ -2782,9 +2769,9 @@ impl BidiPage {
     self.track_listener(route_listener.abort_handle());
   }
 
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher, scope: crate::route::RouteScope) -> Result<()> {
     let mut routes = self.routes.write().await;
-    routes.retain(|r| !r.matcher.equivalent(matcher));
+    routes.retain(|r| r.scope != scope || !r.matcher.equivalent(matcher));
 
     // If no routes left, remove the intercept entirely
     if routes.is_empty() {
@@ -2797,11 +2784,21 @@ impl BidiPage {
     Ok(())
   }
 
-  pub async fn unroute_all(&self, _behavior: crate::options::UnrouteBehavior) -> Result<()> {
-    self.routes.write().await.clear();
-    let mut ids = self.intercept_ids.write().await;
-    for id in ids.drain(..) {
-      let _ = self.cmd("network.removeIntercept", json!({"intercept": id})).await;
+  pub async fn unroute_all(
+    &self,
+    _behavior: crate::options::UnrouteBehavior,
+    scope: Option<crate::route::RouteScope>,
+  ) -> Result<()> {
+    let mut routes = self.routes.write().await;
+    match scope {
+      Some(scope) => routes.retain(|r| r.scope != scope),
+      None => routes.clear(),
+    }
+    if routes.is_empty() {
+      let mut ids = self.intercept_ids.write().await;
+      for id in ids.drain(..) {
+        let _ = self.cmd("network.removeIntercept", json!({"intercept": id})).await;
+      }
     }
     Ok(())
   }
@@ -3630,7 +3627,7 @@ async fn execute_bidi_route_action(
         )
         .await;
     },
-    crate::route::RouteAction::Continue(overrides) => {
+    crate::route::RouteAction::Continue(overrides) | crate::route::RouteAction::Fallback(overrides) => {
       if let Some(target_url) = &overrides.url {
         // Continue with a URL override. Firefox/BiDi `network.continueRequest`
         // accepts a `url` field but then aborts the request instead of

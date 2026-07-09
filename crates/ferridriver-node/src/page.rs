@@ -2031,7 +2031,7 @@ impl Page {
               if truthy {
                 handler.call(crate::route::Route::wrap(route), nb);
               } else {
-                route.continue_route(ferridriver::route::ContinueOverrides::default());
+                route.fallback(ferridriver::route::ContinueOverrides::default());
               }
             });
           }),
@@ -2261,7 +2261,7 @@ pub struct UnrouteAllOptions {
   pub behavior: Option<String>,
 }
 
-fn parse_unroute_behavior(behavior: &str) -> Result<ferridriver::options::UnrouteBehavior> {
+pub(crate) fn parse_unroute_behavior(behavior: &str) -> Result<ferridriver::options::UnrouteBehavior> {
   match behavior {
     "default" => Ok(ferridriver::options::UnrouteBehavior::Default),
     "wait" => Ok(ferridriver::options::UnrouteBehavior::Wait),

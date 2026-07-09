@@ -2802,10 +2802,13 @@ impl Page {
     handler: crate::route::RouteHandler,
     times: Option<u32>,
   ) -> Result<crate::disposable::Disposable> {
-    self.inner.route(matcher.clone(), handler, times).await?;
+    self
+      .inner
+      .route(crate::route::RegisteredRoute::new(matcher.clone(), handler, times))
+      .await?;
     let inner = self.inner.clone();
     Ok(crate::disposable::Disposable::new(move || async move {
-      inner.unroute(&matcher).await
+      inner.unroute(&matcher, crate::route::RouteScope::Page).await
     }))
   }
 
@@ -2834,7 +2837,10 @@ impl Page {
   ) -> Result<()> {
     let handler = crate::har::route_handler_from_file(path, options.not_found)?;
     let matcher = options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any);
-    self.inner.route(matcher, handler, None).await
+    self
+      .inner
+      .route(crate::route::RegisteredRoute::new(matcher, handler, None))
+      .await
   }
 
   /// Remove all route handlers whose matcher is
@@ -2844,7 +2850,7 @@ impl Page {
   ///
   /// Returns an error if the route handlers cannot be removed.
   pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
-    self.inner.unroute(matcher).await
+    self.inner.unroute(matcher, crate::route::RouteScope::Page).await
   }
 
   /// Remove all route handlers registered via [`Page::route`].
@@ -2857,11 +2863,18 @@ impl Page {
   /// task can still be in flight — every variant performs the same teardown
   /// (clear routes, disable interception).
   ///
+  /// Context-scoped routes installed via `context.route` stay active,
+  /// matching Playwright where `page.unrouteAll` only clears
+  /// `page._routes`.
+  ///
   /// # Errors
   ///
   /// Returns an error if the underlying interception teardown fails.
   pub async fn unroute_all(&self, behavior: Option<crate::options::UnrouteBehavior>) -> Result<()> {
-    self.inner.unroute_all(behavior.unwrap_or_default()).await
+    self
+      .inner
+      .unroute_all(behavior.unwrap_or_default(), Some(crate::route::RouteScope::Page))
+      .await
   }
 
   // ── Interactive picker ──────────────────────────────────────────────────

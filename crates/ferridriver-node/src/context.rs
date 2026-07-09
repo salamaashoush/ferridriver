@@ -289,7 +289,7 @@ impl BrowserContext {
               if truthy {
                 handler.call(crate::route::Route::wrap(route), nb);
               } else {
-                route.continue_route(ferridriver::route::ContinueOverrides::default());
+                route.fallback(ferridriver::route::ContinueOverrides::default());
               }
             });
           }),
@@ -397,6 +397,18 @@ impl BrowserContext {
       Ok(())
     })
     .build(env)
+  }
+
+  /// Playwright:
+  /// `browserContext.unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' })`.
+  /// Removes all context-scoped routes; page-scoped routes stay active.
+  #[napi]
+  pub async fn unroute_all(&self, options: Option<crate::page::UnrouteAllOptions>) -> Result<()> {
+    let behavior = options
+      .and_then(|o| o.behavior)
+      .map(|b| crate::page::parse_unroute_behavior(&b))
+      .transpose()?;
+    self.inner.unroute_all(behavior).await.map_err(crate::error::to_napi)
   }
 
   // ── Context-level init scripts ──

@@ -1187,3 +1187,124 @@ pub fn test_context_route_and_unroute(c: &mut McpClient) {
     "context.route should fulfil the matched request: {v}"
   );
 }
+
+/// `context.route(url, handler, { times })` consumes ONE context-wide
+/// budget: a `times: 1` route claimed by page A is exhausted for page B
+/// too, and newer registrations win over older ones (newest-first
+/// precedence within the context scope).
+pub fn test_context_route_times_shared_across_pages(c: &mut McpClient) {
+  if skip_if_no_new_context(c) {
+    return;
+  }
+  let v = c.script_value(
+    r"
+    const ctx = await browser.newContext({});
+    try {
+      const matcher = 'https://ferri.test/**';
+      await ctx.route(matcher, (route) => {
+        route.fulfill({ status: 200, contentType: 'text/html', body: '<body>BASE</body>' });
+      });
+      await ctx.route(matcher, (route) => {
+        route.fulfill({ status: 200, contentType: 'text/html', body: '<body>LIMITED</body>' });
+      }, { times: 1 });
+      const p1 = await ctx.newPage();
+      const p2 = await ctx.newPage();
+      await p1.goto('https://ferri.test/one');
+      const first = await p1.evaluate(() => document.body.textContent);
+      await p2.goto('https://ferri.test/two');
+      const second = await p2.evaluate(() => document.body.textContent);
+      return { first, second };
+    } finally {
+      await ctx.close();
+    }
+  ",
+  );
+  assert!(
+    v["first"].as_str().unwrap_or("").contains("LIMITED"),
+    "newest context route should win the first request: {v}"
+  );
+  assert!(
+    v["second"].as_str().unwrap_or("").contains("BASE"),
+    "times budget spent on page 1 must be exhausted for page 2: {v}"
+  );
+}
+
+/// `context.route` registered BEFORE `newPage` intercepts requests from
+/// the future page (Playwright context routes are current + future).
+pub fn test_context_route_applies_to_future_page(c: &mut McpClient) {
+  if skip_if_no_new_context(c) {
+    return;
+  }
+  let v = c.script_value(
+    r"
+    const ctx = await browser.newContext({});
+    try {
+      await ctx.route('https://ferri.test/**', (route) => {
+        route.fulfill({ status: 200, contentType: 'text/html', body: '<body>FUTURE</body>' });
+      });
+      const p = await ctx.newPage();
+      await p.goto('https://ferri.test/later');
+      const routed = await p.evaluate(() => document.body.textContent);
+      return { routed };
+    } finally {
+      await ctx.close();
+    }
+  ",
+  );
+  assert!(
+    v["routed"].as_str().unwrap_or("").contains("FUTURE"),
+    "context route must apply to a page created after registration: {v}"
+  );
+}
+
+/// Page routes take precedence over context routes regardless of
+/// registration order, and `page.unrouteAll()` leaves context routes
+/// active while `context.unrouteAll()` removes only context routes.
+pub fn test_route_scope_precedence_and_unroute_all(c: &mut McpClient) {
+  if skip_if_no_new_context(c) {
+    return;
+  }
+  let v = c.script_value(
+    r"
+    const ctx = await browser.newContext({});
+    try {
+      const matcher = 'https://ferri.test/**';
+      const p = await ctx.newPage();
+      await p.route(matcher, (route) => {
+        route.fulfill({ status: 200, contentType: 'text/html', body: '<body>PAGE</body>' });
+      });
+      await ctx.route(matcher, (route) => {
+        route.fulfill({ status: 200, contentType: 'text/html', body: '<body>CTX</body>' });
+      });
+      await p.goto('https://ferri.test/a');
+      const withBoth = await p.evaluate(() => document.body.textContent);
+      await p.unrouteAll();
+      await p.goto('https://ferri.test/b');
+      const afterPageClear = await p.evaluate(() => document.body.textContent);
+      await ctx.unrouteAll();
+      let contextCleared = false;
+      try {
+        await p.goto('https://ferri.test/c', { timeout: 3000 });
+      } catch {
+        contextCleared = true;
+      }
+      return { withBoth, afterPageClear, contextCleared };
+    } finally {
+      await ctx.close();
+    }
+  ",
+  );
+  assert!(
+    v["withBoth"].as_str().unwrap_or("").contains("PAGE"),
+    "page route must win over context route even when registered earlier: {v}"
+  );
+  assert!(
+    v["afterPageClear"].as_str().unwrap_or("").contains("CTX"),
+    "page.unrouteAll must leave context routes active: {v}"
+  );
+  assert_eq!(
+    v["contextCleared"].as_bool(),
+    Some(true),
+    "context.unrouteAll must remove the context route (navigation to the fake host then fails): {v}"
+  );
+}
