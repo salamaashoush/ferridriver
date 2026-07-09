@@ -7,7 +7,7 @@
 //! #[ferritest]
 //! async fn my_test(ctx: TestContext) {
 //!     let page = ctx.page().await?;
-//!     page.goto("https://example.com", None).await?;
+//!     page.goto("https://example.com").await?;
 //! }
 //! ```
 
@@ -55,6 +55,16 @@ impl TestContext {
     self
       .pool
       .get::<ferridriver::ContextRef>("context")
+      .await
+      .map_err(TestFailure::from)
+  }
+
+  /// Get the `HttpClient` fixture (worker-scoped, pre-configured with the
+  /// run's `base_url`).
+  pub async fn request(&self) -> Result<Arc<ferridriver::http_client::HttpClient>, TestFailure> {
+    self
+      .pool
+      .get::<ferridriver::http_client::HttpClient>("request")
       .await
       .map_err(TestFailure::from)
   }

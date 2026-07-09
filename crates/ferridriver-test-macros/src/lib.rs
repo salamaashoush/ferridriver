@@ -1,22 +1,21 @@
 //! Proc macros for the ferridriver test framework.
 //!
-//! Provides `#[ferritest]` to register async browser test functions. The
-//! annotated function takes a single `TestContext`; built-in fixtures
-//! (`page`, `browser`, `context`, ...) resolve lazily through it.
+//! Provides `#[ferritest]` to register async browser test functions. Test
+//! parameters are fixtures: declare what the test needs and the runner
+//! injects it. `TestContext` gives dynamic access; `Arc<T>` parameters
+//! resolve the fixture whose name matches the parameter name.
 //!
 //! ```ignore
 //! use ferridriver_test::prelude::*;
 //!
 //! #[ferritest]
-//! async fn basic_navigation(ctx: TestContext) {
-//!     let page = ctx.page().await?;
-//!     page.goto("https://example.com", None).await?;
+//! async fn basic_navigation(page: Arc<Page>) {
+//!     page.goto("https://example.com").await?;
 //!     expect(&page).to_have_title("Example").await?;
 //! }
 //!
-//! #[ferritest(retries = 2, timeout = "30s", tag = "smoke")]
-//! async fn flaky_test(ctx: TestContext) {
-//!     let page = ctx.page().await?;
+//! #[ferritest(retries = 2, timeout = "30s", tag = "smoke", viewport = "1280x720")]
+//! async fn flaky_test(page: Arc<Page>, ctx: TestContext) {
 //!     let context = ctx.browser_context().await?;
 //!     // ...
 //! }
@@ -26,9 +25,13 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 use syn::{Expr, FnArg, ItemFn, ItemMod, Lit, Meta, Pat, Token, Type, parse_macro_input, parse_quote};
 
-/// Attribute arguments: `#[ferritest(retries = 2, timeout = "30s", tag = "smoke")]`
+/// Attribute arguments shared by `#[ferritest]` and `#[ferritest_each]`:
+/// `retries`, `timeout`, `tag`, `skip`/`slow`/`fixme`/`fail`, `only`,
+/// `info`, plus context overrides (`viewport`, `locale`, ... or raw
+/// `use_options` JSON).
 struct FerritestArgs {
   retries: Option<u32>,
   timeout_ms: Option<u64>,
@@ -44,13 +47,17 @@ struct FerritestArgs {
   only: bool,
   /// Structured metadata annotations: `info = "type:description"`.
   infos: Vec<(String, String)>,
-  /// Raw JSON string for fixture/context overrides (viewport, locale, etc.)
-  use_options: Option<String>,
+  /// Raw `use_options` JSON, parsed for validation and merged with the
+  /// structured keys below (structured keys win).
+  use_raw: Option<serde_json::Map<String, serde_json::Value>>,
+  /// Context overrides from structured attribute keys (`viewport`,
+  /// `locale`, ...), stored under their camelCase wire names.
+  use_structured: serde_json::Map<String, serde_json::Value>,
 }
 
-impl Parse for FerritestArgs {
-  fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-    let mut args = Self {
+impl Default for FerritestArgs {
+  fn default() -> Self {
+    Self {
       retries: None,
       timeout_ms: None,
       tags: Vec::new(),
@@ -60,106 +67,239 @@ impl Parse for FerritestArgs {
       fail: None,
       only: false,
       infos: Vec::new(),
-      use_options: None,
-    };
+      use_raw: None,
+      use_structured: serde_json::Map::new(),
+    }
+  }
+}
 
-    let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
-    for meta in metas {
-      match &meta {
-        Meta::NameValue(nv) => {
-          let ident = nv.path.get_ident().map(ToString::to_string).unwrap_or_default();
-          match ident.as_str() {
-            "retries" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Int(i) = &lit.lit {
-                  args.retries = Some(i.base10_parse()?);
-                }
+fn lit_str(nv: &syn::MetaNameValue) -> syn::Result<String> {
+  if let Expr::Lit(lit) = &nv.value {
+    if let Lit::Str(s) = &lit.lit {
+      return Ok(s.value());
+    }
+  }
+  Err(syn::Error::new(nv.value.span(), "expected a string literal"))
+}
+
+fn lit_bool(nv: &syn::MetaNameValue) -> syn::Result<bool> {
+  if let Expr::Lit(lit) = &nv.value {
+    if let Lit::Bool(b) = &lit.lit {
+      return Ok(b.value());
+    }
+  }
+  Err(syn::Error::new(nv.value.span(), "expected a bool literal"))
+}
+
+fn lit_f64(nv: &syn::MetaNameValue) -> syn::Result<f64> {
+  if let Expr::Lit(lit) = &nv.value {
+    match &lit.lit {
+      Lit::Float(f) => return f.base10_parse(),
+      Lit::Int(i) => return i.base10_parse::<i64>().map(|v| v as f64),
+      _ => {},
+    }
+  }
+  Err(syn::Error::new(nv.value.span(), "expected a numeric literal"))
+}
+
+/// Structured context-override keys: snake_case attribute name to the
+/// camelCase wire key used by the runner's `use_options` JSON.
+const USE_STR_KEYS: &[(&str, &str)] = &[
+  ("locale", "locale"),
+  ("color_scheme", "colorScheme"),
+  ("timezone_id", "timezoneId"),
+  ("user_agent", "userAgent"),
+  ("reduced_motion", "reducedMotion"),
+  ("forced_colors", "forcedColors"),
+  ("service_workers", "serviceWorkers"),
+  ("storage_state", "storageState"),
+  ("base_url", "baseURL"),
+];
+
+const USE_BOOL_KEYS: &[(&str, &str)] = &[
+  ("is_mobile", "isMobile"),
+  ("has_touch", "hasTouch"),
+  ("offline", "offline"),
+  ("java_script_enabled", "javaScriptEnabled"),
+  ("bypass_csp", "bypassCSP"),
+  ("accept_downloads", "acceptDownloads"),
+  ("ignore_https_errors", "ignoreHTTPSErrors"),
+];
+
+impl FerritestArgs {
+  /// Apply one attribute meta. Shared by `#[ferritest]` and
+  /// `#[ferritest_each]` (which additionally handles `data`).
+  fn apply_meta(&mut self, meta: &Meta) -> syn::Result<()> {
+    match meta {
+      Meta::NameValue(nv) => {
+        let ident = nv.path.get_ident().map(ToString::to_string).unwrap_or_default();
+        match ident.as_str() {
+          "retries" => {
+            if let Expr::Lit(lit) = &nv.value {
+              if let Lit::Int(i) = &lit.lit {
+                self.retries = Some(i.base10_parse()?);
+                return Ok(());
               }
-            },
-            "timeout" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Str(s) = &lit.lit {
-                  args.timeout_ms = Some(parse_duration_str(&s.value())?);
-                }
-              }
-            },
-            "tag" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Str(s) = &lit.lit {
-                  args.tags.push(s.value());
-                }
-              }
-            },
-            "skip" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Str(s) = &lit.lit {
-                  args.skip = Some(Some(s.value()));
-                }
-              }
-            },
-            "slow" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Str(s) = &lit.lit {
-                  args.slow = Some(Some(s.value()));
-                }
-              }
-            },
-            "fixme" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Str(s) = &lit.lit {
-                  args.fixme = Some(Some(s.value()));
-                }
-              }
-            },
-            "fail" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Str(s) = &lit.lit {
-                  args.fail = Some(Some(s.value()));
-                }
-              }
-            },
-            "use_options" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Str(s) = &lit.lit {
-                  args.use_options = Some(s.value());
-                }
-              }
-            },
-            "info" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Str(s) = &lit.lit {
-                  let val = s.value();
-                  if let Some((type_name, desc)) = val.split_once(':') {
-                    args.infos.push((type_name.trim().to_string(), desc.trim().to_string()));
-                  } else {
-                    args.infos.push((val, String::new()));
-                  }
-                }
-              }
-            },
-            _ => {
+            }
+            return Err(syn::Error::new(nv.value.span(), "expected an integer literal"));
+          },
+          "timeout" => self.timeout_ms = Some(parse_duration_str(&lit_str(nv)?)?),
+          "tag" => self.tags.push(lit_str(nv)?),
+          "skip" => self.skip = Some(Some(lit_str(nv)?)),
+          "slow" => self.slow = Some(Some(lit_str(nv)?)),
+          "fixme" => self.fixme = Some(Some(lit_str(nv)?)),
+          "fail" => self.fail = Some(Some(lit_str(nv)?)),
+          "info" => {
+            let val = lit_str(nv)?;
+            if let Some((type_name, desc)) = val.split_once(':') {
+              self.infos.push((type_name.trim().to_string(), desc.trim().to_string()));
+            } else {
+              self.infos.push((val, String::new()));
+            }
+          },
+          "use_options" => {
+            let raw = lit_str(nv)?;
+            let parsed: serde_json::Value = serde_json::from_str(&raw)
+              .map_err(|e| syn::Error::new(nv.value.span(), format!("use_options is not valid JSON: {e}")))?;
+            let serde_json::Value::Object(map) = parsed else {
+              return Err(syn::Error::new(nv.value.span(), "use_options must be a JSON object"));
+            };
+            self.use_raw = Some(map);
+          },
+          "viewport" => {
+            let val = lit_str(nv)?;
+            let parsed = val.split_once('x').and_then(|(w, h)| {
+              let w = w.trim().parse::<i64>().ok()?;
+              let h = h.trim().parse::<i64>().ok()?;
+              Some((w, h))
+            });
+            let Some((w, h)) = parsed else {
+              return Err(syn::Error::new(
+                nv.value.span(),
+                "viewport must be \"<width>x<height>\", e.g. \"1280x720\"",
+              ));
+            };
+            self
+              .use_structured
+              .insert("viewport".into(), serde_json::json!({ "width": w, "height": h }));
+          },
+          "device_scale_factor" => {
+            self
+              .use_structured
+              .insert("deviceScaleFactor".into(), serde_json::json!(lit_f64(nv)?));
+          },
+          other => {
+            if let Some((_, wire)) = USE_STR_KEYS.iter().find(|(attr, _)| *attr == other) {
+              self
+                .use_structured
+                .insert((*wire).to_string(), serde_json::Value::String(lit_str(nv)?));
+            } else if let Some((_, wire)) = USE_BOOL_KEYS.iter().find(|(attr, _)| *attr == other) {
+              self
+                .use_structured
+                .insert((*wire).to_string(), serde_json::Value::Bool(lit_bool(nv)?));
+            } else {
               return Err(syn::Error::new_spanned(
                 &nv.path,
-                format!("unknown ferritest attribute: {ident}"),
+                format!("unknown ferritest attribute: {other}"),
               ));
-            },
+            }
+          },
+        }
+      },
+      Meta::Path(p) => {
+        let ident = p.get_ident().map(ToString::to_string).unwrap_or_default();
+        match ident.as_str() {
+          "skip" => self.skip = Some(None),
+          "slow" => self.slow = Some(None),
+          "fixme" => self.fixme = Some(None),
+          "fail" => self.fail = Some(None),
+          "only" => self.only = true,
+          other => {
+            if let Some((_, wire)) = USE_BOOL_KEYS.iter().find(|(attr, _)| *attr == other) {
+              self
+                .use_structured
+                .insert((*wire).to_string(), serde_json::Value::Bool(true));
+            } else {
+              return Err(syn::Error::new_spanned(p, format!("unknown ferritest flag: {other}")));
+            }
+          },
+        }
+      },
+      Meta::List(_) => {
+        return Err(syn::Error::new_spanned(meta, "unexpected nested attribute"));
+      },
+    }
+    Ok(())
+  }
+
+  /// Merge raw `use_options` JSON with structured keys (structured wins)
+  /// into the final wire string, or `None` when no overrides were given.
+  fn use_options_json(&self) -> Option<String> {
+    if self.use_raw.is_none() && self.use_structured.is_empty() {
+      return None;
+    }
+    let mut merged = self.use_raw.clone().unwrap_or_default();
+    for (k, v) in &self.use_structured {
+      merged.insert(k.clone(), v.clone());
+    }
+    Some(serde_json::Value::Object(merged).to_string())
+  }
+
+  fn annotations(&self) -> Vec<proc_macro2::TokenStream> {
+    // Helper: parse "condition" or "condition | reason" into (condition, reason) tokens.
+    fn annotation_tokens(variant: &str, arg: &Option<Option<String>>, annotations: &mut Vec<proc_macro2::TokenStream>) {
+      let variant_ident = quote::format_ident!("{}", variant);
+      match arg {
+        Some(None) => {
+          annotations
+            .push(quote! { ferridriver_test::model::TestAnnotation::#variant_ident { reason: None, condition: None } });
+        },
+        Some(Some(val)) => {
+          // Support "condition | reason" format.
+          if let Some((cond, reason)) = val.split_once('|') {
+            let cond = cond.trim();
+            let reason = reason.trim();
+            annotations.push(quote! { ferridriver_test::model::TestAnnotation::#variant_ident {
+              reason: Some(#reason.to_string()),
+              condition: Some(#cond.to_string()),
+            } });
+          } else {
+            annotations.push(quote! { ferridriver_test::model::TestAnnotation::#variant_ident {
+              reason: None,
+              condition: Some(#val.to_string()),
+            } });
           }
         },
-        Meta::Path(p) => {
-          let ident = p.get_ident().map(ToString::to_string).unwrap_or_default();
-          match ident.as_str() {
-            "skip" => args.skip = Some(None),
-            "slow" => args.slow = Some(None),
-            "fixme" => args.fixme = Some(None),
-            "fail" => args.fail = Some(None),
-            "only" => args.only = true,
-            _ => return Err(syn::Error::new_spanned(p, format!("unknown ferritest flag: {ident}"))),
-          }
-        },
-        Meta::List(_) => {
-          return Err(syn::Error::new_spanned(&meta, "unexpected nested attribute"));
-        },
+        None => {},
       }
+    }
+
+    let mut annotations = Vec::new();
+    annotation_tokens("Skip", &self.skip, &mut annotations);
+    annotation_tokens("Slow", &self.slow, &mut annotations);
+    annotation_tokens("Fixme", &self.fixme, &mut annotations);
+    annotation_tokens("Fail", &self.fail, &mut annotations);
+    if self.only {
+      annotations.push(quote! { ferridriver_test::model::TestAnnotation::Only });
+    }
+    for tag in &self.tags {
+      annotations.push(quote! { ferridriver_test::model::TestAnnotation::Tag(#tag.to_string()) });
+    }
+    for (type_name, desc) in &self.infos {
+      annotations.push(
+        quote! { ferridriver_test::model::TestAnnotation::Info { type_name: #type_name.to_string(), description: #desc.to_string() } },
+      );
+    }
+    annotations
+  }
+}
+
+impl Parse for FerritestArgs {
+  fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+    let mut args = Self::default();
+    let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
+    for meta in metas {
+      args.apply_meta(&meta)?;
     }
     Ok(args)
   }
@@ -187,10 +327,120 @@ fn parse_duration_str(s: &str) -> syn::Result<u64> {
   }
 }
 
+// ── Fixture parameter injection ──
+
+/// How one test-function parameter is bound.
+enum ParamBinding {
+  /// `ctx: TestContext` — dynamic fixture access.
+  Context,
+  /// `page: Arc<Page>` — resolves the fixture named after the parameter.
+  Fixture { inner: Box<Type>, name: String },
+  /// Anything else — only valid as a `#[ferritest_each]` data parameter.
+  Data,
+}
+
+struct BoundParam {
+  pat: syn::PatIdent,
+  ty: Type,
+  binding: ParamBinding,
+}
+
+fn classify_param(arg: &FnArg) -> syn::Result<BoundParam> {
+  let FnArg::Typed(pt) = arg else {
+    return Err(syn::Error::new(arg.span(), "test functions cannot take self"));
+  };
+  let Pat::Ident(pat) = pt.pat.as_ref() else {
+    return Err(syn::Error::new(
+      pt.pat.span(),
+      "test parameters must be plain identifiers",
+    ));
+  };
+  let binding = match pt.ty.as_ref() {
+    Type::Path(tp) => {
+      let last = tp.path.segments.last();
+      match last {
+        Some(seg) if seg.ident == "TestContext" => ParamBinding::Context,
+        Some(seg) if seg.ident == "Arc" => {
+          let inner = match &seg.arguments {
+            syn::PathArguments::AngleBracketed(ab) => ab.args.iter().find_map(|a| {
+              if let syn::GenericArgument::Type(t) = a {
+                Some(t.clone())
+              } else {
+                None
+              }
+            }),
+            _ => None,
+          };
+          let Some(inner) = inner else {
+            return Err(syn::Error::new(
+              pt.ty.span(),
+              "Arc fixture parameter needs a type argument",
+            ));
+          };
+          let name = pat.ident.to_string();
+          let name = name.trim_start_matches('_').to_string();
+          ParamBinding::Fixture {
+            inner: Box::new(inner),
+            name,
+          }
+        },
+        _ => ParamBinding::Data,
+      }
+    },
+    _ => ParamBinding::Data,
+  };
+  Ok(BoundParam {
+    pat: pat.clone(),
+    ty: pt.ty.as_ref().clone(),
+    binding,
+  })
+}
+
+/// Generate the `let` bindings that resolve fixture parameters, plus the
+/// list of fixture names for the registration's `fixture_requests`.
+fn fixture_binding_stmts(params: &[BoundParam]) -> (Vec<proc_macro2::TokenStream>, Vec<String>) {
+  let mut stmts = Vec::new();
+  let mut names = Vec::new();
+  let needs_ctx = params
+    .iter()
+    .any(|p| matches!(p.binding, ParamBinding::Context | ParamBinding::Fixture { .. }));
+  if needs_ctx {
+    stmts.push(quote! { let __ferri_ctx = ferridriver_test::TestContext::new(__pool); });
+  }
+  for param in params {
+    let pat = &param.pat;
+    match &param.binding {
+      ParamBinding::Context => stmts.push(quote! { let #pat = __ferri_ctx.clone(); }),
+      ParamBinding::Fixture { inner, name } => {
+        names.push(name.clone());
+        stmts.push(quote! { let #pat = __ferri_ctx.get::<#inner>(#name).await?; });
+      },
+      ParamBinding::Data => {},
+    }
+  }
+  (stmts, names)
+}
+
 /// `#[ferritest]` attribute macro.
 ///
 /// Transforms an async function into a registered test case with automatic
-/// fixture injection based on parameter types.
+/// fixture injection based on parameters:
+///
+/// - `ctx: TestContext` — dynamic access to any fixture (`ctx.page()`,
+///   `ctx.get::<T>("name")`).
+/// - `page: Arc<Page>`, `context: Arc<BrowserContext>`, `browser:
+///   Arc<Browser>`, `request: Arc<HttpClient>`, `test_info: Arc<TestInfo>`
+///   — built-in fixtures, resolved by parameter name.
+/// - `seeded_users: Arc<Vec<User>>` — a custom `#[fixture]`, resolved by
+///   parameter name.
+///
+/// ```ignore
+/// #[ferritest]
+/// async fn shows_dashboard(page: Arc<Page>, seeded_users: Arc<Vec<User>>) {
+///     page.goto("/dashboard").await?;
+///     expect(&page.locator("h1")).to_have_text(&seeded_users[0].name).await?;
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   let args = parse_macro_input!(attr as FerritestArgs);
@@ -202,68 +452,24 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   let block = &input.block;
   let attrs = &input.attrs;
 
-  // The function receives a TestContext. Extract the parameter name the user chose
-  // (e.g., `ctx`, `context`, `t`, etc.)
-  let ctx_param_name = if let Some(FnArg::Typed(pt)) = input.sig.inputs.first() {
-    if let Pat::Ident(pi) = pt.pat.as_ref() {
-      pi.ident.clone()
-    } else {
-      format_ident!("ctx")
-    }
-  } else {
-    format_ident!("ctx")
+  let params: Vec<BoundParam> = match input.sig.inputs.iter().map(classify_param).collect() {
+    Ok(p) => p,
+    Err(e) => return e.to_compile_error().into(),
   };
+  if let Some(bad) = params.iter().find(|p| matches!(p.binding, ParamBinding::Data)) {
+    return syn::Error::new(
+      bad.ty.span(),
+      "ferritest parameters must be `TestContext` or `Arc<T>` (fixtures are shared; \
+       the fixture name is the parameter name)",
+    )
+    .to_compile_error()
+    .into();
+  }
 
-  // Rust tests resolve built-in fixtures lazily via TestContext getters.
-  let fixture_names: Vec<String> = Vec::new();
+  let (binding_stmts, fixture_names) = fixture_binding_stmts(&params);
   let fixture_array = fixture_names.iter().map(|f| quote! { #f });
 
-  // Build annotations.
-  // Helper: parse "condition" or "condition | reason" into (condition, reason) tokens.
-  fn annotation_tokens(variant: &str, arg: &Option<Option<String>>, annotations: &mut Vec<proc_macro2::TokenStream>) {
-    let variant_ident = quote::format_ident!("{}", variant);
-    match arg {
-      Some(None) => {
-        annotations
-          .push(quote! { ferridriver_test::model::TestAnnotation::#variant_ident { reason: None, condition: None } });
-      },
-      Some(Some(val)) => {
-        // Support "condition | reason" format.
-        if let Some((cond, reason)) = val.split_once('|') {
-          let cond = cond.trim();
-          let reason = reason.trim();
-          annotations.push(quote! { ferridriver_test::model::TestAnnotation::#variant_ident {
-            reason: Some(#reason.to_string()),
-            condition: Some(#cond.to_string()),
-          } });
-        } else {
-          annotations.push(quote! { ferridriver_test::model::TestAnnotation::#variant_ident {
-            reason: None,
-            condition: Some(#val.to_string()),
-          } });
-        }
-      },
-      None => {},
-    }
-  }
-
-  let mut annotations = Vec::new();
-  annotation_tokens("Skip", &args.skip, &mut annotations);
-  annotation_tokens("Slow", &args.slow, &mut annotations);
-  annotation_tokens("Fixme", &args.fixme, &mut annotations);
-  annotation_tokens("Fail", &args.fail, &mut annotations);
-  if args.only {
-    annotations.push(quote! { ferridriver_test::model::TestAnnotation::Only });
-  }
-  for tag in &args.tags {
-    annotations.push(quote! { ferridriver_test::model::TestAnnotation::Tag(#tag.to_string()) });
-  }
-  for (type_name, desc) in &args.infos {
-    annotations.push(
-      quote! { ferridriver_test::model::TestAnnotation::Info { type_name: #type_name.to_string(), description: #desc.to_string() } },
-    );
-  }
-
+  let annotations = args.annotations();
   let retries_expr = match args.retries {
     Some(r) => quote! { Some(#r) },
     None => quote! { None },
@@ -272,7 +478,7 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
     Some(ms) => quote! { Some(#ms) },
     None => quote! { None },
   };
-  let use_options_expr = match &args.use_options {
+  let use_options_expr = match args.use_options_json() {
     Some(json) => quote! { Some(#json) },
     None => quote! { None },
   };
@@ -281,18 +487,18 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
     #(#attrs)*
     #[allow(clippy::unused_async)]
     #vis async fn #fn_name(__pool: ferridriver_test::fixture::FixturePool) -> Result<(), ferridriver_test::model::TestFailure> {
-      let #ctx_param_name = ferridriver_test::TestContext::new(__pool);
+      #(#binding_stmts)*
       #block
       Ok(())
     }
 
-    inventory::submit! {
+    ferridriver_test::inventory::submit! {
       ferridriver_test::discovery::TestRegistration {
         file: file!(),
         module_path: module_path!(),
         name: #fn_name_str,
         fixture_requests: &[#(#fixture_array),*],
-        annotations: &[#(#annotations),*],
+        annotations: || vec![#(#annotations),*],
         timeout_ms: #timeout_ms_expr,
         retries: #retries_expr,
         use_options: #use_options_expr,
@@ -304,49 +510,90 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   expanded.into()
 }
 
-/// Arguments for `#[ferritest_each]`: `data = [(...), (...)]`.
+/// Arguments for `#[ferritest_each]`: `data = [...]` plus every common
+/// `#[ferritest]` argument (`retries`, `tag`, `skip`, `viewport`, ...).
 struct FerritestEachArgs {
   data: Vec<Vec<Expr>>,
+  /// Optional per-row display names (`names = ["admin", "guest"]`),
+  /// used instead of the value-derived suffix.
+  names: Option<Vec<String>>,
+  common: FerritestArgs,
 }
 
 impl Parse for FerritestEachArgs {
   fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-    // Parse: data = [(...), (...)]
-    let ident: syn::Ident = input.parse()?;
-    if ident != "data" {
-      return Err(syn::Error::new_spanned(&ident, "expected `data = [...]`"));
+    let mut data: Option<Vec<Vec<Expr>>> = None;
+    let mut names: Option<Vec<String>> = None;
+    let mut common = FerritestArgs::default();
+
+    let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
+    for meta in metas {
+      if let Meta::NameValue(nv) = &meta {
+        if nv.path.is_ident("data") {
+          let Expr::Array(arr) = &nv.value else {
+            return Err(syn::Error::new(nv.value.span(), "expected `data = [(...), (...)]`"));
+          };
+          let mut rows = Vec::new();
+          for elem in &arr.elems {
+            match elem {
+              Expr::Tuple(t) => rows.push(t.elems.iter().cloned().collect()),
+              Expr::Paren(p) => rows.push(vec![(*p.expr).clone()]),
+              other => rows.push(vec![other.clone()]),
+            }
+          }
+          data = Some(rows);
+          continue;
+        }
+        if nv.path.is_ident("names") {
+          let Expr::Array(arr) = &nv.value else {
+            return Err(syn::Error::new(nv.value.span(), "expected `names = [\"a\", \"b\"]`"));
+          };
+          let mut list = Vec::new();
+          for elem in &arr.elems {
+            if let Expr::Lit(lit) = elem {
+              if let Lit::Str(s) = &lit.lit {
+                list.push(s.value());
+                continue;
+              }
+            }
+            return Err(syn::Error::new(elem.span(), "names entries must be string literals"));
+          }
+          names = Some(list);
+          continue;
+        }
+      }
+      common.apply_meta(&meta)?;
     }
-    let _: Token![=] = input.parse()?;
 
-    let content;
-    syn::bracketed!(content in input);
-
-    let mut data = Vec::new();
-    while !content.is_empty() {
-      let inner;
-      syn::parenthesized!(inner in content);
-      let exprs: Punctuated<Expr, Token![,]> = Punctuated::parse_terminated(&inner)?;
-      data.push(exprs.into_iter().collect());
-
-      if content.peek(Token![,]) {
-        let _: Token![,] = content.parse()?;
+    let Some(data) = data else {
+      return Err(syn::Error::new(
+        proc_macro2::Span::call_site(),
+        "ferritest_each requires `data = [...]`",
+      ));
+    };
+    if let Some(names) = &names {
+      if names.len() != data.len() {
+        return Err(syn::Error::new(
+          proc_macro2::Span::call_site(),
+          format!("names has {} entries but data has {} rows", names.len(), data.len()),
+        ));
       }
     }
-
-    Ok(Self { data })
+    Ok(Self { data, names, common })
   }
 }
 
 /// `#[ferritest_each(data = [("a", 1), ("b", 2)])]` — parameterized test macro.
 ///
-/// Expands a single async test function into N registered tests, one per data row.
-/// First parameter is `TestContext`, remaining parameters receive the data values.
+/// Expands a single async test function into N registered tests, one per data
+/// row. Fixture parameters (`TestContext`, `Arc<T>`) come first; the remaining
+/// parameters receive the row values. Accepts every `#[ferritest]` argument
+/// (`retries`, `tag`, `skip`, `viewport`, ...), applied to every generated test.
 ///
 /// ```ignore
-/// #[ferritest_each(data = [("admin", "admin@example.com"), ("guest", "guest@example.com")])]
-/// async fn login(ctx: TestContext, role: &str, email: &str) {
-///     let page = ctx.page().await?;
-///     page.goto(&format!("/login?role={role}"), None).await?;
+/// #[ferritest_each(data = [("admin", "admin@example.com"), ("guest", "guest@example.com")], tag = "auth")]
+/// async fn login(page: Arc<Page>, role: &str, email: &str) {
+///     page.goto(&format!("/login?role={role}")).await?;
 /// }
 /// ```
 /// Registers: `login (admin, admin@example.com)` and `login (guest, guest@example.com)`.
@@ -357,35 +604,32 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
 
   let fn_name = &input.sig.ident;
   let fn_name_str = fn_name.to_string();
-  let block = &input.block;
   let attrs = &input.attrs;
+  let block = &input.block;
 
-  // First param is TestContext, rest are data params.
-  let all_params: Vec<_> = input.sig.inputs.iter().collect();
-  let ctx_param_name = if let Some(FnArg::Typed(pt)) = all_params.first() {
-    if let Pat::Ident(pi) = pt.pat.as_ref() {
-      pi.ident.clone()
-    } else {
-      format_ident!("ctx")
-    }
-  } else {
-    format_ident!("ctx")
+  let params: Vec<BoundParam> = match input.sig.inputs.iter().map(classify_param).collect() {
+    Ok(p) => p,
+    Err(e) => return e.to_compile_error().into(),
   };
-
-  let data_params: Vec<(&syn::Ident, &Type)> = all_params
+  let (binding_stmts, fixture_names) = fixture_binding_stmts(&params);
+  let data_params: Vec<&BoundParam> = params
     .iter()
-    .skip(1) // skip FixturePool
-    .filter_map(|arg| {
-      if let FnArg::Typed(pat_type) = arg {
-        if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
-          return Some((&pat_ident.ident, &*pat_type.ty));
-        }
-      }
-      None
-    })
+    .filter(|p| matches!(p.binding, ParamBinding::Data))
     .collect();
 
-  let fixture_names: Vec<String> = Vec::new();
+  let annotations = args.common.annotations();
+  let retries_expr = match args.common.retries {
+    Some(r) => quote! { Some(#r) },
+    None => quote! { None },
+  };
+  let timeout_ms_expr = match args.common.timeout_ms {
+    Some(ms) => quote! { Some(#ms) },
+    None => quote! { None },
+  };
+  let use_options_expr = match args.common.use_options_json() {
+    Some(json) => quote! { Some(#json) },
+    None => quote! { None },
+  };
 
   // Generate one inventory::submit! per data row.
   let mut submissions = Vec::new();
@@ -404,42 +648,57 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
       .into();
     }
 
-    // Build name suffix: "(val1, val2)"
-    let row_values_str: Vec<String> = row.iter().map(|e| quote!(#e).to_string().replace('"', "")).collect();
-    let suffix = row_values_str.join(", ");
+    // Name suffix: explicit `names = [...]` entry, or "(val1, val2)".
+    let suffix = args.names.as_ref().map_or_else(
+      || {
+        row
+          .iter()
+          .map(|e| quote!(#e).to_string().replace('"', ""))
+          .collect::<Vec<_>>()
+          .join(", ")
+      },
+      |names| names[row_idx].clone(),
+    );
     let test_name = format!("{fn_name_str} ({suffix})");
 
     // Build let bindings for data params.
     let data_bindings: Vec<_> = data_params
       .iter()
       .zip(row.iter())
-      .map(|((param_name, param_type), value)| {
-        quote! { let #param_name: #param_type = #value; }
+      .map(|(param, value)| {
+        let pat = &param.pat;
+        let ty = &param.ty;
+        quote! { let #pat: #ty = #value; }
       })
       .collect();
 
     let inner_fn_name = format_ident!("__ferritest_each_{}_{}", fn_name, row_idx);
     let fixture_array = fixture_names.iter().map(|f| quote! { #f });
-    let ctx_param = ctx_param_name.clone();
+    let binding_stmts = binding_stmts.clone();
+    let annotations = annotations.clone();
+    let retries_expr = retries_expr.clone();
+    let timeout_ms_expr = timeout_ms_expr.clone();
+    let use_options_expr = use_options_expr.clone();
 
     submissions.push(quote! {
       #[allow(clippy::unused_async)]
       async fn #inner_fn_name(__pool: ferridriver_test::fixture::FixturePool) -> Result<(), ferridriver_test::model::TestFailure> {
-        let #ctx_param = ferridriver_test::TestContext::new(__pool);
+        #(#binding_stmts)*
         #(#data_bindings)*
         #block
         Ok(())
       }
 
-      inventory::submit! {
+      ferridriver_test::inventory::submit! {
         ferridriver_test::discovery::TestRegistration {
           file: file!(),
           module_path: module_path!(),
           name: #test_name,
           fixture_requests: &[#(#fixture_array),*],
-          annotations: &[],
-          timeout_ms: None,
-          retries: None,
+          annotations: || vec![#(#annotations),*],
+          timeout_ms: #timeout_ms_expr,
+          retries: #retries_expr,
+          use_options: #use_options_expr,
           test_fn: |pool| Box::pin(#inner_fn_name(pool)),
         }
       }
@@ -531,32 +790,56 @@ impl Parse for FixtureArgs {
   }
 }
 
+/// Whether a `#[fixture]` fn's return type is
+/// `Result<Fixture<T>>` — the teardown-carrying guard form.
+fn returns_fixture_guard(output: &syn::ReturnType) -> bool {
+  let syn::ReturnType::Type(_, ty) = output else {
+    return false;
+  };
+  let Type::Path(tp) = ty.as_ref() else {
+    return false;
+  };
+  let Some(result_seg) = tp.path.segments.last() else {
+    return false;
+  };
+  if result_seg.ident != "Result" {
+    return false;
+  }
+  let syn::PathArguments::AngleBracketed(ab) = &result_seg.arguments else {
+    return false;
+  };
+  ab.args.iter().any(|a| {
+    if let syn::GenericArgument::Type(Type::Path(inner)) = a {
+      inner.path.segments.last().is_some_and(|s| s.ident == "Fixture")
+    } else {
+      false
+    }
+  })
+}
+
 /// `#[fixture]` — register a custom, dependency-injected, scoped fixture.
 ///
-/// The function takes a single `TestContext` and returns
-/// `ferridriver_test::Result<T>`. The resolved value is shared as `Arc<T>`
-/// and retrieved from a test (or another fixture) via
-/// `ctx.get::<T>("fixture_name").await?`. Custom fixtures may depend on the
-/// built-ins (`page`, `context`, `browser`, `request`, `test_info`) and on
-/// each other — dependencies resolve lazily through `ctx.get`.
+/// The function takes fixture parameters like a test (`TestContext` for
+/// dynamic access, `Arc<T>` to resolve another fixture by parameter name)
+/// and returns `ferridriver_test::Result<T>`. The resolved value is shared
+/// as `Arc<T>` and retrieved from a test (or another fixture) via a typed
+/// `Arc<T>` parameter or `ctx.get::<T>("fixture_name")`.
 ///
 /// ```ignore
 /// use ferridriver_test::prelude::*;
 /// use std::sync::Arc;
 ///
 /// #[fixture(scope = "test")]
-/// async fn authed_page(ctx: TestContext) -> ferridriver_test::Result<Arc<Page>> {
-///     let page = ctx.page().await?;
-///     page.goto("https://app.example.com/login", None).await?;
-///     page.locator("#email", None).fill("user@example.com", None).await?;
-///     page.locator("button[type=submit]", None).click(None).await?;
+/// async fn authed_page(page: Arc<Page>) -> ferridriver_test::Result<Arc<Page>> {
+///     page.goto("https://app.example.com/login").await?;
+///     page.locator("#email").fill("user@example.com").await?;
+///     page.locator("button[type=submit]").click().await?;
 ///     Ok(page)
 /// }
 ///
 /// #[ferritest]
-/// async fn shows_dashboard(ctx: TestContext) {
-///     let page = ctx.get::<Arc<Page>>("authed_page").await?;
-///     expect(&page.locator("h1", None)).to_have_text("Dashboard").await?;
+/// async fn shows_dashboard(authed_page: Arc<Arc<Page>>) {
+///     expect(&authed_page.locator("h1")).to_have_text("Dashboard").await?;
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -564,11 +847,14 @@ pub fn fixture(attr: TokenStream, item: TokenStream) -> TokenStream {
   let args = parse_macro_input!(attr as FixtureArgs);
   let input = parse_macro_input!(item as ItemFn);
 
-  // Require exactly one parameter (the TestContext).
-  if input.sig.inputs.len() != 1 {
-    return syn::Error::new_spanned(
-      &input.sig,
-      "#[fixture] functions take exactly one parameter: `ctx: TestContext`",
+  let params: Vec<BoundParam> = match input.sig.inputs.iter().map(classify_param).collect() {
+    Ok(p) => p,
+    Err(e) => return e.to_compile_error().into(),
+  };
+  if let Some(bad) = params.iter().find(|p| matches!(p.binding, ParamBinding::Data)) {
+    return syn::Error::new(
+      bad.ty.span(),
+      "fixture parameters must be `TestContext` or `Arc<T>` (the fixture name is the parameter name)",
     )
     .to_compile_error()
     .into();
@@ -586,6 +872,48 @@ pub fn fixture(attr: TokenStream, item: TokenStream) -> TokenStream {
   let timeout_ms = args.timeout_ms.unwrap_or(10_000);
   let auto = args.auto;
 
+  // The setup closure resolves this fixture's own parameters the same way
+  // tests do, then calls the user's function. Fresh idents (not the user's
+  // parameter names) so an `_`-prefixed parameter doesn't become a used
+  // underscore binding in the expansion.
+  let call_args: Vec<syn::Ident> = (0..params.len()).map(|i| format_ident!("__ferri_arg{}", i)).collect();
+  let mut setup_stmts = Vec::new();
+  let needs_ctx = !params.is_empty();
+  if needs_ctx {
+    setup_stmts.push(quote! { let __ferri_ctx = ferridriver_test::TestContext::new(__pool.clone()); });
+  }
+  let mut dependency_names = Vec::new();
+  for (p, arg_ident) in params.iter().zip(&call_args) {
+    match &p.binding {
+      ParamBinding::Context => setup_stmts.push(quote! { let #arg_ident = __ferri_ctx.clone(); }),
+      ParamBinding::Fixture { inner, name } => {
+        dependency_names.push(name.clone());
+        setup_stmts.push(quote! {
+          let #arg_ident = __ferri_ctx.get::<#inner>(#name).await.map_err(|__e| {
+            ferridriver::error::FerriError::backend(::std::format!(
+              "fixture '{}' dependency '{}' failed: {}", #fn_name_str, #name, __e
+            ))
+          })?;
+        });
+      },
+      ParamBinding::Data => {},
+    }
+  }
+  let dependency_array = dependency_names.iter().map(|d| quote! { #d.to_string() });
+
+  // `Result<Fixture<T>>` bodies carry a teardown: unwrap the guard and
+  // register the teardown on the resolving pool (runs at scope end).
+  let unwrap_guard = if returns_fixture_guard(&input.sig.output) {
+    quote! {
+      let (__value, __teardown) = __value.into_parts();
+      if let ::std::option::Option::Some(__td) = __teardown {
+        __pool.register_teardown(#fn_name_str, __td);
+      }
+    }
+  } else {
+    quote! {}
+  };
+
   let expanded = quote! {
     // Keep the user's function callable. Fixtures are async by contract
     // (most await a built-in or another fixture); a data-only fixture that
@@ -599,13 +927,14 @@ pub fn fixture(attr: TokenStream, item: TokenStream) -> TokenStream {
       ferridriver_test::fixture::FixtureDef {
         name: #fn_name_str.to_string(),
         scope: #scope_tok,
-        dependencies: ::std::vec::Vec::new(),
+        dependencies: ::std::vec![#(#dependency_array),*],
         setup: ::std::sync::Arc::new(|__pool: ferridriver_test::fixture::FixturePool| {
           ::std::boxed::Box::pin(async move {
-            let __ctx = ferridriver_test::TestContext::new(__pool);
-            let __value = #fn_name(__ctx).await.map_err(|__e| {
+            #(#setup_stmts)*
+            let __value = #fn_name(#(#call_args),*).await.map_err(|__e| {
               ferridriver::error::FerriError::backend(::std::format!("fixture '{}' failed: {}", #fn_name_str, __e))
             })?;
+            #unwrap_guard
             ::std::result::Result::Ok(
               ::std::sync::Arc::new(__value)
                 as ::std::sync::Arc<dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync>,
@@ -687,9 +1016,9 @@ impl Parse for SuiteArgs {
 ///     use ferridriver_test::prelude::*;
 ///
 ///     #[ferritest]
-///     async fn initiate(ctx: TestContext) { /* ... */ }
+///     async fn initiate(page: Arc<Page>) { /* ... */ }
 ///     #[ferritest]
-///     async fn verify_receipt(ctx: TestContext) { /* runs only if initiate passed */ }
+///     async fn verify_receipt(page: Arc<Page>) { /* runs only if initiate passed */ }
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -739,16 +1068,19 @@ fn hook_impl(kind_tag: &str, is_suite_hook: bool, item: TokenStream) -> TokenStr
 
   let kind_ident = format_ident!("{}", kind_tag);
 
-  // Extract parameter name for TestContext.
-  let ctx_param_name = if let Some(FnArg::Typed(pt)) = input.sig.inputs.first() {
-    if let Pat::Ident(pi) = pt.pat.as_ref() {
-      pi.ident.clone()
-    } else {
-      format_ident!("ctx")
-    }
-  } else {
-    format_ident!("ctx")
+  let params: Vec<BoundParam> = match input.sig.inputs.iter().map(classify_param).collect() {
+    Ok(p) => p,
+    Err(e) => return e.to_compile_error().into(),
   };
+  if let Some(bad) = params.iter().find(|p| matches!(p.binding, ParamBinding::Data)) {
+    return syn::Error::new(
+      bad.ty.span(),
+      "hook parameters must be `TestContext` or `Arc<T>` (the fixture name is the parameter name)",
+    )
+    .to_compile_error()
+    .into();
+  }
+  let (binding_stmts, _) = fixture_binding_stmts(&params);
 
   if is_suite_hook {
     // before_all / after_all: fn(FixturePool) -> Result
@@ -758,13 +1090,13 @@ fn hook_impl(kind_tag: &str, is_suite_hook: bool, item: TokenStream) -> TokenStr
         -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Result<(), ferridriver_test::model::TestFailure>> + Send>>
       {
         Box::pin(async move {
-          let #ctx_param_name = ferridriver_test::TestContext::new(__pool);
+          #(#binding_stmts)*
           #block
           Ok(())
         })
       }
 
-      inventory::submit! {
+      ferridriver_test::inventory::submit! {
         ferridriver_test::discovery::HookRegistration {
           module_path: module_path!(),
           suite_hook_fn: Some(#fn_name),
@@ -784,13 +1116,13 @@ fn hook_impl(kind_tag: &str, is_suite_hook: bool, item: TokenStream) -> TokenStr
       ) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Result<(), ferridriver_test::model::TestFailure>> + Send>>
       {
         Box::pin(async move {
-          let #ctx_param_name = ferridriver_test::TestContext::new(__pool);
+          #(#binding_stmts)*
           #block
           Ok(())
         })
       }
 
-      inventory::submit! {
+      ferridriver_test::inventory::submit! {
         ferridriver_test::discovery::HookRegistration {
           module_path: module_path!(),
           suite_hook_fn: None,
@@ -815,7 +1147,7 @@ fn hook_impl(kind_tag: &str, is_suite_hook: bool, item: TokenStream) -> TokenStr
 ///     }
 ///
 ///     #[ferritest]
-///     async fn test_one(ctx: TestContext) { ... }
+///     async fn test_one(page: Arc<Page>) { ... }
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -836,13 +1168,12 @@ pub fn after_all(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     use ferridriver_test::prelude::*;
 ///
 ///     #[before_each]
-///     async fn login(ctx: TestContext) {
-///         let page = ctx.page().await?;
-///         page.goto("/login", None).await?;
+///     async fn login(page: Arc<Page>) {
+///         page.goto("/login").await?;
 ///     }
 ///
 ///     #[ferritest]
-///     async fn dashboard_test(ctx: TestContext) { ... }
+///     async fn dashboard_test(page: Arc<Page>) { ... }
 /// }
 /// ```
 #[proc_macro_attribute]

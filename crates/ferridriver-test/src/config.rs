@@ -23,9 +23,15 @@ use std::path::PathBuf;
 /// flags (`--tags`, `--dry-run`, `--strict`, `--fail-fast`, `--step-timeout`,
 /// `--order`, `--language`). BDD flags are silently ignored when running
 /// non-BDD test runs.
+///
+/// `FERRITEST_*` environment variables seed the overrides first (the channel
+/// `ferridriver test` uses to reach harness binaries spawned through
+/// cargo/nextest, where extra CLI flags would be rejected by libtest
+/// binaries in the same run); explicit CLI flags win over them.
 pub fn parse_common_cli_args() -> CliOverrides {
   let args: Vec<String> = std::env::args().collect();
   let mut overrides = CliOverrides::default();
+  apply_env_overrides(&mut overrides);
   let mut i = 1;
   while i < args.len() {
     match args[i].as_str() {
@@ -149,6 +155,33 @@ pub fn parse_common_cli_args() -> CliOverrides {
     i += 1;
   }
   overrides
+}
+
+fn apply_env_overrides(overrides: &mut CliOverrides) {
+  fn env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+  }
+  if env("FERRITEST_HEADLESS").is_some_and(|v| v != "0" && v != "false") {
+    overrides.headless = true;
+  }
+  if let Some(v) = env("FERRITEST_BACKEND") {
+    overrides.backend = Some(v);
+  }
+  if let Some(v) = env("FERRITEST_WORKERS") {
+    overrides.workers = v.parse().ok();
+  }
+  if let Some(v) = env("FERRITEST_GREP") {
+    overrides.grep = Some(v);
+  }
+  if let Some(v) = env("FERRITEST_TAG") {
+    overrides.tag = Some(v);
+  }
+  if let Some(v) = env("FERRITEST_RETRIES") {
+    overrides.retries = v.parse().ok();
+  }
+  if let Some(v) = env("FERRITEST_TIMEOUT") {
+    overrides.timeout = v.parse().ok();
+  }
 }
 
 // ── Config resolution ───────────────────────────────────────────────────────

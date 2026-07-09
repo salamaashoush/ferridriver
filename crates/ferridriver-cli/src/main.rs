@@ -212,6 +212,24 @@ fn run_test(args: &cli::TestArgs) -> anyhow::Result<()> {
 
   let mut cmd = Command::new(program);
   cmd.args(&base_args);
+  if args.headless {
+    cmd.env("FERRITEST_HEADLESS", "1");
+  }
+  if let Some(backend) = args.backend.as_deref() {
+    cmd.env("FERRITEST_BACKEND", backend);
+  }
+  if let Some(workers) = args.workers {
+    cmd.env("FERRITEST_WORKERS", workers.to_string());
+  }
+  if let Some(grep) = args.grep.as_deref() {
+    cmd.env("FERRITEST_GREP", grep);
+  }
+  if let Some(tag) = args.tag.as_deref() {
+    cmd.env("FERRITEST_TAG", tag);
+  }
+  if let Some(retries) = args.retries {
+    cmd.env("FERRITEST_RETRIES", retries.to_string());
+  }
   for pkg in &args.packages {
     cmd.arg("-p").arg(pkg);
   }
