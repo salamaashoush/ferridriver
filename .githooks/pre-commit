@@ -2,8 +2,16 @@
 set -euo pipefail
 
 # Auto-format on commit so we never need a separate "style: cargo fmt" commit.
+# Restage only staged paths cargo fmt touched — a bare `git add -u` here
+# would sweep unrelated unstaged work into partial commits.
 cargo fmt --all
-git diff --quiet || {
-  echo "[pre-commit] cargo fmt applied changes, staging them..."
-  git add -u
-}
+staged=$(git diff --cached --name-only)
+if [ -n "$staged" ]; then
+  # shellcheck disable=SC2086
+  reformatted=$(git diff --name-only -- $staged)
+  if [ -n "$reformatted" ]; then
+    echo "[pre-commit] cargo fmt reformatted staged files, restaging them..."
+    # shellcheck disable=SC2086
+    git add -- $reformatted
+  fi
+fi
