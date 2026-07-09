@@ -9,7 +9,7 @@ async fn click_at_position(world: &mut BrowserWorld, x: i64, y: i64) {
   world
     .page()
     .mouse()
-    .click(x as f64, y as f64, None)
+    .click(x as f64, y as f64)
     .await
     .map_err(|e| StepError::wrap(format!("click at ({x},{y})"), e))?;
 }
@@ -19,7 +19,7 @@ async fn move_mouse(world: &mut BrowserWorld, x: i64, y: i64) {
   world
     .page()
     .mouse()
-    .r#move(x as f64, y as f64, None)
+    .r#move(x as f64, y as f64)
     .await
     .map_err(|e| StepError::wrap(format!("move mouse to ({x},{y})"), e))?;
 }
@@ -48,19 +48,20 @@ async fn scroll_wheel_up(world: &mut BrowserWorld, delta: i64) {
 async fn drag_coordinates(world: &mut BrowserWorld, x1: i64, y1: i64, x2: i64, y2: i64) {
   let mouse = world.page().mouse();
   mouse
-    .r#move(x1 as f64, y1 as f64, None)
+    .r#move(x1 as f64, y1 as f64)
     .await
     .map_err(|e| StepError::wrap(format!("move to ({x1},{y1})"), e))?;
   mouse
-    .down(None)
+    .down()
     .await
     .map_err(|e| StepError::wrap(format!("mouse down at ({x1},{y1})"), e))?;
   mouse
-    .r#move(x2 as f64, y2 as f64, Some(10))
+    .r#move(x2 as f64, y2 as f64)
+    .steps(10u32)
     .await
     .map_err(|e| StepError::wrap(format!("move to ({x2},{y2})"), e))?;
   mouse
-    .up(None)
+    .up()
     .await
     .map_err(|e| StepError::wrap(format!("mouse up at ({x2},{y2})"), e))?;
 }

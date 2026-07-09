@@ -1004,7 +1004,7 @@ pub struct GotoOptions {
 impl From<GotoOptions> for ferridriver::options::GotoOptions {
   fn from(o: GotoOptions) -> Self {
     Self {
-      wait_until: o.wait_until,
+      wait_until: o.wait_until.as_deref().map(ferridriver::options::LoadState::from),
       timeout: o.timeout.map(f64_to_u64),
       referer: o.referer,
     }
@@ -1221,23 +1221,32 @@ impl From<FilterOptions> for ferridriver::options::FilterOptions {
   }
 }
 
-impl From<WaitOptions> for ferridriver::options::WaitOptions {
-  fn from(o: WaitOptions) -> Self {
-    Self {
-      state: o.state,
+impl TryFrom<WaitOptions> for ferridriver::options::WaitOptions {
+  type Error = napi::Error;
+
+  fn try_from(o: WaitOptions) -> std::result::Result<Self, napi::Error> {
+    Ok(Self {
+      state: o
+        .state
+        .as_deref()
+        .map(|s| {
+          ferridriver::options::WaitState::try_from_str(s)
+            .map_err(|bad| napi::Error::from_reason(format!("unknown wait state: {bad}")))
+        })
+        .transpose()?,
       timeout: o.timeout.map(f64_to_u64),
-    }
+    })
   }
 }
 
 impl From<ScreenshotOptions> for ferridriver::options::ScreenshotOptions {
   fn from(o: ScreenshotOptions) -> Self {
     Self {
-      animations: o.animations,
-      caret: o.caret,
+      animations: o.animations.as_deref().map(ferridriver::options::AnimationsMode::from),
+      caret: o.caret.as_deref().map(ferridriver::options::CaretMode::from),
       clip: o.clip.map(Into::into),
       full_page: o.full_page,
-      format: o.format,
+      format: o.format.as_deref().map(ferridriver::options::ScreenshotFormat::from),
       // `mask` needs a `Page` to materialise core `Locator` values; the
       // caller (`Page::screenshot`) fills it from `o.mask` selectors.
       mask: Vec::new(),
@@ -1245,7 +1254,7 @@ impl From<ScreenshotOptions> for ferridriver::options::ScreenshotOptions {
       omit_background: o.omit_background,
       path: o.path.map(std::path::PathBuf::from),
       quality: o.quality.map(i64::from),
-      scale: o.scale,
+      scale: o.scale.as_deref().map(ferridriver::options::ScreenshotScale::from),
       style: o.style,
       timeout: o.timeout.map(f64_to_u64),
     }

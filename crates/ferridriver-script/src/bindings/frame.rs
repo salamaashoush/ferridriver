@@ -149,7 +149,12 @@ impl FrameJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Option<crate::bindings::element_handle::ElementHandleJs>> {
     let opts = crate::bindings::page::parse_wait_options(&ctx, options)?;
-    let handle = self.inner.wait_for_selector(&selector, opts).await.into_js_with(&ctx)?;
+    let handle = self
+      .inner
+      .wait_for_selector(&selector)
+      .options(opts)
+      .await
+      .into_js_with(&ctx)?;
     Ok(handle.map(crate::bindings::element_handle::ElementHandleJs::new))
   }
 
@@ -158,7 +163,7 @@ impl FrameJs {
   /// Create a locator scoped to this frame.
   #[qjs(rename = "locator")]
   pub fn locator(&self, selector: String) -> LocatorJs {
-    LocatorJs::new(self.inner.locator(&selector, None))
+    LocatorJs::new(self.inner.locator(&selector))
   }
 
   #[qjs(rename = "getByRole")]
@@ -168,7 +173,9 @@ impl FrameJs {
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
     let opts = crate::bindings::page::parse_role_options(options)?;
-    Ok(LocatorJs::new(self.inner.get_by_role(&role, &opts)))
+    Ok(LocatorJs::new(
+      self.inner.get_by_role(role.as_str()).options(opts).into_locator(),
+    ))
   }
 
   #[qjs(rename = "getByText")]
@@ -179,7 +186,7 @@ impl FrameJs {
   ) -> rquickjs::Result<LocatorJs> {
     let t = crate::bindings::page::string_or_regex_from_js(text)?;
     let opts = crate::bindings::page::parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_text(&t, &opts)))
+    Ok(LocatorJs::new(self.inner.get_by_text(t).options(opts).into_locator()))
   }
 
   #[qjs(rename = "getByLabel")]
@@ -190,7 +197,7 @@ impl FrameJs {
   ) -> rquickjs::Result<LocatorJs> {
     let t = crate::bindings::page::string_or_regex_from_js(text)?;
     let opts = crate::bindings::page::parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_label(&t, &opts)))
+    Ok(LocatorJs::new(self.inner.get_by_label(t).options(opts).into_locator()))
   }
 
   #[qjs(rename = "getByPlaceholder")]
@@ -201,7 +208,9 @@ impl FrameJs {
   ) -> rquickjs::Result<LocatorJs> {
     let t = crate::bindings::page::string_or_regex_from_js(text)?;
     let opts = crate::bindings::page::parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_placeholder(&t, &opts)))
+    Ok(LocatorJs::new(
+      self.inner.get_by_placeholder(t).options(opts).into_locator(),
+    ))
   }
 
   #[qjs(rename = "getByAltText")]
@@ -212,7 +221,9 @@ impl FrameJs {
   ) -> rquickjs::Result<LocatorJs> {
     let t = crate::bindings::page::string_or_regex_from_js(text)?;
     let opts = crate::bindings::page::parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_alt_text(&t, &opts)))
+    Ok(LocatorJs::new(
+      self.inner.get_by_alt_text(t).options(opts).into_locator(),
+    ))
   }
 
   #[qjs(rename = "getByTitle")]
@@ -223,13 +234,13 @@ impl FrameJs {
   ) -> rquickjs::Result<LocatorJs> {
     let t = crate::bindings::page::string_or_regex_from_js(text)?;
     let opts = crate::bindings::page::parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_title(&t, &opts)))
+    Ok(LocatorJs::new(self.inner.get_by_title(t).options(opts).into_locator()))
   }
 
   #[qjs(rename = "getByTestId")]
   pub fn get_by_test_id(&self, test_id: rquickjs::Value<'_>) -> rquickjs::Result<LocatorJs> {
     let t = crate::bindings::page::string_or_regex_from_js(test_id)?;
-    Ok(LocatorJs::new(self.inner.get_by_test_id(&t)))
+    Ok(LocatorJs::new(self.inner.get_by_test_id(t)))
   }
 
   /// Playwright: `frame.frameLocator(selector): FrameLocator`.
@@ -261,7 +272,7 @@ impl FrameJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_click_options(&ctx, options)?;
-    self.inner.click(&selector, opts).await.into_js_with(&ctx)
+    self.inner.click(&selector).maybe_options(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "dblclick")]
@@ -272,7 +283,12 @@ impl FrameJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_dblclick_options(&ctx, options)?;
-    self.inner.dblclick(&selector, opts).await.into_js_with(&ctx)
+    self
+      .inner
+      .dblclick(&selector)
+      .maybe_options(opts)
+      .await
+      .into_js_with(&ctx)
   }
 
   #[qjs(rename = "hover")]
@@ -283,7 +299,7 @@ impl FrameJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_hover_options(&ctx, options)?;
-    self.inner.hover(&selector, opts).await.into_js_with(&ctx)
+    self.inner.hover(&selector).maybe_options(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "tap")]
@@ -294,7 +310,7 @@ impl FrameJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_tap_options(&ctx, options)?;
-    self.inner.tap(&selector, opts).await.into_js_with(&ctx)
+    self.inner.tap(&selector).maybe_options(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "focus")]
@@ -311,7 +327,12 @@ impl FrameJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_fill_options(&ctx, options)?;
-    self.inner.fill(&selector, &value, opts).await.into_js_with(&ctx)
+    self
+      .inner
+      .fill(&selector, &value)
+      .maybe_options(opts)
+      .await
+      .into_js_with(&ctx)
   }
 
   #[qjs(rename = "type")]
@@ -323,7 +344,12 @@ impl FrameJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
-    self.inner.r#type(&selector, &text, opts).await.into_js_with(&ctx)
+    self
+      .inner
+      .r#type(&selector, &text)
+      .maybe_options(opts)
+      .await
+      .into_js_with(&ctx)
   }
 
   #[qjs(rename = "press")]
@@ -335,7 +361,12 @@ impl FrameJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_press_options(&ctx, options)?;
-    self.inner.press(&selector, &key, opts).await.into_js_with(&ctx)
+    self
+      .inner
+      .press(&selector, &key)
+      .maybe_options(opts)
+      .await
+      .into_js_with(&ctx)
   }
 
   #[qjs(rename = "check")]
@@ -346,7 +377,7 @@ impl FrameJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self.inner.check(&selector, opts).await.into_js_with(&ctx)
+    self.inner.check(&selector).maybe_options(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "uncheck")]
@@ -357,7 +388,12 @@ impl FrameJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self.inner.uncheck(&selector, opts).await.into_js_with(&ctx)
+    self
+      .inner
+      .uncheck(&selector)
+      .maybe_options(opts)
+      .await
+      .into_js_with(&ctx)
   }
 
   #[qjs(rename = "setChecked")]
@@ -371,7 +407,8 @@ impl FrameJs {
     let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
     self
       .inner
-      .set_checked(&selector, checked, opts)
+      .set_checked(&selector, checked)
+      .maybe_options(opts)
       .await
       .into_js_with(&ctx)
   }
@@ -388,7 +425,8 @@ impl FrameJs {
     let opts = crate::bindings::convert::parse_select_option_options(&ctx, options)?;
     self
       .inner
-      .select_option(&selector, values, opts)
+      .select_option(&selector, values)
+      .maybe_options(opts)
       .await
       .into_js_with(&ctx)
   }
@@ -405,7 +443,8 @@ impl FrameJs {
     let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
     self
       .inner
-      .set_input_files(&selector, files, opts)
+      .set_input_files(&selector, files)
+      .maybe_options(opts)
       .await
       .into_js_with(&ctx)
   }
@@ -414,11 +453,7 @@ impl FrameJs {
   /// Options ride on Locator's drag option bag.
   #[qjs(rename = "dragAndDrop")]
   pub async fn drag_and_drop(&self, ctx: rquickjs::Ctx<'_>, source: String, target: String) -> rquickjs::Result<()> {
-    self
-      .inner
-      .drag_and_drop(&source, &target, None)
-      .await
-      .into_js_with(&ctx)
+    self.inner.drag_and_drop(&source, &target).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "dispatchEvent")]
@@ -439,7 +474,8 @@ impl FrameJs {
     let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
     self
       .inner
-      .dispatch_event(&selector, &event_type, init_json, opts)
+      .dispatch_event(&selector, &event_type, init_json)
+      .maybe_options(opts)
       .await
       .into_js_with(&ctx)
   }

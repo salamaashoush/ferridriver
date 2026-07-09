@@ -67,7 +67,7 @@ fn make_nav_test(i: usize) -> TestCase {
         let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(fail)?;
         let want = format!("Test {i}");
         let url = data_url(&format!("<title>{want}</title><body><h1>Page {i}</h1></body>"));
-        page.goto(&url, None).await.map_err(|e| fail(e.to_string()))?;
+        page.goto(&url).await.map_err(|e| fail(e.to_string()))?;
         let got = page.title().await.map_err(|e| fail(e.to_string()))?;
         if got != want {
           return Err(fail(format!("nav: got {got:?} want {want:?}")));
@@ -99,17 +99,13 @@ fn make_click_test(i: usize) -> TestCase {
         let url = data_url(&format!(
           "<button id='btn' onclick=\"this.textContent='{want}'\">Click {i}</button>"
         ));
-        page.goto(&url, None).await.map_err(|e| fail(e.to_string()))?;
-        page
-          .locator("#btn", None)
-          .click(None)
-          .await
-          .map_err(|e| fail(e.to_string()))?;
+        page.goto(&url).await.map_err(|e| fail(e.to_string()))?;
+        page.locator("#btn").click().await.map_err(|e| fail(e.to_string()))?;
         // Spin-poll text — same shape as `expect(...).toHaveText` in TS.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
           let txt = page
-            .locator("#btn", None)
+            .locator("#btn")
             .text_content()
             .await
             .map_err(|e| fail(e.to_string()))?
@@ -146,7 +142,7 @@ fn make_eval_test(i: usize) -> TestCase {
         let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(fail)?;
         let want = format!("{i}");
         let url = data_url(&format!("<title>Eval {i}</title><div id='out'>{i}</div>"));
-        page.goto(&url, None).await.map_err(|e| fail(e.to_string()))?;
+        page.goto(&url).await.map_err(|e| fail(e.to_string()))?;
         let v = page
           .evaluate(
             "document.getElementById('out')?.textContent",

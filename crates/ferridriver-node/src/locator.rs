@@ -84,13 +84,16 @@ impl Locator {
       napi::Either::B(inner) => ferridriver::options::LocatorLike::Selector(inner.selector),
     };
     let opts = options.map(ferridriver::options::FilterOptions::from);
-    Self::wrap(self.inner.locator(like, opts))
+    Self::wrap(match opts {
+      Some(f) => self.inner.locator_with(like, &f),
+      None => self.inner.locator(like),
+    })
   }
 
   #[napi]
   pub fn get_by_role(&self, role: String, options: Option<RoleOptions>) -> Locator {
-    let opts: ferridriver::options::RoleOptions = options.map_or_else(Default::default, Into::into);
-    Self::wrap(self.inner.get_by_role(&role, &opts))
+    let opts = options.map(ferridriver::options::RoleOptions::from);
+    Self::wrap(self.inner.get_by_role(role.as_str()).maybe_options(opts).into_locator())
   }
 
   #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
@@ -99,8 +102,14 @@ impl Locator {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Self::wrap(self.inner.get_by_text(&crate::types::getby_input_to_rust(text), &opts))
+    let opts = options.map(ferridriver::options::TextOptions::from);
+    Self::wrap(
+      self
+        .inner
+        .get_by_text(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
+    )
   }
 
   #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
@@ -109,8 +118,14 @@ impl Locator {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Self::wrap(self.inner.get_by_label(&crate::types::getby_input_to_rust(text), &opts))
+    let opts = options.map(ferridriver::options::TextOptions::from);
+    Self::wrap(
+      self
+        .inner
+        .get_by_label(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
+    )
   }
 
   #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
@@ -119,11 +134,13 @@ impl Locator {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
+    let opts = options.map(ferridriver::options::TextOptions::from);
     Self::wrap(
       self
         .inner
-        .get_by_placeholder(&crate::types::getby_input_to_rust(text), &opts),
+        .get_by_placeholder(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
     )
   }
 
@@ -133,11 +150,13 @@ impl Locator {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
+    let opts = options.map(ferridriver::options::TextOptions::from);
     Self::wrap(
       self
         .inner
-        .get_by_alt_text(&crate::types::getby_input_to_rust(text), &opts),
+        .get_by_alt_text(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
     )
   }
 
@@ -147,13 +166,19 @@ impl Locator {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Self::wrap(self.inner.get_by_title(&crate::types::getby_input_to_rust(text), &opts))
+    let opts = options.map(ferridriver::options::TextOptions::from);
+    Self::wrap(
+      self
+        .inner
+        .get_by_title(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
+    )
   }
 
   #[napi(ts_args_type = "testId: string | RegExp")]
   pub fn get_by_test_id(&self, test_id: napi::Either<String, crate::types::JsRegExpLike>) -> Locator {
-    Self::wrap(self.inner.get_by_test_id(&crate::types::getby_input_to_rust(test_id)))
+    Self::wrap(self.inner.get_by_test_id(crate::types::getby_input_to_rust(test_id)))
   }
 
   /// Playwright: `locator.contentFrame(): FrameLocator`. Treats the
@@ -233,7 +258,12 @@ impl Locator {
   #[napi]
   pub async fn click(&self, options: Option<crate::types::ClickOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.click(opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .click()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// Double-click the element matched by this locator. Accepts
@@ -241,7 +271,12 @@ impl Locator {
   #[napi]
   pub async fn dblclick(&self, options: Option<crate::types::DblClickOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.dblclick(opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .dblclick()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// Fill an input with `value`. Accepts Playwright's full
@@ -249,7 +284,12 @@ impl Locator {
   #[napi]
   pub async fn fill(&self, value: String, options: Option<crate::types::FillOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.fill(&value, opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .fill(&value)
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -286,13 +326,23 @@ impl Locator {
   #[napi]
   pub async fn type_text(&self, text: String, options: Option<crate::types::TypeOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.r#type(&text, opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .r#type(&text)
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi(js_name = "type")]
   pub async fn type_alias(&self, text: String, options: Option<crate::types::TypeOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.r#type(&text, opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .r#type(&text)
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// Press a key or key combination. Accepts Playwright's full
@@ -300,7 +350,12 @@ impl Locator {
   #[napi]
   pub async fn press(&self, key: String, options: Option<crate::types::PressOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.press(&key, opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .press(&key)
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// Hover over the element matched by this locator. Accepts
@@ -308,7 +363,12 @@ impl Locator {
   #[napi]
   pub async fn hover(&self, options: Option<crate::types::HoverOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.hover(opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .hover()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -326,14 +386,24 @@ impl Locator {
   #[napi]
   pub async fn check(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.check(opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .check()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// Uncheck a checkbox. Accepts Playwright's full `LocatorUncheckOptions` bag.
   #[napi]
   pub async fn uncheck(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.uncheck(opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .uncheck()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// Select options on a `<select>` element. Accepts Playwright's
@@ -348,7 +418,8 @@ impl Locator {
     let opts = options.map(Into::into);
     self
       .inner
-      .select_option(values.0, opts)
+      .select_option(values.0)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -379,7 +450,8 @@ impl Locator {
   ) -> Result<()> {
     self
       .inner
-      .dispatch_event(&event_type, event_init, options.map(Into::into))
+      .dispatch_event(&event_type, event_init)
+      .maybe_options(options.map(Into::into))
       .await
       .map_err(crate::error::to_napi)
   }
@@ -391,7 +463,8 @@ impl Locator {
     let opts = options.map(Into::into);
     self
       .inner
-      .press_sequentially(&text, opts)
+      .press_sequentially(&text)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -409,7 +482,12 @@ impl Locator {
   )]
   pub async fn aria_snapshot(&self, options: Option<crate::types::AriaSnapshotOptions>) -> Result<String> {
     let opts = options.map(Into::into).unwrap_or_default();
-    self.inner.aria_snapshot(opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .aria_snapshot()
+      .options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -504,7 +582,7 @@ impl Locator {
   #[napi(js_name = "dragTo")]
   pub async fn drag_to(&self, target: &Locator, options: Option<crate::types::DragAndDropOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.drag_to(&target.inner, opts).await.into_napi()
+    self.inner.drag_to(&target.inner).maybe_options(opts).await.into_napi()
   }
 
   /// Drop a file/data payload onto this element. Mirrors Playwright's
@@ -518,15 +596,25 @@ impl Locator {
     options: Option<crate::types::DropOptions>,
   ) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.drop(payload.0, opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .drop(payload.0)
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   // ── Waiting ─────────────────────────────────────────────────────────────
 
   #[napi]
   pub async fn wait_for(&self, options: Option<WaitOptions>) -> Result<()> {
-    let opts: ferridriver::options::WaitOptions = options.map_or_else(Default::default, Into::into);
-    self.inner.wait_for(opts).await.map_err(crate::error::to_napi)
+    let opts = options.map(ferridriver::options::WaitOptions::try_from).transpose()?;
+    self
+      .inner
+      .wait_for()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   // ── Screenshot ──────────────────────────────────────────────────────────
@@ -561,7 +649,12 @@ impl Locator {
   #[napi]
   pub async fn tap(&self, options: Option<crate::types::TapOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.tap(opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .tap()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -574,7 +667,8 @@ impl Locator {
     let opts = options.map(Into::into);
     self
       .inner
-      .set_checked(checked, opts)
+      .set_checked(checked)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -591,7 +685,8 @@ impl Locator {
     let opts = options.map(Into::into);
     self
       .inner
-      .set_input_files(files.0, opts)
+      .set_input_files(files.0)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -617,7 +712,8 @@ impl Locator {
     let opts = options.map(Into::into);
     let result = self
       .inner
-      .evaluate(&page_function.source, serialized, page_function.is_function, opts)
+      .evaluate(&page_function.source, serialized, page_function.is_function)
+      .maybe_options(opts)
       .await
       .into_napi()?;
     Ok(crate::serialize_out::Evaluated(result))
@@ -636,7 +732,8 @@ impl Locator {
     let opts = options.map(Into::into);
     let handle = self
       .inner
-      .evaluate_handle(&page_function.source, serialized, page_function.is_function, opts)
+      .evaluate_handle(&page_function.source, serialized, page_function.is_function)
+      .maybe_options(opts)
       .await
       .into_napi()?;
     Ok(crate::js_handle::JSHandle::wrap(handle))

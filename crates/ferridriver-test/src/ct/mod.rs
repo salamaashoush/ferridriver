@@ -107,7 +107,7 @@ pub async fn mount(
   })?;
 
   // Return a locator pointing at the component root.
-  Ok(page.locator("#root, #app", None))
+  Ok(page.locator("#root, #app"))
 }
 
 /// Unmount the currently mounted component.

@@ -32,13 +32,15 @@ impl FrameLocatorJs {
 impl FrameLocatorJs {
   #[qjs(rename = "locator")]
   pub fn locator(&self, selector: String) -> LocatorJs {
-    LocatorJs::new(self.inner.locator(&selector, None))
+    LocatorJs::new(self.inner.locator(&selector))
   }
 
   #[qjs(rename = "getByRole")]
   pub fn get_by_role(&self, role: String, options: Opt<rquickjs::Value<'_>>) -> rquickjs::Result<LocatorJs> {
     let opts = parse_role_options(options)?;
-    Ok(LocatorJs::new(self.inner.get_by_role(&role, &opts)))
+    Ok(LocatorJs::new(
+      self.inner.get_by_role(role.as_str()).options(opts).into_locator(),
+    ))
   }
 
   #[qjs(rename = "getByText")]
@@ -49,7 +51,7 @@ impl FrameLocatorJs {
   ) -> rquickjs::Result<LocatorJs> {
     let t = string_or_regex_from_js(text)?;
     let opts = parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_text(&t, &opts)))
+    Ok(LocatorJs::new(self.inner.get_by_text(t).options(opts).into_locator()))
   }
 
   #[qjs(rename = "getByLabel")]
@@ -60,7 +62,7 @@ impl FrameLocatorJs {
   ) -> rquickjs::Result<LocatorJs> {
     let t = string_or_regex_from_js(text)?;
     let opts = parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_label(&t, &opts)))
+    Ok(LocatorJs::new(self.inner.get_by_label(t).options(opts).into_locator()))
   }
 
   #[qjs(rename = "getByPlaceholder")]
@@ -71,7 +73,9 @@ impl FrameLocatorJs {
   ) -> rquickjs::Result<LocatorJs> {
     let t = string_or_regex_from_js(text)?;
     let opts = parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_placeholder(&t, &opts)))
+    Ok(LocatorJs::new(
+      self.inner.get_by_placeholder(t).options(opts).into_locator(),
+    ))
   }
 
   #[qjs(rename = "getByAltText")]
@@ -82,7 +86,9 @@ impl FrameLocatorJs {
   ) -> rquickjs::Result<LocatorJs> {
     let t = string_or_regex_from_js(text)?;
     let opts = parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_alt_text(&t, &opts)))
+    Ok(LocatorJs::new(
+      self.inner.get_by_alt_text(t).options(opts).into_locator(),
+    ))
   }
 
   #[qjs(rename = "getByTitle")]
@@ -93,13 +99,13 @@ impl FrameLocatorJs {
   ) -> rquickjs::Result<LocatorJs> {
     let t = string_or_regex_from_js(text)?;
     let opts = parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_title(&t, &opts)))
+    Ok(LocatorJs::new(self.inner.get_by_title(t).options(opts).into_locator()))
   }
 
   #[qjs(rename = "getByTestId")]
   pub fn get_by_test_id(&self, test_id: rquickjs::Value<'_>) -> rquickjs::Result<LocatorJs> {
     let t = string_or_regex_from_js(test_id)?;
-    Ok(LocatorJs::new(self.inner.get_by_test_id(&t)))
+    Ok(LocatorJs::new(self.inner.get_by_test_id(t)))
   }
 
   #[qjs(rename = "owner")]

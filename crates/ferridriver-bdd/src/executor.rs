@@ -234,11 +234,7 @@ impl ScenarioExecutor {
 
     // Screenshot on failure.
     let failure_screenshot = if had_failure && self.screenshot_on_failure {
-      world
-        .page()
-        .screenshot(ferridriver::options::ScreenshotOptions::default())
-        .await
-        .ok()
+      world.page().screenshot().await.ok()
     } else {
       None
     };

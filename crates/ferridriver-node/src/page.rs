@@ -299,7 +299,12 @@ impl Page {
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn goto(&self, url: String, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
-    let resp = self.inner.goto(&url, opts).await.map_err(crate::error::to_napi)?;
+    let resp = self
+      .inner
+      .goto(&url)
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)?;
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
@@ -308,7 +313,12 @@ impl Page {
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn go_back(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
-    let resp = self.inner.go_back(opts).await.map_err(crate::error::to_napi)?;
+    let resp = self
+      .inner
+      .go_back()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)?;
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
@@ -317,7 +327,12 @@ impl Page {
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn go_forward(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
-    let resp = self.inner.go_forward(opts).await.map_err(crate::error::to_napi)?;
+    let resp = self
+      .inner
+      .go_forward()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)?;
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
@@ -326,7 +341,12 @@ impl Page {
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn reload(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
-    let resp = self.inner.reload(opts).await.map_err(crate::error::to_napi)?;
+    let resp = self
+      .inner
+      .reload()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)?;
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
@@ -364,7 +384,10 @@ impl Page {
   #[napi]
   pub fn locator(&self, selector: String, options: Option<crate::types::FilterOptions>) -> Locator {
     let opts = options.map(ferridriver::options::FilterOptions::from);
-    Locator::wrap(self.inner.locator(&selector, opts))
+    Locator::wrap(match opts {
+      Some(f) => self.inner.locator_with(&selector, &f),
+      None => self.inner.locator(&selector),
+    })
   }
 
   /// Playwright: `page.querySelector(selector): Promise<ElementHandle | null>`
@@ -408,8 +431,8 @@ impl Page {
 
   #[napi]
   pub fn get_by_role(&self, role: String, options: Option<RoleOptions>) -> Locator {
-    let opts: ferridriver::options::RoleOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_role(&role, &opts))
+    let opts = options.map(ferridriver::options::RoleOptions::from);
+    Locator::wrap(self.inner.get_by_role(role.as_str()).maybe_options(opts).into_locator())
   }
 
   #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
@@ -418,8 +441,14 @@ impl Page {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_text(&crate::types::getby_input_to_rust(text), &opts))
+    let opts = options.map(ferridriver::options::TextOptions::from);
+    Locator::wrap(
+      self
+        .inner
+        .get_by_text(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
+    )
   }
 
   #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
@@ -428,8 +457,14 @@ impl Page {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_label(&crate::types::getby_input_to_rust(text), &opts))
+    let opts = options.map(ferridriver::options::TextOptions::from);
+    Locator::wrap(
+      self
+        .inner
+        .get_by_label(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
+    )
   }
 
   #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
@@ -438,11 +473,13 @@ impl Page {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
+    let opts = options.map(ferridriver::options::TextOptions::from);
     Locator::wrap(
       self
         .inner
-        .get_by_placeholder(&crate::types::getby_input_to_rust(text), &opts),
+        .get_by_placeholder(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
     )
   }
 
@@ -452,11 +489,13 @@ impl Page {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
+    let opts = options.map(ferridriver::options::TextOptions::from);
     Locator::wrap(
       self
         .inner
-        .get_by_alt_text(&crate::types::getby_input_to_rust(text), &opts),
+        .get_by_alt_text(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
     )
   }
 
@@ -466,13 +505,19 @@ impl Page {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_title(&crate::types::getby_input_to_rust(text), &opts))
+    let opts = options.map(ferridriver::options::TextOptions::from);
+    Locator::wrap(
+      self
+        .inner
+        .get_by_title(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
+    )
   }
 
   #[napi(ts_args_type = "testId: string | RegExp")]
   pub fn get_by_test_id(&self, test_id: napi::Either<String, crate::types::JsRegExpLike>) -> Locator {
-    Locator::wrap(self.inner.get_by_test_id(&crate::types::getby_input_to_rust(test_id)))
+    Locator::wrap(self.inner.get_by_test_id(crate::types::getby_input_to_rust(test_id)))
   }
 
   // ── Frames (sync, Playwright parity — task 3.8) ─────────────────────
@@ -843,7 +888,12 @@ impl Page {
   #[napi]
   pub async fn click(&self, selector: String, options: Option<crate::types::ClickOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.click(&selector, opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .click(&selector)
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// Double-click the first element matching `selector`. Accepts
@@ -853,7 +903,8 @@ impl Page {
     let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
-      .dblclick(&selector, opts)
+      .dblclick(&selector)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -865,7 +916,8 @@ impl Page {
     let opts = options.map(Into::into);
     self
       .inner
-      .fill(&selector, &value, opts)
+      .fill(&selector, &value)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -882,7 +934,8 @@ impl Page {
     let opts = options.map(Into::into);
     self
       .inner
-      .r#type(&selector, &text, opts)
+      .r#type(&selector, &text)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -894,7 +947,8 @@ impl Page {
     let opts = options.map(Into::into);
     self
       .inner
-      .press(&selector, &key, opts)
+      .press(&selector, &key)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -904,7 +958,12 @@ impl Page {
   #[napi]
   pub async fn hover(&self, selector: String, options: Option<crate::types::HoverOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.hover(&selector, opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .hover(&selector)
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// Select options on the `<select>` matching `selector`. Accepts
@@ -919,7 +978,8 @@ impl Page {
     let opts = options.map(Into::into);
     self
       .inner
-      .select_option(&selector, values.0, opts)
+      .select_option(&selector, values.0)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -929,7 +989,12 @@ impl Page {
   #[napi]
   pub async fn check(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.check(&selector, opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .check(&selector)
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// Uncheck a checkbox matching `selector`. Accepts Playwright's full
@@ -937,7 +1002,12 @@ impl Page {
   #[napi]
   pub async fn uncheck(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.uncheck(&selector, opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .uncheck(&selector)
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// Set the checked state of a checkbox or radio matching `selector`.
@@ -952,7 +1022,8 @@ impl Page {
     let opts = options.map(Into::into);
     self
       .inner
-      .set_checked(&selector, checked, opts)
+      .set_checked(&selector, checked)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -962,7 +1033,12 @@ impl Page {
   #[napi]
   pub async fn tap(&self, selector: String, options: Option<crate::types::TapOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.tap(&selector, opts).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .tap(&selector)
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   // ── Content ─────────────────────────────────────────────────────────────
@@ -1089,10 +1165,11 @@ impl Page {
 
   #[napi]
   pub async fn wait_for_selector(&self, selector: String, options: Option<WaitOptions>) -> Result<()> {
-    let opts: ferridriver::options::WaitOptions = options.map_or_else(Default::default, Into::into);
+    let opts = options.map(ferridriver::options::WaitOptions::try_from).transpose()?;
     self
       .inner
-      .wait_for_selector(&selector, opts)
+      .wait_for_selector(&selector)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1147,11 +1224,13 @@ impl Page {
       .map(|m| m.iter().map(|l| l.selector.clone()).collect())
       .unwrap_or_default();
     let mut opts: ferridriver::options::ScreenshotOptions = options.map_or_else(Default::default, Into::into);
-    opts.mask = mask_selectors
-      .into_iter()
-      .map(|sel| self.inner.locator(&sel, None))
-      .collect();
-    let bytes = self.inner.screenshot(opts).await.map_err(crate::error::to_napi)?;
+    opts.mask = mask_selectors.into_iter().map(|sel| self.inner.locator(&sel)).collect();
+    let bytes = self
+      .inner
+      .screenshot()
+      .options(opts)
+      .await
+      .map_err(crate::error::to_napi)?;
     Ok(bytes.into())
   }
 
@@ -1174,7 +1253,8 @@ impl Page {
     let rust_opts: ferridriver::options::PdfOptions = options.unwrap_or_default().try_into()?;
     let bytes = self
       .inner
-      .pdf(rust_opts)
+      .pdf()
+      .options(rust_opts)
       .await
       .map_err(|e| napi::Error::from_reason(e.to_string()))?;
     Ok(bytes.into())
@@ -1220,12 +1300,7 @@ impl Page {
   /// Move mouse to coordinates without clicking.
   #[napi]
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
-    self
-      .inner
-      .mouse()
-      .r#move(x, y, None)
-      .await
-      .map_err(crate::error::to_napi)?;
+    self.inner.mouse().r#move(x, y).await.map_err(crate::error::to_napi)?;
     *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
     Ok(())
   }
@@ -1258,27 +1333,22 @@ impl Page {
   #[napi]
   pub async fn drag_and_drop(&self, source: String, target: String, options: Option<DragAndDropOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.drag_and_drop(&source, &target, opts).await.into_napi()
+    self
+      .inner
+      .drag_and_drop(&source, &target)
+      .maybe_options(opts)
+      .await
+      .into_napi()
   }
 
   #[napi]
   pub async fn type_str(&self, text: String) -> Result<()> {
-    self
-      .inner
-      .keyboard()
-      .r#type(&text, None)
-      .await
-      .map_err(crate::error::to_napi)
+    self.inner.keyboard().r#type(&text).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn press_key(&self, key: String) -> Result<()> {
-    self
-      .inner
-      .keyboard()
-      .press(&key, None)
-      .await
-      .map_err(crate::error::to_napi)
+    self.inner.keyboard().press(&key).await.map_err(crate::error::to_napi)
   }
 
   // ── Emulation ───────────────────────────────────────────────────────────
@@ -1300,8 +1370,13 @@ impl Page {
   /// via the option being absent or explicitly `null`).
   #[napi]
   pub async fn emulate_media(&self, options: Option<crate::types::EmulateMediaOptions>) -> Result<()> {
-    let opts: ferridriver::options::EmulateMediaOptions = options.map(Into::into).unwrap_or_default();
-    self.inner.emulate_media(&opts).await.map_err(crate::error::to_napi)
+    let opts = options.map(ferridriver::options::EmulateMediaOptions::from);
+    self
+      .inner
+      .emulate_media()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   // ── Focus / dispatch ────────────────────────────────────────────────────
@@ -1323,7 +1398,8 @@ impl Page {
   ) -> Result<()> {
     self
       .inner
-      .dispatch_event(&selector, &event_type, event_init, options.map(Into::into))
+      .dispatch_event(&selector, &event_type, event_init)
+      .maybe_options(options.map(Into::into))
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1431,7 +1507,8 @@ impl Page {
     let opts: Option<ferridriver::options::PageCloseOptions> = options.map(Into::into);
     self
       .inner
-      .close(opts)
+      .close()
+      .maybe_options(opts)
       .await
       .map_err(|e| napi::Error::from_reason(e.to_string()))
   }
@@ -1560,8 +1637,13 @@ impl Page {
     ts_return_type = "Promise<{ full: string; incremental?: string; refMap: Record<string, number> }>"
   )]
   pub async fn snapshot_for_ai(&self, options: Option<SnapshotForAiOptions>) -> Result<serde_json::Value> {
-    let opts = options.map(Into::into).unwrap_or_default();
-    let snap = self.inner.snapshot_for_ai(opts).await.map_err(crate::error::to_napi)?;
+    let opts = options.map(Into::into);
+    let snap = self
+      .inner
+      .snapshot_for_ai()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)?;
     let mut obj = serde_json::Map::new();
     obj.insert("full".to_string(), serde_json::Value::String(snap.full));
     if let Some(inc) = snap.incremental {
@@ -1583,8 +1665,13 @@ impl Page {
     ts_return_type = "Promise<string>"
   )]
   pub async fn aria_snapshot(&self, options: Option<SnapshotForAiOptions>) -> Result<String> {
-    let opts = options.map(Into::into).unwrap_or_default();
-    self.inner.aria_snapshot(opts).await.map_err(crate::error::to_napi)
+    let opts = options.map(Into::into);
+    self
+      .inner
+      .aria_snapshot()
+      .maybe_options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// ferridriver-specific (NOT Playwright): `startScreencast(quality,
@@ -1697,12 +1784,12 @@ impl Page {
   #[napi]
   pub async fn mouse_down(&self, x: f64, y: f64, button: Option<String>) -> Result<()> {
     let mouse = self.inner.mouse();
-    mouse.r#move(x, y, None).await.map_err(crate::error::to_napi)?;
+    mouse.r#move(x, y).await.map_err(crate::error::to_napi)?;
     let opts = ferridriver::page::MouseDownOptions {
-      button,
+      button: button.as_deref().map(ferridriver::options::MouseButton::from),
       click_count: None,
     };
-    mouse.down(Some(opts)).await.map_err(crate::error::to_napi)?;
+    mouse.down().options(opts).await.map_err(crate::error::to_napi)?;
     *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
     Ok(())
   }
@@ -1710,12 +1797,12 @@ impl Page {
   #[napi]
   pub async fn mouse_up(&self, x: f64, y: f64, button: Option<String>) -> Result<()> {
     let mouse = self.inner.mouse();
-    mouse.r#move(x, y, None).await.map_err(crate::error::to_napi)?;
+    mouse.r#move(x, y).await.map_err(crate::error::to_napi)?;
     let opts = ferridriver::page::MouseUpOptions {
-      button,
+      button: button.as_deref().map(ferridriver::options::MouseButton::from),
       click_count: None,
     };
-    mouse.up(Some(opts)).await.map_err(crate::error::to_napi)?;
+    mouse.up().options(opts).await.map_err(crate::error::to_napi)?;
     *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
     Ok(())
   }
@@ -1734,7 +1821,8 @@ impl Page {
     let opts = options.map(Into::into);
     self
       .inner
-      .set_input_files(&selector, files.0, opts)
+      .set_input_files(&selector, files.0)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -2082,7 +2170,8 @@ impl Page {
     let opts = crate::page::parse_har_options(options.as_ref())?;
     self
       .inner
-      .route_from_har(std::path::Path::new(&har), opts)
+      .route_from_har(std::path::Path::new(&har))
+      .options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -2254,7 +2343,8 @@ impl Keyboard {
     self
       .page
       .keyboard()
-      .press(&key, opts)
+      .press(&key)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -2269,7 +2359,8 @@ impl Keyboard {
     self
       .page
       .keyboard()
-      .r#type(&text, opts)
+      .r#type(&text)
+      .maybe_options(opts)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -2296,7 +2387,10 @@ impl Mouse {
   #[napi]
   pub async fn click(&self, x: f64, y: f64, options: Option<MouseClickOptions>) -> Result<()> {
     let opts = ferridriver::page::MouseClickOptions {
-      button: options.as_ref().and_then(|o| o.button.clone()),
+      button: options
+        .as_ref()
+        .and_then(|o| o.button.as_deref())
+        .map(ferridriver::options::MouseButton::from),
       click_count: options
         .as_ref()
         .and_then(|o| o.click_count)
@@ -2306,7 +2400,8 @@ impl Mouse {
     self
       .page
       .mouse()
-      .click(x, y, Some(opts))
+      .click(x, y)
+      .options(opts)
       .await
       .map_err(crate::error::to_napi)?;
     *self.position.lock().expect("mouse position lock poisoned") = (x, y);
@@ -2318,12 +2413,11 @@ impl Mouse {
     let step_count = steps
       .map(|s| u32::try_from(s).map_err(|_| napi::Error::from_reason("steps must be non-negative")))
       .transpose()?;
-    self
-      .page
-      .mouse()
-      .r#move(x, y, step_count)
-      .await
-      .map_err(crate::error::to_napi)?;
+    let mut action = self.page.mouse().r#move(x, y);
+    if let Some(steps) = step_count {
+      action = action.steps(steps);
+    }
+    action.await.map_err(crate::error::to_napi)?;
     *self.position.lock().expect("mouse position lock poisoned") = (x, y);
     Ok(())
   }
@@ -2331,14 +2425,18 @@ impl Mouse {
   #[napi]
   pub async fn dblclick(&self, x: f64, y: f64, options: Option<MouseClickOptions>) -> Result<()> {
     let opts = ferridriver::page::MouseClickOptions {
-      button: options.as_ref().and_then(|o| o.button.clone()),
+      button: options
+        .as_ref()
+        .and_then(|o| o.button.as_deref())
+        .map(ferridriver::options::MouseButton::from),
       click_count: None,
       delay: options.as_ref().and_then(|o| o.delay).map(crate::types::f64_to_u64),
     };
     self
       .page
       .mouse()
-      .dblclick(x, y, Some(opts))
+      .dblclick(x, y)
+      .options(opts)
       .await
       .map_err(crate::error::to_napi)?;
     *self.position.lock().expect("mouse position lock poisoned") = (x, y);
@@ -2349,26 +2447,44 @@ impl Mouse {
   #[napi]
   pub async fn down(&self, options: Option<MouseClickOptions>) -> Result<()> {
     let opts = ferridriver::page::MouseDownOptions {
-      button: options.as_ref().and_then(|o| o.button.clone()),
+      button: options
+        .as_ref()
+        .and_then(|o| o.button.as_deref())
+        .map(ferridriver::options::MouseButton::from),
       click_count: options
         .as_ref()
         .and_then(|o| o.click_count)
         .and_then(|n| u32::try_from(n).ok()),
     };
-    self.page.mouse().down(Some(opts)).await.map_err(crate::error::to_napi)
+    self
+      .page
+      .mouse()
+      .down()
+      .options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// Playwright: `mouse.up(options?: { button?, clickCount? })`.
   #[napi]
   pub async fn up(&self, options: Option<MouseClickOptions>) -> Result<()> {
     let opts = ferridriver::page::MouseUpOptions {
-      button: options.as_ref().and_then(|o| o.button.clone()),
+      button: options
+        .as_ref()
+        .and_then(|o| o.button.as_deref())
+        .map(ferridriver::options::MouseButton::from),
       click_count: options
         .as_ref()
         .and_then(|o| o.click_count)
         .and_then(|n| u32::try_from(n).ok()),
     };
-    self.page.mouse().up(Some(opts)).await.map_err(crate::error::to_napi)
+    self
+      .page
+      .mouse()
+      .up()
+      .options(opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]

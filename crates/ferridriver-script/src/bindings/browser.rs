@@ -42,7 +42,7 @@ impl BrowserJs {
   /// Accepts the full `BrowserContextOptions` bag via the
   /// isomorphic serde lowering.
   #[qjs(rename = "newContext")]
-  pub fn new_context<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+  pub async fn new_context<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     let core_opts = match options.0 {
       None => None,
       Some(v) if v.is_undefined() || v.is_null() => None,
@@ -51,7 +51,14 @@ impl BrowserJs {
         Some(parsed.into_core())
       },
     };
-    let ctx_ref = Arc::new(self.inner.new_context(core_opts));
+    let ctx_ref = Arc::new(
+      self
+        .inner
+        .new_context()
+        .maybe_options(core_opts)
+        .await
+        .into_js_with(&ctx)?,
+    );
     let wrapper = BrowserContextJs::new(ctx_ref);
     let instance = Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
@@ -78,7 +85,7 @@ impl BrowserJs {
   pub async fn close(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     self
       .inner
-      .close(None)
+      .close()
       .await
       .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
     Ok(())

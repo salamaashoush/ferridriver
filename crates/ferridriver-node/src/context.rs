@@ -110,7 +110,7 @@ impl BrowserContext {
       path: o.path.map(std::path::PathBuf::from),
       indexed_db: o.indexed_db,
     });
-    let state = self.inner.storage_state(core_opts).await.into_napi()?;
+    let state = self.inner.storage_state().maybe_options(core_opts).await.into_napi()?;
     Ok(NapiStorageState::from(state))
   }
 
@@ -201,7 +201,8 @@ impl BrowserContext {
     let opts = crate::page::parse_har_options(options.as_ref())?;
     self
       .inner
-      .route_from_har(std::path::Path::new(&har), opts)
+      .route_from_har(std::path::Path::new(&har))
+      .options(opts)
       .await
       .map_err(crate::error::to_napi)
   }

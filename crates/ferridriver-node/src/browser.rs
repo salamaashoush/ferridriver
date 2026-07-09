@@ -128,9 +128,15 @@ impl Browser {
   pub fn new_context(
     &self,
     options: Option<crate::context::NapiBrowserContextOptions>,
-  ) -> crate::context::BrowserContext {
+  ) -> Result<crate::context::BrowserContext> {
     let core = options.map(crate::context::NapiBrowserContextOptions::into_core);
-    crate::context::BrowserContext::wrap(self.inner.new_context(core))
+    // The core builder resolves synchronously (context registration is pure
+    // bookkeeping); block_on keeps this method's sync JS shape.
+    let ctx = napi::bindgen_prelude::block_on(std::future::IntoFuture::into_future(
+      self.inner.new_context().maybe_options(core),
+    ))
+    .into_napi()?;
+    Ok(crate::context::BrowserContext::wrap(ctx))
   }
 
   /// Get the default browser context.
@@ -192,7 +198,7 @@ impl Browser {
   #[napi]
   pub async fn close(&self, options: Option<crate::types::BrowserCloseOptions>) -> Result<()> {
     let opts: Option<ferridriver::options::BrowserCloseOptions> = options.map(Into::into);
-    self.inner.close(opts).await.into_napi()
+    self.inner.close().maybe_options(opts).await.into_napi()
   }
 
   /// List all browser contexts. Sync — mirrors Playwright's

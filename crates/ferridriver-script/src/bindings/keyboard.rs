@@ -90,7 +90,13 @@ impl KeyboardJs {
   ) -> rquickjs::Result<()> {
     let delay = parse_delay(&ctx, options)?;
     let opts = delay.map(|d| ferridriver::page::KeyboardPressOptions { delay: Some(d) });
-    self.page.keyboard().press(&key, opts).await.into_js_with(&ctx)
+    self
+      .page
+      .keyboard()
+      .press(&key)
+      .maybe_options(opts)
+      .await
+      .into_js_with(&ctx)
   }
 
   /// `keyboard.type(text, options?: { delay?, namedKeys? })`.
@@ -102,7 +108,13 @@ impl KeyboardJs {
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = parse_type_options(&ctx, options)?;
-    self.page.keyboard().r#type(&text, opts).await.into_js_with(&ctx)
+    self
+      .page
+      .keyboard()
+      .r#type(&text)
+      .maybe_options(opts)
+      .await
+      .into_js_with(&ctx)
   }
 
   /// `keyboard.insertText(text)` — `input` event only, no key events.

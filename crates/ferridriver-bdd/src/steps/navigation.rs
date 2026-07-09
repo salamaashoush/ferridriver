@@ -18,7 +18,7 @@ async fn navigate(world: &mut BrowserWorld, url: String) {
   let resolved = super::resolve_url(&url);
   world
     .page()
-    .goto(&resolved, None)
+    .goto(&resolved)
     .await
     .map_err(|e| StepError::wrap(format!("navigate to \"{resolved}\""), e))?;
 }
@@ -27,7 +27,7 @@ async fn navigate(world: &mut BrowserWorld, url: String) {
 async fn go_back(world: &mut BrowserWorld) {
   world
     .page()
-    .go_back(None)
+    .go_back()
     .await
     .map_err(|e| StepError::wrap("go back", e))?;
 }
@@ -36,18 +36,14 @@ async fn go_back(world: &mut BrowserWorld) {
 async fn go_forward(world: &mut BrowserWorld) {
   world
     .page()
-    .go_forward(None)
+    .go_forward()
     .await
     .map_err(|e| StepError::wrap("go forward", e))?;
 }
 
 #[step("I reload the page")]
 async fn reload(world: &mut BrowserWorld) {
-  world
-    .page()
-    .reload(None)
-    .await
-    .map_err(|e| StepError::wrap("reload", e))?;
+  world.page().reload().await.map_err(|e| StepError::wrap("reload", e))?;
 }
 
 #[then("the URL should contain {string}")]

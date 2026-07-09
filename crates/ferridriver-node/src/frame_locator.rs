@@ -42,14 +42,17 @@ impl FrameLocator {
       napi::Either::B(loc) => loc.selector,
     };
     let opts = options.map(ferridriver::options::FilterOptions::from);
-    Locator::wrap(self.inner.locator(&selector, opts))
+    Locator::wrap(match opts {
+      Some(f) => self.inner.locator_with(&selector, &f),
+      None => self.inner.locator(&selector),
+    })
   }
 
   /// Playwright: `frameLocator.getByRole(role, options?): Locator`.
   #[napi]
   pub fn get_by_role(&self, role: String, options: Option<RoleOptions>) -> Locator {
-    let opts: ferridriver::options::RoleOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_role(&role, &opts))
+    let opts = options.map(ferridriver::options::RoleOptions::from);
+    Locator::wrap(self.inner.get_by_role(role.as_str()).maybe_options(opts).into_locator())
   }
 
   #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
@@ -58,13 +61,19 @@ impl FrameLocator {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_text(&crate::types::getby_input_to_rust(text), &opts))
+    let opts = options.map(ferridriver::options::TextOptions::from);
+    Locator::wrap(
+      self
+        .inner
+        .get_by_text(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
+    )
   }
 
   #[napi(ts_args_type = "testId: string | RegExp")]
   pub fn get_by_test_id(&self, test_id: napi::Either<String, crate::types::JsRegExpLike>) -> Locator {
-    Locator::wrap(self.inner.get_by_test_id(&crate::types::getby_input_to_rust(test_id)))
+    Locator::wrap(self.inner.get_by_test_id(crate::types::getby_input_to_rust(test_id)))
   }
 
   #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
@@ -73,8 +82,14 @@ impl FrameLocator {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_label(&crate::types::getby_input_to_rust(text), &opts))
+    let opts = options.map(ferridriver::options::TextOptions::from);
+    Locator::wrap(
+      self
+        .inner
+        .get_by_label(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
+    )
   }
 
   #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
@@ -83,11 +98,13 @@ impl FrameLocator {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
+    let opts = options.map(ferridriver::options::TextOptions::from);
     Locator::wrap(
       self
         .inner
-        .get_by_placeholder(&crate::types::getby_input_to_rust(text), &opts),
+        .get_by_placeholder(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
     )
   }
 
@@ -97,11 +114,13 @@ impl FrameLocator {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
+    let opts = options.map(ferridriver::options::TextOptions::from);
     Locator::wrap(
       self
         .inner
-        .get_by_alt_text(&crate::types::getby_input_to_rust(text), &opts),
+        .get_by_alt_text(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
     )
   }
 
@@ -111,8 +130,14 @@ impl FrameLocator {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_title(&crate::types::getby_input_to_rust(text), &opts))
+    let opts = options.map(ferridriver::options::TextOptions::from);
+    Locator::wrap(
+      self
+        .inner
+        .get_by_title(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
+    )
   }
 
   /// Playwright: `frameLocator.owner(): Locator` — returns the

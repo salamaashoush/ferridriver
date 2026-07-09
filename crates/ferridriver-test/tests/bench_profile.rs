@@ -67,9 +67,9 @@ async fn deep_profile() {
     t.elapsed().as_secs_f64() * 1000.0,
     t.elapsed().as_secs_f64() * 1000.0 / 3.0
   );
-  b2.close(None).await.ok();
-  b3.close(None).await.ok();
-  b4.close(None).await.ok();
+  b2.close().await.ok();
+  b3.close().await.ok();
+  b4.close().await.ok();
   println!();
 
   // ── 2. Context creation breakdown ──
@@ -79,7 +79,7 @@ async fn deep_profile() {
   let mut total_times = Vec::new();
   for _ in 0..iters {
     let t0 = Instant::now();
-    let ctx = b1.new_context(None);
+    let ctx = b1.new_context().await.unwrap();
     let t1 = Instant::now();
     let _page = ctx.new_page().await.unwrap();
     let t2 = Instant::now();
@@ -103,13 +103,13 @@ async fn deep_profile() {
 
   // ── 3. Navigation cost ──
   println!("  [3] Navigation cost ({iters} iterations)");
-  let ctx = b1.new_context(None);
+  let ctx = b1.new_context().await.unwrap();
   let page = ctx.new_page().await.unwrap();
   let mut nav_times = Vec::new();
   for i in 0..iters {
     let url = data_url(&format!("<title>T{i}</title><body>B{i}</body>"));
     let t = Instant::now();
-    page.goto(&url, None).await.unwrap();
+    page.goto(&url).await.unwrap();
     nav_times.push(t.elapsed());
   }
   let nav_avg = nav_times.iter().map(|d| d.as_secs_f64() * 1000.0).sum::<f64>() / iters as f64;
@@ -128,16 +128,16 @@ async fn deep_profile() {
   let mut text_times = Vec::new();
   let mut eval_times = Vec::new();
 
-  page.goto(&data_url("<button id='b'>Go</button>"), None).await.unwrap();
+  page.goto(&data_url("<button id='b'>Go</button>")).await.unwrap();
   for _ in 0..iters {
     let t = Instant::now();
     page.title().await.unwrap();
     title_times.push(t.elapsed());
     let t = Instant::now();
-    page.locator("#b", None).click(None).await.unwrap();
+    page.locator("#b").click().await.unwrap();
     click_times.push(t.elapsed());
     let t = Instant::now();
-    page.locator("#b", None).text_content().await.unwrap();
+    page.locator("#b").text_content().await.unwrap();
     text_times.push(t.elapsed());
     let t = Instant::now();
     page
@@ -158,7 +158,7 @@ async fn deep_profile() {
   println!("  [5] Context close cost ({iters} iterations)");
   let mut close_times = Vec::new();
   for _ in 0..iters {
-    let ctx = b1.new_context(None);
+    let ctx = b1.new_context().await.unwrap();
     let _page = ctx.new_page().await.unwrap();
     let t = Instant::now();
     ctx.close().await.ok();
@@ -177,14 +177,14 @@ async fn deep_profile() {
   let mut cycle_times = Vec::new();
   for i in 0..iters {
     let t = Instant::now();
-    let ctx = b1.new_context(None);
+    let ctx = b1.new_context().await.unwrap();
     let page = ctx.new_page().await.unwrap();
     let url = data_url(&format!(
       "<button id='b' onclick=\"this.textContent='done'\">Click {i}</button>"
     ));
-    page.goto(&url, None).await.unwrap();
-    page.locator("#b", None).click(None).await.unwrap();
-    let _ = page.locator("#b", None).text_content().await.unwrap();
+    page.goto(&url).await.unwrap();
+    page.locator("#b").click().await.unwrap();
+    let _ = page.locator("#b").text_content().await.unwrap();
     ctx.close().await.ok();
     cycle_times.push(t.elapsed());
   }
@@ -282,7 +282,7 @@ async fn deep_profile() {
   );
   println!();
 
-  b1.close(None).await.ok();
+  b1.close().await.ok();
   println!("======================================================================\n");
 }
 

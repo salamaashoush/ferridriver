@@ -37,15 +37,12 @@ pub trait PageSnapshotMatchers {
 impl PageSnapshotMatchers for Expect<'_, Arc<Page>> {
   async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure> {
     let page = self.subject;
-    let actual_png = page
-      .screenshot(ferridriver::options::ScreenshotOptions::default())
-      .await
-      .map_err(|e| TestFailure {
-        message: format!("page screenshot failed: {e}"),
-        stack: None,
-        diff: None,
-        screenshot: None,
-      })?;
+    let actual_png = page.screenshot().await.map_err(|e| TestFailure {
+      message: format!("page screenshot failed: {e}"),
+      stack: None,
+      diff: None,
+      screenshot: None,
+    })?;
 
     crate::snapshot::compare_screenshot_png(&actual_png, name)
   }
@@ -59,10 +56,7 @@ impl PageSnapshotMatchers for Expect<'_, Arc<Page>> {
       let expected = expected.clone();
       async move {
         let snapshot = page
-          .snapshot_for_ai(ferridriver::snapshot::SnapshotOptions {
-            depth: None,
-            track: None,
-          })
+          .snapshot_for_ai()
           .await
           .map_err(|e| MatchError::new("(aria snapshot)", format!("error: {e}")))?;
 

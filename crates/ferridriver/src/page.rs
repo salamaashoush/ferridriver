@@ -333,8 +333,18 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
+  pub fn goto(
+    self: &Arc<Self>,
+    url: &str,
+  ) -> crate::action::Action<'static, GotoOptions, Option<crate::network::Response>> {
+    let page = Arc::clone(self);
+    let url = url.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { page.goto_impl(&url, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::goto`].
   #[tracing::instrument(skip(self, opts), fields(url))]
-  pub async fn goto(
+  pub(crate) async fn goto_impl(
     self: &Arc<Self>,
     url: &str,
     opts: Option<GotoOptions>,
@@ -430,7 +440,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
-  pub async fn go_back(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
+  pub fn go_back(&self) -> crate::action::Action<'_, GotoOptions, Option<crate::network::Response>> {
+    let page = self;
+    crate::action::Action::new(move |opts| Box::pin(async move { page.go_back_impl(Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::go_back`].
+  pub(crate) async fn go_back_impl(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     self.inner.go_back(lifecycle, timeout).await
   }
@@ -441,7 +457,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
-  pub async fn go_forward(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
+  pub fn go_forward(&self) -> crate::action::Action<'_, GotoOptions, Option<crate::network::Response>> {
+    let page = self;
+    crate::action::Action::new(move |opts| Box::pin(async move { page.go_forward_impl(Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::go_forward`].
+  pub(crate) async fn go_forward_impl(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     self.inner.go_forward(lifecycle, timeout).await
   }
@@ -452,7 +474,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the reload fails or the wait condition times out.
-  pub async fn reload(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
+  pub fn reload(&self) -> crate::action::Action<'_, GotoOptions, Option<crate::network::Response>> {
+    let page = self;
+    crate::action::Action::new(move |opts| Box::pin(async move { page.reload_impl(Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::reload`].
+  pub(crate) async fn reload_impl(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let pre_nav = self.observed_lens();
     let result = self.inner.reload(lifecycle, timeout).await;
@@ -483,9 +511,12 @@ impl Page {
 
   /// Parse `GotoOptions` into backend `NavLifecycle` + timeout.
   fn resolve_nav_opts(opts: Option<&GotoOptions>, default_timeout: u64) -> (crate::backend::NavLifecycle, u64) {
-    let wait_until = opts.and_then(|o| o.wait_until.as_deref()).unwrap_or("load");
+    let wait_until = opts.and_then(|o| o.wait_until).unwrap_or_default();
     let timeout = opts.and_then(|o| o.timeout).unwrap_or(default_timeout);
-    (crate::backend::NavLifecycle::parse_lifecycle(wait_until), timeout)
+    (
+      crate::backend::NavLifecycle::parse_lifecycle(wait_until.as_str()),
+      timeout,
+    )
   }
 
   /// Get the current page URL — the main frame's URL.
@@ -521,8 +552,14 @@ impl Page {
   // context; Page never constructs Locators directly.
 
   #[must_use]
-  pub fn locator(self: &Arc<Self>, selector: &str, options: Option<crate::options::FilterOptions>) -> Locator {
-    self.main_frame().locator(selector, options)
+  pub fn locator(self: &Arc<Self>, selector: &str) -> Locator {
+    self.main_frame().locator(selector)
+  }
+
+  /// [`Self::locator`] with Playwright's `LocatorOptions` filter bag.
+  #[must_use]
+  pub fn locator_with(self: &Arc<Self>, selector: &str, options: &crate::options::FilterOptions) -> Locator {
+    self.main_frame().locator_with(selector, options)
   }
 
   /// Internal accessor for the locator-handler registry. Consumed by the
@@ -570,37 +607,55 @@ impl Page {
   }
 
   #[must_use]
-  pub fn get_by_role(self: &Arc<Self>, role: &str, opts: &RoleOptions) -> Locator {
-    self.main_frame().get_by_role(role, opts)
+  pub fn get_by_role(
+    self: &Arc<Self>,
+    role: impl Into<crate::options::Role>,
+  ) -> crate::locator_builder::LocatorBuilder<RoleOptions> {
+    self.main_frame().get_by_role(role)
   }
 
   #[must_use]
-  pub fn get_by_text(self: &Arc<Self>, text: &crate::options::StringOrRegex, opts: &TextOptions) -> Locator {
-    self.main_frame().get_by_text(text, opts)
+  pub fn get_by_text(
+    self: &Arc<Self>,
+    text: impl Into<crate::options::StringOrRegex>,
+  ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.main_frame().get_by_text(text)
   }
 
   #[must_use]
-  pub fn get_by_label(self: &Arc<Self>, text: &crate::options::StringOrRegex, opts: &TextOptions) -> Locator {
-    self.main_frame().get_by_label(text, opts)
+  pub fn get_by_label(
+    self: &Arc<Self>,
+    text: impl Into<crate::options::StringOrRegex>,
+  ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.main_frame().get_by_label(text)
   }
 
   #[must_use]
-  pub fn get_by_placeholder(self: &Arc<Self>, text: &crate::options::StringOrRegex, opts: &TextOptions) -> Locator {
-    self.main_frame().get_by_placeholder(text, opts)
+  pub fn get_by_placeholder(
+    self: &Arc<Self>,
+    text: impl Into<crate::options::StringOrRegex>,
+  ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.main_frame().get_by_placeholder(text)
   }
 
   #[must_use]
-  pub fn get_by_alt_text(self: &Arc<Self>, text: &crate::options::StringOrRegex, opts: &TextOptions) -> Locator {
-    self.main_frame().get_by_alt_text(text, opts)
+  pub fn get_by_alt_text(
+    self: &Arc<Self>,
+    text: impl Into<crate::options::StringOrRegex>,
+  ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.main_frame().get_by_alt_text(text)
   }
 
   #[must_use]
-  pub fn get_by_title(self: &Arc<Self>, text: &crate::options::StringOrRegex, opts: &TextOptions) -> Locator {
-    self.main_frame().get_by_title(text, opts)
+  pub fn get_by_title(
+    self: &Arc<Self>,
+    text: impl Into<crate::options::StringOrRegex>,
+  ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.main_frame().get_by_title(text)
   }
 
   #[must_use]
-  pub fn get_by_test_id(self: &Arc<Self>, test_id: &crate::options::StringOrRegex) -> Locator {
+  pub fn get_by_test_id(self: &Arc<Self>, test_id: impl Into<crate::options::StringOrRegex>) -> Locator {
     self.main_frame().get_by_test_id(test_id)
   }
 
@@ -704,6 +759,38 @@ impl Page {
     self.main_frame().evaluate(fn_source, arg, is_function).await
   }
 
+  /// Typed evaluate: run `fn_source` in the page and deserialize the
+  /// result via serde. Ergonomic wrapper over the wire-level
+  /// [`Self::evaluate`] for JSON-shaped values:
+  ///
+  /// ```ignore
+  /// let title: String = page.eval("() => document.title").await?;
+  /// let ok: bool = page.eval_with("sel => !!document.querySelector(sel)", &"#app").await?;
+  /// ```
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::evaluate`], plus [`crate::error::FerriError::Json`] /
+  /// [`crate::error::FerriError::Evaluation`] when the result does not
+  /// decode into `T` (rich JS values need [`Self::evaluate_handle`]).
+  pub async fn eval<T: serde::de::DeserializeOwned>(self: &Arc<Self>, fn_source: &str) -> Result<T> {
+    self.main_frame().eval(fn_source).await
+  }
+
+  /// [`Self::eval`] with a serde-serialized argument, passed to the page
+  /// function as its single parameter.
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::eval`].
+  pub async fn eval_with<T: serde::de::DeserializeOwned>(
+    self: &Arc<Self>,
+    fn_source: &str,
+    arg: &(impl serde::Serialize + ?Sized),
+  ) -> Result<T> {
+    self.main_frame().eval_with(fn_source, arg).await
+  }
+
   /// Playwright: `page.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
   /// Delegates to the main frame.
   ///
@@ -733,9 +820,20 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the click fails.
-  pub async fn click(self: &Arc<Self>, selector: &str, opts: Option<crate::options::ClickOptions>) -> Result<()> {
+  pub fn click(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, crate::options::ClickOptions, ()> {
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { page.click_impl(&selector, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::click`].
+  pub(crate) async fn click_impl(
+    self: &Arc<Self>,
+    selector: &str,
+    opts: Option<crate::options::ClickOptions>,
+  ) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "click", selector, "page.click");
-    self.main_frame().click(selector, opts).await
+    self.main_frame().click_impl(selector, opts).await
   }
 
   /// Double-click an element matching the selector.
@@ -743,9 +841,23 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the double-click fails.
-  pub async fn dblclick(self: &Arc<Self>, selector: &str, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
+  pub fn dblclick(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::DblClickOptions, ()> {
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { page.dblclick_impl(&selector, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::dblclick`].
+  pub(crate) async fn dblclick_impl(
+    self: &Arc<Self>,
+    selector: &str,
+    opts: Option<crate::options::DblClickOptions>,
+  ) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "dblclick", selector, "page.dblclick");
-    self.main_frame().dblclick(selector, opts).await
+    self.main_frame().dblclick_impl(selector, opts).await
   }
 
   /// Fill an input element matching the selector with a value.
@@ -753,14 +865,26 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not fillable.
-  pub async fn fill(
+  pub fn fill(
+    self: &Arc<Self>,
+    selector: &str,
+    value: &str,
+  ) -> crate::action::Action<'static, crate::options::FillOptions, ()> {
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    let value = value.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { page.fill_impl(&selector, &value, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::fill`].
+  pub(crate) async fn fill_impl(
     self: &Arc<Self>,
     selector: &str,
     value: &str,
     opts: Option<crate::options::FillOptions>,
   ) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "fill", selector, "page.fill");
-    self.main_frame().fill(selector, value, opts).await
+    self.main_frame().fill_impl(selector, value, opts).await
   }
 
   /// Type text character-by-character into an element matching the selector.
@@ -768,13 +892,25 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or typing fails.
-  pub async fn r#type(
+  pub fn r#type(
+    self: &Arc<Self>,
+    selector: &str,
+    text: &str,
+  ) -> crate::action::Action<'static, crate::options::TypeOptions, ()> {
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    let text = text.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { page.type_impl(&selector, &text, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::r#type`].
+  pub(crate) async fn type_impl(
     self: &Arc<Self>,
     selector: &str,
     text: &str,
     opts: Option<crate::options::TypeOptions>,
   ) -> Result<()> {
-    self.main_frame().r#type(selector, text, opts).await
+    self.main_frame().type_impl(selector, text, opts).await
   }
 
   /// Press a key on an element matching the selector.
@@ -782,13 +918,25 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the key press fails.
-  pub async fn press(
+  pub fn press(
+    self: &Arc<Self>,
+    selector: &str,
+    key: &str,
+  ) -> crate::action::Action<'static, crate::options::PressOptions, ()> {
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    let key = key.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { page.press_impl(&selector, &key, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::press`].
+  pub(crate) async fn press_impl(
     self: &Arc<Self>,
     selector: &str,
     key: &str,
     opts: Option<crate::options::PressOptions>,
   ) -> Result<()> {
-    self.main_frame().press(selector, key, opts).await
+    self.main_frame().press_impl(selector, key, opts).await
   }
 
   /// Hover over an element matching the selector.
@@ -796,8 +944,19 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the hover fails.
-  pub async fn hover(self: &Arc<Self>, selector: &str, opts: Option<crate::options::HoverOptions>) -> Result<()> {
-    self.main_frame().hover(selector, opts).await
+  pub fn hover(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, crate::options::HoverOptions, ()> {
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { page.hover_impl(&selector, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::hover`].
+  pub(crate) async fn hover_impl(
+    self: &Arc<Self>,
+    selector: &str,
+    opts: Option<crate::options::HoverOptions>,
+  ) -> Result<()> {
+    self.main_frame().hover_impl(selector, opts).await
   }
 
   /// Select an option in a `<select>` element matching the selector.
@@ -805,13 +964,27 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the option cannot be selected.
-  pub async fn select_option(
+  pub fn select_option(
+    self: &Arc<Self>,
+    selector: &str,
+    values: impl Into<crate::options::SelectOptionValues>,
+  ) -> crate::action::Action<'static, crate::options::SelectOptionOptions, Vec<String>> {
+    let values = values.into().0;
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move { page.select_option_impl(&selector, values, Some(opts)).await })
+    })
+  }
+
+  /// Implementation of [`Self::select_option`].
+  pub(crate) async fn select_option_impl(
     self: &Arc<Self>,
     selector: &str,
     values: Vec<crate::options::SelectOptionValue>,
     opts: Option<crate::options::SelectOptionOptions>,
   ) -> Result<Vec<String>> {
-    self.main_frame().select_option(selector, values, opts).await
+    self.main_frame().select_option_impl(selector, values, opts).await
   }
 
   /// Set input files on a file input element matching the selector.
@@ -819,13 +992,27 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or file setting fails.
-  pub async fn set_input_files(
+  pub fn set_input_files(
+    self: &Arc<Self>,
+    selector: &str,
+    files: impl Into<crate::options::InputFiles>,
+  ) -> crate::action::Action<'static, crate::options::SetInputFilesOptions, ()> {
+    let files = files.into();
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move { page.set_input_files_impl(&selector, files, Some(opts)).await })
+    })
+  }
+
+  /// Implementation of [`Self::set_input_files`].
+  pub(crate) async fn set_input_files_impl(
     self: &Arc<Self>,
     selector: &str,
     files: crate::options::InputFiles,
     opts: Option<crate::options::SetInputFilesOptions>,
   ) -> Result<()> {
-    self.main_frame().set_input_files(selector, files, opts).await
+    self.main_frame().set_input_files_impl(selector, files, opts).await
   }
 
   /// Check a checkbox or radio button matching the selector.
@@ -833,8 +1020,19 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not checkable.
-  pub async fn check(self: &Arc<Self>, selector: &str, opts: Option<crate::options::CheckOptions>) -> Result<()> {
-    self.main_frame().check(selector, opts).await
+  pub fn check(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { page.check_impl(&selector, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::check`].
+  pub(crate) async fn check_impl(
+    self: &Arc<Self>,
+    selector: &str,
+    opts: Option<crate::options::CheckOptions>,
+  ) -> Result<()> {
+    self.main_frame().check_impl(selector, opts).await
   }
 
   /// Uncheck a checkbox matching the selector.
@@ -842,8 +1040,19 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not uncheckable.
-  pub async fn uncheck(self: &Arc<Self>, selector: &str, opts: Option<crate::options::CheckOptions>) -> Result<()> {
-    self.main_frame().uncheck(selector, opts).await
+  pub fn uncheck(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { page.uncheck_impl(&selector, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::uncheck`].
+  pub(crate) async fn uncheck_impl(
+    self: &Arc<Self>,
+    selector: &str,
+    opts: Option<crate::options::CheckOptions>,
+  ) -> Result<()> {
+    self.main_frame().uncheck_impl(selector, opts).await
   }
 
   /// Set a checkbox or radio matching `selector` to `checked`. Mirrors
@@ -853,13 +1062,26 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not checkable.
-  pub async fn set_checked(
+  pub fn set_checked(
+    self: &Arc<Self>,
+    selector: &str,
+    checked: bool,
+  ) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move { page.set_checked_impl(&selector, checked, Some(opts)).await })
+    })
+  }
+
+  /// Implementation of [`Self::set_checked`].
+  pub(crate) async fn set_checked_impl(
     self: &Arc<Self>,
     selector: &str,
     checked: bool,
     opts: Option<crate::options::CheckOptions>,
   ) -> Result<()> {
-    self.main_frame().set_checked(selector, checked, opts).await
+    self.main_frame().set_checked_impl(selector, checked, opts).await
   }
 
   /// Tap (touch) the element matched by `selector`. Mirrors Playwright's
@@ -871,8 +1093,19 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the tap fails.
-  pub async fn tap(self: &Arc<Self>, selector: &str, opts: Option<crate::options::TapOptions>) -> Result<()> {
-    self.main_frame().tap(selector, opts).await
+  pub fn tap(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, crate::options::TapOptions, ()> {
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { page.tap_impl(&selector, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::tap`].
+  pub(crate) async fn tap_impl(
+    self: &Arc<Self>,
+    selector: &str,
+    opts: Option<crate::options::TapOptions>,
+  ) -> Result<()> {
+    self.main_frame().tap_impl(selector, opts).await
   }
 
   // ── Content ─────────────────────────────────────────────────────────────
@@ -1017,8 +1250,15 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wait times out.
-  pub async fn wait_for_selector(self: &Arc<Self>, selector: &str, opts: WaitOptions) -> Result<()> {
-    self.locator(selector, None).wait_for(opts).await
+  pub fn wait_for_selector(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, WaitOptions, ()> {
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { page.wait_for_selector_impl(&selector, opts).await }))
+  }
+
+  /// Implementation of [`Self::wait_for_selector`].
+  pub(crate) async fn wait_for_selector_impl(self: &Arc<Self>, selector: &str, opts: WaitOptions) -> Result<()> {
+    self.locator(selector).wait_for_impl(opts).await
   }
 
   /// Wait for the page URL to match the given matcher.
@@ -1142,27 +1382,30 @@ impl Page {
   /// Returns [`crate::error::FerriError::Timeout`] if the capture
   /// exceeds `opts.timeout` milliseconds; otherwise propagates any
   /// backend-specific failure.
-  pub async fn screenshot(&self, opts: ScreenshotOptions) -> Result<Vec<u8>> {
-    let format = match opts.format.as_deref() {
-      Some("jpeg" | "jpg") => ImageFormat::Jpeg,
-      Some("webp") => ImageFormat::Webp,
-      _ => ImageFormat::Png,
+  pub fn screenshot(&self) -> crate::action::Action<'_, ScreenshotOptions, Vec<u8>> {
+    let page = self;
+    crate::action::Action::new(move |opts| Box::pin(async move { page.screenshot_impl(opts).await }))
+  }
+
+  /// Implementation of [`Self::screenshot`].
+  pub(crate) async fn screenshot_impl(&self, opts: ScreenshotOptions) -> Result<Vec<u8>> {
+    let format = match opts.format.unwrap_or_default() {
+      crate::options::ScreenshotFormat::Jpeg => ImageFormat::Jpeg,
+      crate::options::ScreenshotFormat::Webp => ImageFormat::Webp,
+      crate::options::ScreenshotFormat::Png => ImageFormat::Png,
     };
-    let scale = match opts.scale.as_deref() {
-      Some("css") => Some(crate::backend::ScreenshotScale::Css),
-      Some("device") => Some(crate::backend::ScreenshotScale::Device),
-      _ => None,
-    };
-    let animations = match opts.animations.as_deref() {
-      Some("disabled") => Some(crate::backend::ScreenshotAnimations::Disabled),
-      Some("allow") => Some(crate::backend::ScreenshotAnimations::Allow),
-      _ => None,
-    };
-    let caret = match opts.caret.as_deref() {
-      Some("hide") => Some(crate::backend::ScreenshotCaret::Hide),
-      Some("initial") => Some(crate::backend::ScreenshotCaret::Initial),
-      _ => None,
-    };
+    let scale = opts.scale.map(|s| match s {
+      crate::options::ScreenshotScale::Css => crate::backend::ScreenshotScale::Css,
+      crate::options::ScreenshotScale::Device => crate::backend::ScreenshotScale::Device,
+    });
+    let animations = opts.animations.map(|a| match a {
+      crate::options::AnimationsMode::Disabled => crate::backend::ScreenshotAnimations::Disabled,
+      crate::options::AnimationsMode::Allow => crate::backend::ScreenshotAnimations::Allow,
+    });
+    let caret = opts.caret.map(|c| match c {
+      crate::options::CaretMode::Hide => crate::backend::ScreenshotCaret::Hide,
+      crate::options::CaretMode::Initial => crate::backend::ScreenshotCaret::Initial,
+    });
     let wire = ScreenshotOpts {
       format,
       quality: opts.quality,
@@ -1208,7 +1451,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or screenshot capture fails.
   pub async fn screenshot_element(self: &Arc<Self>, selector: &str) -> Result<Vec<u8>> {
-    self.locator(selector, None).screenshot().await
+    self.locator(selector).screenshot().await
   }
 
   // ── PDF ─────────────────────────────────────────────────────────────────
@@ -1225,7 +1468,13 @@ impl Page {
   /// Returns an error if PDF generation is not supported by the active
   /// backend (`WebKit` has no printToPDF analogue), if the paper format is
   /// unknown, if CDP rejects the parameters, or if writing to `path` fails.
-  pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>> {
+  pub fn pdf(&self) -> crate::action::Action<'_, crate::options::PdfOptions, Vec<u8>> {
+    let page = self;
+    crate::action::Action::new(move |opts| Box::pin(async move { page.pdf_impl(opts).await }))
+  }
+
+  /// Implementation of [`Self::pdf`].
+  pub(crate) async fn pdf_impl(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>> {
     let path = opts.path.clone();
     let bytes = self.inner.pdf(opts).await?;
     if let Some(path) = path {
@@ -1257,7 +1506,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the accessibility snapshot cannot be built.
-  pub async fn snapshot_for_ai(&self, opts: snapshot::SnapshotOptions) -> Result<snapshot::SnapshotForAI> {
+  pub fn snapshot_for_ai(&self) -> crate::action::Action<'_, snapshot::SnapshotOptions, snapshot::SnapshotForAI> {
+    let page = self;
+    crate::action::Action::new(move |opts| Box::pin(async move { page.snapshot_for_ai_impl(opts).await }))
+  }
+
+  /// Implementation of [`Self::snapshot_for_ai`].
+  pub(crate) async fn snapshot_for_ai_impl(&self, opts: snapshot::SnapshotOptions) -> Result<snapshot::SnapshotForAI> {
     let mut tracker = self.snapshot_tracker.lock().await;
     Box::pin(snapshot::build_snapshot_for_ai(&self.inner, &opts, &mut tracker)).await
   }
@@ -1269,8 +1524,14 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the accessibility snapshot cannot be built.
-  pub async fn aria_snapshot(&self, opts: snapshot::SnapshotOptions) -> Result<String> {
-    Ok(Box::pin(self.snapshot_for_ai(opts)).await?.full)
+  pub fn aria_snapshot(&self) -> crate::action::Action<'_, snapshot::SnapshotOptions, String> {
+    let page = self;
+    crate::action::Action::new(move |opts| Box::pin(async move { page.aria_snapshot_impl(opts).await }))
+  }
+
+  /// Implementation of [`Self::aria_snapshot`].
+  pub(crate) async fn aria_snapshot_impl(&self, opts: snapshot::SnapshotOptions) -> Result<String> {
+    Ok(Box::pin(self.snapshot_for_ai_impl(opts)).await?.full)
   }
 
   // ── Viewport ────────────────────────────────────────────────────────────
@@ -1364,20 +1625,38 @@ impl Page {
   ///
   /// Returns an error if either element cannot be found or the
   /// drag-and-drop operation fails.
-  pub async fn drag_and_drop(
+  pub fn drag_and_drop(
+    self: &Arc<Self>,
+    source_selector: &str,
+    target_selector: &str,
+  ) -> crate::action::Action<'static, crate::options::DragAndDropOptions, ()> {
+    let page = Arc::clone(self);
+    let source_selector = source_selector.to_string();
+    let target_selector = target_selector.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        page
+          .drag_and_drop_impl(&source_selector, &target_selector, Some(opts))
+          .await
+      })
+    })
+  }
+
+  /// Implementation of [`Self::drag_and_drop`].
+  pub(crate) async fn drag_and_drop_impl(
     self: &Arc<Self>,
     source_selector: &str,
     target_selector: &str,
     options: Option<crate::options::DragAndDropOptions>,
   ) -> Result<()> {
     let opts = options.unwrap_or_default();
-    let source = self.locator(source_selector, None);
-    let target = self.locator(target_selector, None);
+    let source = self.locator(source_selector);
+    let target = self.locator(target_selector);
     let (source, target) = match opts.strict {
       Some(s) => (source.strict(s), target.strict(s)),
       None => (source, target),
     };
-    source.drag_to(&target, Some(opts)).await
+    source.drag_to_impl(&target, Some(opts)).await
   }
 
   /// Dispatch a keyDown event for a single key (does NOT release it).
@@ -1495,7 +1774,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the backend rejects the media emulation.
-  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
+  pub fn emulate_media(&self) -> crate::action::Action<'_, crate::options::EmulateMediaOptions, ()> {
+    let page = self;
+    crate::action::Action::new(move |opts| Box::pin(async move { page.emulate_media_impl(&opts).await }))
+  }
+
+  /// Implementation of [`Self::emulate_media`].
+  pub(crate) async fn emulate_media_impl(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
     // Merge the incoming partial update with the page's persistent state.
     // An `Unchanged` field leaves the existing override alone; a `Disabled`
     // or `Set` field overwrites the stored state for that field.
@@ -1724,7 +2009,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn focus(self: &Arc<Self>, selector: &str) -> Result<()> {
-    self.locator(selector, None).focus().await
+    self.locator(selector).focus().await
   }
 
   /// Dispatch an event on an element by selector.
@@ -1732,7 +2017,26 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the event dispatch fails.
-  pub async fn dispatch_event(
+  pub fn dispatch_event(
+    self: &Arc<Self>,
+    selector: &str,
+    event_type: &str,
+    event_init: Option<serde_json::Value>,
+  ) -> crate::action::Action<'static, crate::options::DispatchEventOptions, ()> {
+    let page = Arc::clone(self);
+    let selector = selector.to_string();
+    let event_type = event_type.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        page
+          .dispatch_event_impl(&selector, &event_type, event_init, Some(opts))
+          .await
+      })
+    })
+  }
+
+  /// Implementation of [`Self::dispatch_event`].
+  pub(crate) async fn dispatch_event_impl(
     self: &Arc<Self>,
     selector: &str,
     event_type: &str,
@@ -1740,8 +2044,8 @@ impl Page {
     opts: Option<crate::options::DispatchEventOptions>,
   ) -> Result<()> {
     self
-      .locator(selector, None)
-      .dispatch_event(event_type, event_init, opts)
+      .locator(selector)
+      .dispatch_event_impl(event_type, event_init, opts)
       .await
   }
 
@@ -1751,7 +2055,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_editable(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector, None).is_editable().await
+    self.locator(selector).is_editable().await
   }
 
   // ── Waiting (additional) ────────────────────────────────────────────────
@@ -2201,7 +2505,7 @@ impl Page {
   ///
   /// ```ignore
   /// let nav = page.expect_navigation(None);
-  /// page.click("#link", None).await?;
+  /// page.click("#link").await?;
   /// nav.await?; // resolves when navigation completes
   /// ```
   ///
@@ -2219,64 +2523,6 @@ impl Page {
     }
   }
 
-  /// Start listening for a response matching URL pattern. Call BEFORE the action.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if no matching response is received within the timeout.
-  pub fn expect_response(
-    &self,
-    url_pattern: &str,
-    timeout_ms: Option<u64>,
-  ) -> impl std::future::Future<Output = Result<crate::network::Response>> + '_ {
-    let timeout = timeout_ms.unwrap_or(self.default_timeout());
-    let events = self.inner.events().clone();
-    let pattern = url_pattern.to_string();
-    async move {
-      let event = events
-        .wait_for(
-          move |e| matches!(e, PageEvent::Response(r) if r.url().contains(&pattern)),
-          timeout,
-        )
-        .await?;
-      match event {
-        PageEvent::Response(r) => Ok(r),
-        _ => Err(crate::error::FerriError::backend(
-          "event wait returned unexpected event type",
-        )),
-      }
-    }
-  }
-
-  /// Start listening for a request matching URL pattern. Call BEFORE the action.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if no matching request is received within the timeout.
-  pub fn expect_request(
-    &self,
-    url_pattern: &str,
-    timeout_ms: Option<u64>,
-  ) -> impl std::future::Future<Output = Result<crate::network::Request>> + '_ {
-    let timeout = timeout_ms.unwrap_or(self.default_timeout());
-    let events = self.inner.events().clone();
-    let pattern = url_pattern.to_string();
-    async move {
-      let event = events
-        .wait_for(
-          move |e| matches!(e, PageEvent::Request(r) if r.url().contains(&pattern)),
-          timeout,
-        )
-        .await?;
-      match event {
-        PageEvent::Request(r) => Ok(r),
-        _ => Err(crate::error::FerriError::backend(
-          "event wait returned unexpected event type",
-        )),
-      }
-    }
-  }
-
   /// Wait for a specific event (by name) with timeout.
   ///
   /// # Errors
@@ -2288,6 +2534,179 @@ impl Page {
       .events()
       .wait_for_event(event_name, timeout_ms.unwrap_or(self.default_timeout()))
       .await
+  }
+
+  /// Arm a waiter for `event_name`, run `action`, then resolve with the
+  /// event and the action's result. The subscription is registered
+  /// before `action` runs, so an event fired by the action can't be
+  /// missed — the wait-for-event + trigger pattern without the race:
+  ///
+  /// ```ignore
+  /// let (event, ()) = page.expect_event("download", || page.click("#export")).await?;
+  /// ```
+  ///
+  /// Typed wrappers exist for the common events ([`Self::expect_download`],
+  /// [`Self::expect_dialog`], [`Self::expect_console`], ...).
+  ///
+  /// # Errors
+  ///
+  /// Returns the action's error if it fails, or a timeout error when the
+  /// event does not arrive within the page's default timeout.
+  pub async fn expect_event<F, Fut, R>(&self, event_name: &str, action: F) -> Result<(PageEvent, R)>
+  where
+    F: FnOnce() -> Fut,
+    Fut: std::future::IntoFuture<Output = Result<R>>,
+  {
+    // Subscribes synchronously at the call — armed before the action.
+    let waiter = self.inner.events().wait_for_event(event_name, self.default_timeout());
+    let result = action().await?;
+    let event = waiter.await?;
+    Ok((event, result))
+  }
+
+  /// [`Self::expect_event`] for `download`, yielding the [`crate::download::Download`].
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::expect_event`].
+  pub async fn expect_download<F, Fut, R>(&self, action: F) -> Result<(crate::download::Download, R)>
+  where
+    F: FnOnce() -> Fut,
+    Fut: std::future::IntoFuture<Output = Result<R>>,
+  {
+    match self.expect_event("download", action).await? {
+      (PageEvent::Download(download), r) => Ok((download, r)),
+      _ => Err(crate::error::FerriError::Backend(
+        "expect_download: waiter resolved with a non-download event".into(),
+      )),
+    }
+  }
+
+  /// [`Self::expect_event`] for `dialog`, yielding the live [`crate::dialog::Dialog`].
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::expect_event`].
+  pub async fn expect_dialog<F, Fut, R>(&self, action: F) -> Result<(crate::dialog::Dialog, R)>
+  where
+    F: FnOnce() -> Fut,
+    Fut: std::future::IntoFuture<Output = Result<R>>,
+  {
+    match self.expect_event("dialog", action).await? {
+      (PageEvent::Dialog(dialog), r) => Ok((dialog, r)),
+      _ => Err(crate::error::FerriError::Backend(
+        "expect_dialog: waiter resolved with a non-dialog event".into(),
+      )),
+    }
+  }
+
+  /// [`Self::expect_event`] for `console`, yielding the [`crate::console_message::ConsoleMessage`].
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::expect_event`].
+  pub async fn expect_console<F, Fut, R>(&self, action: F) -> Result<(crate::console_message::ConsoleMessage, R)>
+  where
+    F: FnOnce() -> Fut,
+    Fut: std::future::IntoFuture<Output = Result<R>>,
+  {
+    match self.expect_event("console", action).await? {
+      (PageEvent::Console(message), r) => Ok((message, r)),
+      _ => Err(crate::error::FerriError::Backend(
+        "expect_console: waiter resolved with a non-console event".into(),
+      )),
+    }
+  }
+
+  /// [`Self::expect_event`] for `filechooser`, yielding the live
+  /// [`crate::file_chooser::FileChooser`].
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::expect_event`].
+  pub async fn expect_file_chooser<F, Fut, R>(&self, action: F) -> Result<(crate::file_chooser::FileChooser, R)>
+  where
+    F: FnOnce() -> Fut,
+    Fut: std::future::IntoFuture<Output = Result<R>>,
+  {
+    match self.expect_event("filechooser", action).await? {
+      (PageEvent::FileChooser(chooser), r) => Ok((chooser, r)),
+      _ => Err(crate::error::FerriError::Backend(
+        "expect_file_chooser: waiter resolved with a non-filechooser event".into(),
+      )),
+    }
+  }
+
+  /// [`Self::expect_event`] for `request`, yielding the [`crate::network::Request`].
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::expect_event`].
+  pub async fn expect_request<F, Fut, R>(&self, action: F) -> Result<(crate::network::Request, R)>
+  where
+    F: FnOnce() -> Fut,
+    Fut: std::future::IntoFuture<Output = Result<R>>,
+  {
+    match self.expect_event("request", action).await? {
+      (PageEvent::Request(request), r) => Ok((request, r)),
+      _ => Err(crate::error::FerriError::Backend(
+        "expect_request: waiter resolved with a non-request event".into(),
+      )),
+    }
+  }
+
+  /// [`Self::expect_event`] for `response`, yielding the [`crate::network::Response`].
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::expect_event`].
+  pub async fn expect_response<F, Fut, R>(&self, action: F) -> Result<(crate::network::Response, R)>
+  where
+    F: FnOnce() -> Fut,
+    Fut: std::future::IntoFuture<Output = Result<R>>,
+  {
+    match self.expect_event("response", action).await? {
+      (PageEvent::Response(response), r) => Ok((response, r)),
+      _ => Err(crate::error::FerriError::Backend(
+        "expect_response: waiter resolved with a non-response event".into(),
+      )),
+    }
+  }
+
+  /// [`Self::expect_event`] for `websocket`, yielding the [`crate::network::WebSocket`].
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::expect_event`].
+  pub async fn expect_websocket<F, Fut, R>(&self, action: F) -> Result<(crate::network::WebSocket, R)>
+  where
+    F: FnOnce() -> Fut,
+    Fut: std::future::IntoFuture<Output = Result<R>>,
+  {
+    match self.expect_event("websocket", action).await? {
+      (PageEvent::WebSocket(ws), r) => Ok((ws, r)),
+      _ => Err(crate::error::FerriError::Backend(
+        "expect_websocket: waiter resolved with a non-websocket event".into(),
+      )),
+    }
+  }
+
+  /// [`Self::expect_event`] for `pageerror`, yielding the [`crate::web_error::WebError`].
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::expect_event`].
+  pub async fn expect_page_error<F, Fut, R>(&self, action: F) -> Result<(crate::web_error::WebError, R)>
+  where
+    F: FnOnce() -> Fut,
+    Fut: std::future::IntoFuture<Output = Result<R>>,
+  {
+    match self.expect_event("pageerror", action).await? {
+      (PageEvent::PageError(error), r) => Ok((error, r)),
+      _ => Err(crate::error::FerriError::Backend(
+        "expect_page_error: waiter resolved with a non-pageerror event".into(),
+      )),
+    }
   }
 
   /// Wait for a network request matching a URL pattern.
@@ -2398,7 +2817,21 @@ impl Page {
   ///
   /// Returns an error if the HAR file cannot be read/parsed or the route
   /// cannot be installed.
-  pub async fn route_from_har(&self, path: &std::path::Path, options: crate::har::RouteFromHarOptions) -> Result<()> {
+  pub fn route_from_har(
+    &self,
+    path: &std::path::Path,
+  ) -> crate::action::Action<'_, crate::har::RouteFromHarOptions, ()> {
+    let page = self;
+    let path = path.to_path_buf();
+    crate::action::Action::new(move |opts| Box::pin(async move { page.route_from_har_impl(&path, opts).await }))
+  }
+
+  /// Implementation of [`Self::route_from_har`].
+  pub(crate) async fn route_from_har_impl(
+    &self,
+    path: &std::path::Path,
+    options: crate::har::RouteFromHarOptions,
+  ) -> Result<()> {
     let handler = crate::har::route_handler_from_file(path, options.not_found)?;
     let matcher = options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any);
     self.inner.route(matcher, handler, None).await
@@ -2473,7 +2906,7 @@ impl Page {
         None => serde_json::Value::Null,
       };
       if let Some(sel) = parsed.get("selector").and_then(serde_json::Value::as_str) {
-        return Ok(self.locator(sel, None));
+        return Ok(self.locator(sel));
       }
       if !parsed
         .get("active")
@@ -2927,8 +3360,14 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the page cannot be closed.
+  pub fn close(&self) -> crate::action::Action<'_, crate::options::PageCloseOptions, ()> {
+    let page = self;
+    crate::action::Action::new(move |opts| Box::pin(async move { page.close_impl(Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::close`].
   #[tracing::instrument(skip(self, opts))]
-  pub async fn close(&self, opts: Option<crate::options::PageCloseOptions>) -> Result<()> {
+  pub(crate) async fn close_impl(&self, opts: Option<crate::options::PageCloseOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     if let Some(reason) = opts.reason.clone() {
       // Poisoned mutex is recoverable here — the stored reason is just
@@ -3057,7 +3496,7 @@ pub struct Keyboard<'a> {
   page: &'a Page,
 }
 
-impl Keyboard<'_> {
+impl<'a> Keyboard<'a> {
   /// Dispatch a keyDown event. The key is held until `up()` is called.
   ///
   /// Supports modifier keys: "Shift", "Control", "Alt", "Meta".
@@ -3087,7 +3526,14 @@ impl Keyboard<'_> {
   /// # Errors
   ///
   /// Returns an error if the key press dispatch fails.
-  pub async fn press(&self, key: &str, opts: Option<KeyboardPressOptions>) -> Result<()> {
+  pub fn press(&self, key: &str) -> crate::action::Action<'a, KeyboardPressOptions, ()> {
+    let page = self.page;
+    let key = key.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { Self { page }.press_impl(&key, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::press`].
+  pub(crate) async fn press_impl(&self, key: &str, opts: Option<KeyboardPressOptions>) -> Result<()> {
     match opts.and_then(|o| o.delay) {
       // Playwright `delay` waits between keydown and keyup. Combos
       // ("Control+a") keep the atomic `press_key` path.
@@ -3113,7 +3559,14 @@ impl Keyboard<'_> {
   /// # Errors
   ///
   /// Returns an error if the typing dispatch fails.
-  pub async fn r#type(&self, text: &str, opts: Option<KeyboardTypeOptions>) -> Result<()> {
+  pub fn r#type(&self, text: &str) -> crate::action::Action<'a, KeyboardTypeOptions, ()> {
+    let page = self.page;
+    let text = text.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { Self { page }.type_impl(&text, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::r#type`].
+  pub(crate) async fn type_impl(&self, text: &str, opts: Option<KeyboardTypeOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let delay = opts.delay;
     let named_keys = opts.named_keys.unwrap_or(false);
@@ -3151,14 +3604,20 @@ pub struct Mouse<'a> {
   page: &'a Page,
 }
 
-impl Mouse<'_> {
+impl<'a> Mouse<'a> {
   /// Click at coordinates.
   ///
   /// # Errors
   ///
   /// Returns an error if the click dispatch fails.
-  pub async fn click(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<()> {
-    let button = opts.as_ref().and_then(|o| o.button.as_deref()).unwrap_or("left");
+  pub fn click(&self, x: f64, y: f64) -> crate::action::Action<'a, MouseClickOptions, ()> {
+    let page = self.page;
+    crate::action::Action::new(move |opts| Box::pin(async move { Self { page }.click_impl(x, y, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::click`].
+  pub(crate) async fn click_impl(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<()> {
+    let button = opts.as_ref().and_then(|o| o.button).unwrap_or_default().as_cdp();
     let count = opts.as_ref().and_then(|o| o.click_count).unwrap_or(1);
     match opts.as_ref().and_then(|o| o.delay) {
       Some(ms) => {
@@ -3179,7 +3638,14 @@ impl Mouse<'_> {
   /// # Errors
   ///
   /// Returns an error if the mouse move dispatch fails.
-  pub async fn r#move(&self, x: f64, y: f64, steps: Option<u32>) -> Result<()> {
+  pub fn r#move(&self, x: f64, y: f64) -> crate::action::Action<'a, MouseMoveOptions, ()> {
+    let page = self.page;
+    crate::action::Action::new(move |opts: MouseMoveOptions| {
+      Box::pin(async move { Self { page }.move_impl(x, y, opts.steps).await })
+    })
+  }
+
+  pub(crate) async fn move_impl(&self, x: f64, y: f64, steps: Option<u32>) -> Result<()> {
     match steps {
       Some(step_count) => {
         let (from_x, from_y) = *self
@@ -3198,8 +3664,14 @@ impl Mouse<'_> {
   /// # Errors
   ///
   /// Returns an error if the click dispatch fails.
-  pub async fn dblclick(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<()> {
-    let button = opts.as_ref().and_then(|o| o.button.as_deref()).unwrap_or("left");
+  pub fn dblclick(&self, x: f64, y: f64) -> crate::action::Action<'a, MouseClickOptions, ()> {
+    let page = self.page;
+    crate::action::Action::new(move |opts| Box::pin(async move { Self { page }.dblclick_impl(x, y, Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::dblclick`].
+  pub(crate) async fn dblclick_impl(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<()> {
+    let button = opts.as_ref().and_then(|o| o.button).unwrap_or_default().as_cdp();
     self.page.move_mouse(x, y).await?;
     self.page.mouse_down(x, y, button).await?;
     self.page.mouse_up(x, y, button).await?;
@@ -3216,8 +3688,14 @@ impl Mouse<'_> {
   /// # Errors
   ///
   /// Returns an error if the mouse down dispatch fails.
-  pub async fn down(&self, opts: Option<MouseDownOptions>) -> Result<()> {
-    let button = opts.as_ref().and_then(|o| o.button.as_deref()).unwrap_or("left");
+  pub fn down(&self) -> crate::action::Action<'a, MouseDownOptions, ()> {
+    let page = self.page;
+    crate::action::Action::new(move |opts| Box::pin(async move { Self { page }.down_impl(Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::down`].
+  pub(crate) async fn down_impl(&self, opts: Option<MouseDownOptions>) -> Result<()> {
+    let button = opts.as_ref().and_then(|o| o.button).unwrap_or_default().as_cdp();
     let (x, y) = *self
       .page
       .mouse_position
@@ -3231,8 +3709,14 @@ impl Mouse<'_> {
   /// # Errors
   ///
   /// Returns an error if the mouse up dispatch fails.
-  pub async fn up(&self, opts: Option<MouseUpOptions>) -> Result<()> {
-    let button = opts.as_ref().and_then(|o| o.button.as_deref()).unwrap_or("left");
+  pub fn up(&self) -> crate::action::Action<'a, MouseUpOptions, ()> {
+    let page = self.page;
+    crate::action::Action::new(move |opts| Box::pin(async move { Self { page }.up_impl(Some(opts)).await }))
+  }
+
+  /// Implementation of [`Self::up`].
+  pub(crate) async fn up_impl(&self, opts: Option<MouseUpOptions>) -> Result<()> {
+    let button = opts.as_ref().and_then(|o| o.button).unwrap_or_default().as_cdp();
     let (x, y) = *self
       .page
       .mouse_position
@@ -3254,8 +3738,8 @@ impl Mouse<'_> {
 /// Options for `Mouse.click()`.
 #[derive(Debug, Clone, Default)]
 pub struct MouseClickOptions {
-  /// Mouse button: "left", "right", "middle"
-  pub button: Option<String>,
+  /// Mouse button. Default: [`crate::options::MouseButton::Left`].
+  pub button: Option<crate::options::MouseButton>,
   /// Click count (1=single, 2=double, 3=triple)
   pub click_count: Option<u32>,
   /// Milliseconds to wait between `mousedown` and `mouseup`
@@ -3323,11 +3807,19 @@ fn parse_named_keys(text: &str, named_keys: bool) -> Vec<TypeToken> {
   result
 }
 
+/// Options for `Mouse.move()` — Playwright's `{ steps? }`.
+#[derive(Debug, Clone, Default)]
+pub struct MouseMoveOptions {
+  /// Intermediate `mousemove` samples between the current position and
+  /// the destination. Default: `1` (single move at the destination).
+  pub steps: Option<u32>,
+}
+
 /// Options for `Mouse.down()`.
 #[derive(Debug, Clone, Default)]
 pub struct MouseDownOptions {
-  /// Mouse button: "left", "right", "middle"
-  pub button: Option<String>,
+  /// Mouse button. Default: [`crate::options::MouseButton::Left`].
+  pub button: Option<crate::options::MouseButton>,
   /// Click count for the event
   pub click_count: Option<u32>,
 }
@@ -3335,8 +3827,8 @@ pub struct MouseDownOptions {
 /// Options for `Mouse.up()`.
 #[derive(Debug, Clone, Default)]
 pub struct MouseUpOptions {
-  /// Mouse button: "left", "right", "middle"
-  pub button: Option<String>,
+  /// Mouse button. Default: [`crate::options::MouseButton::Left`].
+  pub button: Option<crate::options::MouseButton>,
   /// Click count for the event
   pub click_count: Option<u32>,
 }

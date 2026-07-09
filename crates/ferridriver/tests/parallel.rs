@@ -39,17 +39,17 @@ async fn multi_page_automation() {
   let url2 = data_url("<h1>Page Two</h1><button id='b' onclick=\"this.textContent='clicked'\">Go</button>");
   let url3 = data_url("<h1>Page Three</h1><ul><li>A</li><li>B</li><li>C</li></ul>");
 
-  page1.goto(&url1, None).await.unwrap();
-  page2.goto(&url2, None).await.unwrap();
-  page3.goto(&url3, None).await.unwrap();
+  page1.goto(&url1).await.unwrap();
+  page2.goto(&url2).await.unwrap();
+  page3.goto(&url3).await.unwrap();
 
   // Act on each page -- each has independent state
-  page1.locator("#i", None).fill("multi-page", None).await.unwrap();
-  page2.locator("#b", None).click(None).await.unwrap();
-  let count = page3.locator("css=li", None).count().await.unwrap();
+  page1.locator("#i").fill("multi-page").await.unwrap();
+  page2.locator("#b").click().await.unwrap();
+  let count = page3.locator("css=li").count().await.unwrap();
 
   // Verify each page has independent state
-  let v1 = page1.locator("#i", None).input_value().await.unwrap();
+  let v1 = page1.locator("#i").input_value().await.unwrap();
   let v2 = page2
     .evaluate(
       "document.getElementById('b').textContent",
@@ -65,8 +65,8 @@ async fn multi_page_automation() {
   assert_eq!(count, 3, "page3 count");
 
   // Screenshots from different pages
-  let s1 = page1.screenshot(ScreenshotOptions::default()).await.unwrap();
-  let s2 = page2.screenshot(ScreenshotOptions::default()).await.unwrap();
+  let s1 = page1.screenshot().await.unwrap();
+  let s2 = page2.screenshot().await.unwrap();
   assert!(s1.len() > 100);
   assert!(s2.len() > 100);
   // Different pages should produce different screenshots

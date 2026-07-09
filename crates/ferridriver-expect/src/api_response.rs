@@ -1,14 +1,16 @@
 //! `expect(apiResponse).toBeOK()` — synchronous status check on a
 //! captured `ferridriver::http_client::HttpResponse`.
 
+use std::borrow::Borrow;
+
 use ferridriver::http_client::HttpResponse;
 
 use crate::AssertionFailure;
 use crate::builder::Expect;
 
-impl Expect<'_, HttpResponse> {
+impl<R: Borrow<HttpResponse>> Expect<'_, R> {
   pub fn to_be_ok(&self) -> Result<(), AssertionFailure> {
-    let resp = self.subject;
+    let resp: &HttpResponse = self.subject.borrow();
     let status = resp.status();
     let pass_raw = (200..300).contains(&status);
     let pass = if self.is_not { !pass_raw } else { pass_raw };

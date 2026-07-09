@@ -107,10 +107,7 @@ impl BrowserDispatcher {
   /// Take a snapshot, store its ref-map for `context`, and return the text.
   async fn snapshot(&self, context: &str) -> std::result::Result<String, String> {
     let page = self.page_for(context).await.map_err(|e| e.to_string())?;
-    let snap = page
-      .snapshot_for_ai(ferridriver::snapshot::SnapshotOptions::default())
-      .await
-      .map_err(|e| e.to_string())?;
+    let snap = page.snapshot_for_ai().await.map_err(|e| e.to_string())?;
     self.ref_maps.write().await.insert(context.to_string(), snap.ref_map);
     Ok(snap.full)
   }
@@ -142,7 +139,7 @@ impl BrowserDispatcher {
       "goto" => {
         let url = str_arg(args, "url")?;
         let page = self.page_for(context).await.map_err(|e| e.to_string())?;
-        page.goto(url, None).await.map_err(|e| e.to_string())?;
+        page.goto(url).await.map_err(|e| e.to_string())?;
         Ok(VerbOutput::text(self.snapshot(context).await?))
       },
       "back" => self.navigate(context, Nav::Back).await,
@@ -167,7 +164,7 @@ impl BrowserDispatcher {
         let selector = str_arg(args, "selector")?;
         let key = str_arg(args, "key")?;
         let page = self.page_for(context).await.map_err(|e| e.to_string())?;
-        page.press(selector, key, None).await.map_err(|e| e.to_string())?;
+        page.press(selector, key).await.map_err(|e| e.to_string())?;
         Ok(VerbOutput::text(self.snapshot(context).await?))
       },
       "hover" => {
@@ -193,10 +190,7 @@ impl BrowserDispatcher {
       },
       "screenshot" => {
         let page = self.page_for(context).await.map_err(|e| e.to_string())?;
-        let bytes = page
-          .screenshot(ferridriver::options::ScreenshotOptions::default())
-          .await
-          .map_err(|e| e.to_string())?;
+        let bytes = page.screenshot().await.map_err(|e| e.to_string())?;
         Ok(VerbOutput::data("captured screenshot", bytes))
       },
       "title" => {
@@ -223,9 +217,9 @@ impl BrowserDispatcher {
   async fn navigate(&self, context: &str, nav: Nav) -> std::result::Result<VerbOutput, String> {
     let page = self.page_for(context).await.map_err(|e| e.to_string())?;
     match nav {
-      Nav::Back => page.go_back(None).await.map_err(|e| e.to_string())?,
-      Nav::Forward => page.go_forward(None).await.map_err(|e| e.to_string())?,
-      Nav::Reload => page.reload(None).await.map_err(|e| e.to_string())?,
+      Nav::Back => page.go_back().await.map_err(|e| e.to_string())?,
+      Nav::Forward => page.go_forward().await.map_err(|e| e.to_string())?,
+      Nav::Reload => page.reload().await.map_err(|e| e.to_string())?,
     };
     Ok(VerbOutput::text(self.snapshot(context).await?))
   }

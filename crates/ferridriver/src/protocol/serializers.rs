@@ -871,6 +871,46 @@ impl SerializationContext {
   }
 }
 
+/// Build a [`SerializedArgument`] from any `serde::Serialize` value —
+/// the typed-`eval` entry path. Handles/rich JS types are not
+/// expressible here; use the explicit constructors for those.
+///
+/// # Errors
+///
+/// Returns [`crate::error::FerriError::Json`] when the value fails
+/// JSON serialization.
+pub fn argument_from_serde<A: serde::Serialize + ?Sized>(arg: &A) -> crate::error::Result<SerializedArgument> {
+  let json = serde_json::to_value(arg).map_err(|e| crate::error::FerriError::Json(format!("eval argument: {e}")))?;
+  let mut ctx = SerializationContext::default();
+  Ok(SerializedArgument {
+    value: SerializedValue::from_json(&json, &mut ctx),
+    handles: Vec::new(),
+  })
+}
+
+/// Decode an evaluate result into any `serde::de::DeserializeOwned`
+/// type — the typed-`eval` exit path. `undefined` decodes as JSON
+/// `null` (so `()` and `Option<T>` work for value-less scripts).
+///
+/// # Errors
+///
+/// Returns [`crate::error::FerriError::Evaluation`] when the result
+/// carries a rich JS type (`Date`, `RegExp`, handle, ...) that has no
+/// JSON form, and [`crate::error::FerriError::Json`] when it does not
+/// deserialize into `T`.
+pub fn result_to_serde<T: serde::de::DeserializeOwned>(value: &SerializedValue) -> crate::error::Result<T> {
+  let json = if matches!(value, SerializedValue::Special(SpecialValue::Undefined)) {
+    serde_json::Value::Null
+  } else {
+    value.to_json_like().ok_or_else(|| {
+      crate::error::FerriError::Evaluation(
+        "eval result is not JSON-representable; use evaluate_handle for rich JS values".to_string(),
+      )
+    })?
+  };
+  serde_json::from_value(json).map_err(|e| crate::error::FerriError::Json(format!("eval result: {e}")))
+}
+
 // ── SerializedArgument ──────────────────────────────────────────────────────
 
 /// The full `{ value, handles }` envelope ferridriver passes to the

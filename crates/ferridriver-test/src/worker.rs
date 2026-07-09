@@ -110,7 +110,7 @@ impl TestBrowserResources {
       TestBrowserState::Failed(err) => Err(err.clone()),
       TestBrowserState::Empty => {
         let browser = self.handle.get().await?;
-        let ctx = Arc::new(new_test_context(&browser));
+        let ctx = Arc::new(new_test_context(&browser).await?);
         *state = TestBrowserState::Context(Arc::clone(&ctx));
         Ok(ctx)
       },
@@ -138,7 +138,7 @@ impl TestBrowserResources {
       TestBrowserState::Empty => {
         let browser = self.handle.get().await?;
         let backend = browser.backend_kind();
-        let ctx = Arc::new(new_test_context(&browser));
+        let ctx = Arc::new(new_test_context(&browser).await?);
         match create_ready_page(&ctx, backend).await {
           Ok(page) => {
             apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
@@ -151,7 +151,7 @@ impl TestBrowserResources {
           Err(err) => {
             if is_retryable_bidi_page_error(&err) {
               let _ = ctx.close().await;
-              let ctx = Arc::new(new_test_context(&browser));
+              let ctx = Arc::new(new_test_context(&browser).await?);
               let page = create_ready_page(&ctx, backend).await?;
               apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
               *state = TestBrowserState::Page {
@@ -184,7 +184,7 @@ impl TestBrowserResources {
         // would only add a redundant `closeTarget` round-trip per test
         // (~3-5ms each on the bench's tight loop).
         if ctx.name() == "default" {
-          let _ = page.close(None).await;
+          let _ = page.close().await;
         } else {
           drop(page);
         }
@@ -200,11 +200,11 @@ impl TestBrowserResources {
 /// current backends — CDP pipe, CDP raw, BiDi/Firefox, and Playwright
 /// WebKit — create real isolated contexts; the shared-default fallback
 /// remains for any future backend that reports otherwise.
-fn new_test_context(browser: &Arc<ferridriver::Browser>) -> ferridriver::ContextRef {
+async fn new_test_context(browser: &Arc<ferridriver::Browser>) -> ferridriver::error::Result<ferridriver::ContextRef> {
   if browser.supports_isolated_contexts() {
-    browser.new_context(None)
+    browser.new_context().await
   } else {
-    browser.default_context()
+    Ok(browser.default_context())
   }
 }
 
@@ -756,7 +756,7 @@ impl Worker {
             )));
           }
           let start = Instant::now();
-          let result = hook(state.fixture_pool.clone()).await;
+          let result = run_caught(hook(state.fixture_pool.clone())).await;
           let duration = start.elapsed();
           let error = result.as_ref().err().map(|e| format!("{e}"));
           if let Some(event_bus) = &self.event_bus {
@@ -931,7 +931,7 @@ impl Worker {
           )));
         }
         let start = Instant::now();
-        let result = hook(suite_state.fixture_pool.clone()).await;
+        let result = run_caught(hook(suite_state.fixture_pool.clone())).await;
         let duration = start.elapsed();
         let error = result.as_ref().err().map(|e| e.message.clone());
         if let Some(event_bus) = &self.event_bus {
@@ -1240,7 +1240,7 @@ impl Worker {
         format!("beforeEach [{i}]")
       };
       let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
-      let result = hook(test_pool.clone(), Arc::clone(&test_info)).await;
+      let result = run_caught(hook(test_pool.clone(), Arc::clone(&test_info))).await;
       let err_msg = result.as_ref().err().map(|e| e.message.clone());
       step_handle.end(err_msg).await;
       if let Err(e) = result {
@@ -1252,7 +1252,7 @@ impl Worker {
     let timeout_result = if let Some(err) = before_each_err {
       Ok(Err(err))
     } else {
-      tokio::time::timeout(timeout_dur, (test.test_fn)(test_pool.clone())).await
+      tokio::time::timeout(timeout_dur, run_caught((test.test_fn)(test_pool.clone()))).await
     };
 
     for (i, hook) in hooks.after_each.iter().enumerate() {
@@ -1262,7 +1262,7 @@ impl Worker {
         format!("afterEach [{i}]")
       };
       let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
-      let result = hook(test_pool.clone(), Arc::clone(&test_info)).await;
+      let result = run_caught(hook(test_pool.clone(), Arc::clone(&test_info))).await;
       let err_msg = result.as_ref().err().map(|e| e.message.clone());
       step_handle.end(err_msg).await;
       if let Err(e) = result {
@@ -1543,6 +1543,60 @@ impl Worker {
   }
 }
 
+std::thread_local! {
+  /// Location + backtrace captured by the panic hook, read by
+  /// `run_caught` right after `catch_unwind` returns on the same thread
+  /// (unwinding resolves within the poll that panicked).
+  static LAST_PANIC_STACK: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Chain a capture step onto the process panic hook (once) so test
+/// failures carry the panic's location and backtrace, not just its
+/// message. The previous hook still runs, keeping default stderr output.
+fn install_panic_capture() {
+  static HOOK: std::sync::Once = std::sync::Once::new();
+  HOOK.call_once(|| {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+      let location = info
+        .location()
+        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+        .unwrap_or_else(|| "<unknown>".to_string());
+      let backtrace = std::backtrace::Backtrace::force_capture();
+      LAST_PANIC_STACK.with(|cell| *cell.borrow_mut() = Some(format!("panicked at {location}\n{backtrace}")));
+      previous(info);
+    }));
+  });
+}
+
+/// Await a test or hook future, converting a panic (`assert!`, `unwrap`,
+/// ...) into a `TestFailure` so std assertion macros fail the single test
+/// instead of unwinding through the worker.
+async fn run_caught<F>(fut: F) -> Result<(), TestFailure>
+where
+  F: std::future::Future<Output = Result<(), TestFailure>>,
+{
+  use futures::FutureExt;
+  install_panic_capture();
+  match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+    Ok(result) => result,
+    Err(payload) => {
+      let message = payload
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("panic with non-string payload");
+      let stack = LAST_PANIC_STACK.with(|cell| cell.borrow_mut().take());
+      Err(TestFailure {
+        message: format!("panicked: {message}"),
+        stack,
+        diff: None,
+        screenshot: None,
+      })
+    },
+  }
+}
+
 /// Sanitize a test name for use as a filename.
 fn sanitize_filename(name: &str) -> String {
   name
@@ -1563,7 +1617,7 @@ async fn capture_screenshot(page: &ferridriver::Page) -> Option<Vec<u8>> {
     format: Some("png".into()),
     ..Default::default()
   };
-  page.screenshot(opts).await.ok()
+  page.screenshot().options(opts).await.ok()
 }
 
 /// Evaluate an annotation condition string against the current environment.

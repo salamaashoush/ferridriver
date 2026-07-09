@@ -7,15 +7,15 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use ferridriver::{chromium, Page};
-//! use ferridriver::options::{LaunchOptions, RoleOptions};
+//! use ferridriver::chromium;
+//! use ferridriver::options::LaunchOptions;
 //!
 //! let browser = chromium().launch(LaunchOptions::default()).await?;
 //! let page = browser.new_page_with_url("https://example.com").await?;
 //!
-//! // Playwright-style locators
-//! page.get_by_role("link", &RoleOptions { name: Some("More".into()), ..Default::default() })
-//!     .click(None).await?;
+//! // Playwright-style locators; options chain as builder setters
+//! page.get_by_role("link").name("More").click().await?;
+//! page.locator("#search").fill("rust").timeout(2_000).await?;
 //!
 //! // Content extraction
 //! let title = page.title().await?;
@@ -23,6 +23,7 @@
 //! ```
 
 // ── Public API (Playwright-compatible) ──
+pub mod action;
 pub mod browser;
 pub mod browser_type;
 pub mod console_message;
@@ -39,6 +40,7 @@ pub(crate) mod frame_cache;
 pub mod har;
 pub mod js_handle;
 pub mod locator;
+pub mod locator_builder;
 pub mod locator_handler;
 pub mod network;
 pub mod observed;
@@ -48,6 +50,7 @@ pub mod protocol;
 pub mod url_matcher;
 pub mod web_error;
 
+pub use action::Action;
 pub use browser::Browser;
 pub use browser_type::{BrowserType, chromium, firefox, webkit};
 pub use context::{BrowserContext, ContextRef};
@@ -61,6 +64,7 @@ pub use events::{
 pub use frame::Frame;
 pub use js_handle::{HandleRemote, JSHandle};
 pub use locator::{FrameLocator, Locator};
+pub use locator_builder::LocatorBuilder;
 pub use page::Page;
 pub use url_matcher::{UrlMatcher, UrlPredicate};
 pub use video::Video;

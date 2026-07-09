@@ -27,13 +27,13 @@ async fn wait_seconds(world: &mut BrowserWorld, seconds: i64) {
 
 #[step("I wait for {string}")]
 async fn wait_for_selector(world: &mut BrowserWorld, selector: String) {
-  let locator = world.page().locator(&selector, None);
+  let locator = world.page().locator(&selector);
   expect(&locator).to_be_attached().await.map_err(to_step_err)?;
 }
 
 #[step("I wait for {string} to contain {string}")]
 async fn wait_for_text(world: &mut BrowserWorld, selector: String, expected: String) {
-  let locator = world.page().locator(&selector, None);
+  let locator = world.page().locator(&selector);
   expect(&locator)
     .to_contain_text(expected.as_str())
     .await
@@ -42,13 +42,13 @@ async fn wait_for_text(world: &mut BrowserWorld, selector: String, expected: Str
 
 #[step("I wait for {string} to be visible")]
 async fn wait_for_visible(world: &mut BrowserWorld, selector: String) {
-  let locator = world.page().locator(&selector, None);
+  let locator = world.page().locator(&selector);
   expect(&locator).to_be_visible().await.map_err(to_step_err)?;
 }
 
 #[step("I wait for {string} to be hidden")]
 async fn wait_for_hidden(world: &mut BrowserWorld, selector: String) {
-  let locator = world.page().locator(&selector, None);
+  let locator = world.page().locator(&selector);
   expect(&locator).to_be_hidden().await.map_err(to_step_err)?;
 }
 

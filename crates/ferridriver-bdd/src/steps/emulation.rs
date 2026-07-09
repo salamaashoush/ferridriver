@@ -55,7 +55,8 @@ async fn emulate_color_scheme(world: &mut BrowserWorld, scheme: String) {
   };
   world
     .page()
-    .emulate_media(&opts)
+    .emulate_media()
+    .options(opts)
     .await
     .map_err(|e| StepError::wrap("emulate color scheme", e))?;
 }

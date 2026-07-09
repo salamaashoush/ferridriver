@@ -35,15 +35,15 @@ async fn main() {
     let b = Arc::clone(browser);
     worker_handles.push(tokio::spawn(async move {
       for i in 0..iters {
-        let ctx = b.new_context(None);
+        let ctx = b.new_context().await.unwrap();
         let page = ctx.new_page().await.unwrap();
         let url = format!(
           "data:text/html,<title>T{}</title><button id='b' onclick=\"this.textContent='d'\">Go</button>",
           wid * iters + i
         );
-        page.goto(&url, None).await.unwrap();
-        page.locator("#b", None).click(None).await.unwrap();
-        let _ = page.locator("#b", None).text_content().await.unwrap();
+        page.goto(&url).await.unwrap();
+        page.locator("#b").click().await.unwrap();
+        let _ = page.locator("#b").text_content().await.unwrap();
         ctx.close().await.ok();
       }
     }));
@@ -62,6 +62,6 @@ async fn main() {
   );
 
   for b in &browsers {
-    b.close(None).await.ok();
+    b.close().await.ok();
   }
 }

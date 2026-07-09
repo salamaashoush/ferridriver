@@ -143,7 +143,7 @@ impl WebKitElement {
     Ok(())
   }
 
-  pub async fn screenshot(&self, _format: ImageFormat) -> Result<Vec<u8>> {
+  pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>> {
     let rect = self
       .call_fn_value(
         "function(){this.scrollIntoView({block:'center'});\
@@ -167,9 +167,29 @@ impl WebKitElement {
       .map_err(map_err)?;
     let data_url = resp.get("dataURL").and_then(Value::as_str).unwrap_or_default();
     let b64 = data_url.split_once(',').map_or(data_url, |(_, d)| d);
-    base64::engine::general_purpose::STANDARD
+    let png = base64::engine::general_purpose::STANDARD
       .decode(b64)
-      .map_err(|e| FerriError::backend(format!("element screenshot base64: {e}")))
+      .map_err(|e| FerriError::backend(format!("element screenshot base64: {e}")))?;
+    match format {
+      ImageFormat::Png => Ok(png),
+      // `Page.snapshotRect` only produces PNG — transcode like the
+      // page-screenshot path (Playwright transcodes client-side too,
+      // jpeg-js quality default 80).
+      ImageFormat::Jpeg => {
+        let img = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+          .map_err(|e| FerriError::backend(format!("element screenshot png decode: {e}")))?;
+        let mut out = std::io::Cursor::new(Vec::new());
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
+        img
+          .to_rgb8()
+          .write_with_encoder(encoder)
+          .map_err(|e| FerriError::backend(format!("element screenshot jpeg encode: {e}")))?;
+        Ok(out.into_inner())
+      },
+      ImageFormat::Webp => Err(FerriError::unsupported(
+        "screenshot type 'webp' is not supported on the WebKit backend (Page.snapshotRect produces PNG; Playwright supports webp on Chromium only)",
+      )),
+    }
   }
 
   /// Release the backing remote object (`Runtime.releaseObject`).

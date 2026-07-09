@@ -52,6 +52,74 @@ impl From<String> for StringOrRegex {
   }
 }
 
+macro_rules! aria_roles {
+  ($( $variant:ident => $s:literal ),* $(,)?) => {
+    /// ARIA role for `getByRole` — Playwright's `AriaRole` union. String
+    /// literals convert via `From<&str>`; unknown strings become
+    /// [`Role::Custom`] and flow to the selector engine unchanged (which
+    /// reports them like any other unmatched role).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Role {
+      $( #[doc = concat!("`", $s, "`")] $variant, )*
+      /// A role string outside the WAI-ARIA set.
+      Custom(String),
+    }
+
+    impl Role {
+      #[must_use]
+      pub fn as_str(&self) -> &str {
+        match self {
+          $( Self::$variant => $s, )*
+          Self::Custom(s) => s,
+        }
+      }
+    }
+
+    impl From<&str> for Role {
+      fn from(s: &str) -> Self {
+        match s {
+          $( $s => Self::$variant, )*
+          other => Self::Custom(other.to_string()),
+        }
+      }
+    }
+  };
+}
+
+aria_roles! {
+  Alert => "alert", AlertDialog => "alertdialog", Application => "application", Article => "article",
+  Banner => "banner", Blockquote => "blockquote", Button => "button", Caption => "caption", Cell => "cell",
+  Checkbox => "checkbox", Code => "code", ColumnHeader => "columnheader", Combobox => "combobox",
+  Complementary => "complementary", ContentInfo => "contentinfo", Definition => "definition",
+  Deletion => "deletion", Dialog => "dialog", Directory => "directory", Document => "document",
+  Emphasis => "emphasis", Feed => "feed", Figure => "figure", Form => "form", Generic => "generic",
+  Grid => "grid", GridCell => "gridcell", Group => "group", Heading => "heading", Img => "img",
+  Insertion => "insertion", Link => "link", List => "list", Listbox => "listbox", ListItem => "listitem",
+  Log => "log", Main => "main", Marquee => "marquee", Math => "math", Meter => "meter", Menu => "menu",
+  Menubar => "menubar", MenuItem => "menuitem", MenuItemCheckbox => "menuitemcheckbox",
+  MenuItemRadio => "menuitemradio", Navigation => "navigation", None => "none", Note => "note",
+  Option => "option", Paragraph => "paragraph", Presentation => "presentation", ProgressBar => "progressbar",
+  Radio => "radio", RadioGroup => "radiogroup", Region => "region", Row => "row", RowGroup => "rowgroup",
+  RowHeader => "rowheader", Scrollbar => "scrollbar", Search => "search", SearchBox => "searchbox",
+  Separator => "separator", Slider => "slider", SpinButton => "spinbutton", Status => "status",
+  Strong => "strong", Subscript => "subscript", Superscript => "superscript", Switch => "switch",
+  Tab => "tab", Table => "table", Tablist => "tablist", TabPanel => "tabpanel", Term => "term",
+  Textbox => "textbox", Time => "time", Timer => "timer", Toolbar => "toolbar", Tooltip => "tooltip",
+  Tree => "tree", TreeGrid => "treegrid", TreeItem => "treeitem",
+}
+
+impl From<String> for Role {
+  fn from(s: String) -> Self {
+    Self::from(s.as_str())
+  }
+}
+
+impl std::fmt::Display for Role {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
 /// Options for role-based locators (getByRole).
 #[derive(Debug, Clone, Default)]
 pub struct RoleOptions {
@@ -262,12 +330,112 @@ pub struct FilterOptions {
   pub visible: Option<bool>,
 }
 
+/// Lifecycle milestone for navigation waits — Playwright's
+/// `'load' | 'domcontentloaded' | 'networkidle' | 'commit'`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+pub enum LoadState {
+  #[default]
+  #[serde(rename = "load")]
+  Load,
+  #[serde(rename = "domcontentloaded")]
+  DomContentLoaded,
+  #[serde(rename = "networkidle")]
+  NetworkIdle,
+  #[serde(rename = "commit")]
+  Commit,
+}
+
+impl LoadState {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Load => "load",
+      Self::DomContentLoaded => "domcontentloaded",
+      Self::NetworkIdle => "networkidle",
+      Self::Commit => "commit",
+    }
+  }
+}
+
+impl std::fmt::Display for LoadState {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+impl From<&str> for LoadState {
+  /// Unknown strings fall back to `Load` — the same default the string
+  /// field used before it became typed (bindings forward raw JS input).
+  fn from(s: &str) -> Self {
+    match s {
+      "domcontentloaded" => Self::DomContentLoaded,
+      "networkidle" => Self::NetworkIdle,
+      "commit" => Self::Commit,
+      _ => Self::Load,
+    }
+  }
+}
+
+/// Element state for `waitFor` / `waitForSelector` — Playwright's
+/// `'attached' | 'detached' | 'visible' | 'hidden'`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WaitState {
+  Attached,
+  Detached,
+  #[default]
+  Visible,
+  Hidden,
+}
+
+impl WaitState {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Attached => "attached",
+      Self::Detached => "detached",
+      Self::Visible => "visible",
+      Self::Hidden => "hidden",
+    }
+  }
+}
+
+impl std::fmt::Display for WaitState {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+impl From<&str> for WaitState {
+  /// Unknown strings fall back to `Visible` — the wait default.
+  fn from(s: &str) -> Self {
+    Self::try_from_str(s).unwrap_or_default()
+  }
+}
+
+impl WaitState {
+  /// Strict parse for boundaries that forward raw user strings (JS
+  /// bindings) and must keep rejecting unknown states.
+  ///
+  /// # Errors
+  ///
+  /// Returns the offending input when it names no known state.
+  pub fn try_from_str(s: &str) -> std::result::Result<Self, String> {
+    match s {
+      "attached" => Ok(Self::Attached),
+      "detached" => Ok(Self::Detached),
+      "visible" => Ok(Self::Visible),
+      "hidden" => Ok(Self::Hidden),
+      other => Err(other.to_string()),
+    }
+  }
+}
+
 /// Options for waiting operations.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WaitOptions {
-  /// "visible", "hidden", "attached", "stable"
-  pub state: Option<String>,
+  pub state: Option<WaitState>,
   pub timeout: Option<u64>,
 }
 
@@ -363,18 +531,142 @@ pub struct AriaSnapshotOptions {
 ///   supports transparency.
 #[derive(Debug, Clone, Default)]
 pub struct ScreenshotOptions {
-  pub animations: Option<String>,
-  pub caret: Option<String>,
+  pub animations: Option<AnimationsMode>,
+  pub caret: Option<CaretMode>,
   pub clip: Option<ClipRect>,
   pub full_page: Option<bool>,
-  pub format: Option<String>,
+  pub format: Option<ScreenshotFormat>,
   pub mask: Vec<crate::locator::Locator>,
   pub mask_color: Option<String>,
   pub omit_background: Option<bool>,
   pub path: Option<std::path::PathBuf>,
   pub quality: Option<i64>,
-  pub scale: Option<String>,
+  pub scale: Option<ScreenshotScale>,
   pub style: Option<String>,
+  pub timeout: Option<u64>,
+}
+
+/// Screenshot image format — Playwright's `type?: 'png' | 'jpeg'`, plus
+/// Chromium's `webp` (rejected as Unsupported on WebKit/Firefox).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScreenshotFormat {
+  #[default]
+  Png,
+  Jpeg,
+  Webp,
+}
+
+impl ScreenshotFormat {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Png => "png",
+      Self::Jpeg => "jpeg",
+      Self::Webp => "webp",
+    }
+  }
+}
+
+impl std::fmt::Display for ScreenshotFormat {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+impl From<&str> for ScreenshotFormat {
+  /// `"jpeg"` / `"jpg"` select JPEG, `"webp"` WebP; anything else falls
+  /// back to PNG — the same behavior the string field had.
+  fn from(s: &str) -> Self {
+    match s {
+      "jpeg" | "jpg" => Self::Jpeg,
+      "webp" => Self::Webp,
+      _ => Self::Png,
+    }
+  }
+}
+
+/// CSS-animation handling during a screenshot — Playwright's
+/// `animations?: 'disabled' | 'allow'`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AnimationsMode {
+  #[default]
+  Allow,
+  Disabled,
+}
+
+impl AnimationsMode {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Allow => "allow",
+      Self::Disabled => "disabled",
+    }
+  }
+}
+
+impl From<&str> for AnimationsMode {
+  fn from(s: &str) -> Self {
+    if s == "disabled" { Self::Disabled } else { Self::Allow }
+  }
+}
+
+/// Text-caret handling during a screenshot — Playwright's
+/// `caret?: 'hide' | 'initial'`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CaretMode {
+  #[default]
+  Hide,
+  Initial,
+}
+
+impl CaretMode {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Hide => "hide",
+      Self::Initial => "initial",
+    }
+  }
+}
+
+impl From<&str> for CaretMode {
+  fn from(s: &str) -> Self {
+    if s == "initial" { Self::Initial } else { Self::Hide }
+  }
+}
+
+/// Screenshot pixel scale — Playwright's `scale?: 'css' | 'device'`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScreenshotScale {
+  #[default]
+  Device,
+  Css,
+}
+
+impl ScreenshotScale {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Css => "css",
+      Self::Device => "device",
+    }
+  }
+}
+
+impl From<&str> for ScreenshotScale {
+  fn from(s: &str) -> Self {
+    if s == "css" { Self::Css } else { Self::Device }
+  }
+}
+
+/// Options for element screenshots (`locator.screenshot()` /
+/// `element_handle.screenshot()`). Element captures support the format
+/// family and file output; page-level concerns (`fullPage`, `clip`,
+/// `mask`) stay on [`ScreenshotOptions`].
+#[derive(Debug, Clone, Default)]
+pub struct ElementScreenshotOptions {
+  pub format: Option<ScreenshotFormat>,
+  pub path: Option<std::path::PathBuf>,
   pub timeout: Option<u64>,
 }
 
@@ -386,6 +678,12 @@ pub struct ClipRect {
   pub y: f64,
   pub width: f64,
   pub height: f64,
+}
+
+impl From<(f64, f64, f64, f64)> for ClipRect {
+  fn from((x, y, width, height): (f64, f64, f64, f64)) -> Self {
+    Self { x, y, width, height }
+  }
 }
 
 /// Element bounding box in viewport coordinates.
@@ -408,6 +706,29 @@ pub struct Point {
   pub y: f64,
 }
 
+impl From<(f64, f64)> for Point {
+  fn from((x, y): (f64, f64)) -> Self {
+    Self { x, y }
+  }
+}
+
+/// Milliseconds accepted by action-builder timeout/delay setters. Converts
+/// from a bare `u64` (ms, Playwright convention) or a [`std::time::Duration`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeoutMs(pub u64);
+
+impl From<u64> for TimeoutMs {
+  fn from(ms: u64) -> Self {
+    Self(ms)
+  }
+}
+
+impl From<std::time::Duration> for TimeoutMs {
+  fn from(d: std::time::Duration) -> Self {
+    Self(u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+  }
+}
+
 /// Mouse button for click/dblclick/mousedown/mouseup. The `"left" |
 /// "right" | "middle"` union.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -425,6 +746,14 @@ impl<'de> serde::Deserialize<'de> for MouseButton {
   fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
     let s = String::deserialize(d)?;
     Self::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("Unknown mouse button: {s}")))
+  }
+}
+
+impl From<&str> for MouseButton {
+  /// Unknown strings fall back to `Left` (the default button) — raw JS
+  /// input flows through bindings unvalidated, as before.
+  fn from(s: &str) -> Self {
+    Self::parse(s).unwrap_or_default()
   }
 }
 
@@ -845,6 +1174,91 @@ pub enum InputFiles {
   Paths(Vec<std::path::PathBuf>),
   /// In-memory payloads — uploaded without touching disk.
   Payloads(Vec<FilePayload>),
+}
+
+impl From<&std::path::Path> for InputFiles {
+  fn from(path: &std::path::Path) -> Self {
+    Self::Paths(vec![path.to_path_buf()])
+  }
+}
+
+impl From<std::path::PathBuf> for InputFiles {
+  fn from(path: std::path::PathBuf) -> Self {
+    Self::Paths(vec![path])
+  }
+}
+
+impl From<Vec<std::path::PathBuf>> for InputFiles {
+  fn from(paths: Vec<std::path::PathBuf>) -> Self {
+    Self::Paths(paths)
+  }
+}
+
+impl From<&str> for InputFiles {
+  fn from(path: &str) -> Self {
+    Self::Paths(vec![std::path::PathBuf::from(path)])
+  }
+}
+
+impl From<FilePayload> for InputFiles {
+  fn from(payload: FilePayload) -> Self {
+    Self::Payloads(vec![payload])
+  }
+}
+
+impl From<Vec<FilePayload>> for InputFiles {
+  fn from(payloads: Vec<FilePayload>) -> Self {
+    Self::Payloads(payloads)
+  }
+}
+
+/// Argument for `select_option` — anything option-descriptor-shaped
+/// converts: `"value"`, `["a", "b"]`, a single [`SelectOptionValue`]
+/// (see [`SelectOptionValue::by_label`] / [`SelectOptionValue::by_index`]),
+/// or a prepared `Vec<SelectOptionValue>`.
+#[derive(Debug, Clone, Default)]
+pub struct SelectOptionValues(pub Vec<SelectOptionValue>);
+
+impl From<&str> for SelectOptionValues {
+  fn from(value: &str) -> Self {
+    Self(vec![SelectOptionValue::by_value(value)])
+  }
+}
+
+impl From<String> for SelectOptionValues {
+  fn from(value: String) -> Self {
+    Self(vec![SelectOptionValue::by_value(value)])
+  }
+}
+
+impl From<SelectOptionValue> for SelectOptionValues {
+  fn from(value: SelectOptionValue) -> Self {
+    Self(vec![value])
+  }
+}
+
+impl From<Vec<SelectOptionValue>> for SelectOptionValues {
+  fn from(values: Vec<SelectOptionValue>) -> Self {
+    Self(values)
+  }
+}
+
+impl<const N: usize> From<[&str; N]> for SelectOptionValues {
+  fn from(values: [&str; N]) -> Self {
+    Self(values.into_iter().map(SelectOptionValue::by_value).collect())
+  }
+}
+
+impl From<Vec<&str>> for SelectOptionValues {
+  fn from(values: Vec<&str>) -> Self {
+    Self(values.into_iter().map(SelectOptionValue::by_value).collect())
+  }
+}
+
+impl From<&[&str]> for SelectOptionValues {
+  fn from(values: &[&str]) -> Self {
+    Self(values.iter().copied().map(SelectOptionValue::by_value).collect())
+  }
 }
 
 /// Options for `dispatchEvent`.
@@ -1285,13 +1699,20 @@ pub struct BrowserCloseOptions {
   pub reason: Option<String>,
 }
 
+/// Options for `context.close()` — Playwright's `{ reason? }`. The
+/// reason, when set, is recorded on the browser state and surfaces in
+/// errors from operations interrupted by the close.
+#[derive(Debug, Clone, Default)]
+pub struct ContextCloseOptions {
+  pub reason: Option<String>,
+}
+
 /// Navigation options for goto/reload/goBack/goForward.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GotoOptions {
-  /// When to consider navigation complete:
-  /// "load" (default), "domcontentloaded", "networkidle", "commit"
-  pub wait_until: Option<String>,
+  /// When to consider navigation complete. Default: [`LoadState::Load`].
+  pub wait_until: Option<LoadState>,
   /// Maximum navigation timeout in milliseconds.
   pub timeout: Option<u64>,
   /// HTTP `Referer` header to send with the navigation request. Mirrors

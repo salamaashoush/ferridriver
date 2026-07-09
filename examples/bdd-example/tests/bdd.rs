@@ -25,14 +25,14 @@ use ferridriver_bdd::prelude::*;
 async fn navigate_example(world: &mut BrowserWorld) {
   world
     .page()
-    .goto("https://example.com", None)
+    .goto("https://example.com")
     .await
     .map_err(|e| step_err!("{e}"))?;
 }
 
 #[then("I should see the example heading")]
 async fn check_heading(world: &mut BrowserWorld) {
-  let locator = world.page().locator("h1", None);
+  let locator = world.page().locator("h1");
   ferridriver_test::expect::expect(&locator)
     .to_have_text("Example Domain")
     .await

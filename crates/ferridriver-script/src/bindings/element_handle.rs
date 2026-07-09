@@ -211,7 +211,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_click_options(&ctx, options)?;
-    self.inner.click(opts).await.into_js_with(&ctx)
+    self.inner.click().maybe_options(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "dblclick")]
@@ -221,7 +221,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_dblclick_options(&ctx, options)?;
-    self.inner.dblclick(opts).await.into_js_with(&ctx)
+    self.inner.dblclick().maybe_options(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "hover")]
@@ -231,7 +231,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_hover_options(&ctx, options)?;
-    self.inner.hover(opts).await.into_js_with(&ctx)
+    self.inner.hover().maybe_options(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "type")]
@@ -242,7 +242,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
-    self.inner.type_str(&text, opts).await.into_js_with(&ctx)
+    self.inner.type_str(&text).maybe_options(opts).await.into_js_with(&ctx)
   }
 
   #[qjs(rename = "focus")]
@@ -267,7 +267,16 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Vec<u8>> {
     let format = parse_screenshot_format(&ctx, options)?;
-    self.inner.screenshot(format).await.into_js_with(&ctx)
+    let format = match format {
+      ImageFormat::Png => ferridriver::options::ScreenshotFormat::Png,
+      ImageFormat::Jpeg => ferridriver::options::ScreenshotFormat::Jpeg,
+      ImageFormat::Webp => ferridriver::options::ScreenshotFormat::Webp,
+    };
+    let opts = ferridriver::options::ElementScreenshotOptions {
+      format: Some(format),
+      ..Default::default()
+    };
+    self.inner.screenshot().options(opts).await.into_js_with(&ctx)
   }
 
   // ── $eval / $$eval (Playwright parity) ───────────────────────────────
@@ -404,7 +413,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_fill_options(&ctx, options)?;
-    self.inner.fill(&value, opts).await.into_js_with(&ctx)
+    self.inner.fill(&value).maybe_options(opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.check(options?)`.
@@ -415,7 +424,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self.inner.check(opts).await.into_js_with(&ctx)
+    self.inner.check().maybe_options(opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.uncheck(options?)`.
@@ -426,7 +435,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self.inner.uncheck(opts).await.into_js_with(&ctx)
+    self.inner.uncheck().maybe_options(opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.setChecked(checked, options?)`.
@@ -438,7 +447,12 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self.inner.set_checked(checked, opts).await.into_js_with(&ctx)
+    self
+      .inner
+      .set_checked(checked)
+      .maybe_options(opts)
+      .await
+      .into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.tap(options?)`.
@@ -449,7 +463,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_tap_options(&ctx, options)?;
-    self.inner.tap(opts).await.into_js_with(&ctx)
+    self.inner.tap().maybe_options(opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.press(key, options?)`.
@@ -461,7 +475,7 @@ impl ElementHandleJs {
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::convert::parse_press_options(&ctx, options)?;
-    self.inner.press(&key, opts).await.into_js_with(&ctx)
+    self.inner.press(&key).maybe_options(opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.dispatchEvent(type, eventInit?)`.
@@ -482,7 +496,8 @@ impl ElementHandleJs {
     let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
     self
       .inner
-      .dispatch_event(&event_type, init_json, opts)
+      .dispatch_event(&event_type, init_json)
+      .maybe_options(opts)
       .await
       .into_js_with(&ctx)
   }
@@ -497,7 +512,12 @@ impl ElementHandleJs {
   ) -> rquickjs::Result<Vec<String>> {
     let values = crate::bindings::convert::parse_select_option_values(&ctx, values)?;
     let opts = crate::bindings::convert::parse_select_option_options(&ctx, options)?;
-    self.inner.select_option(values, opts).await.into_js_with(&ctx)
+    self
+      .inner
+      .select_option(values)
+      .maybe_options(opts)
+      .await
+      .into_js_with(&ctx)
   }
 
   /// Playwright: `elementHandle.selectText(options?)`.
@@ -516,6 +536,11 @@ impl ElementHandleJs {
   ) -> rquickjs::Result<()> {
     let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
     let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
-    self.inner.set_input_files(files, opts).await.into_js_with(&ctx)
+    self
+      .inner
+      .set_input_files(files)
+      .maybe_options(opts)
+      .await
+      .into_js_with(&ctx)
   }
 }

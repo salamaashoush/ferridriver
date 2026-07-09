@@ -35,7 +35,7 @@ async fn diagnose_scaling() {
     let launch_ms = t.elapsed().as_millis();
     // Close all
     for b in &browsers {
-      b.close(None).await.ok();
+      b.close().await.ok();
     }
     println!(
       "      {n} browser(s) parallel: {launch_ms}ms (amortized: {:.1}ms each)",
@@ -59,20 +59,20 @@ async fn diagnose_scaling() {
     let iters = 10;
     let t = Instant::now();
     for i in 0..iters {
-      let ctx = browser.new_context(None);
+      let ctx = browser.new_context().await.unwrap();
       let page = ctx.new_page().await.unwrap();
       let url =
         format!("data:text/html,<title>T{i}</title><button id='b' onclick=\"this.textContent='d'\">Go</button>");
-      page.goto(&url, None).await.unwrap();
-      page.locator("#b", None).click(None).await.unwrap();
-      let _ = page.locator("#b", None).text_content().await.unwrap();
+      page.goto(&url).await.unwrap();
+      page.locator("#b").click().await.unwrap();
+      let _ = page.locator("#b").text_content().await.unwrap();
       ctx.close().await.ok();
     }
     let per_test = t.elapsed().as_millis() as f64 / iters as f64;
     println!("      {n} Chrome process(es): {per_test:.1}ms/test");
 
     for b in &browsers {
-      b.close(None).await.ok();
+      b.close().await.ok();
     }
   }
   println!();
@@ -99,13 +99,13 @@ async fn diagnose_scaling() {
         for _ in 0..per_worker {
           let i = counter.fetch_add(1, Ordering::Relaxed);
           let t = Instant::now();
-          let ctx = b.new_context(None);
+          let ctx = b.new_context().await.unwrap();
           let page = ctx.new_page().await.unwrap();
           let url =
             format!("data:text/html,<title>T{i}</title><button id='b' onclick=\"this.textContent='d'\">Go</button>");
-          page.goto(&url, None).await.unwrap();
-          page.locator("#b", None).click(None).await.unwrap();
-          let _ = page.locator("#b", None).text_content().await.unwrap();
+          page.goto(&url).await.unwrap();
+          page.locator("#b").click().await.unwrap();
+          let _ = page.locator("#b").text_content().await.unwrap();
           ctx.close().await.ok();
           times.push(t.elapsed());
         }
@@ -128,7 +128,7 @@ async fn diagnose_scaling() {
     );
 
     for b in &browsers {
-      b.close(None).await.ok();
+      b.close().await.ok();
     }
   }
   println!();
@@ -142,12 +142,9 @@ async fn diagnose_scaling() {
     // Measure with a CPU-heavy background task vs without.
     let t = Instant::now();
     for i in 0..iters {
-      let ctx = browser.new_context(None);
+      let ctx = browser.new_context().await.unwrap();
       let page = ctx.new_page().await.unwrap();
-      page
-        .goto(&format!("data:text/html,<title>T{i}</title>"), None)
-        .await
-        .unwrap();
+      page.goto(&format!("data:text/html,<title>T{i}</title>")).await.unwrap();
       ctx.close().await.ok();
     }
     let baseline = t.elapsed().as_millis() as f64 / iters as f64;
@@ -171,12 +168,9 @@ async fn diagnose_scaling() {
 
     let t = Instant::now();
     for i in 0..iters {
-      let ctx = browser.new_context(None);
+      let ctx = browser.new_context().await.unwrap();
       let page = ctx.new_page().await.unwrap();
-      page
-        .goto(&format!("data:text/html,<title>T{i}</title>"), None)
-        .await
-        .unwrap();
+      page.goto(&format!("data:text/html,<title>T{i}</title>")).await.unwrap();
       ctx.close().await.ok();
     }
     let with_load = t.elapsed().as_millis() as f64 / iters as f64;
@@ -184,7 +178,7 @@ async fn diagnose_scaling() {
     for task in cpu_tasks {
       task.abort();
     }
-    browser.close(None).await.ok();
+    browser.close().await.ok();
 
     println!("      Without CPU load: {baseline:.1}ms/test");
     println!("      With CPU load:    {with_load:.1}ms/test");

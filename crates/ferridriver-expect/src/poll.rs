@@ -9,6 +9,26 @@ use crate::AssertionFailure;
 /// Default expect timeout (5 seconds, matching Playwright).
 pub const DEFAULT_EXPECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Process-wide default `expect()` timeout in ms — the runner sets this
+/// from the config's `expectTimeout` before tests start (Playwright's
+/// `config.expect.timeout`). Per-assertion `with_timeout` still wins.
+static DEFAULT_EXPECT_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
+  std::sync::atomic::AtomicU64::new(DEFAULT_EXPECT_TIMEOUT.as_millis() as u64);
+
+/// Override the process-wide default `expect()` timeout.
+pub fn set_default_expect_timeout(timeout: Duration) {
+  DEFAULT_EXPECT_TIMEOUT_MS.store(
+    u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+    std::sync::atomic::Ordering::Relaxed,
+  );
+}
+
+/// The current process-wide default `expect()` timeout.
+#[must_use]
+pub fn default_expect_timeout() -> Duration {
+  Duration::from_millis(DEFAULT_EXPECT_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Retry intervals matching Playwright: [100, 250, 500, 1000, 1000, ...]
 pub const POLL_INTERVALS: &[u64] = &[100, 250, 500, 1000];
 

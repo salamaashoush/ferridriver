@@ -111,7 +111,7 @@ async fn wait_for_text(
   timeout_ms: u64,
 ) -> crate::error::Result<()> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-  let loc = page.locator("body", None);
+  let loc = page.locator("body");
   loop {
     if tokio::time::Instant::now() >= deadline {
       return Err(crate::error::FerriError::timeout(

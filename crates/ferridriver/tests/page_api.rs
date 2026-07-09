@@ -54,7 +54,7 @@ async fn page_api_tests() {
 
   // ── Navigation ──
   page
-    .goto(&data_url("<title>Hello</title><body>World</body>"), None)
+    .goto(&data_url("<title>Hello</title><body>World</body>"))
     .await
     .unwrap();
   let title = page.title().await.unwrap();
@@ -70,156 +70,124 @@ async fn page_api_tests() {
 
   // ── Locator click ──
   page
-    .goto(
-      &data_url("<button id='b' onclick=\"this.textContent='clicked'\">Go</button>"),
-      None,
-    )
+    .goto(&data_url(
+      "<button id='b' onclick=\"this.textContent='clicked'\">Go</button>",
+    ))
     .await
     .unwrap();
-  page.locator("#b", None).click(None).await.unwrap();
+  page.locator("#b").click().await.unwrap();
   let t = eval_str(&page, "document.getElementById('b').textContent")
     .await
     .unwrap();
   assert!(t.contains("clicked"), "locator click: {t}");
 
   // ── Locator fill + input_value ──
-  page.goto(&data_url("<input id='i' type='text'>"), None).await.unwrap();
-  page.locator("#i", None).fill("hello", None).await.unwrap();
-  let v = page.locator("#i", None).input_value().await.unwrap();
+  page.goto(&data_url("<input id='i' type='text'>")).await.unwrap();
+  page.locator("#i").fill("hello").await.unwrap();
+  let v = page.locator("#i").input_value().await.unwrap();
   assert!(v.contains("hello"), "fill + input_value: {v}");
 
   // ── get_by_role ──
   page
-    .goto(&data_url("<button>Save</button><button>Cancel</button>"), None)
+    .goto(&data_url("<button>Save</button><button>Cancel</button>"))
     .await
     .unwrap();
-  let count = page
-    .get_by_role("button", &RoleOptions::default())
-    .count()
-    .await
-    .unwrap();
+  let count = page.get_by_role("button").count().await.unwrap();
   assert_eq!(count, 2, "get_by_role count");
 
   // ── get_by_text ──
-  page
-    .goto(&data_url("<p>Hello World</p><p>Goodbye</p>"), None)
-    .await
-    .unwrap();
-  let count = page
-    .get_by_text(&"Hello".into(), &TextOptions::default())
-    .count()
-    .await
-    .unwrap();
+  page.goto(&data_url("<p>Hello World</p><p>Goodbye</p>")).await.unwrap();
+  let count = page.get_by_text("Hello").count().await.unwrap();
   assert_eq!(count, 1, "get_by_text count");
 
   // ── get_by_label ──
   page
-    .goto(
-      &data_url("<label for='e'>Email</label><input id='e' type='email'>"),
-      None,
-    )
+    .goto(&data_url("<label for='e'>Email</label><input id='e' type='email'>"))
     .await
     .unwrap();
-  page
-    .get_by_label(&"Email".into(), &TextOptions::default())
-    .fill("a@b.com", None)
-    .await
-    .unwrap();
+  page.get_by_label("Email").fill("a@b.com").await.unwrap();
   let v = eval_str(&page, "document.getElementById('e').value").await.unwrap();
   assert!(v.contains("a@b.com"), "get_by_label fill: {v}");
 
   // ── get_by_test_id ──
   page
-    .goto(&data_url("<div data-testid='card'>Content</div>"), None)
+    .goto(&data_url("<div data-testid='card'>Content</div>"))
     .await
     .unwrap();
-  let t = page.get_by_test_id(&"card".into()).text_content().await.unwrap();
+  let t = page.get_by_test_id("card").text_content().await.unwrap();
   assert!(t.unwrap_or_default().contains("Content"), "get_by_test_id");
 
   // ── Locator chaining ──
   page
-    .goto(
-      &data_url("<div class='a'><span>Inside A</span></div><div class='b'><span>Inside B</span></div>"),
-      None,
-    )
+    .goto(&data_url(
+      "<div class='a'><span>Inside A</span></div><div class='b'><span>Inside B</span></div>",
+    ))
     .await
     .unwrap();
-  let t = page
-    .locator("css=.a", None)
-    .locator("css=span", None)
-    .text_content()
-    .await
-    .unwrap();
+  let t = page.locator("css=.a").locator("css=span").text_content().await.unwrap();
   assert!(t.unwrap_or_default().contains("Inside A"), "chain");
 
   // ── first / last / nth ──
   page
-    .goto(&data_url("<ul><li>A</li><li>B</li><li>C</li></ul>"), None)
+    .goto(&data_url("<ul><li>A</li><li>B</li><li>C</li></ul>"))
     .await
     .unwrap();
-  let first = page.locator("css=li", None).first().text_content().await.unwrap();
+  let first = page.locator("css=li").first().text_content().await.unwrap();
   assert!(first.unwrap_or_default().contains("A"), "first");
-  let last = page.locator("css=li", None).last().text_content().await.unwrap();
+  let last = page.locator("css=li").last().text_content().await.unwrap();
   assert!(last.unwrap_or_default().contains("C"), "last");
-  let second = page.locator("css=li", None).nth(1).text_content().await.unwrap();
+  let second = page.locator("css=li").nth(1).text_content().await.unwrap();
   assert!(second.unwrap_or_default().contains("B"), "nth(1)");
 
   // ── Visibility ──
   page
-    .goto(
-      &data_url("<div id='v'>visible</div><div id='h' style='display:none'>hidden</div>"),
-      None,
-    )
+    .goto(&data_url(
+      "<div id='v'>visible</div><div id='h' style='display:none'>hidden</div>",
+    ))
     .await
     .unwrap();
-  assert!(page.locator("#v", None).is_visible().await.unwrap(), "visible");
-  assert!(page.locator("#h", None).is_hidden().await.unwrap(), "hidden");
+  assert!(page.locator("#v").is_visible().await.unwrap(), "visible");
+  assert!(page.locator("#h").is_hidden().await.unwrap(), "hidden");
 
   // ── Enabled / disabled ──
   page
-    .goto(&data_url("<input id='e'><input id='d' disabled>"), None)
+    .goto(&data_url("<input id='e'><input id='d' disabled>"))
     .await
     .unwrap();
-  assert!(page.locator("#e", None).is_enabled().await.unwrap(), "enabled");
-  assert!(page.locator("#d", None).is_disabled().await.unwrap(), "disabled");
+  assert!(page.locator("#e").is_enabled().await.unwrap(), "enabled");
+  assert!(page.locator("#d").is_disabled().await.unwrap(), "disabled");
 
   // ── Checked ──
-  page
-    .goto(&data_url("<input type='checkbox' id='c'>"), None)
-    .await
-    .unwrap();
-  assert!(!page.locator("#c", None).is_checked().await.unwrap(), "unchecked");
-  page.locator("#c", None).check(None).await.unwrap();
-  assert!(page.locator("#c", None).is_checked().await.unwrap(), "checked");
-  page.locator("#c", None).uncheck(None).await.unwrap();
-  assert!(!page.locator("#c", None).is_checked().await.unwrap(), "unchecked again");
+  page.goto(&data_url("<input type='checkbox' id='c'>")).await.unwrap();
+  assert!(!page.locator("#c").is_checked().await.unwrap(), "unchecked");
+  page.locator("#c").check().await.unwrap();
+  assert!(page.locator("#c").is_checked().await.unwrap(), "checked");
+  page.locator("#c").uncheck().await.unwrap();
+  assert!(!page.locator("#c").is_checked().await.unwrap(), "unchecked again");
 
   // ── Editable ──
   page
-    .goto(&data_url("<input id='e'><input id='d' disabled>"), None)
+    .goto(&data_url("<input id='e'><input id='d' disabled>"))
     .await
     .unwrap();
-  assert!(page.locator("#e", None).is_editable().await.unwrap(), "editable");
+  assert!(page.locator("#e").is_editable().await.unwrap(), "editable");
   assert!(
-    !page.locator("#d", None).is_editable().await.unwrap(),
+    !page.locator("#d").is_editable().await.unwrap(),
     "disabled not editable"
   );
 
   // ── innerHTML / innerText ──
   page
-    .goto(&data_url("<div id='d'><b>Bold</b> text</div>"), None)
+    .goto(&data_url("<div id='d'><b>Bold</b> text</div>"))
     .await
     .unwrap();
-  let inner = page.locator("#d", None).inner_html().await.unwrap();
+  let inner = page.locator("#d").inner_html().await.unwrap();
   assert!(inner.contains("<b>"), "innerHTML: {inner}");
-  let text = page.locator("#d", None).inner_text().await.unwrap();
+  let text = page.locator("#d").inner_text().await.unwrap();
   assert!(text.contains("Bold"), "innerText: {text}");
 
   // ── Content + markdown ──
-  page
-    .goto(&data_url("<h1>Title</h1><p>Body text</p>"), None)
-    .await
-    .unwrap();
+  page.goto(&data_url("<h1>Title</h1><p>Body text</p>")).await.unwrap();
   let html = page.content().await.unwrap();
   assert!(html.contains("Title"), "content");
   let md = page.markdown().await.unwrap();
@@ -227,94 +195,83 @@ async fn page_api_tests() {
 
   // ── all_text_contents ──
   page
-    .goto(&data_url("<ul><li>Alpha</li><li>Beta</li><li>Gamma</li></ul>"), None)
+    .goto(&data_url("<ul><li>Alpha</li><li>Beta</li><li>Gamma</li></ul>"))
     .await
     .unwrap();
-  let texts = page.locator("css=li", None).all_text_contents().await.unwrap();
+  let texts = page.locator("css=li").all_text_contents().await.unwrap();
   assert_eq!(texts.len(), 3);
   assert!(texts[0].contains("Alpha"));
   assert!(texts[2].contains("Gamma"));
 
   // ── count ──
-  let count = page.locator("css=li", None).count().await.unwrap();
+  let count = page.locator("css=li").count().await.unwrap();
   assert_eq!(count, 3, "count");
 
   // ── wait_for_selector ──
-  page.goto(&data_url("<div id='d'></div><script>setTimeout(function(){document.getElementById('d').innerHTML='<span id=\"s\">loaded</span>'},200)</script>"), None).await.unwrap();
-  page
-    .wait_for_selector(
-      "#s",
-      WaitOptions {
-        timeout: Some(5000),
-        ..Default::default()
-      },
-    )
-    .await
-    .unwrap();
+  page.goto(&data_url("<div id='d'></div><script>setTimeout(function(){document.getElementById('d').innerHTML='<span id=\"s\">loaded</span>'},200)</script>")).await.unwrap();
+  page.wait_for_selector("#s").timeout(5000u64).await.unwrap();
 
   // ── wait_for_function ──
   page
-    .goto(
-      &data_url("<script>setTimeout(function(){window.ready=true},200)</script>"),
-      None,
-    )
+    .goto(&data_url(
+      "<script>setTimeout(function(){window.ready=true},200)</script>",
+    ))
     .await
     .unwrap();
   let val = page.wait_for_function("window.ready", Some(5000)).await.unwrap();
   assert_eq!(val, serde_json::json!(true));
 
   // ── Screenshot ──
-  page.goto(&data_url("<h1>Screenshot</h1>"), None).await.unwrap();
-  let bytes = page.screenshot(ScreenshotOptions::default()).await.unwrap();
+  page.goto(&data_url("<h1>Screenshot</h1>")).await.unwrap();
+  let bytes = page.screenshot().await.unwrap();
   assert!(bytes.len() > 100, "screenshot bytes");
   assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47], "PNG magic");
 
   // ── dblclick ──
-  page.goto(&data_url("<h1 id='h'>0</h1><button id='b' onclick=\"document.getElementById('h').textContent=Number(document.getElementById('h').textContent)+1\">+</button>"), None).await.unwrap();
-  page.locator("#b", None).dblclick(None).await.unwrap();
+  page.goto(&data_url("<h1 id='h'>0</h1><button id='b' onclick=\"document.getElementById('h').textContent=Number(document.getElementById('h').textContent)+1\">+</button>")).await.unwrap();
+  page.locator("#b").dblclick().await.unwrap();
   let t = eval_str(&page, "document.getElementById('h').textContent")
     .await
     .unwrap();
   assert!(t.contains("2"), "dblclick: {t}");
 
   // ── focus + blur ──
-  page.goto(&data_url("<input id='i'>"), None).await.unwrap();
-  page.locator("#i", None).focus().await.unwrap();
+  page.goto(&data_url("<input id='i'>")).await.unwrap();
+  page.locator("#i").focus().await.unwrap();
   let active = eval_str(&page, "document.activeElement?.id||''").await.unwrap();
   assert!(active.contains("i"), "focus: {active}");
-  page.locator("#i", None).blur().await.unwrap();
+  page.locator("#i").blur().await.unwrap();
   let active = eval_str(&page, "document.activeElement?.tagName||''").await.unwrap();
   assert!(!active.contains("INPUT"), "blur: {active}");
 
   // ── select_option ──
   page
-    .goto(
-      &data_url("<select id='s'><option value='a'>Apple</option><option value='b'>Banana</option></select>"),
-      None,
-    )
+    .goto(&data_url(
+      "<select id='s'><option value='a'>Apple</option><option value='b'>Banana</option></select>",
+    ))
     .await
     .unwrap();
   // Select by label text — the original test passed "Banana" which is
   // the option's visible text, not its `value` attribute ("b").
   page
-    .locator("#s", None)
-    .select_option(vec![SelectOptionValue::by_label("Banana")], None)
+    .locator("#s")
+    .select_option(vec![SelectOptionValue::by_label("Banana")])
     .await
     .unwrap();
   let v = eval_str(&page, "document.getElementById('s').value").await.unwrap();
   assert!(v.contains("b"), "select_option: {v}");
 
   // ── Click guard on <select> ──
-  let r = page.locator("#s", None).click(None).await;
+  let r = page.locator("#s").click().await;
   assert!(r.is_err(), "clicking select should error");
 
   // ── filter ──
   page
-    .goto(&data_url("<div><p>Keep</p></div><div><p>Remove</p></div>"), None)
+    .goto(&data_url("<div><p>Keep</p></div><div><p>Remove</p></div>"))
     .await
     .unwrap();
   let count = page
-    .locator("css=div", None)
+    .locator("css=div")
     .filter(&FilterOptions {
       has_text: Some("Keep".into()),
       ..Default::default()
@@ -326,10 +283,9 @@ async fn page_api_tests() {
 
   // ── Viewport configuration ──
   page
-    .goto(
-      &data_url("<body><script>document.title=window.innerWidth+'x'+window.innerHeight</script></body>"),
-      None,
-    )
+    .goto(&data_url(
+      "<body><script>document.title=window.innerWidth+'x'+window.innerHeight</script></body>",
+    ))
     .await
     .unwrap();
   let initial = page.title().await.unwrap();
@@ -341,10 +297,9 @@ async fn page_api_tests() {
   // Set to 1024x768
   page.set_viewport_size(1024, 768).await.unwrap();
   page
-    .goto(
-      &data_url("<body><script>document.title=window.innerWidth+'x'+window.innerHeight</script></body>"),
-      None,
-    )
+    .goto(&data_url(
+      "<body><script>document.title=window.innerWidth+'x'+window.innerHeight</script></body>",
+    ))
     .await
     .unwrap();
   let resized = page.title().await.unwrap();
@@ -354,10 +309,9 @@ async fn page_api_tests() {
   // Set to mobile size
   page.set_viewport_size(375, 812).await.unwrap();
   page
-    .goto(
-      &data_url("<body><script>document.title=window.innerWidth+'x'+window.innerHeight</script></body>"),
-      None,
-    )
+    .goto(&data_url(
+      "<body><script>document.title=window.innerWidth+'x'+window.innerHeight</script></body>",
+    ))
     .await
     .unwrap();
   let mobile = page.title().await.unwrap();
@@ -366,13 +320,11 @@ async fn page_api_tests() {
   // Restore
   page.set_viewport_size(initial_w, initial_h).await.unwrap();
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshot_for_ai_tests() {
-  use ferridriver::snapshot::SnapshotOptions;
-
   let browser = chromium()
     .launch(LaunchOptions::default())
     .await
@@ -381,13 +333,12 @@ async fn snapshot_for_ai_tests() {
 
   // ── Basic snapshot ──
   page
-    .goto(
-      &data_url("<h1>Hello World</h1><button>Submit</button><a href='#'>Link</a>"),
-      None,
-    )
+    .goto(&data_url(
+      "<h1>Hello World</h1><button>Submit</button><a href='#'>Link</a>",
+    ))
     .await
     .unwrap();
-  let result = page.snapshot_for_ai(SnapshotOptions::default()).await.unwrap();
+  let result = page.snapshot_for_ai().await.unwrap();
   assert!(result.full.contains("### Page"), "should have page header");
   assert!(
     result.full.contains("heading"),
@@ -406,10 +357,10 @@ async fn snapshot_for_ai_tests() {
 
   // ── Page header includes URL and title ──
   page
-    .goto(&data_url("<title>Test Title</title><body>Content</body>"), None)
+    .goto(&data_url("<title>Test Title</title><body>Content</body>"))
     .await
     .unwrap();
-  let result = page.snapshot_for_ai(SnapshotOptions::default()).await.unwrap();
+  let result = page.snapshot_for_ai().await.unwrap();
   assert!(
     result.full.contains("Title: Test Title"),
     "should contain page title: {}",
@@ -419,26 +370,11 @@ async fn snapshot_for_ai_tests() {
 
   // ── Depth limiting ──
   page
-    .goto(
-      &data_url("<div><ul><li><a href='#'>Deep Link</a></li></ul></div>"),
-      None,
-    )
+    .goto(&data_url("<div><ul><li><a href='#'>Deep Link</a></li></ul></div>"))
     .await
     .unwrap();
-  let deep = page
-    .snapshot_for_ai(SnapshotOptions {
-      depth: None,
-      ..Default::default()
-    })
-    .await
-    .unwrap();
-  let shallow = page
-    .snapshot_for_ai(SnapshotOptions {
-      depth: Some(2),
-      ..Default::default()
-    })
-    .await
-    .unwrap();
+  let deep = page.snapshot_for_ai().await.unwrap();
+  let shallow = page.snapshot_for_ai().depth(2).await.unwrap();
   // Deep should have more content than shallow
   assert!(
     deep.full.len() >= shallow.full.len(),
@@ -448,17 +384,8 @@ async fn snapshot_for_ai_tests() {
   );
 
   // ── Incremental tracking: first call ──
-  page
-    .goto(&data_url("<h1>V1</h1><button>Click</button>"), None)
-    .await
-    .unwrap();
-  let r1 = page
-    .snapshot_for_ai(SnapshotOptions {
-      track: Some("t1".to_string()),
-      ..Default::default()
-    })
-    .await
-    .unwrap();
+  page.goto(&data_url("<h1>V1</h1><button>Click</button>")).await.unwrap();
+  let r1 = page.snapshot_for_ai().track("t1").await.unwrap();
   assert!(r1.full.contains("V1"), "first call should have V1");
   assert!(
     r1.incremental.is_none(),
@@ -466,38 +393,23 @@ async fn snapshot_for_ai_tests() {
   );
 
   // ── Incremental tracking: content changed ──
-  page
-    .goto(&data_url("<h1>V2</h1><button>Click</button>"), None)
-    .await
-    .unwrap();
-  let r2 = page
-    .snapshot_for_ai(SnapshotOptions {
-      track: Some("t1".to_string()),
-      ..Default::default()
-    })
-    .await
-    .unwrap();
+  page.goto(&data_url("<h1>V2</h1><button>Click</button>")).await.unwrap();
+  let r2 = page.snapshot_for_ai().track("t1").await.unwrap();
   assert!(r2.full.contains("V2"), "second call should have V2");
   assert!(r2.incremental.is_some(), "should have incremental after change");
   let inc = r2.incremental.unwrap();
   assert!(inc.contains("V2"), "incremental should contain changed heading: {inc}");
 
   // ── Incremental tracking: no change ──
-  let r3 = page
-    .snapshot_for_ai(SnapshotOptions {
-      track: Some("t1".to_string()),
-      ..Default::default()
-    })
-    .await
-    .unwrap();
+  let r3 = page.snapshot_for_ai().track("t1").await.unwrap();
   assert!(r3.incremental.is_none(), "no incremental when nothing changed");
 
   // ── Ref map has valid refs ──
   page
-    .goto(&data_url("<button id='b1'>Save</button><a href='#'>Help</a>"), None)
+    .goto(&data_url("<button id='b1'>Save</button><a href='#'>Help</a>"))
     .await
     .unwrap();
-  let result = page.snapshot_for_ai(SnapshotOptions::default()).await.unwrap();
+  let result = page.snapshot_for_ai().await.unwrap();
   // Refs should appear in the snapshot text as [ref=eN]
   let has_refs = result.full.contains("[ref=");
   assert!(has_refs, "snapshot should contain ref labels: {}", result.full);
@@ -507,7 +419,7 @@ async fn snapshot_for_ai_tests() {
     assert!(*node_id > 0, "backend node ID should be positive: {node_id}");
   }
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -528,10 +440,9 @@ async fn add_init_script_tests() {
 
   // Navigate -- the init script should run before page JS
   page
-    .goto(
-      &data_url("<script>document.title = window.__test_init || 'missing'</script>"),
-      None,
-    )
+    .goto(&data_url(
+      "<script>document.title = window.__test_init || 'missing'</script>",
+    ))
     .await
     .unwrap();
   let title = page.title().await.unwrap();
@@ -542,10 +453,9 @@ async fn add_init_script_tests() {
 
   // Navigate again -- init script persists across navigations
   page
-    .goto(
-      &data_url("<script>document.title = window.__test_init || 'missing'</script>"),
-      None,
-    )
+    .goto(&data_url(
+      "<script>document.title = window.__test_init || 'missing'</script>",
+    ))
     .await
     .unwrap();
   let title = page.title().await.unwrap();
@@ -557,10 +467,9 @@ async fn add_init_script_tests() {
     .await
     .unwrap();
   page
-    .goto(
-      &data_url("<script>document.title = (window.__test_init || '') + ':' + (window.__test_init2 || '')</script>"),
-      None,
-    )
+    .goto(&data_url(
+      "<script>document.title = (window.__test_init || '') + ':' + (window.__test_init2 || '')</script>",
+    ))
     .await
     .unwrap();
   let title = page.title().await.unwrap();
@@ -569,10 +478,9 @@ async fn add_init_script_tests() {
   // Remove the first init script via the Disposable handle.
   disposable.dispose().await.unwrap();
   page
-    .goto(
-      &data_url("<script>document.title = (window.__test_init || 'gone') + ':' + (window.__test_init2 || '')</script>"),
-      None,
-    )
+    .goto(&data_url(
+      "<script>document.title = (window.__test_init || 'gone') + ':' + (window.__test_init2 || '')</script>",
+    ))
     .await
     .unwrap();
   let title = page.title().await.unwrap();
@@ -582,16 +490,15 @@ async fn add_init_script_tests() {
   // semantics) and the script stays gone.
   disposable.dispose().await.unwrap();
   page
-    .goto(
-      &data_url("<script>document.title = (window.__test_init || 'gone') + ':' + (window.__test_init2 || '')</script>"),
-      None,
-    )
+    .goto(&data_url(
+      "<script>document.title = (window.__test_init || 'gone') + ':' + (window.__test_init2 || '')</script>",
+    ))
     .await
     .unwrap();
   let title = page.title().await.unwrap();
   assert_eq!(title, "gone:second", "repeat dispose() must stay idempotent");
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -610,30 +517,27 @@ async fn dialog_handling_tests() {
   // `hasHandlers === false`. Prompts return null because the backend
   // dismisses them.
   page
-    .goto(
-      &data_url("<script>alert('hello'); document.title = 'after_alert'</script>"),
-      None,
-    )
+    .goto(&data_url(
+      "<script>alert('hello'); document.title = 'after_alert'</script>",
+    ))
     .await
     .unwrap();
   let title = page.title().await.unwrap();
   assert_eq!(title, "after_alert", "alert should be auto-closed so script continues");
 
   page
-    .goto(
-      &data_url("<script>var r = confirm('sure?'); document.title = r ? 'yes' : 'no'</script>"),
-      None,
-    )
+    .goto(&data_url(
+      "<script>var r = confirm('sure?'); document.title = r ? 'yes' : 'no'</script>",
+    ))
     .await
     .unwrap();
   let title = page.title().await.unwrap();
   assert_eq!(title, "no", "confirm should be auto-dismissed when no listener");
 
   page
-    .goto(
-      &data_url("<script>var r = prompt('name?', 'default'); document.title = r || 'null'</script>"),
-      None,
-    )
+    .goto(&data_url(
+      "<script>var r = prompt('name?', 'default'); document.title = r || 'null'</script>",
+    ))
     .await
     .unwrap();
   let title = page.title().await.unwrap();
@@ -651,10 +555,9 @@ async fn dialog_handling_tests() {
     }),
   );
   page
-    .goto(
-      &data_url("<script>var r = confirm('sure?'); document.title = r ? 'yes' : 'no'</script>"),
-      None,
-    )
+    .goto(&data_url(
+      "<script>var r = confirm('sure?'); document.title = r ? 'yes' : 'no'</script>",
+    ))
     .await
     .unwrap();
   let title = page.title().await.unwrap();
@@ -677,16 +580,15 @@ async fn dialog_handling_tests() {
     }),
   );
   page
-    .goto(
-      &data_url("<script>var r = prompt('name?'); document.title = r || 'null'</script>"),
-      None,
-    )
+    .goto(&data_url(
+      "<script>var r = prompt('name?'); document.title = r || 'null'</script>",
+    ))
     .await
     .unwrap();
   let title = page.title().await.unwrap();
   assert_eq!(title, "custom_answer", "prompt should get custom answer from listener");
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -698,7 +600,7 @@ async fn add_script_style_tag_tests() {
   let page = browser.page().await.expect("get page");
 
   // Inline script tag
-  page.goto(&data_url("<body></body>"), None).await.unwrap();
+  page.goto(&data_url("<body></body>")).await.unwrap();
   page
     .add_script_tag(None, Some("document.title = 'injected'"), None)
     .await
@@ -707,14 +609,14 @@ async fn add_script_style_tag_tests() {
   assert_eq!(title, "injected", "inline script tag should execute");
 
   // Inline style tag
-  page.goto(&data_url("<div id='box'>text</div>"), None).await.unwrap();
+  page.goto(&data_url("<div id='box'>text</div>")).await.unwrap();
   page.add_style_tag(None, Some("#box { color: red }")).await.unwrap();
   let color = eval_str(&page, "getComputedStyle(document.getElementById('box')).color")
     .await
     .unwrap();
   assert_eq!(color, "rgb(255, 0, 0)", "inline style tag should apply: {color}");
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -742,7 +644,7 @@ async fn expose_function_tests() {
     .unwrap();
 
   // Navigate and call the exposed function from page JS
-  page.goto(&data_url("<body></body>"), None).await.unwrap();
+  page.goto(&data_url("<body></body>")).await.unwrap();
   let result = eval_str(
     &page,
     "(async () => { const r = await window.double(21); return String(r); })()",
@@ -771,7 +673,7 @@ async fn expose_function_tests() {
   assert_eq!(result, "Hello, Rust!", "greet function should work: {result}");
 
   // Exposed function persists across navigations
-  page.goto(&data_url("<body></body>"), None).await.unwrap();
+  page.goto(&data_url("<body></body>")).await.unwrap();
   let result = eval_str(&page, "(async () => { return String(await window.double(5)); })()")
     .await
     .unwrap();
@@ -805,7 +707,7 @@ async fn expose_function_tests() {
   let result = eval_str(&page, "typeof window.double").await.unwrap();
   assert_eq!(result, "undefined", "removed function should be gone");
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -817,13 +719,13 @@ async fn wait_for_load_state_tests() {
   let page = browser.page().await.expect("get page");
 
   // "load" state (default)
-  page.goto(&data_url("<body>content</body>"), None).await.unwrap();
+  page.goto(&data_url("<body>content</body>")).await.unwrap();
   page.wait_for_load_state(Some("load")).await.unwrap();
   let state = eval_str(&page, "document.readyState").await.unwrap();
   assert_eq!(state, "complete", "should be complete after load state");
 
   // "domcontentloaded" state
-  page.goto(&data_url("<body>content</body>"), None).await.unwrap();
+  page.goto(&data_url("<body>content</body>")).await.unwrap();
   page.wait_for_load_state(Some("domcontentloaded")).await.unwrap();
   let state = eval_str(&page, "document.readyState").await.unwrap();
   assert!(
@@ -832,17 +734,17 @@ async fn wait_for_load_state_tests() {
   );
 
   // None defaults to "load"
-  page.goto(&data_url("<body>content</body>"), None).await.unwrap();
+  page.goto(&data_url("<body>content</body>")).await.unwrap();
   page.wait_for_load_state(None).await.unwrap();
   let state = eval_str(&page, "document.readyState").await.unwrap();
   assert_eq!(state, "complete");
 
   // "networkidle" -- page with no pending requests
-  page.goto(&data_url("<body>idle</body>"), None).await.unwrap();
+  page.goto(&data_url("<body>idle</body>")).await.unwrap();
   page.wait_for_load_state(Some("networkidle")).await.unwrap();
   // If we get here without timeout, networkidle worked
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -853,15 +755,14 @@ async fn locator_evaluate_tests() {
     .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
-  page.goto(&data_url("<ul><li class='item'>Alpha</li><li class='item'>Beta</li><li class='item'>Gamma</li></ul><h1 id='title'>Hello</h1>"), None).await.unwrap();
+  page.goto(&data_url("<ul><li class='item'>Alpha</li><li class='item'>Beta</li><li class='item'>Gamma</li></ul><h1 id='title'>Hello</h1>")).await.unwrap();
 
   // evaluate on single element
   let tag = page
-    .locator("#title", None)
+    .locator("#title")
     .evaluate(
       "el => el.tagName",
       ferridriver::protocol::SerializedArgument::default(),
-      None,
       None,
     )
     .await
@@ -870,11 +771,10 @@ async fn locator_evaluate_tests() {
   assert_eq!(tag, Some(serde_json::json!("H1")));
 
   let text = page
-    .locator("#title", None)
+    .locator("#title")
     .evaluate(
       "el => el.textContent",
       ferridriver::protocol::SerializedArgument::default(),
-      None,
       None,
     )
     .await
@@ -884,7 +784,7 @@ async fn locator_evaluate_tests() {
 
   // evaluate_all on multiple elements
   let count = page
-    .locator("css=.item", None)
+    .locator("css=.item")
     .evaluate_all(
       "elements => elements.length",
       ferridriver::protocol::SerializedArgument::default(),
@@ -896,7 +796,7 @@ async fn locator_evaluate_tests() {
   assert_eq!(count, Some(serde_json::json!(3)));
 
   let texts = page
-    .locator("css=.item", None)
+    .locator("css=.item")
     .evaluate_all(
       "elements => elements.map(function(e){return e.textContent})",
       ferridriver::protocol::SerializedArgument::default(),
@@ -909,11 +809,10 @@ async fn locator_evaluate_tests() {
 
   // evaluate with computed values
   let rect = page
-    .locator("#title", None)
+    .locator("#title")
     .evaluate(
       "el => ({w: el.offsetWidth, h: el.offsetHeight})",
       ferridriver::protocol::SerializedArgument::default(),
-      None,
       None,
     )
     .await
@@ -926,7 +825,7 @@ async fn locator_evaluate_tests() {
     "should have width"
   );
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -939,46 +838,45 @@ async fn locator_set_checked_tap_select_text() {
 
   // set_checked
   page
-    .goto(
-      &data_url("<input id='cb' type='checkbox'><input id='inp' type='text' value='select me'>"),
-      None,
-    )
+    .goto(&data_url(
+      "<input id='cb' type='checkbox'><input id='inp' type='text' value='select me'>",
+    ))
     .await
     .unwrap();
-  assert!(!page.locator("#cb", None).is_checked().await.unwrap());
-  page.locator("#cb", None).set_checked(true, None).await.unwrap();
+  assert!(!page.locator("#cb").is_checked().await.unwrap());
+  page.locator("#cb").set_checked(true).await.unwrap();
   assert!(
-    page.locator("#cb", None).is_checked().await.unwrap(),
+    page.locator("#cb").is_checked().await.unwrap(),
     "should be checked after set_checked(true)"
   );
-  page.locator("#cb", None).set_checked(false, None).await.unwrap();
+  page.locator("#cb").set_checked(false).await.unwrap();
   assert!(
-    !page.locator("#cb", None).is_checked().await.unwrap(),
+    !page.locator("#cb").is_checked().await.unwrap(),
     "should be unchecked after set_checked(false)"
   );
-  page.locator("#cb", None).set_checked(true, None).await.unwrap();
-  page.locator("#cb", None).set_checked(true, None).await.unwrap(); // idempotent
+  page.locator("#cb").set_checked(true).await.unwrap();
+  page.locator("#cb").set_checked(true).await.unwrap(); // idempotent
   assert!(
-    page.locator("#cb", None).is_checked().await.unwrap(),
+    page.locator("#cb").is_checked().await.unwrap(),
     "double set_checked(true) should still be checked"
   );
 
   // select_text
-  page.locator("#inp", None).select_text().await.unwrap();
+  page.locator("#inp").select_text().await.unwrap();
   let selected = eval_str(&page, "window.getSelection().toString()").await.unwrap();
   assert_eq!(selected, "select me", "select_text should select all text in input");
 
   // tap -- listens for both touchend (Chrome) and pointerup with touch type (WebKit fallback)
-  page.goto(&data_url("<button id='btn'>tap me</button><script>var b=document.getElementById('btn');b.addEventListener('touchend',function(){this.textContent='tapped'});b.addEventListener('pointerup',function(e){if(e.pointerType==='touch')this.textContent='tapped'})</script>"), None).await.unwrap();
-  page.locator("#btn", None).tap(None).await.unwrap();
-  let text = page.locator("#btn", None).text_content().await.unwrap();
+  page.goto(&data_url("<button id='btn'>tap me</button><script>var b=document.getElementById('btn');b.addEventListener('touchend',function(){this.textContent='tapped'});b.addEventListener('pointerup',function(e){if(e.pointerType==='touch')this.textContent='tapped'})</script>")).await.unwrap();
+  page.locator("#btn").tap().await.unwrap();
+  let text = page.locator("#btn").text_content().await.unwrap();
   assert_eq!(
     text.unwrap_or_default(),
     "tapped",
     "tap should fire touch/pointer events"
   );
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -989,7 +887,7 @@ async fn storage_state_tests() {
     .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
-  page.goto(&data_url("<body>storage</body>"), None).await.unwrap();
+  page.goto(&data_url("<body>storage</body>")).await.unwrap();
 
   // Save storage state (returns Playwright-compatible structure)
   let state = page.storage_state().await.unwrap();
@@ -1012,7 +910,7 @@ async fn storage_state_tests() {
   assert!(state2.get("cookies").unwrap().is_array());
   assert!(state2.get("origins").unwrap().is_array());
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1027,14 +925,14 @@ async fn page_close_is_closed_tests() {
   assert!(!page.is_closed(), "new page should not be closed");
 
   // Close it
-  page.close(None).await.unwrap();
+  page.close().await.unwrap();
   assert!(page.is_closed(), "page should be closed after close()");
 
   // Closing again should be idempotent
-  page.close(None).await.unwrap();
+  page.close().await.unwrap();
   assert!(page.is_closed());
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1046,15 +944,14 @@ async fn locator_or_and_tests() {
   let page = browser.page().await.expect("get page");
 
   page
-    .goto(
-      &data_url("<button id='a'>Alpha</button><span id='b'>Beta</span><div id='c'>Gamma</div>"),
-      None,
-    )
+    .goto(&data_url(
+      "<button id='a'>Alpha</button><span id='b'>Beta</span><div id='c'>Gamma</div>",
+    ))
     .await
     .unwrap();
 
   // or() with CSS selectors -- should find elements from either selector
-  let combined = page.locator("#a", None).or(&page.locator("#b", None));
+  let combined = page.locator("#a").or(&page.locator("#b"));
   let count = combined.count().await.unwrap();
   assert_eq!(count, 2, "or() should match both selectors: count={count}");
 
@@ -1070,13 +967,12 @@ async fn locator_or_and_tests() {
   //   `<p class="a">A only</p>`       -> does NOT match
   //   `<span>only text no class</span>` -> does NOT match
   page
-    .goto(
-      &data_url("<p class='a b'>Both</p><p class='a'>A only</p><p class='b'>B only</p>"),
-      None,
-    )
+    .goto(&data_url(
+      "<p class='a b'>Both</p><p class='a'>A only</p><p class='b'>B only</p>",
+    ))
     .await
     .unwrap();
-  let and_loc = page.locator("css=.a", None).and(&page.locator("css=.b", None));
+  let and_loc = page.locator("css=.a").and(&page.locator("css=.b"));
   let count = and_loc.count().await.unwrap();
   assert_eq!(count, 1, "and() should match only the element with both classes");
   let text = and_loc.text_content().await.unwrap();
@@ -1086,7 +982,7 @@ async fn locator_or_and_tests() {
     "and() should return the intersection element"
   );
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1119,7 +1015,7 @@ async fn network_interception_tests() {
     .unwrap();
 
   // Navigate to the mocked URL -- Fetch intercepts the navigation request
-  page.goto("http://mock.test/mock-page", None).await.unwrap();
+  page.goto("http://mock.test/mock-page").await.unwrap();
   let title = page.title().await.unwrap();
   assert_eq!(title, "Mocked", "navigated page should show mocked content: {title}");
   let body = eval_str(&page, "document.body.textContent").await.unwrap();
@@ -1199,7 +1095,7 @@ async fn network_interception_tests() {
     .await
     .unwrap();
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1217,32 +1113,27 @@ async fn quick_wins_tests() {
   assert!(!contexts.is_empty(), "should have at least one context");
 
   // ── locator.right_click ──
-  page.goto(&data_url("<div id='target' oncontextmenu=\"document.title='context_menu';return false\" style='padding:20px'>Right click me</div>"), None).await.unwrap();
-  page.locator("#target", None).right_click().await.unwrap();
+  page.goto(&data_url("<div id='target' oncontextmenu=\"document.title='context_menu';return false\" style='padding:20px'>Right click me</div>")).await.unwrap();
+  page.locator("#target").right_click().await.unwrap();
   let title = page.title().await.unwrap();
   assert_eq!(title, "context_menu", "right_click should fire contextmenu: {title}");
 
   // ── locator.is_attached ──
-  page.goto(&data_url("<div id='exists'>here</div>"), None).await.unwrap();
+  page.goto(&data_url("<div id='exists'>here</div>")).await.unwrap();
   assert!(
-    page.locator("#exists", None).is_attached().await.unwrap(),
+    page.locator("#exists").is_attached().await.unwrap(),
     "existing element should be attached"
   );
   assert!(
-    !page.locator("#gone", None).is_attached().await.unwrap(),
+    !page.locator("#gone").is_attached().await.unwrap(),
     "missing element should not be attached"
   );
 
   // ── goto with options ──
   page
-    .goto(
-      &data_url("<title>Opts</title><body>content</body>"),
-      Some(GotoOptions {
-        wait_until: Some("domcontentloaded".into()),
-        timeout: Some(10000),
-        referer: None,
-      }),
-    )
+    .goto(&data_url("<title>Opts</title><body>content</body>"))
+    .wait_until("domcontentloaded")
+    .timeout(10000u64)
     .await
     .unwrap();
   let title = page.title().await.unwrap();
@@ -1255,10 +1146,10 @@ async fn quick_wins_tests() {
   // ── page.is_closed after close ──
   let page2 = browser.new_page_with_url("about:blank").await.unwrap();
   assert!(!page2.is_closed());
-  page2.close(None).await.unwrap();
+  page2.close().await.unwrap();
   assert!(page2.is_closed());
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
   assert!(!browser.is_connected(), "browser should be disconnected after close");
 }
 
@@ -1282,7 +1173,7 @@ async fn console_storm_is_lossless() {
     .await
     .expect("launch browser");
   let page = browser.page().await.expect("get page");
-  page.goto(&data_url("<title>storm</title>"), None).await.expect("goto");
+  page.goto(&data_url("<title>storm</title>")).await.expect("goto");
 
   let received = std::sync::Arc::new(AtomicU64::new(0));
   let counter = std::sync::Arc::clone(&received);
@@ -1312,5 +1203,5 @@ async fn console_storm_is_lossless() {
     "every console event must be delivered"
   );
 
-  browser.close(None).await.unwrap();
+  browser.close().await.unwrap();
 }

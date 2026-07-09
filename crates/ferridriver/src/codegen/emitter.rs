@@ -29,10 +29,10 @@ pub struct RustEmitter;
 impl CodeEmitter for RustEmitter {
   fn header(&self, url: &str) -> String {
     format!(
-      r#"use ferridriver::prelude::*;
+      r#"use ferridriver_test::prelude::*;
 
 #[ferritest]
-async fn recorded_test(page: Page) {{
+async fn recorded_test(page: Arc<Page>) {{
   page.goto("{}").await?;
 "#,
       escape_rust(url)

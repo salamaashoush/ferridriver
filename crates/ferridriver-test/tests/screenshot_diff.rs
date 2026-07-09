@@ -40,7 +40,7 @@ async fn screenshot_creates_baseline_then_matches() {
   }
 
   // First call: creates baseline.
-  let result = expect(&page.locator("#box", None)).to_have_screenshot("red_box").await;
+  let result = expect(&page.locator("#box")).to_have_screenshot("red_box").await;
   assert!(result.is_ok(), "first screenshot should create baseline: {result:?}");
 
   // Verify baseline file exists.
@@ -55,13 +55,13 @@ async fn screenshot_creates_baseline_then_matches() {
   unsafe {
     std::env::remove_var("UPDATE_SNAPSHOTS");
   }
-  let result = expect(&page.locator("#box", None)).to_have_screenshot("red_box").await;
+  let result = expect(&page.locator("#box")).to_have_screenshot("red_box").await;
   assert!(result.is_ok(), "identical screenshot should match: {result:?}");
 
   unsafe {
     std::env::remove_var("SNAPSHOT_DIR");
   }
-  let _ = browser.close(None).await;
+  let _ = browser.close().await;
   server.stop().await;
   let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -95,7 +95,7 @@ async fn screenshot_detects_visual_change() {
     std::env::set_var("UPDATE_SNAPSHOTS", "1");
     std::env::set_var("SNAPSHOT_DIR", snap_dir.as_os_str());
   }
-  expect(&page.locator("#box", None))
+  expect(&page.locator("#box"))
     .to_have_screenshot("color_box")
     .await
     .unwrap();
@@ -114,9 +114,7 @@ async fn screenshot_detects_visual_change() {
     .unwrap();
 
   // Should fail with pixel diff.
-  let result = expect(&page.locator("#box", None))
-    .to_have_screenshot("color_box")
-    .await;
+  let result = expect(&page.locator("#box")).to_have_screenshot("color_box").await;
   assert!(result.is_err(), "changed screenshot should fail");
 
   let err = result.unwrap_err();
@@ -141,7 +139,7 @@ async fn screenshot_detects_visual_change() {
   unsafe {
     std::env::remove_var("SNAPSHOT_DIR");
   }
-  let _ = browser.close(None).await;
+  let _ = browser.close().await;
   server.stop().await;
   let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -175,7 +173,7 @@ async fn screenshot_size_mismatch_detected() {
     std::env::set_var("UPDATE_SNAPSHOTS", "1");
     std::env::set_var("SNAPSHOT_DIR", snap_dir.as_os_str());
   }
-  expect(&page.locator("#box", None))
+  expect(&page.locator("#box"))
     .to_have_screenshot("size_box")
     .await
     .unwrap();
@@ -194,7 +192,7 @@ async fn screenshot_size_mismatch_detected() {
     .unwrap();
 
   // Should fail with size mismatch.
-  let result = expect(&page.locator("#box", None)).to_have_screenshot("size_box").await;
+  let result = expect(&page.locator("#box")).to_have_screenshot("size_box").await;
   assert!(result.is_err(), "resized screenshot should fail");
   let err = result.unwrap_err();
   assert!(
@@ -206,7 +204,7 @@ async fn screenshot_size_mismatch_detected() {
   unsafe {
     std::env::remove_var("SNAPSHOT_DIR");
   }
-  let _ = browser.close(None).await;
+  let _ = browser.close().await;
   server.stop().await;
   let _ = std::fs::remove_dir_all(&tmp);
 }

@@ -126,10 +126,7 @@ async fn host(args: SessionHostArgs) -> anyhow::Result<()> {
   // client sees a ready page immediately.
   let page = browser.new_page().await.context("opening the session's first page")?;
   if let Some(url) = &args.url {
-    page
-      .goto(url, None)
-      .await
-      .with_context(|| format!("navigating to {url}"))?;
+    page.goto(url).await.with_context(|| format!("navigating to {url}"))?;
   }
 
   let registry = Registry::open()?;
@@ -150,7 +147,7 @@ async fn host(args: SessionHostArgs) -> anyhow::Result<()> {
     },
   }
   drop(session);
-  browser.close(None).await.ok();
+  browser.close().await.ok();
   Ok(())
 }
 

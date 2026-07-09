@@ -108,7 +108,7 @@ impl FileChooser {
   /// Forwards the element's `set_input_files` error (missing file,
   /// backend protocol failure, disposed handle).
   pub async fn set_files(&self, files: InputFiles, opts: Option<SetInputFilesOptions>) -> Result<()> {
-    self.inner.element.set_input_files(files, opts).await
+    self.inner.element.set_input_files_impl(files, opts).await
   }
 }
 

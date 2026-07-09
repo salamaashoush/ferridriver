@@ -44,6 +44,64 @@ pub type SetupFn =
 /// Async teardown function: receives the Arc value to clean up.
 pub type TeardownFn = Arc<dyn Fn(ArcValue) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+/// A fixture value paired with an optional teardown, returned from
+/// `#[fixture]` bodies that need cleanup when their scope ends:
+///
+/// ```ignore
+/// #[fixture(scope = "worker")]
+/// async fn db(_ctx: TestContext) -> ferridriver_test::Result<Fixture<DbHandle>> {
+///     let db = DbHandle::connect().await?;
+///     Ok(Fixture::new(db).on_teardown(|db| async move { db.drop_schema().await; }))
+/// }
+/// ```
+///
+/// The teardown receives the shared `Arc<T>` when the fixture's scope
+/// tears down (reverse setup order, like Playwright fixture cleanup).
+pub struct Fixture<T> {
+  value: T,
+  teardown: Option<Box<dyn FnOnce(Arc<T>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+}
+
+impl<T: Any + Send + Sync> Fixture<T> {
+  pub fn new(value: T) -> Self {
+    Self { value, teardown: None }
+  }
+
+  /// Attach an async teardown, run when the fixture's scope ends.
+  #[must_use]
+  pub fn on_teardown<F, Fut>(mut self, teardown: F) -> Self
+  where
+    F: FnOnce(Arc<T>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+  {
+    self.teardown = Some(Box::new(move |value| Box::pin(teardown(value))));
+    self
+  }
+
+  /// Split into the value and a pool-registrable teardown. Consumed by
+  /// the `#[fixture]` macro expansion.
+  #[must_use]
+  pub fn into_parts(self) -> (T, Option<TeardownFn>) {
+    let teardown = self.teardown.map(|f| {
+      let cell = std::sync::Mutex::new(Some(f));
+      Arc::new(move |value: ArcValue| -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let f = cell.lock().ok().and_then(|mut guard| guard.take());
+        match (f, value.downcast::<T>()) {
+          (Some(f), Ok(typed)) => f(typed),
+          _ => Box::pin(async {}),
+        }
+      }) as TeardownFn
+    });
+    (self.value, teardown)
+  }
+}
+
+impl<T: Any + Send + Sync> From<T> for Fixture<T> {
+  fn from(value: T) -> Self {
+    Self::new(value)
+  }
+}
+
 /// Definition of a fixture.
 #[derive(Clone)]
 pub struct FixtureDef {
@@ -113,6 +171,15 @@ impl FixturePool {
         scope,
       }),
     }
+  }
+
+  /// Register a teardown to run when this pool's scope ends (reverse
+  /// registration order). The `#[fixture]` macro calls this for
+  /// [`Fixture`]-returning bodies; the teardown receives the cached
+  /// value for `name`.
+  pub fn register_teardown(&self, name: &str, teardown: TeardownFn) {
+    let mut stack = self.inner.teardown_stack.lock().expect("teardown_stack lock poisoned");
+    stack.push((name.to_string(), teardown));
   }
 
   /// Create a child pool with additional or overridden fixture definitions.
@@ -430,7 +497,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
       teardown: Some(Arc::new(|val| {
         Box::pin(async move {
           if let Ok(browser) = val.downcast::<Browser>() {
-            let _ = browser.close(None).await;
+            let _ = browser.close().await;
           }
         })
       })),
@@ -449,7 +516,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
       setup: Arc::new(|pool| {
         Box::pin(async move {
           let browser: Arc<Browser> = pool.get("browser").await?;
-          let context = browser.new_context(None);
+          let context = browser.new_context().await?;
           Ok(Arc::new(context) as ArcValue)
         })
       }),

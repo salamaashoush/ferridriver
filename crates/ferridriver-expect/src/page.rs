@@ -2,7 +2,7 @@
 //! aria matchers live in `ferridriver-test` because they need the
 //! test-runner's snapshot directory + image pipeline.
 
-use std::sync::Arc;
+use std::borrow::Borrow;
 
 use ferridriver::Page;
 
@@ -19,10 +19,10 @@ fn page_ctx(method: &'static str, is_not: bool) -> ExpectContext {
   }
 }
 
-impl Expect<'_, Arc<Page>> {
+impl<P: Borrow<Page>> Expect<'_, P> {
   pub async fn to_have_title(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     let expected = expected.into();
-    let page = self.subject;
+    let page: &Page = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, page_ctx("toHaveTitle", is_not), || {
       let expected = expected.clone();
@@ -47,7 +47,7 @@ impl Expect<'_, Arc<Page>> {
 
   pub async fn to_contain_title(&self, expected: &str) -> Result<(), AssertionFailure> {
     let expected = expected.to_string();
-    let page = self.subject;
+    let page: &Page = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, page_ctx("toContainTitle", is_not), || {
       let expected = expected.clone();
@@ -72,7 +72,7 @@ impl Expect<'_, Arc<Page>> {
 
   pub async fn to_have_url(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     let expected = expected.into();
-    let page = self.subject;
+    let page: &Page = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, page_ctx("toHaveURL", is_not), || {
       let expected = expected.clone();
@@ -94,7 +94,7 @@ impl Expect<'_, Arc<Page>> {
 
   pub async fn to_contain_url(&self, expected: &str) -> Result<(), AssertionFailure> {
     let expected = expected.to_string();
-    let page = self.subject;
+    let page: &Page = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, page_ctx("toContainURL", is_not), || {
       let expected = expected.clone();

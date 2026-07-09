@@ -265,17 +265,17 @@ pub(crate) fn parse_screenshot_options<'js>(
       };
       let js: JsScreenshotOptions = serde_from_js(ctx, v)?;
       Ok(ferridriver::options::ScreenshotOptions {
-        animations: js.animations,
-        caret: js.caret,
+        animations: js.animations.as_deref().map(ferridriver::options::AnimationsMode::from),
+        caret: js.caret.as_deref().map(ferridriver::options::CaretMode::from),
         clip: js.clip.map(Into::into),
         full_page: js.full_page,
-        format: js.format,
+        format: js.format.as_deref().map(ferridriver::options::ScreenshotFormat::from),
         mask,
         mask_color: js.mask_color,
         omit_background: js.omit_background,
         path: js.path.map(std::path::PathBuf::from),
         quality: js.quality,
-        scale: js.scale,
+        scale: js.scale.as_deref().map(ferridriver::options::ScreenshotScale::from),
         style: js.style,
         timeout: js.timeout,
       })

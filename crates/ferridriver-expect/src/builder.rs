@@ -29,7 +29,7 @@ pub struct HaveCssOptions {
 pub fn expect<T>(subject: &T) -> Expect<'_, T> {
   Expect {
     subject,
-    timeout: DEFAULT_EXPECT_TIMEOUT,
+    timeout: crate::poll::default_expect_timeout(),
     is_not: false,
     is_soft: false,
     message: None,

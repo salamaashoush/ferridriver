@@ -57,7 +57,7 @@ async fn switch_to_tab(world: &mut BrowserWorld, index: i64) {
 async fn close_current_tab(world: &mut BrowserWorld) {
   world
     .page()
-    .close(None)
+    .close()
     .await
     .map_err(|e| StepError::wrap("close tab", e))?;
 
