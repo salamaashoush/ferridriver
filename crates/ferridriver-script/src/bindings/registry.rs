@@ -22,13 +22,23 @@ use super::bdd::StepKind;
 /// JS dispatch.
 pub(crate) struct ToolReg {
   pub(crate) name: String,
+  pub(crate) title: Option<String>,
   pub(crate) description: Option<String>,
   pub(crate) input_schema: Option<serde_json::Value>,
+  /// JSON Schema for the handler's return value. Surfaced as the
+  /// promoted tool's `outputSchema` and validated by the MCP layer.
+  pub(crate) output_schema: Option<serde_json::Value>,
+  /// MCP tool annotations (`readOnlyHint`, `destructiveHint`, ...),
+  /// kept opaque here — the MCP layer types and surfaces them.
+  pub(crate) annotations: Option<serde_json::Value>,
   pub(crate) expose_as_mcp_tool: bool,
   /// `Arc` so per-call dispatch is a refcount bump, not a deep clone of
   /// the command map / host list on every `tools.<name>()` invocation.
   pub(crate) allowed_commands: std::sync::Arc<std::collections::BTreeMap<String, crate::command_spec::CommandSpec>>,
-  pub(crate) allowed_net: std::sync::Arc<[String]>,
+  /// Effective `allow.net` after the operator ceiling: `None` ⇒
+  /// unrestricted, `Some(list)` ⇒ default-deny allow-list (an empty
+  /// list denies every host).
+  pub(crate) allowed_net: Option<std::sync::Arc<[String]>>,
   /// Per-tool handler timeout (ms) from the manifest `timeoutMs`. `None`
   /// ⇒ no independent bound (the session wall-clock still applies).
   /// Enforced natively in `extensions::dispatch_tool`.
@@ -98,6 +108,97 @@ pub(crate) struct ParamTypeReg {
   pub(crate) transformer: Option<Persistent<Function<'static>>>,
 }
 
+/// Operator extension-policy ceiling for this VM, stored as context
+/// userdata at `Session::create`. [`register_tool`] intersects every
+/// declared manifest with it, so the `ToolReg` a session dispatches
+/// from already carries the EFFECTIVE grants. Absent (the manifest
+/// extraction runtime, plain engine tests) ⇒ manifests register
+/// unclamped — extraction reports declared intent; enforcement is
+/// session-scoped.
+pub(crate) struct ExtensionPolicyUd(pub(crate) ferridriver_config::ExtensionPolicyConfig);
+
+// SAFETY: holds only owned config data (no JS values), so re-stating
+// the unused `'js` lifetime is sound — same rationale as
+// `RegistryUserData`.
+#[allow(unsafe_code)]
+unsafe impl JsLifetime<'_> for ExtensionPolicyUd {
+  type Changed<'to> = ExtensionPolicyUd;
+}
+
+/// The effective `allow.net` for a declared list under the operator
+/// ceiling. `None` ⇒ unrestricted; `Some` ⇒ default-deny allow-list.
+///
+/// - no ceiling: declared semantics unchanged (empty = unrestricted).
+/// - ceiling + no declaration: the tool gets exactly the ceiling
+///   (operator flips undeclared tools to default-deny).
+/// - ceiling + declaration: only declared entries the ceiling subsumes
+///   survive (an explicit empty result denies every host).
+fn effective_net(declared: Vec<String>, ceiling: Option<&[String]>) -> Option<std::sync::Arc<[String]>> {
+  match (ceiling, declared.is_empty()) {
+    (None, true) => None,
+    (None, false) => Some(std::sync::Arc::from(declared)),
+    (Some(c), true) => Some(std::sync::Arc::from(c.to_vec())),
+    (Some(c), false) => Some(std::sync::Arc::from(
+      declared
+        .into_iter()
+        .filter(|d| net_entry_subsumed(d, c))
+        .collect::<Vec<_>>(),
+    )),
+  }
+}
+
+/// Whether one manifest `allow.net` entry lies within the ceiling. An
+/// exact host is subsumed when the ceiling would allow it as a request
+/// host; a wildcard `*.suffix` only when a ceiling wildcard's domain
+/// space contains its whole space (an exact ceiling entry can never
+/// subsume a wildcard).
+pub fn net_entry_subsumed(entry: &str, ceiling: &[String]) -> bool {
+  if let Some(suffix) = entry.strip_prefix("*.") {
+    ceiling.iter().any(|c| {
+      c.strip_prefix("*.")
+        .is_some_and(|cs| suffix == cs || suffix.ends_with(&format!(".{cs}")))
+    })
+  } else {
+    ferridriver::http_client::host_allowed(entry, ceiling)
+  }
+}
+
+/// Enforce the operator commands ceiling on a tool's declared command
+/// map. A violation fails the whole registration (the extension file is
+/// skipped and the conflict logged) — a policy conflict is a
+/// configuration error, not something to silently narrow.
+fn check_commands_ceiling(
+  tool: &str,
+  commands: &std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
+  ceiling: ferridriver_config::ExtensionCommandsCeiling,
+) -> Result<(), ScriptError> {
+  use ferridriver_config::ExtensionCommandsCeiling as Ceiling;
+  match ceiling {
+    Ceiling::Any => Ok(()),
+    Ceiling::ArgvOnly => {
+      for (name, spec) in commands {
+        if matches!(spec.run, crate::command_spec::CommandRun::Shell(_)) {
+          return Err(ScriptError::internal(format!(
+            "tool `{tool}`: command `{name}` is a shell-string spec, but the operator policy \
+             (`[extensions.policy] commands = \"argvOnly\"`) permits only argv-array specs"
+          )));
+        }
+      }
+      Ok(())
+    },
+    Ceiling::None => {
+      if commands.is_empty() {
+        Ok(())
+      } else {
+        Err(ScriptError::internal(format!(
+          "tool `{tool}` declares `allow.commands`, but the operator policy \
+           (`[extensions.policy] commands = \"none\"`) forbids command declarations"
+        )))
+      }
+    },
+  }
+}
+
 /// Context userdata holding the registry. Single-threaded VM ⇒
 /// `RefCell`, never `Arc`/`Mutex`.
 struct RegistryUserData(RefCell<ExtensionRegistry>);
@@ -130,16 +231,26 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
       "tool: `name` must be a non-empty string".to_string(),
     ));
   }
-  let description = m
-    .get::<_, Value<'_>>("description")
-    .ok()
-    .and_then(|v| v.as_string().and_then(|s| s.to_string().ok()));
-  let input_schema = match m.get::<_, Value<'_>>("inputSchema") {
-    Ok(v) if !v.is_undefined() && !v.is_null() => {
-      Some(serde_from_js::<serde_json::Value>(ctx, v).map_err(|e| ScriptError::internal(e.to_string()))?)
-    },
-    _ => None,
+  let get_str = |key: &str| {
+    m.get::<_, Value<'_>>(key)
+      .ok()
+      .and_then(|v| v.as_string().and_then(|s| s.to_string().ok()))
   };
+  let title = get_str("title");
+  let description = get_str("description");
+  let get_json = |key: &str| -> Result<Option<serde_json::Value>, ScriptError> {
+    match m.get::<_, Value<'_>>(key) {
+      Ok(v) if !v.is_undefined() && !v.is_null() => {
+        Ok(Some(serde_from_js::<serde_json::Value>(ctx, v).map_err(|e| {
+          ScriptError::internal(format!("tool `{key}` is not JSON-serialisable: {e}"))
+        })?))
+      },
+      _ => Ok(None),
+    }
+  };
+  let input_schema = get_json("inputSchema")?;
+  let output_schema = get_json("outputSchema")?;
+  let annotations = get_json("annotations")?;
   let expose_as_mcp_tool = m
     .get::<_, bool>("exposeAsMcpTool")
     .or_else(|_| m.get::<_, bool>("exposeAsTool"))
@@ -174,6 +285,17 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
     Err(_) => (std::collections::BTreeMap::new(), Vec::new()),
   };
 
+  // Operator ceiling (session VMs only; the extraction runtime carries
+  // none so manifests keep their DECLARED capabilities for reporting).
+  let policy = ctx.userdata::<ExtensionPolicyUd>().map(|u| u.0.clone());
+  let allowed_net = match &policy {
+    Some(p) => effective_net(allowed_net, p.net.as_deref()),
+    None => effective_net(allowed_net, None),
+  };
+  if let Some(p) = &policy {
+    check_commands_ceiling(&name, &allowed_commands, p.commands)?;
+  }
+
   let saved = Persistent::save(ctx, handler);
   with_registry(ctx, |reg| {
     if reg.tools.iter().any(|t| t.name == name) {
@@ -183,11 +305,14 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
     }
     reg.tools.push(ToolReg {
       name,
+      title,
       description,
       input_schema,
+      output_schema,
+      annotations,
       expose_as_mcp_tool,
       allowed_commands: std::sync::Arc::new(allowed_commands),
-      allowed_net: std::sync::Arc::from(allowed_net),
+      allowed_net,
       timeout_ms,
       handler: saved,
     });
@@ -245,9 +370,15 @@ pub struct CollectedAllow {
 pub struct CollectedTool {
   pub name: String,
   #[serde(skip_serializing_if = "Option::is_none")]
+  pub title: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub description: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub input_schema: Option<serde_json::Value>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub output_schema: Option<serde_json::Value>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub annotations: Option<serde_json::Value>,
   pub allow: CollectedAllow,
   pub expose_as_mcp_tool: bool,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -264,11 +395,14 @@ pub fn tools_snapshot(ctx: &Ctx<'_>) -> Result<Vec<CollectedTool>, ScriptError> 
       .iter()
       .map(|t| CollectedTool {
         name: t.name.clone(),
+        title: t.title.clone(),
         description: t.description.clone(),
         input_schema: t.input_schema.clone(),
+        output_schema: t.output_schema.clone(),
+        annotations: t.annotations.clone(),
         allow: CollectedAllow {
           commands: (*t.allowed_commands).clone(),
-          net: t.allowed_net.to_vec(),
+          net: t.allowed_net.as_ref().map(|n| n.to_vec()).unwrap_or_default(),
         },
         expose_as_mcp_tool: t.expose_as_mcp_tool,
         timeout_ms: t.timeout_ms,
@@ -295,7 +429,9 @@ pub fn tool_names(ctx: &Ctx<'_>) -> Result<Vec<String>, ScriptError> {
 pub(crate) struct ToolDispatch<'js> {
   pub handler: Function<'js>,
   pub allowed_commands: std::sync::Arc<std::collections::BTreeMap<String, crate::command_spec::CommandSpec>>,
-  pub allowed_net: std::sync::Arc<[String]>,
+  /// Effective net policy (`None` = unrestricted, `Some` = default-deny
+  /// allow-list, possibly empty = deny all).
+  pub allowed_net: Option<std::sync::Arc<[String]>>,
   pub timeout_ms: Option<u64>,
 }
 
@@ -361,4 +497,64 @@ fn ctx_of<'js>(args: &[Value<'js>]) -> Result<Ctx<'js>, rquickjs::Error> {
     .first()
     .map(|v| v.ctx().clone())
     .ok_or_else(|| rq(&ScriptError::internal("missing arguments".to_string())))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{effective_net, net_entry_subsumed};
+
+  fn v(items: &[&str]) -> Vec<String> {
+    items.iter().map(ToString::to_string).collect()
+  }
+
+  #[test]
+  fn no_ceiling_keeps_declared_semantics() {
+    assert_eq!(effective_net(Vec::new(), None), None);
+    let e = effective_net(v(&["api.box.com"]), None).expect("declared list");
+    assert_eq!(&*e, ["api.box.com".to_string()].as_slice());
+  }
+
+  #[test]
+  fn ceiling_flips_undeclared_tools_to_the_ceiling() {
+    let e = effective_net(Vec::new(), Some(&v(&["*.box.com"]))).expect("ceiling");
+    assert_eq!(&*e, ["*.box.com".to_string()].as_slice());
+  }
+
+  #[test]
+  fn ceiling_intersects_declared_entries() {
+    let e = effective_net(
+      v(&["api.box.com", "evil.example", "*.box.com"]),
+      Some(&v(&["*.box.com"])),
+    )
+    .expect("intersection");
+    assert_eq!(&*e, v(&["api.box.com", "*.box.com"]).as_slice());
+  }
+
+  #[test]
+  fn empty_ceiling_denies_everything() {
+    let e = effective_net(Vec::new(), Some(&[])).expect("deny-all");
+    assert!(e.is_empty());
+    let e = effective_net(v(&["api.box.com"]), Some(&[])).expect("deny-all");
+    assert!(e.is_empty());
+  }
+
+  #[test]
+  fn subsumption_covers_exact_wildcard_and_apex() {
+    let ceiling = v(&["*.box.com", "localhost"]);
+    assert!(net_entry_subsumed("api.box.com", &ceiling));
+    assert!(net_entry_subsumed("box.com", &ceiling), "wildcard covers the apex");
+    assert!(net_entry_subsumed("localhost", &ceiling));
+    assert!(net_entry_subsumed("*.box.com", &ceiling), "equal wildcard");
+    assert!(net_entry_subsumed("*.api.box.com", &ceiling), "narrower wildcard");
+    assert!(!net_entry_subsumed("evil.example", &ceiling));
+    assert!(!net_entry_subsumed("*.com", &ceiling), "wider wildcard must not pass");
+    assert!(
+      !net_entry_subsumed("*.localhost", &v(&["localhost"])),
+      "an exact ceiling entry never subsumes a wildcard"
+    );
+    assert!(
+      !net_entry_subsumed("evilbox.com", &v(&["*.box.com"])),
+      "suffix match must be label-aligned"
+    );
+  }
 }

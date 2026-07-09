@@ -41,6 +41,16 @@ pub struct McpClient {
 
 impl McpClient {
   pub fn new(backend: &str) -> Self {
+    Self::launch(backend, None)
+  }
+
+  /// Like [`Self::new`], but launches the server with an explicit
+  /// `--config` file (extension loading, policy, etc.).
+  pub fn with_config(backend: &str, config: &std::path::Path) -> Self {
+    Self::launch(backend, Some(config))
+  }
+
+  fn launch(backend: &str, config: Option<&std::path::Path>) -> Self {
     let binary = std::env::var("FERRIDRIVER_BIN").unwrap_or_else(|_| {
       let base = format!("{}/../../target", env!("CARGO_MANIFEST_DIR"));
       let debug = format!("{base}/debug/ferridriver");
@@ -52,6 +62,9 @@ impl McpClient {
       }
     });
     let mut cmd = Command::new(&binary);
+    if let Some(cfg) = config {
+      cmd.arg("--config").arg(cfg);
+    }
     cmd.arg("mcp").arg("--backend").arg(backend);
     if std::env::var("FERRIDRIVER_HEADED").is_err() {
       cmd.arg("--headless");

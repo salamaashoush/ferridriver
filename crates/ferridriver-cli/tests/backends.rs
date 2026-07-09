@@ -626,3 +626,13 @@ fn run_bdd_tool() {
   let mut c = McpClient::new("cdp-pipe");
   backends_support::bdd::run(&mut c);
 }
+
+// Extension system at the MCP boundary: promoted-tool metadata /
+// schema contracts on the wire, plus the page-callback half of the
+// capability-follows-registrar invariant. VM-side behaviour, not
+// backend protocol behaviour (and `startScreencast` is CDP-only), so
+// it runs once on cdp-pipe with its own config-loaded server.
+#[test]
+fn extension_tools() {
+  backends_support::extension_tools::run();
+}

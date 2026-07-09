@@ -306,6 +306,25 @@ fn forgiving_base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
   engine.decode(s.as_bytes()).map_err(|_| "invalid base64")
 }
 
+/// WHATWG `queueMicrotask(cb)`. A named generic fn so `Ctx`, the
+/// callback, and the wrapper share one `'js` (an inline closure would
+/// give each its own lifetime).
+fn queue_microtask<'js>(ctx: Ctx<'js>, cb: Function<'js>) -> rquickjs::Result<()> {
+  match crate::bindings::fetch::active_net(&ctx) {
+    None => cb.defer::<()>(()),
+    Some(list) => {
+      // The wrapper captures only plain data (`net`); the real callback
+      // rides the deferred args (a native closure must never capture a
+      // JS value — untraceable GC cycle at teardown).
+      let net = Some(list);
+      let wrapper = Function::new(ctx.clone(), move |args: rquickjs::function::Rest<Value<'_>>| {
+        crate::bindings::timers::deferred_call_with_net(net.as_ref(), &args.0)
+      })?;
+      wrapper.defer((cb,))
+    },
+  }
+}
+
 /// Install the native web-API classes + globals. Called once at
 /// `Session::create`; persists across executions like the rest of the
 /// browser-like runtime surface.
@@ -317,14 +336,11 @@ pub fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<Url>::define(&globals)?;
 
   // queueMicrotask: defer the callback onto the job queue (same
-  // primitive rquickjs-extra-timers' setImmediate uses).
-  globals.set(
-    "queueMicrotask",
-    Func::from(|cb: Function<'_>| -> rquickjs::Result<()> {
-      cb.defer::<()>(())?;
-      Ok(())
-    }),
-  )?;
+  // primitive setImmediate uses). Capability follows the registrar:
+  // the job queue drains outside a tool handler's net-policy bracket,
+  // so a microtask queued by a net-restricted handler must carry that
+  // grant with it (same rule as `setTimeout`/`setImmediate`).
+  globals.set("queueMicrotask", Func::from(queue_microtask))?;
 
   // btoa/atob over a Latin1 "binary string", per the WHATWG contract.
   globals.set(

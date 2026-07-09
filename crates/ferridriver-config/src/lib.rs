@@ -50,7 +50,11 @@ pub struct FerridriverConfig {
   /// (`Given`/`When`/`Then`); the MCP server consumes its tools and the
   /// test runner consumes its steps. Top-level (not under `mcp`) because
   /// both hosts load it.
-  pub extensions: Vec<String>,
+  ///
+  /// Two shapes: the shorthand array of paths, or a table carrying
+  /// `paths` plus an operator `policy` ceiling (see
+  /// [`ExtensionPolicyConfig`]).
+  pub extensions: ExtensionsConfig,
   /// Declared sidecar processes, exposed to scripts as
   /// `sidecars.connect(name)`. Top-level (sibling of `[mcp]` / `[test]`)
   /// because both the MCP server / `run` path and the test runner consume
@@ -73,6 +77,99 @@ pub struct FerridriverConfig {
   /// resolve against it.
   #[serde(skip)]
   pub source_dir: Option<PathBuf>,
+}
+
+/// The `extensions` key: either the shorthand list of paths or the
+/// detailed table with an operator policy.
+///
+/// ```toml
+/// # shorthand
+/// extensions = ["./extensions", "./tools/login.ts"]
+///
+/// # detailed
+/// [extensions]
+/// paths = ["./extensions"]
+/// [extensions.policy]
+/// net = ["*.box.com", "localhost"]
+/// commands = "argvOnly"
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ExtensionsConfig {
+  /// Shorthand: just the paths; no operator policy (back-compat).
+  Paths(Vec<String>),
+  /// Detailed: paths plus the operator policy ceiling.
+  Detailed(ExtensionsDetailed),
+}
+
+impl Default for ExtensionsConfig {
+  fn default() -> Self {
+    Self::Paths(Vec::new())
+  }
+}
+
+impl ExtensionsConfig {
+  /// The configured extension paths/specs, whichever shape was used.
+  #[must_use]
+  pub fn paths(&self) -> &[String] {
+    match self {
+      Self::Paths(p) => p,
+      Self::Detailed(d) => &d.paths,
+    }
+  }
+
+  /// The operator policy ceiling. The shorthand shape has none, which
+  /// resolves to the default (fully open) policy.
+  #[must_use]
+  pub fn policy(&self) -> ExtensionPolicyConfig {
+    match self {
+      Self::Paths(_) => ExtensionPolicyConfig::default(),
+      Self::Detailed(d) => d.policy.clone(),
+    }
+  }
+}
+
+/// The detailed `[extensions]` table.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ExtensionsDetailed {
+  /// Extension paths/specs — same values the shorthand array carries.
+  pub paths: Vec<String>,
+  /// Operator policy ceiling applied to every loaded extension.
+  pub policy: ExtensionPolicyConfig,
+}
+
+/// Operator ceiling over extension capability manifests. An extension
+/// author declares what a tool NEEDS (`allow` in `defineTool`); this is
+/// what the operator GRANTS. The effective authority a tool runs with
+/// is the intersection of the two — a manifest can never widen past the
+/// ceiling.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ExtensionPolicyConfig {
+  /// Host ceiling for extension HTTP (`allow.net`). Absent ⇒ manifests
+  /// keep today's semantics (no declaration = unrestricted). Present ⇒
+  /// every tool's HTTP flips to default-deny: a tool with no `allow.net`
+  /// gets exactly this list; a tool with one keeps only the entries this
+  /// list subsumes. An explicit empty list denies all extension HTTP.
+  pub net: Option<Vec<String>>,
+  /// Ceiling on `allow.commands` declarations.
+  pub commands: ExtensionCommandsCeiling,
+}
+
+/// What kinds of `allow.commands` declarations the operator permits.
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ExtensionCommandsCeiling {
+  /// Both shell-string and argv-array command specs (default).
+  #[default]
+  Any,
+  /// Only argv-array specs. A shell-string spec (`sh -c` line, where
+  /// `$(…)`, pipes and redirection live) fails the tool's registration.
+  ArgvOnly,
+  /// No command declarations at all; a tool declaring any fails
+  /// registration.
+  None,
 }
 
 /// Options for the rolldown bundling pipeline.
@@ -484,6 +581,95 @@ command = []
     let err = FerridriverConfig::load_from(&path).unwrap_err();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(err.to_string().contains("empty command"), "got: {err}");
+  }
+
+  #[test]
+  fn extensions_shorthand_array_parses() {
+    let dir = std::env::temp_dir().join("ferridriver-config-ext-shorthand");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("ferridriver.toml");
+    std::fs::write(&path, "extensions = [\"./ext\", \"./tools/login.ts\"]\n").unwrap();
+
+    let root = FerridriverConfig::load_from(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(root.extensions.paths(), ["./ext", "./tools/login.ts"]);
+    assert_eq!(root.extensions.policy(), ExtensionPolicyConfig::default());
+    assert_eq!(root.extensions.policy().net, None);
+    assert_eq!(root.extensions.policy().commands, ExtensionCommandsCeiling::Any);
+  }
+
+  #[test]
+  fn extensions_detailed_table_with_policy_parses() {
+    let dir = std::env::temp_dir().join("ferridriver-config-ext-detailed");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("ferridriver.toml");
+    std::fs::write(
+      &path,
+      r#"
+[extensions]
+paths = ["./ext"]
+
+[extensions.policy]
+net = ["*.box.com", "localhost"]
+commands = "argvOnly"
+"#,
+    )
+    .unwrap();
+
+    let root = FerridriverConfig::load_from(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(root.extensions.paths(), ["./ext"]);
+    let policy = root.extensions.policy();
+    assert_eq!(
+      policy.net.as_deref(),
+      Some(["*.box.com".to_string(), "localhost".to_string()].as_slice())
+    );
+    assert_eq!(policy.commands, ExtensionCommandsCeiling::ArgvOnly);
+  }
+
+  #[test]
+  fn extensions_policy_empty_net_and_none_commands_parse() {
+    let dir = std::env::temp_dir().join("ferridriver-config-ext-deny");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("ferridriver.toml");
+    std::fs::write(
+      &path,
+      r#"
+[extensions]
+[extensions.policy]
+net = []
+commands = "none"
+"#,
+    )
+    .unwrap();
+
+    let root = FerridriverConfig::load_from(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let policy = root.extensions.policy();
+    assert_eq!(policy.net.as_deref(), Some([].as_slice()), "empty list must stay Some");
+    assert_eq!(policy.commands, ExtensionCommandsCeiling::None);
+  }
+
+  #[test]
+  fn extensions_config_roundtrips_both_shapes() {
+    let shorthand = ExtensionsConfig::Paths(vec!["./a".into()]);
+    let json = serde_json::to_value(&shorthand).unwrap();
+    assert_eq!(json, serde_json::json!(["./a"]));
+    assert_eq!(serde_json::from_value::<ExtensionsConfig>(json).unwrap(), shorthand);
+
+    let detailed = ExtensionsConfig::Detailed(ExtensionsDetailed {
+      paths: vec!["./a".into()],
+      policy: ExtensionPolicyConfig {
+        net: Some(vec!["*.box.com".into()]),
+        commands: ExtensionCommandsCeiling::ArgvOnly,
+      },
+    });
+    let json = serde_json::to_value(&detailed).unwrap();
+    assert_eq!(json["policy"]["commands"], serde_json::json!("argvOnly"));
+    assert_eq!(serde_json::from_value::<ExtensionsConfig>(json).unwrap(), detailed);
   }
 
   #[test]

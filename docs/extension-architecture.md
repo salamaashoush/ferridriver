@@ -36,9 +36,10 @@ and records what ferridriver adopts versus defers, with the tradeoff.
    already) and **net** (`allow.net`: host allow-list on the handler's
    `request` client; empty = unrestricted for back-compat, non-empty flips
    that binding to default-deny). `fs` is deliberately **not** a capability:
-   the extension handler context (`{args,page,context,request,commands}`)
-   exposes no filesystem handle, so an `fs` scope would gate nothing — a
-   stub, which the repo rules forbid. `net` is scoped precisely to the
+   the only filesystem a handler can reach is the session's `fs`/`artifacts`
+   globals, both already `PathSandbox`-confined, so an extension-level `fs`
+   scope would have no ungated authority left to gate — a stub, which the
+   repo rules forbid. `net` is scoped precisely to the
    `request` HTTP client and documented as such; `page`/`context` browser
    navigation is a separate, deliberately ungated authority (an automation
    extension must navigate), so this is a *complete* boundary for what it
@@ -48,6 +49,26 @@ and records what ferridriver adopts versus defers, with the tradeoff.
    content hash; identical/unchanged files skip rebundle+recompile. In-memory
    only — `Module::load` bytecode is interpreter-build- and process-specific,
    so a persisted disk cache would violate that invariant.
+4. **Two-party grants: operator ceiling over author manifests**
+   (Deno process flags / Backstage policy engine): a manifest is
+   self-attestation — the author declaring their own authority is an audit
+   trail, not policy. `[extensions.policy]` adds the operator half; the
+   effective grant is manifest ∩ ceiling, enforced Rust-side at `defineTool`
+   registration in every session VM. This also retires the two known
+   weaknesses of the v1 model: a present `net` ceiling flips undeclared
+   tools to default-deny (closing the back-compat default-open hole on
+   locked-down deployments), and `commands = "argvOnly" | "none"` closes
+   the exec⊃net composition hole (a tool with a shell line could otherwise
+   reach any host its `allow.net` denied). Conflicts surface as startup
+   warnings and through `ferridriver_extensions`.
+5. **Cooperative cancellation + typed results** (MCP spec parity): every
+   handler receives `signal` (a standard `AbortSignal`, fired when
+   `timeoutMs` expires — the race-and-abandon timeout otherwise leaves the
+   JS continuation running as unobservable zombie work), and the manifest
+   carries `title` / `outputSchema` / `annotations` through to `tools/list`.
+   `outputSchema` is enforced symmetrically to `inputSchema` (the return
+   value is validated Rust-side; conforming results ship as MCP
+   `structuredContent`).
 
 **Defer, with rationale** (CLAUDE.md: do not build speculative abstractions
 without a consumer)

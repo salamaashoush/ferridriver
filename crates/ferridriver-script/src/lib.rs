@@ -57,6 +57,7 @@ pub mod sidecar;
 pub mod vars;
 pub mod vm;
 
+pub use bindings::registry::net_entry_subsumed;
 pub use bindings::{
   ArtifactsJs, BrowserContextJs, CollectedRegistry, ExtensionBinding, ExtensionCommandsJs, HookArg, HttpClientJs,
   HttpResponseJs, JsArg, KeyboardJs, LocatorJs, MouseJs, PageJs, ScenarioWorld, ScriptAttachment, StepOutcome,

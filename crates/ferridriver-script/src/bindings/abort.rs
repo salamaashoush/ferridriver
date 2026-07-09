@@ -147,6 +147,27 @@ impl<'js> AbortSignalJs<'js> {
       .or(Some("This operation was aborted".to_string()))
   }
 
+  /// A fresh, not-yet-aborted signal instance for native callers (the
+  /// extension-tool dispatch hands one to every handler as
+  /// `ctx.signal`).
+  pub(crate) fn fresh_instance(ctx: &Ctx<'js>) -> rquickjs::Result<Class<'js, AbortSignalJs<'js>>> {
+    Class::instance(ctx.clone(), Self::fresh())
+  }
+
+  /// Abort `signal` from native code with a `{ name, message }` reason —
+  /// the exact effect of `AbortController.abort` (state flip, native
+  /// channel wake, `onabort` + listener dispatch).
+  pub(crate) fn abort_native(
+    this: &Class<'js, AbortSignalJs<'js>>,
+    ctx: &Ctx<'js>,
+    name: &str,
+    message: &str,
+  ) -> rquickjs::Result<()> {
+    let reason = Self::default_reason(ctx, name, message)?;
+    Self::run_abort(this, reason);
+    Ok(())
+  }
+
   /// Flip to aborted, store the reason, wake the native channel, fire
   /// `onabort` then every `addEventListener('abort')` listener once.
   fn run_abort(this: &Class<'js, AbortSignalJs<'js>>, reason: Value<'js>) {

@@ -24,6 +24,12 @@ pub struct ToolManifest {
   /// `expose_as_mcp_tool` is true. Dot-separated namespacing is recommended.
   pub name: String,
 
+  /// Human-readable display title, surfaced as the promoted tool's
+  /// `title` in `tools/list` (MCP separates the machine `name` from the
+  /// human label).
+  #[serde(default)]
+  pub title: Option<String>,
+
   /// Human-readable description. Surfaced in `tools/list` when the extension
   /// is promoted to a tool. Optional for binding-only extensions but strongly
   /// recommended.
@@ -38,6 +44,21 @@ pub struct ToolManifest {
   /// valid JSON Schema construct without us re-encoding it.
   #[serde(default)]
   pub input_schema: Option<serde_json::Value>,
+
+  /// JSON Schema describing the handler's return value. Surfaced as the
+  /// promoted tool's `outputSchema` and enforced symmetrically to
+  /// `input_schema`: `invoke_extension_tool` validates the handler's
+  /// result against it before replying, and ships the result as MCP
+  /// `structuredContent`. A non-conforming result is the extension
+  /// author's bug, surfaced as a tool error.
+  #[serde(default)]
+  pub output_schema: Option<serde_json::Value>,
+
+  /// MCP tool annotations (`title`, `readOnlyHint`, `destructiveHint`,
+  /// `idempotentHint`, `openWorldHint`), passed through to `tools/list`
+  /// verbatim. Hints only — the server enforces nothing from them.
+  #[serde(default)]
+  pub annotations: Option<rmcp::model::ToolAnnotations>,
 
   /// Whitelist of capabilities the handler may invoke. See [`ToolAllow`].
   #[serde(default)]
@@ -70,6 +91,14 @@ pub struct ToolManifest {
 /// default-open for back-compatibility (an absent list leaves HTTP
 /// unrestricted; declaring any host flips it to default-deny).
 ///
+/// The manifest is the AUTHOR's half of a two-party grant. The operator
+/// half is the `[extensions.policy]` ceiling
+/// (`ferridriver_config::ExtensionPolicyConfig`): at session
+/// registration the effective authority becomes manifest ∩ ceiling — a
+/// present `net` ceiling flips undeclared tools to default-deny and
+/// drops declared entries outside it, and the `commands` ceiling can
+/// forbid shell-form (or all) command declarations.
+///
 /// Covered today:
 /// - **exec** (`commands`): named shell-command templates. Default-deny —
 ///   a `commands.run(name)` for an undeclared `name` throws.
@@ -77,9 +106,12 @@ pub struct ToolManifest {
 ///   Empty = unrestricted (opt-in: declaring any host switches that
 ///   binding to default-deny). Scopes the `request` binding only;
 ///   `page`/`context` browser navigation is a separate, deliberately
-///   ungated authority (an automation extension must be able to navigate) —
-///   see `docs/extension-architecture.md` for why `fs` is not a capability
-///   here (the handler context exposes no filesystem handle to gate).
+///   ungated authority (an automation extension must be able to navigate).
+///   There is no `fs` capability: the only filesystem reachable from a
+///   handler is the session's `fs`/`artifacts` globals, both already
+///   confined to their `PathSandbox` roots — an extension-level scope on
+///   top of that has no ungated authority left to gate (see
+///   `docs/extension-architecture.md`).
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolAllow {
@@ -94,8 +126,10 @@ pub struct ToolAllow {
   /// Host patterns the handler's `request` client may target. Each entry
   /// is an exact host (`api.box.com`) or a leading-wildcard suffix
   /// (`*.box.com`, which also matches the bare apex `box.com`). Empty
-  /// leaves `request` unrestricted (back-compat); a non-empty list flips
-  /// it to default-deny — any other host throws before the call is made.
+  /// leaves `request` unrestricted (back-compat) unless the operator set
+  /// a `[extensions.policy]` net ceiling — then the tool gets exactly
+  /// the ceiling. A non-empty list flips it to default-deny — any other
+  /// host throws before the call is made.
   #[serde(default)]
   pub net: Vec<String>,
 }

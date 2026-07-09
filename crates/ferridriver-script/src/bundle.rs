@@ -103,9 +103,20 @@ pub(crate) fn bundler_shims() -> Arc<BundlerShims> {
     .unwrap_or_default()
 }
 
+/// Virtual id of the synthetic entry that fans out to every requested
+/// entry file. rolldown emits ONE entry chunk per input; feeding it N
+/// step/extension files as N inputs produces N entry chunks, of which
+/// [`bundle_source`] can only return one — every other file's
+/// registrations would be silently dropped. The synthetic entry
+/// side-effect-imports each file instead, so one chunk carries them all.
+const MULTI_ENTRY_ID: &str = "\0ferridriver-multi-entry.js";
+
 #[derive(Debug)]
 struct FerridriverRuntimePlugin {
   shims: Arc<BundlerShims>,
+  /// Source of the synthetic multi-entry module, when the bundle has
+  /// more than one entry file.
+  multi_entry: Option<String>,
 }
 
 impl Plugin for FerridriverRuntimePlugin {
@@ -115,6 +126,9 @@ impl Plugin for FerridriverRuntimePlugin {
 
   #[allow(clippy::unused_async_trait_impl)] // rolldown Plugin trait requires async
   async fn resolve_id(&self, _ctx: &PluginContext, args: &HookResolveIdArgs<'_>) -> HookResolveIdReturn {
+    if args.specifier == MULTI_ENTRY_ID && self.multi_entry.is_some() {
+      return Ok(Some(HookResolveIdOutput::from_id(MULTI_ENTRY_ID)));
+    }
     // Native modules stay EXTERNAL: the emitted chunk keeps the bare
     // import and the bytecode re-links by name against the loading
     // runtime's ModuleDefs (`bindings::native_modules`). Checked first
@@ -149,6 +163,15 @@ impl Plugin for FerridriverRuntimePlugin {
 
   #[allow(clippy::unused_async_trait_impl)] // rolldown Plugin trait requires async
   async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
+    if args.id == MULTI_ENTRY_ID
+      && let Some(src) = &self.multi_entry
+    {
+      return Ok(Some(HookLoadOutput {
+        code: src.clone().into(),
+        module_type: Some(ModuleType::Js),
+        ..Default::default()
+      }));
+    }
     let code: Option<Cow<'_, str>> = args.id.strip_prefix(VIRTUAL_USER_PREFIX).and_then(|spec| {
       self
         .shims
@@ -186,13 +209,30 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<(Strin
     return Err(ScriptError::internal("no step entry files".to_string()));
   }
 
-  let input: Vec<InputItem> = entry_paths
-    .iter()
-    .map(|p| InputItem {
-      name: None,
-      import: p.to_string_lossy().into_owned(),
+  // ONE rolldown input, always. Each input produces its own entry
+  // chunk and only one chunk's code can be returned, so multiple entry
+  // files must be fanned out from a single synthetic entry module that
+  // side-effect-imports each of them (top-level `Given`/`defineTool`
+  // registrations are side effects, so nothing tree-shakes away).
+  let multi_entry = (entry_paths.len() > 1).then(|| {
+    use std::fmt::Write as _;
+    entry_paths.iter().fold(String::new(), |mut acc, p| {
+      let _ = writeln!(
+        acc,
+        "import {};",
+        serde_json::to_string(&p.to_string_lossy()).unwrap_or_else(|_| String::from("\"\""))
+      );
+      acc
     })
-    .collect();
+  });
+  let input: Vec<InputItem> = vec![InputItem {
+    name: None,
+    import: if multi_entry.is_some() {
+      MULTI_ENTRY_ID.to_string()
+    } else {
+      entry_paths[0].to_string_lossy().into_owned()
+    },
+  }];
 
   let options = BundlerOptions {
     input: Some(input),
@@ -209,7 +249,10 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<(Strin
 
   let mut bundler = Bundler::with_plugins(
     options,
-    vec![Arc::new(FerridriverRuntimePlugin { shims: bundler_shims() })],
+    vec![Arc::new(FerridriverRuntimePlugin {
+      shims: bundler_shims(),
+      multi_entry,
+    })],
   )
   .map_err(|e| ScriptError::internal(format!("rolldown init: {e:?}")))?;
   // rolldown's generate future is large; box it so it doesn't bloat the

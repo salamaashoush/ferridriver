@@ -84,8 +84,11 @@ Two equivalent forms:
 // Inline handler on the manifest object:
 defineTool({
   name: "string",              // required, globally unique, dot-namespaced by convention
+  title: "string",             // optional human display label, surfaced in tools/list
   description: "string",       // optional, surfaced in tools/list
   inputSchema: { ... },        // optional JSON Schema, surfaced in tools/list AND enforced
+  outputSchema: { ... },       // optional JSON Schema for the RETURN value (see below)
+  annotations: { ... },        // optional MCP tool annotations (see below)
   exposeAsTool: true,          // optional, default false (see below)
   timeoutMs: 30000,            // optional per-invocation handler timeout (ms)
   allow: { ... },              // optional capability manifest (see below)
@@ -114,10 +117,35 @@ The handler receives one object:
 | `args`     | the caller's argument | For a promoted tool, the MCP `arguments` object. |
 | `page`     | `Page` \| undefined   | The live browser page for the session. |
 | `context`  | `BrowserContext` \| undefined | The session's browser context. |
-| `request`  | `HttpClient` \| undefined | HTTP client. Net-restricted if `allow.net` is non-empty. |
+| `request`  | `HttpClient` \| undefined | HTTP client. Net-restricted per the effective `allow.net`. |
 | `commands` | `ExtensionCommands`   | `.run(name, vars?)` — runs a declared shell template. |
+| `signal`   | `AbortSignal`         | Fires when `timeoutMs` expires (see below). |
 
 Return any JSON-serialisable value; it becomes the tool result.
+
+### Cancellation: `signal`
+
+When `timeoutMs` expires, the dispatcher stops awaiting the handler —
+but the handler's JS continuation keeps executing on the session VM.
+`signal` is a standard `AbortSignal` (aborted with a `TimeoutError`
+reason at that moment) so the handler can stop cooperatively instead of
+running on as zombie work: pass it to `fetch(url, { signal })`, check
+`signal.aborted` between steps, or register
+`signal.addEventListener("abort", ...)` for cleanup.
+
+### `outputSchema` and `annotations`
+
+`outputSchema` is the symmetric half of the schema contract: when
+declared, the promoted tool advertises it in `tools/list`, the server
+validates the handler's RETURN value against it (a non-conforming
+result is the extension author's bug and surfaces as a tool error), and
+a conforming result additionally ships as MCP `structuredContent`
+alongside the text payload.
+
+`annotations` passes MCP tool annotations through to `tools/list`
+verbatim: `{ title?, readOnlyHint?, destructiveHint?, idempotentHint?,
+openWorldHint? }`. They are client-facing hints; the server enforces
+nothing from them.
 
 > When the manifest declares `inputSchema`, the caller's `args` are
 > validated against it (full JSON Schema, via the `jsonschema` crate)
@@ -238,18 +266,75 @@ global `fetch` share one core, so the list binds all of them.
   the running handler: a tool calling another tool, or two tools running
   concurrently, each see only their own declared list.
 - Capability follows the registrar: a callback the handler schedules —
-  `setTimeout`/`setInterval`/`setImmediate`, `page.on` listeners,
+  `setTimeout`/`setInterval`/`setImmediate`, `queueMicrotask` (and
+  `process.nextTick`, which rides it), `page.on` listeners,
   `page.route`/`context.route` handlers, `exposeFunction`/
   `exposeBinding` callbacks, WebSocket route handlers, screencast
-  frames — keeps the scheduling tool's `allow.net` when it later fires,
-  instead of falling back to the unrestricted resting policy. Callbacks
-  registered at top level (outside any tool) stay unrestricted.
+  frames — is captured at the point of **registration** and keeps the
+  scheduling tool's `allow.net` when it later fires cross-task, instead
+  of falling back to the unrestricted resting policy. Callbacks
+  registered at top level (outside any tool) stay unrestricted. An async
+  callback's grant covers its whole continuation, not just the
+  synchronous call — a `page.route(url, async r => { await fetch(...) })`
+  handler stays restricted where its `fetch` actually runs.
+
+The handler's `request` **arg** has the grant baked in at dispatch, so
+it is enforced unconditionally, anywhere in the handler. The global
+`fetch` and global `request` read the grant that is active on the
+running handler's stack; that is reliable on the handler's synchronous
+prefix and inside any registered callback, but a global `fetch` invoked
+from a continuation *after* awaiting an unrelated host operation can
+observe the resting (unrestricted) policy. For guaranteed enforcement of
+the handler's own HTTP, prefer the `request` arg over the global.
 
 `allow.net` scopes HTTP (`request` + `fetch`) **only**. `page`/`context`
 browser navigation is a separate, deliberately ungated authority — an
 automation tool must be able to navigate. There is no `fs` capability:
-the handler context exposes no filesystem handle, so an `fs` scope would
-gate nothing.
+the only filesystem a handler can reach is the session's `fs` and
+`artifacts` globals, both already confined to their `PathSandbox` roots,
+so an extension-level `fs` scope would have no ungated authority left to
+gate.
+
+### Operator policy: `[extensions.policy]`
+
+The manifest is the AUTHOR's half of a two-party grant — it states what
+the tool NEEDS. The config-side policy is the OPERATOR's half — what the
+deployment GRANTS. The effective authority a tool dispatches with is
+the intersection; a manifest can never widen past the ceiling.
+
+```toml
+[extensions]
+paths = ["./extensions"]
+
+[extensions.policy]
+# Host ceiling for every extension's HTTP.
+net = ["*.box.com", "localhost"]
+# What allow.commands declarations are permitted:
+#   "any" (default) | "argvOnly" | "none"
+commands = "argvOnly"
+```
+
+- `net` absent: manifests keep the back-compat semantics documented
+  above (no declaration = unrestricted).
+- `net` present: every tool flips to default-deny. A tool with no
+  `allow.net` gets exactly the ceiling; a tool with one keeps only the
+  entries the ceiling subsumes (dropped entries are reported as startup
+  warnings and via `ferridriver_extensions`). `net = []` denies all
+  extension HTTP.
+- `commands = "argvOnly"` fails registration of any tool declaring a
+  shell-string command spec (where `$(…)`, pipes, and redirection
+  live) — argv-array specs still work. `commands = "none"` fails
+  registration of any command-declaring tool. Both conflicts are also
+  reported as startup warnings.
+
+The `commands` ceiling exists because arbitrary exec subsumes every
+other capability: a tool granted a shell line can trivially reach any
+host `allow.net` would deny. `argvOnly` narrows that to declared
+binaries with inert arguments; `none` closes it.
+
+Enforcement is Rust-side at `defineTool` registration inside each
+session VM, so every dispatch path (promoted MCP tool, `tools.<name>`,
+`ferridriver run`, BDD) sees the same effective grants.
 
 ---
 
@@ -320,6 +405,13 @@ Extensions are configured in the unified config file
 # server (tools) AND, bundled alongside BDD step files, by the test
 # runner (steps).
 extensions = ["./extensions", "./tools/box-login.ts"]
+# Or the detailed table shape, which adds the operator policy ceiling
+# (see "Operator policy" above):
+#   [extensions]
+#   paths = ["./extensions"]
+#   [extensions.policy]
+#   net = ["*.box.com"]
+#   commands = "argvOnly"
 
 [scripting]
 # Sandbox relaxations — default-deny, like allow.net.
