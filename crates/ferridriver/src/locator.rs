@@ -6,7 +6,7 @@
 //!
 //! Locators can be chained to narrow scope:
 //! ```ignore
-//! page.locator("css=.form", None).get_by_role("textbox", &Default::default()).fill("hello", None).await?;
+//! page.locator("css=.form").get_by_role("textbox", &Default::default()).fill("hello").await?;
 //! ```
 
 use std::fmt::Write as _;
@@ -234,13 +234,9 @@ impl Locator {
   /// selector. `visible` is stripped from the option bag (only
   /// `filter()` and the constructor accept it).
   #[must_use]
-  pub fn locator(
-    &self,
-    selector_or_locator: impl Into<crate::options::LocatorLike>,
-    options: Option<crate::options::FilterOptions>,
-  ) -> Locator {
+  pub fn locator(&self, selector_or_locator: impl Into<crate::options::LocatorLike>) -> Locator {
     let inner = selector_or_locator.into();
-    let base = match &inner {
+    match &inner {
       crate::options::LocatorLike::Selector(s) => self.chain(s),
       crate::options::LocatorLike::Locator(l) => {
         if Arc::ptr_eq(self.frame.page_arc(), l.frame.page_arc()) {
@@ -253,67 +249,100 @@ impl Locator {
           self.chain("internal:cross-frame-error=true")
         }
       },
-    };
-    match options {
-      Some(mut opts) => {
-        opts.visible = None; // Omit<LocatorOptions, 'visible'>
-        base.filter(&opts)
-      },
-      None => base,
     }
   }
 
-  /// Locate elements by ARIA role, optionally filtered by role options.
-  /// `options.name` accepts `string | RegExp` — passing a regex matches
-  /// the accessible name with its full JS regex semantics (flags
-  /// preserved), while a literal string matches case-insensitively
-  /// unless `exact: true`.
+  /// [`Self::locator`] with Playwright's `Omit<LocatorOptions, 'visible'>`
+  /// filter bag (`visible` is stripped; only `filter()` and the
+  /// constructor accept it).
   #[must_use]
-  pub fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Locator {
-    self.chain(&build_role_selector(role, opts))
+  pub fn locator_with(
+    &self,
+    selector_or_locator: impl Into<crate::options::LocatorLike>,
+    options: &crate::options::FilterOptions,
+  ) -> Locator {
+    let mut opts = options.clone();
+    opts.visible = None; // Omit<LocatorOptions, 'visible'>
+    self.locator(selector_or_locator).filter(&opts)
+  }
+
+  /// Locate elements by ARIA role, refined via builder setters.
+  /// `.name(...)` accepts `string | RegExp` — a regex matches the
+  /// accessible name with its full JS regex semantics (flags preserved),
+  /// while a literal string matches case-insensitively unless
+  /// `.exact(true)`.
+  #[must_use]
+  pub fn get_by_role(
+    &self,
+    role: impl Into<crate::options::Role>,
+  ) -> crate::locator_builder::LocatorBuilder<RoleOptions> {
+    let base = self.clone();
+    let role = role.into();
+    crate::locator_builder::LocatorBuilder::new(move |opts| base.chain(&build_role_selector(role.as_str(), opts)))
   }
 
   /// Locate elements by visible text content. `text` accepts
   /// `string | RegExp` per Playwright's `getByText`.
   #[must_use]
-  pub fn get_by_text(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
-    self.chain(&build_text_like_selector("internal:text", text, opts))
+  pub fn get_by_text(&self, text: impl Into<StringOrRegex>) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.text_like_builder("internal:text", text.into())
   }
 
   /// Locate form elements by their associated label text. Accepts
   /// `string | RegExp` — the `getByLabel` form.
   #[must_use]
-  pub fn get_by_label(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
-    self.chain(&build_text_like_selector("internal:label", text, opts))
+  pub fn get_by_label(&self, text: impl Into<StringOrRegex>) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.text_like_builder("internal:label", text.into())
   }
 
   /// Locate input elements by their placeholder text. Accepts
   /// `string | RegExp` — the `getByPlaceholder` form.
   #[must_use]
-  pub fn get_by_placeholder(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
-    self.chain(&build_attr_selector("placeholder", text, opts))
+  pub fn get_by_placeholder(
+    &self,
+    text: impl Into<StringOrRegex>,
+  ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.attr_builder("placeholder", text.into())
   }
 
   /// Locate elements by their `alt` attribute text. Accepts
   /// `string | RegExp` — the `getByAltText` form.
   #[must_use]
-  pub fn get_by_alt_text(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
-    self.chain(&build_attr_selector("alt", text, opts))
+  pub fn get_by_alt_text(&self, text: impl Into<StringOrRegex>) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.attr_builder("alt", text.into())
   }
 
   /// Locate elements by their `title` attribute text. Accepts
   /// `string | RegExp` — the `getByTitle` form.
   #[must_use]
-  pub fn get_by_title(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
-    self.chain(&build_attr_selector("title", text, opts))
+  pub fn get_by_title(&self, text: impl Into<StringOrRegex>) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.attr_builder("title", text.into())
   }
 
   /// Locate elements by their `data-testid` (or the configured
   /// test-id attribute). Accepts `string | RegExp` — the `getByTestId`
   /// form. Matches are always exact.
   #[must_use]
-  pub fn get_by_test_id(&self, test_id: &StringOrRegex) -> Locator {
-    self.chain(&build_testid_selector("data-testid", test_id))
+  pub fn get_by_test_id(&self, test_id: impl Into<StringOrRegex>) -> Locator {
+    self.chain(&build_testid_selector("data-testid", &test_id.into()))
+  }
+
+  fn text_like_builder(
+    &self,
+    kind: &'static str,
+    text: StringOrRegex,
+  ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    let base = self.clone();
+    crate::locator_builder::LocatorBuilder::new(move |opts| base.chain(&build_text_like_selector(kind, &text, opts)))
+  }
+
+  fn attr_builder(
+    &self,
+    attr: &'static str,
+    text: StringOrRegex,
+  ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    let base = self.clone();
+    crate::locator_builder::LocatorBuilder::new(move |opts| base.chain(&build_attr_selector(attr, &text, opts)))
   }
 
   /// Attach a human-readable description to this locator for trace /
@@ -445,13 +474,16 @@ impl Locator {
   /// but has no effect (ferridriver does not implicitly wait for
   /// navigation after click).
   ///
-  /// Pass `None` for the common no-options path.
-  ///
   /// # Errors
   ///
   /// Returns an error if the element cannot be found, is not actionable
   /// (unless `force=true`), or the click dispatch fails.
-  pub async fn click(&self, opts: Option<crate::options::ClickOptions>) -> Result<()> {
+  pub fn click(&self) -> crate::action::Action<'static, crate::options::ClickOptions, ()> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.click_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn click_impl(&self, opts: Option<crate::options::ClickOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     // Borrow `opts` across retry iterations — references are `Copy`, so
     // each `async move` closure captures a fresh ref instead of moving
@@ -476,7 +508,12 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the double-click fails.
-  pub async fn dblclick(&self, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
+  pub fn dblclick(&self) -> crate::action::Action<'static, crate::options::DblClickOptions, ()> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.dblclick_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn dblclick_impl(&self, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
     // `dblclick` is a click pair with `clickCount` = 1 then 2. The
     // shared `click_with_opts` honors that when `click_count` is set
     // to `2`.
@@ -522,7 +559,13 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not a fillable element.
-  pub async fn fill(&self, value: &str, opts: Option<crate::options::FillOptions>) -> Result<()> {
+  pub fn fill(&self, value: &str) -> crate::action::Action<'static, crate::options::FillOptions, ()> {
+    let locator = self.clone();
+    let value = value.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.fill_impl(&value, Some(opts)).await }))
+  }
+
+  pub(crate) async fn fill_impl(&self, value: &str, opts: Option<crate::options::FillOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let force = opts.is_force();
     let opts_ref = &opts;
@@ -612,7 +655,13 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or key dispatch fails.
-  pub async fn r#type(&self, text: &str, opts: Option<crate::options::TypeOptions>) -> Result<()> {
+  pub fn r#type(&self, text: &str) -> crate::action::Action<'static, crate::options::TypeOptions, ()> {
+    let locator = self.clone();
+    let text = text.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.type_impl(&text, Some(opts)).await }))
+  }
+
+  pub(crate) async fn type_impl(&self, text: &str, opts: Option<crate::options::TypeOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let delay_ms = opts.resolved_delay_ms();
     let timeout_ms = opts.timeout;
@@ -637,7 +686,13 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the key press fails.
-  pub async fn press(&self, key: &str, opts: Option<crate::options::PressOptions>) -> Result<()> {
+  pub fn press(&self, key: &str) -> crate::action::Action<'static, crate::options::PressOptions, ()> {
+    let locator = self.clone();
+    let key = key.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.press_impl(&key, Some(opts)).await }))
+  }
+
+  pub(crate) async fn press_impl(&self, key: &str, opts: Option<crate::options::PressOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let delay_ms = opts.resolved_delay_ms();
     let timeout_ms = opts.timeout;
@@ -666,7 +721,12 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the hover action fails.
-  pub async fn hover(&self, opts: Option<crate::options::HoverOptions>) -> Result<()> {
+  pub fn hover(&self) -> crate::action::Action<'static, crate::options::HoverOptions, ()> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.hover_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn hover_impl(&self, opts: Option<crate::options::HoverOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let opts_ref = &opts;
     retry_resolve!(self, opts_ref.timeout, "hover", |el, page| async move {
@@ -696,8 +756,13 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not actionable.
-  pub async fn check(&self, opts: Option<crate::options::CheckOptions>) -> Result<()> {
-    self.set_checked(true, opts).await
+  pub fn check(&self) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.check_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn check_impl(&self, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+    self.set_checked_impl(true, opts).await
   }
 
   /// Uncheck a checkbox if it is currently checked.
@@ -705,8 +770,13 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not actionable.
-  pub async fn uncheck(&self, opts: Option<crate::options::CheckOptions>) -> Result<()> {
-    self.set_checked(false, opts).await
+  pub fn uncheck(&self) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.uncheck_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn uncheck_impl(&self, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+    self.set_checked_impl(false, opts).await
   }
 
   /// Set the checked state of a checkbox or radio button to match
@@ -720,7 +790,12 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found, is not
   /// actionable, or the click dispatch fails.
-  pub async fn set_checked(&self, checked: bool, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+  pub fn set_checked(&self, checked: bool) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.set_checked_impl(checked, Some(opts)).await }))
+  }
+
+  pub(crate) async fn set_checked_impl(&self, checked: bool, opts: Option<crate::options::CheckOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let trial = opts.is_trial();
     // Lower to ClickOptions for the shared click dispatch path so
@@ -803,7 +878,12 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the tap event dispatch fails.
-  pub async fn tap(&self, opts: Option<crate::options::TapOptions>) -> Result<()> {
+  pub fn tap(&self) -> crate::action::Action<'static, crate::options::TapOptions, ()> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.tap_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn tap_impl(&self, opts: Option<crate::options::TapOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let opts_ref = &opts;
     retry_resolve!(self, opts_ref.timeout, "tap", |el, page| async move {
@@ -833,7 +913,18 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not a `<select>`.
-  pub async fn select_option(
+  pub fn select_option(
+    &self,
+    values: impl Into<crate::options::SelectOptionValues>,
+  ) -> crate::action::Action<'static, crate::options::SelectOptionOptions, Vec<String>> {
+    let values = values.into().0;
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move { locator.select_option_impl(values, Some(opts)).await })
+    })
+  }
+
+  pub(crate) async fn select_option_impl(
     &self,
     values: Vec<crate::options::SelectOptionValue>,
     opts: Option<crate::options::SelectOptionOptions>,
@@ -871,7 +962,18 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element is not a file input or the upload fails.
-  pub async fn set_input_files(
+  pub fn set_input_files(
+    &self,
+    files: impl Into<crate::options::InputFiles>,
+  ) -> crate::action::Action<'static, crate::options::SetInputFilesOptions, ()> {
+    let files = files.into();
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move { locator.set_input_files_impl(files, Some(opts)).await })
+    })
+  }
+
+  pub(crate) async fn set_input_files_impl(
     &self,
     files: crate::options::InputFiles,
     _opts: Option<crate::options::SetInputFilesOptions>,
@@ -954,7 +1056,19 @@ impl Locator {
   ///
   /// Returns `FerriError::Timeout` if the element does not appear
   /// before the deadline.
-  pub async fn dispatch_event(
+  pub fn dispatch_event(
+    &self,
+    event_type: &str,
+    event_init: Option<serde_json::Value>,
+  ) -> crate::action::Action<'static, crate::options::DispatchEventOptions, ()> {
+    let locator = self.clone();
+    let event_type = event_type.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move { locator.dispatch_event_impl(&event_type, event_init, Some(opts)).await })
+    })
+  }
+
+  pub(crate) async fn dispatch_event_impl(
     &self,
     event_type: &str,
     event_init: Option<serde_json::Value>,
@@ -1065,7 +1179,12 @@ impl Locator {
   ///
   /// [`crate::error::FerriError::Timeout`] if the element cannot be
   /// resolved within the timeout; forwards the page-side render error.
-  pub async fn aria_snapshot(&self, options: crate::options::AriaSnapshotOptions) -> Result<String> {
+  pub fn aria_snapshot(&self) -> crate::action::Action<'static, crate::options::AriaSnapshotOptions, String> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.aria_snapshot_impl(opts).await }))
+  }
+
+  pub(crate) async fn aria_snapshot_impl(&self, options: crate::options::AriaSnapshotOptions) -> Result<String> {
     // The frame the element resolves in (frameLocator enter-frame hops
     // resolved here) — root for the recursive child-iframe descent.
     let (root_frame, _sel) = self.resolved().await?;
@@ -1294,9 +1413,14 @@ impl Locator {
   ///
   /// Returns an error if the timeout expires before the element reaches
   /// the desired state, or if an unknown state is specified.
-  pub async fn wait_for(&self, opts: WaitOptions) -> Result<()> {
+  pub fn wait_for(&self) -> crate::action::Action<'static, crate::options::WaitOptions, ()> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.wait_for_impl(opts).await }))
+  }
+
+  pub(crate) async fn wait_for_impl(&self, opts: WaitOptions) -> Result<()> {
     let timeout = opts.timeout.unwrap_or(30000);
-    let state = opts.state.as_deref().unwrap_or("visible");
+    let state = opts.state.unwrap_or_default();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
 
     loop {
@@ -1307,7 +1431,7 @@ impl Locator {
         ));
       }
       match state {
-        "attached" => {
+        crate::options::WaitState::Attached => {
           // Only require DOM presence — do not consult computed style.
           if selectors::query_one(
             self.frame.page_arc().inner(),
@@ -1326,7 +1450,7 @@ impl Locator {
             return Ok(());
           }
         },
-        "visible" => {
+        crate::options::WaitState::Visible => {
           // DOM presence AND computed-style visible. Fail silently
           // (fall through to next poll) if `is_visible()` errors
           // because the element is detached mid-poll.
@@ -1334,7 +1458,7 @@ impl Locator {
             return Ok(());
           }
         },
-        "detached" => {
+        crate::options::WaitState::Detached => {
           if selectors::query_one(
             self.frame.page_arc().inner(),
             &self.selector,
@@ -1352,7 +1476,7 @@ impl Locator {
           }
           selectors::cleanup_tags(self.frame.page_arc().inner()).await;
         },
-        "hidden" => {
+        crate::options::WaitState::Hidden => {
           // Playwright: `hidden` is satisfied by detachment OR by the
           // element being present but not visible.
           if selectors::query_one(
@@ -1375,12 +1499,6 @@ impl Locator {
             return Ok(());
           }
         },
-        _ => {
-          return Err(crate::error::FerriError::invalid_argument(
-            "state",
-            format!("unknown wait state: {state}"),
-          ));
-        },
       }
       tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -1388,14 +1506,45 @@ impl Locator {
 
   // ── Screenshot ────────────────────────────────────────────────────────────
 
-  /// Take a PNG screenshot of the element.
+  /// Take a screenshot of the element (PNG by default; `.format(...)`,
+  /// `.path(...)`, `.timeout(...)` chain as setters).
   ///
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or screenshot capture fails.
-  pub async fn screenshot(&self) -> Result<Vec<u8>> {
-    let el = self.resolve().await?;
-    el.screenshot(crate::backend::ImageFormat::Png).await
+  pub fn screenshot(&self) -> crate::action::Action<'static, crate::options::ElementScreenshotOptions, Vec<u8>> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.screenshot_impl(opts).await }))
+  }
+
+  pub(crate) async fn screenshot_impl(&self, opts: crate::options::ElementScreenshotOptions) -> Result<Vec<u8>> {
+    let format = match opts.format.unwrap_or_default() {
+      crate::options::ScreenshotFormat::Png => crate::backend::ImageFormat::Png,
+      crate::options::ScreenshotFormat::Jpeg => crate::backend::ImageFormat::Jpeg,
+      crate::options::ScreenshotFormat::Webp => crate::backend::ImageFormat::Webp,
+    };
+    let capture = async {
+      let el = self.resolve().await?;
+      el.screenshot(format).await
+    };
+    let bytes = match opts.timeout {
+      Some(ms) if ms > 0 => match tokio::time::timeout(std::time::Duration::from_millis(ms), capture).await {
+        Ok(res) => res?,
+        Err(_) => return Err(crate::error::FerriError::timeout("screenshot", ms)),
+      },
+      _ => capture.await?,
+    };
+    if let Some(ref path) = opts.path {
+      if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+          let _ = tokio::fs::create_dir_all(parent).await;
+        }
+      }
+      tokio::fs::write(path, &bytes)
+        .await
+        .map_err(|e| crate::error::FerriError::Backend(format!("screenshot write {}: {e}", path.display())))?;
+    }
+    Ok(bytes)
   }
 
   // ── Editable check ───────────────────────────────────────────────────────
@@ -1431,10 +1580,22 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or any key press fails.
-  pub async fn press_sequentially(&self, text: &str, opts: Option<crate::options::TypeOptions>) -> Result<()> {
+  pub fn press_sequentially(&self, text: &str) -> crate::action::Action<'static, crate::options::TypeOptions, ()> {
+    let locator = self.clone();
+    let text = text.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move { locator.press_sequentially_impl(&text, Some(opts)).await })
+    })
+  }
+
+  pub(crate) async fn press_sequentially_impl(
+    &self,
+    text: &str,
+    opts: Option<crate::options::TypeOptions>,
+  ) -> Result<()> {
     // Playwright's `pressSequentially` shares the `TypeOptions` shape
     // with deprecated `type` (same three fields), so route both here.
-    self.r#type(text, opts).await
+    self.type_impl(text, opts).await
   }
 
   // ── Drag to another locator ─────────────────────────────────────────────
@@ -1457,7 +1618,17 @@ impl Locator {
   ///
   /// Returns an error if either element cannot be found, bounding box
   /// coordinates cannot be read, or the drag operation fails.
-  pub async fn drag_to(&self, target: &Locator, options: Option<crate::options::DragAndDropOptions>) -> Result<()> {
+  pub fn drag_to(&self, target: &Locator) -> crate::action::Action<'static, crate::options::DragAndDropOptions, ()> {
+    let locator = self.clone();
+    let target = target.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.drag_to_impl(&target, Some(opts)).await }))
+  }
+
+  pub(crate) async fn drag_to_impl(
+    &self,
+    target: &Locator,
+    options: Option<crate::options::DragAndDropOptions>,
+  ) -> Result<()> {
     let opts = options.unwrap_or_default();
 
     // Get source + target geometry via call_js_fn_value (1 CDP each).
@@ -1523,7 +1694,15 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be resolved, a referenced file
   /// path cannot be read, or the target rejects the drop.
-  pub async fn drop(
+  pub fn drop(
+    &self,
+    payload: crate::options::DropPayload,
+  ) -> crate::action::Action<'static, crate::options::DropOptions, ()> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.drop_impl(payload, Some(opts)).await }))
+  }
+
+  pub(crate) async fn drop_impl(
     &self,
     payload: crate::options::DropPayload,
     options: Option<crate::options::DropOptions>,
@@ -1698,7 +1877,56 @@ impl Locator {
   /// Returns [`crate::error::FerriError::Timeout`] when the element
   /// cannot be resolved within the configured timeout, or forwards
   /// the page-side evaluate error.
-  pub async fn evaluate(
+  pub fn evaluate(
+    &self,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> crate::action::Action<'static, crate::options::EvaluateOptions, crate::protocol::SerializedValue> {
+    let locator = self.clone();
+    let fn_source = fn_source.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move { locator.evaluate_impl(&fn_source, arg, is_function, Some(opts)).await })
+    })
+  }
+
+  /// Typed evaluate: run `fn_source` against the matched element and
+  /// deserialize the result via serde. Ergonomic wrapper over the
+  /// wire-level [`Self::evaluate`] for JSON-shaped values:
+  ///
+  /// ```ignore
+  /// let text: String = locator.eval("el => el.textContent").await?;
+  /// ```
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::evaluate`], plus [`crate::error::FerriError::Json`] /
+  /// [`crate::error::FerriError::Evaluation`] when the result does not
+  /// decode into `T` (rich JS values need [`Self::evaluate_handle`]).
+  pub async fn eval<T: serde::de::DeserializeOwned>(&self, fn_source: &str) -> Result<T> {
+    let value = self
+      .evaluate(fn_source, crate::protocol::SerializedArgument::default(), None)
+      .await?;
+    crate::protocol::result_to_serde(&value)
+  }
+
+  /// [`Self::eval`] with a serde-serialized argument, passed to the page
+  /// function as its second parameter (`(el, arg) => ...`).
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::eval`].
+  pub async fn eval_with<T: serde::de::DeserializeOwned>(
+    &self,
+    fn_source: &str,
+    arg: &(impl serde::Serialize + ?Sized),
+  ) -> Result<T> {
+    let arg = crate::protocol::argument_from_serde(arg)?;
+    let value = self.evaluate(fn_source, arg, None).await?;
+    crate::protocol::result_to_serde(&value)
+  }
+
+  pub(crate) async fn evaluate_impl(
     &self,
     fn_source: &str,
     arg: crate::protocol::SerializedArgument,
@@ -1731,7 +1959,24 @@ impl Locator {
   /// # Errors
   ///
   /// See [`Self::evaluate`].
-  pub async fn evaluate_handle(
+  pub fn evaluate_handle(
+    &self,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> crate::action::Action<'static, crate::options::EvaluateOptions, crate::js_handle::JSHandle> {
+    let locator = self.clone();
+    let fn_source = fn_source.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        locator
+          .evaluate_handle_impl(&fn_source, arg, is_function, Some(opts))
+          .await
+      })
+    })
+  }
+
+  pub(crate) async fn evaluate_handle_impl(
     &self,
     fn_source: &str,
     arg: crate::protocol::SerializedArgument,
@@ -2078,56 +2323,84 @@ impl FrameLocator {
   /// Locator inside this iframe. Mirrors Playwright's
   /// `frameLocator.locator(selector, options?)` — sync, returns a
   /// `Locator` bound to the parent frame with an `enter-frame`
-  /// selector chain.
+  /// selector chain. The options-bag form is [`Self::locator_with`].
   #[must_use]
-  pub fn locator(&self, selector: &str, options: Option<crate::options::FilterOptions>) -> Locator {
-    let base = Locator::new(self.frame.clone(), self.enter(selector));
-    match options {
-      Some(opts) => base.filter(&opts),
-      None => base,
-    }
+  pub fn locator(&self, selector: &str) -> Locator {
+    Locator::new(self.frame.clone(), self.enter(selector))
+  }
+
+  /// [`Self::locator`] with Playwright's `LocatorOptions` filter bag.
+  #[must_use]
+  pub fn locator_with(&self, selector: &str, options: &crate::options::FilterOptions) -> Locator {
+    self.locator(selector).filter(options)
   }
 
   /// `getByRole` inside this iframe.
   #[must_use]
-  pub fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Locator {
-    self.locator(&build_role_selector(role, opts), None)
+  pub fn get_by_role(
+    &self,
+    role: impl Into<crate::options::Role>,
+  ) -> crate::locator_builder::LocatorBuilder<RoleOptions> {
+    let fl = self.clone();
+    let role = role.into();
+    crate::locator_builder::LocatorBuilder::new(move |opts| fl.locator(&build_role_selector(role.as_str(), opts)))
   }
 
   /// `getByText` inside this iframe.
   #[must_use]
-  pub fn get_by_text(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
-    self.locator(&build_text_like_selector("internal:text", text, opts), None)
+  pub fn get_by_text(&self, text: impl Into<StringOrRegex>) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.text_like_builder("internal:text", text.into())
   }
 
   /// `getByTestId` inside this iframe.
   #[must_use]
-  pub fn get_by_test_id(&self, test_id: &StringOrRegex) -> Locator {
-    self.locator(&build_testid_selector("data-testid", test_id), None)
+  pub fn get_by_test_id(&self, test_id: impl Into<StringOrRegex>) -> Locator {
+    self.locator(&build_testid_selector("data-testid", &test_id.into()))
   }
 
   /// `getByLabel` inside this iframe.
   #[must_use]
-  pub fn get_by_label(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
-    self.locator(&build_text_like_selector("internal:label", text, opts), None)
+  pub fn get_by_label(&self, text: impl Into<StringOrRegex>) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.text_like_builder("internal:label", text.into())
   }
 
   /// `getByPlaceholder` inside this iframe.
   #[must_use]
-  pub fn get_by_placeholder(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
-    self.locator(&build_attr_selector("placeholder", text, opts), None)
+  pub fn get_by_placeholder(
+    &self,
+    text: impl Into<StringOrRegex>,
+  ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.attr_builder("placeholder", text.into())
   }
 
   /// `getByAltText` inside this iframe.
   #[must_use]
-  pub fn get_by_alt_text(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
-    self.locator(&build_attr_selector("alt", text, opts), None)
+  pub fn get_by_alt_text(&self, text: impl Into<StringOrRegex>) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.attr_builder("alt", text.into())
   }
 
   /// `getByTitle` inside this iframe.
   #[must_use]
-  pub fn get_by_title(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
-    self.locator(&build_attr_selector("title", text, opts), None)
+  pub fn get_by_title(&self, text: impl Into<StringOrRegex>) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    self.attr_builder("title", text.into())
+  }
+
+  fn text_like_builder(
+    &self,
+    kind: &'static str,
+    text: StringOrRegex,
+  ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    let fl = self.clone();
+    crate::locator_builder::LocatorBuilder::new(move |opts| fl.locator(&build_text_like_selector(kind, &text, opts)))
+  }
+
+  fn attr_builder(
+    &self,
+    attr: &'static str,
+    text: StringOrRegex,
+  ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
+    let fl = self.clone();
+    crate::locator_builder::LocatorBuilder::new(move |opts| fl.locator(&build_attr_selector(attr, &text, opts)))
   }
 
   /// The locator pointing at the `<iframe>` element itself, in the

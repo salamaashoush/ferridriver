@@ -89,6 +89,9 @@ impl TestRunner {
   /// and delegates to `execute()`. For real-time external observation (TUI, WebSocket),
   /// use `execute()` directly with a custom bus.
   pub async fn run(&mut self, plan: TestPlan) -> i32 {
+    // Playwright's `config.expect.timeout`: make the configured default
+    // visible to every bare `expect()` in this process.
+    ferridriver_expect::set_default_expect_timeout(std::time::Duration::from_millis(self.config.expect_timeout));
     let global_timeout = self.config.global_timeout;
     let inner = async move {
       // ── Multi-project path ──
@@ -1012,7 +1015,7 @@ impl TestRunner {
 
     // Cleanup.
     self.shared_browser = None;
-    let _ = browser.close(None).await;
+    let _ = browser.close().await;
 
     0
   }
@@ -1432,7 +1435,7 @@ impl BrowserHandle {
       return;
     }
     if let Some(b) = self.cell.get() {
-      let _ = b.close(None).await;
+      let _ = b.close().await;
     }
   }
 }

@@ -98,35 +98,29 @@ async fn test_retry_with_flaky_detection() {
 // ── All locator matchers test ──
 
 async fn assert_visibility_state(page: &Arc<ferridriver::Page>) -> Result<(), TestFailure> {
-  ferridriver_test::expect(&page.locator("#visible", None))
+  ferridriver_test::expect(&page.locator("#visible"))
     .to_be_visible()
     .await?;
-  ferridriver_test::expect(&page.locator("#hidden", None))
+  ferridriver_test::expect(&page.locator("#hidden"))
     .to_be_hidden()
     .await?;
-  ferridriver_test::expect(&page.locator("#visible", None))
+  ferridriver_test::expect(&page.locator("#visible"))
     .not()
     .to_be_hidden()
     .await?;
-  ferridriver_test::expect(&page.locator("#btn", None))
-    .to_be_disabled()
-    .await?;
-  ferridriver_test::expect(&page.locator("#inp", None))
-    .to_be_enabled()
-    .await?;
-  ferridriver_test::expect(&page.locator("#check", None))
+  ferridriver_test::expect(&page.locator("#btn")).to_be_disabled().await?;
+  ferridriver_test::expect(&page.locator("#inp")).to_be_enabled().await?;
+  ferridriver_test::expect(&page.locator("#check"))
     .to_be_checked()
     .await?;
-  ferridriver_test::expect(&page.locator("#area", None))
+  ferridriver_test::expect(&page.locator("#area"))
     .to_be_editable()
     .await?;
-  ferridriver_test::expect(&page.locator("#visible", None))
+  ferridriver_test::expect(&page.locator("#visible"))
     .to_be_attached()
     .await?;
-  ferridriver_test::expect(&page.locator("#empty", None))
-    .to_be_empty()
-    .await?;
-  ferridriver_test::expect(&page.locator("#visible", None))
+  ferridriver_test::expect(&page.locator("#empty")).to_be_empty().await?;
+  ferridriver_test::expect(&page.locator("#visible"))
     .not()
     .to_be_empty()
     .await?;
@@ -134,28 +128,28 @@ async fn assert_visibility_state(page: &Arc<ferridriver::Page>) -> Result<(), Te
 }
 
 async fn assert_text_and_attributes(page: &Arc<ferridriver::Page>) -> Result<(), TestFailure> {
-  ferridriver_test::expect(&page.locator("#visible", None))
+  ferridriver_test::expect(&page.locator("#visible"))
     .to_have_text("Visible")
     .await?;
-  ferridriver_test::expect(&page.locator("#btn", None))
+  ferridriver_test::expect(&page.locator("#btn"))
     .to_contain_text("Submit")
     .await?;
-  ferridriver_test::expect(&page.locator("#inp", None))
+  ferridriver_test::expect(&page.locator("#inp"))
     .to_have_value("hello")
     .await?;
-  ferridriver_test::expect(&page.locator("#inp", None))
+  ferridriver_test::expect(&page.locator("#inp"))
     .to_have_attribute("type", "text")
     .await?;
-  ferridriver_test::expect(&page.locator("#btn", None))
+  ferridriver_test::expect(&page.locator("#btn"))
     .to_have_class("primary large")
     .await?;
-  ferridriver_test::expect(&page.locator("#btn", None))
+  ferridriver_test::expect(&page.locator("#btn"))
     .to_contain_class("primary")
     .await?;
-  ferridriver_test::expect(&page.locator("#btn", None))
+  ferridriver_test::expect(&page.locator("#btn"))
     .to_contain_class("large")
     .await?;
-  ferridriver_test::expect(&page.locator("#btn", None))
+  ferridriver_test::expect(&page.locator("#btn"))
     .not()
     .to_contain_class("secondary")
     .await?;
@@ -163,28 +157,26 @@ async fn assert_text_and_attributes(page: &Arc<ferridriver::Page>) -> Result<(),
 }
 
 async fn assert_identity_and_structure(page: &Arc<ferridriver::Page>) -> Result<(), TestFailure> {
-  ferridriver_test::expect(&page.locator("#btn", None))
+  ferridriver_test::expect(&page.locator("#btn"))
     .to_have_id("btn")
     .await?;
-  ferridriver_test::expect(&page.locator("#btn", None))
+  ferridriver_test::expect(&page.locator("#btn"))
     .to_have_role("button")
     .await?;
-  ferridriver_test::expect(&page.locator("#btn", None))
+  ferridriver_test::expect(&page.locator("#btn"))
     .to_have_accessible_name("Submit Form")
     .await?;
-  ferridriver_test::expect(&page.locator("#btn", None))
+  ferridriver_test::expect(&page.locator("#btn"))
     .to_have_accessible_description("Submits the form")
     .await?;
-  ferridriver_test::expect(&page.locator("div", None))
-    .to_have_count(4)
-    .await?;
-  ferridriver_test::expect(&page.locator("#styled", None))
+  ferridriver_test::expect(&page.locator("div")).to_have_count(4).await?;
+  ferridriver_test::expect(&page.locator("#styled"))
     .to_have_css("color", "rgb(255, 0, 0)")
     .await?;
-  ferridriver_test::expect(&page.locator("#inp", None))
+  ferridriver_test::expect(&page.locator("#inp"))
     .to_have_js_property("type", serde_json::json!("text"))
     .await?;
-  ferridriver_test::expect(&page.locator("#multi", None))
+  ferridriver_test::expect(&page.locator("#multi"))
     .to_have_values(&["a", "b"])
     .await?;
   Ok(())
@@ -210,7 +202,7 @@ async fn assert_all_matchers(page: &Arc<ferridriver::Page>) -> Result<(), TestFa
     <div id="styled" style="color: rgb(255, 0, 0);">Red</div>
   "#;
   let url = data_url(html);
-  page.goto(&url, None).await.map_err(make_failure)?;
+  page.goto(&url).await.map_err(make_failure)?;
 
   assert_visibility_state(page).await?;
   assert_text_and_attributes(page).await?;
@@ -358,7 +350,7 @@ fn make_to_pass_test() -> TestCase {
           <div id="status">loading</div>
           <script>setTimeout(() => document.getElementById('status').textContent = 'ready', 300)</script>
         "#;
-        page.goto(&data_url(html), None).await.map_err(make_failure)?;
+        page.goto(&data_url(html)).await.map_err(make_failure)?;
 
         // toPass retries the block until it succeeds. The closure
         // returns an `AssertionFailure` (the shared assertion error
@@ -368,7 +360,7 @@ fn make_to_pass_test() -> TestCase {
           let page = Arc::clone(&page);
           async move {
             let text = page
-              .locator("#status", None)
+              .locator("#status")
               .text_content()
               .await
               .map_err(|e| ferridriver_test::expect::AssertionFailure::new(e.to_string(), None))?
@@ -436,7 +428,7 @@ fn make_page_assertions_test() -> TestCase {
       Box::pin(async move {
         let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(make_failure)?;
         let url = data_url("<title>My Title</title><body>Hello</body>");
-        page.goto(&url, None).await.map_err(make_failure)?;
+        page.goto(&url).await.map_err(make_failure)?;
 
         ferridriver_test::expect(&page).to_have_title("My Title").await?;
         ferridriver_test::expect(&page)

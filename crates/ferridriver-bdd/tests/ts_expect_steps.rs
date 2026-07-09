@@ -21,7 +21,7 @@ async fn build_world() -> BrowserWorld {
       .await
       .expect("launch chromium"),
   );
-  let context = Arc::new(browser.new_context(None));
+  let context = Arc::new(browser.new_context().await.expect("new context"));
   let page = context.new_page().await.expect("new page");
   let request = Arc::new(ferridriver::http_client::HttpClient::new(Default::default()));
   let fixtures = ferridriver_test::model::TestFixtures {

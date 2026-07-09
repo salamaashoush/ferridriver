@@ -181,16 +181,20 @@ impl Browser {
   /// Create a new isolated browser context.
   /// Mirrors Playwright's `browser.newContext(options?)` —
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:22229`.
-  /// Pass `None` for the no-options case (Playwright's zero-arg form).
   ///
   /// Options are stored on the shared
   /// [`crate::state::BrowserState::context_options`] registry keyed by
   /// composite session key and consumed by
   /// [`ContextRef::new_page`] as each page is opened. The registry
   /// itself is a plain `std::sync::Mutex` clone-handle on `self` so
-  /// this setter stays sync regardless of whether an async writer
-  /// holds the outer `RwLock<BrowserState>`.
-  pub fn new_context(&self, options: Option<crate::options::BrowserContextOptions>) -> ContextRef {
+  /// the underlying setter stays sync regardless of whether an async
+  /// writer holds the outer `RwLock<BrowserState>`.
+  pub fn new_context(&self) -> crate::action::Action<'static, crate::options::BrowserContextOptions, ContextRef> {
+    let this = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { Ok(this.new_context_impl(Some(opts))) }))
+  }
+
+  pub(crate) fn new_context_impl(&self, options: Option<crate::options::BrowserContextOptions>) -> ContextRef {
     static CTX_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = CTX_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = format!("context-{id}");
@@ -338,7 +342,7 @@ impl Browser {
   /// Returns an error if page creation or navigation fails.
   pub async fn new_page_with_url(&self, url: &str) -> Result<Arc<Page>> {
     let page = Box::pin(self.new_page()).await?;
-    page.goto(url, None).await?;
+    page.goto_impl(url, None).await?;
     Ok(page)
   }
 
@@ -361,16 +365,20 @@ impl Browser {
 
   /// Close the browser.
   ///
-  /// Close the browser. Accepts `Option<`[`crate::options::BrowserCloseOptions`]`>`
-  /// — mirrors Playwright's `browser.close({ reason })`. The reason, if
-  /// set, is surfaced on `TargetClosed` errors emitted to any in-flight
-  /// operation on pages/contexts from this browser. Pass `None` for the
-  /// common no-options case.
+  /// Mirrors Playwright's `browser.close({ reason })`; the option bag is
+  /// [`crate::options::BrowserCloseOptions`]. The reason, if set, is
+  /// surfaced on `TargetClosed` errors emitted to any in-flight
+  /// operation on pages/contexts from this browser.
   ///
   /// # Errors
   ///
   /// Returns an error if the browser cannot be closed cleanly.
-  pub async fn close(&self, opts: Option<crate::options::BrowserCloseOptions>) -> Result<()> {
+  pub fn close(&self) -> crate::action::Action<'static, crate::options::BrowserCloseOptions, ()> {
+    let this = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { this.close_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn close_impl(&self, opts: Option<crate::options::BrowserCloseOptions>) -> Result<()> {
     let mut state = self.state.write().await;
     if let Some(reason) = opts.and_then(|o| o.reason) {
       state.set_close_reason(reason);

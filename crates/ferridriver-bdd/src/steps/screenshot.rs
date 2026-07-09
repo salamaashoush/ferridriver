@@ -8,7 +8,7 @@ use ferridriver_bdd_macros::step;
 async fn take_screenshot(world: &mut BrowserWorld) {
   world
     .page()
-    .screenshot(ferridriver::options::ScreenshotOptions::default())
+    .screenshot()
     .await
     .map_err(|e| StepError::wrap("screenshot", e))?;
 }
@@ -17,7 +17,7 @@ async fn take_screenshot(world: &mut BrowserWorld) {
 async fn take_screenshot_of(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector, None)
+    .locator(&selector)
     .screenshot()
     .await
     .map_err(|e| StepError::wrap(format!("screenshot of \"{selector}\""), e))?;
@@ -27,10 +27,7 @@ async fn take_screenshot_of(world: &mut BrowserWorld, selector: String) {
 async fn take_snapshot(world: &mut BrowserWorld) {
   world
     .page()
-    .snapshot_for_ai(ferridriver::snapshot::SnapshotOptions {
-      depth: None,
-      track: None,
-    })
+    .snapshot_for_ai()
     .await
     .map_err(|e| StepError::wrap("snapshot", e))?;
 }

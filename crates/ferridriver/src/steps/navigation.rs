@@ -20,7 +20,7 @@ step!(NavigateNoWait {
           timeout: None,
           referer: None,
         };
-        page.goto(&url, Some(opts)).await.map_err(|e| format!("Navigate: {e}"))?;
+        page.goto_impl(&url, Some(opts)).await.map_err(|e| format!("Navigate: {e}"))?;
         Ok(None)
     }
 });
@@ -32,7 +32,7 @@ step!(Navigate {
     example: "Given I navigate to \"https://example.com\"",
     execute(page, caps, _table, _vars) {
         let url = q(&caps[1]);
-        page.goto(&url, None).await.map_err(|e| format!("Navigate: {e}"))?;
+        page.goto_impl(&url, None).await.map_err(|e| format!("Navigate: {e}"))?;
         Ok(None)
     }
 });
@@ -43,7 +43,7 @@ step!(GoBack {
     description: "Go back in history",
     example: "When I go back",
     execute(page, _caps, _table, _vars) {
-        page.go_back(None).await?;
+        page.go_back_impl(None).await?;
         Ok(None)
     }
 });
@@ -54,7 +54,7 @@ step!(GoForward {
     description: "Go forward in history",
     example: "When I go forward",
     execute(page, _caps, _table, _vars) {
-        page.go_forward(None).await?;
+        page.go_forward_impl(None).await?;
         Ok(None)
     }
 });
@@ -65,7 +65,7 @@ step!(Reload {
     description: "Reload the page",
     example: "When I reload the page",
     execute(page, _caps, _table, _vars) {
-        page.reload(None).await?;
+        page.reload_impl(None).await?;
         Ok(None)
     }
 });

@@ -67,11 +67,15 @@ impl McpServer {
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let opts = ferridriver::options::GotoOptions {
-      wait_until: Some(p.wait_until.unwrap_or_else(|| "commit".into())),
+      wait_until: Some(
+        p.wait_until
+          .as_deref()
+          .map_or(ferridriver::options::LoadState::Commit, Into::into),
+      ),
       timeout: None,
       referer: None,
     };
-    page.goto(&p.url, Some(opts)).await.map_err(Self::err)?;
+    page.goto(&p.url).options(opts).await.map_err(Self::err)?;
     Box::pin(self.action_ok(&page, s, "Navigation complete.")).await
   }
 
@@ -85,21 +89,21 @@ impl McpServer {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
-        page.go_back(None).await.map_err(Self::err)?;
+        page.go_back().await.map_err(Self::err)?;
         Box::pin(self.action_ok(&page, s, "Navigated back.")).await
       },
       "forward" => {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
-        page.go_forward(None).await.map_err(Self::err)?;
+        page.go_forward().await.map_err(Self::err)?;
         Box::pin(self.action_ok(&page, s, "Navigated forward.")).await
       },
       "reload" => {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
-        page.reload(None).await.map_err(Self::err)?;
+        page.reload().await.map_err(Self::err)?;
         Box::pin(self.action_ok(&page, s, "Page reloaded.")).await
       },
       "new" => {
@@ -109,7 +113,7 @@ impl McpServer {
         let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), s.to_string());
         let page = Box::pin(ctx_ref.new_page()).await.map_err(Self::err)?;
         if url != "about:blank" {
-          page.goto(url, None).await.map_err(Self::err)?;
+          page.goto(url).await.map_err(Self::err)?;
         }
         self.state.invalidate_context(s);
         let snap = self.snap(&page, s).await;

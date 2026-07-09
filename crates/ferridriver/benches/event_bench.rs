@@ -276,7 +276,7 @@ async fn e2e_console_storm(n: u64, chunk: u64) {
   let counter = Stamped::new();
   let result = async {
     let page = browser.page().await?;
-    page.goto("data:text/html,<title>bench</title>", None).await?;
+    page.goto("data:text/html,<title>bench</title>").await?;
     let t0 = Instant::now();
     page.events().on("console", stamped_listener(&counter, t0));
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -316,7 +316,7 @@ async fn e2e_console_storm(n: u64, chunk: u64) {
       counter.count.load(Ordering::Acquire)
     );
   }
-  if let Err(e) = browser.close(None).await {
+  if let Err(e) = browser.close().await {
     println!("e2e_console_storm: close error: {e}");
   }
 }

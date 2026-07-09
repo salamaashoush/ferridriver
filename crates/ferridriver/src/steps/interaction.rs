@@ -27,8 +27,8 @@ step!(Click {
     example: "When I click \"#submit\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel, None);
-        loc.click(None).await?;
+        let loc = page.locator(&sel);
+        loc.click_impl(None).await?;
         Ok(None)
     }
 });
@@ -40,8 +40,8 @@ step!(DoubleClick {
     example: "When I double-click \"#item\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel, None);
-        loc.dblclick(None).await?;
+        let loc = page.locator(&sel);
+        loc.dblclick_impl(None).await?;
         Ok(None)
     }
 });
@@ -66,8 +66,8 @@ step!(Hover {
     example: "When I hover over \"#menu\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel, None);
-        loc.hover(None).await?;
+        let loc = page.locator(&sel);
+        loc.hover_impl(None).await?;
         Ok(None)
     }
 });
@@ -80,8 +80,8 @@ step!(Fill {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let val = q(&caps[2]);
-        let loc = page.locator(&sel, None);
-        loc.fill(&val, None).await?;
+        let loc = page.locator(&sel);
+        loc.fill_impl(&val, None).await?;
         Ok(None)
     }
 });
@@ -100,8 +100,8 @@ step!(FillForm {
             if row.len() >= 2 {
                 let sel = &row[0];
                 let val = &row[1];
-                let loc = page.locator(sel, None);
-                loc.fill(val, None).await?;
+                let loc = page.locator(sel);
+                loc.fill_impl(val, None).await?;
             }
         }
         Ok(None)
@@ -115,8 +115,8 @@ step!(Clear {
     example: "When I clear \"#search\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel, None);
-        loc.fill("", None).await?;
+        let loc = page.locator(&sel);
+        loc.fill_impl("", None).await?;
         Ok(None)
     }
 });
@@ -144,7 +144,7 @@ step!(TypeText {
     example: "When I type \"hello world\"",
     execute(page, caps, _table, _vars) {
         let text = q(&caps[1]);
-        page.keyboard().r#type(&text, None).await?;
+        page.keyboard().type_impl(&text, None).await?;
         Ok(None)
     }
 });
@@ -156,7 +156,7 @@ step!(PressKey {
     example: "When I press \"Enter\"",
     execute(page, caps, _table, _vars) {
         let key = q(&caps[1]);
-        page.keyboard().press(&key, None).await?;
+        page.keyboard().press_impl(&key, None).await?;
         Ok(None)
     }
 });
@@ -168,7 +168,7 @@ step!(Focus {
     example: "When I focus \"#input\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel, None);
+        let loc = page.locator(&sel);
         loc.focus().await?;
         Ok(None)
     }
@@ -181,7 +181,7 @@ step!(Blur {
     example: "When I blur \"#input\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel, None);
+        let loc = page.locator(&sel);
         loc.blur().await?;
         Ok(None)
     }
@@ -194,8 +194,8 @@ step!(Check {
     example: "When I check \"#agree\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel, None);
-        loc.check(None).await?;
+        let loc = page.locator(&sel);
+        loc.check_impl(None).await?;
         Ok(None)
     }
 });
@@ -207,8 +207,8 @@ step!(Uncheck {
     example: "When I uncheck \"#agree\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel, None);
-        loc.uncheck(None).await?;
+        let loc = page.locator(&sel);
+        loc.uncheck_impl(None).await?;
         Ok(None)
     }
 });

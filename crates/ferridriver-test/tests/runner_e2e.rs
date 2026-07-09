@@ -40,7 +40,7 @@ fn make_navigation_test() -> TestCase {
       Box::pin(async move {
         let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(TestFailure::from)?;
         let url = data_url("<title>Test Page</title><body><h1>Hello World</h1></body>");
-        page.goto(&url, None).await.map_err(|e| TestFailure {
+        page.goto(&url).await.map_err(|e| TestFailure {
           message: format!("goto failed: {e}"),
           stack: None,
           diff: None,
@@ -85,20 +85,20 @@ fn make_click_test() -> TestCase {
       Box::pin(async move {
         let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(TestFailure::from)?;
         let url = data_url("<button id='btn' onclick=\"this.textContent='clicked'\">Click Me</button>");
-        page.goto(&url, None).await.map_err(|e| TestFailure {
+        page.goto(&url).await.map_err(|e| TestFailure {
           message: format!("goto failed: {e}"),
           stack: None,
           diff: None,
           screenshot: None,
         })?;
-        page.locator("#btn", None).click(None).await.map_err(|e| TestFailure {
+        page.locator("#btn").click().await.map_err(|e| TestFailure {
           message: format!("click failed: {e}"),
           stack: None,
           diff: None,
           screenshot: None,
         })?;
         let text = page
-          .locator("#btn", None)
+          .locator("#btn")
           .text_content()
           .await
           .map_err(|e| TestFailure {
@@ -141,15 +141,15 @@ fn make_fill_test() -> TestCase {
       Box::pin(async move {
         let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(TestFailure::from)?;
         let url = data_url("<input id='inp' type='text' />");
-        page.goto(&url, None).await.map_err(|e| TestFailure {
+        page.goto(&url).await.map_err(|e| TestFailure {
           message: format!("goto failed: {e}"),
           stack: None,
           diff: None,
           screenshot: None,
         })?;
         page
-          .locator("#inp", None)
-          .fill("hello world", None)
+          .locator("#inp")
+          .fill("hello world")
           .await
           .map_err(|e| TestFailure {
             message: format!("fill failed: {e}"),
@@ -157,16 +157,12 @@ fn make_fill_test() -> TestCase {
             diff: None,
             screenshot: None,
           })?;
-        let val = page
-          .locator("#inp", None)
-          .input_value()
-          .await
-          .map_err(|e| TestFailure {
-            message: format!("input_value failed: {e}"),
-            stack: None,
-            diff: None,
-            screenshot: None,
-          })?;
+        let val = page.locator("#inp").input_value().await.map_err(|e| TestFailure {
+          message: format!("input_value failed: {e}"),
+          stack: None,
+          diff: None,
+          screenshot: None,
+        })?;
         if val != "hello world" {
           return Err(TestFailure {
             message: format!("expected input value 'hello world', got '{val}'"),
@@ -204,7 +200,7 @@ fn make_expect_test() -> TestCase {
            <div id='msg'>Initial</div>\
            <button id='btn' onclick=\"setTimeout(() => document.getElementById('msg').textContent = 'Updated', 200)\">Go</button>",
         );
-        page.goto(&url, None).await.map_err(|e| TestFailure {
+        page.goto(&url).await.map_err(|e| TestFailure {
           message: format!("goto failed: {e}"),
           stack: None,
           diff: None,
@@ -217,7 +213,7 @@ fn make_expect_test() -> TestCase {
           .await?;
 
         // Click button that updates text after 200ms delay.
-        page.locator("#btn", None).click(None).await.map_err(|e| TestFailure {
+        page.locator("#btn").click().await.map_err(|e| TestFailure {
           message: format!("click failed: {e}"),
           stack: None,
           diff: None,
@@ -225,12 +221,12 @@ fn make_expect_test() -> TestCase {
         })?;
 
         // Auto-retry assertion: should poll until text changes.
-        ferridriver_test::expect::expect(&page.locator("#msg", None))
+        ferridriver_test::expect::expect(&page.locator("#msg"))
           .to_have_text("Updated")
           .await?;
 
         // Test negation: should NOT have old text.
-        ferridriver_test::expect::expect(&page.locator("#msg", None))
+        ferridriver_test::expect::expect(&page.locator("#msg"))
           .not()
           .to_have_text("Initial")
           .await?;

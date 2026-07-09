@@ -135,7 +135,6 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
                }",
               ferridriver::protocol::SerializedArgument::default(),
               None,
-              None,
             )
             .await
             .ok()

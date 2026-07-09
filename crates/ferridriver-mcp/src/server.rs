@@ -7,7 +7,6 @@ use ferridriver::Page;
 use ferridriver::actions;
 use ferridriver::backend::BackendKind;
 use ferridriver::backend::{AnyElement, AnyPage};
-use ferridriver::snapshot;
 use ferridriver::state::{BrowserState, ConnectMode, ContextLogHandles};
 use rmcp::{
   ErrorData, RoleServer, ServerHandler,
@@ -540,8 +539,75 @@ impl McpServer {
       tracing::info!(path = %lp.path.display(), tools = ?tool_names, "loaded extension file");
     }
 
-    self.extensions = crate::extension::ExtensionRegistry::new(loaded, failures);
+    let warnings = self.policy_conflicts(&loaded);
+    for (source, message) in &warnings {
+      tracing::warn!(source = %source, "{message}");
+    }
+    self.extensions = crate::extension::ExtensionRegistry::with_warnings(loaded, failures, warnings);
     self.promote_extension_tools();
+  }
+
+  /// Lint every loaded manifest against the operator extension policy
+  /// (`[extensions.policy]`, threaded in via [`Self::with_script_caps`],
+  /// so call that first). Enforcement happens at session registration
+  /// (`defineTool` clamps `allow.net`; a command-ceiling violation fails
+  /// the tool); this pass makes each conflict visible at startup and
+  /// through `ferridriver_extensions` instead of only at first dispatch.
+  fn policy_conflicts(&self, loaded: &[crate::extension::LoadedExtension]) -> Vec<(String, String)> {
+    use ferridriver_config::ExtensionCommandsCeiling as Ceiling;
+    let policy = &self.script_caps.extension_policy;
+    let mut warnings = Vec::new();
+    for lp in loaded {
+      let source = lp.path.display().to_string();
+      for t in &lp.tools {
+        if let Some(ceiling) = policy.net.as_deref() {
+          let dropped: Vec<&str> = t
+            .allow
+            .net
+            .iter()
+            .map(String::as_str)
+            .filter(|d| !ferridriver_script::net_entry_subsumed(d, ceiling))
+            .collect();
+          if !dropped.is_empty() {
+            warnings.push((
+              source.clone(),
+              format!(
+                "tool `{}`: allow.net entries {dropped:?} are outside the operator ceiling \
+                 ([extensions.policy] net) and will be dropped from the effective grant",
+                t.name
+              ),
+            ));
+          }
+        }
+        let shell_form: Vec<&str> = t
+          .allow
+          .commands
+          .iter()
+          .filter(|(_, spec)| matches!(spec.run, ferridriver_script::CommandRun::Shell(_)))
+          .map(|(name, _)| name.as_str())
+          .collect();
+        match policy.commands {
+          Ceiling::ArgvOnly if !shell_form.is_empty() => warnings.push((
+            source.clone(),
+            format!(
+              "tool `{}`: commands {shell_form:?} are shell-string specs, but the operator policy \
+               permits only argv-array specs (`commands = \"argvOnly\"`) — the tool will fail to register",
+              t.name
+            ),
+          )),
+          Ceiling::None if !t.allow.commands.is_empty() => warnings.push((
+            source.clone(),
+            format!(
+              "tool `{}` declares allow.commands, but the operator policy forbids command \
+               declarations (`commands = \"none\"`) — the tool will fail to register",
+              t.name
+            ),
+          )),
+          Ceiling::Any | Ceiling::ArgvOnly | Ceiling::None => {},
+        }
+      }
+    }
+    warnings
   }
 
   /// Register a dynamic tool route for each extension manifest that declares
@@ -567,28 +633,34 @@ impl McpServer {
             "promoted tool name contains characters outside [a-zA-Z0-9_-]; some MCP clients reject such names"
           );
         }
-        let desc = t.description.clone().unwrap_or_default();
-        let schema_value = t
-          .input_schema
-          .clone()
-          .unwrap_or_else(|| serde_json::json!({"type":"object","properties":{}}));
-        let schema_obj = if let serde_json::Value::Object(m) = schema_value {
-          m
-        } else {
-          // tools/list would advertise `{}` while invocation validates
-          // against the real (non-object) schema — surface the
-          // divergence to the author instead of leaving it silent.
-          tracing::warn!(
-            name = %name,
-            "inputSchema is not a JSON object; advertising an empty schema (calls still validate against the declared one)"
-          );
-          serde_json::Map::new()
+        let as_schema_obj = |schema: Option<serde_json::Value>, label: &str| {
+          let schema = schema?;
+          if let serde_json::Value::Object(m) = schema {
+            Some(Arc::new(m))
+          } else {
+            // tools/list would advertise nothing while invocation
+            // validates against the real (non-object) schema — surface
+            // the divergence to the author instead of leaving it silent.
+            tracing::warn!(
+              name = %name,
+              "{label} is not a JSON object; omitting it from tools/list (calls still validate against the declared one)"
+            );
+            None
+          }
         };
-        (name, desc, Arc::new(schema_obj))
+        let input_schema = as_schema_obj(t.input_schema.clone(), "inputSchema")
+          .unwrap_or_else(|| Arc::new(serde_json::Map::new()));
+        let output_schema = as_schema_obj(t.output_schema.clone(), "outputSchema");
+        let mut tool = Tool::new(name.clone(), t.description.clone().unwrap_or_default(), input_schema);
+        tool.title.clone_from(&t.title);
+        tool.output_schema = output_schema;
+        tool.annotations.clone_from(&t.annotations);
+        tool
       })
       .collect();
 
-    for (name, desc, schema_obj) in promoted {
+    for tool in promoted {
+      let name = tool.name.to_string();
       // register_tool already rejects duplicate names within a load
       // batch; this guards the remaining collision: a extension name that
       // shadows a built-in tool (or a name added by an earlier,
@@ -598,7 +670,6 @@ impl McpServer {
         tracing::warn!(name = %name, "extension tool name collides with an existing tool; not promoting");
         continue;
       }
-      let tool = Tool::new(name.clone(), desc, schema_obj);
       let tool_name = name.clone();
 
       let route = ToolRoute::<Self>::new_dyn(tool, move |ctx| {
@@ -690,19 +761,53 @@ impl McpServer {
       )
       .await;
 
-    let json = serde_json::to_string_pretty(&result).map_err(|e| Self::err(format!("serialize result: {e}")))?;
+    self.extension_tool_result(tool_name, &result)
+  }
+
+  /// Shape a finished extension run into the MCP tool reply.
+  ///
+  /// A handler failure surfaces as an MCP error result (`is_error`) so
+  /// the model can distinguish it from success, not a "success"
+  /// carrying an error blob (this deliberately differs from
+  /// `run_script`, whose contract is "always succeed, inspect
+  /// `status`"). On success, a declared `outputSchema` is the symmetric
+  /// half of the schema contract: the handler's return value must
+  /// conform (a violation is the AUTHOR's bug, surfaced as a tool
+  /// error) and ships as MCP `structuredContent` alongside the text
+  /// payload.
+  fn extension_tool_result(
+    &self,
+    tool_name: &str,
+    result: &ferridriver_script::ScriptResult,
+  ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+    use rmcp::model::{CallToolResult, Content};
+
+    let json = serde_json::to_string_pretty(result).map_err(|e| Self::err(format!("serialize result: {e}")))?;
     let mut contents = vec![Content::text(json)];
-    // A promoted extension is a first-class named tool: a handler failure
-    // must surface as an MCP error result (is_error) so the model can
-    // distinguish it from success, not a "success" carrying an error
-    // blob. (This deliberately differs from `run_script`, whose contract
-    // is "always succeed, inspect `status`".)
-    if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
-      let summary = format!("[{:?}] {} ({}ms)", error.kind, error.message, result.duration_ms);
-      contents.insert(0, Content::text(summary));
-      return Ok(CallToolResult::error(contents));
+    let success = match &result.outcome {
+      ferridriver_script::Outcome::Error { error } => {
+        let summary = format!("[{:?}] {} ({}ms)", error.kind, error.message, result.duration_ms);
+        contents.insert(0, Content::text(summary));
+        return Ok(CallToolResult::error(contents));
+      },
+      ferridriver_script::Outcome::Ok { success } => success,
+    };
+    let mut out = CallToolResult::success(contents);
+    if let Some(compiled) = self.extensions.output_validator(tool_name) {
+      match compiled {
+        Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg.clone())])),
+        Ok(validator) => {
+          if let Some(messages) = schema_violations(validator, &success.value) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+              "`{tool_name}` returned a value that does not match its declared outputSchema \
+               (the extension author's bug):\n- {messages}"
+            ))]));
+          }
+          out.structured_content = Some(success.value.clone());
+        },
+      }
     }
-    Ok(CallToolResult::success(contents))
+    Ok(out)
   }
 
   /// Snapshot the loaded extension registry into the script-engine binding
@@ -1079,7 +1184,7 @@ impl McpServer {
   /// Uses a 5-second timeout to avoid hanging on unresponsive pages.
   /// Stores the `ref_map` via wait-free `ArcSwap` — never drops updates.
   pub async fn snap(&self, page: &Page, context: &str) -> String {
-    let snap_fut = page.snapshot_for_ai(snapshot::SnapshotOptions::default());
+    let snap_fut = page.snapshot_for_ai();
     match tokio::time::timeout(std::time::Duration::from_secs(5), snap_fut).await {
       Ok(Ok(result)) => {
         // Wait-free store via cached ArcSwap handle
@@ -1112,13 +1217,11 @@ impl McpServer {
 /// Validate a extension call's arguments against the tool's pre-compiled
 /// `inputSchema` validator (built once at load by
 /// [`crate::extension::ExtensionRegistry::new`]).
-fn validate_tool_args(
-  extension: &str,
-  validator: &jsonschema::Validator,
-  args: &serde_json::Value,
-) -> Result<(), String> {
+/// Every violation of `validator` in `value`, joined for display —
+/// `None` when the value conforms.
+fn schema_violations(validator: &jsonschema::Validator, value: &serde_json::Value) -> Option<String> {
   let mut messages: Vec<String> = validator
-    .iter_errors(args)
+    .iter_errors(value)
     .map(|e| {
       let path = e.instance_path().to_string();
       if path.is_empty() {
@@ -1130,13 +1233,23 @@ fn validate_tool_args(
     .take(20)
     .collect();
   if messages.is_empty() {
-    return Ok(());
+    return None;
   }
   messages.sort();
   messages.dedup();
+  Some(messages.join("\n- "))
+}
+
+fn validate_tool_args(
+  extension: &str,
+  validator: &jsonschema::Validator,
+  args: &serde_json::Value,
+) -> Result<(), String> {
+  let Some(messages) = schema_violations(validator, args) else {
+    return Ok(());
+  };
   Err(format!(
-    "invalid arguments for `{extension}` (does not match inputSchema):\n- {}",
-    messages.join("\n- ")
+    "invalid arguments for `{extension}` (does not match inputSchema):\n- {messages}"
   ))
 }
 
@@ -1300,10 +1413,7 @@ impl ServerHandler for McpServer {
         ]))
       },
       "screenshot" => {
-        let bytes = page
-          .screenshot(ferridriver::options::ScreenshotOptions::default())
-          .await
-          .map_err(Self::err)?;
+        let bytes = page.screenshot().await.map_err(Self::err)?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(ReadResourceResult::new(vec![
           ResourceContents::blob(b64, uri).with_mime_type("image/png"),
@@ -1493,5 +1603,131 @@ mod tests {
     let compiled = registry.validator("bad").expect("schema present");
     let err = compiled.as_ref().expect_err("schema must be invalid");
     assert!(err.contains("invalid inputSchema"), "{err}");
+  }
+
+  fn loaded_extension(manifest: serde_json::Value) -> crate::extension::LoadedExtension {
+    crate::extension::LoadedExtension {
+      tools: vec![serde_json::from_value(manifest).expect("manifest")],
+      bytecode: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+      path: std::path::PathBuf::from("ext.js"),
+    }
+  }
+
+  fn test_server() -> super::McpServer {
+    super::McpServer::with_options(
+      ferridriver::state::ConnectMode::Launch,
+      ferridriver::backend::BackendKind::CdpPipe,
+      true,
+      std::sync::Arc::new(ferridriver_config::mcp::McpConfig::default()),
+    )
+  }
+
+  #[test]
+  fn policy_conflicts_flags_net_and_command_violations() {
+    let server = test_server().with_script_caps(ferridriver_script::ScriptCaps::default().with_extension_policy(
+      ferridriver_config::ExtensionPolicyConfig {
+        net: Some(vec!["*.box.com".into()]),
+        commands: ferridriver_config::ExtensionCommandsCeiling::ArgvOnly,
+      },
+    ));
+    let loaded = vec![loaded_extension(serde_json::json!({
+      "name": "t",
+      "allow": {
+        "net": ["api.box.com", "evil.example"],
+        "commands": { "sh": "echo hi", "ok": { "run": ["echo", "hi"] } }
+      }
+    }))];
+    let warnings = server.policy_conflicts(&loaded);
+    assert_eq!(warnings.len(), 2, "one net + one command warning: {warnings:?}");
+    assert!(
+      warnings
+        .iter()
+        .any(|(_, m)| m.contains("evil.example") && !m.contains("api.box.com")),
+      "only the out-of-ceiling entry is flagged: {warnings:?}"
+    );
+    assert!(
+      warnings
+        .iter()
+        .any(|(_, m)| m.contains("\"sh\"") && m.contains("argvOnly")),
+      "the shell-form command is flagged: {warnings:?}"
+    );
+  }
+
+  #[test]
+  fn policy_conflicts_is_silent_without_a_ceiling() {
+    let server = test_server();
+    let loaded = vec![loaded_extension(serde_json::json!({
+      "name": "t",
+      "allow": { "net": ["anywhere.example"], "commands": { "sh": "echo hi" } }
+    }))];
+    assert!(server.policy_conflicts(&loaded).is_empty());
+  }
+
+  #[test]
+  fn extension_tool_result_validates_output_schema_and_ships_structured_content() {
+    let mut server = test_server();
+    server.extensions = crate::extension::ExtensionRegistry::new(
+      vec![loaded_extension(serde_json::json!({
+        "name": "typed",
+        "outputSchema": {
+          "type": "object",
+          "properties": { "ok": { "type": "boolean" } },
+          "required": ["ok"],
+          "additionalProperties": false
+        }
+      }))],
+      Vec::new(),
+    );
+
+    let good = ferridriver_script::ScriptResult::ok(serde_json::json!({ "ok": true }), 3, Vec::new());
+    let reply = server.extension_tool_result("typed", &good).expect("reply");
+    assert_ne!(reply.is_error, Some(true), "conforming output is a success");
+    assert_eq!(
+      reply.structured_content,
+      Some(serde_json::json!({ "ok": true })),
+      "conforming output ships as structuredContent"
+    );
+
+    let bad = ferridriver_script::ScriptResult::ok(serde_json::json!({ "ok": "yes" }), 3, Vec::new());
+    let reply = server.extension_tool_result("typed", &bad).expect("reply");
+    assert_eq!(reply.is_error, Some(true), "non-conforming output is a tool error");
+
+    let untyped = ferridriver_script::ScriptResult::ok(serde_json::json!("anything"), 3, Vec::new());
+    let reply = server.extension_tool_result("absent", &untyped).expect("reply");
+    assert_ne!(reply.is_error, Some(true));
+    assert_eq!(
+      reply.structured_content, None,
+      "no declared outputSchema, no structuredContent"
+    );
+  }
+
+  #[test]
+  fn output_schema_compilation_errors_are_stored_per_tool() {
+    let registry = crate::extension::ExtensionRegistry::new(
+      vec![loaded_extension(serde_json::json!({
+        "name": "bad-out",
+        "outputSchema": { "type": "not-a-real-type" }
+      }))],
+      Vec::new(),
+    );
+    let compiled = registry.output_validator("bad-out").expect("schema present");
+    let err = compiled.as_ref().expect_err("schema must be invalid");
+    assert!(err.contains("invalid outputSchema"), "{err}");
+  }
+
+  #[test]
+  fn manifest_accepts_title_output_schema_and_annotations() {
+    let m: crate::extension::ToolManifest = serde_json::from_value(serde_json::json!({
+      "name": "meta",
+      "title": "Meta Tool",
+      "outputSchema": { "type": "object" },
+      "annotations": { "readOnlyHint": true, "openWorldHint": false }
+    }))
+    .expect("manifest");
+    assert_eq!(m.title.as_deref(), Some("Meta Tool"));
+    assert!(m.output_schema.is_some());
+    let a = m.annotations.expect("annotations");
+    assert_eq!(a.read_only_hint, Some(true));
+    assert_eq!(a.open_world_hint, Some(false));
   }
 }

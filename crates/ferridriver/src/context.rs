@@ -583,7 +583,14 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist, cookie retrieval fails,
   /// or (when `path` is set) the file cannot be written.
-  pub async fn storage_state(
+  pub fn storage_state(
+    &self,
+  ) -> crate::action::Action<'static, crate::options::StorageStateOptions, crate::options::StorageState> {
+    let this = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { this.storage_state_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn storage_state_impl(
     &self,
     opts: Option<crate::options::StorageStateOptions>,
   ) -> Result<crate::options::StorageState> {
@@ -846,14 +853,25 @@ impl ContextRef {
     self.mutate_options(|o| o.permissions = None).await
   }
 
-  /// Close this context (remove from `BrowserState`).
+  /// Close this context (remove from `BrowserState`). Mirrors
+  /// Playwright's `context.close({ reason })` — chain `.reason(...)` to
+  /// record why; the reason surfaces in errors from operations
+  /// interrupted by the close.
   ///
   /// # Errors
   ///
   /// Returns an error if state lock acquisition fails.
-  pub async fn close(&self) -> Result<()> {
+  pub fn close(&self) -> crate::action::Action<'static, crate::options::ContextCloseOptions, ()> {
+    let ctx = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { ctx.close_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn close_impl(&self, opts: Option<crate::options::ContextCloseOptions>) -> Result<()> {
     self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut state = self.state.write().await;
+    if let Some(reason) = opts.and_then(|o| o.reason) {
+      state.set_close_reason(reason);
+    }
     let persistent = state.persistent_context;
     state.remove_context(&self.name).await;
     if persistent {
@@ -1125,7 +1143,20 @@ impl ContextRef {
   ///
   /// Returns an error if the HAR file cannot be read/parsed or routes fail
   /// to install.
-  pub async fn route_from_har(&self, path: &std::path::Path, options: crate::har::RouteFromHarOptions) -> Result<()> {
+  pub fn route_from_har(
+    &self,
+    path: &std::path::Path,
+  ) -> crate::action::Action<'static, crate::har::RouteFromHarOptions, ()> {
+    let ctx = self.clone();
+    let path = path.to_path_buf();
+    crate::action::Action::new(move |opts| Box::pin(async move { ctx.route_from_har_impl(&path, opts).await }))
+  }
+
+  pub(crate) async fn route_from_har_impl(
+    &self,
+    path: &std::path::Path,
+    options: crate::har::RouteFromHarOptions,
+  ) -> Result<()> {
     let handler = crate::har::route_handler_from_file(path, options.not_found)?;
     let matcher = options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any);
     let state = self.state.read().await;

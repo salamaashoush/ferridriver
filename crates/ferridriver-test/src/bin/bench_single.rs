@@ -16,18 +16,18 @@ async fn main() {
 
   for i in 0..5 {
     let t = Instant::now();
-    let ctx = browser.new_context(None);
+    let ctx = browser.new_context().await.unwrap();
     let page = ctx.new_page().await.unwrap();
     page
-      .goto("data:text/html,<title>T</title><button id='b'>Go</button>", None)
+      .goto("data:text/html,<title>T</title><button id='b'>Go</button>")
       .await
       .unwrap();
-    page.locator("#b", None).click(None).await.unwrap();
-    let _ = page.locator("#b", None).text_content().await.unwrap();
+    page.locator("#b").click().await.unwrap();
+    let _ = page.locator("#b").text_content().await.unwrap();
     ctx.close().await.ok();
     eprintln!("  cycle {i}: {}ms", t.elapsed().as_millis());
   }
 
   eprintln!("=== DONE ===");
-  browser.close(None).await.ok();
+  browser.close().await.ok();
 }

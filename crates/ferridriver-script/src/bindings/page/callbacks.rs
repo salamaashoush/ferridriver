@@ -23,10 +23,28 @@ pub(crate) struct SavedCallback {
 
 impl SavedCallback {
   /// Persist `f` and capture the caller's active net policy.
+  ///
+  /// Correct ONLY from a synchronous context on the registering tool's
+  /// stack (a `#[qjs] fn`, or a `#[qjs] async fn`'s sync prologue before
+  /// the first await). A `#[qjs] async fn` BODY first-polls off the
+  /// caller's `bracket_net` swap (the async-method first-poll quirk), so
+  /// `active_net` there reads the resting `None` and the callback would
+  /// silently lose its registrar's grant — such call sites must snapshot
+  /// the net synchronously and use [`Self::save_with_net`].
   pub(crate) fn save<'js>(ctx: &rquickjs::Ctx<'js>, f: rquickjs::Function<'js>) -> Self {
+    Self::save_with_net(ctx, f, crate::bindings::fetch::active_net(ctx))
+  }
+
+  /// Persist `f` with an explicitly-snapshotted net policy. Use when the
+  /// registrar's grant was captured synchronously (see [`Self::save`]).
+  pub(crate) fn save_with_net<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    f: rquickjs::Function<'js>,
+    net: Option<Arc<[String]>>,
+  ) -> Self {
     Self {
       fun: rquickjs::Persistent::save(ctx, f),
-      net: crate::bindings::fetch::active_net(ctx),
+      net,
     }
   }
 
@@ -43,6 +61,12 @@ impl SavedCallback {
 
   /// Restore and synchronously invoke with the registration-time policy
   /// installed for the duration of the call.
+  ///
+  /// Only the SYNCHRONOUS portion of the callback runs under the grant.
+  /// For an `async` callback whose body defers to the job queue (its net
+  /// I/O runs in a continuation, not on this stack), use
+  /// [`Self::call_bracketed_async`] so the grant covers every poll of the
+  /// returned promise too.
   pub(crate) fn call_bracketed<'js, A, R>(&self, ctx: &rquickjs::Ctx<'js>, args: A) -> rquickjs::Result<R>
   where
     A: rquickjs::function::IntoArgs<'js>,
@@ -50,6 +74,29 @@ impl SavedCallback {
   {
     let f = self.fun.clone().restore(ctx)?;
     crate::bindings::fetch::call_with_net(ctx, self.net.as_ref(), || f.call(args))
+  }
+
+  /// Restore and invoke, then await the result under the
+  /// registration-time policy — so an `async` callback keeps the
+  /// registrar's `allow.net` across the continuation where its `fetch`
+  /// actually runs, not only during the synchronous call. Awaits the
+  /// returned value (resolving a thenable) with `bracket_net` installing
+  /// the grant on every poll.
+  pub(crate) async fn call_bracketed_async<'js, A>(
+    &self,
+    ctx: &rquickjs::Ctx<'js>,
+    args: A,
+  ) -> rquickjs::Result<rquickjs::Value<'js>>
+  where
+    A: rquickjs::function::IntoArgs<'js>,
+  {
+    let f = self.fun.clone().restore(ctx)?;
+    let cell = crate::bindings::fetch::policy_cell(ctx);
+    crate::bindings::fetch::bracket_net(cell, self.net.clone(), async move {
+      let mp: rquickjs::promise::MaybePromise<'js> = f.call(args)?;
+      mp.into_future::<rquickjs::Value<'js>>().await
+    })
+    .await
   }
 }
 

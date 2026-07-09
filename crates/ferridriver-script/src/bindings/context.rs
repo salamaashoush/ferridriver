@@ -136,7 +136,12 @@ impl BrowserContextJs {
       },
       _ => None,
     };
-    let state = self.inner.storage_state(core_opts).await.into_js_with(&ctx)?;
+    let state = self
+      .inner
+      .storage_state()
+      .maybe_options(core_opts)
+      .await
+      .into_js_with(&ctx)?;
     serde_to_js(&ctx, &state)
   }
 
@@ -271,13 +276,13 @@ impl BrowserContextJs {
   /// `AsyncContext`; the JS callback / predicate live in the shared
   /// `PageCallbacks` userdata registry keyed by route id.
   #[qjs(rename = "route")]
-  pub async fn route<'js>(
+  pub fn route<'js>(
     &self,
     ctx: Ctx<'js>,
     url: Value<'js>,
     handler: rquickjs::Function<'js>,
     options: rquickjs::function::Opt<Value<'js>>,
-  ) -> rquickjs::Result<()> {
+  ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
     let times = crate::bindings::page::parse_route_times(&options)?;
     let vm = match ctx.userdata::<crate::engine::SessionVm>() {
       Some(ud) => ud.0.clone(),
@@ -290,11 +295,14 @@ impl BrowserContextJs {
       },
     };
     let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
-    let saved_handler = crate::bindings::page::SavedCallback::save(&ctx, handler);
+    // Sync prologue: snapshot the registrar's grant (see
+    // `SavedCallback::save` — an async-fn body first-polls off-bracket).
+    let net = crate::bindings::fetch::active_net(&ctx);
+    let saved_handler = crate::bindings::page::SavedCallback::save_with_net(&ctx, handler, net.clone());
 
     let has_predicate = url.as_function().is_some();
     let (matcher, saved_pred, registry_matcher) = if let Some(pred) = url.as_function() {
-      let saved_pred = crate::bindings::page::SavedCallback::save(&ctx, pred.clone());
+      let saved_pred = crate::bindings::page::SavedCallback::save_with_net(&ctx, pred.clone(), net);
       let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
       (m.clone(), Some(saved_pred), Some(m))
     } else {
@@ -329,19 +337,21 @@ impl BrowserContextJs {
           let f = with_page_callbacks(&ctx, |r| r.get_route_handler(id))?
             .ok_or_else(|| rquickjs::Error::new_from_js_message("context.route", "Error", "route handler gone".to_string()))?;
           let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
-          let _: rquickjs::Value<'_> = f.call_bracketed(&ctx, (route_class,))?;
+          // `call_bracketed_async`: an async route handler's `fetch`
+          // runs in a continuation off the synchronous call (see
+          // `page.route`).
+          let _: rquickjs::Value<'_> = f.call_bracketed_async(&ctx, (route_class,)).await?;
           Ok(())
         })
         .await;
       });
     });
 
-    self
-      .inner
-      .route(matcher, rust_handler, times)
-      .await
-      .into_js_with(&ctx)?;
-    Ok(())
+    let inner = self.inner.clone();
+    Ok(rquickjs::promise::Promised::from(async move {
+      inner.route(matcher, rust_handler, times).await.into_js_with(&ctx)?;
+      Ok(())
+    }))
   }
 
   /// Playwright: `browserContext.routeWebSocket(url, handler)`. Intercepts
@@ -350,12 +360,12 @@ impl BrowserContextJs {
   /// One-shot create dispatch is shared with `page.routeWebSocket` via
   /// `build_ws_route_handler`; `onMessage`/`onClose` use the WS pump.
   #[qjs(rename = "routeWebSocket")]
-  pub async fn route_web_socket<'js>(
+  pub fn route_web_socket<'js>(
     &self,
     ctx: Ctx<'js>,
     url: Value<'js>,
     handler: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<()> {
+  ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
     let vm = match ctx.userdata::<crate::engine::SessionVm>() {
       Some(ud) => ud.0.clone(),
       None => {
@@ -369,14 +379,15 @@ impl BrowserContextJs {
     let matcher = url_value_to_matcher(&ctx, url)?;
     let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
     let owner = RouteOwner::Context(self.inner.name().to_string());
-    let saved = crate::bindings::page::SavedCallback::save(&ctx, handler);
+    // Sync prologue: snapshot the registrar's grant (see `SavedCallback::save`).
+    let net = crate::bindings::fetch::active_net(&ctx);
+    let saved = crate::bindings::page::SavedCallback::save_with_net(&ctx, handler, net);
     with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, owner.clone(), saved))?;
     let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id, owner);
-    self
-      .inner
-      .route_web_socket(matcher, rust_handler)
-      .await
-      .into_js_with(&ctx)
+    let inner = self.inner.clone();
+    Ok(rquickjs::promise::Promised::from(async move {
+      inner.route_web_socket(matcher, rust_handler).await.into_js_with(&ctx)
+    }))
   }
 
   /// Playwright: `browserContext.routeFromHAR(har, options?)`. Replay-only.
@@ -390,7 +401,8 @@ impl BrowserContextJs {
     let opts = crate::bindings::page::parse_har_options(&options)?;
     self
       .inner
-      .route_from_har(std::path::Path::new(&har), opts)
+      .route_from_har(std::path::Path::new(&har))
+      .options(opts)
       .await
       .into_js_with(&ctx)
   }
@@ -575,15 +587,24 @@ impl BrowserContextJs {
   /// value (awaiting any returned promise) is delivered to the
   /// page-side caller. Returns a `{ dispose() }` Disposable.
   #[qjs(rename = "exposeBinding")]
-  pub async fn expose_binding<'js>(
+  pub fn expose_binding<'js>(
     &self,
     ctx: Ctx<'js>,
     name: String,
     callback: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<Value<'js>> {
+  ) -> rquickjs::Result<
+    rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js>,
+  > {
+    // Both the callback save (inside `make_binding`) and the disposable
+    // build happen synchronously here, on the registrar's stack, so the
+    // callback captures the tool's grant (see `SavedCallback::save`).
     let binding = self.make_binding(&ctx, &name, callback, true)?;
-    self.inner.expose_binding(&name, binding).await.into_js_with(&ctx)?;
-    self.make_disposable(&ctx, name)
+    let disposable = self.make_disposable(&ctx, name.clone())?;
+    let inner = self.inner.clone();
+    Ok(rquickjs::promise::Promised::from(async move {
+      inner.expose_binding(&name, binding).await.into_js_with(&ctx)?;
+      Ok(disposable)
+    }))
   }
 
   /// Playwright: `browserContext.exposeFunction(name, callback)` —
@@ -592,15 +613,21 @@ impl BrowserContextJs {
   /// `exposeFunction` is `exposeBinding` minus the `source` argument:
   /// the callback receives only the spread page-side call args.
   #[qjs(rename = "exposeFunction")]
-  pub async fn expose_function<'js>(
+  pub fn expose_function<'js>(
     &self,
     ctx: Ctx<'js>,
     name: String,
     callback: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<Value<'js>> {
+  ) -> rquickjs::Result<
+    rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js>,
+  > {
     let binding = self.make_binding(&ctx, &name, callback, false)?;
-    self.inner.expose_binding(&name, binding).await.into_js_with(&ctx)?;
-    self.make_disposable(&ctx, name)
+    let disposable = self.make_disposable(&ctx, name.clone())?;
+    let inner = self.inner.clone();
+    Ok(rquickjs::promise::Promised::from(async move {
+      inner.expose_binding(&name, binding).await.into_js_with(&ctx)?;
+      Ok(disposable)
+    }))
   }
 
   // ── Context-level events ───────────────────────────────────────────────

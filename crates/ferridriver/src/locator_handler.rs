@@ -132,7 +132,7 @@ pub(crate) async fn perform_checkpoint(page: &Arc<crate::page::Page>) {
   };
 
   for (uid, selector, callback, no_wait_after) in snapshot {
-    let locator = page.locator(&selector, None);
+    let locator = page.locator(&selector);
     let visible = locator.is_visible().await.unwrap_or(false);
     if !visible {
       continue;

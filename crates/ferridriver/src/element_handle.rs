@@ -490,11 +490,16 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `click` error.
-  pub async fn click(&self, opts: Option<crate::options::ClickOptions>) -> Result<()> {
+  pub fn click(&self) -> crate::action::Action<'static, crate::options::ClickOptions, ()> {
+    let handle = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { handle.click_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn click_impl(&self, opts: Option<crate::options::ClickOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.click(opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.click_impl(opts).await;
     self.temp_untag().await;
     result
   }
@@ -506,11 +511,16 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `dblclick` error.
-  pub async fn dblclick(&self, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
+  pub fn dblclick(&self) -> crate::action::Action<'static, crate::options::DblClickOptions, ()> {
+    let handle = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { handle.dblclick_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn dblclick_impl(&self, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.dblclick(opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.dblclick_impl(opts).await;
     self.temp_untag().await;
     result
   }
@@ -522,11 +532,16 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `hover` error.
-  pub async fn hover(&self, opts: Option<crate::options::HoverOptions>) -> Result<()> {
+  pub fn hover(&self) -> crate::action::Action<'static, crate::options::HoverOptions, ()> {
+    let handle = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { handle.hover_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn hover_impl(&self, opts: Option<crate::options::HoverOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.hover(opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.hover_impl(opts).await;
     self.temp_untag().await;
     result
   }
@@ -539,11 +554,17 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `type` error.
-  pub async fn type_str(&self, text: &str, opts: Option<crate::options::TypeOptions>) -> Result<()> {
+  pub fn type_str(&self, text: &str) -> crate::action::Action<'static, crate::options::TypeOptions, ()> {
+    let handle = self.clone();
+    let text = text.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { handle.type_str_impl(&text, Some(opts)).await }))
+  }
+
+  pub(crate) async fn type_str_impl(&self, text: &str, opts: Option<crate::options::TypeOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.r#type(text, opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.type_impl(text, opts).await;
     self.temp_untag().await;
     result
   }
@@ -580,9 +601,37 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards the backend's screenshot error.
-  pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>> {
+  pub fn screenshot(&self) -> crate::action::Action<'static, crate::options::ElementScreenshotOptions, Vec<u8>> {
+    let handle = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { handle.screenshot_impl(opts).await }))
+  }
+
+  pub(crate) async fn screenshot_impl(&self, opts: crate::options::ElementScreenshotOptions) -> Result<Vec<u8>> {
     self.ensure_live()?;
-    self.any_element().screenshot(format).await
+    let format = match opts.format.unwrap_or_default() {
+      crate::options::ScreenshotFormat::Png => ImageFormat::Png,
+      crate::options::ScreenshotFormat::Jpeg => ImageFormat::Jpeg,
+      crate::options::ScreenshotFormat::Webp => ImageFormat::Webp,
+    };
+    let capture = async { self.any_element().screenshot(format).await };
+    let bytes = match opts.timeout {
+      Some(ms) if ms > 0 => match tokio::time::timeout(std::time::Duration::from_millis(ms), capture).await {
+        Ok(res) => res?,
+        Err(_) => return Err(crate::error::FerriError::timeout("screenshot", ms)),
+      },
+      _ => capture.await?,
+    };
+    if let Some(ref path) = opts.path {
+      if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+          let _ = tokio::fs::create_dir_all(parent).await;
+        }
+      }
+      tokio::fs::write(path, &bytes)
+        .await
+        .map_err(|e| crate::error::FerriError::Backend(format!("screenshot write {}: {e}", path.display())))?;
+    }
+    Ok(bytes)
   }
 
   // ── $eval / $$eval (Playwright: elementHandle.$eval / $$eval) ──────────
@@ -1046,11 +1095,17 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `fill` error.
-  pub async fn fill(&self, value: &str, opts: Option<crate::options::FillOptions>) -> Result<()> {
+  pub fn fill(&self, value: &str) -> crate::action::Action<'static, crate::options::FillOptions, ()> {
+    let handle = self.clone();
+    let value = value.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { handle.fill_impl(&value, Some(opts)).await }))
+  }
+
+  pub(crate) async fn fill_impl(&self, value: &str, opts: Option<crate::options::FillOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.fill(value, opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.fill_impl(value, opts).await;
     self.temp_untag().await;
     result
   }
@@ -1061,11 +1116,16 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `check` error.
-  pub async fn check(&self, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+  pub fn check(&self) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
+    let handle = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { handle.check_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn check_impl(&self, opts: Option<crate::options::CheckOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.check(opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.check_impl(opts).await;
     self.temp_untag().await;
     result
   }
@@ -1076,11 +1136,16 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `uncheck` error.
-  pub async fn uncheck(&self, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+  pub fn uncheck(&self) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
+    let handle = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { handle.uncheck_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn uncheck_impl(&self, opts: Option<crate::options::CheckOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.uncheck(opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.uncheck_impl(opts).await;
     self.temp_untag().await;
     result
   }
@@ -1091,11 +1156,16 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `set_checked` error.
-  pub async fn set_checked(&self, checked: bool, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+  pub fn set_checked(&self, checked: bool) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
+    let handle = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { handle.set_checked_impl(checked, Some(opts)).await }))
+  }
+
+  pub(crate) async fn set_checked_impl(&self, checked: bool, opts: Option<crate::options::CheckOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.set_checked(checked, opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.set_checked_impl(checked, opts).await;
     self.temp_untag().await;
     result
   }
@@ -1106,11 +1176,16 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `tap` error.
-  pub async fn tap(&self, opts: Option<crate::options::TapOptions>) -> Result<()> {
+  pub fn tap(&self) -> crate::action::Action<'static, crate::options::TapOptions, ()> {
+    let handle = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { handle.tap_impl(Some(opts)).await }))
+  }
+
+  pub(crate) async fn tap_impl(&self, opts: Option<crate::options::TapOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.tap(opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.tap_impl(opts).await;
     self.temp_untag().await;
     result
   }
@@ -1121,11 +1196,17 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `press` error.
-  pub async fn press(&self, key: &str, opts: Option<crate::options::PressOptions>) -> Result<()> {
+  pub fn press(&self, key: &str) -> crate::action::Action<'static, crate::options::PressOptions, ()> {
+    let handle = self.clone();
+    let key = key.to_string();
+    crate::action::Action::new(move |opts| Box::pin(async move { handle.press_impl(&key, Some(opts)).await }))
+  }
+
+  pub(crate) async fn press_impl(&self, key: &str, opts: Option<crate::options::PressOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.press(key, opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.press_impl(key, opts).await;
     self.temp_untag().await;
     result
   }
@@ -1138,7 +1219,19 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `dispatch_event` error.
-  pub async fn dispatch_event(
+  pub fn dispatch_event(
+    &self,
+    event_type: &str,
+    event_init: Option<serde_json::Value>,
+  ) -> crate::action::Action<'static, crate::options::DispatchEventOptions, ()> {
+    let handle = self.clone();
+    let event_type = event_type.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move { handle.dispatch_event_impl(&event_type, event_init, Some(opts)).await })
+    })
+  }
+
+  pub(crate) async fn dispatch_event_impl(
     &self,
     event_type: &str,
     event_init: Option<serde_json::Value>,
@@ -1146,8 +1239,8 @@ impl ElementHandle {
   ) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.dispatch_event(event_type, event_init, opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.dispatch_event_impl(event_type, event_init, opts).await;
     self.temp_untag().await;
     result
   }
@@ -1158,15 +1251,24 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `select_option` error.
-  pub async fn select_option(
+  pub fn select_option(
+    &self,
+    values: impl Into<crate::options::SelectOptionValues>,
+  ) -> crate::action::Action<'static, crate::options::SelectOptionOptions, Vec<String>> {
+    let values = values.into().0;
+    let handle = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { handle.select_option_impl(values, Some(opts)).await }))
+  }
+
+  pub(crate) async fn select_option_impl(
     &self,
     values: Vec<crate::options::SelectOptionValue>,
     opts: Option<crate::options::SelectOptionOptions>,
   ) -> Result<Vec<String>> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.select_option(values, opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.select_option_impl(values, opts).await;
     self.temp_untag().await;
     result
   }
@@ -1213,15 +1315,26 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `set_input_files` error.
-  pub async fn set_input_files(
+  pub fn set_input_files(
+    &self,
+    files: impl Into<crate::options::InputFiles>,
+  ) -> crate::action::Action<'static, crate::options::SetInputFilesOptions, ()> {
+    let files = files.into();
+    let handle = self.clone();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move { handle.set_input_files_impl(files, Some(opts)).await })
+    })
+  }
+
+  pub(crate) async fn set_input_files_impl(
     &self,
     files: crate::options::InputFiles,
     opts: Option<crate::options::SetInputFilesOptions>,
   ) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
-    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
-    let result = locator.set_input_files(files, opts).await;
+    let locator = self.page().locator(&Self::temp_selector(&nonce));
+    let result = locator.set_input_files_impl(files, opts).await;
     self.temp_untag().await;
     result
   }

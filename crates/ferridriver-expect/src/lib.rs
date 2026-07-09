@@ -51,7 +51,10 @@ pub use builder::{
   to_pass, to_pass_with_options,
 };
 pub use diff::{json_diff, pretty_json, unified_diff};
-pub use poll::{DEFAULT_EXPECT_TIMEOUT, ExpectContext, MatchError, POLL_INTERVALS, poll_until};
+pub use poll::{
+  DEFAULT_EXPECT_TIMEOUT, ExpectContext, MatchError, POLL_INTERVALS, default_expect_timeout, poll_until,
+  set_default_expect_timeout,
+};
 pub use throw::{ExpectFn, ThrowMatcher, ThrownError, expect_fn};
 pub use value::{ExpectValue, StringOrRegex, expect_value};
 

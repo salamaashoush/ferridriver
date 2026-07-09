@@ -45,7 +45,7 @@ fn make_nav_test(i: usize) -> TestCase {
       Box::pin(async move {
         let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(TestFailure::from)?;
         let html = format!("<title>Test {i}</title><body><h1>Page {i}</h1></body>");
-        page.goto(&data_url(&html), None).await.map_err(|e| TestFailure {
+        page.goto(&data_url(&html)).await.map_err(|e| TestFailure {
           message: e.to_string(),
           stack: None,
           diff: None,
@@ -82,20 +82,20 @@ fn make_interaction_test(i: usize) -> TestCase {
       Box::pin(async move {
         let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(TestFailure::from)?;
         let html = format!("<button id='btn' onclick=\"this.textContent='done {i}'\">Click {i}</button>");
-        page.goto(&data_url(&html), None).await.map_err(|e| TestFailure {
+        page.goto(&data_url(&html)).await.map_err(|e| TestFailure {
           message: e.to_string(),
           stack: None,
           diff: None,
           screenshot: None,
         })?;
-        page.locator("#btn", None).click(None).await.map_err(|e| TestFailure {
+        page.locator("#btn").click().await.map_err(|e| TestFailure {
           message: e.to_string(),
           stack: None,
           diff: None,
           screenshot: None,
         })?;
         let text = page
-          .locator("#btn", None)
+          .locator("#btn")
           .text_content()
           .await
           .map_err(|e| TestFailure {

@@ -99,13 +99,16 @@ impl Frame {
   #[napi]
   pub fn locator(&self, selector: String, options: Option<crate::types::FilterOptions>) -> Locator {
     let opts = options.map(ferridriver::options::FilterOptions::from);
-    Locator::wrap(self.inner.locator(&selector, opts))
+    Locator::wrap(match opts {
+      Some(f) => self.inner.locator_with(&selector, &f),
+      None => self.inner.locator(&selector),
+    })
   }
 
   #[napi]
   pub fn get_by_role(&self, role: String, options: Option<crate::types::RoleOptions>) -> Locator {
-    let opts: ferridriver::options::RoleOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_role(&role, &opts))
+    let opts = options.map(ferridriver::options::RoleOptions::from);
+    Locator::wrap(self.inner.get_by_role(role.as_str()).maybe_options(opts).into_locator())
   }
 
   #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
@@ -114,13 +117,19 @@ impl Frame {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<crate::types::TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_text(&crate::types::getby_input_to_rust(text), &opts))
+    let opts = options.map(ferridriver::options::TextOptions::from);
+    Locator::wrap(
+      self
+        .inner
+        .get_by_text(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
+    )
   }
 
   #[napi(ts_args_type = "testId: string | RegExp")]
   pub fn get_by_test_id(&self, test_id: napi::Either<String, crate::types::JsRegExpLike>) -> Locator {
-    Locator::wrap(self.inner.get_by_test_id(&crate::types::getby_input_to_rust(test_id)))
+    Locator::wrap(self.inner.get_by_test_id(crate::types::getby_input_to_rust(test_id)))
   }
 
   // ── Content ───────────────────────────────────────────────────────────
@@ -164,8 +173,13 @@ impl Frame {
     selector: String,
     options: Option<crate::types::WaitOptions>,
   ) -> Result<Option<crate::element_handle::ElementHandle>> {
-    let opts: ferridriver::options::WaitOptions = options.map_or_else(Default::default, Into::into);
-    let handle = self.inner.wait_for_selector(&selector, opts).await.into_napi()?;
+    let opts = options.map(ferridriver::options::WaitOptions::try_from).transpose()?;
+    let handle = self
+      .inner
+      .wait_for_selector(&selector)
+      .maybe_options(opts)
+      .await
+      .into_napi()?;
     Ok(handle.map(crate::element_handle::ElementHandle::wrap))
   }
 
@@ -214,8 +228,14 @@ impl Frame {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<crate::types::TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_label(&crate::types::getby_input_to_rust(text), &opts))
+    let opts = options.map(ferridriver::options::TextOptions::from);
+    Locator::wrap(
+      self
+        .inner
+        .get_by_label(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
+    )
   }
 
   #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
@@ -224,11 +244,13 @@ impl Frame {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<crate::types::TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
+    let opts = options.map(ferridriver::options::TextOptions::from);
     Locator::wrap(
       self
         .inner
-        .get_by_placeholder(&crate::types::getby_input_to_rust(text), &opts),
+        .get_by_placeholder(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
     )
   }
 
@@ -238,11 +260,13 @@ impl Frame {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<crate::types::TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
+    let opts = options.map(ferridriver::options::TextOptions::from);
     Locator::wrap(
       self
         .inner
-        .get_by_alt_text(&crate::types::getby_input_to_rust(text), &opts),
+        .get_by_alt_text(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
     )
   }
 
@@ -252,8 +276,14 @@ impl Frame {
     text: napi::Either<String, crate::types::JsRegExpLike>,
     options: Option<crate::types::TextOptions>,
   ) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_title(&crate::types::getby_input_to_rust(text), &opts))
+    let opts = options.map(ferridriver::options::TextOptions::from);
+    Locator::wrap(
+      self
+        .inner
+        .get_by_title(crate::types::getby_input_to_rust(text))
+        .maybe_options(opts)
+        .into_locator(),
+    )
   }
 
   /// Playwright: `frame.frameLocator(selector): FrameLocator`. Targets
@@ -282,7 +312,7 @@ impl Frame {
   #[napi]
   pub async fn click(&self, selector: String, options: Option<crate::types::ClickOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.click(&selector, opts).await.into_napi()
+    self.inner.click(&selector).maybe_options(opts).await.into_napi()
   }
 
   /// Double-click the first element matching `selector` in this frame.
@@ -290,7 +320,7 @@ impl Frame {
   #[napi]
   pub async fn dblclick(&self, selector: String, options: Option<crate::types::DblClickOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.dblclick(&selector, opts).await.into_napi()
+    self.inner.dblclick(&selector).maybe_options(opts).await.into_napi()
   }
 
   /// Hover the first element matching `selector` in this frame.
@@ -298,7 +328,7 @@ impl Frame {
   #[napi]
   pub async fn hover(&self, selector: String, options: Option<crate::types::HoverOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.hover(&selector, opts).await.into_napi()
+    self.inner.hover(&selector).maybe_options(opts).await.into_napi()
   }
 
   /// Tap the first element matching `selector` in this frame. Accepts
@@ -306,7 +336,7 @@ impl Frame {
   #[napi]
   pub async fn tap(&self, selector: String, options: Option<crate::types::TapOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.tap(&selector, opts).await.into_napi()
+    self.inner.tap(&selector).maybe_options(opts).await.into_napi()
   }
 
   #[napi]
@@ -317,7 +347,7 @@ impl Frame {
   #[napi]
   pub async fn fill(&self, selector: String, value: String, options: Option<crate::types::FillOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.fill(&selector, &value, opts).await.into_napi()
+    self.inner.fill(&selector, &value).maybe_options(opts).await.into_napi()
   }
 
   #[napi(js_name = "type")]
@@ -328,25 +358,30 @@ impl Frame {
     options: Option<crate::types::TypeOptions>,
   ) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.r#type(&selector, &text, opts).await.into_napi()
+    self
+      .inner
+      .r#type(&selector, &text)
+      .maybe_options(opts)
+      .await
+      .into_napi()
   }
 
   #[napi]
   pub async fn press(&self, selector: String, key: String, options: Option<crate::types::PressOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.press(&selector, &key, opts).await.into_napi()
+    self.inner.press(&selector, &key).maybe_options(opts).await.into_napi()
   }
 
   #[napi]
   pub async fn check(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.check(&selector, opts).await.into_napi()
+    self.inner.check(&selector).maybe_options(opts).await.into_napi()
   }
 
   #[napi]
   pub async fn uncheck(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.uncheck(&selector, opts).await.into_napi()
+    self.inner.uncheck(&selector).maybe_options(opts).await.into_napi()
   }
 
   #[napi]
@@ -357,7 +392,12 @@ impl Frame {
     options: Option<crate::types::CheckOptions>,
   ) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.set_checked(&selector, checked, opts).await.into_napi()
+    self
+      .inner
+      .set_checked(&selector, checked)
+      .maybe_options(opts)
+      .await
+      .into_napi()
   }
 
   #[napi]
@@ -368,7 +408,12 @@ impl Frame {
     options: Option<crate::types::SelectOptionOptions>,
   ) -> Result<Vec<String>> {
     let opts = options.map(Into::into);
-    self.inner.select_option(&selector, values.0, opts).await.into_napi()
+    self
+      .inner
+      .select_option(&selector, values.0)
+      .maybe_options(opts)
+      .await
+      .into_napi()
   }
 
   #[napi(
@@ -381,7 +426,12 @@ impl Frame {
     options: Option<crate::types::SetInputFilesOptions>,
   ) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.set_input_files(&selector, files.0, opts).await.into_napi()
+    self
+      .inner
+      .set_input_files(&selector, files.0)
+      .maybe_options(opts)
+      .await
+      .into_napi()
   }
 
   /// Drag from `source` to `target` selectors within this frame.
@@ -394,7 +444,12 @@ impl Frame {
     options: Option<crate::types::DragAndDropOptions>,
   ) -> Result<()> {
     let opts = options.map(ferridriver::options::DragAndDropOptions::from);
-    self.inner.drag_and_drop(&source, &target, opts).await.into_napi()
+    self
+      .inner
+      .drag_and_drop(&source, &target)
+      .maybe_options(opts)
+      .await
+      .into_napi()
   }
 
   #[napi]
@@ -407,7 +462,8 @@ impl Frame {
   ) -> Result<()> {
     self
       .inner
-      .dispatch_event(&selector, &event_type, event_init, options.map(Into::into))
+      .dispatch_event(&selector, &event_type, event_init)
+      .maybe_options(options.map(Into::into))
       .await
       .into_napi()
   }

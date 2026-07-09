@@ -81,9 +81,9 @@ impl Recorder {
       },
       ..Default::default()
     });
-    let ctx = browser.new_context(ctx_opts);
+    let ctx = browser.new_context_impl(ctx_opts);
     let page = Box::pin(ctx.new_page()).await?;
-    page.goto(&self.options.url, None).await?;
+    page.goto(&self.options.url).await?;
 
     // Expose the action callback: JS -> Rust bridge.
     let emitter_cb = Arc::clone(&emitter);

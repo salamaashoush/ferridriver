@@ -15,7 +15,7 @@ step!(Screenshot {
     description: "Take a full page screenshot",
     example: "Then I take a screenshot",
     execute(page, _caps, _table, _vars) {
-        let bytes = page.screenshot(ScreenshotOptions::default())
+        let bytes = page.screenshot_impl(ScreenshotOptions::default())
             .await?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(Some(serde_json::json!({"screenshot": b64, "format": "png"})))

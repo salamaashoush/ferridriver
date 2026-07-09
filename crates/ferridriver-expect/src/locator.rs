@@ -5,6 +5,8 @@
 //! aria-YAML infrastructure that does not belong in this lightweight
 //! crate.
 
+use std::borrow::Borrow;
+
 use ferridriver::Locator;
 
 use crate::AssertionFailure;
@@ -40,11 +42,11 @@ pub fn check_text_match(expected: &StringOrRegex, actual: &str, is_not: bool, _l
   }
 }
 
-impl Expect<'_, Locator> {
+impl<L: Borrow<Locator>> Expect<'_, L> {
   // ── Visibility / State ──
 
   pub async fn to_be_visible(&self) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(
       self.timeout,
@@ -58,7 +60,7 @@ impl Expect<'_, Locator> {
   }
 
   pub async fn to_be_hidden(&self) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(
       self.timeout,
@@ -72,7 +74,7 @@ impl Expect<'_, Locator> {
   }
 
   pub async fn to_be_enabled(&self) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(
       self.timeout,
@@ -86,7 +88,7 @@ impl Expect<'_, Locator> {
   }
 
   pub async fn to_be_disabled(&self) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(
       self.timeout,
@@ -100,7 +102,7 @@ impl Expect<'_, Locator> {
   }
 
   pub async fn to_be_checked(&self) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(
       self.timeout,
@@ -114,7 +116,7 @@ impl Expect<'_, Locator> {
   }
 
   pub async fn to_be_editable(&self) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(
       self.timeout,
@@ -128,7 +130,7 @@ impl Expect<'_, Locator> {
   }
 
   pub async fn to_be_attached(&self) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(
       self.timeout,
@@ -142,7 +144,7 @@ impl Expect<'_, Locator> {
   }
 
   pub async fn to_be_empty(&self) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, locator_ctx(locator, "toBeEmpty", is_not), || async move {
       let text = locator.text_content().await.unwrap_or(None).unwrap_or_default();
@@ -160,7 +162,7 @@ impl Expect<'_, Locator> {
   }
 
   pub async fn to_be_focused(&self) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(
       self.timeout,
@@ -170,7 +172,6 @@ impl Expect<'_, Locator> {
           .evaluate(
             "el => document.activeElement === el",
             ferridriver::protocol::SerializedArgument::default(),
-            None,
             None,
           )
           .await
@@ -188,7 +189,7 @@ impl Expect<'_, Locator> {
   }
 
   pub async fn to_be_in_viewport_with(&self, options: InViewportOptions) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     let ratio = options.ratio.unwrap_or(0.0).clamp(0.0, 1.0);
     poll_until(
@@ -206,7 +207,7 @@ impl Expect<'_, Locator> {
          return inter / area >= {ratio:.6}; }}"
         );
         let in_viewport = locator
-          .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None, None)
+          .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None)
           .await
           .ok()
           .and_then(|v| v.as_bool())
@@ -221,7 +222,7 @@ impl Expect<'_, Locator> {
 
   pub async fn to_have_text(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     let expected = expected.into();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, locator_ctx(locator, "toHaveText", is_not), || {
       let expected = expected.clone();
@@ -235,7 +236,7 @@ impl Expect<'_, Locator> {
 
   pub async fn to_contain_text(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     let expected = expected.into();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, locator_ctx(locator, "toContainText", is_not), || {
       let expected = expected.clone();
@@ -264,7 +265,7 @@ impl Expect<'_, Locator> {
 
   pub async fn to_have_value(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     let expected = expected.into();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, locator_ctx(locator, "toHaveValue", is_not), || {
       let expected = expected.clone();
@@ -278,7 +279,7 @@ impl Expect<'_, Locator> {
 
   pub async fn to_have_values(&self, expected: &[impl AsRef<str>]) -> Result<(), AssertionFailure> {
     let expected: Vec<String> = expected.iter().map(|s| s.as_ref().to_string()).collect();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, locator_ctx(locator, "toHaveValues", is_not), || {
       let expected = expected.clone();
@@ -287,7 +288,6 @@ impl Expect<'_, Locator> {
           .evaluate(
             "el => Array.from(el.selectedOptions).map(function(o) { return o.value; })",
             ferridriver::protocol::SerializedArgument::default(),
-            None,
             None,
           )
           .await
@@ -319,7 +319,7 @@ impl Expect<'_, Locator> {
 
   pub async fn to_have_attribute(&self, name: &str, value: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     let expected = value.into();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     let attr_name = name.to_string();
     poll_until(self.timeout, locator_ctx(locator, "toHaveAttribute", is_not), || {
@@ -338,7 +338,7 @@ impl Expect<'_, Locator> {
   }
 
   pub async fn to_have_attribute_exists(&self, name: &str) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     let attr_name = name.to_string();
     poll_until(self.timeout, locator_ctx(locator, "toHaveAttribute", is_not), || {
@@ -363,7 +363,7 @@ impl Expect<'_, Locator> {
 
   pub async fn to_have_class(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     let expected = expected.into();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, locator_ctx(locator, "toHaveClass", is_not), || {
       let expected = expected.clone();
@@ -377,7 +377,7 @@ impl Expect<'_, Locator> {
 
   pub async fn to_contain_class(&self, expected: &str) -> Result<(), AssertionFailure> {
     let expected = expected.to_string();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, locator_ctx(locator, "toContainClass", is_not), || {
       let expected = expected.clone();
@@ -409,7 +409,7 @@ impl Expect<'_, Locator> {
     options: HaveCssOptions,
   ) -> Result<(), AssertionFailure> {
     let expected = value.into();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     let prop = property.to_string();
     let pseudo = options.pseudo.clone();
@@ -427,7 +427,7 @@ impl Expect<'_, Locator> {
           prop.replace('\'', "\\'")
         );
         let actual = locator
-          .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None, None)
+          .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None)
           .await
           .ok()
           .and_then(|v| v.as_str().map(String::from))
@@ -444,7 +444,7 @@ impl Expect<'_, Locator> {
 
   pub async fn to_have_role(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     let expected = expected.into();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, locator_ctx(locator, "toHaveRole", is_not), || {
       let expected = expected.clone();
@@ -453,7 +453,6 @@ impl Expect<'_, Locator> {
           .evaluate(
             "el => el.getAttribute('role') || el.tagName.toLowerCase()",
             ferridriver::protocol::SerializedArgument::default(),
-            None,
             None,
           )
           .await
@@ -468,7 +467,7 @@ impl Expect<'_, Locator> {
 
   pub async fn to_have_accessible_name(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     let expected = expected.into();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(
       self.timeout,
@@ -487,7 +486,6 @@ impl Expect<'_, Locator> {
             }",
               ferridriver::protocol::SerializedArgument::default(),
               None,
-              None,
             )
             .await
             .ok()
@@ -505,7 +503,7 @@ impl Expect<'_, Locator> {
     expected: impl Into<StringOrRegex>,
   ) -> Result<(), AssertionFailure> {
     let expected = expected.into();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(
       self.timeout,
@@ -522,7 +520,6 @@ impl Expect<'_, Locator> {
               return desc.trim(); \
             }",
               ferridriver::protocol::SerializedArgument::default(),
-              None,
               None,
             )
             .await
@@ -541,7 +538,7 @@ impl Expect<'_, Locator> {
     expected: impl Into<StringOrRegex>,
   ) -> Result<(), AssertionFailure> {
     let expected = expected.into();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(
       self.timeout,
@@ -561,7 +558,6 @@ impl Expect<'_, Locator> {
             }",
               ferridriver::protocol::SerializedArgument::default(),
               None,
-              None,
             )
             .await
             .ok()
@@ -575,7 +571,7 @@ impl Expect<'_, Locator> {
   }
 
   pub async fn to_have_js_property(&self, name: &str, value: serde_json::Value) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     let prop_name = name.to_string();
     poll_until(self.timeout, locator_ctx(locator, "toHaveJSProperty", is_not), || {
@@ -584,7 +580,7 @@ impl Expect<'_, Locator> {
       async move {
         let js = format!("el => JSON.stringify(el['{}'])", prop_name.replace('\'', "\\'"));
         let actual = locator
-          .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None, None)
+          .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None)
           .await
           .ok()
           .and_then(|v| {
@@ -610,7 +606,7 @@ impl Expect<'_, Locator> {
 
   pub async fn to_have_texts(&self, expected: &[impl Into<StringOrRegex> + Clone]) -> Result<(), AssertionFailure> {
     let expected: Vec<StringOrRegex> = expected.iter().map(|e| e.clone().into()).collect();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, locator_ctx(locator, "toHaveTexts", is_not), || {
       let expected = expected.clone();
@@ -625,7 +621,6 @@ impl Expect<'_, Locator> {
                 locator.selector().replace('\'', "\\'")
               ),
               ferridriver::protocol::SerializedArgument::default(),
-              None,
               None,
             )
             .await
@@ -667,7 +662,7 @@ impl Expect<'_, Locator> {
 
   pub async fn to_contain_texts(&self, expected: &[impl AsRef<str>]) -> Result<(), AssertionFailure> {
     let expected: Vec<String> = expected.iter().map(|s| s.as_ref().to_string()).collect();
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(self.timeout, locator_ctx(locator, "toContainTexts", is_not), || {
       let expected = expected.clone();
@@ -682,7 +677,6 @@ impl Expect<'_, Locator> {
                 locator.selector().replace('\'', "\\'")
               ),
               ferridriver::protocol::SerializedArgument::default(),
-              None,
               None,
             )
             .await
@@ -720,7 +714,7 @@ impl Expect<'_, Locator> {
   // ── Count ──
 
   pub async fn to_have_count(&self, expected: usize) -> Result<(), AssertionFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_until(
       self.timeout,

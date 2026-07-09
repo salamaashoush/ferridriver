@@ -26,7 +26,7 @@ async fn measure_operation_costs() {
   let n = 10;
   for _ in 0..n {
     let start = Instant::now();
-    let ctx = browser.new_context(None);
+    let ctx = browser.new_context().await.unwrap();
     let _page = ctx.new_page().await.unwrap();
     ctx_total += start.elapsed();
     ctx.close().await.ok();
@@ -37,13 +37,13 @@ async fn measure_operation_costs() {
   );
 
   // 3. Page navigation (data URL, 10x average)
-  let ctx = browser.new_context(None);
+  let ctx = browser.new_context().await.unwrap();
   let page = ctx.new_page().await.unwrap();
   let mut nav_total = std::time::Duration::ZERO;
   for i in 0..n {
     let url = format!("data:text/html,<title>T{i}</title><body>B{i}</body>");
     let start = Instant::now();
-    page.goto(&url, None).await.unwrap();
+    page.goto(&url).await.unwrap();
     nav_total += start.elapsed();
   }
   println!(
@@ -65,16 +65,13 @@ async fn measure_operation_costs() {
 
   // 5. Locator click (10x average)
   page
-    .goto(
-      &"data:text/html,<button id='b' onclick=\"\">Go</button>".to_string(),
-      None,
-    )
+    .goto(&"data:text/html,<button id='b' onclick=\"\">Go</button>".to_string())
     .await
     .unwrap();
   let mut click_total = std::time::Duration::ZERO;
   for _ in 0..n {
     let start = Instant::now();
-    page.locator("#b", None).click(None).await.unwrap();
+    page.locator("#b").click().await.unwrap();
     click_total += start.elapsed();
   }
   println!(
@@ -86,7 +83,7 @@ async fn measure_operation_costs() {
   let mut text_total = std::time::Duration::ZERO;
   for _ in 0..n {
     let start = Instant::now();
-    let _ = page.locator("#b", None).text_content().await.unwrap();
+    let _ = page.locator("#b").text_content().await.unwrap();
     text_total += start.elapsed();
   }
   println!(
@@ -101,7 +98,7 @@ async fn measure_operation_costs() {
 
   // 8. Browser close
   let start = Instant::now();
-  browser.close(None).await.ok();
+  browser.close().await.ok();
   println!("  Browser close:         {:>6}ms", start.elapsed().as_millis());
 
   println!();

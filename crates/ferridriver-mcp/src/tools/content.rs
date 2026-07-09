@@ -28,7 +28,7 @@ impl McpServer {
       depth: p.depth,
       track: p.track,
     };
-    match page.snapshot_for_ai(opts).await {
+    match page.snapshot_for_ai().options(opts).await {
       Ok(result) => {
         if let Some(handle) = self.state.ref_map_handle(s).await {
           handle.store(std::sync::Arc::new(result.ref_map));
@@ -69,12 +69,12 @@ impl McpServer {
       page.screenshot_element(sel).await.map_err(Self::err)?
     } else {
       let opts = ScreenshotOptions {
-        format: p.format.clone(),
+        format: p.format.as_deref().map(ferridriver::options::ScreenshotFormat::from),
         quality: p.quality,
         full_page: p.full_page,
         ..Default::default()
       };
-      page.screenshot(opts).await.map_err(Self::err)?
+      page.screenshot().options(opts).await.map_err(Self::err)?
     };
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(CallToolResult::success(vec![Content::image(b64, mime)]))
