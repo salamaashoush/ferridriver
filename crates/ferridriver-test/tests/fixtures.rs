@@ -29,8 +29,65 @@ async fn worker_token(_ctx: TestContext) -> ferridriver_test::Result<String> {
   Ok("worker-secret".to_string())
 }
 
+/// Depends on `seeded_users` via a typed parameter (name = fixture name).
+#[fixture(scope = "test")]
+async fn user_count(seeded_users: Arc<Vec<String>>) -> ferridriver_test::Result<usize> {
+  Ok(seeded_users.len())
+}
+
+/// A `#[ferritest]` with typed fixture parameters, exercised without a
+/// browser by invoking its registered `test_fn` directly.
+#[ferritest]
+async fn typed_params_test(seeded_users: Arc<Vec<String>>, user_count: Arc<usize>, ctx: TestContext) {
+  assert_eq!(seeded_users.first().map(String::as_str), Some("alice"));
+  assert_eq!(*user_count, 2);
+  let via_ctx = ctx.get::<Vec<String>>("seeded_users").await?;
+  assert!(Arc::ptr_eq(&via_ctx, &seeded_users));
+}
+
+#[ferritest_each(data = [("alice", 0), ("bob", 1)], tag = "roster")]
+async fn typed_each_test(seeded_users: Arc<Vec<String>>, expected: &str, index: usize) {
+  assert_eq!(seeded_users[index], expected);
+}
+
+#[ferritest_each(data = [(1, 2), (2, 4)], names = ["one doubles", "two doubles"])]
+async fn named_each_test(input: u32, output: u32) {
+  assert_eq!(input * 2, output);
+}
+
+static TORN_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A fixture with cleanup: returns `Fixture<T>` with an `on_teardown`.
+#[fixture(scope = "test")]
+async fn tracked_resource(_ctx: TestContext) -> ferridriver_test::Result<Fixture<String>> {
+  Ok(Fixture::new("resource".to_string()).on_teardown(|value| async move {
+    assert_eq!(&*value, "resource");
+    TORN_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+  }))
+}
+
 fn pool_with_custom_fixtures(scope: FixtureScope) -> FixturePool {
   FixturePool::new(ferridriver_test::collect_rust_fixtures(), scope)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fixture_guard_registers_teardown() {
+  let pool = pool_with_custom_fixtures(FixtureScope::Test);
+  let value = pool
+    .get::<String>("tracked_resource")
+    .await
+    .expect("resolve guard fixture");
+  assert_eq!(&*value, "resource");
+  assert!(
+    !TORN_DOWN.load(std::sync::atomic::Ordering::SeqCst),
+    "teardown must not run while the scope is alive"
+  );
+  drop(value);
+  pool.teardown_all().await;
+  assert!(
+    TORN_DOWN.load(std::sync::atomic::Ordering::SeqCst),
+    "teardown_all must invoke the fixture's on_teardown"
+  );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -67,4 +124,52 @@ async fn caches_within_scope() {
   let a = pool.get::<Vec<String>>("seeded_users").await.expect("first resolve");
   let b = pool.get::<Vec<String>>("seeded_users").await.expect("second resolve");
   assert!(Arc::ptr_eq(&a, &b), "same scope should return the cached Arc");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_fixture_params_declare_dependencies() {
+  let defs = ferridriver_test::collect_rust_fixtures();
+  assert_eq!(defs["user_count"].dependencies, vec!["seeded_users".to_string()]);
+  assert!(defs["seeded_users"].dependencies.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_test_params_resolve_and_register() {
+  let reg = ferridriver_test::inventory::iter::<ferridriver_test::TestRegistration>()
+    .find(|r| r.name == "typed_params_test")
+    .expect("typed_params_test registered");
+  assert_eq!(reg.fixture_requests, &["seeded_users", "user_count"]);
+
+  let pool = pool_with_custom_fixtures(FixtureScope::Test);
+  (reg.test_fn)(pool).await.expect("typed params test body passes");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ferritest_each_names_label_rows() {
+  let names: Vec<_> = ferridriver_test::inventory::iter::<ferridriver_test::TestRegistration>()
+    .filter(|r| r.name.starts_with("named_each_test"))
+    .map(|r| r.name)
+    .collect();
+  assert_eq!(names.len(), 2);
+  assert!(names.contains(&"named_each_test (one doubles)"));
+  assert!(names.contains(&"named_each_test (two doubles)"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ferritest_each_rows_with_fixtures_and_args() {
+  let regs: Vec<_> = ferridriver_test::inventory::iter::<ferridriver_test::TestRegistration>()
+    .filter(|r| r.name.starts_with("typed_each_test"))
+    .collect();
+  assert_eq!(regs.len(), 2, "one registration per data row");
+  for reg in &regs {
+    assert_eq!(reg.fixture_requests, &["seeded_users"]);
+    assert!(
+      (reg.annotations)()
+        .iter()
+        .any(|a| matches!(a, ferridriver_test::TestAnnotation::Tag(t) if t == "roster")),
+      "shared tag applies to every row"
+    );
+    let pool = pool_with_custom_fixtures(FixtureScope::Test);
+    (reg.test_fn)(pool).await.expect("each-row body passes");
+  }
 }

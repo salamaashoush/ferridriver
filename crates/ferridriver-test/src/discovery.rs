@@ -23,7 +23,9 @@ pub struct TestRegistration {
   pub module_path: &'static str,
   pub name: &'static str,
   pub fixture_requests: &'static [&'static str],
-  pub annotations: &'static [TestAnnotation],
+  /// Builder fn pointer (const-storable in the inventory static) so
+  /// annotations can carry owned strings (tags, skip reasons).
+  pub annotations: fn() -> Vec<TestAnnotation>,
   pub timeout_ms: Option<u64>,
   pub retries: Option<u32>,
   /// Raw JSON string for fixture/context overrides (viewport, locale, etc.)
@@ -119,7 +121,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
       },
       test_fn: Arc::new(move |pool| test_fn_ptr(pool)),
       fixture_requests: reg.fixture_requests.iter().map(|s| (*s).to_string()).collect(),
-      annotations: reg.annotations.to_vec(),
+      annotations: (reg.annotations)(),
       timeout: reg.timeout_ms.map(std::time::Duration::from_millis),
       retries: reg.retries,
       expected_status: ExpectedStatus::Pass,

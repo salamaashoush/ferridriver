@@ -279,6 +279,36 @@ pub struct TestArgs {
   #[arg(long)]
   pub profile: Option<String>,
 
+  /// Run ferritest harness binaries headless (exported as
+  /// `FERRITEST_HEADLESS`; non-harness test binaries ignore it).
+  #[arg(long)]
+  pub headless: bool,
+
+  /// Browser backend for ferritest harness binaries (`cdp-pipe`,
+  /// `cdp-raw`, `bidi`, `webkit`; exported as `FERRITEST_BACKEND`).
+  #[arg(long)]
+  pub backend: Option<String>,
+
+  /// Worker count for ferritest harness binaries (exported as
+  /// `FERRITEST_WORKERS`).
+  #[arg(long)]
+  pub workers: Option<usize>,
+
+  /// Test-title filter for ferritest harness binaries (exported as
+  /// `FERRITEST_GREP`).
+  #[arg(long, short = 'g')]
+  pub grep: Option<String>,
+
+  /// Tag filter for ferritest harness binaries (exported as
+  /// `FERRITEST_TAG`).
+  #[arg(long)]
+  pub tag: Option<String>,
+
+  /// Retry count for ferritest harness binaries (exported as
+  /// `FERRITEST_RETRIES`).
+  #[arg(long)]
+  pub retries: Option<u32>,
+
   /// Pass remaining arguments through to the underlying runner.
   #[arg(last = true)]
   pub passthrough: Vec<String>,

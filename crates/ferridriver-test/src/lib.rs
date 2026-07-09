@@ -60,7 +60,7 @@
   clippy::implicit_hasher,
   clippy::stable_sort_primitive
 )]
-//! ferridriver-test -- High-performance E2E test runner for browser automation.
+//! ferridriver-test -- Rust-based E2E test runner for browser automation.
 //!
 //! Provides a Playwright Test-compatible API for writing and running browser tests
 //! with automatic fixture injection, parallel execution, and rich reporting.
@@ -71,20 +71,18 @@
 //! use ferridriver_test::prelude::*;
 //!
 //! #[ferritest]
-//! async fn basic_navigation(ctx: TestContext) {
-//!     let page = ctx.page().await?;
-//!     page.goto("https://example.com", None).await?;
-//!     expect(&*page).to_have_title("Example Domain").await?;
+//! async fn basic_navigation(page: Arc<Page>) {
+//!     page.goto("https://example.com").await?;
+//!     expect(&page).to_have_title("Example Domain").await?;
 //! }
 //!
 //! #[ferritest(retries = 2, tag = "smoke")]
-//! async fn login_test(ctx: TestContext) {
-//!     let page = ctx.page().await?;
-//!     page.goto("https://app.example.com/login", None).await?;
-//!     page.locator("#email", None).fill("user@example.com", None).await?;
-//!     page.locator("#password", None).fill("password", None).await?;
-//!     page.locator("button[type=submit]", None).click(None).await?;
-//!     expect(&*page).to_have_url("https://app.example.com/dashboard").await?;
+//! async fn login_test(page: Arc<Page>) {
+//!     page.goto("https://app.example.com/login").await?;
+//!     page.locator("#email").fill("user@example.com").await?;
+//!     page.locator("#password").fill("password").await?;
+//!     page.locator("button[type=submit]").click().await?;
+//!     expect(&page).to_have_url("https://app.example.com/dashboard").await?;
 //! }
 //! ```
 
@@ -124,7 +122,7 @@ pub use discovery::{
   TestRegistration, collect_rust_fixtures,
 };
 pub use expect::{ToPassOptions, expect, expect_configured, expect_poll, to_pass, to_pass_with_options};
-pub use fixture::{FixtureDef, FixturePool, FixtureScope};
+pub use fixture::{Fixture, FixtureDef, FixturePool, FixtureScope};
 pub use model::{
   HookDef, HookKind, HookOwner, HookPhase, HookRegistration, HookScope, SuiteDef, SuiteMode, TestAnnotation, TestCase,
   TestFailure, TestFixtures, TestFn, TestId, TestInfo, TestModifiers, TestOutcome, TestPlan, TestPlanBuilder,
@@ -153,7 +151,7 @@ pub use inventory;
 /// #[ferritest]
 /// async fn my_test(ctx: TestContext) {
 ///     let page = ctx.page().await?;
-///     page.goto("https://example.com", None).await?;
+///     page.goto("https://example.com").await?;
 /// }
 ///
 /// ferridriver_test::main!();
@@ -199,11 +197,14 @@ pub fn run_harness() {
 
 /// Prelude for convenient imports in test files.
 pub mod prelude {
+  pub use std::sync::Arc;
+
+  pub use ferridriver::http_client::HttpClient;
   pub use ferridriver::{Browser, ContextRef as BrowserContext, Locator, Page};
 
   pub use crate::context::TestContext;
   pub use crate::expect::{expect, expect_configured, expect_poll, to_pass};
-  pub use crate::fixture::FixturePool;
+  pub use crate::fixture::{Fixture, FixturePool};
   pub use crate::model::{TestFailure, TestInfo};
   pub use ferridriver_test_macros::{
     after_all, after_each, before_all, before_each, ferritest, ferritest_each, ferritest_suite, fixture,
