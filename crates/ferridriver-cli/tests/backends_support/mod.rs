@@ -23,6 +23,7 @@ pub mod dialog;
 pub mod download;
 pub mod evaluate;
 pub mod expect;
+pub mod extension_tools;
 pub mod file_chooser;
 pub mod getby_regex;
 pub mod handle_surface;

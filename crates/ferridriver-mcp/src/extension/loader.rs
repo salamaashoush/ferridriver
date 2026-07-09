@@ -173,3 +173,106 @@ pub fn discover_specs(specs: &[String], cwd: &Path) -> (Vec<PathBuf>, Vec<Extens
     .collect();
   (files, errors)
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn scratch(label: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!("ferri_ext_loader_{label}_{nanos}"));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    dir
+  }
+
+  #[test]
+  fn discover_returns_an_explicit_file_as_is() {
+    let dir = scratch("file");
+    let f = dir.join("tool.weird-ext");
+    std::fs::write(&f, "defineTool({ name: 't', handler: () => 1 });").unwrap();
+    let found = discover(&f).expect("discover file");
+    assert_eq!(found, vec![f]);
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn discover_scans_directories_recursively_for_source_files_only() {
+    let dir = scratch("dir");
+    std::fs::create_dir_all(dir.join("nested/deep")).unwrap();
+    std::fs::write(dir.join("a.ts"), "").unwrap();
+    std::fs::write(dir.join("nested/b.tsx"), "").unwrap();
+    std::fs::write(dir.join("nested/deep/c.cjs"), "").unwrap();
+    std::fs::write(dir.join("nested/readme.md"), "").unwrap();
+    std::fs::write(dir.join("data.json"), "{}").unwrap();
+
+    let mut found = discover(&dir).expect("discover dir");
+    found.sort();
+    let names: Vec<String> = found
+      .iter()
+      .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+      .collect();
+    assert_eq!(names, ["a.ts", "b.tsx", "c.cjs"], "source files only, recursively");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn discover_missing_path_is_an_io_error() {
+    let missing = std::env::temp_dir().join("ferri_ext_loader_definitely_missing/nope.js");
+    let err = discover(&missing).expect_err("must fail");
+    assert!(matches!(err, ExtensionLoadError::Io { .. }), "got: {err}");
+  }
+
+  #[test]
+  fn discover_specs_records_unresolvable_specs_as_errors() {
+    let dir = scratch("specs");
+    std::fs::write(dir.join("ok.js"), "defineTool({ name: 't', handler: () => 1 });").unwrap();
+    // A bare name is a package specifier; a path spec needs `./`.
+    let (files, errors) = discover_specs(&["./ok.js".to_string(), "no-such-package-xyz".to_string()], &dir);
+    assert_eq!(files.len(), 1, "the resolvable spec survives: {files:?}");
+    assert_eq!(errors.len(), 1, "the bogus spec is recorded: {errors:?}");
+    assert!(errors[0].source_label().contains("no-such-package-xyz"));
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[tokio::test(flavor = "multi_thread")]
+  async fn load_all_extracts_manifests_and_isolates_broken_files() {
+    let dir = scratch("load");
+    std::fs::write(
+      dir.join("good.js"),
+      "defineTool({ name: 'good.tool', title: 'Good', exposeAsTool: true, \
+       annotations: { readOnlyHint: true }, \
+       outputSchema: { type: 'object' }, handler: async () => ({}) });",
+    )
+    .unwrap();
+    std::fs::write(dir.join("broken.js"), "this is not (valid js").unwrap();
+    std::fs::write(dir.join("empty.js"), "export const nothing = 1;").unwrap();
+
+    let files = vec![dir.join("good.js"), dir.join("broken.js"), dir.join("empty.js")];
+    let (loaded, errors) = load_all(&files).await;
+
+    assert_eq!(loaded.len(), 1, "only the good file loads: {loaded:?}");
+    let tool = &loaded[0].tools[0];
+    assert_eq!(tool.name, "good.tool");
+    assert_eq!(tool.title.as_deref(), Some("Good"));
+    assert!(tool.expose_as_mcp_tool);
+    assert!(tool.output_schema.is_some());
+    assert_eq!(tool.annotations.as_ref().and_then(|a| a.read_only_hint), Some(true));
+    assert!(!loaded[0].bytecode.is_empty());
+
+    assert_eq!(errors.len(), 2, "broken + toolless: {errors:?}");
+    let by_label = |needle: &str| {
+      errors
+        .iter()
+        .find(|e| e.source_label().contains(needle))
+        .unwrap_or_else(|| panic!("no error for {needle}: {errors:?}"))
+    };
+    assert!(matches!(by_label("broken.js"), ExtensionLoadError::Bundle { .. }));
+    assert!(matches!(
+      by_label("empty.js"),
+      ExtensionLoadError::ManifestNoTools { .. }
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+}

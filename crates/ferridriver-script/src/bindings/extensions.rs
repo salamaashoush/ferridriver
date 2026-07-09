@@ -279,10 +279,11 @@ fn is_js_identifier(part: &str) -> bool {
 }
 
 /// Native `tools.<name>(args)` body: restore the tool's handler from
-/// the registry, build `{ args, page, context, request, commands }` via
-/// the Object API (per-tool `commands` allow-list + optional net-guarded
-/// `request`, both Rust-enforced), apply the handler and await its
-/// result. When the manifest declared `timeoutMs`, the handler is raced
+/// the registry, build `{ args, page, context, request, commands,
+/// signal }` via the Object API (per-tool `commands` allow-list +
+/// optional net-guarded `request`, both Rust-enforced; `signal` is a
+/// standard `AbortSignal` fired on timeout), apply the handler and
+/// await its result. When the manifest declared `timeoutMs`, the handler is raced
 /// against that bound natively (same mechanism `invoke_step` uses) so
 /// every caller — promoted MCP tool, `invoke_extension_tool`, or another
 /// extension calling `tools.<name>` — is covered, not just the MCP
@@ -314,14 +315,12 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
     g.get::<_, Value<'js>>("context").unwrap_or_else(|_| undef.clone()),
   )?;
 
-  // The tool's declared `allow.net` (empty ⇒ unrestricted). Used for
+  // The tool's EFFECTIVE `allow.net` (declared manifest intersected
+  // with the operator ceiling at registration; `None` ⇒ unrestricted,
+  // `Some` ⇒ default-deny, an empty list denies every host). Used for
   // BOTH the net-guarded `request` wrapper AND the `fetch` policy
   // bracket below — one allow-list, both HTTP entry points.
-  let net_policy: Option<Arc<[String]>> = if d.allowed_net.is_empty() {
-    None
-  } else {
-    Some(d.allowed_net.clone())
-  };
+  let net_policy: Option<Arc<[String]>> = d.allowed_net.clone();
 
   // `request`: pass through unless the tool declared `allow.net`, in
   // which case hand it a net-restricted wrapper over the SAME underlying
@@ -344,6 +343,15 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
   let commands = Class::instance(ctx.clone(), ExtensionCommandsJs::new(d.allowed_commands, procs))?;
   arg.set("commands", commands)?;
 
+  // Cooperative cancellation: every handler gets a standard
+  // `AbortSignal` that fires when its `timeoutMs` bound expires. The
+  // timeout race below drops the handler's Rust future, but the JS
+  // continuation keeps running on the VM — without the signal it would
+  // be zombie work with no way to notice. Handlers pass it to
+  // `fetch`/listeners exactly like any web `AbortSignal`.
+  let signal = crate::bindings::abort::AbortSignalJs::fresh_instance(&ctx)?;
+  arg.set("signal", signal.clone())?;
+
   // The same `allow.net` must also bind the global `fetch` and the
   // global `request` (facades over the same core). Both read the
   // active policy from VM userdata; `bracket_net` swaps the cell
@@ -355,17 +363,22 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
 
   let handler = d.handler;
   let timeout_ms = d.timeout_ms;
+  let abort_ctx = ctx.clone();
   let inner = async move {
     let mp: MaybePromise<'js> = handler.call((arg,))?;
     let fut = mp.into_future::<Value<'js>>();
     match timeout_ms {
-      Some(t) => match tokio::time::timeout(Duration::from_millis(t), fut).await {
-        Ok(r) => r,
-        Err(_) => Err(rquickjs::Error::new_from_js_message(
-          "extensions",
-          "Error",
-          format!("tool timed out after {t}ms"),
-        )),
+      Some(t) => {
+        if let Ok(r) = tokio::time::timeout(Duration::from_millis(t), fut).await {
+          r
+        } else {
+          let msg = format!("tool timed out after {t}ms");
+          // Fire the handler's `ctx.signal` so its still-running JS
+          // continuation (and any in-flight `fetch` holding the signal)
+          // can stop instead of running on as zombie work.
+          let _ = crate::bindings::abort::AbortSignalJs::abort_native(&signal, &abort_ctx, "TimeoutError", &msg);
+          Err(rquickjs::Error::new_from_js_message("extensions", "Error", msg))
+        }
       },
       None => fut.await,
     }

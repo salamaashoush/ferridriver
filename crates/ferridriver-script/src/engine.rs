@@ -198,6 +198,11 @@ pub struct ScriptCaps {
   /// First-party command grants exposed as `commands` /
   /// `ferridriver.commands` outside extension handlers.
   pub commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
+  /// Operator ceiling over extension capability manifests
+  /// (`[extensions.policy]`). Enforced at tool registration: a tool's
+  /// effective grants are its declared `allow` intersected with this.
+  /// Default = fully open (manifests keep their declared authority).
+  pub extension_policy: ferridriver_config::ExtensionPolicyConfig,
 }
 
 impl ScriptCaps {
@@ -214,6 +219,7 @@ impl ScriptCaps {
     Self {
       env,
       commands: std::collections::BTreeMap::new(),
+      extension_policy: ferridriver_config::ExtensionPolicyConfig::default(),
     }
   }
 
@@ -226,6 +232,13 @@ impl ScriptCaps {
     let mut caps = Self::resolve(allow_env);
     caps.commands = commands;
     caps
+  }
+
+  /// Attach the operator extension-policy ceiling (`[extensions.policy]`).
+  #[must_use]
+  pub fn with_extension_policy(mut self, policy: ferridriver_config::ExtensionPolicyConfig) -> Self {
+    self.extension_policy = policy;
+    self
   }
 }
 
@@ -489,6 +502,12 @@ impl Session {
       // swaps it around each net-restricted handler's poll.
       let _ = ctx.store_userdata(crate::bindings::fetch::NetPolicyUd(
         crate::bindings::fetch::NetPolicy::default(),
+      ));
+      // The operator extension-policy ceiling. Must precede
+      // `install_extensions`: `defineTool` reads it to clamp each
+      // manifest's `allow` down to the effective grants.
+      let _ = ctx.store_userdata(crate::bindings::registry::ExtensionPolicyUd(
+        caps.extension_policy.clone(),
       ));
       // Native route-handler registry (context userdata): session-once
       // so `page.route` works on ANY page (script-launched

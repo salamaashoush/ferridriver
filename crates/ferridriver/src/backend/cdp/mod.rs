@@ -364,7 +364,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
         frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
         exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
-        binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        binding_initialized: Arc::new(tokio::sync::Mutex::new(false)),
         closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -530,7 +530,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
       frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
-      binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      binding_initialized: Arc::new(tokio::sync::Mutex::new(false)),
       closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
       fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1138,8 +1138,15 @@ pub struct CdpPage<T: CdpTransport> {
   /// Registered exposed binding callbacks (source-aware; plain exposed
   /// functions are wrapped by `AnyPage::expose_function`).
   pub exposed_fns: Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
-  /// Whether the binding channel has been initialized.
-  binding_initialized: Arc<std::sync::atomic::AtomicBool>,
+  /// Guards one-time bootstrap of the `__fd_bc` binding channel. A
+  /// `Mutex<bool>` (not an `AtomicBool`): concurrent
+  /// `exposeFunction`/`exposeBinding`/`routeWebSocket` callers must SERIALIZE
+  /// on the bootstrap — a second caller that merely observed "already
+  /// initialized" via an atomic swap would race ahead and evaluate
+  /// `__fd_bc.add(...)` before the first caller's controller script has
+  /// defined `__fd_bc`, throwing "Uncaught". Holding the lock across the
+  /// whole bootstrap makes late callers wait for it to finish.
+  binding_initialized: Arc<tokio::sync::Mutex<bool>>,
   /// Whether this page has been closed.
   closed: Arc<std::sync::atomic::AtomicBool>,
   /// Registered route handlers for network interception.
@@ -4855,7 +4862,11 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   /// up yet (a separate subscription raced the tracker and misrouted
   /// iframe callers to the main frame).
   async fn ensure_binding_channel(&self) -> Result<()> {
-    if self.binding_initialized.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    // Hold the lock across the whole bootstrap so a concurrent caller
+    // blocks here until `__fd_bc` is actually defined, instead of racing
+    // ahead to `__fd_bc.add(...)` against an undefined controller.
+    let mut initialized = self.binding_initialized.lock().await;
+    if *initialized {
       return Ok(());
     }
     self
@@ -4863,6 +4874,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       .await?;
     self.add_init_script(Self::BINDING_CONTROLLER_JS).await?;
     self.evaluate(Self::BINDING_CONTROLLER_JS).await?;
+    *initialized = true;
     Ok(())
   }
 

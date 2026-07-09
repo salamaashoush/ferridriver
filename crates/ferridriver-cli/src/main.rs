@@ -271,10 +271,13 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   // Thread the `[scripting]` env allow-list into the BDD step VM — the
   // same resolution the MCP server and `ferridriver run` use. Must be
   // set before the run starts.
-  ferridriver_bdd::js::set_bdd_script_caps(ferridriver_script::ScriptCaps::resolve_with_commands(
-    &config.scripting.allow_env,
-    config.scripting.allow.commands.clone(),
-  ));
+  ferridriver_bdd::js::set_bdd_script_caps(
+    ferridriver_script::ScriptCaps::resolve_with_commands(
+      &config.scripting.allow_env,
+      config.scripting.allow.commands.clone(),
+    )
+    .with_extension_policy(config.extensions.policy()),
+  );
   ferridriver_bdd::js::set_bdd_sidecars(sidecar_specs(&config));
   let mut overrides = ferridriver_test::config::CliOverrides {
     bdd_tags: args.tags,
@@ -286,7 +289,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
     bdd_language: args.language,
     bdd_steps: args.steps,
     world_parameters: args.world_parameters,
-    extensions: config.extensions.clone(),
+    extensions: config.extensions.paths().to_vec(),
     workers: args.workers.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
     reporter: args.reporter,
     ..Default::default()
@@ -372,12 +375,13 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
   let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
     &file_config.scripting.allow_env,
     file_config.scripting.allow.commands.clone(),
-  );
+  )
+  .with_extension_policy(file_config.extensions.policy());
   let sidecars = sidecar_specs(&file_config);
 
   // Extensions: config `extensions` plus any `--extension` specs. Their
   // `tool` registrations become `tools.*` callables in the script.
-  let mut extension_roots = file_config.extensions.clone();
+  let mut extension_roots = file_config.extensions.paths().to_vec();
   extension_roots.extend(args.extensions.iter().cloned());
   let extensions = load_run_extensions(&extension_roots).await;
 
@@ -483,7 +487,8 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   // CLI flags fall back when the [mcp] section is empty so the user can
   // launch the server with no config file at all.
   let sidecars = sidecar_specs(&config);
-  let extensions = config.extensions.clone();
+  let extensions = config.extensions.paths().to_vec();
+  let extension_policy = config.extensions.policy();
   let test_config = config.test.clone();
   let scripting = config.scripting;
   let mcp = config.mcp;
@@ -500,7 +505,8 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   let connect_mode = args.browser.connect_mode();
 
   let caps =
-    ferridriver_script::ScriptCaps::resolve_with_commands(&scripting.allow_env, scripting.allow.commands.clone());
+    ferridriver_script::ScriptCaps::resolve_with_commands(&scripting.allow_env, scripting.allow.commands.clone())
+      .with_extension_policy(extension_policy);
   let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(mcp))
     .with_script_caps(caps)
     .with_sidecars(sidecars)

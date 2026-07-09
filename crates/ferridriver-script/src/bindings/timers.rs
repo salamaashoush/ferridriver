@@ -149,7 +149,7 @@ fn set_immediate<'js>(ctx: Ctx<'js>, cb: Function<'js>, rest: Rest<Value<'js>>) 
   }
 }
 
-fn deferred_call_with_net(net: Option<&Arc<[String]>>, args: &[Value<'_>]) -> rquickjs::Result<()> {
+pub(crate) fn deferred_call_with_net(net: Option<&Arc<[String]>>, args: &[Value<'_>]) -> rquickjs::Result<()> {
   let inner = args.first().and_then(|v| v.as_function().cloned()).ok_or_else(|| {
     rquickjs::Error::new_from_js_message("setImmediate", "Error", "deferred callback missing".to_string())
   })?;
