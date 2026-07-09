@@ -58,19 +58,18 @@ await browser.close();
 ```rust
 // ferridriver (Rust)
 use ferridriver::browser_type::chromium;
-use ferridriver::options::{LaunchOptions, RoleOptions};
+use ferridriver::options::LaunchOptions;
+use ferridriver::url_matcher::UrlMatcher;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let browser = chromium().launch(LaunchOptions::default()).await?;
     let page = browser.page().await?;
 
-    page.goto("https://app.example.com/login", None).await?;
+    page.goto("https://app.example.com/login").await?;
     page.locator("#email").fill("user@example.com").await?;
-    page.get_by_role("button", &RoleOptions { name: Some("Sign in".into()), ..Default::default() })
-        .click()
-        .await?;
-    page.wait_for_url("/dashboard").await?;
+    page.get_by_role("button").name("Sign in").click().await?;
+    page.wait_for_url(UrlMatcher::glob("**/dashboard")?).await?;
 
     browser.close().await?;
     Ok(())
@@ -78,9 +77,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 What changes: methods are `snake_case`, calls are `await`ed and return
-`Result` (use `?`), and option bags are structs (`LaunchOptions`,
-`RoleOptions`, …) defaulted with `Default::default()` or passed as `None`.
-The selector strings and locator semantics are identical.
+`Result` (use `?`), and Playwright's option bags become chained setters on
+the returned action or locator builder (`.name("Sign in")`, `.force(true)`,
+`.timeout(5_000u64)`) — no option structs or `None` arguments at call
+sites. The selector strings and locator semantics are identical.
 
 ## Tests: `@playwright/test` → `ferridriver-test`
 
@@ -102,9 +102,8 @@ test('loads homepage', async ({ page }) => {
 use ferridriver_test::prelude::*;
 
 #[ferritest]
-async fn loads_homepage(ctx: TestContext) {
-    let page = ctx.page().await?;
-    page.goto("https://example.com", None).await?;
+async fn loads_homepage(page: Arc<Page>) {
+    page.goto("https://example.com").await?;
     expect(&page).to_have_title("Example Domain").await?;
 }
 ```
@@ -217,7 +216,8 @@ ferridriver's pre-action actionability matches Playwright: before a click
 it waits for the element to be **attached, visible, enabled, position-
 stable** (bounding box unchanged across animation frames), and to
 **actually receive the event** at the click point (no other element
-occludes it). `force: true` skips the checks, same as Playwright.
+occludes it). Chaining `.force(true)` skips the checks, same as
+Playwright's `force: true`.
 
 ## Backends and browser choice
 
@@ -244,7 +244,8 @@ installed (no bundled binary).
 1. Decide what you're replacing — library, test runner, BDD, or MCP — and
    pick the ferridriver piece from the table above.
 2. For automation in Rust: translate scripts to `async fn` with `?`;
-   `snake_case` methods; option structs. Selectors are unchanged.
+   `snake_case` methods; options chain as setters on the returned action.
+   Selectors are unchanged.
 3. For automation from JS/Bun: install `@ferridriver/node` and swap the
    `playwright` import (browser code is unchanged). Remember it has no
    test runner.

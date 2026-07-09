@@ -8,29 +8,26 @@ factor, mobile flag, touch flag, locale, timezone, geolocation.
 
 ```rust
 use ferridriver_test::prelude::*;
-use ferridriver::options::{BrowserContextOptions, ViewportOption};
+use ferridriver::options::ViewportOption;
 
 #[ferritest]
-async fn mobile_layout(ctx: TestContext) {
-    let context = ctx.browser().await?.new_context(Some(
-        BrowserContextOptions {
-            viewport: ViewportOption::Size { width: 390, height: 844 },
-            device_scale_factor: Some(3.0),
-            is_mobile: Some(true),
-            has_touch: Some(true),
-            user_agent: Some(
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) \
-                 AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 \
-                 Mobile/15E148 Safari/604.1".into()
-            ),
-            locale: Some("en-US".into()),
-            ..Default::default()
-        }
-    ));
+async fn mobile_layout(browser: Arc<Browser>) {
+    let context = browser.new_context()
+        .viewport(ViewportOption::Size { width: 390, height: 844 })
+        .device_scale_factor(3.0)
+        .mobile(true)
+        .has_touch(true)
+        .user_agent(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) \
+             AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 \
+             Mobile/15E148 Safari/604.1",
+        )
+        .locale("en-US")
+        .await?;
 
     let page = context.new_page().await?;
-    page.goto("https://example.com", None).await?;
-    expect(&page.locator(".mobile-nav", None)).to_be_visible().await?;
+    page.goto("https://example.com").await?;
+    expect(&page.locator(".mobile-nav")).to_be_visible().await?;
 }
 ```
 
@@ -66,37 +63,31 @@ When `hasTouch` is `true`, use the touch API (or `tap`) instead of
 
 ```rust
 page.touchscreen().tap(200.0, 400.0).await?;
-page.locator("button.cta", None).tap(None).await?;
+page.locator("button.cta").tap().await?;
 ```
 
 ## Geolocation
 
 ```rust
-use ferridriver::options::{BrowserContextOptions, Geolocation};
+use ferridriver::options::Geolocation;
 
-let context = ctx.browser().await?.new_context(Some(
-    BrowserContextOptions {
-        geolocation: Some(Geolocation {
-            latitude: 48.858844,
-            longitude: 2.294351,
-            accuracy: 20.0,
-        }),
-        permissions: Some(vec!["geolocation".into()]),
-        ..Default::default()
-    }
-));
+let context = browser.new_context()
+    .geolocation(Geolocation {
+        latitude: 48.858844,
+        longitude: 2.294351,
+        accuracy: 20.0,
+    })
+    .permissions(vec!["geolocation".into()])
+    .await?;
 ```
 
 ## Timezone and locale
 
 ```rust
-use ferridriver::options::BrowserContextOptions;
-
-BrowserContextOptions {
-    timezone_id: Some("Europe/Paris".into()),
-    locale: Some("fr-FR".into()),
-    ..Default::default()
-};
+let context = browser.new_context()
+    .timezone_id("Europe/Paris")
+    .locale("fr-FR")
+    .await?;
 ```
 
 The page's `Intl` and `Date.now()` reflect both.
@@ -104,25 +95,23 @@ The page's `Intl` and `Date.now()` reflect both.
 ## Color scheme and contrast
 
 ```rust
-use ferridriver::options::{BrowserContextOptions, MediaOverride};
+use ferridriver::options::MediaOverride;
 
-BrowserContextOptions {
-    color_scheme: MediaOverride::Set("dark".into()),
-    contrast: MediaOverride::Set("more".into()),
-    reduced_motion: MediaOverride::Set("reduce".into()),
-    ..Default::default()
-};
+let context = browser.new_context()
+    .color_scheme(MediaOverride::Set("dark".into()))
+    .contrast(MediaOverride::Set("more".into()))
+    .reduced_motion(MediaOverride::Set("reduce".into()))
+    .await?;
 ```
 
 Or per page after creation:
 
 ```rust
-use ferridriver::options::{EmulateMediaOptions, MediaOverride};
+use ferridriver::options::MediaOverride;
 
-page.emulate_media(&EmulateMediaOptions {
-    color_scheme: MediaOverride::Set("dark".into()),
-    ..Default::default()
-}).await?;
+page.emulate_media()
+    .color_scheme(MediaOverride::Set("dark".into()))
+    .await?;
 ```
 
 ## TypeScript

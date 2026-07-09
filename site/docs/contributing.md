@@ -16,13 +16,14 @@ Documentation lives in [`site/`](https://github.com/salamaashoush/ferridriver/bl
 
 ## Prerequisites
 
-- Rust nightly toolchain (edition 2024; MSRV 1.91). The pinned channel
-  is in `rust-toolchain.toml` — rustup installs it automatically.
+- Rust nightly (edition 2024), pinned in `rust-toolchain.toml`. MSRV
+  (`rust-version`) is 1.91.
 - `just` — task runner. `cargo install just` or use your package manager.
 - Bun 1.0+ (only for the `ferridriver-node` NAPI binding and the
   documentation site).
-- For the WebKit backend: the Playwright WebKit binary
-  (`npx playwright install webkit` or set `FERRIDRIVER_WEBKIT`).
+- For the WebKit backend: the Playwright WebKit binary (`ferridriver
+  install webkit`, `npx playwright install webkit`, or set
+  `FERRIDRIVER_WEBKIT`).
 - For the BiDi backend: Firefox installed locally.
 - Linux: `pkg-config`, `libclang-dev`, and the Chromium runtime
   dependencies. `ferridriver install --with-deps chromium` covers them.
@@ -30,7 +31,7 @@ Documentation lives in [`site/`](https://github.com/salamaashoush/ferridriver/bl
 ## Building and testing
 
 ```bash
-# Type-check the workspace (cargo check --all-targets)
+# Type-check the workspace (default-members; ferridriver-node excluded)
 just check
 
 # Format check + clippy + full test suite (matrix across all 4 backends + BDD)
@@ -46,8 +47,7 @@ just bdd tests/features/
 just build
 ```
 
-The Node binding is built with napi-rs via Bun, not `cargo build`. To
-exercise it:
+The Node binding lives outside default-members. To exercise it:
 
 ```bash
 cd crates/ferridriver-node

@@ -78,16 +78,16 @@ role=img[include-hidden=true]       include ARIA-hidden elements
 
 ## Text and label options
 
-Text-based engines accept options from their typed getter equivalents:
+Text-based getters take the text (or a regex) and expose an `.exact(true)`
+setter on the returned builder:
 
 ```rust
-use ferridriver::options::{StringOrRegex, TextOptions};
+use ferridriver::options::StringOrRegex;
 
-let opts = TextOptions { exact: Some(true) };
-page.get_by_text(&"Sign in".into(), &opts);
+page.get_by_text("Sign in").exact(true);
 
 // Regex matching: pass a regex as the text argument, not as an option.
-page.get_by_text(&StringOrRegex::regex("^Sign", ""), &TextOptions::default());
+page.get_by_text(StringOrRegex::regex("^Sign", ""));
 ```
 
 In raw selector strings:
@@ -106,13 +106,13 @@ preferred API when you have something accessible to target.
 **Rust:**
 
 ```rust
-page.get_by_role("button", &RoleOptions { name: Some("Save".into()), ..Default::default() });
-page.get_by_text(&"Hello".into(), &TextOptions::default());
-page.get_by_label(&"Email".into(), &TextOptions::default());
-page.get_by_placeholder(&"you@example.com".into(), &TextOptions::default());
-page.get_by_alt_text(&"Logo".into(), &TextOptions::default());
-page.get_by_title(&"Settings".into(), &TextOptions::default());
-page.get_by_test_id(&"login-form".into());
+page.get_by_role("button").name("Save");
+page.get_by_text("Hello");
+page.get_by_label("Email");
+page.get_by_placeholder("you@example.com");
+page.get_by_alt_text("Logo");
+page.get_by_title("Settings");
+page.get_by_test_id("login-form");
 ```
 
 **TypeScript (NAPI):**

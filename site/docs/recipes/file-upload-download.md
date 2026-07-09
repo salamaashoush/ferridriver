@@ -10,16 +10,15 @@ use ferridriver_test::prelude::*;
 use ferridriver::options::InputFiles;
 
 #[ferritest]
-async fn uploads_avatar(ctx: TestContext) {
-    let page = ctx.page().await?;
-    page.goto("https://app.example.com/profile", None).await?;
+async fn uploads_avatar(page: Arc<Page>) {
+    page.goto("https://app.example.com/profile").await?;
 
-    page.locator("input[type=file]", None)
-        .set_input_files(InputFiles::Paths(vec!["fixtures/avatar.png".into()]), None)
+    page.locator("input[type=file]")
+        .set_input_files(InputFiles::Paths(vec!["fixtures/avatar.png".into()]))
         .await?;
 
-    page.locator("button[type=submit]", None).click(None).await?;
-    expect(&page.locator(".upload-status", None))
+    page.locator("button[type=submit]").click().await?;
+    expect(&page.locator(".upload-status"))
         .to_have_text("Uploaded")
         .await?;
 }
@@ -28,11 +27,11 @@ async fn uploads_avatar(ctx: TestContext) {
 Multiple files:
 
 ```rust
-page.locator("input[type=file][multiple]", None)
+page.locator("input[type=file][multiple]")
     .set_input_files(InputFiles::Paths(vec![
         "fixtures/photo-1.jpg".into(),
         "fixtures/photo-2.jpg".into(),
-    ]), None)
+    ]))
     .await?;
 ```
 
@@ -41,13 +40,12 @@ page.locator("input[type=file][multiple]", None)
 ```rust
 use ferridriver::options::{InputFiles, FilePayload};
 
-page.locator("input[type=file]", None).set_input_files(
+page.locator("input[type=file]").set_input_files(
     InputFiles::Payloads(vec![FilePayload {
         name: "report.csv".into(),
         mime_type: "text/csv".into(),
         buffer: b"name,score\nAda,42\n".to_vec(),
     }]),
-    None,
 ).await?;
 ```
 
@@ -56,7 +54,7 @@ page.locator("input[type=file]", None).set_input_files(
 Trigger the download, then await the `download` event:
 
 ```rust
-page.locator("a.download-csv", None).click(None).await?;
+page.locator("a.download-csv").click().await?;
 let download = page.wait_for_download(30_000).await?;
 
 let path = download.path().await?;

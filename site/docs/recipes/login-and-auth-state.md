@@ -10,12 +10,11 @@ form-fill races.
 use ferridriver_test::prelude::*;
 
 #[ferritest]
-async fn save_auth(ctx: TestContext) {
-    let page = ctx.page().await?;
-    page.goto("https://app.example.com/login", None).await?;
-    page.locator("#email", None).fill("user@example.com", None).await?;
-    page.locator("#password", None).fill("secret", None).await?;
-    page.locator("button[type=submit]", None).click(None).await?;
+async fn save_auth(page: Arc<Page>) {
+    page.goto("https://app.example.com/login").await?;
+    page.locator("#email").fill("user@example.com").await?;
+    page.locator("#password").fill("secret").await?;
+    page.locator("button[type=submit]").click().await?;
     expect(&page).to_have_url("/dashboard").await?;
 
     let state = page.storage_state().await?;
@@ -113,9 +112,8 @@ in `before_each`:
 
 ```rust
 #[before_each]
-async fn ensure_authed(ctx: TestContext) {
-    let page = ctx.page().await?;
-    page.goto("https://app.example.com/", None).await?;
+async fn ensure_authed(page: Arc<Page>) {
+    page.goto("https://app.example.com/").await?;
     if page.url().contains("/login") {
         panic!("auth state expired — re-run save_auth");
     }

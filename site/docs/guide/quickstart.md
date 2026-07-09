@@ -14,18 +14,19 @@ tokio       = { version = "1", features = ["full"] }
 ```rust
 use ferridriver::browser_type::chromium;
 use ferridriver::options::LaunchOptions;
+use ferridriver::url_matcher::UrlMatcher;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let browser = chromium().launch(LaunchOptions::default()).await?;
     let page = browser.page().await?;
 
-    page.goto("https://example.com", None).await?;
+    page.goto("https://example.com").await?;
     page.locator("#email").fill("test@example.com").await?;
     page.locator("button[type=submit]").click().await?;
-    page.wait_for_url("/dashboard").await?;
+    page.wait_for_url(UrlMatcher::glob("**/dashboard")?).await?;
 
-    let png = page.screenshot(Default::default()).await?;
+    let png = page.screenshot().await?;
     std::fs::write("home.png", png)?;
 
     browser.close().await?;
@@ -69,9 +70,8 @@ Rust test using `ferridriver-test`:
 use ferridriver_test::prelude::*;
 
 #[ferritest]
-async fn loads_homepage(ctx: TestContext) {
-    let page = ctx.page().await?;
-    page.goto("https://example.com", None).await?;
+async fn loads_homepage(page: Arc<Page>) {
+    page.goto("https://example.com").await?;
     expect(&page).to_have_title("Example Domain").await?;
 }
 ```

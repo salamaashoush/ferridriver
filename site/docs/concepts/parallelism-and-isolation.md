@@ -78,8 +78,9 @@ auto-scale on a shared host leads to unpredictable timings.
 
 ## Test isolation
 
-Every `#[ferritest]` body receives a `TestContext` whose `page()` /
-`browser_context()` / `browser()` are cached fixtures:
+Every `#[ferritest]` resolves its fixtures from cached pools — typed
+parameters (`page: Arc<Page>`, `context: Arc<BrowserContext>`,
+`browser: Arc<Browser>`) or a `TestContext` with equivalent getters:
 
 - `browser` — worker-scoped, shared across all tests on this worker.
 - `context` — test-scoped, **created fresh for this test**, torn down
