@@ -263,5 +263,73 @@ for (const backend of BACKENDS) {
         await ctx.close();
       }
     });
+
+    it("context.route times budget is shared across pages, newest handler wins", async () => {
+      const ctx = browser.newContext({});
+      try {
+        const matcher = "https://ferri.test/**";
+        await ctx.route(matcher, (route) => {
+          route.fulfill({ status: 200, contentType: "text/html", body: "<body>BASE</body>" });
+        });
+        await ctx.route(
+          matcher,
+          (route) => {
+            route.fulfill({ status: 200, contentType: "text/html", body: "<body>LIMITED</body>" });
+          },
+          { times: 1 },
+        );
+        const p1 = await ctx.newPage();
+        const p2 = await ctx.newPage();
+        await p1.goto("https://ferri.test/one");
+        expect(await p1.evaluate("document.body.textContent")).toContain("LIMITED");
+        await p2.goto("https://ferri.test/two");
+        expect(await p2.evaluate("document.body.textContent")).toContain("BASE");
+      } finally {
+        await ctx.close();
+      }
+    });
+
+    it("context.route applies to pages created after registration", async () => {
+      const ctx = browser.newContext({});
+      try {
+        await ctx.route("https://ferri.test/**", (route) => {
+          route.fulfill({ status: 200, contentType: "text/html", body: "<body>FUTURE</body>" });
+        });
+        const page = await ctx.newPage();
+        await page.goto("https://ferri.test/later");
+        expect(await page.evaluate("document.body.textContent")).toContain("FUTURE");
+      } finally {
+        await ctx.close();
+      }
+    });
+
+    it("page routes beat context routes; unrouteAll respects scopes", async () => {
+      const ctx = browser.newContext({});
+      try {
+        const matcher = "https://ferri.test/**";
+        const page = await ctx.newPage();
+        await page.route(matcher, (route) => {
+          route.fulfill({ status: 200, contentType: "text/html", body: "<body>PAGE</body>" });
+        });
+        await ctx.route(matcher, (route) => {
+          route.fulfill({ status: 200, contentType: "text/html", body: "<body>CTX</body>" });
+        });
+        await page.goto("https://ferri.test/a");
+        expect(await page.evaluate("document.body.textContent")).toContain("PAGE");
+        await page.unrouteAll();
+        await page.goto("https://ferri.test/b");
+        expect(await page.evaluate("document.body.textContent")).toContain("CTX");
+        await ctx.unrouteAll();
+        let navFailed = false;
+        try {
+          await page.goto("https://ferri.test/c", { timeout: 3000 });
+        } catch {
+          navFailed = true;
+        }
+        expect(navFailed).toBe(true);
+      } finally {
+        await ctx.close();
+      }
+    });
   });
 }

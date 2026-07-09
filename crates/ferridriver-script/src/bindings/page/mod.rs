@@ -1382,7 +1382,7 @@ impl PageJs {
             )
             .await?;
             if !truthy {
-              route.continue_route(ferridriver::route::ContinueOverrides::default());
+              route.fallback(ferridriver::route::ContinueOverrides::default());
               return Ok(());
             }
           }

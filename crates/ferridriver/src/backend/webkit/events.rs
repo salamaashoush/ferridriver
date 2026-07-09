@@ -282,6 +282,23 @@ async fn handle_provisional_target_created(params: &Value, page: &WebKitPage, pr
       let _ = new_target.send(method, params).await;
     }
   }
+  // Re-apply request interception — the provisional target carries the
+  // navigation request itself, so without this a routed cross-document
+  // navigation sails past every registered handler (the very goto that
+  // spawned this provisional target goes straight to the network), and
+  // the committed target would start clean too. Mirrors Playwright's
+  // `_updateState('Network.setInterceptionEnabled')` replay.
+  if page.interception_enabled() {
+    let _ = new_target
+      .send("Network.setInterceptionEnabled", json!({ "enabled": true }))
+      .await;
+    let _ = new_target
+      .send(
+        "Network.addInterception",
+        json!({ "url": ".*", "stage": "request", "isRegex": true }),
+      )
+      .await;
+  }
   let _ = new_target
     .send(
       "Page.createUserWorld",
@@ -296,11 +313,39 @@ async fn handle_provisional_target_created(params: &Value, page: &WebKitPage, pr
   // `WKProvisionalPage` re-applying bootstrap + bindings.
   page.replay_bootstrap_script(&new_target).await;
   page.replay_binding_channel(&new_target).await;
+  // Drain the provisional session's events NOW instead of waiting for
+  // commit. The provisional target carries the navigation request; when
+  // that request is intercepted, `Network.requestIntercepted` arrives on
+  // this session BEFORE the commit — and the commit cannot happen until
+  // the paused request is resolved. Subscribing only at commit therefore
+  // deadlocks every routed cross-document navigation. The drain handles
+  // interception events inline (for this target's whole life — the main
+  // listener never sees them, so there is no double resolution) and
+  // forwards everything else into the channel the commit handler swaps
+  // in as the new `target_rx`. Mirrors `WKProvisionalPage`, which
+  // installs session listeners the moment the provisional page exists.
+  let (fwd_tx, fwd_rx) = tokio::sync::mpsc::unbounded_channel();
+  let mut raw_rx = new_target.events();
+  let drain_session = new_target.clone();
+  let drain_routes = Arc::clone(&page.routes);
+  tokio::spawn(async move {
+    while let Some(env) = raw_rx.recv().await {
+      if env.method.as_deref() == Some("Network.requestIntercepted") {
+        handle_request_intercepted(&env.params, &drain_session, &drain_routes);
+        continue;
+      }
+      // Receiver dropped = this provisional was superseded or its
+      // committed target got swapped out again — stop draining.
+      if fwd_tx.send(env).is_err() {
+        break;
+      }
+    }
+  });
   // Stash before resuming — a fast commit could fire before `await`
   // releases here, and the swap reader needs to find the session.
   {
     let mut slot = provisional.lock().await;
-    *slot = Some((new_target, Arc::<str>::from(target_id.clone())));
+    *slot = Some((new_target, Arc::<str>::from(target_id.clone()), fwd_rx));
   }
   if info.get("isPaused").and_then(Value::as_bool).unwrap_or(false) {
     let _ = proxy.send("Target.resume", json!({ "targetId": target_id })).await;
@@ -320,15 +365,18 @@ async fn handle_committed_provisional_target(
   provisional: ProvisionalSlot,
 ) -> Option<tokio::sync::mpsc::UnboundedReceiver<super::protocol::Envelope>> {
   let new_target_id = params.get("newTargetId").and_then(Value::as_str)?.to_string();
-  let (new_session, stashed_id) = provisional.lock().await.take()?;
+  let (new_session, stashed_id, fwd_rx) = provisional.lock().await.take()?;
   if &*stashed_id != new_target_id.as_str() {
     // Defensive: if WebKit committed a target other than the one we
     // stashed, drop the stash and let the next attach cycle recover.
     return None;
   }
-  let new_rx = new_session.events();
+  // `fwd_rx` is the forwarding end of the provisional drain spawned at
+  // target creation — it already holds every event the new session
+  // emitted before this commit (minus interception events, which the
+  // drain resolves itself).
   page.swap_target_session(new_session, stashed_id);
-  Some(new_rx)
+  Some(fwd_rx)
 }
 
 /// Bundle of per-page handles + state the target listener loop hands
@@ -532,7 +580,18 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
 }
 
 type Requests = Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, NetworkRequest>>>;
-type ProvisionalSlot = Arc<tokio::sync::Mutex<Option<(super::connection::Session, Arc<str>)>>>;
+/// Stash for an in-flight provisional target: the opened session, its
+/// target id, and the forwarding receiver of the drain task spawned at
+/// creation (becomes the listener's `target_rx` on commit).
+type ProvisionalSlot = Arc<
+  tokio::sync::Mutex<
+    Option<(
+      super::connection::Session,
+      Arc<str>,
+      tokio::sync::mpsc::UnboundedReceiver<super::protocol::Envelope>,
+    )>,
+  >,
+>;
 
 /// Push a fresh [`NetworkRequest`] into the per-page table and the
 /// context log. When `redirectResponse` is present, link the chain
@@ -983,11 +1042,11 @@ async fn dispatch_intercepted(
   request_payload: Value,
 ) {
   let intercepted = build_intercepted(&request_id, &request_payload);
-  let handler = {
-    let mut guard = routes.write().await;
-    crate::route::take_matching_handler(&mut guard, &intercepted.url)
+  let has_match = {
+    let guard = routes.read().await;
+    crate::route::any_matching_route(&guard, &intercepted.url)
   };
-  let Some(handler) = handler else {
+  if !has_match {
     let _ = target
       .send(
         "Network.interceptContinue",
@@ -995,15 +1054,12 @@ async fn dispatch_intercepted(
       )
       .await;
     return;
-  };
-  let (action_tx, action_rx) = tokio::sync::oneshot::channel();
-  let route = crate::route::Route::new(intercepted, action_tx);
-  handler(route);
-  let action = action_rx.await.unwrap_or(crate::route::RouteAction::Continue(
-    crate::route::ContinueOverrides::default(),
-  ));
+  }
+  let action = crate::route::run_route_chain(&routes, intercepted).await;
   match action {
-    crate::route::RouteAction::Continue(overrides) => intercept_continue(&target, &request_id, overrides).await,
+    crate::route::RouteAction::Continue(overrides) | crate::route::RouteAction::Fallback(overrides) => {
+      intercept_continue(&target, &request_id, overrides).await;
+    },
     crate::route::RouteAction::Fulfill(response) => intercept_fulfill(&target, &request_id, &response).await,
     crate::route::RouteAction::Abort(_) => {
       let _ = target

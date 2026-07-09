@@ -819,12 +819,12 @@ pub fn test_network_post_data_buffer(c: &mut McpClient) {
 
 // ── 9. Route.fallback applies overrides ──────────────────────────────────
 
-/// `route.fallback(overrides)` lets the request proceed with the given
-/// overrides applied (single-handler model: fallback === continue with
-/// overrides). We register a route that calls `route.fallback({ url })`
-/// rewriting `/api/users` to `/api/posts`; the page must observe the
-/// `/api/posts` payload, proving the override took effect rather than
-/// the request being dropped or the original URL fetched.
+/// `route.fallback(overrides)` with no further matching handler lets the
+/// request proceed with the given overrides applied. We register a route
+/// that calls `route.fallback({ url })` rewriting `/api/users` to
+/// `/api/posts`; the page must observe the `/api/posts` payload, proving
+/// the override took effect rather than the request being dropped or the
+/// original URL fetched.
 pub fn test_route_fallback_applies_overrides(c: &mut McpClient) {
   // BiDi/WebKit route interception of page `fetch` is exercised
   // elsewhere; fallback shares the same Continue dispatch path. Run the
@@ -852,6 +852,40 @@ pub fn test_route_fallback_applies_overrides(c: &mut McpClient) {
       "fallback url override should route to /api/posts payload: {v}",
     );
   });
+}
+
+/// `route.fallback()` passes the request to the NEXT matching handler
+/// (newest-first), with fallback overrides visible to that handler —
+/// Playwright's `Page._onRoute` chain, not a plain continue.
+pub fn test_route_fallback_chains_to_next_handler(c: &mut McpClient) {
+  c.nav("<body>chain</body>");
+  let script = r#"
+    const matcher = 'https://ferri.test/**';
+    await page.route(matcher, (route) => {
+      const seen = route.request().headers()['x-chain'] || 'missing';
+      route.fulfill({ status: 200, contentType: 'text/html', body: '<body>OLDER:' + seen + '</body>' });
+    });
+    await page.route(matcher, (route) => {
+      route.fallback({ headers: { ...route.request().headers(), 'x-chain': 'yes' } });
+    });
+    try {
+      await page.goto('https://ferri.test/chained', { timeout: 10000 });
+      const text = await page.evaluate(() => document.body.textContent);
+      return { text: String(text) };
+    } finally {
+      await page.unrouteAll();
+    }
+    "#;
+  let v = c.script_value(script);
+  let text = v["text"].as_str().unwrap_or("");
+  assert!(
+    text.contains("OLDER:"),
+    "fallback must chain to the older handler instead of continuing: {v}"
+  );
+  assert!(
+    text.contains("OLDER:yes"),
+    "fallback header overrides must be visible to the next handler: {v}"
+  );
 }
 
 /// `request.existingResponse()` (Playwright 1.59) returns the response

@@ -5159,17 +5159,14 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-      // Match-and-consume under a single write lock so a `times`-limited
-      // route can never fire more than its budget even when the same logical
-      // request pauses at multiple Fetch stages. The matched route's counter
-      // is decremented and the route removed the moment it reaches zero.
-      let matched_handler = {
-        let mut guard = routes.write().await;
-        crate::route::take_matching_handler(&mut guard, url)
+      // Cheap pre-check under a read lock — the full request payload is
+      // only parsed when at least one live route matches.
+      let has_match = {
+        let guard = routes.read().await;
+        crate::route::any_matching_route(&guard, url)
       };
 
-      if let Some(handler) = matched_handler {
-        // Only parse the full request when a route actually matched.
+      if has_match {
         let method = req_obj
           .and_then(|r| r.get("method"))
           .and_then(|v| v.as_str())
@@ -5201,20 +5198,17 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         // intercepted request behind the slowest handler AND stalled
         // this listener — once the broadcast buffer lapped, a dropped
         // `Fetch.requestPaused` was a request that never continued
-        // (permanent page hang). The `times` budget stays correct
-        // because `take_matching_handler` already ran under the write
-        // lock above. WebKit's interception listener spawns the same
-        // way (`webkit/events.rs::handle_request_intercepted`).
+        // (permanent page hang). `run_route_chain` consumes each
+        // handler's `times` budget under the routes write lock, so the
+        // budget stays correct across concurrent requests. WebKit's
+        // interception listener spawns the same way
+        // (`webkit/events.rs::handle_request_intercepted`).
         let transport2 = Arc::clone(&transport);
         let sid2 = session_id.clone();
         let request_id_owned = request_id.to_string();
+        let routes2 = Arc::clone(&routes);
         tokio::spawn(async move {
-          let (tx, rx) = tokio::sync::oneshot::channel();
-          let route = crate::route::Route::new(intercepted, tx);
-          handler(route);
-          let action = rx.await.unwrap_or(crate::route::RouteAction::Continue(
-            crate::route::ContinueOverrides::default(),
-          ));
+          let action = crate::route::run_route_chain(&routes2, intercepted).await;
           Self::execute_route_action(&transport2, sid2.as_deref(), &request_id_owned, Some(action)).await;
         });
       } else {
@@ -5273,7 +5267,9 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           )
           .await;
       },
-      Some(crate::route::RouteAction::Continue(overrides)) => {
+      // `Fallback` is consumed inside `run_route_chain`; if one leaks
+      // here (chain bypassed), treat it as a continue with its overrides.
+      Some(crate::route::RouteAction::Continue(overrides) | crate::route::RouteAction::Fallback(overrides)) => {
         let mut params = serde_json::json!({"requestId": request_id});
         if let Some(url) = &overrides.url {
           params["url"] = serde_json::Value::String(url.clone());
@@ -5332,23 +5328,14 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     }
   }
 
-  pub async fn route(
-    &self,
-    matcher: crate::url_matcher::UrlMatcher,
-    handler: crate::route::RouteHandler,
-    times: Option<u32>,
-  ) -> Result<()> {
-    self
-      .routes
-      .write()
-      .await
-      .push(crate::route::RegisteredRoute::new(matcher, handler, times));
+  pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {
+    self.routes.write().await.push(route);
     self.ensure_fetch_enabled().await
   }
 
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher, scope: crate::route::RouteScope) -> Result<()> {
     let mut routes = self.routes.write().await;
-    routes.retain(|r| !r.matcher.equivalent(matcher));
+    routes.retain(|r| r.scope != scope || !r.matcher.equivalent(matcher));
     if routes.is_empty() && self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
       self.fetch_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
       let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
@@ -5356,10 +5343,17 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     Ok(())
   }
 
-  pub async fn unroute_all(&self, _behavior: crate::options::UnrouteBehavior) -> Result<()> {
+  pub async fn unroute_all(
+    &self,
+    _behavior: crate::options::UnrouteBehavior,
+    scope: Option<crate::route::RouteScope>,
+  ) -> Result<()> {
     let mut routes = self.routes.write().await;
-    routes.clear();
-    if self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+    match scope {
+      Some(scope) => routes.retain(|r| r.scope != scope),
+      None => routes.clear(),
+    }
+    if routes.is_empty() && self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
       self.fetch_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
       let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
     }

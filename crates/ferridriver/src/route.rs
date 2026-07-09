@@ -36,6 +36,11 @@ pub enum RouteAction {
   Fulfill(FulfillResponse),
   /// Abort the request with an error reason.
   Abort(String),
+  /// Pass to the next matching handler, applying the given overrides to
+  /// the request the next handler observes. Mirrors Playwright's
+  /// `route.fallback(options?)`: consumed by [`run_route_chain`], never
+  /// delivered to a backend resolution path.
+  Fallback(ContinueOverrides),
 }
 
 /// Overrides when continuing an intercepted request.
@@ -159,19 +164,13 @@ impl Route {
 
   /// Fall back to the next matching handler, applying the given
   /// overrides. Mirrors Playwright's `route.fallback(options?)`
-  /// (`client/network.ts`): it records the fallback overrides and
-  /// reports the route as not handled so a subsequent handler (or the
-  /// default behaviour) takes over.
-  ///
-  /// ferridriver dispatches a single handler per matched route, so the
-  /// "next handler" is the default continue: `fallback` resolves the
-  /// route by continuing the request with the supplied overrides
-  /// applied. With no overrides this is identical to letting the
-  /// request proceed unmodified, which is exactly Playwright's
-  /// `fallback()` end state once no further handler claims it.
+  /// (`client/network.ts`): the overrides mutate the request the next
+  /// matching handler observes (`_applyFallbackOverrides`), and when no
+  /// further handler claims the route the request continues with all
+  /// accumulated overrides applied.
   pub fn fallback(mut self, overrides: ContinueOverrides) {
     if let Some(tx) = self.action_tx.take() {
-      let _ = tx.send(RouteAction::Continue(overrides));
+      let _ = tx.send(RouteAction::Fallback(overrides));
     }
   }
 
@@ -198,11 +197,31 @@ impl Drop for Route {
 /// Must be Send + Sync since it's called from async tasks.
 pub type RouteHandler = std::sync::Arc<dyn Fn(Route) + Send + Sync>;
 
+/// Which registration surface a route came from. Playwright keeps page
+/// routes (`page._routes`) and context routes (`context._routes`) in
+/// separate lists — page routes are consulted first, and
+/// `page.unrouteAll` / `context.unrouteAll` each clear only their own
+/// scope. ferridriver stores both in the page's single route list, so
+/// the scope tag preserves those semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteScope {
+  /// Registered via `page.route` / `page.routeFromHAR`.
+  Page,
+  /// Registered via `context.route` / `context.routeFromHAR` and fanned
+  /// out to every page of the context.
+  Context,
+}
+
 /// A registered route: URL matcher + handler.
 ///
 /// Matching delegates to [`crate::url_matcher::UrlMatcher::matches`]; equality
 /// for `unroute` uses [`crate::url_matcher::UrlMatcher::equivalent`] so a
 /// caller passing the same glob string later can retire the registration.
+///
+/// Cloning shares the `times` budget: a context-scoped route cloned onto
+/// several pages consumes one context-wide counter, matching Playwright
+/// where the context holds a single `RouteHandler` for all its pages.
+#[derive(Clone)]
 pub struct RegisteredRoute {
   /// Matcher that decides which URLs this route intercepts.
   pub matcher: crate::url_matcher::UrlMatcher,
@@ -213,16 +232,36 @@ pub struct RegisteredRoute {
   /// loop can decrement it without upgrading its read lock; a route whose
   /// counter has reached zero is skipped (and pruned opportunistically).
   pub remaining: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
+  /// Whether this registration is page- or context-scoped.
+  pub scope: RouteScope,
 }
 
 impl RegisteredRoute {
-  /// Build a route registration, optionally limited to `times` invocations.
+  /// Build a page-scoped registration, optionally limited to `times`
+  /// invocations.
   #[must_use]
   pub fn new(matcher: crate::url_matcher::UrlMatcher, handler: RouteHandler, times: Option<u32>) -> Self {
+    Self::scoped(matcher, handler, times, RouteScope::Page)
+  }
+
+  /// Build a context-scoped registration. Clones of the returned value
+  /// share one `times` budget across every page they are installed on.
+  #[must_use]
+  pub fn context_scoped(matcher: crate::url_matcher::UrlMatcher, handler: RouteHandler, times: Option<u32>) -> Self {
+    Self::scoped(matcher, handler, times, RouteScope::Context)
+  }
+
+  fn scoped(
+    matcher: crate::url_matcher::UrlMatcher,
+    handler: RouteHandler,
+    times: Option<u32>,
+    scope: RouteScope,
+  ) -> Self {
     Self {
       matcher,
       handler,
       remaining: times.map(|t| std::sync::Arc::new(std::sync::atomic::AtomicU32::new(t))),
+      scope,
     }
   }
 
@@ -234,16 +273,40 @@ impl RegisteredRoute {
       .as_ref()
       .is_none_or(|c| c.load(std::sync::atomic::Ordering::Acquire) > 0)
   }
+
+  /// Stable identity of the underlying handler closure — used by the
+  /// chain driver to skip handlers that already ran for this request.
+  fn handler_id(&self) -> usize {
+    std::sync::Arc::as_ptr(&self.handler).cast::<()>() as usize
+  }
 }
 
-/// Select the first live route matching `url`, atomically consume one unit of
-/// its `times` budget, and drop it once exhausted. Returns the handler to run,
-/// or `None` when no live route matches. Shared by every backend's
-/// interception loop so the `times` semantics are identical everywhere.
+/// Whether any live route matches `url` — cheap pre-check the backend
+/// interception loops run before parsing the full request payload.
 #[must_use]
-pub fn take_matching_handler(routes: &mut Vec<RegisteredRoute>, url: &str) -> Option<RouteHandler> {
-  let idx = routes.iter().position(|r| r.live() && r.matcher.matches(url))?;
+pub fn any_matching_route(routes: &[RegisteredRoute], url: &str) -> bool {
+  routes.iter().any(|r| r.live() && r.matcher.matches(url))
+}
+
+/// Select the next live route matching `url` in Playwright precedence
+/// order — page-scoped registrations first, context-scoped after, newest
+/// first within each scope (Playwright `unshift`s new handlers and scans
+/// in order; our lists append, so precedence scans in reverse) — skipping
+/// handlers already consulted for this request. Consumes one unit of the
+/// selected route's `times` budget (Playwright removes an expiring
+/// handler *before* invoking it) and prunes it once exhausted.
+fn take_next_handler(routes: &mut Vec<RegisteredRoute>, url: &str, tried: &[usize]) -> Option<(RouteHandler, usize)> {
+  let pick = |scope: RouteScope, routes: &Vec<RegisteredRoute>| {
+    routes
+      .iter()
+      .enumerate()
+      .rev()
+      .find(|(_, r)| r.scope == scope && r.live() && !tried.contains(&r.handler_id()) && r.matcher.matches(url))
+      .map(|(i, _)| i)
+  };
+  let idx = pick(RouteScope::Page, routes).or_else(|| pick(RouteScope::Context, routes))?;
   let handler = std::sync::Arc::clone(&routes[idx].handler);
+  let id = routes[idx].handler_id();
   let exhausted = routes[idx].remaining.as_ref().is_some_and(|c| {
     c.fetch_update(
       std::sync::atomic::Ordering::AcqRel,
@@ -255,7 +318,85 @@ pub fn take_matching_handler(routes: &mut Vec<RegisteredRoute>, url: &str) -> Op
   if exhausted {
     routes.remove(idx);
   }
-  Some(handler)
+  Some((handler, id))
+}
+
+/// Layer `top` over `base`: fields set by `top` win, unset fields keep
+/// the accumulated fallback value. Mirrors Playwright's
+/// `route.continue()` merging with `_fallbackOverrides`.
+fn merge_overrides(base: &ContinueOverrides, top: ContinueOverrides) -> ContinueOverrides {
+  ContinueOverrides {
+    url: top.url.or_else(|| base.url.clone()),
+    method: top.method.or_else(|| base.method.clone()),
+    headers: top.headers.or_else(|| base.headers.clone()),
+    post_data: top.post_data.or_else(|| base.post_data.clone()),
+  }
+}
+
+/// Apply fallback overrides to the request view the next handler sees.
+fn apply_overrides(request: &mut InterceptedRequest, overrides: &ContinueOverrides) {
+  if let Some(url) = &overrides.url {
+    request.url.clone_from(url);
+  }
+  if let Some(method) = &overrides.method {
+    request.method.clone_from(method);
+  }
+  if let Some(headers) = &overrides.headers {
+    request.headers = headers.iter().cloned().collect();
+  }
+  if let Some(body) = &overrides.post_data {
+    request.post_data = Some(String::from_utf8_lossy(body).into_owned());
+  }
+}
+
+/// Drive the full handler chain for one intercepted request and return
+/// the terminal action to execute against the wire. Mirrors Playwright's
+/// `Page._onRoute` → `BrowserContext._onRoute` walk:
+///
+/// * handlers run in precedence order (page scope before context scope,
+///   newest first within each);
+/// * a handler's `times` budget is consumed when it is invoked, even if
+///   it falls back;
+/// * `route.fallback(overrides)` mutates the request the next handler
+///   observes (including re-matching against an overridden URL) and
+///   accumulates into the final continue;
+/// * when no handler claims the request, it continues with all
+///   accumulated fallback overrides applied;
+/// * a terminal `continue` merges its own overrides over the accumulated
+///   fallback overrides.
+///
+/// Shared by every backend's interception loop so precedence, `times`,
+/// and fallback semantics are identical everywhere.
+pub async fn run_route_chain(
+  routes: &tokio::sync::RwLock<Vec<RegisteredRoute>>,
+  mut request: InterceptedRequest,
+) -> RouteAction {
+  let mut accumulated = ContinueOverrides::default();
+  let mut tried: Vec<usize> = Vec::new();
+  loop {
+    let picked = {
+      let mut guard = routes.write().await;
+      take_next_handler(&mut guard, &request.url, &tried)
+    };
+    let Some((handler, id)) = picked else {
+      return RouteAction::Continue(accumulated);
+    };
+    tried.push(id);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let route = Route::new(request.clone(), tx);
+    handler(route);
+    let action = rx.await.unwrap_or(RouteAction::Continue(ContinueOverrides::default()));
+    match action {
+      RouteAction::Fallback(overrides) => {
+        apply_overrides(&mut request, &overrides);
+        accumulated = merge_overrides(&accumulated, overrides);
+      },
+      RouteAction::Continue(overrides) => {
+        return RouteAction::Continue(merge_overrides(&accumulated, overrides));
+      },
+      terminal => return terminal,
+    }
+  }
 }
 
 /// HTTP status text for common status codes.
@@ -298,7 +439,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn fallback_sends_continue_with_overrides() {
+  async fn fallback_sends_fallback_action_with_overrides() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let route = Route::new(sample_request(), tx);
     route.fallback(ContinueOverrides {
@@ -306,22 +447,157 @@ mod tests {
       ..Default::default()
     });
     match rx.await.expect("route action") {
+      RouteAction::Fallback(o) => assert_eq!(o.method.as_deref(), Some("PUT")),
+      other => panic!("expected Fallback, got {other:?}"),
+    }
+  }
+
+  fn any_matcher() -> crate::url_matcher::UrlMatcher {
+    crate::url_matcher::UrlMatcher::any()
+  }
+
+  fn fulfill_with_body(body: &'static str) -> RouteHandler {
+    std::sync::Arc::new(move |route: Route| {
+      route.fulfill(FulfillResponse {
+        body: body.as_bytes().to_vec(),
+        ..Default::default()
+      });
+    })
+  }
+
+  fn fulfilled_body(action: &RouteAction) -> &str {
+    match action {
+      RouteAction::Fulfill(resp) => std::str::from_utf8(&resp.body).expect("utf8 body"),
+      other => panic!("expected Fulfill, got {other:?}"),
+    }
+  }
+
+  #[tokio::test]
+  async fn chain_picks_newest_registration_first() {
+    let routes = tokio::sync::RwLock::new(vec![
+      RegisteredRoute::new(any_matcher(), fulfill_with_body("old"), None),
+      RegisteredRoute::new(any_matcher(), fulfill_with_body("new"), None),
+    ]);
+    let action = run_route_chain(&routes, sample_request()).await;
+    assert_eq!(fulfilled_body(&action), "new");
+  }
+
+  #[tokio::test]
+  async fn chain_prefers_page_scope_over_newer_context_scope() {
+    let routes = tokio::sync::RwLock::new(vec![
+      RegisteredRoute::new(any_matcher(), fulfill_with_body("page"), None),
+      RegisteredRoute::context_scoped(any_matcher(), fulfill_with_body("context"), None),
+    ]);
+    let action = run_route_chain(&routes, sample_request()).await;
+    assert_eq!(fulfilled_body(&action), "page");
+  }
+
+  #[tokio::test]
+  async fn fallback_reaches_next_handler_with_overridden_request() {
+    let seen_method = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let seen = std::sync::Arc::clone(&seen_method);
+    let older: RouteHandler = std::sync::Arc::new(move |route: Route| {
+      *seen.lock().expect("lock") = route.request().method.clone();
+      route.fulfill(FulfillResponse::default());
+    });
+    let newer: RouteHandler = std::sync::Arc::new(|route: Route| {
+      route.fallback(ContinueOverrides {
+        method: Some("PATCH".to_string()),
+        ..Default::default()
+      });
+    });
+    let routes = tokio::sync::RwLock::new(vec![
+      RegisteredRoute::new(any_matcher(), older, None),
+      RegisteredRoute::new(any_matcher(), newer, None),
+    ]);
+    let action = run_route_chain(&routes, sample_request()).await;
+    assert!(matches!(action, RouteAction::Fulfill(_)));
+    assert_eq!(*seen_method.lock().expect("lock"), "PATCH");
+  }
+
+  #[tokio::test]
+  async fn unclaimed_chain_continues_with_accumulated_overrides() {
+    let only: RouteHandler = std::sync::Arc::new(|route: Route| {
+      route.fallback(ContinueOverrides {
+        method: Some("PUT".to_string()),
+        ..Default::default()
+      });
+    });
+    let routes = tokio::sync::RwLock::new(vec![RegisteredRoute::new(any_matcher(), only, None)]);
+    let action = run_route_chain(&routes, sample_request()).await;
+    match action {
       RouteAction::Continue(o) => assert_eq!(o.method.as_deref(), Some("PUT")),
       other => panic!("expected Continue, got {other:?}"),
     }
   }
 
   #[tokio::test]
-  async fn fallback_without_overrides_sends_unmodified_continue() {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let route = Route::new(sample_request(), tx);
-    route.fallback(ContinueOverrides::default());
-    match rx.await.expect("route action") {
+  async fn terminal_continue_merges_over_accumulated_fallback_overrides() {
+    let older: RouteHandler = std::sync::Arc::new(|route: Route| {
+      route.continue_route(ContinueOverrides {
+        headers: Some(vec![("x-late".to_string(), "1".to_string())]),
+        ..Default::default()
+      });
+    });
+    let newer: RouteHandler = std::sync::Arc::new(|route: Route| {
+      route.fallback(ContinueOverrides {
+        method: Some("PUT".to_string()),
+        ..Default::default()
+      });
+    });
+    let routes = tokio::sync::RwLock::new(vec![
+      RegisteredRoute::new(any_matcher(), older, None),
+      RegisteredRoute::new(any_matcher(), newer, None),
+    ]);
+    let action = run_route_chain(&routes, sample_request()).await;
+    match action {
       RouteAction::Continue(o) => {
-        assert!(o.url.is_none() && o.method.is_none() && o.headers.is_none() && o.post_data.is_none());
+        assert_eq!(o.method.as_deref(), Some("PUT"));
+        assert_eq!(
+          o.headers.as_deref(),
+          Some(&[("x-late".to_string(), "1".to_string())][..])
+        );
       },
       other => panic!("expected Continue, got {other:?}"),
     }
+  }
+
+  #[tokio::test]
+  async fn times_budget_consumed_even_when_handler_falls_back() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let calls2 = std::sync::Arc::clone(&calls);
+    let limited: RouteHandler = std::sync::Arc::new(move |route: Route| {
+      calls2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+      route.fallback(ContinueOverrides::default());
+    });
+    let routes = tokio::sync::RwLock::new(vec![RegisteredRoute::new(any_matcher(), limited, Some(1))]);
+    let first = run_route_chain(&routes, sample_request()).await;
+    assert!(matches!(first, RouteAction::Continue(_)));
+    let second = run_route_chain(&routes, sample_request()).await;
+    assert!(matches!(second, RouteAction::Continue(_)));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(routes.read().await.is_empty(), "exhausted route should be pruned");
+  }
+
+  #[tokio::test]
+  async fn cloned_context_route_shares_times_budget_across_lists() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let calls2 = std::sync::Arc::clone(&calls);
+    let handler: RouteHandler = std::sync::Arc::new(move |route: Route| {
+      calls2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+      route.fulfill(FulfillResponse::default());
+    });
+    let shared = RegisteredRoute::context_scoped(any_matcher(), handler, Some(1));
+    let page_a = tokio::sync::RwLock::new(vec![shared.clone()]);
+    let page_b = tokio::sync::RwLock::new(vec![shared]);
+    let first = run_route_chain(&page_a, sample_request()).await;
+    assert!(matches!(first, RouteAction::Fulfill(_)));
+    let second = run_route_chain(&page_b, sample_request()).await;
+    assert!(
+      matches!(second, RouteAction::Continue(_)),
+      "budget spent on page A must exhaust the clone on page B"
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
   }
 
   #[test]
