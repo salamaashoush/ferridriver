@@ -11,8 +11,7 @@ use ferridriver_test::prelude::*;
 use ferridriver::backend::{CookieData, SameSite};
 
 #[ferritest]
-async fn opts_in_to_beta(ctx: TestContext) {
-    let context = ctx.browser_context().await?;
+async fn opts_in_to_beta(context: Arc<BrowserContext>, page: Arc<Page>) {
     context.add_cookies(vec![CookieData {
         name: "feature_beta".into(),
         value: "1".into(),
@@ -25,9 +24,8 @@ async fn opts_in_to_beta(ctx: TestContext) {
         url: None,
     }]).await?;
 
-    let page = ctx.page().await?;
-    page.goto("https://app.example.com/", None).await?;
-    expect(&page.locator(".beta-banner", None)).to_be_visible().await?;
+    page.goto("https://app.example.com/").await?;
+    expect(&page.locator(".beta-banner")).to_be_visible().await?;
 }
 ```
 
@@ -78,8 +76,7 @@ storageState = ".auth/seed.json"
 ## Read storage state
 
 ```rust
-let page = ctx.page().await?;
-page.goto("https://app.example.com/", None).await?;
+page.goto("https://app.example.com/").await?;
 let state = page.storage_state().await?;
 // state is JSON: { cookies: [...], origins: [{origin, localStorage: [...]}] }
 ```
@@ -90,14 +87,12 @@ let state = page.storage_state().await?;
 sessionStorage (or to clear specific keys), use an init script:
 
 ```rust
-let context = ctx.browser_context().await?;
 context.add_init_script(r#"
   window.sessionStorage.setItem('returning_visitor', '1');
   window.sessionStorage.removeItem('onboarding_step');
 "#.into(), None).await?;
 
-let page = ctx.page().await?;
-page.goto("https://app.example.com/", None).await?;
+page.goto("https://app.example.com/").await?;
 ```
 
 ## TypeScript

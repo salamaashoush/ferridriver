@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let browser = chromium().launch(LaunchOptions::default()).await?;
     let page = browser.page().await?;
 
-    page.goto("https://example.com", None).await?;
+    page.goto("https://example.com").await?;
     let title = page.title().await?;
     println!("{title}");
 
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `firefox()` and `webkit()` are factories with the same shape.
-`BrowserType::with_backend(...)` and `chromium_with(BrowserTypeOptions { ... })`
+`BrowserType::with_backend(...)` and `chromium_with(&BrowserTypeOptions { ... })`
 let you pin a backend explicitly.
 
 ## Public API surface

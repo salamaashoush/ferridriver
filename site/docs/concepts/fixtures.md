@@ -34,7 +34,7 @@ You get these for free, no registration needed:
 | Name        | Scope  | Type              | What it is |
 |-------------|--------|-------------------|------------|
 | `browser`   | Worker | `Arc<Browser>`    | Launched once per worker, reused across tests |
-| `context`   | Test   | `Arc<ContextRef>` | Fresh `BrowserContext` per test — isolated storage, cookies, permissions |
+| `context`   | Test   | `Arc<BrowserContext>` | Fresh `BrowserContext` per test — isolated storage, cookies, permissions |
 | `page`      | Test   | `Arc<Page>`       | Opened in the fresh context |
 | `test_info` | Test   | `Arc<TestInfo>`   | Metadata, annotations, step API |
 
@@ -100,8 +100,8 @@ Then in a test:
 async fn greets_admin(ctx: TestContext) {
     let user = ctx.get::<AdminUser>("admin_user").await?;
     let page = ctx.page().await?;
-    page.goto(&format!("/users/{}", user.name), None).await?;
-    expect(&page.locator("h1", None)).to_have_text(&user.email).await?;
+    page.goto(&format!("/users/{}", user.name)).await?;
+    expect(&page.locator("h1")).to_have_text(&user.email).await?;
 }
 ```
 
@@ -130,9 +130,9 @@ use ferridriver::url_matcher::UrlMatcher;
 #[fixture(scope = "test")]
 async fn authed_page(ctx: TestContext) -> ferridriver_test::Result<std::sync::Arc<Page>> {
     let page = ctx.page().await?;
-    page.goto("https://app.example.com/login", None).await?;
-    page.locator("#email", None).fill("user@example.com", None).await?;
-    page.locator("button[type=submit]", None).click(None).await?;
+    page.goto("https://app.example.com/login").await?;
+    page.locator("#email").fill("user@example.com").await?;
+    page.locator("button[type=submit]").click().await?;
     page.wait_for_url(UrlMatcher::glob("**/dashboard")?).await?;
     Ok(page)
 }

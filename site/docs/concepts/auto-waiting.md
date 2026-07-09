@@ -67,8 +67,8 @@ expect(&page.locator("#banner"))
     .await?;                                    // polls for up to 5s
 
 expect(&page.locator(".row"))
-    .to_have_count(10)
     .with_timeout(Duration::from_secs(30))      // extend for slow endpoints
+    .to_have_count(10)
     .await?;
 ```
 
@@ -87,18 +87,18 @@ Negating a matcher flips the success condition but keeps the polling.
 collecting multiple independent checks in one pass:
 
 ```rust
-expect(&page).to_have_title("Dashboard").soft().with_message("title").await?;
-expect(&page.locator("#user")).to_have_text("Ada").soft().await?;
-expect(&page.locator("#logout")).to_be_visible().soft().await?;
+expect(&page).soft().with_message("title").to_have_title("Dashboard").await?;
+expect(&page.locator("#user")).soft().to_have_text("Ada").await?;
+expect(&page.locator("#logout")).soft().to_be_visible().await?;
 // All three run; failures aggregate and the test fails at the end if any failed.
 ```
 
 ## Navigations
 
-`page.goto(url, None)` resolves on `load` by default. Override with
-`GotoOptions { wait_until: Some("networkidle".into()), .. }` —
-`wait_until` is a string: `"load"` (default), `"domcontentloaded"`,
-`"networkidle"`, or `"commit"`.
+`page.goto(url)` resolves on `load` by default. Override by chaining
+`page.goto(url).wait_until(LoadState::NetworkIdle)` — the states are
+`load` (default), `domcontentloaded`, `networkidle`, and `commit`
+(string literals convert too: `.wait_until("networkidle")`).
 
 For navigations triggered by clicks, use `page.expect_navigation` which
 registers the listener before the action and awaits it afterwards — no
@@ -119,17 +119,13 @@ passes; a blind sleep always waits the full duration.
 
 ## `force` — skipping the checks
 
-Pass `force: true` to bypass actionability entirely and dispatch the
+Chain `.force(true)` to bypass actionability entirely and dispatch the
 action immediately, same as Playwright. Use it only when you deliberately
 want to act on a not-yet-actionable element (e.g. asserting a disabled
 button does nothing).
 
 ```rust
-use ferridriver::options::ClickOptions;
-
-page.locator("#submit")
-    .click(Some(ClickOptions { force: Some(true), ..Default::default() }))
-    .await?;
+page.locator("#submit").click().force(true).await?;
 ```
 
 The `stable` gate is `requestAnimationFrame`-driven. On a backgrounded

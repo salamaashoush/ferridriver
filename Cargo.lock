@@ -1616,6 +1616,7 @@ version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
+ "serde_json",
  "syn",
 ]
 
@@ -4907,6 +4908,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eef73520804cf5aa4876097ac5733058d628c769eba9678e0f4dba5a4ef79703"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "rust-e2e-example"
+version = "0.1.0"
+dependencies = [
+ "ferridriver",
+ "ferridriver-test",
+ "tokio",
 ]
 
 [[package]]

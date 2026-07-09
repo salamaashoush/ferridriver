@@ -3,29 +3,25 @@
 ## Page screenshots
 
 ```rust
-use ferridriver::options::ScreenshotOptions;
+use ferridriver::options::ScreenshotFormat;
 
-let png = page.screenshot(ScreenshotOptions::default()).await?;
+let png = page.screenshot().await?;
 std::fs::write("home.png", png).map_err(|e| e.to_string())?;
 
 // Full page (scrolling capture)
-let png = page.screenshot(ScreenshotOptions {
-    full_page: Some(true),
-    ..Default::default()
-}).await?;
+let png = page.screenshot().full_page(true).await?;
 
 // JPEG with quality
-let jpg = page.screenshot(ScreenshotOptions {
-    format: Some("jpeg".into()),
-    quality: Some(80),
-    ..Default::default()
-}).await?;
+let jpg = page.screenshot()
+    .format(ScreenshotFormat::Jpeg)
+    .quality(80)
+    .await?;
 ```
 
 ## Element screenshots
 
 ```rust
-let png = page.locator(".chart", None).screenshot().await?;
+let png = page.locator(".chart").screenshot().await?;
 ```
 
 ## Masking sensitive regions
@@ -33,29 +29,25 @@ let png = page.locator(".chart", None).screenshot().await?;
 Overlay a solid color over selected elements before snapshotting:
 
 ```rust
-use ferridriver::options::ScreenshotOptions;
-
-let png = page.screenshot(ScreenshotOptions {
-    full_page: Some(true),
-    mask: vec![
-        page.locator(".user-email", None),
-        page.locator(".credit-card", None),
-    ],
-    mask_color: Some("#FF00FF".into()),
-    ..Default::default()
-}).await?;
+let png = page.screenshot()
+    .full_page(true)
+    .mask([
+        page.locator(".user-email"),
+        page.locator(".credit-card"),
+    ])
+    .mask_color("#FF00FF")
+    .await?;
 ```
 
 ## Disable animations for stable captures
 
 ```rust
-use ferridriver::options::ScreenshotOptions;
+use ferridriver::options::{AnimationsMode, CaretMode};
 
-let png = page.screenshot(ScreenshotOptions {
-    animations: Some("disabled".into()),
-    caret: Some("hide".into()),
-    ..Default::default()
-}).await?;
+let png = page.screenshot()
+    .animations(AnimationsMode::Disabled)
+    .caret(CaretMode::Hide)
+    .await?;
 ```
 
 ## Snapshot assertions
@@ -67,10 +59,9 @@ use ferridriver_test::prelude::*;
 use ferridriver_test::expect::LocatorSnapshotMatchers;
 
 #[ferritest]
-async fn dashboard_snapshot(ctx: TestContext) {
-    let page = ctx.page().await?;
-    page.goto("https://app.example.com/dashboard", None).await?;
-    expect(&page.locator(".main", None)).to_have_screenshot("dashboard.png").await?;
+async fn dashboard_snapshot(page: Arc<Page>) {
+    page.goto("https://app.example.com/dashboard").await?;
+    expect(&page.locator(".main")).to_have_screenshot("dashboard.png").await?;
 }
 ```
 
@@ -118,8 +109,8 @@ Modes: `off`, `on`, `retain-on-failure`, `on-first-retry`.
 
 ```rust
 page.start_tracing().await?;
-page.goto("https://app.example.com", None).await?;
-page.locator("button.cta", None).click(None).await?;
+page.goto("https://app.example.com").await?;
+page.locator("button.cta").click().await?;
 page.stop_tracing().await?;
 // Output goes to launchOptions.traces_dir
 ```

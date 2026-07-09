@@ -8,7 +8,7 @@ teardown. Hooks attach to the suite or test lifecycle.
 | Name        | Scope  | Type              |
 |-------------|--------|-------------------|
 | `browser`   | Worker | `Arc<Browser>`    |
-| `context`   | Test   | `Arc<ContextRef>` |
+| `context`   | Test   | `Arc<BrowserContext>` |
 | `page`      | Test   | `Arc<Page>`       |
 | `test_info` | Test   | `Arc<TestInfo>`   |
 
@@ -34,10 +34,10 @@ at startup.
 ## Hooks
 
 All hook macros (`#[before_all]`, `#[after_all]`, `#[before_each]`,
-`#[after_each]`) take no attributes. Every hook receives a
-`TestContext` — name it however you like. Suite hooks (`before_all` /
-`after_all`) run once per suite per worker; each hooks (`before_each` /
-`after_each`) run for every test.
+`#[after_each]`) take no attributes. Hook parameters resolve fixtures the
+same way tests do — a `TestContext` or typed `Arc<T>` fixture parameters.
+Suite hooks (`before_all` / `after_all`) run once per suite per worker;
+each hooks (`before_each` / `after_each`) run for every test.
 
 ```rust
 use ferridriver_test::prelude::*;
@@ -53,8 +53,7 @@ async fn teardown_db(ctx: TestContext) {
 }
 
 #[before_each]
-async fn set_auth(ctx: TestContext) {
-    let context = ctx.browser_context().await?;
+async fn set_auth(context: Arc<BrowserContext>) {
     context.add_cookies(vec![/* ... */]).await?;
 }
 
@@ -117,8 +116,8 @@ async fn admin_user(_ctx: TestContext) -> ferridriver_test::Result<AdminUser> {
 async fn shows_admin(ctx: TestContext) {
     let user = ctx.get::<AdminUser>("admin_user").await?;
     let page = ctx.page().await?;
-    page.goto(&format!("/users/{}", user.name), None).await?;
-    expect(&page.locator("h1", None)).to_have_text(&user.email).await?;
+    page.goto(&format!("/users/{}", user.name)).await?;
+    expect(&page.locator("h1")).to_have_text(&user.email).await?;
 }
 ```
 

@@ -13,9 +13,7 @@ use ferridriver::url_matcher::UrlMatcher;
 use std::sync::Arc;
 
 #[ferritest]
-async fn mocks_user_list(ctx: TestContext) {
-    let page = ctx.page().await?;
-
+async fn mocks_user_list(page: Arc<Page>) {
     let handler: RouteHandler = Arc::new(|route: Route| {
         route.fulfill(FulfillResponse {
             status: 200,
@@ -26,8 +24,8 @@ async fn mocks_user_list(ctx: TestContext) {
     });
     page.route(UrlMatcher::glob("**/api/users")?, handler, None).await?;
 
-    page.goto("https://app.example.com/users", None).await?;
-    expect(&page.locator(".user-row", None)).to_have_count(2).await?;
+    page.goto("https://app.example.com/users").await?;
+    expect(&page.locator(".user-row")).to_have_count(2).await?;
 }
 ```
 
@@ -101,7 +99,6 @@ await page.goto('https://app.example.com/users');
 when you have multi-tab flows:
 
 ```rust
-let context = ctx.browser_context().await?;
 let handler: RouteHandler = Arc::new(|route: Route| {
     route.fulfill(FulfillResponse {
         status: 200,

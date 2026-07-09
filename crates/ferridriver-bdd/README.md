@@ -16,7 +16,7 @@ use ferridriver_bdd::prelude::*;
 
 #[given("I navigate to {string}")]
 async fn navigate(world: &mut BrowserWorld, url: String) {
-    world.page().goto(&url, None).await.unwrap();
+    world.page().goto(&url).await.unwrap();
 }
 
 #[when("I click {string}")]

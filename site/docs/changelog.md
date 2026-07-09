@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.3.0] - 2026-05-26
 
 ### Bug Fixes
 
@@ -14,6 +14,20 @@ All notable changes to this project will be documented in this file.
 - *(pw_webkit)* Lazy file-chooser intercept to unwedge matrix ([d2bcf0e](https://github.com/salamaashoush/ferridriver/commit/d2bcf0efecc8a856b5a0e9a8e8eed30950cf0387))
 - *(pw_webkit)* Handle provisional target swap on cross-process navigation ([737f14a](https://github.com/salamaashoush/ferridriver/commit/737f14a9b05460c540c12cb6aa7fc298f1eda718))
 - *(pw_webkit)* Defer Download event until suggestedFilename arrives ([9c36cdd](https://github.com/salamaashoush/ferridriver/commit/9c36cddfcc3689e7d1550456b80e1a1d2f23a6c2))
+- *(webkit)* Cache path + split backends test into per-category #[test]s ([1389abf](https://github.com/salamaashoush/ferridriver/commit/1389abf0385d9d7a560f44ea16a2125d725b9932))
+- *(tests)* Bootstrap a page in multi_page test ([b3b7c83](https://github.com/salamaashoush/ferridriver/commit/b3b7c83293533c84acccf79807f584689d13ddef))
+- *(install)* Use correct tool name in --with-deps error message ([4500ad0](https://github.com/salamaashoush/ferridriver/commit/4500ad004318dbce0584dc8f6941ed6b770f7eb7))
+- *(install)* Mirror Playwright's full WebKit apt lists per Ubuntu version ([2cbee02](https://github.com/salamaashoush/ferridriver/commit/2cbee02f2087c4ea680b6694ae08d5bdc864abe3))
+
+### CI
+
+- Drop ferridriver-webkit-host references and gtk/webkit2 deps ([ef28d6f](https://github.com/salamaashoush/ferridriver/commit/ef28d6f9dd92a8726531b0ffe7e12f512858cce2))
+- Install Playwright WebKit GTK + GStreamer system deps ([6d3b4fd](https://github.com/salamaashoush/ferridriver/commit/6d3b4fd496d52b456b329d6736a51929ee64e711))
+
+### Documentation
+
+- Full rewrite + site polish ([ab0bb7d](https://github.com/salamaashoush/ferridriver/commit/ab0bb7d3853b9fd4b54c56315c31446ee8c97381))
+- *(webkit)* Fix rustdoc broken intra-doc links ([29e7638](https://github.com/salamaashoush/ferridriver/commit/29e76381abf22c2c5894a3ab5b5bb1860fc450f4))
 
 ### Features
 
@@ -38,10 +52,13 @@ All notable changes to this project will be documented in this file.
 - *(pw_webkit)* Full backend wiring — Browser/Page/Element + AnyPage dispatch ([9bc3f77](https://github.com/salamaashoush/ferridriver/commit/9bc3f771f920ef606609e5fbe68eeb04e3d2bff5))
 - *(pw_webkit)* Route interception, frame contexts, more matrix fixes ([8104d46](https://github.com/salamaashoush/ferridriver/commit/8104d46e59070b1e20bcb0b60b35c658df35999f))
 - *(pw_webkit)* Wire WS events + context-options pre-page hook + page_backref fix ([ff85663](https://github.com/salamaashoush/ferridriver/commit/ff85663309a54e5b39364150aabce4ed9b1f11d9))
+- *(install)* Native webkit install + symlink-aware zip extract ([4a7b414](https://github.com/salamaashoush/ferridriver/commit/4a7b414c8685a491d8af925c93341e70dac31089))
+- *(install)* --with-deps installs Chromium + WebKit system libs ([a9685f9](https://github.com/salamaashoush/ferridriver/commit/a9685f9e76bab877ce464e03162afea01d6412e5))
 
 ### Miscellaneous
 
 - *(ci)* Unblock CI -- fmt + clippy + typos + rustdoc ([c51e58f](https://github.com/salamaashoush/ferridriver/commit/c51e58f2c2a028584667bfd3989f8a67f45fc653))
+- *(deps)* Switch rolldown to crates.io 1.0.0 ([d193da2](https://github.com/salamaashoush/ferridriver/commit/d193da284eaa4b074af1db1e9a915cf2f6132311))
 
 ### Performance
 
@@ -58,6 +75,12 @@ All notable changes to this project will be documented in this file.
 
 - *(cli,bdd-example)* Cross-backend expect coverage + Rust value-matcher demo ([f239696](https://github.com/salamaashoush/ferridriver/commit/f23969653e12b2e92ed12fcc452e8c1fc924363e))
 - *(pw_webkit)* Drop run_cdp! gates on emulation tests, achieve full parity ([53ca4b5](https://github.com/salamaashoush/ferridriver/commit/53ca4b5bb3252f6c2a01ec0d4fba6c6d8448ed39))
+- *(backends)* Extract local test fns into per-category modules ([09381ba](https://github.com/salamaashoush/ferridriver/commit/09381baab80abee8f194c83306d0846a2d415ee0))
+- *(binding_coverage)* Split giant test into per-surface #[test]s ([bec960f](https://github.com/salamaashoush/ferridriver/commit/bec960f5f1533801e7eed69af3cbf43bd5cbc9e2))
+- *(script)* Restructure waitForEvent('console') to listener-first ([9d490e0](https://github.com/salamaashoush/ferridriver/commit/9d490e0f41a383b93c4f492787a64d1f11195883))
+- *(script)* Disable flaky waitForEvent('console') chunk in sweep ([48961ff](https://github.com/salamaashoush/ferridriver/commit/48961ff12bc9b8054bf937b2aa161750fbd5421c))
+- Skip macOS-flaky chunks (screencast hang, HTML5 DnD drop) ([b43a7ff](https://github.com/salamaashoush/ferridriver/commit/b43a7ff1d1b59eebf3594d93afb70a130848125d))
+- *(webkit)* Accept macOS CFNetwork error + skip overrideUserPreference ([b069224](https://github.com/salamaashoush/ferridriver/commit/b069224000bc17a43c4e17a910da4596504f3124))
 
 ## [0.2.0] - 2026-05-18
 

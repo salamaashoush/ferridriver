@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "examples/bdd-example"]
+members = ["crates/*", "examples/bdd-example", "examples/rust-e2e"]
 default-members = [
   "crates/ferridriver",
   "crates/ferridriver-config",

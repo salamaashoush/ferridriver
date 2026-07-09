@@ -1,0 +1,15 @@
+[package]
+name = "rust-e2e-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The E2E test binary -- uses ferridriver's TestRunner, not libtest.
+[[test]]
+name = "e2e"
+harness = false
+
+[dependencies]
+ferridriver = { path = "../../crates/ferridriver" }
+ferridriver-test = { path = "../../crates/ferridriver-test" }
+tokio = { workspace = true }

@@ -9,16 +9,13 @@ ferridriver models every tab and popup as a `Page` on the same
 use ferridriver_test::prelude::*;
 
 #[ferritest]
-async fn checkout_in_new_tab(ctx: TestContext) {
-    let page = ctx.page().await?;
-    let context = ctx.browser_context().await?;
-
+async fn checkout_in_new_tab(context: Arc<BrowserContext>) {
     // Open a fresh tab in the same context (shared cookies/storage)
     let second = context.new_page().await?;
-    second.goto("https://app.example.com/cart", None).await?;
-    expect(&second.locator(".cart-total", None)).to_have_text("$42.00").await?;
+    second.goto("https://app.example.com/cart").await?;
+    expect(&second.locator(".cart-total")).to_have_text("$42.00").await?;
 
-    second.close(None).await?;
+    second.close().await?;
 }
 ```
 
@@ -29,7 +26,7 @@ There is no popup event — when the page opens a new tab (`window.open`,
 
 ```rust
 let before = context.pages().await?.len();
-page.locator("a.open-report", None).click(None).await?;
+page.locator("a.open-report").click().await?;
 
 let popup = loop {
     let pages = context.pages().await?;
@@ -56,7 +53,7 @@ for p in pages {
 let pages = context.pages().await?;
 for p in pages {
     if p.url().contains("/old-flow") {
-        p.close(None).await?;
+        p.close().await?;
     }
 }
 ```
@@ -65,13 +62,11 @@ for p in pages {
 
 ```rust
 #[ferritest]
-async fn oauth_login(ctx: TestContext) {
-    let page = ctx.page().await?;
-    let context = ctx.browser_context().await?;
-    page.goto("https://app.example.com/login", None).await?;
+async fn oauth_login(page: Arc<Page>, context: Arc<BrowserContext>) {
+    page.goto("https://app.example.com/login").await?;
 
     let before = context.pages().await?.len();
-    page.locator("button.sign-in-with-github", None).click(None).await?;
+    page.locator("button.sign-in-with-github").click().await?;
 
     // The page opens the GitHub OAuth tab; grab it once it appears.
     let popup = loop {
@@ -81,10 +76,10 @@ async fn oauth_login(ctx: TestContext) {
         }
     };
 
-    popup.locator("#login_field", None).fill("ada", None).await?;
-    popup.locator("#password", None).fill("secret", None).await?;
-    popup.locator("input[type=submit]", None).click(None).await?;
-    popup.locator("button[name=authorize]", None).click(None).await?;
+    popup.locator("#login_field").fill("ada").await?;
+    popup.locator("#password").fill("secret").await?;
+    popup.locator("input[type=submit]").click().await?;
+    popup.locator("button[name=authorize]").click().await?;
     // popup closes itself after redirect
 
     expect(&page).to_have_url("/dashboard").await?;

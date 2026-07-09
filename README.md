@@ -110,12 +110,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let browser = chromium().launch(LaunchOptions::default()).await?;
     let page = browser.page().await?;
 
-    page.goto("https://example.com", None).await?;
-    page.locator("#email", None).fill("test@example.com", None).await?;
-    page.locator("button[type=submit]", None).click(None).await?;
+    page.goto("https://example.com").await?;
+    page.locator("#email").fill("test@example.com").await?;
+    page.locator("button[type=submit]").click().await?;
     page.wait_for_url(UrlMatcher::glob("**/dashboard")?).await?;
 
-    let png = page.screenshot(Default::default()).await?;
+    let png = page.screenshot().await?;
     std::fs::write("home.png", png)?;
 
     browser.close().await?;
@@ -153,18 +153,16 @@ same workers, same retries, same reporters.
 use ferridriver_test::prelude::*;
 
 #[ferritest]
-async fn loads_homepage(ctx: TestContext) {
-    let page = ctx.page().await?;
-    page.goto("https://example.com", None).await?;
+async fn loads_homepage(page: Arc<Page>) {
+    page.goto("https://example.com").await?;
     expect(&page).to_have_title("Example Domain").await?;
 }
 
 #[ferritest(retries = 2, tag = "smoke", timeout = "30s")]
-async fn login_flow(ctx: TestContext) {
-    let page = ctx.page().await?;
-    page.goto("https://app.example.com/login", None).await?;
-    page.locator("#email", None).fill("user@example.com", None).await?;
-    page.locator("button[type=submit]", None).click(None).await?;
+async fn login_flow(page: Arc<Page>) {
+    page.goto("https://app.example.com/login").await?;
+    page.locator("#email").fill("user@example.com").await?;
+    page.locator("button[type=submit]").click().await?;
     expect(&page).to_have_url("/dashboard").await?;
 }
 ```
@@ -202,12 +200,12 @@ use ferridriver_bdd::prelude::*;
 
 #[given("I navigate to {string}")]
 async fn navigate(world: &mut BrowserWorld, url: String) {
-    world.page().goto(&url, None).await.unwrap();
+    world.page().goto(&url).await.unwrap();
 }
 
 #[when("I click {string}")]
 async fn click(world: &mut BrowserWorld, selector: String) {
-    world.page().locator(&selector, None).click(None).await.unwrap();
+    world.page().locator(&selector).click().await.unwrap();
 }
 ```
 

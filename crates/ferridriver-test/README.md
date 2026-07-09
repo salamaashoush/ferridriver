@@ -15,16 +15,14 @@ set of reporters.
 use ferridriver_test::prelude::*;
 
 #[ferritest]
-async fn loads_homepage(ctx: TestContext) {
-    let page = ctx.page().await?;
-    page.goto("https://example.com", None).await?;
+async fn loads_homepage(page: Arc<Page>) {
+    page.goto("https://example.com").await?;
     expect(&page).to_have_title("Example Domain").await?;
 }
 
 #[ferritest(retries = 2, tag = "smoke", timeout = "30s")]
-async fn login_flow(ctx: TestContext) {
-    let page = ctx.page().await?;
-    page.goto("https://app.example.com/login", None).await?;
+async fn login_flow(page: Arc<Page>) {
+    page.goto("https://app.example.com/login").await?;
     page.locator("#email").fill("user@example.com").await?;
     page.locator("button[type=submit]").click().await?;
     expect(&page).to_have_url("/dashboard").await?;
@@ -84,10 +82,9 @@ use_options = r#"{ ... }"# JSON overrides for launch / context options
     ("https://example.com",   "Example Domain"),
     ("https://rust-lang.org", "Rust Programming Language"),
 ])]
-async fn title_check(ctx: TestContext, case: (&str, &str)) {
-    let page = ctx.page().await?;
-    page.goto(case.0, None).await?;
-    expect(&page).to_contain_title(case.1).await?;
+async fn title_check(page: Arc<Page>, url: &str, title: &str) {
+    page.goto(url).await?;
+    expect(&page).to_contain_title(title).await?;
 }
 ```
 
@@ -99,7 +96,7 @@ Generates one test per row, named `title_check (<row values>)`.
 |--------------|--------|-----------------------|
 | `browser`    | Worker | `Arc<Browser>`        |
 | `request`    | Worker | `Arc<HttpClient>`     |
-| `context`    | Test   | `Arc<ContextRef>`     |
+| `context`    | Test   | `Arc<BrowserContext>` |
 | `page`       | Test   | `Arc<Page>`           |
 | `test_info`  | Test   | `Arc<TestInfo>`       |
 
