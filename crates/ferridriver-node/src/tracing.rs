@@ -59,29 +59,71 @@ impl Tracing {
     self.inner.tracing().stop_har().await.into_napi()
   }
 
-  /// Playwright: `tracing.start(options?)`. Trace `.zip` recording is not
-  /// implemented (returns the core Unsupported error).
-  #[napi]
-  pub async fn start(&self) -> Result<()> {
-    self.inner.tracing().start().await.into_napi()
+  /// Playwright: `tracing.start(options?: { name?, title?, screenshots?,
+  /// snapshots?, sources? })`. Records a Playwright-format trace; write
+  /// it with `stop({ path })` and open it in `npx playwright show-trace`.
+  #[napi(
+    ts_args_type = "options?: { name?: string, title?: string, screenshots?: boolean, snapshots?: boolean, sources?: boolean }"
+  )]
+  pub async fn start(&self, options: Option<TracingStartOptionsJs>) -> Result<()> {
+    let opts = options.map(Into::into).unwrap_or_default();
+    self.inner.tracing().start(opts).await.into_napi()
   }
 
-  /// Playwright: `tracing.startChunk(options?)`. Not implemented.
+  /// Playwright: `tracing.startChunk(options?)`.
   #[napi]
   pub async fn start_chunk(&self) -> Result<()> {
     self.inner.tracing().start_chunk().await.into_napi()
   }
 
-  /// Playwright: `tracing.stopChunk(options?)`. Not implemented.
-  #[napi]
-  pub async fn stop_chunk(&self) -> Result<()> {
-    self.inner.tracing().stop_chunk().await.into_napi()
+  /// Playwright: `tracing.stopChunk(options?: { path? })`.
+  #[napi(ts_args_type = "options?: { path?: string }")]
+  pub async fn stop_chunk(&self, options: Option<TracingStopOptionsJs>) -> Result<()> {
+    let opts = options.map(Into::into).unwrap_or_default();
+    self.inner.tracing().stop_chunk(opts).await.into_napi()
   }
 
-  /// Playwright: `tracing.stop(options?)`. Not implemented.
-  #[napi]
-  pub async fn stop(&self) -> Result<()> {
-    self.inner.tracing().stop().await.into_napi()
+  /// Playwright: `tracing.stop(options?: { path? })`.
+  #[napi(ts_args_type = "options?: { path?: string }")]
+  pub async fn stop(&self, options: Option<TracingStopOptionsJs>) -> Result<()> {
+    let opts = options.map(Into::into).unwrap_or_default();
+    self.inner.tracing().stop(opts).await.into_napi()
+  }
+}
+
+/// Options bag for `tracing.start`.
+#[napi(object)]
+pub struct TracingStartOptionsJs {
+  pub name: Option<String>,
+  pub title: Option<String>,
+  pub screenshots: Option<bool>,
+  pub snapshots: Option<bool>,
+  pub sources: Option<bool>,
+}
+
+impl From<TracingStartOptionsJs> for ferridriver::trace::TracingStartOptions {
+  fn from(o: TracingStartOptionsJs) -> Self {
+    Self {
+      name: o.name,
+      title: o.title,
+      screenshots: o.screenshots.unwrap_or(false),
+      snapshots: o.snapshots.unwrap_or(false),
+      sources: o.sources.unwrap_or(false),
+    }
+  }
+}
+
+/// Options bag for `tracing.stop` / `tracing.stopChunk`.
+#[napi(object)]
+pub struct TracingStopOptionsJs {
+  pub path: Option<String>,
+}
+
+impl From<TracingStopOptionsJs> for ferridriver::trace::TracingStopOptions {
+  fn from(o: TracingStopOptionsJs) -> Self {
+    Self {
+      path: o.path.map(std::path::PathBuf::from),
+    }
   }
 }
 

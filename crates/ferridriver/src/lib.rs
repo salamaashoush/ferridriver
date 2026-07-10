@@ -78,6 +78,7 @@ pub mod backend;
 pub mod route;
 pub mod snapshot;
 pub mod state;
+pub mod trace;
 pub mod tracing;
 pub mod web_socket_route;
 
