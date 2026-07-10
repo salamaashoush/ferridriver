@@ -1445,13 +1445,13 @@ impl PageJs {
 
   /// Playwright: `page.routeFromHAR(har, options?)`. Replay-only.
   #[qjs(rename = "routeFromHAR")]
-  pub async fn route_from_har(
+  pub async fn route_from_har<'js>(
     &self,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     har: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = parse_har_options(&options)?;
+    let opts = parse_har_options(&ctx, &options)?;
     self
       .inner
       .route_from_har(std::path::Path::new(&har))

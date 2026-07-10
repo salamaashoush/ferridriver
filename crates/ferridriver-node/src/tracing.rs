@@ -22,6 +22,9 @@ pub struct StartHarOptionsJs {
   pub mode: Option<String>,
   /// Only record requests whose URL matches this glob or `RegExp`.
   pub url_filter: Option<Either<String, crate::types::JsRegExpLike>>,
+  /// Where `attach`ed bodies are written for a non-zip HAR. Incompatible
+  /// with a `.zip` path.
+  pub resources_dir: Option<String>,
 }
 
 /// `context.tracing` — Playwright's `Tracing`.
@@ -38,10 +41,12 @@ impl Tracing {
 
 #[napi]
 impl Tracing {
-  /// Playwright: `tracing.startHar(path, { content?, mode?, urlFilter? })`.
-  /// Records this context's network into a HAR file until `stopHar`.
+  /// Playwright: `tracing.startHar(path, { content?, mode?, urlFilter?, resourcesDir? })`.
+  /// Records this context's network into a HAR file until `stopHar`. A
+  /// `.zip` path packs `har.har` plus attached bodies; default content
+  /// policy is `attach` for `.zip`, `embed` otherwise.
   #[napi(
-    ts_args_type = "path: string, options?: { content?: 'embed' | 'attach' | 'omit', mode?: 'full' | 'minimal', urlFilter?: string | RegExp }"
+    ts_args_type = "path: string, options?: { content?: 'embed' | 'attach' | 'omit', mode?: 'full' | 'minimal', urlFilter?: string | RegExp, resourcesDir?: string }"
   )]
   pub async fn start_har(&self, path: String, options: Option<StartHarOptionsJs>) -> Result<()> {
     let opts = build_start_har_options(options)?;
@@ -106,5 +111,9 @@ fn build_start_har_options(options: Option<StartHarOptionsJs>) -> Result<StartHa
     content,
     mode,
     url_filter,
+    resources_dir: options
+      .as_ref()
+      .and_then(|o| o.resources_dir.as_ref())
+      .map(std::path::PathBuf::from),
   })
 }

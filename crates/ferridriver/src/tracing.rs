@@ -3,7 +3,11 @@
 //! HAR recording (`startHar` / `stopHar`, Playwright 1.60) is implemented
 //! against the context's observed network log: between `start_har` and
 //! `stop_har` the context's requests are captured and serialized to a
-//! HAR 1.2 archive. Mirrors `client/tracing.ts::startHar` / `stopHar`.
+//! HAR 1.2 archive — a plain `.har` JSON file (bodies inlined or attached
+//! to a resources directory) or a `.zip` packing `har.har` plus
+//! `<sha1>.<ext>` body entries. Mirrors `client/tracing.ts::startHar` /
+//! `stopHar` and `server/har/harRecorder.ts`. The same recorder backs
+//! `routeFromHAR(update: true)`, flushed when the context closes.
 //!
 //! The trace `.zip` recorder (`start` / `stop` / `startChunk` /
 //! `stopChunk`, with DOM snapshots, screenshots and source attachments)
@@ -23,8 +27,10 @@ use crate::url_matcher::UrlMatcher;
 pub enum HarContentPolicy {
   /// Inline the body in `content.text` (base64 for binary).
   Embed,
-  /// Playwright stores bodies as separate resources; ferridriver inlines
-  /// them like `Embed` (no separate resources dir / zip yet).
+  /// Store bodies as separate resources named `<sha1>.<ext>`, referenced
+  /// from the entry via `content._file` — inside the archive for a
+  /// `.zip` HAR, next to the `.har` file (or in `resourcesDir`)
+  /// otherwise.
   Attach,
   /// Drop bodies entirely.
   Omit,
@@ -43,15 +49,21 @@ pub struct StartHarOptions {
   pub content: Option<HarContentPolicy>,
   pub mode: Option<HarMode>,
   pub url_filter: Option<UrlMatcher>,
+  /// Where `attach`ed bodies are written for a non-zip HAR. Defaults to
+  /// the HAR file's directory. Incompatible with a `.zip` path.
+  pub resources_dir: Option<PathBuf>,
 }
 
 /// Live recorder state, stored per-context on [`crate::state::BrowserState`]
-/// between `start_har` and `stop_har`.
+/// between `start_har` and `stop_har` (or, for
+/// `routeFromHAR(update: true)`, until context close).
 pub struct HarRecorder {
   pub path: PathBuf,
   pub content: HarContentPolicy,
   pub mode: HarMode,
   pub url_filter: UrlMatcher,
+  /// Resource directory override for non-zip `attach` recordings.
+  pub resources_dir: Option<PathBuf>,
   /// Index into the context's `network_log` at recording start; only
   /// requests appended after this point are written.
   pub start_len: usize,
@@ -69,26 +81,37 @@ impl Tracing {
   }
 
   /// Begin recording network into a HAR file. Playwright:
-  /// `tracing.startHar(path, { content?, mode?, urlFilter? })`.
+  /// `tracing.startHar(path, { content?, mode?, urlFilter?, resourcesDir? })`.
+  ///
+  /// A `.zip` path packs the archive as `har.har` plus one `<sha1>.<ext>`
+  /// entry per attached body; the default `content` policy is `attach`
+  /// for `.zip` and `embed` otherwise (mirrors `client/tracing.ts:105`).
   ///
   /// # Errors
   ///
-  /// Errors if a HAR recording is already active, the target is a `.zip`
-  /// (zip HAR archives are not implemented), or the context is missing.
+  /// Errors if a HAR recording is already active, `resourcesDir` is
+  /// combined with a `.zip` path, or the context is missing.
   pub async fn start_har(&self, path: impl Into<PathBuf>, options: StartHarOptions) -> Result<()> {
     let path = path.into();
-    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
-      return Err(FerriError::unsupported(
-        "zip HAR archives are not implemented; use a .har path",
+    let is_zip = is_zip_path(&path);
+    if is_zip && options.resources_dir.is_some() {
+      return Err(FerriError::backend(
+        "resourcesDir option is not compatible with a .zip har file".to_string(),
       ));
     }
+    let default_content = if is_zip {
+      HarContentPolicy::Attach
+    } else {
+      HarContentPolicy::Embed
+    };
     let composite = self.ctx.composite();
     let start_len = self.network_log_len().await;
     let recorder = HarRecorder {
       path,
-      content: options.content.unwrap_or(HarContentPolicy::Embed),
+      content: options.content.unwrap_or(default_content),
       mode: options.mode.unwrap_or(HarMode::Full),
       url_filter: options.url_filter.unwrap_or_else(UrlMatcher::any),
+      resources_dir: options.resources_dir,
       start_len,
     };
     let recorders = self.ctx.har_recorders().await;
@@ -120,12 +143,7 @@ impl Tracing {
     };
 
     let requests = self.network_log_slice(recorder.start_len).await;
-    let archive = build_har(&requests, &recorder).await;
-    let json =
-      serde_json::to_string_pretty(&archive).map_err(|e| FerriError::backend(format!("serialize HAR: {e}")))?;
-    std::fs::write(&recorder.path, json)
-      .map_err(|e| FerriError::backend(format!("write HAR {}: {e}", recorder.path.display())))?;
-    Ok(())
+    flush_recorder(&recorder, &requests).await
   }
 
   async fn network_log_len(&self) -> usize {
@@ -199,13 +217,85 @@ impl Tracing {
   }
 }
 
-async fn build_har(requests: &[Request], recorder: &HarRecorder) -> HarArchive {
+/// Whether the recorder writes a zip archive (`.zip` extension).
+fn is_zip_path(path: &std::path::Path) -> bool {
+  path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+}
+
+/// Serialize the recorded requests and write the archive to the
+/// recorder's path — a zip (`har.har` + `<sha1>.<ext>` body entries)
+/// for a `.zip` path, a JSON file plus a resources directory of
+/// attached bodies otherwise. Shared by [`Tracing::stop_har`] and the
+/// context-close flush of `routeFromHAR(update: true)` recorders.
+///
+/// # Errors
+///
+/// Errors if serialization or any filesystem write fails.
+pub(crate) async fn flush_recorder(recorder: &HarRecorder, requests: &[Request]) -> Result<()> {
+  let mut attachments: Vec<(String, Vec<u8>)> = Vec::new();
+  let archive = build_har(requests, recorder, &mut attachments).await;
+  let json = serde_json::to_string_pretty(&archive).map_err(|e| FerriError::backend(format!("serialize HAR: {e}")))?;
+
+  if is_zip_path(&recorder.path) {
+    let file = std::fs::File::create(&recorder.path)
+      .map_err(|e| FerriError::backend(format!("create HAR zip {}: {e}", recorder.path.display())))?;
+    let mut writer = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let zip_err = |e: zip::result::ZipError| FerriError::backend(format!("write HAR zip: {e}"));
+    use std::io::Write;
+    writer.start_file("har.har", opts).map_err(zip_err)?;
+    writer
+      .write_all(json.as_bytes())
+      .map_err(|e| FerriError::backend(format!("write HAR zip: {e}")))?;
+    let mut written = rustc_hash::FxHashSet::default();
+    for (name, bytes) in &attachments {
+      if !written.insert(name.clone()) {
+        continue;
+      }
+      writer.start_file(name.as_str(), opts).map_err(zip_err)?;
+      writer
+        .write_all(bytes)
+        .map_err(|e| FerriError::backend(format!("write HAR zip: {e}")))?;
+    }
+    writer.finish().map_err(zip_err)?;
+    return Ok(());
+  }
+
+  std::fs::write(&recorder.path, json)
+    .map_err(|e| FerriError::backend(format!("write HAR {}: {e}", recorder.path.display())))?;
+  if !attachments.is_empty() {
+    let resources_dir = recorder.resources_dir.clone().unwrap_or_else(|| {
+      recorder
+        .path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf)
+    });
+    std::fs::create_dir_all(&resources_dir)
+      .map_err(|e| FerriError::backend(format!("create HAR resources dir {}: {e}", resources_dir.display())))?;
+    let mut written = rustc_hash::FxHashSet::default();
+    for (name, bytes) in &attachments {
+      if !written.insert(name.clone()) {
+        continue;
+      }
+      let target = resources_dir.join(name);
+      std::fs::write(&target, bytes)
+        .map_err(|e| FerriError::backend(format!("write HAR resource {}: {e}", target.display())))?;
+    }
+  }
+  Ok(())
+}
+
+async fn build_har(
+  requests: &[Request],
+  recorder: &HarRecorder,
+  attachments: &mut Vec<(String, Vec<u8>)>,
+) -> HarArchive {
   let mut entries = Vec::new();
   for req in requests {
     if !recorder.url_filter.matches(req.url()) {
       continue;
     }
-    entries.push(build_entry(req, recorder).await);
+    entries.push(build_entry(req, recorder, attachments).await);
   }
   HarArchive {
     log: HarLogOut {
@@ -219,26 +309,18 @@ async fn build_har(requests: &[Request], recorder: &HarRecorder) -> HarArchive {
   }
 }
 
-async fn build_entry(req: &Request, recorder: &HarRecorder) -> HarEntryOut {
+async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Vec<(String, Vec<u8>)>) -> HarEntryOut {
   let request_headers = header_pairs(&req.headers());
   let post_data = req.post_data().map(|text| HarPostData {
-    mime_type: req
-      .headers()
-      .get("content-type")
-      .cloned()
-      .unwrap_or_else(|| "application/octet-stream".to_string()),
+    mime_type: header_value(&req.headers(), "content-type").unwrap_or_else(|| "application/octet-stream".to_string()),
     text,
   });
 
   let (response_out, response_present) = match req.response().await.ok().flatten() {
     Some(resp) => {
       let headers = header_pairs(&resp.headers());
-      let mime_type = resp
-        .headers()
-        .get("content-type")
-        .cloned()
-        .unwrap_or_else(|| "x-unknown".to_string());
-      let content = build_content(&resp, &mime_type, recorder.content).await;
+      let mime_type = header_value(&resp.headers(), "content-type").unwrap_or_else(|| "x-unknown".to_string());
+      let content = build_content(&resp, &mime_type, recorder.content, attachments).await;
       (
         HarResponseOut {
           status: resp.status(),
@@ -256,9 +338,23 @@ async fn build_entry(req: &Request, recorder: &HarRecorder) -> HarEntryOut {
     None => (HarResponseOut::empty(), false),
   };
 
-  // `mode: minimal` records only entries that have a response; full keeps
-  // request-only entries too. Both still emit the entry shape.
-  let _ = (recorder.mode, response_present);
+  let _ = response_present;
+  // `mode: minimal` omits timing detail (Playwright's slimMode sets
+  // omitTiming, encoded as -1 per HAR convention); full keeps the
+  // best-effort zeros until per-request timing is wired through.
+  let timings = if recorder.mode == HarMode::Minimal {
+    HarTimings {
+      send: -1.0,
+      wait: -1.0,
+      receive: -1.0,
+    }
+  } else {
+    HarTimings {
+      send: 0.0,
+      wait: 0.0,
+      receive: 0.0,
+    }
+  };
 
   HarEntryOut {
     started_date_time: now_iso8601(),
@@ -275,32 +371,48 @@ async fn build_entry(req: &Request, recorder: &HarRecorder) -> HarEntryOut {
     },
     response: response_out,
     cache: HarCache {},
-    timings: HarTimings {
-      send: 0.0,
-      wait: 0.0,
-      receive: 0.0,
-    },
+    timings,
   }
 }
 
-async fn build_content(resp: &crate::network::Response, mime_type: &str, policy: HarContentPolicy) -> HarContentOut {
+async fn build_content(
+  resp: &crate::network::Response,
+  mime_type: &str,
+  policy: HarContentPolicy,
+  attachments: &mut Vec<(String, Vec<u8>)>,
+) -> HarContentOut {
   if policy == HarContentPolicy::Omit {
     return HarContentOut {
       size: 0,
       mime_type: mime_type.to_string(),
       text: None,
       encoding: None,
+      file: None,
     };
   }
   match resp.body().await {
     Ok(bytes) => {
       let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
+      if policy == HarContentPolicy::Attach {
+        // `<sha1hex>.<ext>` naming mirrors `harTracer.ts:563` —
+        // `calculateSha1(buffer) + '.' + (mime.getExtension(...) || 'dat')`.
+        let name = format!("{}.{}", sha1_hex(&bytes), mime_extension(mime_type));
+        attachments.push((name.clone(), bytes));
+        return HarContentOut {
+          size,
+          mime_type: mime_type.to_string(),
+          text: None,
+          encoding: None,
+          file: Some(name),
+        };
+      }
       if let Ok(text) = std::str::from_utf8(&bytes) {
         HarContentOut {
           size,
           mime_type: mime_type.to_string(),
           text: Some(text.to_string()),
           encoding: None,
+          file: None,
         }
       } else {
         use base64::Engine;
@@ -309,6 +421,7 @@ async fn build_content(resp: &crate::network::Response, mime_type: &str, policy:
           mime_type: mime_type.to_string(),
           text: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
           encoding: Some("base64".to_string()),
+          file: None,
         }
       }
     },
@@ -317,8 +430,68 @@ async fn build_content(resp: &crate::network::Response, mime_type: &str, policy:
       mime_type: mime_type.to_string(),
       text: None,
       encoding: None,
+      file: None,
     },
   }
+}
+
+fn sha1_hex(bytes: &[u8]) -> String {
+  use sha1::{Digest, Sha1};
+  let digest = Sha1::digest(bytes);
+  let mut out = String::with_capacity(40);
+  for byte in digest {
+    use std::fmt::Write;
+    let _ = write!(out, "{byte:02x}");
+  }
+  out
+}
+
+/// File extension for an attached body, from its mime type. Mirrors the
+/// `mime.getExtension(...) || 'dat'` fallback in `harTracer.ts:563` for
+/// the types browsers commonly emit.
+fn mime_extension(mime_type: &str) -> &'static str {
+  let essence = mime_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+  match essence.as_str() {
+    "text/html" => "html",
+    "text/css" => "css",
+    "text/plain" => "txt",
+    "text/xml" | "application/xml" => "xml",
+    "text/csv" => "csv",
+    "text/markdown" => "md",
+    "text/javascript" | "application/javascript" | "application/x-javascript" => "js",
+    "application/json" => "json",
+    "application/pdf" => "pdf",
+    "application/zip" => "zip",
+    "application/wasm" => "wasm",
+    "image/png" => "png",
+    "image/jpeg" => "jpeg",
+    "image/gif" => "gif",
+    "image/webp" => "webp",
+    "image/svg+xml" => "svg",
+    "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+    "image/avif" => "avif",
+    "font/woff" | "application/font-woff" => "woff",
+    "font/woff2" => "woff2",
+    "font/ttf" => "ttf",
+    "font/otf" => "otf",
+    "audio/mpeg" => "mp3",
+    "audio/wav" => "wav",
+    "audio/ogg" => "ogg",
+    "video/mp4" => "mp4",
+    "video/webm" => "webm",
+    _ => "dat",
+  }
+}
+
+/// Case-insensitive header lookup — CDP lowercases header names but
+/// WebKit and BiDi deliver them as sent (`Content-Type`), and a HAR
+/// recorded with `mimeType: x-unknown` replays as a download instead of
+/// a rendered document.
+fn header_value(headers: &crate::network::Headers, name: &str) -> Option<String> {
+  headers
+    .iter()
+    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+    .map(|(_, v)| v.clone())
 }
 
 fn header_pairs(headers: &crate::network::Headers) -> Vec<HarHeaderOut> {
@@ -447,6 +620,7 @@ impl HarResponseOut {
         mime_type: "x-unknown".to_string(),
         text: None,
         encoding: None,
+        file: None,
       },
       redirect_url: String::new(),
       headers_size: -1,
@@ -464,6 +638,10 @@ struct HarContentOut {
   text: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   encoding: Option<String>,
+  /// `attach` policy: resource file name (`<sha1>.<ext>`) holding the
+  /// body — a zip entry for `.zip` archives, a sibling file otherwise.
+  #[serde(rename = "_file", skip_serializing_if = "Option::is_none")]
+  file: Option<String>,
 }
 
 #[derive(serde::Serialize)]

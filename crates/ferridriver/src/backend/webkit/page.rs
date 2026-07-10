@@ -190,6 +190,12 @@ pub(crate) struct LifecycleSignals {
   pub failed: AtomicBool,
   pub failure_text: std::sync::Mutex<Option<String>>,
   pub failed_request_id: std::sync::Mutex<Option<String>>,
+  /// `Playwright.provisionalLoadFailed` error text. Main-frame only by
+  /// protocol (it is a page-proxy-level event), so a pending `goto` can
+  /// treat it as its own failure without a request-id match — the
+  /// failing request lives on the provisional target session whose
+  /// events never reach the committed-target listener.
+  pub provisional_failure: std::sync::Mutex<Option<String>>,
   pub notify: tokio::sync::Notify,
 }
 
@@ -207,6 +213,29 @@ impl LifecycleSignals {
       .failed_request_id
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *self
+      .provisional_failure
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+  }
+
+  /// Record a `Playwright.provisionalLoadFailed` for the pending
+  /// main-frame navigation (mirrors `wkPage._onProvisionalLoadFailed`).
+  pub fn mark_provisional_failed(&self, error_text: String) {
+    *self
+      .provisional_failure
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error_text);
+    self.notify.notify_waiters();
+  }
+
+  /// The pending navigation's provisional-load failure, if any.
+  pub fn provisional_failure(&self) -> Option<String> {
+    self
+      .provisional_failure
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
   }
 
   pub fn mark(&self, kind: NavLifecycle) {
@@ -708,6 +737,9 @@ impl WebKitPage {
       loop {
         if signals.seen(lifecycle) {
           return Ok(());
+        }
+        if let Some(err) = signals.provisional_failure() {
+          return Err(FerriError::backend(format!("webkit navigate: {err}")));
         }
         if let Some((event_request_id, err)) = signals.failure() {
           if let Some(req) = nav_slot.get() {

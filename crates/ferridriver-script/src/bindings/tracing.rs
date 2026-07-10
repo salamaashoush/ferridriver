@@ -30,7 +30,9 @@ impl TracingJs {
 
 #[rquickjs::methods]
 impl TracingJs {
-  /// Playwright: `tracing.startHar(path, { content?, mode?, urlFilter? })`.
+  /// Playwright: `tracing.startHar(path, { content?, mode?, urlFilter?, resourcesDir? })`.
+  /// A `.zip` path packs `har.har` plus attached bodies; default content
+  /// policy is `attach` for `.zip`, `embed` otherwise.
   #[qjs(rename = "startHar")]
   pub async fn start_har<'js>(&self, ctx: Ctx<'js>, path: String, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let opts = parse_start_har_options(&ctx, options)?;
@@ -91,9 +93,13 @@ fn parse_start_har_options<'js>(ctx: &Ctx<'js>, options: Opt<Value<'js>>) -> rqu
     Some(v) if !v.is_undefined() && !v.is_null() => Some(crate::bindings::page::options::url_value_to_matcher(ctx, v)?),
     _ => None,
   };
+  let resources_dir = obj
+    .get::<_, Option<String>>("resourcesDir")?
+    .map(std::path::PathBuf::from);
   Ok(StartHarOptions {
     content,
     mode,
     url_filter,
+    resources_dir,
   })
 }

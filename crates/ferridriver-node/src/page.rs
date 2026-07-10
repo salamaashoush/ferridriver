@@ -2161,13 +2161,15 @@ impl Page {
   }
 
   /// Playwright: `page.routeFromHAR(har, options?)`. Replays recorded
-  /// responses from a HAR file. Replay-only (no `update` recording mode).
+  /// responses from a `.har` file or `.zip` archive. Recording
+  /// (`update: true`) is context-scoped — use
+  /// `context.routeFromHAR(har, { update: true })`.
   #[napi(
     js_name = "routeFromHAR",
-    ts_args_type = "har: string, options?: { url?: string, notFound?: 'abort' | 'fallback' }"
+    ts_args_type = "har: string, options?: { url?: string | RegExp, notFound?: 'abort' | 'fallback', update?: boolean, updateContent?: 'attach' | 'embed', updateMode?: 'minimal' | 'full' }"
   )]
-  pub async fn route_from_har(&self, har: String, options: Option<serde_json::Value>) -> Result<()> {
-    let opts = crate::page::parse_har_options(options.as_ref())?;
+  pub async fn route_from_har(&self, har: String, options: Option<RouteFromHarOptionsJs>) -> Result<()> {
+    let opts = crate::page::parse_har_options(options)?;
     self
       .inner
       .route_from_har(std::path::Path::new(&har))
@@ -2272,25 +2274,73 @@ pub(crate) fn parse_unroute_behavior(behavior: &str) -> Result<ferridriver::opti
   }
 }
 
-/// Parse the `{ url?, notFound? }` options bag for `routeFromHAR` (shared by
-/// Page and BrowserContext). `url` is a glob string filter; `notFound`
+/// Playwright `routeFromHAR` options bag (shared by Page and
+/// BrowserContext).
+#[napi(object)]
+pub struct RouteFromHarOptionsJs {
+  /// Only serve/record requests whose URL matches this glob or `RegExp`.
+  #[napi(ts_type = "string | RegExp")]
+  pub url: Option<napi::bindgen_prelude::Either<String, crate::types::JsRegExpLike>>,
+  /// `'abort' | 'fallback'` — action when no recorded entry matches.
+  #[napi(ts_type = "'abort' | 'fallback'")]
+  pub not_found: Option<String>,
+  /// Record network into the HAR instead of replaying (written when the
+  /// context closes).
+  pub update: Option<bool>,
+  /// `'attach' | 'embed'` — body policy for `update` recording.
+  #[napi(ts_type = "'attach' | 'embed'")]
+  pub update_content: Option<String>,
+  /// `'minimal' | 'full'` — detail mode for `update` recording.
+  #[napi(ts_type = "'minimal' | 'full'")]
+  pub update_mode: Option<String>,
+}
+
+/// Parse the `routeFromHAR` options bag into the core options. `notFound`
 /// defaults to `abort` (Playwright default).
-pub(crate) fn parse_har_options(options: Option<&serde_json::Value>) -> Result<ferridriver::har::RouteFromHarOptions> {
+pub(crate) fn parse_har_options(
+  options: Option<RouteFromHarOptionsJs>,
+) -> Result<ferridriver::har::RouteFromHarOptions> {
+  use napi::bindgen_prelude::Either;
   let mut out = ferridriver::har::RouteFromHarOptions::default();
-  if let Some(o) = options {
-    if let Some(url) = o.get("url").and_then(serde_json::Value::as_str) {
-      out.url = Some(ferridriver::url_matcher::UrlMatcher::glob(url).map_err(crate::error::to_napi)?);
-    }
-    match o.get("notFound").and_then(serde_json::Value::as_str) {
-      Some("fallback") => out.not_found = ferridriver::har::HarNotFound::Fallback,
-      Some("abort") | None => out.not_found = ferridriver::har::HarNotFound::Abort,
-      Some(other) => {
-        return Err(napi::Error::from_reason(format!(
-          "routeFromHAR: invalid notFound {other:?} (expected 'abort' or 'fallback')"
-        )));
-      },
-    }
+  let Some(o) = options else { return Ok(out) };
+  out.url = match o.url {
+    Some(Either::A(glob)) => Some(ferridriver::url_matcher::UrlMatcher::glob(glob).map_err(crate::error::to_napi)?),
+    Some(Either::B(re)) => Some(
+      ferridriver::url_matcher::UrlMatcher::regex_from_source(&re.source, re.flags.as_deref().unwrap_or(""))
+        .map_err(crate::error::to_napi)?,
+    ),
+    None => None,
+  };
+  match o.not_found.as_deref() {
+    Some("fallback") => out.not_found = ferridriver::har::HarNotFound::Fallback,
+    Some("abort") | None => out.not_found = ferridriver::har::HarNotFound::Abort,
+    Some(other) => {
+      return Err(napi::Error::from_reason(format!(
+        "routeFromHAR: invalid notFound {other:?} (expected 'abort' or 'fallback')"
+      )));
+    },
   }
+  out.update = o.update.unwrap_or(false);
+  out.update_content = match o.update_content.as_deref() {
+    Some("attach") => Some(ferridriver::tracing::HarContentPolicy::Attach),
+    Some("embed") => Some(ferridriver::tracing::HarContentPolicy::Embed),
+    None => None,
+    Some(other) => {
+      return Err(napi::Error::from_reason(format!(
+        "routeFromHAR: invalid updateContent {other:?} (expected 'attach' or 'embed')"
+      )));
+    },
+  };
+  out.update_mode = match o.update_mode.as_deref() {
+    Some("minimal") => Some(ferridriver::tracing::HarMode::Minimal),
+    Some("full") => Some(ferridriver::tracing::HarMode::Full),
+    None => None,
+    Some(other) => {
+      return Err(napi::Error::from_reason(format!(
+        "routeFromHAR: invalid updateMode {other:?} (expected 'minimal' or 'full')"
+      )));
+    },
+  };
   Ok(out)
 }
 

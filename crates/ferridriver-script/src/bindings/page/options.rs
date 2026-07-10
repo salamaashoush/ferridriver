@@ -146,21 +146,19 @@ pub(crate) fn parse_route_times(
   Ok(t.as_number().map(|n| if n < 0.0 { 0 } else { n as u32 }))
 }
 
-/// Parse the `{ url?, notFound? }` options bag for `routeFromHAR`. Shared by
-/// `page.routeFromHAR` and `context.routeFromHAR`. `url` is a glob string.
-pub(crate) fn parse_har_options(
-  options: &rquickjs::function::Opt<rquickjs::Value<'_>>,
+/// Parse the `{ url?, notFound?, update?, updateContent?, updateMode? }`
+/// options bag for `routeFromHAR`. Shared by `page.routeFromHAR` and
+/// `context.routeFromHAR`. `url` accepts a glob string or `RegExp`.
+pub(crate) fn parse_har_options<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  options: &rquickjs::function::Opt<rquickjs::Value<'js>>,
 ) -> rquickjs::Result<ferridriver::har::RouteFromHarOptions> {
   let mut out = ferridriver::har::RouteFromHarOptions::default();
   let Some(v) = options.0.as_ref() else { return Ok(out) };
   let Some(obj) = v.as_object() else { return Ok(out) };
-  let url: rquickjs::Value<'_> = obj.get("url")?;
-  if let Some(s) = url.as_string() {
-    let glob = s.to_string()?;
-    out.url = Some(
-      ferridriver::url_matcher::UrlMatcher::glob(glob)
-        .map_err(|e| rquickjs::Error::new_from_js_message("routeFromHAR", "url", format!("invalid url glob: {e}")))?,
-    );
+  let url: rquickjs::Value<'js> = obj.get("url")?;
+  if !url.is_undefined() && !url.is_null() {
+    out.url = Some(url_value_to_matcher(ctx, url)?);
   }
   let nf: rquickjs::Value<'_> = obj.get("notFound")?;
   if let Some(s) = nf.as_string() {
@@ -176,6 +174,31 @@ pub(crate) fn parse_har_options(
       },
     }
   }
+  out.update = obj.get::<_, Option<bool>>("update")?.unwrap_or(false);
+  out.update_content = match obj.get::<_, Option<String>>("updateContent")?.as_deref() {
+    Some("attach") => Some(ferridriver::tracing::HarContentPolicy::Attach),
+    Some("embed") => Some(ferridriver::tracing::HarContentPolicy::Embed),
+    None => None,
+    Some(other) => {
+      return Err(rquickjs::Error::new_from_js_message(
+        "routeFromHAR",
+        "updateContent",
+        format!("invalid updateContent {other:?} (expected 'attach' or 'embed')"),
+      ));
+    },
+  };
+  out.update_mode = match obj.get::<_, Option<String>>("updateMode")?.as_deref() {
+    Some("minimal") => Some(ferridriver::tracing::HarMode::Minimal),
+    Some("full") => Some(ferridriver::tracing::HarMode::Full),
+    None => None,
+    Some(other) => {
+      return Err(rquickjs::Error::new_from_js_message(
+        "routeFromHAR",
+        "updateMode",
+        format!("invalid updateMode {other:?} (expected 'minimal' or 'full')"),
+      ));
+    },
+  };
   Ok(out)
 }
 

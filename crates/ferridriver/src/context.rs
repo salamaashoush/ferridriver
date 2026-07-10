@@ -873,6 +873,10 @@ impl ContextRef {
 
   pub(crate) async fn close_impl(&self, opts: Option<crate::options::ContextCloseOptions>) -> Result<()> {
     self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Flush `routeFromHAR(update: true)` recorders while the network log
+    // is still reachable — Playwright writes the updated HAR on context
+    // close (`browserContext.ts` exports every live HAR recorder).
+    self.flush_har_updates().await?;
     let mut state = self.state.write().await;
     if let Some(reason) = opts.and_then(|o| o.reason) {
       state.set_close_reason(reason);
@@ -884,6 +888,29 @@ impl ContextRef {
       // the underlying browser too. Playwright:
       // `/tmp/playwright/packages/playwright-core/types/types.d.ts:15199`.
       state.shutdown().await;
+    }
+    Ok(())
+  }
+
+  /// Write every `routeFromHAR(update: true)` recording registered on
+  /// this context. Consumes the registry entries so a double close does
+  /// not rewrite the files.
+  async fn flush_har_updates(&self) -> Result<()> {
+    let recorders = {
+      let registry = self.state.read().await.context_har_updates.clone();
+      let mut guard = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      guard.remove(&self.key.to_composite()).unwrap_or_default()
+    };
+    if recorders.is_empty() {
+      return Ok(());
+    }
+    let requests: Vec<crate::network::Request> = match self.network_log_handle().await {
+      Some(log) => log.read().await.clone(),
+      None => Vec::new(),
+    };
+    for recorder in recorders {
+      let slice = requests.get(recorder.start_len..).unwrap_or(&[]);
+      crate::tracing::flush_recorder(&recorder, slice).await?;
     }
     Ok(())
   }
@@ -1201,6 +1228,33 @@ impl ContextRef {
     path: &std::path::Path,
     options: crate::har::RouteFromHarOptions,
   ) -> Result<()> {
+    if options.update {
+      // Record instead of replay: register a recorder flushed when the
+      // context closes. Playwright defaults (`client/tracing.ts:131-135`):
+      // content `attach`, mode `minimal`.
+      let start_len = match self.network_log_handle().await {
+        Some(log) => log.read().await.len(),
+        None => 0,
+      };
+      let recorder = crate::tracing::HarRecorder {
+        path: path.to_path_buf(),
+        content: options
+          .update_content
+          .unwrap_or(crate::tracing::HarContentPolicy::Attach),
+        mode: options.update_mode.unwrap_or(crate::tracing::HarMode::Minimal),
+        url_filter: options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any),
+        resources_dir: None,
+        start_len,
+      };
+      let registry = self.state.read().await.context_har_updates.clone();
+      registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(self.key.to_composite())
+        .or_default()
+        .push(recorder);
+      return Ok(());
+    }
     let handler = crate::har::route_handler_from_file(path, options.not_found)?;
     let matcher = options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any);
     self
