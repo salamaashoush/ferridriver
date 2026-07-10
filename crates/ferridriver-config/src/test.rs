@@ -547,6 +547,9 @@ pub struct CliOverrides {
   pub test_files: Vec<String>,
   pub test_match: Option<Vec<String>>,
   pub list_only: bool,
+  /// Watch mode: re-run on file changes with the interactive TUI
+  /// (falls back to non-interactive re-runs without a TTY).
+  pub watch: bool,
   pub update_snapshots: Option<UpdateSnapshotsMode>,
   pub profile: Option<String>,
   pub forbid_only: bool,

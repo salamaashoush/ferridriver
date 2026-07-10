@@ -243,19 +243,6 @@ pub async fn run_bdd_with(
     }
   }
 
-  let feature_set = match feature::FeatureSet::discover_and_parse(&config.features, &config.test_ignore) {
-    Ok(fs) => fs,
-    Err(e) => {
-      eprintln!("feature discovery error: {e}");
-      return 1;
-    },
-  };
-
-  if feature_set.features.is_empty() {
-    eprintln!("no feature files found matching: {:?}", config.features);
-    return 0;
-  }
-
   // JS step files take the QuickJS path; otherwise inventory-collected
   // Rust steps. `--steps` overrides `[test].steps`. Top-level
   // `extensions` (config or `FERRIDRIVER_EXTENSIONS`) are bundled in the
@@ -279,29 +266,93 @@ pub async fn run_bdd_with(
   } else {
     overrides.extensions.clone()
   };
-  let plan = if js_globs.is_empty() && extensions.is_empty() {
-    let registry = Arc::new(registry::StepRegistry::build());
-    translate::translate_features(&feature_set, registry, &config)
-  } else {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    // rolldown-bundle + tree-shake + transpile the whole step +
-    // extension graph to one module, compiled to bytecode once.
-    let bundle = match js::bundle_steps_with(&js_globs, &extensions, &cwd).await {
-      Ok(b) => b,
-      Err(e) => {
-        eprintln!("step bundle error: {e}");
-        return 1;
-      },
-    };
-    js::translate_features_js(&feature_set, &config, bundle, cwd)
-  };
 
+  config.has_bdd = true;
+
+  if overrides.watch {
+    // Watch mode: every cycle rebuilds the plan from disk — features
+    // re-discovered (narrowed to the changed `.feature` files when the
+    // watcher hands them over) and the JS/TS step graph re-bundled so
+    // step edits take effect without restarting.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let factory_config = config.clone();
+    let factory: ferridriver_test::runner::WatchPlanFactory = Box::new(move |changed| {
+      let config = factory_config.clone();
+      let js_globs = js_globs.clone();
+      let extensions = extensions.clone();
+      Box::pin(async move {
+        match build_bdd_plan(&config, &js_globs, &extensions, changed.as_deref()).await {
+          Ok(plan) => plan,
+          Err(e) => {
+            eprintln!("{e}");
+            ferridriver_test::model::TestPlan {
+              suites: Vec::new(),
+              total_tests: 0,
+              shard: None,
+            }
+          },
+        }
+      })
+    });
+    let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
+    return runner.run_watch(factory, cwd).await;
+  }
+
+  let plan = match build_bdd_plan(&config, &js_globs, &extensions, None).await {
+    Ok(plan) => plan,
+    Err(e) => {
+      eprintln!("{e}");
+      return 1;
+    },
+  };
   if plan.total_tests == 0 {
     eprintln!("no scenarios found");
     return 0;
   }
 
-  config.has_bdd = true;
   let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
   runner.run(plan).await
+}
+
+/// Build a BDD test plan from disk: discover + parse features (narrowed
+/// to `only_features` when given) and translate through the Rust step
+/// registry or the bundled JS/TS step graph.
+async fn build_bdd_plan(
+  config: &ferridriver_test::config::TestConfig,
+  js_globs: &[String],
+  extensions: &[String],
+  only_features: Option<&[std::path::PathBuf]>,
+) -> Result<ferridriver_test::model::TestPlan, String> {
+  use std::sync::Arc;
+
+  let patterns: Vec<String> = match only_features {
+    Some(paths) if !paths.is_empty() => paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+    _ => config.features.clone(),
+  };
+  let feature_set = feature::FeatureSet::discover_and_parse(&patterns, &config.test_ignore)
+    .map_err(|e| format!("feature discovery error: {e}"))?;
+  if feature_set.features.is_empty() {
+    // Not an error: one-shot runs report "no scenarios found" and exit
+    // 0 (pre-watch behavior); watch cycles simply idle until the next
+    // change.
+    eprintln!("no feature files found matching: {patterns:?}");
+    return Ok(ferridriver_test::model::TestPlan {
+      suites: Vec::new(),
+      total_tests: 0,
+      shard: None,
+    });
+  }
+  if js_globs.is_empty() && extensions.is_empty() {
+    let registry = Arc::new(registry::StepRegistry::build());
+    Ok(translate::translate_features(&feature_set, registry, config))
+  } else {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    // rolldown-bundle + tree-shake + transpile the whole step +
+    // extension graph to one module, compiled to bytecode once per
+    // plan build.
+    let bundle = js::bundle_steps_with(js_globs, extensions, &cwd)
+      .await
+      .map_err(|e| format!("step bundle error: {e}"))?;
+    Ok(js::translate_features_js(&feature_set, config, bundle, cwd))
+  }
 }

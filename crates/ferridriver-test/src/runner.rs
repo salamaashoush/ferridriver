@@ -970,10 +970,7 @@ impl TestRunner {
   ///   of changed file paths — when `Some`, the factory should only re-process those files
   ///   (e.g., re-parse only changed `.feature` files). When `None`, generate the full plan.
   /// * `watch_root` — Root directory to watch for file changes.
-  pub async fn run_watch<F>(&mut self, plan_factory: F, watch_root: std::path::PathBuf) -> i32
-  where
-    F: Fn(Option<&[std::path::PathBuf]>) -> TestPlan,
-  {
+  pub async fn run_watch(&mut self, plan_factory: WatchPlanFactory, watch_root: std::path::PathBuf) -> i32 {
     use crate::watch::FileWatcher;
 
     // Launch browser once — reuse across all watch cycles.
@@ -1058,16 +1055,14 @@ impl TestRunner {
   }
 
   /// TUI watch loop: ratatui inline viewport with status bar + key controls.
-  async fn run_watch_tui<F>(
+  async fn run_watch_tui(
     &mut self,
     tui: &mut crate::tui::WatchTui,
     tui_tx: tokio::sync::mpsc::UnboundedSender<crate::tui::TuiMessage>,
     watcher: &crate::watch::FileWatcher,
-    plan_factory: &F,
+    plan_factory: &WatchPlanFactory,
     _browser: &Arc<Browser>,
-  ) where
-    F: Fn(Option<&[std::path::PathBuf]>) -> TestPlan,
-  {
+  ) {
     use crate::interactive::WatchCommand;
 
     let mut grep_filter: Option<String> = None;
@@ -1085,7 +1080,7 @@ impl TestRunner {
     ]);
 
     // Initial run — TUI drains messages in real-time.
-    let plan = plan_factory(None);
+    let plan = plan_factory(None).await;
     if self.run_with_tui_drain(plan, tui).await {
       return; // User cancelled during initial run.
     }
@@ -1102,7 +1097,7 @@ impl TestRunner {
           let (run_all, changed_paths) = classify_changes(&all_changes);
           if !run_all && changed_paths.is_empty() { continue; }
 
-          let mut plan = build_plan_for_changes(plan_factory, run_all, &changed_paths);
+          let mut plan = build_plan_for_changes(plan_factory, run_all, &changed_paths).await;
           // Apply active filter to file-change re-runs.
           if let Some(ref pattern) = grep_filter {
             crate::discovery::filter_by_grep(&mut plan, pattern, false);
@@ -1120,11 +1115,11 @@ impl TestRunner {
             WatchCommand::RunAll => {
               grep_filter = None;
               tui.active_filter = None;
-              if self.run_with_tui_drain(plan_factory(None), tui).await { break; }
+              if self.run_with_tui_drain(plan_factory(None).await, tui).await { break; }
               tui.set_status(crate::tui::WatchStatus::Idle);
             }
             WatchCommand::RunFailed => {
-              let mut plan = plan_factory(None);
+              let mut plan = plan_factory(None).await;
               let rerun_path = self.config.output_dir.join("@rerun.txt");
               if rerun_path.exists() {
                 crate::discovery::filter_by_rerun(&mut plan, &rerun_path);
@@ -1138,7 +1133,7 @@ impl TestRunner {
               tui.set_status(crate::tui::WatchStatus::Idle);
             }
             WatchCommand::Rerun => {
-              let mut plan = plan_factory(None);
+              let mut plan = plan_factory(None).await;
               if let Some(ref pattern) = grep_filter {
                 crate::discovery::filter_by_grep(&mut plan, pattern, false);
               }
@@ -1148,7 +1143,7 @@ impl TestRunner {
             WatchCommand::FilterByName(pattern) => {
               if !pattern.is_empty() {
                 grep_filter = Some(pattern.clone());
-                let mut plan = plan_factory(None);
+                let mut plan = plan_factory(None).await;
                 crate::discovery::filter_by_grep(&mut plan, &pattern, false);
                 if self.run_with_tui_drain(plan, tui).await { break; }
               }
@@ -1161,12 +1156,9 @@ impl TestRunner {
   }
 
   /// Non-interactive watch: file changes only, no keyboard, normal terminal output.
-  async fn run_watch_headless<F>(&mut self, watcher: &crate::watch::FileWatcher, plan_factory: &F)
-  where
-    F: Fn(Option<&[std::path::PathBuf]>) -> TestPlan,
-  {
+  async fn run_watch_headless(&mut self, watcher: &crate::watch::FileWatcher, plan_factory: &WatchPlanFactory) {
     // Initial run.
-    let plan = plan_factory(None);
+    let plan = plan_factory(None).await;
     let _ = Box::pin(self.run(plan)).await;
     eprintln!("\n\x1b[2mWatching for changes (non-interactive)...\x1b[0m\n");
 
@@ -1182,7 +1174,7 @@ impl TestRunner {
 
       eprintln!("\n\x1b[2mChange detected, re-running...\x1b[0m\n");
 
-      let plan = build_plan_for_changes(plan_factory, run_all, &changed_paths);
+      let plan = build_plan_for_changes(plan_factory, run_all, &changed_paths).await;
       if plan.total_tests == 0 {
         eprintln!("No tests matched changed files.");
         continue;
@@ -1212,14 +1204,21 @@ fn classify_changes(changes: &[crate::watch::ChangeKind]) -> (bool, Vec<std::pat
   (run_all, changed_paths)
 }
 
+/// Async closure producing a fresh [`TestPlan`] for a watch cycle.
+/// `None` = build the full plan; `Some(paths)` = only re-process those
+/// files (e.g. re-parse only changed `.feature` files). Async so
+/// factories can re-bundle JS/TS step graphs per cycle.
+pub type WatchPlanFactory =
+  Box<dyn Fn(Option<Vec<std::path::PathBuf>>) -> futures::future::BoxFuture<'static, TestPlan> + Send + Sync>;
+
 /// Build a test plan, optionally filtered to changed files.
-fn build_plan_for_changes(
-  plan_factory: &dyn Fn(Option<&[std::path::PathBuf]>) -> TestPlan,
+async fn build_plan_for_changes(
+  plan_factory: &WatchPlanFactory,
   run_all: bool,
   changed_paths: &[std::path::PathBuf],
 ) -> TestPlan {
-  let changed = if run_all { None } else { Some(changed_paths) };
-  let mut plan = plan_factory(changed);
+  let changed = if run_all { None } else { Some(changed_paths.to_vec()) };
+  let mut plan = plan_factory(changed).await;
 
   // Filter plan to changed files if applicable.
   if !run_all && !changed_paths.is_empty() {
