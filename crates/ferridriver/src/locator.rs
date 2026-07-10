@@ -1462,23 +1462,31 @@ impl Locator {
           timeout,
         ));
       }
+      // Resolve frameLocator enter-frame hops each poll so a child frame
+      // that is not yet attached (or was re-attached) is picked up on a
+      // later attempt (no-op for plain selectors). A resolution failure
+      // means the parent `<iframe>` / child frame is not present: for
+      // `attached`/`visible` that is a retry, for `detached`/`hidden`
+      // the element is by definition gone.
+      let resolved = self.resolved().await;
+      let attached = match &resolved {
+        Ok((rframe, rsel)) => {
+          let inner = rframe.page_arc().inner();
+          let frame_id: Option<&str> = if rframe.is_main_frame() {
+            None
+          } else {
+            Some(rframe.id())
+          };
+          let found = selectors::query_one(inner, rsel, false, frame_id).await.is_ok();
+          selectors::cleanup_tags(inner).await;
+          found
+        },
+        Err(_) => false,
+      };
       match state {
         crate::options::WaitState::Attached => {
           // Only require DOM presence — do not consult computed style.
-          if selectors::query_one(
-            self.frame.page_arc().inner(),
-            &self.selector,
-            false,
-            if self.frame.is_main_frame() {
-              None
-            } else {
-              Some(self.frame.id())
-            },
-          )
-          .await
-          .is_ok()
-          {
-            selectors::cleanup_tags(self.frame.page_arc().inner()).await;
+          if attached {
             return Ok(());
           }
         },
@@ -1491,42 +1499,16 @@ impl Locator {
           }
         },
         crate::options::WaitState::Detached => {
-          if selectors::query_one(
-            self.frame.page_arc().inner(),
-            &self.selector,
-            false,
-            if self.frame.is_main_frame() {
-              None
-            } else {
-              Some(self.frame.id())
-            },
-          )
-          .await
-          .is_err()
-          {
+          if !attached {
             return Ok(());
           }
-          selectors::cleanup_tags(self.frame.page_arc().inner()).await;
         },
         crate::options::WaitState::Hidden => {
           // Playwright: `hidden` is satisfied by detachment OR by the
           // element being present but not visible.
-          if selectors::query_one(
-            self.frame.page_arc().inner(),
-            &self.selector,
-            false,
-            if self.frame.is_main_frame() {
-              None
-            } else {
-              Some(self.frame.id())
-            },
-          )
-          .await
-          .is_err()
-          {
+          if !attached {
             return Ok(());
           }
-          selectors::cleanup_tags(self.frame.page_arc().inner()).await;
           if let Ok(false) = self.is_visible().await {
             return Ok(());
           }
@@ -2059,19 +2041,6 @@ impl Locator {
     result
   }
 
-  /// Run a value-returning JS expression in this locator's frame.
-  /// Uses `evaluate_in_frame` for non-main frames (CDP `contextId`,
-  /// `BiDi` realm) and the no-context default for the main frame so we
-  /// avoid an extra `frame_contexts` lookup on the hot path.
-  async fn evaluate_in_frame_js(&self, js: &str) -> Result<Option<serde_json::Value>> {
-    let inner = self.frame.page_arc().inner();
-    if self.frame.is_main_frame() {
-      inner.evaluate(js).await
-    } else {
-      inner.evaluate_in_frame(js, self.frame.id()).await
-    }
-  }
-
   // ── Page / Frame access ────────────────────────────────────────────────────
 
   /// Get the page this locator belongs to.
@@ -2243,15 +2212,20 @@ impl Locator {
   ///
   /// Returns an error if the selector engine cannot be injected or the element is not found.
   pub async fn resolve(&self) -> Result<AnyElement> {
-    self.frame.page_arc().inner().ensure_engine_injected().await?;
+    // Resolve frameLocator enter-frame hops to the real child frame +
+    // trailing selector (no-op for plain selectors). Without this, an
+    // enter-frame selector queries the raw chain in the parent frame,
+    // where the engine's `enter-frame` control returns `[]` by design.
+    let (rframe, rsel) = self.resolved().await?;
+    rframe.page_arc().inner().ensure_engine_injected().await?;
     let fd = "window.__fd";
-    let sel_js = selectors::build_selone_js(&self.selector, fd, self.strict)?;
-    let frame_id: Option<&str> = if self.frame.is_main_frame() {
+    let sel_js = selectors::build_selone_js(&rsel, fd, self.strict)?;
+    let frame_id: Option<&str> = if rframe.is_main_frame() {
       None
     } else {
-      Some(self.frame.id())
+      Some(rframe.id())
     };
-    selectors::query_one_prebuilt(self.frame.page_arc().inner(), &sel_js, &self.selector, frame_id).await
+    selectors::query_one_prebuilt(rframe.page_arc().inner(), &sel_js, &rsel, frame_id).await
   }
 
   fn chain(&self, sub: &str) -> Locator {
@@ -2287,12 +2261,21 @@ impl Locator {
 
   /// Legacy: non-retrying eval for callers that handle retry themselves.
   async fn eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>> {
-    let parsed = selectors::parse(&self.selector)?;
+    // Resolve enter-frame hops so an iframe-scoped locator evaluates in
+    // its child frame (no-op for plain selectors); the raw chain would
+    // return `[]` from the engine's `enter-frame` control.
+    let (rframe, rsel) = self.resolved().await?;
+    let parsed = selectors::parse(&rsel)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    self.frame.page_arc().inner().ensure_engine_injected().await?;
+    let inner = rframe.page_arc().inner();
+    inner.ensure_engine_injected().await?;
     let fd = "window.__fd";
     let js = format!("(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return null; {js_body} }})()");
-    self.evaluate_in_frame_js(&js).await
+    if rframe.is_main_frame() {
+      inner.evaluate(&js).await
+    } else {
+      inner.evaluate_in_frame(&js, rframe.id()).await
+    }
   }
 }
 

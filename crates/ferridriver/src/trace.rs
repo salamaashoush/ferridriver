@@ -114,6 +114,9 @@ pub struct ConsoleEvent {
   pub url: String,
   pub line_number: u32,
   pub column_number: u32,
+  /// `[{ preview, value }]` per arg (the viewer's Console tab expands
+  /// these); empty when the message carried no args.
+  pub args: Vec<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -502,6 +505,7 @@ fn serialize_event(event: &TraceEvent) -> String {
       "time": c.time,
       "messageType": c.message_type,
       "text": c.text,
+      "args": c.args,
       "pageId": c.page_id,
       "location": {
         "url": c.url,
@@ -674,6 +678,7 @@ pub(crate) fn record_page_event(recorder: &Arc<TraceRecorder>, page_id: &str, ev
         url: loc.url.clone(),
         line_number: loc.line_number,
         column_number: loc.column_number,
+        args: msg.trace_args(),
       }));
     },
     PageEvent::PageError(err) => {

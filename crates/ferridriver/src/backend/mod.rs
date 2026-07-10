@@ -151,7 +151,7 @@ pub enum SameSite {
 }
 
 impl SameSite {
-  /// Convert to a CDP/WebKit string.
+  /// Convert to a CDP/`WebKit` string.
   #[must_use]
   pub fn as_str(self) -> &'static str {
     match self {
@@ -590,7 +590,7 @@ impl AnyBrowser {
   ///
   /// # Errors
   ///
-  /// Returns [`crate::error::FerriError::Unsupported`] on WebKit/BiDi, or
+  /// Returns [`crate::error::FerriError::Unsupported`] on `WebKit`/`BiDi`, or
   /// the protocol error if the attach fails.
   pub async fn new_browser_cdp_session(&self) -> Result<crate::cdp_session::CdpSession> {
     use crate::cdp_session::{CdpSession, SessionTransportSource};
@@ -985,9 +985,10 @@ impl AnyPage {
   }
 
   /// The content-frame id for an `<iframe>`/`<frame>` element given its
-  /// remote-object id. Deterministic on CDP (`DOM.describeNode`);
-  /// `None` on BiDi/WebKit (no equivalent — callers fall back to the
-  /// frame-cache heuristic) or when the element hosts no frame.
+  /// remote-object id. Deterministic on CDP and `WebKit`
+  /// (`DOM.describeNode` → `contentFrameId`); `None` on `BiDi` (its
+  /// deterministic path lives on the element handle via
+  /// `content_frame_context`) or when the element hosts no frame.
   pub async fn content_frame_id(&self, object_id: &str) -> Result<Option<String>> {
     match self {
       AnyPage::CdpPipe(p) => p.content_frame_id(object_id).await,
@@ -1403,7 +1404,7 @@ impl AnyPage {
   ///
   /// # Errors
   ///
-  /// Returns [`crate::error::FerriError::Unsupported`] on WebKit/BiDi, or
+  /// Returns [`crate::error::FerriError::Unsupported`] on `WebKit`/`BiDi`, or
   /// the protocol error if the attach fails.
   pub async fn new_cdp_session(&self) -> Result<crate::cdp_session::CdpSession> {
     use crate::cdp_session::{CdpSession, SessionTransportSource};

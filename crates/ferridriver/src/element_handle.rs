@@ -818,23 +818,28 @@ impl ElementHandle {
   /// Returns the child [`crate::frame::Frame`] hosted inside this
   /// element when it is an `<iframe>` / `<frame>`; `None` otherwise.
   ///
-  /// The implementation probes `el.tagName` server-side to decide
-  /// whether to resolve a child frame. Frame resolution for the
-  /// iframe content uses the frame cache on [`crate::page::Page`]
-  /// keyed by the iframe's `name` / `id` / `src` — a best-effort
-  /// match that covers the common case of named iframes. Returns
-  /// `None` for inline iframes without any matching key.
+  /// Resolution is deterministic on every backend: CDP and `WebKit` map
+  /// the element to its `contentFrameId` via `DOM.describeNode`, `BiDi`
+  /// reads the `contentWindow`'s browsing-context id. The frame-cache
+  /// name/`id`/`src` heuristic remains only as a last-resort fallback
+  /// (a backend that ever fails to describe the node), covering unnamed
+  /// / `srcdoc` / `data:` iframes through the protocol paths above.
   ///
   /// # Errors
   ///
   /// Forwards backend error on protocol failure / page-side exception.
   pub async fn content_frame(&self) -> Result<Option<crate::frame::Frame>> {
     self.ensure_live()?;
-    // Deterministic first: CDP `DOM.describeNode` maps the iframe
-    // element to its real content-frame id (robust for unnamed /
-    // `srcdoc` / churned iframes). Backends without it return `None`
-    // and we fall through to the name/url cache heuristic below.
-    if let Some(crate::js_handle::HandleRemote::Cdp(obj)) = self.js_handle.remote()
+    // Deterministic first: CDP and WebKit `DOM.describeNode` map the
+    // iframe element to its real content-frame id (robust for unnamed
+    // / `srcdoc` / `data:` / churned iframes). Backends without it
+    // return `None` and we fall through to the name/url cache
+    // heuristic below.
+    let describe_obj = match self.js_handle.remote() {
+      Some(crate::js_handle::HandleRemote::Cdp(obj) | crate::js_handle::HandleRemote::WebKit(obj)) => Some(obj),
+      _ => None,
+    };
+    if let Some(obj) = describe_obj
       && let Ok(Some(fid)) = self.page().inner().content_frame_id(obj).await
     {
       return Ok(Some(crate::frame::Frame::new(

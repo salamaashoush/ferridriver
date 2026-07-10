@@ -337,7 +337,46 @@ pub fn test_script_locator_napi_parity(c: &mut McpClient) {
   );
 }
 
+// frameLocator enter-frame hops must resolve through the READ / WAIT
+// paths, not just the action funnel. `click` always resolved (retry
+// macro), but `waitFor` / `isVisible` / `isAttached` / `innerText`
+// queried the raw `iframe >> internal:control=enter-frame >> #c` chain
+// in the parent frame — the engine's enter-frame control returns `[]`
+// by design, so they timed out / reported false. Exercises the child
+// frame via srcdoc AND a data: URL (both have no name/url the frame
+// cache heuristic could match — the deterministic content-frame path
+// is the only thing that resolves them).
+pub fn test_script_frame_locator_enter_frame_reads(c: &mut McpClient) {
+  for (label, html) in [
+    ("srcdoc", "<iframe srcdoc='<button id=c>child</button>'></iframe>"),
+    (
+      "dataurl",
+      "<iframe src='data:text/html,<button id=c>child</button>'></iframe>",
+    ),
+  ] {
+    c.nav(html);
+    let v = c.script_value(
+      "const inner = page.frameLocator('iframe').locator('#c'); \
+       await inner.waitFor({ timeout: 10000 }); \
+       return { \
+         visible: await inner.isVisible(), \
+         attached: await inner.isAttached(), \
+         text: await inner.innerText(), \
+         count: await inner.count(), \
+       };",
+    );
+    assert_eq!(v["visible"], json!(true), "{label}: enter-frame isVisible: {v}");
+    assert_eq!(v["attached"], json!(true), "{label}: enter-frame isAttached: {v}");
+    assert_eq!(v["text"], json!("child"), "{label}: enter-frame innerText: {v}");
+    assert_eq!(v["count"], json!(1), "{label}: enter-frame count: {v}");
+  }
+}
+
 pub fn register(set: &mut crate::TestSet<'_>) {
+  set.run(
+    "backends_support::script_locators::test_script_frame_locator_enter_frame_reads",
+    test_script_frame_locator_enter_frame_reads,
+  );
   set.run(
     "backends_support::script_locators::test_script_frame_sync_accessors",
     test_script_frame_sync_accessors,

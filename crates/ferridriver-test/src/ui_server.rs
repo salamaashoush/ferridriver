@@ -28,9 +28,9 @@ use crate::reporter::{ReporterEvent, Subscription};
 
 const INDEX_HTML: &str = include_str!("ui_assets/index.html");
 
-/// Vendored Playwright trace-viewer static app (playwright-core 1.58.2,
-/// Apache-2.0 — LICENSE ships inside the archive). Embedded so "Open in
-/// trace viewer" works fully offline; unpacked into memory on first use.
+/// Vendored Playwright trace-viewer static app (playwright-core 1.61.1,
+/// Apache-2.0 — LICENSE ships inside the archive). Embedded so the
+/// trace viewer works fully offline; unpacked into memory on first use.
 const TRACE_VIEWER_ZIP: &[u8] = include_bytes!("ui_assets/trace_viewer.zip");
 
 static TRACE_VIEWER_ASSETS: std::sync::LazyLock<rustc_hash::FxHashMap<String, Vec<u8>>> =
