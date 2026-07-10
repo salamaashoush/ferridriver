@@ -387,24 +387,25 @@ impl StepObserver for TestInfoObserver {
       let step_title = format!("{}{}", event.step.keyword, event.text);
       self
         .test_info
-        .record_step(
-          step_title,
-          StepCategory::TestStep,
-          match event.result.status {
+        .record_step(ferridriver_test::model::RecordedStep {
+          title: step_title,
+          category: StepCategory::TestStep,
+          status: match event.result.status {
             StepStatus::Passed => ferridriver_test::model::StepStatus::Passed,
             StepStatus::Failed => ferridriver_test::model::StepStatus::Failed,
             StepStatus::Skipped => ferridriver_test::model::StepStatus::Skipped,
             StepStatus::Pending => ferridriver_test::model::StepStatus::Pending,
             StepStatus::Undefined => ferridriver_test::model::StepStatus::Pending,
           },
-          event.result.duration,
-          event.result.error.clone(),
-          Some(serde_json::json!({
+          duration: event.result.duration,
+          ended_ago: Duration::ZERO,
+          error: event.result.error.clone(),
+          metadata: Some(serde_json::json!({
             "bdd_keyword": event.step.keyword.trim(),
             "bdd_text": event.text,
             "bdd_line": event.step.line,
           })),
-        )
+        })
         .await;
     })
   }

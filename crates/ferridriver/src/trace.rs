@@ -79,6 +79,9 @@ pub struct ActionEvent {
   pub params: serde_json::Value,
   pub error: Option<String>,
   pub page_id: Option<String>,
+  /// Call id of the enclosing action (nests actions in the viewer's
+  /// tree, e.g. test steps under their parent step).
+  pub parent_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -330,6 +333,7 @@ fn serialize_event(event: &TraceEvent) -> String {
         "message": message,
       })),
       "pageId": a.page_id,
+      "parentId": a.parent_id,
     })
     .to_string(),
     TraceEvent::Console(c) => serde_json::json!({
@@ -482,12 +486,33 @@ pub struct ActionSpan {
   title: String,
   params: serde_json::Value,
   page_id: Option<String>,
+  parent_id: Option<String>,
 }
 
 impl ActionSpan {
+  /// The span's `call@N` id — pass as `parent_id` of child spans to
+  /// nest them under this action in the viewer.
+  #[must_use]
+  pub fn call_id(&self) -> &str {
+    &self.call_id
+  }
+
   /// Emit the action event, recording `error` when the action failed.
   pub fn finish(self, error: Option<&FerriError>) {
-    let end_time = self.recorder.monotonic_ms();
+    self.finish_message(error.map(std::string::ToString::to_string));
+  }
+
+  /// Emit the action event with an already-stringified error (spans
+  /// opened by external runners carry plain-text failures).
+  pub fn finish_message(self, error: Option<String>) {
+    self.finish_message_ended_ago(error, 0.0);
+  }
+
+  /// Emit the action event with the end time backdated by
+  /// `ended_ms_ago` (steps recorded after the fact, e.g. a scenario
+  /// runner that reports all step results at scenario end).
+  pub fn finish_message_ended_ago(self, error: Option<String>, ended_ms_ago: f64) {
+    let end_time = (self.recorder.monotonic_ms() - ended_ms_ago).max(self.start_time);
     self.recorder.push_event(TraceEvent::Action(ActionEvent {
       call_id: self.call_id,
       start_time: self.start_time,
@@ -496,8 +521,9 @@ impl ActionSpan {
       method: self.method,
       title: self.title,
       params: self.params,
-      error: error.map(std::string::ToString::to_string),
+      error,
       page_id: self.page_id,
+      parent_id: self.parent_id,
     }));
   }
 }
@@ -525,6 +551,39 @@ pub(crate) fn begin_action(
     title,
     params,
     page_id,
+    parent_id: None,
+  })
+}
+
+/// Open a titled action span on the active recorder for `composite`.
+/// Entry point for external runners injecting non-protocol actions
+/// (test-runner step boundaries) into a trace: the runner supplies the
+/// display title, an optional parent call id for nesting, and a
+/// `backdate_ms` for spans recorded after the fact. Returns `None`
+/// when the composite is not being traced.
+#[must_use]
+pub fn begin_custom_action(
+  composite: &str,
+  class: &'static str,
+  method: &str,
+  title: String,
+  params: serde_json::Value,
+  parent_id: Option<String>,
+  backdate_ms: f64,
+) -> Option<ActionSpan> {
+  let recorder = recorder_for(composite)?;
+  let start_time = (recorder.monotonic_ms() - backdate_ms).max(0.0);
+  let call_id = recorder.next_call_id();
+  Some(ActionSpan {
+    recorder,
+    call_id,
+    start_time,
+    class,
+    method: method.to_string(),
+    title,
+    params,
+    page_id: None,
+    parent_id,
   })
 }
 
@@ -554,6 +613,7 @@ mod tests {
       params: serde_json::json!({ "selector": "#a" }),
       error: None,
       page_id: Some("page@1".into()),
+      parent_id: None,
     }));
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid json");
     assert_eq!(parsed["type"].as_str(), Some("action"));
@@ -577,6 +637,7 @@ mod tests {
       params: serde_json::json!({ "url": "about:blank" }),
       error: None,
       page_id: None,
+      parent_id: None,
     }));
     recorder.push_resource(TraceResource {
       name: "page@1-1.jpeg".into(),

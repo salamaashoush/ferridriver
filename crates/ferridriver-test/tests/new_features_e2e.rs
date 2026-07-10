@@ -676,6 +676,8 @@ fn test_snapshot_create_and_match() {
     start_time: std::time::Instant::now(),
     event_bus: None,
     annotations: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    trace_composite: Arc::new(std::sync::Mutex::new(None)),
+    trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
   };
 
   // First call: creates snapshot file.

@@ -47,6 +47,16 @@ struct TestBrowserResources {
   effective: EffectiveContextConfig,
   output_dir: std::path::PathBuf,
   state: Mutex<TestBrowserState>,
+  trace: Option<TraceSpec>,
+}
+
+/// Per-test trace recording request: tracing starts the moment the
+/// test's context materializes (contexts are created lazily by the
+/// page/context fixtures) and publishes the composite key so
+/// `TestInfo` step spans and the worker's stop path find the recorder.
+struct TraceSpec {
+  title: String,
+  composite: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 fn is_retryable_bidi_page_error(err: &ferridriver::FerriError) -> bool {
@@ -93,12 +103,59 @@ impl TestBrowserResources {
     handle: Arc<crate::runner::BrowserHandle>,
     effective: EffectiveContextConfig,
     output_dir: std::path::PathBuf,
+    trace: Option<TraceSpec>,
   ) -> Self {
     Self {
       handle,
       effective,
       output_dir,
       state: Mutex::new(TestBrowserState::Empty),
+      trace,
+    }
+  }
+
+  /// Start the per-test trace on a freshly created context.
+  async fn start_tracing(&self, ctx: &ferridriver::ContextRef) {
+    let Some(spec) = &self.trace else { return };
+    let options = ferridriver::trace::TracingStartOptions {
+      name: None,
+      title: Some(spec.title.clone()),
+      screenshots: true,
+      snapshots: true,
+      sources: false,
+    };
+    match ctx.tracing().start(options).await {
+      Ok(()) => {
+        *spec.composite.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ctx.composite());
+      },
+      Err(e) => tracing::warn!(target: "ferridriver::worker", "trace start failed: {e}"),
+    }
+  }
+
+  /// Discard a live trace on a context that is being torn down without
+  /// the worker's explicit stop (page-creation failure, BiDi retry).
+  async fn discard_tracing(&self, ctx: &ferridriver::ContextRef) {
+    let Some(spec) = &self.trace else { return };
+    let started = spec
+      .composite
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .take()
+      .is_some();
+    if started {
+      let _ = ctx
+        .tracing()
+        .stop(ferridriver::trace::TracingStopOptions::default())
+        .await;
+    }
+  }
+
+  /// The test's live context, if one has been created. Never creates.
+  async fn current_context(&self) -> Option<Arc<ferridriver::ContextRef>> {
+    let state = self.state.lock().await;
+    match &*state {
+      TestBrowserState::Context(ctx) | TestBrowserState::Page { ctx, .. } => Some(Arc::clone(ctx)),
+      TestBrowserState::Empty | TestBrowserState::Failed(_) => None,
     }
   }
 
@@ -111,6 +168,7 @@ impl TestBrowserResources {
       TestBrowserState::Empty => {
         let browser = self.handle.get().await?;
         let ctx = Arc::new(new_test_context(&browser).await?);
+        self.start_tracing(&ctx).await;
         *state = TestBrowserState::Context(Arc::clone(&ctx));
         Ok(ctx)
       },
@@ -139,6 +197,7 @@ impl TestBrowserResources {
         let browser = self.handle.get().await?;
         let backend = browser.backend_kind();
         let ctx = Arc::new(new_test_context(&browser).await?);
+        self.start_tracing(&ctx).await;
         match create_ready_page(&ctx, backend).await {
           Ok(page) => {
             apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
@@ -150,8 +209,10 @@ impl TestBrowserResources {
           },
           Err(err) => {
             if is_retryable_bidi_page_error(&err) {
+              self.discard_tracing(&ctx).await;
               let _ = ctx.close().await;
               let ctx = Arc::new(new_test_context(&browser).await?);
+              self.start_tracing(&ctx).await;
               let page = create_ready_page(&ctx, backend).await?;
               apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
               *state = TestBrowserState::Page {
@@ -172,9 +233,11 @@ impl TestBrowserResources {
     let mut state = self.state.lock().await;
     match std::mem::replace(&mut *state, TestBrowserState::Empty) {
       TestBrowserState::Context(ctx) => {
+        self.discard_tracing(&ctx).await;
         close_test_context(&ctx).await;
       },
       TestBrowserState::Page { ctx, page } => {
+        self.discard_tracing(&ctx).await;
         // When a backend shares the persistent default context the
         // page is the only per-test resource we own — closing the
         // context itself would tear down the persistent default and
@@ -667,6 +730,8 @@ impl Worker {
       start_time: Instant::now(),
       event_bus: self.event_bus.clone(),
       annotations: Arc::new(Mutex::new(Vec::new())),
+      trace_composite: Arc::new(std::sync::Mutex::new(None)),
+      trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
     })
   }
 
@@ -889,10 +954,14 @@ impl Worker {
     // ── beforeAll (once per suite on this worker) ──
     let suite_state = active_suites.entry(suite_key.clone()).or_insert_with(|| {
       let suite_test_info = self.create_suite_test_info(&suite_key);
+      // Suite-hook contexts are not traced: per-test traces belong to
+      // tests, and beforeAll/afterAll containers have no outcome to
+      // attach one to.
       let suite_resources = Arc::new(TestBrowserResources::new(
         Arc::clone(browser),
         build_suite_effective_context_config(&self.config),
         suite_test_info.output_dir.clone(),
+        None,
       ));
       let suite_pool = custom_pool.child_with_defs(build_suite_fixture_defs(suite_resources), FixtureScope::Worker);
       suite_pool.inject("test_info", suite_test_info);
@@ -1075,6 +1144,7 @@ impl Worker {
 
     let start = Instant::now();
     let effective_config = build_effective_context_config(&self.config, test);
+    let trace_composite: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
 
     // Create TestInfo for this test execution.
     let test_info = Arc::new(TestInfo {
@@ -1122,11 +1192,18 @@ impl Worker {
       start_time: start,
       event_bus: self.event_bus.clone(),
       annotations: Arc::new(Mutex::new(Vec::new())),
+      trace_composite: Arc::clone(&trace_composite),
+      trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+    });
+    let trace_spec = self.config.trace.should_record(attempt, false).then(|| TraceSpec {
+      title: test_id.full_name(),
+      composite: Arc::clone(&trace_composite),
     });
     let resources = Arc::new(TestBrowserResources::new(
       Arc::clone(browser),
       effective_config,
       test_info.output_dir.clone(),
+      trace_spec,
     ));
     let test_pool = custom_pool.child_with_defs(build_test_fixture_defs(Arc::clone(&resources)), FixtureScope::Test);
     test_pool.inject("test_info", Arc::clone(&test_info));
@@ -1313,6 +1390,43 @@ impl Worker {
       },
       _ => None,
     };
+    // Stop the per-test trace while the context is still alive: export
+    // to disk when the mode retains it, discard otherwise. Retention
+    // keys off the RAW body result (same signal as screenshot-on-failure
+    // and buffered video): an expected-failure test that fails as
+    // expected still retains its trace under retain-on-failure — the
+    // trace shows the deliberate failure.
+    let trace_path = {
+      let started = trace_composite
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .is_some();
+      match (started, resources.current_context().await) {
+        (true, Some(ctx)) => {
+          let path = self.config.trace.should_write(attempt, test_failed).then(|| {
+            let _ = std::fs::create_dir_all(&test_info.output_dir);
+            test_info.output_dir.join(format!(
+              "{}-attempt{}.trace.zip",
+              sanitize_filename(&test_id.name),
+              attempt
+            ))
+          });
+          match ctx
+            .tracing()
+            .stop(ferridriver::trace::TracingStopOptions { path: path.clone() })
+            .await
+          {
+            Ok(()) => path,
+            Err(e) => {
+              tracing::warn!(target: "ferridriver::worker", "trace stop failed: {e}");
+              None
+            },
+          }
+        },
+        _ => None,
+      }
+    };
     resources.close().await;
 
     let duration = start.elapsed();
@@ -1321,10 +1435,29 @@ impl Worker {
 
     let mut attachments = Vec::new();
     if let Some(ref png) = screenshot {
+      let _ = std::fs::create_dir_all(&test_info.output_dir);
+      let screenshot_path = test_info.output_dir.join(format!("test-failed-attempt{attempt}.png"));
+      match std::fs::write(&screenshot_path, png) {
+        Ok(()) => attachments.push(Attachment {
+          name: "screenshot-on-failure".into(),
+          content_type: "image/png".into(),
+          body: AttachmentBody::Path(screenshot_path),
+        }),
+        Err(e) => {
+          tracing::warn!(target: "ferridriver::worker", "screenshot write failed: {e}");
+          attachments.push(Attachment {
+            name: "screenshot-on-failure".into(),
+            content_type: "image/png".into(),
+            body: AttachmentBody::Bytes(png.clone()),
+          });
+        },
+      }
+    }
+    if let Some(path) = trace_path {
       attachments.push(Attachment {
-        name: "screenshot-on-failure".into(),
-        content_type: "image/png".into(),
-        body: AttachmentBody::Bytes(png.clone()),
+        name: "trace".into(),
+        content_type: "application/zip".into(),
+        body: AttachmentBody::Path(path),
       });
     }
 
@@ -1444,43 +1577,6 @@ impl Worker {
     let steps = test_info.steps.lock().await.clone();
     let info_attachments = test_info.attachments.lock().await.clone();
     attachments.extend(info_attachments);
-
-    // ── Trace recording ──
-    // Uses should_write() to skip entirely for RetainOnFailure + passed tests
-    // (no wasted ZIP write + delete). Serialization happens in-memory (borrows
-    // steps, zero-copy for titles/errors), file I/O on spawn_blocking.
-    let trace_mode = self.config.trace;
-    let test_failed = status == TestStatus::Failed || status == TestStatus::TimedOut;
-    if trace_mode.should_write(attempt, test_failed) {
-      let mut recorder = crate::tracing::TraceRecorder::for_steps(&self.config.browser.browser, &steps);
-      recorder.record_steps(&steps);
-      // Serialize to in-memory ZIP bytes (fast, no file I/O).
-      match recorder.into_zip_bytes() {
-        Ok(zip_bytes) => {
-          let trace_path = test_info.output_dir.join(format!(
-            "{}-attempt{}.trace.zip",
-            sanitize_filename(&test_id.name),
-            attempt
-          ));
-          // Offload file write to blocking thread so the async worker isn't stalled.
-          let write_path = trace_path.clone();
-          let write_result =
-            tokio::task::spawn_blocking(move || crate::tracing::write_trace_file(&write_path, &zip_bytes)).await;
-          match write_result {
-            Ok(Ok(())) => {
-              attachments.push(Attachment {
-                name: "trace".into(),
-                content_type: "application/zip".into(),
-                body: AttachmentBody::Path(trace_path),
-              });
-            },
-            Ok(Err(e)) => tracing::warn!(target: "ferridriver::worker", "trace write failed: {e}"),
-            Err(e) => tracing::warn!(target: "ferridriver::worker", "trace task panicked: {e}"),
-          }
-        },
-        Err(e) => tracing::warn!(target: "ferridriver::worker", "trace serialize failed: {e}"),
-      }
-    }
 
     // Attach or clean up video recording.
     // For buffered mode, video_path is only Some when the test failed (already filtered).

@@ -158,9 +158,31 @@ async fn fetch_and_validate_trace(host: &str, url_path: &str) {
     .expect("trace.trace entry")
     .read_to_string(&mut trace_text)
     .expect("read trace.trace");
-  let first: serde_json::Value = serde_json::from_str(trace_text.lines().next().expect("first line")).expect("json");
+  archive.by_name("trace.network").expect("trace.network entry");
+  let lines: Vec<serde_json::Value> = trace_text
+    .lines()
+    .map(|l| serde_json::from_str(l).expect("json trace line"))
+    .collect();
+  let first = &lines[0];
   assert_eq!(first["type"].as_str(), Some("context-options"), "first line: {first}");
   assert_eq!(first["version"].as_u64(), Some(8), "first line: {first}");
+
+  // The trace is recorded live by the library recorder: the BDD step
+  // boundary and the protocol-level goto must both appear as actions
+  // with a coherent timeline.
+  let actions: Vec<&serde_json::Value> = lines.iter().filter(|l| l["type"] == "action").collect();
+  let step_action = actions
+    .iter()
+    .find(|a| a["title"].as_str() == Some("Given a blank ui page"))
+    .unwrap_or_else(|| panic!("step action in trace: {actions:?}"));
+  assert!(
+    step_action["endTime"].as_f64().unwrap_or(0.0) >= step_action["startTime"].as_f64().unwrap_or(f64::MAX),
+    "step span times ordered: {step_action}"
+  );
+  assert!(
+    actions.iter().any(|a| a["method"].as_str() == Some("goto")),
+    "protocol goto action in trace: {actions:?}"
+  );
 }
 
 #[tokio::test(flavor = "multi_thread")]

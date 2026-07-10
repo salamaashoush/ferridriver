@@ -413,6 +413,13 @@ pub struct TestInfo {
   pub event_bus: Option<EventBus>,
   /// Runtime annotations added via `test_info.annotate()`.
   pub annotations: Arc<Mutex<Vec<TestAnnotation>>>,
+  /// Composite session key of the live per-test trace recorder, set by
+  /// the worker once tracing starts on the test's context. Steps opened
+  /// while this is `Some` are mirrored into the trace as action events.
+  pub trace_composite: Arc<std::sync::Mutex<Option<String>>>,
+  /// step_id -> trace call id, so child steps nest under their parent
+  /// in the trace viewer's action tree.
+  pub trace_step_calls: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, String>>>,
 }
 
 impl TestInfo {
@@ -448,6 +455,8 @@ impl TestInfo {
       start_time: Instant::now(),
       event_bus: None,
       annotations: Arc::new(Mutex::new(Vec::new())),
+      trace_composite: Arc::new(std::sync::Mutex::new(None)),
+      trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
     }
   }
 
@@ -525,6 +534,7 @@ impl TestInfo {
       )));
     }
 
+    let trace_span = self.open_step_span(&step_id, &title, &category, None);
     StepHandle {
       step_id,
       test_id: self.test_id.clone(),
@@ -535,6 +545,7 @@ impl TestInfo {
       metadata: None,
       event_bus: self.event_bus.clone(),
       steps: Arc::clone(&self.steps),
+      trace_span,
     }
   }
 
@@ -561,6 +572,7 @@ impl TestInfo {
       )));
     }
 
+    let trace_span = self.open_step_span(&step_id, &title, &category, Some(parent_step_id));
     StepHandle {
       step_id,
       test_id: self.test_id.clone(),
@@ -571,21 +583,22 @@ impl TestInfo {
       metadata: None,
       event_bus: self.event_bus.clone(),
       steps: Arc::clone(&self.steps),
+      trace_span,
     }
   }
 
   /// Record a step that already executed elsewhere but still needs to flow
   /// through reporter events and the stored step tree.
-  pub async fn record_step(
-    &self,
-    title: impl Into<String>,
-    category: StepCategory,
-    status: StepStatus,
-    duration: Duration,
-    error: Option<String>,
-    metadata: Option<serde_json::Value>,
-  ) {
-    let title = title.into();
+  pub async fn record_step(&self, step: RecordedStep) {
+    let RecordedStep {
+      title,
+      category,
+      status,
+      duration,
+      ended_ago,
+      error,
+      metadata,
+    } = step;
     let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
 
     if let Some(bus) = &self.event_bus {
@@ -611,6 +624,10 @@ impl TestInfo {
       )));
     }
 
+    if let Some(span) = self.open_step_span_backdated(&step_id, &title, &category, None, ended_ago + duration) {
+      span.finish_message_ended_ago(error.clone(), ended_ago.as_secs_f64() * 1000.0);
+    }
+
     self.steps.lock().await.push(TestStep {
       step_id,
       title,
@@ -624,6 +641,80 @@ impl TestInfo {
       steps: Vec::new(),
     });
   }
+
+  /// Mirror a starting step into the active per-test trace as an
+  /// action span. `None` when the test's context is not being traced.
+  fn open_step_span(
+    &self,
+    step_id: &str,
+    title: &str,
+    category: &StepCategory,
+    parent_step_id: Option<&str>,
+  ) -> Option<ferridriver::trace::ActionSpan> {
+    self.open_step_span_backdated(step_id, title, category, parent_step_id, Duration::ZERO)
+  }
+
+  fn open_step_span_backdated(
+    &self,
+    step_id: &str,
+    title: &str,
+    category: &StepCategory,
+    parent_step_id: Option<&str>,
+    backdate: Duration,
+  ) -> Option<ferridriver::trace::ActionSpan> {
+    let composite = self
+      .trace_composite
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()?;
+    let parent_call = parent_step_id.and_then(|parent| {
+      self
+        .trace_step_calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(parent)
+        .cloned()
+    });
+    let span = ferridriver::trace::begin_custom_action(
+      &composite,
+      "Test",
+      trace_method_for_category(category),
+      title.to_string(),
+      serde_json::json!({}),
+      parent_call,
+      backdate.as_secs_f64() * 1000.0,
+    )?;
+    self
+      .trace_step_calls
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert(step_id.to_string(), span.call_id().to_string());
+    Some(span)
+  }
+}
+
+/// Trace `action.method` for a step category (the viewer's fallback
+/// apiName is `class.method`; the explicit title wins for display).
+fn trace_method_for_category(category: &StepCategory) -> &'static str {
+  match category {
+    StepCategory::TestStep | StepCategory::PwApi => "step",
+    StepCategory::Expect => "expect",
+    StepCategory::Fixture => "fixture",
+    StepCategory::Hook => "hook",
+  }
+}
+
+/// An already-executed step handed to [`TestInfo::record_step`].
+pub struct RecordedStep {
+  pub title: String,
+  pub category: StepCategory,
+  pub status: StepStatus,
+  pub duration: Duration,
+  /// How long ago the step finished (zero when reported at its real
+  /// end); anchors the step's mirrored trace span on the timeline.
+  pub ended_ago: Duration,
+  pub error: Option<String>,
+  pub metadata: Option<serde_json::Value>,
 }
 
 /// Global step ID counter for unique step identification.
@@ -645,6 +736,8 @@ pub struct StepHandle {
   pub metadata: Option<serde_json::Value>,
   event_bus: Option<EventBus>,
   steps: Arc<Mutex<Vec<TestStep>>>,
+  /// Mirrored trace action, open while the step runs.
+  trace_span: Option<ferridriver::trace::ActionSpan>,
 }
 
 impl StepHandle {
@@ -656,6 +749,9 @@ impl StepHandle {
     } else {
       StepStatus::Passed
     };
+    if let Some(span) = self.trace_span {
+      span.finish_message(error.clone());
+    }
 
     // Emit real-time event.
     if let Some(bus) = &self.event_bus {
@@ -700,6 +796,9 @@ impl StepHandle {
 
   async fn finish_with_status(self, status: StepStatus, error: Option<String>) {
     let duration = self.start.elapsed();
+    if let Some(span) = self.trace_span {
+      span.finish_message(error.clone());
+    }
 
     if let Some(bus) = &self.event_bus {
       bus.emit(crate::reporter::ReporterEvent::StepFinished(Box::new(

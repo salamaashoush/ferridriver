@@ -670,7 +670,11 @@ async fn worker_session(
     .cloned()
 }
 
-async fn record_step(test_info: &TestInfo, s: &JsStepResult) {
+/// `ended_ago` — how long ago this step finished. Step results arrive
+/// in a batch at scenario end, so step `i`'s end sits the sum of the
+/// later steps' durations before "now" (contiguous-execution
+/// approximation; anchors the mirrored trace spans on the timeline).
+async fn record_step(test_info: &TestInfo, s: &JsStepResult, ended_ago: std::time::Duration) {
   use ferridriver_test::model::StepStatus as S;
   let title = format!("{}{}", s.keyword, s.text);
   let (status, error) = match &s.status {
@@ -686,7 +690,15 @@ async fn record_step(test_info: &TestInfo, s: &JsStepResult) {
     "bdd_line": s.line,
   });
   test_info
-    .record_step(title, StepCategory::TestStep, status, s.duration, error, Some(meta))
+    .record_step(ferridriver_test::model::RecordedStep {
+      title,
+      category: StepCategory::TestStep,
+      status,
+      duration: s.duration,
+      ended_ago,
+      error,
+      metadata: Some(meta),
+    })
     .await;
 }
 
@@ -785,8 +797,11 @@ pub fn translate_features_js(
 
           let result = session.run_scenario(&scenario, &mut world).await;
           forward_attachments(&test_info, session.drain_attachments().await).await;
+          let total: std::time::Duration = result.steps.iter().map(|s| s.duration).sum();
+          let mut consumed = std::time::Duration::ZERO;
           for s in &result.steps {
-            record_step(&test_info, s).await;
+            consumed += s.duration;
+            record_step(&test_info, s, total.saturating_sub(consumed)).await;
           }
           if result.passed {
             return Ok(());
