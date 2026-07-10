@@ -1,6 +1,6 @@
 //! `Clock` — fake-time control (`context.clock` / `page.clock`).
 //!
-//! Playwright: `Clock` lives on the BrowserContext (`page.clock` is the
+//! Playwright: `Clock` lives on the `BrowserContext` (`page.clock` is the
 //! same object, `client/page.ts:137`) with seven methods —
 //! `install`, `fastForward`, `pauseAt`, `resume`, `runFor`,
 //! `setFixedTime`, `setSystemTime` (`types.d.ts:20004`). Every method
@@ -240,7 +240,7 @@ fn now_epoch_ms() -> f64 {
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap_or_default();
   // f64 keeps millisecond precision for dates well past year 275760.
-  now.as_millis() as f64
+  now.as_secs_f64() * 1000.0
 }
 
 /// `server/clock.ts::parseTicks` — number passes through (ms); a string
@@ -393,6 +393,8 @@ fn parse_iso_date_ms(text: &str) -> Option<f64> {
   }
   let days = days_from_civil(year, month, day);
   let secs = days * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second);
+  // Civil-date seconds stay far below 2^53 — exact in f64.
+  #[allow(clippy::cast_precision_loss)]
   let utc_ms = secs as f64 * 1000.0 + millis - (offset_minutes as f64) * 60_000.0;
   Some(utc_ms)
 }

@@ -1184,6 +1184,211 @@ impl TestRunner {
       eprintln!("\n\x1b[2mWatching for changes (non-interactive)...\x1b[0m\n");
     }
   }
+
+  /// Run in UI mode: a localhost web app (`ferridriver bdd --ui`) that
+  /// lists scenarios, streams live results over a websocket, and re-runs
+  /// on file changes or UI commands.
+  ///
+  /// Same skeleton as [`Self::run_watch`]: the browser launches once and
+  /// is reused across cycles. Traces are forced on when disabled so every
+  /// test produces a trace attachment for the viewer link. No tests run
+  /// until a file changes or a client sends a run command.
+  pub async fn run_ui(
+    &mut self,
+    plan_factory: WatchPlanFactory,
+    watch_root: std::path::PathBuf,
+    port: Option<u16>,
+  ) -> i32 {
+    use crate::ui_server::{UiCommand, UiServer};
+    use crate::watch::FileWatcher;
+
+    if self.config.trace == crate::tracing::TraceMode::Off {
+      Arc::make_mut(&mut self.config).trace = crate::tracing::TraceMode::On;
+    }
+
+    let server = match UiServer::start(self.config.output_dir.clone(), port).await {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("Failed to start UI server: {e}");
+        return 1;
+      },
+    };
+    let UiServer {
+      addr,
+      state,
+      mut commands,
+    } = server;
+    println!("\n  ferridriver UI mode\n\n  http://{addr}\n");
+
+    // Launch browser once — reuse across all UI-triggered runs.
+    let launch_plan = build_launch_plan(&self.config.browser);
+    let browser = match launch_with_plan(launch_plan).await {
+      Ok(b) => Arc::new(b),
+      Err(e) => {
+        eprintln!("Failed to launch browser: {e}");
+        return 1;
+      },
+    };
+    self.shared_browser = Some(Arc::clone(&browser));
+
+    let watcher = match FileWatcher::new(&watch_root, &self.config.test_match, &self.config.test_ignore) {
+      Ok(w) => w,
+      Err(e) => {
+        eprintln!("Failed to start file watcher: {e}");
+        return 1;
+      },
+    };
+
+    // Initial plan populates the sidebar; nothing runs until requested.
+    let plan = plan_factory(None).await;
+    state.publish_test_list(&plan);
+
+    // Commands that arrive mid-run are buffered here and processed in
+    // order once the current run finishes (Stop is consumed by the run
+    // itself and cancels it).
+    let mut queued: std::collections::VecDeque<UiCommand> = std::collections::VecDeque::new();
+
+    loop {
+      if let Some(cmd) = queued.pop_front() {
+        if let Some(plan) = self.plan_for_ui_command(&plan_factory, cmd, &state).await {
+          let pending = self.run_plan_for_ui(plan, &state, &mut commands).await;
+          queued.extend(pending);
+        }
+        continue;
+      }
+
+      tokio::select! {
+        _ = tokio::signal::ctrl_c() => break,
+
+        change = watcher.recv() => {
+          let Some(change) = change else { break };
+          let mut all_changes = vec![change];
+          all_changes.extend(watcher.drain_deduped());
+
+          let (run_all, changed_paths) = classify_changes(&all_changes);
+          if !run_all && changed_paths.is_empty() { continue; }
+
+          // Full plan refreshes the sidebar (new/renamed scenarios show
+          // up); the run itself is narrowed to the changed files.
+          let mut plan = plan_factory(None).await;
+          state.publish_test_list(&plan);
+          if !run_all {
+            retain_tests_in_files(&mut plan, &changed_paths);
+          }
+          if plan.total_tests == 0 { continue; }
+          let pending = self.run_plan_for_ui(plan, &state, &mut commands).await;
+          queued.extend(pending);
+        }
+
+        cmd = commands.recv() => {
+          let Some(cmd) = cmd else { break };
+          queued.push_back(cmd);
+        }
+      }
+    }
+
+    self.shared_browser = None;
+    let _ = browser.close().await;
+
+    0
+  }
+
+  /// Build the (filtered) plan a UI command asks for. Publishes the
+  /// refreshed full test list as a side effect. Returns `None` when
+  /// nothing matches or the command needs no run (idle `Stop`).
+  async fn plan_for_ui_command(
+    &mut self,
+    plan_factory: &WatchPlanFactory,
+    cmd: crate::ui_server::UiCommand,
+    state: &Arc<crate::ui_server::UiState>,
+  ) -> Option<TestPlan> {
+    use crate::ui_server::UiCommand;
+
+    if cmd == UiCommand::Stop {
+      return None;
+    }
+    let mut plan = plan_factory(None).await;
+    state.publish_test_list(&plan);
+    match cmd {
+      UiCommand::RunAll | UiCommand::Stop => {},
+      UiCommand::RunFailed => {
+        let rerun_path = self.config.output_dir.join("@rerun.txt");
+        if rerun_path.exists() {
+          crate::discovery::filter_by_rerun(&mut plan, &rerun_path);
+        }
+      },
+      UiCommand::RunGrep(pattern) => {
+        crate::discovery::filter_by_grep(&mut plan, &pattern, false);
+      },
+      UiCommand::RunTest(id) => {
+        let exact = format!("^{}$", regex::escape(&id));
+        crate::discovery::filter_by_grep(&mut plan, &exact, false);
+      },
+      UiCommand::RunFile(file) => {
+        plan.suites.retain(|s| s.file == file);
+        plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
+      },
+    }
+    (plan.total_tests > 0).then_some(plan)
+  }
+
+  /// Execute a plan while streaming reporter events to UI clients.
+  ///
+  /// Same take/restore reporter dance as `run_with_tui_drain`: terminal
+  /// reporters keep printing while a second subscriber forwards every
+  /// event (mapped to JSON) into the UI broadcast channel.
+  ///
+  /// Keeps draining the command channel while tests execute: `Stop`
+  /// cancels the run (the execute future is dropped, mirroring the TUI
+  /// cancel path); every other command is returned for the caller to run
+  /// afterwards.
+  async fn run_plan_for_ui(
+    &mut self,
+    plan: TestPlan,
+    state: &Arc<crate::ui_server::UiState>,
+    commands: &mut tokio::sync::mpsc::UnboundedReceiver<crate::ui_server::UiCommand>,
+  ) -> Vec<crate::ui_server::UiCommand> {
+    state.set_watch_status("running");
+
+    let mut builder = EventBusBuilder::new();
+    let driver_handle = if self.reporters.is_empty() {
+      None
+    } else {
+      let reporter_sub = builder.subscribe();
+      let reporters = std::mem::take(&mut self.reporters);
+      Some(tokio::spawn(ReporterDriver::new(reporters, reporter_sub).run()))
+    };
+    let ui_sub = builder.subscribe();
+    let forwarder = tokio::spawn(Arc::clone(state).forward_run_events(ui_sub));
+    let bus = builder.build();
+
+    let mut pending = Vec::new();
+    {
+      let execute = self.execute(plan, bus.clone());
+      tokio::pin!(execute);
+      loop {
+        tokio::select! {
+          _ = &mut execute => break,
+          cmd = commands.recv() => match cmd {
+            Some(crate::ui_server::UiCommand::Stop) => break,
+            Some(other) => pending.push(other),
+            None => break,
+          }
+        }
+      }
+    }
+    bus.close();
+
+    if let Some(handle) = driver_handle {
+      if let Ok(reporters) = handle.await {
+        self.reporters = reporters;
+      }
+    }
+    let _ = forwarder.await;
+
+    state.set_watch_status("idle");
+    pending
+  }
 }
 
 /// Classify file changes into run-all vs specific changed files.
@@ -1221,21 +1426,30 @@ async fn build_plan_for_changes(
   let mut plan = plan_factory(changed).await;
 
   // Filter plan to changed files if applicable.
-  if !run_all && !changed_paths.is_empty() {
-    let changed_names: rustc_hash::FxHashSet<&str> = changed_paths
-      .iter()
-      .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
-      .collect();
-    for suite in &mut plan.suites {
-      suite
-        .tests
-        .retain(|t| changed_names.iter().any(|name| t.id.file.contains(name)));
-    }
-    plan.suites.retain(|s| !s.tests.is_empty());
-    plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
+  if !run_all {
+    retain_tests_in_files(&mut plan, changed_paths);
   }
 
   plan
+}
+
+/// Narrow a plan to tests whose file matches one of the changed paths
+/// (by file name). No-op when `changed_paths` is empty.
+fn retain_tests_in_files(plan: &mut TestPlan, changed_paths: &[std::path::PathBuf]) {
+  if changed_paths.is_empty() {
+    return;
+  }
+  let changed_names: rustc_hash::FxHashSet<&str> = changed_paths
+    .iter()
+    .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+    .collect();
+  for suite in &mut plan.suites {
+    suite
+      .tests
+      .retain(|t| changed_names.iter().any(|name| t.id.file.contains(name)));
+  }
+  plan.suites.retain(|s| !s.tests.is_empty());
+  plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
 }
 
 /// Topologically sort projects by `dependencies`. Returns indices in execution order.

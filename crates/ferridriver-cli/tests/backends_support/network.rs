@@ -859,7 +859,7 @@ pub fn test_route_fallback_applies_overrides(c: &mut McpClient) {
 /// Playwright's `Page._onRoute` chain, not a plain continue.
 pub fn test_route_fallback_chains_to_next_handler(c: &mut McpClient) {
   c.nav("<body>chain</body>");
-  let script = r#"
+  let script = r"
     const matcher = 'https://ferri.test/**';
     await page.route(matcher, (route) => {
       const seen = route.request().headers()['x-chain'] || 'missing';
@@ -875,7 +875,7 @@ pub fn test_route_fallback_chains_to_next_handler(c: &mut McpClient) {
     } finally {
       await page.unrouteAll();
     }
-    "#;
+    ";
   let v = c.script_value(script);
   let text = v["text"].as_str().unwrap_or("");
   assert!(

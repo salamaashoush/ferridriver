@@ -269,11 +269,14 @@ pub async fn run_bdd_with(
 
   config.has_bdd = true;
 
-  if overrides.watch {
-    // Watch mode: every cycle rebuilds the plan from disk — features
+  if overrides.ui || overrides.watch {
+    // Watch/UI mode: every cycle rebuilds the plan from disk — features
     // re-discovered (narrowed to the changed `.feature` files when the
     // watcher hands them over) and the JS/TS step graph re-bundled so
-    // step edits take effect without restarting.
+    // step edits take effect without restarting. UI mode wins when both
+    // flags are passed.
+    let ui_mode = overrides.ui;
+    let ui_port = overrides.ui_port;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let factory_config = config.clone();
     let factory: ferridriver_test::runner::WatchPlanFactory = Box::new(move |changed| {
@@ -295,7 +298,11 @@ pub async fn run_bdd_with(
       })
     });
     let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
-    return runner.run_watch(factory, cwd).await;
+    return if ui_mode {
+      runner.run_ui(factory, cwd, ui_port).await
+    } else {
+      runner.run_watch(factory, cwd).await
+    };
   }
 
   let plan = match build_bdd_plan(&config, &js_globs, &extensions, None).await {

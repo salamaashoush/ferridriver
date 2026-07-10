@@ -371,7 +371,7 @@ fn now_epoch_ms() -> f64 {
   let now = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap_or_default();
-  now.as_millis() as f64
+  now.as_secs_f64() * 1000.0
 }
 
 // ── Process-global recorder registry ───────────────────────────────────
@@ -442,6 +442,8 @@ pub(crate) async fn spawn_screencast_pump(recorder: &Arc<TraceRecorder>, page: &
       }
       last_ts = timestamp;
       let (width, height) = jpeg_dimensions(&jpeg).unwrap_or((800, 600));
+      // Epoch-ms wall clock: positive and below 2^53, exact as u64.
+      #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
       let name = format!("{page_id}-{}.jpeg", recorder.wall_ms() as u64);
       recorder.push_resource(TraceResource {
         name: name.clone(),

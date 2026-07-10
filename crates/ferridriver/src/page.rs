@@ -267,7 +267,7 @@ impl Page {
   /// `None` for a page constructed without a context handle.
   #[must_use]
   pub fn clock(&self) -> Option<crate::clock::Clock> {
-    self.context_ref.as_ref().map(|ctx| ctx.clock())
+    self.context_ref.as_ref().map(super::context::ContextRef::clock)
   }
 
   /// Open a trace action span for a page-level API call when this

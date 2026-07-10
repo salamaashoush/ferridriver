@@ -58,6 +58,8 @@ impl BrowserContext {
     ts_args_type = "page: Page",
     ts_return_type = "Promise<CDPSession>"
   )]
+  // napi-rs injects Env only as `&Env` (no by-value FromNapiValue).
+  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn new_cdp_session(
     &self,
     env: &napi::Env,

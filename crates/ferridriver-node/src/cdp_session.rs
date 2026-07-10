@@ -85,6 +85,8 @@ impl CDPSession {
   /// Remove a previously registered listener (matched by function
   /// identity, like `page.off`).
   #[napi(ts_args_type = "event: string, listener: (params: any) => void")]
+  // napi-rs injects Env only as `&Env` (no by-value FromNapiValue).
+  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn off(
     &self,
     env: &napi::Env,

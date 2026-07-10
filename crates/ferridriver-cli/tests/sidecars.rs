@@ -77,7 +77,7 @@ fn declared_sidecar_is_reachable_from_a_script() {
 }
 
 /// The gateway extension (`fixtures/sidecar_gateway.ts`) is loaded via
-/// `--plugin` and drives the declared sidecar through its tools — the real
+/// `--extension` and drives the declared sidecar through its tools — the real
 /// deployed path (extension → `tools['gateway.*']` → `sidecars`). Covers
 /// the event path (`on` + pushed frame) that deadlocked under the
 /// multi-threaded runtime before the pump moved onto `ctx.spawn`.
@@ -86,7 +86,7 @@ fn gateway_fixture() -> PathBuf {
 }
 
 #[test]
-fn gateway_plugin_drives_sidecar_over_the_real_binary() {
+fn gateway_extension_drives_sidecar_over_the_real_binary() {
   let echo = ensure_sidecar_echo();
   let dir = tempfile::tempdir().unwrap();
   let toml = format!(
@@ -104,7 +104,7 @@ fn gateway_plugin_drives_sidecar_over_the_real_binary() {
 
   let out = Command::new(ferridriver_bin())
     .current_dir(dir.path())
-    .args(["run", "--plugin", gateway_fixture().to_str().unwrap(), "-e", script])
+    .args(["run", "--extension", gateway_fixture().to_str().unwrap(), "-e", script])
     .output()
     .expect("spawn ferridriver run");
 
@@ -119,7 +119,7 @@ fn gateway_plugin_drives_sidecar_over_the_real_binary() {
   assert_eq!(
     v["value"]["evt"],
     serde_json::json!({ "hits": 3 }),
-    "pushed event via plugin: {v}"
+    "pushed event via extension: {v}"
   );
 }
 
