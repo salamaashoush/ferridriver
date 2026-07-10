@@ -20,8 +20,9 @@ pub fn test_tracing_records_viewer_loadable_zip(c: &mut McpClient) {
   let v = c.script_value_with_args(
     r"
     const [tracePath] = args;
-    await context.tracing.start({ title: 'rule9 trace', screenshots: true });
-    await page.goto('data:text/html,<body><button id=b>Go</button></body>');
+    await context.tracing.start({ title: 'rule9 trace', screenshots: true, snapshots: true });
+    await page.goto('data:text/html,<body><style>button{color:red}</style><button id=b>Go</button></body>');
+    await page.evaluate(`document.styleSheets[0].insertRule('body{margin:0}')`);
     await page.locator('#b').click();
     let missingError = '';
     try { await page.locator('#missing').click({ timeout: 500 }); } catch (e) { missingError = String(e); }
@@ -96,6 +97,42 @@ pub fn test_tracing_records_viewer_loadable_zip(c: &mut McpClient) {
   assert!(
     failed["error"]["message"].as_str().is_some(),
     "failed action must carry its error: {failed}"
+  );
+
+  // DOM snapshots: the click action must carry before/after snapshot
+  // names, each resolving to a frame-snapshot event. Snapshots are
+  // incremental ([[n, m]] subtree references), so the button's literal
+  // markup only has to appear SOMEWHERE in the page's snapshot chain,
+  // and the CSSOM mutation (insertRule) must be re-serialized into the
+  // captured stylesheet text.
+  let snapshots: Vec<&serde_json::Value> = lines.iter().filter(|e| e["type"] == "frame-snapshot").collect();
+  assert!(!snapshots.is_empty(), "snapshots: true must capture frame-snapshots");
+  for kind in ["beforeSnapshot", "afterSnapshot"] {
+    let name = click[kind]
+      .as_str()
+      .unwrap_or_else(|| panic!("click must carry {kind}: {click}"));
+    let snapshot = snapshots
+      .iter()
+      .find(|f| f["snapshot"]["snapshotName"].as_str() == Some(name))
+      .unwrap_or_else(|| panic!("{kind} {name} must resolve to a frame-snapshot"));
+    assert_eq!(
+      snapshot["snapshot"]["isMainFrame"].as_bool(),
+      Some(true),
+      "main-frame snapshot: {snapshot}"
+    );
+    assert!(
+      snapshot["snapshot"]["html"].is_array(),
+      "snapshot html must be a NodeSnapshot tree: {snapshot}"
+    );
+  }
+  let all_html: String = snapshots.iter().map(|f| f["snapshot"]["html"].to_string()).collect();
+  assert!(
+    all_html.contains("BUTTON"),
+    "the button must appear in the page's snapshot chain"
+  );
+  assert!(
+    all_html.contains("margin"),
+    "the CSSOM insertRule mutation must be captured in stylesheet text"
   );
 
   // Screencast frames must resolve to zip resources.

@@ -192,7 +192,35 @@ impl Tracing {
     if recorder.screenshots {
       self.start_screencast_pumps(&recorder).await;
     }
+    if recorder.snapshots {
+      self.install_snapshot_streamer().await;
+    }
     Ok(())
+  }
+
+  /// Install the DOM snapshot streamer: registered as a context
+  /// init-script (future documents, all frames) and evaluated into the
+  /// current document of every open page. Child frames of documents
+  /// that predate `start` pick the streamer up on their next
+  /// navigation.
+  async fn install_snapshot_streamer(&self) {
+    let source = crate::snapshotter::install_source();
+    if let Err(e) = self.ctx.add_init_script_source(source.clone()).await {
+      tracing::warn!(target: "ferridriver::trace", "snapshot streamer init-script failed: {e}");
+      return;
+    }
+    let pages = {
+      let state = self.ctx.state().read().await;
+      state
+        .context(self.ctx.name())
+        .map(|c| c.pages.clone())
+        .unwrap_or_default()
+    };
+    for page in pages {
+      if let Err(e) = page.evaluate(&source).await {
+        tracing::debug!(target: "ferridriver::trace", "snapshot streamer eval skipped: {e}");
+      }
+    }
   }
 
   /// Playwright: `tracing.startChunk(options?)`. Resets the chunk-local
@@ -250,9 +278,12 @@ impl Tracing {
   async fn trace_network_entries(&self, recorder: &crate::trace::TraceRecorder) -> Vec<serde_json::Value> {
     let start = usize::try_from(recorder.network_start_len.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(0);
     let requests = self.network_log_slice(start).await;
+    // Attach bodies as sha1-named resources so snapshot subresources
+    // (stylesheets, images) resolve in the viewer — its snapshot server
+    // reads `response.content._sha1` (`snapshotServer.ts`).
     let ephemeral = HarRecorder {
       path: std::path::PathBuf::new(),
-      content: HarContentPolicy::Omit,
+      content: HarContentPolicy::Attach,
       mode: HarMode::Full,
       url_filter: UrlMatcher::any(),
       resources_dir: None,
@@ -263,6 +294,11 @@ impl Tracing {
     for (i, req) in requests.iter().enumerate() {
       let entry = build_entry(req, &ephemeral, &mut attachments).await;
       if let Ok(mut value) = serde_json::to_value(&entry) {
+        if let Some(content) = value.pointer_mut("/response/content").and_then(|c| c.as_object_mut()) {
+          if let Some(file) = content.remove("_file") {
+            content.insert("_sha1".to_string(), file);
+          }
+        }
         if let Some(obj) = value.as_object_mut() {
           // Approximate wire order: the log preserves arrival order but
           // per-request monotonic capture isn't wired yet, so entries
@@ -271,6 +307,9 @@ impl Tracing {
         }
         entries.push(value);
       }
+    }
+    for (name, bytes) in attachments {
+      recorder.push_resource(crate::trace::TraceResource { name, bytes });
     }
     entries
   }
@@ -509,7 +548,7 @@ async fn build_content(
   }
 }
 
-fn sha1_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
   use sha1::{Digest, Sha1};
   let digest = Sha1::digest(bytes);
   let mut out = String::with_capacity(40);

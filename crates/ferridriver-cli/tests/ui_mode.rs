@@ -179,10 +179,24 @@ async fn fetch_and_validate_trace(host: &str, url_path: &str) {
     step_action["endTime"].as_f64().unwrap_or(0.0) >= step_action["startTime"].as_f64().unwrap_or(f64::MAX),
     "step span times ordered: {step_action}"
   );
-  assert!(
-    actions.iter().any(|a| a["method"].as_str() == Some("goto")),
-    "protocol goto action in trace: {actions:?}"
-  );
+  let goto = actions
+    .iter()
+    .find(|a| a["method"].as_str() == Some("goto"))
+    .unwrap_or_else(|| panic!("protocol goto action in trace: {actions:?}"));
+
+  // Worker traces request DOM snapshots: the goto must carry snapshot
+  // names resolving to frame-snapshot events.
+  let snapshots: Vec<&serde_json::Value> = lines.iter().filter(|l| l["type"] == "frame-snapshot").collect();
+  assert!(!snapshots.is_empty(), "frame-snapshot events in per-test trace");
+  for kind in ["beforeSnapshot", "afterSnapshot"] {
+    let name = goto[kind].as_str().unwrap_or_else(|| panic!("goto {kind}: {goto}"));
+    assert!(
+      snapshots
+        .iter()
+        .any(|f| f["snapshot"]["snapshotName"].as_str() == Some(name)),
+      "{kind} {name} must resolve to a frame-snapshot"
+    );
+  }
 }
 
 #[tokio::test(flavor = "multi_thread")]
