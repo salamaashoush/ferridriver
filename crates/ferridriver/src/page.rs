@@ -284,6 +284,71 @@ impl Page {
     )
   }
 
+  /// Capture the "before" DOM snapshot for a traced action and stamp
+  /// its name on the span. No-ops (and costs nothing) unless this
+  /// context is being traced with `snapshots: true`.
+  pub(crate) async fn snapshot_before(
+    &self,
+    span: Option<crate::trace::ActionSpan>,
+  ) -> Option<crate::trace::ActionSpan> {
+    let mut span = span?;
+    if span.snapshots_enabled() {
+      if let Some(recorder) = self.active_trace_recorder() {
+        let name = format!("before@{}", span.call_id());
+        crate::snapshotter::capture_page_snapshot(&recorder, self, span.call_id(), &name).await;
+        span.set_before_snapshot(name);
+      }
+    }
+    Some(span)
+  }
+
+  /// Capture the "after" DOM snapshot, stamp it, and finish the span.
+  pub(crate) async fn snapshot_after_and_finish(
+    &self,
+    mut span: crate::trace::ActionSpan,
+    error: Option<&crate::error::FerriError>,
+  ) {
+    if span.snapshots_enabled() {
+      if let Some(recorder) = self.active_trace_recorder() {
+        let name = format!("after@{}", span.call_id());
+        crate::snapshotter::capture_page_snapshot(&recorder, self, span.call_id(), &name).await;
+        span.set_after_snapshot(name);
+      }
+    }
+    span.finish(error);
+  }
+
+  fn active_trace_recorder(&self) -> Option<std::sync::Arc<crate::trace::TraceRecorder>> {
+    let composite = self.context_ref.as_ref()?.composite();
+    crate::trace::recorder_for(&composite)
+  }
+
+  /// `(frame_id, is_main)` for every live frame, main frame first.
+  /// Falls back to the backend's main-frame id when the cache is cold
+  /// (fresh page before its first navigation event).
+  pub(crate) fn trace_frame_list(&self) -> Vec<(std::sync::Arc<str>, bool)> {
+    let (main_id, ids) = self.with_frame_cache(|c| {
+      let main = c.main_frame_id();
+      let ids: Vec<std::sync::Arc<str>> = c.live_ids().collect();
+      (main, ids)
+    });
+    let mut out: Vec<(std::sync::Arc<str>, bool)> = Vec::with_capacity(ids.len().max(1));
+    if let Some(ref main) = main_id {
+      out.push((std::sync::Arc::clone(main), true));
+    }
+    for id in ids {
+      if main_id.as_deref() != Some(&*id) {
+        out.push((id, false));
+      }
+    }
+    if out.is_empty() {
+      if let Some(fid) = self.inner.peek_main_frame_id() {
+        out.push((std::sync::Arc::from(fid), true));
+      }
+    }
+    out
+  }
+
   /// Access the underlying backend page (escape hatch).
   #[must_use]
   pub fn inner(&self) -> &AnyPage {
@@ -378,12 +443,13 @@ impl Page {
     let resolved = self.resolve_with_base_url(url).await;
     tracing::debug!(target: "ferridriver::action", action = "goto", url = %resolved, "page.goto");
     let trace_span = self.trace_span("goto", serde_json::json!({ "url": resolved }));
+    let trace_span = self.snapshot_before(trace_span).await;
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let referer = opts.as_ref().and_then(|o| o.referer.as_deref());
     let pre_nav = self.observed_lens();
     let result = self.inner.goto(&resolved, lifecycle, timeout, referer).await;
     if let Some(span) = trace_span {
-      span.finish(result.as_ref().err());
+      self.snapshot_after_and_finish(span, result.as_ref().err()).await;
     }
     // A goto that returned a document Response committed a NEW document
     // — deterministically advance the observed since-navigation window
@@ -475,9 +541,10 @@ impl Page {
   pub(crate) async fn go_back_impl(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let trace_span = self.trace_span("goBack", serde_json::json!({}));
+    let trace_span = self.snapshot_before(trace_span).await;
     let result = self.inner.go_back(lifecycle, timeout).await;
     if let Some(span) = trace_span {
-      span.finish(result.as_ref().err());
+      self.snapshot_after_and_finish(span, result.as_ref().err()).await;
     }
     result
   }
@@ -497,9 +564,10 @@ impl Page {
   pub(crate) async fn go_forward_impl(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let trace_span = self.trace_span("goForward", serde_json::json!({}));
+    let trace_span = self.snapshot_before(trace_span).await;
     let result = self.inner.go_forward(lifecycle, timeout).await;
     if let Some(span) = trace_span {
-      span.finish(result.as_ref().err());
+      self.snapshot_after_and_finish(span, result.as_ref().err()).await;
     }
     result
   }
@@ -519,10 +587,11 @@ impl Page {
   pub(crate) async fn reload_impl(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let trace_span = self.trace_span("reload", serde_json::json!({}));
+    let trace_span = self.snapshot_before(trace_span).await;
     let pre_nav = self.observed_lens();
     let result = self.inner.reload(lifecycle, timeout).await;
     if let Some(span) = trace_span {
-      span.finish(result.as_ref().err());
+      self.snapshot_after_and_finish(span, result.as_ref().err()).await;
     }
     // A successful reload ALWAYS commits a new document — advance the
     // observed since-navigation window even when the listener's

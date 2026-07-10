@@ -66,6 +66,9 @@ pub enum TraceEvent {
   PageEvent(PageEventEntry),
   /// Screencast frame reference (`screencast-frame` type).
   ScreencastFrame(ScreencastFrameEvent),
+  /// DOM snapshot of one frame (`frame-snapshot` type). Carries the
+  /// fully built snapshot object (see `crate::snapshotter`).
+  FrameSnapshot(serde_json::Value),
 }
 
 #[derive(Clone)]
@@ -82,6 +85,10 @@ pub struct ActionEvent {
   /// Call id of the enclosing action (nests actions in the viewer's
   /// tree, e.g. test steps under their parent step).
   pub parent_id: Option<String>,
+  /// `before@<callId>` snapshot name (viewer's Before pane).
+  pub before_snapshot: Option<String>,
+  /// `after@<callId>` snapshot name (viewer's After pane).
+  pub after_snapshot: Option<String>,
 }
 
 #[derive(Clone)]
@@ -137,6 +144,8 @@ pub struct TraceRecorder {
   title: Option<String>,
   /// Whether screencast frames are being captured.
   pub screenshots: bool,
+  /// Whether DOM snapshots are being captured around actions.
+  pub snapshots: bool,
   /// Chunk-local recorded events, in order.
   events: std::sync::Mutex<Vec<TraceEvent>>,
   /// Chunk-local captured resources.
@@ -160,6 +169,7 @@ impl TraceRecorder {
       wall_origin: now_epoch_ms(),
       title: options.title.clone(),
       screenshots: options.screenshots,
+      snapshots: options.snapshots,
       events: std::sync::Mutex::new(Vec::new()),
       resources: std::sync::Mutex::new(Vec::new()),
       network_start_len: AtomicU64::new(network_len as u64),
@@ -334,6 +344,8 @@ fn serialize_event(event: &TraceEvent) -> String {
       })),
       "pageId": a.page_id,
       "parentId": a.parent_id,
+      "beforeSnapshot": a.before_snapshot,
+      "afterSnapshot": a.after_snapshot,
     })
     .to_string(),
     TraceEvent::Console(c) => serde_json::json!({
@@ -356,6 +368,11 @@ fn serialize_event(event: &TraceEvent) -> String {
       "method": e.method,
       "params": e.params,
       "pageId": e.page_id,
+    })
+    .to_string(),
+    TraceEvent::FrameSnapshot(snapshot) => serde_json::json!({
+      "type": "frame-snapshot",
+      "snapshot": snapshot,
     })
     .to_string(),
     TraceEvent::ScreencastFrame(f) => serde_json::json!({
@@ -487,6 +504,8 @@ pub struct ActionSpan {
   params: serde_json::Value,
   page_id: Option<String>,
   parent_id: Option<String>,
+  before_snapshot: Option<String>,
+  after_snapshot: Option<String>,
 }
 
 impl ActionSpan {
@@ -495,6 +514,21 @@ impl ActionSpan {
   #[must_use]
   pub fn call_id(&self) -> &str {
     &self.call_id
+  }
+
+  /// Whether the recorder captures DOM snapshots — callers skip the
+  /// capture round-trips entirely when off.
+  #[must_use]
+  pub fn snapshots_enabled(&self) -> bool {
+    self.recorder.snapshots
+  }
+
+  pub fn set_before_snapshot(&mut self, name: String) {
+    self.before_snapshot = Some(name);
+  }
+
+  pub fn set_after_snapshot(&mut self, name: String) {
+    self.after_snapshot = Some(name);
   }
 
   /// Emit the action event, recording `error` when the action failed.
@@ -524,6 +558,8 @@ impl ActionSpan {
       error,
       page_id: self.page_id,
       parent_id: self.parent_id,
+      before_snapshot: self.before_snapshot,
+      after_snapshot: self.after_snapshot,
     }));
   }
 }
@@ -552,6 +588,8 @@ pub(crate) fn begin_action(
     params,
     page_id,
     parent_id: None,
+    before_snapshot: None,
+    after_snapshot: None,
   })
 }
 
@@ -584,6 +622,8 @@ pub fn begin_custom_action(
     params,
     page_id: None,
     parent_id,
+    before_snapshot: None,
+    after_snapshot: None,
   })
 }
 
@@ -614,6 +654,8 @@ mod tests {
       error: None,
       page_id: Some("page@1".into()),
       parent_id: None,
+      before_snapshot: None,
+      after_snapshot: None,
     }));
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid json");
     assert_eq!(parsed["type"].as_str(), Some("action"));
@@ -638,6 +680,8 @@ mod tests {
       error: None,
       page_id: None,
       parent_id: None,
+      before_snapshot: None,
+      after_snapshot: None,
     }));
     recorder.push_resource(TraceResource {
       name: "page@1-1.jpeg".into(),

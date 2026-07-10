@@ -29,11 +29,19 @@ CORS for trace.playwright.dev; the runner-side step-trace recorder in
 ## Partial / known limitations
 
 ### Trace recording (`crates/ferridriver/src/trace.rs`)
-- **DOM snapshots not captured.** No `frame-snapshot` events, no
-  `beforeSnapshot`/`afterSnapshot` names on actions — the viewer's
-  snapshot pane renders blank (actions, film strip, network, errors all
-  work). Needs Playwright's `snapshotterInjected.ts` vendored into the
-  injected bundle plus per-action capture plumbing.
+- DOM snapshots ARE captured (`tracing.start({ snapshots: true })`,
+  vendored playwright-core 1.58.2 `frameSnapshotStreamer` in
+  `src/injected/snapshotter_injected.js`, capture wiring in
+  `src/snapshotter.rs`): `frame-snapshot` events with incremental
+  NodeSnapshot trees, `beforeSnapshot`/`afterSnapshot` names on every
+  traced action, CSSOM-mutation re-serialization, stylesheet resource
+  overrides by sha1, and network BODIES attached as sha1 resources
+  (`response.content._sha1`) so snapshot subresources render. Remaining
+  snapshot gaps: child frames are captured but not annotated onto the
+  parent's `<iframe>` (`markIframe` needs a frame-element handle), so
+  subframes render as placeholders; documents already open in frames
+  when tracing starts only pick the streamer up on their next
+  navigation (main frames are seeded immediately).
 - Console messages and page lifecycle events are not written into the
   trace (`console` / `event` entry types exist in the serializer,
   unwired).
@@ -41,7 +49,8 @@ CORS for trace.playwright.dev; the runner-side step-trace recorder in
   (`resources/src@<sha1>.txt` + inline stacks).
 - Network entries carry ordinal `_monotonicTime` (arrival order), not
   real per-request capture times; HAR `timings` are zeros/-1 because
-  per-request timing is not wired through the network log.
+  per-request timing is not wired through the network log. (Bodies ARE
+  now attached as sha1 resources for snapshot rendering.)
 - Screencast capture is steady-state throttled (1 frame/200ms) without
   Playwright's unthrottled burst window around each action.
 - Action coverage: every locator operation (via the retry funnel) plus
@@ -105,14 +114,9 @@ CORS for trace.playwright.dev; the runner-side step-trace recorder in
   `run_watch` / `run_ui` the same way `bdd` did.
 
 ### `bdd --ui` remaining gaps vs Playwright UI mode
-- Step traces have no DOM snapshots (same `snapshotterInjected.ts` gap
-  as the library recorder above), no screencast frames, and no network
-  entries — the viewer shows actions, source locations, and errors; the
-  snapshot pane renders blank.
-- Step timelines are reconstructed sequentially from durations
-  (`TestStep` carries no start timestamps), so concurrent-step overlap
-  is not represented.
-- `screenshot-on-failure` attachments are captured as in-memory bytes,
-  not files, so the UI lists them without a download link.
+- Per-test traces are now recorded live by the library recorder (real
+  action/step timelines, DOM snapshots, screencast frames, network
+  entries with bodies); tests that never touch a browser produce no
+  trace (the recorder is context-scoped).
 - No embedded trace viewer; the "Open in trace viewer" link requires
   network access to trace.playwright.dev.

@@ -453,6 +453,14 @@ impl ContextRef {
       if recorder.screenshots {
         crate::trace::spawn_screencast_pump(&recorder, page.inner()).await;
       }
+      // The context init script only reaches the page's NEXT documents;
+      // its initial about:blank predates registration on some backends,
+      // so install the snapshot streamer into it directly.
+      if recorder.snapshots {
+        if let Err(e) = page.inner().evaluate(&crate::snapshotter::install_source()).await {
+          tracing::debug!(target: "ferridriver::trace", "snapshot streamer eval skipped: {e}");
+        }
+      }
     }
 
     Ok(page)

@@ -41,8 +41,8 @@ macro_rules! retry_resolve {
     // Trace span for the whole retried action — every exit path below
     // funnels through `break 'retry` so the span always closes with the
     // final outcome (timeout / strict violation / success / hard error).
+    let __trace_page = $self.frame.page_arc();
     let __trace_span = {
-      let __trace_page = $self.frame.page_arc();
       let __trace_composite = __trace_page.context().map(|c| c.composite());
       $crate::trace::begin_action(
         __trace_composite.as_deref(),
@@ -52,6 +52,7 @@ macro_rules! retry_resolve {
         ::serde_json::json!({ "selector": $self.selector }),
       )
     };
+    let __trace_span = __trace_page.snapshot_before(__trace_span).await;
     let __result = 'retry: {
       // Resolve `frameLocator` enter-frame hops to the real child frame
       // + trailing selector (no-op for plain selectors).
@@ -163,7 +164,9 @@ macro_rules! retry_resolve {
       }
     };
     if let ::std::option::Option::Some(__s) = __trace_span {
-      __s.finish(__result.as_ref().err());
+      __trace_page
+        .snapshot_after_and_finish(__s, __result.as_ref().err())
+        .await;
     }
     __result
   }};
