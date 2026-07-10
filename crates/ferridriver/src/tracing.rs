@@ -10,9 +10,9 @@
 //! `routeFromHAR(update: true)`, flushed when the context closes.
 //!
 //! The trace `.zip` recorder (`start` / `stop` / `startChunk` /
-//! `stopChunk`, with DOM snapshots, screenshots and source attachments)
-//! is a separate large subsystem; those methods return a typed
-//! [`FerriError::Unsupported`] rather than a placeholder artifact.
+//! `stopChunk`) lives in [`crate::trace`] and emits Playwright's
+//! format VERSION 8; this module hosts the `context.tracing` handle
+//! that fronts both recorders.
 
 use std::path::PathBuf;
 
@@ -163,57 +163,131 @@ impl Tracing {
     }
   }
 
-  /// Playwright: `tracing.start(options?)`. The trace `.zip` recorder is
-  /// not implemented.
+  /// Playwright: `tracing.start(options?: { name?, title?, screenshots?,
+  /// snapshots?, sources? })`. Starts recording a Playwright-format
+  /// (VERSION 8) trace; write it with [`Self::stop`]. See
+  /// [`crate::trace`] for the exact coverage (actions, film strip,
+  /// network; DOM snapshots not yet captured).
   ///
   /// # Errors
   ///
-  /// Always [`FerriError::Unsupported`].
-  pub async fn start(&self) -> Result<()> {
-    Err(self.trace_zip_unsupported().await)
+  /// Errors if tracing is already started on this context.
+  pub async fn start(&self, options: crate::trace::TracingStartOptions) -> Result<()> {
+    let composite = self.ctx.composite();
+    let browser_name = {
+      let state = self.ctx.state().read().await;
+      match state.backend_kind() {
+        crate::backend::BackendKind::CdpPipe | crate::backend::BackendKind::CdpRaw => "chromium",
+        crate::backend::BackendKind::WebKit => "webkit",
+        crate::backend::BackendKind::Bidi => "firefox",
+      }
+    };
+    let network_len = self.network_log_len().await;
+    let recorder = std::sync::Arc::new(crate::trace::TraceRecorder::new(
+      &options,
+      browser_name.to_string(),
+      network_len,
+    ));
+    crate::trace::install_recorder(&composite, std::sync::Arc::clone(&recorder))?;
+    if recorder.screenshots {
+      self.start_screencast_pumps(&recorder).await;
+    }
+    Ok(())
   }
 
-  /// Playwright: `tracing.startChunk(options?)`.
+  /// Playwright: `tracing.startChunk(options?)`. Resets the chunk-local
+  /// event/resource buffers; the recorder keeps running.
   ///
   /// # Errors
   ///
-  /// Always [`FerriError::Unsupported`].
+  /// Errors if tracing was not started.
   pub async fn start_chunk(&self) -> Result<()> {
-    Err(self.trace_zip_unsupported().await)
+    let recorder = crate::trace::recorder_for(&self.ctx.composite())
+      .ok_or_else(|| FerriError::backend("Must start tracing before starting a new chunk".to_string()))?;
+    recorder.start_chunk(self.network_log_len().await);
+    Ok(())
   }
 
-  /// Playwright: `tracing.stopChunk(options?)`.
+  /// Playwright: `tracing.stopChunk(options?: { path? })`. Exports the
+  /// current chunk (when `path` is given) and starts a fresh one;
+  /// tracing keeps running.
   ///
   /// # Errors
   ///
-  /// Always [`FerriError::Unsupported`].
-  pub async fn stop_chunk(&self) -> Result<()> {
-    Err(self.trace_zip_unsupported().await)
+  /// Errors if tracing was not started or the export fails.
+  pub async fn stop_chunk(&self, options: crate::trace::TracingStopOptions) -> Result<()> {
+    let recorder = crate::trace::recorder_for(&self.ctx.composite())
+      .ok_or_else(|| FerriError::backend("Must start tracing before stopping".to_string()))?;
+    if let Some(path) = options.path {
+      let network = self.trace_network_entries(&recorder).await;
+      recorder.export(&path, &network)?;
+    }
+    recorder.start_chunk(self.network_log_len().await);
+    Ok(())
   }
 
-  /// Playwright: `tracing.stop(options?)`.
+  /// Playwright: `tracing.stop(options?: { path? })`. Ends the
+  /// recording, writing `trace.zip` when `path` is given.
   ///
   /// # Errors
   ///
-  /// Always [`FerriError::Unsupported`].
-  pub async fn stop(&self) -> Result<()> {
-    Err(self.trace_zip_unsupported().await)
+  /// Errors if tracing was not started or the export fails.
+  pub async fn stop(&self, options: crate::trace::TracingStopOptions) -> Result<()> {
+    let composite = self.ctx.composite();
+    let recorder = crate::trace::take_recorder(&composite)
+      .ok_or_else(|| FerriError::backend("Must start tracing before stopping".to_string()))?;
+    recorder.stop_screencasts();
+    if let Some(path) = options.path {
+      let network = self.trace_network_entries(&recorder).await;
+      recorder.export(&path, &network)?;
+    }
+    Ok(())
   }
 
-  async fn trace_zip_unsupported(&self) -> FerriError {
-    let har_active = {
-      let recorders = self.ctx.har_recorders().await;
-      let guard = recorders.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-      guard.contains_key(&self.ctx.composite())
+  /// Serialize the context's network log (from the recorder's chunk
+  /// start) into HAR entry values for `trace.network`, stamping the
+  /// `_monotonicTime` the viewer sorts and correlates by.
+  async fn trace_network_entries(&self, recorder: &crate::trace::TraceRecorder) -> Vec<serde_json::Value> {
+    let start = usize::try_from(recorder.network_start_len.load(std::sync::atomic::Ordering::SeqCst)).unwrap_or(0);
+    let requests = self.network_log_slice(start).await;
+    let ephemeral = HarRecorder {
+      path: std::path::PathBuf::new(),
+      content: HarContentPolicy::Omit,
+      mode: HarMode::Full,
+      url_filter: UrlMatcher::any(),
+      resources_dir: None,
+      start_len: start,
     };
-    let hint = if har_active {
-      "a HAR recording is active on this context"
-    } else {
-      "use startHar/stopHar for network capture"
+    let mut attachments = Vec::new();
+    let mut entries = Vec::new();
+    for (i, req) in requests.iter().enumerate() {
+      let entry = build_entry(req, &ephemeral, &mut attachments).await;
+      if let Ok(mut value) = serde_json::to_value(&entry) {
+        if let Some(obj) = value.as_object_mut() {
+          // Approximate wire order: the log preserves arrival order but
+          // per-request monotonic capture isn't wired yet, so entries
+          // are spaced inside the chunk for stable viewer sorting.
+          obj.insert("_monotonicTime".to_string(), serde_json::json!(i as f64));
+        }
+        entries.push(value);
+      }
+    }
+    entries
+  }
+
+  /// Start a screencast pump on every open page, feeding JPEG frames
+  /// into the trace (Playwright film strip).
+  async fn start_screencast_pumps(&self, recorder: &std::sync::Arc<crate::trace::TraceRecorder>) {
+    let pages = {
+      let state = self.ctx.state().read().await;
+      state
+        .context(self.ctx.name())
+        .map(|c| c.pages.clone())
+        .unwrap_or_default()
     };
-    FerriError::unsupported(format!(
-      "trace.zip recording (start/stop/startChunk/stopChunk) is not implemented; {hint}"
-    ))
+    for page in pages {
+      crate::trace::spawn_screencast_pump(recorder, &page).await;
+    }
   }
 }
 

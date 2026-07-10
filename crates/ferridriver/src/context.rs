@@ -467,6 +467,14 @@ impl ContextRef {
     // fresh page replay them like pages that were already open.
     self.apply_context_init_scripts(&page).await?;
 
+    // A trace with screenshots films every page of the context —
+    // including ones opened mid-recording.
+    if let Some(recorder) = crate::trace::recorder_for(&self.key.to_composite()) {
+      if recorder.screenshots {
+        crate::trace::spawn_screencast_pump(&recorder, page.inner()).await;
+      }
+    }
+
     Ok(page)
   }
 

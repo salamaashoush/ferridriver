@@ -38,105 +38,134 @@ use crate::selectors;
 /// value on overflow.
 macro_rules! retry_resolve {
   ($self:expr, $timeout_ms:expr, $op:expr, |$el:ident, $page:ident| $body:expr) => {{
-    // Resolve `frameLocator` enter-frame hops to the real child frame
-    // + trailing selector (no-op for plain selectors).
-    let (__rframe, __rsel) = $self.resolved().await.map_err($crate::error::FerriError::from)?;
-    let $page: &$crate::backend::AnyPage = __rframe.page_arc().inner();
-    $page
-      .ensure_engine_injected()
-      .await
-      .map_err($crate::error::FerriError::from)?;
-    let __fd = "window.__fd";
-    let __sel_js =
-      $crate::selectors::build_selone_js(&__rsel, &__fd, $self.strict).map_err($crate::error::FerriError::from)?;
-    // Pass `None` for main-frame locators so the backend skips a
-    // `frame_contexts` lookup; child frames thread their cached id.
-    let __frame_id: ::std::option::Option<&str> = if __rframe.is_main_frame() {
-      ::std::option::Option::None
-    } else {
-      ::std::option::Option::Some(__rframe.id())
+    // Trace span for the whole retried action — every exit path below
+    // funnels through `break 'retry` so the span always closes with the
+    // final outcome (timeout / strict violation / success / hard error).
+    let __trace_span = {
+      let __trace_page = $self.frame.page_arc();
+      let __trace_composite = __trace_page.context().map(|c| c.composite());
+      $crate::trace::begin_action(
+        __trace_composite.as_deref(),
+        "Locator",
+        $op,
+        ::std::option::Option::Some(format!("page@{}", __trace_page.backend_page_id())),
+        ::serde_json::json!({ "selector": $self.selector }),
+      )
     };
-
-    let __op_name: &str = $op;
-    let __resolved_timeout: u64 = $timeout_ms.unwrap_or_else(|| $self.frame.page_arc().default_timeout());
-    let __deadline: ::std::option::Option<::std::time::Instant> = if __resolved_timeout == 0 {
-      ::std::option::Option::None
-    } else {
-      ::std::option::Option::Some(::std::time::Instant::now() + ::std::time::Duration::from_millis(__resolved_timeout))
-    };
-
-    let mut __idx: usize = 0;
-    loop {
-      // Deadline check up-front so we never race into one more attempt after
-      // time has already run out.
-      if let ::std::option::Option::Some(__d) = __deadline {
-        if ::std::time::Instant::now() >= __d {
-          return ::std::result::Result::Err($crate::error::FerriError::timeout(
-            __op_name.to_string(),
-            __resolved_timeout,
-          ));
-        }
+    let __result = 'retry: {
+      // Resolve `frameLocator` enter-frame hops to the real child frame
+      // + trailing selector (no-op for plain selectors).
+      let (__rframe, __rsel) = match $self.resolved().await {
+        ::std::result::Result::Ok(v) => v,
+        ::std::result::Result::Err(e) => break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e)),
+      };
+      let $page: &$crate::backend::AnyPage = __rframe.page_arc().inner();
+      if let ::std::result::Result::Err(e) = $page.ensure_engine_injected().await {
+        break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
       }
+      let __fd = "window.__fd";
+      let __sel_js = match $crate::selectors::build_selone_js(&__rsel, &__fd, $self.strict) {
+        ::std::result::Result::Ok(v) => v,
+        ::std::result::Result::Err(e) => break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e)),
+      };
+      // Pass `None` for main-frame locators so the backend skips a
+      // `frame_contexts` lookup; child frames thread their cached id.
+      let __frame_id: ::std::option::Option<&str> = if __rframe.is_main_frame() {
+        ::std::option::Option::None
+      } else {
+        ::std::option::Option::Some(__rframe.id())
+      };
 
-      // Action pre-checks: run registered locator handlers if any of their
-      // overlays are currently visible (Playwright `performActionPreChecks`).
-      $crate::locator_handler::perform_checkpoint(__rframe.page_arc()).await;
+      let __op_name: &str = $op;
+      let __resolved_timeout: u64 = $timeout_ms.unwrap_or_else(|| $self.frame.page_arc().default_timeout());
+      let __deadline: ::std::option::Option<::std::time::Instant> = if __resolved_timeout == 0 {
+        ::std::option::Option::None
+      } else {
+        ::std::option::Option::Some(
+          ::std::time::Instant::now() + ::std::time::Duration::from_millis(__resolved_timeout),
+        )
+      };
 
-      let __delay_ms = Locator::RETRY_BACKOFFS_MS[__idx.min(Locator::RETRY_BACKOFFS_MS.len() - 1)];
-      __idx = __idx.saturating_add(1);
-      if __delay_ms > 0 {
-        // Clamp the sleep to whatever's left on the deadline so the timeout
-        // error fires on time rather than after an overshoot sleep.
-        let __sleep_ms = match __deadline {
-          ::std::option::Option::Some(__d) => {
-            let __left = u64::try_from(__d.saturating_duration_since(::std::time::Instant::now()).as_millis())
-              .unwrap_or(__delay_ms);
-            __delay_ms.min(__left)
-          },
-          ::std::option::Option::None => __delay_ms,
-        };
-        if __sleep_ms > 0 {
-          ::tokio::time::sleep(::std::time::Duration::from_millis(__sleep_ms)).await;
-        }
-      }
-
-      // Strict mode (the default) is folded into the same engine-side
-      // `selOne(parts, strict)` call below — the JS throws
-      // `strict mode violation: <count>` when the selector matches more
-      // than one element, the host catches the exception and converts
-      // to a typed `FerriError::StrictModeViolation`. Saves the
-      // separate `query_all` + `cleanup_tags` round-trips the previous
-      // implementation paid on every retry attempt (~2 RTTs).
-      match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector, __frame_id).await {
-        ::std::result::Result::Ok($el) => match ($body).await {
-          ::std::result::Result::Ok(val) => return ::std::result::Result::Ok(val),
-          ::std::result::Result::Err(e) => {
-            let __msg = e.to_string();
-            if __msg.contains("not connected")
-              || __msg.contains("not found")
-              || __msg.contains("detached")
-              || __msg.contains("error:not")
-            {
-              // Retriable: `checkElementStates` returns
-              // `error:notvisible` / `error:notenabled` /
-              // `error:noteditable` etc. as signals to keep polling until
-              // the deadline.
-            } else {
-              return ::std::result::Result::Err($crate::error::FerriError::from(e));
-            }
-          },
-        },
-        ::std::result::Result::Err(__err) => {
-          // Strict-mode violation: the engine threw
-          // `strict mode violation: <count>` from inside `selOne`.
-          // Surface it as a typed error rather than a retry signal.
-          if let ::std::option::Option::Some(__count) = $crate::selectors::parse_strict_violation_count(&__err) {
-            return ::std::result::Result::Err($crate::error::FerriError::strict($self.selector.clone(), __count));
+      let mut __idx: usize = 0;
+      loop {
+        // Deadline check up-front so we never race into one more attempt after
+        // time has already run out.
+        if let ::std::option::Option::Some(__d) = __deadline {
+          if ::std::time::Instant::now() >= __d {
+            break 'retry ::std::result::Result::Err($crate::error::FerriError::timeout(
+              __op_name.to_string(),
+              __resolved_timeout,
+            ));
           }
-          // Otherwise: element not found this iteration; retry until deadline.
-        },
+        }
+
+        // Action pre-checks: run registered locator handlers if any of their
+        // overlays are currently visible (Playwright `performActionPreChecks`).
+        $crate::locator_handler::perform_checkpoint(__rframe.page_arc()).await;
+
+        let __delay_ms = Locator::RETRY_BACKOFFS_MS[__idx.min(Locator::RETRY_BACKOFFS_MS.len() - 1)];
+        __idx = __idx.saturating_add(1);
+        if __delay_ms > 0 {
+          // Clamp the sleep to whatever's left on the deadline so the timeout
+          // error fires on time rather than after an overshoot sleep.
+          let __sleep_ms = match __deadline {
+            ::std::option::Option::Some(__d) => {
+              let __left = u64::try_from(__d.saturating_duration_since(::std::time::Instant::now()).as_millis())
+                .unwrap_or(__delay_ms);
+              __delay_ms.min(__left)
+            },
+            ::std::option::Option::None => __delay_ms,
+          };
+          if __sleep_ms > 0 {
+            ::tokio::time::sleep(::std::time::Duration::from_millis(__sleep_ms)).await;
+          }
+        }
+
+        // Strict mode (the default) is folded into the same engine-side
+        // `selOne(parts, strict)` call below — the JS throws
+        // `strict mode violation: <count>` when the selector matches more
+        // than one element, the host catches the exception and converts
+        // to a typed `FerriError::StrictModeViolation`. Saves the
+        // separate `query_all` + `cleanup_tags` round-trips the previous
+        // implementation paid on every retry attempt (~2 RTTs).
+        match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector, __frame_id).await {
+          ::std::result::Result::Ok($el) => match ($body).await {
+            ::std::result::Result::Ok(val) => break 'retry ::std::result::Result::Ok(val),
+            ::std::result::Result::Err(e) => {
+              let __msg = e.to_string();
+              if __msg.contains("not connected")
+                || __msg.contains("not found")
+                || __msg.contains("detached")
+                || __msg.contains("error:not")
+              {
+                // Retriable: `checkElementStates` returns
+                // `error:notvisible` / `error:notenabled` /
+                // `error:noteditable` etc. as signals to keep polling until
+                // the deadline.
+              } else {
+                break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
+              }
+            },
+          },
+          ::std::result::Result::Err(__err) => {
+            // Strict-mode violation: the engine threw
+            // `strict mode violation: <count>` from inside `selOne`.
+            // Surface it as a typed error rather than a retry signal.
+            if let ::std::option::Option::Some(__count) = $crate::selectors::parse_strict_violation_count(&__err) {
+              break 'retry ::std::result::Result::Err($crate::error::FerriError::strict(
+                $self.selector.clone(),
+                __count,
+              ));
+            }
+            // Otherwise: element not found this iteration; retry until deadline.
+          },
+        }
       }
+    };
+    if let ::std::option::Option::Some(__s) = __trace_span {
+      __s.finish(__result.as_ref().err());
     }
+    __result
   }};
 }
 

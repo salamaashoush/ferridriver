@@ -270,6 +270,20 @@ impl Page {
     self.context_ref.as_ref().map(|ctx| ctx.clock())
   }
 
+  /// Open a trace action span for a page-level API call when this
+  /// page's context is being traced. Callers pass the final outcome to
+  /// [`crate::trace::ActionSpan::finish`].
+  pub(crate) fn trace_span(&self, method: &str, params: serde_json::Value) -> Option<crate::trace::ActionSpan> {
+    let composite = self.context_ref.as_ref()?.composite();
+    crate::trace::begin_action(
+      Some(&composite),
+      "Page",
+      method,
+      Some(format!("page@{}", self.backend_page_id())),
+      params,
+    )
+  }
+
   /// Access the underlying backend page (escape hatch).
   #[must_use]
   pub fn inner(&self) -> &AnyPage {
@@ -363,10 +377,14 @@ impl Page {
     // Absolute URLs passthrough; relative paths resolve against baseURL.
     let resolved = self.resolve_with_base_url(url).await;
     tracing::debug!(target: "ferridriver::action", action = "goto", url = %resolved, "page.goto");
+    let trace_span = self.trace_span("goto", serde_json::json!({ "url": resolved }));
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let referer = opts.as_ref().and_then(|o| o.referer.as_deref());
     let pre_nav = self.observed_lens();
     let result = self.inner.goto(&resolved, lifecycle, timeout, referer).await;
+    if let Some(span) = trace_span {
+      span.finish(result.as_ref().err());
+    }
     // A goto that returned a document Response committed a NEW document
     // — deterministically advance the observed since-navigation window
     // past pre-nav entries even if the listener's `FrameNavigated` mark
@@ -456,7 +474,12 @@ impl Page {
   /// Implementation of [`Self::go_back`].
   pub(crate) async fn go_back_impl(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
-    self.inner.go_back(lifecycle, timeout).await
+    let trace_span = self.trace_span("goBack", serde_json::json!({}));
+    let result = self.inner.go_back(lifecycle, timeout).await;
+    if let Some(span) = trace_span {
+      span.finish(result.as_ref().err());
+    }
+    result
   }
 
   /// Navigate forward in history. Returns the main-document `Response`
@@ -473,7 +496,12 @@ impl Page {
   /// Implementation of [`Self::go_forward`].
   pub(crate) async fn go_forward_impl(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
-    self.inner.go_forward(lifecycle, timeout).await
+    let trace_span = self.trace_span("goForward", serde_json::json!({}));
+    let result = self.inner.go_forward(lifecycle, timeout).await;
+    if let Some(span) = trace_span {
+      span.finish(result.as_ref().err());
+    }
+    result
   }
 
   /// Reload the current page. Returns the main-document `Response` on
@@ -490,8 +518,12 @@ impl Page {
   /// Implementation of [`Self::reload`].
   pub(crate) async fn reload_impl(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
+    let trace_span = self.trace_span("reload", serde_json::json!({}));
     let pre_nav = self.observed_lens();
     let result = self.inner.reload(lifecycle, timeout).await;
+    if let Some(span) = trace_span {
+      span.finish(result.as_ref().err());
+    }
     // A successful reload ALWAYS commits a new document — advance the
     // observed since-navigation window even when the listener's
     // `FrameNavigated` mark was dropped (lagged broadcast receiver).

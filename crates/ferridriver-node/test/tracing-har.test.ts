@@ -1,6 +1,5 @@
 // NAPI coverage for context.tracing.startHar() / stopHar() (Playwright
-// 1.60). tracing.start() (trace .zip recorder) is not implemented and
-// must reject.
+// 1.60).
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { tmpdir } from "os";
@@ -45,8 +44,6 @@ for (const backend of BACKENDS) {
         expect(urls.some((u) => u.includes(`127.0.0.1:${server.port}`))).toBe(true);
         expect(har.log.entries.some((e: any) => e.response.status === 200)).toBe(true);
 
-        // trace .zip recorder is not implemented.
-        await expect(page.context().tracing.start()).rejects.toThrow();
       } finally {
         server.stop(true);
         rmSync(harPath, { force: true });

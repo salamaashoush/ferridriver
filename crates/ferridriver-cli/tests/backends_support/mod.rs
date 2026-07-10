@@ -44,6 +44,7 @@ pub mod script_locators;
 pub mod script_sessions;
 pub mod session_bind;
 pub mod storage_state;
+pub mod trace;
 pub mod tracing_har;
 pub mod video;
 pub mod web_error;
