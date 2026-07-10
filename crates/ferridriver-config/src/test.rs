@@ -550,6 +550,12 @@ pub struct CliOverrides {
   /// Watch mode: re-run on file changes with the interactive TUI
   /// (falls back to non-interactive re-runs without a TTY).
   pub watch: bool,
+  /// UI mode: serve a localhost web app that lists tests, streams live
+  /// results over a websocket, and re-runs on file changes or UI
+  /// commands. Wins over `watch` when both are set.
+  pub ui: bool,
+  /// Port for the UI-mode server (`None` = ephemeral free port).
+  pub ui_port: Option<u16>,
   pub update_snapshots: Option<UpdateSnapshotsMode>,
   pub profile: Option<String>,
   pub forbid_only: bool,

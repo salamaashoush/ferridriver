@@ -55,10 +55,13 @@ pub fn test_clock_controls_time(c: &mut McpClient) {
     return { paused, fired, after, replayed };
     "
   };
-  let now_ms = std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .unwrap()
-    .as_millis() as u64;
+  let now_ms = u64::try_from(
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_millis(),
+  )
+  .unwrap();
   let v = if fresh_context {
     c.script_value(script)
   } else {
@@ -117,10 +120,13 @@ pub fn test_clock_fixed_time_and_errors(c: &mut McpClient) {
     return { f1, f2, ticksError, dateError };
     "
   };
-  let now_ms = std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .unwrap()
-    .as_millis() as u64;
+  let now_ms = u64::try_from(
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_millis(),
+  )
+  .unwrap();
   let v = if fresh_context {
     c.script_value(script)
   } else {

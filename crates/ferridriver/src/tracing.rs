@@ -267,7 +267,7 @@ impl Tracing {
           // Approximate wire order: the log preserves arrival order but
           // per-request monotonic capture isn't wired yet, so entries
           // are spaced inside the chunk for stable viewer sorting.
-          obj.insert("_monotonicTime".to_string(), serde_json::json!(i as f64));
+          obj.insert("_monotonicTime".to_string(), serde_json::json!(i));
         }
         entries.push(value);
       }
@@ -311,12 +311,12 @@ pub(crate) async fn flush_recorder(recorder: &HarRecorder, requests: &[Request])
   let json = serde_json::to_string_pretty(&archive).map_err(|e| FerriError::backend(format!("serialize HAR: {e}")))?;
 
   if is_zip_path(&recorder.path) {
+    use std::io::Write;
     let file = std::fs::File::create(&recorder.path)
       .map_err(|e| FerriError::backend(format!("create HAR zip {}: {e}", recorder.path.display())))?;
     let mut writer = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let zip_err = |e: zip::result::ZipError| FerriError::backend(format!("write HAR zip: {e}"));
-    use std::io::Write;
     writer.start_file("har.har", opts).map_err(zip_err)?;
     writer
       .write_all(json.as_bytes())
@@ -558,7 +558,7 @@ fn mime_extension(mime_type: &str) -> &'static str {
 }
 
 /// Case-insensitive header lookup — CDP lowercases header names but
-/// WebKit and BiDi deliver them as sent (`Content-Type`), and a HAR
+/// `WebKit` and `BiDi` deliver them as sent (`Content-Type`), and a HAR
 /// recorded with `mimeType: x-unknown` replays as a download instead of
 /// a rendered document.
 fn header_value(headers: &crate::network::Headers, name: &str) -> Option<String> {

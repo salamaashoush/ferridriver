@@ -322,32 +322,12 @@ impl ContextRef {
       let state = self.state.read().await;
       state.get_context_options(&self.key.to_composite())
     };
-    let resolved_viewport = match &ctx_opts {
-      Some(opts) => match opts.viewport {
-        crate::options::ViewportOption::Null => None,
-        crate::options::ViewportOption::Default | crate::options::ViewportOption::Size { .. } => {
-          opts.resolved_viewport()
-        },
-      },
-      None => None,
-    };
 
     let plan = {
       let state = self.state.read().await;
       state.page_open_plan(&self.key)?
     };
-    // Override the state's default viewport with the options bag's
-    // resolved viewport when the caller supplied one. `ViewportOption::Null`
-    // drops the default entirely (matches Playwright's `viewport: null`
-    // opt-out).
-    let effective_viewport = if ctx_opts
-      .as_ref()
-      .is_some_and(|o| o.viewport != crate::options::ViewportOption::Default)
-    {
-      resolved_viewport
-    } else {
-      plan.viewport.clone()
-    };
+    let effective_viewport = effective_viewport(ctx_opts.as_ref(), plan.viewport.clone());
 
     let (any_page, browser_context_id) = if &*self.key.context == "default" {
       (
@@ -1533,6 +1513,24 @@ fn bind_source(binding: crate::events::ExposedBinding, context_key: String) -> c
 /// "apply the whole bag or don't".
 async fn apply_context_options(page: &Arc<Page>, opts: &crate::options::BrowserContextOptions) -> Result<()> {
   Box::pin(page.apply_context_options(opts)).await
+}
+
+/// The viewport a backend should open a new page with: an explicit
+/// `BrowserContextOptions.viewport` wins over the launch plan's default,
+/// and `ViewportOption::Null` drops the default entirely (matches
+/// Playwright's `viewport: null` opt-out).
+fn effective_viewport(
+  ctx_opts: Option<&crate::options::BrowserContextOptions>,
+  plan_viewport: Option<crate::options::ViewportConfig>,
+) -> Option<crate::options::ViewportConfig> {
+  let Some(opts) = ctx_opts else {
+    return plan_viewport;
+  };
+  match opts.viewport {
+    crate::options::ViewportOption::Null => None,
+    crate::options::ViewportOption::Size { .. } => opts.resolved_viewport(),
+    crate::options::ViewportOption::Default => plan_viewport,
+  }
 }
 
 /// Kick off a background recording runtime for a freshly-opened page

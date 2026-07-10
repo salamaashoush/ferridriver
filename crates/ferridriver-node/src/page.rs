@@ -180,10 +180,6 @@ impl Page {
     }
   }
 
-  pub(crate) fn inner_ref(&self) -> &ferridriver::Page {
-    &self.inner
-  }
-
   pub(crate) fn inner_arc(&self) -> Arc<ferridriver::Page> {
     Arc::clone(&self.inner)
   }

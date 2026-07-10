@@ -19,7 +19,12 @@ protocol-agnostic, log replay across navigations);
 `context.addInitScript` now reaches future pages (per-context
 registry); trace recording (`tracing.start/stop/startChunk/stopChunk`)
 emitting Playwright format VERSION 8 that `npx playwright show-trace`
-opens; `ferridriver bdd --watch` / `--ui` interactive TUI watch mode.
+opens; `ferridriver bdd --watch` interactive TUI watch mode;
+`ferridriver bdd --ui` web UI mode (localhost app: live test tree over
+a websocket, run all/failed/file/single/grep, stop, file-change re-runs
+with a shared browser, per-test v8 traces forced on and served with
+CORS for trace.playwright.dev; the runner-side step-trace recorder in
+`crates/ferridriver-test/src/tracing.rs` now emits VERSION 8 too).
 
 ## Partial / known limitations
 
@@ -92,9 +97,22 @@ opens; `ferridriver bdd --watch` / `--ui` interactive TUI watch mode.
   FAILURES reject correctly (wired via `Playwright.provisionalLoadFailed`);
   only the silent-timeout path diverges.
 
-### `ferridriver test --watch`
-- Watch mode is wired for `bdd` only. The `test` subcommand shells out
-  to cargo nextest/cargo for `#[ferritest]` suites, so watch there means
-  re-running cargo on change — closer to cargo-watch than to the
-  in-process runner loop; the harness `main!` entry could adopt
-  `run_watch` the same way `bdd` did.
+### `ferridriver test --watch` / `--ui`
+- Watch and UI modes are wired for `bdd` only. The `test` subcommand
+  shells out to cargo nextest/cargo for `#[ferritest]` suites, so watch
+  there means re-running cargo on change — closer to cargo-watch than to
+  the in-process runner loop; the harness `main!` entry could adopt
+  `run_watch` / `run_ui` the same way `bdd` did.
+
+### `bdd --ui` remaining gaps vs Playwright UI mode
+- Step traces have no DOM snapshots (same `snapshotterInjected.ts` gap
+  as the library recorder above), no screencast frames, and no network
+  entries — the viewer shows actions, source locations, and errors; the
+  snapshot pane renders blank.
+- Step timelines are reconstructed sequentially from durations
+  (`TestStep` carries no start timestamps), so concurrent-step overlap
+  is not represented.
+- `screenshot-on-failure` attachments are captured as in-memory bytes,
+  not files, so the UI lists them without a download link.
+- No embedded trace viewer; the "Open in trace viewer" link requires
+  network access to trace.playwright.dev.

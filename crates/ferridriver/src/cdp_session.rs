@@ -1,9 +1,9 @@
-//! `CDPSession` — raw Chrome DevTools Protocol access.
+//! `CDPSession` — raw Chrome `DevTools` Protocol access.
 //!
 //! Playwright: `browser.newBrowserCDPSession()` and
 //! `browserContext.newCDPSession(page)` return a `CDPSession` with
 //! `send(method, params?)`, `detach()`, and per-protocol-event listeners
-//! (`client/cdpSession.ts`). Chromium-only — the WebKit and BiDi
+//! (`client/cdpSession.ts`). Chromium-only — the `WebKit` and `BiDi`
 //! backends return a typed [`FerriError::Unsupported`].
 //!
 //! Session creation mirrors `crConnection.ts`: a page session attaches

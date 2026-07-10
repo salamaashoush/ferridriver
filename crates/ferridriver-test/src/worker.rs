@@ -1452,7 +1452,7 @@ impl Worker {
     let trace_mode = self.config.trace;
     let test_failed = status == TestStatus::Failed || status == TestStatus::TimedOut;
     if trace_mode.should_write(attempt, test_failed) {
-      let mut recorder = crate::tracing::TraceRecorder::for_steps(&steps);
+      let mut recorder = crate::tracing::TraceRecorder::for_steps(&self.config.browser.browser, &steps);
       recorder.record_steps(&steps);
       // Serialize to in-memory ZIP bytes (fast, no file I/O).
       match recorder.into_zip_bytes() {

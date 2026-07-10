@@ -196,6 +196,9 @@ pub struct McpArgs {
 
 // ── bdd subcommand ──────────────────────────────────────────────────────
 
+// Independent bool flags from `clap` parse — grouping into enums adds
+// no value; each flag has its own --foo.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Args)]
 pub struct BddArgs {
   /// Feature file globs. Overrides `[bdd].features` from config.
@@ -215,6 +218,18 @@ pub struct BddArgs {
   /// everything with a freshly bundled step graph.
   #[arg(long)]
   pub watch: bool,
+
+  /// UI mode: serve a localhost web app that lists scenarios, streams
+  /// live results, and re-runs on file changes or in-app commands.
+  /// Traces are recorded for every test so the app can link into the
+  /// Playwright trace viewer. Wins over --watch when both are passed.
+  #[arg(long)]
+  pub ui: bool,
+
+  /// Port for the --ui server (defaults to an ephemeral free port;
+  /// the chosen URL is printed on startup).
+  #[arg(long, requires = "ui")]
+  pub ui_port: Option<u16>,
 
   /// Stop after the first failing scenario.
   #[arg(long)]
