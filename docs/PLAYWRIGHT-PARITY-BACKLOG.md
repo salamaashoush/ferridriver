@@ -47,10 +47,12 @@ CORS for trace.playwright.dev; the runner-side step-trace recorder in
   unwired).
 - `sources: true` accepted but source files are not embedded
   (`resources/src@<sha1>.txt` + inline stacks).
-- Network entries carry ordinal `_monotonicTime` (arrival order), not
-  real per-request capture times; HAR `timings` are zeros/-1 because
-  per-request timing is not wired through the network log. (Bodies ARE
-  now attached as sha1 resources for snapshot rendering.)
+- Network entries now carry real `_monotonicTime` / `startedDateTime` /
+  `time` and `wait`/`receive` phases derived from the backend timing
+  samples (`Request.timing()`), with an ordinal fallback for requests
+  without a sample; `dns`/`connect`/`ssl` phases are not emitted (the
+  3-field HAR timings struct) and backends that do not fill timing
+  samples still fall back to ordinal.
 - Screencast capture is steady-state throttled (1 frame/200ms) without
   Playwright's unthrottled burst window around each action.
 - Action coverage: every locator operation (via the retry funnel) plus
