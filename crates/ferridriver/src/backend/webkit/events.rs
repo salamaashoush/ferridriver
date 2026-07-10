@@ -1061,11 +1061,23 @@ async fn dispatch_intercepted(
       intercept_continue(&target, &request_id, overrides).await;
     },
     crate::route::RouteAction::Fulfill(response) => intercept_fulfill(&target, &request_id, &response).await,
-    crate::route::RouteAction::Abort(_) => {
+    crate::route::RouteAction::Abort(reason) => {
+      // Mirror Playwright's abort-reason → WebKit ResourceErrorType map
+      // (`wkInterceptableRequest.ts:28-43`). `Cancellation` reads as a
+      // benign user stop — an aborted NAVIGATION then resolves `goto`
+      // instead of failing it — so only the reasons Playwright maps to
+      // Cancellation get it; everything else (incl. the default
+      // `failed`) is `General`.
+      let error_type = match reason.to_lowercase().as_str() {
+        "aborted" | "blockedbyclient" => "Cancellation",
+        "accessdenied" => "AccessControl",
+        "timedout" => "Timeout",
+        _ => "General",
+      };
       let _ = target
         .send(
           "Network.interceptRequestWithError",
-          json!({ "requestId": request_id, "errorType": "Cancellation" }),
+          json!({ "requestId": request_id, "errorType": error_type }),
         )
         .await;
     },

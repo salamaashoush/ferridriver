@@ -397,6 +397,27 @@ fn spawn_download_listener(root: &Session, pages: Arc<Mutex<Vec<WebKitPage>>>, d
           // the Page.Events.Download event once the filename is known.
           page.download_manager.register_pending(&download);
         },
+        Some("Playwright.provisionalLoadFailed") => {
+          // Main-frame provisional load failed (aborted route,
+          // interception error, ...). The failing request lives on the
+          // provisional target session whose events never reach the
+          // committed-target listener, and this event carries its
+          // `pageProxyId` inside `params` (browser-session routing) —
+          // so the pending `goto` is failed from here. Mirrors
+          // `wkPage._onProvisionalLoadFailed`.
+          let Some(page_proxy_id) = env.params.get("pageProxyId").and_then(serde_json::Value::as_str) else {
+            continue;
+          };
+          let err = env
+            .params
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("provisional load failed")
+            .to_string();
+          if let Some(page) = find_page(&pages, page_proxy_id) {
+            page.lifecycle.mark_provisional_failed(err);
+          }
+        },
         Some("Playwright.downloadFilenameSuggested") => {
           let uuid = env.params.get("uuid").and_then(serde_json::Value::as_str).unwrap_or("");
           let suggested = env

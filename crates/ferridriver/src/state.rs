@@ -235,6 +235,11 @@ pub struct BrowserState {
   /// while a recording is in flight. Sync mutex so the start/stop paths
   /// can register/take without owning the tokio `RwLock` guard.
   pub har_recorders: Arc<std::sync::Mutex<HashMap<String, crate::tracing::HarRecorder>>>,
+  /// Per-context `routeFromHAR(update: true)` recorder registry. Unlike
+  /// `har_recorders` (one explicit `startHar` per context), a context
+  /// can accumulate several update recordings; all are flushed by
+  /// `ContextRef::close`.
+  pub context_har_updates: Arc<std::sync::Mutex<HashMap<String, Vec<crate::tracing::HarRecorder>>>>,
   /// Per-context binding registry — `exposeBinding` / `exposeFunction`
   /// callbacks registered on a [`crate::ContextRef`]. Keyed by composite
   /// session key, then by binding name so a context-level binding
@@ -337,6 +342,7 @@ impl BrowserState {
       record_video: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_options: Arc::new(std::sync::Mutex::new(HashMap::default())),
       har_recorders: Arc::new(std::sync::Mutex::new(HashMap::default())),
+      context_har_updates: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_bindings: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       context_ws_routes: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       context_routes: Arc::new(tokio::sync::RwLock::new(HashMap::default())),

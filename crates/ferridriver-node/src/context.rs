@@ -191,14 +191,16 @@ impl BrowserContext {
     self.inner.set_http_credentials(creds).await.into_napi()
   }
 
-  /// Playwright: `browserContext.routeFromHAR(har, options?)`. Replays a HAR
-  /// file across every page in the context. Replay-only.
+  /// Playwright: `browserContext.routeFromHAR(har, options?)`. Replays a
+  /// `.har` file or `.zip` archive across every page in the context
+  /// (current and future). With `update: true`, records the context's
+  /// network into the HAR instead — written when the context closes.
   #[napi(
     js_name = "routeFromHAR",
-    ts_args_type = "har: string, options?: { url?: string, notFound?: 'abort' | 'fallback' }"
+    ts_args_type = "har: string, options?: { url?: string | RegExp, notFound?: 'abort' | 'fallback', update?: boolean, updateContent?: 'attach' | 'embed', updateMode?: 'minimal' | 'full' }"
   )]
-  pub async fn route_from_har(&self, har: String, options: Option<serde_json::Value>) -> Result<()> {
-    let opts = crate::page::parse_har_options(options.as_ref())?;
+  pub async fn route_from_har(&self, har: String, options: Option<crate::page::RouteFromHarOptionsJs>) -> Result<()> {
+    let opts = crate::page::parse_har_options(options)?;
     self
       .inner
       .route_from_har(std::path::Path::new(&har))

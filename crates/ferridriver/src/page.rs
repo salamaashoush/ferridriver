@@ -2813,8 +2813,13 @@ impl Page {
   }
 
   /// Playwright: `page.routeFromHAR(har, options?)`. Replay recorded
-  /// responses from a HAR file for matching requests. Replay-only; HAR
-  /// recording (`update: true`) is not supported.
+  /// responses from a HAR file (plain `.har` or `.zip` archive) for
+  /// matching requests.
+  ///
+  /// Recording (`update: true`) is context-scoped in ferridriver — use
+  /// `context.routeFromHAR(har, { update: true })`; the page-scoped
+  /// variant returns a typed `Unsupported` because per-page network
+  /// attribution is not wired into the context network log yet.
   ///
   /// # Errors
   ///
@@ -2835,6 +2840,12 @@ impl Page {
     path: &std::path::Path,
     options: crate::har::RouteFromHarOptions,
   ) -> Result<()> {
+    if options.update {
+      return Err(crate::error::FerriError::unsupported(
+        "page.routeFromHAR({ update: true }) is not implemented (page-scoped network attribution); \
+         use context.routeFromHAR({ update: true })",
+      ));
+    }
     let handler = crate::har::route_handler_from_file(path, options.not_found)?;
     let matcher = options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any);
     self
