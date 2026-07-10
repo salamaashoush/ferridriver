@@ -284,45 +284,6 @@
     border-radius: 8px; background: var(--bg-active); color: var(--fg-mid);
   }
 
-  /* ── Steps ── */
-  .step {
-    display: flex;
-    align-items: baseline;
-    gap: 9px;
-    padding: 3px 8px;
-    border-radius: 4px;
-    font-size: 13px;
-  }
-  .step:hover { background: var(--bg-hover); }
-  .step .chev { width: 12px; flex: none; color: var(--fg-dim); font-size: 9px; cursor: pointer; text-align: center; transition: transform 0.12s; }
-  .step .chev.leaf { visibility: hidden; }
-  .step.collapsed .chev { transform: rotate(-90deg); }
-  .step .cat {
-    color: var(--cyan);
-    font-family: var(--mono);
-    font-size: 10px;
-    flex: none;
-    width: 66px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    opacity: 0.75;
-  }
-  .step .step-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .step .dur { color: var(--fg-dim); font-size: 11px; font-variant-numeric: tabular-nums; flex: none; }
-  .step.failed > .step-title, .step.failed .step-title { color: var(--red); }
-  .step.pending .dur { color: var(--amber); }
-  .step-error {
-    color: var(--red);
-    font-family: var(--mono);
-    font-size: 12px;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    background: rgba(247, 118, 142, 0.07);
-    border-left: 2px solid var(--red);
-    border-radius: 0 4px 4px 0;
-    padding: 6px 10px;
-    margin: 2px 8px 6px 30px;
-  }
   pre.error-box {
     background: var(--bg-inset);
     border: 1px solid rgba(247, 118, 142, 0.5);
@@ -496,7 +457,7 @@ function formatMs(ms) {
 function ensureTest(id) {
   let test = state.tests.get(id);
   if (!test) {
-    test = { id, title: id, file: "", status: "idle", steps: [], stepsById: new Map(), outcome: null };
+    test = { id, title: id, file: "", status: "idle", outcome: null, liveTraceUrl: null };
     state.tests.set(id, test);
   }
   return test;
@@ -549,42 +510,17 @@ function onMessage(msg) {
     case "testStarted": {
       const test = ensureTest(msg.id);
       test.status = "running";
-      test.steps = [];
-      test.stepsById = new Map();
       test.outcome = null;
+      // Live-trace snapshot endpoint the viewer polls while running.
+      test.liveTraceUrl = msg.liveTraceUrl || null;
       updateRow(msg.id);
       renderCounts();
       if (state.selected === msg.id) renderDetail();
       break;
     }
-    case "stepStarted": {
-      const test = ensureTest(msg.id);
-      const step = {
-        stepId: msg.stepId,
-        parentStepId: msg.parentStepId || null,
-        title: msg.title,
-        category: msg.category,
-        durationMs: null,
-        error: null,
-      };
-      test.steps.push(step);
-      test.stepsById.set(msg.stepId, step);
-      if (state.selected === msg.id) renderDetail();
-      break;
-    }
-    case "stepFinished": {
-      const test = ensureTest(msg.id);
-      let step = test.stepsById.get(msg.stepId);
-      if (!step) {
-        step = { stepId: msg.stepId, parentStepId: null, title: msg.title, category: msg.category };
-        test.steps.push(step);
-        test.stepsById.set(msg.stepId, step);
-      }
-      step.durationMs = msg.durationMs;
-      step.error = msg.error || null;
-      if (state.selected === msg.id) renderDetail();
-      break;
-    }
+    // stepStarted / stepFinished are still emitted (other reporters use
+    // them) but the UI's step list is gone — the trace viewer's Actions
+    // panel is the step list now, so these events are ignored here.
     case "testFinished": {
       const test = ensureTest(msg.id);
       test.status = msg.outcome.status;
@@ -842,11 +778,15 @@ function selectTest(id) {
 }
 
 /* ── Detail pane ──
-   Playwright-UI-mode model: the embedded trace viewer IS the main pane
-   for a selected finished test with a trace. The custom Steps list only
-   serves as the live view while the test runs and as the fallback for
-   untraced tests. Attachments / Output are slim secondary tabs; the
-   trace Download / trace.playwright.dev links live in the tab strip. */
+   Playwright-UI-mode model: the embedded trace viewer IS the pane. It is
+   live WHILE the test runs (the viewer stays mounted; the shell polls a
+   live-trace snapshot endpoint and feeds each zip in via the viewer's
+   postMessage `load` hook, so actions / snapshots / filmstrip update
+   without an iframe reload) and loads the finished trace when the test
+   completes. There is no separate Steps list — the viewer's own Actions
+   panel is the step list. Attachments / Output are slim secondary tabs;
+   the trace Download / trace.playwright.dev links live in the tab strip.
+   Untraced / not-yet-run tests show a placeholder. */
 let activeTab = "trace";
 
 function renderDetail() {
@@ -855,14 +795,19 @@ function renderDetail() {
   content.textContent = "";
   const test = state.selected ? state.tests.get(state.selected) : null;
   const traceAttachment = test ? attachmentsOf(test).find((a) => a.name === "trace" && a.urlPath) || null : null;
-  const viewerAvailable = !!traceAttachment && test.status !== "running";
+  // Live while running (a live-trace URL was announced); finished trace
+  // once the test completes. Either yields the viewer.
+  const liveMode = !!test && test.status === "running" && !!test.liveTraceUrl;
+  const finishedTrace = test && test.status !== "running" ? traceAttachment : null;
+  const viewerAvailable = liveMode || !!finishedTrace;
 
   if (!test) {
+    stopLivePoll();
     showViewer(false);
     const placeholder = document.createElement("div");
     placeholder.className = "placeholder";
     const line1 = document.createElement("div");
-    line1.textContent = "Select a test to inspect its trace, errors, output, and attachments.";
+    line1.textContent = "Select a test to watch its trace live and inspect it after it finishes.";
     const keys = document.createElement("div");
     keys.className = "keys";
     keys.innerHTML = "<kbd>&uarr;</kbd><kbd>&darr;</kbd> navigate &nbsp; <kbd>Enter</kbd> run selected &nbsp; <kbd>/</kbd> filter";
@@ -914,20 +859,16 @@ function renderDetail() {
   const attachments = attachmentsOf(test);
   const hasOutput = test.outcome && (test.outcome.stdout || test.outcome.stderr);
 
-  const tabDefs = viewerAvailable
-    ? [
-      { key: "trace", label: "Trace", count: null },
-      { key: "attachments", label: "Attachments", count: attachments.length },
-      { key: "output", label: "Output", count: hasOutput ? null : 0 },
-    ]
-    : [
-      { key: "steps", label: "Steps", count: test.steps.length },
-      { key: "attachments", label: "Attachments", count: attachments.length },
-      { key: "output", label: "Output", count: hasOutput ? null : 0 },
-    ];
-  if (!tabDefs.some((def) => def.key === activeTab)) activeTab = tabDefs[0].key;
-  if (activeTab === "attachments" && !attachments.length) activeTab = tabDefs[0].key;
-  if (activeTab === "output" && !hasOutput) activeTab = tabDefs[0].key;
+  const tabDefs = [
+    { key: "trace", label: liveMode ? "Trace (live)" : "Trace", count: null, on: viewerAvailable },
+    { key: "attachments", label: "Attachments", count: attachments.length, on: true },
+    { key: "output", label: "Output", count: hasOutput ? null : 0, on: true },
+  ];
+  // Trace tab is only selectable when a viewer is available; fall back
+  // to Attachments/Output (or the placeholder) otherwise.
+  if (activeTab === "trace" && !viewerAvailable) activeTab = "attachments";
+  if (activeTab === "attachments" && !attachments.length) activeTab = viewerAvailable ? "trace" : "output";
+  if (activeTab === "output" && !hasOutput) activeTab = viewerAvailable ? "trace" : "attachments";
 
   const tabs = document.createElement("div");
   tabs.className = "tabs";
@@ -942,23 +883,25 @@ function renderDetail() {
       tab.appendChild(n);
     }
     tab.disabled =
+      (def.key === "trace" && !viewerAvailable) ||
       (def.key === "attachments" && !attachments.length) ||
       (def.key === "output" && !hasOutput);
     tab.onclick = () => { activeTab = def.key; renderDetail(); };
     tabs.appendChild(tab);
   }
-  if (traceAttachment) {
+  // Download / trace.playwright.dev links only for a finished trace file.
+  if (finishedTrace) {
     const spacer = document.createElement("span");
     spacer.className = "spacer";
     tabs.appendChild(spacer);
     const download = document.createElement("a");
     download.className = "trace-link";
-    download.href = traceAttachment.urlPath;
+    download.href = finishedTrace.urlPath;
     download.setAttribute("download", "");
     download.textContent = "Download trace";
     const online = document.createElement("a");
     online.className = "trace-link";
-    online.href = onlineTraceViewerUrl(traceAttachment);
+    online.href = onlineTraceViewerUrl(finishedTrace);
     online.target = "_blank";
     online.rel = "noopener";
     online.textContent = "trace.playwright.dev";
@@ -967,12 +910,25 @@ function renderDetail() {
   inner.appendChild(tabs);
 
   const viewerActive = viewerAvailable && activeTab === "trace";
-  if (activeTab === "steps") renderStepsTab(inner, test);
-  else if (activeTab === "attachments") renderAttachmentsTab(inner, attachments);
+  if (activeTab === "attachments") renderAttachmentsTab(inner, attachments);
   else if (activeTab === "output") renderOutputTab(inner, test);
+  else if (activeTab === "trace" && !viewerAvailable) {
+    const empty = document.createElement("div");
+    empty.className = "section-empty";
+    empty.textContent = test.status === "idle"
+      ? "This test has not run yet. Press Run test to record a trace."
+      : "No trace was recorded for this test.";
+    inner.appendChild(empty);
+  }
 
   content.appendChild(inner);
-  if (viewerActive) loadViewer(test, traceAttachment);
+  // Drive the viewer: live poll while running, finished zip once done.
+  if (viewerActive && liveMode) {
+    startLivePoll(test);
+  } else {
+    stopLivePoll();
+    if (viewerActive) loadFinishedViewer(test, finishedTrace);
+  }
   showViewer(viewerActive);
 }
 
@@ -991,24 +947,84 @@ function showViewer(visible) {
   $("detail").classList.toggle("viewer-on", visible);
 }
 
-/* Point the persistent iframe at the test's trace. The ?v cache-buster
-   (durationMs-attempt) changes on every re-run, so a fresh outcome
-   reloads the viewer while unrelated re-renders leave it untouched. */
-function loadViewer(test, traceAttachment) {
+/* Point the persistent iframe at a finished trace zip (SW loads it). The
+   ?v cache-buster (durationMs-attempt) changes on every re-run, so a
+   fresh outcome reloads the viewer while unrelated re-renders leave it
+   untouched. Marks the iframe 'finished' so the live path knows to
+   re-navigate when switching back to a running test. */
+function loadFinishedViewer(test, traceAttachment) {
   const frame = $("trace-frame");
   const buster = test.outcome ? test.outcome.durationMs + "-" + test.outcome.attempt : "0";
   const src = "/trace-viewer/index.html?trace="
     + encodeURIComponent(location.origin + traceAttachment.urlPath + "?v=" + buster);
   if (frame.dataset.src !== src) {
     frame.dataset.src = src;
+    frame.dataset.mode = "finished";
     frame.src = src;
   }
+}
+
+/* Live trace: the viewer stays mounted as the bare WorkbenchLoader (no
+   ?trace), and we feed it fresh trace zips via its postMessage `load`
+   hook. Each blob is a distinct object URL, so the viewer's service
+   worker re-reads it (it caches models by URL) — that is how updates
+   land without an iframe reload. Playwright's own smooth incremental
+   live needs its websocket test-server (uiMode); this snapshot-feed is
+   the equivalent the standalone viewer supports. */
+let livePoll = null; // { url, testId, timer, lastLen, lastBlob }
+
+function ensureLiveViewer() {
+  const frame = $("trace-frame");
+  if (frame.dataset.mode !== "live") {
+    frame.dataset.mode = "live";
+    frame.dataset.src = "";
+    frame.src = "/trace-viewer/index.html";
+  }
+}
+
+function postTraceBlob(blob) {
+  const frame = $("trace-frame");
+  if (frame.contentWindow) {
+    frame.contentWindow.postMessage({ method: "load", params: { trace: blob } }, location.origin);
+  }
+}
+
+function startLivePoll(test) {
+  ensureLiveViewer();
+  if (livePoll && livePoll.testId === test.id && livePoll.url === test.liveTraceUrl) return;
+  stopLivePoll();
+  livePoll = { url: test.liveTraceUrl, testId: test.id, timer: null, lastLen: -1, lastBlob: null };
+  const tick = async () => {
+    if (!livePoll) return;
+    try {
+      const res = await fetch(livePoll.url, { cache: "no-store" });
+      if (res.ok) {
+        const buf = await res.arrayBuffer();
+        // Only re-feed the viewer when the trace actually grew, to avoid
+        // needless model rebuilds (which reset the viewer's selection).
+        if (buf.byteLength !== livePoll.lastLen) {
+          livePoll.lastLen = buf.byteLength;
+          livePoll.lastBlob = new Blob([buf], { type: "application/zip" });
+          postTraceBlob(livePoll.lastBlob);
+        }
+      }
+    } catch (_) { /* server gone / between-poll teardown */ }
+    if (livePoll) livePoll.timer = setTimeout(tick, 800);
+  };
+  tick();
+}
+
+function stopLivePoll() {
+  if (livePoll && livePoll.timer) clearTimeout(livePoll.timer);
+  livePoll = null;
 }
 
 /* Blend the viewer into the app: hide its own Playwright-branded header
    so the workbench reads as our main pane. Same-origin iframe, styled
    via the viewer's source-defined stable class
-   (.workbench-loader-header) — never build-hashed ones. */
+   (.workbench-loader-header) — never build-hashed ones. Runs on each
+   iframe navigation (live vs finished); postMessage model swaps do NOT
+   reload the document, so the injected style persists across them. */
 $("trace-frame").addEventListener("load", () => {
   const frame = $("trace-frame");
   const doc = frame.contentDocument;
@@ -1016,6 +1032,12 @@ $("trace-frame").addEventListener("load", () => {
   const style = doc.createElement("style");
   style.textContent = ".workbench-loader-header { display: none; }";
   doc.head.appendChild(style);
+  // Live viewer just navigated to the bare loader — feed it the latest
+  // snapshot now that its postMessage listener is mounted (the poll that
+  // fired during navigation was dropped).
+  if (frame.dataset.mode === "live" && livePoll && livePoll.lastBlob) {
+    postTraceBlob(livePoll.lastBlob);
+  }
   /* Focus model: while a viewer widget (action list, tabs) has focus,
      the viewer owns every key — its own arrow-key navigation keeps
      working. Only keys that land on the iframe's body (nothing focused
@@ -1030,71 +1052,6 @@ $("trace-frame").addEventListener("load", () => {
     }
   });
 });
-
-const collapsedSteps = new Set();
-
-function renderStepsTab(container, test) {
-  if (!test.steps.length) {
-    const empty = document.createElement("div");
-    empty.className = "section-empty";
-    empty.textContent = test.status === "idle"
-      ? "This test has not run yet. Press Run test to execute it."
-      : test.status === "running" ? "Waiting for the first step…" : "No steps were recorded for this test.";
-    container.appendChild(empty);
-    return;
-  }
-  const children = new Map();
-  const roots = [];
-  for (const step of test.steps) {
-    if (step.parentStepId && test.stepsById.has(step.parentStepId)) {
-      if (!children.has(step.parentStepId)) children.set(step.parentStepId, []);
-      children.get(step.parentStepId).push(step);
-    } else {
-      roots.push(step);
-    }
-  }
-  const renderLevel = (steps, depth) => {
-    for (const step of steps) {
-      const kids = children.get(step.stepId) || [];
-      const isCollapsed = collapsedSteps.has(step.stepId);
-      const row = document.createElement("div");
-      row.className = "step"
-        + (step.error ? " failed" : step.durationMs == null ? " pending" : "")
-        + (isCollapsed ? " collapsed" : "");
-      row.style.paddingLeft = 8 + depth * 20 + "px";
-      const chev = document.createElement("span");
-      chev.className = "chev" + (kids.length ? "" : " leaf");
-      chev.textContent = "▼";
-      chev.onclick = (event) => {
-        event.stopPropagation();
-        if (collapsedSteps.has(step.stepId)) collapsedSteps.delete(step.stepId);
-        else collapsedSteps.add(step.stepId);
-        renderDetail();
-      };
-      const cat = document.createElement("span");
-      cat.className = "cat";
-      cat.textContent = step.category;
-      cat.title = step.category;
-      const title = document.createElement("span");
-      title.className = "step-title";
-      title.textContent = step.title;
-      title.title = step.title;
-      const dur = document.createElement("span");
-      dur.className = "dur";
-      dur.textContent = step.durationMs == null ? "running" : formatMs(step.durationMs);
-      row.append(chev, cat, title, dur);
-      container.appendChild(row);
-      if (step.error) {
-        const err = document.createElement("div");
-        err.className = "step-error";
-        err.textContent = step.error;
-        container.appendChild(err);
-      }
-      if (!isCollapsed) renderLevel(kids, depth + 1);
-    }
-  };
-  renderLevel(roots, 0);
-}
 
 function renderAttachmentsTab(container, attachments) {
   for (const attachment of attachments) {

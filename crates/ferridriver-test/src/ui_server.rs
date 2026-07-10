@@ -17,7 +17,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Path as UrlPath, State, WebSocketUpgrade};
+use axum::extract::{Path as UrlPath, Query, State, WebSocketUpgrade};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -27,6 +27,41 @@ use crate::model::{AttachmentBody, TestOutcome, TestPlan};
 use crate::reporter::{ReporterEvent, Subscription};
 
 const INDEX_HTML: &str = include_str!("ui_assets/index.html");
+
+/// Live-trace registry: the composite session key of the in-progress
+/// trace for each running test, keyed by the test's full name. The
+/// worker publishes into it when a test's trace starts and removes the
+/// entry when the trace stops; the `/live-trace` endpoint reads it to
+/// export a snapshot of the still-growing trace on demand. Process-
+/// global (like the core recorder registry) so the worker and the UI
+/// server share it without threading a handle through the run loop.
+static LIVE_TRACES: std::sync::LazyLock<std::sync::Mutex<rustc_hash::FxHashMap<String, String>>> =
+  std::sync::LazyLock::new(|| std::sync::Mutex::new(rustc_hash::FxHashMap::default()));
+
+/// Publish the active trace's composite key for `test_full_name` so the
+/// UI server can export live snapshots while the test runs.
+pub fn register_live_trace(test_full_name: &str, composite: &str) {
+  LIVE_TRACES
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .insert(test_full_name.to_string(), composite.to_string());
+}
+
+/// Drop the live-trace entry for `test_full_name` (trace stopped).
+pub fn unregister_live_trace(test_full_name: &str) {
+  LIVE_TRACES
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .remove(test_full_name);
+}
+
+fn live_trace_composite(test_full_name: &str) -> Option<String> {
+  LIVE_TRACES
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .get(test_full_name)
+    .cloned()
+}
 
 /// Vendored Playwright trace-viewer static app (playwright-core 1.61.1,
 /// Apache-2.0 — LICENSE ships inside the archive). Embedded so the
@@ -224,6 +259,7 @@ impl UiServer {
       .route("/", get(index))
       .route("/ws", get(ws_upgrade))
       .route("/artifact/{*path}", get(artifact))
+      .route("/live-trace", get(live_trace))
       .route("/trace-viewer", get(trace_viewer_index))
       .route("/trace-viewer/", get(trace_viewer_index))
       .route("/trace-viewer/{*path}", get(trace_viewer_asset))
@@ -265,6 +301,48 @@ fn serve_trace_viewer(path: &str) -> Response {
         .body(Body::from(bytes.clone()))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     },
+    None => StatusCode::NOT_FOUND.into_response(),
+  }
+}
+
+/// Export a snapshot of a running test's in-progress trace to a zip and
+/// serve it. `key` is the test's full name (the same id the client saw
+/// on `testStarted`). Returns 404 before the test's trace starts, after
+/// it stops, or for an unknown test — the live poller treats 404 as
+/// "not recording yet" and keeps trying. The exported zip is a normal
+/// Playwright trace the embedded viewer loads via its `postMessage`
+/// hook; CORS is open so the viewer (any origin) can consume it.
+async fn live_trace(Query(params): Query<rustc_hash::FxHashMap<String, String>>) -> Response {
+  let Some(key) = params.get("key") else {
+    return StatusCode::BAD_REQUEST.into_response();
+  };
+  let Some(composite) = live_trace_composite(key) else {
+    return StatusCode::NOT_FOUND.into_response();
+  };
+  // Unique temp path per request; removed after reading.
+  static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+  let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+  let tmp = std::env::temp_dir().join(format!("ferridriver-live-{}-{n}.zip", std::process::id()));
+
+  let composite_owned = composite.clone();
+  let tmp_for_export = tmp.clone();
+  let exported =
+    tokio::task::spawn_blocking(move || ferridriver::trace::export_live_snapshot(&composite_owned, &tmp_for_export))
+      .await;
+
+  let served = match exported {
+    Ok(Ok(true)) => tokio::fs::read(&tmp).await.ok(),
+    _ => None,
+  };
+  let _ = tokio::fs::remove_file(&tmp).await;
+
+  match served {
+    Some(bytes) => Response::builder()
+      .header(header::CONTENT_TYPE, "application/zip")
+      .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+      .header(header::CACHE_CONTROL, "no-store")
+      .body(Body::from(bytes))
+      .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
     None => StatusCode::NOT_FOUND.into_response(),
   }
 }
@@ -362,6 +440,23 @@ fn resolve_artifact_path(root: &Path, relative: &str) -> Option<PathBuf> {
   canonical.starts_with(&canonical_root).then_some(canonical)
 }
 
+/// Percent-encode a string for use as a URL query-parameter value
+/// (encodes `/` too, unlike [`encode_url_path`]). The `/live-trace`
+/// handler reads it back via axum's query decoding.
+fn encode_query_value(value: &str) -> String {
+  let mut encoded = String::with_capacity(value.len());
+  for byte in value.bytes() {
+    match byte {
+      b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => encoded.push(byte as char),
+      _ => {
+        encoded.push('%');
+        encoded.push_str(&format!("{byte:02X}"));
+      },
+    }
+  }
+  encoded
+}
+
 /// Percent-encode a relative artifact path for use in a URL path,
 /// keeping `/` separators intact.
 fn encode_url_path(relative: &str) -> String {
@@ -451,6 +546,10 @@ pub fn reporter_event_to_json(event: &ReporterEvent, artifacts_root: &Path) -> s
       "type": "testStarted",
       "id": test_id.full_name(),
       "attempt": attempt,
+      // Live-trace snapshot endpoint the viewer polls while the test
+      // runs (404 until the test's trace actually starts). The key is
+      // the test's full name, percent-encoded as a query value.
+      "liveTraceUrl": format!("/live-trace?key={}", encode_query_value(&test_id.full_name())),
     }),
     ReporterEvent::StepStarted(step) => serde_json::json!({
       "type": "stepStarted",

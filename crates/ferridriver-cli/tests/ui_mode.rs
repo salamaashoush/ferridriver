@@ -280,6 +280,13 @@ async fn ui_mode_end_to_end() {
     index_text.contains("id=\"trace-frame\""),
     "the shell must carry the persistent trace-viewer iframe"
   );
+  // Live-trace wiring: the shell polls a live snapshot and feeds it to
+  // the viewer via the postMessage `load` hook (Playwright-UI-mode live
+  // view). These markers guard the feature staying wired.
+  assert!(
+    index_text.contains("startLivePoll") && index_text.contains("method: \"load\""),
+    "the shell must carry the live-trace poller + postMessage feed"
+  );
 
   let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{host}/ws"))
     .await
@@ -294,9 +301,17 @@ async fn ui_mode_end_to_end() {
     .expect("send runAll");
 
   let mut outcome = None;
+  let mut live_trace_url = None;
   let totals = loop {
     let msg = next_json(&mut ws).await;
     match msg["type"].as_str() {
+      Some("testStarted") => {
+        // Every started test announces its live-trace snapshot endpoint,
+        // which the viewer polls while the test runs.
+        if msg["id"].as_str() == Some(test_id.as_str()) {
+          live_trace_url = msg["liveTraceUrl"].as_str().map(str::to_string);
+        }
+      },
       Some("testFinished") => {
         assert_eq!(msg["id"].as_str(), Some(test_id.as_str()));
         outcome = Some(msg["outcome"].clone());
@@ -305,6 +320,19 @@ async fn ui_mode_end_to_end() {
       _ => {},
     }
   };
+  let live_trace_url = live_trace_url.expect("testStarted must announce a liveTraceUrl");
+  assert!(
+    live_trace_url.starts_with("/live-trace?key="),
+    "liveTraceUrl shape: {live_trace_url}"
+  );
+  // After the run the trace has stopped, so the live endpoint reports
+  // 404 (its documented "not recording" response) — proving the route
+  // is wired rather than missing.
+  let (live_headers, _) = http_get(&host, &live_trace_url).await;
+  assert!(
+    live_headers.starts_with("HTTP/1.1 404"),
+    "live-trace after stop must 404: {live_headers}"
+  );
   assert_eq!(totals["total"].as_u64(), Some(1), "totals: {totals}");
   assert_eq!(totals["passed"].as_u64(), Some(1), "totals: {totals}");
   assert_eq!(totals["failed"].as_u64(), Some(0), "totals: {totals}");
@@ -325,17 +353,20 @@ async fn ui_mode_end_to_end() {
   assert!(url_path.starts_with("/artifact/"), "urlPath: {url_path}");
 
   fetch_and_validate_trace(&host, url_path).await;
+  validate_viewer_and_security(&host).await;
+}
 
-  // The embedded trace viewer is served by the same server (offline,
-  // no trace.playwright.dev dependency); its service worker must
-  // arrive as JavaScript or the browser rejects registration.
-  let (viewer_headers, viewer_body) = http_get(&host, "/trace-viewer/").await;
+/// The embedded viewer is served offline by the same server, its service
+/// worker arrives as JavaScript (else the browser rejects registration),
+/// and artifact path traversal is rejected.
+async fn validate_viewer_and_security(host: &str) {
+  let (viewer_headers, viewer_body) = http_get(host, "/trace-viewer/").await;
   assert!(viewer_headers.starts_with("HTTP/1.1 200"), "viewer: {viewer_headers}");
   assert!(
     String::from_utf8_lossy(&viewer_body).contains("Playwright Trace Viewer"),
     "viewer shell served"
   );
-  let (sw_headers, _) = http_get(&host, "/trace-viewer/sw.bundle.js").await;
+  let (sw_headers, _) = http_get(host, "/trace-viewer/sw.bundle.js").await;
   assert!(
     sw_headers
       .to_ascii_lowercase()
@@ -346,8 +377,7 @@ async fn ui_mode_end_to_end() {
     "service worker MIME: {sw_headers}"
   );
 
-  // Path traversal is rejected.
-  let (traversal_headers, _) = http_get(&host, "/artifact/../Cargo.toml").await;
+  let (traversal_headers, _) = http_get(host, "/artifact/../Cargo.toml").await;
   assert!(
     traversal_headers.starts_with("HTTP/1.1 404"),
     "traversal must 404: {traversal_headers}"
