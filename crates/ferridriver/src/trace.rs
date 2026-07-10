@@ -590,6 +590,31 @@ pub(crate) fn take_recorder(composite: &str) -> Option<Arc<TraceRecorder>> {
     .remove(composite)
 }
 
+/// Export a SNAPSHOT of the in-progress recording for `composite` to a
+/// Playwright-compatible `trace.zip` at `path`, without stopping the
+/// recording. Non-destructive: the spool keeps growing after this
+/// returns. Powers the `bdd --ui` live-trace view — a poller exports
+/// the current trace repeatedly while the test runs and feeds each zip
+/// to the embedded viewer.
+///
+/// Network entries are intentionally empty: the HAR entries are built
+/// from the context's network log at `stop`, which this free function
+/// (no context handle) cannot reach — so the viewer's Network tab is
+/// empty in the live view and fills once the finished trace loads.
+///
+/// # Errors
+///
+/// Returns `Ok(false)` when `composite` is not being traced (the
+/// recording has not started yet or already stopped); `Err` when the
+/// zip write fails.
+pub fn export_live_snapshot(composite: &str, path: &std::path::Path) -> Result<bool> {
+  let Some(recorder) = recorder_for(composite) else {
+    return Ok(false);
+  };
+  recorder.export(path, &[])?;
+  Ok(true)
+}
+
 // ── Screencast pump ────────────────────────────────────────────────────
 
 /// Steady-state screencast cap: 1 frame / 200ms (Playwright's

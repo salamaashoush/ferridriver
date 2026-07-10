@@ -131,21 +131,32 @@ CORS for trace.playwright.dev; the runner-side step-trace recorder in
   entries with bodies, protocol actions nested under their step spans);
   tests that never touch a browser produce no trace (the recorder is
   context-scoped).
-- The trace viewer is embedded (vendored playwright-core 1.58.2 static
-  app served at /trace-viewer/) and is THE main pane for a selected
-  finished test with a trace — Playwright UI mode's model. The custom
-  Steps list serves only as the live view while a test runs and as the
-  fallback for untraced tests; Attachments / Output are slim secondary
-  tabs, and the trace Download / trace.playwright.dev links live in the
-  tab strip. The viewer's own header is hidden via a same-origin
-  injected stylesheet targeting its source-defined stable class
-  (`.workbench-loader > .header`) — never build-hashed names. The
-  iframe element is persistent (websocket re-renders never reload it);
-  a re-run's fresh outcome changes the `?v=durationMs-attempt`
-  cache-buster and reloads it. Focus model: viewer widgets own the
-  keys while focused (its action-list arrows keep working); arrow keys
-  landing on the viewer's body forward to the sidebar. Fully offline;
-  trace.playwright.dev remains a secondary link.
+- The trace viewer is embedded (vendored playwright-core 1.61.1 static
+  app served at /trace-viewer/) and is THE pane — Playwright UI mode's
+  model, with no separate Steps list (the viewer's Actions panel is the
+  step list). It is LIVE while the test runs: the shell polls
+  `/live-trace?key=<test>` (the UI server exports a snapshot of the
+  still-growing recorder via `trace::export_live_snapshot`) and feeds
+  each zip to the viewer through its `postMessage({method:'load'})`
+  hook, so actions / DOM snapshots / filmstrip update without an iframe
+  reload; on finish it loads the finished zip (`?trace=`). The vendored
+  viewer's service worker caches models by URL, so a constant live URL
+  never refreshes — Playwright's own smooth incremental live needs its
+  websocket test-server (uiMode); the postMessage snapshot-feed (fresh
+  blob URL each poll) is the equivalent the standalone viewer supports.
+  Live LIMITATION: the Network tab is empty while running (HAR entries
+  are built from the context log at `stop`, which the context-less
+  live export can't reach) and fills once the finished trace loads;
+  the model re-swap on each poll is coarser than PW's byte-incremental
+  append (viewer selection resets), and the poller only re-feeds when
+  the trace actually grew. The viewer is dark (matches the shell) via
+  `localStorage.theme='dark-mode'` set same-origin, and its own header
+  is hidden via a same-origin injected stylesheet on the source-defined
+  stable class `.workbench-loader-header` — never build-hashed names.
+  Focus model: viewer widgets own the keys while focused (its
+  action-list arrows keep working); arrow keys landing on the viewer's
+  body forward to the sidebar. Fully offline; trace.playwright.dev
+  remains a secondary link.
 - Rust-registry BDD steps (no JS step files) are live boundaries: the
   executor observer opens the `TestInfo` step before the handler runs
   (`on_step_start`), so their protocol actions nest under step spans

@@ -128,7 +128,12 @@ impl TestBrowserResources {
     };
     match ctx.tracing().start(options).await {
       Ok(()) => {
-        *spec.composite.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ctx.composite());
+        let composite = ctx.composite();
+        *spec.composite.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(composite.clone());
+        // Publish for the UI server's live-trace snapshot endpoint (the
+        // `bdd --ui` viewer polls it while the test runs). Keyed by the
+        // test's full name — the same id the client sees on testStarted.
+        crate::ui_server::register_live_trace(&spec.title, &composite);
       },
       Err(e) => tracing::warn!(target: "ferridriver::worker", "trace start failed: {e}"),
     }
@@ -145,6 +150,7 @@ impl TestBrowserResources {
       .take()
       .is_some();
     if started {
+      crate::ui_server::unregister_live_trace(&spec.title);
       let _ = ctx
         .tracing()
         .stop(ferridriver::trace::TracingStopOptions::default())
@@ -1404,6 +1410,11 @@ impl Worker {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
         .is_some();
+      // Stop the UI live-trace poller from exporting a recorder that is
+      // about to be torn down (the finished zip takes over at finish).
+      if started {
+        crate::ui_server::unregister_live_trace(&test_id.full_name());
+      }
       match (started, resources.current_context().await) {
         (true, Some(ctx)) => {
           let path = self.config.trace.should_write(attempt, test_failed).then(|| {
