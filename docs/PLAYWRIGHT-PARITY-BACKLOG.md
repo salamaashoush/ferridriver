@@ -132,8 +132,20 @@ CORS for trace.playwright.dev; the runner-side step-trace recorder in
   tests that never touch a browser produce no trace (the recorder is
   context-scoped).
 - The trace viewer is embedded (vendored playwright-core 1.58.2 static
-  app served at /trace-viewer/, inline Trace tab in the detail pane) —
-  fully offline; trace.playwright.dev remains a secondary link.
+  app served at /trace-viewer/) and is THE main pane for a selected
+  finished test with a trace — Playwright UI mode's model. The custom
+  Steps list serves only as the live view while a test runs and as the
+  fallback for untraced tests; Attachments / Output are slim secondary
+  tabs, and the trace Download / trace.playwright.dev links live in the
+  tab strip. The viewer's own header is hidden via a same-origin
+  injected stylesheet targeting its source-defined stable class
+  (`.workbench-loader > .header`) — never build-hashed names. The
+  iframe element is persistent (websocket re-renders never reload it);
+  a re-run's fresh outcome changes the `?v=durationMs-attempt`
+  cache-buster and reloads it. Focus model: viewer widgets own the
+  keys while focused (its action-list arrows keep working); arrow keys
+  landing on the viewer's body forward to the sidebar. Fully offline;
+  trace.playwright.dev remains a secondary link.
 - Rust-registry BDD steps (no JS step files) are live boundaries: the
   executor observer opens the `TestInfo` step before the handler runs
   (`on_step_start`), so their protocol actions nest under step spans

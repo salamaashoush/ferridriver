@@ -213,7 +213,14 @@
   .status-flaky { background: var(--orange); }
 
   /* ── Detail pane ── */
-  #detail { flex: 1; overflow-y: auto; min-width: 0; display: flex; flex-direction: column; }
+  #detail { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #detail-content { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+  /* Viewer-first layout: the header/tabs strip shrinks to content and
+     the embedded trace viewer takes the remaining height. */
+  #detail.viewer-on #detail-content { flex: none; max-height: 45%; }
+  #viewer-host { flex: 1 1 auto; min-height: 0; border-top: 1px solid var(--border); background: #fff; }
+  #viewer-host[hidden] { display: none; }
+  #viewer-host iframe { width: 100%; height: 100%; border: 0; display: block; }
   #detail .placeholder {
     color: var(--fg-dim);
     margin: auto;
@@ -228,6 +235,7 @@
     border-radius: 4px; padding: 0 5px; margin: 0 2px;
   }
   .detail-inner { padding: 16px 22px 32px; }
+  #detail.viewer-on .detail-inner { padding-bottom: 0; }
   .detail-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .detail-head h2 { font-size: 16px; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
   .badge {
@@ -254,7 +262,11 @@
   .detail-meta { color: var(--fg-dim); font-size: 12px; margin-left: 2px; }
 
   /* ── Tabs ── */
-  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+  .tabs { display: flex; gap: 2px; align-items: center; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+  .tabs .spacer { flex: 1; }
+  .tabs .trace-link { color: var(--accent); font-size: 11px; text-decoration: none; white-space: nowrap; padding: 0 8px; }
+  .tabs .trace-link:hover { text-decoration: underline; }
+  #detail.viewer-on .tabs { margin-bottom: 0; }
   .tab {
     padding: 6px 14px;
     font-size: 12px;
@@ -371,16 +383,6 @@
   }
   .output-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-dim); margin: 0 0 5px 2px; }
 
-  /* ── Embedded trace viewer ── */
-  .trace-frame-wrap {
-    height: calc(100vh - 250px);
-    min-height: 360px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    overflow: hidden;
-    background: #fff;
-  }
-  .trace-frame-wrap iframe { width: 100%; height: 100%; border: 0; display: block; }
   .attachment img.preview {
     max-height: 48px;
     max-width: 120px;
@@ -434,7 +436,12 @@
     <div id="tree"></div>
   </div>
   <div id="splitter"></div>
-  <div id="detail"></div>
+  <div id="detail">
+    <div id="detail-content"></div>
+    <!-- Persistent iframe: rebuilt detail renders never touch it, so an
+         unrelated websocket message cannot reload the viewer. -->
+    <div id="viewer-host" hidden><iframe id="trace-frame" title="Trace viewer"></iframe></div>
+  </div>
 </main>
 <script>
 "use strict";
@@ -825,24 +832,33 @@ function selectTest(id) {
   renderDetail();
 }
 
-/* ── Detail pane ── */
-let activeTab = "steps";
+/* ── Detail pane ──
+   Playwright-UI-mode model: the embedded trace viewer IS the main pane
+   for a selected finished test with a trace. The custom Steps list only
+   serves as the live view while the test runs and as the fallback for
+   untraced tests. Attachments / Output are slim secondary tabs; the
+   trace Download / trace.playwright.dev links live in the tab strip. */
+let activeTab = "trace";
 
 function renderDetail() {
   const detail = $("detail");
-  detail.textContent = "";
+  const content = $("detail-content");
+  content.textContent = "";
   const test = state.selected ? state.tests.get(state.selected) : null;
+  const traceAttachment = test ? attachmentsOf(test).find((a) => a.name === "trace" && a.urlPath) || null : null;
+  const viewerAvailable = !!traceAttachment && test.status !== "running";
 
   if (!test) {
+    showViewer(false);
     const placeholder = document.createElement("div");
     placeholder.className = "placeholder";
     const line1 = document.createElement("div");
-    line1.textContent = "Select a test to inspect steps, errors, output, and attachments.";
+    line1.textContent = "Select a test to inspect its trace, errors, output, and attachments.";
     const keys = document.createElement("div");
     keys.className = "keys";
     keys.innerHTML = "<kbd>&uarr;</kbd><kbd>&darr;</kbd> navigate &nbsp; <kbd>Enter</kbd> run selected &nbsp; <kbd>/</kbd> filter";
     placeholder.append(line1, keys);
-    detail.appendChild(placeholder);
+    content.appendChild(placeholder);
     return;
   }
 
@@ -870,13 +886,6 @@ function renderDetail() {
   runBtn.disabled = !state.connected;
   runBtn.onclick = () => send({ cmd: "runTest", id: test.id });
   actions.appendChild(runBtn);
-  const trace = attachmentsOf(test).find((a) => a.name === "trace" && a.urlPath);
-  if (trace) {
-    const viewBtn = document.createElement("button");
-    viewBtn.textContent = "Open trace";
-    viewBtn.onclick = () => { activeTab = "trace"; renderDetail(); };
-    actions.appendChild(viewBtn);
-  }
   head.append(title, badge, meta, actions);
   inner.appendChild(head);
 
@@ -885,6 +894,7 @@ function renderDetail() {
   file.textContent = test.file;
   inner.appendChild(file);
 
+  // Errors banner stays above the viewer.
   if (test.outcome && test.outcome.error) {
     const pre = document.createElement("pre");
     pre.className = "error-box";
@@ -895,18 +905,23 @@ function renderDetail() {
   const attachments = attachmentsOf(test);
   const hasOutput = test.outcome && (test.outcome.stdout || test.outcome.stderr);
 
+  const tabDefs = viewerAvailable
+    ? [
+      { key: "trace", label: "Trace", count: null },
+      { key: "attachments", label: "Attachments", count: attachments.length },
+      { key: "output", label: "Output", count: hasOutput ? null : 0 },
+    ]
+    : [
+      { key: "steps", label: "Steps", count: test.steps.length },
+      { key: "attachments", label: "Attachments", count: attachments.length },
+      { key: "output", label: "Output", count: hasOutput ? null : 0 },
+    ];
+  if (!tabDefs.some((def) => def.key === activeTab)) activeTab = tabDefs[0].key;
+  if (activeTab === "attachments" && !attachments.length) activeTab = tabDefs[0].key;
+  if (activeTab === "output" && !hasOutput) activeTab = tabDefs[0].key;
+
   const tabs = document.createElement("div");
   tabs.className = "tabs";
-  const traceAttachment = attachments.find((a) => a.name === "trace" && a.urlPath) || null;
-  const tabDefs = [
-    { key: "steps", label: "Steps", count: test.steps.length },
-    { key: "trace", label: "Trace", count: traceAttachment ? null : 0 },
-    { key: "attachments", label: "Attachments", count: attachments.length },
-    { key: "output", label: "Output", count: hasOutput ? null : 0 },
-  ];
-  if (activeTab === "attachments" && !attachments.length) activeTab = "steps";
-  if (activeTab === "output" && !hasOutput) activeTab = "steps";
-  if (activeTab === "trace" && !traceAttachment) activeTab = "steps";
   for (const def of tabDefs) {
     const tab = document.createElement("button");
     tab.className = "tab" + (activeTab === def.key ? " on" : "");
@@ -919,32 +934,93 @@ function renderDetail() {
     }
     tab.disabled =
       (def.key === "attachments" && !attachments.length) ||
-      (def.key === "output" && !hasOutput) ||
-      (def.key === "trace" && !traceAttachment);
+      (def.key === "output" && !hasOutput);
     tab.onclick = () => { activeTab = def.key; renderDetail(); };
     tabs.appendChild(tab);
   }
+  if (traceAttachment) {
+    const spacer = document.createElement("span");
+    spacer.className = "spacer";
+    tabs.appendChild(spacer);
+    const download = document.createElement("a");
+    download.className = "trace-link";
+    download.href = traceAttachment.urlPath;
+    download.setAttribute("download", "");
+    download.textContent = "Download trace";
+    const online = document.createElement("a");
+    online.className = "trace-link";
+    online.href = onlineTraceViewerUrl(traceAttachment);
+    online.target = "_blank";
+    online.rel = "noopener";
+    online.textContent = "trace.playwright.dev";
+    tabs.append(download, online);
+  }
   inner.appendChild(tabs);
 
+  const viewerActive = viewerAvailable && activeTab === "trace";
   if (activeTab === "steps") renderStepsTab(inner, test);
-  else if (activeTab === "trace") renderTraceTab(inner, test, traceAttachment);
   else if (activeTab === "attachments") renderAttachmentsTab(inner, attachments);
-  else renderOutputTab(inner, test);
+  else if (activeTab === "output") renderOutputTab(inner, test);
 
-  detail.appendChild(inner);
+  content.appendChild(inner);
+  if (viewerActive) loadViewer(test, traceAttachment);
+  showViewer(viewerActive);
 }
 
 function attachmentsOf(test) {
   return (test.outcome && test.outcome.attachments) || [];
 }
 
-function traceViewerUrl(attachment) {
-  return "/trace-viewer/index.html?trace=" + encodeURIComponent(location.origin + attachment.urlPath);
-}
-
 function onlineTraceViewerUrl(attachment) {
   return "https://trace.playwright.dev/?trace=" + encodeURIComponent(location.origin + attachment.urlPath);
 }
+
+/* ── Embedded trace viewer ── */
+
+function showViewer(visible) {
+  $("viewer-host").hidden = !visible;
+  $("detail").classList.toggle("viewer-on", visible);
+}
+
+/* Point the persistent iframe at the test's trace. The ?v cache-buster
+   (durationMs-attempt) changes on every re-run, so a fresh outcome
+   reloads the viewer while unrelated re-renders leave it untouched. */
+function loadViewer(test, traceAttachment) {
+  const frame = $("trace-frame");
+  const buster = test.outcome ? test.outcome.durationMs + "-" + test.outcome.attempt : "0";
+  const src = "/trace-viewer/index.html?trace="
+    + encodeURIComponent(location.origin + traceAttachment.urlPath + "?v=" + buster);
+  if (frame.dataset.src !== src) {
+    frame.dataset.src = src;
+    frame.src = src;
+  }
+}
+
+/* Blend the viewer into the app: hide its own Playwright-branded header
+   so the workbench reads as our main pane. Same-origin iframe, styled
+   via source-defined stable class names (.workbench-loader > .header) —
+   never build-hashed ones. */
+$("trace-frame").addEventListener("load", () => {
+  const frame = $("trace-frame");
+  const doc = frame.contentDocument;
+  if (!doc) return;
+  const style = doc.createElement("style");
+  style.textContent = ".workbench-loader > .header { display: none; }";
+  doc.head.appendChild(style);
+  /* Focus model: while a viewer widget (action list, tabs) has focus,
+     the viewer owns every key — its own arrow-key navigation keeps
+     working. Only keys that land on the iframe's body (nothing focused
+     inside the viewer, e.g. after clicking dead space) forward to the
+     sidebar so test navigation never goes dead. */
+  frame.contentWindow.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented) return;
+    if (event.target !== doc.body && event.target !== doc.documentElement) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      navigateSidebar(event.key === "ArrowDown" ? 1 : -1);
+    }
+  });
+});
 
 const collapsedSteps = new Set();
 
@@ -1011,20 +1087,6 @@ function renderStepsTab(container, test) {
   renderLevel(roots, 0);
 }
 
-function renderTraceTab(container, test, traceAttachment) {
-  if (!traceAttachment) return;
-  const wrap = document.createElement("div");
-  wrap.className = "trace-frame-wrap";
-  const frame = document.createElement("iframe");
-  // Cache-bust per outcome so a re-run's fresh zip replaces the viewer's
-  // cached copy of the same artifact path.
-  const buster = test.outcome ? test.outcome.durationMs + "-" + test.outcome.attempt : "0";
-  frame.src = "/trace-viewer/index.html?trace="
-    + encodeURIComponent(location.origin + traceAttachment.urlPath + "?v=" + buster);
-  wrap.appendChild(frame);
-  container.appendChild(wrap);
-}
-
 function renderAttachmentsTab(container, attachments) {
   for (const attachment of attachments) {
     const row = document.createElement("div");
@@ -1053,20 +1115,6 @@ function renderAttachmentsTab(container, attachments) {
       download.textContent = "Download";
       download.setAttribute("download", "");
       row.appendChild(download);
-      if (attachment.name === "trace") {
-        const viewer = document.createElement("a");
-        viewer.href = traceViewerUrl(attachment);
-        viewer.target = "_blank";
-        viewer.rel = "noopener";
-        viewer.textContent = "Open in trace viewer";
-        row.appendChild(viewer);
-        const online = document.createElement("a");
-        online.href = onlineTraceViewerUrl(attachment);
-        online.target = "_blank";
-        online.rel = "noopener";
-        online.textContent = "trace.playwright.dev";
-        row.appendChild(online);
-      }
     }
     container.appendChild(row);
   }
@@ -1112,6 +1160,16 @@ for (const chip of document.querySelectorAll(".chip")) {
   };
 }
 
+function navigateSidebar(direction) {
+  const ids = visibleTestIds();
+  if (!ids.length) return;
+  const index = ids.indexOf(state.selected);
+  const next = direction > 0
+    ? ids[Math.min(index + 1, ids.length - 1)] ?? ids[0]
+    : ids[Math.max(index - 1, 0)] ?? ids[ids.length - 1];
+  selectTest(next);
+}
+
 document.addEventListener("keydown", (event) => {
   if (event.target.tagName === "INPUT") return;
   if (event.key === "/") {
@@ -1125,13 +1183,7 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
-    const ids = visibleTestIds();
-    if (!ids.length) return;
-    const index = ids.indexOf(state.selected);
-    const next = event.key === "ArrowDown"
-      ? ids[Math.min(index + 1, ids.length - 1)] ?? ids[0]
-      : ids[Math.max(index - 1, 0)] ?? ids[ids.length - 1];
-    selectTest(next);
+    navigateSidebar(event.key === "ArrowDown" ? 1 : -1);
     return;
   }
   if (event.key === "Enter" && state.selected) {
