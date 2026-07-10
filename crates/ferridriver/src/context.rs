@@ -462,6 +462,11 @@ impl ContextRef {
     // intercepted and consume the shared `times` budget.
     self.apply_context_routes(&page).await?;
 
+    // Re-apply every context-level init script (`context.addInitScript`
+    // and the fake-clock engine + call log) so new documents in the
+    // fresh page replay them like pages that were already open.
+    self.apply_context_init_scripts(&page).await?;
+
     Ok(page)
   }
 
@@ -536,6 +541,13 @@ impl ContextRef {
   #[must_use]
   pub fn tracing(&self) -> crate::tracing::Tracing {
     crate::tracing::Tracing::new(self.clone())
+  }
+
+  /// `context.clock` handle. Playwright: `browserContext.clock`
+  /// (`page.clock` is the same object).
+  #[must_use]
+  pub fn clock(&self) -> crate::clock::Clock {
+    crate::clock::Clock::new(self.clone())
   }
 
   /// Composite session key (`instance:context`) identifying this context.
@@ -1013,20 +1025,67 @@ impl ContextRef {
     arg: Option<serde_json::Value>,
   ) -> Result<crate::disposable::Disposable> {
     let source = crate::options::evaluation_script(script, arg.as_ref())?;
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    let mut undo = Vec::with_capacity(ctx.pages.len());
-    for page in &ctx.pages {
+    self.add_init_script_source(source).await
+  }
+
+  /// Register a lowered init-script source on this context: applied to
+  /// every open page now, recorded in the per-context registry so
+  /// [`Self::new_page`] applies it to future pages too (Playwright
+  /// context init scripts are current + future).
+  pub(crate) async fn add_init_script_source(&self, source: String) -> Result<crate::disposable::Disposable> {
+    let composite = self.key.to_composite();
+    let (registry, registry_id) = {
+      let state = self.state.read().await;
+      let id = state
+        .context_init_script_counter
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+      (state.context_init_scripts.clone(), id)
+    };
+    registry
+      .write()
+      .await
+      .entry(composite.clone())
+      .or_default()
+      .push((registry_id, source.clone()));
+
+    let inner_pages = {
+      let state = self.state.read().await;
+      state.context(&self.name).map(|c| c.pages.clone()).unwrap_or_default()
+    };
+    let mut undo = Vec::with_capacity(inner_pages.len());
+    for page in inner_pages {
       let id = page.add_init_script(&source).await?;
-      undo.push((page.clone(), id));
+      undo.push((page, id));
     }
-    drop(state);
     Ok(crate::disposable::Disposable::new(move || async move {
+      {
+        let mut guard = registry.write().await;
+        if let Some(entries) = guard.get_mut(&composite) {
+          entries.retain(|(id, _)| *id != registry_id);
+        }
+      }
       for (page, id) in undo {
         page.remove_init_script(&id).await?;
       }
       Ok(())
     }))
+  }
+
+  /// Install every registered context-level init script onto a fresh
+  /// page.
+  async fn apply_context_init_scripts(&self, page: &Arc<Page>) -> Result<()> {
+    let sources: Vec<String> = {
+      let registry = self.state.read().await.context_init_scripts.clone();
+      let guard = registry.read().await;
+      guard
+        .get(&self.key.to_composite())
+        .map(|entries| entries.iter().map(|(_, s)| s.clone()).collect())
+        .unwrap_or_default()
+    };
+    for source in sources {
+      page.inner().add_init_script(&source).await?;
+    }
+    Ok(())
   }
 
   /// Playwright: `browserContext.setGeolocation(geo)` — mutates the

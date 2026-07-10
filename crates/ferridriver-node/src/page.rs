@@ -233,6 +233,18 @@ impl Page {
 
 #[napi]
 impl Page {
+  /// Playwright: `page.clock` — the owning context's fake-time
+  /// controller (`page.clock` IS `context.clock`).
+  #[napi(getter)]
+  pub fn clock(&self) -> Result<crate::clock::Clock> {
+    let ctx = self
+      .inner
+      .context()
+      .cloned()
+      .ok_or_else(|| napi::Error::from_reason("page has no associated browser context"))?;
+    Ok(crate::clock::Clock::wrap(ctx))
+  }
+
   #[napi(js_name = "context")]
   pub fn context(&self) -> Result<crate::context::BrowserContext> {
     let ctx = self

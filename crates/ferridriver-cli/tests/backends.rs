@@ -345,6 +345,7 @@ fn register_events_metadata(set: &mut TestSet<'_>) {
   backends_support::context_events::register(set);
   backends_support::tracing_har::register(set);
   backends_support::cdp_session::register(set);
+  backends_support::clock::register(set);
   run!(set, backends_support::video::test_video_null_without_recording);
   run!(set, backends_support::video::test_video_recording_lifecycle);
 }

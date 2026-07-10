@@ -18,6 +18,7 @@ pub mod browser_context_options;
 pub mod browser_type;
 pub mod cdp_session;
 pub mod client;
+pub mod clock;
 pub mod console_message;
 pub mod context_events;
 pub mod dialog;

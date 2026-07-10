@@ -168,6 +168,12 @@ pub type ContextWsRoutes = HashMap<String, Vec<(crate::url_matcher::UrlMatcher, 
 /// `times` budget), so one context-wide counter governs all pages.
 pub type ContextRoutes = HashMap<String, Vec<crate::route::RegisteredRoute>>;
 
+/// Per-context init-script registry map: composite session key →
+/// `(registry id, lowered script source)` in registration order.
+/// Applied to every page of the context — current pages at
+/// registration time, future pages by `ContextRef::new_page`.
+pub type ContextInitScripts = HashMap<String, Vec<(u64, String)>>;
+
 /// All browser state -- manages multiple Chrome instances, each with contexts and pages.
 pub struct BrowserState {
   instances: HashMap<String, BrowserInstance>,
@@ -262,6 +268,19 @@ pub struct BrowserState {
   /// page in the context (current + future) with one shared `times`
   /// budget, matching Playwright's context-scoped `_routes` list.
   pub context_routes: Arc<tokio::sync::RwLock<ContextRoutes>>,
+  /// Per-context init-script registry — `context.addInitScript`
+  /// registrations keyed by composite session key. Consumed by
+  /// `ContextRef::new_page` so a context-level init script reaches
+  /// pages created after registration (Playwright context init scripts
+  /// are current + future). Also carries the fake-clock engine + call
+  /// log, which every new document must replay.
+  pub context_init_scripts: Arc<tokio::sync::RwLock<ContextInitScripts>>,
+  /// Monotonic id source for `context_init_scripts` entries.
+  pub context_init_script_counter: Arc<std::sync::atomic::AtomicU64>,
+  /// Composite session keys whose fake clock (`context.clock`) engine
+  /// has been installed (`clock.install`-family calls auto-install on
+  /// first use, mirroring `server/clock.ts::_installIfNeeded`).
+  pub clock_installed: Arc<std::sync::Mutex<rustc_hash::FxHashSet<String>>>,
   /// Sync-readable connection flag mirroring `!instances.is_empty()`.
   /// Set true when an instance is ensured, false on `shutdown`, so
   /// `Browser::is_connected()` stays sync like Playwright's.
@@ -346,6 +365,9 @@ impl BrowserState {
       context_bindings: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       context_ws_routes: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       context_routes: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
+      context_init_scripts: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
+      context_init_script_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+      clock_installed: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       persistent_context: false,
