@@ -635,6 +635,28 @@ impl WebKitPage {
       .clone()
   }
 
+  /// The content-frame id hosted inside an `<iframe>`/`<frame>` element
+  /// given its remote-object id, via `DOM.describeNode` →
+  /// `contentFrameId` (mirrors `wkPage.ts::getContentFrame`). `None`
+  /// when the element hosts no frame. Deterministic — works for
+  /// unnamed / `srcdoc` / `data:` iframes the name/url cache heuristic
+  /// cannot attribute.
+  pub async fn content_frame_id(&self, object_id: &str) -> Result<Option<String>> {
+    let resp = self
+      .target_session()
+      .send(protocol::DOM_DESCRIBE_NODE, json!({ "objectId": object_id }))
+      .await
+      .map_err(conn_err)?;
+    // WebKit nests the node under `node`; the frame id is
+    // `contentFrameId` (top-level) in the DOM domain reply.
+    let frame_id = resp
+      .get("contentFrameId")
+      .or_else(|| resp.pointer("/node/contentFrameId"))
+      .and_then(Value::as_str)
+      .map(std::string::ToString::to_string);
+    Ok(frame_id)
+  }
+
   /// Mark a child frame's owner `<iframe>` element with the child's
   /// frame id via the trace snapshot streamer (mirrors
   /// `wkPage.ts::getFrameElement`: `DOM.resolveNode {frameId}` into the
@@ -720,11 +742,6 @@ impl WebKitPage {
         .cloned()
         .unwrap_or(Value::Null),
     ))
-  }
-
-  pub async fn content_frame_id(&self, _object_id: &str) -> Result<Option<String>> {
-    tokio::task::yield_now().await;
-    Ok(None)
   }
 
   // ── Navigation ────────────────────────────────────────────────────────

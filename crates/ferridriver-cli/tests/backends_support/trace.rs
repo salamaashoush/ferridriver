@@ -22,7 +22,7 @@ pub fn test_tracing_records_viewer_loadable_zip(c: &mut McpClient) {
     const [tracePath] = args;
     await context.tracing.start({ title: 'rule9 trace', screenshots: true, snapshots: true });
     await page.goto('data:text/html,<body><style>button{color:red}</style><button id=b>Go</button></body>');
-    await page.evaluate(`console.log('trace-console-probe')`);
+    await page.evaluate(`console.log('trace-console-probe', 42)`);
     // The observed console log is pushed by the same listener task that
     // spools trace console lines (trace push first) — once the probe is
     // visible here, its trace line is guaranteed to be in the spool.
@@ -170,6 +170,18 @@ pub fn test_tracing_records_viewer_loadable_zip(c: &mut McpClient) {
     Some("log"),
     "console messageType: {console_probe}"
   );
+  // Args previews: `console.log('...', 42)` -> two `{preview, value}`
+  // entries; the numeric arg's value survives as a JSON primitive.
+  let args = console_probe["args"]
+    .as_array()
+    .unwrap_or_else(|| panic!("console args array: {console_probe}"));
+  assert_eq!(args.len(), 2, "console.log carried two args: {console_probe}");
+  assert!(
+    args
+      .iter()
+      .any(|a| a["value"].as_i64() == Some(42) || a["preview"].as_str() == Some("42")),
+    "the numeric arg must survive as a preview/value: {console_probe}"
+  );
   let goto_page_id = goto["pageId"].as_str().expect("goto must carry a pageId");
   assert_eq!(
     console_probe["pageId"].as_str(),
@@ -248,15 +260,9 @@ pub fn test_tracing_iframe_snapshots_inline(c: &mut McpClient) {
     await context.tracing.start({ title: 'iframe trace', snapshots: true });
     await page.goto('data:text/html,<h1>parent</h1>');
     await page.setContent(`<h1 id=p>parent</h1><iframe name=kid srcdoc='<button id=c>child</button>'></iframe>`);
-    // A frame-scoped wait guarantees the child frame is attached and
-    // its document live before the traced click captures snapshots.
-    await page.waitForSelector('iframe[name=kid]');
-    let kid = null;
-    for (let i = 0; i < 200 && !kid; i++) {
-      kid = page.frame('kid');
-      if (!kid) await page.waitForTimeout(25);
-    }
-    await kid.waitForSelector('#c', { timeout: 10000 });
+    // frameLocator enter-frame guarantees the child frame is attached
+    // and its document live before the traced click captures snapshots.
+    await page.frameLocator('iframe').locator('#c').waitFor({ timeout: 10000 });
     await page.locator('#p').click();
     await context.tracing.stop({ path: tracePath });
     return {};

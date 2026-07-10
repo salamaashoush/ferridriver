@@ -446,6 +446,15 @@
 <script>
 "use strict";
 
+/* Match the embedded trace viewer to our dark shell. The viewer reads
+   localStorage["theme"] (default "system", which would follow the OS
+   and clash with our always-dark UI); it is served same-origin from
+   /trace-viewer/, so this shell's localStorage IS the viewer's. Set
+   before the iframe ever navigates — the viewer applies the theme once
+   at module load. Uses the viewer's own setting mechanism, not a CSS
+   override. */
+try { localStorage.setItem("theme", "dark-mode"); } catch (_) { /* private mode */ }
+
 /* ── State ── */
 const state = {
   suites: [],
@@ -998,14 +1007,14 @@ function loadViewer(test, traceAttachment) {
 
 /* Blend the viewer into the app: hide its own Playwright-branded header
    so the workbench reads as our main pane. Same-origin iframe, styled
-   via source-defined stable class names (.workbench-loader > .header) —
-   never build-hashed ones. */
+   via the viewer's source-defined stable class
+   (.workbench-loader-header) — never build-hashed ones. */
 $("trace-frame").addEventListener("load", () => {
   const frame = $("trace-frame");
   const doc = frame.contentDocument;
   if (!doc) return;
   const style = doc.createElement("style");
-  style.textContent = ".workbench-loader > .header { display: none; }";
+  style.textContent = ".workbench-loader-header { display: none; }";
   doc.head.appendChild(style);
   /* Focus model: while a viewer widget (action list, tabs) has focus,
      the viewer owns every key — its own arrow-key navigation keeps

@@ -181,6 +181,30 @@ impl ConsoleMessage {
   pub fn timestamp(&self) -> u64 {
     self.inner.timestamp
   }
+
+  /// The `args: [{ preview, value }]` array the trace's `console`
+  /// event carries (Playwright's `tracing.ts::_onConsoleMessage`:
+  /// `args: message.args().map(a => ({ preview: a.toString(), value:
+  /// a.rawValue() }))`). `preview` is the handle's string preview;
+  /// `value` is the raw serialized value for a primitive-backed handle
+  /// and `null` for a remote (object) handle — the recorder runs on
+  /// the synchronous event path and must not issue a protocol
+  /// round-trip to serialize a live object.
+  #[must_use]
+  pub fn trace_args(&self) -> Vec<serde_json::Value> {
+    self
+      .inner
+      .args
+      .iter()
+      .map(|h| {
+        let value = match h.backing() {
+          crate::js_handle::JSHandleBacking::Value(v) => v.to_json_like().unwrap_or(serde_json::Value::Null),
+          crate::js_handle::JSHandleBacking::Remote(_) => serde_json::Value::Null,
+        };
+        serde_json::json!({ "preview": preview_arg(h), "value": value })
+      })
+      .collect()
+  }
 }
 
 impl std::fmt::Debug for ConsoleMessage {
