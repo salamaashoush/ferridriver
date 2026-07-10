@@ -17,9 +17,10 @@
 //! fields in one line) — fully supported at v8
 //! (`traceModernizer.ts:141-144`) and immune to the loader's
 //! orphaned-`after` crash. DOM snapshots (`frame-snapshot` events,
-//! `beforeSnapshot`/`afterSnapshot` names) are not yet captured: the
-//! viewer shows the action list, film strip, console, network, and
-//! errors tabs; the snapshot pane renders blank.
+//! `beforeSnapshot`/`afterSnapshot` names) are captured around actions
+//! by [`crate::snapshotter`]; console messages and page lifecycle
+//! events are fed from the per-page bookkeeping listener
+//! (`crate::page::Page::seed_frame_cache`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,10 +42,21 @@ pub struct TracingStartOptions {
   pub title: Option<String>,
   /// Capture screencast frames into the film strip.
   pub screenshots: bool,
-  /// Accepted for parity; DOM snapshots are not captured yet.
+  /// Capture DOM snapshots around actions.
   pub snapshots: bool,
-  /// Accepted for parity; source files are not embedded yet.
+  /// Embed each source file referenced by an action's stack frames as a
+  /// `resources/src@<sha1>.txt` entry (the viewer's Source tab).
   pub sources: bool,
+}
+
+/// One frame of an action's call stack (`trace.ts` `StackFrame`). The
+/// viewer's Source tab loads `resources/src@<sha1-of-file-path>.txt`
+/// for the top frame's `file` when the trace embeds sources.
+#[derive(Clone)]
+pub struct StackFrame {
+  pub file: String,
+  pub line: u32,
+  pub column: u32,
 }
 
 /// Options bag for `tracing.stop` / `tracing.stopChunk`.
@@ -89,6 +101,8 @@ pub struct ActionEvent {
   pub before_snapshot: Option<String>,
   /// `after@<callId>` snapshot name (viewer's After pane).
   pub after_snapshot: Option<String>,
+  /// Call-site stack frames (viewer's Source tab / action location).
+  pub stack: Vec<StackFrame>,
 }
 
 #[derive(Clone)]
@@ -200,6 +214,14 @@ pub struct TraceRecorder {
   pub screenshots: bool,
   /// Whether DOM snapshots are being captured around actions.
   pub snapshots: bool,
+  /// Whether source files referenced by action stacks are embedded.
+  pub sources: bool,
+  /// Monotonic-ms deadline until which the screencast throttle is
+  /// lifted (Playwright's around-action burst, `tracing.ts:783-837`:
+  /// `temporarilyDisableThrottling` on before/input/after call).
+  screencast_burst_until_ms: AtomicU64,
+  /// Source files already embedded as `src@<sha1>.txt` resources.
+  sources_embedded: std::sync::Mutex<rustc_hash::FxHashSet<String>>,
   /// Chunk-local disk spool (events + resources).
   spool: std::sync::Mutex<TraceSpool>,
   /// Network-log length at chunk start — `stop` serializes entries
@@ -230,6 +252,9 @@ impl TraceRecorder {
       title: options.title.clone(),
       screenshots: options.screenshots,
       snapshots: options.snapshots,
+      sources: options.sources,
+      screencast_burst_until_ms: AtomicU64::new(0),
+      sources_embedded: std::sync::Mutex::new(rustc_hash::FxHashSet::default()),
       spool: std::sync::Mutex::new(TraceSpool::create(&first_line)?),
       network_start_len: AtomicU64::new(network_len as u64),
       next_call_id: AtomicU64::new(1),
@@ -280,6 +305,48 @@ impl TraceRecorder {
   #[must_use]
   pub fn next_call_id(&self) -> String {
     format!("call@{}", self.next_call_id.fetch_add(1, Ordering::Relaxed))
+  }
+
+  /// Lift the screencast throttle for the next 500ms (mirrors
+  /// Playwright's `unthrottleDuration` around every action boundary).
+  fn bump_screencast_burst(&self) {
+    // Millisecond resolution is plenty for a 500ms window.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let until = (self.monotonic_ms() + SCREENCAST_BURST_MS) as u64;
+    self.screencast_burst_until_ms.store(until, Ordering::Relaxed);
+  }
+
+  /// Whether the around-action burst window is open at `now_ms`.
+  fn screencast_burst_active(&self, now_ms: f64) -> bool {
+    #[allow(clippy::cast_precision_loss)]
+    let until = self.screencast_burst_until_ms.load(Ordering::Relaxed) as f64;
+    now_ms < until
+  }
+
+  /// Embed `file` as a `resources/src@<sha1-of-path>.txt` entry (the
+  /// viewer's Source tab fetches exactly that name for a stack frame's
+  /// `file`, `sourceTab.tsx` / `localUtils.ts:78`). No-op unless the
+  /// recording was started with `sources: true`; each file is read
+  /// once per recorder; unreadable files are skipped (best effort,
+  /// like Playwright's zip-time collection).
+  pub fn embed_source(&self, file: &str) {
+    if !self.sources {
+      return;
+    }
+    {
+      let mut seen = self
+        .sources_embedded
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      if !seen.insert(file.to_string()) {
+        return;
+      }
+    }
+    let Ok(bytes) = std::fs::read(file) else {
+      return;
+    };
+    let name = format!("src@{}.txt", crate::tracing::sha1_hex(file.as_bytes()));
+    self.push_resource(&TraceResource { name, bytes });
   }
 
   pub fn push_event(&self, event: &TraceEvent) {
@@ -423,6 +490,11 @@ fn serialize_event(event: &TraceEvent) -> String {
       "parentId": a.parent_id,
       "beforeSnapshot": a.before_snapshot,
       "afterSnapshot": a.after_snapshot,
+      "stack": a.stack.iter().map(|f| serde_json::json!({
+        "file": f.file,
+        "line": f.line,
+        "column": f.column,
+      })).collect::<Vec<_>>(),
     })
     .to_string(),
     TraceEvent::Console(c) => serde_json::json!({
@@ -516,29 +588,38 @@ pub(crate) fn take_recorder(composite: &str) -> Option<Arc<TraceRecorder>> {
 
 // ── Screencast pump ────────────────────────────────────────────────────
 
-static NEXT_TRACE_PAGE_ID: AtomicU64 = AtomicU64::new(1);
+/// Steady-state screencast cap: 1 frame / 200ms (Playwright's
+/// `throttledRate`, `tracing.ts:783`).
+const MIN_FRAME_GAP_MS: f64 = 200.0;
+/// Around-action burst: every action boundary lifts the throttle for
+/// this long (Playwright's `unthrottleDuration`, `tracing.ts:784`).
+const SCREENCAST_BURST_MS: f64 = 500.0;
+
+/// The `page@<id>` identity used for a page's trace events. Derived
+/// from the backend page's frame-cache Arc — the same pointer
+/// [`crate::page::Page::backend_page_id`] hashes — so screencast
+/// frames, console events, and action `pageId`s all correlate in the
+/// viewer.
+pub(crate) fn trace_page_id(page: &crate::backend::AnyPage) -> String {
+  format!("page@{}", Arc::as_ptr(page.frame_cache()).cast::<()>() as usize)
+}
 
 /// Start a screencast on `page` and pump JPEG frames into the trace's
 /// film strip. Failure to start (backend without screencast, video
 /// recording already holding the stream) degrades to a trace without
 /// frames for that page.
 pub(crate) async fn spawn_screencast_pump(recorder: &Arc<TraceRecorder>, page: &crate::backend::AnyPage) {
-  // Throttle mirrors Playwright's steady-state cap (1 frame / 200ms,
-  // `tracing.ts:783-837`); the around-action burst window is not
-  // implemented.
-  const MIN_FRAME_GAP_MS: f64 = 200.0;
-
   let Ok((mut rx, stop_tx)) = page.start_screencast(70, 800, 600).await else {
     return;
   };
   recorder.track_screencast_stop(stop_tx);
-  let page_id = format!("page@{}", NEXT_TRACE_PAGE_ID.fetch_add(1, Ordering::Relaxed));
+  let page_id = trace_page_id(page);
   let recorder = Arc::clone(recorder);
   tokio::spawn(async move {
     let mut last_ts = f64::NEG_INFINITY;
     while let Some((jpeg, _backend_ts)) = rx.recv().await {
       let timestamp = recorder.monotonic_ms();
-      if timestamp - last_ts < MIN_FRAME_GAP_MS {
+      if timestamp - last_ts < MIN_FRAME_GAP_MS && !recorder.screencast_burst_active(timestamp) {
         continue;
       }
       last_ts = timestamp;
@@ -570,6 +651,96 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     .ok()
 }
 
+// ── Page-event recording ───────────────────────────────────────────────
+
+/// Mirror a user-visible page event into the trace: console messages
+/// become `console` lines (the viewer's Console tab), page lifecycle
+/// (dialog / download / pageError / close) becomes `event` lines on
+/// the timeline. Shapes mirror `tracing.ts::_onConsoleMessage` /
+/// `onDialog` / `onDownload` / `onPageClose` / `_onPageError`. Fed
+/// from the per-page bookkeeping listener — a lossless emitter
+/// subscription, so an event storm cannot drop trace lines.
+pub(crate) fn record_page_event(recorder: &Arc<TraceRecorder>, page_id: &str, event: &crate::events::PageEvent) {
+  use crate::events::PageEvent;
+  let time = recorder.monotonic_ms();
+  match event {
+    PageEvent::Console(msg) => {
+      let loc = msg.location();
+      recorder.push_event(&TraceEvent::Console(ConsoleEvent {
+        time,
+        message_type: msg.type_str().to_string(),
+        text: msg.text().to_string(),
+        page_id: Some(page_id.to_string()),
+        url: loc.url.clone(),
+        line_number: loc.line_number,
+        column_number: loc.column_number,
+      }));
+    },
+    PageEvent::PageError(err) => {
+      let details = err.error();
+      recorder.push_event(&TraceEvent::PageEvent(PageEventEntry {
+        time,
+        method: "pageError".to_string(),
+        params: serde_json::json!({
+          "error": {
+            "error": {
+              "name": details.name,
+              "message": details.message,
+              "stack": details.stack,
+            },
+          },
+        }),
+        page_id: Some(page_id.to_string()),
+      }));
+    },
+    PageEvent::Dialog(dialog) => {
+      recorder.push_event(&TraceEvent::PageEvent(PageEventEntry {
+        time,
+        method: "dialog".to_string(),
+        params: serde_json::json!({
+          "pageId": page_id,
+          "type": dialog.dialog_type().as_str(),
+          "message": dialog.message(),
+          "defaultValue": dialog.default_value(),
+        }),
+        page_id: Some(page_id.to_string()),
+      }));
+    },
+    PageEvent::Download(download) => {
+      recorder.push_event(&TraceEvent::PageEvent(PageEventEntry {
+        time,
+        method: "download".to_string(),
+        params: serde_json::json!({
+          "pageId": page_id,
+          "url": download.url(),
+          "suggestedFilename": download.suggested_filename(),
+        }),
+        page_id: Some(page_id.to_string()),
+      }));
+    },
+    PageEvent::Close => {
+      recorder.push_event(&TraceEvent::PageEvent(PageEventEntry {
+        time,
+        method: "pageClosed".to_string(),
+        params: serde_json::json!({ "pageId": page_id }),
+        page_id: Some(page_id.to_string()),
+      }));
+    },
+    _ => {},
+  }
+}
+
+/// Record the `page` lifecycle event for a page opened while tracing
+/// (mirrors `tracing.ts::onPageOpen`).
+pub(crate) fn record_page_open(recorder: &Arc<TraceRecorder>, page_id: &str) {
+  recorder.push_event(&TraceEvent::PageEvent(PageEventEntry {
+    time: recorder.monotonic_ms(),
+    method: "page".to_string(),
+    params: serde_json::json!({ "pageId": page_id }),
+    page_id: Some(page_id.to_string()),
+  }));
+}
+
 // ── Action spans ───────────────────────────────────────────────────────
 
 /// An in-flight traced action. Created by [`begin_action`] at an action
@@ -586,6 +757,7 @@ pub struct ActionSpan {
   parent_id: Option<String>,
   before_snapshot: Option<String>,
   after_snapshot: Option<String>,
+  stack: Vec<StackFrame>,
 }
 
 impl ActionSpan {
@@ -633,14 +805,8 @@ impl ActionSpan {
   /// Emit the action event with an already-stringified error (spans
   /// opened by external runners carry plain-text failures).
   pub fn finish_message(self, error: Option<String>) {
-    self.finish_message_ended_ago(error, 0.0);
-  }
-
-  /// Emit the action event with the end time backdated by
-  /// `ended_ms_ago` (steps recorded after the fact, e.g. a scenario
-  /// runner that reports all step results at scenario end).
-  pub fn finish_message_ended_ago(self, error: Option<String>, ended_ms_ago: f64) {
-    let end_time = (self.recorder.monotonic_ms() - ended_ms_ago).max(self.start_time);
+    self.recorder.bump_screencast_burst();
+    let end_time = self.recorder.monotonic_ms().max(self.start_time);
     self.recorder.push_event(&TraceEvent::Action(ActionEvent {
       call_id: self.call_id,
       start_time: self.start_time,
@@ -654,6 +820,7 @@ impl ActionSpan {
       parent_id: self.parent_id,
       before_snapshot: self.before_snapshot,
       after_snapshot: self.after_snapshot,
+      stack: self.stack,
     }));
   }
 }
@@ -669,6 +836,7 @@ pub(crate) fn begin_action(
   params: serde_json::Value,
 ) -> Option<ActionSpan> {
   let recorder = recorder_for(composite?)?;
+  recorder.bump_screencast_burst();
   let start_time = recorder.monotonic_ms();
   let call_id = recorder.next_call_id();
   let parent_id = recorder.current_parent();
@@ -685,40 +853,53 @@ pub(crate) fn begin_action(
     parent_id,
     before_snapshot: None,
     after_snapshot: None,
+    stack: Vec::new(),
   })
 }
 
+/// A non-protocol action injected into a trace by an external runner
+/// (test-runner step boundaries). See [`begin_custom_action`].
+pub struct CustomAction {
+  /// Trace `class` — the viewer's fallback apiName is `class.method`.
+  pub class: &'static str,
+  pub method: &'static str,
+  /// Display title (wins over `class.method` in the viewer).
+  pub title: String,
+  pub params: serde_json::Value,
+  /// Call id of the enclosing action, for nesting.
+  pub parent_id: Option<String>,
+  /// Shift the span's start time into the past (spans recorded after
+  /// the fact).
+  pub backdate_ms: f64,
+  /// Call-site stack frames (the viewer's Source tab; a
+  /// `sources: true` recording embeds each referenced file).
+  pub stack: Vec<StackFrame>,
+}
+
 /// Open a titled action span on the active recorder for `composite`.
-/// Entry point for external runners injecting non-protocol actions
-/// (test-runner step boundaries) into a trace: the runner supplies the
-/// display title, an optional parent call id for nesting, and a
-/// `backdate_ms` for spans recorded after the fact. Returns `None`
-/// when the composite is not being traced.
+/// Returns `None` when the composite is not being traced.
 #[must_use]
-pub fn begin_custom_action(
-  composite: &str,
-  class: &'static str,
-  method: &str,
-  title: String,
-  params: serde_json::Value,
-  parent_id: Option<String>,
-  backdate_ms: f64,
-) -> Option<ActionSpan> {
+pub fn begin_custom_action(composite: &str, action: CustomAction) -> Option<ActionSpan> {
   let recorder = recorder_for(composite)?;
-  let start_time = (recorder.monotonic_ms() - backdate_ms).max(0.0);
+  recorder.bump_screencast_burst();
+  for frame in &action.stack {
+    recorder.embed_source(&frame.file);
+  }
+  let start_time = (recorder.monotonic_ms() - action.backdate_ms).max(0.0);
   let call_id = recorder.next_call_id();
   Some(ActionSpan {
     recorder,
     call_id,
     start_time,
-    class,
-    method: method.to_string(),
-    title,
-    params,
+    class: action.class,
+    method: action.method.to_string(),
+    title: action.title,
+    params: action.params,
     page_id: None,
-    parent_id,
+    parent_id: action.parent_id,
     before_snapshot: None,
     after_snapshot: None,
+    stack: action.stack,
   })
 }
 
@@ -751,6 +932,7 @@ mod tests {
       parent_id: None,
       before_snapshot: None,
       after_snapshot: None,
+      stack: Vec::new(),
     }));
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid json");
     assert_eq!(parsed["type"].as_str(), Some("action"));
@@ -777,6 +959,7 @@ mod tests {
       parent_id: None,
       before_snapshot: None,
       after_snapshot: None,
+      stack: Vec::new(),
     }));
     recorder.push_resource(&TraceResource {
       name: "page@1-1.jpeg".into(),

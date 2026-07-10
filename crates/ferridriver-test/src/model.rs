@@ -517,8 +517,21 @@ impl TestInfo {
   ///
   /// Returns a `StepHandle` that must be completed via `handle.end()`.
   /// Emits `ReporterEvent::StepStarted` immediately if an event bus is available.
-  #[allow(clippy::unused_async_trait_impl)] // async signature held for the awaiting reporter API
   pub async fn begin_step(&self, title: impl Into<String>, category: StepCategory) -> StepHandle {
+    self.begin_step_at(title, category, None).await
+  }
+
+  /// [`Self::begin_step`] with the step's source location (a BDD step's
+  /// `.feature` file line, a `test.step` call site). The location flows
+  /// into the step's trace span as its stack frame — the viewer's
+  /// Source tab — and into the recorded [`TestStep::location`].
+  #[allow(clippy::unused_async_trait_impl)] // async signature held for the awaiting reporter API
+  pub async fn begin_step_at(
+    &self,
+    title: impl Into<String>,
+    category: StepCategory,
+    location: Option<StepLocation>,
+  ) -> StepHandle {
     let title = title.into();
     let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
 
@@ -534,10 +547,11 @@ impl TestInfo {
       )));
     }
 
-    let trace_span = self.open_step_span(&step_id, &title, &category, None);
-    let trace_prev_parent = trace_span
-      .as_ref()
-      .map(ferridriver::trace::ActionSpan::make_current_parent);
+    let trace_span = self.open_step_span(&step_id, &title, &category, None, Duration::ZERO, location.as_ref());
+    let trace_prev_parent = match trace_span.as_ref() {
+      Some(span) => TraceParentGuard::RestoreTo(span.make_current_parent()),
+      None => TraceParentGuard::NotCurrent,
+    };
     StepHandle {
       step_id,
       test_id: self.test_id.clone(),
@@ -546,6 +560,7 @@ impl TestInfo {
       parent_step_id: None,
       start: Instant::now(),
       metadata: None,
+      location,
       event_bus: self.event_bus.clone(),
       steps: Arc::clone(&self.steps),
       trace_span,
@@ -576,10 +591,11 @@ impl TestInfo {
       )));
     }
 
-    let trace_span = self.open_step_span(&step_id, &title, &category, Some(parent_step_id));
-    let trace_prev_parent = trace_span
-      .as_ref()
-      .map(ferridriver::trace::ActionSpan::make_current_parent);
+    let trace_span = self.open_step_span(&step_id, &title, &category, Some(parent_step_id), Duration::ZERO, None);
+    let trace_prev_parent = match trace_span.as_ref() {
+      Some(span) => TraceParentGuard::RestoreTo(span.make_current_parent()),
+      None => TraceParentGuard::NotCurrent,
+    };
     StepHandle {
       step_id,
       test_id: self.test_id.clone(),
@@ -588,6 +604,7 @@ impl TestInfo {
       parent_step_id: Some(parent_step_id.to_string()),
       start: Instant::now(),
       metadata: None,
+      location: None,
       event_bus: self.event_bus.clone(),
       steps: Arc::clone(&self.steps),
       trace_span,
@@ -603,7 +620,6 @@ impl TestInfo {
       category,
       status,
       duration,
-      ended_ago,
       error,
       metadata,
     } = step;
@@ -632,8 +648,8 @@ impl TestInfo {
       )));
     }
 
-    if let Some(span) = self.open_step_span_backdated(&step_id, &title, &category, None, ended_ago + duration) {
-      span.finish_message_ended_ago(error.clone(), ended_ago.as_secs_f64() * 1000.0);
+    if let Some(span) = self.open_step_span(&step_id, &title, &category, None, duration, None) {
+      span.finish_message(error.clone());
     }
 
     self.steps.lock().await.push(TestStep {
@@ -652,23 +668,17 @@ impl TestInfo {
 
   /// Mirror a starting step into the active per-test trace as an
   /// action span. `None` when the test's context is not being traced.
+  /// `backdate` shifts the span's start time into the past (steps
+  /// recorded after they already ran, [`Self::record_step`]); the
+  /// location becomes the span's stack frame (viewer's Source tab).
   fn open_step_span(
     &self,
     step_id: &str,
     title: &str,
     category: &StepCategory,
     parent_step_id: Option<&str>,
-  ) -> Option<ferridriver::trace::ActionSpan> {
-    self.open_step_span_backdated(step_id, title, category, parent_step_id, Duration::ZERO)
-  }
-
-  fn open_step_span_backdated(
-    &self,
-    step_id: &str,
-    title: &str,
-    category: &StepCategory,
-    parent_step_id: Option<&str>,
     backdate: Duration,
+    location: Option<&StepLocation>,
   ) -> Option<ferridriver::trace::ActionSpan> {
     let composite = self
       .trace_composite
@@ -683,14 +693,26 @@ impl TestInfo {
         .get(parent)
         .cloned()
     });
+    let stack = location
+      .map(|loc| {
+        vec![ferridriver::trace::StackFrame {
+          file: loc.file.clone(),
+          line: loc.line,
+          column: loc.column,
+        }]
+      })
+      .unwrap_or_default();
     let span = ferridriver::trace::begin_custom_action(
       &composite,
-      "Test",
-      trace_method_for_category(category),
-      title.to_string(),
-      serde_json::json!({}),
-      parent_call,
-      backdate.as_secs_f64() * 1000.0,
+      ferridriver::trace::CustomAction {
+        class: "Test",
+        method: trace_method_for_category(category),
+        title: title.to_string(),
+        params: serde_json::json!({}),
+        parent_id: parent_call,
+        backdate_ms: backdate.as_secs_f64() * 1000.0,
+        stack,
+      },
     )?;
     self
       .trace_step_calls
@@ -698,6 +720,26 @@ impl TestInfo {
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .insert(step_id.to_string(), span.call_id().to_string());
     Some(span)
+  }
+}
+
+/// Source location of a step (`file` + 1-based `line`), e.g. the BDD
+/// step's `.feature` line or a `test.step` call site.
+#[derive(Debug, Clone)]
+pub struct StepLocation {
+  pub file: String,
+  pub line: u32,
+  pub column: u32,
+}
+
+impl StepLocation {
+  #[must_use]
+  pub fn new(file: impl Into<String>, line: u32) -> Self {
+    Self {
+      file: file.into(),
+      line,
+      column: 0,
+    }
   }
 }
 
@@ -712,21 +754,29 @@ fn trace_method_for_category(category: &StepCategory) -> &'static str {
   }
 }
 
-/// An already-executed step handed to [`TestInfo::record_step`].
+/// An already-executed step handed to [`TestInfo::record_step`]. Its
+/// mirrored trace span is backdated by `duration` (the step ends at
+/// report time).
 pub struct RecordedStep {
   pub title: String,
   pub category: StepCategory,
   pub status: StepStatus,
   pub duration: Duration,
-  /// How long ago the step finished (zero when reported at its real
-  /// end); anchors the step's mirrored trace span on the timeline.
-  pub ended_ago: Duration,
   pub error: Option<String>,
   pub metadata: Option<serde_json::Value>,
 }
 
 /// Global step ID counter for unique step identification.
 static STEP_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a step's trace span became the recorder's current parent,
+/// and if so which parent id to restore when the step closes.
+enum TraceParentGuard {
+  /// The step never became the current parent (no trace span).
+  NotCurrent,
+  /// Restore this enclosing-parent id on close (stack discipline).
+  RestoreTo(Option<String>),
+}
 
 /// Handle to an in-progress step. Must be completed via `end()`.
 ///
@@ -742,13 +792,15 @@ pub struct StepHandle {
   pub start: Instant,
   /// Arbitrary metadata attached to this step (set before calling `end()`).
   pub metadata: Option<serde_json::Value>,
+  /// Source location recorded into [`TestStep::location`].
+  pub location: Option<StepLocation>,
   event_bus: Option<EventBus>,
   steps: Arc<Mutex<Vec<TestStep>>>,
   /// Mirrored trace action, open while the step runs.
   trace_span: Option<ferridriver::trace::ActionSpan>,
-  /// Enclosing-parent id to restore when this step's span closes
-  /// (`Some` only when this step became the live trace parent).
-  trace_prev_parent: Option<Option<String>>,
+  /// How to restore the recorder's enclosing parent when this step's
+  /// span closes.
+  trace_prev_parent: TraceParentGuard,
 }
 
 impl StepHandle {
@@ -762,8 +814,8 @@ impl StepHandle {
     };
     if let Some(span) = self.trace_span {
       match self.trace_prev_parent {
-        Some(previous) => span.finish_message_restoring(error.clone(), previous),
-        None => span.finish_message(error.clone()),
+        TraceParentGuard::RestoreTo(previous) => span.finish_message_restoring(error.clone(), previous),
+        TraceParentGuard::NotCurrent => span.finish_message(error.clone()),
       }
     }
 
@@ -790,7 +842,7 @@ impl StepHandle {
       duration,
       status,
       error,
-      location: None,
+      location: self.location.map(|l| format!("{}:{}", l.file, l.line)),
       parent_step_id: self.parent_step_id,
       metadata: self.metadata.clone(),
       steps: Vec::new(),
@@ -812,8 +864,8 @@ impl StepHandle {
     let duration = self.start.elapsed();
     if let Some(span) = self.trace_span {
       match self.trace_prev_parent {
-        Some(previous) => span.finish_message_restoring(error.clone(), previous),
-        None => span.finish_message(error.clone()),
+        TraceParentGuard::RestoreTo(previous) => span.finish_message_restoring(error.clone(), previous),
+        TraceParentGuard::NotCurrent => span.finish_message(error.clone()),
       }
     }
 
@@ -838,7 +890,7 @@ impl StepHandle {
       duration,
       status,
       error,
-      location: None,
+      location: self.location.map(|l| format!("{}:{}", l.file, l.line)),
       parent_step_id: self.parent_step_id,
       metadata: self.metadata,
       steps: Vec::new(),

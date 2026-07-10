@@ -635,6 +635,59 @@ impl WebKitPage {
       .clone()
   }
 
+  /// Mark a child frame's owner `<iframe>` element with the child's
+  /// frame id via the trace snapshot streamer (mirrors
+  /// `wkPage.ts::getFrameElement`: `DOM.resolveNode {frameId}` into the
+  /// parent's main-world context, then `Runtime.callFunctionOn` with
+  /// the element as `this`).
+  pub async fn mark_snapshot_iframe(
+    &self,
+    child_frame_id: &str,
+    parent_frame_id: &str,
+    streamer_global: &str,
+  ) -> Result<()> {
+    let ctx_id = self.resolve_frame_context(parent_frame_id).await?;
+    let resolved = self
+      .target_session()
+      .send(
+        protocol::DOM_RESOLVE_NODE,
+        json!({ "frameId": child_frame_id, "executionContextId": ctx_id }),
+      )
+      .await
+      .map_err(conn_err)?;
+    let object = resolved
+      .get("object")
+      .ok_or_else(|| FerriError::protocol("DOM.resolveNode", "frame owner did not resolve to an object"))?;
+    if object.get("subtype").and_then(Value::as_str) == Some("null") {
+      return Err(FerriError::protocol("DOM.resolveNode", "frame has been detached"));
+    }
+    let object_id = object
+      .get("objectId")
+      .and_then(Value::as_str)
+      .ok_or_else(|| FerriError::protocol("DOM.resolveNode", "frame owner has no objectId"))?
+      .to_string();
+    let declaration =
+      format!("function(frameId) {{ const s = window[{streamer_global:?}]; if (s) s.markIframe(this, frameId); }}");
+    let call = self
+      .target_session()
+      .send(
+        protocol::RUNTIME_CALL_FUNCTION_ON,
+        json!({
+          "functionDeclaration": declaration,
+          "objectId": object_id,
+          "arguments": [{ "value": child_frame_id }],
+          "returnByValue": true,
+        }),
+      )
+      .await
+      .map_err(conn_err);
+    let _ = self
+      .target_session()
+      .send(protocol::RUNTIME_RELEASE_OBJECT, json!({ "objectId": object_id }))
+      .await;
+    call.map(|_| ())
+  }
+
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<Value>> {
     let ctx_id = self.resolve_frame_context(frame_id).await?;
     // Selector-engine calls reach a child frame's realm through

@@ -966,6 +966,24 @@ impl AnyPage {
     page_dispatch!(self, evaluate_in_frame(expression, frame_id))
   }
 
+  /// Mark a child frame's `<iframe>` element in its parent frame with
+  /// the child's frame id via the trace snapshot streamer's
+  /// `markIframe` (see [`crate::snapshotter::annotate_iframe`]).
+  /// Protocol-level on every backend: CDP `DOM.getFrameOwner`,
+  /// `WebKit` `DOM.resolveNode {frameId}`, `BiDi`
+  /// `browsingContext.locateNodes` with a context locator.
+  pub async fn mark_snapshot_iframe(
+    &self,
+    child_frame_id: &str,
+    parent_frame_id: &str,
+    streamer_global: &str,
+  ) -> Result<()> {
+    page_dispatch!(
+      self,
+      mark_snapshot_iframe(child_frame_id, parent_frame_id, streamer_global)
+    )
+  }
+
   /// The content-frame id for an `<iframe>`/`<frame>` element given its
   /// remote-object id. Deterministic on CDP (`DOM.describeNode`);
   /// `None` on BiDi/WebKit (no equivalent — callers fall back to the

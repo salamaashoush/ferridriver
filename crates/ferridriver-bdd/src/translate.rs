@@ -330,6 +330,8 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
       let executor = ScenarioExecutor::new(Arc::clone(&registry), step_timeout, strict, screenshot_on_failure);
       let observer = TestInfoObserver {
         test_info: Arc::clone(&test_info),
+        feature_path: scenario.feature_path.display().to_string(),
+        open: std::sync::Mutex::new(None),
       };
       let result = executor.run_scenario_observed(&mut world, &scenario, &observer).await;
 
@@ -379,40 +381,83 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
 // ── TestInfo observer ───────────────────────────────────────────────────────
 
 /// Observer that bridges `ScenarioExecutor` step events to `TestInfo` for
-/// the test runner's real-time reporting pipeline.
+/// the test runner's real-time reporting pipeline. Steps are LIVE
+/// boundaries: `on_step_start` opens the `TestInfo` step (streaming
+/// `StepStarted` to reporters and making the step's trace span the
+/// recorder's current parent so the handler's protocol actions nest
+/// under it), `on_step` closes it with the outcome. Steps skipped
+/// after a failure never start; they get a zero-duration boundary at
+/// `on_step` time.
 struct TestInfoObserver {
   test_info: Arc<TestInfo>,
+  feature_path: String,
+  open: std::sync::Mutex<Option<ferridriver_test::model::StepHandle>>,
+}
+
+impl TestInfoObserver {
+  fn step_metadata(step: &ScenarioStep, text: &str) -> serde_json::Value {
+    serde_json::json!({
+      "bdd_keyword": step.keyword.trim(),
+      "bdd_text": text,
+      "bdd_line": step.line,
+    })
+  }
+
+  fn step_location(&self, step: &ScenarioStep) -> ferridriver_test::model::StepLocation {
+    ferridriver_test::model::StepLocation::new(self.feature_path.clone(), u32::try_from(step.line).unwrap_or(0))
+  }
+
+  fn take_open(&self) -> Option<ferridriver_test::model::StepHandle> {
+    self
+      .open
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .take()
+  }
 }
 
 impl StepObserver for TestInfoObserver {
+  fn on_step_start<'a>(
+    &'a self,
+    step: &'a ScenarioStep,
+    text: &'a str,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+      let title = format!("{}{}", step.keyword, text);
+      let mut handle = self
+        .test_info
+        .begin_step_at(&title, StepCategory::TestStep, Some(self.step_location(step)))
+        .await;
+      handle.metadata = Some(Self::step_metadata(step, text));
+      *self.open.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+    })
+  }
+
   fn on_step<'a>(
     &'a self,
     event: StepEvent<'a>,
   ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
-      let step_title = format!("{}{}", event.step.keyword, event.text);
-      self
-        .test_info
-        .record_step(ferridriver_test::model::RecordedStep {
-          title: step_title,
-          category: StepCategory::TestStep,
-          status: match event.result.status {
-            StepStatus::Passed => ferridriver_test::model::StepStatus::Passed,
-            StepStatus::Failed => ferridriver_test::model::StepStatus::Failed,
-            StepStatus::Skipped => ferridriver_test::model::StepStatus::Skipped,
-            StepStatus::Pending => ferridriver_test::model::StepStatus::Pending,
-            StepStatus::Undefined => ferridriver_test::model::StepStatus::Pending,
-          },
-          duration: event.result.duration,
-          ended_ago: Duration::ZERO,
-          error: event.result.error.clone(),
-          metadata: Some(serde_json::json!({
-            "bdd_keyword": event.step.keyword.trim(),
-            "bdd_text": event.text,
-            "bdd_line": event.step.line,
-          })),
-        })
-        .await;
+      let handle = match self.take_open() {
+        Some(handle) => handle,
+        None => {
+          // Skipped before starting (a previous step failed): open the
+          // boundary now so the step still shows up everywhere.
+          let title = format!("{}{}", event.step.keyword, event.text);
+          let mut handle = self
+            .test_info
+            .begin_step_at(&title, StepCategory::TestStep, Some(self.step_location(event.step)))
+            .await;
+          handle.metadata = Some(Self::step_metadata(event.step, event.text));
+          handle
+        },
+      };
+      match event.result.status {
+        StepStatus::Passed => handle.end(None).await,
+        StepStatus::Failed => handle.end(event.result.error.clone()).await,
+        StepStatus::Skipped => handle.skip(event.result.error.clone()).await,
+        StepStatus::Pending | StepStatus::Undefined => handle.pending(event.result.error.clone()).await,
+      }
     })
   }
 }

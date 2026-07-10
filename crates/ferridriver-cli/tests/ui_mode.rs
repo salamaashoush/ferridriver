@@ -209,6 +209,36 @@ async fn fetch_and_validate_trace(host: &str, url_path: &str) {
       "{kind} {name} must resolve to a frame-snapshot"
     );
   }
+
+  // Sources: the BDD step's stack frame points at its .feature line and
+  // the worker's `sources: true` embeds the file as
+  // `resources/src@<sha1-of-path>.txt` — exactly the name the viewer's
+  // Source tab fetches (`sourceTab.tsx`).
+  let stack = step_action["stack"].as_array().expect("step action stack");
+  let top = stack
+    .first()
+    .unwrap_or_else(|| panic!("step stack frame: {step_action}"));
+  let file = top["file"].as_str().expect("stack frame file");
+  assert!(file.ends_with("smoke.feature"), "stack file: {top}");
+  assert_eq!(top["line"].as_u64(), Some(3), "the Given's feature line: {top}");
+  let sha1_hex = {
+    use sha1::{Digest as _, Sha1};
+    Sha1::digest(file.as_bytes()).iter().fold(String::new(), |mut acc, b| {
+      use std::fmt::Write as _;
+      let _ = write!(acc, "{b:02x}");
+      acc
+    })
+  };
+  let mut source_text = String::new();
+  archive
+    .by_name(&format!("resources/src@{sha1_hex}.txt"))
+    .expect("embedded feature source in trace zip")
+    .read_to_string(&mut source_text)
+    .expect("read embedded source");
+  assert!(
+    source_text.contains("Given a blank ui page"),
+    "embedded source must be the feature file: {source_text}"
+  );
 }
 
 #[tokio::test(flavor = "multi_thread")]

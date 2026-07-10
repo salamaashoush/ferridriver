@@ -153,8 +153,32 @@ impl Page {
     let cache = Arc::clone(&self.frame_cache);
     let observed = Arc::clone(self.inner.observed());
     let mut rx = self.inner.events().subscribe();
+    // Trace identity captured at spawn: console / page-lifecycle events
+    // mirror into the context's live trace (when one is recording).
+    let trace_composite = self.context_ref.as_ref().map(super::context::ContextRef::composite);
+    let trace_page_id = crate::trace::trace_page_id(&self.inner);
+    let trace_inner = self.inner.clone();
     tokio::spawn(async move {
       while let Some(event) = rx.recv().await {
+        // Cheap probe (RwLock read + map hit) — only pays when tracing.
+        if let Some(recorder) = trace_composite.as_deref().and_then(crate::trace::recorder_for) {
+          crate::trace::record_page_event(&recorder, &trace_page_id, &event);
+          // markIframe keeps child-frame snapshots inlining in the
+          // viewer (snapshotter.ts::_annotateFrameHierarchy fires on
+          // FrameAttached). Spawned: a bookkeeping listener must never
+          // block on protocol round-trips.
+          if recorder.snapshots {
+            if let PageEvent::FrameAttached(info) = &event {
+              if let Some(parent_id) = info.parent_frame_id.clone() {
+                let inner = trace_inner.clone();
+                let child_id = info.frame_id.clone();
+                tokio::spawn(async move {
+                  let _ = crate::snapshotter::annotate_iframe(&inner, &child_id, &parent_id).await;
+                });
+              }
+            }
+          }
+        }
         match event {
           PageEvent::FrameAttached(info) => {
             if let Ok(mut g) = cache.lock() {
@@ -321,6 +345,17 @@ impl Page {
   fn active_trace_recorder(&self) -> Option<std::sync::Arc<crate::trace::TraceRecorder>> {
     let composite = self.context_ref.as_ref()?.composite();
     crate::trace::recorder_for(&composite)
+  }
+
+  /// `(child_frame_id, parent_frame_id)` for every live child frame —
+  /// the pairs [`crate::snapshotter`] annotates with `markIframe`
+  /// before capturing.
+  pub(crate) fn trace_child_frame_list(&self) -> Vec<(std::sync::Arc<str>, std::sync::Arc<str>)> {
+    self.with_frame_cache(|c| {
+      c.live_ids()
+        .filter_map(|id| c.parent_id(&id).map(|parent| (id, parent)))
+        .collect()
+    })
   }
 
   /// `(frame_id, is_main)` for every live frame, main frame first.

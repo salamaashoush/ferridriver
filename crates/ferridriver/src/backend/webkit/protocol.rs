@@ -65,6 +65,7 @@ pub const RUNTIME_EVALUATE: &str = "Runtime.evaluate";
 pub const RUNTIME_CALL_FUNCTION_ON: &str = "Runtime.callFunctionOn";
 pub const RUNTIME_RELEASE_OBJECT: &str = "Runtime.releaseObject";
 pub const DOM_QUERY_SELECTOR: &str = "DOM.querySelector";
+pub const DOM_RESOLVE_NODE: &str = "DOM.resolveNode";
 pub const INPUT_DISPATCH_MOUSE: &str = "Input.dispatchMouseEvent";
 pub const INPUT_DISPATCH_KEY: &str = "Input.dispatchKeyEvent";
 pub const CONSOLE_ENABLE: &str = "Console.enable";

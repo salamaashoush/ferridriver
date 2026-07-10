@@ -122,7 +122,9 @@ impl TestBrowserResources {
       title: Some(spec.title.clone()),
       screenshots: true,
       snapshots: true,
-      sources: false,
+      // Steps carry their .feature / call-site stack frames; embedding
+      // the referenced files lights up the viewer's Source tab.
+      sources: true,
     };
     match ctx.tracing().start(options).await {
       Ok(()) => {

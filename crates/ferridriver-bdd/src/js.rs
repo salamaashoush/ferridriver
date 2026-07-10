@@ -399,16 +399,23 @@ impl JsBddSession {
 
     if !failed {
       let test_info = std::sync::Arc::clone(&world.fixtures().test_info);
+      let feature_path = scenario.feature_path.display().to_string();
       for step in &scenario.steps {
         let step_meta = serde_json::json!({
           "bdd_keyword": step.keyword.trim(),
           "bdd_text": step.text,
           "bdd_line": step.line,
         });
+        let step_location =
+          ferridriver_test::model::StepLocation::new(feature_path.clone(), u32::try_from(step.line).unwrap_or(0));
         let title = format!("{}{}", step.keyword, step.text);
         if failed {
           let mut handle = test_info
-            .begin_step(&title, ferridriver_test::model::StepCategory::TestStep)
+            .begin_step_at(
+              &title,
+              ferridriver_test::model::StepCategory::TestStep,
+              Some(step_location),
+            )
             .await;
           handle.metadata = Some(step_meta);
           handle.skip(None).await;
@@ -427,7 +434,11 @@ impl JsBddSession {
         // under (the span is the recorder's current parent while the
         // handler runs).
         let mut step_handle = test_info
-          .begin_step(&title, ferridriver_test::model::StepCategory::TestStep)
+          .begin_step_at(
+            &title,
+            ferridriver_test::model::StepCategory::TestStep,
+            Some(step_location),
+          )
           .await;
         step_handle.metadata = Some(step_meta);
 
@@ -537,7 +548,6 @@ impl JsBddSession {
           category: ferridriver_test::model::StepCategory::Hook,
           status: ferridriver_test::model::StepStatus::Failed,
           duration: Duration::ZERO,
-          ended_ago: Duration::ZERO,
           error: Some(msg.clone()),
           metadata: None,
         })
