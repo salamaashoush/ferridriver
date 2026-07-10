@@ -44,6 +44,13 @@ impl BrowserContextJs {
     crate::bindings::tracing::TracingJs::new(self.inner.clone())
   }
 
+  /// `context.clock` — Playwright's fake-time controller. Exposed as a
+  /// JS property.
+  #[qjs(get, rename = "clock")]
+  pub fn clock(&self) -> crate::bindings::clock::ClockJs {
+    crate::bindings::clock::ClockJs::new(self.inner.clone())
+  }
+
   /// Playwright: `browserContext.newCDPSession(page)`. Attaches a raw
   /// CDP session to the page's target. Chromium-only. Playwright also
   /// accepts an OOPIF `Frame`; ferridriver currently supports the

@@ -262,6 +262,14 @@ impl Page {
     self.context_ref.as_ref()
   }
 
+  /// `page.clock` — the owning context's fake-time controller
+  /// (Playwright: `page.clock` IS `context.clock`, `client/page.ts:137`).
+  /// `None` for a page constructed without a context handle.
+  #[must_use]
+  pub fn clock(&self) -> Option<crate::clock::Clock> {
+    self.context_ref.as_ref().map(|ctx| ctx.clock())
+  }
+
   /// Access the underlying backend page (escape hatch).
   #[must_use]
   pub fn inner(&self) -> &AnyPage {

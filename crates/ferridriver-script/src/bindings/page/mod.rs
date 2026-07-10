@@ -1092,6 +1092,18 @@ impl PageJs {
 
   /// `page.context()`. Returns the `BrowserContext` this page belongs to.
   #[qjs(rename = "context")]
+  /// `page.clock` — the owning context's fake-time controller
+  /// (Playwright: `page.clock` IS `context.clock`).
+  #[qjs(get, rename = "clock")]
+  pub fn clock<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let Some(cref) = self.inner.context() else {
+      return Ok(rquickjs::Value::new_null(ctx.clone()));
+    };
+    let wrapper = crate::bindings::clock::ClockJs::new(std::sync::Arc::new(cref.clone()));
+    let instance = rquickjs::class::Class::instance(ctx.clone(), wrapper)?;
+    rquickjs::IntoJs::into_js(instance, &ctx)
+  }
+
   pub fn context<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     let Some(cref) = self.inner.context() else {
       return Ok(rquickjs::Value::new_null(ctx.clone()));

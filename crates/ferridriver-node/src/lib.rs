@@ -54,6 +54,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod browser;
 mod browser_type;
 mod cdp_session;
+mod clock;
 mod codegen;
 mod console_message;
 mod context;

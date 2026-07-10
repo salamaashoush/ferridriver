@@ -67,6 +67,57 @@ pub struct TextOptions {
   pub exact: Option<bool>,
 }
 
+/// A JS `Date` lowered to epoch milliseconds at the NAPI boundary.
+///
+/// napi-rs only binds `Date` through chrono types (behind a feature
+/// this crate does not enable), so this reads the timestamp directly
+/// via `napi_get_date_value`; `validate` gates on `napi_is_date` so an
+/// `Either` union dispatches plain numbers/strings to their own arms.
+#[derive(Debug, Clone, Copy)]
+pub struct JsDateLike {
+  pub time_ms: f64,
+}
+
+impl napi::bindgen_prelude::TypeName for JsDateLike {
+  fn type_name() -> &'static str {
+    "Date"
+  }
+
+  fn value_type() -> napi::ValueType {
+    napi::ValueType::Object
+  }
+}
+
+impl napi::bindgen_prelude::ValidateNapiValue for JsDateLike {
+  unsafe fn validate(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<napi::sys::napi_value> {
+    let mut is_date = false;
+    napi::check_status!(unsafe { napi::sys::napi_is_date(env, napi_val, &raw mut is_date) })?;
+    if !is_date {
+      return Err(napi::Error::new(
+        napi::Status::InvalidArg,
+        "Expected a Date object".to_owned(),
+      ));
+    }
+    Ok(std::ptr::null_mut())
+  }
+}
+
+impl napi::bindgen_prelude::FromNapiValue for JsDateLike {
+  unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
+    let mut time_ms = 0f64;
+    napi::check_status!(unsafe { napi::sys::napi_get_date_value(env, napi_val, &raw mut time_ms) })?;
+    Ok(Self { time_ms })
+  }
+}
+
+impl napi::bindgen_prelude::ToNapiValue for JsDateLike {
+  unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
+    let mut ptr = std::ptr::null_mut();
+    napi::check_status!(unsafe { napi::sys::napi_create_date(env, val.time_ms, &raw mut ptr) })?;
+    Ok(ptr)
+  }
+}
+
 /// Locator-shaped input: anything with a `.selector` string accessor.
 ///
 /// Same prototype-chain trick as [`JsRegExpLike`] — `napi_get_named_property`

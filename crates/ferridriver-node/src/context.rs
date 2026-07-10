@@ -43,6 +43,12 @@ impl BrowserContext {
     crate::tracing::Tracing::wrap(self.inner.clone())
   }
 
+  /// Playwright: `browserContext.clock` — the fake-time controller.
+  #[napi(getter)]
+  pub fn clock(&self) -> crate::clock::Clock {
+    crate::clock::Clock::wrap(self.inner.clone())
+  }
+
   /// Playwright: `browserContext.newCDPSession(page)`. Attaches a raw
   /// CDP session to the page's target. Chromium-only. Playwright also
   /// accepts an OOPIF `Frame`; ferridriver currently supports the
