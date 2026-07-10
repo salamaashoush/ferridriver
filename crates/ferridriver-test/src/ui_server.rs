@@ -28,6 +28,33 @@ use crate::reporter::{ReporterEvent, Subscription};
 
 const INDEX_HTML: &str = include_str!("ui_assets/index.html");
 
+/// Vendored Playwright trace-viewer static app (playwright-core 1.58.2,
+/// Apache-2.0 — LICENSE ships inside the archive). Embedded so "Open in
+/// trace viewer" works fully offline; unpacked into memory on first use.
+const TRACE_VIEWER_ZIP: &[u8] = include_bytes!("ui_assets/trace_viewer.zip");
+
+static TRACE_VIEWER_ASSETS: std::sync::LazyLock<rustc_hash::FxHashMap<String, Vec<u8>>> =
+  std::sync::LazyLock::new(|| {
+    let mut assets = rustc_hash::FxHashMap::default();
+    let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(TRACE_VIEWER_ZIP)) else {
+      return assets;
+    };
+    for index in 0..archive.len() {
+      let Ok(mut entry) = archive.by_index(index) else {
+        continue;
+      };
+      if entry.is_dir() {
+        continue;
+      }
+      let name = entry.name().to_string();
+      let mut bytes = Vec::new();
+      if std::io::Read::read_to_end(&mut entry, &mut bytes).is_ok() {
+        assets.insert(name, bytes);
+      }
+    }
+    assets
+  });
+
 /// Command sent from a browser tab to the run loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiCommand {
@@ -197,6 +224,9 @@ impl UiServer {
       .route("/", get(index))
       .route("/ws", get(ws_upgrade))
       .route("/artifact/{*path}", get(artifact))
+      .route("/trace-viewer", get(trace_viewer_index))
+      .route("/trace-viewer/", get(trace_viewer_index))
+      .route("/trace-viewer/{*path}", get(trace_viewer_asset))
       .with_state(Arc::clone(&state));
     tokio::spawn(async move {
       let _ = axum::serve(listener, app).await;
@@ -212,6 +242,31 @@ impl UiServer {
 
 async fn index() -> Html<&'static str> {
   Html(INDEX_HTML)
+}
+
+async fn trace_viewer_index() -> Response {
+  serve_trace_viewer("index.html")
+}
+
+async fn trace_viewer_asset(UrlPath(path): UrlPath<String>) -> Response {
+  serve_trace_viewer(&path)
+}
+
+/// Serve one embedded trace-viewer file. Correct Content-Type matters:
+/// the viewer's service worker (`sw.bundle.js`) is rejected by the
+/// browser unless it arrives as JavaScript.
+fn serve_trace_viewer(path: &str) -> Response {
+  let key = if path.is_empty() { "index.html" } else { path };
+  match TRACE_VIEWER_ASSETS.get(key) {
+    Some(bytes) => {
+      let mime = mime_guess::from_path(key).first_or_octet_stream();
+      Response::builder()
+        .header(header::CONTENT_TYPE, mime.as_ref())
+        .body(Body::from(bytes.clone()))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    },
+    None => StatusCode::NOT_FOUND.into_response(),
+  }
 }
 
 async fn ws_upgrade(State(state): State<Arc<UiState>>, ws: WebSocketUpgrade) -> Response {

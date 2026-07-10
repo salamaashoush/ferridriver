@@ -286,6 +286,57 @@ impl<T: CdpWrap> CdpBrowser<T> {
       )
       .await?;
 
+    // Resume every auto-attached target the page-open flow does not
+    // claim. `setAutoAttach` pauses ALL new targets
+    // (`waitForDebuggerOnStart`); `create_page` resumes only the page
+    // target it created, so service workers, shared workers, and other
+    // worker targets would sit suspended forever — observed as
+    // `navigator.serviceWorker.register()` never resolving. Mirrors
+    // Playwright's `crBrowser.ts` attachedToTarget handling, which
+    // resumes every session it does not turn into a page. Lossless tap:
+    // a dropped attach event would wedge that worker for good.
+    {
+      let mut attach_rx = transport.tap_event_methods(&["Target.attachedToTarget"], None);
+      let resume_transport = Arc::clone(&transport);
+      tokio::spawn(async move {
+        while let Some(event) = attach_rx.recv().await {
+          let Some(params) = event.get("params") else { continue };
+          let target_type = params
+            .pointer("/targetInfo/type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+          let waiting = params
+            .get("waitingForDebugger")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+          // Page targets are owned by the new-page flow, which does its
+          // setup while the target is paused and resumes it itself.
+          if target_type == "page" || !waiting {
+            continue;
+          }
+          let Some(session_id) = params.get("sessionId").and_then(|v| v.as_str()) else {
+            continue;
+          };
+          // Fire-and-forget (Playwright's `_sendMayFail`): a worker can
+          // attach through two sessions (browser-level AND page-level
+          // auto-attach both see it), and a session Chrome never
+          // answers must not stall the other session's resume behind
+          // the 30s command timeout.
+          let session_id = session_id.to_string();
+          let transport = Arc::clone(&resume_transport);
+          tokio::spawn(async move {
+            let _ = transport
+              .send_command(
+                Some(&session_id),
+                "Runtime.runIfWaitingForDebugger",
+                &super::EMPTY_PARAMS,
+              )
+              .await;
+          });
+        }
+      });
+    }
+
     Ok(Self {
       transport,
       child: Arc::new(tokio::sync::Mutex::new(child)),

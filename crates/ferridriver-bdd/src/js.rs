@@ -398,8 +398,20 @@ impl JsBddSession {
     }
 
     if !failed {
+      let test_info = std::sync::Arc::clone(&world.fixtures().test_info);
       for step in &scenario.steps {
+        let step_meta = serde_json::json!({
+          "bdd_keyword": step.keyword.trim(),
+          "bdd_text": step.text,
+          "bdd_line": step.line,
+        });
+        let title = format!("{}{}", step.keyword, step.text);
         if failed {
+          let mut handle = test_info
+            .begin_step(&title, ferridriver_test::model::StepCategory::TestStep)
+            .await;
+          handle.metadata = Some(step_meta);
+          handle.skip(None).await;
           steps.push(JsStepResult {
             keyword: step.keyword.clone(),
             text: step.text.clone(),
@@ -410,6 +422,14 @@ impl JsBddSession {
           continue;
         }
         let started = Instant::now();
+        // Live step boundary: streams StepStarted to reporters DURING
+        // the scenario and opens the trace span protocol actions nest
+        // under (the span is the recorder's current parent while the
+        // handler runs).
+        let mut step_handle = test_info
+          .begin_step(&title, ferridriver_test::model::StepCategory::TestStep)
+          .await;
+        step_handle.metadata = Some(step_meta);
 
         // BeforeStep hooks — mirror the Rust executor: a failing
         // step-scoped hook warns but never fails the step itself, and
@@ -477,6 +497,13 @@ impl JsBddSession {
           tracing::warn!(step = %step.text, "AfterStep hook failed: {msg}");
         }
 
+        match &status {
+          JsStepStatus::Passed => step_handle.end(None).await,
+          JsStepStatus::Skipped => step_handle.skip(None).await,
+          JsStepStatus::Pending => step_handle.pending(None).await,
+          JsStepStatus::Undefined(msg) => step_handle.pending(Some(msg.clone())).await,
+          JsStepStatus::Failed(msg) => step_handle.end(Some(msg.clone())).await,
+        }
         steps.push(JsStepResult {
           keyword: step.keyword.clone(),
           text: step.text.clone(),
@@ -502,6 +529,19 @@ impl JsBddSession {
       message: after_msg,
     };
     if let Err(msg) = self.run_hooks("After", Some(&scenario.tags), Some(&after_arg)).await {
+      world
+        .fixtures()
+        .test_info
+        .record_step(ferridriver_test::model::RecordedStep {
+          title: "After hook".to_string(),
+          category: ferridriver_test::model::StepCategory::Hook,
+          status: ferridriver_test::model::StepStatus::Failed,
+          duration: Duration::ZERO,
+          ended_ago: Duration::ZERO,
+          error: Some(msg.clone()),
+          metadata: None,
+        })
+        .await;
       steps.push(JsStepResult {
         keyword: "After".into(),
         text: "hook".into(),
@@ -670,38 +710,6 @@ async fn worker_session(
     .cloned()
 }
 
-/// `ended_ago` — how long ago this step finished. Step results arrive
-/// in a batch at scenario end, so step `i`'s end sits the sum of the
-/// later steps' durations before "now" (contiguous-execution
-/// approximation; anchors the mirrored trace spans on the timeline).
-async fn record_step(test_info: &TestInfo, s: &JsStepResult, ended_ago: std::time::Duration) {
-  use ferridriver_test::model::StepStatus as S;
-  let title = format!("{}{}", s.keyword, s.text);
-  let (status, error) = match &s.status {
-    JsStepStatus::Passed => (S::Passed, None),
-    JsStepStatus::Skipped => (S::Skipped, None),
-    JsStepStatus::Pending => (S::Pending, None),
-    JsStepStatus::Undefined(m) => (S::Pending, Some(m.clone())),
-    JsStepStatus::Failed(m) => (S::Failed, Some(m.clone())),
-  };
-  let meta = serde_json::json!({
-    "bdd_keyword": s.keyword.trim(),
-    "bdd_text": s.text,
-    "bdd_line": s.line,
-  });
-  test_info
-    .record_step(ferridriver_test::model::RecordedStep {
-      title,
-      category: StepCategory::TestStep,
-      status,
-      duration: s.duration,
-      ended_ago,
-      error,
-      metadata: Some(meta),
-    })
-    .await;
-}
-
 /// Translate parsed Gherkin features into a `TestPlan` whose scenarios
 /// execute through per-worker JS sessions. Reuses the core
 /// `feature`/`scenario`/`filter` expansion and the shared
@@ -797,12 +805,7 @@ pub fn translate_features_js(
 
           let result = session.run_scenario(&scenario, &mut world).await;
           forward_attachments(&test_info, session.drain_attachments().await).await;
-          let total: std::time::Duration = result.steps.iter().map(|s| s.duration).sum();
-          let mut consumed = std::time::Duration::ZERO;
-          for s in &result.steps {
-            consumed += s.duration;
-            record_step(&test_info, s, total.saturating_sub(consumed)).await;
-          }
+
           if result.passed {
             return Ok(());
           }

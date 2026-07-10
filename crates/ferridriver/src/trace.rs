@@ -207,6 +207,9 @@ pub struct TraceRecorder {
   pub network_start_len: AtomicU64,
   /// Monotonic action-id source (`call@N`).
   next_call_id: AtomicU64,
+  /// Call id of the live enclosing span (a test step): actions recorded
+  /// while set nest under it in the viewer's tree.
+  current_parent: std::sync::Mutex<Option<String>>,
   /// Shutdown senders for per-page screencast pumps.
   screencast_stops: std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
   /// Browser name recorded in `context-options`.
@@ -230,9 +233,28 @@ impl TraceRecorder {
       spool: std::sync::Mutex::new(TraceSpool::create(&first_line)?),
       network_start_len: AtomicU64::new(network_len as u64),
       next_call_id: AtomicU64::new(1),
+      current_parent: std::sync::Mutex::new(None),
       screencast_stops: std::sync::Mutex::new(Vec::new()),
       browser_name,
     })
+  }
+
+  /// Swap the live enclosing-span id, returning the previous one so the
+  /// caller can restore it when its span closes (stack discipline).
+  pub fn swap_current_parent(&self, parent: Option<String>) -> Option<String> {
+    let mut guard = self
+      .current_parent
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::mem::replace(&mut *guard, parent)
+  }
+
+  fn current_parent(&self) -> Option<String> {
+    self
+      .current_parent
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
   }
 
   /// Milliseconds since the recorder's monotonic origin.
@@ -581,6 +603,20 @@ impl ActionSpan {
     self.recorder.snapshots
   }
 
+  /// Make this span the live enclosing parent for actions recorded
+  /// until [`Self::finish_message_restoring`]; returns the previous
+  /// parent to restore.
+  #[must_use]
+  pub fn make_current_parent(&self) -> Option<String> {
+    self.recorder.swap_current_parent(Some(self.call_id.clone()))
+  }
+
+  /// Restore the previous enclosing parent, then emit the event.
+  pub fn finish_message_restoring(self, error: Option<String>, previous_parent: Option<String>) {
+    self.recorder.swap_current_parent(previous_parent);
+    self.finish_message(error);
+  }
+
   pub fn set_before_snapshot(&mut self, name: String) {
     self.before_snapshot = Some(name);
   }
@@ -635,6 +671,7 @@ pub(crate) fn begin_action(
   let recorder = recorder_for(composite?)?;
   let start_time = recorder.monotonic_ms();
   let call_id = recorder.next_call_id();
+  let parent_id = recorder.current_parent();
   let title = format!("{}.{method}", class.to_ascii_lowercase());
   Some(ActionSpan {
     recorder,
@@ -645,7 +682,7 @@ pub(crate) fn begin_action(
     title,
     params,
     page_id,
-    parent_id: None,
+    parent_id,
     before_snapshot: None,
     after_snapshot: None,
   })

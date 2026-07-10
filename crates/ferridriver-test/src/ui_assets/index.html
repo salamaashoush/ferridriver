@@ -371,6 +371,24 @@
   }
   .output-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-dim); margin: 0 0 5px 2px; }
 
+  /* ── Embedded trace viewer ── */
+  .trace-frame-wrap {
+    height: calc(100vh - 250px);
+    min-height: 360px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: #fff;
+  }
+  .trace-frame-wrap iframe { width: 100%; height: 100%; border: 0; display: block; }
+  .attachment img.preview {
+    max-height: 48px;
+    max-width: 120px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    display: block;
+  }
+
   ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 5px; border: 2px solid var(--bg); }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -856,7 +874,7 @@ function renderDetail() {
   if (trace) {
     const viewBtn = document.createElement("button");
     viewBtn.textContent = "Open trace";
-    viewBtn.onclick = () => window.open(traceViewerUrl(trace), "_blank", "noopener");
+    viewBtn.onclick = () => { activeTab = "trace"; renderDetail(); };
     actions.appendChild(viewBtn);
   }
   head.append(title, badge, meta, actions);
@@ -879,13 +897,16 @@ function renderDetail() {
 
   const tabs = document.createElement("div");
   tabs.className = "tabs";
+  const traceAttachment = attachments.find((a) => a.name === "trace" && a.urlPath) || null;
   const tabDefs = [
     { key: "steps", label: "Steps", count: test.steps.length },
+    { key: "trace", label: "Trace", count: traceAttachment ? null : 0 },
     { key: "attachments", label: "Attachments", count: attachments.length },
     { key: "output", label: "Output", count: hasOutput ? null : 0 },
   ];
   if (activeTab === "attachments" && !attachments.length) activeTab = "steps";
   if (activeTab === "output" && !hasOutput) activeTab = "steps";
+  if (activeTab === "trace" && !traceAttachment) activeTab = "steps";
   for (const def of tabDefs) {
     const tab = document.createElement("button");
     tab.className = "tab" + (activeTab === def.key ? " on" : "");
@@ -896,13 +917,17 @@ function renderDetail() {
       n.textContent = def.count;
       tab.appendChild(n);
     }
-    tab.disabled = (def.key === "attachments" && !attachments.length) || (def.key === "output" && !hasOutput);
+    tab.disabled =
+      (def.key === "attachments" && !attachments.length) ||
+      (def.key === "output" && !hasOutput) ||
+      (def.key === "trace" && !traceAttachment);
     tab.onclick = () => { activeTab = def.key; renderDetail(); };
     tabs.appendChild(tab);
   }
   inner.appendChild(tabs);
 
   if (activeTab === "steps") renderStepsTab(inner, test);
+  else if (activeTab === "trace") renderTraceTab(inner, test, traceAttachment);
   else if (activeTab === "attachments") renderAttachmentsTab(inner, attachments);
   else renderOutputTab(inner, test);
 
@@ -914,6 +939,10 @@ function attachmentsOf(test) {
 }
 
 function traceViewerUrl(attachment) {
+  return "/trace-viewer/index.html?trace=" + encodeURIComponent(location.origin + attachment.urlPath);
+}
+
+function onlineTraceViewerUrl(attachment) {
   return "https://trace.playwright.dev/?trace=" + encodeURIComponent(location.origin + attachment.urlPath);
 }
 
@@ -982,6 +1011,20 @@ function renderStepsTab(container, test) {
   renderLevel(roots, 0);
 }
 
+function renderTraceTab(container, test, traceAttachment) {
+  if (!traceAttachment) return;
+  const wrap = document.createElement("div");
+  wrap.className = "trace-frame-wrap";
+  const frame = document.createElement("iframe");
+  // Cache-bust per outcome so a re-run's fresh zip replaces the viewer's
+  // cached copy of the same artifact path.
+  const buster = test.outcome ? test.outcome.durationMs + "-" + test.outcome.attempt : "0";
+  frame.src = "/trace-viewer/index.html?trace="
+    + encodeURIComponent(location.origin + traceAttachment.urlPath + "?v=" + buster);
+  wrap.appendChild(frame);
+  container.appendChild(wrap);
+}
+
 function renderAttachmentsTab(container, attachments) {
   for (const attachment of attachments) {
     const row = document.createElement("div");
@@ -998,6 +1041,13 @@ function renderAttachmentsTab(container, attachments) {
     path.title = attachment.path || "";
     row.append(name, ctype, path);
     if (attachment.urlPath) {
+      if ((attachment.contentType || "").startsWith("image/")) {
+        const img = document.createElement("img");
+        img.className = "preview";
+        img.src = attachment.urlPath;
+        img.loading = "lazy";
+        row.appendChild(img);
+      }
       const download = document.createElement("a");
       download.href = attachment.urlPath;
       download.textContent = "Download";
@@ -1010,6 +1060,12 @@ function renderAttachmentsTab(container, attachments) {
         viewer.rel = "noopener";
         viewer.textContent = "Open in trace viewer";
         row.appendChild(viewer);
+        const online = document.createElement("a");
+        online.href = onlineTraceViewerUrl(attachment);
+        online.target = "_blank";
+        online.rel = "noopener";
+        online.textContent = "trace.playwright.dev";
+        row.appendChild(online);
       }
     }
     container.appendChild(row);
@@ -1105,6 +1161,7 @@ document.addEventListener("keydown", (event) => {
 
 connect();
 renderAll();
+window.__ferridriverUiState = state;
 </script>
 </body>
 </html>

@@ -184,6 +184,18 @@ async fn fetch_and_validate_trace(host: &str, url_path: &str) {
     .find(|a| a["method"].as_str() == Some("goto"))
     .unwrap_or_else(|| panic!("protocol goto action in trace: {actions:?}"));
 
+  // Protocol actions nest under the live BDD step span.
+  let step_call_id = lines
+    .iter()
+    .find(|l| l["type"] == "action" && l["title"].as_str() == Some("Given a blank ui page"))
+    .and_then(|l| l["callId"].as_str())
+    .expect("step action present");
+  assert_eq!(
+    goto["parentId"].as_str(),
+    Some(step_call_id),
+    "goto must nest under its BDD step: {goto}"
+  );
+
   // Worker traces request DOM snapshots: the goto must carry snapshot
   // names resolving to frame-snapshot events.
   let snapshots: Vec<&serde_json::Value> = lines.iter().filter(|l| l["type"] == "frame-snapshot").collect();
@@ -281,6 +293,26 @@ async fn ui_mode_end_to_end() {
   assert!(url_path.starts_with("/artifact/"), "urlPath: {url_path}");
 
   fetch_and_validate_trace(&host, url_path).await;
+
+  // The embedded trace viewer is served by the same server (offline,
+  // no trace.playwright.dev dependency); its service worker must
+  // arrive as JavaScript or the browser rejects registration.
+  let (viewer_headers, viewer_body) = http_get(&host, "/trace-viewer/").await;
+  assert!(viewer_headers.starts_with("HTTP/1.1 200"), "viewer: {viewer_headers}");
+  assert!(
+    String::from_utf8_lossy(&viewer_body).contains("Playwright Trace Viewer"),
+    "viewer shell served"
+  );
+  let (sw_headers, _) = http_get(&host, "/trace-viewer/sw.bundle.js").await;
+  assert!(
+    sw_headers
+      .to_ascii_lowercase()
+      .contains("content-type: text/javascript")
+      || sw_headers
+        .to_ascii_lowercase()
+        .contains("content-type: application/javascript"),
+    "service worker MIME: {sw_headers}"
+  );
 
   // Path traversal is rejected.
   let (traversal_headers, _) = http_get(&host, "/artifact/../Cargo.toml").await;
