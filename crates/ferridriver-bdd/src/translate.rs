@@ -334,13 +334,19 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
       let result = executor.run_scenario_observed(&mut world, &scenario, &observer).await;
 
       // Attach failure screenshot via TestInfo (for test reports).
+      // Written to disk so reporters clone a path, not the PNG bytes,
+      // and the UI server can serve it with a download link.
       if let Some(bytes) = result.failure_screenshot {
+        let _ = std::fs::create_dir_all(&test_info.output_dir);
+        let path = test_info
+          .output_dir
+          .join(format!("failure-screenshot-retry{}.png", test_info.retry));
+        let body = match std::fs::write(&path, &bytes) {
+          Ok(()) => ferridriver_test::model::AttachmentBody::Path(path),
+          Err(_) => ferridriver_test::model::AttachmentBody::Bytes(bytes),
+        };
         test_info
-          .attach(
-            "failure-screenshot".to_string(),
-            "image/png".to_string(),
-            ferridriver_test::model::AttachmentBody::Bytes(bytes),
-          )
+          .attach("failure-screenshot".to_string(), "image/png".to_string(), body)
           .await;
       }
 

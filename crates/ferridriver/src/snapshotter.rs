@@ -94,7 +94,7 @@ fn push_frame_snapshot(
         Some(serde_json::Value::String(text)) => {
           // `calculateSha1(buffer) + '.' + extension` (snapshotter.ts).
           let name = format!("{}.css", crate::tracing::sha1_hex(text.as_bytes()));
-          recorder.push_resource(TraceResource {
+          recorder.push_resource(&TraceResource {
             name: name.clone(),
             bytes: text.clone().into_bytes(),
           });
@@ -123,5 +123,5 @@ fn push_frame_snapshot(
     "resourceOverrides": resource_overrides,
     "isMainFrame": is_main,
   });
-  recorder.push_event(TraceEvent::FrameSnapshot(snapshot));
+  recorder.push_event(&TraceEvent::FrameSnapshot(snapshot));
 }

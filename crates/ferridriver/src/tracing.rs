@@ -187,7 +187,7 @@ impl Tracing {
       &options,
       browser_name.to_string(),
       network_len,
-    ));
+    )?);
     crate::trace::install_recorder(&composite, std::sync::Arc::clone(&recorder))?;
     if recorder.screenshots {
       self.start_screencast_pumps(&recorder).await;
@@ -300,16 +300,23 @@ impl Tracing {
           }
         }
         if let Some(obj) = value.as_object_mut() {
-          // Approximate wire order: the log preserves arrival order but
-          // per-request monotonic capture isn't wired yet, so entries
-          // are spaced inside the chunk for stable viewer sorting.
-          obj.insert("_monotonicTime".to_string(), serde_json::json!(i));
+          // Real capture time when the backend supplied a timing
+          // sample (epoch ms mapped onto the recorder's monotonic
+          // origin); ordinal fallback keeps viewer sorting stable for
+          // requests without one.
+          let start_time = req.timing().start_time;
+          let monotonic = if start_time > 0.0 {
+            serde_json::json!(recorder.monotonic_of_wall_ms(start_time))
+          } else {
+            serde_json::json!(i)
+          };
+          obj.insert("_monotonicTime".to_string(), monotonic);
         }
         entries.push(value);
       }
     }
     for (name, bytes) in attachments {
-      recorder.push_resource(crate::trace::TraceResource { name, bytes });
+      recorder.push_resource(&crate::trace::TraceResource { name, bytes });
     }
     entries
   }
@@ -453,8 +460,12 @@ async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Ve
 
   let _ = response_present;
   // `mode: minimal` omits timing detail (Playwright's slimMode sets
-  // omitTiming, encoded as -1 per HAR convention); full keeps the
-  // best-effort zeros until per-request timing is wired through.
+  // omitTiming, encoded as -1 per HAR convention); full derives the
+  // phases from the backend timing samples exactly like
+  // `harTracer.ts`: `wait = responseStart - requestStart`,
+  // `receive = responseEnd - responseStart`, `send: 0`, `-1` when the
+  // sample is absent.
+  let timing = req.timing();
   let timings = if recorder.mode == HarMode::Minimal {
     HarTimings {
       send: -1.0,
@@ -462,16 +473,39 @@ async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Ve
       receive: -1.0,
     }
   } else {
+    let wait = if timing.response_start >= 0.0 && timing.request_start >= 0.0 {
+      (timing.response_start - timing.request_start).max(0.0)
+    } else {
+      -1.0
+    };
+    let receive = if timing.response_end >= 0.0 && timing.response_start >= 0.0 {
+      (timing.response_end - timing.response_start).max(0.0)
+    } else {
+      -1.0
+    };
     HarTimings {
       send: 0.0,
-      wait: 0.0,
-      receive: 0.0,
+      wait,
+      receive,
     }
+  };
+  let started_date_time = if timing.start_time > 0.0 {
+    // Epoch ms stay far below 2^53 — exact in f64, in-range for i64.
+    #[allow(clippy::cast_possible_truncation)]
+    let ms = timing.start_time as i64;
+    epoch_ms_to_iso8601(ms)
+  } else {
+    now_iso8601()
+  };
+  let total_time = if timing.response_end >= 0.0 {
+    timing.response_end
+  } else {
+    0.0
   };
 
   HarEntryOut {
-    started_date_time: now_iso8601(),
-    time: 0.0,
+    started_date_time,
+    time: total_time,
     request: HarRequestOut {
       method: req.method().to_string(),
       url: req.url().to_string(),
@@ -624,7 +658,12 @@ fn now_iso8601() -> String {
   let now = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap_or_default();
-  let total_ms = i64::try_from(now.as_millis()).unwrap_or(i64::MAX);
+  epoch_ms_to_iso8601(i64::try_from(now.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// Format Unix-epoch milliseconds as ISO-8601 with millisecond
+/// precision (`YYYY-MM-DDTHH:MM:SS.mmmZ`).
+fn epoch_ms_to_iso8601(total_ms: i64) -> String {
   let secs = total_ms.div_euclid(1000);
   let ms = total_ms.rem_euclid(1000);
   let days = secs.div_euclid(86_400);

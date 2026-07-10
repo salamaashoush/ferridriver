@@ -131,10 +131,64 @@ pub struct TraceResource {
   pub bytes: Vec<u8>,
 }
 
+/// On-disk spool for an in-flight recording: events append to a
+/// buffered `trace.trace` JSONL file, resources land under
+/// `resources/` as they arrive. Memory stays flat no matter how long
+/// the recording runs (screencast frames alone would otherwise grow
+/// unbounded); export streams the spool into the final zip.
+struct TraceSpool {
+  dir: std::path::PathBuf,
+  trace: std::io::BufWriter<std::fs::File>,
+  /// sha1-style resource names already written (dedup).
+  written_resources: rustc_hash::FxHashSet<String>,
+}
+
+impl TraceSpool {
+  fn create(first_line: &str) -> Result<Self> {
+    static NEXT_SPOOL_ID: AtomicU64 = AtomicU64::new(1);
+    let dir = std::env::temp_dir().join(format!(
+      "ferridriver-trace-{}-{}",
+      std::process::id(),
+      NEXT_SPOOL_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(dir.join("resources"))
+      .map_err(|e| FerriError::backend(format!("create trace spool {}: {e}", dir.display())))?;
+    let file = std::fs::File::create(dir.join("trace.trace"))
+      .map_err(|e| FerriError::backend(format!("create trace spool file: {e}")))?;
+    let mut spool = Self {
+      dir,
+      trace: std::io::BufWriter::new(file),
+      written_resources: rustc_hash::FxHashSet::default(),
+    };
+    spool.write_line(first_line);
+    Ok(spool)
+  }
+
+  fn write_line(&mut self, line: &str) {
+    use std::io::Write;
+    let _ = self.trace.write_all(line.as_bytes());
+    let _ = self.trace.write_all(b"\n");
+  }
+
+  fn write_resource(&mut self, resource: &TraceResource) {
+    if !self.written_resources.insert(resource.name.clone()) {
+      return;
+    }
+    let _ = std::fs::write(self.dir.join("resources").join(&resource.name), &resource.bytes);
+  }
+}
+
+impl Drop for TraceSpool {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_dir_all(&self.dir);
+  }
+}
+
 /// Live trace recorder, stored per-context on
 /// [`crate::state::BrowserState`] between `tracing.start` and
 /// `tracing.stop`. All interior mutability is sync — the action hot
-/// path appends under a brief mutex.
+/// path appends a serialized line to the disk spool under a brief
+/// mutex.
 pub struct TraceRecorder {
   /// Monotonic origin: event times are milliseconds since this instant.
   origin: Instant,
@@ -146,10 +200,8 @@ pub struct TraceRecorder {
   pub screenshots: bool,
   /// Whether DOM snapshots are being captured around actions.
   pub snapshots: bool,
-  /// Chunk-local recorded events, in order.
-  events: std::sync::Mutex<Vec<TraceEvent>>,
-  /// Chunk-local captured resources.
-  resources: std::sync::Mutex<Vec<TraceResource>>,
+  /// Chunk-local disk spool (events + resources).
+  spool: std::sync::Mutex<TraceSpool>,
   /// Network-log length at chunk start — `stop` serializes entries
   /// appended after this point.
   pub network_start_len: AtomicU64,
@@ -162,21 +214,25 @@ pub struct TraceRecorder {
 }
 
 impl TraceRecorder {
-  #[must_use]
-  pub fn new(options: &TracingStartOptions, browser_name: String, network_len: usize) -> Self {
-    Self {
-      origin: Instant::now(),
-      wall_origin: now_epoch_ms(),
+  /// # Errors
+  ///
+  /// Errors if the on-disk spool cannot be created.
+  pub fn new(options: &TracingStartOptions, browser_name: String, network_len: usize) -> Result<Self> {
+    let origin = Instant::now();
+    let wall_origin = now_epoch_ms();
+    let first_line = context_options_line(&browser_name, wall_origin, options.title.as_deref());
+    Ok(Self {
+      origin,
+      wall_origin,
       title: options.title.clone(),
       screenshots: options.screenshots,
       snapshots: options.snapshots,
-      events: std::sync::Mutex::new(Vec::new()),
-      resources: std::sync::Mutex::new(Vec::new()),
+      spool: std::sync::Mutex::new(TraceSpool::create(&first_line)?),
       network_start_len: AtomicU64::new(network_len as u64),
       next_call_id: AtomicU64::new(1),
       screencast_stops: std::sync::Mutex::new(Vec::new()),
       browser_name,
-    }
+    })
   }
 
   /// Milliseconds since the recorder's monotonic origin.
@@ -191,26 +247,34 @@ impl TraceRecorder {
     self.wall_origin + self.monotonic_ms()
   }
 
+  /// Map a wall-clock epoch-ms sample onto this recorder's monotonic
+  /// timeline (`context-options` anchors `wallTime` at monotonic 0).
+  #[must_use]
+  pub fn monotonic_of_wall_ms(&self, wall_ms: f64) -> f64 {
+    wall_ms - self.wall_origin
+  }
+
   /// Allocate the next `call@N` action id.
   #[must_use]
   pub fn next_call_id(&self) -> String {
     format!("call@{}", self.next_call_id.fetch_add(1, Ordering::Relaxed))
   }
 
-  pub fn push_event(&self, event: TraceEvent) {
+  pub fn push_event(&self, event: &TraceEvent) {
+    let line = serialize_event(event);
     self
-      .events
+      .spool
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .push(event);
+      .write_line(&line);
   }
 
-  pub fn push_resource(&self, resource: TraceResource) {
+  pub fn push_resource(&self, resource: &TraceResource) {
     self
-      .resources
+      .spool
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .push(resource);
+      .write_resource(resource);
   }
 
   /// Track a screencast pump's shutdown sender so `stop` can end it.
@@ -223,18 +287,14 @@ impl TraceRecorder {
   }
 
   /// Reset chunk-local state (`tracing.startChunk` — network sha1s
-  /// persist in Playwright, but chunk events/resources restart).
+  /// persist in Playwright, but chunk events/resources restart): the
+  /// old spool is replaced (and its directory removed on drop).
   pub fn start_chunk(&self, network_len: usize) {
-    self
-      .events
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .clear();
-    self
-      .resources
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .clear();
+    let first_line = context_options_line(&self.browser_name, self.wall_origin, self.title.as_deref());
+    if let Ok(fresh) = TraceSpool::create(&first_line) {
+      let mut guard = self.spool.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      *guard = fresh;
+    }
     self.network_start_len.store(network_len as u64, Ordering::SeqCst);
   }
 
@@ -251,8 +311,9 @@ impl TraceRecorder {
     }
   }
 
-  /// Serialize and write the chunk as a Playwright-compatible
-  /// `trace.zip` at `path`.
+  /// Stream the spooled chunk into a Playwright-compatible `trace.zip`
+  /// at `path`. Memory stays flat — the spool files are copied into the
+  /// archive, never loaded whole.
   ///
   /// # Errors
   ///
@@ -260,71 +321,65 @@ impl TraceRecorder {
   pub fn export(&self, path: &std::path::Path, network_entries: &[serde_json::Value]) -> Result<()> {
     use std::io::Write;
 
-    let mut trace_lines: Vec<String> = Vec::new();
-    trace_lines.push(self.context_options_line());
-
-    let events = self.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    for event in events.iter() {
-      trace_lines.push(serialize_event(event));
-    }
-    drop(events);
-
-    let mut network_lines: Vec<String> = Vec::new();
-    for entry in network_entries {
-      let wrapped = serde_json::json!({ "type": "resource-snapshot", "snapshot": entry });
-      network_lines.push(wrapped.to_string());
-    }
+    let mut spool = self.spool.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    spool
+      .trace
+      .flush()
+      .map_err(|e| FerriError::backend(format!("flush trace spool: {e}")))?;
 
     let file = std::fs::File::create(path)
       .map_err(|e| FerriError::backend(format!("create trace zip {}: {e}", path.display())))?;
     let mut writer = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let zip_err = |e: zip::result::ZipError| FerriError::backend(format!("write trace zip: {e}"));
+    let io_err = |e: std::io::Error| FerriError::backend(format!("write trace zip: {e}"));
 
     writer.start_file("trace.trace", opts).map_err(zip_err)?;
-    writer
-      .write_all(trace_lines.join("\n").as_bytes())
-      .map_err(|e| FerriError::backend(format!("write trace zip: {e}")))?;
+    let mut trace_file = std::fs::File::open(spool.dir.join("trace.trace"))
+      .map_err(|e| FerriError::backend(format!("open trace spool: {e}")))?;
+    std::io::copy(&mut trace_file, &mut writer).map_err(io_err)?;
 
     writer.start_file("trace.network", opts).map_err(zip_err)?;
-    writer
-      .write_all(network_lines.join("\n").as_bytes())
-      .map_err(|e| FerriError::backend(format!("write trace zip: {e}")))?;
-
-    let resources = self.resources.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut written = rustc_hash::FxHashSet::default();
-    for resource in resources.iter() {
-      if !written.insert(resource.name.clone()) {
-        continue;
-      }
-      writer
-        .start_file(format!("resources/{}", resource.name), opts)
-        .map_err(zip_err)?;
-      writer
-        .write_all(&resource.bytes)
-        .map_err(|e| FerriError::backend(format!("write trace zip: {e}")))?;
+    for entry in network_entries {
+      let wrapped = serde_json::json!({ "type": "resource-snapshot", "snapshot": entry });
+      writer.write_all(wrapped.to_string().as_bytes()).map_err(io_err)?;
+      writer.write_all(b"\n").map_err(io_err)?;
     }
-    drop(resources);
+
+    let resources_dir = spool.dir.join("resources");
+    let entries =
+      std::fs::read_dir(&resources_dir).map_err(|e| FerriError::backend(format!("read trace spool resources: {e}")))?;
+    for entry in entries.flatten() {
+      let Ok(name) = entry.file_name().into_string() else {
+        continue;
+      };
+      writer.start_file(format!("resources/{name}"), opts).map_err(zip_err)?;
+      let mut resource = std::fs::File::open(entry.path())
+        .map_err(|e| FerriError::backend(format!("open trace spool resource {name}: {e}")))?;
+      std::io::copy(&mut resource, &mut writer).map_err(io_err)?;
+    }
 
     writer.finish().map_err(zip_err)?;
     Ok(())
   }
+}
 
-  fn context_options_line(&self) -> String {
-    serde_json::json!({
-      "version": TRACE_VERSION,
-      "type": "context-options",
-      "origin": "library",
-      "browserName": self.browser_name,
-      "platform": std::env::consts::OS,
-      "wallTime": self.wall_origin,
-      "monotonicTime": 0.0,
-      "title": self.title.clone().unwrap_or_default(),
-      "options": {},
-      "sdkLanguage": "javascript",
-    })
-    .to_string()
-  }
+/// First trace line: `context-options` with `version: 8` (the loader
+/// mis-modernizes everything as v6 without it).
+fn context_options_line(browser_name: &str, wall_origin: f64, title: Option<&str>) -> String {
+  serde_json::json!({
+    "version": TRACE_VERSION,
+    "type": "context-options",
+    "origin": "library",
+    "browserName": browser_name,
+    "platform": std::env::consts::OS,
+    "wallTime": wall_origin,
+    "monotonicTime": 0.0,
+    "title": title.unwrap_or_default(),
+    "options": {},
+    "sdkLanguage": "javascript",
+  })
+  .to_string()
 }
 
 fn serialize_event(event: &TraceEvent) -> String {
@@ -403,12 +458,15 @@ fn now_epoch_ms() -> f64 {
 // state's tokio RwLock, and a `try_read` miss would silently drop
 // actions from the trace.
 
-static RECORDERS: std::sync::LazyLock<std::sync::Mutex<rustc_hash::FxHashMap<String, Arc<TraceRecorder>>>> =
-  std::sync::LazyLock::new(|| std::sync::Mutex::new(rustc_hash::FxHashMap::default()));
+// RwLock: `recorder_for` runs on every action across ALL parallel
+// workers — concurrent read probes must not serialize on a Mutex.
+// Writes (install/take) happen twice per recording.
+static RECORDERS: std::sync::LazyLock<std::sync::RwLock<rustc_hash::FxHashMap<String, Arc<TraceRecorder>>>> =
+  std::sync::LazyLock::new(|| std::sync::RwLock::new(rustc_hash::FxHashMap::default()));
 
 /// Install a recorder for `composite`. Errors if one is already active.
 pub(crate) fn install_recorder(composite: &str, recorder: Arc<TraceRecorder>) -> Result<()> {
-  let mut guard = RECORDERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+  let mut guard = RECORDERS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
   if guard.contains_key(composite) {
     return Err(FerriError::backend("Tracing has been already started".to_string()));
   }
@@ -420,7 +478,7 @@ pub(crate) fn install_recorder(composite: &str, recorder: Arc<TraceRecorder>) ->
 #[must_use]
 pub(crate) fn recorder_for(composite: &str) -> Option<Arc<TraceRecorder>> {
   RECORDERS
-    .lock()
+    .read()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .get(composite)
     .cloned()
@@ -429,7 +487,7 @@ pub(crate) fn recorder_for(composite: &str) -> Option<Arc<TraceRecorder>> {
 /// Remove and return the recorder for `composite`.
 pub(crate) fn take_recorder(composite: &str) -> Option<Arc<TraceRecorder>> {
   RECORDERS
-    .lock()
+    .write()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .remove(composite)
 }
@@ -466,11 +524,11 @@ pub(crate) async fn spawn_screencast_pump(recorder: &Arc<TraceRecorder>, page: &
       // Epoch-ms wall clock: positive and below 2^53, exact as u64.
       #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
       let name = format!("{page_id}-{}.jpeg", recorder.wall_ms() as u64);
-      recorder.push_resource(TraceResource {
+      recorder.push_resource(&TraceResource {
         name: name.clone(),
         bytes: jpeg,
       });
-      recorder.push_event(TraceEvent::ScreencastFrame(ScreencastFrameEvent {
+      recorder.push_event(&TraceEvent::ScreencastFrame(ScreencastFrameEvent {
         page_id: page_id.clone(),
         resource_name: name,
         width,
@@ -547,7 +605,7 @@ impl ActionSpan {
   /// runner that reports all step results at scenario end).
   pub fn finish_message_ended_ago(self, error: Option<String>, ended_ms_ago: f64) {
     let end_time = (self.recorder.monotonic_ms() - ended_ms_ago).max(self.start_time);
-    self.recorder.push_event(TraceEvent::Action(ActionEvent {
+    self.recorder.push_event(&TraceEvent::Action(ActionEvent {
       call_id: self.call_id,
       start_time: self.start_time,
       end_time,
@@ -633,12 +691,12 @@ mod tests {
 
   #[test]
   fn context_options_is_first_line_with_version_8() {
-    let recorder = TraceRecorder::new(&TracingStartOptions::default(), "chromium".into(), 0);
-    let line = recorder.context_options_line();
+    let line = context_options_line("chromium", 1.0, Some("t"));
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid json");
     assert_eq!(parsed["version"].as_u64(), Some(8));
     assert_eq!(parsed["type"].as_str(), Some("context-options"));
     assert_eq!(parsed["origin"].as_str(), Some("library"));
+    assert_eq!(parsed["title"].as_str(), Some("t"));
   }
 
   #[test]
@@ -668,8 +726,8 @@ mod tests {
     let dir = std::env::temp_dir().join(format!("ferri-trace-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("t.zip");
-    let recorder = TraceRecorder::new(&TracingStartOptions::default(), "chromium".into(), 0);
-    recorder.push_event(TraceEvent::Action(ActionEvent {
+    let recorder = TraceRecorder::new(&TracingStartOptions::default(), "chromium".into(), 0).expect("spool");
+    recorder.push_event(&TraceEvent::Action(ActionEvent {
       call_id: recorder.next_call_id(),
       start_time: recorder.monotonic_ms(),
       end_time: recorder.monotonic_ms(),
@@ -683,7 +741,7 @@ mod tests {
       before_snapshot: None,
       after_snapshot: None,
     }));
-    recorder.push_resource(TraceResource {
+    recorder.push_resource(&TraceResource {
       name: "page@1-1.jpeg".into(),
       bytes: vec![0xFF, 0xD8],
     });
