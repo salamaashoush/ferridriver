@@ -87,6 +87,8 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       start_time: std::time::Instant::now(),
       event_bus: None,
       annotations: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+      trace_composite: std::sync::Arc::new(std::sync::Mutex::new(None)),
+      trace_step_calls: std::sync::Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
     };
     crate::snapshot::assert_snapshot(&info, &actual, name, update)
   }
