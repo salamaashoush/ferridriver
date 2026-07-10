@@ -428,6 +428,10 @@ const state = {
   connected: false,
   lastTotals: null,
   progress: { total: 0, done: 0 },
+  // Failure auto-follow window: runActive spans a run; userPinned is set
+  // once the user manually selects a test during it (stops the follow).
+  runActive: false,
+  userPinned: false,
 };
 let ws = null;
 
@@ -505,6 +509,12 @@ function onMessage(msg) {
     }
     case "runStarted":
       state.progress = { total: msg.totalTests || 0, done: 0 };
+      // A fresh run resets the failure auto-follow: until the user picks
+      // a test, we reveal the first failure as it lands (Playwright's
+      // model — run does NOT step through every test, it surfaces
+      // failures).
+      state.runActive = true;
+      state.userPinned = false;
       renderProgress();
       break;
     case "testStarted": {
@@ -529,10 +539,18 @@ function onMessage(msg) {
       renderProgress();
       updateRow(msg.id);
       renderCounts();
-      if (state.selected === msg.id) renderDetail();
+      // Auto-reveal the first failure of a run (unless the user has
+      // pinned a selection) — Playwright's failure-follow. selectTest
+      // renders; otherwise re-render only the currently-selected test.
+      if (state.runActive && !state.userPinned && isFailedStatus(test.status)) {
+        selectTest(msg.id, false);
+      } else if (state.selected === msg.id) {
+        renderDetail();
+      }
       break;
     }
     case "runFinished":
+      state.runActive = false;
       state.lastTotals = msg.totals;
       renderCounts();
       break;
@@ -738,6 +756,9 @@ function renderTree() {
       runOne.title = "Run this test";
       runOne.onclick = (event) => {
         event.stopPropagation();
+        // Running a test selects it so its (live) trace shows — matches
+        // Playwright's runTreeItem. Not a manual pin (byUser=false).
+        selectTest(test.id, false);
         send({ cmd: "runTest", id: test.id });
       };
       row.append(dot, label, dur, runOne);
@@ -766,7 +787,13 @@ function updateRow(id) {
   row.querySelector(".dur").textContent = test.outcome ? formatMs(test.outcome.durationMs) : "";
 }
 
-function selectTest(id) {
+/* Select a test and show its detail/trace. `byUser` is true for an
+   explicit pick (row click, arrow nav) — during a run that pins the
+   selection so the failure auto-follow stops fighting the user
+   (Playwright's `itemSelectedByUser`). Run actions and the auto-follow
+   itself pass `byUser=false`. */
+function selectTest(id, byUser = true) {
+  if (byUser && state.running) state.userPinned = true;
   state.selected = id;
   document.querySelectorAll(".test-row.selected").forEach((el) => el.classList.remove("selected"));
   const row = document.querySelector('.test-row[data-id="' + CSS.escape(id) + '"]');
