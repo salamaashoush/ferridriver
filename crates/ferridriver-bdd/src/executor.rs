@@ -30,10 +30,21 @@ pub struct StepEvent<'a> {
 
 /// Callback for observing step execution in real-time.
 ///
-/// Implement this to receive `StepEvent`s as each step completes (or is
-/// skipped).  The test runner uses this for `TestInfo` step events; MCP
-/// could use it for progress notifications.
+/// `on_step_start` fires BEFORE an executed step's handler runs (never
+/// for steps skipped after a failure), `on_step` after it completes or
+/// is skipped. A live observer (the test runner's `TestInfo` bridge)
+/// opens its step boundary in `on_step_start` so protocol actions the
+/// handler performs nest under the step in trace recordings, and
+/// closes it in `on_step`.
 pub trait StepObserver: Send + Sync {
+  fn on_step_start<'a>(
+    &'a self,
+    _step: &'a ScenarioStep,
+    _text: &'a str,
+  ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    Box::pin(std::future::ready(()))
+  }
+
   fn on_step<'a>(&'a self, event: StepEvent<'a>) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
 
@@ -157,6 +168,10 @@ impl ScenarioExecutor {
 
       let text = world.interpolate(&step.text);
       let step_start = Instant::now();
+
+      // Live step boundary: the observer opens its step (reporter
+      // event + trace span) before the handler runs.
+      observer.on_step_start(step, &text).await;
 
       // BeforeStep hooks.
       if let Err(e) = self

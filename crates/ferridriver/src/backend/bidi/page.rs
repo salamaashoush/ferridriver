@@ -577,6 +577,60 @@ impl BidiPage {
     self.eval_internal(expression, frame_id).await
   }
 
+  /// Mark a child frame's owner `<iframe>` element with the child's
+  /// frame id via the trace snapshot streamer (mirrors
+  /// `bidiPage.ts::getFrameElement`: `browsingContext.locateNodes` with
+  /// a context locator in the parent, then `script.callFunction` in the
+  /// parent realm with the element as argument).
+  pub async fn mark_snapshot_iframe(
+    &self,
+    child_frame_id: &str,
+    parent_frame_id: &str,
+    streamer_global: &str,
+  ) -> Result<()> {
+    let located = self
+      .cmd(
+        "browsingContext.locateNodes",
+        json!({
+          "context": parent_frame_id,
+          "locator": { "type": "context", "value": { "context": child_frame_id } },
+        }),
+      )
+      .await?;
+    let shared_id = located
+      .get("nodes")
+      .and_then(|n| n.get(0))
+      .and_then(|n| n.get("sharedId"))
+      .and_then(serde_json::Value::as_str)
+      .ok_or_else(|| FerriError::protocol("browsingContext.locateNodes", "no node for child frame"))?
+      .to_string();
+    let declaration =
+      format!("(el, frameId) => {{ const s = window[{streamer_global:?}]; if (s) s.markIframe(el, frameId); }}");
+    let result = self
+      .cmd(
+        "script.callFunction",
+        json!({
+          "functionDeclaration": declaration,
+          "target": { "context": parent_frame_id },
+          "arguments": [
+            { "type": "sharedReference", "sharedId": shared_id },
+            { "type": "string", "value": child_frame_id },
+          ],
+          "awaitPromise": false,
+          "resultOwnership": "none",
+        }),
+      )
+      .await?;
+    if result.get("type").and_then(serde_json::Value::as_str) == Some("exception") {
+      let text = result
+        .pointer("/exceptionDetails/text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("markIframe threw");
+      return Err(FerriError::evaluation(text.to_string()));
+    }
+    Ok(())
+  }
+
   // ── Navigation ──────────────────────────────────────────────────────────
 
   pub async fn goto(

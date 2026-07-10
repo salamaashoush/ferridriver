@@ -450,6 +450,7 @@ impl ContextRef {
     // A trace with screenshots films every page of the context —
     // including ones opened mid-recording.
     if let Some(recorder) = crate::trace::recorder_for(&self.key.to_composite()) {
+      crate::trace::record_page_open(&recorder, &crate::trace::trace_page_id(page.inner()));
       if recorder.screenshots {
         crate::trace::spawn_screencast_pump(&recorder, page.inner()).await;
       }

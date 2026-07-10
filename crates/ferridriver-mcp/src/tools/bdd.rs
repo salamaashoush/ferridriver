@@ -368,7 +368,7 @@ impl McpServer {
         .map_err(|e| McpServer::err(format!("step engine: {e}")))?;
       for sc in &scenarios {
         world.reset_scenario_state();
-        let r = session.run_scenario(sc, &mut world).await;
+        let r = Box::pin(session.run_scenario(sc, &mut world)).await;
         let failed = !r.passed;
         out.push(r.into());
         if fail_fast && failed {

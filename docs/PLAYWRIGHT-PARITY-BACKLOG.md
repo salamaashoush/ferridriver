@@ -36,25 +36,35 @@ CORS for trace.playwright.dev; the runner-side step-trace recorder in
   NodeSnapshot trees, `beforeSnapshot`/`afterSnapshot` names on every
   traced action, CSSOM-mutation re-serialization, stylesheet resource
   overrides by sha1, and network BODIES attached as sha1 resources
-  (`response.content._sha1`) so snapshot subresources render. Remaining
-  snapshot gaps: child frames are captured but not annotated onto the
-  parent's `<iframe>` (`markIframe` needs a frame-element handle), so
-  subframes render as placeholders; documents already open in frames
-  when tracing starts only pick the streamer up on their next
-  navigation (main frames are seeded immediately).
-- Console messages and page lifecycle events are not written into the
-  trace (`console` / `event` entry types exist in the serializer,
-  unwired).
-- `sources: true` accepted but source files are not embedded
-  (`resources/src@<sha1>.txt` + inline stacks).
+  (`response.content._sha1`) so snapshot subresources render. Child
+  frames annotate onto the parent's `<iframe>` via `markIframe`
+  (protocol-level frame-owner resolution on all four backends: CDP
+  `DOM.getFrameOwner`, WebKit `DOM.resolveNode {frameId}`, BiDi
+  `browsingContext.locateNodes` context locator; fired on frame attach
+  and re-asserted before every capture), so subframe snapshots inline
+  instead of rendering placeholders. Remaining snapshot gap: documents
+  already open in frames when tracing starts only pick the streamer up
+  on their next navigation (main frames are seeded immediately).
+- Console messages and page lifecycle events (`page` / `pageClosed` /
+  `dialog` / `download` / `pageError`) are written into the trace from
+  the per-page lossless event listener; console lines carry the same
+  `page@<id>` the actions and screencast frames use. Console `args`
+  previews (`args: [{preview, value}]`) are not captured — text,
+  type, and location only.
+- `sources: true` embeds each file referenced by an action's stack
+  frames as `resources/src@<sha1-of-path>.txt`; BDD steps carry their
+  `.feature` file + line as the stack frame, so the viewer's Source
+  tab lights up. Protocol actions (`goto`, locator ops) carry no stack
+  — there is no JS call site in a Rust-driven session.
 - Network entries now carry real `_monotonicTime` / `startedDateTime` /
   `time` and `wait`/`receive` phases derived from the backend timing
   samples (`Request.timing()`), with an ordinal fallback for requests
   without a sample; `dns`/`connect`/`ssl` phases are not emitted (the
   3-field HAR timings struct) and backends that do not fill timing
   samples still fall back to ordinal.
-- Screencast capture is steady-state throttled (1 frame/200ms) without
-  Playwright's unthrottled burst window around each action.
+- Screencast capture mirrors Playwright's throttle model: steady-state
+  1 frame/200ms, lifted for 500ms at every action boundary
+  (`unthrottleDuration` burst).
 - Action coverage: every locator operation (via the retry funnel) plus
   `page.goto/reload/goBack/goForward`. Other page-level APIs
   (`screenshot`, `evaluate`, keyboard/mouse, waits) are not yet traced.
@@ -124,9 +134,9 @@ CORS for trace.playwright.dev; the runner-side step-trace recorder in
 - The trace viewer is embedded (vendored playwright-core 1.58.2 static
   app served at /trace-viewer/, inline Trace tab in the detail pane) —
   fully offline; trace.playwright.dev remains a secondary link.
-- Rust-registry BDD steps (no JS step files) still report post-hoc via
-  the executor observer, so their protocol actions do not nest under
-  step spans (the QuickJS path nests; convert the Rust executor to live
-  begin_step/end to match).
-- Screencast filmstrip is sparse for sub-second tests: steady-state
-  1 frame / 200ms with no around-action burst window.
+- Rust-registry BDD steps (no JS step files) are live boundaries: the
+  executor observer opens the `TestInfo` step before the handler runs
+  (`on_step_start`), so their protocol actions nest under step spans
+  exactly like the QuickJS path.
+- Screencast filmstrip: steady-state 1 frame / 200ms with a 500ms
+  around-action burst window (Playwright's throttle model).

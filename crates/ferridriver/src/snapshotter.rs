@@ -10,10 +10,15 @@
 //! each action. Stylesheet text captured by the streamer is deduplicated
 //! by sha1 into `resources/` and referenced via `resourceOverrides`.
 //!
-//! Known gap vs Playwright: child frames are captured but not annotated
-//! onto their parent's `<iframe>` element (`markIframe` needs a
-//! frame-element handle), so the viewer renders subframe placeholders
-//! rather than inlining their content.
+//! Child frames are annotated onto their parent's `<iframe>` element
+//! ([`annotate_iframe`], mirroring
+//! `snapshotter.ts::_annotateFrameHierarchy`), so the parent snapshot
+//! serializes the iframe as `src="/snapshot/<frameId>"` and the viewer
+//! inlines the child frame's own snapshot instead of a placeholder.
+//! Annotation fires on frame attach (the page bookkeeping listener) and
+//! is re-asserted before every capture — the attach-time call can race
+//! an action's snapshot, and the mark is a per-document element
+//! property that a parent navigation silently drops.
 
 use std::sync::Arc;
 
@@ -43,6 +48,28 @@ fn capture_expression() -> String {
   format!("window[{STREAMER_GLOBAL:?}] && JSON.stringify(window[{STREAMER_GLOBAL:?}].captureSnapshot(false))")
 }
 
+/// Mark a child frame's `<iframe>` element in its parent frame with the
+/// child's frame id (`window[streamer].markIframe(el, frameId)`), so
+/// the parent's snapshot serializes the iframe as
+/// `src="/snapshot/<frameId>"` and the viewer inlines the child's
+/// snapshot. The backend resolves the frame-owner element at protocol
+/// level (CDP `DOM.getFrameOwner`, `WebKit` `DOM.resolveNode {frameId}`,
+/// `BiDi` `browsingContext.locateNodes` with a context locator).
+///
+/// # Errors
+///
+/// Propagates the backend's protocol error (frame detached, context
+/// not ready); callers treat annotation as best effort.
+pub(crate) async fn annotate_iframe(
+  page: &crate::backend::AnyPage,
+  child_frame_id: &str,
+  parent_frame_id: &str,
+) -> crate::error::Result<()> {
+  page
+    .mark_snapshot_iframe(child_frame_id, parent_frame_id, STREAMER_GLOBAL)
+    .await
+}
+
 /// Capture a named DOM snapshot of every live frame of `page` into
 /// `recorder`. Best effort per frame; ordering puts the main frame first.
 pub(crate) async fn capture_page_snapshot(
@@ -52,6 +79,20 @@ pub(crate) async fn capture_page_snapshot(
   snapshot_name: &str,
 ) {
   let page_id = format!("page@{}", page.backend_page_id());
+  // Re-assert iframe marks before serializing the parent frame — the
+  // attach-time annotation can still be in flight when the action's
+  // capture fires, and a parent navigation mints fresh iframe elements
+  // that carry no mark.
+  for (frame_id, parent_id) in page.trace_child_frame_list() {
+    let annotated = tokio::time::timeout(
+      std::time::Duration::from_millis(CAPTURE_TIMEOUT_MS),
+      annotate_iframe(page.inner(), &frame_id, &parent_id),
+    )
+    .await;
+    if let Ok(Err(e)) = annotated {
+      tracing::debug!(target: "ferridriver::trace", "markIframe skipped for {frame_id}: {e}");
+    }
+  }
   for (frame_id, is_main) in page.trace_frame_list() {
     let expression = capture_expression();
     let evaluated = tokio::time::timeout(std::time::Duration::from_millis(CAPTURE_TIMEOUT_MS), async {

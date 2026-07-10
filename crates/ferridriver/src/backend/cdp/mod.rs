@@ -2192,6 +2192,56 @@ impl<T: CdpWrap> CdpPage<T> {
     )
   }
 
+  /// Mark a child frame's owner `<iframe>` element with the child's
+  /// frame id via the trace snapshot streamer (mirrors
+  /// `crPage.ts::getFrameElement`: `DOM.getFrameOwner` →
+  /// `DOM.resolveNode` into the parent's main-world context →
+  /// `Runtime.callFunctionOn` with the element as `this`).
+  pub async fn mark_snapshot_iframe(
+    &self,
+    child_frame_id: &str,
+    parent_frame_id: &str,
+    streamer_global: &str,
+  ) -> Result<()> {
+    let owner = self
+      .cmd("DOM.getFrameOwner", serde_json::json!({ "frameId": child_frame_id }))
+      .await?;
+    let backend_node_id = owner
+      .get("backendNodeId")
+      .and_then(serde_json::Value::as_i64)
+      .ok_or_else(|| FerriError::protocol("DOM.getFrameOwner", "no backendNodeId for frame owner"))?;
+    let ctx_id = self.resolve_frame_context(parent_frame_id).await?;
+    let resolved = self
+      .cmd(
+        "DOM.resolveNode",
+        serde_json::json!({ "backendNodeId": backend_node_id, "executionContextId": ctx_id }),
+      )
+      .await?;
+    let object_id = resolved
+      .get("object")
+      .and_then(|o| o.get("objectId"))
+      .and_then(|v| v.as_str())
+      .ok_or_else(|| FerriError::protocol("DOM.resolveNode", "frame owner did not resolve to an object"))?
+      .to_string();
+    let declaration =
+      format!("function(frameId) {{ const s = window[{streamer_global:?}]; if (s) s.markIframe(this, frameId); }}");
+    let call = self
+      .cmd(
+        "Runtime.callFunctionOn",
+        serde_json::json!({
+          "functionDeclaration": declaration,
+          "objectId": object_id,
+          "arguments": [{ "value": child_frame_id }],
+          "returnByValue": true,
+        }),
+      )
+      .await;
+    let _ = self
+      .cmd("Runtime.releaseObject", serde_json::json!({ "objectId": object_id }))
+      .await;
+    call.map(|_| ())
+  }
+
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>> {
     let ctx_id = self.resolve_frame_context(frame_id).await?;
     let result = self

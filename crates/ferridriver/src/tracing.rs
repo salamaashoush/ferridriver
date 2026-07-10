@@ -166,8 +166,8 @@ impl Tracing {
   /// Playwright: `tracing.start(options?: { name?, title?, screenshots?,
   /// snapshots?, sources? })`. Starts recording a Playwright-format
   /// (VERSION 8) trace; write it with [`Self::stop`]. See
-  /// [`crate::trace`] for the exact coverage (actions, film strip,
-  /// network; DOM snapshots not yet captured).
+  /// [`crate::trace`] for the exact coverage (actions, DOM snapshots,
+  /// film strip, console, page events, network, embedded sources).
   ///
   /// # Errors
   ///
