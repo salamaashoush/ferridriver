@@ -274,9 +274,11 @@ async fn ui_mode_end_to_end() {
     index_headers.starts_with("HTTP/1.1 200"),
     "index status: {index_headers}"
   );
+  let index_text = String::from_utf8_lossy(&index_body);
+  assert!(index_text.contains("ferridriver UI"), "index page must be the UI shell");
   assert!(
-    String::from_utf8_lossy(&index_body).contains("ferridriver UI"),
-    "index page must be the UI shell"
+    index_text.contains("id=\"trace-frame\""),
+    "the shell must carry the persistent trace-viewer iframe"
   );
 
   let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{host}/ws"))
