@@ -210,10 +210,10 @@ pub struct BddArgs {
   pub dry_run: bool,
 
   /// Watch mode: re-run scenarios on file changes with an interactive
-  /// TUI (falls back to plain re-runs without a TTY). Feature edits
-  /// re-run just the changed files; step/source edits re-run everything
-  /// with a freshly bundled step graph.
-  #[arg(long, visible_alias = "ui")]
+  /// terminal TUI (falls back to plain re-runs without a TTY). Feature
+  /// edits re-run just the changed files; step/source edits re-run
+  /// everything with a freshly bundled step graph.
+  #[arg(long)]
   pub watch: bool,
 
   /// Stop after the first failing scenario.
