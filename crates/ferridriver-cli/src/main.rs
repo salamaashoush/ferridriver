@@ -300,6 +300,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   let mut overrides = ferridriver_test::config::CliOverrides {
     bdd_tags: args.tags,
     bdd_dry_run: args.dry_run,
+    watch: args.watch,
     bdd_fail_fast: args.fail_fast,
     bdd_strict: args.strict,
     bdd_step_timeout: args.step_timeout,
