@@ -465,6 +465,19 @@ impl ContextRef {
     Ok(page)
   }
 
+  /// Attach a raw CDP session to `page`'s target. Playwright:
+  /// `browserContext.newCDPSession(page)` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:488`.
+  /// Chromium-only.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::Unsupported`] on WebKit/BiDi, or
+  /// the protocol error if the attach fails.
+  pub async fn new_cdp_session(&self, page: &Page) -> Result<crate::cdp_session::CdpSession> {
+    page.inner().new_cdp_session().await
+  }
+
   /// Install every registered context-level WebSocket route onto a
   /// fresh page (context scope — page-level routes keep precedence).
   async fn apply_context_ws_routes(&self, page: &Arc<Page>) -> Result<()> {

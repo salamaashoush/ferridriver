@@ -584,6 +584,25 @@ pub enum AnyBrowser {
 }
 
 impl AnyBrowser {
+  /// Attach a raw [`crate::cdp_session::CdpSession`] to the browser
+  /// target (`Target.attachToBrowserTarget`). Chromium-only, mirroring
+  /// Playwright's `browser.newBrowserCDPSession()`.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::Unsupported`] on WebKit/BiDi, or
+  /// the protocol error if the attach fails.
+  pub async fn new_browser_cdp_session(&self) -> Result<crate::cdp_session::CdpSession> {
+    use crate::cdp_session::{CdpSession, SessionTransportSource};
+    match self {
+      Self::CdpPipe(b) => CdpSession::attach_to_browser_target(SessionTransportSource::Pipe(b.transport_arc())).await,
+      Self::CdpRaw(b) => CdpSession::attach_to_browser_target(SessionTransportSource::Ws(b.transport_arc())).await,
+      Self::WebKit(_) | Self::Bidi(_) => Err(crate::error::FerriError::unsupported(
+        "CDP session is only available on Chromium (cdp-pipe / cdp-raw backends)",
+      )),
+    }
+  }
+
   /// List all open pages in this browser.
   ///
   /// # Errors
@@ -1359,6 +1378,31 @@ impl AnyPage {
   // otherwise).
 
   // ── Network Interception ──
+
+  /// Attach a raw [`crate::cdp_session::CdpSession`] to this page's
+  /// target. Chromium-only, mirroring Playwright's
+  /// `browserContext.newCDPSession(page)`.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::Unsupported`] on WebKit/BiDi, or
+  /// the protocol error if the attach fails.
+  pub async fn new_cdp_session(&self) -> Result<crate::cdp_session::CdpSession> {
+    use crate::cdp_session::{CdpSession, SessionTransportSource};
+    match self {
+      Self::CdpPipe(p) => {
+        let (transport, target_id) = p.session_parts();
+        CdpSession::attach_to_target(SessionTransportSource::Pipe(transport), target_id).await
+      },
+      Self::CdpRaw(p) => {
+        let (transport, target_id) = p.session_parts();
+        CdpSession::attach_to_target(SessionTransportSource::Ws(transport), target_id).await
+      },
+      Self::WebKit(_) | Self::Bidi(_) => Err(crate::error::FerriError::unsupported(
+        "CDP session is only available on Chromium (cdp-pipe / cdp-raw backends)",
+      )),
+    }
+  }
 
   pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {
     page_dispatch!(self, route(route))

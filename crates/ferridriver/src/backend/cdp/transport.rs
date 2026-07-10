@@ -255,6 +255,11 @@ pub trait CdpTransport: Send + Sync + 'static {
     session_id: Option<&str>,
   ) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>>;
 
+  /// Lossless, wire-ordered tap of EVERY event carried by exactly one
+  /// session. Strict session match: browser-scoped events do not leak
+  /// into a page-session stream. Backs the public `CDPSession` events.
+  fn tap_all_events(&self, session_id: &str) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>>;
+
   fn register_lifecycle_tracker(
     &self,
     session_id: &str,
@@ -298,6 +303,9 @@ pub(crate) struct CdpDispatcher {
   method_taps: Arc<DashMap<&'static str, Vec<EventTap>>>,
   /// Lossless per-consumer taps keyed by CDP domain.
   domain_taps: Arc<DashMap<&'static str, Vec<EventTap>>>,
+  /// Lossless wildcard taps — every event of one exact session, in wire
+  /// order. Backs the public `CDPSession` event stream.
+  wildcard_taps: Arc<std::sync::Mutex<Vec<EventTap>>>,
   /// Per-method RTT statistics. Only populated when
   /// `FERRIDRIVER_RTT_STATS=1` is set; otherwise the entry insert /
   /// remove path skips the bookkeeping for zero-cost-when-unused.
@@ -317,14 +325,23 @@ fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub(crate) struct EventTap {
   session: Option<String>,
   tx: tokio::sync::mpsc::UnboundedSender<Arc<serde_json::Value>>,
+  /// Strict taps match the event's `sessionId` exactly — browser-scoped
+  /// events (empty sid) do NOT pass a page-session filter. Used by the
+  /// public `CDPSession` wildcard stream, where an attached session must
+  /// only observe its own events (Playwright `CRSession` semantics).
+  strict: bool,
 }
 
 impl EventTap {
   /// Whether an event carrying `sid` (empty when the event is
-  /// browser-scoped) belongs to this tap. Browser-scoped events pass
-  /// every session filter — per-page consumers of browser-level
-  /// domains (`Browser.download*`) decide relevance themselves.
+  /// browser-scoped) belongs to this tap. For non-strict taps,
+  /// browser-scoped events pass every session filter — per-page
+  /// consumers of browser-level domains (`Browser.download*`) decide
+  /// relevance themselves.
   fn matches_session(&self, sid: &str) -> bool {
+    if self.strict {
+      return self.session.as_deref() == Some(sid);
+    }
     self.session.as_deref().is_none_or(|s| sid.is_empty() || sid == s)
   }
 }
@@ -371,6 +388,7 @@ impl CdpDispatcher {
       domain_event_txs: Arc::new(DashMap::default()),
       method_taps: Arc::new(DashMap::default()),
       domain_taps: Arc::new(DashMap::default()),
+      wildcard_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
       rtt_stats: Arc::new(std::sync::Mutex::new(RttStats::default())),
     }
   }
@@ -385,8 +403,22 @@ impl CdpDispatcher {
       self.method_taps.entry(method).or_default().push(EventTap {
         session: session_id.map(str::to_string),
         tx: tx.clone(),
+        strict: false,
       });
     }
+    rx
+  }
+
+  /// Lossless, wire-ordered tap of EVERY event carried by exactly one
+  /// session (strict match — browser-scoped events do not leak into a
+  /// page-session stream). Backs the public `CDPSession` event surface.
+  pub fn tap_all_events(&self, session_id: &str) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    lock_or_recover(&self.wildcard_taps).push(EventTap {
+      session: Some(session_id.to_string()),
+      tx,
+      strict: true,
+    });
     rx
   }
 
@@ -400,6 +432,7 @@ impl CdpDispatcher {
       self.domain_taps.entry(domain).or_default().push(EventTap {
         session: session_id.map(str::to_string),
         tx: tx.clone(),
+        strict: false,
       });
     }
     rx
@@ -571,8 +604,9 @@ impl CdpDispatcher {
       let needs_domain = domain_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
       let has_method_taps = self.method_taps.get(method_str).is_some_and(|taps| !taps.is_empty());
       let has_domain_taps = domain.is_some_and(|d| self.domain_taps.get(d).is_some_and(|taps| !taps.is_empty()));
+      let has_wildcard_taps = !lock_or_recover(&self.wildcard_taps).is_empty();
 
-      if (needs_global || needs_method || needs_domain || has_method_taps || has_domain_taps)
+      if (needs_global || needs_method || needs_domain || has_method_taps || has_domain_taps || has_wildcard_taps)
         && let Ok(msg) = serde_json::from_slice::<serde_json::Value>(raw)
       {
         let msg = Arc::new(msg);
@@ -586,6 +620,9 @@ impl CdpDispatcher {
           && let Some(mut taps) = self.domain_taps.get_mut(d)
         {
           send_to_taps(&mut taps, sid_str, &msg);
+        }
+        if has_wildcard_taps {
+          send_to_taps(&mut lock_or_recover(&self.wildcard_taps), sid_str, &msg);
         }
         if needs_global {
           let _ = self.event_tx.send(msg.clone());

@@ -43,6 +43,29 @@ impl BrowserContext {
     crate::tracing::Tracing::wrap(self.inner.clone())
   }
 
+  /// Playwright: `browserContext.newCDPSession(page)`. Attaches a raw
+  /// CDP session to the page's target. Chromium-only. Playwright also
+  /// accepts an OOPIF `Frame`; ferridriver currently supports the
+  /// `Page` form.
+  #[napi(
+    js_name = "newCDPSession",
+    ts_args_type = "page: Page",
+    ts_return_type = "Promise<CDPSession>"
+  )]
+  pub fn new_cdp_session(
+    &self,
+    env: &napi::Env,
+    page: napi::bindgen_prelude::Reference<crate::page::Page>,
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::cdp_session::CDPSession>> {
+    let core_page = page.inner_arc();
+    let inner = self.inner.clone();
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      let session = inner.new_cdp_session(&core_page).await.into_napi()?;
+      Ok(crate::cdp_session::CDPSession::wrap(session))
+    })
+    .build(env)
+  }
+
   /// Create a new page in this context.
   #[napi]
   pub async fn new_page(&self) -> Result<Page> {

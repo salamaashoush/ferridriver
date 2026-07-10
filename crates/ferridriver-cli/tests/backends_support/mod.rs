@@ -16,6 +16,7 @@ pub mod bdd;
 pub mod binding_surface;
 pub mod browser_context_options;
 pub mod browser_type;
+pub mod cdp_session;
 pub mod client;
 pub mod console_message;
 pub mod context_events;

@@ -66,6 +66,14 @@ impl Browser {
     Ok(Page::wrap(page))
   }
 
+  /// Playwright: `browser.newBrowserCDPSession()`. Attaches a raw CDP
+  /// session to the browser target. Chromium-only.
+  #[napi(js_name = "newBrowserCDPSession")]
+  pub async fn new_browser_cdp_session(&self) -> Result<crate::cdp_session::CDPSession> {
+    let session = self.inner.new_browser_cdp_session().await.into_napi()?;
+    Ok(crate::cdp_session::CDPSession::wrap(session))
+  }
+
   /// Create a new page and navigate to URL.
   #[napi]
   pub async fn new_page_with_url(&self, url: String) -> Result<Page> {
