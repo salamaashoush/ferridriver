@@ -26,6 +26,7 @@
 pub mod action;
 pub mod browser;
 pub mod browser_type;
+pub mod cdp_session;
 pub mod console_message;
 pub mod context;
 pub mod dialog;
@@ -53,6 +54,7 @@ pub mod web_error;
 pub use action::Action;
 pub use browser::Browser;
 pub use browser_type::{BrowserType, chromium, firefox, webkit};
+pub use cdp_session::CdpSession;
 pub use context::{BrowserContext, ContextRef};
 pub use disposable::Disposable;
 pub use element_handle::{BoundingBox, ElementHandle, ElementState};

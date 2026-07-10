@@ -145,6 +145,10 @@ pub(crate) struct PageCallbacks {
   /// `page.exposeFunction` has no dispose in Playwright, so page close
   /// is the only hook that can release the persisted callbacks.
   exposed_by_page: rustc_hash::FxHashMap<usize, Vec<String>>,
+  /// `cdpSession.on/once` JS listeners, keyed by a registry-global id
+  /// and carrying the event name so `off(event, fn)` can match by JS
+  /// function identity. Restored by the CDP event pump.
+  cdp_listeners: rustc_hash::FxHashMap<u64, (String, SavedCallback)>,
 }
 
 /// Identity of the object a route was registered through, so
@@ -245,6 +249,31 @@ impl PageCallbacks {
   /// Restore a WS callback by id (inside `async_with`).
   pub(crate) fn get_ws_callback(&self, id: u64) -> Option<SavedCallback> {
     self.ws_callbacks.get(&id).cloned()
+  }
+
+  /// Store a `cdpSession.on/once` listener under a registry-global id.
+  pub(crate) fn insert_cdp_listener(&mut self, id: u64, event: String, cb: SavedCallback) {
+    self.cdp_listeners.insert(id, (event, cb));
+  }
+
+  /// Restore a CDP listener by id (inside the VM pump).
+  pub(crate) fn get_cdp_listener(&self, id: u64) -> Option<SavedCallback> {
+    self.cdp_listeners.get(&id).map(|(_, cb)| cb.clone())
+  }
+
+  pub(crate) fn remove_cdp_listener(&mut self, id: u64) {
+    self.cdp_listeners.remove(&id);
+  }
+
+  /// `(id, callback)` pairs registered for `event`, for `off(event, fn)`
+  /// identity matching.
+  pub(crate) fn cdp_listeners_for_event(&self, event: &str) -> Vec<(u64, SavedCallback)> {
+    self
+      .cdp_listeners
+      .iter()
+      .filter(|(_, (e, _))| e == event)
+      .map(|(id, (_, cb))| (*id, cb.clone()))
+      .collect()
   }
 
   pub(crate) fn get_route_pred(&self, id: u64) -> Option<SavedCallback> {

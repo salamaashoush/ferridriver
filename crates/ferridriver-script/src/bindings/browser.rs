@@ -135,6 +135,15 @@ impl BrowserJs {
     rquickjs::IntoJs::into_js(instance, &ctx)
   }
 
+  /// Playwright: `browser.newBrowserCDPSession()`. Attaches a raw CDP
+  /// session to the browser target. Chromium-only.
+  #[qjs(rename = "newBrowserCDPSession")]
+  pub async fn new_browser_cdp_session<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let session = self.inner.new_browser_cdp_session().await.into_js_with(&ctx)?;
+    let instance = Class::instance(ctx.clone(), crate::bindings::cdp_session::CdpSessionJs::new(session))?;
+    rquickjs::IntoJs::into_js(instance, &ctx)
+  }
+
   /// The active page of the default context (mirrors NAPI `browser.page()`).
   #[qjs(rename = "page")]
   pub async fn page<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {

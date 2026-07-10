@@ -44,6 +44,23 @@ impl BrowserContextJs {
     crate::bindings::tracing::TracingJs::new(self.inner.clone())
   }
 
+  /// Playwright: `browserContext.newCDPSession(page)`. Attaches a raw
+  /// CDP session to the page's target. Chromium-only. Playwright also
+  /// accepts an OOPIF `Frame`; ferridriver currently supports the
+  /// `Page` form.
+  #[qjs(rename = "newCDPSession")]
+  pub async fn new_cdp_session<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    page: rquickjs::Class<'js, crate::bindings::page::PageJs>,
+  ) -> rquickjs::Result<Value<'js>> {
+    let core_page = page.borrow().page_arc();
+    let session = self.inner.new_cdp_session(&core_page).await.into_js_with(&ctx)?;
+    let instance =
+      rquickjs::class::Class::instance(ctx.clone(), crate::bindings::cdp_session::CdpSessionJs::new(session))?;
+    rquickjs::IntoJs::into_js(instance, &ctx)
+  }
+
   // ── Cookies ───────────────────────────────────────────────────────────────
 
   /// All cookies visible in this context.

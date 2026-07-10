@@ -24,6 +24,7 @@ pub mod bdd;
 pub mod blob;
 pub mod browser;
 pub mod browser_type;
+pub mod cdp_session;
 pub mod console_message;
 pub mod context;
 pub mod convert;

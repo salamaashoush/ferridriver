@@ -429,4 +429,22 @@ impl Browser {
   pub fn is_connected(&self) -> bool {
     self.connected.load(std::sync::atomic::Ordering::Relaxed)
   }
+
+  /// Attach a raw CDP session to the browser target. Playwright:
+  /// `browser.newBrowserCDPSession()` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browser.ts:157`.
+  /// Chromium-only.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::Unsupported`] on WebKit/BiDi,
+  /// an error if the browser is not launched, or the protocol error if
+  /// the attach fails.
+  pub async fn new_browser_cdp_session(&self) -> crate::error::Result<crate::cdp_session::CdpSession> {
+    let state = self.state.read().await;
+    let browser = state
+      .default_browser()
+      .ok_or_else(|| crate::error::FerriError::backend("browser is not launched".to_string()))?;
+    browser.new_browser_cdp_session().await
+  }
 }

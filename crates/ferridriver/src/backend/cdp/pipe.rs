@@ -185,6 +185,13 @@ impl super::transport::CdpTransport for PipeTransport {
     self.dispatcher.tap_event_domains(domains, session_id)
   }
 
+  fn tap_all_events(
+    &self,
+    session_id: &str,
+  ) -> tokio::sync::mpsc::UnboundedReceiver<std::sync::Arc<serde_json::Value>> {
+    self.dispatcher.tap_all_events(session_id)
+  }
+
   fn register_lifecycle_tracker(
     &self,
     session_id: &str,

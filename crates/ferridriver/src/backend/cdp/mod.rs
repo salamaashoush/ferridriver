@@ -82,6 +82,12 @@ impl<T: CdpTransport> CdpBrowser<T> {
   pub fn version(&self) -> &str {
     &self.version
   }
+
+  /// Shared transport handle for attaching a public raw
+  /// [`crate::cdp_session::CdpSession`] to the browser target.
+  pub(crate) fn transport_arc(&self) -> Arc<T> {
+    Arc::clone(&self.transport)
+  }
 }
 
 impl<T: CdpTransport> Clone for CdpBrowser<T> {
@@ -5326,6 +5332,12 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           .await;
       },
     }
+  }
+
+  /// Shared transport handle + target id for attaching a public raw
+  /// [`crate::cdp_session::CdpSession`] to this page's target.
+  pub(crate) fn session_parts(&self) -> (Arc<T>, &str) {
+    (Arc::clone(&self.transport), &self.target_id)
   }
 
   pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {
