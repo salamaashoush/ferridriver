@@ -1,57 +1,100 @@
 # Playwright parity backlog
 
 Tracks Playwright client-API surface that ferridriver does not yet fully
-implement, with the concrete blocker for each. Everything else from the
-2026-05 parity sweep has landed (ElementHandle option bags + `$`/`$$`,
-Locator `drop`/`highlight`/`normalize`/`selector`/`isStrict`/`setStrict`/
-`selectText`/`rightClick`/`boundingBox`, screenshot `mask` as `Locator[]`,
-BrowserContext `exposeBinding`/`exposeFunction`/`setHTTPCredentials`/
-`isClosed`/`browser`/`storageState`, Page `pickLocator`/`unrouteAll`/
-`addLocatorHandler`, Frame `waitForSelector` handle return, Disposable
-contract, `route({ times })`, `routeFromHAR`, keyboard `namedKeys`,
-Browser `newPage`/`page`, accessor batch).
+implement, with the concrete blocker for each. Verified against the code
+(not memory) as of 2026-07-10.
 
-## Not yet implemented
-
-### CDPSession (`browser.newBrowserCDPSession`, `context.newCDPSession`)
-- **Status:** not implemented (any layer).
-- **Blocker:** `CdpTransport::send_command` returns `impl Future` (async fn in
-  trait), so the trait is **not dyn-compatible**. `AnyPage` can't hand out a
-  type-erased transport for a `CdpSession` to hold.
-- **Design to unblock:** add a small dyn-compatible shim trait
-  (`trait CdpSend { fn send(&self, ..) -> BoxFuture<Result<Value>>; }`)
-  implemented for each `CdpTransport`, store `Arc<dyn CdpSend>` on the CDP
-  `AnyPage` variants, expose a core `CdpSession { send(method, params), on(event) }`.
-  WebKit/BiDi return `FerriError::Unsupported`. Then wrap in NAPI (a
-  `CDPSession` class) + QuickJS. Event subscription rides
-  `transport.subscribe_event_method`.
-- **Effort:** medium-large (new public type + event plumbing across 3 layers).
+Landed since the previous revision of this file — do not re-implement:
+hit-target interceptor wired into the click gate; `addLocatorHandler` on
+QuickJS; `routeWebSocket` (all scopes); route-chain parity
+(`route.fallback` chains to the next matching handler, newest-first,
+page scope before context scope; context routes reach future pages with
+one context-wide `times` budget; `RouteScope` separates
+`page.unrouteAll` from `context.unrouteAll`); HAR zip archives +
+`attach` bodies + `routeFromHAR({ update: true })` at context level;
+`CDPSession` (`browser.newBrowserCDPSession`,
+`context.newCDPSession(page)`, send/detach/events, Chromium-only);
+`Clock` (full seven-method surface, vendored Playwright engine,
+protocol-agnostic, log replay across navigations);
+`context.addInitScript` now reaches future pages (per-context
+registry); trace recording (`tracing.start/stop/startChunk/stopChunk`)
+emitting Playwright format VERSION 8 that `npx playwright show-trace`
+opens; `ferridriver bdd --watch` / `--ui` interactive TUI watch mode.
 
 ## Partial / known limitations
 
-### Actionability "receives pointer events" hit-test
-- ferridriver's click actionability checks visible/stable/enabled but does
-  **not** gate on the target being the topmost element at the click point
-  (Playwright's obscured-element retry). An overlay therefore does not make a
-  click time out; the click dispatches at the coordinates regardless.
-- Consequence: `addLocatorHandler` handlers still fire on each actionability
-  retry (and dismiss overlays), but the "action blocks until the overlay is
-  gone" guarantee is not enforced. The injected `hitTargetInterceptor`
-  (`injected/injectedScript.ts`) exists but is not wired into the click gate.
+### Trace recording (`crates/ferridriver/src/trace.rs`)
+- **DOM snapshots not captured.** No `frame-snapshot` events, no
+  `beforeSnapshot`/`afterSnapshot` names on actions — the viewer's
+  snapshot pane renders blank (actions, film strip, network, errors all
+  work). Needs Playwright's `snapshotterInjected.ts` vendored into the
+  injected bundle plus per-action capture plumbing.
+- Console messages and page lifecycle events are not written into the
+  trace (`console` / `event` entry types exist in the serializer,
+  unwired).
+- `sources: true` accepted but source files are not embedded
+  (`resources/src@<sha1>.txt` + inline stacks).
+- Network entries carry ordinal `_monotonicTime` (arrival order), not
+  real per-request capture times; HAR `timings` are zeros/-1 because
+  per-request timing is not wired through the network log.
+- Screencast capture is steady-state throttled (1 frame/200ms) without
+  Playwright's unthrottled burst window around each action.
+- Action coverage: every locator operation (via the retry funnel) plus
+  `page.goto/reload/goBack/goForward`. Other page-level APIs
+  (`screenshot`, `evaluate`, keyboard/mouse, waits) are not yet traced.
+- `tracing.start({ screenshots: true })` and `recordVideo` on the same
+  page contend for the single screencast stream — whichever starts
+  second gets no frames.
 
-### `addLocatorHandler` on the QuickJS scripting engine
-- Returns `FerriError::Unsupported`. A handler must run *during* an in-progress
-  action, but every script action runs inside an exclusive `async_with` over
-  the single session VM, so a nested handler callback would deadlock. Core +
-  NAPI implement it fully. Fixing QuickJS needs the action to yield the VM
-  while a handler runs (non-trivial engine change).
+### `context.newCDPSession(frame)` (OOPIF form)
+- Only the `Page` form is implemented. Playwright also accepts an OOPIF
+  `Frame` (attaches to the iframe's own target); ferridriver does not
+  track per-frame targets yet.
 
-### `BrowserContext.route({ times })` counter scope
-- `times` is tracked **per page**, not shared across all pages of a context.
-  Single-page / `times: 1` usage matches Playwright; a multi-page context that
-  shares one budget across pages would need a context-level shared counter.
+### `page.routeFromHAR({ update: true })`
+- Typed `Unsupported`. Context-level update recording works; the
+  page-scoped variant needs per-page attribution in the context network
+  log (`Request.frame_id` → owning page).
 
-### `routeFromHAR`
-- Replay only. HAR **recording** (`update: true`, `updateContent`,
-  `updateMode`) is unsupported. URL filter accepts a glob string; `RegExp`
-  url-filter is not yet wired.
+### Route predicate `times` budget
+- A JS predicate route whose predicate rejects now falls through to the
+  next handler (chain-correct), but its `times` budget is still
+  consumed: the predicate runs inside the wrapped handler, not the
+  matcher, because matchers are sync Rust and the predicate is an async
+  JS call. Playwright evaluates predicates during matching, before
+  `willExpire`.
+
+### HAR recording gaps
+- `full` mode emits zero timings (see network timing above) and no
+  cookies/serverIP/security sections.
+- WebSocket frames are not recorded into HAR (`_webSocketMessages`).
+- BiDi records entries but no response bodies: Firefox discards bytes
+  for non-intercepted responses (`network.getData` → "no such network
+  data") — same hole as Playwright's own BiDi backend.
+
+### Clock date-string parsing
+- ISO-8601 only (`YYYY-MM-DD`, `YYYY-MM-DD[T ]HH:MM[:SS[.mmm]][Z|±HH:MM]`).
+  Bare date-times parse as UTC (JS `new Date` treats them as local);
+  non-ISO forms JS accepts ("Feb 1 2024") are rejected with
+  `Invalid date`.
+
+### WebKit: no multiple browser contexts
+- `browser.newContext()` rejects on the WebKit backend (single-context
+  driver); context-options integration tests skip WebKit for this
+  reason. Playwright's WebKit supports contexts via
+  `Playwright.createContext` — ferridriver creates one at launch but
+  cannot mint more.
+
+### WebKit: navigation-wait timeout resolves instead of rejecting
+- `wait_for_lifecycle` maps its own timeout to `Ok(())`
+  (`backend/webkit/page.rs`), so a `goto` whose lifecycle never fires
+  resolves silently instead of throwing `TimeoutError`. Provisional-load
+  FAILURES reject correctly (wired via `Playwright.provisionalLoadFailed`);
+  only the silent-timeout path diverges.
+
+### `ferridriver test --watch`
+- Watch mode is wired for `bdd` only. The `test` subcommand shells out
+  to cargo nextest/cargo for `#[ferritest]` suites, so watch there means
+  re-running cargo on change — closer to cargo-watch than to the
+  in-process runner loop; the harness `main!` entry could adopt
+  `run_watch` the same way `bdd` did.
