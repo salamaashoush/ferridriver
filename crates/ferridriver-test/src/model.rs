@@ -535,6 +535,9 @@ impl TestInfo {
     }
 
     let trace_span = self.open_step_span(&step_id, &title, &category, None);
+    let trace_prev_parent = trace_span
+      .as_ref()
+      .map(ferridriver::trace::ActionSpan::make_current_parent);
     StepHandle {
       step_id,
       test_id: self.test_id.clone(),
@@ -546,6 +549,7 @@ impl TestInfo {
       event_bus: self.event_bus.clone(),
       steps: Arc::clone(&self.steps),
       trace_span,
+      trace_prev_parent,
     }
   }
 
@@ -573,6 +577,9 @@ impl TestInfo {
     }
 
     let trace_span = self.open_step_span(&step_id, &title, &category, Some(parent_step_id));
+    let trace_prev_parent = trace_span
+      .as_ref()
+      .map(ferridriver::trace::ActionSpan::make_current_parent);
     StepHandle {
       step_id,
       test_id: self.test_id.clone(),
@@ -584,6 +591,7 @@ impl TestInfo {
       event_bus: self.event_bus.clone(),
       steps: Arc::clone(&self.steps),
       trace_span,
+      trace_prev_parent,
     }
   }
 
@@ -738,6 +746,9 @@ pub struct StepHandle {
   steps: Arc<Mutex<Vec<TestStep>>>,
   /// Mirrored trace action, open while the step runs.
   trace_span: Option<ferridriver::trace::ActionSpan>,
+  /// Enclosing-parent id to restore when this step's span closes
+  /// (`Some` only when this step became the live trace parent).
+  trace_prev_parent: Option<Option<String>>,
 }
 
 impl StepHandle {
@@ -750,7 +761,10 @@ impl StepHandle {
       StepStatus::Passed
     };
     if let Some(span) = self.trace_span {
-      span.finish_message(error.clone());
+      match self.trace_prev_parent {
+        Some(previous) => span.finish_message_restoring(error.clone(), previous),
+        None => span.finish_message(error.clone()),
+      }
     }
 
     // Emit real-time event.
@@ -797,7 +811,10 @@ impl StepHandle {
   async fn finish_with_status(self, status: StepStatus, error: Option<String>) {
     let duration = self.start.elapsed();
     if let Some(span) = self.trace_span {
-      span.finish_message(error.clone());
+      match self.trace_prev_parent {
+        Some(previous) => span.finish_message_restoring(error.clone(), previous),
+        None => span.finish_message(error.clone()),
+      }
     }
 
     if let Some(bus) = &self.event_bus {

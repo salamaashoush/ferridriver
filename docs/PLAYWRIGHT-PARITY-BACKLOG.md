@@ -118,7 +118,15 @@ CORS for trace.playwright.dev; the runner-side step-trace recorder in
 ### `bdd --ui` remaining gaps vs Playwright UI mode
 - Per-test traces are now recorded live by the library recorder (real
   action/step timelines, DOM snapshots, screencast frames, network
-  entries with bodies); tests that never touch a browser produce no
-  trace (the recorder is context-scoped).
-- No embedded trace viewer; the "Open in trace viewer" link requires
-  network access to trace.playwright.dev.
+  entries with bodies, protocol actions nested under their step spans);
+  tests that never touch a browser produce no trace (the recorder is
+  context-scoped).
+- The trace viewer is embedded (vendored playwright-core 1.58.2 static
+  app served at /trace-viewer/, inline Trace tab in the detail pane) —
+  fully offline; trace.playwright.dev remains a secondary link.
+- Rust-registry BDD steps (no JS step files) still report post-hoc via
+  the executor observer, so their protocol actions do not nest under
+  step spans (the QuickJS path nests; convert the Rust executor to live
+  begin_step/end to match).
+- Screencast filmstrip is sparse for sub-second tests: steady-state
+  1 frame / 200ms with no around-action burst window.
