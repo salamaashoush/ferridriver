@@ -215,9 +215,11 @@ impl Tracing {
   /// init-script (future documents, all frames) and evaluated into the
   /// current document of every open page. Child frames of documents
   /// that predate `start` pick the streamer up on their next
-  /// navigation. Existing documents get their snapshot history
-  /// reset-marked — a streamer left over from a previous recording
-  /// still holds node refs into a file this trace does not contain.
+  /// navigation. A streamer left over from a previous recording still
+  /// holds node refs into a file this trace does not contain — the
+  /// capture expression's epoch check self-resets it on the next
+  /// capture ([`crate::snapshotter`]), with no boundary-time evaluate
+  /// into every frame (which would stall on dead frames).
   async fn install_snapshot_streamer(&self) {
     let source = crate::snapshotter::install_source();
     if let Err(e) = self.ctx.add_init_script_source(source.clone()).await {
@@ -230,7 +232,6 @@ impl Tracing {
         tracing::debug!(target: "ferridriver::trace", "snapshot streamer eval skipped: {e}");
       }
     }
-    crate::snapshotter::mark_needs_reset(&pages).await;
   }
 
   async fn context_pages(&self) -> Vec<crate::backend::AnyPage> {
@@ -251,8 +252,6 @@ impl Tracing {
     let recorder = crate::trace::recorder_for(&self.ctx.composite())
       .ok_or_else(|| FerriError::backend("Must start tracing before starting a new chunk".to_string()))?;
     recorder.start_chunk(self.network_log_len().await);
-    // Back-references into the previous chunk's snapshots would dangle.
-    crate::snapshotter::mark_needs_reset(&self.context_pages().await).await;
     Ok(())
   }
 
@@ -271,7 +270,6 @@ impl Tracing {
       recorder.export(&path, &network)?;
     }
     recorder.start_chunk(self.network_log_len().await);
-    crate::snapshotter::mark_needs_reset(&self.context_pages().await).await;
     Ok(())
   }
 

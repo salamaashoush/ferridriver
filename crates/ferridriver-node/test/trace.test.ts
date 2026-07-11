@@ -48,9 +48,13 @@ for (const backend of BACKENDS) {
         const first = JSON.parse(lines[0]);
         expect(first.type).toBe("context-options");
         expect(first.version).toBe(8);
-        const actions = lines.map((l) => JSON.parse(l)).filter((e) => e.type === "action");
-        expect(actions.some((a) => a.method === "goto")).toBe(true);
-        expect(actions.some((a) => a.method === "click")).toBe(true);
+        // Actions arrive as Playwright's split before/input/after triplet.
+        const befores = lines.map((l) => JSON.parse(l)).filter((e) => e.type === "before");
+        expect(befores.some((a) => a.method === "goto")).toBe(true);
+        const click = befores.find((a) => a.method === "click");
+        expect(click === undefined).toBe(false);
+        const afters = lines.map((l) => JSON.parse(l)).filter((e) => e.type === "after");
+        expect(afters.some((a) => a.callId === click.callId)).toBe(true);
 
         await expect(ctx.tracing.stop()).rejects.toThrow(/Must start tracing/);
       } finally {

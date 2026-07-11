@@ -149,7 +149,32 @@ impl FrameCache {
       name: merged_name,
       url: merged_url,
     };
-    self.by_id.insert(id, FrameRecord { info: merged, detached });
+    self
+      .by_id
+      .insert(Arc::clone(&id), FrameRecord { info: merged, detached });
+    // A cross-document navigation destroys the frame's subtree (CDP
+    // `frameNavigated` is cross-document only). Backends do not
+    // reliably emit `frameDetached` for the children, and a stale
+    // "live" child wedges every consumer that round-trips into it
+    // (trace snapshot captures stalled 2s per dead frame per capture).
+    // Mirrors Playwright's frameManager, which drops child frames on
+    // the parent's navigation.
+    self.detach_descendants(&id);
+  }
+
+  fn detach_descendants(&mut self, parent: &str) {
+    let children: Vec<Arc<str>> = self
+      .by_id
+      .iter()
+      .filter(|(_, rec)| !rec.detached && rec.info.parent_frame_id.as_deref() == Some(parent))
+      .map(|(id, _)| Arc::clone(id))
+      .collect();
+    for child in children {
+      if let Some(rec) = self.by_id.get_mut(&child) {
+        rec.detached = true;
+      }
+      self.detach_descendants(&child);
+    }
   }
 
   /// Snapshot of the main frame record (`None` only before the first

@@ -35,13 +35,22 @@ const SNAPSHOTTER_JS: &str = include_str!("injected/snapshotter_injected.js");
 /// rather than wedging the action that triggered it.
 const CAPTURE_TIMEOUT_MS: u64 = 2_000;
 
-/// Per-document flag: the next capture must run `captureSnapshot(true)`
-/// (full reset, no `[[n,m]]` back-references). `undefined` counts as
-/// "needs reset" — a fresh document, a document that outlived a prior
-/// recording, or a re-`tracing.start` all begin with a self-contained
-/// snapshot, so stale node refs can never dangle into snapshots the
-/// current trace file does not contain (mirrors Playwright's
-/// `kNeedsResetSymbol` protocol, `snapshotter.ts`).
+/// Per-document snapshot-history epoch. The capture expression compares
+/// the document's stored epoch against the recording's current one and
+/// runs `captureSnapshot(true)` (full reset, no `[[n,m]]`
+/// back-references) on mismatch — a fresh document (`undefined`), a
+/// document that outlived a prior recording, a re-`tracing.start`, and
+/// every chunk boundary all begin with a self-contained snapshot, so
+/// stale node refs can never dangle into snapshots the current trace
+/// file does not contain (mirrors Playwright's reset-on-start protocol,
+/// `snapshotter.ts`). Epoch comparison happens lazily inside the next
+/// capture — no boundary-time evaluate into every frame, which would
+/// stall on frames whose execution context is gone.
+const EPOCH_GLOBAL: &str = "__ferridriver_snapshot_epoch__";
+
+/// Per-document force-reset flag, set after a capture whose result was
+/// dropped (the streamer's snapshot number advanced past what the trace
+/// file contains).
 const NEEDS_RESET_GLOBAL: &str = "__ferridriver_snapshot_needs_reset__";
 
 /// Source that installs the streamer into a document (idempotent — the
@@ -52,12 +61,14 @@ pub(crate) fn install_source() -> String {
 
 /// Expression evaluated in each frame to capture one snapshot. Returns a
 /// JSON string (the wire-clean stringify pattern shared with the utility
-/// wrapper) or `undefined` when the streamer is not installed. Consumes
-/// the per-document needs-reset flag.
-fn capture_expression() -> String {
+/// wrapper) or `undefined` when the streamer is not installed. Resets
+/// the streamer's history when the document's epoch is stale or a
+/// dropped capture flagged it.
+fn capture_expression(epoch: u64) -> String {
   format!(
     "window[{STREAMER_GLOBAL:?}] && (() => {{ \
-       const reset = window[{NEEDS_RESET_GLOBAL:?}] !== false; \
+       const reset = window[{EPOCH_GLOBAL:?}] !== {epoch} || window[{NEEDS_RESET_GLOBAL:?}] === true; \
+       window[{EPOCH_GLOBAL:?}] = {epoch}; \
        window[{NEEDS_RESET_GLOBAL:?}] = false; \
        return JSON.stringify(window[{STREAMER_GLOBAL:?}].captureSnapshot(reset)); \
      }})()"
@@ -65,38 +76,9 @@ fn capture_expression() -> String {
 }
 
 /// Expression that forces the frame's next capture to be self-contained
-/// (evaluated after a dropped capture or at a chunk boundary).
+/// (evaluated after a dropped capture).
 fn mark_reset_expression() -> String {
   format!("window[{NEEDS_RESET_GLOBAL:?}] = true")
-}
-
-/// Force every frame of every page to reset its snapshot history on the
-/// next capture — called at chunk boundaries, where `[[n,m]]`
-/// back-references into the previous chunk's events would dangle.
-pub(crate) async fn mark_needs_reset(pages: &[crate::backend::AnyPage]) {
-  let expression = mark_reset_expression();
-  for page in pages {
-    if let Err(e) = page.evaluate(&expression).await {
-      tracing::debug!(target: "ferridriver::trace", "snapshot reset mark skipped: {e}");
-    }
-    for (frame_id, parent) in frame_pairs(page) {
-      let _ = parent;
-      if let Err(e) = page.evaluate_in_frame(&expression, &frame_id).await {
-        tracing::debug!(target: "ferridriver::trace", "snapshot reset mark skipped for {frame_id}: {e}");
-      }
-    }
-  }
-}
-
-fn frame_pairs(page: &crate::backend::AnyPage) -> Vec<(String, String)> {
-  let cache = page
-    .frame_cache()
-    .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner);
-  cache
-    .live_ids()
-    .filter_map(|id| cache.parent_id(&id).map(|parent| (id.to_string(), parent.to_string())))
-    .collect()
 }
 
 /// Mark a child frame's `<iframe>` element in its parent frame with the
@@ -145,7 +127,7 @@ pub(crate) async fn capture_page_snapshot(
     }
   }
   for (frame_id, is_main) in page.trace_frame_list() {
-    let expression = capture_expression();
+    let expression = capture_expression(recorder.snapshot_epoch());
     let evaluated = tokio::time::timeout(std::time::Duration::from_millis(CAPTURE_TIMEOUT_MS), async {
       if is_main {
         page.inner().evaluate(&expression).await
@@ -154,23 +136,33 @@ pub(crate) async fn capture_page_snapshot(
       }
     })
     .await;
-    let data = match evaluated {
-      Ok(Ok(Some(serde_json::Value::String(raw)))) => serde_json::from_str::<serde_json::Value>(&raw).ok(),
-      _ => None,
+    let (reachable, data) = match evaluated {
+      Ok(Ok(Some(serde_json::Value::String(raw)))) => (true, serde_json::from_str::<serde_json::Value>(&raw).ok()),
+      Ok(Ok(_)) => (true, None),
+      // Timeout or protocol error: the frame is unreachable — a NEW
+      // document starts with an undefined epoch, which the capture
+      // expression already treats as "needs reset", so there is
+      // nothing to mark (and a mark round-trip would just stall the
+      // same way the capture did).
+      _ => (false, None),
     };
     let Some(data) = data else {
-      // The streamer already advanced its snapshot number for a capture
-      // this trace will never contain — every `[[n,m]]` back-reference
-      // across the gap would resolve to the wrong entry in the viewer.
-      // Force the frame's next capture to be self-contained.
-      force_frame_reset(page, &frame_id, is_main).await;
+      if reachable {
+        // The streamer already advanced its snapshot number for a
+        // capture this trace will never contain — every `[[n,m]]`
+        // back-reference across the gap would resolve to the wrong
+        // entry in the viewer. Force the frame's next capture to be
+        // self-contained.
+        force_frame_reset(page, &frame_id, is_main).await;
+      }
       continue;
     };
     push_frame_snapshot(recorder, &page_id, &frame_id, is_main, call_id, snapshot_name, &data);
   }
 }
 
-/// Mark one frame's next capture as needing a full reset (best effort).
+/// Mark one frame's next capture as needing a full reset (best effort;
+/// only called on frames that just answered an evaluate).
 async fn force_frame_reset(page: &crate::page::Page, frame_id: &str, is_main: bool) {
   let expression = mark_reset_expression();
   let marked = tokio::time::timeout(std::time::Duration::from_millis(CAPTURE_TIMEOUT_MS), async {
@@ -182,8 +174,6 @@ async fn force_frame_reset(page: &crate::page::Page, frame_id: &str, is_main: bo
   })
   .await;
   if !matches!(marked, Ok(Ok(_))) {
-    // Unreachable frame: a NEW document starts with the flag undefined,
-    // which the capture expression already treats as "needs reset".
     tracing::debug!(target: "ferridriver::trace", "snapshot reset mark unreachable for {frame_id}");
   }
 }

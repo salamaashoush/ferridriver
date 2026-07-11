@@ -319,7 +319,16 @@ pub struct TraceRecorder {
   context_options: serde_json::Value,
   /// Bumped on every appended event/resource ([`Self::spool_version`]).
   spool_version: AtomicU64,
+  /// Snapshot-history epoch for this chunk: page documents compare it
+  /// against their stored value at capture time and self-reset on
+  /// mismatch ([`crate::snapshotter`]). Process-unique so a document
+  /// that outlived a previous recording (or chunk) can never reuse its
+  /// node-dedup cache against the new file.
+  snapshot_epoch: AtomicU64,
 }
+
+/// Process-global source for [`TraceRecorder::snapshot_epoch`] values.
+static NEXT_SNAPSHOT_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 impl TraceRecorder {
   /// # Errors
@@ -357,7 +366,14 @@ impl TraceRecorder {
       browser_name,
       context_options,
       spool_version: AtomicU64::new(0),
+      snapshot_epoch: AtomicU64::new(NEXT_SNAPSHOT_EPOCH.fetch_add(1, Ordering::Relaxed)),
     })
+  }
+
+  /// Current snapshot-history epoch (see the field doc).
+  #[must_use]
+  pub(crate) fn snapshot_epoch(&self) -> u64 {
+    self.snapshot_epoch.load(Ordering::Relaxed)
   }
 
   /// Swap the live enclosing-span id, returning the previous one so the
@@ -501,6 +517,12 @@ impl TraceRecorder {
       *guard = fresh;
     }
     self.network_start_len.store(network_len as u64, Ordering::SeqCst);
+    // Fresh epoch: `[[n,m]]` back-references into the previous chunk's
+    // snapshots would dangle, so every document self-resets on its next
+    // capture.
+    self
+      .snapshot_epoch
+      .store(NEXT_SNAPSHOT_EPOCH.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
   }
 
   /// Stop screencast pumps (idempotent).
