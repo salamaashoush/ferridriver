@@ -1398,6 +1398,32 @@ impl Worker {
       },
       _ => None,
     };
+    // Mirror the failure screenshot into the trace as an `attach`
+    // action (Playwright's test runner does the same), so the viewer's
+    // Attachments tab carries it alongside the timeline.
+    if let Some(ref png) = screenshot {
+      let composite = trace_composite
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+      if let Some(composite) = composite {
+        if let Some(mut span) = ferridriver::trace::begin_custom_action(
+          &composite,
+          ferridriver::trace::CustomAction {
+            class: "Test",
+            method: "attach",
+            title: "attach \"screenshot-on-failure\"".to_string(),
+            params: serde_json::json!({}),
+            parent_id: None,
+            backdate_ms: 0.0,
+            stack: Vec::new(),
+          },
+        ) {
+          span.attach("screenshot-on-failure", "image/png", png.clone());
+          span.finish_message(None);
+        }
+      }
+    }
     // Stop the per-test trace while the context is still alive: export
     // to disk when the mode retains it, discard otherwise. Retention
     // keys off the RAW body result (same signal as screenshot-on-failure

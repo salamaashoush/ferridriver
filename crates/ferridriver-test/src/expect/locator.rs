@@ -8,7 +8,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use ferridriver::Locator;
-use ferridriver_expect::{Expect, ExpectContext, MatchError, poll_until as expect_poll_until};
+use ferridriver_expect::{Expect, ExpectContext, MatchError, poll_traced};
 
 use super::ScreenshotMatcherOptions;
 use crate::model::TestFailure;
@@ -21,12 +21,24 @@ fn locator_ctx(locator: &Locator, method: &'static str, is_not: bool) -> ExpectC
   }
 }
 
-async fn poll_until_test<F, Fut>(timeout: Duration, ctx: ExpectContext, check: F) -> Result<(), TestFailure>
+async fn poll_until_test<F, Fut>(
+  locator: &Locator,
+  timeout: Duration,
+  ctx: ExpectContext,
+  check: F,
+) -> Result<(), TestFailure>
 where
   F: FnMut() -> Fut,
   Fut: Future<Output = Result<(), MatchError>>,
 {
-  expect_poll_until(timeout, ctx, check).await.map_err(Into::into)
+  let params = serde_json::json!({
+    "selector": locator.selector(),
+    "isNot": ctx.is_not,
+    "timeout": u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+  });
+  poll_traced(Some(&**locator.page()), params, timeout, ctx, check)
+    .await
+    .map_err(Into::into)
 }
 
 /// Snapshot matchers for `expect(locator)`. Imported via
@@ -109,6 +121,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
     let locator = self.subject;
     let is_not = self.is_not;
     poll_until_test(
+      locator,
       self.timeout,
       locator_ctx(locator, "toMatchAriaSnapshot", is_not),
       || {
