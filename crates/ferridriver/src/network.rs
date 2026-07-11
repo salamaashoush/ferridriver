@@ -47,7 +47,7 @@ pub struct RequestTiming {
 }
 
 impl RequestTiming {
-  fn empty() -> Self {
+  pub(crate) fn empty() -> Self {
     Self {
       start_time: 0.0,
       domain_lookup_start: -1.0,
@@ -66,6 +66,15 @@ impl Default for RequestTiming {
   fn default() -> Self {
     Self::empty()
   }
+}
+
+/// Wall-clock epoch milliseconds (the `RequestTiming::start_time` unit).
+pub(crate) fn now_epoch_ms() -> f64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap_or_default()
+    .as_secs_f64()
+    * 1000.0
 }
 
 /// Body / header byte counts for a completed request. Field names mirror
@@ -204,7 +213,13 @@ impl Request {
       provisional_headers: init.headers,
       frame_id: init.frame_id,
       redirected_from: init.redirected_from.map(|r| r.inner),
-      timing: ArcSwap::from_pointee(init.timing.unwrap_or_default()),
+      timing: ArcSwap::from_pointee(init.timing.unwrap_or_else(|| RequestTiming {
+        // Wall-clock anchor at capture time — backends without a
+        // wall-time sample in their request event still satisfy the
+        // epoch-ms `start_time` contract.
+        start_time: now_epoch_ms(),
+        ..RequestTiming::empty()
+      })),
       sizes: ArcSwap::from_pointee(RequestSizes::default()),
       redirected_to: ArcSwapOption::const_empty(),
       failure: ArcSwapOption::const_empty(),
@@ -477,8 +492,20 @@ impl Request {
     self.inner.headers_notify.notify_waiters();
   }
 
+  /// Merge a backend `ResourceTiming` sample. `start_time` keeps the
+  /// wall-clock epoch-ms anchor captured at request creation — protocol
+  /// samples carry a monotonic `requestTime` that must not overwrite it.
   pub fn update_timing(&self, timing: RequestTiming) {
-    self.inner.timing.store(Arc::new(timing));
+    let existing = self.inner.timing.load().start_time;
+    let merged = if existing > 0.0 {
+      RequestTiming {
+        start_time: existing,
+        ..timing
+      }
+    } else {
+      timing
+    };
+    self.inner.timing.store(Arc::new(merged));
   }
 
   pub fn update_sizes(&self, sizes: RequestSizes) {

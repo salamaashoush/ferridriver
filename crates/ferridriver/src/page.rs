@@ -308,22 +308,115 @@ impl Page {
     )
   }
 
-  /// Capture the "before" DOM snapshot for a traced action and stamp
-  /// its name on the span. No-ops (and costs nothing) unless this
-  /// context is being traced with `snapshots: true`.
+  /// Capture the "before" DOM snapshot for a traced action (the
+  /// `before` event already referenced the name — [`crate::trace`]
+  /// fixes snapshot names up front like Playwright). No-ops (and costs
+  /// nothing) unless this context is being traced with
+  /// `snapshots: true`.
   pub(crate) async fn snapshot_before(
     &self,
     span: Option<crate::trace::ActionSpan>,
   ) -> Option<crate::trace::ActionSpan> {
-    let mut span = span?;
-    if span.snapshots_enabled() {
+    let span = span?;
+    if let Some(name) = span.before_snapshot_name().map(str::to_string) {
       if let Some(recorder) = self.active_trace_recorder() {
-        let name = format!("before@{}", span.call_id());
         crate::snapshotter::capture_page_snapshot(&recorder, self, span.call_id(), &name).await;
-        span.set_before_snapshot(name);
       }
     }
     Some(span)
+  }
+
+  /// Open a traced `expect.<matcher>` action span (with its before
+  /// snapshot). Public so the assertion crates layered on the core can
+  /// mirror Playwright's expect tracing — an `expect.toBeVisible` call
+  /// appears in the trace with DOM snapshots exactly like a page
+  /// action. `None` when the context is not being traced.
+  pub async fn begin_expect_trace(&self, matcher: &str, params: serde_json::Value) -> Option<crate::trace::ActionSpan> {
+    let composite = self.context()?.composite();
+    let span = crate::trace::begin_action(
+      Some(&composite),
+      "Expect",
+      matcher,
+      Some(format!("page@{}", self.backend_page_id())),
+      params,
+    );
+    self.snapshot_before(span).await
+  }
+
+  /// Finish a traced expect span: capture the after snapshot and record
+  /// the assertion outcome.
+  pub async fn finish_expect_trace(&self, mut span: crate::trace::ActionSpan, error: Option<String>) {
+    if span.snapshots_enabled() {
+      if let Some(recorder) = self.active_trace_recorder() {
+        let name = format!("after@{}", span.call_id());
+        crate::snapshotter::capture_page_snapshot(&recorder, self, span.call_id(), &name).await;
+        span.set_after_snapshot(name);
+      }
+    }
+    span.finish_message(error);
+  }
+
+  /// Record the input-time trace state for an input-dispatching locator
+  /// action: mark `element` as the action's target (the viewer's
+  /// element highlight), capture the `input@<callId>` DOM snapshot,
+  /// and emit the `input` event with the dispatch point (pointer
+  /// actions aim at the element's border-box center — the backend's
+  /// default click point). No-op for pure reads.
+  pub(crate) async fn trace_capture_input(
+    &self,
+    span: &crate::trace::ActionSpan,
+    element: &crate::backend::AnyElement,
+    method: &str,
+  ) {
+    let Some(kind) = crate::trace::input_action_kind(method) else {
+      return;
+    };
+    let mark_fn = format!(
+      "function() {{ \
+         try {{ \
+           const prev = window.__ferridriver_marked_targets__ || []; \
+           for (const el of prev) {{ try {{ delete el.__playwright_target__; }} catch (e) {{}} }} \
+           this.__playwright_target__ = {call_id:?}; \
+           window.__ferridriver_marked_targets__ = [this]; \
+         }} catch (e) {{}} \
+         try {{ \
+           const r = this.getBoundingClientRect(); \
+           let x = r.x + r.width / 2, y = r.y + r.height / 2; \
+           let win = this.ownerDocument && this.ownerDocument.defaultView; \
+           while (win && win !== win.parent && win.frameElement) {{ \
+             const fr = win.frameElement.getBoundingClientRect(); \
+             x += fr.x; y += fr.y; \
+             win = win.parent; \
+           }} \
+           return JSON.stringify({{ x, y }}); \
+         }} catch (e) {{ return JSON.stringify(null); }} \
+       }}",
+      call_id = span.call_id(),
+    );
+    let marked = element.call_js_fn_value(&mark_fn).await;
+    let point = if kind == crate::trace::InputKind::Pointer {
+      marked.ok().flatten().and_then(|value| {
+        let parsed = match value {
+          serde_json::Value::String(raw) => serde_json::from_str::<serde_json::Value>(&raw).ok()?,
+          other => other,
+        };
+        Some((parsed.get("x")?.as_f64()?, parsed.get("y")?.as_f64()?))
+      })
+    } else {
+      None
+    };
+    let input_snapshot = if span.snapshots_enabled() {
+      if let Some(recorder) = self.active_trace_recorder() {
+        let name = format!("input@{}", span.call_id());
+        crate::snapshotter::capture_page_snapshot(&recorder, self, span.call_id(), &name).await;
+        Some(name)
+      } else {
+        None
+      }
+    } else {
+      None
+    };
+    span.mark_input(input_snapshot, point);
   }
 
   /// Capture the "after" DOM snapshot, stamp it, and finish the span.

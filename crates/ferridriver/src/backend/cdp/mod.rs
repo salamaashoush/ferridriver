@@ -5951,6 +5951,17 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
 
     let raw_headers_fn = self.make_request_raw_headers_fn(&request_id);
 
+    // `wallTime` is epoch seconds — the one wall-clock sample CDP
+    // provides for a request (`ResourceTiming.requestTime` is monotonic).
+    let timing = params
+      .get("wallTime")
+      .and_then(serde_json::Value::as_f64)
+      .filter(|wall| *wall > 0.0)
+      .map(|wall| network::RequestTiming {
+        start_time: wall * 1000.0,
+        ..network::RequestTiming::empty()
+      });
+
     let new_request = network::Request::new(RequestInit {
       id: request_id.clone(),
       url,
@@ -5961,7 +5972,7 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       headers,
       frame_id,
       redirected_from,
-      timing: None,
+      timing,
       raw_headers_fn: Some(raw_headers_fn),
     });
 
@@ -6317,7 +6328,10 @@ fn parse_raw_headers(headers: Option<&serde_json::Value>) -> Vec<HeaderEntry> {
 fn parse_timing(value: &serde_json::Value) -> RequestTiming {
   let f = |key: &str, default: f64| value.get(key).and_then(serde_json::Value::as_f64).unwrap_or(default);
   RequestTiming {
-    start_time: f("requestTime", 0.0) * 1000.0,
+    // CDP `requestTime` is MONOTONIC seconds, not wall clock — the
+    // request's epoch-ms anchor (from `requestWillBeSent.wallTime`)
+    // survives the merge in `Request::update_timing`.
+    start_time: 0.0,
     domain_lookup_start: f("dnsStart", -1.0),
     domain_lookup_end: f("dnsEnd", -1.0),
     connect_start: f("connectStart", -1.0),

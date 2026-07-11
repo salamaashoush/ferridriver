@@ -53,6 +53,14 @@ macro_rules! retry_resolve {
       )
     };
     let __trace_span = __trace_page.snapshot_before(__trace_span).await;
+    if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
+      __s.log(format!("waiting for locator('{}')", $self.selector));
+    }
+    // Input-time capture (target mark + input@ snapshot + point) fires
+    // once, on the first successful resolution.
+    let mut __trace_input_pending = __trace_span.is_some();
+    // Last call-log line, to collapse identical retry messages.
+    let mut __trace_last_log = ::std::string::String::new();
     let __result = 'retry: {
       // Resolve `frameLocator` enter-frame hops to the real child frame
       // + trailing selector (no-op for plain selectors).
@@ -130,23 +138,37 @@ macro_rules! retry_resolve {
         // separate `query_all` + `cleanup_tags` round-trips the previous
         // implementation paid on every retry attempt (~2 RTTs).
         match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector, __frame_id).await {
-          ::std::result::Result::Ok($el) => match ($body).await {
-            ::std::result::Result::Ok(val) => break 'retry ::std::result::Result::Ok(val),
-            ::std::result::Result::Err(e) => {
-              let __msg = e.to_string();
-              if __msg.contains("not connected")
-                || __msg.contains("not found")
-                || __msg.contains("detached")
-                || __msg.contains("error:not")
-              {
-                // Retriable: `checkElementStates` returns
-                // `error:notvisible` / `error:notenabled` /
-                // `error:noteditable` etc. as signals to keep polling until
-                // the deadline.
-              } else {
-                break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
+          ::std::result::Result::Ok($el) => {
+            if __trace_input_pending {
+              __trace_input_pending = false;
+              if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
+                __trace_page.trace_capture_input(__s, &$el, $op).await;
               }
-            },
+            }
+            match ($body).await {
+              ::std::result::Result::Ok(val) => break 'retry ::std::result::Result::Ok(val),
+              ::std::result::Result::Err(e) => {
+                let __msg = e.to_string();
+                if __msg.contains("not connected")
+                  || __msg.contains("not found")
+                  || __msg.contains("detached")
+                  || __msg.contains("error:not")
+                {
+                  // Retriable: `checkElementStates` returns
+                  // `error:notvisible` / `error:notenabled` /
+                  // `error:noteditable` etc. as signals to keep polling until
+                  // the deadline.
+                  if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
+                    if __msg != __trace_last_log {
+                      __s.log(__msg.clone());
+                      __trace_last_log = __msg;
+                    }
+                  }
+                } else {
+                  break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
+                }
+              },
+            }
           },
           ::std::result::Result::Err(__err) => {
             // Strict-mode violation: the engine threw

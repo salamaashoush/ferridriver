@@ -3413,7 +3413,15 @@ impl BidiNetworkTracker {
       headers,
       frame_id,
       redirected_from,
-      timing: None,
+      // BiDi event `timestamp` is epoch milliseconds.
+      timing: params
+        .get("timestamp")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|ts| *ts > 0.0)
+        .map(|ts| network::RequestTiming {
+          start_time: ts,
+          ..network::RequestTiming::empty()
+        }),
       raw_headers_fn: None,
     });
 

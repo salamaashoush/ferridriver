@@ -174,18 +174,31 @@ impl Tracing {
   /// Errors if tracing is already started on this context.
   pub async fn start(&self, options: crate::trace::TracingStartOptions) -> Result<()> {
     let composite = self.ctx.composite();
-    let browser_name = {
+    let (browser_name, context_options) = {
       let state = self.ctx.state().read().await;
-      match state.backend_kind() {
+      let browser_name = match state.backend_kind() {
         crate::backend::BackendKind::CdpPipe | crate::backend::BackendKind::CdpRaw => "chromium",
         crate::backend::BackendKind::WebKit => "webkit",
         crate::backend::BackendKind::Bidi => "firefox",
+      };
+      let mut context_options = serde_json::Map::new();
+      if let Some(viewport) = state.default_viewport.as_ref() {
+        context_options.insert(
+          "viewport".to_string(),
+          serde_json::json!({ "width": viewport.width, "height": viewport.height }),
+        );
+        context_options.insert(
+          "deviceScaleFactor".to_string(),
+          serde_json::json!(viewport.device_scale_factor),
+        );
       }
+      (browser_name, serde_json::Value::Object(context_options))
     };
     let network_len = self.network_log_len().await;
     let recorder = std::sync::Arc::new(crate::trace::TraceRecorder::new(
       &options,
       browser_name.to_string(),
+      context_options,
       network_len,
     )?);
     crate::trace::install_recorder(&composite, std::sync::Arc::clone(&recorder))?;
@@ -202,25 +215,30 @@ impl Tracing {
   /// init-script (future documents, all frames) and evaluated into the
   /// current document of every open page. Child frames of documents
   /// that predate `start` pick the streamer up on their next
-  /// navigation.
+  /// navigation. Existing documents get their snapshot history
+  /// reset-marked — a streamer left over from a previous recording
+  /// still holds node refs into a file this trace does not contain.
   async fn install_snapshot_streamer(&self) {
     let source = crate::snapshotter::install_source();
     if let Err(e) = self.ctx.add_init_script_source(source.clone()).await {
       tracing::warn!(target: "ferridriver::trace", "snapshot streamer init-script failed: {e}");
       return;
     }
-    let pages = {
-      let state = self.ctx.state().read().await;
-      state
-        .context(self.ctx.name())
-        .map(|c| c.pages.clone())
-        .unwrap_or_default()
-    };
-    for page in pages {
+    let pages = self.context_pages().await;
+    for page in &pages {
       if let Err(e) = page.evaluate(&source).await {
         tracing::debug!(target: "ferridriver::trace", "snapshot streamer eval skipped: {e}");
       }
     }
+    crate::snapshotter::mark_needs_reset(&pages).await;
+  }
+
+  async fn context_pages(&self) -> Vec<crate::backend::AnyPage> {
+    let state = self.ctx.state().read().await;
+    state
+      .context(self.ctx.name())
+      .map(|c| c.pages.clone())
+      .unwrap_or_default()
   }
 
   /// Playwright: `tracing.startChunk(options?)`. Resets the chunk-local
@@ -233,6 +251,8 @@ impl Tracing {
     let recorder = crate::trace::recorder_for(&self.ctx.composite())
       .ok_or_else(|| FerriError::backend("Must start tracing before starting a new chunk".to_string()))?;
     recorder.start_chunk(self.network_log_len().await);
+    // Back-references into the previous chunk's snapshots would dangle.
+    crate::snapshotter::mark_needs_reset(&self.context_pages().await).await;
     Ok(())
   }
 
@@ -251,6 +271,7 @@ impl Tracing {
       recorder.export(&path, &network)?;
     }
     recorder.start_chunk(self.network_log_len().await);
+    crate::snapshotter::mark_needs_reset(&self.context_pages().await).await;
     Ok(())
   }
 
@@ -289,9 +310,36 @@ impl Tracing {
       resources_dir: None,
       start_len: start,
     };
+    // frame id -> `page@<id>` map so entries carry `pageref` /
+    // `_frameref` — the viewer prefers a same-frame resource when a
+    // snapshot subresource URL matches several responses
+    // (`snapshotRenderer.ts::resourceByUrl`).
+    let mut frame_to_page: rustc_hash::FxHashMap<String, String> = rustc_hash::FxHashMap::default();
+    {
+      let state = self.ctx.state().read().await;
+      let pages = state
+        .context(self.ctx.name())
+        .map(|c| c.pages.clone())
+        .unwrap_or_default();
+      drop(state);
+      for page in pages {
+        let page_ref = crate::trace::trace_page_id(&page);
+        let frame_ids = {
+          let cache = page
+            .frame_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+          cache.all_frame_ids()
+        };
+        for frame_id in frame_ids {
+          frame_to_page.insert(frame_id.to_string(), page_ref.clone());
+        }
+      }
+    }
+
     let mut attachments = Vec::new();
     let mut entries = Vec::new();
-    for (i, req) in requests.iter().enumerate() {
+    for req in &requests {
       let entry = build_entry(req, &ephemeral, &mut attachments).await;
       if let Ok(mut value) = serde_json::to_value(&entry) {
         if let Some(content) = value.pointer_mut("/response/content").and_then(|c| c.as_object_mut()) {
@@ -300,17 +348,22 @@ impl Tracing {
           }
         }
         if let Some(obj) = value.as_object_mut() {
-          // Real capture time when the backend supplied a timing
-          // sample (epoch ms mapped onto the recorder's monotonic
-          // origin); ordinal fallback keeps viewer sorting stable for
-          // requests without one.
+          // Capture time (epoch ms) mapped onto the recorder's
+          // monotonic timeline — requests are anchored at creation, so
+          // the sample is always present.
           let start_time = req.timing().start_time;
           let monotonic = if start_time > 0.0 {
-            serde_json::json!(recorder.monotonic_of_wall_ms(start_time))
+            recorder.monotonic_of_wall_ms(start_time)
           } else {
-            serde_json::json!(i)
+            recorder.monotonic_ms()
           };
-          obj.insert("_monotonicTime".to_string(), monotonic);
+          obj.insert("_monotonicTime".to_string(), serde_json::json!(monotonic));
+          if let Some(frame_id) = req.frame_id() {
+            obj.insert("_frameref".to_string(), serde_json::json!(frame_id));
+            if let Some(page_ref) = frame_to_page.get(frame_id) {
+              obj.insert("pageref".to_string(), serde_json::json!(page_ref));
+            }
+          }
         }
         entries.push(value);
       }
@@ -511,7 +564,7 @@ async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Ve
       url: req.url().to_string(),
       http_version: "HTTP/1.1".to_string(),
       headers: request_headers,
-      query_string: Vec::new(),
+      query_string: query_pairs(req.url()),
       post_data,
       headers_size: -1,
       body_size: -1,
@@ -628,6 +681,57 @@ fn mime_extension(mime_type: &str) -> &'static str {
     "video/webm" => "webm",
     _ => "dat",
   }
+}
+
+/// Decoded query pairs for a HAR entry's `queryString` (harTracer.ts
+/// derives them from `new URL(request.url).searchParams`).
+fn query_pairs(url: &str) -> Vec<HarHeaderOut> {
+  let Some(query) = url.split_once('?').map(|(_, rest)| rest) else {
+    return Vec::new();
+  };
+  let query = query.split('#').next().unwrap_or("");
+  query
+    .split('&')
+    .filter(|pair| !pair.is_empty())
+    .map(|pair| {
+      let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+      HarHeaderOut {
+        name: percent_decode(name),
+        value: percent_decode(value),
+      }
+    })
+    .collect()
+}
+
+/// Decode `%XX` escapes and `+`-as-space (application/x-www-form-urlencoded).
+fn percent_decode(input: &str) -> String {
+  let bytes = input.as_bytes();
+  let mut out = Vec::with_capacity(bytes.len());
+  let mut i = 0;
+  while i < bytes.len() {
+    match bytes[i] {
+      b'+' => {
+        out.push(b' ');
+        i += 1;
+      },
+      b'%' if i + 2 < bytes.len() => {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+          #[allow(clippy::cast_possible_truncation)]
+          out.push((hi * 16 + lo) as u8);
+          i += 3;
+        } else {
+          out.push(bytes[i]);
+          i += 1;
+        }
+      },
+      other => {
+        out.push(other);
+        i += 1;
+      },
+    }
+  }
+  String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Case-insensitive header lookup — CDP lowercases header names but

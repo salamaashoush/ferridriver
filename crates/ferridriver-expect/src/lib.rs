@@ -52,7 +52,7 @@ pub use builder::{
 };
 pub use diff::{json_diff, pretty_json, unified_diff};
 pub use poll::{
-  DEFAULT_EXPECT_TIMEOUT, ExpectContext, MatchError, POLL_INTERVALS, default_expect_timeout, poll_until,
+  DEFAULT_EXPECT_TIMEOUT, ExpectContext, MatchError, POLL_INTERVALS, default_expect_timeout, poll_traced, poll_until,
   set_default_expect_timeout,
 };
 pub use throw::{ExpectFn, ThrowMatcher, ThrownError, expect_fn};

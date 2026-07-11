@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferridriver::Page;
-use ferridriver_expect::{Expect, ExpectContext, MatchError, poll_until as expect_poll_until};
+use ferridriver_expect::{Expect, ExpectContext, MatchError, poll_traced};
 
 use crate::model::TestFailure;
 
@@ -18,12 +18,23 @@ fn page_ctx(method: &'static str, is_not: bool) -> ExpectContext {
   }
 }
 
-async fn poll_until_test<F, Fut>(timeout: Duration, ctx: ExpectContext, check: F) -> Result<(), TestFailure>
+async fn poll_until_test<F, Fut>(
+  page: &Page,
+  timeout: Duration,
+  ctx: ExpectContext,
+  check: F,
+) -> Result<(), TestFailure>
 where
   F: FnMut() -> Fut,
   Fut: Future<Output = Result<(), MatchError>>,
 {
-  expect_poll_until(timeout, ctx, check).await.map_err(Into::into)
+  let params = serde_json::json!({
+    "isNot": ctx.is_not,
+    "timeout": u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+  });
+  poll_traced(Some(page), params, timeout, ctx, check)
+    .await
+    .map_err(Into::into)
 }
 
 /// Snapshot matchers for `expect(page)`. Import via
@@ -52,7 +63,7 @@ impl PageSnapshotMatchers for Expect<'_, Arc<Page>> {
     let is_not = self.is_not;
     let expected = expected.to_string();
 
-    poll_until_test(self.timeout, page_ctx("toMatchAriaSnapshot", is_not), || {
+    poll_until_test(page, self.timeout, page_ctx("toMatchAriaSnapshot", is_not), || {
       let expected = expected.clone();
       async move {
         let snapshot = page

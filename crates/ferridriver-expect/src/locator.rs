@@ -9,9 +9,12 @@ use std::borrow::Borrow;
 
 use ferridriver::Locator;
 
+use std::future::Future;
+use std::time::Duration;
+
 use crate::AssertionFailure;
 use crate::builder::{Expect, HaveCssOptions, InViewportOptions};
-use crate::poll::{ExpectContext, MatchError, poll_until};
+use crate::poll::{ExpectContext, MatchError, poll_traced};
 use crate::value::StringOrRegex;
 
 fn locator_ctx(locator: &Locator, method: &'static str, is_not: bool) -> ExpectContext {
@@ -20,6 +23,34 @@ fn locator_ctx(locator: &Locator, method: &'static str, is_not: bool) -> ExpectC
     subject: format!("locator('{}')", locator.selector()),
     is_not,
   }
+}
+
+/// [`poll_traced`] with this locator's page, selector params, and ctx —
+/// the shared funnel for every locator matcher below.
+async fn poll_locator<F, Fut>(
+  locator: &Locator,
+  timeout: Duration,
+  method: &'static str,
+  is_not: bool,
+  check: F,
+) -> Result<(), AssertionFailure>
+where
+  F: FnMut() -> Fut,
+  Fut: Future<Output = Result<(), MatchError>>,
+{
+  let params = serde_json::json!({
+    "selector": locator.selector(),
+    "isNot": is_not,
+    "timeout": u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+  });
+  poll_traced(
+    Some(&**locator.page()),
+    params,
+    timeout,
+    locator_ctx(locator, method, is_not),
+    check,
+  )
+  .await
 }
 
 pub fn check_bool(actual: bool, is_not: bool, expected_state: &str) -> Result<(), MatchError> {
@@ -48,105 +79,77 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   pub async fn to_be_visible(&self) -> Result<(), AssertionFailure> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toBeVisible", is_not),
-      || async move {
-        let visible = locator.is_visible().await.unwrap_or(false);
-        check_bool(visible, is_not, "visible")
-      },
-    )
+    poll_locator(locator, self.timeout, "toBeVisible", is_not, || async move {
+      let visible = locator.is_visible().await.unwrap_or(false);
+      check_bool(visible, is_not, "visible")
+    })
     .await
   }
 
   pub async fn to_be_hidden(&self) -> Result<(), AssertionFailure> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toBeHidden", is_not),
-      || async move {
-        let hidden = locator.is_hidden().await.unwrap_or(true);
-        check_bool(hidden, is_not, "to be hidden")
-      },
-    )
+    poll_locator(locator, self.timeout, "toBeHidden", is_not, || async move {
+      let hidden = locator.is_hidden().await.unwrap_or(true);
+      check_bool(hidden, is_not, "to be hidden")
+    })
     .await
   }
 
   pub async fn to_be_enabled(&self) -> Result<(), AssertionFailure> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toBeEnabled", is_not),
-      || async move {
-        let enabled = locator.is_enabled().await.unwrap_or(false);
-        check_bool(enabled, is_not, "to be enabled")
-      },
-    )
+    poll_locator(locator, self.timeout, "toBeEnabled", is_not, || async move {
+      let enabled = locator.is_enabled().await.unwrap_or(false);
+      check_bool(enabled, is_not, "to be enabled")
+    })
     .await
   }
 
   pub async fn to_be_disabled(&self) -> Result<(), AssertionFailure> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toBeDisabled", is_not),
-      || async move {
-        let disabled = locator.is_disabled().await.unwrap_or(false);
-        check_bool(disabled, is_not, "to be disabled")
-      },
-    )
+    poll_locator(locator, self.timeout, "toBeDisabled", is_not, || async move {
+      let disabled = locator.is_disabled().await.unwrap_or(false);
+      check_bool(disabled, is_not, "to be disabled")
+    })
     .await
   }
 
   pub async fn to_be_checked(&self) -> Result<(), AssertionFailure> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toBeChecked", is_not),
-      || async move {
-        let checked = locator.is_checked().await.unwrap_or(false);
-        check_bool(checked, is_not, "to be checked")
-      },
-    )
+    poll_locator(locator, self.timeout, "toBeChecked", is_not, || async move {
+      let checked = locator.is_checked().await.unwrap_or(false);
+      check_bool(checked, is_not, "to be checked")
+    })
     .await
   }
 
   pub async fn to_be_editable(&self) -> Result<(), AssertionFailure> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toBeEditable", is_not),
-      || async move {
-        let editable = locator.is_editable().await.unwrap_or(false);
-        check_bool(editable, is_not, "to be editable")
-      },
-    )
+    poll_locator(locator, self.timeout, "toBeEditable", is_not, || async move {
+      let editable = locator.is_editable().await.unwrap_or(false);
+      check_bool(editable, is_not, "to be editable")
+    })
     .await
   }
 
   pub async fn to_be_attached(&self) -> Result<(), AssertionFailure> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toBeAttached", is_not),
-      || async move {
-        let attached = locator.is_attached().await.unwrap_or(false);
-        check_bool(attached, is_not, "to be attached")
-      },
-    )
+    poll_locator(locator, self.timeout, "toBeAttached", is_not, || async move {
+      let attached = locator.is_attached().await.unwrap_or(false);
+      check_bool(attached, is_not, "to be attached")
+    })
     .await
   }
 
   pub async fn to_be_empty(&self) -> Result<(), AssertionFailure> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeEmpty", is_not), || async move {
+    poll_locator(locator, self.timeout, "toBeEmpty", is_not, || async move {
       let text = locator.text_content().await.unwrap_or(None).unwrap_or_default();
       let empty = text.trim().is_empty();
       if empty == is_not {
@@ -164,23 +167,19 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   pub async fn to_be_focused(&self) -> Result<(), AssertionFailure> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toBeFocused", is_not),
-      || async move {
-        let focused = locator
-          .evaluate(
-            "el => document.activeElement === el",
-            ferridriver::protocol::SerializedArgument::default(),
-            None,
-          )
-          .await
-          .ok()
-          .and_then(|v| v.as_bool())
-          .unwrap_or(false);
-        check_bool(focused, is_not, "to be focused")
-      },
-    )
+    poll_locator(locator, self.timeout, "toBeFocused", is_not, || async move {
+      let focused = locator
+        .evaluate(
+          "el => document.activeElement === el",
+          ferridriver::protocol::SerializedArgument::default(),
+          None,
+        )
+        .await
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+      check_bool(focused, is_not, "to be focused")
+    })
     .await
   }
 
@@ -192,12 +191,9 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     let ratio = options.ratio.unwrap_or(0.0).clamp(0.0, 1.0);
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toBeInViewport", is_not),
-      || async move {
-        let js = format!(
-          "el => {{ var r = el.getBoundingClientRect(); \
+    poll_locator(locator, self.timeout, "toBeInViewport", is_not, || async move {
+      let js = format!(
+        "el => {{ var r = el.getBoundingClientRect(); \
          if (r.width === 0 || r.height === 0) return false; \
          var iw = window.innerWidth, ih = window.innerHeight; \
          var visW = Math.max(0, Math.min(r.right, iw) - Math.max(r.left, 0)); \
@@ -205,16 +201,15 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
          var inter = visW * visH; var area = r.width * r.height; \
          if (inter <= 0) return false; \
          return inter / area >= {ratio:.6}; }}"
-        );
-        let in_viewport = locator
-          .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None)
-          .await
-          .ok()
-          .and_then(|v| v.as_bool())
-          .unwrap_or(false);
-        check_bool(in_viewport, is_not, "to be in viewport")
-      },
-    )
+      );
+      let in_viewport = locator
+        .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None)
+        .await
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+      check_bool(in_viewport, is_not, "to be in viewport")
+    })
     .await
   }
 
@@ -224,7 +219,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let expected = expected.into();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toHaveText", is_not), || {
+    poll_locator(locator, self.timeout, "toHaveText", is_not, || {
       let expected = expected.clone();
       async move {
         let actual = locator.text_content().await.unwrap_or(None).unwrap_or_default();
@@ -238,7 +233,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let expected = expected.into();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toContainText", is_not), || {
+    poll_locator(locator, self.timeout, "toContainText", is_not, || {
       let expected = expected.clone();
       async move {
         let actual = locator.text_content().await.unwrap_or(None).unwrap_or_default();
@@ -267,7 +262,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let expected = expected.into();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toHaveValue", is_not), || {
+    poll_locator(locator, self.timeout, "toHaveValue", is_not, || {
       let expected = expected.clone();
       async move {
         let actual = locator.input_value().await.unwrap_or_default();
@@ -281,7 +276,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let expected: Vec<String> = expected.iter().map(|s| s.as_ref().to_string()).collect();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toHaveValues", is_not), || {
+    poll_locator(locator, self.timeout, "toHaveValues", is_not, || {
       let expected = expected.clone();
       async move {
         let actual = locator
@@ -322,7 +317,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     let attr_name = name.to_string();
-    poll_until(self.timeout, locator_ctx(locator, "toHaveAttribute", is_not), || {
+    poll_locator(locator, self.timeout, "toHaveAttribute", is_not, || {
       let expected = expected.clone();
       let attr_name = attr_name.clone();
       async move {
@@ -341,7 +336,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     let attr_name = name.to_string();
-    poll_until(self.timeout, locator_ctx(locator, "toHaveAttribute", is_not), || {
+    poll_locator(locator, self.timeout, "toHaveAttribute", is_not, || {
       let attr_name = attr_name.clone();
       async move {
         let present = locator.get_attribute(&attr_name).await.unwrap_or(None).is_some();
@@ -365,7 +360,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let expected = expected.into();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toHaveClass", is_not), || {
+    poll_locator(locator, self.timeout, "toHaveClass", is_not, || {
       let expected = expected.clone();
       async move {
         let actual = locator.get_attribute("class").await.unwrap_or(None).unwrap_or_default();
@@ -379,7 +374,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let expected = expected.to_string();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toContainClass", is_not), || {
+    poll_locator(locator, self.timeout, "toContainClass", is_not, || {
       let expected = expected.clone();
       async move {
         let class_attr = locator.get_attribute("class").await.unwrap_or(None).unwrap_or_default();
@@ -413,7 +408,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let is_not = self.is_not;
     let prop = property.to_string();
     let pseudo = options.pseudo.clone();
-    poll_until(self.timeout, locator_ctx(locator, "toHaveCSS", is_not), || {
+    poll_locator(locator, self.timeout, "toHaveCSS", is_not, || {
       let expected = expected.clone();
       let prop = prop.clone();
       let pseudo = pseudo.clone();
@@ -446,7 +441,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let expected = expected.into();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toHaveRole", is_not), || {
+    poll_locator(locator, self.timeout, "toHaveRole", is_not, || {
       let expected = expected.clone();
       async move {
         let actual = locator
@@ -469,32 +464,28 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let expected = expected.into();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toHaveAccessibleName", is_not),
-      || {
-        let expected = expected.clone();
-        async move {
-          let actual = locator
-            .evaluate(
-              "el => { \
+    poll_locator(locator, self.timeout, "toHaveAccessibleName", is_not, || {
+      let expected = expected.clone();
+      async move {
+        let actual = locator
+          .evaluate(
+            "el => { \
               var label = el.getAttribute('aria-label') || \
                 (el.getAttribute('aria-labelledby') ? \
                   (document.getElementById(el.getAttribute('aria-labelledby')) || {}).textContent : null) || \
                 (el.labels && el.labels[0] ? el.labels[0].textContent : null) || ''; \
               return label.trim(); \
             }",
-              ferridriver::protocol::SerializedArgument::default(),
-              None,
-            )
-            .await
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
-          check_text_match(&expected, &actual, is_not, "accessible name")
-        }
-      },
-    )
+            ferridriver::protocol::SerializedArgument::default(),
+            None,
+          )
+          .await
+          .ok()
+          .and_then(|v| v.as_str().map(String::from))
+          .unwrap_or_default();
+        check_text_match(&expected, &actual, is_not, "accessible name")
+      }
+    })
     .await
   }
 
@@ -505,31 +496,27 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let expected = expected.into();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toHaveAccessibleDescription", is_not),
-      || {
-        let expected = expected.clone();
-        async move {
-          let actual = locator
-            .evaluate(
-              "el => { \
+    poll_locator(locator, self.timeout, "toHaveAccessibleDescription", is_not, || {
+      let expected = expected.clone();
+      async move {
+        let actual = locator
+          .evaluate(
+            "el => { \
               var desc = el.getAttribute('aria-description') || \
                 (el.getAttribute('aria-describedby') ? \
                   (document.getElementById(el.getAttribute('aria-describedby')) || {}).textContent : null) || ''; \
               return desc.trim(); \
             }",
-              ferridriver::protocol::SerializedArgument::default(),
-              None,
-            )
-            .await
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
-          check_text_match(&expected, &actual, is_not, "accessible description")
-        }
-      },
-    )
+            ferridriver::protocol::SerializedArgument::default(),
+            None,
+          )
+          .await
+          .ok()
+          .and_then(|v| v.as_str().map(String::from))
+          .unwrap_or_default();
+        check_text_match(&expected, &actual, is_not, "accessible description")
+      }
+    })
     .await
   }
 
@@ -540,15 +527,12 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let expected = expected.into();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toHaveAccessibleErrorMessage", is_not),
-      || {
-        let expected = expected.clone();
-        async move {
-          let actual = locator
-            .evaluate(
-              "el => { \
+    poll_locator(locator, self.timeout, "toHaveAccessibleErrorMessage", is_not, || {
+      let expected = expected.clone();
+      async move {
+        let actual = locator
+          .evaluate(
+            "el => { \
               var errId = el.getAttribute('aria-errormessage'); \
               if (errId) { \
                 var errEl = document.getElementById(errId); \
@@ -556,17 +540,16 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
               } \
               return el.validationMessage || ''; \
             }",
-              ferridriver::protocol::SerializedArgument::default(),
-              None,
-            )
-            .await
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
-          check_text_match(&expected, &actual, is_not, "accessible error message")
-        }
-      },
-    )
+            ferridriver::protocol::SerializedArgument::default(),
+            None,
+          )
+          .await
+          .ok()
+          .and_then(|v| v.as_str().map(String::from))
+          .unwrap_or_default();
+        check_text_match(&expected, &actual, is_not, "accessible error message")
+      }
+    })
     .await
   }
 
@@ -574,7 +557,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     let prop_name = name.to_string();
-    poll_until(self.timeout, locator_ctx(locator, "toHaveJSProperty", is_not), || {
+    poll_locator(locator, self.timeout, "toHaveJSProperty", is_not, || {
       let prop_name = prop_name.clone();
       let expected = value.clone();
       async move {
@@ -608,7 +591,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let expected: Vec<StringOrRegex> = expected.iter().map(|e| e.clone().into()).collect();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toHaveTexts", is_not), || {
+    poll_locator(locator, self.timeout, "toHaveTexts", is_not, || {
       let expected = expected.clone();
       async move {
         let count = locator.count().await.unwrap_or(0);
@@ -664,7 +647,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let expected: Vec<String> = expected.iter().map(|s| s.as_ref().to_string()).collect();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toContainTexts", is_not), || {
+    poll_locator(locator, self.timeout, "toContainTexts", is_not, || {
       let expected = expected.clone();
       async move {
         let count = locator.count().await.unwrap_or(0);
@@ -716,22 +699,18 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   pub async fn to_have_count(&self, expected: usize) -> Result<(), AssertionFailure> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
-    poll_until(
-      self.timeout,
-      locator_ctx(locator, "toHaveCount", is_not),
-      || async move {
-        let actual = locator.count().await.unwrap_or(0);
-        let matches = actual == expected;
-        if matches == is_not {
-          Err(MatchError::new(
-            format!("{}{expected}", if is_not { "not " } else { "" }),
-            format!("{actual}"),
-          ))
-        } else {
-          Ok(())
-        }
-      },
-    )
+    poll_locator(locator, self.timeout, "toHaveCount", is_not, || async move {
+      let actual = locator.count().await.unwrap_or(0);
+      let matches = actual == expected;
+      if matches == is_not {
+        Err(MatchError::new(
+          format!("{}{expected}", if is_not { "not " } else { "" }),
+          format!("{actual}"),
+        ))
+      } else {
+        Ok(())
+      }
+    })
     .await
   }
 }

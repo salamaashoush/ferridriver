@@ -13,10 +13,12 @@
 //! * `resources/<name>` — screencast JPEG frames
 //!   (`<pageId>-<epochMs>.jpeg`) and network bodies (`<sha1>.<ext>`).
 //!
-//! Actions are emitted as single merged `action` events (before+after
-//! fields in one line) — fully supported at v8
-//! (`traceModernizer.ts:141-144`) and immune to the loader's
-//! orphaned-`after` crash. DOM snapshots (`frame-snapshot` events,
+//! Actions are emitted as Playwright's split `before` / `input` /
+//! `after` triplet (plus `log` lines), exactly like `tracing.ts`:
+//! the `before` event is written when the action starts, so a live
+//! export (`bdd --ui`) shows in-flight actions and a crashed action
+//! still appears in the trace (the loader synthesizes the missing
+//! `after`, `traceLoader.ts`). DOM snapshots (`frame-snapshot` events,
 //! `beforeSnapshot`/`afterSnapshot` names) are captured around actions
 //! by [`crate::snapshotter`]; console messages and page lifecycle
 //! events are fed from the per-page bookkeeping listener
@@ -70,12 +72,21 @@ pub struct TracingStopOptions {
 /// One recorded protocol/action event, ready for JSONL serialization.
 #[derive(Clone)]
 pub enum TraceEvent {
-  /// Merged before+after action (`trace.ts` `action` type).
-  Action(ActionEvent),
+  /// Action start (`trace.ts` `before` type) — written when the call
+  /// begins so live exports show in-flight actions.
+  Before(BeforeActionEvent),
+  /// Input-time marker (`input` type): input snapshot name + pointer.
+  Input(InputActionEvent),
+  /// Action end (`after` type): end time, error, attachments.
+  After(AfterActionEvent),
+  /// One call-log line (`log` type; the viewer's per-action Log pane).
+  Log(LogEvent),
   /// Console message (`console` type).
   Console(ConsoleEvent),
   /// Page lifecycle event shown on the timeline (`event` type).
   PageEvent(PageEventEntry),
+  /// Test process output (`stdout` / `stderr` types).
+  Stdio(StdioEvent),
   /// Screencast frame reference (`screencast-frame` type).
   ScreencastFrame(ScreencastFrameEvent),
   /// DOM snapshot of one frame (`frame-snapshot` type). Carries the
@@ -84,25 +95,89 @@ pub enum TraceEvent {
 }
 
 #[derive(Clone)]
-pub struct ActionEvent {
+pub struct BeforeActionEvent {
   pub call_id: String,
   pub start_time: f64,
-  pub end_time: f64,
   pub class: String,
   pub method: String,
   pub title: String,
   pub params: serde_json::Value,
-  pub error: Option<String>,
   pub page_id: Option<String>,
   /// Call id of the enclosing action (nests actions in the viewer's
   /// tree, e.g. test steps under their parent step).
   pub parent_id: Option<String>,
   /// `before@<callId>` snapshot name (viewer's Before pane).
   pub before_snapshot: Option<String>,
-  /// `after@<callId>` snapshot name (viewer's After pane).
-  pub after_snapshot: Option<String>,
   /// Call-site stack frames (viewer's Source tab / action location).
   pub stack: Vec<StackFrame>,
+}
+
+#[derive(Clone)]
+pub struct InputActionEvent {
+  pub call_id: String,
+  /// `input@<callId>` snapshot name (viewer's Action pane).
+  pub input_snapshot: Option<String>,
+  /// Viewport point the input was dispatched at (the viewer's red
+  /// pointer marker).
+  pub point: Option<(f64, f64)>,
+}
+
+#[derive(Clone)]
+pub struct AfterActionEvent {
+  pub call_id: String,
+  pub end_time: f64,
+  pub error: Option<ActionErrorInfo>,
+  /// `after@<callId>` snapshot name (viewer's After pane).
+  pub after_snapshot: Option<String>,
+  /// Attachments surfaced in the viewer's Attachments tab; bodies are
+  /// `resources/<sha1>` entries.
+  pub attachments: Vec<TraceAttachment>,
+}
+
+/// Serialized action failure (`trace.ts` `SerializedError['error']`).
+#[derive(Clone)]
+pub struct ActionErrorInfo {
+  /// Error class name (`TimeoutError` for deadline failures — the
+  /// viewer color-codes it).
+  pub name: String,
+  pub message: String,
+}
+
+impl ActionErrorInfo {
+  fn from_ferri(error: &FerriError) -> Self {
+    let name = match error {
+      FerriError::Timeout { .. } => "TimeoutError",
+      _ => "Error",
+    };
+    Self {
+      name: name.to_string(),
+      message: error.to_string(),
+    }
+  }
+}
+
+/// One attachment recorded on an action's `after` event.
+#[derive(Clone)]
+pub struct TraceAttachment {
+  pub name: String,
+  pub content_type: String,
+  /// Resource entry name (`resources/<sha1>.<ext>`).
+  pub sha1: String,
+}
+
+#[derive(Clone)]
+pub struct LogEvent {
+  pub call_id: String,
+  pub time: f64,
+  pub message: String,
+}
+
+#[derive(Clone)]
+pub struct StdioEvent {
+  /// `stdout` or `stderr`.
+  pub kind: &'static str,
+  pub timestamp: f64,
+  pub text: String,
 }
 
 #[derive(Clone)]
@@ -239,16 +314,30 @@ pub struct TraceRecorder {
   screencast_stops: std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
   /// Browser name recorded in `context-options`.
   browser_name: String,
+  /// Context-creation options recorded in `context-options.options`
+  /// (viewport etc. — the viewer's Metadata tab).
+  context_options: serde_json::Value,
 }
 
 impl TraceRecorder {
   /// # Errors
   ///
   /// Errors if the on-disk spool cannot be created.
-  pub fn new(options: &TracingStartOptions, browser_name: String, network_len: usize) -> Result<Self> {
+  pub fn new(
+    options: &TracingStartOptions,
+    browser_name: String,
+    context_options: serde_json::Value,
+    network_len: usize,
+  ) -> Result<Self> {
     let origin = Instant::now();
     let wall_origin = now_epoch_ms();
-    let first_line = context_options_line(&browser_name, wall_origin, options.title.as_deref());
+    let first_line = context_options_line(
+      &browser_name,
+      wall_origin,
+      0.0,
+      options.title.as_deref(),
+      &context_options,
+    );
     Ok(Self {
       origin,
       wall_origin,
@@ -264,6 +353,7 @@ impl TraceRecorder {
       current_parent: std::sync::Mutex::new(None),
       screencast_stops: std::sync::Mutex::new(Vec::new()),
       browser_name,
+      context_options,
     })
   }
 
@@ -380,9 +470,19 @@ impl TraceRecorder {
 
   /// Reset chunk-local state (`tracing.startChunk` — network sha1s
   /// persist in Playwright, but chunk events/resources restart): the
-  /// old spool is replaced (and its directory removed on drop).
+  /// old spool is replaced (and its directory removed on drop). The
+  /// fresh `context-options` line carries the CURRENT monotonic time —
+  /// the chunk's events start there, not at 0 (`tracing.ts` stamps
+  /// `monotonicTime()` per chunk; a 0 would show a dead lead-in on the
+  /// viewer timeline).
   pub fn start_chunk(&self, network_len: usize) {
-    let first_line = context_options_line(&self.browser_name, self.wall_origin, self.title.as_deref());
+    let first_line = context_options_line(
+      &self.browser_name,
+      self.wall_origin,
+      self.monotonic_ms(),
+      self.title.as_deref(),
+      &self.context_options,
+    );
     if let Ok(fresh) = TraceSpool::create(&first_line) {
       let mut guard = self.spool.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
       *guard = fresh;
@@ -457,47 +557,114 @@ impl TraceRecorder {
 }
 
 /// First trace line: `context-options` with `version: 8` (the loader
-/// mis-modernizes everything as v6 without it).
-fn context_options_line(browser_name: &str, wall_origin: f64, title: Option<&str>) -> String {
+/// mis-modernizes everything as v6 without it). `monotonic` anchors
+/// the chunk's start on the timeline (0 for a fresh recording, the
+/// current clock for later chunks).
+fn context_options_line(
+  browser_name: &str,
+  wall_origin: f64,
+  monotonic: f64,
+  title: Option<&str>,
+  context_options: &serde_json::Value,
+) -> String {
   serde_json::json!({
     "version": TRACE_VERSION,
     "type": "context-options",
     "origin": "library",
     "browserName": browser_name,
     "platform": std::env::consts::OS,
-    "wallTime": wall_origin,
-    "monotonicTime": 0.0,
+    "wallTime": wall_origin + monotonic,
+    "monotonicTime": monotonic,
     "title": title.unwrap_or_default(),
-    "options": {},
+    "options": context_options,
     "sdkLanguage": "javascript",
+    "testIdAttributeName": "data-testid",
   })
   .to_string()
 }
 
+/// Insert `key` only when the value is present — Playwright's writers
+/// omit absent optionals rather than writing `null`.
+fn insert_opt(obj: &mut serde_json::Map<String, serde_json::Value>, key: &str, value: Option<serde_json::Value>) {
+  if let Some(value) = value {
+    obj.insert(key.to_string(), value);
+  }
+}
+
 fn serialize_event(event: &TraceEvent) -> String {
   match event {
-    TraceEvent::Action(a) => serde_json::json!({
-      "type": "action",
-      "callId": a.call_id,
-      "startTime": a.start_time,
-      "endTime": a.end_time,
-      "class": a.class,
-      "method": a.method,
-      "title": a.title,
-      "params": a.params,
-      "error": a.error.as_ref().map(|message| serde_json::json!({
-        "name": "Error",
-        "message": message,
-      })),
-      "pageId": a.page_id,
-      "parentId": a.parent_id,
-      "beforeSnapshot": a.before_snapshot,
-      "afterSnapshot": a.after_snapshot,
-      "stack": a.stack.iter().map(|f| serde_json::json!({
-        "file": f.file,
-        "line": f.line,
-        "column": f.column,
-      })).collect::<Vec<_>>(),
+    TraceEvent::Before(b) => {
+      let mut obj = serde_json::Map::new();
+      obj.insert("type".into(), "before".into());
+      obj.insert("callId".into(), b.call_id.clone().into());
+      obj.insert("startTime".into(), b.start_time.into());
+      obj.insert("class".into(), b.class.clone().into());
+      obj.insert("method".into(), b.method.clone().into());
+      obj.insert("title".into(), b.title.clone().into());
+      obj.insert("params".into(), b.params.clone());
+      insert_opt(&mut obj, "pageId", b.page_id.clone().map(Into::into));
+      insert_opt(&mut obj, "parentId", b.parent_id.clone().map(Into::into));
+      insert_opt(&mut obj, "beforeSnapshot", b.before_snapshot.clone().map(Into::into));
+      if !b.stack.is_empty() {
+        obj.insert(
+          "stack".into(),
+          b.stack
+            .iter()
+            .map(|f| serde_json::json!({ "file": f.file, "line": f.line, "column": f.column }))
+            .collect::<Vec<_>>()
+            .into(),
+        );
+      }
+      serde_json::Value::Object(obj).to_string()
+    },
+    TraceEvent::Input(i) => {
+      let mut obj = serde_json::Map::new();
+      obj.insert("type".into(), "input".into());
+      obj.insert("callId".into(), i.call_id.clone().into());
+      insert_opt(&mut obj, "inputSnapshot", i.input_snapshot.clone().map(Into::into));
+      insert_opt(
+        &mut obj,
+        "point",
+        i.point.map(|(x, y)| serde_json::json!({ "x": x, "y": y })),
+      );
+      serde_json::Value::Object(obj).to_string()
+    },
+    TraceEvent::After(a) => {
+      let mut obj = serde_json::Map::new();
+      obj.insert("type".into(), "after".into());
+      obj.insert("callId".into(), a.call_id.clone().into());
+      obj.insert("endTime".into(), a.end_time.into());
+      insert_opt(
+        &mut obj,
+        "error",
+        a.error
+          .as_ref()
+          .map(|e| serde_json::json!({ "name": e.name, "message": e.message })),
+      );
+      insert_opt(&mut obj, "afterSnapshot", a.after_snapshot.clone().map(Into::into));
+      if !a.attachments.is_empty() {
+        obj.insert(
+          "attachments".into(),
+          a.attachments
+            .iter()
+            .map(|att| serde_json::json!({ "name": att.name, "contentType": att.content_type, "sha1": att.sha1 }))
+            .collect::<Vec<_>>()
+            .into(),
+        );
+      }
+      serde_json::Value::Object(obj).to_string()
+    },
+    TraceEvent::Log(l) => serde_json::json!({
+      "type": "log",
+      "callId": l.call_id,
+      "time": l.time,
+      "message": l.message,
+    })
+    .to_string(),
+    TraceEvent::Stdio(s) => serde_json::json!({
+      "type": s.kind,
+      "timestamp": s.timestamp,
+      "text": s.text,
     })
     .to_string(),
     TraceEvent::Console(c) => serde_json::json!({
@@ -773,21 +940,20 @@ pub(crate) fn record_page_open(recorder: &Arc<TraceRecorder>, page_id: &str) {
 
 // ── Action spans ───────────────────────────────────────────────────────
 
-/// An in-flight traced action. Created by [`begin_action`] at an action
-/// funnel; [`ActionSpan::finish`] emits the merged `action` event.
+/// An in-flight traced action. [`begin_action`] /
+/// [`begin_custom_action`] write the `before` event immediately (live
+/// exports show the action while it runs); [`ActionSpan::finish`]
+/// writes the `after` event. Snapshot names are decided up front —
+/// exactly like Playwright, where the `before` line references
+/// `before@<callId>` before the async capture lands.
 pub struct ActionSpan {
   recorder: Arc<TraceRecorder>,
   call_id: String,
-  start_time: f64,
-  class: &'static str,
-  method: String,
-  title: String,
-  params: serde_json::Value,
-  page_id: Option<String>,
-  parent_id: Option<String>,
+  /// `before@<callId>` when the recorder captures snapshots and the
+  /// action is page-bound.
   before_snapshot: Option<String>,
   after_snapshot: Option<String>,
-  stack: Vec<StackFrame>,
+  attachments: Vec<TraceAttachment>,
 }
 
 impl ActionSpan {
@@ -805,6 +971,19 @@ impl ActionSpan {
     self.recorder.snapshots
   }
 
+  /// Snapshot name the `before` event referenced (`None` when the
+  /// recorder is not capturing snapshots).
+  #[must_use]
+  pub fn before_snapshot_name(&self) -> Option<&str> {
+    self.before_snapshot.as_deref()
+  }
+
+  /// Snapshot name the `after` event will reference; marks it so
+  /// `finish` includes it.
+  pub fn set_after_snapshot(&mut self, name: String) {
+    self.after_snapshot = Some(name);
+  }
+
   /// Make this span the live enclosing parent for actions recorded
   /// until [`Self::finish_message_restoring`]; returns the previous
   /// parent to restore.
@@ -819,44 +998,113 @@ impl ActionSpan {
     self.finish_message(error);
   }
 
-  pub fn set_before_snapshot(&mut self, name: String) {
-    self.before_snapshot = Some(name);
+  /// Append one line to this action's call log (the viewer's Log pane).
+  pub fn log(&self, message: impl Into<String>) {
+    self.recorder.push_event(&TraceEvent::Log(LogEvent {
+      call_id: self.call_id.clone(),
+      time: self.recorder.monotonic_ms(),
+      message: message.into(),
+    }));
   }
 
-  pub fn set_after_snapshot(&mut self, name: String) {
-    self.after_snapshot = Some(name);
+  /// Emit the `input` marker: input-time snapshot name and/or the
+  /// viewport point the input was dispatched at.
+  pub fn mark_input(&self, input_snapshot: Option<String>, point: Option<(f64, f64)>) {
+    self.recorder.bump_screencast_burst();
+    self.recorder.push_event(&TraceEvent::Input(InputActionEvent {
+      call_id: self.call_id.clone(),
+      input_snapshot,
+      point,
+    }));
   }
 
-  /// Emit the action event, recording `error` when the action failed.
+  /// Attach `bytes` to this action (the viewer's Attachments tab); the
+  /// body is stored as a sha1-named resource.
+  pub fn attach(&mut self, name: impl Into<String>, content_type: impl Into<String>, bytes: Vec<u8>) {
+    let content_type = content_type.into();
+    let ext = attachment_extension(&content_type);
+    let sha1 = format!("{}.{ext}", crate::tracing::sha1_hex(&bytes));
+    self.recorder.push_resource(&TraceResource {
+      name: sha1.clone(),
+      bytes,
+    });
+    self.attachments.push(TraceAttachment {
+      name: name.into(),
+      content_type,
+      sha1,
+    });
+  }
+
+  /// Emit the `after` event, recording `error` when the action failed.
   pub fn finish(self, error: Option<&FerriError>) {
-    self.finish_message(error.map(std::string::ToString::to_string));
+    self.finish_error_info(error.map(ActionErrorInfo::from_ferri));
   }
 
-  /// Emit the action event with an already-stringified error (spans
+  /// Emit the `after` event with an already-stringified error (spans
   /// opened by external runners carry plain-text failures).
   pub fn finish_message(self, error: Option<String>) {
+    self.finish_error_info(error.map(|message| ActionErrorInfo {
+      name: "Error".to_string(),
+      message,
+    }));
+  }
+
+  fn finish_error_info(self, error: Option<ActionErrorInfo>) {
     self.recorder.bump_screencast_burst();
-    let end_time = self.recorder.monotonic_ms().max(self.start_time);
-    self.recorder.push_event(&TraceEvent::Action(ActionEvent {
+    let end_time = self.recorder.monotonic_ms();
+    self.recorder.push_event(&TraceEvent::After(AfterActionEvent {
       call_id: self.call_id,
-      start_time: self.start_time,
       end_time,
-      class: self.class.to_string(),
-      method: self.method,
-      title: self.title,
-      params: self.params,
       error,
-      page_id: self.page_id,
-      parent_id: self.parent_id,
-      before_snapshot: self.before_snapshot,
       after_snapshot: self.after_snapshot,
-      stack: self.stack,
+      attachments: self.attachments,
     }));
   }
 }
 
+/// How a locator method dispatches input — decides whether the action
+/// gets an `input` event, an `input@` snapshot, and a pointer point.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputKind {
+  /// Dispatches pointer input at a viewport point (click family).
+  Pointer,
+  /// Dispatches keyboard/value input (fill family) — no point.
+  Keyboard,
+}
+
+/// Input classification for a locator action method, `None` for pure
+/// reads (textContent, boundingBox, …).
+pub(crate) fn input_action_kind(method: &str) -> Option<InputKind> {
+  match method {
+    "click" | "dblclick" | "hover" | "tap" | "check" | "uncheck" | "setChecked" | "dragTo" | "selectText" => {
+      Some(InputKind::Pointer)
+    },
+    "fill" | "press" | "pressSequentially" | "type" | "clear" | "selectOption" | "setInputFiles" => {
+      Some(InputKind::Keyboard)
+    },
+    _ => None,
+  }
+}
+
+/// Resource-name extension for an attachment's content type.
+fn attachment_extension(content_type: &str) -> &'static str {
+  let essence = content_type.split(';').next().unwrap_or("").trim();
+  match essence {
+    "image/png" => "png",
+    "image/jpeg" => "jpeg",
+    "image/webp" => "webp",
+    "text/plain" => "txt",
+    "text/html" => "html",
+    "application/json" => "json",
+    "application/zip" => "zip",
+    "video/webm" => "webm",
+    _ => "dat",
+  }
+}
+
 /// Start a traced action span when `composite` has an active recorder.
-/// Cheap when tracing is off (one mutex-protected map probe).
+/// Cheap when tracing is off (one mutex-protected map probe). Writes
+/// the `before` event immediately.
 #[must_use]
 pub(crate) fn begin_action(
   composite: Option<&str>,
@@ -871,19 +1119,29 @@ pub(crate) fn begin_action(
   let call_id = recorder.next_call_id();
   let parent_id = recorder.current_parent();
   let title = format!("{}.{method}", class.to_ascii_lowercase());
-  Some(ActionSpan {
-    recorder,
-    call_id,
+  // Snapshot names are fixed up front; the capture lands as a later
+  // `frame-snapshot` line (same contract as Playwright's async
+  // `captureSnapshot` — a failed capture leaves a dangling name the
+  // viewer tolerates).
+  let before_snapshot = (recorder.snapshots && page_id.is_some()).then(|| format!("before@{call_id}"));
+  recorder.push_event(&TraceEvent::Before(BeforeActionEvent {
+    call_id: call_id.clone(),
     start_time,
-    class,
+    class: class.to_string(),
     method: method.to_string(),
     title,
     params,
     page_id,
     parent_id,
-    before_snapshot: None,
-    after_snapshot: None,
+    before_snapshot: before_snapshot.clone(),
     stack: Vec::new(),
+  }));
+  Some(ActionSpan {
+    recorder,
+    call_id,
+    before_snapshot,
+    after_snapshot: None,
+    attachments: Vec::new(),
   })
 }
 
@@ -907,7 +1165,8 @@ pub struct CustomAction {
 }
 
 /// Open a titled action span on the active recorder for `composite`.
-/// Returns `None` when the composite is not being traced.
+/// Returns `None` when the composite is not being traced. Writes the
+/// `before` event immediately.
 #[must_use]
 pub fn begin_custom_action(composite: &str, action: CustomAction) -> Option<ActionSpan> {
   let recorder = recorder_for(composite)?;
@@ -917,19 +1176,24 @@ pub fn begin_custom_action(composite: &str, action: CustomAction) -> Option<Acti
   }
   let start_time = (recorder.monotonic_ms() - action.backdate_ms).max(0.0);
   let call_id = recorder.next_call_id();
-  Some(ActionSpan {
-    recorder,
-    call_id,
+  recorder.push_event(&TraceEvent::Before(BeforeActionEvent {
+    call_id: call_id.clone(),
     start_time,
-    class: action.class,
+    class: action.class.to_string(),
     method: action.method.to_string(),
     title: action.title,
     params: action.params,
     page_id: None,
     parent_id: action.parent_id,
     before_snapshot: None,
-    after_snapshot: None,
     stack: action.stack,
+  }));
+  Some(ActionSpan {
+    recorder,
+    call_id,
+    before_snapshot: None,
+    after_snapshot: None,
+    attachments: Vec::new(),
   })
 }
 
@@ -939,35 +1203,86 @@ mod tests {
 
   #[test]
   fn context_options_is_first_line_with_version_8() {
-    let line = context_options_line("chromium", 1.0, Some("t"));
+    let line = context_options_line("chromium", 1.0, 0.0, Some("t"), &serde_json::json!({}));
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid json");
     assert_eq!(parsed["version"].as_u64(), Some(8));
     assert_eq!(parsed["type"].as_str(), Some("context-options"));
     assert_eq!(parsed["origin"].as_str(), Some("library"));
     assert_eq!(parsed["title"].as_str(), Some("t"));
+    assert_eq!(parsed["monotonicTime"].as_f64(), Some(0.0));
   }
 
   #[test]
-  fn action_event_serializes_v8_merged_shape() {
-    let line = serialize_event(&TraceEvent::Action(ActionEvent {
+  fn chunk_context_options_carries_current_monotonic_time() {
+    let line = context_options_line("chromium", 1000.0, 250.0, None, &serde_json::json!({}));
+    let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid json");
+    assert_eq!(parsed["monotonicTime"].as_f64(), Some(250.0));
+    assert_eq!(parsed["wallTime"].as_f64(), Some(1250.0));
+  }
+
+  #[test]
+  fn before_event_serializes_v8_shape_omitting_absent_optionals() {
+    let line = serialize_event(&TraceEvent::Before(BeforeActionEvent {
       call_id: "call@1".into(),
       start_time: 1.0,
-      end_time: 2.0,
       class: "Frame".into(),
       method: "click".into(),
-      title: "click".into(),
+      title: "frame.click".into(),
       params: serde_json::json!({ "selector": "#a" }),
-      error: None,
       page_id: Some("page@1".into()),
       parent_id: None,
-      before_snapshot: None,
-      after_snapshot: None,
+      before_snapshot: Some("before@call@1".into()),
       stack: Vec::new(),
     }));
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid json");
-    assert_eq!(parsed["type"].as_str(), Some("action"));
+    assert_eq!(parsed["type"].as_str(), Some("before"));
     assert_eq!(parsed["callId"].as_str(), Some("call@1"));
-    assert!(parsed["startTime"].as_f64().unwrap() < parsed["endTime"].as_f64().unwrap());
+    assert_eq!(parsed["beforeSnapshot"].as_str(), Some("before@call@1"));
+    assert!(parsed.get("parentId").is_none(), "absent optionals are omitted");
+    assert!(parsed.get("stack").is_none(), "empty stack is omitted");
+  }
+
+  #[test]
+  fn after_event_serializes_error_and_attachments() {
+    let line = serialize_event(&TraceEvent::After(AfterActionEvent {
+      call_id: "call@1".into(),
+      end_time: 2.0,
+      error: Some(ActionErrorInfo {
+        name: "TimeoutError".into(),
+        message: "Timeout 100ms exceeded".into(),
+      }),
+      after_snapshot: Some("after@call@1".into()),
+      attachments: vec![TraceAttachment {
+        name: "screenshot".into(),
+        content_type: "image/png".into(),
+        sha1: "abc.png".into(),
+      }],
+    }));
+    let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid json");
+    assert_eq!(parsed["type"].as_str(), Some("after"));
+    assert_eq!(parsed["error"]["name"].as_str(), Some("TimeoutError"));
+    assert_eq!(parsed["attachments"][0]["sha1"].as_str(), Some("abc.png"));
+  }
+
+  #[test]
+  fn input_and_log_events_serialize() {
+    let input = serialize_event(&TraceEvent::Input(InputActionEvent {
+      call_id: "call@2".into(),
+      input_snapshot: Some("input@call@2".into()),
+      point: Some((10.5, 20.0)),
+    }));
+    let parsed: serde_json::Value = serde_json::from_str(&input).expect("valid json");
+    assert_eq!(parsed["type"].as_str(), Some("input"));
+    assert_eq!(parsed["point"]["x"].as_f64(), Some(10.5));
+
+    let log = serialize_event(&TraceEvent::Log(LogEvent {
+      call_id: "call@2".into(),
+      time: 3.0,
+      message: "waiting for locator".into(),
+    }));
+    let parsed: serde_json::Value = serde_json::from_str(&log).expect("valid json");
+    assert_eq!(parsed["type"].as_str(), Some("log"));
+    assert_eq!(parsed["message"].as_str(), Some("waiting for locator"));
   }
 
   #[test]
@@ -975,21 +1290,31 @@ mod tests {
     let dir = std::env::temp_dir().join(format!("ferri-trace-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("t.zip");
-    let recorder = TraceRecorder::new(&TracingStartOptions::default(), "chromium".into(), 0).expect("spool");
-    recorder.push_event(&TraceEvent::Action(ActionEvent {
+    let recorder = TraceRecorder::new(
+      &TracingStartOptions::default(),
+      "chromium".into(),
+      serde_json::json!({}),
+      0,
+    )
+    .expect("spool");
+    recorder.push_event(&TraceEvent::Before(BeforeActionEvent {
       call_id: recorder.next_call_id(),
       start_time: recorder.monotonic_ms(),
-      end_time: recorder.monotonic_ms(),
       class: "Page".into(),
       method: "goto".into(),
       title: "page.goto".into(),
       params: serde_json::json!({ "url": "about:blank" }),
-      error: None,
       page_id: None,
       parent_id: None,
       before_snapshot: None,
-      after_snapshot: None,
       stack: Vec::new(),
+    }));
+    recorder.push_event(&TraceEvent::After(AfterActionEvent {
+      call_id: "call@1".into(),
+      end_time: recorder.monotonic_ms(),
+      error: None,
+      after_snapshot: None,
+      attachments: Vec::new(),
     }));
     recorder.push_resource(&TraceResource {
       name: "page@1-1.jpeg".into(),

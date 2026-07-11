@@ -672,7 +672,15 @@ async fn handle_request_will_be_sent(
     headers,
     frame_id: params.get("frameId").and_then(Value::as_str).map(String::from),
     redirected_from,
-    timing: None,
+    // `walltime` is epoch seconds (wkInterceptableRequest.ts: `* 1000`).
+    timing: params
+      .get("walltime")
+      .and_then(Value::as_f64)
+      .filter(|wall| *wall > 0.0)
+      .map(|wall| crate::network::RequestTiming {
+        start_time: wall * 1000.0,
+        ..crate::network::RequestTiming::empty()
+      }),
     raw_headers_fn: None,
   });
   requests

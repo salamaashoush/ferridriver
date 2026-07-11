@@ -133,3 +133,33 @@ where
 
   Err(AssertionFailure::new(message, Some(diff)))
 }
+
+/// [`poll_until`] wrapped in a traced `expect.<method>` action span on
+/// `page`'s context — the assertion appears in the trace with before /
+/// after DOM snapshots, mirroring Playwright's expect tracing. Costs
+/// nothing when the context is not being traced.
+pub async fn poll_traced<F, Fut>(
+  page: Option<&ferridriver::Page>,
+  params: serde_json::Value,
+  timeout: Duration,
+  ctx: ExpectContext,
+  check: F,
+) -> Result<(), AssertionFailure>
+where
+  F: FnMut() -> Fut,
+  Fut: Future<Output = Result<(), MatchError>>,
+{
+  let span = match page {
+    Some(page) => page.begin_expect_trace(ctx.method, params).await,
+    None => None,
+  };
+  let result = poll_until(timeout, ctx, check).await;
+  if let Some(span) = span {
+    if let Some(page) = page {
+      page
+        .finish_expect_trace(span, result.as_ref().err().map(|e| e.message.clone()))
+        .await;
+    }
+  }
+  result
+}
