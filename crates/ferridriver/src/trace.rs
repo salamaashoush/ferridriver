@@ -317,6 +317,8 @@ pub struct TraceRecorder {
   /// Context-creation options recorded in `context-options.options`
   /// (viewport etc. — the viewer's Metadata tab).
   context_options: serde_json::Value,
+  /// Bumped on every appended event/resource ([`Self::spool_version`]).
+  spool_version: AtomicU64,
 }
 
 impl TraceRecorder {
@@ -354,6 +356,7 @@ impl TraceRecorder {
       screencast_stops: std::sync::Mutex::new(Vec::new()),
       browser_name,
       context_options,
+      spool_version: AtomicU64::new(0),
     })
   }
 
@@ -449,6 +452,7 @@ impl TraceRecorder {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .write_line(&line);
+    self.spool_version.fetch_add(1, Ordering::Relaxed);
   }
 
   pub fn push_resource(&self, resource: &TraceResource) {
@@ -457,6 +461,15 @@ impl TraceRecorder {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .write_resource(resource);
+    self.spool_version.fetch_add(1, Ordering::Relaxed);
+  }
+
+  /// Monotonic counter bumped on every appended event/resource — live
+  /// exporters skip re-zipping when nothing changed since their last
+  /// snapshot.
+  #[must_use]
+  pub fn spool_version(&self) -> u64 {
+    self.spool_version.load(Ordering::Relaxed)
   }
 
   /// Track a screencast pump's shutdown sender so `stop` can end it.
@@ -771,15 +784,26 @@ pub(crate) fn take_recorder(composite: &str) -> Option<Arc<TraceRecorder>> {
 ///
 /// # Errors
 ///
-/// Returns `Ok(false)` when `composite` is not being traced (the
+/// Returns `Ok(None)` when `composite` is not being traced (the
 /// recording has not started yet or already stopped); `Err` when the
-/// zip write fails.
-pub fn export_live_snapshot(composite: &str, path: &std::path::Path) -> Result<bool> {
+/// zip write fails. On success returns the exported spool version —
+/// pollers pass it back as `known_version` next time and get
+/// `Ok(Some(same))` WITHOUT a re-export when nothing changed (the
+/// `path` is not written in that case).
+pub fn export_live_snapshot(
+  composite: &str,
+  path: &std::path::Path,
+  known_version: Option<u64>,
+) -> Result<Option<u64>> {
   let Some(recorder) = recorder_for(composite) else {
-    return Ok(false);
+    return Ok(None);
   };
+  let version = recorder.spool_version();
+  if known_version == Some(version) {
+    return Ok(Some(version));
+  }
   recorder.export(path, &[])?;
-  Ok(true)
+  Ok(Some(version))
 }
 
 // ── Screencast pump ────────────────────────────────────────────────────
@@ -875,6 +899,7 @@ pub(crate) fn record_page_event(recorder: &Arc<TraceRecorder>, page_id: &str, ev
     },
     PageEvent::PageError(err) => {
       let details = err.error();
+      let location = err.location();
       recorder.push_event(&TraceEvent::PageEvent(PageEventEntry {
         time,
         method: "pageError".to_string(),
@@ -885,6 +910,11 @@ pub(crate) fn record_page_event(recorder: &Arc<TraceRecorder>, page_id: &str, ev
               "message": details.message,
               "stack": details.stack,
             },
+          },
+          "location": {
+            "url": location.url,
+            "line": location.line_number,
+            "column": location.column_number,
           },
         }),
         page_id: Some(page_id.to_string()),

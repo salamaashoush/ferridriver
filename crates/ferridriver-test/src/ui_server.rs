@@ -68,7 +68,7 @@ fn live_trace_composite(test_full_name: &str) -> Option<String> {
 /// trace viewer works fully offline; unpacked into memory on first use.
 const TRACE_VIEWER_ZIP: &[u8] = include_bytes!("ui_assets/trace_viewer.zip");
 
-static TRACE_VIEWER_ASSETS: std::sync::LazyLock<rustc_hash::FxHashMap<String, Vec<u8>>> =
+static TRACE_VIEWER_ASSETS: std::sync::LazyLock<rustc_hash::FxHashMap<String, axum::body::Bytes>> =
   std::sync::LazyLock::new(|| {
     let mut assets = rustc_hash::FxHashMap::default();
     let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(TRACE_VIEWER_ZIP)) else {
@@ -84,7 +84,7 @@ static TRACE_VIEWER_ASSETS: std::sync::LazyLock<rustc_hash::FxHashMap<String, Ve
       let name = entry.name().to_string();
       let mut bytes = Vec::new();
       if std::io::Read::read_to_end(&mut entry, &mut bytes).is_ok() {
-        assets.insert(name, bytes);
+        assets.insert(name, axum::body::Bytes::from(bytes));
       }
     }
     assets
@@ -127,6 +127,12 @@ struct UiSnapshot {
   test_list: Option<serde_json::Value>,
   /// Latest status per test id, overlaid onto `test_list` on replay.
   statuses: rustc_hash::FxHashMap<String, String>,
+  /// Latest serialized `testFinished` message per test id — without
+  /// these, a tab that connects (or lags) after a run has pass/fail
+  /// dots but no outcome: no trace link, no error, no attachments.
+  outcomes: rustc_hash::FxHashMap<String, String>,
+  /// Latest serialized `runFinished` message (header totals).
+  last_run: Option<String>,
   watch_status: String,
 }
 
@@ -172,9 +178,10 @@ impl UiState {
   }
 
   /// Drain one run's reporter events into the broadcast channel, keeping
-  /// the status snapshot current for late-joining tabs.
+  /// the status + outcome snapshot current for late-joining tabs.
   pub async fn forward_run_events(self: Arc<Self>, mut subscription: Subscription) {
     while let Some(event) = subscription.rx.recv().await {
+      let message = reporter_event_to_json(&event, &self.artifacts_root);
       match &event {
         ReporterEvent::TestStarted { test_id, .. } => {
           self
@@ -185,27 +192,54 @@ impl UiState {
             .insert(test_id.full_name(), "running".to_string());
         },
         ReporterEvent::TestFinished { test_id, outcome } => {
+          let mut snapshot = self.snapshot.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+          snapshot
+            .statuses
+            .insert(test_id.full_name(), outcome.status.to_string());
+          snapshot.outcomes.insert(test_id.full_name(), message.to_string());
+        },
+        ReporterEvent::RunFinished { .. } => {
           self
             .snapshot
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .statuses
-            .insert(test_id.full_name(), outcome.status.to_string());
+            .last_run = Some(message.to_string());
         },
         _ => {},
       }
-      self.send(&reporter_event_to_json(&event, &self.artifacts_root));
+      self.send(&message);
     }
   }
 
-  /// Messages that bring a fresh (or lagged) tab up to date.
+  /// Notify clients that the in-flight run was cancelled (Stop): no
+  /// `runFinished` follows, so tabs reset their running state on this.
+  pub fn publish_run_cancelled(&self) {
+    self.send(&serde_json::json!({ "type": "runCancelled" }));
+  }
+
+  /// Messages that bring a fresh (or lagged) tab up to date: the test
+  /// list, every known test outcome, the last run's totals, and the
+  /// watch status.
   fn snapshot_messages(&self) -> Vec<String> {
     let snapshot = self.snapshot.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut messages = Vec::with_capacity(2);
+    let mut messages = Vec::with_capacity(3 + snapshot.outcomes.len());
     if let Some(ref list) = snapshot.test_list {
       let mut list = list.clone();
       overlay_statuses(&mut list, &snapshot.statuses);
       messages.push(list.to_string());
+    }
+    // Skip outcomes of currently-running tests — replaying a previous
+    // attempt's `testFinished` after the list would flip the client's
+    // "running" state back to finished.
+    messages.extend(
+      snapshot
+        .outcomes
+        .iter()
+        .filter(|(id, _)| snapshot.statuses.get(*id).is_none_or(|s| s != "running"))
+        .map(|(_, message)| message.clone()),
+    );
+    if let Some(ref last_run) = snapshot.last_run {
+      messages.push(last_run.clone());
     }
     let status = if snapshot.watch_status.is_empty() {
       "idle"
@@ -290,14 +324,23 @@ async fn trace_viewer_asset(UrlPath(path): UrlPath<String>) -> Response {
 
 /// Serve one embedded trace-viewer file. Correct Content-Type matters:
 /// the viewer's service worker (`sw.bundle.js`) is rejected by the
-/// browser unless it arrives as JavaScript.
+/// browser unless it arrives as JavaScript. Hash-named bundle assets
+/// are served immutable; entry points and the service worker are
+/// revalidated so a viewer upgrade takes effect on reload.
 fn serve_trace_viewer(path: &str) -> Response {
   let key = if path.is_empty() { "index.html" } else { path };
   match TRACE_VIEWER_ASSETS.get(key) {
     Some(bytes) => {
       let mime = mime_guess::from_path(key).first_or_octet_stream();
+      let immutable = !key.ends_with(".html") && key != "sw.bundle.js" && key != "manifest.webmanifest";
+      let cache = if immutable {
+        "public, max-age=31536000, immutable"
+      } else {
+        "no-cache"
+      };
       Response::builder()
         .header(header::CONTENT_TYPE, mime.as_ref())
+        .header(header::CACHE_CONTROL, cache)
         .body(Body::from(bytes.clone()))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     },
@@ -313,12 +356,31 @@ fn serve_trace_viewer(path: &str) -> Response {
 /// Playwright trace the embedded viewer loads via its `postMessage`
 /// hook; CORS is open so the viewer (any origin) can consume it.
 async fn live_trace(Query(params): Query<rustc_hash::FxHashMap<String, String>>) -> Response {
+  // Cache of the last exported snapshot per composite — polls where the
+  // trace grew nothing since serve the cached bytes instead of paying
+  // an O(trace) zip re-export every 800ms tick.
+  static EXPORT_CACHE: std::sync::LazyLock<std::sync::Mutex<rustc_hash::FxHashMap<String, (u64, axum::body::Bytes)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(rustc_hash::FxHashMap::default()));
+
   let Some(key) = params.get("key") else {
     return StatusCode::BAD_REQUEST.into_response();
   };
   let Some(composite) = live_trace_composite(key) else {
+    // The trace ended — drop any cached snapshot for dead composites so
+    // the map does not grow across a long watch session.
+    EXPORT_CACHE
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clear();
     return StatusCode::NOT_FOUND.into_response();
   };
+
+  let cached = EXPORT_CACHE
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .get(&composite)
+    .cloned();
+
   // Unique temp path per request; removed after reading.
   static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
   let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -326,25 +388,49 @@ async fn live_trace(Query(params): Query<rustc_hash::FxHashMap<String, String>>)
 
   let composite_owned = composite.clone();
   let tmp_for_export = tmp.clone();
-  let exported =
-    tokio::task::spawn_blocking(move || ferridriver::trace::export_live_snapshot(&composite_owned, &tmp_for_export))
-      .await;
+  let known_version = cached.as_ref().map(|(version, _)| *version);
+  let exported = tokio::task::spawn_blocking(move || {
+    ferridriver::trace::export_live_snapshot(&composite_owned, &tmp_for_export, known_version)
+  })
+  .await;
 
   let served = match exported {
-    Ok(Ok(true)) => tokio::fs::read(&tmp).await.ok(),
+    Ok(Ok(Some(version))) => {
+      if let Some((cached_version, bytes)) = cached {
+        if cached_version == version {
+          let _ = tokio::fs::remove_file(&tmp).await;
+          return live_trace_response(bytes);
+        }
+      }
+      match tokio::fs::read(&tmp).await {
+        Ok(bytes) => {
+          let bytes = axum::body::Bytes::from(bytes);
+          EXPORT_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(composite, (version, bytes.clone()));
+          Some(bytes)
+        },
+        Err(_) => None,
+      }
+    },
     _ => None,
   };
   let _ = tokio::fs::remove_file(&tmp).await;
 
   match served {
-    Some(bytes) => Response::builder()
-      .header(header::CONTENT_TYPE, "application/zip")
-      .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-      .header(header::CACHE_CONTROL, "no-store")
-      .body(Body::from(bytes))
-      .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    Some(bytes) => live_trace_response(bytes),
     None => StatusCode::NOT_FOUND.into_response(),
   }
+}
+
+fn live_trace_response(bytes: axum::body::Bytes) -> Response {
+  Response::builder()
+    .header(header::CONTENT_TYPE, "application/zip")
+    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+    .header(header::CACHE_CONTROL, "no-store")
+    .body(Body::from(bytes))
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 async fn ws_upgrade(State(state): State<Arc<UiState>>, ws: WebSocketUpgrade) -> Response {
@@ -398,22 +484,27 @@ async fn client_session(mut socket: WebSocket, state: Arc<UiState>) {
 /// Serve a file from the run's output directory. The path is confined to
 /// the artifacts root (no traversal, no symlink escape) and responses
 /// carry `Access-Control-Allow-Origin: *` so trace.playwright.dev can
-/// fetch trace zips cross-origin.
-async fn artifact(State(state): State<Arc<UiState>>, UrlPath(path): UrlPath<String>) -> Response {
+/// fetch trace zips cross-origin. Delegates to `tower_http::ServeFile`,
+/// which streams from disk and honors `Range` / conditional requests —
+/// `<video>` seeking on webm attachments needs 206 partial content.
+async fn artifact(
+  State(state): State<Arc<UiState>>,
+  UrlPath(path): UrlPath<String>,
+  request: axum::extract::Request,
+) -> Response {
   let Some(full_path) = resolve_artifact_path(&state.artifacts_root, &path) else {
     return StatusCode::NOT_FOUND.into_response();
   };
-  match tokio::fs::read(&full_path).await {
-    Ok(bytes) => {
-      let mime = mime_guess::from_path(&full_path).first_or_octet_stream();
-      Response::builder()
-        .header(header::CONTENT_TYPE, mime.as_ref())
-        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .body(Body::from(bytes))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-    },
-    Err(_) => StatusCode::NOT_FOUND.into_response(),
-  }
+  let served = tower::ServiceExt::oneshot(tower_http::services::ServeFile::new(&full_path), request).await;
+  let mut response = match served {
+    Ok(response) => response.into_response(),
+    Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+  };
+  response.headers_mut().insert(
+    header::ACCESS_CONTROL_ALLOW_ORIGIN,
+    header::HeaderValue::from_static("*"),
+  );
+  response
 }
 
 /// Resolve a client-supplied relative path against the artifacts root.

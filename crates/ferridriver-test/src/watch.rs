@@ -60,7 +60,11 @@ impl FileWatcher {
   /// * `ignore_patterns` — Extra directory names to ignore (merged with defaults).
   pub fn new(root: &Path, test_globs: &[String], ignore_patterns: &[String]) -> ferridriver::error::Result<Self> {
     use ferridriver::FerriError;
-    let (tx, rx) = async_channel::bounded(256);
+    // Unbounded: the run loop stops draining while a run executes, and a
+    // burst past a bounded cap (branch switch, formatter sweep) would
+    // silently drop changes — the post-run rerun would miss files.
+    // Events are tiny and deduplicated on drain.
+    let (tx, rx) = async_channel::unbounded();
     let compiled_globs: Vec<glob::Pattern> = test_globs.iter().filter_map(|g| glob::Pattern::new(g).ok()).collect();
     let root_owned = root.to_path_buf();
     let extra_ignore: Vec<String> = ignore_patterns.to_vec();
