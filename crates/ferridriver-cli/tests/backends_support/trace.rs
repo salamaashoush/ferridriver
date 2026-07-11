@@ -96,31 +96,76 @@ pub fn test_tracing_records_viewer_loadable_zip(c: &mut McpClient) {
   assert_eq!(first["version"].as_u64(), Some(8), "format version: {first}");
   assert_eq!(first["origin"].as_str(), Some("library"), "origin: {first}");
 
-  let actions: Vec<&serde_json::Value> = lines.iter().filter(|e| e["type"] == "action").collect();
+  // Actions arrive as Playwright's split before/input/after triplet
+  // (tracing.ts): merge them by callId, the same way the viewer's
+  // modernizer does, then assert on the merged view.
+  let mut merged: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>> =
+    std::collections::BTreeMap::new();
+  for line in &lines {
+    let Some(call_id) = line["callId"].as_str() else {
+      continue;
+    };
+    match line["type"].as_str() {
+      Some("before" | "input" | "after") => {
+        let entry = merged.entry(call_id.to_string()).or_default();
+        if let Some(obj) = line.as_object() {
+          for (key, value) in obj {
+            if key != "type" {
+              entry.insert(key.clone(), value.clone());
+            }
+          }
+        }
+      },
+      _ => {},
+    }
+  }
+  let actions: Vec<&serde_json::Map<String, serde_json::Value>> = merged.values().collect();
   let goto = actions
     .iter()
-    .find(|a| a["method"] == "goto")
+    .find(|a| a.get("method").map(serde_json::Value::as_str) == Some(Some("goto")))
     .expect("page.goto must be traced");
   assert!(
     goto["callId"].as_str().unwrap_or("").starts_with("call@"),
-    "callId: {goto}"
+    "callId: {goto:?}"
   );
   assert!(
     goto["startTime"].as_f64().unwrap() <= goto["endTime"].as_f64().unwrap(),
-    "monotonic action timing: {goto}"
+    "monotonic action timing: {goto:?}"
   );
   let click = actions
     .iter()
-    .find(|a| a["method"] == "click" && a["params"]["selector"] == "#b")
+    .find(|a| a.get("method").map(serde_json::Value::as_str) == Some(Some("click")) && a["params"]["selector"] == "#b")
     .expect("locator click must be traced with its selector");
-  assert_eq!(click["class"].as_str(), Some("Locator"), "class: {click}");
+  assert_eq!(click["class"].as_str(), Some("Locator"), "class: {click:?}");
+  // Input-dispatching actions record the input marker: an input@
+  // snapshot name plus the pointer point the click aimed at.
+  assert!(
+    click["inputSnapshot"].as_str().unwrap_or("").starts_with("input@"),
+    "click must carry an input snapshot: {click:?}"
+  );
+  assert!(
+    click["point"]["x"].as_f64().is_some() && click["point"]["y"].as_f64().is_some(),
+    "click must carry its dispatch point: {click:?}"
+  );
+  let click_call_id = click["callId"].as_str().expect("click callId");
+  assert!(
+    lines.iter().any(|e| e["type"] == "log"
+      && e["callId"] == click_call_id
+      && e["message"].as_str().unwrap_or("").contains("waiting for")),
+    "click must carry call-log lines (viewer Log pane)"
+  );
   let failed = actions
     .iter()
     .find(|a| a["params"]["selector"] == "#missing")
     .expect("failed click must be traced too");
   assert!(
     failed["error"]["message"].as_str().is_some(),
-    "failed action must carry its error: {failed}"
+    "failed action must carry its error: {failed:?}"
+  );
+  assert_eq!(
+    failed["error"]["name"].as_str(),
+    Some("TimeoutError"),
+    "deadline failures serialize as TimeoutError: {failed:?}"
   );
 
   // DOM snapshots: the click action must carry before/after snapshot
@@ -134,7 +179,7 @@ pub fn test_tracing_records_viewer_loadable_zip(c: &mut McpClient) {
   for kind in ["beforeSnapshot", "afterSnapshot"] {
     let name = click[kind]
       .as_str()
-      .unwrap_or_else(|| panic!("click must carry {kind}: {click}"));
+      .unwrap_or_else(|| panic!("click must carry {kind}: {click:?}"));
     let snapshot = snapshots
       .iter()
       .find(|f| f["snapshot"]["snapshotName"].as_str() == Some(name))
@@ -157,6 +202,10 @@ pub fn test_tracing_records_viewer_loadable_zip(c: &mut McpClient) {
   assert!(
     all_html.contains("margin"),
     "the CSSOM insertRule mutation must be captured in stylesheet text"
+  );
+  assert!(
+    all_html.contains("__playwright_target__"),
+    "the clicked element must be marked as the action target (viewer highlight)"
   );
 
   // Console messages must land in the trace (the viewer's Console tab)
@@ -228,7 +277,10 @@ pub fn test_tracing_records_viewer_loadable_zip(c: &mut McpClient) {
     );
   }
 
-  // trace.network must be valid resource-snapshot JSONL.
+  // trace.network must be valid resource-snapshot JSONL with sane
+  // wall-clock timing: `startedDateTime` from the request's epoch
+  // anchor (a monotonic sample fed through here once produced 1970
+  // dates and negative `_monotonicTime`, breaking the Network tab).
   let mut network = String::new();
   std::io::Read::read_to_string(
     &mut archive.by_name("trace.network").expect("trace.network"),
@@ -241,6 +293,15 @@ pub fn test_tracing_records_viewer_loadable_zip(c: &mut McpClient) {
       entry["type"].as_str(),
       Some("resource-snapshot"),
       "network line: {entry}"
+    );
+    let started = entry["snapshot"]["startedDateTime"].as_str().unwrap_or("");
+    assert!(
+      started.starts_with("20"),
+      "startedDateTime must be a current wall-clock date: {entry}"
+    );
+    assert!(
+      entry["snapshot"]["_monotonicTime"].as_f64().unwrap_or(-1.0) >= 0.0,
+      "_monotonicTime must be on the recorder's monotonic timeline: {entry}"
     );
   }
   std::fs::remove_file(&trace_path).ok();

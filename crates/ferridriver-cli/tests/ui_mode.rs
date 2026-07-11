@@ -167,41 +167,47 @@ async fn fetch_and_validate_trace(host: &str, url_path: &str) {
   assert_eq!(first["type"].as_str(), Some("context-options"), "first line: {first}");
   assert_eq!(first["version"].as_u64(), Some(8), "first line: {first}");
 
-  // The trace is recorded live by the library recorder: the BDD step
-  // boundary and the protocol-level goto must both appear as actions
-  // with a coherent timeline.
-  let actions: Vec<&serde_json::Value> = lines.iter().filter(|l| l["type"] == "action").collect();
-  let step_action = actions
+  // The trace is recorded live by the library recorder as split
+  // before/after events (tracing.ts): the BDD step boundary and the
+  // protocol-level goto must both appear with a coherent timeline.
+  let befores: Vec<&serde_json::Value> = lines.iter().filter(|l| l["type"] == "before").collect();
+  let step_action = befores
     .iter()
     .find(|a| a["title"].as_str() == Some("Given a blank ui page"))
-    .unwrap_or_else(|| panic!("step action in trace: {actions:?}"));
+    .unwrap_or_else(|| panic!("step before event in trace: {befores:?}"));
+  let step_call_id = step_action["callId"].as_str().expect("step callId");
+  let step_after = lines
+    .iter()
+    .find(|l| l["type"] == "after" && l["callId"] == step_call_id)
+    .unwrap_or_else(|| panic!("step after event in trace"));
   assert!(
-    step_action["endTime"].as_f64().unwrap_or(0.0) >= step_action["startTime"].as_f64().unwrap_or(f64::MAX),
-    "step span times ordered: {step_action}"
+    step_after["endTime"].as_f64().unwrap_or(0.0) >= step_action["startTime"].as_f64().unwrap_or(f64::MAX),
+    "step span times ordered: {step_action} {step_after}"
   );
-  let goto = actions
+  let goto = befores
     .iter()
     .find(|a| a["method"].as_str() == Some("goto"))
-    .unwrap_or_else(|| panic!("protocol goto action in trace: {actions:?}"));
+    .unwrap_or_else(|| panic!("protocol goto before event in trace: {befores:?}"));
 
   // Protocol actions nest under the live BDD step span.
-  let step_call_id = lines
-    .iter()
-    .find(|l| l["type"] == "action" && l["title"].as_str() == Some("Given a blank ui page"))
-    .and_then(|l| l["callId"].as_str())
-    .expect("step action present");
   assert_eq!(
     goto["parentId"].as_str(),
     Some(step_call_id),
     "goto must nest under its BDD step: {goto}"
   );
 
-  // Worker traces request DOM snapshots: the goto must carry snapshot
-  // names resolving to frame-snapshot events.
+  // Worker traces request DOM snapshots: the goto's before event names
+  // the before snapshot, its after event names the after snapshot,
+  // both resolving to frame-snapshot events.
   let snapshots: Vec<&serde_json::Value> = lines.iter().filter(|l| l["type"] == "frame-snapshot").collect();
   assert!(!snapshots.is_empty(), "frame-snapshot events in per-test trace");
-  for kind in ["beforeSnapshot", "afterSnapshot"] {
-    let name = goto[kind].as_str().unwrap_or_else(|| panic!("goto {kind}: {goto}"));
+  let goto_call_id = goto["callId"].as_str().expect("goto callId");
+  let goto_after = lines
+    .iter()
+    .find(|l| l["type"] == "after" && l["callId"] == goto_call_id)
+    .unwrap_or_else(|| panic!("goto after event in trace"));
+  for (event, kind) in [(*goto, "beforeSnapshot"), (goto_after, "afterSnapshot")] {
+    let name = event[kind].as_str().unwrap_or_else(|| panic!("goto {kind}: {event}"));
     assert!(
       snapshots
         .iter()

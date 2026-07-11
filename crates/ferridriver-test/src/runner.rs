@@ -1251,8 +1251,15 @@ impl TestRunner {
     loop {
       if let Some(cmd) = queued.pop_front() {
         if let Some(plan) = self.plan_for_ui_command(&plan_factory, cmd, &state).await {
-          let pending = self.run_plan_for_ui(plan, &state, &mut commands).await;
-          queued.extend(pending);
+          let outcome = self.run_plan_for_ui(plan, &state, &mut commands).await;
+          if outcome.stopped {
+            // Stop cancels the current run AND the backlog — a queued
+            // pile of runs executing after an explicit Stop is the
+            // opposite of what the user asked for.
+            queued.clear();
+          } else {
+            queue_pending(&mut queued, outcome.pending);
+          }
         }
         continue;
       }
@@ -1276,13 +1283,19 @@ impl TestRunner {
             retain_tests_in_files(&mut plan, &changed_paths);
           }
           if plan.total_tests == 0 { continue; }
-          let pending = self.run_plan_for_ui(plan, &state, &mut commands).await;
-          queued.extend(pending);
+          let outcome = self.run_plan_for_ui(plan, &state, &mut commands).await;
+          if outcome.stopped {
+            queued.clear();
+          } else {
+            queue_pending(&mut queued, outcome.pending);
+          }
         }
 
         cmd = commands.recv() => {
           let Some(cmd) = cmd else { break };
-          queued.push_back(cmd);
+          if !queued.contains(&cmd) {
+            queued.push_back(cmd);
+          }
         }
       }
     }
@@ -1312,10 +1325,17 @@ impl TestRunner {
     match cmd {
       UiCommand::RunAll | UiCommand::Stop => {},
       UiCommand::RunFailed => {
+        // No recorded failures — a no-op, NOT "run everything" (an
+        // absent or empty @rerun.txt would otherwise leave the full
+        // plan in place).
         let rerun_path = self.config.output_dir.join("@rerun.txt");
-        if rerun_path.exists() {
-          crate::discovery::filter_by_rerun(&mut plan, &rerun_path);
+        let has_failures = std::fs::read_to_string(&rerun_path)
+          .map(|contents| contents.lines().any(|line| !line.trim().is_empty()))
+          .unwrap_or(false);
+        if !has_failures {
+          return None;
         }
+        crate::discovery::filter_by_rerun(&mut plan, &rerun_path);
       },
       UiCommand::RunGrep(pattern) => {
         crate::discovery::filter_by_grep(&mut plan, &pattern, false);
@@ -1347,7 +1367,7 @@ impl TestRunner {
     plan: TestPlan,
     state: &Arc<crate::ui_server::UiState>,
     commands: &mut tokio::sync::mpsc::UnboundedReceiver<crate::ui_server::UiCommand>,
-  ) -> Vec<crate::ui_server::UiCommand> {
+  ) -> UiRunOutcome {
     state.set_watch_status("running");
 
     let mut builder = EventBusBuilder::new();
@@ -1363,6 +1383,7 @@ impl TestRunner {
     let bus = builder.build();
 
     let mut pending = Vec::new();
+    let mut stopped = false;
     {
       let execute = self.execute(plan, bus.clone());
       tokio::pin!(execute);
@@ -1370,7 +1391,7 @@ impl TestRunner {
         tokio::select! {
           _ = &mut execute => break,
           cmd = commands.recv() => match cmd {
-            Some(crate::ui_server::UiCommand::Stop) => break,
+            Some(crate::ui_server::UiCommand::Stop) => { stopped = true; break; },
             Some(other) => pending.push(other),
             None => break,
           }
@@ -1386,8 +1407,33 @@ impl TestRunner {
     }
     let _ = forwarder.await;
 
+    if stopped {
+      // A cancelled run emits no `runFinished`; tell clients explicitly
+      // so they reset their running state instead of leaking it.
+      state.publish_run_cancelled();
+    }
     state.set_watch_status("idle");
-    pending
+    UiRunOutcome { pending, stopped }
+  }
+}
+
+/// What a UI-driven run left behind: commands that arrived mid-run and
+/// whether the run was cancelled by Stop.
+struct UiRunOutcome {
+  pending: Vec<crate::ui_server::UiCommand>,
+  stopped: bool,
+}
+
+/// Append mid-run commands to the backlog, dropping duplicates —
+/// spamming "Run All" during a run must not schedule N more full runs.
+fn queue_pending(
+  queued: &mut std::collections::VecDeque<crate::ui_server::UiCommand>,
+  pending: Vec<crate::ui_server::UiCommand>,
+) {
+  for cmd in pending {
+    if !queued.contains(&cmd) {
+      queued.push_back(cmd);
+    }
   }
 }
 
