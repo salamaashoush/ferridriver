@@ -225,6 +225,42 @@ pub fn test_page_expose_function(c: &mut McpClient) {
   );
 }
 
+pub fn test_page_expose_binding(c: &mut McpClient) {
+  setup(c);
+  // page.exposeBinding = page.exposeFunction plus a leading BindingSource
+  // ({ context, page, frame }). Prove the source object arrives, the
+  // spread args follow it, and the callback's return value reaches the
+  // page-side caller (an effect only present when the binding wired
+  // through, not merely that the call didn't throw).
+  let v = c.script_value(
+    r"
+    let sourceKeys = null;
+    await page.exposeBinding('__page_bind', (source, ...a) => {
+      sourceKeys = Object.keys(source).sort();
+      return { sum: a.reduce((x, y) => x + y, 0), hasPage: typeof source.page };
+    });
+    const installed = await page.evaluate(`typeof window.__page_bind`);
+    const result = await page.evaluate(`window.__page_bind(2, 3, 5)`);
+    return { installed, result, sourceKeys };
+  ",
+  );
+  assert_eq!(
+    v["installed"].as_str(),
+    Some("function"),
+    "page.exposeBinding should install window.__page_bind as a function: {v}"
+  );
+  assert_eq!(
+    &v["result"],
+    &json!({ "sum": 10, "hasPage": "string" }),
+    "binding callback receives spread args after the source object and its return reaches the page: {v}"
+  );
+  assert_eq!(
+    v["sourceKeys"],
+    json!(["context", "frame", "page"]),
+    "exposeBinding callback first arg is the {{ context, page, frame }} BindingSource: {v}"
+  );
+}
+
 pub fn test_context_expose_binding(c: &mut McpClient) {
   setup(c);
   // Register the binding BEFORE opening the page, then open a fresh

@@ -180,6 +180,67 @@ for (const backend of BACKENDS) {
       expect(seen[0]).toEqual([1, "two", { three: 3 }]);
     });
 
+    it("page.$eval runs the function on the first match", async () => {
+      await page.setContent("<ul><li data-v='a'>one</li><li data-v='b'>two</li></ul>");
+      expect(await page.$eval("li", (el: Element) => el.getAttribute("data-v"))).toBe("a");
+      expect(
+        await page.$eval("li", (el: Element, s: string) => el.textContent + s, "!"),
+      ).toBe("one!");
+    });
+
+    it("page.$$eval runs the function over all matches", async () => {
+      await page.setContent("<ul><li>one</li><li>two</li></ul>");
+      expect(
+        await page.$$eval("li", (els: Element[]) => els.map((e) => e.textContent)),
+      ).toEqual(["one", "two"]);
+    });
+
+    it("page.$eval rejects when the selector matches nothing", async () => {
+      await page.setContent("<div>x</div>");
+      await expect(
+        page.$eval(".nope", (el: Element) => el.tagName),
+      ).rejects.toThrow();
+    });
+
+    it("page.pause rejects with Unsupported (no Inspector UI)", async () => {
+      // pause() is sync-throwing on NAPI (always Unsupported); assert it
+      // throws rather than silently resolving.
+      expect(() => page.pause()).toThrow(/pause|inspector|unsupported/i);
+    });
+
+    it("page.exposeBinding delivers the BindingSource plus spread args", async () => {
+      const seenSource: Record<string, unknown>[] = [];
+      const seenArgs: unknown[][] = [];
+      await page.exposeBinding(
+        "__page_bind",
+        (source: { context: string; page: string; frame: string }, args: unknown[]) => {
+          seenSource.push(source);
+          seenArgs.push(args);
+        },
+      );
+      await page.setContent("<button>x</button>");
+      expect(await page.evaluate(`typeof window.__page_bind`)).toBe("function");
+      await page.evaluate(`window.__page_bind(2, 3)`);
+      for (let i = 0; i < 50 && seenArgs.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(seenArgs.length).toBe(1);
+      expect(seenArgs[0]).toEqual([2, 3]);
+      expect(Object.keys(seenSource[0]).sort()).toEqual(["context", "frame", "page"]);
+      expect(typeof seenSource[0].page).toBe("string");
+    });
+
+    it("locator.waitForFunction polls the element until truthy", async () => {
+      await page.setContent("<div id='t'>pending</div>");
+      await page.evaluate(
+        `setTimeout(() => { document.getElementById('t').textContent = 'ready'; }, 60)`,
+      );
+      await page
+        .locator("#t")
+        .waitForFunction((node: Element) => node.textContent === "ready");
+      expect((await page.locator("#t").textContent())?.trim()).toBe("ready");
+    });
+
     // ── Context additions ────────────────────────────────────────────
 
     it("context.exposeBinding applies to a page opened after registration", async () => {

@@ -542,7 +542,7 @@ impl Page {
   /// it, or `None` for same-document navigations (no new request was
   /// issued) / backends that genuinely cannot expose the main-document
   /// response (stock `WKWebView` has no public API for this — see the
-  /// §1.4 backend gap matrix in `PLAYWRIGHT_COMPAT.md`). Mirrors
+  /// backend gap matrix in `docs/PLAYWRIGHT-PARITY-BACKLOG.md`). Mirrors
   /// Playwright's `Promise<Response | null>` contract on `page.goto`.
   ///
   /// # Errors
@@ -975,6 +975,46 @@ impl Page {
     }
     crate::selectors::cleanup_tags(&self.inner).await;
     Ok(handles)
+  }
+
+  /// Playwright: `page.$eval(selector, pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:342`).
+  /// Delegates to the main frame, same as Playwright's `this._mainFrame.$eval(...)`.
+  ///
+  /// # Errors
+  ///
+  /// See [`crate::frame::Frame::eval_on_selector`].
+  pub async fn eval_on_selector(
+    self: &Arc<Self>,
+    selector: &str,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::protocol::SerializedValue> {
+    self
+      .main_frame()
+      .eval_on_selector(selector, fn_source, arg, is_function)
+      .await
+  }
+
+  /// Playwright: `page.$$eval(selector, pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:347`).
+  /// Delegates to the main frame, same as Playwright's `this._mainFrame.$$eval(...)`.
+  ///
+  /// # Errors
+  ///
+  /// See [`crate::frame::Frame::eval_on_selector_all`].
+  pub async fn eval_on_selector_all(
+    self: &Arc<Self>,
+    selector: &str,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::protocol::SerializedValue> {
+    self
+      .main_frame()
+      .eval_on_selector_all(selector, fn_source, arg, is_function)
+      .await
   }
 
   // ── evaluate (Playwright parity) ─────────────────────────────────────
@@ -3246,6 +3286,37 @@ impl Page {
   /// Returns an error if the function cannot be exposed to the page.
   pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
     self.inner.expose_function(name, func).await
+  }
+
+  /// Expose a Rust binding to the page as `window.<name>(...)`. Like
+  /// [`Self::expose_function`], but the callback additionally receives a
+  /// [`crate::events::BindingSource`] identifying the calling context,
+  /// page, and frame (Playwright: `page.exposeBinding(name, callback)`,
+  /// `client/page.ts:371`). The page still calls it as an async function
+  /// receiving the return value.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the binding cannot be installed on the page.
+  pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    self.inner.expose_binding(name, binding).await
+  }
+
+  /// Playwright: `page.pause(): Promise<void>` (`client/page.ts:858`).
+  /// Playwright suspends script execution and hands control to the
+  /// Inspector/recorder UI. ferridriver has no recorder, so this is a
+  /// typed [`crate::error::FerriError::Unsupported`] rather than a
+  /// silent no-op that would mislead callers into thinking a breakpoint
+  /// was honoured.
+  ///
+  /// # Errors
+  ///
+  /// Always returns [`crate::error::FerriError::Unsupported`].
+  pub fn pause(&self) -> Result<()> {
+    Err(crate::error::FerriError::Unsupported(format!(
+      "page.pause() (page at {}) requires the Playwright Inspector/recorder UI, which ferridriver does not provide",
+      self.url()
+    )))
   }
 
   /// Intercept WebSocket connections on this page that match `matcher`.

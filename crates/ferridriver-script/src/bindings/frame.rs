@@ -100,6 +100,44 @@ impl FrameJs {
     serialized_value_to_quickjs(&ctx, &result)
   }
 
+  /// Playwright: `frame.$eval(selector, pageFunction, arg?): Promise<R>`.
+  #[qjs(rename = "$eval")]
+  pub async fn eval_on_selector<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    page_function: rquickjs::Value<'js>,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
+    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let result = self
+      .inner
+      .eval_on_selector(&selector, &source, serialized, is_fn)
+      .await
+      .into_js_with(&ctx)?;
+    serialized_value_to_quickjs(&ctx, &result)
+  }
+
+  /// Playwright: `frame.$$eval(selector, pageFunction, arg?): Promise<R>`.
+  #[qjs(rename = "$$eval")]
+  pub async fn eval_on_selector_all<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    page_function: rquickjs::Value<'js>,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
+    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let result = self
+      .inner
+      .eval_on_selector_all(&selector, &source, serialized, is_fn)
+      .await
+      .into_js_with(&ctx)?;
+    serialized_value_to_quickjs(&ctx, &result)
+  }
+
   /// Playwright: `frame.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
   #[qjs(rename = "evaluateHandle")]
   pub async fn evaluate_handle<'js>(

@@ -149,15 +149,11 @@ macro_rules! retry_resolve {
               ::std::result::Result::Ok(val) => break 'retry ::std::result::Result::Ok(val),
               ::std::result::Result::Err(e) => {
                 let __msg = e.to_string();
-                if __msg.contains("not connected")
-                  || __msg.contains("not found")
-                  || __msg.contains("detached")
-                  || __msg.contains("error:not")
-                {
-                  // Retriable: `checkElementStates` returns
-                  // `error:notvisible` / `error:notenabled` /
-                  // `error:noteditable` etc. as signals to keep polling until
-                  // the deadline.
+                if $crate::locator::is_retryable_action_error(&__msg) {
+                  // Retriable: actionability signals
+                  // (`error:notvisible` / `error:notenabled` / ...) plus
+                  // stale-handle backend errors (the node detached
+                  // mid-action). Keep re-resolving until the deadline.
                   if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
                     if __msg != __trace_last_log {
                       __s.log(__msg.clone());
@@ -192,6 +188,40 @@ macro_rules! retry_resolve {
     }
     __result
   }};
+}
+
+/// Should a failed action attempt be retried (re-resolve + try again
+/// until the action timeout), rather than surfaced as a hard error?
+///
+/// Two families:
+/// 1. Actionability signals from `checkElementStates`
+///    (`error:notvisible` / `error:notenabled` / `error:noteditable`,
+///    "not connected", "detached") — the element exists but is not yet
+///    actionable.
+/// 2. Stale-handle / navigated-away backend errors — the resolved node
+///    vanished mid-action (React re-mount, SPA route swap, in-flight
+///    navigation). Playwright's actionability loop re-resolves and
+///    retries these; ferridriver previously surfaced the raw protocol
+///    error (e.g. CDP "Object id doesn't reference a Node"), which
+///    escaped callers' try/catch and made every real SPA interaction
+///    fragile.
+pub(crate) fn is_retryable_action_error(msg: &str) -> bool {
+  msg.contains("not connected")
+    || msg.contains("not found")
+    || msg.contains("detached")
+    || msg.contains("error:not")
+    // CDP stale-node / stale-context messages.
+    || msg.contains("reference a Node")
+    || msg.contains("Could not find node")
+    || msg.contains("No node with given")
+    || msg.contains("Node with given id")
+    || msg.contains("belong to the document")
+    || msg.contains("Execution context was destroyed")
+    || msg.contains("Cannot find context with specified id")
+    // WebKit / BiDi stale-node phrasings.
+    || msg.contains("Node was not found")
+    || msg.contains("no such node")
+    || msg.contains("stale element")
 }
 
 /// A lazy element locator bound to a [`crate::Frame`]. Every Locator
@@ -1030,7 +1060,7 @@ impl Locator {
   pub(crate) async fn set_input_files_impl(
     &self,
     files: crate::options::InputFiles,
-    _opts: Option<crate::options::SetInputFilesOptions>,
+    opts: Option<crate::options::SetInputFilesOptions>,
   ) -> Result<()> {
     // Lower `Payloads` to temp-file paths so the wire-level CDP
     // `DOM.setFileInputFiles` command can carry them unchanged — the
@@ -1038,11 +1068,11 @@ impl Locator {
     // op, which only Playwright's internal CDP protocol supports.
     // Temp files live for the action only; we delete them after the
     // backend call returns regardless of success/failure.
-    match files {
-      crate::options::InputFiles::Paths(paths) => {
-        let strs: Vec<String> = paths.into_iter().map(|p| p.display().to_string()).collect();
-        actions::upload_file(self.frame.page_arc().inner(), &self.selector, &strs).await
-      },
+    let timeout_ms = opts
+      .and_then(|o| o.timeout)
+      .unwrap_or_else(|| self.frame.page_arc().default_timeout());
+    let paths: Vec<String> = match files {
+      crate::options::InputFiles::Paths(paths) => paths.into_iter().map(|p| p.display().to_string()).collect(),
       crate::options::InputFiles::Payloads(payloads) => {
         // Each payload gets its own subdirectory so the filename on
         // disk matches `payload.name` verbatim — otherwise the page
@@ -1083,8 +1113,41 @@ impl Locator {
             .map_err(|e| crate::error::FerriError::Backend(format!("failed to write upload payload: {e}")))?;
           paths.push(path.display().to_string());
         }
-        actions::upload_file(self.frame.page_arc().inner(), &self.selector, &paths).await
+        paths
       },
+    };
+
+    // Retry on stale-handle errors until the timeout. The upload target
+    // is often a hidden, framework-managed `<input type=file>` that
+    // re-mounts during a builder/route transition; a single-shot upload
+    // races the re-render and surfaces a raw "Object id doesn't
+    // reference a Node" that escaped callers' try/catch. This mirrors
+    // the locator action retry funnel for the file-input path, which
+    // resolves the selector fresh (`upload_file` re-queries) on each
+    // attempt.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut attempt: usize = 0;
+    loop {
+      match actions::upload_file(self.frame.page_arc().inner(), &self.selector, &paths).await {
+        Ok(()) => return Ok(()),
+        Err(e) => {
+          let now = tokio::time::Instant::now();
+          let timed_out = timeout_ms != 0 && now >= deadline;
+          if timed_out || !is_retryable_action_error(&e.to_string()) {
+            return Err(e);
+          }
+          let delay = Self::RETRY_BACKOFFS_MS[attempt.min(Self::RETRY_BACKOFFS_MS.len() - 1)];
+          attempt = attempt.saturating_add(1);
+          let sleep_ms = if timeout_ms == 0 {
+            delay
+          } else {
+            delay.min(u64::try_from(deadline.saturating_duration_since(now).as_millis()).unwrap_or(delay))
+          };
+          if sleep_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+          }
+        },
+      }
     }
   }
 
@@ -1094,8 +1157,9 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or scroll fails.
   pub async fn scroll_into_view_if_needed(&self) -> Result<()> {
-    let el = self.resolve().await?;
-    el.scroll_into_view().await
+    retry_resolve!(self, None, "scrollIntoViewIfNeeded", |el, _page| async move {
+      el.scroll_into_view().await
+    })
   }
 
   /// Dispatch a DOM event of the given type on the element. Mirrors
@@ -1430,9 +1494,12 @@ impl Locator {
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn bounding_box(&self) -> Result<Option<BoundingBox>> {
-    let val = self
-      .eval_on_element("var r = el.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height};")
-      .await?;
+    let val = retry_resolve!(self, None, "boundingBox", |el, _page| async move {
+      el.call_js_fn_value(
+        "function() { var r = this.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height}; }",
+      )
+      .await
+    })?;
     match val {
       Some(v) => Ok(Some(BoundingBox {
         x: v["x"].as_f64().unwrap_or(0.0),
@@ -1559,17 +1626,9 @@ impl Locator {
       crate::options::ScreenshotFormat::Jpeg => crate::backend::ImageFormat::Jpeg,
       crate::options::ScreenshotFormat::Webp => crate::backend::ImageFormat::Webp,
     };
-    let capture = async {
-      let el = self.resolve().await?;
+    let bytes = retry_resolve!(self, opts.timeout, "screenshot", |el, _page| async move {
       el.screenshot(format).await
-    };
-    let bytes = match opts.timeout {
-      Some(ms) if ms > 0 => match tokio::time::timeout(std::time::Duration::from_millis(ms), capture).await {
-        Ok(res) => res?,
-        Err(_) => return Err(crate::error::FerriError::timeout("screenshot", ms)),
-      },
-      _ => capture.await?,
-    };
+    })?;
     if let Some(ref path) = opts.path {
       if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -1665,26 +1724,24 @@ impl Locator {
     target: &Locator,
     options: Option<crate::options::DragAndDropOptions>,
   ) -> Result<()> {
+    // `RECT_JS` scrolls the element into view and returns its full
+    // padding-box rect so `sourcePosition` / `targetPosition` offset from
+    // the origin as Playwright does.
+    const RECT_JS: &str = "function() { try { this.scrollIntoViewIfNeeded(); } catch (e) { this.scrollIntoView(); } var r = this.getBoundingClientRect(); return {x: r.x, y: r.y, width: r.width, height: r.height}; }";
     let opts = options.unwrap_or_default();
 
-    // Get source + target geometry via call_js_fn_value (1 CDP each).
-    let source_el = self.resolve().await?;
-    let target_el = target.resolve().await?;
-
-    // Parallel: get both bounding rects simultaneously — we need the full
-    // rect (x, y, width, height) so that sourcePosition / targetPosition can
-    // be offset from the padding-box origin as Playwright does.
-    let (src_result, tgt_result) = tokio::join!(
-      source_el.call_js_fn_value(
-        "function() { try { this.scrollIntoViewIfNeeded(); } catch (e) { this.scrollIntoView(); } var r = this.getBoundingClientRect(); return {x: r.x, y: r.y, width: r.width, height: r.height}; }"
-      ),
-      target_el.call_js_fn_value(
-        "function() { try { this.scrollIntoViewIfNeeded(); } catch (e) { this.scrollIntoView(); } var r = this.getBoundingClientRect(); return {x: r.x, y: r.y, width: r.width, height: r.height}; }"
-      ),
-    );
-
-    let src = src_result?.ok_or_else(|| crate::error::FerriError::Backend("no source bounding box".into()))?;
-    let tgt = tgt_result?.ok_or_else(|| crate::error::FerriError::Backend("no target bounding box".into()))?;
+    // Resolve source then target geometry under the action retry funnel
+    // (Playwright resolves each with its own `_retryPointerAction`, source
+    // first), so a node that detaches mid-drag is re-resolved rather than
+    // surfacing a hard error.
+    let src = retry_resolve!(self, opts.timeout, "dragTo", |el, _page| async move {
+      el.call_js_fn_value(RECT_JS).await
+    })?
+    .ok_or_else(|| crate::error::FerriError::Backend("no source bounding box".into()))?;
+    let tgt = retry_resolve!(target, opts.timeout, "dragTo", |el, _page| async move {
+      el.call_js_fn_value(RECT_JS).await
+    })?
+    .ok_or_else(|| crate::error::FerriError::Backend("no target bounding box".into()))?;
 
     let from = rect_point(&src, opts.source_position);
     let to = rect_point(&tgt, opts.target_position);
@@ -1981,6 +2038,58 @@ impl Locator {
       let _ = handle.dispose().await;
       result
     })
+  }
+
+  /// Playwright: `locator.waitForFunction(pageFunction, arg?, options?): Promise<void>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:396`).
+  ///
+  /// Polls `fn(element, arg)` against this locator's resolved element
+  /// until it returns a truthy value or the timeout elapses. Auto-waits
+  /// for the element to attach, like every other locator action.
+  ///
+  /// # Errors
+  ///
+  /// [`crate::error::FerriError::timeout`] if the function never returns
+  /// truthy within the timeout.
+  pub async fn wait_for_function(
+    &self,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+    timeout_ms: Option<u64>,
+  ) -> Result<()> {
+    let timeout = timeout_ms.unwrap_or_else(|| self.frame.page_arc().default_timeout());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
+    loop {
+      let now = tokio::time::Instant::now();
+      if now >= deadline {
+        return Err(crate::error::FerriError::timeout(
+          format!("waiting for function on locator {}", self.selector),
+          timeout,
+        ));
+      }
+      let remaining = u64::try_from((deadline - now).as_millis()).unwrap_or(u64::MAX);
+      let opts = crate::options::EvaluateOptions {
+        timeout: Some(remaining),
+      };
+      if let Ok(value) = self
+        .evaluate_impl(fn_source, arg.clone(), is_function, Some(opts))
+        .await
+        && let Ok(json) = crate::protocol::result_to_serde::<serde_json::Value>(&value)
+      {
+        let truthy = match &json {
+          serde_json::Value::Bool(b) => *b,
+          serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) != 0.0,
+          serde_json::Value::String(s) => !s.is_empty(),
+          serde_json::Value::Null => false,
+          _ => true,
+        };
+        if truthy {
+          return Ok(());
+        }
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
   }
 
   /// Playwright: `locator.evaluateHandle(pageFunction, arg?, options?): Promise<JSHandle>`
@@ -2935,4 +3044,44 @@ async fn aria_child_snapshot(
     Arc::clone(seq),
   )
   .await
+}
+
+#[cfg(test)]
+mod retry_classify_tests {
+  use super::is_retryable_action_error;
+
+  #[test]
+  fn stale_and_actionability_errors_are_retryable() {
+    for msg in [
+      // Actionability signals (pre-existing behaviour).
+      "error:notvisible",
+      "error:notenabled",
+      "element is not connected",
+      "element is detached",
+      // Stale-handle / navigated-away signals (the fix): a resolved
+      // node vanished mid-action and must be re-resolved, not surfaced
+      // as a hard error.
+      "protocol error (CDP): Object id doesn't reference a Node",
+      "Could not find node with given id",
+      "No node with given id found",
+      "Node with given id does not belong to the document",
+      "Execution context was destroyed.",
+      "Cannot find context with specified id",
+      "Node was not found",
+    ] {
+      assert!(is_retryable_action_error(msg), "should be retryable: {msg}");
+    }
+  }
+
+  #[test]
+  fn genuine_failures_are_not_retryable() {
+    for msg in [
+      "strict mode violation: 3 elements",
+      "Timeout 30000ms exceeded",
+      "Target closed",
+      "boom",
+    ] {
+      assert!(!is_retryable_action_error(msg), "should NOT be retryable: {msg}");
+    }
+  }
 }

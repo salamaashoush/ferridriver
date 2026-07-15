@@ -942,6 +942,13 @@ impl LocatorJs {
 
   // ── All variants ──────────────────────────────────────────────────────────
 
+  /// Playwright: `locator.all(): Promise<Locator[]>`.
+  #[qjs(rename = "all")]
+  pub async fn all(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<Vec<LocatorJs>> {
+    let inner = self.inner.all().await.into_js_with(&ctx)?;
+    Ok(inner.into_iter().map(LocatorJs::new).collect())
+  }
+
   #[qjs(rename = "allTextContents")]
   pub async fn all_text_contents(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<Vec<String>> {
     self.inner.all_text_contents().await.into_js_with(&ctx)
@@ -970,6 +977,33 @@ impl LocatorJs {
       .await
       .into_js_with(&ctx)?;
     crate::bindings::convert::serialized_value_to_quickjs(&ctx, &result)
+  }
+
+  /// Playwright: `locator.waitForFunction(pageFunction, arg?, options?): Promise<void>`.
+  #[qjs(rename = "waitForFunction")]
+  pub async fn wait_for_function<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    page_function: rquickjs::Value<'js>,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    struct JsWaitFnOpts {
+      timeout: Option<u64>,
+    }
+    let (source, is_fn) = crate::bindings::convert::extract_page_function(&ctx, page_function)?;
+    let serialized = crate::bindings::convert::quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let parsed: JsWaitFnOpts = match options.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => crate::bindings::convert::serde_from_js(&ctx, v)?,
+      _ => JsWaitFnOpts::default(),
+    };
+    self
+      .inner
+      .wait_for_function(&source, serialized, is_fn, parsed.timeout)
+      .await
+      .into_js_with(&ctx)
   }
 
   /// Playwright: `locator.evaluateHandle(pageFunction, arg?, options?): Promise<JSHandle>`.

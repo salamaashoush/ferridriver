@@ -352,6 +352,52 @@ impl PageJs {
     self.query_selector_all(ctx, selector).await
   }
 
+  /// Playwright: `page.$eval(selector, pageFunction, arg?): Promise<R>`.
+  #[qjs(rename = "$eval")]
+  pub async fn eval_on_selector<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    page_function: rquickjs::Value<'js>,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
+    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let result = self
+      .inner
+      .eval_on_selector(&selector, &source, serialized, is_fn)
+      .await
+      .into_js_with(&ctx)?;
+    serialized_value_to_quickjs(&ctx, &result)
+  }
+
+  /// Playwright: `page.$$eval(selector, pageFunction, arg?): Promise<R>`.
+  #[qjs(rename = "$$eval")]
+  pub async fn eval_on_selector_all<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    page_function: rquickjs::Value<'js>,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
+    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let result = self
+      .inner
+      .eval_on_selector_all(&selector, &source, serialized, is_fn)
+      .await
+      .into_js_with(&ctx)?;
+    serialized_value_to_quickjs(&ctx, &result)
+  }
+
+  /// Playwright: `page.pause(): Promise<void>`. ferridriver has no
+  /// Inspector/recorder UI, so this rejects with a typed `Unsupported`
+  /// error rather than silently pretending to pause.
+  #[qjs(rename = "pause")]
+  pub fn pause(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    self.inner.pause().into_js_with(&ctx)
+  }
+
   /// Playwright: `page.evaluate(pageFunction, arg?): Promise<R>`.
   /// `pageFunction` accepts a string or a JS function; rich return
   /// types (`Date` / `RegExp` / `BigInt` / `URL` / `Error` / typed
@@ -2094,6 +2140,85 @@ impl PageJs {
     let inner = self.inner.clone();
     Ok(rquickjs::promise::Promised::from(async move {
       inner.expose_function(&name, cb).await.into_js_with(&ctx)
+    }))
+  }
+
+  /// Playwright: `page.exposeBinding(name, callback)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:371`).
+  /// Like [`Self::expose_function`], but the callback receives a
+  /// `BindingSource` object (`{ context, page, frame }` identifiers) as
+  /// its first argument, then the spread page-side call arguments.
+  #[qjs(rename = "exposeBinding")]
+  pub fn expose_binding<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    name: String,
+    callback: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
+    let vm = self.vm.clone().ok_or_else(|| {
+      rquickjs::Error::new_from_js_message(
+        "page.exposeBinding",
+        "Error",
+        "page.exposeBinding requires the script engine's VM handle (install_page)".to_string(),
+      )
+    })?;
+    let net = crate::bindings::fetch::active_net(&ctx);
+    let saved = SavedCallback::save_with_net(&ctx, callback, net);
+    let page_key = self.inner.backend_page_id();
+    with_page_callbacks(&ctx, |r| {
+      r.exposed.insert(name.clone(), saved);
+      r.track_exposed_owner(page_key, name.clone());
+    })?;
+
+    let cb: ferridriver::events::ExposedBinding = std::sync::Arc::new({
+      let name = name.clone();
+      move |source, args: Vec<serde_json::Value>| {
+        let vm = vm.clone();
+        let name = name.clone();
+        Box::pin(async move {
+          let out: Result<rquickjs::Result<serde_json::Value>, crate::error::ScriptError> =
+            crate::vm_with!(vm => |ctx| {
+              let saved = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?.ok_or_else(|| {
+                rquickjs::Error::new_from_js_message("page.exposeBinding", "Error", "exposed callback gone".to_string())
+              })?;
+              let f = saved.restore(&ctx)?;
+              let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
+              // Playwright passes the source object first, then spreads
+              // the page-side call arguments: `callback(source, ...args)`.
+              let source_obj = rquickjs::Object::new(ctx.clone())?;
+              let source: ferridriver::events::BindingSource = source;
+              source_obj.set("context", source.context)?;
+              source_obj.set("page", source.page)?;
+              source_obj.set("frame", source.frame)?;
+              call_args.push_arg(source_obj.into_value())?;
+              for v in args {
+                call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;
+              }
+              let res = crate::bindings::fetch::bracket_net(
+                crate::bindings::fetch::policy_cell(&ctx),
+                saved.net().cloned(),
+                async {
+                  let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
+                  mp.into_future::<rquickjs::Value<'_>>().await
+                },
+              )
+              .await?;
+              let json = match ctx.json_stringify(res)? {
+                Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),
+                None => serde_json::Value::Null,
+              };
+              Ok(json)
+            })
+            .await;
+          out.map_or(serde_json::Value::Null, |inner| {
+            inner.unwrap_or(serde_json::Value::Null)
+          })
+        })
+      }
+    });
+    let inner = self.inner.clone();
+    Ok(rquickjs::promise::Promised::from(async move {
+      inner.expose_binding(&name, cb).await.into_js_with(&ctx)
     }))
   }
 

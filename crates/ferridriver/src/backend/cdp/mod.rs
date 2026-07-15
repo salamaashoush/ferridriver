@@ -3270,10 +3270,26 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
+    // Mirror Playwright's `frames.ts::dragAndDrop`:
+    //   mouse.move(source) -> mouse.down() -> mouse.move(target, {steps}) -> mouse.up()
+    // The initial hover-move positions the pointer over the draggable so
+    // drag libraries (interact.js, dnd-kit, native HTML5 DnD) register
+    // the ensuing `mousedown`/`pointerdown` as originating ON the
+    // element. Without it, `mousedown` fires from a stale pointer
+    // position and the library never starts the drag. The drag
+    // `mousemove`s carry `buttons: 1` (the left-button bitmask) — page
+    // handlers that gate on `event.buttons` need the held-button state,
+    // which a bare `button: "left"` does not convey.
     self
       .cmd(
         "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mousePressed", "x": from.0, "y": from.1, "button": "left", "clickCount": 1}),
+        serde_json::json!({"type": "mouseMoved", "x": from.0, "y": from.1}),
+      )
+      .await?;
+    self
+      .cmd(
+        "Input.dispatchMouseEvent",
+        serde_json::json!({"type": "mousePressed", "x": from.0, "y": from.1, "button": "left", "buttons": 1, "clickCount": 1}),
       )
       .await?;
     // Playwright default is `1` — a single `mousemove` at the destination.
@@ -3290,14 +3306,14 @@ impl<T: CdpWrap> CdpPage<T> {
       self
         .cmd(
           "Input.dispatchMouseEvent",
-          serde_json::json!({"type": "mouseMoved", "x": x, "y": y, "button": "left"}),
+          serde_json::json!({"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1}),
         )
         .await?;
     }
     self
       .cmd(
         "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mouseReleased", "x": to.0, "y": to.1, "button": "left", "clickCount": 1}),
+        serde_json::json!({"type": "mouseReleased", "x": to.0, "y": to.1, "button": "left", "buttons": 0, "clickCount": 1}),
       )
       .await?;
     if let Ok(mut guard) = self.last_cursor_pos.lock() {

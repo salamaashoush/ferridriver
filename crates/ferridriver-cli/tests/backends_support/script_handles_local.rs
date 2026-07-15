@@ -135,6 +135,38 @@ pub fn test_script_locator_drag_to_options(c: &mut McpClient) {
   assert!((214.0..=216.0).contains(&uy), "drop y should be ~215: got {uy} (v={v})");
 }
 
+// dragTo must hold the left button DOWN across the move (Playwright:
+// move(source) -> down -> move(target,{steps}) -> up). Drag libraries
+// (interact.js, dnd-kit, native HTML5 DnD) gate the drag on a mousemove
+// where `event.buttons` reflects the held button; CDP previously emitted
+// the drag moves without the `buttons` bitmask, so no drag ever started.
+// Observes a mousemove with buttons===1 firing between mousedown and
+// mouseup — an effect ONLY present when the held-button state is wired.
+pub fn test_script_drag_buttons_held(c: &mut McpClient) {
+  c.nav(
+    "<style>html,body{margin:0;padding:0}</style>\
+     <div id='src' style='width:80px;height:80px;background:#f00;position:absolute;left:20px;top:20px'></div>\
+     <div id='tgt' style='width:80px;height:80px;background:#0f0;position:absolute;left:200px;top:200px'></div>\
+     <div id='out'></div>\
+     <script>\
+       var down=false, moveWithButton=false;\
+       window.addEventListener('mousedown',function(){down=true;},true);\
+       window.addEventListener('mousemove',function(e){ if(down && e.buttons===1){moveWithButton=true;} },true);\
+       window.addEventListener('mouseup',function(){ document.getElementById('out').dataset.r=JSON.stringify({moveWithButton:moveWithButton}); },true);\
+     </script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#src').dragTo(page.locator('#tgt'), { steps: 4 }); \
+       const raw = await page.evaluate(\"document.getElementById('out').dataset.r || ''\"); \
+       return raw ? JSON.parse(raw) : null;",
+  );
+  assert_eq!(
+    v["moveWithButton"],
+    json!(true),
+    "a mousemove with buttons===1 (left held) must fire between mousedown and mouseup during the drag: {v}"
+  );
+}
+
 pub fn test_script_locator_drop_payload(c: &mut McpClient) {
   // A drop zone whose dragover calls preventDefault (accepts the drop)
   // and whose drop handler records the DataTransfer's text payload plus
