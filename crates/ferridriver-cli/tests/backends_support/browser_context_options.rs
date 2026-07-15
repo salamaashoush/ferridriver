@@ -36,11 +36,12 @@ use serde_json::json;
 
 use super::client::McpClient;
 
-/// WebKit's `WKWebView` host only supports a single browser context;
-/// `browser.newContext()` rejects with `WebKit does not support
-/// multiple browser contexts`. For options-bag tests that require a
-/// fresh context, skip on WebKit and document the gap in
-/// PLAYWRIGHT_COMPAT.md §4.1 → backend coverage.
+/// `browser.newContext()` works on WebKit (it mints a real context via
+/// `Playwright.createContext`), but whether each per-context option-bag
+/// override (userAgent, locale, viewport, ...) actually applies on the
+/// WebKit backend is unverified, so option-bag tests that need a fresh
+/// context skip WebKit conservatively. Tracked in
+/// `docs/PLAYWRIGHT-PARITY-BACKLOG.md`.
 fn skip_if_no_new_context(c: &McpClient) -> bool {
   c.backend == "webkit"
 }

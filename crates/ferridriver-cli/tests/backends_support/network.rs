@@ -500,8 +500,8 @@ pub fn test_network_response_body(c: &mut McpClient) {
   with_stub_server(|base| {
     c.nav_url(&format!("{base}/landed"));
     // Glob-string matcher (RegExp in waitFor* is a separate QuickJS
-    // parity gap tracked in PLAYWRIGHT_COMPAT.md; NAPI already accepts
-    // string | RegExp).
+    // parity gap tracked in docs/PLAYWRIGHT-PARITY-BACKLOG.md; NAPI already
+    // accepts string | RegExp).
     let script = r#"
       const wait = page.waitForResponse('**/api/users', 10000);
       await page.evaluate("fetch('/api/users').then(r => r.text())");
@@ -596,7 +596,7 @@ pub fn test_network_post_data(c: &mut McpClient) {
       // BiDi's `network.beforeRequestSent.request.body` is null for
       // fetch with a body in current Firefox builds; WebKit's JS-side
       // interceptor doesn't capture body either. Both leave `postData`
-      // null. Tracked in PLAYWRIGHT_COMPAT.md as a future enhancement.
+      // null. Tracked in docs/PLAYWRIGHT-PARITY-BACKLOG.md as a future enhancement.
       assert!(
         v["data"].is_null() || v["data"].as_str() == Some(""),
         "{} backend cannot capture postData yet: {v}",
@@ -644,8 +644,8 @@ pub fn test_network_headers(c: &mut McpClient) {
       // browser-sent request headers — the JS-fetch interceptor only
       // sees user-provided header overrides. `User-Agent` is set by the
       // browser stack and never reaches the interceptor. Tracked in
-      // PLAYWRIGHT_COMPAT.md as a real protocol limit (Rule 4 typed
-      // gap) — analogous to `printToPDF` on `WKWebView`.
+      // docs/PLAYWRIGHT-PARITY-BACKLOG.md as a real protocol limit (Rule 4
+      // typed gap) — analogous to `printToPDF` on `WKWebView`.
       assert!(
         v["userAgent"].is_null() || v["userAgent"].as_str() == Some(""),
         "WebKit cannot surface browser-set request headers: {v}",

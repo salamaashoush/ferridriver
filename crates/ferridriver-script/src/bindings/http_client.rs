@@ -259,7 +259,7 @@ impl HttpClientJs {
 
   /// Generic fetch — `options` may include `method` via `headers` only; this
   /// mirrors `RequestOptions` (no request overload for now — see the
-  /// `PLAYWRIGHT_COMPAT.md` gap for `HttpClient.fetch(Request, ...)`).
+  /// `docs/PLAYWRIGHT-PARITY-BACKLOG.md` gap for `HttpClient.fetch(Request, ...)`).
   #[qjs(rename = "fetch")]
   pub fn fetch<'js>(
     &self,
