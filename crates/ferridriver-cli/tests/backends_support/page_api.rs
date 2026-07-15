@@ -35,7 +35,53 @@ fn urlencoding(s: &str) -> String {
 
 const H1_HTML: &str = "<!doctype html><html><body><h1>page-api</h1></body></html>";
 
+// Playwright: `page.$eval(sel, fn, arg?)` runs the function on the FIRST
+// match; `page.$$eval(sel, fn, arg?)` on ALL matches as an array. Each
+// assertion observes a DOM-derived value that only appears when the
+// function actually ran against the resolved element(s).
+fn test_script_eval_on_selector(c: &mut McpClient) {
+  c.nav("<ul><li data-v='a'>one</li><li data-v='b'>two</li></ul>");
+  let first = c.script_value("return await page.$eval('li', el => el.getAttribute('data-v'));");
+  assert_eq!(first, json!("a"), "$eval ran fn on the first match: {first}");
+
+  let with_arg = c.script_value("return await page.$eval('li', (el, s) => el.textContent + s, '!');");
+  assert_eq!(with_arg, json!("one!"), "$eval forwards the arg to the fn: {with_arg}");
+
+  let all = c.script_value("return await page.$$eval('li', els => els.map(e => e.textContent));");
+  assert_eq!(all, json!(["one", "two"]), "$$eval ran fn over all matches: {all}");
+
+  // $eval throws when nothing matches (Playwright's evalOnSelector).
+  let miss = c.script("return await page.$eval('.nope', el => el.tagName);");
+  assert_ne!(
+    miss["status"].as_str(),
+    Some("ok"),
+    "$eval rejects when the selector matches nothing: {miss}"
+  );
+}
+
+// Playwright: `page.pause()`. ferridriver has no Inspector UI, so it
+// rejects with a typed Unsupported error rather than a silent no-op.
+fn test_script_page_pause_unsupported(c: &mut McpClient) {
+  c.nav("<h1>x</h1>");
+  let r = c.script("await page.pause(); return 'unreached';");
+  assert_ne!(
+    r["status"].as_str(),
+    Some("ok"),
+    "page.pause() must reject (Unsupported), not resolve: {r}"
+  );
+  let msg = r["error"]["message"].as_str().unwrap_or("").to_lowercase();
+  assert!(
+    msg.contains("pause") || msg.contains("inspector") || msg.contains("unsupported"),
+    "pause() error explains the missing Inspector: {r}"
+  );
+}
+
 pub fn register(set: &mut crate::TestSet<'_>) {
+  set.run("page_api::test_script_eval_on_selector", test_script_eval_on_selector);
+  set.run(
+    "page_api::test_script_page_pause_unsupported",
+    test_script_page_pause_unsupported,
+  );
   set.run("page_api::test_page_on_receives_console", test_page_on_receives_console);
   set.run("page_api::test_page_off_stops_delivery", test_page_off_stops_delivery);
   set.run("page_api::test_page_once_fires_once", test_page_once_fires_once);

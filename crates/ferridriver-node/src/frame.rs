@@ -75,6 +75,50 @@ impl Frame {
     Ok(crate::serialize_out::Evaluated(result))
   }
 
+  /// Playwright: `frame.$eval(selector, pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:242`).
+  #[napi(
+    js_name = "$eval",
+    ts_args_type = "selector: string, pageFunction: string | Function, arg?: unknown",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn eval_on_selector(
+    &self,
+    selector: String,
+    page_function: crate::types::NapiPageFunction,
+    arg: Option<crate::types::NapiEvaluateArg>,
+  ) -> Result<crate::serialize_out::Evaluated> {
+    let serialized = crate::page::build_serialized_argument(arg);
+    let result = self
+      .inner
+      .eval_on_selector(&selector, &page_function.source, serialized, page_function.is_function)
+      .await
+      .into_napi()?;
+    Ok(crate::serialize_out::Evaluated(result))
+  }
+
+  /// Playwright: `frame.$$eval(selector, pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:248`).
+  #[napi(
+    js_name = "$$eval",
+    ts_args_type = "selector: string, pageFunction: string | Function, arg?: unknown",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn eval_on_selector_all(
+    &self,
+    selector: String,
+    page_function: crate::types::NapiPageFunction,
+    arg: Option<crate::types::NapiEvaluateArg>,
+  ) -> Result<crate::serialize_out::Evaluated> {
+    let serialized = crate::page::build_serialized_argument(arg);
+    let result = self
+      .inner
+      .eval_on_selector_all(&selector, &page_function.source, serialized, page_function.is_function)
+      .await
+      .into_napi()?;
+    Ok(crate::serialize_out::Evaluated(result))
+  }
+
   /// Playwright: `frame.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:190`).
   #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown")]

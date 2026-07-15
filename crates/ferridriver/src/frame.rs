@@ -170,6 +170,70 @@ impl Frame {
     }
   }
 
+  /// Playwright: `frame.$eval(selector, pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:242`).
+  /// Resolves the first element matching `selector` through the selector
+  /// engine, then calls `fn(element, arg)`. Throws when no element
+  /// matches, matching Playwright's `evalOnSelector`.
+  ///
+  /// # Errors
+  ///
+  /// [`crate::error::FerriError::Evaluation`] when the selector matches
+  /// nothing or the user function throws; selector-parse / backend error.
+  pub async fn eval_on_selector(
+    &self,
+    selector: &str,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::protocol::SerializedValue> {
+    let parsed = crate::selectors::parse(selector)?;
+    let parts_json = crate::selectors::build_parts_json(&parsed);
+    self.page.inner.ensure_engine_injected().await?;
+    let sel_str = serde_json::to_string(selector)
+      .map_err(|e| crate::error::FerriError::Backend(format!("$eval selector escape: {e}")))?;
+    let probe = format!(
+      "() => {{ const r = window.__fd.selOne({parts_json}); \
+        if (!r) throw new Error('failed to find element matching selector ' + {sel_str}); \
+        return r; }}"
+    );
+    let match_handle = self
+      .evaluate_handle(&probe, crate::protocol::SerializedArgument::default(), Some(true))
+      .await?;
+    let result = match_handle.evaluate(fn_source, arg, is_function).await;
+    let _ = match_handle.dispose().await;
+    result
+  }
+
+  /// Playwright: `frame.$$eval(selector, pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:248`).
+  /// Resolves every element matching `selector` as an array, then calls
+  /// `fn(elements, arg)`. Unlike `$eval`, an empty match is not an error
+  /// -- the function receives an empty array.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error only when the user function throws, or on selector
+  /// parse / protocol failure.
+  pub async fn eval_on_selector_all(
+    &self,
+    selector: &str,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::protocol::SerializedValue> {
+    let parsed = crate::selectors::parse(selector)?;
+    let parts_json = crate::selectors::build_parts_json(&parsed);
+    self.page.inner.ensure_engine_injected().await?;
+    let probe = format!("() => window.__fd.selAll({parts_json})");
+    let array_handle = self
+      .evaluate_handle(&probe, crate::protocol::SerializedArgument::default(), Some(true))
+      .await?;
+    let result = array_handle.evaluate(fn_source, arg, is_function).await;
+    let _ = array_handle.dispose().await;
+    result
+  }
+
   /// Typed evaluate: run `fn_source` in this frame and deserialize the
   /// result via serde. Ergonomic wrapper over the wire-level
   /// [`Self::evaluate`] for JSON-shaped values:

@@ -759,6 +759,25 @@ impl Locator {
     Ok(crate::serialize_out::Evaluated(result))
   }
 
+  /// Playwright: `locator.waitForFunction(pageFunction, arg?, options?): Promise<void>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:396`).
+  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number }")]
+  pub async fn wait_for_function(
+    &self,
+    page_function: crate::types::NapiPageFunction,
+    arg: Option<crate::types::NapiEvaluateArg>,
+    options: Option<crate::types::EvaluateOptions>,
+  ) -> Result<()> {
+    let serialized = crate::page::build_serialized_argument(arg);
+    let opts: Option<ferridriver::options::EvaluateOptions> = options.map(Into::into);
+    let timeout = opts.and_then(|o| o.timeout);
+    self
+      .inner
+      .wait_for_function(&page_function.source, serialized, page_function.is_function, timeout)
+      .await
+      .map_err(crate::error::to_napi)
+  }
+
   #[napi]
   pub fn or_locator(&self, other: &Locator) -> Locator {
     Locator {

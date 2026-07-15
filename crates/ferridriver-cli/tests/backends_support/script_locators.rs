@@ -372,7 +372,53 @@ pub fn test_script_frame_locator_enter_frame_reads(c: &mut McpClient) {
   }
 }
 
+// Playwright: `locator.all()` returns one Locator per matching element
+// (nth=0..count-1). Proves each returned handle resolves its OWN element,
+// not just that the call didn't throw.
+pub fn test_script_locator_all(c: &mut McpClient) {
+  c.nav("<ul><li>one</li><li>two</li><li>three</li></ul>");
+  let v = c.script_value(
+    "const items = await page.locator('li').all(); \
+     const texts = []; \
+     for (const it of items) texts.push((await it.textContent()).trim()); \
+     return { count: items.length, texts };",
+  );
+  assert_eq!(v["count"], json!(3), "all() yields one locator per element: {v}");
+  assert_eq!(
+    v["texts"],
+    json!(["one", "two", "three"]),
+    "each locator resolves its own element in order: {v}"
+  );
+}
+
+// Playwright: `locator.waitForFunction(fn, arg?, options?)` polls the
+// element-scoped predicate until truthy. A page-side setTimeout flips the
+// text after the first poll, so a passing test proves the loop actually
+// re-polled (not that the predicate was already true).
+pub fn test_script_locator_wait_for_function(c: &mut McpClient) {
+  c.nav("<div id='t'>pending</div>");
+  let v = c.script_value(
+    "const el = page.locator('#t'); \
+     await page.evaluate(() => { setTimeout(() => { document.getElementById('t').textContent = 'ready'; }, 60); }); \
+     await el.waitForFunction(node => node.textContent === 'ready'); \
+     return { text: (await el.textContent()).trim() };",
+  );
+  assert_eq!(
+    v["text"],
+    json!("ready"),
+    "waitForFunction polled the element until the predicate turned truthy: {v}"
+  );
+}
+
 pub fn register(set: &mut crate::TestSet<'_>) {
+  set.run(
+    "backends_support::script_locators::test_script_locator_all",
+    test_script_locator_all,
+  );
+  set.run(
+    "backends_support::script_locators::test_script_locator_wait_for_function",
+    test_script_locator_wait_for_function,
+  );
   set.run(
     "backends_support::script_locators::test_script_frame_locator_enter_frame_reads",
     test_script_frame_locator_enter_frame_reads,

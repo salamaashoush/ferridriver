@@ -440,6 +440,50 @@ impl Page {
     self.query_selector_all(selector).await
   }
 
+  /// Playwright: `page.$eval(selector, pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:342`).
+  #[napi(
+    js_name = "$eval",
+    ts_args_type = "selector: string, pageFunction: string | Function, arg?: unknown",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn eval_on_selector(
+    &self,
+    selector: String,
+    page_function: crate::types::NapiPageFunction,
+    arg: Option<crate::types::NapiEvaluateArg>,
+  ) -> Result<crate::serialize_out::Evaluated> {
+    let serialized = build_serialized_argument(arg);
+    let result = self
+      .inner
+      .eval_on_selector(&selector, &page_function.source, serialized, page_function.is_function)
+      .await
+      .into_napi()?;
+    Ok(crate::serialize_out::Evaluated(result))
+  }
+
+  /// Playwright: `page.$$eval(selector, pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:347`).
+  #[napi(
+    js_name = "$$eval",
+    ts_args_type = "selector: string, pageFunction: string | Function, arg?: unknown",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn eval_on_selector_all(
+    &self,
+    selector: String,
+    page_function: crate::types::NapiPageFunction,
+    arg: Option<crate::types::NapiEvaluateArg>,
+  ) -> Result<crate::serialize_out::Evaluated> {
+    let serialized = build_serialized_argument(arg);
+    let result = self
+      .inner
+      .eval_on_selector_all(&selector, &page_function.source, serialized, page_function.is_function)
+      .await
+      .into_napi()?;
+    Ok(crate::serialize_out::Evaluated(result))
+  }
+
   #[napi]
   pub fn get_by_role(&self, role: String, options: Option<RoleOptions>) -> Locator {
     let opts = options.map(ferridriver::options::RoleOptions::from);
@@ -1628,6 +1672,63 @@ impl Page {
       inner.expose_function(&name, cb).await.map_err(crate::error::to_napi)
     })
     .build(env)
+  }
+
+  /// Playwright: `page.exposeBinding(name, callback)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:371`).
+  /// Like [`Self::expose_function`], but the callback additionally
+  /// receives a `BindingSource` (`{ context, page, frame }` identifiers).
+  /// NAPI is fire-and-forget — the page-side promise resolves to `null`.
+  #[napi(
+    ts_args_type = "name: string, callback: (source: { context: string, page: string, frame: string }, args: unknown[]) => void",
+    ts_return_type = "Promise<void>"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)] // napi-derive requires `&Env`
+  pub fn expose_binding(
+    &self,
+    env: &napi::Env,
+    name: String,
+    callback: napi::bindgen_prelude::Function<
+      '_,
+      napi::bindgen_prelude::FnArgs<(crate::context::BindingSourceJs, serde_json::Value)>,
+      (),
+    >,
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
+    let tsfn = callback
+      .build_threadsafe_function()
+      .callee_handled::<false>()
+      .weak::<true>()
+      .max_queue_size::<0>()
+      .build()?;
+    let binding: ferridriver::ExposedBinding = std::sync::Arc::new(move |source, args| {
+      let arg: napi::bindgen_prelude::FnArgs<(crate::context::BindingSourceJs, serde_json::Value)> = (
+        crate::context::BindingSourceJs {
+          context: source.context,
+          page: source.page,
+          frame: source.frame,
+        },
+        serde_json::Value::Array(args),
+      )
+        .into();
+      tsfn.call(arg, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
+      Box::pin(async move { serde_json::Value::Null })
+    });
+    let inner = Arc::clone(&self.inner);
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      inner
+        .expose_binding(&name, binding)
+        .await
+        .map_err(crate::error::to_napi)
+    })
+    .build(env)
+  }
+
+  /// Playwright: `page.pause(): Promise<void>` (`client/page.ts:858`).
+  /// ferridriver has no Inspector/recorder UI, so this rejects with a
+  /// typed `Unsupported` error rather than silently pretending to pause.
+  #[napi]
+  pub fn pause(&self) -> Result<()> {
+    self.inner.pause().map_err(crate::error::to_napi)
   }
 
   /// ferridriver-specific (NOT Playwright). Playwright's public

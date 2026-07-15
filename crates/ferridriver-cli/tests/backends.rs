@@ -156,6 +156,10 @@ fn register_script_handles(set: &mut TestSet<'_>) {
   );
   run!(
     set,
+    backends_support::script_handles_local::test_script_drag_buttons_held
+  );
+  run!(
+    set,
     backends_support::script_handles_local::test_script_locator_drop_payload
   );
   run!(
@@ -506,6 +510,7 @@ fn register_binding_surface(set: &mut TestSet<'_>) {
   run!(set, backends_support::binding_surface::test_page_touchscreen_tap);
   run!(set, backends_support::binding_surface::test_page_snapshot_for_ai);
   run!(set, backends_support::binding_surface::test_page_expose_function);
+  run!(set, backends_support::binding_surface::test_page_expose_binding);
   run!(set, backends_support::binding_surface::test_context_expose_binding);
   run!(set, backends_support::binding_surface::test_context_expose_function);
   run!(
