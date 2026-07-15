@@ -1087,8 +1087,8 @@ impl AnyPage {
   /// uses `Runtime.evaluate.contextId`; `BiDi` uses the browsing-context
   /// realm; `WebKit` currently has no per-frame execution context, so
   /// non-main `frame_id` values fall back to the main page (DOM access
-  /// via `WKFrameInfo` is a separate gap tracked in Section B of
-  /// `PLAYWRIGHT_COMPAT.md`).
+  /// via `WKFrameInfo` is a separate gap tracked in
+  /// `docs/PLAYWRIGHT-PARITY-BACKLOG.md`).
   pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement> {
     page_dispatch!(self, evaluate_to_element(js, frame_id))
   }

@@ -1693,8 +1693,8 @@ impl From<AriaSnapshotOptions> for ferridriver::options::AriaSnapshotOptions {
 /// a string match (exact). The Playwright TS surface accepts
 /// `string | RegExp` here too; ferridriver's Rust core only supports
 /// the string form today (regex filtering would require touching
-/// every backend's cookie clear path) — that gap is tracked under
-/// "Section B" of `PLAYWRIGHT_COMPAT.md`.
+/// every backend's cookie clear path) — that gap is tracked in
+/// `docs/PLAYWRIGHT-PARITY-BACKLOG.md`.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct ClearCookieOptions {
