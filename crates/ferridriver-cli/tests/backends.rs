@@ -508,6 +508,16 @@ fn register_expect(set: &mut TestSet<'_>) {
   run!(set, backends_support::expect::test_expect_to_throw_in_script);
   run!(set, backends_support::expect::test_expect_failure_throws);
   run!(set, backends_support::expect::test_expect_poll_with_browser);
+  run!(set, backends_support::expect::test_expect_inline_timeout_option);
+  run!(set, backends_support::expect::test_expect_to_pass_retries);
+  run!(set, backends_support::expect::test_expect_to_pass_timeout_and_intervals);
+  run!(set, backends_support::expect::test_expect_not_to_pass);
+  run!(set, backends_support::expect::test_expect_boolean_state_options);
+  run!(set, backends_support::expect::test_expect_text_match_options);
+  run!(set, backends_support::expect::test_expect_to_have_attribute_overloads);
+  run!(set, backends_support::expect::test_expect_new_locator_matchers);
+  run!(set, backends_support::expect::test_expect_to_have_url_ignore_case);
+  run!(set, backends_support::expect::test_expect_poll_intervals_option);
 }
 
 fn register_binding_surface(set: &mut TestSet<'_>) {

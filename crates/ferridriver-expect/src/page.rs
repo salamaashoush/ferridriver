@@ -94,6 +94,14 @@ impl<P: Borrow<Page>> Expect<'_, P> {
   }
 
   pub async fn to_have_url(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
+    self.to_have_url_with(expected, false).await
+  }
+
+  pub async fn to_have_url_with(
+    &self,
+    expected: impl Into<StringOrRegex>,
+    ignore_case: bool,
+  ) -> Result<(), AssertionFailure> {
     let expected = expected.into();
     let page: &Page = self.subject.borrow();
     let is_not = self.is_not;
@@ -101,7 +109,7 @@ impl<P: Borrow<Page>> Expect<'_, P> {
       let expected = expected.clone();
       async move {
         let actual = page.url();
-        let matches = expected.matches(&actual);
+        let matches = expected.matches_with(&actual, ignore_case);
         if matches == is_not {
           Err(MatchError::new(
             format!("{}{}", if is_not { "not " } else { "" }, expected.description()),

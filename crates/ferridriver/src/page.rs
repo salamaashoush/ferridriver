@@ -202,6 +202,14 @@ impl Page {
               g.navigated(info);
             }
           },
+          PageEvent::FrameNavigatedWithinDocument(info) => {
+            // Same document, new URL: no `since-navigation` reset, no
+            // subtree detach — just keep the tracked URL fresh so
+            // `page.url()` / `waitForURL` observe SPA route changes.
+            if let Ok(mut g) = cache.lock() {
+              g.navigated_within(&info.frame_id, &info.url);
+            }
+          },
           PageEvent::Console(msg) => {
             if let Ok(mut o) = observed.lock() {
               o.push_console(msg);
@@ -1401,7 +1409,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the content cannot be set.
-  pub async fn set_content(&self, html: &str) -> Result<()> {
+  pub async fn set_content(self: &Arc<Self>, html: &str) -> Result<()> {
     self.inner.set_content(html).await?;
     // Playwright `page.setContent` defaults to `waitUntil: 'load'`.
     // Wait for the injected document to finish loading so its
@@ -1541,27 +1549,77 @@ impl Page {
   /// Wait for the page URL to match the given matcher.
   ///
   /// Accepts glob, regex, or predicate via [`crate::url_matcher::UrlMatcher`].
-  /// Mirrors Playwright's `page.waitForURL(url | RegExp | predicate)` semantic.
+  /// Playwright: `page.waitForURL(url: string | RegExp | ((url: URL) => boolean),
+  /// options?: { timeout?, waitUntil? })` — once the URL matches, the
+  /// `waitUntil` lifecycle state (default `load`) is awaited within the
+  /// same timeout budget; `commit` returns on the URL match alone.
   ///
   /// # Errors
   ///
   /// Returns an error if the wait times out.
-  pub async fn wait_for_url(&self, matcher: crate::url_matcher::UrlMatcher) -> Result<()> {
-    let timeout_ms = self.default_navigation_timeout();
+  pub fn wait_for_url(
+    self: &Arc<Self>,
+    matcher: crate::url_matcher::UrlMatcher,
+  ) -> crate::action::Action<'static, crate::options::WaitForUrlOptions, ()> {
+    let page = Arc::clone(self);
+    crate::action::Action::new(move |opts| Box::pin(async move { page.wait_for_url_impl(&matcher, opts).await }))
+  }
+
+  /// Implementation of [`Self::wait_for_url`]. The URL is tracked
+  /// locally (no wire cost to read), so the loop parks on the page
+  /// event stream and re-checks on each event, with a coarse fallback
+  /// tick for anything the stream misses.
+  pub(crate) async fn wait_for_url_impl(
+    self: &Arc<Self>,
+    matcher: &crate::url_matcher::UrlMatcher,
+    opts: crate::options::WaitForUrlOptions,
+  ) -> Result<()> {
+    let timeout_ms = opts.timeout.unwrap_or_else(|| self.default_navigation_timeout());
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut events = self.events().subscribe();
     loop {
-      if tokio::time::Instant::now() >= deadline {
+      if matcher.matches(&self.url()) {
+        break;
+      }
+      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+      if remaining.is_zero() {
         return Err(crate::error::FerriError::timeout(
           format!("waiting for URL matching {:?}", matcher.identifier()),
           timeout_ms,
         ));
       }
-      let current = self.url();
-      if matcher.matches(&current) {
-        return Ok(());
+      let tick = remaining.min(std::time::Duration::from_millis(250));
+      tokio::select! {
+        ev = events.recv() => {
+          if ev.is_none() {
+            // Emitter dropped (page closing) — keep ticking until the
+            // deadline instead of spinning on a closed channel.
+            tokio::time::sleep(tick).await;
+          }
+        },
+        () = tokio::time::sleep(tick) => {},
       }
-      tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+    let state = match opts.wait_until.unwrap_or_default() {
+      crate::options::LoadState::Commit => return Ok(()),
+      crate::options::LoadState::Load => "load",
+      crate::options::LoadState::DomContentLoaded => "domcontentloaded",
+      crate::options::LoadState::NetworkIdle => "networkidle",
+    };
+    let remaining = u64::try_from(
+      deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
+    self
+      .wait_for_load_state_impl(
+        Some(state),
+        crate::options::WaitForLoadStateOptions {
+          timeout: Some(remaining),
+        },
+      )
+      .await
   }
 
   pub async fn wait_for_timeout(&self, ms: u64) {
@@ -1573,72 +1631,105 @@ impl Page {
   /// - `"domcontentloaded"` - wait for `document.readyState !== "loading"`
   /// - `"networkidle"` - wait for no network activity for 500ms
   ///
+  /// Playwright: `page.waitForLoadState(state?, options?: { timeout? })`.
+  ///
   /// # Errors
   ///
   /// Returns an error if the wait times out before the load state is reached.
-  pub async fn wait_for_load_state(&self, state: Option<&str>) -> Result<()> {
+  pub fn wait_for_load_state(
+    self: &Arc<Self>,
+    state: Option<&str>,
+  ) -> crate::action::Action<'static, crate::options::WaitForLoadStateOptions, ()> {
+    let page = Arc::clone(self);
+    let state = state.map(str::to_string);
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move { page.wait_for_load_state_impl(state.as_deref(), opts).await })
+    })
+  }
+
+  /// Implementation of [`Self::wait_for_load_state`]. One in-page
+  /// promise per attempt instead of a protocol-eval poll loop: the page
+  /// resolves the promise when the state is reached, so the wire
+  /// carries a single round trip in the common case. An attempt dies
+  /// with its document on cross-document navigation — the loop re-arms
+  /// in the new document. Each attempt is also capped so a reply lost
+  /// to a target swap (`WebKit`) re-arms instead of hanging forever.
+  pub(crate) async fn wait_for_load_state_impl(
+    self: &Arc<Self>,
+    state: Option<&str>,
+    opts: crate::options::WaitForLoadStateOptions,
+  ) -> Result<()> {
+    const JS_WAIT_LOAD: &str = "() => document.readyState === 'complete' \
+       ? true \
+       : new Promise(function(resolve) { window.addEventListener('load', function() { resolve(true); }, { once: true }); })";
+    const JS_WAIT_DOMCONTENTLOADED: &str = "() => (document.readyState === 'interactive' || document.readyState === 'complete') \
+       ? true \
+       : new Promise(function(resolve) { document.addEventListener('DOMContentLoaded', function() { resolve(true); }, { once: true }); })";
+    // Same signal the old Rust-side poll used (resource timing entries,
+    // 500ms quiet window, 100ms sampling) — but sampled in-page so the
+    // whole wait is one round trip.
+    const JS_WAIT_NETWORKIDLE: &str = "() => new Promise(function(resolve) { \
+       var idleSince = performance.now(); \
+       function pending() { \
+         var rs = performance.getEntriesByType('resource'); \
+         var now = performance.now(); \
+         for (var i = 0; i < rs.length; i++) { \
+           if (rs[i].responseEnd === 0 || now - rs[i].responseEnd < 100) return true; \
+         } \
+         return false; \
+       } \
+       (function check() { \
+         var now = performance.now(); \
+         if (pending()) idleSince = now; \
+         if (now - idleSince >= 500) return resolve(true); \
+         setTimeout(check, 100); \
+       })(); \
+     })";
+
     let state = state.unwrap_or("load");
-    let timeout_ms = self.default_timeout();
+    let timeout_ms = opts.timeout.unwrap_or_else(|| self.default_timeout());
+
+    // The state check precedes the deadline, matching the old poll loop
+    // and Playwright's local lifecycle bookkeeping: an already-reached
+    // state passes regardless of how small the timeout is. Without this,
+    // the promise attempt's own round trip would eat a tiny budget and
+    // report a false timeout on slower transports.
+    if state != "networkidle"
+      && let Ok(Some(v)) = self.inner.evaluate("document.readyState").await
+    {
+      let s = v.as_str().unwrap_or("loading");
+      let reached = match state {
+        "domcontentloaded" => s == "interactive" || s == "complete",
+        _ => s == "complete",
+      };
+      if reached {
+        return Ok(());
+      }
+    }
+
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
 
-    match state {
-      "domcontentloaded" => loop {
-        if tokio::time::Instant::now() >= deadline {
-          return Err(crate::error::FerriError::timeout(
-            "waiting for domcontentloaded",
-            timeout_ms,
-          ));
-        }
-        if let Ok(Some(v)) = self.inner.evaluate("document.readyState").await {
-          let s = v.as_str().unwrap_or("loading");
-          if s == "interactive" || s == "complete" {
-            return Ok(());
-          }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(16)).await;
-      },
-      "networkidle" => {
-        // Wait for no pending network requests for 500ms.
-        // Uses Performance API to detect network activity.
-        let mut idle_since = tokio::time::Instant::now();
-        let idle_threshold = std::time::Duration::from_millis(500);
-        loop {
-          if tokio::time::Instant::now() >= deadline {
-            return Err(crate::error::FerriError::timeout("waiting for networkidle", timeout_ms));
-          }
-          // Check if there are pending resource loads
-          let has_pending = self
-            .inner
-            .evaluate(
-              "(function(){var p=performance.getEntriesByType('resource');\
-             var now=performance.now();\
-             return p.some(function(e){return e.responseEnd===0 || (now - e.responseEnd) < 100})})()",
-            )
-            .await
-            .ok()
-            .flatten();
-          if has_pending == Some(serde_json::Value::Bool(true)) {
-            idle_since = tokio::time::Instant::now();
-          } else if tokio::time::Instant::now() - idle_since >= idle_threshold {
-            return Ok(());
-          }
-          tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-      },
-      _ => {
-        // "load" -- wait for document.readyState === "complete"
-        loop {
-          if tokio::time::Instant::now() >= deadline {
-            return Err(crate::error::FerriError::timeout("waiting for load state", timeout_ms));
-          }
-          if let Ok(Some(v)) = self.inner.evaluate("document.readyState").await {
-            if v.as_str() == Some("complete") {
-              return Ok(());
-            }
-          }
+    let (js, timeout_label) = match state {
+      "domcontentloaded" => (JS_WAIT_DOMCONTENTLOADED, "waiting for domcontentloaded"),
+      "networkidle" => (JS_WAIT_NETWORKIDLE, "waiting for networkidle"),
+      _ => (JS_WAIT_LOAD, "waiting for load state"),
+    };
+
+    loop {
+      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+      if remaining.is_zero() {
+        return Err(crate::error::FerriError::timeout(timeout_label, timeout_ms));
+      }
+      let attempt_cap = remaining.min(std::time::Duration::from_secs(5));
+      match tokio::time::timeout(attempt_cap, self.main_frame().eval::<bool>(js)).await {
+        Ok(Ok(true)) => return Ok(()),
+        Ok(Ok(false) | Err(_)) => {
+          // Transient evaluate failure (document destroyed mid-wait);
+          // brief pause, then re-arm in whatever document is live now.
           tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-      },
+        },
+        Err(_) => {}, // attempt cap hit — re-arm
+      }
     }
   }
 

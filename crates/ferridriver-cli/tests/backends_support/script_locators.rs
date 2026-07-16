@@ -501,7 +501,35 @@ pub fn test_script_locator_wait_for_function(c: &mut McpClient) {
   );
 }
 
+pub fn test_script_locator_filter_has(c: &mut McpClient) {
+  // filter({ has / hasNot }) round-trips a JSON-encoded inner selector
+  // through internal:has= — double-encoding turned the inner selector
+  // into a quoted string that parsed as a text engine and matched
+  // nothing. XPath inner locators additionally exercise the
+  // relative-`.//` rewrite of the injected XPathEngine.
+  c.nav(
+    "<div class='card'><span class='tag'>Signature</span></div> \
+     <div class='card'><span class='tag'>Date</span></div>",
+  );
+  let v = c.script_value(
+    "const cssHas = await page.locator('.card').filter({ has: page.locator('.tag') }).count(); \
+     const xpathHas = await page.locator(\"//*[contains(@class,'card')]\") \
+       .filter({ has: page.locator(\"//*[contains(@class,'tag') and contains(.,'Signature')]\") }).count(); \
+     const hasNot = await page.locator('.card').filter({ hasNot: page.locator(\"//*[contains(.,'Signature')]\") }).count(); \
+     const bareHas = await page.locator('css=.card >> has=.tag').count(); \
+     return { cssHas, xpathHas, hasNot, bareHas };",
+  );
+  assert_eq!(v["cssHas"], serde_json::json!(2), "{v}");
+  assert_eq!(v["xpathHas"], serde_json::json!(1), "{v}");
+  assert_eq!(v["hasNot"], serde_json::json!(1), "{v}");
+  assert_eq!(v["bareHas"], serde_json::json!(2), "{v}");
+}
+
 pub fn register(set: &mut crate::TestSet<'_>) {
+  set.run(
+    "backends_support::script_locators::test_script_locator_filter_has",
+    test_script_locator_filter_has,
+  );
   set.run(
     "backends_support::script_locators::test_script_locator_all",
     test_script_locator_all,

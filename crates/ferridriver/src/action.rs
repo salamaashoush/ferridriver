@@ -238,6 +238,15 @@ action_options!(crate::options::WaitOptions {
   ms timeout: u64,
 });
 
+action_options!(crate::options::WaitForUrlOptions {
+  opt wait_until: crate::options::LoadState,
+  ms timeout: u64,
+});
+
+action_options!(crate::options::WaitForLoadStateOptions {
+  ms timeout: u64,
+});
+
 action_options!(crate::options::AriaSnapshotOptions {
   opt mode: crate::options::AriaSnapshotMode,
   opt depth: i32,

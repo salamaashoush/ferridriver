@@ -186,20 +186,38 @@ for (const backend of BACKENDS) {
       await expect(page.route(/x/y, () => {})).rejects.toThrow(/unsupported JS regex flag/);
     });
 
-    // ── waitForUrl ─────────────────────────────────────────────────────
+    // ── waitForURL ─────────────────────────────────────────────────────
 
-    it("waitForUrl resolves on glob match after navigation", async () => {
+    it("waitForURL resolves on glob match after navigation", async () => {
       const nav = page.goto(testUrl + "/page-a", null);
-      await page.waitForUrl("**/page-a");
+      await page.waitForURL("**/page-a");
       await nav;
       expect(await page.title()).toBe("A");
     });
 
-    it("waitForUrl resolves on RegExp match after navigation", async () => {
+    it("waitForURL resolves on RegExp match after navigation", async () => {
       const nav = page.goto(testUrl + "/page-b", null);
-      await page.waitForUrl(/\/page-[ab]$/);
+      await page.waitForURL(/\/page-[ab]$/);
       await nav;
       expect(await page.title()).toBe("B");
+    });
+
+    it("waitForURL honors the inline timeout option", async () => {
+      const started = Date.now();
+      await expect(page.waitForURL(/never-matches/, { timeout: 400 })).rejects.toThrow(/400/);
+      expect(Date.now() - started).toBeLessThan(3000);
+    });
+
+    it("waitForURL accepts waitUntil lifecycle states", async () => {
+      await page.waitForURL(/\/page-[ab]$/, { waitUntil: "domcontentloaded" });
+      await page.waitForURL(/\/page-[ab]$/, { waitUntil: "commit" });
+    });
+
+    it("waitForLoadState honors state and inline timeout option", async () => {
+      // Already-loaded page: the state check runs before the deadline
+      // check, so even a 1ms budget passes.
+      await page.waitForLoadState("load", { timeout: 1 });
+      await page.waitForLoadState("networkidle", { timeout: 10_000 });
     });
 
     // ── waitForRequest + waitForResponse ──────────────────────────────

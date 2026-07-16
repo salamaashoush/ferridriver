@@ -1091,6 +1091,42 @@ impl From<GotoOptions> for ferridriver::options::GotoOptions {
   }
 }
 
+/// Options for `page.waitForURL(url, { timeout?, waitUntil? })`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct WaitForUrlOptions {
+  /// Maximum wait time in milliseconds.
+  pub timeout: Option<f64>,
+  /// Lifecycle state to await once the URL matches: "load",
+  /// "domcontentloaded", "networkidle", "commit".
+  pub wait_until: Option<String>,
+}
+
+impl From<WaitForUrlOptions> for ferridriver::options::WaitForUrlOptions {
+  fn from(o: WaitForUrlOptions) -> Self {
+    Self {
+      timeout: o.timeout.map(f64_to_u64),
+      wait_until: o.wait_until.as_deref().map(ferridriver::options::LoadState::from),
+    }
+  }
+}
+
+/// Options for `page.waitForLoadState(state?, { timeout? })`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct WaitForLoadStateOptions {
+  /// Maximum wait time in milliseconds.
+  pub timeout: Option<f64>,
+}
+
+impl From<WaitForLoadStateOptions> for ferridriver::options::WaitForLoadStateOptions {
+  fn from(o: WaitForLoadStateOptions) -> Self {
+    Self {
+      timeout: o.timeout.map(f64_to_u64),
+    }
+  }
+}
+
 /// Options for `page.consoleMessages` / `page.pageErrors`. Playwright:
 /// `{ filter?: 'all' | 'since-navigation' }` (default `since-navigation`).
 #[napi(object)]

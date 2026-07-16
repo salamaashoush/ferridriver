@@ -439,6 +439,21 @@ pub struct WaitOptions {
   pub timeout: Option<u64>,
 }
 
+/// Playwright: `page.waitForURL(url, options?: { timeout?, waitUntil? })`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WaitForUrlOptions {
+  pub timeout: Option<u64>,
+  pub wait_until: Option<LoadState>,
+}
+
+/// Playwright: `page.waitForLoadState(state?, options?: { timeout? })`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WaitForLoadStateOptions {
+  pub timeout: Option<u64>,
+}
+
 /// `LocatorEvaluateOptions` — only the `timeout` field today.
 #[derive(Debug, Clone, Default)]
 pub struct EvaluateOptions {

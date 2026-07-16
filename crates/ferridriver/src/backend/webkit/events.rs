@@ -582,6 +582,9 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
     Some("Page.frameDetached") => {
       handle_frame_detached(&env.params, &ctx.frame_cache, &ctx.emitter_frame, &ctx.frame_contexts).await;
     },
+    Some("Page.navigatedWithinDocument") => {
+      handle_frame_navigated_within(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
+    },
     Some("Network.webSocketCreated") => handle_websocket_created(&env.params, &ctx.websockets, &ctx.emitter).await,
     Some("Network.webSocketFrameSent") => handle_websocket_frame(&env.params, &ctx.websockets, true).await,
     Some("Network.webSocketFrameReceived") => handle_websocket_frame(&env.params, &ctx.websockets, false).await,
@@ -942,6 +945,28 @@ fn handle_frame_navigated(params: &Value, frame_cache: &FrameCache, emitter: &cr
     cache.navigated(info.clone());
   }
   emitter.emit(crate::events::PageEvent::FrameNavigated(info));
+}
+
+/// Same-document navigation (`history.pushState` / `replaceState` /
+/// fragment): `WebKit` sends `{ frameId, url }`. URL-only cache update —
+/// the document (and any child frames) persists. Mirrors Playwright's
+/// `wkPage.ts::_onFrameNavigatedWithinDocument`.
+fn handle_frame_navigated_within(params: &Value, frame_cache: &FrameCache, emitter: &crate::events::EventEmitter) {
+  let Some(frame_id) = params.get("frameId").and_then(Value::as_str) else {
+    return;
+  };
+  let url = params.get("url").and_then(Value::as_str).unwrap_or("");
+  if let Ok(mut cache) = frame_cache.lock() {
+    cache.navigated_within(frame_id, url);
+  }
+  emitter.emit(crate::events::PageEvent::FrameNavigatedWithinDocument(
+    crate::backend::FrameInfo {
+      frame_id: frame_id.to_string(),
+      parent_frame_id: None,
+      name: String::new(),
+      url: url.to_string(),
+    },
+  ));
 }
 
 async fn handle_frame_detached(

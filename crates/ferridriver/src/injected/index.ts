@@ -16,7 +16,7 @@ import { parseEvaluationResultValue, serializeAsCallArgument } from '@isomorphic
 
 // ── Types ──
 
-type SelectorPart = { engine: string; body: string };
+type SelectorPart = { engine: string; body: string; capture?: boolean };
 
 // ── Create InjectedScript instance ──
 
@@ -41,6 +41,16 @@ const injected = new InjectedScript(window, {
 // exact flag: body enclosed in double quotes = exact match, otherwise substring/case-insensitive.
 function partsToSelectorString(parts: SelectorPart[]): string {
   return parts.map(p => {
+    // Playwright `*` capture modifier: re-emitted onto the converted
+    // part so the ported parseSelector records the capture index.
+    const star = p.capture ? '*' : '';
+    const converted = partToSelectorString(p);
+    return star + converted;
+  }).join(' >> ');
+}
+
+function partToSelectorString(p: SelectorPart): string {
+  {
     const engine = p.engine;
     const body = p.body;
     // Detect exact match: Playwright convention is body wrapped in double quotes
@@ -65,9 +75,9 @@ function partsToSelectorString(parts: SelectorPart[]): string {
         // role body is already in Playwright format: button[name="Save"][checked=true]...
         return `internal:role=${body}`;
       case 'has':
-        return `internal:has="${body.replace(/"/g, '\\"')}"`;
+        return `internal:has=${normalizeHasBody(body)}`;
       case 'has-not':
-        return `internal:has-not="${body.replace(/"/g, '\\"')}"`;
+        return `internal:has-not=${normalizeHasBody(body)}`;
       case 'has-text':
         return `internal:has-text=${escapeForTextSelector(rawBody, isExact)}`;
       case 'has-not-text':
@@ -91,10 +101,30 @@ function partsToSelectorString(parts: SelectorPart[]): string {
       case 'internal:or':
         return `${engine}=${body}`;
       default:
-        // css, xpath, id, nth, visible - pass through
+        // css, xpath, id, nth, visible, and Playwright-native engines
+        // (`:light` variants, data-testid aliases, aria-ref,
+        // internal:control, internal:chain) - pass through
         return `${engine}=${body}`;
     }
-  }).join(' >> ');
+  }
+}
+
+// `internal:has=` arrives with a JSON-encoded inner selector (the
+// Playwright client wire shape core's `filter()` emits); the bare
+// `has=` shorthand in hand-written selector strings carries a raw
+// selector. Normalize to exactly one level of JSON encoding — wrapping
+// an already-encoded body a second time turns the inner selector into
+// a quoted string that Playwright's parser reads as a text engine.
+function normalizeHasBody(body: string): string {
+  if (body.startsWith('"')) {
+    try {
+      JSON.parse(body);
+      return body;
+    } catch {
+      // fall through: not valid JSON — treat as a raw selector
+    }
+  }
+  return JSON.stringify(body);
 }
 
 function executeSelector(parts: SelectorPart[], root: Node): Element[] {

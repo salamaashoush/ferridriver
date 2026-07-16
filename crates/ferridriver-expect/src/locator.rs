@@ -63,13 +63,39 @@ pub fn check_bool(actual: bool, is_not: bool, expected_state: &str) -> Result<()
   }
 }
 
-pub fn check_text_match(expected: &StringOrRegex, actual: &str, is_not: bool, _label: &str) -> Result<(), MatchError> {
-  let matches = expected.matches(actual);
+pub fn check_text_match(expected: &StringOrRegex, actual: &str, is_not: bool, label: &str) -> Result<(), MatchError> {
+  check_text_match_with(expected, actual, is_not, false, label)
+}
+
+pub fn check_text_match_with(
+  expected: &StringOrRegex,
+  actual: &str,
+  is_not: bool,
+  ignore_case: bool,
+  _label: &str,
+) -> Result<(), MatchError> {
+  let matches = expected.matches_with(actual, ignore_case);
   if matches == is_not {
     let exp = format!("{}{}", if is_not { "not " } else { "" }, expected.description());
     Err(MatchError::new(exp, format!("\"{actual}\"")))
   } else {
     Ok(())
+  }
+}
+
+/// Options shared by the text matchers (`toHaveText` / `toContainText`).
+/// Mirrors Playwright's `{ ignoreCase?, useInnerText? }`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TextMatchOptions {
+  pub ignore_case: bool,
+  pub use_inner_text: bool,
+}
+
+async fn fetch_text(locator: &Locator, use_inner_text: bool) -> String {
+  if use_inner_text {
+    locator.inner_text().await.unwrap_or_default()
+  } else {
+    locator.text_content().await.unwrap_or(None).unwrap_or_default()
   }
 }
 
@@ -132,6 +158,30 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     poll_locator(locator, self.timeout, "toBeEditable", is_not, || async move {
       let editable = locator.is_editable().await.unwrap_or(false);
       check_bool(editable, is_not, "to be editable")
+    })
+    .await
+  }
+
+  /// Playwright's `toBeEditable({ editable: false })` maps to a
+  /// readonly assertion (`to.be.readonly`), which is not the negation of
+  /// editable: a disabled input is neither editable nor readonly.
+  /// Mirrors the injected-script check: `readOnly` for form controls,
+  /// `aria-readonly` otherwise.
+  pub async fn to_be_readonly(&self) -> Result<(), AssertionFailure> {
+    let locator: &Locator = self.subject.borrow();
+    let is_not = self.is_not;
+    poll_locator(locator, self.timeout, "toBeReadonly", is_not, || async move {
+      let readonly = locator
+        .evaluate(
+          "el => el.readOnly === true || el.getAttribute('aria-readonly') === 'true'",
+          ferridriver::protocol::SerializedArgument::default(),
+          None,
+        )
+        .await
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+      check_bool(readonly, is_not, "to be readonly")
     })
     .await
   }
@@ -216,30 +266,52 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   // ── Text / Value ──
 
   pub async fn to_have_text(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
+    self.to_have_text_with(expected, TextMatchOptions::default()).await
+  }
+
+  pub async fn to_have_text_with(
+    &self,
+    expected: impl Into<StringOrRegex>,
+    options: TextMatchOptions,
+  ) -> Result<(), AssertionFailure> {
     let expected = expected.into();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_locator(locator, self.timeout, "toHaveText", is_not, || {
       let expected = expected.clone();
       async move {
-        let actual = locator.text_content().await.unwrap_or(None).unwrap_or_default();
-        check_text_match(&expected, actual.trim(), is_not, "text")
+        let actual = fetch_text(locator, options.use_inner_text).await;
+        check_text_match_with(&expected, actual.trim(), is_not, options.ignore_case, "text")
       }
     })
     .await
   }
 
   pub async fn to_contain_text(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
+    self.to_contain_text_with(expected, TextMatchOptions::default()).await
+  }
+
+  pub async fn to_contain_text_with(
+    &self,
+    expected: impl Into<StringOrRegex>,
+    options: TextMatchOptions,
+  ) -> Result<(), AssertionFailure> {
     let expected = expected.into();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     poll_locator(locator, self.timeout, "toContainText", is_not, || {
       let expected = expected.clone();
       async move {
-        let actual = locator.text_content().await.unwrap_or(None).unwrap_or_default();
+        let actual = fetch_text(locator, options.use_inner_text).await;
         let matches = match &expected {
-          StringOrRegex::String(s) => actual.contains(s.as_str()),
-          StringOrRegex::Regex(re) => re.is_match(&actual),
+          StringOrRegex::String(s) => {
+            if options.ignore_case {
+              actual.to_lowercase().contains(&s.to_lowercase())
+            } else {
+              actual.contains(s.as_str())
+            }
+          },
+          StringOrRegex::Regex(_) => expected.matches_with(&actual, options.ignore_case),
         };
         if matches == is_not {
           Err(MatchError::new(
@@ -313,6 +385,15 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   // ── Attributes ──
 
   pub async fn to_have_attribute(&self, name: &str, value: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
+    self.to_have_attribute_with(name, value, false).await
+  }
+
+  pub async fn to_have_attribute_with(
+    &self,
+    name: &str,
+    value: impl Into<StringOrRegex>,
+    ignore_case: bool,
+  ) -> Result<(), AssertionFailure> {
     let expected = value.into();
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
@@ -326,7 +407,13 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
           .await
           .unwrap_or(None)
           .unwrap_or_default();
-        check_text_match(&expected, &actual, is_not, &format!("attribute \"{attr_name}\""))
+        check_text_match_with(
+          &expected,
+          &actual,
+          is_not,
+          ignore_case,
+          &format!("attribute \"{attr_name}\""),
+        )
       }
     })
     .await

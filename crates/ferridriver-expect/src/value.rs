@@ -35,6 +35,21 @@ impl StringOrRegex {
       Self::Regex(re) => format!("/{}/", re.as_str()),
     }
   }
+
+  /// Like [`Self::matches`], with Playwright's `ignoreCase` semantics:
+  /// strings compare case-folded, regexes are re-evaluated with the `i`
+  /// flag prepended.
+  pub fn matches_with(&self, actual: &str, ignore_case: bool) -> bool {
+    if !ignore_case {
+      return self.matches(actual);
+    }
+    match self {
+      Self::String(expected) => actual.to_lowercase() == expected.to_lowercase(),
+      Self::Regex(re) => {
+        Regex::new(&format!("(?i){}", re.as_str())).map_or_else(|_| re.is_match(actual), |r| r.is_match(actual))
+      },
+    }
+  }
 }
 
 impl From<&str> for StringOrRegex {

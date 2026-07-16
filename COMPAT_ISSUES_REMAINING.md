@@ -40,6 +40,12 @@ real app.acme.com Sign flow and minimal local pages.
 (nothing verified-failing at the moment — re-test the real app.acme.com Sign
 flow on the next rebuilt binary and log regressions here)
 
+New script-sandbox parity gaps found on the 2026-07-16 signer-flow run
+(`context.waitForEvent`, `context.pages()`, `filter({hasText: RegExp})`,
+`waitForURL` timeout option) are tracked in
+`docs/PLAYWRIGHT-PARITY-BACKLOG.md` under "Script-sandbox gaps hit driving
+the real app.acme.com Sign flow".
+
 ## Live app verification (real app.acme.com Sign, cdp-pipe, via box plugin)
 
 Re-tested end-to-end after the fixes, not just synthetic pages:

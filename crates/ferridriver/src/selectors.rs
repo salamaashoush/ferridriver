@@ -30,6 +30,9 @@ pub struct Selector {
 pub struct SelectorPart {
   pub engine: Engine,
   pub body: String,
+  /// Playwright `*` capture modifier: in a chain, the query returns this
+  /// part's element instead of the last part's.
+  pub capture: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +86,11 @@ pub enum Engine {
   /// engine passes the current element through untouched, so matching
   /// is unaffected. Body is the JSON-quoted description.
   InternalDescribe,
+  /// Any other engine Playwright's injected registry resolves natively
+  /// (`:light` variants, `data-testid` aliases, `aria-ref`,
+  /// `internal:control`, `internal:chain`). The name is forwarded
+  /// verbatim; matching happens in the injected engine.
+  Other(String),
 }
 
 /// Bootstrap JS script to be evaluated on new document.
@@ -131,43 +139,31 @@ pub struct MatchedElement {
 /// Check if a selector string uses the rich engine format (not plain CSS).
 #[must_use]
 pub fn is_rich_selector(s: &str) -> bool {
-  let prefixes = [
-    "role=",
-    "text=",
-    "testid=",
-    "label=",
-    "placeholder=",
-    "alt=",
-    "title=",
-    "xpath=",
-    "id=",
-    "css=",
-    "nth=",
-    "visible=",
-    "has=",
-    "internal:has=",
-    "has-text=",
-    "internal:has-text=",
-    "has-not=",
-    "internal:has-not=",
-    "has-not-text=",
-    "internal:has-not-text=",
-    "internal:and=",
-    "internal:or=",
-    "internal:text=",
-    "internal:label=",
-    "internal:attr=",
-    "internal:testid=",
-    "internal:role=",
-    "internal:describe=",
-  ];
   let trimmed = s.trim();
-  // Has explicit engine prefix
-  if prefixes.iter().any(|p| trimmed.starts_with(p)) {
+  // Chaining operator (Playwright splits on `>>` regardless of spacing)
+  if trimmed.contains(">>") {
     return true;
   }
-  // Has chaining operator
-  if trimmed.contains(" >> ") {
+  // Explicit engine prefix (`name=`, optionally `*`-captured)
+  if let Some(eq_idx) = trimmed.find('=') {
+    let raw_name = trimmed[..eq_idx].trim();
+    if is_engine_name(raw_name) {
+      let name = raw_name.strip_prefix('*').unwrap_or(raw_name);
+      if engine_by_name(name).is_some() {
+        return true;
+      }
+    }
+  }
+  // Playwright auto-detected engines (quoted text, bare xpath) need the
+  // selector engine too — a backend CSS query would silently match nothing.
+  let bytes = trimmed.as_bytes();
+  if trimmed.len() > 1
+    && ((bytes[0] == b'"' && bytes[trimmed.len() - 1] == b'"')
+      || (bytes[0] == b'\'' && bytes[trimmed.len() - 1] == b'\''))
+  {
+    return true;
+  }
+  if trimmed.trim_start_matches('(').starts_with("//") || trimmed.starts_with("..") {
     return true;
   }
   false
@@ -175,12 +171,18 @@ pub fn is_rich_selector(s: &str) -> bool {
 
 // ─── Parser ─────────────────────────────────────────────────────────────────
 
-/// Parse a selector string into a Selector AST.
+/// Parse a selector string into a Selector AST. Mirrors Playwright's
+/// `parseSelectorString`
+/// (`/tmp/playwright/packages/isomorphic/selectorParser.ts:154`):
+/// same tokenizer, engine-name detection, `*` capture modifier, and
+/// text/xpath/css auto-detection.
 ///
 /// # Errors
 ///
-/// Returns an error if the selector string is empty or has an invalid chain.
+/// Returns an error if the selector string is empty, has an invalid
+/// chain, names an unknown engine, or uses more than one `*` capture.
 pub fn parse(selector: &str) -> Result<Selector> {
+  let original = selector;
   let selector = selector.trim();
   if selector.is_empty() {
     return Err(FerriError::invalid_selector(selector, "selector cannot be empty"));
@@ -189,16 +191,42 @@ pub fn parse(selector: &str) -> Result<Selector> {
   // Split by >> respecting quoted strings
   let raw_parts = split_by_chain(selector);
   let mut parts = Vec::new();
+  let mut has_capture = false;
 
   for raw in raw_parts {
     let raw = raw.trim();
     if raw.is_empty() {
       return Err(FerriError::invalid_selector(selector, "empty selector part in chain"));
     }
-    parts.push(parse_part(raw));
+    let part = parse_part(original, raw)?;
+    if part.capture {
+      if has_capture {
+        return Err(FerriError::invalid_selector(
+          original,
+          "Only one of the selectors can capture using * modifier",
+        ));
+      }
+      has_capture = true;
+    }
+    parts.push(part);
   }
 
   Ok(Selector { parts })
+}
+
+/// Playwright quirk (`selectorParser.ts:202`): inside a `text=` body that
+/// already has content, a quote character is literal text, not a quote
+/// opener — `text=some "quoted" >> css=div` must still split at `>>`.
+fn should_ignore_text_selector_quote(prefix: &str) -> bool {
+  let t = prefix.trim_start();
+  let Some(rest) = t.strip_prefix("text") else {
+    return false;
+  };
+  let rest = rest.trim_start();
+  let Some(body) = rest.strip_prefix('=') else {
+    return false;
+  };
+  !body.is_empty()
 }
 
 fn split_by_chain(s: &str) -> Vec<String> {
@@ -212,7 +240,7 @@ fn split_by_chain(s: &str) -> Vec<String> {
   let bytes = s.as_bytes();
   let mut start = 0;
   let mut i = 0;
-  let mut in_quote: u8 = 0; // 0 = none, b'"' or b'\''
+  let mut in_quote: u8 = 0; // 0 = none, b'"', b'\'', or b'`'
 
   while i < bytes.len() {
     let c = bytes[i];
@@ -230,7 +258,7 @@ fn split_by_chain(s: &str) -> Vec<String> {
       continue;
     }
 
-    if c == b'"' || c == b'\'' {
+    if (c == b'"' || c == b'\'' || c == b'`') && !should_ignore_text_selector_quote(&s[start..i]) {
       in_quote = c;
       i += 1;
       continue;
@@ -260,62 +288,114 @@ fn split_by_chain(s: &str) -> Vec<String> {
   parts
 }
 
-fn parse_part(s: &str) -> SelectorPart {
-  // Try each engine prefix.
-  //
-  // `internal:has`, `internal:has-text`, `internal:has-not`,
-  // `internal:has-not-text` are aliases Playwright emits from
-  // `client/locator.ts` (`filter({ hasText, has, ... })`). They are the
-  // same semantics as the non-prefixed engines on the server side —
-  // see `/tmp/playwright/packages/playwright-core/src/server/selectors.ts:42-43`
-  // which lists `internal:has`, `internal:has-not`, `internal:has-text`,
-  // `internal:has-not-text` alongside the bare engines. Alias them here
-  // so ferridriver's filter() output is accepted unchanged.
-  let engines = [
-    ("role=", Engine::Role),
-    ("text=", Engine::Text),
-    ("testid=", Engine::TestId),
-    ("label=", Engine::Label),
-    ("placeholder=", Engine::Placeholder),
-    ("alt=", Engine::Alt),
-    ("title=", Engine::Title),
-    ("xpath=", Engine::XPath),
-    ("id=", Engine::Id),
-    ("css=", Engine::Css),
-    ("nth=", Engine::Nth),
-    ("visible=", Engine::Visible),
-    ("has=", Engine::Has),
-    ("internal:has=", Engine::Has),
-    ("has-text=", Engine::HasText),
-    ("internal:has-text=", Engine::HasText),
-    ("has-not=", Engine::HasNot),
-    ("internal:has-not=", Engine::HasNot),
-    ("has-not-text=", Engine::HasNotText),
-    ("internal:has-not-text=", Engine::HasNotText),
-    ("internal:and=", Engine::InternalAnd),
-    ("internal:or=", Engine::InternalOr),
-    ("internal:text=", Engine::InternalText),
-    ("internal:label=", Engine::InternalLabel),
-    ("internal:attr=", Engine::InternalAttr),
-    ("internal:testid=", Engine::InternalTestId),
-    ("internal:role=", Engine::InternalRole),
-    ("internal:describe=", Engine::InternalDescribe),
-  ];
+/// Map an explicit engine name (the text before `=`) to its engine.
+///
+/// `internal:has`, `internal:has-text`, `internal:has-not`,
+/// `internal:has-not-text` are aliases Playwright emits from
+/// `client/locator.ts` (`filter({ hasText, has, ... })`). They are the
+/// same semantics as the non-prefixed engines on the server side —
+/// see `/tmp/playwright/packages/playwright-core/src/server/selectors.ts:42-43`.
+///
+/// Names without a dedicated variant that Playwright's injected registry
+/// knows (`injectedScript.ts:214-244`: the `:light` variants,
+/// `data-testid`/`data-test-id`/`data-test`, `aria-ref`,
+/// `internal:control`, `internal:chain`) pass through as
+/// [`Engine::Other`] — the injected engine resolves them natively.
+fn engine_by_name(name: &str) -> Option<Engine> {
+  let engine = match name {
+    "role" => Engine::Role,
+    "text" => Engine::Text,
+    "testid" => Engine::TestId,
+    "label" => Engine::Label,
+    "placeholder" => Engine::Placeholder,
+    "alt" => Engine::Alt,
+    "title" => Engine::Title,
+    "xpath" => Engine::XPath,
+    "id" => Engine::Id,
+    "css" => Engine::Css,
+    "nth" => Engine::Nth,
+    "visible" => Engine::Visible,
+    "has" | "internal:has" => Engine::Has,
+    "has-text" | "internal:has-text" => Engine::HasText,
+    "has-not" | "internal:has-not" => Engine::HasNot,
+    "has-not-text" | "internal:has-not-text" => Engine::HasNotText,
+    "internal:and" => Engine::InternalAnd,
+    "internal:or" => Engine::InternalOr,
+    "internal:text" => Engine::InternalText,
+    "internal:label" => Engine::InternalLabel,
+    "internal:attr" => Engine::InternalAttr,
+    "internal:testid" => Engine::InternalTestId,
+    "internal:role" => Engine::InternalRole,
+    "internal:describe" => Engine::InternalDescribe,
+    "css:light" | "xpath:light" | "text:light" | "id:light" | "data-testid" | "data-testid:light" | "data-test-id"
+    | "data-test-id:light" | "data-test" | "data-test:light" | "aria-ref" | "internal:control" | "internal:chain" => {
+      Engine::Other(name.to_string())
+    },
+    _ => return None,
+  };
+  Some(engine)
+}
 
-  for (prefix, engine) in &engines {
-    if let Some(body) = s.strip_prefix(prefix) {
-      return SelectorPart {
-        engine: engine.clone(),
-        body: body.to_string(),
+/// True when the name before `=` is shaped like an engine name —
+/// Playwright's `/^[a-zA-Z_0-9-+:*]+$/` (`selectorParser.ts:164`).
+fn is_engine_name(name: &str) -> bool {
+  !name.is_empty()
+    && name
+      .bytes()
+      .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'+' | b':' | b'*'))
+}
+
+fn parse_part(selector: &str, s: &str) -> Result<SelectorPart> {
+  // Mirrors the `append()` closure of Playwright's `parseSelectorString`
+  // (`/tmp/playwright/packages/isomorphic/selectorParser.ts:160-193`):
+  // an engine-name prefix before `=` wins; then a fully quoted part is
+  // the text engine (quotes kept in the body); then `//` (optionally
+  // behind opening parentheses) or a leading `..` is xpath; everything
+  // else is CSS. A leading `*` on the name marks the capture part.
+  if let Some(eq_idx) = s.find('=') {
+    let raw_name = s[..eq_idx].trim();
+    if is_engine_name(raw_name) {
+      let (capture, name) = match raw_name.strip_prefix('*') {
+        Some(rest) => (true, rest),
+        None => (false, raw_name),
       };
+      let Some(engine) = engine_by_name(name) else {
+        return Err(FerriError::invalid_selector(
+          selector,
+          format!("unknown selector engine \"{name}\""),
+        ));
+      };
+      return Ok(SelectorPart {
+        engine,
+        body: s[eq_idx + 1..].to_string(),
+        capture,
+      });
     }
   }
 
-  // Default: treat as CSS selector
-  SelectorPart {
+  let bytes = s.as_bytes();
+  if s.len() > 1
+    && ((bytes[0] == b'"' && bytes[s.len() - 1] == b'"') || (bytes[0] == b'\'' && bytes[s.len() - 1] == b'\''))
+  {
+    return Ok(SelectorPart {
+      engine: Engine::Text,
+      body: s.to_string(),
+      capture: false,
+    });
+  }
+  if s.trim_start_matches('(').starts_with("//") || s.starts_with("..") {
+    return Ok(SelectorPart {
+      engine: Engine::XPath,
+      body: s.to_string(),
+      capture: false,
+    });
+  }
+
+  Ok(SelectorPart {
     engine: Engine::Css,
     body: s.to_string(),
-  }
+    capture: false,
+  })
 }
 
 // ─── JS Query Builder ───────────────────────────────────────────────────────
@@ -351,6 +431,9 @@ pub fn build_parts_json(selector: &Selector) -> String {
     buf.push_str(r#"","body":"#);
     // Inline JSON string escaping into the buffer
     json_escape_string_into(&mut buf, &p.body);
+    if p.capture {
+      buf.push_str(r#","capture":true"#);
+    }
     buf.push('}');
   }
   buf.push(']');
@@ -358,8 +441,9 @@ pub fn build_parts_json(selector: &Selector) -> String {
 }
 
 /// Map Engine variant to its protocol string.
-fn engine_str(engine: &Engine) -> &'static str {
+fn engine_str(engine: &Engine) -> &str {
   match engine {
+    Engine::Other(name) => name,
     Engine::Css => "css",
     Engine::Text => "text",
     Engine::Role => "role",
@@ -656,4 +740,121 @@ pub async fn cleanup_tags(page: &AnyPage) {
     })()",
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn single_engine(selector: &str) -> Engine {
+    let parsed = parse(selector).unwrap();
+    assert_eq!(parsed.parts.len(), 1, "expected one part for {selector}");
+    parsed.parts[0].engine.clone()
+  }
+
+  #[test]
+  fn bare_xpath_auto_detects() {
+    assert_eq!(single_engine("//h1"), Engine::XPath);
+    assert_eq!(single_engine("//*[@id='a' or @name='b']"), Engine::XPath);
+    assert_eq!(single_engine("(//h1)[1]"), Engine::XPath);
+    assert_eq!(single_engine("((//a)[2])"), Engine::XPath);
+    assert_eq!(single_engine("../div"), Engine::XPath);
+  }
+
+  #[test]
+  fn quoted_text_auto_detects_and_keeps_quotes() {
+    let parsed = parse("\"Sign In\"").unwrap();
+    assert_eq!(parsed.parts[0].engine, Engine::Text);
+    assert_eq!(parsed.parts[0].body, "\"Sign In\"");
+    assert_eq!(single_engine("'Sign In'"), Engine::Text);
+  }
+
+  #[test]
+  fn css_still_default() {
+    assert_eq!(single_engine("h1"), Engine::Css);
+    assert_eq!(single_engine("div.cls > a"), Engine::Css);
+    assert_eq!(single_engine("[data-x='//not-xpath']"), Engine::Css);
+  }
+
+  #[test]
+  fn explicit_prefixes_untouched() {
+    assert_eq!(single_engine("xpath=//h1"), Engine::XPath);
+    assert_eq!(single_engine("css=//weird"), Engine::Css);
+    assert_eq!(single_engine("text=//literal"), Engine::Text);
+  }
+
+  #[test]
+  fn chained_parts_detect_each() {
+    let parsed = parse("div.row >> //button").unwrap();
+    assert_eq!(parsed.parts[0].engine, Engine::Css);
+    assert_eq!(parsed.parts[1].engine, Engine::XPath);
+  }
+
+  #[test]
+  fn rich_selector_covers_auto_detected() {
+    assert!(is_rich_selector("//h1"));
+    assert!(is_rich_selector("(//h1)[1]"));
+    assert!(is_rich_selector("../div"));
+    assert!(is_rich_selector("\"Sign In\""));
+    assert!(is_rich_selector("data-testid=submit"));
+    assert!(is_rich_selector("*css=div >> text=x"));
+    assert!(!is_rich_selector("h1.cls"));
+    assert!(!is_rich_selector("input[name=login]"));
+  }
+
+  #[test]
+  fn engine_name_with_surrounding_whitespace() {
+    // Playwright trims the name (`part.substring(0, eqIndex).trim()`)
+    // and keeps the body untrimmed.
+    let parsed = parse("div >> text =  hi").unwrap();
+    assert_eq!(parsed.parts[1].engine, Engine::Text);
+    assert_eq!(parsed.parts[1].body, "  hi");
+  }
+
+  #[test]
+  fn unknown_engine_errors_like_playwright() {
+    let err = parse("bogus=stuff").unwrap_err();
+    assert!(err.to_string().contains("unknown selector engine"), "{err}");
+  }
+
+  #[test]
+  fn capture_modifier_parses_once() {
+    let parsed = parse("*css=div >> text=x").unwrap();
+    assert!(parsed.parts[0].capture);
+    assert!(!parsed.parts[1].capture);
+    let err = parse("*css=div >> *text=x").unwrap_err();
+    assert!(err.to_string().contains("capture"), "{err}");
+  }
+
+  #[test]
+  fn playwright_native_engines_pass_through() {
+    assert_eq!(single_engine("data-testid=submit"), Engine::Other("data-testid".into()));
+    assert_eq!(single_engine("aria-ref=e12"), Engine::Other("aria-ref".into()));
+    assert_eq!(single_engine("css:light=div"), Engine::Other("css:light".into()));
+  }
+
+  #[test]
+  fn text_body_quotes_do_not_swallow_chain() {
+    // Inside a non-empty text= body, quotes are literal (Playwright's
+    // shouldIgnoreTextSelectorQuote) — the chain after must still split.
+    let parsed = parse("text=Don't stop >> css=div").unwrap();
+    assert_eq!(parsed.parts.len(), 2);
+    assert_eq!(parsed.parts[0].engine, Engine::Text);
+    assert_eq!(parsed.parts[0].body, "Don't stop");
+    assert_eq!(parsed.parts[1].engine, Engine::Css);
+  }
+
+  #[test]
+  fn backtick_quotes_protect_chain() {
+    let parsed = parse("css=[data-x=`a >> b`] >> text=x").unwrap();
+    assert_eq!(parsed.parts.len(), 2);
+    assert_eq!(parsed.parts[0].body, "[data-x=`a >> b`]");
+  }
+
+  #[test]
+  fn capture_survives_parts_json() {
+    let parsed = parse("*css=div >> text=x").unwrap();
+    let json = build_parts_json(&parsed);
+    assert!(json.contains(r#""capture":true"#), "{json}");
+  }
 }

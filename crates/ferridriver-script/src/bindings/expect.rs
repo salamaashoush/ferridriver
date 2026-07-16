@@ -198,6 +198,24 @@ impl ExpectJs {
     }
     Ok(e)
   }
+
+  /// Per-call copy with the inline `{ timeout }` matcher option applied
+  /// (Playwright: every web-first matcher accepts `{ timeout? }` in its
+  /// trailing options bag, overriding the assertion default).
+  fn for_call(&self, obj: Option<&Object<'_>>) -> Self {
+    let timeout = u64_field(obj, "timeout");
+    self.clone_with(|e| {
+      if let Some(ms) = timeout {
+        e.timeout = Duration::from_millis(ms);
+      }
+    })
+  }
+
+  /// Copy with negation toggled — backs boolean-state matcher options
+  /// (`toBeChecked({ checked: false })`, `toBeAttached({ attached: false })`).
+  fn negated(&self) -> Self {
+    self.clone_with(|e| e.is_not = !e.is_not)
+  }
 }
 
 fn assertion_to_rq(ctx: &Ctx<'_>, err: AssertionFailure) -> rquickjs::Error {
@@ -210,6 +228,79 @@ fn assertion_to_rq(ctx: &Ctx<'_>, err: AssertionFailure) -> rquickjs::Error {
     _ => err.message,
   };
   crate::bindings::convert::throw_named(ctx, "AssertionError", full)
+}
+
+/// The options bag of a web-first matcher call, if one was passed.
+fn opts_obj<'js>(options: &Opt<Value<'js>>) -> Option<Object<'js>> {
+  options.0.as_ref().and_then(Value::as_object).cloned()
+}
+
+fn u64_field(obj: Option<&Object<'_>>, key: &str) -> Option<u64> {
+  let v = obj?.get::<_, rquickjs::Value<'_>>(key).ok()?;
+  v.as_int()
+    .and_then(|i| u64::try_from(i).ok())
+    .or_else(|| v.as_number().filter(|n| *n >= 0.0).map(|n| n as u64))
+}
+
+fn bool_field(obj: Option<&Object<'_>>, key: &str) -> Option<bool> {
+  obj?.get::<_, rquickjs::Value<'_>>(key).ok()?.as_bool()
+}
+
+fn f64_field(obj: Option<&Object<'_>>, key: &str) -> Option<f64> {
+  let v = obj?.get::<_, rquickjs::Value<'_>>(key).ok()?;
+  v.as_number().or_else(|| v.as_int().map(f64::from))
+}
+
+/// Parse a `number[]` option field (e.g. `intervals`), dropping
+/// non-numeric entries; `None` when absent or empty.
+fn u64_array_field(obj: Option<&Object<'_>>, key: &str) -> Option<Vec<u64>> {
+  let arr = obj?.get::<_, rquickjs::Value<'_>>(key).ok()?.into_array()?;
+  let out: Vec<u64> = arr
+    .iter::<rquickjs::Value<'_>>()
+    .filter_map(std::result::Result::ok)
+    .filter_map(|v| {
+      v.as_int()
+        .and_then(|i| u64::try_from(i).ok())
+        .or_else(|| v.as_number().filter(|n| *n >= 0.0).map(|n| n as u64))
+    })
+    .collect();
+  (!out.is_empty()).then_some(out)
+}
+
+/// Throw when a Playwright option we cannot honor yet is present —
+/// silently accepting and dropping it would be a false completion.
+fn reject_unsupported_option(obj: Option<&Object<'_>>, matcher: &'static str, key: &str) -> rquickjs::Result<()> {
+  if let Some(o) = obj
+    && o.contains_key(key).unwrap_or(false)
+  {
+    return Err(rquickjs::Error::new_from_js_message(
+      "expect",
+      matcher,
+      format!("the \"{key}\" option is not supported yet"),
+    ));
+  }
+  Ok(())
+}
+
+/// True when the value is a string or a RegExp instance — the shapes
+/// Playwright treats as an expected text value rather than an options
+/// bag in overloads like `toHaveAttribute(name, value?, options?)`.
+fn is_string_or_regex(value: &Value<'_>) -> bool {
+  if value.as_string().is_some() {
+    return true;
+  }
+  value.as_object().is_some_and(|obj| {
+    let src = obj.get::<_, rquickjs::Value<'_>>("source").ok();
+    let flags = obj.get::<_, rquickjs::Value<'_>>("flags").ok();
+    matches!((src, flags), (Some(s), Some(f)) if s.as_string().is_some() && f.as_string().is_some())
+  })
+}
+
+fn text_match_options(obj: Option<&Object<'_>>) -> ferridriver_expect::TextMatchOptions {
+  ferridriver_expect::TextMatchOptions {
+    ignore_case: bool_field(obj, "ignoreCase").unwrap_or(false),
+    use_inner_text: bool_field(obj, "useInnerText").unwrap_or(false),
+  }
 }
 
 fn parse_string_or_regex<'js>(_ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<StringOrRegex> {
@@ -506,155 +597,550 @@ impl ExpectJs {
   }
 
   // ── Locator web-first matchers (delegated to ferridriver-expect) ──
+  //
+  // Every matcher takes Playwright's trailing options bag; `{ timeout }`
+  // overrides the assertion timeout for that call. Boolean-state options
+  // (`visible: false`, `enabled: false`, ...) dispatch to the matching
+  // counterpart assertion, mirroring Playwright's matcher lowering.
 
+  /// Playwright: `toBeVisible(options?: { timeout?, visible? })`.
   #[qjs(rename = "toBeVisible")]
-  pub async fn to_be_visible(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-    self
-      .build_locator_expect()?
-      .to_be_visible()
-      .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
+  pub async fn to_be_visible<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
+    let me = self.for_call(o.as_ref());
+    let want_visible = bool_field(o.as_ref(), "visible").unwrap_or(true);
+    if want_visible {
+      me.build_locator_expect()?.to_be_visible().await
+    } else {
+      me.build_locator_expect()?.to_be_hidden().await
+    }
+    .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright: `toBeHidden(options?: { timeout? })`.
   #[qjs(rename = "toBeHidden")]
-  pub async fn to_be_hidden(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+  pub async fn to_be_hidden<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
     self
+      .for_call(o.as_ref())
       .build_locator_expect()?
       .to_be_hidden()
       .await
       .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright: `toBeEnabled(options?: { enabled?, timeout? })`.
   #[qjs(rename = "toBeEnabled")]
-  pub async fn to_be_enabled(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-    self
-      .build_locator_expect()?
-      .to_be_enabled()
-      .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
+  pub async fn to_be_enabled<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
+    let me = self.for_call(o.as_ref());
+    let want_enabled = bool_field(o.as_ref(), "enabled").unwrap_or(true);
+    if want_enabled {
+      me.build_locator_expect()?.to_be_enabled().await
+    } else {
+      me.build_locator_expect()?.to_be_disabled().await
+    }
+    .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright: `toBeDisabled(options?: { timeout? })`.
   #[qjs(rename = "toBeDisabled")]
-  pub async fn to_be_disabled(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+  pub async fn to_be_disabled<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
     self
+      .for_call(o.as_ref())
       .build_locator_expect()?
       .to_be_disabled()
       .await
       .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright: `toBeChecked(options?: { checked?, indeterminate?, timeout? })`.
   #[qjs(rename = "toBeChecked")]
-  pub async fn to_be_checked(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-    self
-      .build_locator_expect()?
+  pub async fn to_be_checked<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
+    reject_unsupported_option(o.as_ref(), "toBeChecked", "indeterminate")?;
+    let me = self.for_call(o.as_ref());
+    let want_checked = bool_field(o.as_ref(), "checked").unwrap_or(true);
+    let me = if want_checked { me } else { me.negated() };
+    me.build_locator_expect()?
       .to_be_checked()
       .await
       .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright: `toBeEditable(options?: { editable?, timeout? })`.
+  /// `editable: false` maps to the readonly assertion, matching
+  /// Playwright's `to.be.readonly` lowering (not a plain negation).
   #[qjs(rename = "toBeEditable")]
-  pub async fn to_be_editable(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-    self
-      .build_locator_expect()?
-      .to_be_editable()
-      .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
+  pub async fn to_be_editable<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
+    let me = self.for_call(o.as_ref());
+    let want_editable = bool_field(o.as_ref(), "editable").unwrap_or(true);
+    if want_editable {
+      me.build_locator_expect()?.to_be_editable().await
+    } else {
+      me.build_locator_expect()?.to_be_readonly().await
+    }
+    .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright: `toBeAttached(options?: { attached?, timeout? })`.
   #[qjs(rename = "toBeAttached")]
-  pub async fn to_be_attached(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-    self
-      .build_locator_expect()?
+  pub async fn to_be_attached<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
+    let me = self.for_call(o.as_ref());
+    let want_attached = bool_field(o.as_ref(), "attached").unwrap_or(true);
+    let me = if want_attached { me } else { me.negated() };
+    me.build_locator_expect()?
       .to_be_attached()
       .await
       .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright: `toBeEmpty(options?: { timeout? })`.
   #[qjs(rename = "toBeEmpty")]
-  pub async fn to_be_empty(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+  pub async fn to_be_empty<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
     self
+      .for_call(o.as_ref())
       .build_locator_expect()?
       .to_be_empty()
       .await
       .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright: `toBeFocused(options?: { timeout? })`.
+  #[qjs(rename = "toBeFocused")]
+  pub async fn to_be_focused<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
+    self
+      .for_call(o.as_ref())
+      .build_locator_expect()?
+      .to_be_focused()
+      .await
+      .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
+  /// Playwright: `toBeInViewport(options?: { ratio?, timeout? })`.
+  #[qjs(rename = "toBeInViewport")]
+  pub async fn to_be_in_viewport<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
+    let opts = ferridriver_expect::InViewportOptions {
+      ratio: f64_field(o.as_ref(), "ratio"),
+    };
+    self
+      .for_call(o.as_ref())
+      .build_locator_expect()?
+      .to_be_in_viewport_with(opts)
+      .await
+      .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
+  /// Playwright: `toHaveText(expected: string | RegExp,
+  /// options?: { ignoreCase?, timeout?, useInnerText? })`.
   #[qjs(rename = "toHaveText")]
-  pub async fn to_have_text<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
+  pub async fn to_have_text<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
     let exp = parse_string_or_regex(&ctx, &expected)?;
+    let o = opts_obj(&options);
     self
+      .for_call(o.as_ref())
       .build_locator_expect()?
-      .to_have_text(exp)
+      .to_have_text_with(exp, text_match_options(o.as_ref()))
       .await
       .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright: `toContainText(expected: string | RegExp,
+  /// options?: { ignoreCase?, timeout?, useInnerText? })`.
   #[qjs(rename = "toContainText")]
-  pub async fn to_contain_text(&self, ctx: Ctx<'_>, expected: String) -> rquickjs::Result<()> {
+  pub async fn to_contain_text<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let exp = parse_string_or_regex(&ctx, &expected)?;
+    let o = opts_obj(&options);
     self
+      .for_call(o.as_ref())
       .build_locator_expect()?
-      .to_contain_text(StringOrRegex::String(expected))
+      .to_contain_text_with(exp, text_match_options(o.as_ref()))
       .await
       .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright: `toHaveValue(value: string | RegExp, options?: { timeout? })`.
   #[qjs(rename = "toHaveValue")]
-  pub async fn to_have_value<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
+  pub async fn to_have_value<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
     let exp = parse_string_or_regex(&ctx, &expected)?;
+    let o = opts_obj(&options);
     self
+      .for_call(o.as_ref())
       .build_locator_expect()?
       .to_have_value(exp)
       .await
       .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
-  #[qjs(rename = "toHaveCount")]
-  pub async fn to_have_count(&self, ctx: Ctx<'_>, expected: u32) -> rquickjs::Result<()> {
+  /// Playwright: `toHaveValues(values: Array<string | RegExp>,
+  /// options?: { timeout? })`. RegExp entries are not supported yet —
+  /// they throw rather than silently mismatching.
+  #[qjs(rename = "toHaveValues")]
+  pub async fn to_have_values<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: Vec<Value<'js>>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let mut values = Vec::with_capacity(expected.len());
+    for v in &expected {
+      let Some(s) = v.as_string() else {
+        return Err(rquickjs::Error::new_from_js_message(
+          "expect",
+          "toHaveValues",
+          "RegExp entries are not supported yet — pass strings",
+        ));
+      };
+      values.push(s.to_string()?);
+    }
+    let o = opts_obj(&options);
     self
+      .for_call(o.as_ref())
+      .build_locator_expect()?
+      .to_have_values(&values)
+      .await
+      .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
+  /// Playwright: `toHaveCount(count: number, options?: { timeout? })`.
+  #[qjs(rename = "toHaveCount")]
+  pub async fn to_have_count<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: u32,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
+    self
+      .for_call(o.as_ref())
       .build_locator_expect()?
       .to_have_count(expected as usize)
       .await
       .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright overloads: `toHaveAttribute(name, value: string | RegExp,
+  /// options?: { ignoreCase?, timeout? })` and
+  /// `toHaveAttribute(name, options?: { timeout? })` (presence check).
+  /// A second argument that is a string/RegExp is the expected value;
+  /// any other object is the options bag.
   #[qjs(rename = "toHaveAttribute")]
   pub async fn to_have_attribute<'js>(
     &self,
     ctx: Ctx<'js>,
     name: String,
     value: Opt<Value<'js>>,
+    options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let e = self.build_locator_expect()?;
-    match value.0 {
-      Some(v) if !v.is_undefined() => {
-        let exp = parse_string_or_regex(&ctx, &v)?;
-        e.to_have_attribute(&name, exp).await
+    let (expected, opts_val) = match value.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => {
+        if is_string_or_regex(&v) {
+          (Some(v), options.0)
+        } else {
+          (None, Some(v))
+        }
       },
-      _ => e.to_have_attribute_exists(&name).await,
+      _ => (None, options.0),
+    };
+    let o = opts_val.as_ref().and_then(Value::as_object).cloned();
+    let me = self.for_call(o.as_ref());
+    let ignore_case = bool_field(o.as_ref(), "ignoreCase").unwrap_or(false);
+    let e = me.build_locator_expect()?;
+    match expected {
+      Some(v) => {
+        let exp = parse_string_or_regex(&ctx, &v)?;
+        e.to_have_attribute_with(&name, exp, ignore_case).await
+      },
+      None => e.to_have_attribute_exists(&name).await,
     }
     .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright: `toHaveClass(expected: string | RegExp, options?: { timeout? })`.
+  /// The array form is not supported yet — it throws rather than
+  /// silently comparing wrong.
+  #[qjs(rename = "toHaveClass")]
+  pub async fn to_have_class<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    if expected.as_array().is_some() {
+      return Err(rquickjs::Error::new_from_js_message(
+        "expect",
+        "toHaveClass",
+        "the array form is not supported yet — pass a string or RegExp",
+      ));
+    }
+    let exp = parse_string_or_regex(&ctx, &expected)?;
+    let o = opts_obj(&options);
+    self
+      .for_call(o.as_ref())
+      .build_locator_expect()?
+      .to_have_class(exp)
+      .await
+      .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
+  /// Playwright: `toContainClass(expected: string, options?: { timeout? })`.
+  #[qjs(rename = "toContainClass")]
+  pub async fn to_contain_class<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: String,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
+    self
+      .for_call(o.as_ref())
+      .build_locator_expect()?
+      .to_contain_class(&expected)
+      .await
+      .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
+  /// Playwright: `toHaveCSS(name: string, value: string | RegExp,
+  /// options?: { timeout? })`.
+  #[qjs(rename = "toHaveCSS")]
+  pub async fn to_have_css<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    name: String,
+    expected: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let exp = parse_string_or_regex(&ctx, &expected)?;
+    let o = opts_obj(&options);
+    self
+      .for_call(o.as_ref())
+      .build_locator_expect()?
+      .to_have_css_with(&name, exp, ferridriver_expect::HaveCssOptions::default())
+      .await
+      .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
+  /// Playwright: `toHaveId(id: string | RegExp, options?: { timeout? })`.
+  #[qjs(rename = "toHaveId")]
+  pub async fn to_have_id<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let exp = parse_string_or_regex(&ctx, &expected)?;
+    let o = opts_obj(&options);
+    self
+      .for_call(o.as_ref())
+      .build_locator_expect()?
+      .to_have_id(exp)
+      .await
+      .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
+  /// Playwright: `toHaveRole(role: string, options?: { timeout? })`.
+  #[qjs(rename = "toHaveRole")]
+  pub async fn to_have_role<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: String,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let o = opts_obj(&options);
+    self
+      .for_call(o.as_ref())
+      .build_locator_expect()?
+      .to_have_role(StringOrRegex::String(expected))
+      .await
+      .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
+  /// Playwright: `toHaveJSProperty(name: string, value: any,
+  /// options?: { timeout? })`.
+  #[qjs(rename = "toHaveJSProperty")]
+  pub async fn to_have_js_property<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    name: String,
+    expected: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let exp: JsonValue = serde_from_js(&ctx, expected)?;
+    let o = opts_obj(&options);
+    self
+      .for_call(o.as_ref())
+      .build_locator_expect()?
+      .to_have_js_property(&name, exp)
+      .await
+      .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
+  /// Playwright: `toHaveAccessibleName(name: string | RegExp,
+  /// options?: { ignoreCase?, timeout? })`. `ignoreCase` is not
+  /// supported yet — it throws rather than being silently dropped.
+  #[qjs(rename = "toHaveAccessibleName")]
+  pub async fn to_have_accessible_name<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let exp = parse_string_or_regex(&ctx, &expected)?;
+    let o = opts_obj(&options);
+    reject_unsupported_option(o.as_ref(), "toHaveAccessibleName", "ignoreCase")?;
+    self
+      .for_call(o.as_ref())
+      .build_locator_expect()?
+      .to_have_accessible_name(exp)
+      .await
+      .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
+  /// Playwright: `toHaveAccessibleDescription(description: string | RegExp,
+  /// options?: { ignoreCase?, timeout? })`. `ignoreCase` is not
+  /// supported yet — it throws rather than being silently dropped.
+  #[qjs(rename = "toHaveAccessibleDescription")]
+  pub async fn to_have_accessible_description<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let exp = parse_string_or_regex(&ctx, &expected)?;
+    let o = opts_obj(&options);
+    reject_unsupported_option(o.as_ref(), "toHaveAccessibleDescription", "ignoreCase")?;
+    self
+      .for_call(o.as_ref())
+      .build_locator_expect()?
+      .to_have_accessible_description(exp)
+      .await
+      .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
   // ── Page web-first matchers (delegated) ───────────────────────────
 
+  /// Playwright: `toHaveTitle(title: string | RegExp, options?: { timeout? })`.
   #[qjs(rename = "toHaveTitle")]
-  pub async fn to_have_title<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
+  pub async fn to_have_title<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
     let exp = parse_string_or_regex(&ctx, &expected)?;
+    let o = opts_obj(&options);
     self
+      .for_call(o.as_ref())
       .build_page_expect()?
       .to_have_title(exp)
       .await
       .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
+  /// Playwright: `toHaveURL(url: string | RegExp, options?: { ignoreCase?, timeout? })`.
   #[qjs(rename = "toHaveURL")]
-  pub async fn to_have_url<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
+  pub async fn to_have_url<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
     let exp = parse_string_or_regex(&ctx, &expected)?;
+    let o = opts_obj(&options);
+    let ignore_case = bool_field(o.as_ref(), "ignoreCase").unwrap_or(false);
     self
+      .for_call(o.as_ref())
       .build_page_expect()?
-      .to_have_url(exp)
+      .to_have_url_with(exp, ignore_case)
       .await
       .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
+  // ── Retrying function matcher ──────────────────────────────────────
+
+  /// Playwright: `expect(callback).toPass(options?: { intervals?, timeout? })`.
+  /// Retries the callback until it stops throwing. Timeout defaults to 0
+  /// (unbounded, Playwright parity); intervals default to
+  /// `[100, 250, 500, 1000]`. With `.not`, passes as soon as the callback
+  /// throws.
+  #[qjs(rename = "toPass")]
+  pub async fn to_pass<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let func = self.fn_target()?.clone();
+    let o = opts_obj(&options);
+    let timeout_ms = u64_field(o.as_ref(), "timeout").unwrap_or(0);
+    let intervals = u64_array_field(o.as_ref(), "intervals").unwrap_or_else(|| vec![100, 250, 500, 1000]);
+    // Playwright treats timeout 0 as "no deadline"; the retry loop needs
+    // a finite instant, so unbounded is modeled as a year.
+    let timeout = if timeout_ms == 0 {
+      Duration::from_secs(60 * 60 * 24 * 365)
+    } else {
+      Duration::from_millis(timeout_ms)
+    };
+    let is_not = self.is_not;
+    let body = || {
+      let func = func.clone();
+      let ctx = ctx.clone();
+      async move {
+        let call: rquickjs::Result<()> = async {
+          let f = func.restore(&ctx)?;
+          let v: Value<'_> = f.call(())?;
+          if let Some(p) = v.as_promise() {
+            let _: Value<'_> = p.clone().into_future().await?;
+          }
+          Ok(())
+        }
+        .await;
+        match call {
+          Ok(()) if !is_not => Ok(()),
+          Ok(()) => Err(AssertionFailure::new(
+            "the callback unexpectedly passed".to_string(),
+            None,
+          )),
+          Err(e) if is_not => {
+            // `.not.toPass` succeeds once the callback fails — but the
+            // pending exception must be consumed or it leaks into the
+            // next VM call.
+            let _ = crate::engine::caught_to_script_error(rquickjs::CaughtError::from_error(&ctx, e), "toPass");
+            Ok(())
+          },
+          Err(e) => Err(AssertionFailure::new(
+            crate::engine::caught_to_script_error(rquickjs::CaughtError::from_error(&ctx, e), "toPass").message,
+            None,
+          )),
+        }
+      }
+    };
+    ferridriver_expect::to_pass_with_options(
+      body,
+      ferridriver_expect::ToPassOptions {
+        timeout,
+        intervals,
+        message: self.message.clone(),
+      },
+    )
+    .await
+    .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   // ── APIResponse matcher (delegated) ──────────────────────────────
@@ -732,6 +1218,8 @@ pub struct ExpectPollJs {
   generator: Persistent<Function<'static>>,
   #[qjs(skip_trace)]
   timeout: Duration,
+  #[qjs(skip_trace)]
+  intervals: Vec<u64>,
   is_not: bool,
 }
 
@@ -742,6 +1230,7 @@ impl ExpectPollJs {
     ExpectPollJs {
       generator: self.generator.clone(),
       timeout: Duration::from_millis(u64::from(timeout_ms)),
+      intervals: self.intervals.clone(),
       is_not: self.is_not,
     }
   }
@@ -751,6 +1240,7 @@ impl ExpectPollJs {
     ExpectPollJs {
       generator: self.generator.clone(),
       timeout: self.timeout,
+      intervals: self.intervals.clone(),
       is_not: !self.is_not,
     }
   }
@@ -786,10 +1276,11 @@ impl ExpectPollJs {
       if passes {
         return Ok(());
       }
-      let interval_ms = POLL_INTERVALS
+      let interval_ms = self
+        .intervals
         .get(interval_idx)
         .copied()
-        .unwrap_or_else(|| POLL_INTERVALS.last().copied().unwrap_or(1000));
+        .unwrap_or_else(|| self.intervals.last().copied().unwrap_or(1000));
       interval_idx += 1;
       let sleep_dur = Duration::from_millis(interval_ms);
       if tokio::time::Instant::now() + sleep_dur > deadline {
@@ -824,10 +1315,11 @@ impl ExpectPollJs {
       if pass {
         return Ok(());
       }
-      let interval_ms = POLL_INTERVALS
+      let interval_ms = self
+        .intervals
         .get(interval_idx)
         .copied()
-        .unwrap_or_else(|| POLL_INTERVALS.last().copied().unwrap_or(1000));
+        .unwrap_or_else(|| self.intervals.last().copied().unwrap_or(1000));
       interval_idx += 1;
       let sleep_dur = Duration::from_millis(interval_ms);
       if tokio::time::Instant::now() + sleep_dur > deadline {
@@ -934,27 +1426,18 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   )?;
   expect_fn.set_name("expect")?;
 
-  // expect.poll(fn, opts?)
+  // expect.poll(fn, opts?: { timeout?, intervals? })
   let poll_fn = Function::new(
     ctx.clone(),
     |ctx: Ctx<'js>, generator: Function<'js>, opts: Opt<Value<'js>>| -> rquickjs::Result<Value<'js>> {
-      let timeout_ms = opts
-        .0
-        .as_ref()
-        .and_then(|v| {
-          v.as_object()
-            .and_then(|o| o.get::<_, rquickjs::Value<'js>>("timeout").ok())
-        })
-        .and_then(|v| {
-          v.as_int()
-            .map(|i| u64::try_from(i).unwrap_or(0))
-            .or_else(|| v.as_number().map(|n| n as u64))
-        })
-        .unwrap_or_else(|| DEFAULT_EXPECT_TIMEOUT.as_millis() as u64);
+      let o = opts_obj(&opts);
+      let timeout_ms = u64_field(o.as_ref(), "timeout").unwrap_or_else(|| DEFAULT_EXPECT_TIMEOUT.as_millis() as u64);
+      let intervals = u64_array_field(o.as_ref(), "intervals").unwrap_or_else(|| POLL_INTERVALS.to_vec());
       let saved = Persistent::save(&ctx, generator);
       let inst = ExpectPollJs {
         generator: saved,
         timeout: Duration::from_millis(timeout_ms),
+        intervals,
         is_not: false,
       };
       let class = Class::instance(ctx.clone(), inst)?;

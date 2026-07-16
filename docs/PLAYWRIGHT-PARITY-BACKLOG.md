@@ -83,4 +83,49 @@ record.
   its websocket test-server (uiMode); the standalone vendored viewer only
   supports the postMessage snapshot-feed (a fresh blob URL per poll).
 
+## Script-sandbox gaps hit driving the real app.acme.com Sign flow
+
+Found live (ferridriver 0.5.0, `cdp-pipe`, `run_script` via MCP) while
+automating the the signing app signer flow on staging, 2026-07-16.
+
+### `context.waitForEvent` unusable from scripts
+- `context.waitForEvent('page', { timeout: 20000 })` →
+  `Error converting from js 'object' into type 'f64'` — the Playwright
+  options-object form is rejected (binding expects a bare number).
+- `context.waitForEvent('page', 20000)` → `not a function` at the
+  `.catch(...)` call site — the binding returns a non-promise (or is
+  absent on the script `context` object), so even the number form cannot
+  be awaited. Net effect: no way to wait for a popup/new-tab from a
+  script; popup-opening clicks cannot be raced against page creation.
+
+### `context.pages()` missing in the script sandbox
+- `context.pages()` → `not a function`. Playwright exposes it for tab
+  enumeration; today the only way to list/switch tabs is the MCP `page`
+  tool, whose output is human-readable markdown, not data a script can
+  consume. Needed together with `waitForEvent('page')` for any
+  new-tab flow.
+
+### `locator.filter({ hasText })` rejects RegExp
+- `locator.filter({ hasText: /change/i })` →
+  `Error converting from js 'filter options' into type 'field': hasText:
+  expected string`. Playwright accepts `string | RegExp` (and the same
+  applies to `hasNotText`). String form works.
+
+### `page.waitForURL` ignores its `timeout` option
+- `page.waitForURL(/\/sign\/document\//, { timeout: 40000 })` fails with
+  `Timeout 30000ms exceeded while waiting for URL matching ...` — the
+  wait runs on a fixed 30s budget regardless of the passed option.
+  (`page.goto` respects its `timeout`, so this is specific to the
+  waitForURL binding.)
+
+### Suspected: deep-chained locator click silently no-ops (unconfirmed)
+- On the Sign inbox (react-aria grid),
+  `page.getByRole('row').filter({ hasText: name }).getByRole('button',
+  { name: 'Review' }).first().click()` reports success but the app never
+  navigates, repeatedly (re-clicks included), while
+  `page.getByRole('button', { name: 'Review' }).first().click()` on the
+  same rendered page navigates. Possibly a wrong click point when
+  resolving through the row-scoped chain. Needs a synthetic repro before
+  treating it as a ferridriver bug.
+
 <!-- Append new findings below as they are discovered. Remove items when they land — git history is the archive. -->

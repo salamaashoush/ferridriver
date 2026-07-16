@@ -66,6 +66,12 @@ pub enum PageEvent {
   FrameDetached { frame_id: String },
   /// Frame navigated to a new URL.
   FrameNavigated(FrameInfo),
+  /// Same-document navigation (`history.pushState` / `replaceState` /
+  /// fragment change): the document persists, only the URL changed.
+  /// Surfaced to JS listeners under `framenavigated` like Playwright,
+  /// but kept distinct internally so the frame cache updates the URL
+  /// without detaching the frame's subtree.
+  FrameNavigatedWithinDocument(FrameInfo),
   /// Page load event fired.
   Load,
   /// `DOMContentLoaded` event fired.
@@ -133,7 +139,9 @@ impl PageEvent {
         "defaultValue": d.default_value(),
       }),
       PageEvent::FileChooser(fc) => serde_json::json!({ "isMultiple": fc.is_multiple() }),
-      PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
+      PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) | PageEvent::FrameNavigatedWithinDocument(f) => {
+        serde_json::to_value(f).unwrap_or_default()
+      },
       PageEvent::FrameDetached { frame_id } => serde_json::json!({ "frameId": frame_id }),
       PageEvent::Download(d) => serde_json::json!({
         "url": d.url(),
@@ -227,7 +235,10 @@ pub fn event_name_matches(name: &str, event: &PageEvent) -> bool {
       | ("filechooser", PageEvent::FileChooser(_))
       | ("frameattached", PageEvent::FrameAttached(_))
       | ("framedetached", PageEvent::FrameDetached { .. })
-      | ("framenavigated", PageEvent::FrameNavigated(_))
+      | (
+        "framenavigated",
+        PageEvent::FrameNavigated(_) | PageEvent::FrameNavigatedWithinDocument(_)
+      )
       | ("load", PageEvent::Load)
       | ("domcontentloaded", PageEvent::DomContentLoaded)
       | ("close", PageEvent::Close)

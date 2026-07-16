@@ -727,8 +727,8 @@ async fn binding_surface_sweep() {
     "waitForFunction",
     "await page.setContent('<div></div>'); \
      setTimeout(async () => { await page.evaluate(() => { window.__r = 7; }); }, 0); \
-     const r = await page.waitForFunction(() => window.__r || false, null, { timeout: 5000 }); \
-     return { got: r === 7 };",
+     const h = await page.waitForFunction(() => window.__r || false, null, { timeout: 5000 }); \
+     return { got: (await h.jsonValue()) === 7 };",
   )
   .await;
   assert_all_true("waitForFunction", &v);

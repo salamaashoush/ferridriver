@@ -62,7 +62,9 @@ fn live_event_arg(page: &Arc<ferridriver::Page>, ev: ferridriver::events::PageEv
     // Playwright's `'pageerror'` listener receives a native JS `Error`;
     // `JsErrorValue::to_napi_value` constructs one on the JS thread.
     PageEvent::PageError(err) => Either10::H(crate::web_error::JsErrorValue::from_details(err.error())),
-    PageEvent::FrameAttached(info) | PageEvent::FrameNavigated(info) => {
+    PageEvent::FrameAttached(info)
+    | PageEvent::FrameNavigated(info)
+    | PageEvent::FrameNavigatedWithinDocument(info) => {
       Either10::I(crate::frame::Frame::wrap(page.frame_for_id(&info.frame_id)))
     },
     PageEvent::FrameDetached { frame_id } => Either10::I(crate::frame::Frame::wrap(page.frame_for_id(&frame_id))),
@@ -293,7 +295,7 @@ impl Page {
   }
 
   /// Set the default timeout for navigation-family operations
-  /// (`goto`, `reload`, `goBack`, `goForward`, `waitForUrl`). Mirrors
+  /// (`goto`, `reload`, `goBack`, `goForward`, `waitForURL`). Mirrors
   /// Playwright's `page.setDefaultNavigationTimeout(timeout)` — distinct
   /// from `setDefaultTimeout`, which applies to non-navigation actions.
   /// `0` = no timeout.
@@ -1230,11 +1232,23 @@ impl Page {
   }
 
   /// Wait for the page URL to match. Accepts a glob string or a native JS `RegExp`.
-  /// Playwright API: `page.waitForURL(url)`.
-  #[napi(ts_args_type = "url: string | RegExp")]
-  pub async fn wait_for_url(&self, url: napi::Either<String, crate::types::JsRegExpLike>) -> Result<()> {
+  /// Playwright API: `page.waitForURL(url, options?: { timeout?, waitUntil? })`.
+  #[napi(
+    js_name = "waitForURL",
+    ts_args_type = "url: string | RegExp, options?: { timeout?: number, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }"
+  )]
+  pub async fn wait_for_url(
+    &self,
+    url: napi::Either<String, crate::types::JsRegExpLike>,
+    options: Option<crate::types::WaitForUrlOptions>,
+  ) -> Result<()> {
     let matcher = crate::types::string_or_regex_to_rust(url)?;
-    self.inner.wait_for_url(matcher).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .wait_for_url(matcher)
+      .maybe_options(options.map(Into::into))
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -1242,11 +1256,17 @@ impl Page {
     self.inner.wait_for_timeout(crate::types::f64_to_u64(ms)).await;
   }
 
-  #[napi]
-  pub async fn wait_for_load_state(&self, state: Option<String>) -> Result<()> {
+  /// Playwright API: `page.waitForLoadState(state?, options?: { timeout? })`.
+  #[napi(ts_args_type = "state?: 'load' | 'domcontentloaded' | 'networkidle', options?: { timeout?: number }")]
+  pub async fn wait_for_load_state(
+    &self,
+    state: Option<String>,
+    options: Option<crate::types::WaitForLoadStateOptions>,
+  ) -> Result<()> {
     self
       .inner
       .wait_for_load_state(state.as_deref())
+      .maybe_options(options.map(Into::into))
       .await
       .map_err(crate::error::to_napi)
   }

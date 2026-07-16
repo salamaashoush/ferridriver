@@ -162,6 +162,18 @@ impl FrameCache {
     self.detach_descendants(&id);
   }
 
+  /// Apply a same-document navigation (`history.pushState` /
+  /// `replaceState` / fragment change): the document persists, so only
+  /// the URL changes — name, parentage, and the child-frame subtree all
+  /// survive, unlike [`Self::navigated`], which models a cross-document
+  /// swap.
+  pub(crate) fn navigated_within(&mut self, frame_id: &str, url: &str) {
+    let key: Arc<str> = Arc::from(frame_id);
+    if let Some(rec) = self.by_id.get_mut(&key) {
+      rec.info.url = url.to_string();
+    }
+  }
+
   fn detach_descendants(&mut self, parent: &str) {
     let children: Vec<Arc<str>> = self
       .by_id

@@ -2049,10 +2049,36 @@ impl BidiPage {
         }
 
         match event.method.as_str() {
-          "browsingContext.navigationStarted"
-          | "browsingContext.fragmentNavigated"
-          | "browsingContext.domContentLoaded"
-          | "browsingContext.load" => {
+          // Same-document navigations: `historyUpdated` covers
+          // `history.pushState` / `replaceState`, `fragmentNavigated`
+          // covers hash changes. The document (and `window.__fd`)
+          // persists, so no engine reset — just keep the tracked URL
+          // fresh. Mirrors Playwright's `bidiPage.ts::_onHistoryUpdated`
+          // / `_onFragmentNavigated`.
+          "browsingContext.historyUpdated" | "browsingContext.fragmentNavigated" => {
+            let url = event
+              .params
+              .get("url")
+              .and_then(|v| v.as_str())
+              .unwrap_or("")
+              .to_string();
+            if event_ctx == &*ctx {
+              emitter.emit(PageEvent::FrameNavigatedWithinDocument(crate::backend::FrameInfo {
+                frame_id: (*ctx).to_string(),
+                parent_frame_id: None,
+                name: String::new(),
+                url,
+              }));
+            } else if child_frames.contains(event_ctx) {
+              emitter.emit(PageEvent::FrameNavigatedWithinDocument(crate::backend::FrameInfo {
+                frame_id: event_ctx.to_string(),
+                parent_frame_id: Some((*ctx).to_string()),
+                name: String::new(),
+                url,
+              }));
+            }
+          },
+          "browsingContext.navigationStarted" | "browsingContext.domContentLoaded" | "browsingContext.load" => {
             // Surface the main frame's cross-document navigation as
             // `FrameNavigated` (CDP gets this from `Page.frameNavigated`;
             // BiDi has no direct analogue). Keeps the frame cache's

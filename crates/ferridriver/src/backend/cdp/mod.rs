@@ -3144,22 +3144,27 @@ impl<T: CdpWrap> CdpPage<T> {
     }
 
     if !skip_move {
-      for i in 1..=steps {
+      // Pipeline the interpolated moves: enqueue the burst in order and
+      // await all acks together (same mechanism `single_click_fast_path`
+      // relies on for press-before-release ordering) — one round trip
+      // instead of one per step. No button is held here, so the drag
+      // manager never needs to intercept mid-burst.
+      let moves = (1..=steps).map(|i| {
         let t = f64::from(i) / f64::from(steps);
-        let sx = x * t; // conservative: interpolate from (0,0) when we lack prior-pos state
+        // conservative: interpolate from (0,0) when we lack prior-pos state
+        let sx = x * t;
         let sy = y * t;
-        self
-          .cmd(
-            "Input.dispatchMouseEvent",
-            serde_json::json!({
-              "type": "mouseMoved",
-              "x": if i == steps { x } else { sx },
-              "y": if i == steps { y } else { sy },
-              "modifiers": mods,
-            }),
-          )
-          .await?;
-      }
+        self.cmd(
+          "Input.dispatchMouseEvent",
+          serde_json::json!({
+            "type": "mouseMoved",
+            "x": if i == steps { x } else { sx },
+            "y": if i == steps { y } else { sy },
+            "modifiers": mods,
+          }),
+        )
+      });
+      futures::future::try_join_all(moves).await?;
     }
     for n in 1..=args.click_count {
       self
@@ -3212,22 +3217,23 @@ impl<T: CdpWrap> CdpPage<T> {
         Err(_) => false,
       };
     if !skip_move {
-      for i in 1..=steps {
+      // Pipelined like the click move burst: no button held, one round
+      // trip for the whole interpolation.
+      let moves = (1..=steps).map(|i| {
         let t = f64::from(i) / f64::from(steps);
         let sx = if i == steps { x } else { x * t };
         let sy = if i == steps { y } else { y * t };
-        self
-          .cmd(
-            "Input.dispatchMouseEvent",
-            serde_json::json!({
-              "type": "mouseMoved",
-              "x": sx,
-              "y": sy,
-              "modifiers": mods,
-            }),
-          )
-          .await?;
-      }
+        self.cmd(
+          "Input.dispatchMouseEvent",
+          serde_json::json!({
+            "type": "mouseMoved",
+            "x": sx,
+            "y": sy,
+            "modifiers": mods,
+          }),
+        )
+      });
+      futures::future::try_join_all(moves).await?;
     }
     if let Ok(mut guard) = self.last_cursor_pos.lock() {
       *guard = Some((x, y));
@@ -5184,6 +5190,23 @@ impl<T: CdpWrap> CdpPage<T> {
             }
           },
           "Page.frameNavigated" => Self::emit_frame_navigated(&event, &emitter),
+          "Page.navigatedWithinDocument" => {
+            // Same-document navigation (history.pushState / replaceState /
+            // fragment). Chromium sends only { frameId, url } — without
+            // this, `page.url()` / `waitForURL` never see SPA route
+            // changes. Mirrors Playwright's
+            // `crPage.ts::_onFrameNavigatedWithinDocument`.
+            if let Some(params) = event.get("params") {
+              emitter.emit(crate::events::PageEvent::FrameNavigatedWithinDocument(
+                super::FrameInfo {
+                  frame_id: params.get("frameId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                  parent_frame_id: None,
+                  name: String::new(),
+                  url: params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                },
+              ));
+            }
+          },
           _ => {},
         }
       }

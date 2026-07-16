@@ -38,3 +38,6 @@ bench/_legacy/go-bench/chromedp-bench
 bench/_legacy/go-bench/rod-bench
 bench/results/
 .midnight-expert/
+
+# Local Catchpoint transaction scripts (contain staging credentials)
+/catchpoint-tests/

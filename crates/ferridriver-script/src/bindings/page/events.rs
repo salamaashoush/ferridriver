@@ -64,7 +64,9 @@ pub(crate) fn page_event_to_js<'js>(
     },
     PageEvent::Download(d) => Class::instance(ctx.clone(), crate::bindings::download::DownloadJs::new(d))?.into_js(ctx),
     PageEvent::PageError(err) => crate::bindings::web_error::build_native_error(ctx, err.error()),
-    PageEvent::FrameAttached(info) | PageEvent::FrameNavigated(info) => Class::instance(
+    PageEvent::FrameAttached(info)
+    | PageEvent::FrameNavigated(info)
+    | PageEvent::FrameNavigatedWithinDocument(info) => Class::instance(
       ctx.clone(),
       crate::bindings::frame::FrameJs::new(page.frame_for_id(&info.frame_id)),
     )?

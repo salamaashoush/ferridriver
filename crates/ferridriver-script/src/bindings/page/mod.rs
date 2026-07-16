@@ -1713,26 +1713,45 @@ impl PageJs {
   /// canonical call shape — scripts write `await page.waitForEvent('websocket')`
   /// and receive a real `WebSocket` instance.
   /// Playwright: `page.waitForLoadState(state?: 'load' |
-  /// 'domcontentloaded' | 'networkidle', options?)`. Defaults to
-  /// `'load'`. Thin delegator to `Page::wait_for_load_state`.
+  /// 'domcontentloaded' | 'networkidle', options?: { timeout? })`.
+  /// Defaults to `'load'`. Thin delegator to `Page::wait_for_load_state`.
   #[qjs(rename = "waitForLoadState")]
-  pub async fn wait_for_load_state(&self, ctx: rquickjs::Ctx<'_>, state: Opt<String>) -> rquickjs::Result<()> {
+  pub async fn wait_for_load_state<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    state: Opt<String>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts: Option<ferridriver::options::WaitForLoadStateOptions> =
+      crate::bindings::convert::parse_opt_bag(&ctx, options)?;
     self
       .inner
       .wait_for_load_state(state.0.as_deref())
+      .maybe_options(opts)
       .await
       .into_js_with(&ctx)
   }
 
   /// Playwright: `page.waitForURL(url: string | RegExp | (url:URL) =>
-  /// boolean, options?)`. Thin delegator to `Page::wait_for_url`
-  /// (a function predicate is reduced to an always-true matcher; the
-  /// function check is enforced by the core polling against the
-  /// current URL).
+  /// boolean, options?: { timeout?, waitUntil? })`. Thin delegator to
+  /// `Page::wait_for_url` (a function predicate is reduced to an
+  /// always-true matcher; the function check is enforced by the core
+  /// polling against the current URL).
   #[qjs(rename = "waitForURL")]
-  pub async fn wait_for_url<'js>(&self, ctx: rquickjs::Ctx<'js>, url: rquickjs::Value<'js>) -> rquickjs::Result<()> {
+  pub async fn wait_for_url<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    url: rquickjs::Value<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
     let matcher = url_value_to_matcher(&ctx, url)?;
-    self.inner.wait_for_url(matcher).await.into_js_with(&ctx)
+    let opts: Option<ferridriver::options::WaitForUrlOptions> = crate::bindings::convert::parse_opt_bag(&ctx, options)?;
+    self
+      .inner
+      .wait_for_url(matcher)
+      .maybe_options(opts)
+      .await
+      .into_js_with(&ctx)
   }
 
   /// Playwright: `page.waitForFunction(pageFunction: Function|string,
