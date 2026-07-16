@@ -76,6 +76,7 @@ export interface TestFixtures {
   headless: boolean;
   isMobile: boolean;
   hasTouch: boolean;
+  baseURL: string | undefined;
   testInfo: TestInfo;
 }
 
@@ -868,7 +869,8 @@ export interface APIRequestContext {
   dispose(): Promise<void>;
 }
 
-// The QuickJS environment provides Node-parity `Buffer` as a global.
+// The QuickJS environment provides Node-parity `Buffer` and the
+// web-platform text codecs (UTF-8 only) as globals.
 declare global {
   class Buffer extends Uint8Array {
     static from(value: string | ArrayBuffer | Uint8Array | number[], encoding?: 'utf8' | 'utf-8' | 'base64' | 'hex'): Buffer;
@@ -876,5 +878,16 @@ declare global {
     static concat(buffers: Buffer[]): Buffer;
     static alloc(size: number): Buffer;
     toString(encoding?: 'utf8' | 'utf-8' | 'base64' | 'hex'): string;
+  }
+
+  class TextEncoder {
+    readonly encoding: 'utf-8';
+    encode(input?: string): Uint8Array;
+  }
+
+  class TextDecoder {
+    constructor(label?: string);
+    readonly encoding: string;
+    decode(input?: Uint8Array | ArrayBuffer | number[]): string;
   }
 }

@@ -329,6 +329,7 @@ struct TestFnParams {
   file: Arc<String>,
   title: Arc<String>,
   browser_config: ferridriver_test::config::BrowserConfig,
+  base_url: Option<String>,
   expected_status: ExpectedStatus,
   requests: Vec<String>,
   hooks_before: Vec<usize>,
@@ -358,6 +359,12 @@ async fn build_world_data(
       .get("hasTouch")
       .and_then(serde_json::Value::as_bool)
       .unwrap_or(false),
+    base_url: p
+      .world_use
+      .get("baseURL")
+      .and_then(serde_json::Value::as_str)
+      .map(String::from)
+      .or_else(|| p.base_url.clone()),
     use_options: (*p.world_use).clone(),
     info: TestInfoData {
       title: p.title.as_str().to_string(),
@@ -626,6 +633,7 @@ fn lower_test(
     file: Arc::new(file),
     title: Arc::new(test.title.clone()),
     browser_config: cx.config.browser.clone(),
+    base_url: cx.config.base_url.clone(),
     expected_status: meta.expected_status.clone(),
     requests: requests.clone(),
     hooks_before,
@@ -675,12 +683,14 @@ fn lower_all_hooks(
     let cwd_fn = Arc::clone(cwd_arc);
     let sessions_fn = Arc::clone(sessions);
     let browser_config = config.browser.clone();
+    let hook_base_url = config.base_url.clone();
     let label = file.clone();
     let hook_fn: ferridriver_test::model::SuiteHookFn = Arc::new(move |pool| {
       let bundle = Arc::clone(&bundle_fn);
       let cwd = Arc::clone(&cwd_fn);
       let sessions = Arc::clone(&sessions_fn);
       let browser_config = browser_config.clone();
+      let base_url = hook_base_url.clone();
       let label = label.clone();
       Box::pin(async move {
         let session = sessions
@@ -699,6 +709,7 @@ fn lower_all_hooks(
           headless: browser_config.headless,
           is_mobile: false,
           has_touch: false,
+          base_url,
           use_options: serde_json::json!({}),
           info: TestInfoData {
             title: "beforeAll/afterAll hook".to_string(),

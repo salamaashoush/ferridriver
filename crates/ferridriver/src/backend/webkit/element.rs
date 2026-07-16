@@ -110,17 +110,17 @@ impl WebKitElement {
   }
 
   pub async fn type_str(&self, text: &str) -> Result<()> {
-    let escaped = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
+    // Focus, then insert through the real input path (`Page.insertText`
+    // — the same command the page-level keyboard uses). Unlike a JS
+    // `value +=` dispatch, this replaces an active selection and fires
+    // trusted input events, so framework-controlled inputs behave
+    // exactly as with a physical keyboard.
+    self.call_fn("function(){this.focus();}", true).await?;
     self
-      .call_fn(
-        &format!(
-          "function(){{this.focus();this.value=(this.value||'')+{escaped};\
-           this.dispatchEvent(new Event('input',{{bubbles:true}}));\
-           this.dispatchEvent(new Event('change',{{bubbles:true}}));}}"
-        ),
-        true,
-      )
-      .await?;
+      .target
+      .send("Page.insertText", json!({ "text": text }))
+      .await
+      .map_err(map_err)?;
     Ok(())
   }
 

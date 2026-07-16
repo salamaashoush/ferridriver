@@ -1466,7 +1466,7 @@ impl WebKitPage {
     // care about document timing. No reload needed.
     self.apply_runtime_overrides(opts).await?;
     self.apply_proxy_session_overrides(opts).await;
-    self.apply_browser_session_overrides(opts).await;
+    self.apply_browser_session_overrides(opts).await?;
     self.apply_target_session_overrides(opts).await;
     Ok(())
   }
@@ -1549,18 +1549,19 @@ impl WebKitPage {
     }
   }
 
-  async fn apply_browser_session_overrides(&self, opts: &crate::options::BrowserContextOptions) {
+  async fn apply_browser_session_overrides(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     let Some(ctx) = &self.context_id else {
-      return;
+      return Ok(());
     };
     if let Some(locale) = opts.locale.as_deref() {
-      let _ = self
+      self
         .browser
         .send(
           "Playwright.setLanguages",
           json!({ "browserContextId": ctx.to_string(), "languages": [locale] }),
         )
-        .await;
+        .await
+        .map_err(conn_err)?;
     }
     if let Some(g) = opts.geolocation {
       let ts: u64 = std::time::SystemTime::now()
@@ -1584,6 +1585,7 @@ impl WebKitPage {
         )
         .await;
     }
+    Ok(())
   }
 
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {

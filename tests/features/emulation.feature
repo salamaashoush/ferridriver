@@ -7,9 +7,12 @@ Feature: Emulation
     And I reload the page
     Then "#timezone" should have text "America/New_York"
 
+  # locale is a context-creation option (`test.use` analog): WebKit web
+  # processes latch languages at spawn, so it must be present before the
+  # page's process exists — the @use tag feeds the worker's context setup.
+  @use(locale=de-DE)
   Scenario: Set locale and verify
-    Given I set locale to "de-DE"
-    And I navigate to "/emulation.html"
+    When I navigate to "/emulation.html"
     Then "#language" should contain text "de"
 
   @skip(firefox)

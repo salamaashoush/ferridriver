@@ -121,6 +121,21 @@ impl TestRunner {
     self.reporters.add(reporter);
   }
 
+  /// Export the configured `baseUrl` as `FERRIDRIVER_BASE_URL` so
+  /// URL-resolving consumers outside the config path (BDD step
+  /// definitions) see it. When no `baseUrl` is configured, the
+  /// webServer startup path exports the first server's URL instead.
+  fn export_base_url_env(&self) {
+    if let Some(url) = &self.config.base_url {
+      // SAFETY: called from the single-threaded run entry points before
+      // any worker threads spawn.
+      #[allow(unsafe_code)]
+      unsafe {
+        std::env::set_var("FERRIDRIVER_BASE_URL", url);
+      }
+    }
+  }
+
   /// Run the full test plan. Returns exit code (0 = all passed).
   ///
   /// When `config.projects` is non-empty, topologically sorts projects by
@@ -134,6 +149,7 @@ impl TestRunner {
     // Playwright's `config.expect.timeout`: make the configured default
     // visible to every bare `expect()` in this process.
     ferridriver_expect::set_default_expect_timeout(std::time::Duration::from_millis(self.config.expect_timeout));
+    self.export_base_url_env();
     let global_timeout = self.config.global_timeout;
     let inner = async move {
       // ── Multi-project path ──
@@ -1032,6 +1048,8 @@ impl TestRunner {
   pub async fn run_watch(&mut self, plan_factory: WatchPlanFactory, watch_root: std::path::PathBuf) -> i32 {
     use crate::watch::FileWatcher;
 
+    self.export_base_url_env();
+
     // Launch browser once — reuse across all watch cycles.
     let launch_plan = build_launch_plan(&self.config.browser);
     let browser = match launch_with_plan(launch_plan).await {
@@ -1260,6 +1278,8 @@ impl TestRunner {
   ) -> i32 {
     use crate::ui_server::{UiCommand, UiServer};
     use crate::watch::FileWatcher;
+
+    self.export_base_url_env();
 
     // Reclaim spool dirs a SIGKILLed previous session left in the temp
     // dir before this long-lived server starts producing its own.

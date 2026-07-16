@@ -709,6 +709,7 @@ pub fn translate_features_js(
         line: crate::translate::scenario_line(&scenario),
       };
       let annotations = crate::translate::scenario_annotations(&scenario);
+      let use_options = crate::translate::scenario_use_options(&scenario);
       let scenario = Arc::new(scenario);
 
       let bundle = Arc::clone(&bundle);
@@ -811,7 +812,7 @@ pub fn translate_features_js(
         timeout: None,
         retries: None,
         expected_status: ExpectedStatus::Pass,
-        use_options: None,
+        use_options,
       });
     }
 

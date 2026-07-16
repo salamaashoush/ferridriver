@@ -1111,6 +1111,9 @@ pub struct TestWorldData {
   pub headless: bool,
   pub is_mobile: bool,
   pub has_touch: bool,
+  /// Effective `baseURL` (test-level `use` override, else config) —
+  /// exposed as the `baseURL` fixture, Playwright-style.
+  pub base_url: Option<String>,
   /// Effective merged `use` options (config ⊕ suite/file bags ⊕
   /// project) — option fixtures read their overrides from here.
   pub use_options: serde_json::Value,
@@ -1374,6 +1377,7 @@ fn set_current_test(
   obj.set("headless", world.headless).map_err(se)?;
   obj.set("isMobile", world.is_mobile).map_err(se)?;
   obj.set("hasTouch", world.has_touch).map_err(se)?;
+  obj.set("baseURL", world.base_url.clone()).map_err(se)?;
   if let Some(page) = &world.page {
     install_page_on(ctx, &obj, Arc::clone(page), vm.clone()).map_err(se)?;
   }

@@ -63,7 +63,7 @@ Feature: TodoMVC
     When I fill ".new-todo" with "Edit me"
     And I press "Enter"
     And I double click ".todo-list li label"
-    And I press "Control+a" on ".todo-list li .edit"
+    And I press "ControlOrMeta+a" on ".todo-list li .edit"
     And I type "Edited item" into ".todo-list li .edit"
     And I press "Enter"
     Then ".todo-list li" should contain text "Edited item"

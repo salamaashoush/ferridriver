@@ -143,12 +143,14 @@ test('test.step returns value', async ({ page }) => {
 // ── test.use() ──
 
 describe('test.use scope', () => {
-  test.use({ locale: 'de-DE', colorScheme: 'dark' });
+  // locale is honored by every backend; colorScheme coverage lives in the
+  // context-options e2e suite with its per-backend Unsupported branching.
+  test.use({ locale: 'de-DE' });
 
   test('use options are set', async ({ page }) => {
-    // test.use() sets options that the worker applies to the context.
-    // For now we just verify the test runs without error.
     await page.goto('data:text/html,<title>UseOptions</title>');
+    const lang = await page.evaluate(() => navigator.language);
+    if (!String(lang).startsWith('de')) throw new Error(`locale not applied: ${lang}`);
   });
 });
 
@@ -234,4 +236,17 @@ test.each([
   await page.goto(`data:text/html,<title>${greeting}</title>`);
   const title = await page.title();
   if (title !== greeting) throw new Error(`expected ${greeting}, got ${title}`);
+});
+
+// ── baseURL fixture + relative navigation ──
+
+test('baseURL fixture resolves relative navigation', async ({ page, request, baseURL }) => {
+  if (!baseURL) throw new Error('baseURL fixture missing — fixture webServer not configured?');
+  await page.goto('/fx/landed');
+  if (!page.url().startsWith(baseURL)) throw new Error(`url ${page.url()} not under baseURL ${baseURL}`);
+  const body = await page.locator('body').textContent();
+  if (!String(body).includes('landed')) throw new Error(`unexpected body: ${body}`);
+  const resp = await request.get('/fx/api/users');
+  const users = (await resp.json()) as { users: string[] };
+  if (users.users[0] !== 'alice') throw new Error(`request baseURL broken: ${JSON.stringify(users)}`);
 });

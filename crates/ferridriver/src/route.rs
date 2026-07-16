@@ -455,6 +455,62 @@ pub async fn run_route_chain(
   }
 }
 
+/// Sniff a fulfilled body's MIME type when the handler supplied no
+/// `contentType` and no `content-type` header.
+///
+/// Chromium and Firefox receive our fulfilled response without a
+/// content-type header and run WHATWG MIME sniffing on the bytes, so an
+/// HTML body renders as HTML. `WebKit`'s `Network.interceptRequestWithResponse`
+/// takes an explicit `mimeType` instead and never sniffs (Playwright
+/// hardcodes `text/plain` there and diverges from its own Chromium
+/// behavior). Running the sniffing step ourselves keeps fulfill
+/// semantics identical across backends.
+///
+/// Implements the "identifying a resource's computed MIME type" HTML
+/// patterns from <https://mimesniff.spec.whatwg.org/#identifying-a-resource-with-an-unknown-mime-type>:
+/// optional leading whitespace, a known tag pattern, then a
+/// tag-terminating byte (space or `>`). Falls back to `text/plain`.
+#[must_use]
+pub fn sniff_content_type(body: &[u8]) -> &'static str {
+  const HTML_PATTERNS: &[&str] = &[
+    "<!DOCTYPE HTML",
+    "<HTML",
+    "<HEAD",
+    "<SCRIPT",
+    "<IFRAME",
+    "<H1",
+    "<DIV",
+    "<FONT",
+    "<TABLE",
+    "<A",
+    "<STYLE",
+    "<TITLE",
+    "<B",
+    "<BODY",
+    "<BR",
+    "<P",
+    "<!--",
+  ];
+  let trimmed = body
+    .iter()
+    .position(|b| !matches!(b, b'\t' | b'\n' | b'\x0c' | b'\r' | b' '))
+    .map_or(&[][..], |start| &body[start..]);
+  for pattern in HTML_PATTERNS {
+    let plen = pattern.len();
+    if trimmed.len() > plen
+      && trimmed[..plen].eq_ignore_ascii_case(pattern.as_bytes())
+      && matches!(trimmed[plen], b' ' | b'>')
+    {
+      return "text/html";
+    }
+    // A comment pattern is complete without a terminating byte.
+    if *pattern == "<!--" && trimmed.len() >= plen && trimmed[..plen].eq_ignore_ascii_case(pattern.as_bytes()) {
+      return "text/html";
+    }
+  }
+  "text/plain"
+}
+
 /// HTTP status text for common status codes.
 #[must_use]
 pub fn status_text(code: i32) -> &'static str {
@@ -480,6 +536,24 @@ pub fn status_text(code: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn sniff_html_bodies() {
+    assert_eq!(sniff_content_type(b"<!doctype html><body>x</body>"), "text/html");
+    assert_eq!(sniff_content_type(b"<HTML><head></head></HTML>"), "text/html");
+    assert_eq!(sniff_content_type(b"  \r\n\t<html lang=\"en\">"), "text/html");
+    assert_eq!(sniff_content_type(b"<!-- comment page -->"), "text/html");
+    assert_eq!(sniff_content_type(b"<DIV class='x'>y</DIV>"), "text/html");
+  }
+
+  #[test]
+  fn sniff_non_html_bodies_default_to_text_plain() {
+    assert_eq!(sniff_content_type(b"plain body"), "text/plain");
+    assert_eq!(sniff_content_type(b"{\"json\": true}"), "text/plain");
+    // `<htmlx` has no tag-terminating byte after the pattern.
+    assert_eq!(sniff_content_type(b"<htmlx>"), "text/plain");
+    assert_eq!(sniff_content_type(b""), "text/plain");
+  }
 
   fn sample_request() -> InterceptedRequest {
     let mut headers = FxHashMap::default();

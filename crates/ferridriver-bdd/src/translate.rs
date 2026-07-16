@@ -174,6 +174,55 @@ async fn build_world_from_pool(
   }))
 }
 
+/// Map `@use(key=value, ...)` tags to a Playwright-style `use` bag for
+/// [`TestCase::use_options`] — the BDD analog of `test.use`. The worker
+/// merges the bag over the config's context options BEFORE the
+/// scenario's browser context is created, so creation-time options
+/// (locale, timezoneId, userAgent, viewport scalars, ...) take effect
+/// on every backend, including the ones whose web processes latch them
+/// at spawn. Repeatable; later tags override earlier keys. A bare key
+/// (`@use(hasTouch)`) means `true`; values parse as bool/number when
+/// they look like one, else string.
+pub fn scenario_use_options(scenario: &ScenarioExecution) -> Option<serde_json::Value> {
+  let mut map = serde_json::Map::new();
+  for tag in &scenario.tags {
+    let Some(body) = tag.strip_prefix("@use(").and_then(|s| s.strip_suffix(')')) else {
+      continue;
+    };
+    for pair in body.split(',') {
+      let pair = pair.trim();
+      if pair.is_empty() {
+        continue;
+      }
+      match pair.split_once('=') {
+        Some((key, value)) => {
+          map.insert(key.trim().to_string(), parse_use_value(value.trim()));
+        },
+        None => {
+          map.insert(pair.to_string(), serde_json::Value::Bool(true));
+        },
+      }
+    }
+  }
+  (!map.is_empty()).then_some(serde_json::Value::Object(map))
+}
+
+fn parse_use_value(raw: &str) -> serde_json::Value {
+  match raw {
+    "true" => serde_json::Value::Bool(true),
+    "false" => serde_json::Value::Bool(false),
+    _ => {
+      if let Ok(n) = raw.parse::<i64>() {
+        serde_json::Value::Number(n.into())
+      } else if let Some(n) = raw.parse::<f64>().ok().and_then(serde_json::Number::from_f64) {
+        serde_json::Value::Number(n)
+      } else {
+        serde_json::Value::String(raw.to_string())
+      }
+    },
+  }
+}
+
 /// Translate a single scenario into a `TestCase`.
 /// Map a scenario's Gherkin tags to core `TestAnnotation`s
 /// (`@wip`/`@only`/`@skip(...)`/`@fixme(...)`/`@fail(...)`/`@slow(...)`
@@ -235,7 +284,7 @@ pub fn scenario_annotations(scenario: &ScenarioExecution) -> Vec<TestAnnotation>
             if rest.ends_with(')') {
               let key = &rest[..paren_pos];
               let value = &rest[paren_pos + 1..rest.len() - 1];
-              if !matches!(key, "fixme" | "skip" | "fail" | "slow" | "only") {
+              if !matches!(key, "fixme" | "skip" | "fail" | "slow" | "only" | "use") {
                 annotations.push(TestAnnotation::Info {
                   type_name: key.to_string(),
                   description: value.to_string(),
@@ -270,6 +319,7 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
   // then move the scenario into an Arc so the per-invocation closure shares
   // it via a cheap refcount bump instead of deep-cloning the step Vec.
   let annotations = scenario_annotations(&scenario);
+  let use_options = scenario_use_options(&scenario);
   let line = scenario_line(&scenario);
   let id = TestId {
     file: scenario.feature_path.display().to_string(),
@@ -374,7 +424,7 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
     timeout: None,
     retries: None,
     expected_status: ExpectedStatus::Pass,
-    use_options: None,
+    use_options,
   }
 }
 
@@ -542,5 +592,64 @@ fn fisher_yates_shuffle<T>(items: &mut [T], seed: u64) {
 
     let j = (z as usize) % (i + 1);
     items.swap(i, j);
+  }
+}
+
+#[cfg(test)]
+mod use_options_tests {
+  use super::*;
+
+  fn scenario_with_tags(tags: &[&str]) -> ScenarioExecution {
+    ScenarioExecution {
+      feature_name: "f".to_string(),
+      feature_path: std::path::PathBuf::from("f.feature"),
+      name: "s".to_string(),
+      tags: tags.iter().map(|t| (*t).to_string()).collect(),
+      steps: Vec::new(),
+      location: "f.feature:1".to_string(),
+      example_values: None,
+    }
+  }
+
+  #[test]
+  fn use_tag_maps_to_use_options_bag() {
+    let s = scenario_with_tags(&["@use(locale=de-DE)"]);
+    assert_eq!(scenario_use_options(&s), Some(serde_json::json!({"locale": "de-DE"})));
+  }
+
+  #[test]
+  fn use_tag_parses_types_and_merges_repeats() {
+    let s = scenario_with_tags(&[
+      "@use(locale=de-DE, hasTouch, deviceScaleFactor=2)",
+      "@use(offline=false)",
+      "@use(locale=fr-FR)",
+    ]);
+    assert_eq!(
+      scenario_use_options(&s),
+      Some(serde_json::json!({
+        "locale": "fr-FR",
+        "hasTouch": true,
+        "deviceScaleFactor": 2,
+        "offline": false,
+      }))
+    );
+  }
+
+  #[test]
+  fn non_use_tags_produce_no_bag() {
+    let s = scenario_with_tags(&["@smoke", "@skip(firefox)"]);
+    assert_eq!(scenario_use_options(&s), None);
+  }
+
+  #[test]
+  fn use_tag_is_not_an_info_annotation() {
+    let s = scenario_with_tags(&["@use(locale=de-DE)"]);
+    let annotations = scenario_annotations(&s);
+    assert!(
+      !annotations
+        .iter()
+        .any(|a| matches!(a, TestAnnotation::Info { type_name, .. } if type_name == "use")),
+      "@use must not leak into Info annotations: {annotations:?}"
+    );
   }
 }

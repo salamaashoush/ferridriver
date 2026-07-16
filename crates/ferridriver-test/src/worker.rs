@@ -175,7 +175,8 @@ impl TestBrowserResources {
       TestBrowserState::Failed(err) => Err(err.clone()),
       TestBrowserState::Empty => {
         let browser = self.handle.get().await?;
-        let ctx = Arc::new(new_test_context(&browser).await?);
+        let opts = build_context_options(&self.effective, &self.output_dir, browser.backend_kind());
+        let ctx = Arc::new(new_test_context(&browser, opts).await?);
         self.start_tracing(&ctx).await;
         *state = TestBrowserState::Context(Arc::clone(&ctx));
         Ok(ctx)
@@ -193,7 +194,6 @@ impl TestBrowserResources {
         let browser = self.handle.get().await?;
         let backend = browser.backend_kind();
         let page = create_ready_page(ctx, backend).await?;
-        apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
         let ctx = Arc::clone(ctx);
         *state = TestBrowserState::Page {
           ctx,
@@ -204,11 +204,11 @@ impl TestBrowserResources {
       TestBrowserState::Empty => {
         let browser = self.handle.get().await?;
         let backend = browser.backend_kind();
-        let ctx = Arc::new(new_test_context(&browser).await?);
+        let opts = build_context_options(&self.effective, &self.output_dir, backend);
+        let ctx = Arc::new(new_test_context(&browser, opts.clone()).await?);
         self.start_tracing(&ctx).await;
         match create_ready_page(&ctx, backend).await {
           Ok(page) => {
-            apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
             *state = TestBrowserState::Page {
               ctx: Arc::clone(&ctx),
               page: Arc::clone(&page),
@@ -219,10 +219,9 @@ impl TestBrowserResources {
             if is_retryable_bidi_page_error(&err) {
               self.discard_tracing(&ctx).await;
               let _ = ctx.close().await;
-              let ctx = Arc::new(new_test_context(&browser).await?);
+              let ctx = Arc::new(new_test_context(&browser, opts).await?);
               self.start_tracing(&ctx).await;
               let page = create_ready_page(&ctx, backend).await?;
-              apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
               *state = TestBrowserState::Page {
                 ctx,
                 page: Arc::clone(&page),
@@ -271,10 +270,17 @@ impl TestBrowserResources {
 /// current backends — CDP pipe, CDP raw, BiDi/Firefox, and Playwright
 /// WebKit — create real isolated contexts; the shared-default fallback
 /// remains for any future backend that reports otherwise.
-async fn new_test_context(browser: &Arc<ferridriver::Browser>) -> ferridriver::error::Result<ferridriver::ContextRef> {
+async fn new_test_context(
+  browser: &Arc<ferridriver::Browser>,
+  opts: ferridriver::options::BrowserContextOptions,
+) -> ferridriver::error::Result<ferridriver::ContextRef> {
   if browser.supports_isolated_contexts() {
-    browser.new_context().await
+    browser.new_context().options(opts).await
   } else {
+    tracing::warn!(
+      target: "ferridriver::worker",
+      "backend shares a default context — per-test context options are not applied",
+    );
     Ok(browser.default_context())
   }
 }
@@ -426,12 +432,18 @@ fn build_suite_effective_context_config(config: &TestConfig) -> EffectiveContext
   }
 }
 
-async fn apply_page_config(
-  page: &Arc<ferridriver::Page>,
+/// Lower the effective test config into the `BrowserContextOptions` bag
+/// passed to `browser.new_context()`. Creation-time options matter:
+/// document-time overrides (locale, userAgent, timezone) must be in the
+/// context's stashed options BEFORE the first page's process spawns —
+/// WebKit in particular latches languages at target creation and a
+/// post-attach `Playwright.setLanguages` never reaches the already
+/// running web process.
+fn build_context_options(
   effective: &EffectiveContextConfig,
   output_dir: &std::path::Path,
   backend_kind: ferridriver::backend::BackendKind,
-) -> ferridriver::error::Result<()> {
+) -> ferridriver::options::BrowserContextOptions {
   let ctx_config = &effective.context;
   let mut opts = ferridriver::options::BrowserContextOptions::default();
   // Playwright WebKit rejects several context-options fields outright
@@ -459,8 +471,8 @@ async fn apply_page_config(
   opts.color_scheme = ctx_config.color_scheme.clone().into();
   opts.reduced_motion = ctx_config.reduced_motion.clone().into();
   opts.forced_colors = ctx_config.forced_colors.clone().into();
-  opts.locale = ctx_config.locale.clone();
-  opts.timezone_id = ctx_config.timezone_id.clone();
+  opts.locale.clone_from(&ctx_config.locale);
+  opts.timezone_id.clone_from(&ctx_config.timezone_id);
   if let Some(ref geo) = ctx_config.geolocation {
     opts.geolocation = Some(ferridriver::options::Geolocation {
       latitude: geo.latitude,
@@ -483,7 +495,7 @@ async fn apply_page_config(
         .collect(),
     );
   }
-  opts.user_agent = ctx_config.user_agent.clone();
+  opts.user_agent.clone_from(&ctx_config.user_agent);
   // Plumb the test config's `baseURL` into the BrowserContext bag so
   // `page.goto('/route')` resolves against it. Previously the value
   // was only stored as `request_base_url` for the API-request
@@ -491,7 +503,7 @@ async fn apply_page_config(
   // navigate to invalid URL" — Playwright resolves these via the
   // context's baseURL option, mirror that.
   if opts.base_url.is_none() {
-    opts.base_url = effective.request_base_url.clone();
+    opts.base_url.clone_from(&effective.request_base_url);
   }
   if !ctx_config.java_script_enabled {
     opts.java_script_enabled = Some(false);
@@ -529,27 +541,11 @@ async fn apply_page_config(
   if ctx_config.service_workers.as_deref() == Some("block") {
     opts.service_workers = Some(ferridriver::options::ServiceWorkerPolicy::Block);
   }
-
-  // `storageState` is not part of the apply_context_options bag yet
-  // (needs IndexedDB capture — see §4.2/§4.3). Fall back to the
-  // legacy load path which hydrates cookies + localStorage via the
-  // page's backend storage helpers.
   if let Some(ss_path) = ctx_config.storage_state.as_deref() {
-    let path = std::path::Path::new(ss_path);
-    match std::fs::read_to_string(path) {
-      Ok(json_str) => match serde_json::from_str::<serde_json::Value>(&json_str) {
-        Ok(state) => tracing::warn!(
-          target: "ferridriver::worker",
-          "storage state not yet wired through apply_context_options — skipping hydration from {}: {state:?}",
-          path.display()
-        ),
-        Err(e) => tracing::warn!(target: "ferridriver::worker", "parse storage state {}: {e}", path.display()),
-      },
-      Err(e) => tracing::warn!(target: "ferridriver::worker", "read storage state {}: {e}", path.display()),
-    }
+    opts.storage_state = Some(ferridriver::options::StorageStateInput::Path(ss_path.into()));
   }
 
-  page.apply_context_options(&opts).await
+  opts
 }
 
 /// Worker-scope `browser` fixture backed by `BrowserHandle`. Added to the

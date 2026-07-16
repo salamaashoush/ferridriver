@@ -26,14 +26,14 @@ check:
 # parallelism, dozens of concurrent browsers starve each other and
 # Firefox dies mid-startup (~20/81 cascade failures at any commit).
 test:
-  cargo build --bin ferridriver
+  cargo build --bin ferridriver --bin ferridriver-fixtures
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --workspace --exclude ferridriver-cli
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli -- --test-threads=1
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo run --bin ferridriver -- bdd tests/features/
 
 # Run all tests with maximum parallelism
 test-fast:
-  cargo build --bin ferridriver
+  cargo build --bin ferridriver --bin ferridriver-fixtures
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --exclude ferridriver-cli & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_pipe" & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_raw" & \
@@ -78,13 +78,19 @@ run *args:
 run-http port="8080":
   cargo run --bin ferridriver -- --transport http --port {{port}}
 
+# Run the TS e2e suite through the native runner (all projects; pass --project <p> to narrow)
+test-e2e *args:
+  cargo build --bin ferridriver --bin ferridriver-fixtures
+  ./target/debug/ferridriver test {{args}}
+
 # Run BDD feature tests via the Rust CLI
 bdd *args:
+  cargo build -p ferridriver-fixtures
   cargo run --bin ferridriver -- bdd {{args}} tests/features/
 
 # Build CLI then run BDD feature tests
 test-bdd *args:
-  cargo build --bin ferridriver
+  cargo build --bin ferridriver --bin ferridriver-fixtures
   ./target/debug/ferridriver bdd {{args}} tests/features/
 
 # Bump version everywhere, commit, tag, and push to trigger release CI.

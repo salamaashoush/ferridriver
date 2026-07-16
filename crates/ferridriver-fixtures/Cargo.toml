@@ -1,0 +1,25 @@
+[package]
+name = "ferridriver-fixtures"
+description = "Local fixture web server for ferridriver's own test suites. Dev-only, never published."
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+tower-http = { version = "0.7", features = ["fs", "cors"] }
+serde_json = { workspace = true }
+base64 = "0.22"
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+tokio-tungstenite = "0.30"
+futures = { workspace = true }

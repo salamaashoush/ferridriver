@@ -7,9 +7,9 @@ Feature: Interaction
     Then the URL should contain "iana.org"
 
   Scenario: Fill and check value
-    Given I navigate to "https://www.google.com"
-    When I fill "textarea[name=q]" with "ferridriver"
-    Then "textarea[name=q]" should have value "ferridriver"
+    Given I navigate to "/input/textarea.html"
+    When I fill "textarea" with "ferridriver"
+    Then "textarea" should have value "ferridriver"
 
   Scenario: Check element visibility
     Given I navigate to "https://example.com"

@@ -1,144 +1,45 @@
-//! TestServer: Playwright-style HTTP server for E2E test fixtures.
+//! Config-driven web servers for the test runner.
 //!
-//! Serves static files from `tests/assets/` and supports programmatic routes
-//! for dynamic responses, request tracking, and interception.
-//!
-//! Usage:
-//! ```ignore
-//! let server = TestServer::start("tests/assets").await?;
-//! page.goto(&format!("{}/input/button.html", server.url()), None).await?;
-//! server.stop().await;
-//! ```
+//! `TestServer` serves a `webServer.staticDir` directory (with optional
+//! SPA fallback); `WebServerManager` owns the lifecycle of every
+//! configured server — static directories and `command`-launched dev
+//! servers alike.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use axum::Router;
-use axum::body::Body;
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, Response};
-use axum::routing::any;
-use tokio::sync::RwLock;
-use tower_http::services::ServeDir;
+use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 
-type RouteHandlerFn = Arc<dyn Fn(&str, &HeaderMap) -> RouteResponse + Send + Sync>;
-
-/// A programmatic route response.
-pub struct RouteResponse {
-  pub status: u16,
-  pub content_type: String,
-  pub body: Vec<u8>,
-  pub headers: Vec<(String, String)>,
-}
-
-impl RouteResponse {
-  /// HTML response.
-  pub fn html(body: &str) -> Self {
-    Self {
-      status: 200,
-      content_type: "text/html".into(),
-      body: body.as_bytes().to_vec(),
-      headers: vec![],
-    }
-  }
-
-  /// JSON response.
-  pub fn json(body: &str) -> Self {
-    Self {
-      status: 200,
-      content_type: "application/json".into(),
-      body: body.as_bytes().to_vec(),
-      headers: vec![],
-    }
-  }
-
-  /// Plain text response.
-  pub fn text(body: &str) -> Self {
-    Self {
-      status: 200,
-      content_type: "text/plain".into(),
-      body: body.as_bytes().to_vec(),
-      headers: vec![],
-    }
-  }
-
-  /// Empty response with status code.
-  pub fn status(code: u16) -> Self {
-    Self {
-      status: code,
-      content_type: "text/plain".into(),
-      body: vec![],
-      headers: vec![],
-    }
-  }
-}
-
-/// Recorded request for assertion.
-#[derive(Debug, Clone)]
-pub struct RecordedRequest {
-  pub path: String,
-  pub method: String,
-  pub headers: HashMap<String, String>,
-  pub body: Vec<u8>,
-}
-
-struct ServerState {
-  routes: RwLock<HashMap<String, RouteHandlerFn>>,
-  requests: RwLock<Vec<RecordedRequest>>,
-  assets_dir: PathBuf,
-  spa: bool,
-}
-
-/// Playwright-style test HTTP server.
-///
-/// Serves static files from an assets directory and supports
-/// programmatic routes for dynamic responses.
+/// Static-directory web server backing `webServer.staticDir`.
 pub struct TestServer {
   addr: SocketAddr,
-  state: Arc<ServerState>,
   shutdown_tx: tokio::sync::oneshot::Sender<()>,
   handle: tokio::task::JoinHandle<()>,
 }
 
 impl TestServer {
-  /// Start the test server, serving static files from `assets_dir`.
+  /// Start from a `WebServerConfig`.
   ///
   /// # Errors
   ///
   /// Returns an error if the server fails to bind.
-  pub async fn start(assets_dir: impl Into<PathBuf>) -> ferridriver::error::Result<Self> {
-    Self::start_with_options(assets_dir.into(), 0, false).await
-  }
-
-  /// Start with SPA fallback: unmatched routes serve `index.html`.
-  pub async fn start_spa(assets_dir: impl Into<PathBuf>) -> ferridriver::error::Result<Self> {
-    Self::start_with_options(assets_dir.into(), 0, true).await
-  }
-
-  /// Start from a `WebServerConfig`.
   pub async fn from_config(config: &crate::config::WebServerConfig) -> ferridriver::error::Result<Self> {
     let dir = config.static_dir.as_deref().unwrap_or(".");
     Self::start_with_options(PathBuf::from(dir), config.port, config.spa).await
   }
 
   async fn start_with_options(assets_dir: PathBuf, port: u16, spa: bool) -> ferridriver::error::Result<Self> {
-    let state = Arc::new(ServerState {
-      routes: RwLock::new(HashMap::new()),
-      requests: RwLock::new(Vec::new()),
-      assets_dir: assets_dir.clone(),
-      spa,
-    });
-
-    let state2 = state.clone();
-    let fallback = ServeDir::new(&assets_dir).append_index_html_on_directories(true);
-
-    let app = Router::new()
-      .route("/{*path}", any(handle_request))
-      .route("/", any(handle_request))
-      .with_state(state2)
-      .fallback_service(fallback);
+    let serve_dir = ServeDir::new(&assets_dir).append_index_html_on_directories(true);
+    let app = if spa {
+      // SPA fallback: unmatched routes serve `index.html` (client-side routing).
+      let index = ServeFile::new(assets_dir.join("index.html"));
+      Router::new().fallback_service(serve_dir.fallback(index))
+    } else {
+      Router::new().fallback_service(serve_dir)
+    };
+    let app = app.layer(CorsLayer::permissive());
 
     let bind_addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
@@ -156,7 +57,6 @@ impl TestServer {
 
     Ok(Self {
       addr,
-      state,
       shutdown_tx,
       handle,
     })
@@ -168,185 +68,10 @@ impl TestServer {
     format!("http://{}", self.addr)
   }
 
-  /// Shorthand: `{url}/path`.
-  #[must_use]
-  pub fn prefix(&self) -> String {
-    self.url()
-  }
-
-  /// URL for the empty page.
-  #[must_use]
-  pub fn empty_page(&self) -> String {
-    format!("{}/empty.html", self.url())
-  }
-
-  /// Register a programmatic route. The handler receives (path, headers) and returns a response.
-  pub async fn set_route(&self, path: &str, handler: RouteHandlerFn) {
-    self.state.routes.write().await.insert(path.to_string(), handler);
-  }
-
-  /// Register a simple static response for a path.
-  pub async fn set_content(&self, path: &str, content_type: &str, body: &str) {
-    let ct = content_type.to_string();
-    let b = body.as_bytes().to_vec();
-    self
-      .set_route(
-        path,
-        Arc::new(move |_, _| RouteResponse {
-          status: 200,
-          content_type: ct.clone(),
-          body: b.clone(),
-          headers: vec![],
-        }),
-      )
-      .await;
-  }
-
-  /// Get all recorded requests.
-  pub async fn requests(&self) -> Vec<RecordedRequest> {
-    self.state.requests.read().await.clone()
-  }
-
-  /// Get recorded requests matching a path prefix.
-  pub async fn requests_for(&self, path: &str) -> Vec<RecordedRequest> {
-    self
-      .state
-      .requests
-      .read()
-      .await
-      .iter()
-      .filter(|r| r.path.starts_with(path))
-      .cloned()
-      .collect()
-  }
-
-  /// Clear recorded requests.
-  pub async fn clear_requests(&self) {
-    self.state.requests.write().await.clear();
-  }
-
   /// Stop the server.
   pub async fn stop(self) {
     let _ = self.shutdown_tx.send(());
     let _ = self.handle.await;
-  }
-}
-
-async fn handle_request(
-  State(state): State<Arc<ServerState>>,
-  path: Option<Path<String>>,
-  headers: HeaderMap,
-  method: axum::http::Method,
-  body: axum::body::Bytes,
-) -> Response<Body> {
-  let request_path = format!("/{}", path.as_ref().map(|p| p.as_str()).unwrap_or(""));
-
-  // Record the request.
-  let mut header_map = HashMap::new();
-  for (name, value) in &headers {
-    if let Ok(v) = value.to_str() {
-      header_map.insert(name.to_string(), v.to_string());
-    }
-  }
-  state.requests.write().await.push(RecordedRequest {
-    path: request_path.clone(),
-    method: method.to_string(),
-    headers: header_map.clone(),
-    body: body.to_vec(),
-  });
-
-  // Built-in echo endpoints under `/_api/` — an httpbin-shaped JSON echo
-  // of the request (url, method, headers, raw body, parsed JSON body) so
-  // HTTP-client fixtures can assert round-trips without depending on an
-  // external service being up.
-  if request_path.starts_with("/_api/") {
-    let body_text = String::from_utf8_lossy(&body).to_string();
-    let parsed_json: serde_json::Value = serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
-    let echo = serde_json::json!({
-      "url": request_path,
-      "method": method.to_string(),
-      "headers": header_map,
-      "data": body_text,
-      "json": parsed_json,
-    });
-    return Response::builder()
-      .status(200)
-      .header("content-type", "application/json")
-      .header("access-control-allow-origin", "*")
-      .body(Body::from(echo.to_string()))
-      .unwrap_or_else(|_| {
-        Response::builder()
-          .status(500)
-          .body(Body::empty())
-          .expect("empty 500 response")
-      });
-  }
-
-  // Check programmatic routes.
-  let routes = state.routes.read().await;
-  if let Some(handler) = routes.get(&request_path) {
-    let resp = handler(&request_path, &headers);
-    let mut builder = Response::builder().status(resp.status);
-    builder = builder.header("content-type", &resp.content_type);
-    builder = builder.header("access-control-allow-origin", "*");
-    for (k, v) in &resp.headers {
-      builder = builder.header(k.as_str(), v.as_str());
-    }
-    return builder.body(Body::from(resp.body)).unwrap_or_else(|_| {
-      Response::builder()
-        .status(500)
-        .body(Body::empty())
-        .expect("empty 500 response")
-    });
-  }
-  drop(routes);
-
-  // Fall through to static file serving — return 404 so the fallback layer handles it.
-  // axum's fallback_service will serve static files if this handler returns 404.
-  let file_path = state.assets_dir.join(request_path.trim_start_matches('/'));
-  if file_path.exists() && file_path.is_file() {
-    let content_type = mime_guess::from_path(&file_path).first_or_octet_stream().to_string();
-    match tokio::fs::read(&file_path).await {
-      Ok(contents) => Response::builder()
-        .status(200)
-        .header("content-type", content_type)
-        .header("access-control-allow-origin", "*")
-        .body(Body::from(contents))
-        .expect("static file response"),
-      Err(_) => Response::builder()
-        .status(500)
-        .body(Body::empty())
-        .expect("empty 500 response"),
-    }
-  } else if state.spa {
-    // SPA fallback: serve index.html for any unmatched route (client-side routing).
-    let index = state.assets_dir.join("index.html");
-    if index.exists() {
-      match tokio::fs::read(&index).await {
-        Ok(contents) => Response::builder()
-          .status(200)
-          .header("content-type", "text/html")
-          .header("access-control-allow-origin", "*")
-          .body(Body::from(contents))
-          .expect("SPA index.html response"),
-        Err(_) => Response::builder()
-          .status(500)
-          .body(Body::empty())
-          .expect("empty 500 response"),
-      }
-    } else {
-      Response::builder()
-        .status(404)
-        .header("content-type", "text/plain")
-        .body(Body::from("Not Found (SPA: no index.html)"))
-        .expect("404 response")
-    }
-  } else {
-    Response::builder()
-      .status(404)
-      .header("content-type", "text/plain")
-      .body(Body::from("Not Found"))
-      .expect("404 response")
   }
 }
 
@@ -445,14 +170,6 @@ impl WebServerManager {
     self.servers.first().map(|s| match s {
       RunningServer::Static(entry) => entry.server.url(),
       RunningServer::Command(entry) => entry.url.clone(),
-    })
-  }
-
-  /// Get the TestServer instance (for programmatic routes), if the first server is static.
-  pub fn test_server(&self) -> Option<&TestServer> {
-    self.servers.first().and_then(|s| match s {
-      RunningServer::Static(entry) => Some(&entry.server),
-      RunningServer::Command(_) => None,
     })
   }
 

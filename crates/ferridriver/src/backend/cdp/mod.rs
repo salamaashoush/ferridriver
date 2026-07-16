@@ -3844,8 +3844,20 @@ impl<T: CdpWrap> CdpPage<T> {
     // Press each modifier (down), then the primary key with the
     // modifiers bitfield set so the page sees a real combo (e.g.
     // select-all on Ctrl+A), then release in reverse.
-    let parts: Vec<&str> = key.split('+').collect();
+    //
+    // `ControlOrMeta` resolves per-OS BEFORE key lookup, exactly like
+    // Playwright's `resolveSmartModifierString` (keyboards.ts): Meta on
+    // macOS, Control elsewhere.
+    fn resolve(name: &str) -> &str {
+      if name == "ControlOrMeta" {
+        if cfg!(target_os = "macos") { "Meta" } else { "Control" }
+      } else {
+        name
+      }
+    }
+    let parts: Vec<&str> = key.split('+').map(resolve).collect();
     if parts.len() <= 1 {
+      let key = resolve(key);
       self.key_down(key).await?;
       self.key_up(key).await?;
       return Ok(());
@@ -3855,7 +3867,7 @@ impl<T: CdpWrap> CdpPage<T> {
     let mod_bit = |name: &str| -> u32 {
       match name {
         "Alt" => 1,
-        "Control" | "ControlOrMeta" => 2,
+        "Control" => 2,
         "Meta" => 4,
         "Shift" => 8,
         _ => 0,

@@ -458,6 +458,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   ferridriver_bdd::js::set_bdd_sidecars(sidecar_specs(&config));
   let mut overrides = ferridriver_test::config::CliOverrides {
     bdd_tags: args.tags,
+    project_filter: args.project,
     bdd_dry_run: args.dry_run,
     watch: args.watch,
     ui: args.ui,

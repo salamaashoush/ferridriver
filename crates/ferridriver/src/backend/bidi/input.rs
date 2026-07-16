@@ -46,8 +46,16 @@ pub fn key_to_bidi(key: &str) -> String {
     "PageDown" => "\u{E00F}".into(),
     "Insert" => "\u{E016}".into(),
 
-    // Modifier keys
+    // Modifier keys. `ControlOrMeta` resolves per-OS before the wire
+    // mapping, matching Playwright's `resolveSmartModifierString`.
     "Shift" | "ShiftLeft" | "ShiftRight" => "\u{E008}".into(),
+    "ControlOrMeta" => {
+      if cfg!(target_os = "macos") {
+        "\u{E03D}".into()
+      } else {
+        "\u{E009}".into()
+      }
+    },
     "Control" | "ControlLeft" | "ControlRight" => "\u{E009}".into(),
     "Alt" | "AltLeft" | "AltRight" => "\u{E00A}".into(),
     "Meta" | "MetaLeft" | "MetaRight" => "\u{E03D}".into(),

@@ -1768,16 +1768,23 @@ impl BidiPage {
   }
 
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
-    use crate::options::MediaOverride;
-    // Firefox/BiDi only exposes `emulation.setForcedColorsModeThemeOverride`
-    // (per /tmp/playwright/packages/playwright-core/src/server/bidi/third_party/bidiProtocolCore.ts:1069).
+    tokio::task::yield_now().await;
     // Playwright's own BiDi `updateEmulateMedia` is an empty stub — media,
-    // reducedMotion, forcedColors and contrast have no BiDi equivalent yet.
-    // Rather than silently pretending they worked, we error out with a
-    // typed Unsupported so the caller knows Firefox can't honor that knob.
+    // colorScheme, reducedMotion, forcedColors and contrast have no BiDi
+    // equivalent yet. `emulation.setForcedColorsModeThemeOverride` appears in
+    // Playwright's vendored protocol (bidiProtocolCore.ts:1069) but shipping
+    // Firefox (151) rejects it as `unknown command`, so it cannot back
+    // colorScheme either. Rather than silently pretending an override worked,
+    // error out with a typed Unsupported so the caller knows Firefox can't
+    // honor that knob.
     if opts.media.is_specified() {
       return Err(FerriError::unsupported(
         "BiDi/Firefox does not support `media` emulation — no BiDi protocol command exists for it",
+      ));
+    }
+    if opts.color_scheme.is_specified() {
+      return Err(FerriError::unsupported(
+        "BiDi/Firefox does not support `colorScheme` emulation — Firefox's BiDi implementation has no working command for it",
       ));
     }
     if opts.reduced_motion.is_specified() {
@@ -1794,32 +1801,6 @@ impl BidiPage {
       return Err(FerriError::unsupported(
         "BiDi/Firefox does not support `contrast` emulation — no BiDi protocol command exists for it",
       ));
-    }
-    // Color scheme: `emulation.setForcedColorsModeThemeOverride` accepts
-    // `{ theme: 'light' | 'dark' | null }`. Treat Disabled as null.
-    match &opts.color_scheme {
-      MediaOverride::Unchanged => {},
-      MediaOverride::Disabled => {
-        self
-          .cmd(
-            "emulation.setForcedColorsModeThemeOverride",
-            json!({ "contexts": [&*self.context_id], "theme": serde_json::Value::Null }),
-          )
-          .await?;
-      },
-      MediaOverride::Set(cs) => {
-        let theme: serde_json::Value = match cs.as_str() {
-          "dark" => json!("dark"),
-          "light" => json!("light"),
-          _ => serde_json::Value::Null,
-        };
-        self
-          .cmd(
-            "emulation.setForcedColorsModeThemeOverride",
-            json!({ "contexts": [&*self.context_id], "theme": theme }),
-          )
-          .await?;
-      },
     }
     Ok(())
   }

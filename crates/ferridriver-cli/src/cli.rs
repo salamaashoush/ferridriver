@@ -214,6 +214,12 @@ pub struct BddArgs {
   #[arg(long)]
   pub tags: Option<String>,
 
+  /// Run only on these `[test.projects]` entries (repeatable). Without
+  /// this flag the suite runs on every configured project, or on the
+  /// single `[test.browser]` when no projects are configured.
+  #[arg(long)]
+  pub project: Vec<String>,
+
   /// Parse and report scenarios without executing steps.
   #[arg(long)]
   pub dry_run: bool,

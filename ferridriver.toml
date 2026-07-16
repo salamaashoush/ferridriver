@@ -1,9 +1,55 @@
 [test]
-testMatch = ["tests/**/*.spec.ts", "tests/**/*.test.ts", "tests/**/*.feature"]
+testMatch = ["tests/**/*.spec.ts", "tests/**/*.test.ts"]
 steps = ["tests/steps/**/*.ts"]
+baseUrl = "http://127.0.0.1:47831"
+# Workers auto-detect (cpus/2), one browser per worker. Projects run one
+# at a time so at most one browser engine's worker pool is live at once;
+# raise maxParallelProjects once the ported e2e suite proves stable.
+maxParallelProjects = 1
 
 [test.browser]
 headless = true
 
+# The repo's own fixture server (dev-only crate, never published):
+# static assets plus the dynamic /fx/* and /_api/* routes the BDD and
+# TS e2e suites assert against. Built by `just test` before running.
 [[test.webServer]]
-staticDir = "tests/assets"
+name = "fixtures"
+command = "target/debug/ferridriver-fixtures --port 47831 --static tests/assets"
+url = "http://127.0.0.1:47831/fx/landed"
+reuseExistingServer = true
+
+# Backend matrix for the TS e2e suite: `ferridriver test` runs every
+# project; `--project <name>` narrows. BDD features are NOT in testMatch
+# — the feature suite runs through its own `ferridriver bdd` invocation
+# on the single [test.browser] above. Each project sets headless
+# explicitly: a project browser section that omits it would force
+# headed mode (the merge cannot tell an unset flag from `false`).
+
+[[test.projects]]
+name = "cdp-pipe"
+[test.projects.browser]
+browser = "chromium"
+backend = "cdp-pipe"
+headless = true
+
+[[test.projects]]
+name = "cdp-raw"
+[test.projects.browser]
+browser = "chromium"
+backend = "cdp-raw"
+headless = true
+
+[[test.projects]]
+name = "bidi"
+[test.projects.browser]
+browser = "firefox"
+backend = "bidi"
+headless = true
+
+[[test.projects]]
+name = "webkit"
+[test.projects.browser]
+browser = "webkit"
+backend = "webkit"
+headless = true

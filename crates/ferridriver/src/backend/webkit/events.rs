@@ -1215,7 +1215,11 @@ async fn intercept_fulfill(
 ) {
   use base64::Engine as _;
   let mut headers_map = serde_json::Map::new();
-  let mut mime_type = String::from("text/plain");
+  // WebKit's interception never sniffs — the `mimeType` param decides how
+  // the document is parsed. When the handler names no content type, run
+  // the WHATWG sniffing step ourselves so fulfill renders the same as on
+  // CDP/BiDi (where the browser sniffs the header-less response).
+  let mut mime_type = crate::route::sniff_content_type(&response.body).to_string();
   for (k, v) in &response.headers {
     if k.eq_ignore_ascii_case("content-type") {
       mime_type = v.clone();

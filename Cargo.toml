@@ -10,6 +10,7 @@ default-members = [
   "crates/ferridriver-bdd-macros",
   "crates/ferridriver-test",
   "crates/ferridriver-test-macros",
+  "crates/ferridriver-fixtures",
   "crates/ferridriver-script",
   "crates/ferridriver-session",
   "crates/ferridriver-node",

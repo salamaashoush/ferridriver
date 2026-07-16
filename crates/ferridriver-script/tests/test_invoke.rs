@@ -212,6 +212,7 @@ fn world(title: &str) -> TestWorldData {
     headless: true,
     is_mobile: false,
     has_touch: false,
+    base_url: None,
     use_options: serde_json::json!({}),
     info: TestInfoData {
       title: title.to_string(),
