@@ -73,13 +73,24 @@ for (const backend of BACKENDS) {
 
       // Re-add the overlay and click again. The handler is exhausted
       // (times:1 already consumed), so it must NOT fire a second time --
-      // runs stays 1.
+      // runs stays 1 -- and the hit-target check must BLOCK the click
+      // (the overlay intercepts pointer events, so the click times out
+      // instead of landing through it).
+      await page.evaluate("window.__clicked = false", undefined);
       await page.evaluate(
         "const d=document.createElement('div');d.id='overlay';d.style.cssText='position:fixed;inset:0;z-index:9999';document.body.appendChild(d);",
         undefined,
       );
-      await page.locator("#target", undefined).click({ timeout: 2000 });
+      let msg = "";
+      try {
+        await page.locator("#target", undefined).click({ timeout: 2000 });
+      } catch (e) {
+        msg = String((e as Error).message ?? e);
+      }
+      expect(msg).toContain("Timeout");
       expect(runs).toBe(1);
+      expect(await page.evaluate("window.__clicked === true", undefined)).toBe(false);
+      expect(await page.locator("#overlay", undefined).isVisible()).toBe(true);
     });
 
     it("removeLocatorHandler stops the handler from firing", async () => {
@@ -90,9 +101,19 @@ for (const backend of BACKENDS) {
         await page.evaluate("document.getElementById('overlay').remove()", undefined);
       });
       page.removeLocatorHandler(overlay);
-      // With the handler removed, a click must not invoke it (runs stays 0).
-      await page.locator("#target", undefined).click({ timeout: 2000 });
+      // With the handler removed nothing dismisses the overlay: the
+      // handler must not run (runs stays 0) and the hit-target check
+      // blocks the click (timeout, no landing through the overlay).
+      let msg = "";
+      try {
+        await page.locator("#target", undefined).click({ timeout: 2000 });
+      } catch (e) {
+        msg = String((e as Error).message ?? e);
+      }
+      expect(msg).toContain("Timeout");
       expect(runs).toBe(0);
+      expect(await page.evaluate("window.__clicked === true", undefined)).toBe(false);
+      expect(await page.locator("#overlay", undefined).isVisible()).toBe(true);
     });
   });
 }

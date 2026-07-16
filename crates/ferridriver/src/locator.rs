@@ -222,6 +222,11 @@ pub(crate) fn is_retryable_action_error(msg: &str) -> bool {
     || msg.contains("Node was not found")
     || msg.contains("no such node")
     || msg.contains("stale element")
+    // Hit-target interception: another element covers the action point.
+    // Retryable so the Locator loop keeps running locator handlers and
+    // re-resolving until its deadline (Playwright retries the pointer
+    // action on `hitTargetDescription` the same way).
+    || msg.contains("intercepts pointer events")
 }
 
 /// A lazy element locator bound to a [`crate::Frame`]. Every Locator

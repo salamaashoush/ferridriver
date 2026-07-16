@@ -281,9 +281,17 @@ describe('locator handler', () => {
     });
     page.removeLocatorHandler(page.locator('#overlay'));
     // With the handler removed the overlay stays: the checkpoint must not
-    // invoke it (runs stays 0) and the overlay remains in the DOM.
-    await page.click('#target', { timeout: 2000 });
+    // invoke it (runs stays 0) and the hit-target check blocks the click —
+    // it times out instead of landing through the overlay.
+    let msg = '';
+    try {
+      await page.click('#target', { timeout: 2000 });
+    } catch (e) {
+      msg = String((e as Error).message ?? e);
+    }
+    expect(msg).toContain('Timeout');
     expect(handlerRuns).toBe(0);
+    expect(await page.evaluate('window.__clicked === true')).toBe(false);
     expect(await page.evaluate("document.getElementById('overlay') !== null")).toBe(true);
   });
 
@@ -301,14 +309,24 @@ describe('locator handler', () => {
     await page.click('#target', { timeout: 10000 });
     expect(handlerRuns).toBe(1);
     // Re-add the overlay and click again: the handler is exhausted
-    // (times: 1 consumed), so it must NOT fire a second time.
+    // (times: 1 consumed), so it must NOT fire a second time, and the
+    // hit-target check blocks the click (timeout, no landing through
+    // the overlay).
+    await page.evaluate('window.__clicked = false');
     await page.evaluate(
       "const d = document.createElement('div'); d.id = 'overlay'; " +
         "d.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.5)'; " +
         'document.body.appendChild(d)',
     );
-    await page.click('#target', { timeout: 2000 });
+    let msg = '';
+    try {
+      await page.click('#target', { timeout: 2000 });
+    } catch (e) {
+      msg = String((e as Error).message ?? e);
+    }
+    expect(msg).toContain('Timeout');
     expect(handlerRuns).toBe(1);
+    expect(await page.evaluate('window.__clicked === true')).toBe(false);
     expect(await page.evaluate("document.getElementById('overlay') !== null")).toBe(true);
   });
 });

@@ -198,8 +198,31 @@ function isActionable(el: Element): { actionable: boolean; reason?: string } {
 
 // ── Hit Target Testing (delegates to Playwright) ──
 
+/**
+ * Convert a TOP-viewport point (the coordinate space the Rust click
+ * path resolves and every backend dispatches in — see
+ * `actions.rs::resolve_click_point`, which ADDS the same
+ * `frameElement.getBoundingClientRect()` chain) into the coordinate
+ * space of `el`'s own document, where `elementsFromPoint` operates.
+ * No-op for main-frame elements. Same-origin frames only — a
+ * cross-origin iframe has its own engine and an inaccessible
+ * `frameElement`, and never composes with a same-document target.
+ */
+function topViewportPointToLocal(el: Element, p: { x: number; y: number }): { x: number; y: number } {
+  let x = p.x;
+  let y = p.y;
+  let win: Window | null = el.ownerDocument?.defaultView ?? null;
+  while (win && win !== win.parent && win.frameElement) {
+    const fr = win.frameElement.getBoundingClientRect();
+    x -= fr.x;
+    y -= fr.y;
+    win = win.parent;
+  }
+  return { x, y };
+}
+
 function expectHitTarget(hitPoint: { x: number; y: number }, targetElement: Element): 'done' | { hitTargetDescription: string } {
-  return injected.expectHitTarget(hitPoint, targetElement);
+  return injected.expectHitTarget(topViewportPointToLocal(targetElement, hitPoint), targetElement);
 }
 
 /**
@@ -233,7 +256,7 @@ function installHitInterceptor(
     } catch {}
     w.__fd._hitInterceptor = null;
   }
-  const r = injected.setupHitTargetInterceptor(el, action, hitPoint, false);
+  const r = injected.setupHitTargetInterceptor(el, action, topViewportPointToLocal(el, hitPoint), false);
   if (typeof r === 'string') return r;
   if (r === 'error:notconnected') return r;
   w.__fd._hitInterceptor = r;

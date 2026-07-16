@@ -917,21 +917,35 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     };
 
     // Install Playwright's `setupHitTargetInterceptor` page-side
-    // BEFORE dispatching the mouse events. Skipped on force=true and
-    // trial=true to match Playwright's `_performPointerAction`
-    // (force bypasses actionability checks; trial does not click at
-    // all). Skipped also when the backend has no functioning JS
-    // injection bridge — `install_hit_interceptor` falls back to
-    // `'ok'` in that case so the click still attempts.
-    let interceptor_installed = if opts.is_force() || opts.is_trial() {
+    // BEFORE dispatching the mouse events. force=true bypasses the
+    // check entirely; trial=true runs only the preliminary
+    // `expectHitTarget` (Playwright's trial performs the same check
+    // inside `setupHitTargetInterceptor` without dispatching).
+    // Protocol failure while arming (JS bridge unavailable, teardown
+    // race) dispatches uninstrumented — Playwright treats "no events
+    // received" as done.
+    let interceptor_installed = if opts.is_force() {
+      false
+    } else if opts.is_trial() {
+      if let Ok(HitResult::Missed { description }) = expect_hit_target(element, x, y).await {
+        // Surface immediately: "intercepts pointer events" is
+        // retryable, and the Locator-level loop owns the deadline, the
+        // locator-handler checkpoint, and the retry backoff (Playwright
+        // has exactly one such loop). Retrying here would double-sleep
+        // past the caller's timeout.
+        return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
+      }
       false
     } else {
-      // Either branch (preliminary miss OR protocol failure) skips
-      // arming so we don't gate the click on a finalize that has no
-      // listener to wake. `Ok(false)` lets the retry loop re-resolve
-      // the point; `Err` falls through to the dispatch which surfaces
-      // the underlying CDP / BiDi error on its own.
-      matches!(install_hit_interceptor(element, x, y).await, Ok(true))
+      match install_hit_interceptor(element, x, y, "mouse").await {
+        Ok(InstallOutcome::Armed) => true,
+        Ok(InstallOutcome::Miss(description)) => {
+          // Another element already covers the hit point: do NOT
+          // dispatch; bubble the retryable miss (see the trial branch).
+          return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
+        },
+        Err(_) => false,
+      }
     };
 
     page.press_modifiers(&opts.modifiers).await?;
@@ -967,13 +981,11 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     match hit {
       HitResult::Done => return Ok(()),
       HitResult::Missed { description } => {
-        attempt += 1;
-        if attempt >= retry_backoff_ms.len() + 2 {
-          return Err(FerriError::Backend(format!(
-            "{description} intercepts pointer events after {attempt} attempts"
-          )));
-        }
-        // Loop continues — re-resolve + retry.
+        // The events dispatched but landed elsewhere (layout shifted
+        // between point resolution and the browser processing the
+        // queued input). Bubble the retryable miss to the Locator loop
+        // (see the trial branch above for the single-loop rationale).
+        return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
       },
     }
   }
@@ -991,16 +1003,61 @@ enum HitResult {
   Missed { description: String },
 }
 
-/// Install Playwright's `setupHitTargetInterceptor` for the click
-/// about to be dispatched. Returns `Ok(true)` when the interceptor is
-/// armed, `Ok(false)` when the preliminary hit-target check already
-/// reports a miss (the caller should retry without dispatching), and
-/// `Err(_)` on protocol failure.
-async fn install_hit_interceptor(element: &AnyElement, x: f64, y: f64) -> Result<bool> {
-  let js = format!("function() {{ return window.__fd.installHitInterceptor(this, {{x: {x}, y: {y}}}, 'mouse'); }}");
+/// Outcome of arming the page-side hit-target interceptor.
+enum InstallOutcome {
+  /// Interceptor armed; finalize after the dispatch.
+  Armed,
+  /// The preliminary `expectHitTarget` already reports another element
+  /// at the hit point — nothing was armed and the action must NOT
+  /// dispatch (Playwright returns the description into its retry loop).
+  Miss(String),
+}
+
+/// Install Playwright's `setupHitTargetInterceptor` for the pointer
+/// action about to be dispatched (`action` is Playwright's event-set
+/// key: `'mouse'` / `'hover'` / `'tap'`).
+///
+/// # Errors
+///
+/// `Err(_)` on protocol failure (JS bridge unavailable, target gone) —
+/// callers dispatch uninstrumented in that case, mirroring Playwright's
+/// "no events received counts as done" stance.
+async fn install_hit_interceptor(element: &AnyElement, x: f64, y: f64, action: &str) -> Result<InstallOutcome> {
+  let js = format!("function() {{ return window.__fd.installHitInterceptor(this, {{x: {x}, y: {y}}}, '{action}'); }}");
   let val = element.call_js_fn_value(&js).await?;
   let s = val.and_then(|v| v.as_str().map(std::string::ToString::to_string));
-  Ok(matches!(s.as_deref(), Some("ok")))
+  match s.as_deref() {
+    // `None` (no string came back) is treated as armed — dispatching
+    // uninstrumented beats failing the action on a JS-bridge quirk.
+    Some("ok") | None => Ok(InstallOutcome::Armed),
+    Some("error:notconnected") => Err(FerriError::Backend("error:notconnected".to_string())),
+    Some(desc) => Ok(InstallOutcome::Miss(desc.to_string())),
+  }
+}
+
+/// Trial-mode preliminary hit-target check: `expectHitTarget` only, no
+/// interceptor armed and no events dispatched. Playwright's trial run
+/// performs the same check inside `setupHitTargetInterceptor`.
+async fn expect_hit_target(element: &AnyElement, x: f64, y: f64) -> Result<HitResult> {
+  let js = format!(
+    "function() {{ const r = window.__fd.expectHitTarget({{x: {x}, y: {y}}}, this); \
+     return r === 'done' ? 'done' : JSON.stringify(r); }}"
+  );
+  let val = element.call_js_fn_value(&js).await?;
+  let raw = val
+    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+    .unwrap_or_default();
+  if raw.is_empty() || raw == "done" || raw == "\"done\"" {
+    return Ok(HitResult::Done);
+  }
+  if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
+    if let Some(desc) = parsed.get("hitTargetDescription").and_then(|v| v.as_str()) {
+      return Ok(HitResult::Missed {
+        description: desc.to_string(),
+      });
+    }
+  }
+  Ok(HitResult::Done)
 }
 
 /// Tear down the interceptor and read the captured outcome.
@@ -1041,22 +1098,54 @@ pub async fn hover_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     // Playwright hover: visible + stable (no enabled gate).
     wait_for_states(element, page, &["visible", "stable"]).await.ok();
   }
+  let (x, y) = resolve_click_point(element, opts.position).await?;
+
+  // Hit-target check (Playwright's `'hover'` interceptor set:
+  // `mousemove`): trial runs only the preliminary `expectHitTarget`;
+  // the real dispatch arms the interceptor around the pointer move. A
+  // miss surfaces the retryable "intercepts pointer events" error so
+  // the Locator loop re-resolves and runs locator handlers until its
+  // deadline.
+  let interceptor_installed = if opts.is_force() {
+    false
+  } else if opts.is_trial() {
+    if let Ok(HitResult::Missed { description }) = expect_hit_target(element, x, y).await {
+      return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
+    }
+    false
+  } else {
+    match install_hit_interceptor(element, x, y, "hover").await {
+      Ok(InstallOutcome::Armed) => true,
+      Ok(InstallOutcome::Miss(description)) => {
+        return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
+      },
+      Err(_) => false,
+    }
+  };
+
   page.press_modifiers(&opts.modifiers).await?;
   let result: Result<()> = if opts.is_trial() {
     Ok(())
   } else {
-    match resolve_click_point(element, opts.position).await {
-      Ok((x, y)) => {
-        let args = crate::backend::BackendHoverArgs {
-          modifiers_bitmask: crate::options::modifiers_bitmask(&opts.modifiers),
-          steps: 1,
-        };
-        page.hover_at_with(x, y, &args).await
-      },
-      Err(e) => Err(e),
-    }
+    let args = crate::backend::BackendHoverArgs {
+      modifiers_bitmask: crate::options::modifiers_bitmask(&opts.modifiers),
+      steps: 1,
+    };
+    page.hover_at_with(x, y, &args).await
   };
   let _ = page.release_modifiers(&opts.modifiers).await;
+
+  if interceptor_installed {
+    // Always tear down (a dispatch error must not leak an armed
+    // listener into the next attempt); the captured outcome only
+    // matters when the dispatch itself succeeded.
+    let hit = finalize_hit_interceptor(element).await;
+    if result.is_ok()
+      && let Ok(HitResult::Missed { description }) = hit
+    {
+      return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
+    }
+  }
   result
 }
 
@@ -1067,15 +1156,12 @@ pub async fn hover_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
 /// then emit a real `Input.dispatchTouchEvent { touchStart; touchEnd }`
 /// pair at the element's centre (or `position` offset).
 ///
-/// CDP (`cdp-pipe`, `cdp-raw`) uses the native
-/// `Input.dispatchTouchEvent` protocol command so dispatched touch
-/// events have `isTrusted === true` and fire through the full
-/// hit-testing + pointer event pipeline. `BiDi` and `WebKit` have no
-/// public touch-injection primitive; both emit a backend-level
-/// `unsupported:` error that the Locator layer surfaces as
-/// [`crate::error::FerriError::Unsupported`]. Matches Playwright's
-/// `server/chromium/crInput.ts::RawTouchscreenImpl::tap` (CDP) plus
-/// the explicit absence of `Touchscreen` in the `BiDi` backend.
+/// Every backend dispatches native, trusted touch input: CDP
+/// `Input.dispatchTouchEvent`, `WebKit` `Input.dispatchTapEvent`,
+/// `BiDi` an `input.performActions` `touch` pointer sequence. On `BiDi`
+/// only the modifiers variant surfaces
+/// [`crate::error::FerriError::Unsupported`] (Firefox does not apply
+/// key-source modifier state to touch-pointer events).
 ///
 /// Modifiers are pressed before dispatch and released on every exit
 /// path so page state never leaks.
@@ -1091,21 +1177,46 @@ pub async fn tap_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::o
       .await
       .ok();
   }
+  let (x, y) = resolve_click_point(element, opts.position).await?;
+
+  // Hit-target check (Playwright's `'tap'` interceptor set:
+  // pointerdown/up + touchstart/end/cancel) — same lifecycle as hover.
+  let interceptor_installed = if opts.is_force() {
+    false
+  } else if opts.is_trial() {
+    if let Ok(HitResult::Missed { description }) = expect_hit_target(element, x, y).await {
+      return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
+    }
+    false
+  } else {
+    match install_hit_interceptor(element, x, y, "tap").await {
+      Ok(InstallOutcome::Armed) => true,
+      Ok(InstallOutcome::Miss(description)) => {
+        return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
+      },
+      Err(_) => false,
+    }
+  };
+
   page.press_modifiers(&opts.modifiers).await?;
   let result: Result<()> = if opts.is_trial() {
     Ok(())
   } else {
-    match resolve_click_point(element, opts.position).await {
-      Ok((x, y)) => {
-        let args = crate::backend::BackendTapArgs {
-          modifiers_bitmask: crate::options::modifiers_bitmask(&opts.modifiers),
-        };
-        page.tap_at_with(x, y, &args).await
-      },
-      Err(e) => Err(e),
-    }
+    let args = crate::backend::BackendTapArgs {
+      modifiers_bitmask: crate::options::modifiers_bitmask(&opts.modifiers),
+    };
+    page.tap_at_with(x, y, &args).await
   };
   let _ = page.release_modifiers(&opts.modifiers).await;
+
+  if interceptor_installed {
+    let hit = finalize_hit_interceptor(element).await;
+    if result.is_ok()
+      && let Ok(HitResult::Missed { description }) = hit
+    {
+      return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
+    }
+  }
   result
 }
 
