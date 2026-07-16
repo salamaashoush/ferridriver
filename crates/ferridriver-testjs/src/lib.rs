@@ -19,11 +19,11 @@ mod bridge;
 mod translate;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use dashmap::DashMap;
 use ferridriver_script::{CollectedTests, CompiledBundle, bundle_and_compile_named, collect_tests, eval_bundle};
-use ferridriver_test::config::TestConfig;
+use ferridriver_test::config::{CliOverrides, TestConfig};
 use ferridriver_test::model::TestPlan;
 use tokio::sync::OnceCell;
 
@@ -312,4 +312,93 @@ pub async fn build_ts_plan(config: &TestConfig, cwd: &Path) -> anyhow::Result<Op
   ));
   let plan = translate_tests(&source, config, cwd, &pool)?;
   Ok(Some((plan, pool)))
+}
+
+/// Default discovery globs when neither config nor CLI narrowed them —
+/// the Playwright convention.
+const DEFAULT_TEST_MATCH: &[&str] = &["**/*.spec.ts", "**/*.test.ts"];
+
+fn empty_plan() -> TestPlan {
+  TestPlan {
+    suites: Vec::new(),
+    total_tests: 0,
+    shard: None,
+  }
+}
+
+/// The `ferridriver test` entry point: resolve discovery globs, build
+/// the plan, and run it through the core `TestRunner` — plain runs and
+/// `--watch`/`--ui` (each cycle re-bundles and swaps in a fresh
+/// session pool, tearing down the previous cycle's).
+pub async fn run_ts_tests_with(mut config: TestConfig, overrides: CliOverrides) -> i32 {
+  let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+  // Positional files/globs on the CLI replace the config's testMatch.
+  if !overrides.test_files.is_empty() {
+    config.test_match = overrides.test_files.clone();
+  }
+  if config.test_match.is_empty() {
+    config.test_match = DEFAULT_TEST_MATCH.iter().map(|s| (*s).to_string()).collect();
+  }
+
+  if overrides.ui || overrides.watch {
+    let ui_mode = overrides.ui;
+    let ui_port = overrides.ui_port;
+    let factory_config = config.clone();
+    let factory_cwd = cwd.clone();
+    // Each watch cycle owns a fresh pool; the previous cycle's suspended
+    // worker fixtures are resumed before its sessions drop.
+    let live_pool: Arc<Mutex<Option<Arc<SessionPool>>>> = Arc::new(Mutex::new(None));
+    let factory: ferridriver_test::runner::WatchPlanFactory = Box::new(move |_changed| {
+      let config = factory_config.clone();
+      let cwd = factory_cwd.clone();
+      let live_pool = Arc::clone(&live_pool);
+      Box::pin(async move {
+        let previous = live_pool
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .take();
+        if let Some(pool) = previous {
+          pool.teardown().await;
+        }
+        match build_ts_plan(&config, &cwd).await {
+          Ok(Some((plan, pool))) => {
+            *live_pool.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pool);
+            plan
+          },
+          Ok(None) => {
+            eprintln!("no test files found (testMatch: {:?})", config.test_match);
+            empty_plan()
+          },
+          Err(e) => {
+            eprintln!("{e}");
+            empty_plan()
+          },
+        }
+      })
+    });
+    let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
+    return if ui_mode {
+      runner.run_ui(factory, cwd, ui_port).await
+    } else {
+      runner.run_watch(factory, cwd).await
+    };
+  }
+
+  let (plan, pool) = match build_ts_plan(&config, &cwd).await {
+    Ok(Some(built)) => built,
+    Ok(None) => {
+      eprintln!("no test files found (testMatch: {:?})", config.test_match);
+      return i32::from(!overrides.pass_with_no_tests);
+    },
+    Err(e) => {
+      eprintln!("{e}");
+      return 1;
+    },
+  };
+  let code = ferridriver_test::runner::TestRunner::new(config, overrides)
+    .run(plan)
+    .await;
+  pool.teardown().await;
+  code
 }

@@ -43,8 +43,14 @@ pub enum Command {
   /// Run BDD/Cucumber feature files via the Rust test runner.
   Bdd(BddArgs),
 
+  /// Run TypeScript/JavaScript test files (`*.test.ts`, `*.spec.ts`)
+  /// through the native test runner — Playwright-shaped `test`/
+  /// `describe`/`expect` from '@ferridriver/test', executed in the
+  /// embedded QuickJS engine (no Node required).
+  Test(TestRunArgs),
+
   /// Run cargo unit/integration tests via nextest (or cargo test).
-  Test(TestArgs),
+  RustTest(RustTestArgs),
 
   /// Execute a JS script with Playwright-style bindings (script
   /// launches its own browser via `chromium()` / `firefox()` /
@@ -284,8 +290,95 @@ pub struct BddArgs {
 
 // ── test subcommand ─────────────────────────────────────────────────────
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Args)]
-pub struct TestArgs {
+pub struct TestRunArgs {
+  /// Test file paths or globs. Overrides `[test].testMatch` from config.
+  pub files: Vec<String>,
+
+  /// Only run tests whose full title matches this substring/regex.
+  #[arg(long, short = 'g')]
+  pub grep: Option<String>,
+
+  /// Skip tests whose full title matches this substring/regex.
+  #[arg(long)]
+  pub grep_invert: Option<String>,
+
+  /// Only run tests carrying this tag (from `test(title, { tag })`).
+  #[arg(long)]
+  pub tag: Option<String>,
+
+  /// Number of parallel workers.
+  #[arg(long)]
+  pub workers: Option<usize>,
+
+  /// Retry count for failing tests.
+  #[arg(long)]
+  pub retries: Option<u32>,
+
+  /// Per-test timeout in milliseconds.
+  #[arg(long)]
+  pub timeout: Option<u64>,
+
+  /// Reporter name, repeatable (e.g. `--reporter list --reporter junit`).
+  #[arg(long)]
+  pub reporter: Vec<String>,
+
+  /// Shard the tests across CI machines, `X/N`.
+  #[arg(long)]
+  pub shard: Option<String>,
+
+  /// Run only the tests of these projects (repeatable).
+  #[arg(long)]
+  pub project: Vec<String>,
+
+  /// Watch mode: re-run on file changes.
+  #[arg(long)]
+  pub watch: bool,
+
+  /// UI mode: serve a localhost web app that lists tests, streams live
+  /// results, and re-runs on file changes or in-app commands.
+  #[arg(long)]
+  pub ui: bool,
+
+  /// Port for the --ui server (defaults to an ephemeral free port).
+  #[arg(long, requires = "ui")]
+  pub ui_port: Option<u16>,
+
+  /// Only re-run the tests that failed in the previous run.
+  #[arg(long)]
+  pub last_failed: bool,
+
+  /// Only run test files changed since the given git ref (default HEAD).
+  #[arg(long, num_args = 0..=1, default_missing_value = "HEAD")]
+  pub only_changed: Option<String>,
+
+  /// Stop after the first failing test.
+  #[arg(long)]
+  pub fail_fast: bool,
+
+  /// Stop after this many failures.
+  #[arg(long)]
+  pub max_failures: Option<u32>,
+
+  /// Run each test N times.
+  #[arg(long)]
+  pub repeat_each: Option<u32>,
+
+  /// Fail the run when `test.only` is present (CI guard).
+  #[arg(long)]
+  pub forbid_only: bool,
+
+  /// List discovered tests without running them.
+  #[arg(long)]
+  pub list: bool,
+
+  #[command(flatten)]
+  pub browser: BrowserArgs,
+}
+
+#[derive(Args)]
+pub struct RustTestArgs {
   /// Test name filter passed through to the underlying runner.
   pub filter: Option<String>,
 

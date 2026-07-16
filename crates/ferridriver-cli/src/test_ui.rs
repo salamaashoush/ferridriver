@@ -262,7 +262,7 @@ impl Drop for ScratchCleanup {
 }
 
 struct CycleSpawner {
-  args: cli::TestArgs,
+  args: cli::RustTestArgs,
   sock_path: PathBuf,
   /// Scratch file for [`RunScope::ids`] selections, exported as
   /// `FERRITEST_ID_FILE`; rewritten by each cycle that uses it.
@@ -391,7 +391,7 @@ fn handle_wire_message(
   }
 }
 
-pub async fn run(config: FerridriverConfig, args: cli::TestArgs) -> anyhow::Result<()> {
+pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::Result<()> {
   if matches!(args.runner, Some(cli::TestRunner::Nextest)) {
     anyhow::bail!(
       "--ui drives ferritest harness binaries through `cargo test`; nextest cannot enumerate \

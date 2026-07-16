@@ -95,17 +95,10 @@ impl InfoBridge {
   fn remap_location(&self, location: Option<(u32, u32)>) -> Option<StepLocation> {
     let (line, col) = location?;
     let (src, src_line, src_col) = self.bundle.remap(line, col)?;
-    let file = {
-      let p = std::path::Path::new(&src);
-      let abs = if p.is_absolute() {
-        p.to_path_buf()
-      } else {
-        self.cwd.join(p)
-      };
-      abs
-        .strip_prefix(self.cwd.as_path())
-        .map_or_else(|_| abs.display().to_string(), |r| r.display().to_string())
-    };
+    let abs = crate::translate::resolve_source(&self.cwd, &src);
+    let file = abs
+      .strip_prefix(self.cwd.as_path())
+      .map_or_else(|_| abs.display().to_string(), |r| r.display().to_string());
     Some(StepLocation {
       file,
       line: src_line,

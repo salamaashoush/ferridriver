@@ -159,7 +159,7 @@ async fn test_ui_mode_end_to_end() {
   let root = workspace_root();
   let mut child = Command::new(bin())
     .current_dir(&root)
-    .args(["test", "--ui", "--headless", "-p", "rust-e2e-example"])
+    .args(["rust-test", "--ui", "--headless", "-p", "rust-e2e-example"])
     .stdout(Stdio::piped())
     .stderr(Stdio::inherit())
     .spawn()

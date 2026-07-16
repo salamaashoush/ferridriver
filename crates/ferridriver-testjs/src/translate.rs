@@ -32,12 +32,34 @@ struct SuiteChain {
 
 fn remap_file(bundle: &CompiledBundle, cwd: &Path, line: u32, col: u32) -> Option<(String, u32)> {
   let (src, src_line, _src_col) = bundle.remap(line, col)?;
-  let p = Path::new(&src);
-  let abs = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+  let abs = resolve_source(cwd, &src);
   let rel = abs
     .strip_prefix(cwd)
     .map_or_else(|_| abs.display().to_string(), |r| r.display().to_string());
   Some((rel, src_line))
+}
+
+/// Resolve a source-map `sources` entry to a real file. The entries are
+/// relative to the bundle chunk's virtual location (a level below the
+/// bundling cwd), so a literal join produces paths like
+/// `<cwd>/../tests/a.test.ts` — peel leading `../` segments until the
+/// candidate exists under `cwd`.
+pub(crate) fn resolve_source(cwd: &Path, src: &str) -> std::path::PathBuf {
+  let p = Path::new(src);
+  if p.is_absolute() {
+    return p.to_path_buf();
+  }
+  let mut rest = src;
+  loop {
+    let candidate = cwd.join(rest);
+    if candidate.exists() {
+      return candidate;
+    }
+    match rest.strip_prefix("../") {
+      Some(stripped) => rest = stripped,
+      None => return cwd.join(src),
+    }
+  }
 }
 
 fn merge_bag(base: &mut Option<serde_json::Value>, incoming: &serde_json::Value) {

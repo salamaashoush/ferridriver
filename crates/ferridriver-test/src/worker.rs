@@ -693,6 +693,22 @@ pub struct Worker {
   event_bus: Option<EventBus>,
 }
 
+/// Directory-safe name for a test's artifact folder under `outputDir`.
+/// Titles and file paths are user-controlled and may contain path
+/// separators or `..` — folding each path-hostile component keeps every
+/// artifact inside `outputDir` (Playwright sanitizes the same way).
+fn artifact_dir_name(full_name: &str) -> String {
+  full_name
+    .chars()
+    .map(|c| match c {
+      '/' | '\\' | ':' => '-',
+      c if c.is_control() => '-',
+      c => c,
+    })
+    .collect::<String>()
+    .replace("..", "-")
+}
+
 impl Worker {
   pub fn new(id: u32, config: Arc<TestConfig>, event_bus: Option<EventBus>) -> Self {
     Self { id, config, event_bus }
@@ -1170,7 +1186,7 @@ impl Worker {
       worker_index: self.id,
       parallel_index: self.id,
       repeat_each_index: 0,
-      output_dir: self.config.output_dir.join(test_id.full_name()),
+      output_dir: self.config.output_dir.join(artifact_dir_name(&test_id.full_name())),
       snapshot_dir: self
         .config
         .snapshot_dir

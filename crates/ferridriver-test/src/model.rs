@@ -31,7 +31,15 @@ impl TestId {
   #[must_use]
   pub fn full_name(&self) -> String {
     match &self.suite {
-      Some(s) => format!("{} > {} > {}", self.file, s, self.name),
+      // A file-level suite carries the file as its id — printing it
+      // twice ("a.test.ts > a.test.ts > title") is pure noise; a
+      // describe suite's id is namespaced as "file::path" — display
+      // just the path.
+      Some(s) if *s == self.file => format!("{} > {}", self.file, self.name),
+      Some(s) => match s.strip_prefix(&format!("{}::", self.file)) {
+        Some(path) => format!("{} > {} > {}", self.file, path, self.name),
+        None => format!("{} > {} > {}", self.file, s, self.name),
+      },
       None => format!("{} > {}", self.file, self.name),
     }
   }

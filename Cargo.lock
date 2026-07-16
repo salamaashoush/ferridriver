@@ -1435,6 +1435,7 @@ dependencies = [
  "ferridriver-script",
  "ferridriver-session",
  "ferridriver-test",
+ "ferridriver-testjs",
  "futures",
  "libc",
  "mimalloc",

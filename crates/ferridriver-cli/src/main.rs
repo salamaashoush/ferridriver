@@ -113,7 +113,8 @@ async fn main() -> anyhow::Result<()> {
   match args.command {
     cli::Command::Mcp(mcp_args) => Box::pin(run_mcp(config, mcp_args)).await,
     cli::Command::Bdd(bdd_args) => Box::pin(run_bdd(config, bdd_args)).await,
-    cli::Command::Test(test_args) => {
+    cli::Command::Test(test_args) => Box::pin(run_test_native(config, test_args)).await,
+    cli::Command::RustTest(test_args) => {
       if test_args.ui {
         Box::pin(test_ui::run(config, test_args)).await
       } else if test_args.watch {
@@ -206,7 +207,7 @@ async fn run_install(args: cli::InstallArgs) -> anyhow::Result<()> {
 /// and the `--ui` cycle spawner: runner selection, `FERRITEST_*` env
 /// exports, and package filters. Callers append positionals /
 /// passthrough / UI-cycle env on top.
-pub(crate) fn base_test_command(args: &cli::TestArgs, runner: cli::TestRunner) -> std::process::Command {
+pub(crate) fn base_test_command(args: &cli::RustTestArgs, runner: cli::TestRunner) -> std::process::Command {
   let (program, base_args): (&str, Vec<String>) = match runner {
     cli::TestRunner::Nextest => {
       let mut a = vec!["nextest".into(), "run".into()];
@@ -247,7 +248,7 @@ pub(crate) fn base_test_command(args: &cli::TestArgs, runner: cli::TestRunner) -
 
 /// The exact command `ferridriver test` runs once — shared with watch
 /// mode, which re-runs it per file change.
-fn full_test_command(args: &cli::TestArgs, chosen_runner: cli::TestRunner) -> std::process::Command {
+fn full_test_command(args: &cli::RustTestArgs, chosen_runner: cli::TestRunner) -> std::process::Command {
   use std::process::Stdio;
   let mut cmd = base_test_command(args, chosen_runner);
   if let Some(filter) = args.filter.as_deref() {
@@ -267,7 +268,7 @@ fn full_test_command(args: &cli::TestArgs, chosen_runner: cli::TestRunner) -> st
   cmd
 }
 
-fn run_test(args: &cli::TestArgs) -> anyhow::Result<()> {
+fn run_test(args: &cli::RustTestArgs) -> anyhow::Result<()> {
   let chosen_runner = args.runner.unwrap_or(detect_test_runner());
   let mut cmd = full_test_command(args, chosen_runner);
 
@@ -293,7 +294,7 @@ fn run_test(args: &cli::TestArgs) -> anyhow::Result<()> {
 /// A change arriving while a cycle runs queues exactly one re-run for
 /// when it finishes; Ctrl-C / SIGTERM kill the cycle's whole process
 /// group (cargo, harness binaries, browsers) and exit.
-async fn run_test_watch(config: FerridriverConfig, args: cli::TestArgs) -> anyhow::Result<()> {
+async fn run_test_watch(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::Result<()> {
   let overrides = ferridriver_test::config::CliOverrides {
     headless: args.headless,
     backend: args.backend.clone(),
@@ -377,6 +378,69 @@ fn chosen_runner_name(r: cli::TestRunner) -> &'static str {
   match r {
     cli::TestRunner::Nextest => "nextest",
     cli::TestRunner::Cargo => "cargo",
+  }
+}
+
+async fn run_test_native(config: FerridriverConfig, args: cli::TestRunArgs) -> anyhow::Result<()> {
+  // Thread the `[scripting]` env allow-list + sidecars into the test VM
+  // — same resolution the MCP server, `ferridriver run` and BDD use.
+  ferridriver_testjs::set_test_script_caps(
+    ferridriver_script::ScriptCaps::resolve_with_commands(
+      &config.scripting.allow_env,
+      config.scripting.allow.commands.clone(),
+    )
+    .with_extension_policy(config.extensions.policy()),
+  );
+  ferridriver_testjs::set_test_sidecars(sidecar_specs(&config));
+
+  let mut overrides = ferridriver_test::config::CliOverrides {
+    test_files: args.files,
+    grep: args.grep,
+    grep_invert: args.grep_invert,
+    tag: args.tag,
+    workers: args.workers.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+    retries: args.retries,
+    timeout: args.timeout,
+    reporter: args.reporter,
+    project_filter: args.project,
+    watch: args.watch,
+    ui: args.ui,
+    ui_port: args.ui_port,
+    last_failed: args.last_failed,
+    only_changed: args.only_changed,
+    fail_fast: args.fail_fast,
+    max_failures: args.max_failures,
+    repeat_each: args.repeat_each,
+    forbid_only: args.forbid_only,
+    list_only: args.list,
+    extensions: config.extensions.paths().to_vec(),
+    ..Default::default()
+  };
+  if args.browser.headless {
+    overrides.headless = true;
+  }
+  if !matches!(args.browser.backend, cli::Backend::CdpPipe) {
+    overrides.backend = match args.browser.backend {
+      cli::Backend::CdpPipe => Some("cdp-pipe".into()),
+      cli::Backend::CdpRaw => Some("cdp-raw".into()),
+      cli::Backend::WebKit => Some("webkit".into()),
+      cli::Backend::Bidi => Some("bidi".into()),
+    };
+  }
+  overrides.executable_path = args.browser.executable_path;
+  if let Some(ref spec) = args.shard {
+    overrides.shard =
+      Some(ferridriver_test::config::ShardArg::parse(spec).map_err(|e| anyhow::anyhow!("invalid --shard: {e}"))?);
+  }
+
+  let test_config = ferridriver_test::config::resolve_config_from(config.test, &overrides)
+    .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
+
+  let exit_code = Box::pin(ferridriver_testjs::run_ts_tests_with(test_config, overrides)).await;
+  if exit_code == 0 {
+    Ok(())
+  } else {
+    std::process::exit(exit_code);
   }
 }
 
