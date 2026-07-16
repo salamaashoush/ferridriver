@@ -175,7 +175,7 @@ test('test.info returns testInfo', async ({ page }) => {
 // ── test.extend() — custom fixtures ──
 
 const myTest = test.extend<{ greeting: string }>({
-  greeting: async ({ browserName }: any, use: (v: string) => Promise<void>) => {
+  greeting: async ({ browserName }, use) => {
     // Setup
     const value = `Hello from ${browserName}`;
     // Use (suspends factory, runs test body, then resumes for teardown)
@@ -184,7 +184,7 @@ const myTest = test.extend<{ greeting: string }>({
   },
 });
 
-myTest('custom fixture via test.extend', async ({ page, greeting }: any) => {
+myTest('custom fixture via test.extend', async ({ page, greeting }) => {
   if (!greeting || !greeting.startsWith('Hello from ')) {
     throw new Error(`unexpected greeting: ${greeting}`);
   }

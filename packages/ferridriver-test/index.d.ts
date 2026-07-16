@@ -1,0 +1,880 @@
+// Type declarations for ferridriver's native TypeScript test runner.
+//
+// `import { test, describe, expect } from '@ferridriver/test'` resolves
+// at RUN time to a native module inside the embedded QuickJS engine
+// (`ferridriver test`); this package carries only the editor/typecheck
+// surface. The declarations cover the shipped binding surface — when a
+// binding gains a method, it is added here in the same change. There
+// are intentionally no index-signature escapes: a missing declaration
+// is a visible type error, not a silently-any call.
+
+// ── Test runner ──────────────────────────────────────────────────────
+
+export interface TestDetailsAnnotation {
+  type: string;
+  description?: string;
+}
+
+export interface TestDetails {
+  tag?: string | string[];
+  annotation?: TestDetailsAnnotation | TestDetailsAnnotation[];
+  timeout?: number;
+  retries?: number;
+}
+
+export interface TestProject {
+  name: string;
+}
+
+export interface TestInfo {
+  readonly title: string;
+  readonly titlePath: string[];
+  readonly file: string;
+  readonly line: number;
+  readonly column: number;
+  readonly retry: number;
+  readonly workerIndex: number;
+  readonly parallelIndex: number;
+  readonly repeatEachIndex: number;
+  readonly timeout: number;
+  readonly expectedStatus: 'passed' | 'failed' | 'timedOut' | 'skipped';
+  readonly tags: string[];
+  readonly outputDir: string;
+  readonly snapshotDir: string;
+  readonly snapshotSuffix: string;
+  readonly project: TestProject | null;
+  readonly annotations: TestDetailsAnnotation[];
+  readonly attachmentCount: number;
+  readonly errors: string[];
+  attach(
+    name: string,
+    contentType: string,
+    body: string | Uint8Array | ArrayBuffer | Buffer,
+    options?: undefined
+  ): Promise<void>;
+  attach(name: string, options: { body?: string | Uint8Array | ArrayBuffer | Buffer; contentType?: string; path?: string }): Promise<void>;
+  annotate(type: string, description?: string): void;
+  skip(): void;
+  skip(condition: boolean, description?: string): void;
+  fixme(): void;
+  fixme(condition: boolean, description?: string): void;
+  fail(): void;
+  fail(condition: boolean, description?: string): void;
+  slow(): void;
+  slow(condition: boolean, description?: string): void;
+  setTimeout(timeout: number): void;
+  outputPath(...pathSegments: string[]): string;
+  snapshotPath(name: string): string;
+}
+
+export interface TestFixtures {
+  page: Page;
+  context: BrowserContext;
+  request: APIRequestContext;
+  browser: Browser;
+  browserName: string;
+  headless: boolean;
+  isMobile: boolean;
+  hasTouch: boolean;
+  testInfo: TestInfo;
+}
+
+export type TestBody<TFixtures> = (fixtures: TFixtures, testInfoOrRow?: any) => void | Promise<void>;
+
+export interface DescribeFunction {
+  (title: string, body: () => void): void;
+  serial(title: string, body: () => void): void;
+  parallel(title: string, body: () => void): void;
+  skip(title: string, body: () => void): void;
+  fixme(title: string, body: () => void): void;
+  only(title: string, body: () => void): void;
+  each<Row>(rows: Row[]): (titleTemplate: string, body: (row: Row) => void) => void;
+  configure(options: { mode?: 'serial' | 'parallel' | 'default'; retries?: number; timeout?: number }): void;
+}
+
+export type FixtureScope = 'test' | 'worker';
+
+export type FixtureValue<T, TFixtures> =
+  | ((fixtures: TFixtures, use: (value: T) => Promise<void>) => void | Promise<void>)
+  | [
+      T | ((fixtures: TFixtures, use: (value: T) => Promise<void>) => void | Promise<void>),
+      { scope?: FixtureScope; auto?: boolean; option?: boolean },
+    ];
+
+export interface TestType<TFixtures = TestFixtures> {
+  (title: string, body: TestBody<TFixtures>): void;
+  (title: string, details: TestDetails, body: TestBody<TFixtures>): void;
+
+  skip(title: string, body: TestBody<TFixtures>): void;
+  skip(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
+  skip(): void;
+  skip(condition: boolean, description?: string): void;
+
+  fixme(title: string, body: TestBody<TFixtures>): void;
+  fixme(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
+  fixme(): void;
+  fixme(condition: boolean, description?: string): void;
+
+  fail(title: string, body: TestBody<TFixtures>): void;
+  fail(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
+  fail(): void;
+  fail(condition: boolean, description?: string): void;
+
+  slow(title: string, body: TestBody<TFixtures>): void;
+  slow(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
+  slow(): void;
+  slow(condition: boolean, description?: string): void;
+
+  only(title: string, body: TestBody<TFixtures>): void;
+  only(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
+
+  each<Row>(rows: Row[]): (titleTemplate: string, body: (fixtures: TFixtures, row: Row) => void | Promise<void>) => void;
+
+  beforeAll(body: (fixtures: Partial<TFixtures>, testInfo: TestInfo) => void | Promise<void>): void;
+  beforeAll(title: string, body: (fixtures: Partial<TFixtures>, testInfo: TestInfo) => void | Promise<void>): void;
+  afterAll(body: (fixtures: Partial<TFixtures>, testInfo: TestInfo) => void | Promise<void>): void;
+  afterAll(title: string, body: (fixtures: Partial<TFixtures>, testInfo: TestInfo) => void | Promise<void>): void;
+  beforeEach(body: (fixtures: TFixtures, testInfo: TestInfo) => void | Promise<void>): void;
+  beforeEach(title: string, body: (fixtures: TFixtures, testInfo: TestInfo) => void | Promise<void>): void;
+  afterEach(body: (fixtures: TFixtures, testInfo: TestInfo) => void | Promise<void>): void;
+  afterEach(title: string, body: (fixtures: TFixtures, testInfo: TestInfo) => void | Promise<void>): void;
+
+  use(options: Record<string, unknown>): void;
+  setTimeout(timeout: number): void;
+  info(): TestInfo;
+  step<T>(title: string, body: () => T | Promise<T>): Promise<T>;
+  extend<T extends Record<string, unknown>>(fixtures: {
+    [K in keyof T]: FixtureValue<T[K], TFixtures & T>;
+  }): TestType<TFixtures & T>;
+
+  describe: DescribeFunction;
+}
+
+export const test: TestType;
+export const describe: DescribeFunction;
+
+// ── Expect ───────────────────────────────────────────────────────────
+
+export interface ExpectMatcherOptions {
+  timeout?: number;
+}
+
+export interface TextMatcherOptions extends ExpectMatcherOptions {
+  ignoreCase?: boolean;
+  useInnerText?: boolean;
+}
+
+export interface ScreenshotAssertionOptions {
+  threshold?: number;
+  maxDiffPixels?: number;
+  maxDiffPixelRatio?: number;
+  animations?: 'disabled' | 'allow';
+  caret?: 'hide' | 'initial';
+  scale?: 'css' | 'device';
+  stylePath?: string;
+  mask?: string[];
+  maskColor?: string;
+  clip?: { x: number; y: number; width: number; height: number };
+}
+
+export interface GenericMatchers {
+  toBe(expected: unknown): void;
+  toEqual(expected: unknown): void;
+  toStrictEqual(expected: unknown): void;
+  toBeNull(): void;
+  toBeUndefined(): void;
+  toBeDefined(): void;
+  toBeTruthy(): void;
+  toBeFalsy(): void;
+  toBeNaN(): void;
+  toBeCloseTo(expected: number, numDigits?: number): void;
+  toBeGreaterThan(expected: number): void;
+  toBeGreaterThanOrEqual(expected: number): void;
+  toBeLessThan(expected: number): void;
+  toBeLessThanOrEqual(expected: number): void;
+  toContain(expected: unknown): void;
+  toContainEqual(expected: unknown): void;
+  toHaveLength(length: number): void;
+  toHaveProperty(path: string, value?: unknown): void;
+  toMatch(pattern: string | RegExp): void;
+  toMatchObject(subset: object): void;
+  toBeInstanceOf(ctor: Function): void;
+  toThrow(matcher?: string | RegExp | Function | { message?: string | RegExp; name?: string }): void | Promise<void>;
+  toMatchSnapshot(name?: string): Promise<void>;
+}
+
+export interface WebFirstMatchers {
+  toBeVisible(options?: ExpectMatcherOptions & { visible?: boolean }): Promise<void>;
+  toBeHidden(options?: ExpectMatcherOptions): Promise<void>;
+  toBeEnabled(options?: ExpectMatcherOptions & { enabled?: boolean }): Promise<void>;
+  toBeDisabled(options?: ExpectMatcherOptions): Promise<void>;
+  toBeChecked(options?: ExpectMatcherOptions & { checked?: boolean }): Promise<void>;
+  toBeEditable(options?: ExpectMatcherOptions & { editable?: boolean }): Promise<void>;
+  toBeAttached(options?: ExpectMatcherOptions & { attached?: boolean }): Promise<void>;
+  toBeEmpty(options?: ExpectMatcherOptions): Promise<void>;
+  toBeFocused(options?: ExpectMatcherOptions): Promise<void>;
+  toBeInViewport(options?: ExpectMatcherOptions & { ratio?: number }): Promise<void>;
+  toHaveText(expected: string | RegExp | Array<string | RegExp>, options?: TextMatcherOptions): Promise<void>;
+  toContainText(expected: string | RegExp | Array<string | RegExp>, options?: TextMatcherOptions): Promise<void>;
+  toHaveTexts(expected: Array<string | RegExp>, options?: ExpectMatcherOptions): Promise<void>;
+  toContainTexts(expected: Array<string | RegExp>, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveValue(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveValues(expected: Array<string | RegExp>, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveAttribute(name: string, value?: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveClass(expected: string | RegExp | Array<string | RegExp>, options?: ExpectMatcherOptions): Promise<void>;
+  toContainClass(expected: string, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveCSS(name: string, value: string | RegExp, options?: ExpectMatcherOptions & { pseudo?: string }): Promise<void>;
+  toHaveId(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveRole(role: string, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveAccessibleName(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveAccessibleDescription(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveAccessibleErrorMessage(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveJSProperty(name: string, value: unknown, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveCount(count: number, options?: ExpectMatcherOptions): Promise<void>;
+  toMatchSnapshot(name?: string): Promise<void>;
+  toHaveScreenshot(name?: string, options?: ScreenshotAssertionOptions): Promise<void>;
+  toHaveScreenshot(options?: ScreenshotAssertionOptions): Promise<void>;
+  toMatchAriaSnapshot(expected: string, options?: ExpectMatcherOptions): Promise<void>;
+}
+
+export interface PageMatchers {
+  toHaveTitle(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
+  toContainTitle(expected: string, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveURL(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
+  toContainURL(expected: string, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveScreenshot(name?: string, options?: ScreenshotAssertionOptions): Promise<void>;
+  toHaveScreenshot(options?: ScreenshotAssertionOptions): Promise<void>;
+  toMatchAriaSnapshot(expected: string, options?: ExpectMatcherOptions): Promise<void>;
+}
+
+export interface APIResponseMatchers {
+  toBeOK(): void;
+}
+
+export type LocatorAssertions = WebFirstMatchers & { not: WebFirstMatchers };
+export type PageAssertions = PageMatchers & { not: PageMatchers };
+export type ValueAssertions = GenericMatchers & { not: GenericMatchers };
+
+export interface PollAssertions {
+  toBe(expected: unknown): Promise<void>;
+  toEqual(expected: unknown): Promise<void>;
+  toSatisfy(predicate: (value: unknown) => boolean): Promise<void>;
+  not: PollAssertions;
+}
+
+export interface Expect {
+  (locator: Locator): LocatorAssertions;
+  (page: Page): PageAssertions;
+  (response: APIResponse): APIResponseMatchers & { not: APIResponseMatchers };
+  (fn: () => unknown | Promise<unknown>): ValueAssertions & { toPass(options?: { timeout?: number; intervals?: number[] }): Promise<void> };
+  (value: unknown): ValueAssertions;
+  soft(value: unknown): ValueAssertions;
+  soft(locator: Locator): LocatorAssertions;
+  poll(fn: () => unknown | Promise<unknown>, options?: { timeout?: number }): PollAssertions;
+  any(ctor: Function): unknown;
+  anything(): unknown;
+  arrayContaining(items: unknown[]): unknown;
+  objectContaining(subset: object): unknown;
+  stringContaining(substring: string): unknown;
+  stringMatching(pattern: string | RegExp): unknown;
+  closeTo(value: number, numDigits?: number): unknown;
+  not: {
+    any(ctor: Function): unknown;
+    anything(): unknown;
+    arrayContaining(items: unknown[]): unknown;
+    objectContaining(subset: object): unknown;
+    stringContaining(substring: string): unknown;
+    stringMatching(pattern: string | RegExp): unknown;
+    closeTo(value: number, numDigits?: number): unknown;
+  };
+}
+
+export const expect: Expect;
+
+// ── Browser surface (QuickJS bindings over the Rust core) ────────────
+
+export interface GotoOptions {
+  timeout?: number;
+  waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit';
+  referer?: string;
+}
+
+export interface ClickOptions {
+  button?: 'left' | 'right' | 'middle';
+  clickCount?: number;
+  delay?: number;
+  position?: { x: number; y: number };
+  modifiers?: Array<'Alt' | 'Control' | 'ControlOrMeta' | 'Meta' | 'Shift'>;
+  force?: boolean;
+  noWaitAfter?: boolean;
+  trial?: boolean;
+  timeout?: number;
+}
+
+export interface FillOptions {
+  force?: boolean;
+  noWaitAfter?: boolean;
+  timeout?: number;
+}
+
+export interface TimeoutOption {
+  timeout?: number;
+}
+
+export interface WaitForSelectorOptions extends TimeoutOption {
+  state?: 'attached' | 'detached' | 'visible' | 'hidden';
+}
+
+export interface ScreenshotOptions extends TimeoutOption {
+  type?: 'png' | 'jpeg';
+  quality?: number;
+  fullPage?: boolean;
+  clip?: { x: number; y: number; width: number; height: number };
+  omitBackground?: boolean;
+  path?: string;
+}
+
+export interface GetByRoleOptions {
+  checked?: boolean;
+  disabled?: boolean;
+  exact?: boolean;
+  expanded?: boolean;
+  includeHidden?: boolean;
+  level?: number;
+  name?: string | RegExp;
+  pressed?: boolean;
+  selected?: boolean;
+}
+
+export interface GetByTextOptions {
+  exact?: boolean;
+}
+
+export interface LocatorFilterOptions {
+  has?: Locator;
+  hasNot?: Locator;
+  hasText?: string | RegExp;
+  hasNotText?: string | RegExp;
+  visible?: boolean;
+}
+
+export interface SelectOptionValues {
+  value?: string;
+  label?: string;
+  index?: number;
+}
+
+export interface Keyboard {
+  press(key: string, options?: { delay?: number }): Promise<void>;
+  down(key: string): Promise<void>;
+  up(key: string): Promise<void>;
+  type(text: string, options?: { delay?: number }): Promise<void>;
+  insertText(text: string): Promise<void>;
+}
+
+export interface Mouse {
+  move(x: number, y: number, options?: { steps?: number }): Promise<void>;
+  click(x: number, y: number, options?: ClickOptions): Promise<void>;
+  dblclick(x: number, y: number, options?: ClickOptions): Promise<void>;
+  down(options?: { button?: 'left' | 'right' | 'middle'; clickCount?: number }): Promise<void>;
+  up(options?: { button?: 'left' | 'right' | 'middle'; clickCount?: number }): Promise<void>;
+  wheel(deltaX: number, deltaY: number): Promise<void>;
+}
+
+export interface JSHandle {
+  jsonValue(): Promise<unknown>;
+  evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  dispose(): Promise<void>;
+}
+
+export interface ElementHandle extends JSHandle {
+  click(options?: ClickOptions): Promise<void>;
+  fill(value: string, options?: FillOptions): Promise<void>;
+  textContent(): Promise<string | null>;
+  innerText(): Promise<string>;
+  innerHTML(): Promise<string>;
+  getAttribute(name: string): Promise<string | null>;
+  isVisible(): Promise<boolean>;
+  boundingBox(): Promise<{ x: number; y: number; width: number; height: number } | null>;
+  screenshot(options?: ScreenshotOptions): Promise<Uint8Array>;
+}
+
+export interface Locator {
+  click(options?: ClickOptions): Promise<void>;
+  dblclick(options?: ClickOptions): Promise<void>;
+  tap(options?: ClickOptions): Promise<void>;
+  fill(value: string, options?: FillOptions): Promise<void>;
+  clear(options?: FillOptions): Promise<void>;
+  press(key: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
+  pressSequentially(text: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
+  type(text: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
+  check(options?: ClickOptions): Promise<void>;
+  uncheck(options?: ClickOptions): Promise<void>;
+  setChecked(checked: boolean, options?: ClickOptions): Promise<void>;
+  hover(options?: ClickOptions): Promise<void>;
+  focus(options?: TimeoutOption): Promise<void>;
+  blur(options?: TimeoutOption): Promise<void>;
+  selectOption(
+    values: string | string[] | SelectOptionValues | SelectOptionValues[] | null,
+    options?: TimeoutOption & { force?: boolean }
+  ): Promise<string[]>;
+  selectText(options?: TimeoutOption & { force?: boolean }): Promise<void>;
+  setInputFiles(
+    files: string | string[] | { name: string; mimeType: string; buffer: Uint8Array | Buffer } | Array<{ name: string; mimeType: string; buffer: Uint8Array | Buffer }>,
+    options?: TimeoutOption
+  ): Promise<void>;
+  dragTo(target: Locator, options?: TimeoutOption & { force?: boolean; sourcePosition?: { x: number; y: number }; targetPosition?: { x: number; y: number }; trial?: boolean }): Promise<void>;
+  scrollIntoViewIfNeeded(options?: TimeoutOption): Promise<void>;
+
+  textContent(options?: TimeoutOption): Promise<string | null>;
+  innerText(options?: TimeoutOption): Promise<string>;
+  innerHTML(options?: TimeoutOption): Promise<string>;
+  inputValue(options?: TimeoutOption): Promise<string>;
+  getAttribute(name: string, options?: TimeoutOption): Promise<string | null>;
+  allTextContents(): Promise<string[]>;
+  allInnerTexts(): Promise<string[]>;
+  count(): Promise<number>;
+  all(): Promise<Locator[]>;
+  boundingBox(options?: TimeoutOption): Promise<{ x: number; y: number; width: number; height: number } | null>;
+  screenshot(options?: ScreenshotOptions): Promise<Uint8Array>;
+  ariaSnapshot(options?: TimeoutOption): Promise<string>;
+
+  isVisible(options?: TimeoutOption): Promise<boolean>;
+  isHidden(options?: TimeoutOption): Promise<boolean>;
+  isEnabled(options?: TimeoutOption): Promise<boolean>;
+  isDisabled(options?: TimeoutOption): Promise<boolean>;
+  isChecked(options?: TimeoutOption): Promise<boolean>;
+  isEditable(options?: TimeoutOption): Promise<boolean>;
+
+  evaluate(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption): Promise<unknown>;
+  evaluateAll(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  evaluateHandle(pageFunction: Function | string, arg?: unknown): Promise<JSHandle>;
+  elementHandle(options?: TimeoutOption): Promise<ElementHandle>;
+  elementHandles(): Promise<ElementHandle[]>;
+  waitFor(options?: WaitForSelectorOptions): Promise<void>;
+  highlight(): Promise<void>;
+  describe(description: string): Locator;
+
+  locator(selectorOrLocator: string | Locator, options?: LocatorFilterOptions): Locator;
+  filter(options?: LocatorFilterOptions): Locator;
+  and(locator: Locator): Locator;
+  or(locator: Locator): Locator;
+  first(): Locator;
+  last(): Locator;
+  nth(index: number): Locator;
+  getByRole(role: string, options?: GetByRoleOptions): Locator;
+  getByText(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByLabel(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByPlaceholder(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByAltText(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByTitle(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByTestId(testId: string): Locator;
+  frameLocator(selector: string): FrameLocator;
+  contentFrame(): FrameLocator;
+  page(): Page;
+}
+
+export interface FrameLocator {
+  locator(selectorOrLocator: string | Locator, options?: LocatorFilterOptions): Locator;
+  getByRole(role: string, options?: GetByRoleOptions): Locator;
+  getByText(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByLabel(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByPlaceholder(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByAltText(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByTitle(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByTestId(testId: string): Locator;
+  frameLocator(selector: string): FrameLocator;
+  first(): FrameLocator;
+  last(): FrameLocator;
+  nth(index: number): FrameLocator;
+  owner(): Locator;
+}
+
+export interface Route {
+  request(): Request;
+  fulfill(options?: {
+    status?: number;
+    headers?: Record<string, string>;
+    contentType?: string;
+    body?: string | Uint8Array | Buffer;
+    json?: unknown;
+    path?: string;
+  }): Promise<void>;
+  continue(options?: {
+    url?: string;
+    method?: string;
+    headers?: Record<string, string>;
+    postData?: string | Uint8Array | Buffer;
+  }): Promise<void>;
+  fallback(options?: {
+    url?: string;
+    method?: string;
+    headers?: Record<string, string>;
+    postData?: string | Uint8Array | Buffer;
+  }): Promise<void>;
+  abort(errorCode?: string): Promise<void>;
+  fetch(options?: {
+    url?: string;
+    method?: string;
+    headers?: Record<string, string>;
+    postData?: string | Uint8Array | Buffer;
+    maxRedirects?: number;
+  }): Promise<APIResponse>;
+}
+
+export interface Request {
+  url(): string;
+  method(): string;
+  headers(): Record<string, string>;
+  headersArray(): Array<{ name: string; value: string }>;
+  postData(): string | null;
+  postDataJSON(): unknown;
+  resourceType(): string;
+  isNavigationRequest(): boolean;
+  redirectedFrom(): Request | null;
+  redirectedTo(): Request | null;
+  frame(): Frame;
+  response(): Promise<Response | null>;
+  failure(): { errorText: string } | null;
+  timing(): Record<string, number>;
+}
+
+export interface Response {
+  url(): string;
+  status(): number;
+  statusText(): string;
+  ok(): boolean;
+  headers(): Record<string, string>;
+  headersArray(): Array<{ name: string; value: string }>;
+  body(): Promise<Uint8Array>;
+  text(): Promise<string>;
+  json(): Promise<unknown>;
+  request(): Request;
+  frame(): Frame;
+  finished(): Promise<null>;
+}
+
+export interface Frame {
+  name(): string;
+  url(): string;
+  goto(url: string, options?: GotoOptions): Promise<Response | null>;
+  content(): Promise<string>;
+  title(): Promise<string>;
+  locator(selectorOrLocator: string | Locator, options?: LocatorFilterOptions): Locator;
+  evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  parentFrame(): Frame | null;
+  childFrames(): Frame[];
+}
+
+export interface ConsoleMessage {
+  type(): string;
+  text(): string;
+  args(): JSHandle[];
+  location(): { url: string; lineNumber: number; columnNumber: number };
+}
+
+export interface Dialog {
+  type(): string;
+  message(): string;
+  defaultValue(): string;
+  accept(promptText?: string): Promise<void>;
+  dismiss(): Promise<void>;
+}
+
+export interface Download {
+  url(): string;
+  suggestedFilename(): string;
+  path(): Promise<string>;
+  saveAs(path: string): Promise<void>;
+  failure(): Promise<string | null>;
+  cancel(): Promise<void>;
+  delete(): Promise<void>;
+}
+
+export interface FileChooser {
+  element(): ElementHandle;
+  isMultiple(): boolean;
+  page(): Page;
+  setFiles(
+    files: string | string[] | { name: string; mimeType: string; buffer: Uint8Array | Buffer } | Array<{ name: string; mimeType: string; buffer: Uint8Array | Buffer }>,
+    options?: TimeoutOption
+  ): Promise<void>;
+}
+
+export interface Clock {
+  install(options?: { time?: number | string | Date }): Promise<void>;
+  setFixedTime(time: number | string | Date): Promise<void>;
+  setSystemTime(time: number | string | Date): Promise<void>;
+  fastForward(ticks: number | string): Promise<void>;
+  runFor(ticks: number | string): Promise<void>;
+  pauseAt(time: number | string | Date): Promise<void>;
+  resume(): Promise<void>;
+}
+
+export interface CDPSession {
+  send(method: string, params?: Record<string, unknown>): Promise<unknown>;
+  on(event: string, handler: (params: unknown) => void): void;
+  detach(): Promise<void>;
+}
+
+export type PageEvent =
+  | 'close'
+  | 'console'
+  | 'crash'
+  | 'dialog'
+  | 'domcontentloaded'
+  | 'download'
+  | 'filechooser'
+  | 'frameattached'
+  | 'framedetached'
+  | 'framenavigated'
+  | 'load'
+  | 'pageerror'
+  | 'popup'
+  | 'request'
+  | 'requestfailed'
+  | 'requestfinished'
+  | 'response'
+  | 'websocket'
+  | 'worker';
+
+export interface Page {
+  goto(url: string, options?: GotoOptions): Promise<Response | null>;
+  goBack(options?: GotoOptions): Promise<Response | null>;
+  goForward(options?: GotoOptions): Promise<Response | null>;
+  reload(options?: GotoOptions): Promise<Response | null>;
+  url(): string;
+  title(): Promise<string>;
+  content(): Promise<string>;
+  setContent(html: string, options?: GotoOptions): Promise<void>;
+  close(options?: { runBeforeUnload?: boolean }): Promise<void>;
+  isClosed(): boolean;
+  bringToFront(): Promise<void>;
+
+  locator(selectorOrLocator: string | Locator, options?: LocatorFilterOptions): Locator;
+  getByRole(role: string, options?: GetByRoleOptions): Locator;
+  getByText(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByLabel(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByPlaceholder(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByAltText(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByTitle(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByTestId(testId: string): Locator;
+  frameLocator(selector: string): FrameLocator;
+  frames(): Frame[];
+  mainFrame(): Frame;
+  frame(nameOrOptions: string | { name?: string; url?: string | RegExp }): Frame | null;
+
+  click(selector: string, options?: ClickOptions): Promise<void>;
+  dblclick(selector: string, options?: ClickOptions): Promise<void>;
+  fill(selector: string, value: string, options?: FillOptions): Promise<void>;
+  press(selector: string, key: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
+  type(selector: string, text: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
+  check(selector: string, options?: ClickOptions): Promise<void>;
+  uncheck(selector: string, options?: ClickOptions): Promise<void>;
+  hover(selector: string, options?: ClickOptions): Promise<void>;
+  focus(selector: string, options?: TimeoutOption): Promise<void>;
+  selectOption(
+    selector: string,
+    values: string | string[] | SelectOptionValues | SelectOptionValues[] | null,
+    options?: TimeoutOption & { force?: boolean }
+  ): Promise<string[]>;
+  setInputFiles(
+    selector: string,
+    files: string | string[] | { name: string; mimeType: string; buffer: Uint8Array | Buffer } | Array<{ name: string; mimeType: string; buffer: Uint8Array | Buffer }>,
+    options?: TimeoutOption
+  ): Promise<void>;
+  dragAndDrop(source: string, target: string, options?: TimeoutOption & { force?: boolean; sourcePosition?: { x: number; y: number }; targetPosition?: { x: number; y: number }; trial?: boolean }): Promise<void>;
+  tap(selector: string, options?: ClickOptions): Promise<void>;
+
+  textContent(selector: string, options?: TimeoutOption): Promise<string | null>;
+  innerText(selector: string, options?: TimeoutOption): Promise<string>;
+  innerHTML(selector: string, options?: TimeoutOption): Promise<string>;
+  inputValue(selector: string, options?: TimeoutOption): Promise<string>;
+  getAttribute(selector: string, name: string, options?: TimeoutOption): Promise<string | null>;
+  isVisible(selector: string, options?: TimeoutOption): Promise<boolean>;
+  isHidden(selector: string, options?: TimeoutOption): Promise<boolean>;
+  isEnabled(selector: string, options?: TimeoutOption): Promise<boolean>;
+  isDisabled(selector: string, options?: TimeoutOption): Promise<boolean>;
+  isChecked(selector: string, options?: TimeoutOption): Promise<boolean>;
+  isEditable(selector: string, options?: TimeoutOption): Promise<boolean>;
+
+  evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  evaluateHandle(pageFunction: Function | string, arg?: unknown): Promise<JSHandle>;
+  $(selector: string): Promise<ElementHandle | null>;
+  $$(selector: string): Promise<ElementHandle[]>;
+  $eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  $$eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown): Promise<void>;
+  addScriptTag(options?: { url?: string; path?: string; content?: string; type?: string }): Promise<ElementHandle>;
+  addStyleTag(options?: { url?: string; path?: string; content?: string }): Promise<ElementHandle>;
+  exposeFunction(name: string, callback: Function): Promise<void>;
+  exposeBinding(name: string, callback: Function, options?: { handle?: boolean }): Promise<void>;
+
+  waitForSelector(selector: string, options?: WaitForSelectorOptions): Promise<ElementHandle | null>;
+  waitForFunction(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & { polling?: number | 'raf' }): Promise<JSHandle>;
+  waitForLoadState(state?: 'load' | 'domcontentloaded' | 'networkidle', options?: TimeoutOption): Promise<void>;
+  waitForURL(url: string | RegExp | ((url: URL) => boolean), options?: TimeoutOption & { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }): Promise<void>;
+  waitForTimeout(timeout: number): Promise<void>;
+  waitForEvent(event: PageEvent, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number }): Promise<unknown>;
+  waitForRequest(urlOrPredicate: string | RegExp | ((request: Request) => boolean), options?: TimeoutOption): Promise<Request>;
+  waitForResponse(urlOrPredicate: string | RegExp | ((response: Response) => boolean), options?: TimeoutOption): Promise<Response>;
+
+  route(url: string | RegExp | ((url: URL) => boolean), handler: (route: Route, request: Request) => void | Promise<void>, options?: { times?: number }): Promise<void>;
+  unroute(url: string | RegExp | ((url: URL) => boolean), handler?: (route: Route, request: Request) => void | Promise<void>): Promise<void>;
+  unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
+  routeWebSocket(url: string | RegExp | ((url: URL) => boolean), handler: (ws: unknown) => void | Promise<void>): Promise<void>;
+
+  screenshot(options?: ScreenshotOptions): Promise<Uint8Array>;
+  pdf(options?: Record<string, unknown>): Promise<Uint8Array>;
+
+  setViewportSize(size: { width: number; height: number }): Promise<void>;
+  viewportSize(): { width: number; height: number } | null;
+  setExtraHTTPHeaders(headers: Record<string, string>): Promise<void>;
+  emulateMedia(options?: { media?: 'screen' | 'print' | null; colorScheme?: 'light' | 'dark' | 'no-preference' | null; reducedMotion?: 'reduce' | 'no-preference' | null; forcedColors?: 'active' | 'none' | null }): Promise<void>;
+  setDefaultTimeout(timeout: number): void;
+  setDefaultNavigationTimeout(timeout: number): void;
+
+  on(event: PageEvent, handler: (arg: unknown) => void): void;
+  once(event: PageEvent, handler: (arg: unknown) => void): void;
+  off(event: PageEvent, handler: (arg: unknown) => void): void;
+
+  keyboard: Keyboard;
+  mouse: Mouse;
+  clock: Clock;
+  context(): BrowserContext;
+  opener(): Promise<Page | null>;
+}
+
+export interface Cookie {
+  name: string;
+  value: string;
+  domain?: string;
+  path?: string;
+  url?: string;
+  expires?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: 'Strict' | 'Lax' | 'None';
+}
+
+export interface StorageState {
+  cookies: Cookie[];
+  origins: Array<{
+    origin: string;
+    localStorage: Array<{ name: string; value: string }>;
+  }>;
+}
+
+export interface BrowserContext {
+  newPage(): Promise<Page>;
+  pages(): Page[];
+  close(): Promise<void>;
+  cookies(urls?: string | string[]): Promise<Cookie[]>;
+  addCookies(cookies: Cookie[]): Promise<void>;
+  clearCookies(options?: { name?: string | RegExp; domain?: string | RegExp; path?: string | RegExp }): Promise<void>;
+  grantPermissions(permissions: string[], options?: { origin?: string }): Promise<void>;
+  clearPermissions(): Promise<void>;
+  setGeolocation(geolocation: { latitude: number; longitude: number; accuracy?: number } | null): Promise<void>;
+  setOffline(offline: boolean): Promise<void>;
+  setExtraHTTPHeaders(headers: Record<string, string>): Promise<void>;
+  storageState(options?: { path?: string }): Promise<StorageState>;
+  addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown): Promise<void>;
+  exposeFunction(name: string, callback: Function): Promise<void>;
+  exposeBinding(name: string, callback: Function, options?: { handle?: boolean }): Promise<void>;
+  route(url: string | RegExp | ((url: URL) => boolean), handler: (route: Route, request: Request) => void | Promise<void>, options?: { times?: number }): Promise<void>;
+  unroute(url: string | RegExp | ((url: URL) => boolean), handler?: (route: Route, request: Request) => void | Promise<void>): Promise<void>;
+  unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
+  waitForEvent(event: string, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number }): Promise<unknown>;
+  on(event: string, handler: (arg: unknown) => void): void;
+  once(event: string, handler: (arg: unknown) => void): void;
+  off(event: string, handler: (arg: unknown) => void): void;
+  setDefaultTimeout(timeout: number): void;
+  setDefaultNavigationTimeout(timeout: number): void;
+  newCDPSession(page: Page): Promise<CDPSession>;
+  browser(): Browser | null;
+  clock: Clock;
+}
+
+export interface BrowserContextOptions {
+  viewport?: { width: number; height: number } | null;
+  userAgent?: string;
+  locale?: string;
+  timezoneId?: string;
+  geolocation?: { latitude: number; longitude: number; accuracy?: number };
+  permissions?: string[];
+  extraHTTPHeaders?: Record<string, string>;
+  httpCredentials?: { username: string; password: string; origin?: string };
+  offline?: boolean;
+  colorScheme?: 'light' | 'dark' | 'no-preference';
+  reducedMotion?: 'reduce' | 'no-preference';
+  forcedColors?: 'active' | 'none';
+  isMobile?: boolean;
+  hasTouch?: boolean;
+  deviceScaleFactor?: number;
+  javaScriptEnabled?: boolean;
+  bypassCSP?: boolean;
+  ignoreHTTPSErrors?: boolean;
+  acceptDownloads?: boolean;
+  baseURL?: string;
+  storageState?: string | StorageState;
+  proxy?: { server: string; bypass?: string; username?: string; password?: string };
+  serviceWorkers?: 'allow' | 'block';
+}
+
+export interface Browser {
+  newContext(options?: BrowserContextOptions): Promise<BrowserContext>;
+  newPage(options?: BrowserContextOptions): Promise<Page>;
+  contexts(): BrowserContext[];
+  version(): Promise<string>;
+  browserType(): unknown;
+  isConnected(): boolean;
+  close(): Promise<void>;
+  newBrowserCDPSession(): Promise<CDPSession>;
+}
+
+export interface APIResponse {
+  url(): string;
+  status(): number;
+  statusText(): string;
+  ok(): boolean;
+  headers(): Record<string, string>;
+  headersArray(): Array<{ name: string; value: string }>;
+  body(): Promise<Uint8Array>;
+  text(): Promise<string>;
+  json(): Promise<unknown>;
+  dispose(): Promise<void>;
+}
+
+export interface APIRequestOptions {
+  headers?: Record<string, string>;
+  data?: string | Uint8Array | Buffer | object;
+  form?: Record<string, string>;
+  multipart?: Record<string, string | { name: string; mimeType: string; buffer: Uint8Array | Buffer }>;
+  params?: Record<string, string | number | boolean>;
+  timeout?: number;
+  failOnStatusCode?: boolean;
+  ignoreHTTPSErrors?: boolean;
+  maxRedirects?: number;
+}
+
+export interface APIRequestContext {
+  get(url: string, options?: APIRequestOptions): Promise<APIResponse>;
+  post(url: string, options?: APIRequestOptions): Promise<APIResponse>;
+  put(url: string, options?: APIRequestOptions): Promise<APIResponse>;
+  patch(url: string, options?: APIRequestOptions): Promise<APIResponse>;
+  delete(url: string, options?: APIRequestOptions): Promise<APIResponse>;
+  head(url: string, options?: APIRequestOptions): Promise<APIResponse>;
+  fetch(urlOrRequest: string | Request, options?: APIRequestOptions & { method?: string }): Promise<APIResponse>;
+  dispose(): Promise<void>;
+}
+
+// The QuickJS environment provides Node-parity `Buffer` as a global.
+declare global {
+  class Buffer extends Uint8Array {
+    static from(value: string | ArrayBuffer | Uint8Array | number[], encoding?: 'utf8' | 'utf-8' | 'base64' | 'hex'): Buffer;
+    static isBuffer(value: unknown): value is Buffer;
+    static concat(buffers: Buffer[]): Buffer;
+    static alloc(size: number): Buffer;
+    toString(encoding?: 'utf8' | 'utf-8' | 'base64' | 'hex'): string;
+  }
+}

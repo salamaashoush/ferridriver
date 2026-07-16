@@ -3,6 +3,7 @@
   "private": true,
   "workspaces": [
     "crates/ferridriver-node",
+    "packages/ferridriver-test",
     "site"
   ]
 }
