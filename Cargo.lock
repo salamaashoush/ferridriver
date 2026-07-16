@@ -1637,6 +1637,7 @@ dependencies = [
  "anyhow",
  "dashmap",
  "ferridriver",
+ "ferridriver-expect",
  "ferridriver-script",
  "ferridriver-test",
  "glob",

@@ -148,6 +148,28 @@ pub fn compare_screenshot_png_with(
   name: &str,
   options: &crate::expect::ScreenshotMatcherOptions,
 ) -> Result<(), TestFailure> {
+  let snap_dir = std::env::var("SNAPSHOT_DIR")
+    .map(PathBuf::from)
+    .unwrap_or_else(|_| PathBuf::from("__snapshots__"));
+  let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
+  compare_screenshot_png_in(&snap_dir, actual_png, name, options, update)
+}
+
+/// [`compare_screenshot_png_with`] with an explicit snapshot directory
+/// and update flag — the test-runner path, where both come from the
+/// live `TestInfo` instead of environment variables.
+///
+/// # Errors
+///
+/// Returns `TestFailure` with diff details if the screenshots differ
+/// beyond the configured budget.
+pub fn compare_screenshot_png_in(
+  snap_dir: &std::path::Path,
+  actual_png: &[u8],
+  name: &str,
+  options: &crate::expect::ScreenshotMatcherOptions,
+  update: bool,
+) -> Result<(), TestFailure> {
   // `--ignore-snapshots`: the matcher succeeds without ever touching
   // the baseline file. The text-snapshot path already short-circuits
   // here via `TestInfo::ignore_snapshots`; the screenshot path threads
@@ -156,10 +178,6 @@ pub fn compare_screenshot_png_with(
   if options.ignore {
     return Ok(());
   }
-  let snap_dir = std::env::var("SNAPSHOT_DIR")
-    .map(PathBuf::from)
-    .unwrap_or_else(|_| PathBuf::from("__snapshots__"));
-  let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
   let snap_path = snap_dir.join(format!("{name}.png"));
   let diff_path = snap_dir.join(format!("{name}-diff.png"));
   let actual_path = snap_dir.join(format!("{name}-actual.png"));
@@ -210,7 +228,7 @@ pub fn compare_screenshot_png_with(
   let (aw, ah) = actual_img.dimensions();
 
   if ew != aw || eh != ah {
-    let _ = std::fs::create_dir_all(&snap_dir);
+    let _ = std::fs::create_dir_all(snap_dir);
     let _ = std::fs::write(&actual_path, actual_png);
     return Err(TestFailure {
       message: format!(
@@ -287,7 +305,7 @@ pub fn compare_screenshot_png_with(
 
   let mismatch_pct = (mismatch_count as f64 / total_pixels as f64) * 100.0;
 
-  let _ = std::fs::create_dir_all(&snap_dir);
+  let _ = std::fs::create_dir_all(snap_dir);
   let _ = diff_img.save(&diff_path);
   let _ = std::fs::write(&actual_path, actual_png);
 

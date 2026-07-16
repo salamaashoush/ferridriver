@@ -154,6 +154,24 @@ impl ExpectJs {
   /// impl in `ferridriver-expect` (single source of truth). Matcher
   /// state (timeout, `.not`, `.soft`, message) is copied over once
   /// per call.
+  /// Owned core handle for the snapshot matchers, crossing the bridge.
+  fn snapshot_target(&self, matcher: &'static str) -> Result<crate::bindings::test::SnapshotTarget, rquickjs::Error> {
+    use crate::bindings::test::SnapshotTarget;
+    match &self.target {
+      ExpectTarget::Locator(l) => Ok(SnapshotTarget::Locator(l.clone())),
+      ExpectTarget::Page(p) => Ok(SnapshotTarget::Page(std::sync::Arc::clone(p))),
+      ExpectTarget::Value { value, .. } => match value.as_str() {
+        Some(s) => Ok(SnapshotTarget::Value(s.to_string())),
+        None => Ok(SnapshotTarget::Value(value.to_string())),
+      },
+      _ => Err(rquickjs::Error::new_from_js_message(
+        "expect",
+        matcher,
+        "snapshot matchers apply to a locator, a page, or a serializable value",
+      )),
+    }
+  }
+
   fn build_locator_expect(&self) -> Result<ferridriver_expect::Expect<'_, Locator>, rquickjs::Error> {
     let loc = self.locator_target()?;
     let mut e = ferridriver_expect::expect(loc).with_timeout(self.timeout);
@@ -216,6 +234,12 @@ impl ExpectJs {
   fn negated(&self) -> Self {
     self.clone_with(|e| e.is_not = !e.is_not)
   }
+}
+
+/// A snapshot-matcher failure thrown as an `AssertionError`-shaped JS
+/// error (message produced runner-side, already fully formatted).
+fn snapshot_failure(ctx: &Ctx<'_>, _matcher: &str, message: String) -> rquickjs::Error {
+  crate::bindings::convert::throw_named(ctx, "AssertionError", message)
 }
 
 fn assertion_to_rq(ctx: &Ctx<'_>, err: AssertionFailure) -> rquickjs::Error {
@@ -1141,6 +1165,85 @@ impl ExpectJs {
     )
     .await
     .map_err(|e| assertion_to_rq(&ctx, e))
+  }
+
+  // ── Snapshot matchers (test-runner host only) ────────────────────
+  //
+  // These need the run's snapshot directory, update mode and the
+  // `image`-crate compare, all of which live runner-side — the calls
+  // cross the `TestHostBridge`. Outside `ferridriver test` (MCP,
+  // `ferridriver run`, BDD steps) they throw a typed error, the same
+  // stance Playwright takes for snapshot assertions without a runner.
+
+  /// Playwright: `toMatchSnapshot(name?: string)` on a string value or
+  /// a locator (compares the locator's text content).
+  #[qjs(rename = "toMatchSnapshot")]
+  pub async fn to_match_snapshot(&self, ctx: Ctx<'_>, name: Opt<String>) -> rquickjs::Result<()> {
+    let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toMatchSnapshot()")?;
+    if self.is_not {
+      return Err(rquickjs::Error::new_from_js_message(
+        "expect",
+        "toMatchSnapshot",
+        "not.toMatchSnapshot is not supported",
+      ));
+    }
+    let target = self.snapshot_target("toMatchSnapshot")?;
+    bridge
+      .match_text_snapshot(target, name.0)
+      .await
+      .map_err(|m| snapshot_failure(&ctx, "toMatchSnapshot", m))
+  }
+
+  /// Playwright: `toHaveScreenshot(name?: string, options?)` /
+  /// `toHaveScreenshot(options?)` on a locator or page.
+  #[qjs(rename = "toHaveScreenshot")]
+  pub async fn to_have_screenshot<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    name_or_options: Opt<Value<'js>>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toHaveScreenshot()")?;
+    if self.is_not {
+      return Err(rquickjs::Error::new_from_js_message(
+        "expect",
+        "toHaveScreenshot",
+        "not.toHaveScreenshot is not supported",
+      ));
+    }
+    let (name, opts_val) = match name_or_options.0 {
+      Some(v) if v.as_string().is_some() => (v.as_string().and_then(|s| s.to_string().ok()), options.0),
+      Some(v) if v.as_object().is_some() => (None, Some(v)),
+      _ => (None, options.0),
+    };
+    let opts_json: serde_json::Value = match opts_val {
+      Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(&ctx, v)?,
+      _ => serde_json::json!({}),
+    };
+    let target = self.snapshot_target("toHaveScreenshot")?;
+    bridge
+      .match_screenshot(target, name, opts_json)
+      .await
+      .map_err(|m| snapshot_failure(&ctx, "toHaveScreenshot", m))
+  }
+
+  /// Playwright: `toMatchAriaSnapshot(expected: string, options?: { timeout? })`
+  /// on a locator or page.
+  #[qjs(rename = "toMatchAriaSnapshot")]
+  pub async fn to_match_aria_snapshot<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    expected: String,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toMatchAriaSnapshot()")?;
+    let o = opts_obj(&options);
+    let timeout_ms = u64_field(o.as_ref(), "timeout");
+    let target = self.snapshot_target("toMatchAriaSnapshot")?;
+    bridge
+      .match_aria_snapshot(target, expected, self.is_not, timeout_ms)
+      .await
+      .map_err(|m| snapshot_failure(&ctx, "toMatchAriaSnapshot", m))
   }
 
   // ── APIResponse matcher (delegated) ──────────────────────────────

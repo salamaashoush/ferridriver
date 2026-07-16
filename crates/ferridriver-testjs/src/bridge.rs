@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ferridriver_script::{BridgeFuture, CompiledBundle, TestHostBridge};
+use ferridriver_script::{BridgeFuture, CompiledBundle, SnapshotTarget, TestHostBridge};
 use ferridriver_test::model::{
   AttachmentBody, StepCategory, StepHandle, StepLocation, TestAnnotation, TestInfo, TestModifiers,
 };
@@ -35,6 +35,9 @@ pub struct InfoBridge {
   static_annotations: Vec<(String, Option<String>)>,
   attachment_count: AtomicUsize,
   soft_errors: Mutex<Vec<String>>,
+  /// Counter behind Playwright's auto-generated snapshot names
+  /// (`{title}-{n}`).
+  snapshot_counter: AtomicUsize,
 }
 
 impl InfoBridge {
@@ -59,7 +62,28 @@ impl InfoBridge {
       static_annotations,
       attachment_count: AtomicUsize::new(0),
       soft_errors: Mutex::new(Vec::new()),
+      snapshot_counter: AtomicUsize::new(0),
     }
+  }
+
+  /// `toMatchSnapshot()` / `toHaveScreenshot()` without a name — the
+  /// Playwright convention: sanitized test title + running counter.
+  fn auto_snapshot_name(&self) -> String {
+    let n = self.snapshot_counter.fetch_add(1, Ordering::Relaxed) + 1;
+    let title: String = self
+      .test_info
+      .test_id
+      .name
+      .chars()
+      .map(|c| {
+        if c.is_alphanumeric() || c == '-' || c == '_' {
+          c
+        } else {
+          '-'
+        }
+      })
+      .collect();
+    format!("{title}-{n}")
   }
 
   fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -212,6 +236,126 @@ impl TestHostBridge for InfoBridge {
 
   fn errors(&self) -> Vec<String> {
     Self::lock(&self.soft_errors).clone()
+  }
+
+  fn match_text_snapshot(&self, target: SnapshotTarget, name: Option<String>) -> BridgeFuture<Result<(), String>> {
+    let info = Arc::clone(&self.test_info);
+    let name = name.unwrap_or_else(|| self.auto_snapshot_name());
+    Box::pin(async move {
+      let actual = match target {
+        SnapshotTarget::Value(s) => s,
+        SnapshotTarget::Locator(locator) => locator
+          .text_content()
+          .await
+          .map_err(|e| format!("toMatchSnapshot: reading text content: {e}"))?
+          .unwrap_or_default(),
+        SnapshotTarget::Page(_) => {
+          return Err(
+            "toMatchSnapshot applies to a string value or a locator — use toHaveScreenshot for pages".to_string(),
+          );
+        },
+      };
+      ferridriver_test::snapshot::assert_snapshot(&info, &actual, &name, false).map_err(|f| f.message)
+    })
+  }
+
+  fn match_screenshot(
+    &self,
+    target: SnapshotTarget,
+    name: Option<String>,
+    options: serde_json::Value,
+  ) -> BridgeFuture<Result<(), String>> {
+    let info = Arc::clone(&self.test_info);
+    let name = name.unwrap_or_else(|| self.auto_snapshot_name());
+    Box::pin(async move {
+      let opts = screenshot_options_from_json(&options, info.ignore_snapshots);
+      let png = match target {
+        SnapshotTarget::Locator(locator) => ferridriver_test::expect::locator::capture_with_options(&locator, &opts)
+          .await
+          .map_err(|f| f.message)?,
+        SnapshotTarget::Page(page) => page
+          .screenshot()
+          .await
+          .map_err(|e| format!("toHaveScreenshot: page screenshot failed: {e}"))?,
+        SnapshotTarget::Value(_) => {
+          return Err("toHaveScreenshot applies to a locator or a page".to_string());
+        },
+      };
+      let update = matches!(
+        info.update_snapshots,
+        ferridriver_test::config::UpdateSnapshotsMode::All | ferridriver_test::config::UpdateSnapshotsMode::Changed
+      );
+      ferridriver_test::snapshot::compare_screenshot_png_in(&info.snapshot_dir, &png, &name, &opts, update)
+        .map_err(|f| f.message)
+    })
+  }
+
+  fn match_aria_snapshot(
+    &self,
+    target: SnapshotTarget,
+    expected_yaml: String,
+    is_not: bool,
+    timeout_ms: Option<u64>,
+  ) -> BridgeFuture<Result<(), String>> {
+    let timeout = Duration::from_millis(
+      timeout_ms
+        .unwrap_or_else(|| u64::try_from(ferridriver_expect::default_expect_timeout().as_millis()).unwrap_or(5000)),
+    );
+    Box::pin(async move {
+      match target {
+        SnapshotTarget::Locator(locator) => {
+          let mut e = ferridriver_expect::expect(&locator).with_timeout(timeout);
+          if is_not {
+            e = e.not();
+          }
+          ferridriver_test::expect::LocatorSnapshotMatchers::to_match_aria_snapshot(&e, &expected_yaml)
+            .await
+            .map_err(|f| f.message)
+        },
+        SnapshotTarget::Page(page) => {
+          let mut e = ferridriver_expect::expect(&page).with_timeout(timeout);
+          if is_not {
+            e = e.not();
+          }
+          ferridriver_test::expect::PageSnapshotMatchers::to_match_aria_snapshot(&e, &expected_yaml)
+            .await
+            .map_err(|f| f.message)
+        },
+        SnapshotTarget::Value(_) => Err("toMatchAriaSnapshot applies to a locator or a page".to_string()),
+      }
+    })
+  }
+}
+
+/// Lower the raw Playwright option bag into the runner's
+/// [`ferridriver_test::expect::ScreenshotMatcherOptions`].
+fn screenshot_options_from_json(
+  v: &serde_json::Value,
+  ignore_snapshots: bool,
+) -> ferridriver_test::expect::ScreenshotMatcherOptions {
+  let f = |k: &str| v.get(k).and_then(serde_json::Value::as_f64);
+  let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_string);
+  ferridriver_test::expect::ScreenshotMatcherOptions {
+    threshold: f("threshold"),
+    max_diff_pixels: v.get("maxDiffPixels").and_then(serde_json::Value::as_u64),
+    max_diff_pixel_ratio: f("maxDiffPixelRatio"),
+    mask_color: s("maskColor"),
+    animations: s("animations"),
+    caret: s("caret"),
+    scale: s("scale"),
+    style_path: s("stylePath").map(std::path::PathBuf::from),
+    clip: v.get("clip").map(|c| ferridriver_test::expect::ScreenshotClip {
+      x: c.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+      y: c.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+      width: c.get("width").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+      height: c.get("height").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+    }),
+    mask: v
+      .get("mask")
+      .and_then(serde_json::Value::as_array)
+      .map(|a| a.iter().filter_map(|m| m.as_str().map(str::to_string)).collect())
+      .unwrap_or_default(),
+    ignore: ignore_snapshots,
   }
 }
 

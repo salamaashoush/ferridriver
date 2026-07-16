@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use ferridriver_script::{
   BridgeFuture, CollectedTests, CompiledBundle, ExtensionHost, InMemoryVars, PathSandbox, RunContext, RunTestSpec,
-  ScriptCaps, ScriptEngineConfig, Session, TEST_SKIP_SENTINEL, TestHostBridge, TestInfoData, TestWorldData,
-  bundle_and_compile_named, collect_tests, eval_bundle, run_test, teardown_worker_fixtures,
+  ScriptCaps, ScriptEngineConfig, Session, SnapshotTarget, TEST_SKIP_SENTINEL, TestHostBridge, TestInfoData,
+  TestWorldData, bundle_and_compile_named, collect_tests, eval_bundle, run_test, teardown_worker_fixtures,
 };
 
 #[derive(Default)]
@@ -25,6 +25,7 @@ struct MockBridgeState {
   slow: bool,
   timeout_override: Option<u64>,
   next_step_id: u32,
+  snapshot_calls: Vec<String>,
 }
 
 #[derive(Default)]
@@ -110,6 +111,54 @@ impl TestHostBridge for MockBridge {
 
   fn errors(&self) -> Vec<String> {
     self.state(|s| s.soft_errors.clone())
+  }
+
+  fn match_text_snapshot(&self, target: SnapshotTarget, name: Option<String>) -> BridgeFuture<Result<(), String>> {
+    let kind = snapshot_target_kind(&target);
+    self.state(|s| {
+      s.snapshot_calls
+        .push(format!("text {kind} name={}", name.as_deref().unwrap_or("<auto>")));
+    });
+    Box::pin(async { Ok(()) })
+  }
+
+  fn match_screenshot(
+    &self,
+    target: SnapshotTarget,
+    name: Option<String>,
+    options: serde_json::Value,
+  ) -> BridgeFuture<Result<(), String>> {
+    let kind = snapshot_target_kind(&target);
+    self.state(|s| {
+      s.snapshot_calls.push(format!(
+        "screenshot {kind} name={} opts={options}",
+        name.as_deref().unwrap_or("<auto>")
+      ));
+    });
+    Box::pin(async { Ok(()) })
+  }
+
+  fn match_aria_snapshot(
+    &self,
+    target: SnapshotTarget,
+    expected_yaml: String,
+    is_not: bool,
+    _timeout_ms: Option<u64>,
+  ) -> BridgeFuture<Result<(), String>> {
+    let kind = snapshot_target_kind(&target);
+    self.state(|s| {
+      s.snapshot_calls
+        .push(format!("aria {kind} not={is_not} yaml={expected_yaml}"));
+    });
+    Box::pin(async { Ok(()) })
+  }
+}
+
+fn snapshot_target_kind(target: &SnapshotTarget) -> &'static str {
+  match target {
+    SnapshotTarget::Locator(_) => "locator",
+    SnapshotTarget::Page(_) => "page",
+    SnapshotTarget::Value(_) => "value",
   }
 }
 
@@ -671,4 +720,29 @@ extended('needs broken', async ({ broken }) => {});
     "got: {}",
     err.message
   );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_matchers_cross_the_bridge() {
+  let h = harness(
+    r"import { test, expect } from '@ferridriver/test';
+
+test('value snapshot', async () => {
+  await expect('rendered output').toMatchSnapshot('greeting');
+  await expect('auto named').toMatchSnapshot();
+});
+",
+  )
+  .await;
+  let bridge = Arc::new(MockBridge::default());
+  run_test(
+    &h.session.vm_handle(),
+    spec(title_index(&h.collected, "value snapshot")),
+    world("value snapshot"),
+    bridge.clone(),
+  )
+  .await
+  .expect("snapshot test passes");
+  let calls = bridge.state(|s| s.snapshot_calls.clone());
+  assert_eq!(calls, ["text value name=greeting", "text value name=<auto>"]);
 }

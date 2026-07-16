@@ -177,7 +177,13 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
 
 // ── Screenshot capture wrapper (§7.17 capture-time options) ─────────────────
 
-async fn capture_with_options(locator: &Locator, options: &ScreenshotMatcherOptions) -> Result<Vec<u8>, TestFailure> {
+/// Capture a locator screenshot honoring the matcher's capture options
+/// (animations, caret, masks, clip, style). Public so the JS test
+/// runner's bridge reuses the exact capture pipeline.
+pub async fn capture_with_options(
+  locator: &Locator,
+  options: &ScreenshotMatcherOptions,
+) -> Result<Vec<u8>, TestFailure> {
   let page = locator.page();
 
   let mut style_blocks: Vec<String> = Vec::new();

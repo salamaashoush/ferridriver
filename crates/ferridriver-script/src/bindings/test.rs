@@ -39,6 +39,15 @@ pub const TEST_SKIP_SENTINEL: &str = "__FERRIDRIVER_SKIP__:";
 /// the bridge needs no extra dependency crate-side).
 pub type BridgeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
+/// Subject of a snapshot matcher, handed across the bridge as owned
+/// core handles (no JS types leave the VM).
+pub enum SnapshotTarget {
+  Locator(ferridriver::Locator),
+  Page(Arc<ferridriver::Page>),
+  /// `expect(string).toMatchSnapshot(...)` — the serialized value.
+  Value(String),
+}
+
 /// Runner-side services a running test reaches from JS (`testInfo`,
 /// `test.step`, runtime modifiers). Implemented by the test-runner glue
 /// over the core `TestInfo`/`TestModifiers`; `ferridriver-script` never
@@ -60,6 +69,25 @@ pub trait TestHostBridge: Send + Sync {
   fn output_path(&self, parts: &[String]) -> String;
   fn snapshot_path(&self, name: &str) -> String;
   fn errors(&self) -> Vec<String>;
+  /// `toMatchSnapshot(name?)` — text snapshot against the run's
+  /// snapshot directory/update mode. `Err(message)` = assertion failed.
+  fn match_text_snapshot(&self, target: SnapshotTarget, name: Option<String>) -> BridgeFuture<Result<(), String>>;
+  /// `toHaveScreenshot(name?, options?)` — PNG baseline compare.
+  /// `options` is the raw Playwright option bag as JSON.
+  fn match_screenshot(
+    &self,
+    target: SnapshotTarget,
+    name: Option<String>,
+    options: serde_json::Value,
+  ) -> BridgeFuture<Result<(), String>>;
+  /// `toMatchAriaSnapshot(yaml, { timeout? })`.
+  fn match_aria_snapshot(
+    &self,
+    target: SnapshotTarget,
+    expected_yaml: String,
+    is_not: bool,
+    timeout_ms: Option<u64>,
+  ) -> BridgeFuture<Result<(), String>>;
 }
 
 /// Suite execution mode requested via `describe.serial` /
@@ -498,7 +526,7 @@ fn modifier_call<'js>(
 
 /// The running test's bridge, or the Playwright-parity hard error when
 /// no test is executing in this VM.
-fn current_bridge(ctx: &Ctx<'_>, what: &str) -> rquickjs::Result<Arc<dyn TestHostBridge>> {
+pub(crate) fn current_bridge(ctx: &Ctx<'_>, what: &str) -> rquickjs::Result<Arc<dyn TestHostBridge>> {
   with_test_registry(ctx, |r| r.current.as_ref().map(|c| Arc::clone(&c.bridge)))
     .map_err(|e| rq(&e))?
     .ok_or_else(|| {

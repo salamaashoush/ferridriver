@@ -62,9 +62,10 @@ pub use bindings::{
   ArtifactsJs, BridgeFuture, BrowserContextJs, CollectedAnnotation, CollectedFileConfigure, CollectedFileUse,
   CollectedFixture, CollectedRegistry, CollectedSuite, CollectedTest, CollectedTestHook, CollectedTests,
   ExtensionBinding, ExtensionCommandsJs, HookArg, HttpClientJs, HttpResponseJs, JsArg, JsFixtureScope, KeyboardJs,
-  LocatorJs, MouseJs, PageJs, RunTestSpec, ScenarioWorld, ScriptAttachment, StepOutcome, TEST_SKIP_SENTINEL,
-  TestHostBridge, TestInfoData, TestWorldData, collect_registry, collect_tests, drain_attachments, install_extensions,
-  invoke_hook, invoke_step, reset_world, run_standalone_hook, run_test, set_scenario_world, teardown_worker_fixtures,
+  LocatorJs, MouseJs, PageJs, RunTestSpec, ScenarioWorld, ScriptAttachment, SnapshotTarget, StepOutcome,
+  TEST_SKIP_SENTINEL, TestHostBridge, TestInfoData, TestWorldData, collect_registry, collect_tests, drain_attachments,
+  install_extensions, invoke_hook, invoke_step, reset_world, run_standalone_hook, run_test, set_scenario_world,
+  teardown_worker_fixtures,
 };
 pub use bundle::{
   CompiledBundle, CompiledExtension, bundle_and_compile, bundle_and_compile_named, bundle_source,

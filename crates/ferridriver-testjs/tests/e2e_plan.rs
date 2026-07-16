@@ -13,6 +13,7 @@ fn config_for(dir: &std::path::Path) -> TestConfig {
     test_match: vec!["**/*.test.ts".to_string()],
     workers: 1,
     output_dir: dir.join("test-results"),
+    snapshot_dir: Some(dir.join("__snapshots__").display().to_string()),
     reporter: vec![ReporterConfig {
       name: "null".to_string(),
       options: std::collections::BTreeMap::new(),
@@ -121,4 +122,80 @@ test('fails', async () => {
 
   let code = Box::pin(run_plan(dir.path())).await;
   assert_ne!(code, 0, "a failing test must fail the run");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_matchers_write_then_match() {
+  let dir = tempfile::tempdir().expect("tempdir");
+  std::fs::write(
+    dir.path().join("snap.test.ts"),
+    r#"import { test, expect } from '@ferridriver/test';
+
+test('snapshots', async ({ page }) => {
+  await page.goto('data:text/html,<title>Snap</title><main><h1>Header</h1><button id=b>Save</button></main>');
+  await expect(page.locator('h1')).toMatchSnapshot('header-text');
+  await expect('literal value').toMatchSnapshot('literal');
+  await expect(page.locator('main')).toHaveScreenshot('main-shot');
+  await expect(page).toHaveScreenshot('page-shot', { maxDiffPixels: 25 });
+  await expect(page.locator('main')).toMatchAriaSnapshot(`
+    - heading "Header" [level=1]
+    - button "Save"
+  `);
+});
+"#,
+  )
+  .expect("write suite");
+
+  // First run: UpdateSnapshotsMode::Missing writes every baseline and
+  // passes. Second run: everything must MATCH the stored baselines.
+  let first = Box::pin(run_plan(dir.path())).await;
+  assert_eq!(first, 0, "baseline-writing run must be green");
+  let snap_dir = dir.path().join("__snapshots__");
+  assert!(snap_dir.exists(), "snapshot dir created");
+  let entries: Vec<String> = std::fs::read_dir(&snap_dir)
+    .expect("read snapshots")
+    .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+    .collect();
+  assert!(
+    entries.iter().any(|e| e.contains("main-shot")
+      && std::path::Path::new(e)
+        .extension()
+        .is_some_and(|x| x.eq_ignore_ascii_case("png"))),
+    "locator screenshot baseline written: {entries:?}"
+  );
+  let second = Box::pin(run_plan(dir.path())).await;
+  assert_eq!(second, 0, "comparison run must match the baselines");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_matchers_fail_on_mismatch() {
+  let dir = tempfile::tempdir().expect("tempdir");
+  let spec = dir.path().join("mismatch.test.ts");
+  std::fs::write(
+    &spec,
+    r"import { test, expect } from '@ferridriver/test';
+
+test('text snapshot', async () => {
+  await expect('version one').toMatchSnapshot('content');
+});
+",
+  )
+  .expect("write suite");
+  assert_eq!(Box::pin(run_plan(dir.path())).await, 0, "baseline run green");
+
+  std::fs::write(
+    &spec,
+    r"import { test, expect } from '@ferridriver/test';
+
+test('text snapshot', async () => {
+  await expect('version two').toMatchSnapshot('content');
+});
+",
+  )
+  .expect("rewrite suite");
+  assert_ne!(
+    Box::pin(run_plan(dir.path())).await,
+    0,
+    "changed value must fail against the stored baseline"
+  );
 }

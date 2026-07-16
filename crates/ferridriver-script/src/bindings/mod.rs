@@ -93,8 +93,9 @@ pub use registry::{CollectedAllow, CollectedTool, ScriptAttachment, tools_len, t
 pub use sidecars::{SidecarJs, SidecarsJs, install_sidecars};
 pub use test::{
   BridgeFuture, CollectedAnnotation, CollectedFileConfigure, CollectedFileUse, CollectedFixture, CollectedSuite,
-  CollectedTest, CollectedTestHook, CollectedTests, JsFixtureScope, RunTestSpec, TEST_SKIP_SENTINEL, TestHostBridge,
-  TestInfoData, TestWorldData, collect_tests, install_test, run_standalone_hook, run_test, teardown_worker_fixtures,
+  CollectedTest, CollectedTestHook, CollectedTests, JsFixtureScope, RunTestSpec, SnapshotTarget, TEST_SKIP_SENTINEL,
+  TestHostBridge, TestInfoData, TestWorldData, collect_tests, install_test, run_standalone_hook, run_test,
+  teardown_worker_fixtures,
 };
 pub use video::VideoJs;
 pub use web_error::WebErrorJs;

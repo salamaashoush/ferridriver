@@ -9,6 +9,7 @@ description = "TypeScript test-file front-end for the ferridriver test runner (Q
 ferridriver = { workspace = true }
 ferridriver-script = { workspace = true }
 ferridriver-test = { workspace = true }
+ferridriver-expect = { workspace = true }
 anyhow = "1"
 dashmap = { workspace = true }
 glob = "0.3"
