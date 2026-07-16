@@ -194,7 +194,11 @@ fn decode(ctx: &Ctx<'_>, s: &str, encoding: &str) -> rquickjs::Result<Vec<u8>> {
   }
 }
 
-fn value_to_bytes<'js>(ctx: &Ctx<'js>, value: &Value<'js>, encoding: Option<&str>) -> rquickjs::Result<Vec<u8>> {
+pub(crate) fn value_to_bytes<'js>(
+  ctx: &Ctx<'js>,
+  value: &Value<'js>,
+  encoding: Option<&str>,
+) -> rquickjs::Result<Vec<u8>> {
   if let Some(s) = value.as_string() {
     return decode(ctx, &s.to_string()?, encoding.unwrap_or("utf8"));
   }

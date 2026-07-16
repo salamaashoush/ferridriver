@@ -59,13 +59,16 @@ pub mod vm;
 
 pub use bindings::registry::net_entry_subsumed;
 pub use bindings::{
-  ArtifactsJs, BrowserContextJs, CollectedRegistry, ExtensionBinding, ExtensionCommandsJs, HookArg, HttpClientJs,
-  HttpResponseJs, JsArg, KeyboardJs, LocatorJs, MouseJs, PageJs, ScenarioWorld, ScriptAttachment, StepOutcome,
-  collect_registry, drain_attachments, install_extensions, invoke_hook, invoke_step, reset_world, set_scenario_world,
+  ArtifactsJs, BridgeFuture, BrowserContextJs, CollectedAnnotation, CollectedFileConfigure, CollectedFileUse,
+  CollectedFixture, CollectedRegistry, CollectedSuite, CollectedTest, CollectedTestHook, CollectedTests,
+  ExtensionBinding, ExtensionCommandsJs, HookArg, HttpClientJs, HttpResponseJs, JsArg, JsFixtureScope, KeyboardJs,
+  LocatorJs, MouseJs, PageJs, RunTestSpec, ScenarioWorld, ScriptAttachment, StepOutcome, TEST_SKIP_SENTINEL,
+  TestHostBridge, TestInfoData, TestWorldData, collect_registry, collect_tests, drain_attachments, install_extensions,
+  invoke_hook, invoke_step, reset_world, run_standalone_hook, run_test, set_scenario_world, teardown_worker_fixtures,
 };
 pub use bundle::{
-  CompiledBundle, CompiledExtension, bundle_and_compile, bundle_source, compile_and_extract_extensions, eval_bundle,
-  is_typescript_path, source_is_es_module,
+  CompiledBundle, CompiledExtension, bundle_and_compile, bundle_and_compile_named, bundle_source,
+  compile_and_extract_extensions, eval_bundle, is_typescript_path, source_is_es_module,
 };
 pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
 pub use console::ConsoleCapture;

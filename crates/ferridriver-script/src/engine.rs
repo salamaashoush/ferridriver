@@ -127,6 +127,9 @@ pub enum ExtensionHost {
   Mcp,
   /// BDD test runner (`ferridriver bdd`) — consumes step/hook defs.
   Bdd,
+  /// Playwright-shaped test runner (`ferridriver test`) — consumes
+  /// `test`/`describe` registrations from `@ferridriver/test`.
+  Test,
   /// Ad-hoc script (`ferridriver run` / `run_script`).
   #[default]
   Script,
@@ -138,6 +141,7 @@ impl ExtensionHost {
     match self {
       Self::Mcp => "mcp",
       Self::Bdd => "bdd",
+      Self::Test => "test",
       Self::Script => "script",
     }
   }
@@ -537,6 +541,18 @@ impl Session {
       crate::bindings::install_browser_type(&ctx)
         .map_err(|e| ScriptError::internal(format!("failed to install browser_type: {e}")))?;
 
+      // Node-parity `Buffer` global (same constructor `node:buffer`
+      // exports) — test files and scripts use `Buffer.from` bare, as
+      // they would under Node/Bun.
+      ctx
+        .globals()
+        .set(
+          "Buffer",
+          crate::bindings::node_compat::buffer_constructor(&ctx)
+            .map_err(|e| ScriptError::internal(format!("failed to install Buffer: {e}")))?,
+        )
+        .map_err(|e| ScriptError::internal(format!("failed to install Buffer: {e}")))?;
+
       // expect() global (Jest value matchers, Playwright web-first
       // matchers, asymmetric matchers, expect.poll). Session-stable —
       // class prototypes + factory function are installed once and
@@ -551,6 +567,14 @@ impl Session {
       // `Given`...), so the registry must already exist.
       crate::bindings::install_bdd(&ctx)
         .map_err(|e| ScriptError::internal(format!("failed to install extension registry: {e}")))?;
+
+      // Playwright-shaped `test`/`describe` registration surface —
+      // host-gated: only `ferridriver test` sessions consume these, and
+      // the registry userdata is what the runner glue snapshots.
+      if host == ExtensionHost::Test {
+        crate::bindings::test::install_test(&ctx)
+          .map_err(|e| ScriptError::internal(format!("failed to install test surface: {e}")))?;
+      }
 
       // `sidecars.connect(name)` — declared external processes driven over
       // fd 3/4. Connect is by declared name only; no arbitrary spawn.
@@ -600,6 +624,19 @@ impl Session {
       applied,
       timeout,
     })
+  }
+
+  /// Arm the session's interrupt deadline so a busy-looping test body
+  /// is force-halted when its per-test budget expires. The test-runner
+  /// glue arms this around each `run_test`; [`Self::disarm_deadline`]
+  /// must follow, or the stale deadline would halt later VM entries.
+  pub fn arm_deadline(&self, timeout: Duration) {
+    self.timeout.arm(Instant::now() + timeout);
+  }
+
+  /// Clear a deadline armed with [`Self::arm_deadline`].
+  pub fn disarm_deadline(&self) {
+    self.timeout.disarm();
   }
 
   /// The session's VM-loop handle. The BDD core clones this to drive

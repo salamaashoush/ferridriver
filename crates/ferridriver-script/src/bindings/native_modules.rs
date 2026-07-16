@@ -22,6 +22,7 @@ use rquickjs::{Ctx, Module, Object, Value};
 /// drift apart.
 pub const NATIVE_MODULE_NAMES: &[&str] = &[
   "ferridriver",
+  "@ferridriver/test",
   "@cucumber/cucumber",
   "fs",
   "node:fs",
@@ -63,6 +64,10 @@ pub fn loader() -> NativeModuleLoader {
   NativeModuleLoader {
     modules: vec![
       ("ferridriver", NativeModuleLoader::declare_fn::<FerridriverModule>()),
+      (
+        "@ferridriver/test",
+        NativeModuleLoader::declare_fn::<FerridriverTestModule>(),
+      ),
       ("@cucumber/cucumber", NativeModuleLoader::declare_fn::<CucumberModule>()),
       ("fs", NativeModuleLoader::declare_fn::<FsModule>()),
       ("node:fs", NativeModuleLoader::declare_fn::<FsModule>()),
@@ -163,6 +168,38 @@ impl ModuleDef for FerridriverModule {
     ] {
       exports.export(name, global(ctx, name)?)?;
     }
+    Ok(())
+  }
+}
+
+/// `import { test, describe, expect } from '@ferridriver/test'` — the
+/// Playwright-shaped test-runner surface. `test`/`describe` live on the
+/// `ferridriver` global object (installed only for
+/// `ExtensionHost::Test` sessions); under any other host they evaluate
+/// to `undefined`, so importing is harmless and calling gives a plain
+/// TypeError.
+pub struct FerridriverTestModule;
+
+impl ModuleDef for FerridriverTestModule {
+  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
+    for name in ["default", "test", "describe", "expect"] {
+      decl.declare(name)?;
+    }
+    Ok(())
+  }
+
+  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
+    let test = fd_prop(ctx, "test")?;
+    let describe = fd_prop(ctx, "describe")?;
+    let expect = global(ctx, "expect")?;
+    let default = Object::new(ctx.clone())?;
+    default.set("test", test.clone())?;
+    default.set("describe", describe.clone())?;
+    default.set("expect", expect.clone())?;
+    exports.export("default", default)?;
+    exports.export("test", test)?;
+    exports.export("describe", describe)?;
+    exports.export("expect", expect)?;
     Ok(())
   }
 }
