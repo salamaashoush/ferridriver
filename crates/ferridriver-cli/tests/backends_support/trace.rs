@@ -105,18 +105,15 @@ pub fn test_tracing_records_viewer_loadable_zip(c: &mut McpClient) {
     let Some(call_id) = line["callId"].as_str() else {
       continue;
     };
-    match line["type"].as_str() {
-      Some("before" | "input" | "after") => {
-        let entry = merged.entry(call_id.to_string()).or_default();
-        if let Some(obj) = line.as_object() {
-          for (key, value) in obj {
-            if key != "type" {
-              entry.insert(key.clone(), value.clone());
-            }
+    if let Some("before" | "input" | "after") = line["type"].as_str() {
+      let entry = merged.entry(call_id.to_string()).or_default();
+      if let Some(obj) = line.as_object() {
+        for (key, value) in obj {
+          if key != "type" {
+            entry.insert(key.clone(), value.clone());
           }
         }
-      },
-      _ => {},
+      }
     }
   }
   let actions: Vec<&serde_json::Map<String, serde_json::Value>> = merged.values().collect();

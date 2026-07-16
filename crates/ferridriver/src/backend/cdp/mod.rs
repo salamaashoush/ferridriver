@@ -445,6 +445,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
         frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
         listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+        fetch_interceptor: Arc::new(std::sync::Mutex::new(None)),
+        drag_manager: DragManagerState::new(),
       }));
     }
     Ok(pages)
@@ -615,6 +617,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+      fetch_interceptor: Arc::new(std::sync::Mutex::new(None)),
+      drag_manager: DragManagerState::new(),
     };
 
     // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
@@ -1342,7 +1346,133 @@ pub struct CdpPage<T: CdpTransport> {
   /// wake on every subsequent CDP event and pin the page's state
   /// (emitter, managers, logs) until the browser exits.
   listener_tasks: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
+  /// The live `Fetch.*` interceptor task, if interception is enabled.
+  /// `unroute`/`unroute_all` MUST abort it when they `Fetch.disable` on
+  /// the last route: a later `route` re-enables and spawns a fresh
+  /// loop, and a surviving old loop would double-process every
+  /// `Fetch.requestPaused` — its chain sees a `times`-consumed route as
+  /// gone and its `Fetch.continueRequest` races (and can beat) the real
+  /// handler's fulfill.
+  fetch_interceptor: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
+  /// Native drag-and-drop interception state. See [`DragManagerState`].
+  drag_manager: Arc<DragManagerState>,
 }
+
+/// Port of Playwright's `crDragDrop.ts::DragManager` plus the
+/// pressed-button bookkeeping its `RawMouseImpl` receives from the
+/// client-side `Mouse` class.
+///
+/// Chromium cannot drive a native drag through plain
+/// `Input.dispatchMouseEvent`: a `mousePressed` + `mouseMoved` over a
+/// `draggable` element starts a browser-side drag session that swallows
+/// every subsequent synthetic mouse event, wedging pointer input for the
+/// rest of the page's life. Playwright's answer — mirrored here — is to
+/// intercept the drag (`Input.setInterceptDrags`), receive its payload
+/// via the `Input.dragIntercepted` event, and re-dispatch the drag
+/// itself with `Input.dispatchDragEvent` (`dragEnter` / `dragOver` /
+/// `drop` / `dragCancel`).
+struct DragManagerState {
+  /// `Input.DragData` captured from `Input.dragIntercepted` while a
+  /// native drag is in flight; `None` when no drag is active. While
+  /// `Some`, mouse moves become `dragOver`, mouse up becomes `drop`,
+  /// and Escape becomes `dragCancel`.
+  drag_data: tokio::sync::Mutex<Option<serde_json::Value>>,
+  /// Currently-pressed buttons as a CDP `buttons` bitmask
+  /// (left=1, right=2, middle=4). Updated by mouse down/up; moves
+  /// consult it to decide drag interception and to stamp
+  /// `button`/`buttons` on drag mousemoves so page handlers gating on
+  /// `event.buttons` see the held state.
+  buttons: std::sync::Mutex<u32>,
+  /// Latest `Input.dragIntercepted` payload (`params.data`), written
+  /// by the lossless tap task; consumed by the intercept flow.
+  intercepted_slot: std::sync::Mutex<Option<serde_json::Value>>,
+  /// Wakes the intercept flow when `intercepted_slot` fills.
+  intercepted_notify: tokio::sync::Notify,
+  /// One-time latch for the `Input.dragIntercepted` tap task.
+  tap_started: std::sync::atomic::AtomicBool,
+}
+
+impl DragManagerState {
+  fn new() -> Arc<Self> {
+    Arc::new(Self {
+      drag_data: tokio::sync::Mutex::new(None),
+      buttons: std::sync::Mutex::new(0),
+      intercepted_slot: std::sync::Mutex::new(None),
+      intercepted_notify: tokio::sync::Notify::new(),
+      tap_started: std::sync::atomic::AtomicBool::new(false),
+    })
+  }
+
+  fn pressed_buttons(&self) -> u32 {
+    self.buttons.lock().map(|g| *g).unwrap_or(0)
+  }
+
+  fn update_buttons(&self, f: impl FnOnce(&mut u32)) -> u32 {
+    let mut guard = match self.buttons.lock() {
+      Ok(g) => g,
+      Err(poisoned) => poisoned.into_inner(),
+    };
+    f(&mut guard);
+    *guard
+  }
+
+  /// CDP `button` field for a mousemove: the primary held button, or
+  /// `"none"` when nothing is pressed (mirrors Playwright's
+  /// `_lastButton` threading into `RawMouse.move`).
+  fn move_button(&self) -> &'static str {
+    let mask = self.pressed_buttons();
+    if mask & 1 != 0 {
+      "left"
+    } else if mask & 2 != 0 {
+      "right"
+    } else if mask & 4 != 0 {
+      "middle"
+    } else {
+      "none"
+    }
+  }
+}
+
+fn cdp_button_bit(button: &str) -> u32 {
+  match button {
+    "left" => 1,
+    "right" => 2,
+    "middle" => 4,
+    _ => 0,
+  }
+}
+
+/// Page-side listener rig from `crDragDrop.ts::setupDragListeners`,
+/// installed in every known execution context immediately before a
+/// left-button-held mousemove is dispatched. After that move, awaiting
+/// `window.__cleanupDrag()` answers "did this move start a native drag
+/// that nobody `preventDefault()`ed?" — which decides whether an
+/// `Input.dragIntercepted` payload is expected. Idempotent (`__fd`-style
+/// main-world global; re-install while armed is a no-op) because the
+/// same rig may be pushed to a frame twice when the main frame's
+/// context id is also tracked in `frame_contexts`.
+const DRAG_SETUP_JS: &str = "(function() {\
+  if (window.__cleanupDrag) return;\
+  let didStartDrag = Promise.resolve(false);\
+  let dragEvent = null;\
+  const dragListener = (event) => dragEvent = event;\
+  const mouseListener = () => {\
+    didStartDrag = new Promise((callback) => {\
+      window.addEventListener('dragstart', dragListener, { once: true, capture: true });\
+      setTimeout(() => callback(dragEvent ? !dragEvent.defaultPrevented : false), 0);\
+    });\
+  };\
+  window.addEventListener('mousemove', mouseListener, { once: true, capture: true });\
+  window.__cleanupDrag = async () => {\
+    const val = await didStartDrag;\
+    window.removeEventListener('mousemove', mouseListener, { capture: true });\
+    window.removeEventListener('dragstart', dragListener, { capture: true });\
+    delete window.__cleanupDrag;\
+    return val;\
+  };\
+})()";
+
+const DRAG_CLEANUP_JS: &str = "window.__cleanupDrag ? window.__cleanupDrag() : false";
 
 pub struct InjectedScriptManager {
   injected: std::sync::atomic::AtomicBool,
@@ -1425,6 +1555,8 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       frame_listener_started: self.frame_listener_started.clone(),
       observed: self.observed.clone(),
       listener_tasks: self.listener_tasks.clone(),
+      fetch_interceptor: self.fetch_interceptor.clone(),
+      drag_manager: self.drag_manager.clone(),
     }
   }
 }
@@ -2845,54 +2977,6 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- File upload ----
 
-  pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<()> {
-    // Resolve the selector to a Runtime.RemoteObjectId via Runtime.evaluate
-    // — `DOM.nodeId` is invalidated by document lifecycle events (e.g. the
-    // page re-issuing `DOM.setChildNodes`), so a getDocument → querySelector
-    // → describeNode pipeline races against the renderer and produces
-    // `Could not find node with given id` under CI load.
-    // Playwright's `setInputFilePaths` (crPage.ts:312) passes
-    // `objectId: handle._objectId` for exactly this reason — the
-    // RemoteObject handle stays valid for as long as the JS reference is
-    // reachable.
-    let escaped = selector.replace('\\', "\\\\").replace('"', "\\\"");
-    let expression = format!("document.querySelector(\"{escaped}\")");
-    let result = self
-      .cmd(
-        "Runtime.evaluate",
-        serde_json::json!({
-            "expression": expression,
-            "returnByValue": false,
-            "awaitPromise": false,
-        }),
-      )
-      .await?;
-    let object_id = result
-      .get("result")
-      .and_then(|r| r.get("objectId"))
-      .and_then(serde_json::Value::as_str)
-      .ok_or_else(|| FerriError::protocol("Runtime.evaluate", "Element not found"))?
-      .to_string();
-
-    let set_result = self
-      .cmd(
-        "DOM.setFileInputFiles",
-        serde_json::json!({
-            "files": paths,
-            "objectId": object_id,
-        }),
-      )
-      .await;
-
-    // Release the RemoteObject so the renderer can GC it.
-    let _ = self
-      .cmd("Runtime.releaseObject", serde_json::json!({ "objectId": object_id }))
-      .await;
-
-    set_result?;
-    Ok(())
-  }
-
   // ---- Accessibility ----
 
   pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>> {
@@ -3239,17 +3323,223 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
-    self
-      .cmd(
-        "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mouseMoved", "x": x, "y": y}),
-      )
-      .await?;
+  fn set_cursor_pos(&self, x: f64, y: f64) {
     if let Ok(mut guard) = self.last_cursor_pos.lock() {
       *guard = Some((x, y));
     }
+  }
+
+  /// Spawn the lossless `Input.dragIntercepted` tap once per page. The
+  /// task writes each intercepted payload into the drag manager's slot
+  /// and wakes the intercept flow; the abort handle rides
+  /// `listener_tasks` so `close_page` reaps it.
+  fn ensure_drag_intercept_tap(&self) {
+    if self
+      .drag_manager
+      .tap_started
+      .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+      return;
+    }
+    let mut rx = self
+      .transport
+      .tap_event_methods(&["Input.dragIntercepted"], self.session_id.as_deref());
+    let dm = self.drag_manager.clone();
+    let task = tokio::spawn(async move {
+      while let Some(evt) = rx.recv().await {
+        if let Some(data) = evt.get("params").and_then(|p| p.get("data")).cloned() {
+          match dm.intercepted_slot.lock() {
+            Ok(mut slot) => *slot = Some(data),
+            Err(poisoned) => *poisoned.into_inner() = Some(data),
+          }
+          // `notify_one` stores a permit when nobody is waiting yet, so
+          // an event landing between the intercept flow's slot check and
+          // its `notified().await` is not lost.
+          dm.intercepted_notify.notify_one();
+        }
+      }
+    });
+    if let Ok(mut tasks) = self.listener_tasks.lock() {
+      tasks.push(task.abort_handle());
+    }
+  }
+
+  /// Evaluate `js` in the main frame's default context and every tracked
+  /// child-frame context concurrently, returning each successful
+  /// evaluation's boolean result. Per-frame failures (mid-navigation,
+  /// destroyed context) are skipped, and the whole batch is capped at
+  /// one second so a wedged frame cannot stall the input pipeline —
+  /// the moral equivalent of Playwright's
+  /// `safeNonStallingEvaluateInAllFrames`.
+  async fn eval_bool_in_all_contexts(&self, js: &str, await_promise: bool) -> Vec<bool> {
+    let base = serde_json::json!({
+      "expression": js,
+      "returnByValue": true,
+      "awaitPromise": await_promise,
+    });
+    let mut params = vec![base.clone()];
+    for ctx_id in self.frame_contexts.read().await.values() {
+      let mut p = base.clone();
+      p["contextId"] = serde_json::json!(ctx_id);
+      params.push(p);
+    }
+    let evals = params.into_iter().map(|p| self.cmd("Runtime.evaluate", p));
+    let joined = tokio::time::timeout(std::time::Duration::from_millis(1000), futures::future::join_all(evals));
+    match joined.await {
+      Ok(results) => results
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .map(|r| {
+          r.get("result")
+            .and_then(|res| res.get("value"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        })
+        .collect(),
+      Err(_) => Vec::new(),
+    }
+  }
+
+  /// Port of `crDragDrop.ts::DragManager.interceptDragCausedByMove` for
+  /// a mousemove dispatched while the left button is held: arm the
+  /// page-side dragstart detectors, enable `Input.setInterceptDrags`,
+  /// ship the move, and if the page reports an un-prevented `dragstart`,
+  /// adopt the `Input.dragIntercepted` payload as the active drag and
+  /// announce it with a `dragEnter`.
+  async fn intercept_drag_caused_by_move(&self, x: f64, y: f64, mask: u32) -> Result<()> {
+    self.ensure_drag_intercept_tap();
+    match self.drag_manager.intercepted_slot.lock() {
+      Ok(mut slot) => *slot = None,
+      Err(poisoned) => *poisoned.into_inner() = None,
+    }
+    self.eval_bool_in_all_contexts(DRAG_SETUP_JS, false).await;
+    if let Err(e) = self
+      .cmd("Input.setInterceptDrags", serde_json::json!({"enabled": true}))
+      .await
+    {
+      // Embedder builds without drag interception (the command only
+      // exists on real Chromium): fall back to the plain move rather
+      // than failing every held-button move.
+      if e.to_string().contains("wasn't found") {
+        tracing::debug!(target: "ferridriver::cdp", "Input.setInterceptDrags unavailable; skipping drag interception");
+        self
+          .cmd(
+            "Input.dispatchMouseEvent",
+            serde_json::json!({"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": mask}),
+          )
+          .await?;
+        self.set_cursor_pos(x, y);
+        return Ok(());
+      }
+      return Err(e);
+    }
+    let move_result = self
+      .cmd(
+        "Input.dispatchMouseEvent",
+        serde_json::json!({"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": mask}),
+      )
+      .await;
+    let expecting = self
+      .eval_bool_in_all_contexts(DRAG_CLEANUP_JS, true)
+      .await
+      .into_iter()
+      .any(|started| started);
+    let _ = self
+      .cmd("Input.setInterceptDrags", serde_json::json!({"enabled": false}))
+      .await;
+    move_result?;
+
+    let take_slot = || match self.drag_manager.intercepted_slot.lock() {
+      Ok(mut slot) => slot.take(),
+      Err(poisoned) => poisoned.into_inner().take(),
+    };
+    let mut drag_data = take_slot();
+    if expecting && drag_data.is_none() {
+      // An un-prevented dragstart means Chromium WILL emit
+      // `Input.dragIntercepted`; the cap only guards a crashed renderer.
+      let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2000);
+      loop {
+        drag_data = take_slot();
+        if drag_data.is_some() {
+          break;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+          break;
+        }
+        if tokio::time::timeout(deadline - now, self.drag_manager.intercepted_notify.notified())
+          .await
+          .is_err()
+        {
+          drag_data = take_slot();
+          break;
+        }
+      }
+    }
+    if let Some(data) = drag_data {
+      self
+        .cmd(
+          "Input.dispatchDragEvent",
+          serde_json::json!({"type": "dragEnter", "x": x, "y": y, "data": data, "modifiers": 0}),
+        )
+        .await?;
+      *self.drag_manager.drag_data.lock().await = Some(data);
+    }
+    self.set_cursor_pos(x, y);
     Ok(())
+  }
+
+  /// Cancel an in-flight intercepted drag (`crDragDrop.ts::cancelDrag`).
+  /// Returns `true` if a drag was active and cancelled.
+  async fn cancel_drag(&self) -> Result<bool> {
+    if self.drag_manager.drag_data.lock().await.take().is_none() {
+      return Ok(false);
+    }
+    let (x, y) = self.last_cursor_pos.lock().ok().and_then(|g| *g).unwrap_or((0.0, 0.0));
+    self
+      .cmd(
+        "Input.dispatchDragEvent",
+        serde_json::json!({
+          "type": "dragCancel",
+          "x": x,
+          "y": y,
+          "data": {"items": [], "dragOperationsMask": 0xFFFF},
+        }),
+      )
+      .await?;
+    Ok(true)
+  }
+
+  pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
+    // Route through the drag manager (Playwright `RawMouse.move` →
+    // `DragManager.interceptDragCausedByMove`): while a native drag is
+    // in flight the move is re-dispatched as `dragOver`; while the left
+    // button is held it runs under an interception window that captures
+    // a starting native drag.
+    if let Some(data) = self.drag_manager.drag_data.lock().await.clone() {
+      self
+        .cmd(
+          "Input.dispatchDragEvent",
+          serde_json::json!({"type": "dragOver", "x": x, "y": y, "data": data, "modifiers": 0}),
+        )
+        .await?;
+      self.set_cursor_pos(x, y);
+      return Ok(());
+    }
+    let mask = self.drag_manager.pressed_buttons();
+    if mask & 1 == 0 {
+      // No left button held — plain move. `button`/`buttons` carry any
+      // held secondary button so `event.buttons`-gating handlers see it.
+      self
+        .cmd(
+          "Input.dispatchMouseEvent",
+          serde_json::json!({"type": "mouseMoved", "x": x, "y": y, "button": self.drag_manager.move_button(), "buttons": mask}),
+        )
+        .await?;
+      self.set_cursor_pos(x, y);
+      return Ok(());
+    }
+    self.intercept_drag_caused_by_move(x, y, mask).await
   }
 
   pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<()> {
@@ -3259,12 +3549,10 @@ impl<T: CdpWrap> CdpPage<T> {
       let ease = t * t * (3.0 - 2.0 * t);
       let x = from_x + (to_x - from_x) * ease;
       let y = from_y + (to_y - from_y) * ease;
-      self
-        .cmd(
-          "Input.dispatchMouseEvent",
-          serde_json::json!({"type": "mouseMoved", "x": x, "y": y}),
-        )
-        .await?;
+      // Per-step `move_mouse` (not a raw dispatch) so a drag started
+      // mid-path is intercepted exactly like Playwright's `Mouse.move`
+      // steps loop, which routes every step through `RawMouse.move`.
+      self.move_mouse(x, y).await?;
     }
     Ok(())
   }
@@ -3275,25 +3563,12 @@ impl<T: CdpWrap> CdpPage<T> {
     // The initial hover-move positions the pointer over the draggable so
     // drag libraries (interact.js, dnd-kit, native HTML5 DnD) register
     // the ensuing `mousedown`/`pointerdown` as originating ON the
-    // element. Without it, `mousedown` fires from a stale pointer
-    // position and the library never starts the drag. The drag
-    // `mousemove`s carry `buttons: 1` (the left-button bitmask) — page
-    // handlers that gate on `event.buttons` need the held-button state,
-    // which a bare `button: "left"` does not convey.
-    self
-      .cmd(
-        "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mouseMoved", "x": from.0, "y": from.1}),
-      )
-      .await?;
-    self
-      .cmd(
-        "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mousePressed", "x": from.0, "y": from.1, "button": "left", "buttons": 1, "clickCount": 1}),
-      )
-      .await?;
-    // Playwright default is `1` — a single `mousemove` at the destination.
-    // For steps > 1, interpolate with a cubic ease between press and release.
+    // element. Every move routes through the drag manager, so a native
+    // HTML5 drag started by the first held-button move is intercepted
+    // and re-dispatched as `dragEnter`/`dragOver`/`drop`, while JS drag
+    // libraries see stepped `mousemove`s carrying `buttons: 1`.
+    self.move_mouse(from.0, from.1).await?;
+    self.mouse_down(from.0, from.1, "left").await?;
     let steps = steps.max(1);
     for i in 1..=steps {
       let (x, y) = if steps == 1 {
@@ -3303,22 +3578,9 @@ impl<T: CdpWrap> CdpPage<T> {
         let ease = t * t * (3.0 - 2.0 * t);
         (from.0 + (to.0 - from.0) * ease, from.1 + (to.1 - from.1) * ease)
       };
-      self
-        .cmd(
-          "Input.dispatchMouseEvent",
-          serde_json::json!({"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1}),
-        )
-        .await?;
+      self.move_mouse(x, y).await?;
     }
-    self
-      .cmd(
-        "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mouseReleased", "x": to.0, "y": to.1, "button": "left", "buttons": 0, "clickCount": 1}),
-      )
-      .await?;
-    if let Ok(mut guard) = self.last_cursor_pos.lock() {
-      *guard = Some(to);
-    }
+    self.mouse_up(to.0, to.1, "left").await?;
     Ok(())
   }
 
@@ -3333,28 +3595,45 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<()> {
+    let mask = self.drag_manager.update_buttons(|m| *m |= cdp_button_bit(button));
+    // Playwright skips the protocol press while a native drag is in
+    // flight (`crInput.ts::RawMouseImpl.down`) — the browser considers
+    // the button already held by the drag session.
+    if self.drag_manager.drag_data.lock().await.is_some() {
+      self.set_cursor_pos(x, y);
+      return Ok(());
+    }
     self
       .cmd(
         "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": button, "clickCount": 1}),
+        serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": button, "buttons": mask, "clickCount": 1}),
       )
       .await?;
-    if let Ok(mut guard) = self.last_cursor_pos.lock() {
-      *guard = Some((x, y));
-    }
+    self.set_cursor_pos(x, y);
     Ok(())
   }
 
   pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<()> {
+    let mask = self.drag_manager.update_buttons(|m| *m &= !cdp_button_bit(button));
+    // An in-flight intercepted drag ends in a `drop`, not a
+    // `mouseReleased` (`crInput.ts::RawMouseImpl.up`).
+    if let Some(data) = self.drag_manager.drag_data.lock().await.take() {
+      self
+        .cmd(
+          "Input.dispatchDragEvent",
+          serde_json::json!({"type": "drop", "x": x, "y": y, "data": data, "modifiers": 0}),
+        )
+        .await?;
+      self.set_cursor_pos(x, y);
+      return Ok(());
+    }
     self
       .cmd(
         "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "clickCount": 1}),
+        serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "buttons": mask, "clickCount": 1}),
       )
       .await?;
-    if let Ok(mut guard) = self.last_cursor_pos.lock() {
-      *guard = Some((x, y));
-    }
+    self.set_cursor_pos(x, y);
     Ok(())
   }
 
@@ -3410,6 +3689,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// Ctrl=2, Meta=4, Shift=8). Used by `press_key` to handle
   /// Playwright-style combos like `"Control+a"`.
   pub(crate) async fn key_down_with_mods(&self, key: &str, modifiers: u32) -> Result<()> {
+    // Escape cancels an in-flight intercepted drag instead of reaching
+    // the page (`crInput.ts::RawKeyboardImpl.keydown`).
+    if key == "Escape" && self.cancel_drag().await? {
+      return Ok(());
+    }
     let (dom_key, vk, text) = Self::resolve_key(key);
     let down_type = if text.is_some() { "keyDown" } else { "rawKeyDown" };
     // Don't emit text characters while a non-Shift modifier is held —
@@ -4184,6 +4468,7 @@ impl<T: CdpWrap> CdpPage<T> {
     tasks.push(Self::spawn_network_listener(
       transport.clone(),
       session_id.clone(),
+      self.target_id.clone(),
       network_log,
       emitter2,
       self.nav_request_slot.clone(),
@@ -4381,6 +4666,7 @@ impl<T: CdpWrap> CdpPage<T> {
   fn spawn_network_listener(
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
+    target_id: Arc<str>,
     network_log: Arc<RwLock<Vec<NetworkRequest>>>,
     emitter: crate::events::EventEmitter,
     nav_request_slot: crate::network::NavRequestSlot,
@@ -4388,6 +4674,7 @@ impl<T: CdpWrap> CdpPage<T> {
     let tracker: Arc<NetworkTracker<T>> = Arc::new(NetworkTracker::new(
       transport.clone(),
       session_id.clone(),
+      target_id,
       nav_request_slot,
     ));
     tokio::spawn(async move {
@@ -5175,10 +5462,30 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       Self::handle_fetch_events(t, sid, routes, creds).await;
     })
     .abort_handle();
+    // Dedicated slot so the disable path can abort exactly this loop;
+    // also on `listener_tasks` for page-close cleanup (abort is
+    // idempotent). A stale handle in the slot is already-aborted.
+    if let Ok(mut slot) = self.fetch_interceptor.lock() {
+      *slot = Some(handle.clone());
+    }
     if let Ok(mut guard) = self.listener_tasks.lock() {
       guard.push(handle);
     }
     Ok(())
+  }
+
+  /// `Fetch.disable` + tear down the interceptor loop. Both `unroute`
+  /// paths call this when the last route goes away; leaving the loop
+  /// alive would double-process `Fetch.requestPaused` after the next
+  /// `route` call re-enables interception (see `fetch_interceptor`).
+  async fn disable_fetch_interception(&self) {
+    self.fetch_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+    let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
+    if let Ok(mut slot) = self.fetch_interceptor.lock()
+      && let Some(handle) = slot.take()
+    {
+      handle.abort();
+    }
   }
 
   #[allow(clippy::too_many_lines)]
@@ -5439,7 +5746,10 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           )
           .await;
       },
-      None => {
+      // `PredicateRejected` is chain-internal — `run_route_chain`
+      // refunds the budget and keeps walking, so it can never surface
+      // here; if it ever leaks, fail open like an unhandled route.
+      Some(crate::route::RouteAction::PredicateRejected) | None => {
         let _ = transport
           .send_command(
             session_id,
@@ -5463,11 +5773,13 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   }
 
   pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher, scope: crate::route::RouteScope) -> Result<()> {
-    let mut routes = self.routes.write().await;
-    routes.retain(|r| r.scope != scope || !r.matcher.equivalent(matcher));
-    if routes.is_empty() && self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-      self.fetch_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
-      let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
+    let now_empty = {
+      let mut routes = self.routes.write().await;
+      routes.retain(|r| r.scope != scope || !r.matcher.equivalent(matcher));
+      routes.is_empty()
+    };
+    if now_empty && self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+      self.disable_fetch_interception().await;
     }
     Ok(())
   }
@@ -5477,14 +5789,16 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     _behavior: crate::options::UnrouteBehavior,
     scope: Option<crate::route::RouteScope>,
   ) -> Result<()> {
-    let mut routes = self.routes.write().await;
-    match scope {
-      Some(scope) => routes.retain(|r| r.scope != scope),
-      None => routes.clear(),
-    }
-    if routes.is_empty() && self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-      self.fetch_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
-      let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
+    let now_empty = {
+      let mut routes = self.routes.write().await;
+      match scope {
+        Some(scope) => routes.retain(|r| r.scope != scope),
+        None => routes.clear(),
+      }
+      routes.is_empty()
+    };
+    if now_empty && self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+      self.disable_fetch_interception().await;
     }
     Ok(())
   }
@@ -5774,6 +6088,24 @@ impl<T: CdpTransport> CdpElement<T> {
     Ok(())
   }
 
+  /// Set the file list on this `<input type=file>` element. Mirrors
+  /// Playwright's `crPage.ts::setInputFilePaths`, which sends
+  /// `DOM.setFileInputFiles` with the resolved handle's `objectId` — the
+  /// element was resolved through the selector engine in the owning
+  /// frame's context immediately before this call, so a stale node
+  /// surfaces as a retryable protocol error and the locator funnel
+  /// re-resolves instead of reusing a dead reference.
+  pub async fn set_input_files(&self, paths: &[String]) -> Result<()> {
+    let object_id = self.object_id().await?;
+    self
+      .cmd(
+        "DOM.setFileInputFiles",
+        serde_json::json!({"files": paths, "objectId": &*object_id}),
+      )
+      .await?;
+    Ok(())
+  }
+
   pub async fn type_str(&self, text: &str) -> Result<()> {
     self.click().await?;
     self.cmd("Input.insertText", serde_json::json!({"text": text})).await?;
@@ -5873,6 +6205,10 @@ impl<T: CdpTransport> CdpElement<T> {
 struct NetworkTracker<T: CdpTransport> {
   transport: Arc<T>,
   session_id: Option<Arc<str>>,
+  /// Owning page's target id — stamped on every captured `Request` as
+  /// its `page_guid` for context-level page attribution (HAR pages,
+  /// page-scoped HAR update recording).
+  target_id: Arc<str>,
   requests: tokio::sync::Mutex<FxHashMap<String, network::Request>>,
   responses: tokio::sync::Mutex<FxHashMap<String, Response>>,
   websockets: tokio::sync::Mutex<FxHashMap<String, WebSocket>>,
@@ -5883,10 +6219,16 @@ struct NetworkTracker<T: CdpTransport> {
 }
 
 impl<T: CdpTransport + 'static> NetworkTracker<T> {
-  fn new(transport: Arc<T>, session_id: Option<Arc<str>>, nav_request_slot: crate::network::NavRequestSlot) -> Self {
+  fn new(
+    transport: Arc<T>,
+    session_id: Option<Arc<str>>,
+    target_id: Arc<str>,
+    nav_request_slot: crate::network::NavRequestSlot,
+  ) -> Self {
     Self {
       transport,
       session_id,
+      target_id,
       requests: tokio::sync::Mutex::new(FxHashMap::default()),
       responses: tokio::sync::Mutex::new(FxHashMap::default()),
       websockets: tokio::sync::Mutex::new(FxHashMap::default()),
@@ -5987,6 +6329,7 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       post_data,
       headers,
       frame_id,
+      page_guid: Some(self.target_id.to_string()),
       redirected_from,
       timing,
       raw_headers_fn: Some(raw_headers_fn),

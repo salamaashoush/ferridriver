@@ -38,6 +38,14 @@ const INDEX_HTML: &str = include_str!("ui_assets/index.html");
 static LIVE_TRACES: std::sync::LazyLock<std::sync::Mutex<rustc_hash::FxHashMap<String, String>>> =
   std::sync::LazyLock::new(|| std::sync::Mutex::new(rustc_hash::FxHashMap::default()));
 
+/// Last exported live snapshot per composite — polls where the trace
+/// grew nothing since serve the cached bytes instead of paying an
+/// O(trace) zip re-export per tick. Entries are evicted when their
+/// trace unregisters, so the map only ever holds actively watched
+/// recordings.
+static EXPORT_CACHE: std::sync::LazyLock<std::sync::Mutex<rustc_hash::FxHashMap<String, (u64, axum::body::Bytes)>>> =
+  std::sync::LazyLock::new(|| std::sync::Mutex::new(rustc_hash::FxHashMap::default()));
+
 /// Publish the active trace's composite key for `test_full_name` so the
 /// UI server can export live snapshots while the test runs.
 pub fn register_live_trace(test_full_name: &str, composite: &str) {
@@ -47,12 +55,19 @@ pub fn register_live_trace(test_full_name: &str, composite: &str) {
     .insert(test_full_name.to_string(), composite.to_string());
 }
 
-/// Drop the live-trace entry for `test_full_name` (trace stopped).
+/// Drop the live-trace entry for `test_full_name` (trace stopped) and
+/// evict its cached export snapshot.
 pub fn unregister_live_trace(test_full_name: &str) {
-  LIVE_TRACES
+  let composite = LIVE_TRACES
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .remove(test_full_name);
+  if let Some(composite) = composite {
+    EXPORT_CACHE
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(&composite);
+  }
 }
 
 fn live_trace_composite(test_full_name: &str) -> Option<String> {
@@ -151,10 +166,14 @@ impl UiState {
   }
 
   /// Publish a fresh test list built from a full plan. Existing statuses
-  /// are preserved for tests that survive the rebuild.
+  /// are preserved for tests that survive the rebuild; statuses and
+  /// outcomes of tests that no longer exist are dropped — replaying a
+  /// removed test's outcome would resurrect it in connecting tabs and
+  /// inflate their counts.
   pub fn publish_test_list(&self, plan: &TestPlan) {
     let mut snapshot = self.snapshot.write().unwrap_or_else(std::sync::PoisonError::into_inner);
     let message = test_list_json(plan, &snapshot.statuses);
+    prune_to_listed_tests(&mut snapshot, &message);
     snapshot.test_list = Some(message.clone());
     drop(snapshot);
     self.send(&message);
@@ -178,37 +197,73 @@ impl UiState {
   }
 
   /// Drain one run's reporter events into the broadcast channel, keeping
-  /// the status + outcome snapshot current for late-joining tabs.
+  /// the status + outcome snapshot current for late-joining tabs. Step
+  /// events are not forwarded: the app's detail pane is the embedded
+  /// trace viewer (its Actions panel is the step list), so per-step
+  /// frames would only burn serialization and websocket bandwidth —
+  /// thousands of dead messages per BDD run.
   pub async fn forward_run_events(self: Arc<Self>, mut subscription: Subscription) {
     while let Some(event) = subscription.rx.recv().await {
-      let message = reporter_event_to_json(&event, &self.artifacts_root);
-      match &event {
-        ReporterEvent::TestStarted { test_id, .. } => {
-          self
-            .snapshot
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .statuses
-            .insert(test_id.full_name(), "running".to_string());
-        },
-        ReporterEvent::TestFinished { test_id, outcome } => {
-          let mut snapshot = self.snapshot.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-          snapshot
-            .statuses
-            .insert(test_id.full_name(), outcome.status.to_string());
-          snapshot.outcomes.insert(test_id.full_name(), message.to_string());
-        },
-        ReporterEvent::RunFinished { .. } => {
-          self
-            .snapshot
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .last_run = Some(message.to_string());
-        },
-        _ => {},
+      if matches!(event, ReporterEvent::StepStarted(_) | ReporterEvent::StepFinished(_)) {
+        continue;
       }
-      self.send(&message);
+      let message = reporter_event_to_json(&event, &self.artifacts_root);
+      self.publish_wire_event(&message);
     }
+  }
+
+  /// Publish an already-serialized wire event, keeping the status +
+  /// outcome snapshot current for late-joining tabs. Shared by
+  /// [`Self::forward_run_events`] and the `ferridriver test --ui`
+  /// bridge, whose events arrive as JSON lines from harness processes
+  /// rather than as in-process [`ReporterEvent`]s.
+  pub fn publish_wire_event(&self, message: &serde_json::Value) {
+    let id = message.get("id").and_then(|v| v.as_str());
+    match (message.get("type").and_then(|v| v.as_str()), id) {
+      (Some("testStarted"), Some(id)) => {
+        self
+          .snapshot
+          .write()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .statuses
+          .insert(id.to_string(), "running".to_string());
+      },
+      (Some("testFinished"), Some(id)) => {
+        let status = message
+          .get("outcome")
+          .and_then(|o| o.get("status"))
+          .and_then(|s| s.as_str())
+          .unwrap_or("failed")
+          .to_string();
+        let mut snapshot = self.snapshot.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshot.statuses.insert(id.to_string(), status);
+        snapshot.outcomes.insert(id.to_string(), message.to_string());
+      },
+      (Some("runFinished"), _) => {
+        self
+          .snapshot
+          .write()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .last_run = Some(message.to_string());
+      },
+      _ => {},
+    }
+    self.send(message);
+  }
+
+  /// Publish a pre-built `testList` message. The `test --ui` bridge
+  /// aggregates suites from several harness binaries into one list, so
+  /// it cannot use the plan-based [`Self::publish_test_list`]. Known
+  /// statuses overlay the incoming list before it is stored and sent;
+  /// statuses and outcomes of vanished tests are pruned (see
+  /// [`Self::publish_test_list`]).
+  pub fn publish_test_list_message(&self, mut message: serde_json::Value) {
+    let mut snapshot = self.snapshot.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    overlay_statuses(&mut message, &snapshot.statuses);
+    prune_to_listed_tests(&mut snapshot, &message);
+    snapshot.test_list = Some(message.clone());
+    drop(snapshot);
+    self.send(&message);
   }
 
   /// Notify clients that the in-flight run was cancelled (Stop): no
@@ -310,6 +365,33 @@ impl UiServer {
   }
 }
 
+/// Bind a minimal server exposing ONLY `/live-trace` on an ephemeral
+/// localhost port. Harness binaries under `ferridriver test --ui` run in
+/// a separate process from the CLI's UI server, so the CLI cannot export
+/// their in-progress recorder spools; each harness serves its own live
+/// snapshots and advertises the absolute URL on `testStarted`
+/// (responses carry `Access-Control-Allow-Origin: *`, so the app's
+/// poller fetches them cross-origin).
+///
+/// # Errors
+///
+/// Errors if the listener cannot bind.
+pub async fn start_live_trace_server() -> ferridriver::error::Result<SocketAddr> {
+  use ferridriver::FerriError;
+
+  let app = Router::new().route("/live-trace", get(live_trace));
+  let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+    .await
+    .map_err(|e| FerriError::backend(format!("bind live-trace server: {e}")))?;
+  let addr = listener
+    .local_addr()
+    .map_err(|e| FerriError::backend(format!("live-trace server local_addr: {e}")))?;
+  tokio::spawn(async move {
+    let _ = axum::serve(listener, app).await;
+  });
+  Ok(addr)
+}
+
 async fn index() -> Html<&'static str> {
   Html(INDEX_HTML)
 }
@@ -332,7 +414,10 @@ fn serve_trace_viewer(path: &str) -> Response {
   match TRACE_VIEWER_ASSETS.get(key) {
     Some(bytes) => {
       let mime = mime_guess::from_path(key).first_or_octet_stream();
-      let immutable = !key.ends_with(".html") && key != "sw.bundle.js" && key != "manifest.webmanifest";
+      let is_html = Path::new(key)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("html"));
+      let immutable = !is_html && key != "sw.bundle.js" && key != "manifest.webmanifest";
       let cache = if immutable {
         "public, max-age=31536000, immutable"
       } else {
@@ -355,23 +440,16 @@ fn serve_trace_viewer(path: &str) -> Response {
 /// "not recording yet" and keeps trying. The exported zip is a normal
 /// Playwright trace the embedded viewer loads via its `postMessage`
 /// hook; CORS is open so the viewer (any origin) can consume it.
-async fn live_trace(Query(params): Query<rustc_hash::FxHashMap<String, String>>) -> Response {
-  // Cache of the last exported snapshot per composite — polls where the
-  // trace grew nothing since serve the cached bytes instead of paying
-  // an O(trace) zip re-export every 800ms tick.
-  static EXPORT_CACHE: std::sync::LazyLock<std::sync::Mutex<rustc_hash::FxHashMap<String, (u64, axum::body::Bytes)>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(rustc_hash::FxHashMap::default()));
+async fn live_trace(
+  headers: axum::http::HeaderMap,
+  Query(params): Query<rustc_hash::FxHashMap<String, String>>,
+) -> Response {
+  use ferridriver::trace::LiveTraceSnapshot;
 
   let Some(key) = params.get("key") else {
     return StatusCode::BAD_REQUEST.into_response();
   };
   let Some(composite) = live_trace_composite(key) else {
-    // The trace ended — drop any cached snapshot for dead composites so
-    // the map does not grow across a long watch session.
-    EXPORT_CACHE
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .clear();
     return StatusCode::NOT_FOUND.into_response();
   };
 
@@ -380,61 +458,90 @@ async fn live_trace(Query(params): Query<rustc_hash::FxHashMap<String, String>>)
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .get(&composite)
     .cloned();
-
-  // Unique temp path per request; removed after reading.
-  static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-  let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-  let tmp = std::env::temp_dir().join(format!("ferridriver-live-{}-{n}.zip", std::process::id()));
+  let known_version = cached.as_ref().map(|(version, _)| *version);
 
   let composite_owned = composite.clone();
-  let tmp_for_export = tmp.clone();
-  let known_version = cached.as_ref().map(|(version, _)| *version);
-  let exported = tokio::task::spawn_blocking(move || {
-    ferridriver::trace::export_live_snapshot(&composite_owned, &tmp_for_export, known_version)
-  })
-  .await;
+  let exported =
+    tokio::task::spawn_blocking(move || ferridriver::trace::export_live_snapshot(&composite_owned, known_version))
+      .await;
 
   let served = match exported {
-    Ok(Ok(Some(version))) => {
-      if let Some((cached_version, bytes)) = cached {
-        if cached_version == version {
-          let _ = tokio::fs::remove_file(&tmp).await;
-          return live_trace_response(bytes);
-        }
-      }
-      match tokio::fs::read(&tmp).await {
-        Ok(bytes) => {
-          let bytes = axum::body::Bytes::from(bytes);
-          EXPORT_CACHE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(composite, (version, bytes.clone()));
-          Some(bytes)
-        },
-        Err(_) => None,
-      }
+    Ok(Ok(LiveTraceSnapshot::Unchanged(_))) => cached.map(|(_, bytes)| bytes),
+    Ok(Ok(LiveTraceSnapshot::Zip { version, bytes })) => {
+      let bytes = axum::body::Bytes::from(bytes);
+      EXPORT_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(composite, (version, bytes.clone()));
+      Some(bytes)
     },
     _ => None,
   };
-  let _ = tokio::fs::remove_file(&tmp).await;
 
   match served {
-    Some(bytes) => live_trace_response(bytes),
+    Some(bytes) => live_trace_response(&headers, bytes),
     None => StatusCode::NOT_FOUND.into_response(),
   }
 }
 
-fn live_trace_response(bytes: axum::body::Bytes) -> Response {
-  Response::builder()
+fn live_trace_response(headers: &axum::http::HeaderMap, bytes: axum::body::Bytes) -> Response {
+  let mut builder = Response::builder()
     .header(header::CONTENT_TYPE, "application/zip")
-    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
     .header(header::CACHE_CONTROL, "no-store")
+    .header(header::VARY, "Origin");
+  if let Some(origin) = cors_allow_origin(headers) {
+    builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+  }
+  builder
     .body(Body::from(bytes))
     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-async fn ws_upgrade(State(state): State<Arc<UiState>>, ws: WebSocketUpgrade) -> Response {
+/// Upgrade a websocket client. Browsers enforce no cross-origin policy
+/// on websocket handshakes, so the `Origin` header is checked here: a
+/// page served by any non-loopback origin (an external website) must
+/// not be able to command runs or read results. Non-browser clients
+/// (no `Origin` header) are allowed — they are local processes, which
+/// could reach the socket regardless.
+async fn ws_upgrade(
+  State(state): State<Arc<UiState>>,
+  headers: axum::http::HeaderMap,
+  ws: WebSocketUpgrade,
+) -> Response {
+  match headers.get(header::ORIGIN).map(|v| v.to_str()) {
+    None => {},
+    Some(Ok(origin)) if is_loopback_origin(origin) => {},
+    Some(_) => return StatusCode::FORBIDDEN.into_response(),
+  }
   ws.on_upgrade(move |socket| client_session(socket, state))
+}
+
+/// Whether `origin` is an http(s) origin on a loopback host. Loopback
+/// pages (this app, another local dev server) may talk to the server;
+/// external origins may not.
+fn is_loopback_origin(origin: &str) -> bool {
+  let Some(rest) = origin
+    .strip_prefix("http://")
+    .or_else(|| origin.strip_prefix("https://"))
+  else {
+    return false;
+  };
+  let host = match rest.rsplit_once(':') {
+    Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
+    _ => rest,
+  };
+  matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+}
+
+/// CORS reflection for artifact/live-trace responses: echo the caller's
+/// `Origin` only for loopback origins (the UI app fetching a harness's
+/// live-trace server across ports) and trace.playwright.dev (the
+/// online viewer loading a trace zip). External origins get no CORS
+/// grant.
+fn cors_allow_origin(headers: &axum::http::HeaderMap) -> Option<header::HeaderValue> {
+  let origin = headers.get(header::ORIGIN)?;
+  let text = origin.to_str().ok()?;
+  (is_loopback_origin(text) || text == "https://trace.playwright.dev").then(|| origin.clone())
 }
 
 async fn client_session(mut socket: WebSocket, state: Arc<UiState>) {
@@ -482,9 +589,9 @@ async fn client_session(mut socket: WebSocket, state: Arc<UiState>) {
 }
 
 /// Serve a file from the run's output directory. The path is confined to
-/// the artifacts root (no traversal, no symlink escape) and responses
-/// carry `Access-Control-Allow-Origin: *` so trace.playwright.dev can
-/// fetch trace zips cross-origin. Delegates to `tower_http::ServeFile`,
+/// the artifacts root (no traversal, no symlink escape); CORS is
+/// granted only to loopback origins and trace.playwright.dev (see
+/// [`cors_allow_origin`]). Delegates to `tower_http::ServeFile`,
 /// which streams from disk and honors `Range` / conditional requests —
 /// `<video>` seeking on webm attachments needs 206 partial content.
 async fn artifact(
@@ -495,15 +602,20 @@ async fn artifact(
   let Some(full_path) = resolve_artifact_path(&state.artifacts_root, &path) else {
     return StatusCode::NOT_FOUND.into_response();
   };
+  let allow_origin = cors_allow_origin(request.headers());
   let served = tower::ServiceExt::oneshot(tower_http::services::ServeFile::new(&full_path), request).await;
   let mut response = match served {
     Ok(response) => response.into_response(),
     Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
   };
-  response.headers_mut().insert(
-    header::ACCESS_CONTROL_ALLOW_ORIGIN,
-    header::HeaderValue::from_static("*"),
-  );
+  response
+    .headers_mut()
+    .insert(header::VARY, header::HeaderValue::from_static("Origin"));
+  if let Some(origin) = allow_origin {
+    response
+      .headers_mut()
+      .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+  }
   response
 }
 
@@ -565,7 +677,7 @@ fn encode_url_path(relative: &str) -> String {
 }
 
 /// Build the `testList` message from a plan, overlaying known statuses.
-fn test_list_json(plan: &TestPlan, statuses: &rustc_hash::FxHashMap<String, String>) -> serde_json::Value {
+pub(crate) fn test_list_json(plan: &TestPlan, statuses: &rustc_hash::FxHashMap<String, String>) -> serde_json::Value {
   let suites: Vec<serde_json::Value> = plan
     .suites
     .iter()
@@ -592,6 +704,21 @@ fn test_list_json(plan: &TestPlan, statuses: &rustc_hash::FxHashMap<String, Stri
     })
     .collect();
   serde_json::json!({ "type": "testList", "suites": suites })
+}
+
+/// Drop snapshot statuses/outcomes whose test id no longer appears in
+/// the `testList` message about to be published.
+fn prune_to_listed_tests(snapshot: &mut UiSnapshot, list: &serde_json::Value) {
+  let mut live = rustc_hash::FxHashSet::default();
+  for suite in list.get("suites").and_then(|s| s.as_array()).into_iter().flatten() {
+    for test in suite.get("tests").and_then(|t| t.as_array()).into_iter().flatten() {
+      if let Some(id) = test.get("id").and_then(|i| i.as_str()) {
+        live.insert(id.to_string());
+      }
+    }
+  }
+  snapshot.statuses.retain(|id, _| live.contains(id));
+  snapshot.outcomes.retain(|id, _| live.contains(id));
 }
 
 /// Overlay the latest statuses onto a cached `testList` message.
@@ -776,6 +903,54 @@ mod tests {
     let snapshot = state.snapshot.read().expect("lock");
     assert_eq!(snapshot.statuses["a"], "idle");
     assert_eq!(snapshot.statuses["b"], "passed");
+  }
+
+  #[test]
+  fn loopback_origins_allowed_external_rejected() {
+    assert!(is_loopback_origin("http://127.0.0.1:8080"));
+    assert!(is_loopback_origin("http://localhost:3000"));
+    assert!(is_loopback_origin("http://localhost"));
+    assert!(is_loopback_origin("http://[::1]:9000"));
+    assert!(is_loopback_origin("http://[::1]"));
+    assert!(!is_loopback_origin("https://evil.example"));
+    assert!(!is_loopback_origin("https://localhost.evil.example"));
+    assert!(!is_loopback_origin("http://192.168.1.10:8080"));
+    assert!(!is_loopback_origin("null"));
+    assert!(!is_loopback_origin("file://localhost"));
+  }
+
+  #[test]
+  fn cors_reflects_loopback_and_trace_viewer_origins_only() {
+    let mut headers = axum::http::HeaderMap::new();
+    assert!(cors_allow_origin(&headers).is_none(), "no Origin, no grant");
+
+    headers.insert(header::ORIGIN, "http://127.0.0.1:4242".parse().expect("value"));
+    let allowed = cors_allow_origin(&headers).expect("loopback origin allowed");
+    assert_eq!(allowed.to_str().ok(), Some("http://127.0.0.1:4242"));
+
+    headers.insert(header::ORIGIN, "https://trace.playwright.dev".parse().expect("value"));
+    assert!(cors_allow_origin(&headers).is_some());
+
+    headers.insert(header::ORIGIN, "https://evil.example".parse().expect("value"));
+    assert!(cors_allow_origin(&headers).is_none());
+  }
+
+  #[test]
+  fn snapshot_prunes_state_of_removed_tests() {
+    let mut snapshot = UiSnapshot::default();
+    snapshot.statuses.insert("kept".to_string(), "passed".to_string());
+    snapshot.statuses.insert("gone".to_string(), "failed".to_string());
+    snapshot
+      .outcomes
+      .insert("gone".to_string(), r#"{"type":"testFinished","id":"gone"}"#.to_string());
+    let list = serde_json::json!({
+      "type": "testList",
+      "suites": [{ "title": "s", "file": "f", "tests": [{ "id": "kept", "title": "kept", "status": "idle" }] }],
+    });
+    prune_to_listed_tests(&mut snapshot, &list);
+    assert!(snapshot.statuses.contains_key("kept"));
+    assert!(!snapshot.statuses.contains_key("gone"));
+    assert!(snapshot.outcomes.is_empty(), "removed test's outcome must not replay");
   }
 
   #[test]

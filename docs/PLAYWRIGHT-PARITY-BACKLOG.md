@@ -20,13 +20,6 @@ record.
   `Target.attachedToTarget` worker tracking on CDP/BiDi/WebKit and a new
   class across all three layers (core, NAPI, QuickJS).
 
-### `page.waitForFunction` signature mismatch
-- ferridriver ships `(expression: string, timeoutMs?)`; Playwright is
-  `(pageFunction: string | Function, arg?, options?)`. The current form
-  cannot pass a function, an arg, or the polling option bag. Rework
-  touches existing callers. (`locator.waitForFunction` already matches
-  Playwright.)
-
 ### `context.newCDPSession(frame)` (OOPIF form)
 - Only the `Page` form is implemented (`context.rs`, script binding
   `bindings/context.rs`). Playwright also accepts an OOPIF `Frame`
@@ -53,47 +46,33 @@ record.
   page contend for the single screencast stream — whichever starts second
   gets no frames.
 
-### `page.routeFromHAR({ update: true })`
-- Page-scoped variant returns typed `Unsupported` (`page.rs`);
-  context-level update recording works. Needs per-page attribution in the
-  context network log (`Request.frame_id` → owning page).
-
-### Route predicate `times` budget
-- A JS predicate route whose predicate rejects falls through to the next
-  handler (chain-correct), but its `times` budget is still consumed: the
-  predicate runs inside the wrapped handler, not the matcher (matchers are
-  sync Rust; the predicate is an async JS call). Playwright evaluates
-  predicates during matching, before `willExpire`.
-
 ### HAR recording gaps
-- No cookies / `serverIPAddress` / `_securityDetails` sections; the HAR log
-  carries no `pages`.
+- No cookies / `serverIPAddress` / `_securityDetails` sections.
+- `log.pages` entries carry empty `title` and `-1` `pageTimings` (the
+  network log tracks no page-load samples); Playwright fills these from
+  page lifecycle events.
 - WebSocket frames are not recorded (`_webSocketMessages`).
 - BiDi records entries but no response bodies: Firefox discards bytes for
   non-intercepted responses (`network.getData` → "no such network data")
   — the same hole as Playwright's own BiDi backend.
 
-### Clock date-string parsing
-- ISO-8601 only (`YYYY-MM-DD`, `YYYY-MM-DD[T ]HH:MM[:SS[.mmm]][Z|±HH:MM]`).
-  Bare date-times parse as UTC; non-ISO forms JS accepts ("Feb 1 2024")
-  are rejected with `Invalid date`.
+### BiDi: native HTML5 drag delivers no `drop`
+- Firefox over BiDi starts a native drag from `input.performActions`
+  (`dragstart`/`dragenter` fire) but the remote input stack never
+  delivers the final `drop`, so `DataTransfer` payloads don't reach the
+  target. Same hole as Playwright's own BiDi backend, which carries no
+  drag handling at all; the CDP backends intercept via
+  `Input.setInterceptDrags` (crDragDrop.ts port) and WebKit's build runs
+  the drag natively. `test_script_drag_native_html5` asserts the
+  achievable subset on BiDi (drag started + input pipeline alive) until
+  the protocol grows drop support.
 
-### WebKit: navigation-wait timeout resolves instead of rejecting
-- `wait_for_lifecycle` maps its own timeout to `Ok(())`
-  (`backend/webkit/page.rs`), so a `goto` whose lifecycle never fires
-  resolves silently instead of throwing `TimeoutError`. Provisional-load
-  FAILURES reject correctly (wired via `Playwright.provisionalLoadFailed`);
-  only the silent-timeout path diverges.
-
-### `ferridriver test --watch`
-- `ferridriver test --ui` is done (it hosts the same UI server as
-  `bdd --ui` plus a unix-socket NDJSON bridge, respawning `cargo test` per
-  cycle). `test --watch` (re-run cargo on file change, cargo-watch shape)
-  is not wired — the `--ui` cycle spawner is the natural base for it.
-  Known `--ui` limits: nextest is rejected (it cannot enumerate ferritest
-  harness binaries via libtest `--list`); compile errors surface in the
-  launching terminal, not the app; libtest binaries in scope run during
-  cycles but do not report to the app.
+### `ferridriver test --ui` limits
+- nextest is rejected (it cannot enumerate ferritest harness binaries
+  via libtest `--list`); compile errors surface in the launching
+  terminal, not the app; libtest binaries in scope run during cycles but
+  do not report to the app. (`test --watch` is wired — plain re-run of
+  the test command on `.rs` changes.)
 
 ### `bdd --ui` remaining gaps vs Playwright UI mode
 - The Network tab is empty while a test runs (HAR entries are built from

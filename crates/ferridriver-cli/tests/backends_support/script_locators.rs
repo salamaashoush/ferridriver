@@ -218,6 +218,97 @@ pub fn test_script_upload_file(c: &mut McpClient) {
   let _ = std::fs::remove_file(&tmp);
 }
 
+// A hidden, framework-managed file input that re-mounts every 25ms
+// during page setup (the app.acme.com Sign builder shape). The old
+// selector-string path resolved via a bare main-frame
+// `document.querySelector` and reused the captured objectId, racing
+// the re-render into a raw CDP "Object id doesn't reference a Node";
+// the locator funnel now re-resolves through the selector engine
+// immediately before each `DOM.setFileInputFiles`-equivalent call.
+// The observed effect is the page-side `change` event reporting the
+// file name — proof the set landed on a live node AND fired events.
+pub fn test_script_set_input_files_hidden_remounting(c: &mut McpClient) {
+  c.nav(
+    "<div id='mount' data-test-id='file-upload-desktop'></div>\
+     <script>\
+       window.uploaded='';\
+       var flips=0;\
+       function remake(){\
+         if(window.uploaded){return;}\
+         var mount=document.getElementById('mount');\
+         mount.innerHTML='';\
+         var input=document.createElement('input');\
+         input.type='file';\
+         input.style.display='none';\
+         input.addEventListener('change',function(){window.uploaded=input.files[0]?input.files[0].name:'';});\
+         mount.appendChild(input);\
+         if(++flips<40){setTimeout(remake,25);}\
+       }\
+       remake();\
+     </script>",
+  );
+  let v = c.script_value(
+    "await page.setInputFiles('[data-test-id=\"file-upload-desktop\"] input[type=file]', \
+         { name: 'hello.txt', mimeType: 'text/plain', buffer: new Uint8Array([104,105]) }); \
+       let name = ''; \
+       for (let i = 0; i < 200 && !name; i++) { name = await page.evaluate('window.uploaded'); } \
+       return { name };",
+  );
+  assert_eq!(
+    v["name"],
+    json!("hello.txt"),
+    "setInputFiles must land on the re-mounting hidden input and fire change: {v}"
+  );
+}
+
+// File input inside an iframe, addressed through a frameLocator chain.
+// The old page-level path always resolved against the MAIN frame's
+// document, so iframe-scoped inputs could never be set on CDP.
+// Verified from the parent document (same-origin srcdoc) because a
+// string pageFunction is expression-semantics per Playwright.
+pub fn test_script_set_input_files_in_iframe(c: &mut McpClient) {
+  c.nav("<iframe id='fr' srcdoc='<input type=file id=up>'></iframe>");
+  let v = c.script_value(
+    "await page.frameLocator('#fr').locator('#up').setInputFiles(\
+         { name: 'inner.txt', mimeType: 'text/plain', buffer: new Uint8Array([105]) }); \
+       const name = await page.evaluate(\"document.getElementById('fr').contentDocument.getElementById('up').files[0].name\"); \
+       return { name };",
+  );
+  assert_eq!(
+    v["name"],
+    json!("inner.txt"),
+    "setInputFiles must resolve the input in the iframe's own frame: {v}"
+  );
+}
+
+// Engine selector (getByTestId) + Uint8Array payload + page-side
+// content read-back. Engine selectors never worked with the old
+// querySelector-based resolve; the content read proves the backing
+// bytes are readable by the page (on WebKit that requires the
+// browser-session Playwright.grantFileReadAccess pairing).
+pub fn test_script_set_input_files_engine_selector_payload(c: &mut McpClient) {
+  c.nav("<input type='file' data-testid='uploader'>");
+  let v = c.script_value(
+    "await page.getByTestId('uploader').setInputFiles(\
+         { name: 'engine.txt', mimeType: 'text/plain', buffer: new Uint8Array([111,107]) }); \
+       const f = await page.evaluate(`(async () => { \
+         const f = document.querySelector('input').files[0]; \
+         return f ? { name: f.name, content: await f.text() } : null; \
+       })()`); \
+       return f;",
+  );
+  assert_eq!(
+    v["name"],
+    json!("engine.txt"),
+    "engine selector must resolve the input: {v}"
+  );
+  assert_eq!(
+    v["content"],
+    json!("ok"),
+    "the page must be able to read the payload bytes back: {v}"
+  );
+}
+
 // Playwright: `locator.normalize(): Promise<Locator>`
 // (client/locator.ts:269 -> server frames.ts:1274 resolveSelector ->
 // injected.generateSelectorSimple). normalize() must return a NEW
@@ -482,6 +573,18 @@ pub fn register(set: &mut crate::TestSet<'_>) {
   set.run(
     "backends_support::script_locators::test_script_upload_file",
     test_script_upload_file,
+  );
+  set.run(
+    "backends_support::script_locators::test_script_set_input_files_hidden_remounting",
+    test_script_set_input_files_hidden_remounting,
+  );
+  set.run(
+    "backends_support::script_locators::test_script_set_input_files_in_iframe",
+    test_script_set_input_files_in_iframe,
+  );
+  set.run(
+    "backends_support::script_locators::test_script_set_input_files_engine_selector_payload",
+    test_script_set_input_files_engine_selector_payload,
   );
   set.run(
     "backends_support::script_locators::test_script_locator_normalize",

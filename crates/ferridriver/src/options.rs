@@ -1384,7 +1384,9 @@ pub struct DragAndDropOptions {
   /// When absent, the target element's center is used.
   pub target_position: Option<Point>,
   /// Number of interpolated `mousemove` events between press and release.
-  /// default is `1` (a single move at the destination).
+  /// Default is `5` — enough for drag libraries to observe their drag
+  /// threshold being crossed (Playwright defaults to `1` but intercepts
+  /// the native drag on Chromium, which ferridriver does not).
   pub steps: Option<u32>,
   /// Strict-mode override for resolving the source/target selector.
   /// Meaningful only on `page.drag_and_drop`; ignored by `locator.drag_to`.
@@ -1394,6 +1396,47 @@ pub struct DragAndDropOptions {
   pub timeout: Option<u64>,
   /// Perform actionability checks only; skip the actual mouse press/move/release.
   pub trial: Option<bool>,
+}
+
+/// Polling cadence for `waitForFunction`. Playwright's `polling` union:
+/// `'raf'` (poll on every animation frame, the default) or a number of
+/// milliseconds between polls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Polling {
+  /// One poll per animation frame.
+  Raf,
+  /// Fixed interval between polls, in milliseconds.
+  Interval(u64),
+}
+
+impl<'de> serde::Deserialize<'de> for Polling {
+  fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+      Num(u64),
+      Text(String),
+    }
+    match Raw::deserialize(deserializer)? {
+      Raw::Num(ms) => Ok(Self::Interval(ms)),
+      Raw::Text(s) if s == "raf" => Ok(Self::Raf),
+      Raw::Text(s) => Err(serde::de::Error::custom(format!("Unknown polling option: {s}"))),
+    }
+  }
+}
+
+/// Options for `page.waitForFunction` / `frame.waitForFunction`.
+/// Mirrors Playwright's `WaitForFunctionOptions`
+/// (`types.d.ts::PageWaitForFunctionOptions`).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WaitForFunctionOptions {
+  /// `'raf'` (default) polls on every animation frame; a number polls
+  /// on that interval in milliseconds.
+  pub polling: Option<Polling>,
+  /// Maximum time in ms. `0` means no timeout. Default is inherited
+  /// from the context's default timeout.
+  pub timeout: Option<u64>,
 }
 
 /// Options for `Locator.drop`.

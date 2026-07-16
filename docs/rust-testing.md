@@ -277,3 +277,38 @@ baseURL, reporters, viewport, storageState, webServer, projects, ...).
 CLI flags after `--` override the file; `FERRITEST_*` environment
 variables sit between the two. See `docs/` config reference for the full
 key list.
+
+## UI mode
+
+`ferridriver test --ui` serves the same localhost web app as
+`ferridriver bdd --ui`: a live test tree, streamed results, and the
+embedded Playwright trace viewer as the detail pane (traces are forced
+on, so every finished test gets one).
+
+```sh
+ferridriver test --ui -p my-e2e-package --headless
+```
+
+Because `#[ferritest]` tests live in separate harness binaries that must
+be recompiled when sources change, the app does not run tests
+in-process. Each cycle respawns cargo; harness binaries connect
+back to the CLI over a unix socket, announce their discovered tests, and
+stream reporter events while they run. On startup (and whenever a
+watched `.rs` file changes) a list-only cycle (`cargo test --tests --
+--list`) refreshes the sidebar without running anything. Runs happen on
+explicit commands from the app: the cycle builds only the harness
+binaries holding selected tests (`cargo test --test <bin>` per binary —
+unrelated workspace tests and doctests never run), and the selection
+travels as `FERRITEST_GREP` (patterns, single tests) or
+`FERRITEST_ID_FILE` (exact id lists for run-file / run-failed, which
+can exceed the env size limit). Stop kills the whole cycle (cargo,
+harnesses, and their browsers).
+
+Notes:
+
+- Cycles always use `cargo test`, never nextest — nextest enumerates
+  binaries via libtest's `--list` protocol, which ferritest harness
+  binaries do not speak (`--runner nextest` is rejected with `--ui`).
+- `--grep` and positional filters conflict with `--ui`; filter in-app.
+- Compile errors show in the terminal that launched `--ui`, not in the
+  app; the sidebar keeps its last good state until a cycle compiles.

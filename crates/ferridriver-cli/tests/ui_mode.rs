@@ -47,7 +47,12 @@ fn write_scratch_project(root: &std::path::Path) {
   .expect("write feature");
   std::fs::write(
     root.join("steps/steps.js"),
-    "Given(\"a blank ui page\", async (world) => { await world.page.goto(\"about:blank\"); });\n",
+    concat!(
+      "Given(\"a blank ui page\", async (world) => { await world.page.goto(\"about:blank\"); });\n",
+      // Used by the stop test's late-written feature: long enough that a
+      // Stop reliably lands while the step is executing.
+      "Given(\"a slow ui step\", async (world) => { await world.page.waitForTimeout(4000); });\n",
+    ),
   )
   .expect("write steps");
 }
@@ -97,8 +102,14 @@ async fn next_json(ws: &mut WsStream) -> serde_json::Value {
 
 /// Minimal HTTP/1.1 GET over a raw socket; returns (headers, body).
 async fn http_get(host: &str, path: &str) -> (String, Vec<u8>) {
+  http_get_with_origin(host, path, None).await
+}
+
+/// [`http_get`] with an optional `Origin` header, for CORS assertions.
+async fn http_get_with_origin(host: &str, path: &str, origin: Option<&str>) -> (String, Vec<u8>) {
   let mut stream = tokio::net::TcpStream::connect(host).await.expect("connect");
-  let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+  let origin_header = origin.map(|o| format!("Origin: {o}\r\n")).unwrap_or_default();
+  let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{origin_header}Connection: close\r\n\r\n");
   stream.write_all(request.as_bytes()).await.expect("send request");
   let mut response = Vec::new();
   stream.read_to_end(&mut response).await.expect("read response");
@@ -138,17 +149,28 @@ async fn read_snapshot_test_id(ws: &mut WsStream) -> String {
 }
 
 /// Fetch the trace artifact and validate CORS + the v8 first line.
+/// CORS is reflected per-origin, never a wildcard: trace.playwright.dev
+/// and loopback origins get a grant, external origins get nothing.
 async fn fetch_and_validate_trace(host: &str, url_path: &str) {
+  let (viewer_headers, _) = http_get_with_origin(host, url_path, Some("https://trace.playwright.dev")).await;
+  assert!(
+    viewer_headers
+      .to_ascii_lowercase()
+      .contains("access-control-allow-origin: https://trace.playwright.dev"),
+    "CORS grant for trace.playwright.dev: {viewer_headers}"
+  );
+  let (external_headers, _) = http_get_with_origin(host, url_path, Some("https://evil.example")).await;
+  assert!(
+    !external_headers
+      .to_ascii_lowercase()
+      .contains("access-control-allow-origin"),
+    "no CORS grant for external origins: {external_headers}"
+  );
+
   let (trace_headers, trace_body) = http_get(host, url_path).await;
   assert!(
     trace_headers.starts_with("HTTP/1.1 200"),
     "trace fetch status: {trace_headers}"
-  );
-  assert!(
-    trace_headers
-      .to_ascii_lowercase()
-      .contains("access-control-allow-origin: *"),
-    "CORS header for trace.playwright.dev: {trace_headers}"
   );
 
   let mut archive = zip::ZipArchive::new(std::io::Cursor::new(trace_body)).expect("trace zip");
@@ -360,6 +382,73 @@ async fn ui_mode_end_to_end() {
 
   fetch_and_validate_trace(&host, url_path).await;
   validate_viewer_and_security(&host).await;
+  stop_is_graceful(&mut ws, dir.path(), &test_id).await;
+}
+
+/// Stop cancels cooperatively: the in-flight test FINISHES (its
+/// `testFinished` arrives before `runCancelled`) instead of being
+/// dropped into a detached task that keeps driving the shared browser,
+/// and the server accepts and completes a fresh run afterwards.
+///
+/// The slow feature is written mid-session: the watcher refreshes the
+/// sidebar and auto-runs the changed file, giving a 4-second in-flight
+/// step to stop into.
+async fn stop_is_graceful(ws: &mut WsStream, project_root: &std::path::Path, smoke_test_id: &str) {
+  std::fs::write(
+    project_root.join("features/slow.feature"),
+    "Feature: UI slow\n  Scenario: slow page\n    Given a slow ui step\n",
+  )
+  .expect("write slow feature");
+
+  // Wait for the auto-run of the new file to actually start executing.
+  let slow_id = loop {
+    let msg = next_json(ws).await;
+    if msg["type"].as_str() == Some("testStarted") {
+      let id = msg["id"].as_str().expect("testStarted id").to_string();
+      if id.contains("slow.feature") {
+        break id;
+      }
+    }
+  };
+
+  ws.send(Message::Text(r#"{"cmd":"stop"}"#.into()))
+    .await
+    .expect("send stop");
+
+  let mut finished_before_cancel = false;
+  let mut cancelled = false;
+  loop {
+    let msg = next_json(ws).await;
+    match msg["type"].as_str() {
+      Some("testFinished") if msg["id"].as_str() == Some(slow_id.as_str()) => {
+        assert!(!cancelled, "the in-flight test must finish before runCancelled");
+        finished_before_cancel = true;
+      },
+      Some("runCancelled") => cancelled = true,
+      Some("watchStatus") if msg["status"].as_str() == Some("idle") && cancelled => break,
+      _ => {},
+    }
+  }
+  assert!(
+    finished_before_cancel,
+    "graceful stop lets the executing test complete instead of detaching it"
+  );
+
+  // The runner must be fully idle and reusable: a follow-up run of the
+  // fast scenario completes normally.
+  let run_test = serde_json::json!({ "cmd": "runTest", "id": smoke_test_id });
+  ws.send(Message::Text(run_test.to_string().into()))
+    .await
+    .expect("send runTest after stop");
+  loop {
+    let msg = next_json(ws).await;
+    if msg["type"].as_str() == Some("runFinished") {
+      let totals = &msg["totals"];
+      assert_eq!(totals["total"].as_u64(), Some(1), "post-stop totals: {totals}");
+      assert_eq!(totals["passed"].as_u64(), Some(1), "post-stop totals: {totals}");
+      break;
+    }
+  }
 }
 
 /// The embedded viewer is served offline by the same server, its service

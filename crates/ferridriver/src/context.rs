@@ -932,7 +932,17 @@ impl ContextRef {
     };
     for recorder in recorders {
       let slice = requests.get(recorder.start_len..).unwrap_or(&[]);
-      crate::tracing::flush_recorder(&recorder, slice).await?;
+      match recorder.page_filter.as_deref() {
+        Some(page_guid) => {
+          let filtered: Vec<crate::network::Request> = slice
+            .iter()
+            .filter(|r| r.page_guid() == Some(page_guid))
+            .cloned()
+            .collect();
+          crate::tracing::flush_recorder(&recorder, &filtered).await?;
+        },
+        None => crate::tracing::flush_recorder(&recorder, slice).await?,
+      }
     }
     Ok(())
   }
@@ -1298,37 +1308,49 @@ impl ContextRef {
     options: crate::har::RouteFromHarOptions,
   ) -> Result<()> {
     if options.update {
-      // Record instead of replay: register a recorder flushed when the
-      // context closes. Playwright defaults (`client/tracing.ts:131-135`):
-      // content `attach`, mode `minimal`.
-      let start_len = match self.network_log_handle().await {
-        Some(log) => log.read().await.len(),
-        None => 0,
-      };
-      let recorder = crate::tracing::HarRecorder {
-        path: path.to_path_buf(),
-        content: options
-          .update_content
-          .unwrap_or(crate::tracing::HarContentPolicy::Attach),
-        mode: options.update_mode.unwrap_or(crate::tracing::HarMode::Minimal),
-        url_filter: options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any),
-        resources_dir: None,
-        start_len,
-      };
-      let registry = self.state.read().await.context_har_updates.clone();
-      registry
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .entry(self.key.to_composite())
-        .or_default()
-        .push(recorder);
-      return Ok(());
+      return self.register_har_update_recorder(path, &options, None).await;
     }
     let handler = crate::har::route_handler_from_file(path, options.not_found)?;
     let matcher = options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any);
     self
       .install_context_route(crate::route::RegisteredRoute::context_scoped(matcher, handler, None))
       .await
+  }
+
+  /// Register a `routeFromHAR({ update: true })` recorder, flushed when
+  /// this context closes. Playwright defaults
+  /// (`client/tracing.ts:131-135`): content `attach`, mode `minimal`.
+  /// `page_filter` narrows the recording to one page's traffic (the
+  /// page-scoped `page.routeFromHAR` form).
+  pub(crate) async fn register_har_update_recorder(
+    &self,
+    path: &std::path::Path,
+    options: &crate::har::RouteFromHarOptions,
+    page_filter: Option<String>,
+  ) -> Result<()> {
+    let start_len = match self.network_log_handle().await {
+      Some(log) => log.read().await.len(),
+      None => 0,
+    };
+    let recorder = crate::tracing::HarRecorder {
+      path: path.to_path_buf(),
+      content: options
+        .update_content
+        .unwrap_or(crate::tracing::HarContentPolicy::Attach),
+      mode: options.update_mode.unwrap_or(crate::tracing::HarMode::Minimal),
+      url_filter: options.url.clone().unwrap_or_else(crate::url_matcher::UrlMatcher::any),
+      resources_dir: None,
+      start_len,
+      page_filter,
+    };
+    let registry = self.state.read().await.context_har_updates.clone();
+    registry
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .entry(self.key.to_composite())
+      .or_default()
+      .push(recorder);
+    Ok(())
   }
 
   /// Remove context-scoped route handlers matching the given matcher

@@ -449,6 +449,42 @@ pub fn test_route_disposable(c: &mut McpClient) {
   });
 }
 
+/// A `times: 1` route whose URL predicate rejects a request must keep
+/// its budget: Playwright evaluates predicates during matching, before
+/// `willExpire` consumes `times`. The rejected URL passes through, the
+/// first matching URL is fulfilled, and the next matching URL reaches
+/// the real server (budget spent exactly once, on the real match).
+pub fn test_route_predicate_preserves_times_budget(c: &mut McpClient) {
+  if c.backend == "webkit" {
+    return;
+  }
+  with_stub_server(|base| {
+    c.nav_url(&format!("{base}/landed"));
+    let script = r#"
+      await page.route(url => url.pathname === '/api/users', (route) => {
+        route.fulfill({ status: 200, contentType: 'application/json', body: '{"mocked":true}' });
+      }, { times: 1 });
+      const rejected = await page.evaluate("fetch('/api/posts').then(r => r.text())");
+      const mocked = await page.evaluate("fetch('/api/users').then(r => r.text())");
+      const after = await page.evaluate("fetch('/api/users').then(r => r.text())");
+      return { rejected, mocked, after };
+      "#;
+    let v = c.script_value(script);
+    assert!(
+      v["rejected"].as_str().is_some_and(|s| s.contains("first")),
+      "predicate-rejected URL must reach the real server: {v}",
+    );
+    assert!(
+      v["mocked"].as_str().is_some_and(|s| s.contains("\"mocked\":true")),
+      "the first matching URL must still be fulfilled — the rejection must not burn the times budget: {v}",
+    );
+    assert!(
+      v["after"].as_str().is_some_and(|s| s.contains("alice")),
+      "the second matching URL must fall through — budget spent exactly once: {v}",
+    );
+  });
+}
+
 /// Playwright parity: `page.routeFromHAR(har, { notFound })`. Replays a
 /// recorded response for a matching request; an unrecorded URL with
 /// `notFound: 'fallback'` reaches the real server. WebKit's evaluate runs in

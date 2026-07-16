@@ -12,9 +12,9 @@ use rmcp::{
   ErrorData, RoleServer, ServerHandler,
   handler::server::router::tool::ToolRouter,
   model::{
-    Annotated, CallToolResult, Content, GetPromptRequestParams, GetPromptResult, ListPromptsResult,
-    ListResourcesResult, PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, PromptMessageRole, RawResource,
-    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo,
+    CallToolResult, ContentBlock, GetPromptRequestParams, GetPromptResult, ListPromptsResult, ListResourcesResult,
+    PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, ReadResourceRequestParams, ReadResourceResult,
+    Resource, ResourceContents, Role, ServerCapabilities, ServerInfo,
   },
   service::RequestContext,
   tool_handler,
@@ -22,6 +22,7 @@ use rmcp::{
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
+use tracing::Instrument;
 
 // ── SharedState ──────────────────────────────────────────────────────────────
 
@@ -704,7 +705,7 @@ impl McpServer {
     tool_name: &str,
     args_obj: serde_json::Value,
   ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-    use rmcp::model::{CallToolResult, Content};
+    use rmcp::model::{CallToolResult, ContentBlock};
 
     if self.extensions.get_tool(tool_name).is_none() {
       return Err(Self::err(format!("unknown extension: {tool_name}")));
@@ -717,7 +718,7 @@ impl McpServer {
     // loudly rather than silently skipped.
     if let Some(compiled) = self.extensions.validator(tool_name) {
       match compiled {
-        Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg.clone())])),
+        Err(msg) => return Ok(CallToolResult::error(vec![ContentBlock::text(msg.clone())])),
         Ok(validator) => {
           // `session` is the reserved routing key (browser-session
           // selection), not part of the tool's declared contract —
@@ -733,7 +734,7 @@ impl McpServer {
             other => std::borrow::Cow::Borrowed(other),
           };
           if let Err(msg) = validate_tool_args(tool_name, validator, &validate_target) {
-            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+            return Ok(CallToolResult::error(vec![ContentBlock::text(msg)]));
           }
         },
       }
@@ -780,14 +781,14 @@ impl McpServer {
     tool_name: &str,
     result: &ferridriver_script::ScriptResult,
   ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-    use rmcp::model::{CallToolResult, Content};
+    use rmcp::model::{CallToolResult, ContentBlock};
 
     let json = serde_json::to_string_pretty(result).map_err(|e| Self::err(format!("serialize result: {e}")))?;
-    let mut contents = vec![Content::text(json)];
+    let mut contents = vec![ContentBlock::text(json)];
     let success = match &result.outcome {
       ferridriver_script::Outcome::Error { error } => {
         let summary = format!("[{:?}] {} ({}ms)", error.kind, error.message, result.duration_ms);
-        contents.insert(0, Content::text(summary));
+        contents.insert(0, ContentBlock::text(summary));
         return Ok(CallToolResult::error(contents));
       },
       ferridriver_script::Outcome::Ok { success } => success,
@@ -795,10 +796,10 @@ impl McpServer {
     let mut out = CallToolResult::success(contents);
     if let Some(compiled) = self.extensions.output_validator(tool_name) {
       match compiled {
-        Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg.clone())])),
+        Err(msg) => return Ok(CallToolResult::error(vec![ContentBlock::text(msg.clone())])),
         Ok(validator) => {
           if let Some(messages) = schema_violations(validator, &success.value) {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
               "`{tool_name}` returned a value that does not match its declared outputSchema \
                (the extension author's bug):\n- {messages}"
             ))]));
@@ -1054,6 +1055,92 @@ impl McpServer {
     ]))
   }
 
+  /// Serve an `artifact://<relpath>` resource: raw bytes of a file the
+  /// scripting layer wrote under `artifacts_root`. Binary payloads
+  /// (screenshots, PDFs, traces) ship as base64 blobs; UTF-8 text ships as
+  /// text. The sandbox rejects traversal / symlink escapes.
+  async fn read_artifact_resource(&self, rel: &str, uri: &str) -> Result<ReadResourceResult, ErrorData> {
+    let sandbox = self
+      .artifacts_sandbox
+      .as_ref()
+      .ok_or_else(|| Self::err("artifacts are disabled: artifacts_root could not be prepared at startup"))?;
+    let resolved = sandbox
+      .resolve_read(rel)
+      .map_err(|e| Self::err(format!("artifact path: {}", e.message)))?;
+    let bytes = tokio::fs::read(&resolved)
+      .await
+      .map_err(|e| Self::err(format!("read artifact {rel}: {e}")))?;
+    let mime = mime_for_path(rel);
+    let contents = match String::from_utf8(bytes) {
+      Ok(text) if mime.starts_with("text/") || mime == "application/json" => {
+        ResourceContents::text(text, uri.to_string()).with_mime_type(mime)
+      },
+      Ok(text) => {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+        ResourceContents::blob(b64, uri.to_string()).with_mime_type(mime)
+      },
+      Err(e) => {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(e.as_bytes());
+        ResourceContents::blob(b64, uri.to_string()).with_mime_type(mime)
+      },
+    };
+    Ok(ReadResourceResult::new(vec![contents]))
+  }
+
+  /// Write `bytes` to `rel` under `artifacts_root` and return an
+  /// `artifact://<rel>` resource link for it. `None` when artifacts are
+  /// disabled or the write fails — artifact persistence is best-effort and
+  /// never fails the caller's primary result.
+  pub(crate) async fn persist_artifact(&self, rel: &str, bytes: &[u8], mime: &str) -> Option<ContentBlock> {
+    let sandbox = self.artifacts_sandbox.as_ref()?;
+    let resolved = sandbox.resolve_write(rel).ok()?;
+    if let Some(parent) = resolved.parent() {
+      tokio::fs::create_dir_all(parent).await.ok()?;
+    }
+    tokio::fs::write(&resolved, bytes).await.ok()?;
+    let uri = format!("artifact://{rel}");
+    let link = Resource::new(uri, rel)
+      .with_mime_type(mime.to_string())
+      .with_size(bytes.len() as u64);
+    Some(ContentBlock::ResourceLink(link))
+  }
+
+  /// Enumerate files under `artifacts_root` (bounded) as `artifact://`
+  /// resources for `resources/list`. Skips directories; caps the count so a
+  /// runaway output dir can't blow up the listing.
+  async fn list_artifact_resources(&self, out: &mut Vec<Resource>) {
+    const MAX: usize = 200;
+    let Some(sandbox) = self.artifacts_sandbox.as_ref() else {
+      return;
+    };
+    let root = sandbox.root().to_path_buf();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+      let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+        continue;
+      };
+      while let Ok(Some(entry)) = entries.next_entry().await {
+        if out.len() >= MAX {
+          return;
+        }
+        let path = entry.path();
+        let Ok(ft) = entry.file_type().await else { continue };
+        if ft.is_dir() {
+          stack.push(path);
+          continue;
+        }
+        let Ok(rel) = path.strip_prefix(&root) else { continue };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        let size = entry.metadata().await.ok().map(|m| m.len());
+        let mut r = Resource::new(format!("artifact://{rel}"), rel.clone()).with_mime_type(mime_for_path(&rel));
+        if let Some(size) = size {
+          r = r.with_size(size);
+        }
+        out.push(r);
+      }
+    }
+  }
+
   pub async fn context_guard(&self, context: &str) -> tokio::sync::OwnedMutexGuard<()> {
     let lock = self
       .state
@@ -1210,7 +1297,30 @@ impl McpServer {
   /// (soft failures produce inline error text instead).
   pub async fn action_ok(&self, page: &Page, context: &str, msg: &str) -> Result<CallToolResult, ErrorData> {
     let snap = self.snap(page, context).await;
-    Ok(CallToolResult::success(vec![Content::text(format!("{msg}\n\n{snap}"))]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+      "{msg}\n\n{snap}"
+    ))]))
+  }
+
+  /// Emit an MCP progress notification for the in-flight tool call (SEP-2575).
+  ///
+  /// `token` is the caller's `_meta.progressToken`; a `None` (client did not
+  /// opt into progress) or a transport hiccup is silently ignored — progress
+  /// is strictly best-effort and never fails the tool. `progress`/`total`
+  /// use the same units the tool documents; `message` is a short human note.
+  pub(crate) async fn emit_progress(
+    peer: &rmcp::service::Peer<rmcp::RoleServer>,
+    token: Option<&rmcp::model::ProgressToken>,
+    progress: f64,
+    total: Option<f64>,
+    message: &str,
+  ) {
+    let Some(token) = token else { return };
+    let mut param = rmcp::model::ProgressNotificationParam::new(token.clone(), progress).with_message(message);
+    if let Some(total) = total {
+      param = param.with_total(total);
+    }
+    let _ = peer.notify_progress(param).await;
   }
 }
 
@@ -1253,6 +1363,69 @@ fn validate_tool_args(
   ))
 }
 
+/// Best-effort MIME type from a file extension, for `artifact://` resources.
+/// Covers the formats the scripting layer actually emits (screenshots, PDFs,
+/// traces, text); everything else falls back to `application/octet-stream`.
+fn mime_for_path(path: &str) -> String {
+  let ext = std::path::Path::new(path)
+    .extension()
+    .and_then(|e| e.to_str())
+    .unwrap_or("")
+    .to_ascii_lowercase();
+  match ext.as_str() {
+    "png" => "image/png",
+    "jpg" | "jpeg" => "image/jpeg",
+    "webp" => "image/webp",
+    "gif" => "image/gif",
+    "svg" => "image/svg+xml",
+    "pdf" => "application/pdf",
+    "json" | "trace" => "application/json",
+    "txt" | "log" => "text/plain",
+    "html" | "htm" => "text/html",
+    "csv" => "text/csv",
+    "zip" => "application/zip",
+    _ => "application/octet-stream",
+  }
+  .to_string()
+}
+
+/// Parse a W3C `traceparent` header (`version-traceId-parentId-flags`) into
+/// its `(traceId, parentSpanId)` hex pair. Returns `None` for anything that
+/// doesn't match the trace-context shape (32-hex trace id, 16-hex span id,
+/// neither all-zero), so a malformed value never pollutes the span.
+fn parse_traceparent(tp: &str) -> Option<(&str, &str)> {
+  let mut parts = tp.split('-');
+  let _version = parts.next()?;
+  let trace_id = parts.next()?;
+  let parent_id = parts.next()?;
+  let _flags = parts.next()?;
+  let all_hex = |s: &str| s.bytes().all(|b| b.is_ascii_hexdigit());
+  if trace_id.len() == 32
+    && parent_id.len() == 16
+    && all_hex(trace_id)
+    && all_hex(parent_id)
+    && trace_id.bytes().any(|b| b != b'0')
+    && parent_id.bytes().any(|b| b != b'0')
+  {
+    Some((trace_id, parent_id))
+  } else {
+    None
+  }
+}
+
+/// Build the dispatch span for a tool call, linked to the caller's trace when
+/// `_meta.traceparent` (SEP-414) carries a valid W3C trace context.
+fn tool_call_span(tool: &str, meta: Option<&rmcp::model::Meta>) -> tracing::Span {
+  if let Some((trace_id, parent_span_id)) = meta
+    .and_then(rmcp::model::Meta::get_traceparent)
+    .and_then(parse_traceparent)
+  {
+    tracing::info_span!("mcp.call_tool", tool, trace_id, parent_span_id)
+  } else {
+    tracing::info_span!("mcp.call_tool", tool)
+  }
+}
+
 #[tool_handler(router = self.tool_router)]
 // list_prompts / get_prompt are async by the ServerHandler trait contract;
 // they currently have no internal await but must keep the trait's signature.
@@ -1272,6 +1445,25 @@ impl ServerHandler for McpServer {
     .with_instructions(self.config.server_instructions().to_string())
   }
 
+  /// Manual `call_tool` (replaces the one `#[tool_handler]` would generate)
+  /// so every tool dispatch runs inside a tracing span seeded from the
+  /// caller's W3C `traceparent` (`_meta`, SEP-414). This threads the MCP
+  /// client's trace/span ids into the ferridriver → CDP spans, giving one
+  /// correlated trace across the whole automation. Dispatch itself is
+  /// identical to the generated version (`ToolCallContext` → router).
+  async fn call_tool(
+    &self,
+    request: rmcp::model::CallToolRequestParams,
+    context: RequestContext<RoleServer>,
+  ) -> Result<CallToolResult, ErrorData> {
+    // The serve loop moves the request's `_meta` into `context.meta` before
+    // dispatch (so the progress token isn't lost), leaving `request.meta`
+    // empty — read the trace context from the context, not the request.
+    let span = tool_call_span(request.name.as_ref(), Some(&context.meta));
+    let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+    self.tool_router.call(tcc).instrument(span).await
+  }
+
   async fn list_resources(
     &self,
     _request: Option<PaginatedRequestParams>,
@@ -1283,19 +1475,7 @@ impl ServerHandler for McpServer {
 
     let mut resources = Vec::new();
     let res = |uri: &str, name: &str, desc: &str, mime: &str| -> Resource {
-      Annotated::new(
-        RawResource {
-          uri: uri.into(),
-          name: name.into(),
-          title: None,
-          description: Some(desc.into()),
-          mime_type: Some(mime.into()),
-          size: None,
-          icons: None,
-          meta: None,
-        },
-        None,
-      )
+      Resource::new(uri, name).with_description(desc).with_mime_type(mime)
     };
 
     for c in &contexts {
@@ -1340,6 +1520,10 @@ impl ServerHandler for McpServer {
       ));
     }
 
+    // Files written under artifacts_root (screenshots, PDFs, traces) are
+    // fetchable as `artifact://<relpath>` resources.
+    self.list_artifact_resources(&mut resources).await;
+
     let result = ListResourcesResult {
       resources,
       ..Default::default()
@@ -1353,6 +1537,9 @@ impl ServerHandler for McpServer {
     _context: RequestContext<RoleServer>,
   ) -> Result<ReadResourceResult, ErrorData> {
     let uri = &request.uri;
+    if let Some(rel) = uri.strip_prefix("artifact://") {
+      return self.read_artifact_resource(rel, uri).await;
+    }
     let (context_name, resource) = if let Some(rest) = uri.strip_prefix("browser://session/") {
       let mut parts = rest.splitn(2, '/');
       (
@@ -1510,7 +1697,7 @@ impl ServerHandler for McpServer {
           format!("First navigate to {url}.\n")
         };
         Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-          PromptMessageRole::User,
+          Role::User,
           format!(
             "{nav}Debug the current page:\n1. Take a snapshot to understand the page structure\n2. Check console_messages for errors\n3. Check network_requests for failed requests (4xx/5xx)\n4. Report all issues found with suggested fixes"
           ),
@@ -1522,14 +1709,14 @@ impl ServerHandler for McpServer {
           if s.is_empty() { "the submit button".into() } else { s }
         };
         Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-          PromptMessageRole::User,
+          Role::User,
           format!(
             "Test the form on {url}:\n1. Navigate to the page\n2. Take a snapshot to identify form fields\n3. Fill all required fields with realistic test data\n4. Click {submit}\n5. Verify the form submitted successfully\n6. Report the result"
           ),
         )]))
       },
       "audit-accessibility" => Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-        PromptMessageRole::User,
+        Role::User,
         format!(
           "Audit the accessibility of {url}:\n1. Navigate to the page\n2. Take a snapshot (a11y tree)\n3. Check for: missing labels, incorrect heading hierarchy, images without alt text, interactive elements without accessible names, form inputs without labels\n4. Report issues with severity and how to fix each one"
         ),
@@ -1544,7 +1731,7 @@ impl ServerHandler for McpServer {
           if s.is_empty() { "userB".into() } else { s }
         };
         Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-          PromptMessageRole::User,
+          Role::User,
           format!(
             "Compare {url} between two sessions:\n1. Open the page in session='{sa}' and session='{sb}'\n2. Take a snapshot of each\n3. Compare: visible content differences, available navigation, form fields, cookies\n4. Report what differs between the two sessions"
           ),
@@ -1729,5 +1916,138 @@ mod tests {
     let a = m.annotations.expect("annotations");
     assert_eq!(a.read_only_hint, Some(true));
     assert_eq!(a.open_world_hint, Some(false));
+  }
+
+  #[test]
+  fn traceparent_parses_valid_and_rejects_malformed() {
+    let (trace, parent) =
+      super::parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01").expect("valid");
+    assert_eq!(trace, "4bf92f3577b34da6a3ce929d0e0e4736");
+    assert_eq!(parent, "00f067aa0ba902b7");
+    // all-zero trace id is invalid per the trace-context spec
+    assert!(super::parse_traceparent("00-00000000000000000000000000000000-00f067aa0ba902b7-01").is_none());
+    // all-zero parent id is invalid
+    assert!(super::parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01").is_none());
+    assert!(super::parse_traceparent("garbage").is_none());
+    assert!(super::parse_traceparent("00-tooShort-00f067aa0ba902b7-01").is_none());
+    // non-hex characters in the trace id
+    assert!(super::parse_traceparent("00-ZZf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01").is_none());
+  }
+
+  #[test]
+  fn mime_for_path_maps_known_and_falls_back() {
+    assert_eq!(super::mime_for_path("screenshots/a.png"), "image/png");
+    assert_eq!(super::mime_for_path("x.PDF"), "application/pdf");
+    assert_eq!(super::mime_for_path("run.trace"), "application/json");
+    assert_eq!(super::mime_for_path("notes.txt"), "text/plain");
+    assert_eq!(super::mime_for_path("blob.bin"), "application/octet-stream");
+    assert_eq!(super::mime_for_path("noext"), "application/octet-stream");
+  }
+
+  #[test]
+  fn builtin_tools_carry_titles_and_annotations() {
+    let tools = super::McpServer::tool_router().list_all();
+    let by = |n: &str| {
+      tools
+        .iter()
+        .find(|t| t.name == n)
+        .unwrap_or_else(|| panic!("tool {n} not found"))
+    };
+    let ro = |t: &rmcp::model::Tool| t.annotations.as_ref().and_then(|a| a.read_only_hint);
+    let ow = |t: &rmcp::model::Tool| t.annotations.as_ref().and_then(|a| a.open_world_hint);
+    let de = |t: &rmcp::model::Tool| t.annotations.as_ref().and_then(|a| a.destructive_hint);
+
+    let snap = by("snapshot");
+    assert_eq!(snap.title.as_deref(), Some("Accessibility Snapshot"));
+    assert_eq!(ro(snap), Some(true));
+    assert_eq!(ow(snap), Some(false));
+
+    let nav = by("navigate");
+    assert_eq!(nav.title.as_deref(), Some("Navigate"));
+    assert_eq!(ro(nav), Some(false));
+    assert_eq!(ow(nav), Some(true));
+
+    let page = by("page");
+    assert_eq!(de(page), Some(true));
+
+    let script = by("run_script");
+    assert_eq!(script.title.as_deref(), Some("Run Browser Script"));
+    assert_eq!(ro(script), Some(false));
+
+    // Every built-in tool should carry a human title.
+    for t in &tools {
+      assert!(t.title.is_some(), "tool {} is missing a title", t.name);
+    }
+  }
+
+  struct TmpArtifactsConfig(std::path::PathBuf);
+  impl super::McpServerConfig for TmpArtifactsConfig {
+    fn script_root(&self) -> std::path::PathBuf {
+      self.0.join("scripts")
+    }
+    fn artifacts_root(&self) -> std::path::PathBuf {
+      self.0.join("artifacts")
+    }
+  }
+
+  #[tokio::test]
+  async fn artifact_persist_and_read_roundtrip() {
+    use base64::Engine as _;
+    let base = std::env::temp_dir().join(format!("ferri-artifact-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let server = super::McpServer::with_config(
+      ferridriver::state::ConnectMode::Launch,
+      ferridriver::backend::BackendKind::CdpPipe,
+      std::sync::Arc::new(TmpArtifactsConfig(base.clone())),
+    );
+
+    let png = b"\x89PNG\r\n\x1a\nfake";
+    let link = server
+      .persist_artifact("screenshots/x.png", png, "image/png")
+      .await
+      .expect("artifact persisted → resource link");
+    match link {
+      rmcp::model::ContentBlock::ResourceLink(res) => {
+        assert_eq!(res.uri, "artifact://screenshots/x.png");
+        assert_eq!(res.mime_type.as_deref(), Some("image/png"));
+        assert_eq!(res.size, Some(png.len() as u64));
+      },
+      other => panic!("expected ResourceLink, got {other:?}"),
+    }
+
+    // The persisted bytes come back through the artifact:// resource reader as a base64 blob.
+    let read = server
+      .read_artifact_resource("screenshots/x.png", "artifact://screenshots/x.png")
+      .await
+      .expect("artifact readable");
+    let blob = match read.contents.first().expect("one content") {
+      rmcp::model::ResourceContents::BlobResourceContents { blob, mime_type, .. } => {
+        assert_eq!(mime_type.as_deref(), Some("image/png"));
+        blob.clone()
+      },
+      other => panic!("expected blob contents, got {other:?}"),
+    };
+    let decoded = base64::engine::general_purpose::STANDARD
+      .decode(blob)
+      .expect("valid base64");
+    assert_eq!(decoded, png);
+
+    // A traversal attempt is rejected by the sandbox, not served.
+    assert!(
+      server
+        .read_artifact_resource("../secret", "artifact://../secret")
+        .await
+        .is_err()
+    );
+
+    // list_resources surfaces the persisted artifact as an artifact:// resource.
+    let mut listed = Vec::new();
+    server.list_artifact_resources(&mut listed).await;
+    assert!(
+      listed.iter().any(|r| r.uri == "artifact://screenshots/x.png"),
+      "artifact should appear in resource listing: {listed:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
   }
 }

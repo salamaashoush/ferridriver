@@ -616,20 +616,53 @@ pub fn parse_input_files<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Re
     let mut payloads = Vec::with_capacity(len);
     for idx in 0..len {
       let el: Value<'js> = arr.get(idx)?;
-      let p: ferridriver::options::FilePayload = serde_from_js(ctx, el)?;
-      payloads.push(p);
+      payloads.push(parse_file_payload(ctx, el)?);
     }
     return Ok(ferridriver::options::InputFiles::Payloads(payloads));
   }
   if value.is_object() {
-    let p: ferridriver::options::FilePayload = serde_from_js(ctx, value)?;
-    return Ok(ferridriver::options::InputFiles::Payloads(vec![p]));
+    return Ok(ferridriver::options::InputFiles::Payloads(vec![parse_file_payload(
+      ctx, value,
+    )?]));
   }
   Err(rquickjs::Error::new_from_js_message(
     "ferridriver",
     "setInputFiles",
     "files must be string | string[] | FilePayload | FilePayload[]",
   ))
+}
+
+/// Parse one `FilePayload`. Playwright's `buffer` is a Node `Buffer`;
+/// the QuickJS equivalents are `Uint8Array` / `ArrayBuffer`, which have
+/// no serde sequence representation — extract their bytes directly and
+/// fall back to serde for plain number arrays.
+fn parse_file_payload<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<ferridriver::options::FilePayload> {
+  if let Some(obj) = value.as_object() {
+    let buffer: Value<'js> = obj.get("buffer")?;
+    if let Some(bytes) = binary_buffer_bytes(&buffer) {
+      return Ok(ferridriver::options::FilePayload {
+        name: obj.get("name")?,
+        mime_type: obj.get("mimeType")?,
+        buffer: bytes,
+      });
+    }
+  }
+  serde_from_js(ctx, value)
+}
+
+fn binary_buffer_bytes(v: &Value<'_>) -> Option<Vec<u8>> {
+  if let Ok(ta) = rquickjs::TypedArray::<u8>::from_value(v.clone())
+    && let Some(b) = ta.as_bytes()
+  {
+    return Some(b.to_vec());
+  }
+  if let Some(obj) = v.as_object()
+    && let Some(buf) = rquickjs::ArrayBuffer::from_object(obj.clone())
+    && let Some(b) = buf.as_bytes()
+  {
+    return Some(b.to_vec());
+  }
+  None
 }
 
 /// Parse Playwright's `SetInputFilesOptions` JS bag into the core struct.

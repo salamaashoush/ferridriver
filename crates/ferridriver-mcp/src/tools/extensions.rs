@@ -8,7 +8,7 @@
 use rmcp::{
   ErrorData,
   handler::server::wrapper::Parameters,
-  model::{CallToolResult, Content},
+  model::{CallToolResult, ContentBlock},
   tool, tool_router,
 };
 use serde::Deserialize;
@@ -26,13 +26,15 @@ pub struct ExtensionsParams {
 impl McpServer {
   #[tool(
     name = "ferridriver_extensions",
+    title = "List Extensions",
     description = "List the extensions loaded at server startup: for each source file, \
     the tools it declares with their description, whether they are exposed as first-class MCP \
     tools, the per-tool timeout, and the declared capability allow-lists (exec command names, \
     net host patterns) — plus every file/spec that FAILED to load with its error, and every \
     operator-policy conflict warning (a declared capability outside the [extensions.policy] \
     ceiling). Use to discover available tools, audit what authority each one was granted, and \
-    debug an extension that did not come up."
+    debug an extension that did not come up.",
+    annotations(read_only_hint = true, open_world_hint = false)
   )]
   async fn ferridriver_extensions(
     &self,
@@ -104,7 +106,7 @@ impl McpServer {
     });
     let json =
       serde_json::to_string_pretty(&payload).map_err(|e| McpServer::err(format!("serialize extensions: {e}")))?;
-    Ok(CallToolResult::success(vec![Content::text(json)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
   }
 }
 

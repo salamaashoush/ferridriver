@@ -1440,7 +1440,7 @@ impl PageJs {
             )
             .await?;
             if !truthy {
-              route.fallback(ferridriver::route::ContinueOverrides::default());
+              route.reject_as_unmatched();
               return Ok(());
             }
           }
@@ -1736,42 +1736,30 @@ impl PageJs {
   }
 
   /// Playwright: `page.waitForFunction(pageFunction: Function|string,
-  /// arg?, options?: { timeout?, polling? })`. Function values get
-  /// `String(fn)` (Playwright parity) and are evaluated as IIFEs
-  /// inside the page. Returns the truthy value the function resolved
-  /// to.
+  /// arg?, options?: { polling?: number|'raf', timeout? }): Promise<JSHandle>`.
+  /// Function values get `String(fn)` (Playwright parity); strings are
+  /// polled as expressions. The truthy result comes back as a JSHandle,
+  /// like Playwright's SmartHandle.
   #[qjs(rename = "waitForFunction")]
   pub async fn wait_for_function<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
     page_function: rquickjs::Value<'js>,
-    _arg: Opt<rquickjs::Value<'js>>,
+    arg: Opt<rquickjs::Value<'js>>,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    #[derive(serde::Deserialize, Default)]
-    #[serde(rename_all = "camelCase", default)]
-    struct JsOpts {
-      timeout: Option<u64>,
-    }
-    let opts: JsOpts = match options.0 {
-      Some(v) if !v.is_undefined() && !v.is_null() => crate::bindings::convert::serde_from_js(&ctx, v)?,
-      _ => JsOpts::default(),
+  ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
+    let opts: Option<ferridriver::options::WaitForFunctionOptions> = match options.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => Some(crate::bindings::convert::serde_from_js(&ctx, v)?),
+      _ => None,
     };
-    let (src, is_fn) = crate::bindings::convert::extract_page_function(&ctx, page_function)?;
-    // For a function: invoke it as `(<src>)()` so the body's return is
-    // the polled value. For a string: use as-is (the user passes an
-    // expression string, like Playwright).
-    let expr = if is_fn.unwrap_or(false) {
-      format!("({src})()")
-    } else {
-      src
-    };
-    let v = self
+    let (src, is_fn) = extract_page_function(&ctx, page_function)?;
+    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let handle = self
       .inner
-      .wait_for_function(&expr, opts.timeout)
+      .wait_for_function(&src, serialized, is_fn, opts)
       .await
       .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
-    crate::bindings::convert::json_to_js(&ctx, &v)
+    Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
   }
 
   /// `page.waitForEvent(event, optionsOrPredicate?)`. The second

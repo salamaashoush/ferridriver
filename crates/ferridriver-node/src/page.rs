@@ -4,7 +4,7 @@ use crate::error::IntoNapi;
 use crate::locator::Locator;
 use crate::types::{
   DragAndDropOptions, GotoOptions, MetricData, RoleOptions, ScreenshotOptions, SnapshotForAiOptions, TextOptions,
-  WaitOptions,
+  WaitForFunctionOptions, WaitOptions,
 };
 use std::sync::{Arc, Mutex};
 
@@ -1251,13 +1251,27 @@ impl Page {
       .map_err(crate::error::to_napi)
   }
 
-  #[napi]
-  pub async fn wait_for_function(&self, expression: String, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
-    self
+  /// Playwright: `page.waitForFunction(pageFunction, arg?, options?): Promise<JSHandle>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:565`).
+  #[napi(
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { polling?: number | 'raf', timeout?: number }"
+  )]
+  pub async fn wait_for_function(
+    &self,
+    page_function: crate::types::NapiPageFunction,
+    arg: Option<crate::types::NapiEvaluateArg>,
+    options: Option<WaitForFunctionOptions>,
+  ) -> Result<crate::js_handle::JSHandle> {
+    let serialized = build_serialized_argument(arg);
+    let opts = options
+      .map(ferridriver::options::WaitForFunctionOptions::try_from)
+      .transpose()?;
+    let handle = self
       .inner
-      .wait_for_function(&expression, timeout_ms.map(crate::types::f64_to_u64))
+      .wait_for_function(&page_function.source, serialized, page_function.is_function, opts)
       .await
-      .map_err(crate::error::to_napi)
+      .map_err(crate::error::to_napi)?;
+    Ok(crate::js_handle::JSHandle::wrap(handle))
   }
 
   #[napi]
@@ -2143,7 +2157,7 @@ impl Page {
               if truthy {
                 handler.call(crate::route::Route::wrap(route), nb);
               } else {
-                route.fallback(ferridriver::route::ContinueOverrides::default());
+                route.reject_as_unmatched();
               }
             });
           }),

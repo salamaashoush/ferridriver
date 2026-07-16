@@ -160,6 +160,18 @@ fn register_script_handles(set: &mut TestSet<'_>) {
   );
   run!(
     set,
+    backends_support::script_handles_local::test_script_page_wait_for_function_arg_polling
+  );
+  run!(
+    set,
+    backends_support::script_handles_local::test_script_drag_default_steps
+  );
+  run!(
+    set,
+    backends_support::script_handles_local::test_script_drag_native_html5
+  );
+  run!(
+    set,
     backends_support::script_handles_local::test_script_locator_drop_payload
   );
   run!(
@@ -267,6 +279,10 @@ fn register_events_network(set: &mut TestSet<'_>) {
   run!(set, backends_support::network::test_network_redirect_chain);
   run!(set, backends_support::network::test_network_request_failure);
   run!(set, backends_support::network::test_route_disposable);
+  run!(
+    set,
+    backends_support::network::test_route_predicate_preserves_times_budget
+  );
   run!(
     set,
     backends_support::network::test_route_two_pages_keep_their_own_handlers
@@ -541,6 +557,10 @@ fn register_session_bind(set: &mut TestSet<'_>) {
   backends_support::session_bind::register(set);
 }
 
+fn register_mcp_features(set: &mut TestSet<'_>) {
+  backends_support::mcp_features::register(set);
+}
+
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
 // 17 categories × 4 backends = 68 `#[test]`s grouped into one module
@@ -659,4 +679,12 @@ fn run_bdd_tool() {
 #[test]
 fn extension_tools() {
   backends_support::extension_tools::run();
+}
+
+// rmcp-2.x server features (tool annotations/titles, artifact:// resource
+// links, progress notifications) are protocol-level, not backend-specific,
+// so they run once on cdp-pipe.
+#[test]
+fn mcp_features() {
+  run_category("cdp-pipe", register_mcp_features);
 }

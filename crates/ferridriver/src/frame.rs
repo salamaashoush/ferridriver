@@ -170,6 +170,90 @@ impl Frame {
     }
   }
 
+  /// Playwright: `frame.waitForFunction(pageFunction, arg?, options?): Promise<JSHandle>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:481`).
+  ///
+  /// Polls `pageFunction` (with `arg`) in this frame until it returns a
+  /// truthy value, then returns that value as a
+  /// [`crate::js_handle::JSHandle`]. `options.polling` is `'raf'`
+  /// (default) — one poll per animation frame — or a number of
+  /// milliseconds between polls. Probe errors from a navigating frame
+  /// (context destroyed) re-poll against the new document, mirroring
+  /// Playwright's rerunnable-task re-install; other page-side
+  /// exceptions propagate immediately.
+  ///
+  /// # Errors
+  ///
+  /// [`crate::error::FerriError::timeout`] when the function never
+  /// turns truthy before the deadline; page-side exceptions from the
+  /// function itself are forwarded.
+  pub async fn wait_for_function(
+    &self,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+    options: Option<crate::options::WaitForFunctionOptions>,
+  ) -> Result<crate::js_handle::JSHandle> {
+    let opts = options.unwrap_or_default();
+    let polling = opts.polling.unwrap_or(crate::options::Polling::Raf);
+    let timeout = opts.timeout.unwrap_or_else(|| self.page.default_timeout());
+    let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
+    // Truthiness is decided page-side (`!!`) so objects, NaN, and
+    // empty-string edge cases follow JS semantics exactly instead of a
+    // lossy serialized-value reconstruction.
+    let probe_is_function = is_function.unwrap_or(false);
+    let probe = if probe_is_function {
+      format!("arg => !!(({fn_source})(arg))")
+    } else {
+      format!("!!({fn_source})")
+    };
+    loop {
+      if let Some(d) = deadline
+        && tokio::time::Instant::now() >= d
+      {
+        return Err(crate::error::FerriError::timeout(
+          format!("waiting for function: {fn_source}"),
+          timeout,
+        ));
+      }
+      match self.evaluate(&probe, arg.clone(), Some(probe_is_function)).await {
+        Ok(value) => {
+          if crate::protocol::result_to_serde::<bool>(&value).unwrap_or(false) {
+            break;
+          }
+        },
+        Err(e) => {
+          if !crate::locator::is_retryable_action_error(&e.to_string()) {
+            return Err(e);
+          }
+        },
+      }
+      match polling {
+        crate::options::Polling::Interval(ms) => {
+          tokio::time::sleep(std::time::Duration::from_millis(ms.max(1))).await;
+        },
+        crate::options::Polling::Raf => {
+          // One animation frame between polls; a failing round-trip
+          // (frame mid-navigation) degrades to a frame-length sleep.
+          if self
+            .evaluate(
+              "() => new Promise(f => requestAnimationFrame(() => f(1)))",
+              crate::protocol::SerializedArgument::default(),
+              Some(true),
+            )
+            .await
+            .is_err()
+          {
+            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+          }
+        },
+      }
+    }
+    // Materialize the truthy result as a handle. The function runs once
+    // more; waitForFunction predicates are truthy-stable by contract.
+    self.evaluate_handle(fn_source, arg, is_function).await
+  }
+
   /// Playwright: `frame.$eval(selector, pageFunction, arg?): Promise<R>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:242`).
   /// Resolves the first element matching `selector` through the selector

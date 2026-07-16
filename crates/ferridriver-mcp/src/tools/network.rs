@@ -3,7 +3,7 @@ use crate::server::{McpServer, sess};
 use rmcp::{
   ErrorData,
   handler::server::wrapper::Parameters,
-  model::{CallToolResult, Content},
+  model::{CallToolResult, ContentBlock},
   tool, tool_router,
 };
 use std::fmt::Write;
@@ -12,7 +12,9 @@ use std::fmt::Write;
 impl McpServer {
   #[tool(
     name = "diagnostics",
-    description = "Page diagnostics. Types: console (log/warn/error messages), network (HTTP requests since load), trace_start (begin perf tracing), trace_stop (end tracing + metrics)."
+    title = "Page Diagnostics",
+    description = "Page diagnostics. Types: console (log/warn/error messages), network (HTTP requests since load), trace_start (begin perf tracing), trace_stop (end tracing + metrics).",
+    annotations(read_only_hint = true, open_world_hint = false)
   )]
   async fn diagnostics(&self, Parameters(p): Parameters<DiagnosticsParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_opt());
@@ -43,7 +45,7 @@ impl McpServer {
           .rev()
           .collect();
         drop(log);
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
           serde_json::to_string_pretty(&msgs).unwrap_or_default(),
         )]))
       },
@@ -70,7 +72,7 @@ impl McpServer {
         for req in &reqs {
           snapshots.push(req.to_diagnostic_json().await);
         }
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
           serde_json::to_string_pretty(&snapshots).unwrap_or_default(),
         )]))
       },
@@ -78,7 +80,7 @@ impl McpServer {
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
         page.start_tracing().await.map_err(Self::err)?;
-        Ok(CallToolResult::success(vec![Content::text("Trace started.")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text("Trace started.")]))
       },
       "trace_stop" => {
         let _guard = self.session_guard(s).await;
@@ -91,7 +93,7 @@ impl McpServer {
             let _ = writeln!(out, "- {}: {:.2}", m.name, m.value);
           }
         }
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
       },
       other => Err(Self::err(format!(
         "Unknown type '{other}'. Use: console, network, trace_start, trace_stop."

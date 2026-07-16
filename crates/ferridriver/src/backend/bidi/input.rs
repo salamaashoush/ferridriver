@@ -328,7 +328,7 @@ pub fn mouse_up(context: &str, x: f64, y: f64, button: u32) -> serde_json::Value
 ///
 /// Emits `steps` interpolated `pointerMove` events between the press and
 /// release, matching Playwright's `FrameDragAndDropOptions.steps` semantics
-/// (default `1` = single move at the destination).
+/// (`steps == 1` = single move at the destination).
 #[must_use]
 pub fn click_and_drag(context: &str, from: (f64, f64), to: (f64, f64), steps: u32) -> serde_json::Value {
   let steps = steps.max(1);

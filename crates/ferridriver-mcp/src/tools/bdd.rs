@@ -23,7 +23,7 @@ use std::time::Duration;
 use rmcp::{
   ErrorData,
   handler::server::wrapper::Parameters,
-  model::{CallToolResult, Content},
+  model::{CallToolResult, ContentBlock},
   tool, tool_router,
 };
 use serde::{Deserialize, Serialize};
@@ -211,6 +211,8 @@ impl From<JsScenarioResult> for ScenarioJson {
 impl McpServer {
   #[tool(
     name = "run_bdd",
+    title = "Run BDD Tests",
+    annotations(read_only_hint = false, open_world_hint = true),
     description = "Run BDD/Gherkin features on the CURRENT live browser session (the same session as \
     run_script / snapshot / click) -- not in an isolated test-runner browser. The scenario executes against \
     the session's existing page, cookies and navigation state, so you can navigate/log in first and then run \
@@ -226,7 +228,13 @@ impl McpServer {
     Returns { status, total, passed, failed, skipped, duration_ms, scenarios[] } with per-step results; a \
     short human summary is prepended."
   )]
-  async fn run_bdd(&self, Parameters(p): Parameters<RunBddParams>) -> Result<CallToolResult, ErrorData> {
+  async fn run_bdd(
+    &self,
+    Parameters(p): Parameters<RunBddParams>,
+    meta: rmcp::model::Meta,
+    peer: rmcp::service::Peer<rmcp::RoleServer>,
+  ) -> Result<CallToolResult, ErrorData> {
+    let progress = meta.get_progress_token();
     let session = sess(p.session.as_ref()).to_string();
     // Serialize with run_script / navigation on the same session so the
     // scenario doesn't interleave with another mutation of the live page.
@@ -251,7 +259,7 @@ impl McpServer {
       let files = FeatureSet::discover(&globs, &self.test_config.test_ignore)
         .map_err(|e| McpServer::err(format!("feature discovery: {e}")))?;
       if files.is_empty() {
-        return Ok(CallToolResult::success(vec![Content::text(format!(
+        return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
           "run_bdd: no .feature files matched {globs:?}"
         ))]));
       }
@@ -270,7 +278,7 @@ impl McpServer {
       scenarios.retain(|s| parsed.matches(&s.tags));
     }
     if scenarios.is_empty() {
-      return Ok(CallToolResult::success(vec![Content::text(
+      return Ok(CallToolResult::success(vec![ContentBlock::text(
         "run_bdd: no scenarios matched the given filters",
       )]));
     }
@@ -347,6 +355,15 @@ impl McpServer {
     let use_js = !js_globs.is_empty() || !extensions.is_empty();
 
     let mut out: Vec<ScenarioJson> = Vec::with_capacity(scenarios.len());
+    let total_scenarios = as_progress(scenarios.len());
+    McpServer::emit_progress(
+      &peer,
+      progress.as_ref(),
+      0.0,
+      Some(total_scenarios),
+      &format!("running {} scenario(s)", scenarios.len()),
+    )
+    .await;
 
     if use_js {
       // Thread scripting caps + declared sidecars into the BDD step VM
@@ -371,6 +388,14 @@ impl McpServer {
         let r = Box::pin(session.run_scenario(sc, &mut world)).await;
         let failed = !r.passed;
         out.push(r.into());
+        McpServer::emit_progress(
+          &peer,
+          progress.as_ref(),
+          as_progress(out.len()),
+          Some(total_scenarios),
+          &sc.name,
+        )
+        .await;
         if fail_fast && failed {
           break;
         }
@@ -390,6 +415,14 @@ impl McpServer {
         let r = executor.run_scenario(&mut world, sc).await;
         let failed = matches!(r.status, ScenarioStatus::Failed | ScenarioStatus::Undefined);
         out.push(r.into());
+        McpServer::emit_progress(
+          &peer,
+          progress.as_ref(),
+          as_progress(out.len()),
+          Some(total_scenarios),
+          &sc.name,
+        )
+        .await;
         if fail_fast && failed {
           break;
         }
@@ -419,10 +452,17 @@ impl McpServer {
   }
 }
 
+/// Widen a scenario count to the `f64` the MCP progress field wants. Counts
+/// are always small; the saturating conversion just keeps the precision-loss
+/// lint honest.
+fn as_progress(n: usize) -> f64 {
+  f64::from(u32::try_from(n).unwrap_or(u32::MAX))
+}
+
 /// Build the tool result: human summary block + machine-readable JSON block.
 fn finish(summary: String, result: &BddRunResult) -> CallToolResult {
   let json = serde_json::to_string_pretty(result).unwrap_or_else(|e| format!("{{\"error\":\"serialize: {e}\"}}"));
-  CallToolResult::success(vec![Content::text(summary), Content::text(json)])
+  CallToolResult::success(vec![ContentBlock::text(summary), ContentBlock::text(json)])
 }
 
 fn bdd_summary(r: &BddRunResult) -> String {

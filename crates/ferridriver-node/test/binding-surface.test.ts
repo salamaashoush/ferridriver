@@ -241,6 +241,25 @@ for (const backend of BACKENDS) {
       expect((await page.locator("#t").textContent())?.trim()).toBe("ready");
     });
 
+    it("page.waitForFunction takes a function + arg + polling and returns a JSHandle", async () => {
+      await page.setContent("<div></div>");
+      await page.evaluate("setTimeout(() => { window.counter = 9; }, 60)");
+      const handle = await page.waitForFunction(
+        (min: number) => ((window as any).counter || 0) >= min && (window as any).counter,
+        5,
+        { polling: 25, timeout: 5000 },
+      );
+      expect(await handle.jsonValue()).toBe(9);
+      await handle.dispose();
+    });
+
+    it("page.waitForFunction rejects unknown polling keyword", async () => {
+      await page.setContent("<div></div>");
+      await expect(
+        page.waitForFunction("true", undefined, { polling: "interval" as any }),
+      ).rejects.toThrow(/Unknown polling option/);
+    });
+
     // ── Context additions ────────────────────────────────────────────
 
     it("context.exposeBinding applies to a page opened after registration", async () => {

@@ -322,7 +322,7 @@ impl BrowserContext {
               if truthy {
                 handler.call(crate::route::Route::wrap(route), nb);
               } else {
-                route.fallback(ferridriver::route::ContinueOverrides::default());
+                route.reject_as_unmatched();
               }
             });
           }),

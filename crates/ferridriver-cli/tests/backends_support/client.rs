@@ -228,6 +228,46 @@ impl McpClient {
     self.send_request("tools/call", json!({"name":name,"arguments":args}))
   }
 
+  /// List the server's advertised tools (`tools/list`).
+  pub fn list_tools(&mut self) -> Value {
+    self.send_request("tools/list", json!({}))
+  }
+
+  /// List the server's resources (`resources/list`).
+  pub fn list_resources(&mut self) -> Value {
+    self.send_request("resources/list", json!({}))
+  }
+
+  /// Read a resource by URI (`resources/read`).
+  pub fn read_resource(&mut self, uri: &str) -> Value {
+    self.send_request("resources/read", json!({"uri": uri}))
+  }
+
+  /// Call a tool while subscribing to progress: injects a `_meta.progressToken`
+  /// and collects every `notifications/progress` the server emits before the
+  /// tool response lands. Returns `(response, progress_notifications)`.
+  pub fn call_tool_with_progress(&mut self, name: &str, args: Value) -> (Value, Vec<Value>) {
+    let id = GLOBAL_ID.fetch_add(1, Ordering::SeqCst);
+    let token = format!("tok-{id}");
+    let params = json!({"name": name, "arguments": args, "_meta": {"progressToken": token}});
+    self.send_raw(&json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":params}));
+    let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
+    let mut progress = Vec::new();
+    loop {
+      let ctx = format!("id={id} tool={name} (with progress)");
+      let msg = self.read_response_with_deadline(&ctx, deadline);
+      if msg.get("method").and_then(|m| m.as_str()) == Some("notifications/progress") {
+        if msg["params"]["progressToken"].as_str() == Some(token.as_str()) {
+          progress.push(msg);
+        }
+        continue;
+      }
+      if msg.get("id").and_then(|v| v.as_u64()) == Some(id) {
+        return (msg, progress);
+      }
+    }
+  }
+
   pub fn tool_text(&mut self, name: &str, args: Value) -> String {
     extract_text(&self.call_tool(name, args))
   }

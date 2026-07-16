@@ -824,7 +824,13 @@ impl WebKitPage {
     .await;
     match result {
       Ok(inner) => inner,
-      Err(_) => Ok(()),
+      // A navigation whose lifecycle never fires is a TimeoutError, not
+      // a silent success — Playwright rejects the goto/reload promise
+      // when the waitUntil signal misses the deadline.
+      Err(_) => Err(FerriError::timeout(
+        format!("waiting for navigation lifecycle {lifecycle:?}"),
+        timeout_ms,
+      )),
     }
   }
 
@@ -855,7 +861,7 @@ impl WebKitPage {
       .send("Page.reload", json!({}))
       .await
       .map_err(conn_err)?;
-    let _ = self.wait_for_lifecycle(lifecycle, timeout_ms).await;
+    self.wait_for_lifecycle(lifecycle, timeout_ms).await?;
     Ok(self.await_nav_response().await)
   }
 
@@ -872,8 +878,16 @@ impl WebKitPage {
     self.reset_realm();
     self.nav_request_slot.clear();
     self.lifecycle.reset();
-    self.target_session().send(method, json!({})).await.map_err(conn_err)?;
-    let _ = self.wait_for_lifecycle(lifecycle, timeout_ms).await;
+    if let Err(e) = self.target_session().send(method, json!({})).await {
+      // No history entry in that direction: Playwright maps the
+      // protocol's "Failed to go" to a null response without waiting
+      // (`wkPage.ts::goBack`/`goForward`).
+      if e.to_string().contains("Failed to go") {
+        return Ok(None);
+      }
+      return Err(conn_err(e));
+    }
+    self.wait_for_lifecycle(lifecycle, timeout_ms).await?;
     Ok(self.await_nav_response().await)
   }
 
@@ -1807,20 +1821,21 @@ impl WebKitPage {
 
   // ── File upload / interception ────────────────────────────────────────
 
-  pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<()> {
-    let elem = self.find_element(selector).await?;
-    let AnyElement::WebKit(e) = elem else {
-      return Err(FerriError::backend("set_file_input: non-webkit element"));
-    };
-    self
-      .target_session()
-      .send(
-        "DOM.setInputFiles",
-        json!({ "objectId": e.object_id(), "paths": paths }),
-      )
-      .await
-      .map_err(conn_err)?;
-    Ok(())
+  /// Set the file list on a resolved `<input type=file>` element.
+  /// Mirrors Playwright's `wkPage.ts::setInputFilePaths`, which pairs
+  /// the target-session `DOM.setInputFiles` with a browser-session
+  /// `Playwright.grantFileReadAccess` so the sandboxed WebKit process
+  /// is allowed to read the payload bytes when the page later touches
+  /// `input.files[i]`.
+  pub async fn set_input_files_element(&self, element: &super::WebKitElement, paths: &[String]) -> Result<()> {
+    let grant = self.browser.send(
+      protocol::PLAYWRIGHT_GRANT_FILE_READ_ACCESS,
+      json!({ "pageProxyId": &*self.proxy_id, "paths": paths }),
+    );
+    let set = element.set_input_files(paths);
+    let (grant_result, set_result) = tokio::join!(grant, set);
+    grant_result.map_err(conn_err)?;
+    set_result
   }
 
   pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {

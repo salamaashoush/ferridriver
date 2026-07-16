@@ -424,6 +424,16 @@ for (const backend of BACKENDS) {
       // CDP / WebKit accept the full bag in one call; assert every field
       // lands in matchMedia. BiDi only supports colorScheme reliably.
       if (backend === "bidi") return;
+      // WebKit reads the host's real appearance as the prefers-color-scheme
+      // baseline (dark macOS => dark baseline). Capture it before overriding
+      // so the print-suppression assertion below is baseline-aware instead of
+      // assuming a light host.
+      await page.goto(testUrl);
+      const baselineDark = JSON.parse(
+        (await page.evaluate(
+          `JSON.stringify(matchMedia('(prefers-color-scheme: dark)').matches)`
+        )) as string
+      ) as boolean;
       await page.emulateMedia({
         media: "print",
         colorScheme: "dark",
@@ -445,11 +455,11 @@ for (const backend of BACKENDS) {
       expect(result.print).toBe(true);
       expect(result.screen).toBe(false);
       // WebKit's print rendering suppresses the prefers-color-scheme
-      // override while a print media override is active (the preference
-      // returns once media is cleared); Chromium honours both at once.
-      // Engine semantics, not a driver gap — Playwright's own
-      // page-emulate-media spec never asserts the print+dark combination.
-      expect(result.dark).toBe(backend !== "webkit");
+      // OVERRIDE while a print media override is active, so `dark` falls back
+      // to the host baseline (the preference returns once media is cleared);
+      // Chromium honours the override outright. Engine semantics, not a driver
+      // gap — Playwright's own page-emulate-media spec never asserts print+dark.
+      expect(result.dark).toBe(backend === "webkit" ? baselineDark : true);
       expect(result.reduced).toBe(true);
       expect(result.forced).toBe(true);
       expect(result.contrast).toBe(true);

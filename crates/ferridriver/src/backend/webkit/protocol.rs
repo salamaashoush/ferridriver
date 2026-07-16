@@ -49,6 +49,7 @@ pub const PLAYWRIGHT_TAKE_SCREENSHOT: &str = "Playwright.takePageScreenshot";
 pub const PLAYWRIGHT_GET_ALL_COOKIES: &str = "Playwright.getAllCookies";
 pub const PLAYWRIGHT_SET_COOKIES: &str = "Playwright.setCookies";
 pub const PLAYWRIGHT_DELETE_ALL_COOKIES: &str = "Playwright.deleteAllCookies";
+pub const PLAYWRIGHT_GRANT_FILE_READ_ACCESS: &str = "Playwright.grantFileReadAccess";
 
 // ── Browser-session events ─────────────────────────────────────────────
 
@@ -68,6 +69,7 @@ pub const DOM_QUERY_SELECTOR: &str = "DOM.querySelector";
 pub const DOM_RESOLVE_NODE: &str = "DOM.resolveNode";
 pub const DOM_DESCRIBE_NODE: &str = "DOM.describeNode";
 pub const DOM_REQUEST_NODE: &str = "DOM.requestNode";
+pub const DOM_SET_INPUT_FILES: &str = "DOM.setInputFiles";
 pub const INPUT_DISPATCH_MOUSE: &str = "Input.dispatchMouseEvent";
 pub const INPUT_DISPATCH_KEY: &str = "Input.dispatchKeyEvent";
 pub const CONSOLE_ENABLE: &str = "Console.enable";

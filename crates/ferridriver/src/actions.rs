@@ -772,18 +772,6 @@ pub async fn extract_markdown(page: &AnyPage) -> Result<String> {
   rt_eval_str(page, &format!("{fd}.extractMarkdown()")).await
 }
 
-// ─── File Upload ────────────────────────────────────────────────────────────
-
-/// Upload file(s) to a file input element.
-/// Uses CDP `DOM.setFileInputFiles` with the element's `backendNodeId`.
-///
-/// # Errors
-///
-/// Returns an error if the file input element is not found or the files cannot be set.
-pub async fn upload_file(page: &AnyPage, selector: &str, paths: &[String]) -> Result<()> {
-  page.set_file_input(selector, paths).await
-}
-
 // ─── Auto-waiting ───────────────────────────────────────────────────────────
 
 /// Resolve the click dispatch point for an element, in top-level page

@@ -67,6 +67,10 @@ pub struct HarRecorder {
   /// Index into the context's `network_log` at recording start; only
   /// requests appended after this point are written.
   pub start_len: usize,
+  /// When set, only requests whose capture-time `page_guid` matches are
+  /// written — the page-scoped `page.routeFromHAR({update: true})`
+  /// recorder (Playwright's HarTracer `page` filter).
+  pub page_filter: Option<String>,
 }
 
 /// `context.tracing` handle. Cheap to construct (wraps a [`ContextRef`]).
@@ -113,6 +117,7 @@ impl Tracing {
       url_filter: options.url_filter.unwrap_or_else(UrlMatcher::any),
       resources_dir: options.resources_dir,
       start_len,
+      page_filter: None,
     };
     let recorders = self.ctx.har_recorders().await;
     let mut guard = recorders.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -267,7 +272,7 @@ impl Tracing {
       .ok_or_else(|| FerriError::backend("Must start tracing before stopping".to_string()))?;
     if let Some(path) = options.path {
       let network = self.trace_network_entries(&recorder).await;
-      recorder.export(&path, &network)?;
+      export_blocking(std::sync::Arc::clone(&recorder), path, network).await?;
     }
     recorder.start_chunk(self.network_log_len().await);
     Ok(())
@@ -286,7 +291,7 @@ impl Tracing {
     recorder.stop_screencasts();
     if let Some(path) = options.path {
       let network = self.trace_network_entries(&recorder).await;
-      recorder.export(&path, &network)?;
+      export_blocking(recorder, path, network).await?;
     }
     Ok(())
   }
@@ -307,6 +312,7 @@ impl Tracing {
       url_filter: UrlMatcher::any(),
       resources_dir: None,
       start_len: start,
+      page_filter: None,
     };
     // frame id -> `page@<id>` map so entries carry `pageref` /
     // `_frameref` — the viewer prefers a same-frame resource when a
@@ -389,6 +395,19 @@ impl Tracing {
 }
 
 /// Whether the recorder writes a zip archive (`.zip` extension).
+/// Run the final zip export on the blocking pool — deflating a whole
+/// recording (screencast frames, snapshots) can take long enough to
+/// starve the async worker the caller runs on.
+async fn export_blocking(
+  recorder: std::sync::Arc<crate::trace::TraceRecorder>,
+  path: std::path::PathBuf,
+  network: Vec<serde_json::Value>,
+) -> Result<()> {
+  tokio::task::spawn_blocking(move || recorder.export(&path, &network))
+    .await
+    .map_err(|e| FerriError::backend(format!("trace export task: {e}")))?
+}
+
 fn is_zip_path(path: &std::path::Path) -> bool {
   path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))
 }
@@ -462,11 +481,38 @@ async fn build_har(
   attachments: &mut Vec<(String, Vec<u8>)>,
 ) -> HarArchive {
   let mut entries = Vec::new();
+  // `log.pages` in first-seen order, keyed by the capture-time page
+  // guid; each entry gets a matching `pageref` (`harTracer.ts` keeps
+  // `_pageEntries` the same way). Requests without a page identity
+  // (e.g. synthesized route requests) carry no pageref.
+  let mut pages: Vec<HarPageOut> = Vec::new();
+  let mut page_index: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
   for req in requests {
     if !recorder.url_filter.matches(req.url()) {
       continue;
     }
-    entries.push(build_entry(req, recorder, attachments).await);
+    let entry = build_entry(req, recorder, attachments).await;
+    if let Some(guid) = req.page_guid() {
+      let pageref = format!("page@{guid}");
+      if !page_index.contains_key(guid) {
+        page_index.insert(guid.to_string(), pages.len());
+        pages.push(HarPageOut {
+          started_date_time: entry.started_date_time.clone(),
+          id: pageref.clone(),
+          title: String::new(),
+          page_timings: HarPageTimings {
+            on_content_load: -1.0,
+            on_load: -1.0,
+          },
+        });
+      }
+      entries.push(HarEntryOut {
+        pageref: Some(pageref),
+        ..entry
+      });
+    } else {
+      entries.push(entry);
+    }
   }
   HarArchive {
     log: HarLogOut {
@@ -475,6 +521,7 @@ async fn build_har(
         name: "ferridriver",
         version: env!("CARGO_PKG_VERSION"),
       },
+      pages: (!pages.is_empty()).then_some(pages),
       entries,
     },
   }
@@ -557,6 +604,7 @@ async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Ve
   HarEntryOut {
     started_date_time,
     time: total_time,
+    pageref: None,
     request: HarRequestOut {
       method: req.method().to_string(),
       url: req.url().to_string(),
@@ -801,6 +849,8 @@ struct HarArchive {
 struct HarLogOut {
   version: &'static str,
   creator: HarCreator,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pages: Option<Vec<HarPageOut>>,
   entries: Vec<HarEntryOut>,
 }
 
@@ -810,11 +860,36 @@ struct HarCreator {
   version: &'static str,
 }
 
+/// `log.pages[]` entry — one per page whose traffic appears in the log
+/// (`harTracer.ts::_createPageEntry`). `title` and the `pageTimings`
+/// load samples are not tracked by the network log, so they carry the
+/// HAR spec's "unknown" values (empty string / -1), same as Playwright
+/// before its page-lifecycle events fill them in.
+#[derive(serde::Serialize)]
+struct HarPageOut {
+  #[serde(rename = "startedDateTime")]
+  started_date_time: String,
+  id: String,
+  title: String,
+  #[serde(rename = "pageTimings")]
+  page_timings: HarPageTimings,
+}
+
+#[derive(serde::Serialize)]
+struct HarPageTimings {
+  #[serde(rename = "onContentLoad")]
+  on_content_load: f64,
+  #[serde(rename = "onLoad")]
+  on_load: f64,
+}
+
 #[derive(serde::Serialize)]
 struct HarEntryOut {
   #[serde(rename = "startedDateTime")]
   started_date_time: String,
   time: f64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pageref: Option<String>,
   request: HarRequestOut,
   response: HarResponseOut,
   cache: HarCache,

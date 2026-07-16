@@ -46,6 +46,41 @@ pub struct TestRunner {
   /// rather than one pair per project (which would reset terminal counters
   /// and finalize reporters mid-run).
   suppress_run_boundary: bool,
+  /// Cooperative cancel for an in-flight `execute` (UI Stop).
+  run_stop: RunStop,
+}
+
+/// Cooperative cancel signal for an in-flight [`TestRunner::execute`].
+/// Requesting a stop trips the dispatcher's hard-stop: workers drop
+/// queued items and exit after their current test, and `execute`
+/// unwinds normally — contexts close, traces stop, live-trace entries
+/// unregister. Dropping the `execute` future instead would detach the
+/// spawned worker tasks: the in-flight tests would keep driving the
+/// shared browser behind an "idle" UI and overlap the next run.
+#[derive(Clone, Default)]
+pub struct RunStop {
+  requested: Arc<std::sync::atomic::AtomicBool>,
+  notify: Arc<tokio::sync::Notify>,
+}
+
+impl RunStop {
+  /// Ask the in-flight run to stop after the tests currently executing.
+  pub fn request(&self) {
+    self.requested.store(true, std::sync::atomic::Ordering::SeqCst);
+    // notify_one stores a permit when no waiter is registered yet, so a
+    // request that lands before `wait` is first polled is not lost.
+    self.notify.notify_one();
+  }
+
+  fn reset(&self) {
+    self.requested.store(false, std::sync::atomic::Ordering::SeqCst);
+  }
+
+  async fn wait(&self) {
+    while !self.requested.load(std::sync::atomic::Ordering::SeqCst) {
+      self.notify.notified().await;
+    }
+  }
 }
 
 impl TestRunner {
@@ -71,7 +106,14 @@ impl TestRunner {
       overrides,
       shared_browser: None,
       suppress_run_boundary: false,
+      run_stop: RunStop::default(),
     }
+  }
+
+  /// Handle for cancelling an in-flight `execute` cooperatively (see
+  /// [`RunStop`]).
+  pub fn stop_handle(&self) -> RunStop {
+    self.run_stop.clone()
   }
 
   /// Append an additional reporter after construction (e.g., NAPI ResultCollector).
@@ -440,6 +482,9 @@ impl TestRunner {
           overrides: self.overrides.clone(),
           shared_browser: self.shared_browser.clone(),
           suppress_run_boundary: true,
+          // Sub-runners share the parent's stop signal so one Stop
+          // cancels every concurrently-running project.
+          run_stop: self.run_stop.clone(),
         };
         let project_bus = bus.clone();
         join_set.spawn(async move {
@@ -826,7 +871,21 @@ impl TestRunner {
       self.config.max_failures as usize // 0 = unlimited
     };
 
-    while let Some(result) = result_rx.recv().await {
+    let mut stop_requested = false;
+    loop {
+      let result = tokio::select! {
+        result = result_rx.recv() => result,
+        () = self.run_stop.wait(), if !stop_requested => {
+          // UI Stop: trip the dispatcher's hard-stop so workers drop
+          // queued items and exit after their current test, then keep
+          // draining results until the workers finish — the run unwinds
+          // normally (contexts closed, traces stopped).
+          stop_requested = true;
+          dispatcher.stop();
+          continue;
+        },
+      };
+      let Some(result) = result else { break };
       let test_key = result.outcome.test_id.full_name();
       attempt_history
         .entry(test_key)
@@ -1202,6 +1261,10 @@ impl TestRunner {
     use crate::ui_server::{UiCommand, UiServer};
     use crate::watch::FileWatcher;
 
+    // Reclaim spool dirs a SIGKILLed previous session left in the temp
+    // dir before this long-lived server starts producing its own.
+    ferridriver::trace::sweep_stale_spools();
+
     if self.config.trace == crate::tracing::TraceMode::Off {
       Arc::make_mut(&mut self.config).trace = crate::tracing::TraceMode::On;
     }
@@ -1359,9 +1422,11 @@ impl TestRunner {
   /// event (mapped to JSON) into the UI broadcast channel.
   ///
   /// Keeps draining the command channel while tests execute: `Stop`
-  /// cancels the run (the execute future is dropped, mirroring the TUI
-  /// cancel path); every other command is returned for the caller to run
-  /// afterwards.
+  /// requests a cooperative cancel ([`RunStop`]) — workers drop queued
+  /// tests, finish the ones already executing, and `execute` unwinds
+  /// normally so no detached test keeps driving the shared browser
+  /// behind an idle UI; every other command is returned for the caller
+  /// to run afterwards.
   async fn run_plan_for_ui(
     &mut self,
     plan: TestPlan,
@@ -1384,6 +1449,8 @@ impl TestRunner {
 
     let mut pending = Vec::new();
     let mut stopped = false;
+    self.run_stop.reset();
+    let stop = self.run_stop.clone();
     {
       let execute = self.execute(plan, bus.clone());
       tokio::pin!(execute);
@@ -1391,9 +1458,18 @@ impl TestRunner {
         tokio::select! {
           _ = &mut execute => break,
           cmd = commands.recv() => match cmd {
-            Some(crate::ui_server::UiCommand::Stop) => { stopped = true; break; },
+            Some(crate::ui_server::UiCommand::Stop) => {
+              stopped = true;
+              stop.request();
+            },
             Some(other) => pending.push(other),
-            None => break,
+            None => {
+              // Command channel gone (server shutting down): cancel and
+              // let the run unwind before returning.
+              stop.request();
+              (&mut execute).await;
+              break;
+            },
           }
         }
       }

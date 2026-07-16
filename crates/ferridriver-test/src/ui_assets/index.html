@@ -722,9 +722,9 @@ function onMessage(msg) {
       if (state.selected === msg.id) renderDetail();
       break;
     }
-    // stepStarted / stepFinished are still emitted (other reporters use
-    // them) but the trace viewer's Actions panel is the step list now,
-    // so these events are ignored here.
+    // stepStarted / stepFinished never arrive: the server filters them
+    // out of the UI stream (the trace viewer's Actions panel is the
+    // step list), so there is no case for them here.
     case "testFinished": {
       const test = ensureTest(msg.id);
       test.status = msg.outcome.status;
@@ -1327,7 +1327,15 @@ function startLivePoll(test) {
         }
       }
     } catch (_) { /* server gone / between-poll teardown */ }
-    if (livePoll) livePoll.timer = setTimeout(tick, 800);
+    // Each poll re-downloads and re-models the whole snapshot, so the
+    // interval backs off as the trace grows (+200ms per 256KB, capped
+    // at 5s) — long screencast-heavy tests would otherwise spend the
+    // whole run re-zipping and re-parsing megabytes every tick.
+    if (livePoll) {
+      const size = Math.max(0, livePoll.lastLen);
+      const delay = Math.min(5000, 800 + Math.floor(size / 262144) * 200);
+      livePoll.timer = setTimeout(tick, delay);
+    }
   };
   tick();
 }

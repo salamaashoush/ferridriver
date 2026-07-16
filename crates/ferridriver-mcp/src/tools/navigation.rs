@@ -3,7 +3,7 @@ use crate::server::{McpServer, sess};
 use rmcp::{
   ErrorData,
   handler::server::wrapper::Parameters,
-  model::{CallToolResult, Content},
+  model::{CallToolResult, ContentBlock},
   tool, tool_router,
 };
 use std::fmt::Write;
@@ -12,7 +12,9 @@ use std::fmt::Write;
 impl McpServer {
   #[tool(
     name = "connect",
-    description = "Connect to a running Chrome browser. Provide a WebSocket/HTTP URL, or use auto_discover to find a running instance by reading DevToolsActivePort."
+    title = "Connect to Browser",
+    description = "Connect to a running Chrome browser. Provide a WebSocket/HTTP URL, or use auto_discover to find a running instance by reading DevToolsActivePort.",
+    annotations(read_only_hint = false, idempotent_hint = true, open_world_hint = true)
   )]
   async fn connect(&self, Parameters(p): Parameters<ConnectParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_opt());
@@ -32,7 +34,7 @@ impl McpServer {
       };
       let page = Box::pin(self.page(s)).await?;
       let snap = self.snap(&page, s).await;
-      Ok(CallToolResult::success(vec![Content::text(format!(
+      Ok(CallToolResult::success(vec![ContentBlock::text(format!(
         "Connected to browser at {url}. Found {page_count} existing page(s) in session '{s}'.\n\n{snap}"
       ))]))
     } else if p.auto_discover.unwrap_or(false) {
@@ -48,7 +50,7 @@ impl McpServer {
       };
       let page = Box::pin(self.page(s)).await?;
       let snap = self.snap(&page, s).await;
-      Ok(CallToolResult::success(vec![Content::text(format!(
+      Ok(CallToolResult::success(vec![ContentBlock::text(format!(
         "Auto-connected to {channel} Chrome. Found {page_count} existing page(s) in session '{s}'.\n\n{snap}"
       ))]))
     } else {
@@ -60,11 +62,27 @@ impl McpServer {
 
   #[tool(
     name = "navigate",
-    description = "Navigate the browser to a URL and wait for the page to load. Returns an accessibility snapshot of the loaded page. After navigation, all previous element refs are invalidated -- use the new snapshot's refs."
+    title = "Navigate",
+    description = "Navigate the browser to a URL and wait for the page to load. Returns an accessibility snapshot of the loaded page. After navigation, all previous element refs are invalidated -- use the new snapshot's refs.",
+    annotations(read_only_hint = false, open_world_hint = true)
   )]
-  async fn navigate(&self, Parameters(p): Parameters<NavigateParams>) -> Result<CallToolResult, ErrorData> {
+  async fn navigate(
+    &self,
+    Parameters(p): Parameters<NavigateParams>,
+    meta: rmcp::model::Meta,
+    peer: rmcp::service::Peer<rmcp::RoleServer>,
+  ) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_opt());
+    let token = meta.get_progress_token();
     let _guard = self.session_guard(s).await;
+    McpServer::emit_progress(
+      &peer,
+      token.as_ref(),
+      0.0,
+      Some(2.0),
+      &format!("navigating to {}", p.url),
+    )
+    .await;
     let page = Box::pin(self.page(s)).await?;
     let opts = ferridriver::options::GotoOptions {
       wait_until: Some(
@@ -76,12 +94,17 @@ impl McpServer {
       referer: None,
     };
     page.goto(&p.url).options(opts).await.map_err(Self::err)?;
-    Box::pin(self.action_ok(&page, s, "Navigation complete.")).await
+    McpServer::emit_progress(&peer, token.as_ref(), 1.0, Some(2.0), "loaded; capturing snapshot").await;
+    let out = Box::pin(self.action_ok(&page, s, "Navigation complete.")).await;
+    McpServer::emit_progress(&peer, token.as_ref(), 2.0, Some(2.0), "done").await;
+    out
   }
 
   #[tool(
     name = "page",
-    description = "Manage pages (tabs) and sessions. Actions: list (show all tabs with URLs), select (switch to tab by index -- invalidates old refs), new (open tab), close (close tab by index), back, forward, reload, close_browser. Use 'list' to find tabs, then 'select' to switch."
+    title = "Manage Tabs",
+    description = "Manage pages (tabs) and sessions. Actions: list (show all tabs with URLs), select (switch to tab by index -- invalidates old refs), new (open tab), close (close tab by index), back, forward, reload, close_browser. Use 'list' to find tabs, then 'select' to switch.",
+    annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
   )]
   async fn page_manage(&self, Parameters(p): Parameters<PageParams>) -> Result<CallToolResult, ErrorData> {
     match p.action.as_str() {
@@ -117,7 +140,7 @@ impl McpServer {
         }
         self.state.invalidate_context(s);
         let snap = self.snap(&page, s).await;
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
           "Opened new page in session '{s}'.\n\n{snap}"
         ))]))
       },
@@ -131,7 +154,7 @@ impl McpServer {
         state.close_page(s, idx).map_err(Self::err)?;
         drop(state);
         self.state.invalidate_context(s);
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
           "Closed page {idx} in session '{s}'."
         ))]))
       },
@@ -160,12 +183,12 @@ impl McpServer {
             let _ = writeln!(out, "  Page {}{}: {} - {}", pg.index, marker, pg.url, pg.title);
           }
         }
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
       },
       "close_browser" => {
         self.state.write().await.shutdown().await;
         self.state.invalidate_all();
-        Ok(CallToolResult::success(vec![Content::text("Browser closed.")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text("Browser closed.")]))
       },
       other => Err(Self::err(format!(
         "Unknown action '{other}'. Use: back, forward, reload, new, close, select, list, close_browser."

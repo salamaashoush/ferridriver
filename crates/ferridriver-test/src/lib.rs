@@ -112,6 +112,7 @@ pub mod tracing;
 pub mod tui;
 pub mod tui_reporter;
 pub mod ui_server;
+pub mod ui_wire;
 pub mod watch;
 pub mod worker;
 
@@ -182,6 +183,11 @@ pub fn run_harness() {
       eprintln!("config error: {e}");
       std::process::exit(1);
     });
+    // Spawned by `ferridriver test --ui`: stream the plan + reporter
+    // events back to the CLI's UI server over its unix socket.
+    if let Some(sock_path) = std::env::var_os(ui_wire::UI_SOCK_ENV).filter(|v| !v.is_empty()) {
+      return Box::pin(ui_wire::run_harness_ui(sock_path.into(), config, overrides)).await;
+    }
     let plan = discovery::collect_rust_tests(&config);
     let mut runner = runner::TestRunner::new(config, overrides);
     Box::pin(runner.run(plan)).await

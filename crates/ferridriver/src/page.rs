@@ -2337,35 +2337,24 @@ impl Page {
 
   // ── Waiting (additional) ────────────────────────────────────────────────
 
-  /// Wait for a JS function/expression to return a truthy value.
+  /// Playwright: `page.waitForFunction(pageFunction, arg?, options?): Promise<JSHandle>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:565`).
+  /// Delegates to the main frame, same as Playwright.
   ///
   /// # Errors
   ///
-  /// Returns an error if the wait times out.
-  pub async fn wait_for_function(&self, expression: &str, timeout_ms: Option<u64>) -> Result<serde_json::Value> {
-    let timeout = timeout_ms.unwrap_or(self.default_timeout());
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
-    loop {
-      if tokio::time::Instant::now() >= deadline {
-        return Err(crate::error::FerriError::timeout(
-          format!("waiting for function: {expression}"),
-          timeout,
-        ));
-      }
-      if let Ok(Some(val)) = self.inner.evaluate(expression).await {
-        let truthy = match &val {
-          serde_json::Value::Bool(b) => *b,
-          serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) != 0.0,
-          serde_json::Value::String(s) => !s.is_empty(),
-          serde_json::Value::Null => false,
-          _ => true,
-        };
-        if truthy {
-          return Ok(val);
-        }
-      }
-      tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+  /// See [`crate::frame::Frame::wait_for_function`].
+  pub async fn wait_for_function(
+    self: &Arc<Self>,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+    options: Option<crate::options::WaitForFunctionOptions>,
+  ) -> Result<crate::js_handle::JSHandle> {
+    self
+      .main_frame()
+      .wait_for_function(fn_source, arg, is_function, options)
+      .await
   }
 
   /// Wait for the page to navigate to a URL matching the pattern.
@@ -3091,17 +3080,15 @@ impl Page {
 
   /// Playwright: `page.routeFromHAR(har, options?)`. Replay recorded
   /// responses from a HAR file (plain `.har` or `.zip` archive) for
-  /// matching requests.
-  ///
-  /// Recording (`update: true`) is context-scoped in ferridriver — use
-  /// `context.routeFromHAR(har, { update: true })`; the page-scoped
-  /// variant returns a typed `Unsupported` because per-page network
-  /// attribution is not wired into the context network log yet.
+  /// matching requests, or with `update: true` record this page's
+  /// traffic into the file instead (written when the owning context
+  /// closes, like Playwright's HarTracer page-filtered recorder).
   ///
   /// # Errors
   ///
-  /// Returns an error if the HAR file cannot be read/parsed or the route
-  /// cannot be installed.
+  /// Returns an error if the HAR file cannot be read/parsed, the route
+  /// cannot be installed, or (`update: true`) the page is not bound to
+  /// a context whose close can flush the recording.
   pub fn route_from_har(
     &self,
     path: &std::path::Path,
@@ -3118,10 +3105,17 @@ impl Page {
     options: crate::har::RouteFromHarOptions,
   ) -> Result<()> {
     if options.update {
-      return Err(crate::error::FerriError::unsupported(
-        "page.routeFromHAR({ update: true }) is not implemented (page-scoped network attribution); \
-         use context.routeFromHAR({ update: true })",
-      ));
+      // Same registry + flush point as the context-scoped recorder
+      // (context close), narrowed to this page's traffic via the
+      // capture-time `page_guid` stamped on every logged request.
+      let Some(ctx) = self.context() else {
+        return Err(crate::error::FerriError::unsupported(
+          "page.routeFromHAR({ update: true }) requires a page opened through a context",
+        ));
+      };
+      return ctx
+        .register_har_update_recorder(path, &options, Some(self.inner.page_guid()))
+        .await;
     }
     let handler = crate::har::route_handler_from_file(path, options.not_found)?;
     let matcher = options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any);

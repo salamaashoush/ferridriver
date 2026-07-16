@@ -167,6 +167,129 @@ pub fn test_script_drag_buttons_held(c: &mut McpClient) {
   );
 }
 
+// Playwright: `page.waitForFunction(pageFunction, arg?, options?):
+// Promise<JSHandle>` — function form with an arg, interval polling,
+// and a JSHandle result whose jsonValue is the truthy value. The old
+// shape only took an expression string + timeout.
+pub fn test_script_page_wait_for_function_arg_polling(c: &mut McpClient) {
+  c.nav("<script>setTimeout(function(){window.counter=9;},80)</script>");
+  let v = c.script_value(
+    "const handle = await page.waitForFunction(\
+         min => (window.counter || 0) >= min && window.counter, 5, { polling: 20, timeout: 5000 }); \
+       const value = await handle.jsonValue(); \
+       await handle.dispose(); \
+       let badPolling = ''; \
+       try { await page.waitForFunction('true', undefined, { polling: 'interval' }); } \
+       catch (e) { badPolling = String(e.message || e); } \
+       return { value, badPolling };",
+  );
+  assert_eq!(v["value"], json!(9), "handle.jsonValue() is the truthy result: {v}");
+  assert!(
+    v["badPolling"]
+      .as_str()
+      .unwrap_or("")
+      .contains("Unknown polling option"),
+    "non-'raf' polling keyword must be rejected: {v}"
+  );
+}
+
+// A default dragTo (no options) must emit intermediate mousemoves
+// between press and release — ferridriver defaults `steps` to 5.
+// Drag libraries (interact.js, dnd-kit) track the pointer across
+// several moves to cross their drag threshold; a single source→target
+// jump never starts the drag (observed on the app.acme.com Sign
+// builder, where the placeholder was never placed). Playwright
+// defaults to one move but compensates with native drag interception,
+// which only helps native HTML5 DnD — stepped moves are the fix for
+// mousemove-tracked libraries.
+pub fn test_script_drag_default_steps(c: &mut McpClient) {
+  c.nav(
+    "<style>html,body{margin:0;padding:0}</style>\
+     <div id='src' style='width:60px;height:60px;background:#f00;position:absolute;left:20px;top:20px'></div>\
+     <div id='tgt' style='width:60px;height:60px;background:#0f0;position:absolute;left:300px;top:300px'></div>\
+     <script>\
+       var down=false, movesWhileDown=0, allHeld=true;\
+       window.addEventListener('mousedown',function(){down=true;},true);\
+       window.addEventListener('mouseup',function(){down=false;},true);\
+       window.addEventListener('mousemove',function(e){ if(down){movesWhileDown++; if(e.buttons!==1){allHeld=false;}} },true);\
+     </script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#src').dragTo(page.locator('#tgt')); \
+       return { moves: await page.evaluate('movesWhileDown'), held: await page.evaluate('allHeld') };",
+  );
+  let moves = v["moves"].as_i64().unwrap_or(0);
+  assert!(
+    moves >= 5,
+    "default dragTo must emit at least 5 mousemoves between press and release (got {moves}): {v}"
+  );
+  assert_eq!(
+    v["held"],
+    json!(true),
+    "every drag mousemove must carry buttons===1: {v}"
+  );
+}
+
+// Native HTML5 drag-and-drop end-to-end: a `draggable` source that
+// stashes a DataTransfer payload and a target that accepts the drop.
+// On CDP this exercises the `Input.setInterceptDrags` +
+// `Input.dispatchDragEvent` port of Playwright's `crDragDrop.ts` —
+// plain synthetic mouse events cannot drive a Chromium native drag and
+// used to wedge the input queue for the rest of the page's life, so
+// the post-drag click assertion is part of the contract. WebKit's
+// Playwright build runs the native drag from the dispatched mouse
+// events directly. Firefox over BiDi starts the drag
+// (dragstart/dragenter fire) but its remote input stack never delivers
+// the final drop — the same hole as Playwright's own BiDi backend,
+// which has no drag handling at all — so BiDi asserts the achievable
+// subset (drag started + input pipeline alive).
+pub fn test_script_drag_native_html5(c: &mut McpClient) {
+  c.nav(
+    "<style>html,body{margin:0;padding:0}</style>\
+     <div id='src' draggable='true' style='width:60px;height:60px;background:#f00;position:absolute;left:20px;top:20px'></div>\
+     <div id='dst' style='width:120px;height:120px;background:#00f;position:absolute;left:300px;top:300px'></div>\
+     <script>\
+       window.log=[];\
+       var src=document.getElementById('src'), dst=document.getElementById('dst');\
+       src.addEventListener('dragstart',function(e){e.dataTransfer.setData('text/plain','payload-123');window.log.push('dragstart');});\
+       dst.addEventListener('dragenter',function(e){e.preventDefault();if(window.log.indexOf('dragenter')<0){window.log.push('dragenter');}});\
+       dst.addEventListener('dragover',function(e){e.preventDefault();if(window.log.indexOf('dragover')<0){window.log.push('dragover');}});\
+       dst.addEventListener('drop',function(e){e.preventDefault();window.log.push('drop:'+e.dataTransfer.getData('text/plain'));});\
+     </script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#src').dragTo(page.locator('#dst')); \
+       const log = await page.evaluate('JSON.stringify(window.log)'); \
+       await page.evaluate(\"window.clicked=false; document.getElementById('dst').addEventListener('click',function(){window.clicked=true;})\"); \
+       await page.locator('#dst').click(); \
+       const clicked = await page.evaluate('window.clicked'); \
+       return { log: JSON.parse(log), clicked };",
+  );
+  let log: Vec<String> = v["log"]
+    .as_array()
+    .map(|a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect())
+    .unwrap_or_default();
+  assert!(
+    log.iter().any(|e| e == "dragstart"),
+    "native dragstart must fire on the draggable source: {v}"
+  );
+  assert!(
+    log.iter().any(|e| e == "dragenter"),
+    "dragenter must reach the drop target: {v}"
+  );
+  assert_eq!(
+    v["clicked"],
+    json!(true),
+    "input pipeline must stay alive after the native drag (no wedged drag session): {v}"
+  );
+  if c.backend != "bidi" {
+    assert!(
+      log.iter().any(|e| e == "drop:payload-123"),
+      "drop must deliver the DataTransfer payload set in dragstart: {v}"
+    );
+  }
+}
+
 pub fn test_script_locator_drop_payload(c: &mut McpClient) {
   // A drop zone whose dragover calls preventDefault (accepts the drop)
   // and whose drop handler records the DataTransfer's text payload plus

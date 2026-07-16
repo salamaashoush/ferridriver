@@ -168,6 +168,12 @@ pub(crate) struct RequestState {
   post_data: Option<Vec<u8>>,
   provisional_headers: Headers,
   frame_id: Option<String>,
+  /// Stable identity of the page whose listener captured this request
+  /// (CDP `targetId` / WebKit `pageProxyId` / BiDi top-level context
+  /// id). Stamped at capture time so context-level consumers (HAR
+  /// `pages`/`pageref`, page-scoped `routeFromHAR({update})`) can
+  /// attribute entries without a frame-to-page reverse lookup.
+  page_guid: Option<String>,
   redirected_from: Option<Arc<RequestState>>,
 
   // Sync-readable mutable fields — `ArcSwap` so Playwright-style sync
@@ -212,6 +218,7 @@ impl Request {
       post_data: init.post_data,
       provisional_headers: init.headers,
       frame_id: init.frame_id,
+      page_guid: init.page_guid,
       redirected_from: init.redirected_from.map(|r| r.inner),
       timing: ArcSwap::from_pointee(init.timing.unwrap_or_else(|| RequestTiming {
         // Wall-clock anchor at capture time — backends without a
@@ -268,6 +275,12 @@ impl Request {
   #[must_use]
   pub fn frame_id(&self) -> Option<&str> {
     self.inner.frame_id.as_deref()
+  }
+
+  /// Stable capture-time page identity — see the `RequestState` field.
+  #[must_use]
+  pub fn page_guid(&self) -> Option<&str> {
+    self.inner.page_guid.as_deref()
   }
 
   /// POST body as UTF-8 text (matches Playwright's `postData()`). Returns
@@ -559,6 +572,7 @@ pub struct RequestInit {
   pub post_data: Option<Vec<u8>>,
   pub headers: Headers,
   pub frame_id: Option<String>,
+  pub page_guid: Option<String>,
   pub redirected_from: Option<Request>,
   pub timing: Option<RequestTiming>,
   pub raw_headers_fn: Option<RawHeadersFn>,
@@ -1094,6 +1108,7 @@ mod tests {
       post_data: None,
       headers: Headers::default(),
       frame_id: None,
+      page_guid: None,
       redirected_from: None,
       timing: None,
       raw_headers_fn: None,
@@ -1108,6 +1123,7 @@ mod tests {
       post_data: None,
       headers: Headers::default(),
       frame_id: None,
+      page_guid: None,
       redirected_from: Some(original.clone()),
       timing: None,
       raw_headers_fn: None,
@@ -1151,6 +1167,7 @@ mod tests {
           post_data: None,
           headers: Headers::default(),
           frame_id: None,
+          page_guid: None,
           redirected_from: None,
           timing: None,
           raw_headers_fn: None,

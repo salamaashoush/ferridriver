@@ -1384,8 +1384,24 @@ impl AnyPage {
 
   // ── File upload ──
 
-  pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<()> {
-    page_dispatch!(self, set_file_input(selector, paths))
+  /// Set the file list on a resolved `<input type=file>` element.
+  /// Element-addressed (not selector-addressed) to mirror Playwright's
+  /// `setInputFilePaths(handle, paths)`: the caller resolves the element
+  /// through the selector engine in the owning frame immediately before
+  /// this call, so a stale node surfaces as a retryable error and the
+  /// locator funnel re-resolves. Dispatched through the page (not
+  /// `AnyElement`) because WebKit pairs the DOM call with a
+  /// browser-session `Playwright.grantFileReadAccess`.
+  pub async fn set_input_files_element(&self, element: &AnyElement, paths: &[String]) -> Result<()> {
+    match (self, element) {
+      (AnyPage::CdpPipe(_), AnyElement::CdpPipe(e)) => e.set_input_files(paths).await,
+      (AnyPage::CdpRaw(_), AnyElement::CdpRaw(e)) => e.set_input_files(paths).await,
+      (AnyPage::WebKit(p), AnyElement::WebKit(e)) => p.set_input_files_element(e, paths).await,
+      (AnyPage::Bidi(p), AnyElement::Bidi(e)) => p.set_input_files_element(e, paths).await,
+      _ => Err(crate::error::FerriError::backend(
+        "set_input_files: element does not belong to this page's backend",
+      )),
+    }
   }
 
   // ── Dialog handling ──
@@ -1406,6 +1422,20 @@ impl AnyPage {
   ///
   /// Returns [`crate::error::FerriError::Unsupported`] on `WebKit`/`BiDi`, or
   /// the protocol error if the attach fails.
+  /// Stable identity of this page for capture-time request attribution
+  /// — the same value the per-page network listener stamps on every
+  /// `Request::page_guid` (CDP `targetId` / WebKit `pageProxyId` /
+  /// BiDi top-level context id).
+  #[must_use]
+  pub fn page_guid(&self) -> String {
+    match self {
+      Self::CdpPipe(p) => p.session_parts().1.to_string(),
+      Self::CdpRaw(p) => p.session_parts().1.to_string(),
+      Self::WebKit(p) => p.page_proxy_id().to_string(),
+      Self::Bidi(p) => p.page_guid(),
+    }
+  }
+
   pub async fn new_cdp_session(&self) -> Result<crate::cdp_session::CdpSession> {
     use crate::cdp_session::{CdpSession, SessionTransportSource};
     match self {

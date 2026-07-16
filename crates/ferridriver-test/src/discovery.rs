@@ -242,25 +242,30 @@ fn apply_filters(mut plan: TestPlan, _config: &TestConfig) -> TestPlan {
 
 /// Filter a test plan by grep pattern.
 pub fn filter_by_grep(plan: &mut TestPlan, pattern: &str, invert: bool) {
-  // Build a case-insensitive regex. If the pattern has invalid regex syntax,
-  // fall back to case-insensitive literal substring match.
-  let re = regex::RegexBuilder::new(pattern).case_insensitive(true).build().ok();
-  let pattern_lower = pattern.to_lowercase();
-
+  let matcher = grep_matcher(pattern);
   for suite in &mut plan.suites {
     suite.tests.retain(|test| {
-      let full_name = test.id.full_name();
-      let matches = if let Some(ref r) = re {
-        r.is_match(&full_name)
-      } else {
-        // Fallback: case-insensitive substring search.
-        full_name.to_lowercase().contains(&pattern_lower)
-      };
+      let matches = matcher(&test.id.full_name());
       if invert { !matches } else { matches }
     });
   }
   plan.suites.retain(|s| !s.tests.is_empty());
   plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
+}
+
+/// The grep predicate [`filter_by_grep`] applies to a test's full name:
+/// case-insensitive regex, falling back to case-insensitive literal
+/// substring match when the pattern has invalid regex syntax. Exposed
+/// so out-of-process planners (the `test --ui` bridge counting how many
+/// tests a cycle will select) share the exact semantics instead of
+/// mirroring them.
+pub fn grep_matcher(pattern: &str) -> impl Fn(&str) -> bool + use<> {
+  let re = regex::RegexBuilder::new(pattern).case_insensitive(true).build().ok();
+  let pattern_lower = pattern.to_lowercase();
+  move |full_name: &str| match &re {
+    Some(re) => re.is_match(full_name),
+    None => full_name.to_lowercase().contains(&pattern_lower),
+  }
 }
 
 /// Error returned when `--forbid-only` is set and `.only()` markers are found.

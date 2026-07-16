@@ -218,8 +218,48 @@ async fn page_api_tests() {
     ))
     .await
     .unwrap();
-  let val = page.wait_for_function("window.ready", Some(5000)).await.unwrap();
-  assert_eq!(val, serde_json::json!(true));
+  let handle = page
+    .wait_for_function(
+      "window.ready",
+      ferridriver::protocol::SerializedArgument::default(),
+      Some(false),
+      Some(ferridriver::options::WaitForFunctionOptions {
+        timeout: Some(5000),
+        ..Default::default()
+      }),
+    )
+    .await
+    .unwrap();
+  let val = handle.json_value().await.unwrap();
+  assert_eq!(
+    ferridriver::protocol::result_to_serde::<serde_json::Value>(&val).unwrap(),
+    serde_json::json!(true)
+  );
+
+  // Function form with an arg and interval polling.
+  page
+    .goto(&data_url(
+      "<script>setTimeout(function(){window.counter=7},150)</script>",
+    ))
+    .await
+    .unwrap();
+  let handle = page
+    .wait_for_function(
+      "min => (window.counter || 0) >= min",
+      ferridriver::protocol::argument_from_serde(&5).unwrap(),
+      Some(true),
+      Some(ferridriver::options::WaitForFunctionOptions {
+        polling: Some(ferridriver::options::Polling::Interval(25)),
+        timeout: Some(5000),
+      }),
+    )
+    .await
+    .unwrap();
+  let val = handle.json_value().await.unwrap();
+  assert_eq!(
+    ferridriver::protocol::result_to_serde::<serde_json::Value>(&val).unwrap(),
+    serde_json::json!(true)
+  );
 
   // ── Screenshot ──
   page.goto(&data_url("<h1>Screenshot</h1>")).await.unwrap();

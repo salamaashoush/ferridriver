@@ -354,7 +354,7 @@ impl BrowserContextJs {
             )
             .await?;
             if !truthy {
-              route.fallback(ferridriver::route::ContinueOverrides::default());
+              route.reject_as_unmatched();
               return Ok(());
             }
           }

@@ -183,6 +183,7 @@ pub fn attach_listeners(page: &WebKitPage) {
     lifecycle: Arc::clone(&page.lifecycle),
     main_frame_id_cache: Arc::clone(&page.main_frame_id_cache),
     exposed_fns: page.exposed_fns.clone(),
+    page_proxy_id: Arc::from(page.page_proxy_id()),
   };
   let dialog_log = Arc::clone(&page.dialog_log);
   // Provisional-target slot. Populated on `Target.targetCreated` with
@@ -412,6 +413,9 @@ struct TargetListenerCtx {
   /// session) so exposed functions keep working after a cross-process
   /// navigation swaps the live target — the main listener follows the swap.
   exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedBinding>>>,
+  /// Owning page's proxy id — stamped on every captured `Request` as
+  /// its `page_guid` for context-level page attribution.
+  page_proxy_id: Arc<str>,
 }
 
 impl TargetListenerCtx {
@@ -498,7 +502,15 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
     },
     Some("Network.requestWillBeSent") => {
       let log = arc_swap::Guard::into_inner(ctx.network_log.load());
-      handle_request_will_be_sent(&env.params, &ctx.requests, &ctx.nav_slot, &log, &ctx.emitter).await;
+      handle_request_will_be_sent(
+        &env.params,
+        &ctx.requests,
+        &ctx.nav_slot,
+        &log,
+        &ctx.emitter,
+        &ctx.page_proxy_id,
+      )
+      .await;
     },
     Some("Network.responseReceived") => {
       let target = ctx.target();
@@ -602,6 +614,7 @@ async fn handle_request_will_be_sent(
   nav_slot: &crate::network::NavRequestSlot,
   network_log: &Arc<RwLock<Vec<NetworkRequest>>>,
   emitter: &crate::events::EventEmitter,
+  page_proxy_id: &str,
 ) {
   let Some(request_payload) = params.get("request") else {
     return;
@@ -671,6 +684,7 @@ async fn handle_request_will_be_sent(
     }),
     headers,
     frame_id: params.get("frameId").and_then(Value::as_str).map(String::from),
+    page_guid: Some(page_proxy_id.to_string()),
     redirected_from,
     // `walltime` is epoch seconds (wkInterceptableRequest.ts: `* 1000`).
     timing: params
@@ -1067,6 +1081,11 @@ async fn dispatch_intercepted(
   match action {
     crate::route::RouteAction::Continue(overrides) | crate::route::RouteAction::Fallback(overrides) => {
       intercept_continue(&target, &request_id, overrides).await;
+    },
+    // Chain-internal marker; never emitted as a terminal action. Fail
+    // open like an unhandled route if it ever leaks.
+    crate::route::RouteAction::PredicateRejected => {
+      intercept_continue(&target, &request_id, crate::route::ContinueOverrides::default()).await;
     },
     crate::route::RouteAction::Fulfill(response) => intercept_fulfill(&target, &request_id, &response).await,
     crate::route::RouteAction::Abort(reason) => {

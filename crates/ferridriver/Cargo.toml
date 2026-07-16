@@ -24,7 +24,7 @@ async-trait = { workspace = true }
 base64 = { workspace = true }
 libc = { workspace = true }
 tracing = { workspace = true }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 rustc-hash = "2"
 arc-swap = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "cookies", "rustls", "stream", "query", "form"] }

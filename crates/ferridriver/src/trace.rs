@@ -538,57 +538,158 @@ impl TraceRecorder {
     }
   }
 
+  /// Freeze the spool's current extent under the lock: flush the trace
+  /// writer, record the flushed byte length, and list the fully written
+  /// resource names. Zipping happens AFTER the lock is released —
+  /// `push_event` sits on the action hot path and must never wait out a
+  /// multi-megabyte deflate (live exports run every poll tick).
+  fn snapshot_spool(&self) -> Result<SpoolSnapshot> {
+    let mut spool = self.spool.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::io::Write::flush(&mut spool.trace).map_err(|e| FerriError::backend(format!("flush trace spool: {e}")))?;
+    let trace_len = spool
+      .trace
+      .get_ref()
+      .metadata()
+      .map_err(|e| FerriError::backend(format!("stat trace spool: {e}")))?
+      .len();
+    Ok(SpoolSnapshot {
+      dir: spool.dir.clone(),
+      trace_len,
+      resources: spool.written_resources.iter().cloned().collect(),
+    })
+  }
+
   /// Stream the spooled chunk into a Playwright-compatible `trace.zip`
   /// at `path`. Memory stays flat — the spool files are copied into the
-  /// archive, never loaded whole.
+  /// archive, never loaded whole. The spool lock is held only long
+  /// enough to freeze the export extent; concurrent appends past that
+  /// point land in the next export.
   ///
   /// # Errors
   ///
   /// Errors if serialization or the zip write fails.
   pub fn export(&self, path: &std::path::Path, network_entries: &[serde_json::Value]) -> Result<()> {
-    use std::io::Write;
-
-    let mut spool = self.spool.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    spool
-      .trace
-      .flush()
-      .map_err(|e| FerriError::backend(format!("flush trace spool: {e}")))?;
-
+    let snapshot = self.snapshot_spool()?;
     let file = std::fs::File::create(path)
       .map_err(|e| FerriError::backend(format!("create trace zip {}: {e}", path.display())))?;
-    let mut writer = zip::ZipWriter::new(file);
-    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let zip_err = |e: zip::result::ZipError| FerriError::backend(format!("write trace zip: {e}"));
-    let io_err = |e: std::io::Error| FerriError::backend(format!("write trace zip: {e}"));
-
-    writer.start_file("trace.trace", opts).map_err(zip_err)?;
-    let mut trace_file = std::fs::File::open(spool.dir.join("trace.trace"))
-      .map_err(|e| FerriError::backend(format!("open trace spool: {e}")))?;
-    std::io::copy(&mut trace_file, &mut writer).map_err(io_err)?;
-
-    writer.start_file("trace.network", opts).map_err(zip_err)?;
-    for entry in network_entries {
-      let wrapped = serde_json::json!({ "type": "resource-snapshot", "snapshot": entry });
-      writer.write_all(wrapped.to_string().as_bytes()).map_err(io_err)?;
-      writer.write_all(b"\n").map_err(io_err)?;
-    }
-
-    let resources_dir = spool.dir.join("resources");
-    let entries =
-      std::fs::read_dir(&resources_dir).map_err(|e| FerriError::backend(format!("read trace spool resources: {e}")))?;
-    for entry in entries.flatten() {
-      let Ok(name) = entry.file_name().into_string() else {
-        continue;
-      };
-      writer.start_file(format!("resources/{name}"), opts).map_err(zip_err)?;
-      let mut resource = std::fs::File::open(entry.path())
-        .map_err(|e| FerriError::backend(format!("open trace spool resource {name}: {e}")))?;
-      std::io::copy(&mut resource, &mut writer).map_err(io_err)?;
-    }
-
-    writer.finish().map_err(zip_err)?;
-    Ok(())
+    write_trace_zip(&snapshot, file, network_entries)
   }
+
+  /// [`Self::export`] into an in-memory buffer — the live-trace endpoint
+  /// serves the bytes straight from RAM instead of a temp-file round
+  /// trip per poll.
+  ///
+  /// # Errors
+  ///
+  /// Errors if serialization or the zip write fails.
+  pub fn export_to_vec(&self, network_entries: &[serde_json::Value]) -> Result<Vec<u8>> {
+    let snapshot = self.snapshot_spool()?;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    write_trace_zip(&snapshot, &mut cursor, network_entries)?;
+    Ok(cursor.into_inner())
+  }
+}
+
+/// Frozen extent of a spool at export time (see
+/// [`TraceRecorder::snapshot_spool`]).
+struct SpoolSnapshot {
+  dir: std::path::PathBuf,
+  trace_len: u64,
+  resources: Vec<String>,
+}
+
+/// Whether a resource is already compressed — deflating JPEG frames,
+/// PNGs, or nested zips burns CPU on every live poll for ~0% gain, so
+/// those are stored raw.
+fn resource_is_precompressed(name: &str) -> bool {
+  std::path::Path::new(name)
+    .extension()
+    .and_then(|e| e.to_str())
+    .is_some_and(|ext| matches!(ext, "jpeg" | "jpg" | "png" | "webp" | "zip" | "webm"))
+}
+
+fn write_trace_zip<W: std::io::Write + std::io::Seek>(
+  snapshot: &SpoolSnapshot,
+  writer: W,
+  network_entries: &[serde_json::Value],
+) -> Result<()> {
+  use std::io::Write;
+
+  let mut writer = zip::ZipWriter::new(writer);
+  let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+  let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+  let zip_err = |e: zip::result::ZipError| FerriError::backend(format!("write trace zip: {e}"));
+  let io_err = |e: std::io::Error| FerriError::backend(format!("write trace zip: {e}"));
+
+  writer.start_file("trace.trace", deflated).map_err(zip_err)?;
+  let trace_file = std::fs::File::open(snapshot.dir.join("trace.trace"))
+    .map_err(|e| FerriError::backend(format!("open trace spool: {e}")))?;
+  // Copy only the frozen extent — the recorder may have appended since.
+  let mut trace_file = std::io::Read::take(trace_file, snapshot.trace_len);
+  std::io::copy(&mut trace_file, &mut writer).map_err(io_err)?;
+
+  writer.start_file("trace.network", deflated).map_err(zip_err)?;
+  for entry in network_entries {
+    let wrapped = serde_json::json!({ "type": "resource-snapshot", "snapshot": entry });
+    writer.write_all(wrapped.to_string().as_bytes()).map_err(io_err)?;
+    writer.write_all(b"\n").map_err(io_err)?;
+  }
+
+  let resources_dir = snapshot.dir.join("resources");
+  for name in &snapshot.resources {
+    // A resource can vanish under a concurrent `start_chunk` swap (the
+    // old spool dir is removed); a live snapshot just skips it.
+    let Ok(mut resource) = std::fs::File::open(resources_dir.join(name)) else {
+      continue;
+    };
+    let opts = if resource_is_precompressed(name) {
+      stored
+    } else {
+      deflated
+    };
+    writer.start_file(format!("resources/{name}"), opts).map_err(zip_err)?;
+    std::io::copy(&mut resource, &mut writer).map_err(io_err)?;
+  }
+
+  writer.finish().map_err(zip_err)?;
+  Ok(())
+}
+
+/// Remove trace spool directories left behind by dead processes. Spool
+/// dirs are named `ferridriver-trace-<pid>-<n>`; a run killed with
+/// SIGKILL (UI
+/// Stop kills the cycle's process group) never runs [`TraceSpool`]'s
+/// `Drop`, so long-lived UI servers sweep on startup. Live processes'
+/// spools (including this one's) are left alone.
+pub fn sweep_stale_spools() {
+  let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+    return;
+  };
+  let own_pid = std::process::id();
+  for entry in entries.flatten() {
+    let name = entry.file_name();
+    let Some(name) = name.to_str() else { continue };
+    let Some(rest) = name.strip_prefix("ferridriver-trace-") else {
+      continue;
+    };
+    let Some((pid, _)) = rest.split_once('-') else { continue };
+    let Ok(pid) = pid.parse::<u32>() else { continue };
+    if pid == own_pid || process_alive(pid) {
+      continue;
+    }
+    let _ = std::fs::remove_dir_all(entry.path());
+  }
+}
+
+fn process_alive(pid: u32) -> bool {
+  let Ok(pid) = i32::try_from(pid) else {
+    return false;
+  };
+  // SAFETY: kill(2) with signal 0 touches no memory; it only probes for
+  // process existence (0 = alive, EPERM = alive but not ours).
+  #[allow(unsafe_code)]
+  let rc = unsafe { libc::kill(pid, 0) };
+  rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// First trace line: `context-options` with `version: 8` (the loader
@@ -626,69 +727,75 @@ fn insert_opt(obj: &mut serde_json::Map<String, serde_json::Value>, key: &str, v
   }
 }
 
+fn serialize_before(b: &BeforeActionEvent) -> String {
+  let mut obj = serde_json::Map::new();
+  obj.insert("type".into(), "before".into());
+  obj.insert("callId".into(), b.call_id.clone().into());
+  obj.insert("startTime".into(), b.start_time.into());
+  obj.insert("class".into(), b.class.clone().into());
+  obj.insert("method".into(), b.method.clone().into());
+  obj.insert("title".into(), b.title.clone().into());
+  obj.insert("params".into(), b.params.clone());
+  insert_opt(&mut obj, "pageId", b.page_id.clone().map(Into::into));
+  insert_opt(&mut obj, "parentId", b.parent_id.clone().map(Into::into));
+  insert_opt(&mut obj, "beforeSnapshot", b.before_snapshot.clone().map(Into::into));
+  if !b.stack.is_empty() {
+    obj.insert(
+      "stack".into(),
+      b.stack
+        .iter()
+        .map(|f| serde_json::json!({ "file": f.file, "line": f.line, "column": f.column }))
+        .collect::<Vec<_>>()
+        .into(),
+    );
+  }
+  serde_json::Value::Object(obj).to_string()
+}
+
+fn serialize_input(i: &InputActionEvent) -> String {
+  let mut obj = serde_json::Map::new();
+  obj.insert("type".into(), "input".into());
+  obj.insert("callId".into(), i.call_id.clone().into());
+  insert_opt(&mut obj, "inputSnapshot", i.input_snapshot.clone().map(Into::into));
+  insert_opt(
+    &mut obj,
+    "point",
+    i.point.map(|(x, y)| serde_json::json!({ "x": x, "y": y })),
+  );
+  serde_json::Value::Object(obj).to_string()
+}
+
+fn serialize_after(a: &AfterActionEvent) -> String {
+  let mut obj = serde_json::Map::new();
+  obj.insert("type".into(), "after".into());
+  obj.insert("callId".into(), a.call_id.clone().into());
+  obj.insert("endTime".into(), a.end_time.into());
+  insert_opt(
+    &mut obj,
+    "error",
+    a.error
+      .as_ref()
+      .map(|e| serde_json::json!({ "name": e.name, "message": e.message })),
+  );
+  insert_opt(&mut obj, "afterSnapshot", a.after_snapshot.clone().map(Into::into));
+  if !a.attachments.is_empty() {
+    obj.insert(
+      "attachments".into(),
+      a.attachments
+        .iter()
+        .map(|att| serde_json::json!({ "name": att.name, "contentType": att.content_type, "sha1": att.sha1 }))
+        .collect::<Vec<_>>()
+        .into(),
+    );
+  }
+  serde_json::Value::Object(obj).to_string()
+}
+
 fn serialize_event(event: &TraceEvent) -> String {
   match event {
-    TraceEvent::Before(b) => {
-      let mut obj = serde_json::Map::new();
-      obj.insert("type".into(), "before".into());
-      obj.insert("callId".into(), b.call_id.clone().into());
-      obj.insert("startTime".into(), b.start_time.into());
-      obj.insert("class".into(), b.class.clone().into());
-      obj.insert("method".into(), b.method.clone().into());
-      obj.insert("title".into(), b.title.clone().into());
-      obj.insert("params".into(), b.params.clone());
-      insert_opt(&mut obj, "pageId", b.page_id.clone().map(Into::into));
-      insert_opt(&mut obj, "parentId", b.parent_id.clone().map(Into::into));
-      insert_opt(&mut obj, "beforeSnapshot", b.before_snapshot.clone().map(Into::into));
-      if !b.stack.is_empty() {
-        obj.insert(
-          "stack".into(),
-          b.stack
-            .iter()
-            .map(|f| serde_json::json!({ "file": f.file, "line": f.line, "column": f.column }))
-            .collect::<Vec<_>>()
-            .into(),
-        );
-      }
-      serde_json::Value::Object(obj).to_string()
-    },
-    TraceEvent::Input(i) => {
-      let mut obj = serde_json::Map::new();
-      obj.insert("type".into(), "input".into());
-      obj.insert("callId".into(), i.call_id.clone().into());
-      insert_opt(&mut obj, "inputSnapshot", i.input_snapshot.clone().map(Into::into));
-      insert_opt(
-        &mut obj,
-        "point",
-        i.point.map(|(x, y)| serde_json::json!({ "x": x, "y": y })),
-      );
-      serde_json::Value::Object(obj).to_string()
-    },
-    TraceEvent::After(a) => {
-      let mut obj = serde_json::Map::new();
-      obj.insert("type".into(), "after".into());
-      obj.insert("callId".into(), a.call_id.clone().into());
-      obj.insert("endTime".into(), a.end_time.into());
-      insert_opt(
-        &mut obj,
-        "error",
-        a.error
-          .as_ref()
-          .map(|e| serde_json::json!({ "name": e.name, "message": e.message })),
-      );
-      insert_opt(&mut obj, "afterSnapshot", a.after_snapshot.clone().map(Into::into));
-      if !a.attachments.is_empty() {
-        obj.insert(
-          "attachments".into(),
-          a.attachments
-            .iter()
-            .map(|att| serde_json::json!({ "name": att.name, "contentType": att.content_type, "sha1": att.sha1 }))
-            .collect::<Vec<_>>()
-            .into(),
-        );
-      }
-      serde_json::Value::Object(obj).to_string()
-    },
+    TraceEvent::Before(b) => serialize_before(b),
+    TraceEvent::Input(i) => serialize_input(i),
+    TraceEvent::After(a) => serialize_after(a),
     TraceEvent::Log(l) => serde_json::json!({
       "type": "log",
       "callId": l.call_id,
@@ -792,12 +899,28 @@ pub(crate) fn take_recorder(composite: &str) -> Option<Arc<TraceRecorder>> {
     .remove(composite)
 }
 
-/// Export a SNAPSHOT of the in-progress recording for `composite` to a
-/// Playwright-compatible `trace.zip` at `path`, without stopping the
+/// Result of a live-trace snapshot request (see
+/// [`export_live_snapshot`]).
+pub enum LiveTraceSnapshot {
+  /// `composite` is not being traced (not started yet, or stopped).
+  NotRecording,
+  /// The spool has not grown past `known_version` — the caller's cached
+  /// bytes are still current; no export was performed.
+  Unchanged(u64),
+  /// A fresh zip snapshot of the in-progress recording, plus the spool
+  /// version it captures.
+  Zip { version: u64, bytes: Vec<u8> },
+}
+
+/// Export a SNAPSHOT of the in-progress recording for `composite` as an
+/// in-memory Playwright-compatible `trace.zip`, without stopping the
 /// recording. Non-destructive: the spool keeps growing after this
 /// returns. Powers the `bdd --ui` live-trace view — a poller exports
 /// the current trace repeatedly while the test runs and feeds each zip
-/// to the embedded viewer.
+/// to the embedded viewer. Pollers pass the version of their cached
+/// snapshot back as `known_version` and get
+/// [`LiveTraceSnapshot::Unchanged`] without a re-export when nothing
+/// changed.
 ///
 /// Network entries are intentionally empty: the HAR entries are built
 /// from the context's network log at `stop`, which this free function
@@ -806,26 +929,17 @@ pub(crate) fn take_recorder(composite: &str) -> Option<Arc<TraceRecorder>> {
 ///
 /// # Errors
 ///
-/// Returns `Ok(None)` when `composite` is not being traced (the
-/// recording has not started yet or already stopped); `Err` when the
-/// zip write fails. On success returns the exported spool version —
-/// pollers pass it back as `known_version` next time and get
-/// `Ok(Some(same))` WITHOUT a re-export when nothing changed (the
-/// `path` is not written in that case).
-pub fn export_live_snapshot(
-  composite: &str,
-  path: &std::path::Path,
-  known_version: Option<u64>,
-) -> Result<Option<u64>> {
+/// Errors when the zip write fails.
+pub fn export_live_snapshot(composite: &str, known_version: Option<u64>) -> Result<LiveTraceSnapshot> {
   let Some(recorder) = recorder_for(composite) else {
-    return Ok(None);
+    return Ok(LiveTraceSnapshot::NotRecording);
   };
   let version = recorder.spool_version();
   if known_version == Some(version) {
-    return Ok(Some(version));
+    return Ok(LiveTraceSnapshot::Unchanged(version));
   }
-  recorder.export(path, &[])?;
-  Ok(Some(version))
+  let bytes = recorder.export_to_vec(&[])?;
+  Ok(LiveTraceSnapshot::Zip { version, bytes })
 }
 
 // ── Screencast pump ────────────────────────────────────────────────────

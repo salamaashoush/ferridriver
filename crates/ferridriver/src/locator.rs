@@ -1082,8 +1082,8 @@ impl Locator {
         // materialises each payload to a temporary directory unique
         // to the upload.
         //
-        // We deliberately DO NOT delete these temp files after
-        // `upload_file` returns. CDP's `DOM.setFileInputFiles` only
+        // We deliberately DO NOT delete these temp files after the
+        // upload call returns. CDP's `DOM.setFileInputFiles` only
         // records the paths on the `<input>`; the browser does not
         // actually read file content until the page JS calls
         // `input.files[i].size` / `reader.readAsText(...)` — which
@@ -1117,38 +1117,18 @@ impl Locator {
       },
     };
 
-    // Retry on stale-handle errors until the timeout. The upload target
-    // is often a hidden, framework-managed `<input type=file>` that
-    // re-mounts during a builder/route transition; a single-shot upload
-    // races the re-render and surfaces a raw "Object id doesn't
-    // reference a Node" that escaped callers' try/catch. This mirrors
-    // the locator action retry funnel for the file-input path, which
-    // resolves the selector fresh (`upload_file` re-queries) on each
-    // attempt.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-    let mut attempt: usize = 0;
-    loop {
-      match actions::upload_file(self.frame.page_arc().inner(), &self.selector, &paths).await {
-        Ok(()) => return Ok(()),
-        Err(e) => {
-          let now = tokio::time::Instant::now();
-          let timed_out = timeout_ms != 0 && now >= deadline;
-          if timed_out || !is_retryable_action_error(&e.to_string()) {
-            return Err(e);
-          }
-          let delay = Self::RETRY_BACKOFFS_MS[attempt.min(Self::RETRY_BACKOFFS_MS.len() - 1)];
-          attempt = attempt.saturating_add(1);
-          let sleep_ms = if timeout_ms == 0 {
-            delay
-          } else {
-            delay.min(u64::try_from(deadline.saturating_duration_since(now).as_millis()).unwrap_or(delay))
-          };
-          if sleep_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
-          }
-        },
-      }
-    }
+    // Resolve the element through the standard action retry funnel and
+    // address it directly (mirrors Playwright's
+    // `setInputFilePaths(handle, paths)`). The funnel resolves in the
+    // locator's owning frame with full selector-engine support, and a
+    // stale node between resolve and the protocol call (hidden,
+    // framework-managed inputs that re-mount mid-flow) surfaces as a
+    // retryable error that re-resolves fresh instead of escaping as a
+    // raw "Object id doesn't reference a Node".
+    let paths_ref = &paths;
+    retry_resolve!(self, Some(timeout_ms), "setInputFiles", |el, page| async move {
+      page.set_input_files_element(&el, paths_ref).await
+    })
   }
 
   /// Scroll the element into the visible area of the viewport.
@@ -1704,7 +1684,9 @@ impl Locator {
   /// the source element's center is used. Same for `target_position` on the
   /// release point. `DragAndDropOptions::steps` controls how many
   /// interpolated `mousemove` events are emitted between press and release
-  /// (Playwright default: `1`). `DragAndDropOptions::trial` skips the
+  /// (default `5`; Playwright defaults to `1` but compensates with native
+  /// drag interception, which ferridriver does not implement).
+  /// `DragAndDropOptions::trial` skips the
   /// actual mouse action, returning after both elements resolve.
   /// `DragAndDropOptions::strict` is ignored here (per Playwright) because
   /// this locator already carries its own strict flag.
@@ -1753,7 +1735,14 @@ impl Locator {
       return Ok(());
     }
 
-    let steps = opts.steps.unwrap_or(1);
+    // Default to 5 interpolated moves rather than Playwright's 1. Playwright
+    // can afford a single jump because its Chromium backend intercepts the
+    // native drag (`Input.setInterceptDrags` + `Input.dispatchDragEvent`);
+    // ferridriver dispatches plain mouse events, and drag libraries
+    // (interact.js, dnd-kit, HTML5 DnD polyfills) only start a drag when
+    // intermediate `mousemove`s cross their drag threshold — a single jump
+    // from source to target never does.
+    let steps = opts.steps.unwrap_or(5);
     self.frame.page_arc().inner().click_and_drag(from, to, steps).await
   }
 

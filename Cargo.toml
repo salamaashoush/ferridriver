@@ -71,9 +71,9 @@ console-subscriber = "0.5"
 anyhow = "1"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
-rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server", "tower"] }
+rmcp = { version = "2.2", features = ["server", "transport-io", "transport-streamable-http-server", "tower"] }
 schemars = "1"
-jsonschema = { version = "0.46", default-features = false }
+jsonschema = { version = "0.47", default-features = false }
 axum = "0.8"
 tokio-util = "0.7"
 dashmap = "6"
@@ -98,3 +98,9 @@ strip = false
 
 [profile.dev]
 debug = false
+
+# Optimizing dependencies keeps the binary's __eh_frame under the 16MB ceiling
+# Apple's ld needs to encode unwind offsets in the compact unwind table. Workspace
+# crates stay at opt-level 0 so incremental rebuilds are unaffected.
+[profile.dev.package."*"]
+opt-level = 1

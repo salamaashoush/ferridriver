@@ -13,6 +13,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod cli;
 mod session_cmd;
+mod test_ui;
 
 use std::sync::Arc;
 
@@ -112,8 +113,16 @@ async fn main() -> anyhow::Result<()> {
   match args.command {
     cli::Command::Mcp(mcp_args) => Box::pin(run_mcp(config, mcp_args)).await,
     cli::Command::Bdd(bdd_args) => Box::pin(run_bdd(config, bdd_args)).await,
-    cli::Command::Test(test_args) => run_test(&test_args),
-    cli::Command::Run(run_args) => Box::pin(run_script_cli(run_args)).await,
+    cli::Command::Test(test_args) => {
+      if test_args.ui {
+        Box::pin(test_ui::run(config, test_args)).await
+      } else if test_args.watch {
+        Box::pin(run_test_watch(config, test_args)).await
+      } else {
+        run_test(&test_args)
+      }
+    },
+    cli::Command::Run(run_args) => Box::pin(run_script_cli(config, run_args)).await,
     cli::Command::Install(install_args) => Box::pin(run_install(install_args)).await,
     cli::Command::Codegen(codegen_args) => Box::pin(run_codegen(codegen_args)).await,
     cli::Command::Session(session_args) => Box::pin(session_cmd::run(session_args)).await,
@@ -193,12 +202,12 @@ async fn run_install(args: cli::InstallArgs) -> anyhow::Result<()> {
   Ok(())
 }
 
-fn run_test(args: &cli::TestArgs) -> anyhow::Result<()> {
-  use std::process::{Command, Stdio};
-
-  let chosen_runner = args.runner.unwrap_or(detect_test_runner());
-
-  let (program, base_args): (&str, Vec<String>) = match chosen_runner {
+/// Build the underlying cargo command shared by the plain `test` path
+/// and the `--ui` cycle spawner: runner selection, `FERRITEST_*` env
+/// exports, and package filters. Callers append positionals /
+/// passthrough / UI-cycle env on top.
+pub(crate) fn base_test_command(args: &cli::TestArgs, runner: cli::TestRunner) -> std::process::Command {
+  let (program, base_args): (&str, Vec<String>) = match runner {
     cli::TestRunner::Nextest => {
       let mut a = vec!["nextest".into(), "run".into()];
       if let Some(profile) = args.profile.as_deref() {
@@ -210,7 +219,7 @@ fn run_test(args: &cli::TestArgs) -> anyhow::Result<()> {
     cli::TestRunner::Cargo => ("cargo", vec!["test".into()]),
   };
 
-  let mut cmd = Command::new(program);
+  let mut cmd = std::process::Command::new(program);
   cmd.args(&base_args);
   if args.headless {
     cmd.env("FERRITEST_HEADLESS", "1");
@@ -233,6 +242,14 @@ fn run_test(args: &cli::TestArgs) -> anyhow::Result<()> {
   for pkg in &args.packages {
     cmd.arg("-p").arg(pkg);
   }
+  cmd
+}
+
+/// The exact command `ferridriver test` runs once — shared with watch
+/// mode, which re-runs it per file change.
+fn full_test_command(args: &cli::TestArgs, chosen_runner: cli::TestRunner) -> std::process::Command {
+  use std::process::Stdio;
+  let mut cmd = base_test_command(args, chosen_runner);
   if let Some(filter) = args.filter.as_deref() {
     // For nextest, filter is a positional. For cargo test, filter is also positional.
     cmd.arg(filter);
@@ -243,11 +260,16 @@ fn run_test(args: &cli::TestArgs) -> anyhow::Result<()> {
       cmd.arg(arg);
     }
   }
-
   cmd
     .stdout(Stdio::inherit())
     .stderr(Stdio::inherit())
     .stdin(Stdio::inherit());
+  cmd
+}
+
+fn run_test(args: &cli::TestArgs) -> anyhow::Result<()> {
+  let chosen_runner = args.runner.unwrap_or(detect_test_runner());
+  let mut cmd = full_test_command(args, chosen_runner);
 
   tracing::info!(
     runner = ?chosen_runner_name(chosen_runner),
@@ -257,11 +279,84 @@ fn run_test(args: &cli::TestArgs) -> anyhow::Result<()> {
 
   let status = cmd
     .status()
-    .map_err(|e| anyhow::anyhow!("failed to spawn `{program}`: {e}"))?;
+    .map_err(|e| anyhow::anyhow!("failed to spawn `cargo`: {e}"))?;
   if status.success() {
     Ok(())
   } else {
     std::process::exit(status.code().unwrap_or(1));
+  }
+}
+
+/// `ferridriver test --watch`: run the test command, then re-run it
+/// whenever a `.rs` file under the working directory changes
+/// (`testIgnore` patterns from the resolved `[test]` config excluded).
+/// A change arriving while a cycle runs queues exactly one re-run for
+/// when it finishes; Ctrl-C / SIGTERM kill the cycle's whole process
+/// group (cargo, harness binaries, browsers) and exit.
+async fn run_test_watch(config: FerridriverConfig, args: cli::TestArgs) -> anyhow::Result<()> {
+  let overrides = ferridriver_test::config::CliOverrides {
+    headless: args.headless,
+    backend: args.backend.clone(),
+    workers: args.workers.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+    tag: args.tag.clone(),
+    retries: args.retries,
+    ..Default::default()
+  };
+  let test_config = ferridriver_test::config::resolve_config_from(config.test, &overrides)
+    .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
+  let cwd = std::env::current_dir()?;
+  let watcher = ferridriver_test::watch::FileWatcher::new(&cwd, &["**/*.rs".to_string()], &test_config.test_ignore)
+    .map_err(|e| anyhow::anyhow!("start file watcher: {e}"))?;
+  let chosen_runner = args.runner.unwrap_or(detect_test_runner());
+  let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+  loop {
+    let mut cmd = full_test_command(&args, chosen_runner);
+    // Fresh process group so an interrupt kills cargo + harness
+    // binaries + their browsers without touching this process.
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = tokio::process::Command::from(cmd)
+      .spawn()
+      .map_err(|e| anyhow::anyhow!("failed to spawn `cargo`: {e}"))?;
+    let pid = child.id().and_then(|p| i32::try_from(p).ok());
+
+    let mut rerun_pending = false;
+    let status = loop {
+      tokio::select! {
+        status = child.wait() => break status?,
+        _ = tokio::signal::ctrl_c() => {
+          test_ui::kill_process_group(pid);
+          return Ok(());
+        },
+        _ = sigterm.recv() => {
+          test_ui::kill_process_group(pid);
+          return Ok(());
+        },
+        change = watcher.recv() => {
+          if change.is_some() {
+            let _ = watcher.drain_deduped();
+            rerun_pending = true;
+          }
+        },
+      }
+    };
+
+    let outcome = if status.success() { "passed" } else { "failed" };
+    if rerun_pending {
+      println!("\n[watch] tests {outcome}; files changed during the run — re-running\n");
+      continue;
+    }
+    println!("\n[watch] tests {outcome}; waiting for file changes (Ctrl-C to quit)\n");
+    tokio::select! {
+      _ = tokio::signal::ctrl_c() => return Ok(()),
+      _ = sigterm.recv() => return Ok(()),
+      change = watcher.recv() => {
+        if change.is_none() {
+          return Ok(());
+        }
+        let _ = watcher.drain_deduped();
+      },
+    }
   }
 }
 
@@ -367,7 +462,7 @@ enum ScriptOrigin {
   Inline,
 }
 
-async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
+async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::Result<()> {
   use std::io::Read as _;
 
   let (source, origin) = match (args.eval, args.script.as_deref()) {
@@ -389,10 +484,10 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
     ferridriver_script::PathSandbox::new(&cwd)
       .map_err(|e| anyhow::anyhow!("sandbox init ({}): {}", cwd.display(), e.message))?,
   );
-  // `ferridriver run` honours a ferridriver.toml in scope for the
-  // scripting sandbox env allow-list and declared sidecars.
-  let file_config = FerridriverConfig::load(None).unwrap_or_default();
-  install_bundler_shims(&file_config);
+  // Config comes from the global `-c/--config` (already loaded and
+  // shimmed in `main`), falling back to a discovered ferridriver.toml —
+  // the same document the MCP server reads. Threading it here fixes
+  // `run -c` dropping the config's `extensions:` / scripting settings.
   let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
     &file_config.scripting.allow_env,
     file_config.scripting.allow.commands.clone(),

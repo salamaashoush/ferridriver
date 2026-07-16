@@ -154,6 +154,35 @@ pub struct WaitOptions {
   pub timeout: Option<f64>,
 }
 
+/// Playwright `PageWaitForFunctionOptions` — matches
+/// `{ polling?: number | 'raf', timeout?: number }`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct WaitForFunctionOptions {
+  #[napi(ts_type = "number | 'raf'")]
+  pub polling: Option<napi::Either<f64, String>>,
+  pub timeout: Option<f64>,
+}
+
+impl TryFrom<WaitForFunctionOptions> for ferridriver::options::WaitForFunctionOptions {
+  type Error = napi::Error;
+
+  fn try_from(o: WaitForFunctionOptions) -> std::result::Result<Self, napi::Error> {
+    let polling = match o.polling {
+      None => None,
+      Some(napi::Either::A(ms)) => Some(ferridriver::options::Polling::Interval(f64_to_u64(ms))),
+      Some(napi::Either::B(s)) if s == "raf" => Some(ferridriver::options::Polling::Raf),
+      Some(napi::Either::B(s)) => {
+        return Err(napi::Error::from_reason(format!("Unknown polling option: {s}")));
+      },
+    };
+    Ok(Self {
+      polling,
+      timeout: o.timeout.map(f64_to_u64),
+    })
+  }
+}
+
 /// Playwright `LocatorEvaluateOptions` — matches `{ timeout?: number }`.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]

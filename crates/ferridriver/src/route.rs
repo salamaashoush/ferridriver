@@ -41,6 +41,13 @@ pub enum RouteAction {
   /// `route.fallback(options?)`: consumed by [`run_route_chain`], never
   /// delivered to a backend resolution path.
   Fallback(ContinueOverrides),
+  /// The handler's JS URL predicate did not match this request. Distinct
+  /// from [`Self::Fallback`]: Playwright evaluates predicates during
+  /// matching, before a handler's `times` budget is consumed — so the
+  /// chain refunds the consumed unit and moves on. Emitted only by the
+  /// binding layers' predicate wrappers via [`Route::reject_as_unmatched`];
+  /// consumed by [`run_route_chain`], never delivered to a backend.
+  PredicateRejected,
 }
 
 /// Overrides when continuing an intercepted request.
@@ -142,6 +149,7 @@ impl Route {
       post_data: self.request.post_data.clone().map(String::into_bytes),
       headers: self.request.headers.clone(),
       frame_id: None,
+      page_guid: None,
       redirected_from: None,
       timing: None,
       raw_headers_fn: None,
@@ -178,6 +186,18 @@ impl Route {
   pub fn abort(mut self, reason: &str) {
     if let Some(tx) = self.action_tx.take() {
       let _ = tx.send(RouteAction::Abort(reason.to_string()));
+    }
+  }
+
+  /// Report that this handler's JS URL predicate did not match the
+  /// request. Binding-layer use only (predicates are async JS calls, so
+  /// they run inside the wrapped handler rather than the sync Rust
+  /// matcher); the chain refunds the handler's `times` unit and
+  /// continues to the next handler, mirroring Playwright where a
+  /// predicate is evaluated during matching, before `willExpire`.
+  pub fn reject_as_unmatched(mut self) {
+    if let Some(tx) = self.action_tx.take() {
+      let _ = tx.send(RouteAction::PredicateRejected);
     }
   }
 }
@@ -295,7 +315,7 @@ pub fn any_matching_route(routes: &[RegisteredRoute], url: &str) -> bool {
 /// handlers already consulted for this request. Consumes one unit of the
 /// selected route's `times` budget (Playwright removes an expiring
 /// handler *before* invoking it) and prunes it once exhausted.
-fn take_next_handler(routes: &mut Vec<RegisteredRoute>, url: &str, tried: &[usize]) -> Option<(RouteHandler, usize)> {
+fn take_next_handler(routes: &mut Vec<RegisteredRoute>, url: &str, tried: &[usize]) -> Option<PickedRoute> {
   let pick = |scope: RouteScope, routes: &Vec<RegisteredRoute>| {
     routes
       .iter()
@@ -307,6 +327,7 @@ fn take_next_handler(routes: &mut Vec<RegisteredRoute>, url: &str, tried: &[usiz
   let idx = pick(RouteScope::Page, routes).or_else(|| pick(RouteScope::Context, routes))?;
   let handler = std::sync::Arc::clone(&routes[idx].handler);
   let id = routes[idx].handler_id();
+  let budget = routes[idx].remaining.clone();
   let exhausted = routes[idx].remaining.as_ref().is_some_and(|c| {
     c.fetch_update(
       std::sync::atomic::Ordering::AcqRel,
@@ -315,10 +336,29 @@ fn take_next_handler(routes: &mut Vec<RegisteredRoute>, url: &str, tried: &[usiz
     )
     .map_or(true, |prev| prev <= 1)
   });
-  if exhausted {
-    routes.remove(idx);
-  }
-  Some((handler, id))
+  let removed = exhausted.then(|| routes.remove(idx));
+  Some(PickedRoute {
+    handler,
+    id,
+    index: idx,
+    budget,
+    removed,
+  })
+}
+
+/// One selected route registration plus what [`run_route_chain`] needs
+/// to refund the consumed `times` unit when the handler's JS predicate
+/// reports the request as unmatched.
+struct PickedRoute {
+  handler: RouteHandler,
+  id: usize,
+  /// Original position in the route list, for reinstating a route that
+  /// was pruned on (what turned out to be a phantom) exhaustion.
+  index: usize,
+  budget: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
+  /// The registration removed on exhaustion — held so a predicate
+  /// rejection can put it back.
+  removed: Option<RegisteredRoute>,
 }
 
 /// Layer `top` over `base`: fields set by `top` win, unset fields keep
@@ -356,7 +396,9 @@ fn apply_overrides(request: &mut InterceptedRequest, overrides: &ContinueOverrid
 /// * handlers run in precedence order (page scope before context scope,
 ///   newest first within each);
 /// * a handler's `times` budget is consumed when it is invoked, even if
-///   it falls back;
+///   it falls back — but NOT when its JS URL predicate reports the
+///   request as unmatched ([`Route::reject_as_unmatched`]), which
+///   refunds the unit like Playwright's match-before-`willExpire`;
 /// * `route.fallback(overrides)` mutates the request the next handler
 ///   observes (including re-matching against an overridden URL) and
 ///   accumulates into the final continue;
@@ -378,18 +420,32 @@ pub async fn run_route_chain(
       let mut guard = routes.write().await;
       take_next_handler(&mut guard, &request.url, &tried)
     };
-    let Some((handler, id)) = picked else {
+    let Some(picked) = picked else {
       return RouteAction::Continue(accumulated);
     };
-    tried.push(id);
+    tried.push(picked.id);
     let (tx, rx) = tokio::sync::oneshot::channel();
     let route = Route::new(request.clone(), tx);
-    handler(route);
+    (picked.handler)(route);
     let action = rx.await.unwrap_or(RouteAction::Continue(ContinueOverrides::default()));
     match action {
       RouteAction::Fallback(overrides) => {
         apply_overrides(&mut request, &overrides);
         accumulated = merge_overrides(&accumulated, overrides);
+      },
+      RouteAction::PredicateRejected => {
+        // The JS predicate did not match, so the handler never really
+        // fired: refund its `times` unit and reinstate the registration
+        // if the phantom consumption pruned it. Playwright never charges
+        // in the first place (predicates run during matching).
+        let mut guard = routes.write().await;
+        if let Some(budget) = &picked.budget {
+          budget.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        if let Some(route) = picked.removed {
+          let at = picked.index.min(guard.len());
+          guard.insert(at, route);
+        }
       },
       RouteAction::Continue(overrides) => {
         return RouteAction::Continue(merge_overrides(&accumulated, overrides));
@@ -598,6 +654,43 @@ mod tests {
       "budget spent on page A must exhaust the clone on page B"
     );
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+  }
+
+  #[tokio::test]
+  async fn predicate_rejection_refunds_times_budget() {
+    // A `times: 1` route whose JS predicate rejects the first request
+    // must still fire for the second (Playwright evaluates predicates
+    // during matching, before the budget is consumed).
+    let accept = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let accept2 = std::sync::Arc::clone(&accept);
+    let fulfilled = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let fulfilled2 = std::sync::Arc::clone(&fulfilled);
+    let handler: RouteHandler = std::sync::Arc::new(move |route: Route| {
+      if accept2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+        route.reject_as_unmatched();
+      } else {
+        fulfilled2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        route.fulfill(FulfillResponse::default());
+      }
+    });
+    let routes = tokio::sync::RwLock::new(vec![RegisteredRoute::new(any_matcher(), handler, Some(1))]);
+    let first = run_route_chain(&routes, sample_request()).await;
+    assert!(
+      matches!(first, RouteAction::Continue(_)),
+      "predicate-rejected request continues unrouted"
+    );
+    assert_eq!(
+      routes.read().await.len(),
+      1,
+      "rejected predicate must not consume the times budget"
+    );
+    let second = run_route_chain(&routes, sample_request()).await;
+    assert!(matches!(second, RouteAction::Fulfill(_)));
+    assert_eq!(fulfilled.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+      routes.read().await.is_empty(),
+      "the real invocation consumes the budget and prunes"
+    );
   }
 
   #[test]

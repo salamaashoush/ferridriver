@@ -14,7 +14,7 @@ use ferridriver_script::RunOptions;
 use rmcp::{
   ErrorData,
   handler::server::wrapper::Parameters,
-  model::{CallToolResult, Content},
+  model::{CallToolResult, ContentBlock},
   tool, tool_router,
 };
 use serde::Deserialize;
@@ -83,6 +83,8 @@ pub struct RunScriptParams {
 impl McpServer {
   #[tool(
     name = "run_script",
+    title = "Run Browser Script",
+    annotations(read_only_hint = false, open_world_hint = true),
     description = "Execute JavaScript in a sandboxed QuickJS runtime against the current session. \
     Provide `source` (inline JS) or `path` (a .js/.mjs file under script_root) — exactly one. \
     Use `path` to iterate on a saved script: edit the file, re-invoke, no need to resend the body. \
@@ -103,11 +105,18 @@ impl McpServer {
     On `error`, the payload includes message, stack, line, column, and a source snippet around the failure. \
     Pair with snapshot/screenshot tools when the LLM needs to ground selectors before acting."
   )]
-  async fn run_script(&self, Parameters(p): Parameters<RunScriptParams>) -> Result<CallToolResult, ErrorData> {
+  async fn run_script(
+    &self,
+    Parameters(p): Parameters<RunScriptParams>,
+    meta: rmcp::model::Meta,
+    peer: rmcp::service::Peer<rmcp::RoleServer>,
+  ) -> Result<CallToolResult, ErrorData> {
     let session = sess(p.session.as_ref()).to_string();
+    let token = meta.get_progress_token();
     // Serialize per-session: a concurrent run_script / extension / navigation
     // call on the same session must not interleave browser state.
     let guard = self.session_guard(&session).await;
+    McpServer::emit_progress(&peer, token.as_ref(), 0.0, Some(1.0), "executing script").await;
 
     let Some(sandbox) = self.script_sandbox.clone() else {
       return Err(McpServer::err(
@@ -202,14 +211,16 @@ impl McpServer {
 
     // Build the return: one JSON text block is the mechanical payload the
     // caller (often an LLM) parses. Well-formed per ScriptResult's schema.
-    let mut contents = vec![Content::text(json)];
+    let mut contents = vec![ContentBlock::text(json)];
 
     // On error, also surface a short human-readable summary so LLMs that skim
     // tool output see the failure reason without parsing JSON.
     if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
       let summary = format!("[{}] {} ({}ms)", error.kind, error.message, result.duration_ms);
-      contents.insert(0, Content::text(summary));
+      contents.insert(0, ContentBlock::text(summary));
     }
+
+    McpServer::emit_progress(&peer, token.as_ref(), 1.0, Some(1.0), "done").await;
 
     // We always return success at the MCP layer and let the caller inspect
     // `status` in the payload; a thrown script error is not an MCP error.

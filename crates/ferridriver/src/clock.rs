@@ -295,8 +295,14 @@ pub fn parse_ticks(ticks: &ClockTicks) -> Result<f64> {
 }
 
 /// `server/clock.ts::parseTime` — number passes through (epoch ms); a
-/// string parses as a date (ferridriver supports the ISO-8601 shapes:
-/// `YYYY-MM-DD`, `YYYY-MM-DD[T ]HH:MM[:SS[.mmm]][Z|±HH:MM]`).
+/// string parses as a date. Playwright feeds the string to JS
+/// `new Date(...)`, so beyond ISO-8601 (`YYYY-MM-DD`,
+/// `YYYY-MM-DD[T ]HH:MM[:SS[.mmm]][Z|±HH:MM]`) the common V8 shapes are
+/// accepted: month-name forms ("Feb 1 2024", "1 February 2024",
+/// "Mon Feb 01 2024 10:30:15", "Thu, 01 Feb 2024 10:30:00 GMT"),
+/// slash dates ("2024/02/01", "02/01/2024" US order), each with an
+/// optional `HH:MM[:SS[.mmm]]` time and `GMT`/`UTC`/`Z`/`±HH[:]MM`
+/// designator.
 ///
 /// # Errors
 ///
@@ -304,9 +310,9 @@ pub fn parse_ticks(ticks: &ClockTicks) -> Result<f64> {
 pub fn parse_time(time: &ClockTime) -> Result<f64> {
   match time {
     ClockTime::Millis(ms) => Ok(*ms),
-    ClockTime::Text(text) => {
-      parse_iso_date_ms(text).ok_or_else(|| FerriError::invalid_argument("time", format!("Invalid date: {text}")))
-    },
+    ClockTime::Text(text) => parse_iso_date_ms(text)
+      .or_else(|| parse_human_date_ms(text))
+      .ok_or_else(|| FerriError::invalid_argument("time", format!("Invalid date: {text}"))),
   }
 }
 
@@ -346,57 +352,203 @@ fn parse_iso_date_ms(text: &str) -> Option<f64> {
         _ => (rest, ""),
       },
     };
-    let (hms, frac) = match time_part.find('.') {
-      Some(idx) => time_part.split_at(idx),
-      None => (time_part, ""),
-    };
-    let hms_parts: Vec<&str> = hms.split(':').collect();
-    if hms_parts.len() < 2 || hms_parts.len() > 3 {
-      return None;
-    }
-    hour = hms_parts[0].parse().ok()?;
-    minute = hms_parts[1].parse().ok()?;
-    second = if hms_parts.len() == 3 {
-      hms_parts[2].parse().ok()?
-    } else {
-      0
-    };
-    if hour > 23 || minute > 59 || second > 60 {
-      return None;
-    }
-    if !frac.is_empty() {
-      let digits = &frac[1..];
-      if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-      }
-      let f: f64 = format!("0.{digits}").parse().ok()?;
-      millis = f * 1000.0;
-    }
+    (hour, minute, second, millis) = parse_hms(time_part)?;
     match tz_part.chars().next() {
       None => {},
       Some('Z' | 'z') if tz_part.len() == 1 => {},
-      Some(sign @ ('+' | '-')) => {
-        let tz = &tz_part[1..];
-        let (oh, om) = match tz.find(':') {
-          Some(idx) => (tz[..idx].parse::<i64>().ok()?, tz[idx + 1..].parse::<i64>().ok()?),
-          None if tz.len() == 4 => (tz[..2].parse::<i64>().ok()?, tz[2..].parse::<i64>().ok()?),
-          None if tz.len() == 2 => (tz.parse::<i64>().ok()?, 0),
-          _ => return None,
-        };
-        offset_minutes = oh * 60 + om;
-        if sign == '-' {
-          offset_minutes = -offset_minutes;
-        }
-      },
+      Some('+' | '-') => offset_minutes = parse_tz_offset(tz_part)?,
       _ => return None,
     }
   }
+  Some(civil_to_utc_ms(
+    year,
+    month,
+    day,
+    (hour, minute, second, millis),
+    offset_minutes,
+  ))
+}
+
+/// `HH:MM[:SS[.fraction]]` → (hour, minute, second, millis).
+fn parse_hms(time_part: &str) -> Option<(u32, u32, u32, f64)> {
+  let (hms, frac) = match time_part.find('.') {
+    Some(idx) => time_part.split_at(idx),
+    None => (time_part, ""),
+  };
+  let hms_parts: Vec<&str> = hms.split(':').collect();
+  if hms_parts.len() < 2 || hms_parts.len() > 3 {
+    return None;
+  }
+  let hour: u32 = hms_parts[0].parse().ok()?;
+  let minute: u32 = hms_parts[1].parse().ok()?;
+  let second: u32 = if hms_parts.len() == 3 {
+    hms_parts[2].parse().ok()?
+  } else {
+    0
+  };
+  if hour > 23 || minute > 59 || second > 60 {
+    return None;
+  }
+  let mut millis = 0.0;
+  if !frac.is_empty() {
+    let digits = &frac[1..];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+      return None;
+    }
+    let f: f64 = format!("0.{digits}").parse().ok()?;
+    millis = f * 1000.0;
+  }
+  Some((hour, minute, second, millis))
+}
+
+/// `±HH:MM` / `±HHMM` / `±HH` → signed minutes east of UTC.
+fn parse_tz_offset(tz_part: &str) -> Option<i64> {
+  let sign = tz_part.chars().next()?;
+  if sign != '+' && sign != '-' {
+    return None;
+  }
+  let tz = &tz_part[1..];
+  let (oh, om) = match tz.find(':') {
+    Some(idx) => (tz[..idx].parse::<i64>().ok()?, tz[idx + 1..].parse::<i64>().ok()?),
+    None if tz.len() == 4 => (tz[..2].parse::<i64>().ok()?, tz[2..].parse::<i64>().ok()?),
+    None if tz.len() == 2 => (tz.parse::<i64>().ok()?, 0),
+    _ => return None,
+  };
+  let mut offset_minutes = oh * 60 + om;
+  if sign == '-' {
+    offset_minutes = -offset_minutes;
+  }
+  Some(offset_minutes)
+}
+
+fn civil_to_utc_ms(year: i64, month: u32, day: u32, hms: (u32, u32, u32, f64), offset_minutes: i64) -> f64 {
+  let (hour, minute, second, millis) = hms;
   let days = days_from_civil(year, month, day);
   let secs = days * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second);
   // Civil-date seconds stay far below 2^53 — exact in f64.
   #[allow(clippy::cast_precision_loss)]
   let utc_ms = secs as f64 * 1000.0 + millis - (offset_minutes as f64) * 60_000.0;
-  Some(utc_ms)
+  utc_ms
+}
+
+/// The common non-ISO shapes V8's `new Date(string)` accepts — month
+/// names ("Feb 1 2024", "1 February 2024"), an optional weekday prefix
+/// ("Mon Feb 01 2024 ...", "Thu, 01 Feb 2024 10:30:00 GMT"), and slash
+/// dates ("2024/02/01", "02/01/2024" in US month/day/year order) —
+/// each with an optional `HH:MM[:SS[.mmm]]` time and a
+/// `GMT`/`UTC`(`±HH[:]MM`) / `Z` / bare `±HH[:]MM` designator.
+/// Designator-less strings are UTC (same TZ-stability policy as the
+/// ISO parser above).
+fn parse_human_date_ms(text: &str) -> Option<f64> {
+  let cleaned = text.replace(',', " ");
+  let mut tokens: Vec<&str> = cleaned.split_whitespace().collect();
+  if tokens.first().is_some_and(|t| weekday_from_name(t)) {
+    tokens.remove(0);
+  }
+  if tokens.is_empty() {
+    return None;
+  }
+
+  let (year, month, day): (i64, u32, u32);
+  let rest: &[&str];
+  if tokens[0].contains('/') {
+    let parts: Vec<&str> = tokens[0].split('/').collect();
+    if parts.len() != 3 {
+      return None;
+    }
+    if parts[0].len() == 4 {
+      year = parts[0].parse().ok()?;
+      month = parts[1].parse().ok()?;
+      day = parts[2].parse().ok()?;
+    } else {
+      // JS reads all-numeric slash dates as US month/day/year.
+      month = parts[0].parse().ok()?;
+      day = parts[1].parse().ok()?;
+      year = parts[2].parse().ok()?;
+    }
+    rest = &tokens[1..];
+  } else if let Some(m) = month_from_name(tokens[0]) {
+    month = m;
+    day = tokens.get(1)?.parse().ok()?;
+    year = tokens.get(2)?.parse().ok()?;
+    rest = tokens.get(3..).unwrap_or(&[]);
+  } else if let Some(m) = tokens.get(1).and_then(|t| month_from_name(t)) {
+    day = tokens[0].parse().ok()?;
+    month = m;
+    year = tokens.get(2)?.parse().ok()?;
+    rest = tokens.get(3..).unwrap_or(&[]);
+  } else {
+    return None;
+  }
+  if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    return None;
+  }
+
+  let (mut hour, mut minute, mut second, mut millis): (u32, u32, u32, f64) = (0, 0, 0, 0.0);
+  let mut offset_minutes: i64 = 0;
+  let mut saw_time = false;
+  for tok in rest {
+    if !saw_time && tok.contains(':') && tok.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+      (hour, minute, second, millis) = parse_hms(tok)?;
+      saw_time = true;
+      continue;
+    }
+    let upper = tok.to_ascii_uppercase();
+    if upper == "Z" {
+      continue;
+    }
+    let after_name = upper.strip_prefix("GMT").or_else(|| upper.strip_prefix("UTC"));
+    match after_name {
+      Some("") => {},
+      Some(off) => offset_minutes = parse_tz_offset(off)?,
+      None if upper.starts_with('+') || upper.starts_with('-') => offset_minutes = parse_tz_offset(&upper)?,
+      None => return None,
+    }
+  }
+  Some(civil_to_utc_ms(
+    year,
+    month,
+    day,
+    (hour, minute, second, millis),
+    offset_minutes,
+  ))
+}
+
+fn month_from_name(token: &str) -> Option<u32> {
+  const MONTHS: [&str; 12] = [
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+  ];
+  let t = token.to_ascii_lowercase();
+  if t.len() < 3 {
+    return None;
+  }
+  let idx = MONTHS.iter().position(|m| m.starts_with(&t))?;
+  Some(u32::try_from(idx).ok()? + 1)
+}
+
+fn weekday_from_name(token: &str) -> bool {
+  const DAYS: [&str; 7] = [
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+  ];
+  let t = token.to_ascii_lowercase();
+  t.len() >= 3 && DAYS.iter().any(|d| d.starts_with(&t))
 }
 
 /// Howard Hinnant's `days_from_civil`: Gregorian date → days since the
@@ -452,5 +604,49 @@ mod tests {
   fn time_rejects_garbage() {
     assert!(parse_time(&ClockTime::Text("not a date".into())).is_err());
     assert!(parse_time(&ClockTime::Text("2024-13-01".into())).is_err());
+    assert!(parse_time(&ClockTime::Text("Foo 1 2024".into())).is_err());
+    assert!(parse_time(&ClockTime::Text("Feb 1".into())).is_err());
+    assert!(parse_time(&ClockTime::Text("Feb 32 2024".into())).is_err());
+  }
+
+  const FEB1_2024: f64 = 1_706_745_600_000.0;
+
+  #[test]
+  fn time_parses_month_name_shapes() {
+    for text in [
+      "Feb 1 2024",
+      "February 1, 2024",
+      "1 Feb 2024",
+      "1 February 2024",
+      "Thu Feb 01 2024",
+      "Thu, 01 Feb 2024",
+    ] {
+      let ms = parse_time(&ClockTime::Text(text.into())).unwrap();
+      assert!((ms - FEB1_2024).abs() < f64::EPSILON, "{text} -> {ms}");
+    }
+  }
+
+  #[test]
+  fn time_parses_month_name_with_time_and_zone() {
+    let plain = parse_time(&ClockTime::Text("Feb 1 2024 10:30".into())).unwrap();
+    assert!((plain - (FEB1_2024 + 10.5 * 3_600_000.0)).abs() < f64::EPSILON);
+    let seconds = parse_time(&ClockTime::Text("Mon Feb 01 2024 10:30:15".into())).unwrap();
+    assert!((seconds - (FEB1_2024 + 10.5 * 3_600_000.0 + 15_000.0)).abs() < f64::EPSILON);
+    let gmt = parse_time(&ClockTime::Text("Thu, 01 Feb 2024 10:30:00 GMT".into())).unwrap();
+    assert!((gmt - (FEB1_2024 + 10.5 * 3_600_000.0)).abs() < f64::EPSILON);
+    let offset = parse_time(&ClockTime::Text("Feb 1 2024 10:30 GMT+01:00".into())).unwrap();
+    assert!((offset - (FEB1_2024 + 9.5 * 3_600_000.0)).abs() < f64::EPSILON);
+    let bare_offset = parse_time(&ClockTime::Text("Feb 1 2024 10:30 -0200".into())).unwrap();
+    assert!((bare_offset - (FEB1_2024 + 12.5 * 3_600_000.0)).abs() < f64::EPSILON);
+  }
+
+  #[test]
+  fn time_parses_slash_shapes() {
+    let ymd = parse_time(&ClockTime::Text("2024/02/01".into())).unwrap();
+    assert!((ymd - FEB1_2024).abs() < f64::EPSILON);
+    let us = parse_time(&ClockTime::Text("02/01/2024".into())).unwrap();
+    assert!((us - FEB1_2024).abs() < f64::EPSILON);
+    let with_time = parse_time(&ClockTime::Text("02/01/2024 08:00".into())).unwrap();
+    assert!((with_time - (FEB1_2024 + 8.0 * 3_600_000.0)).abs() < f64::EPSILON);
   }
 }

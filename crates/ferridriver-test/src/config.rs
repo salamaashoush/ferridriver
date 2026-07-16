@@ -157,6 +157,13 @@ pub fn parse_common_cli_args() -> CliOverrides {
   overrides
 }
 
+/// Anchored, regex-escaped alternation matching exactly `ids` when run
+/// through the runner's grep filter.
+fn exact_id_alternation(ids: &[&str]) -> String {
+  let escaped: Vec<String> = ids.iter().map(|id| regex::escape(id)).collect();
+  format!("^(?:{})$", escaped.join("|"))
+}
+
 fn apply_env_overrides(overrides: &mut CliOverrides) {
   fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
@@ -173,6 +180,19 @@ fn apply_env_overrides(overrides: &mut CliOverrides) {
   if let Some(v) = env("FERRITEST_GREP") {
     overrides.grep = Some(v);
   }
+  // Exact-id selection file (newline-delimited full names). The
+  // `test --ui` bridge uses it for run-file / run-failed scopes: an
+  // env-var alternation of hundreds of escaped ids can blow past the
+  // kernel's env size limit (E2BIG), a file cannot. Wins over
+  // FERRITEST_GREP when both are set.
+  if let Some(path) = env("FERRITEST_ID_FILE") {
+    if let Ok(contents) = std::fs::read_to_string(&path) {
+      let ids: Vec<&str> = contents.lines().filter(|line| !line.trim().is_empty()).collect();
+      if !ids.is_empty() {
+        overrides.grep = Some(exact_id_alternation(&ids));
+      }
+    }
+  }
   if let Some(v) = env("FERRITEST_TAG") {
     overrides.tag = Some(v);
   }
@@ -181,6 +201,9 @@ fn apply_env_overrides(overrides: &mut CliOverrides) {
   }
   if let Some(v) = env("FERRITEST_TIMEOUT") {
     overrides.timeout = v.parse().ok();
+  }
+  if env("FERRITEST_LIST").is_some_and(|v| v != "0" && v != "false") {
+    overrides.list_only = true;
   }
 }
 

@@ -331,6 +331,27 @@ pub struct TestArgs {
   #[arg(long)]
   pub retries: Option<u32>,
 
+  /// Watch mode: run the tests, then re-run the same command whenever a
+  /// `.rs` file changes (`testIgnore` patterns from the config are
+  /// excluded). A change arriving mid-run queues one re-run after the
+  /// current cycle finishes.
+  #[arg(long, conflicts_with = "ui")]
+  pub watch: bool,
+
+  /// UI mode: serve a localhost web app that lists ferritest harness
+  /// tests, streams live results, and refreshes on file changes or
+  /// in-app commands. Each cycle respawns `cargo test` (nextest cannot
+  /// enumerate ferritest harness binaries); harness binaries stream
+  /// events back over a unix socket. Filtering happens in-app, so
+  /// --grep and positional filters conflict with this flag.
+  #[arg(long, conflicts_with_all = ["filter", "grep", "passthrough"])]
+  pub ui: bool,
+
+  /// Port for the --ui server (defaults to an ephemeral free port;
+  /// the chosen URL is printed on startup).
+  #[arg(long, requires = "ui")]
+  pub ui_port: Option<u16>,
+
   /// Pass remaining arguments through to the underlying runner.
   #[arg(last = true)]
   pub passthrough: Vec<String>,

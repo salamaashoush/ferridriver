@@ -895,6 +895,14 @@ impl BidiPage {
 
   // ── Elements ────────────────────────────────────────────────────────────
 
+  /// Stable page identity for request attribution — the top-level
+  /// browsing-context id, same value the network tracker stamps on
+  /// captured requests.
+  #[must_use]
+  pub fn page_guid(&self) -> String {
+    self.context_id.to_string()
+  }
+
   pub async fn find_element(&self, selector: &str) -> Result<AnyElement> {
     self.ensure_engine_injected().await?;
     // `find_element` is a non-strict path (used by raw page.locator
@@ -1941,6 +1949,7 @@ impl BidiPage {
     let exposed_ctx = self.context_id.clone();
     let tracker = Arc::new(BidiNetworkTracker::new(
       self.session.clone(),
+      self.context_id.clone(),
       self.nav_request_slot.clone(),
     ));
 
@@ -2651,20 +2660,17 @@ impl BidiPage {
 
   // ── File upload ─────────────────────────────────────────────────────────
 
-  pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<()> {
-    // Find the element, then use input.setFiles
-    let elem = self.find_element(selector).await?;
-    let shared_id = match &elem {
-      AnyElement::Bidi(e) => e.shared_id.clone(),
-      _ => return Err(FerriError::backend("set_file_input: non-BiDi element on BiDi backend")),
-    };
-
+  /// Set the file list on a resolved `<input type=file>` element via
+  /// BiDi `input.setFiles` (Playwright's `bidiPage.ts::setInputFilePaths`).
+  /// The element's owning context is used so iframe-scoped inputs
+  /// resolve in their own browsing context.
+  pub async fn set_input_files_element(&self, element: &super::BidiElement, paths: &[String]) -> Result<()> {
     self
       .cmd(
         "input.setFiles",
         json!({
-          "context": &*self.context_id,
-          "element": {"sharedId": shared_id},
+          "context": &*element.context_id,
+          "element": {"sharedId": element.shared_id},
           "files": paths
         }),
       )
@@ -3336,15 +3342,24 @@ fn collect_frames(ctx: &serde_json::Value, parent_id: Option<&str>, frames: &mut
 /// `FerriError::Unsupported` per Rule 4 instead of dangling indefinitely.
 struct BidiNetworkTracker {
   session: Arc<super::session::BidiSession>,
+  /// Owning page's top-level browsing-context id — stamped on every
+  /// captured `Request` as its `page_guid` for context-level page
+  /// attribution.
+  context_id: Arc<str>,
   requests: tokio::sync::Mutex<FxHashMap<String, NetworkRequest>>,
   responses: tokio::sync::Mutex<FxHashMap<String, Response>>,
   nav_request_slot: crate::network::NavRequestSlot,
 }
 
 impl BidiNetworkTracker {
-  fn new(session: Arc<super::session::BidiSession>, nav_request_slot: crate::network::NavRequestSlot) -> Self {
+  fn new(
+    session: Arc<super::session::BidiSession>,
+    context_id: Arc<str>,
+    nav_request_slot: crate::network::NavRequestSlot,
+  ) -> Self {
     Self {
       session,
+      context_id,
       requests: tokio::sync::Mutex::new(FxHashMap::default()),
       responses: tokio::sync::Mutex::new(FxHashMap::default()),
       nav_request_slot,
@@ -3412,6 +3427,7 @@ impl BidiNetworkTracker {
       post_data,
       headers,
       frame_id,
+      page_guid: Some(self.context_id.to_string()),
       redirected_from,
       // BiDi event `timestamp` is epoch milliseconds.
       timing: params
@@ -3740,6 +3756,13 @@ async fn execute_bidi_route_action(
     crate::route::RouteAction::Abort(_reason) => {
       let _ = transport
         .send_command("network.failRequest", json!({"request": request_id}))
+        .await;
+    },
+    // Chain-internal marker; never emitted as a terminal action. Fail
+    // open like an unhandled route if it ever leaks.
+    crate::route::RouteAction::PredicateRejected => {
+      let _ = transport
+        .send_command("network.continueRequest", json!({"request": request_id}))
         .await;
     },
   }
