@@ -3082,7 +3082,7 @@ impl Page {
   /// responses from a HAR file (plain `.har` or `.zip` archive) for
   /// matching requests, or with `update: true` record this page's
   /// traffic into the file instead (written when the owning context
-  /// closes, like Playwright's HarTracer page-filtered recorder).
+  /// closes, like Playwright's `HarTracer` page-filtered recorder).
   ///
   /// # Errors
   ///

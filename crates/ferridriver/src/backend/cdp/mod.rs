@@ -1404,7 +1404,7 @@ impl DragManagerState {
   }
 
   fn pressed_buttons(&self) -> u32 {
-    self.buttons.lock().map(|g| *g).unwrap_or(0)
+    self.buttons.lock().map_or(0, |g| *g)
   }
 
   fn update_buttons(&self, f: impl FnOnce(&mut u32)) -> u32 {

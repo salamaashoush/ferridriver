@@ -1538,6 +1538,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "libc",
+ "regex",
  "rolldown",
  "rolldown_common",
  "rolldown_plugin",

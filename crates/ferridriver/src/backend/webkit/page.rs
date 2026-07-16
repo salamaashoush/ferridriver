@@ -1824,7 +1824,7 @@ impl WebKitPage {
   /// Set the file list on a resolved `<input type=file>` element.
   /// Mirrors Playwright's `wkPage.ts::setInputFilePaths`, which pairs
   /// the target-session `DOM.setInputFiles` with a browser-session
-  /// `Playwright.grantFileReadAccess` so the sandboxed WebKit process
+  /// `Playwright.grantFileReadAccess` so the sandboxed `WebKit` process
   /// is allowed to read the payload bytes when the page later touches
   /// `input.files[i]`.
   pub async fn set_input_files_element(&self, element: &super::WebKitElement, paths: &[String]) -> Result<()> {

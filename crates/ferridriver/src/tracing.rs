@@ -69,7 +69,7 @@ pub struct HarRecorder {
   pub start_len: usize,
   /// When set, only requests whose capture-time `page_guid` matches are
   /// written — the page-scoped `page.routeFromHAR({update: true})`
-  /// recorder (Playwright's HarTracer `page` filter).
+  /// recorder (Playwright's `HarTracer` `page` filter).
   pub page_filter: Option<String>,
 }
 

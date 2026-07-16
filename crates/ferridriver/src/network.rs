@@ -169,7 +169,7 @@ pub(crate) struct RequestState {
   provisional_headers: Headers,
   frame_id: Option<String>,
   /// Stable identity of the page whose listener captured this request
-  /// (CDP `targetId` / WebKit `pageProxyId` / BiDi top-level context
+  /// (CDP `targetId` / `WebKit` `pageProxyId` / `BiDi` top-level context
   /// id). Stamped at capture time so context-level consumers (HAR
   /// `pages`/`pageref`, page-scoped `routeFromHAR({update})`) can
   /// attribute entries without a frame-to-page reverse lookup.

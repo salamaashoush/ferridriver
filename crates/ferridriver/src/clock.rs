@@ -472,13 +472,11 @@ fn parse_human_date_ms(text: &str) -> Option<f64> {
     day = tokens.get(1)?.parse().ok()?;
     year = tokens.get(2)?.parse().ok()?;
     rest = tokens.get(3..).unwrap_or(&[]);
-  } else if let Some(m) = tokens.get(1).and_then(|t| month_from_name(t)) {
+  } else {
+    month = tokens.get(1).and_then(|t| month_from_name(t))?;
     day = tokens[0].parse().ok()?;
-    month = m;
     year = tokens.get(2)?.parse().ok()?;
     rest = tokens.get(3..).unwrap_or(&[]);
-  } else {
-    return None;
   }
   if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
     return None;

@@ -248,7 +248,7 @@ impl JsBddSession {
     let vm = session.vm_handle();
     eval_bundle(&vm, &bundle)
       .await
-      .map_err(|e| anyhow::anyhow!("step bundle failed to load: {}", fmt_script_error(&bundle, &e)))?;
+      .map_err(|e| anyhow::anyhow!("step bundle failed to load: {}", bundle.format_error(&e)))?;
     let snapshot = collect_registry(&vm)
       .await
       .map_err(|e| anyhow::anyhow!("collect registry: {}", e.message))?;
@@ -326,7 +326,7 @@ impl JsBddSession {
         continue;
       }
       if let Err(e) = invoke_hook(&vm, idx, arg, &self.bundle.module_name).await {
-        return Err(fmt_script_error(&self.bundle, &e));
+        return Err(self.bundle.format_error(&e));
       }
     }
     Ok(())
@@ -591,7 +591,7 @@ fn js_step_handler(vm: VmHandle, idx: usize, bundle: Arc<CompiledBundle>) -> Ste
       {
         Ok(StepOutcome::Passed | StepOutcome::Skipped) => Ok(()),
         Ok(StepOutcome::Pending) => Err(StepError::pending("step returned 'pending'")),
-        Err(e) => Err(StepError::from(fmt_script_error(&bundle, &e))),
+        Err(e) => Err(StepError::from(bundle.format_error(&e))),
       }
     })
   })
@@ -607,55 +607,6 @@ fn step_param_to_jsarg(p: &StepParam) -> JsArg {
       raw: value.clone(),
     },
   }
-}
-
-fn fmt_script_error(bundle: &CompiledBundle, e: &ferridriver_script::ScriptError) -> String {
-  let mut m = e.message.clone();
-  // Remap the bundled-output position back to the original .ts/.js
-  // source via the rolldown source map.
-  if let Some(line) = e.line {
-    let col = e.column.unwrap_or(1);
-    if let Some((src, sl, sc)) = bundle.remap(line, col) {
-      m.push_str(&format!(" (at {src}:{sl}:{sc})"));
-    } else {
-      m.push_str(&format!(" (at {}:{line}:{col})", bundle.module_name));
-    }
-  }
-  if let Some(snippet) = &e.source_snippet {
-    m.push('\n');
-    m.push_str(snippet);
-  }
-  // QuickJS does not expose `lineNumber` as an own property on a plain
-  // `throw new Error(...)`; the location lives in the stack. Remap each
-  // `<bundle>:line:col` frame back to the original .ts/.js source.
-  if let Some(stack) = &e.stack {
-    let stack = stack.trim_end();
-    if !stack.is_empty() {
-      m.push('\n');
-      m.push_str(&remap_stack(bundle, stack));
-    }
-  }
-  m
-}
-
-/// Rewrite `ferridriver-bdd-steps.js:LINE:COL` occurrences in a JS stack
-/// to the original source location via the rolldown source map.
-fn remap_stack(bundle: &CompiledBundle, stack: &str) -> String {
-  use std::sync::OnceLock;
-
-  use regex::Regex;
-  static RE: OnceLock<Regex> = OnceLock::new();
-  let re = RE.get_or_init(|| Regex::new(r"([^\s()]+):(\d+):(\d+)").expect("valid stack regex"));
-  re.replace_all(stack, |caps: &regex::Captures<'_>| {
-    let (Ok(line), Ok(col)) = (caps[2].parse::<u32>(), caps[3].parse::<u32>()) else {
-      return caps[0].to_string();
-    };
-    match bundle.remap(line, col) {
-      Some((src, sl, sc)) => format!("{src}:{sl}:{sc}"),
-      None => caps[0].to_string(),
-    }
-  })
-  .into_owned()
 }
 
 // ── Per-worker session cache + TestRunner integration ────────────────

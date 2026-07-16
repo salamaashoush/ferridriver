@@ -2661,7 +2661,7 @@ impl BidiPage {
   // ── File upload ─────────────────────────────────────────────────────────
 
   /// Set the file list on a resolved `<input type=file>` element via
-  /// BiDi `input.setFiles` (Playwright's `bidiPage.ts::setInputFilePaths`).
+  /// `BiDi` `input.setFiles` (Playwright's `bidiPage.ts::setInputFilePaths`).
   /// The element's owning context is used so iframe-scoped inputs
   /// resolve in their own browsing context.
   pub async fn set_input_files_element(&self, element: &super::BidiElement, paths: &[String]) -> Result<()> {

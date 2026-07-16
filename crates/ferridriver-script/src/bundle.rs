@@ -279,11 +279,30 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<(Strin
 /// shared utils resolved + tree-shaken) into one ESM module and compile
 /// it to bytecode. Done once, before workers spawn.
 pub async fn bundle_and_compile(entry_paths: &[PathBuf], cwd: &Path) -> Result<CompiledBundle, ScriptError> {
-  let module_name = "ferridriver-bdd-steps.js".to_string();
+  bundle_and_compile_named(entry_paths, cwd, "ferridriver-bdd-steps.js").await
+}
+
+/// [`bundle_and_compile`] with a caller-chosen bundle module name, so
+/// error locations and stack frames carry a label matching the host
+/// (e.g. `ferridriver-tests.js` for the test runner).
+pub async fn bundle_and_compile_named(
+  entry_paths: &[PathBuf],
+  cwd: &Path,
+  module_name: &str,
+) -> Result<CompiledBundle, ScriptError> {
+  let module_name = module_name.to_string();
 
   // Disk cache: an unchanged source tree skips rolldown AND the QuickJS
   // compile. Validated against every transitive input's content hash.
-  let cache_key = crate::bytecode_cache::entry_key("bundle", entry_paths, bundler_shims().fingerprint());
+  // The module name participates in the key: it is baked into the
+  // written bytecode (QuickJS stores the module name), so two hosts
+  // bundling the same files under different labels must not share an
+  // entry.
+  let cache_key = crate::bytecode_cache::entry_key(
+    &format!("bundle:{module_name}"),
+    entry_paths,
+    bundler_shims().fingerprint(),
+  );
   if let Some(hit) = crate::bytecode_cache::load(cache_key) {
     let source_map = hit
       .source_map_json
@@ -379,6 +398,62 @@ impl CompiledBundle {
     let token = sm.lookup_token(line.saturating_sub(1), col.saturating_sub(1))?;
     let src = token.get_source().unwrap_or("<unknown>").to_string();
     Some((src, token.get_src_line() + 1, token.get_src_col() + 1))
+  }
+
+  /// Render a [`ScriptError`] with every bundled-output position
+  /// translated back to the original `.ts`/`.js` source: the primary
+  /// `line:col`, the source snippet, and each stack frame.
+  #[must_use]
+  pub fn format_error(&self, e: &ScriptError) -> String {
+    use std::fmt::Write as _;
+
+    let mut m = e.message.clone();
+    if let Some(line) = e.line {
+      let col = e.column.unwrap_or(1);
+      if let Some((src, sl, sc)) = self.remap(line, col) {
+        let _ = write!(m, " (at {src}:{sl}:{sc})");
+      } else {
+        let _ = write!(m, " (at {}:{line}:{col})", self.module_name);
+      }
+    }
+    if let Some(snippet) = &e.source_snippet {
+      m.push('\n');
+      m.push_str(snippet);
+    }
+    // QuickJS does not expose `lineNumber` as an own property on a plain
+    // `throw new Error(...)`; the location lives in the stack. Remap each
+    // `<bundle>:line:col` frame back to the original .ts/.js source.
+    if let Some(stack) = &e.stack {
+      let stack = stack.trim_end();
+      if !stack.is_empty() {
+        m.push('\n');
+        m.push_str(&self.remap_stack(stack));
+      }
+    }
+    m
+  }
+
+  /// Rewrite `<bundle module>:LINE:COL` occurrences in a JS stack to the
+  /// original source location via the rolldown source map.
+  #[must_use]
+  pub fn remap_stack(&self, stack: &str) -> String {
+    use std::sync::OnceLock;
+
+    use regex::Regex;
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
+    let Some(re) = RE.get_or_init(|| Regex::new(r"([^\s()]+):(\d+):(\d+)").ok()) else {
+      return stack.to_string();
+    };
+    re.replace_all(stack, |caps: &regex::Captures<'_>| {
+      let (Ok(line), Ok(col)) = (caps[2].parse::<u32>(), caps[3].parse::<u32>()) else {
+        return caps[0].to_string();
+      };
+      match self.remap(line, col) {
+        Some((src, sl, sc)) => format!("{src}:{sl}:{sc}"),
+        None => caps[0].to_string(),
+      }
+    })
+    .into_owned()
   }
 
   /// Every source file that went into this bundle (entry + transitive

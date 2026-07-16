@@ -193,7 +193,7 @@ impl WebKitElement {
   }
 
   /// Set the file list on this `<input type=file>` element via the
-  /// WebKit Inspector protocol's `DOM.setInputFiles` (the method
+  /// `WebKit` Inspector protocol's `DOM.setInputFiles` (the method
   /// Playwright's `wkPage.ts::setInputFilePaths` uses), addressed by
   /// this handle's `objectId`.
   pub async fn set_input_files(&self, paths: &[String]) -> Result<()> {

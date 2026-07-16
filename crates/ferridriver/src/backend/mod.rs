@@ -1390,7 +1390,7 @@ impl AnyPage {
   /// through the selector engine in the owning frame immediately before
   /// this call, so a stale node surfaces as a retryable error and the
   /// locator funnel re-resolves. Dispatched through the page (not
-  /// `AnyElement`) because WebKit pairs the DOM call with a
+  /// `AnyElement`) because `WebKit` pairs the DOM call with a
   /// browser-session `Playwright.grantFileReadAccess`.
   pub async fn set_input_files_element(&self, element: &AnyElement, paths: &[String]) -> Result<()> {
     match (self, element) {
@@ -1424,8 +1424,8 @@ impl AnyPage {
   /// the protocol error if the attach fails.
   /// Stable identity of this page for capture-time request attribution
   /// — the same value the per-page network listener stamps on every
-  /// `Request::page_guid` (CDP `targetId` / WebKit `pageProxyId` /
-  /// BiDi top-level context id).
+  /// `Request::page_guid` (CDP `targetId` / `WebKit` `pageProxyId` /
+  /// `BiDi` top-level context id).
   #[must_use]
   pub fn page_guid(&self) -> String {
     match self {
