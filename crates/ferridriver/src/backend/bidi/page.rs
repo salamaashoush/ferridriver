@@ -224,6 +224,13 @@ fn f64_to_u64_saturating(n: f64) -> u64 {
 pub struct BidiPage {
   pub(crate) session: Arc<BidiSession>,
   pub(crate) context_id: Arc<str>,
+  /// Owning user context (`"default"` for the default context). Cookie
+  /// commands partition on `{type: "storageKey", userContext}` — the
+  /// browsing-context partition (`{type: "context"}`) makes Firefox
+  /// return each cookie once per matching storage key, duplicating
+  /// every entry in `storage.getCookies` (and Playwright's own `BiDi`
+  /// backend partitions on the user context for the same reason).
+  pub(crate) user_context: Arc<str>,
   pub events: EventEmitter,
   routes: Arc<RwLock<Vec<crate::route::RegisteredRoute>>>,
   intercept_ids: Arc<RwLock<Vec<String>>>,
@@ -375,7 +382,7 @@ impl InjectedScriptManager {
 impl BidiPage {
   /// Create a new `BidiPage` and enable required domains (inject engine, etc.).
   /// This is the `BiDi` equivalent of CDP's `enable_domains()`.
-  pub(crate) fn create(session: Arc<BidiSession>, context_id: String) -> Result<Self> {
+  pub(crate) fn create(session: Arc<BidiSession>, context_id: String, user_context: Option<&str>) -> Result<Self> {
     // BiDi handles navigation-aware injection via script.addPreloadScript.
     // Domain enables are deferred (lazy injection), unlike CDP's upfront enable_domains().
     let downloads_dir = tempfile::Builder::new()
@@ -385,6 +392,7 @@ impl BidiPage {
     Ok(Self {
       session,
       context_id: Arc::from(context_id),
+      user_context: Arc::from(user_context.unwrap_or("default")),
       events: EventEmitter::new(),
       routes: Arc::new(RwLock::new(Vec::new())),
       intercept_ids: Arc::new(RwLock::new(Vec::new())),
@@ -1323,18 +1331,34 @@ impl BidiPage {
     Ok(())
   }
 
-  /// `BiDi` has no public touch `pointerType` in the stable spec — the
-  /// `input.performActions` `pointerType` union is `'mouse' | 'pen'`
-  /// only. Playwright's own `BiDi` backend leaves `tap` unimplemented
-  /// for the same reason. Returns a typed `unsupported:` error that
-  /// the caller surfaces as [`crate::error::FerriError::Unsupported`].
-  #[allow(clippy::unused_async, clippy::unused_async_trait_impl, clippy::unused_self)]
-  pub async fn tap_at_with(&self, _x: f64, _y: f64, _args: &super::super::BackendTapArgs) -> Result<()> {
-    Err(FerriError::unsupported(
-      "tap is not available on the BiDi backend — WebDriver BiDi's input.performActions \
-         pointerType has no 'touch' value in the stable spec (Playwright's own BiDi backend leaves \
-         Touchscreen unimplemented for the same reason). Use the cdp-pipe or cdp-raw backend for tap.",
-    ))
+  /// Native tap via `input.performActions` with a `touch` pointer
+  /// source (`pointerType: "touch"` is in the `WebDriver` `BiDi`
+  /// `Input.PointerType` union; Playwright's own `BiDi` backend leaves
+  /// `Touchscreen.tap` an empty stub, but the wire supports it).
+  /// Firefox dispatches trusted `pointerdown`/`pointerup` with
+  /// `pointerType === 'touch'` plus real `touchstart`/`touchend` and
+  /// the compatibility mouse sequence.
+  ///
+  /// Modifier keys are the one gap: the caller's
+  /// [`Self::press_modifiers`] holds them on the shared key source
+  /// (which Firefox applies to mouse-pointer events), but Firefox does
+  /// not propagate key-source modifier state onto touch-pointer events
+  /// — `e.shiftKey` stays false on every event of the tap sequence
+  /// (verified empirically; the `BiDi` wire has no per-action modifier
+  /// field to express it differently). Surface that as a typed error
+  /// instead of silently dropping the requested modifiers.
+  pub async fn tap_at_with(&self, x: f64, y: f64, args: &super::super::BackendTapArgs) -> Result<()> {
+    if args.modifiers_bitmask != 0 {
+      return Err(FerriError::unsupported(
+        "tap with modifiers is not available on the BiDi backend — Firefox does not apply \
+         key-source modifier state to touch-pointer events, so the requested modifiers would be \
+         silently dropped (plain tap works; WebDriver BiDi has no per-action modifier field).",
+      ));
+    }
+    self
+      .cmd("input.performActions", input::tap(&self.context_id, x, y))
+      .await?;
+    Ok(())
   }
 
   pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
@@ -1440,12 +1464,18 @@ impl BidiPage {
 
   // ── Cookies ─────────────────────────────────────────────────────────────
 
+  /// Cookie partition descriptor: the owning user context's storage key
+  /// (see the `user_context` field for why not `{type: "context"}`).
+  fn cookie_partition(&self) -> serde_json::Value {
+    json!({"type": "storageKey", "userContext": &*self.user_context})
+  }
+
   pub async fn get_cookies(&self) -> Result<Vec<CookieData>> {
     let result = self
       .cmd(
         "storage.getCookies",
         json!({
-          "partition": {"type": "context", "context": &*self.context_id}
+          "partition": self.cookie_partition()
         }),
       )
       .await?;
@@ -1509,7 +1539,7 @@ impl BidiPage {
         "storage.setCookie",
         json!({
           "cookie": cookie_obj,
-          "partition": {"type": "context", "context": &*self.context_id}
+          "partition": self.cookie_partition()
         }),
       )
       .await?;
@@ -1526,7 +1556,7 @@ impl BidiPage {
         "storage.deleteCookies",
         json!({
           "filter": filter,
-          "partition": {"type": "context", "context": &*self.context_id}
+          "partition": self.cookie_partition()
         }),
       )
       .await?;
@@ -1538,7 +1568,7 @@ impl BidiPage {
       .cmd(
         "storage.deleteCookies",
         json!({
-          "partition": {"type": "context", "context": &*self.context_id}
+          "partition": self.cookie_partition()
         }),
       )
       .await?;

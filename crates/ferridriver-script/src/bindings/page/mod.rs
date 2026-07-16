@@ -1125,15 +1125,20 @@ impl PageJs {
     self.inner.is_editable(&selector).await.into_js_with(&ctx)
   }
 
-  /// `page.viewportSize()`. Returns `{ width, height }` for the current
-  /// viewport. Playwright exposes this as a method (not a property).
+  /// Playwright: `page.viewportSize(): null | { width, height }` — a
+  /// synchronous accessor over the tracked emulated viewport; `null`
+  /// when no viewport emulation is applied.
   #[qjs(rename = "viewportSize")]
-  pub async fn viewport_size<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let (w, h) = self.inner.viewport_size().await.into_js_with(&ctx)?;
-    let obj = rquickjs::Object::new(ctx.clone())?;
-    obj.set("width", w)?;
-    obj.set("height", h)?;
-    Ok(obj.into_value())
+  pub fn viewport_size<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
+    match self.inner.viewport_size() {
+      None => Ok(rquickjs::Value::new_null(ctx)),
+      Some((w, h)) => {
+        let obj = rquickjs::Object::new(ctx.clone())?;
+        obj.set("width", w)?;
+        obj.set("height", h)?;
+        Ok(obj.into_value())
+      },
+    }
   }
 
   /// `page.context()`. Returns the `BrowserContext` this page belongs to.

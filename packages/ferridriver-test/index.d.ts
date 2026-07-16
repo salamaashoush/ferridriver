@@ -566,6 +566,15 @@ export interface Frame {
   content(): Promise<string>;
   title(): Promise<string>;
   locator(selectorOrLocator: string | Locator, options?: LocatorFilterOptions): Locator;
+  getByRole(role: string, options?: GetByRoleOptions): Locator;
+  getByText(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByLabel(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByPlaceholder(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByAltText(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByTitle(text: string | RegExp, options?: GetByTextOptions): Locator;
+  getByTestId(testId: string | RegExp): Locator;
+  frameLocator(selector: string): FrameLocator;
+  page(): Page;
   evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
   parentFrame(): Frame | null;
   childFrames(): Frame[];
@@ -712,6 +721,13 @@ export interface Page {
 
   evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
   evaluateHandle(pageFunction: Function | string, arg?: unknown): Promise<JSHandle>;
+  pause(): Promise<void>;
+  requestGC(): Promise<void>;
+  snapshotForAI(options?: { depth?: number; track?: string }): Promise<{ full: string; incremental?: string; refMap: Record<string, number> }>;
+  consoleMessages(options?: { filter?: 'all' | 'since-navigation' }): ConsoleMessage[];
+  clearConsoleMessages(): void;
+  pageErrors(options?: { filter?: 'all' | 'since-navigation' }): Error[];
+  clearPageErrors(): void;
   $(selector: string): Promise<ElementHandle | null>;
   $$(selector: string): Promise<ElementHandle[]>;
   $eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
@@ -746,15 +762,29 @@ export interface Page {
   setDefaultTimeout(timeout: number): void;
   setDefaultNavigationTimeout(timeout: number): void;
 
-  on(event: PageEvent, handler: (arg: unknown) => void): void;
-  once(event: PageEvent, handler: (arg: unknown) => void): void;
+  // on/once return a listener id (a ferridriver extension over
+  // Playwright's chainable emitter); off accepts either that id or the
+  // (event, listener) pair Playwright uses.
+  on(event: PageEvent, handler: (arg: unknown) => void): number;
+  once(event: PageEvent, handler: (arg: unknown) => void): number;
   off(event: PageEvent, handler: (arg: unknown) => void): void;
+  off(listenerId: number): void;
+  removeAllListeners(event?: PageEvent): void;
 
   keyboard: Keyboard;
   mouse: Mouse;
+  touchscreen: Touchscreen;
   clock: Clock;
   context(): BrowserContext;
   opener(): Promise<Page | null>;
+}
+
+export interface Touchscreen {
+  tap(x: number, y: number): Promise<void>;
+}
+
+export interface Disposable {
+  dispose(): Promise<void>;
 }
 
 export interface Cookie {
@@ -791,8 +821,11 @@ export interface BrowserContext {
   setExtraHTTPHeaders(headers: Record<string, string>): Promise<void>;
   storageState(options?: { path?: string }): Promise<StorageState>;
   addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown): Promise<void>;
-  exposeFunction(name: string, callback: Function): Promise<void>;
-  exposeBinding(name: string, callback: Function, options?: { handle?: boolean }): Promise<void>;
+  // Context-level expose returns a Disposable that unregisters the
+  // binding and removes the page-side window proxy (a ferridriver
+  // extension over Playwright's void return).
+  exposeFunction(name: string, callback: Function): Promise<Disposable>;
+  exposeBinding(name: string, callback: Function, options?: { handle?: boolean }): Promise<Disposable>;
   route(url: string | RegExp | ((url: URL) => boolean), handler: (route: Route, request: Request) => void | Promise<void>, options?: { times?: number }): Promise<void>;
   unroute(url: string | RegExp | ((url: URL) => boolean), handler?: (route: Route, request: Request) => void | Promise<void>): Promise<void>;
   unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;

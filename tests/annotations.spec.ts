@@ -41,10 +41,14 @@ test('runtime fail inverts result', async ({ page }) => {
 });
 
 test('runtime fail conditional', async ({ page, browserName }) => {
+  // On webkit the fail annotation arms AND the body throws (inverted to
+  // pass); everywhere else neither happens. Exercises both branches now
+  // that browserName reports the per-project browser.
   test.fail(browserName === 'webkit', 'expected to fail on webkit');
   await page.goto('data:text/html,<title>OK</title>');
   const title = await page.title();
   if (title !== 'OK') throw new Error(`unexpected: ${title}`);
+  if (browserName === 'webkit') throw new Error('intentional webkit failure — inverted to pass');
 });
 
 // ── Registration-time fail ──

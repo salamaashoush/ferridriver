@@ -252,6 +252,31 @@ pub fn modifiers_up(context: &str, mods: &[crate::options::Modifier]) -> serde_j
   })
 }
 
+/// Build a native tap: a `touch` pointer source performing
+/// `pointerMove` -> `pointerDown` -> `pointerUp` at `(x, y)`. The
+/// `WebDriver` `BiDi` `input.performActions` pointer parameters accept
+/// `pointerType: "touch"` (`Input.PointerType` in the spec, shared with
+/// `WebDriver` classic actions); Firefox dispatches pointer events with
+/// `pointerType === 'touch'` plus the compatibility mouse sequence.
+/// Modifier state is carried by a prior `modifiers_down` on the key
+/// source, same as click/hover.
+#[must_use]
+pub fn tap(context: &str, x: f64, y: f64) -> serde_json::Value {
+  json!({
+    "context": context,
+    "actions": [{
+      "type": "pointer",
+      "id": "touch",
+      "parameters": {"pointerType": "touch"},
+      "actions": [
+        {"type": "pointerMove", "x": coord(x), "y": coord(y), "duration": 0},
+        {"type": "pointerDown", "button": 0},
+        {"type": "pointerUp", "button": 0}
+      ]
+    }]
+  })
+}
+
 /// Build a pointer move action.
 #[must_use]
 pub fn pointer_move(context: &str, x: f64, y: f64) -> serde_json::Value {

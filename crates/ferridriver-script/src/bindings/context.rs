@@ -94,10 +94,9 @@ impl BrowserContextJs {
 
   /// Playwright: `context.clearCookies(options?)`. Without options
   /// clears every cookie; with `{ name?, domain?, path? }` only
-  /// cookies matching ALL specified filters are cleared. Filter
-  /// values are exact-match strings — Playwright's TS surface accepts
-  /// `string | RegExp` here too; regex filters are tracked under
-  /// "Section B" pending a Rust core extension.
+  /// cookies matching ALL specified filters are cleared. Each filter
+  /// is `string | RegExp` — exact match for strings, `.test()` for
+  /// regexes (Playwright's `server/browserContext.ts::clearCookies`).
   #[qjs(rename = "clearCookies")]
   pub async fn clear_cookies<'js>(
     &self,
@@ -108,17 +107,24 @@ impl BrowserContextJs {
       None => self.inner.clear_cookies().await.into_js_with(&ctx),
       Some(v) if v.is_undefined() || v.is_null() => self.inner.clear_cookies().await.into_js_with(&ctx),
       Some(v) => {
-        #[derive(serde::Deserialize, Default)]
-        struct Filter {
-          name: Option<String>,
-          domain: Option<String>,
-          path: Option<String>,
-        }
-        let parsed: Filter = crate::bindings::convert::serde_from_js(&ctx, v)?;
+        let obj = v.as_object().ok_or_else(|| {
+          rquickjs::Error::new_from_js_message(
+            "BrowserContext.clearCookies",
+            "options",
+            "expected an options object".to_string(),
+          )
+        })?;
+        let field = |key: &str| -> rquickjs::Result<Option<ferridriver::options::StringOrRegex>> {
+          let value: rquickjs::Value<'_> = obj.get(key)?;
+          if value.is_undefined() || value.is_null() {
+            return Ok(None);
+          }
+          crate::bindings::page::options::string_or_regex_from_js(value).map(Some)
+        };
         let core = ferridriver::backend::ClearCookieOptions {
-          name: parsed.name,
-          domain: parsed.domain,
-          path: parsed.path,
+          name: field("name")?,
+          domain: field("domain")?,
+          path: field("path")?,
         };
         self.inner.clear_cookies_filtered(&core).await.into_js_with(&ctx)
       },

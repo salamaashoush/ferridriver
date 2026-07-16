@@ -1179,9 +1179,10 @@ async fn quick_wins_tests() {
   let title = page.title().await.unwrap();
   assert_eq!(title, "Opts", "goto_with_options should work");
 
-  // ── viewport_size ──
-  let (w, h) = page.viewport_size().await.unwrap();
-  assert!(w > 0 && h > 0, "viewport should have positive dimensions: {w}x{h}");
+  // ── viewport_size (sync tracked accessor, Playwright shape) ──
+  page.set_viewport_size(640, 480).await.unwrap();
+  let (w, h) = page.viewport_size().expect("viewport tracked after set_viewport_size");
+  assert_eq!((w, h), (640, 480), "viewport should be the size just set: {w}x{h}");
 
   // ── page.is_closed after close ──
   let page2 = browser.new_page_with_url("about:blank").await.unwrap();

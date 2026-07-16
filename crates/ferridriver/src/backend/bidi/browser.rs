@@ -186,9 +186,11 @@ impl BidiBrowser {
         .get("context")
         .and_then(|v| v.as_str())
         .ok_or_else(|| FerriError::protocol("browsingContext.getTree", "context missing 'context' field"))?;
+      let user_context = ctx.get("userContext").and_then(|v| v.as_str());
       pages.push(AnyPage::Bidi(BidiPage::create(
         self.session.clone(),
         context_id.to_string(),
+        user_context,
       )?));
     }
     Ok(pages)
@@ -231,7 +233,7 @@ impl BidiBrowser {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), wait_for_created).await;
 
     debug!("BiDi new page: context={context_id}");
-    let page = BidiPage::create(self.session.clone(), context_id)?;
+    let page = BidiPage::create(self.session.clone(), context_id, user_context_id)?;
     page.wait_until_ready().await?;
 
     if let Some(viewport) = viewport {

@@ -126,10 +126,6 @@ fn register_observation(set: &mut TestSet<'_>) {
   backends_support::observation::register(set);
 }
 
-fn register_page_api(set: &mut TestSet<'_>) {
-  backends_support::page_api::register(set);
-}
-
 fn register_script_input(set: &mut TestSet<'_>) {
   backends_support::script_input::register(set);
 }
@@ -496,31 +492,6 @@ fn register_browser_type(set: &mut TestSet<'_>) {
   );
 }
 
-fn register_binding_surface(set: &mut TestSet<'_>) {
-  run!(set, backends_support::binding_surface::test_frame_get_by_methods);
-  run!(
-    set,
-    backends_support::binding_surface::test_frame_page_and_frame_locator
-  );
-  run!(set, backends_support::binding_surface::test_locator_get_by_methods);
-  run!(
-    set,
-    backends_support::binding_surface::test_locator_page_and_frame_methods
-  );
-  run!(set, backends_support::binding_surface::test_frame_locator_class);
-  run!(set, backends_support::binding_surface::test_page_frame_locator);
-  run!(set, backends_support::binding_surface::test_page_touchscreen_tap);
-  run!(set, backends_support::binding_surface::test_page_snapshot_for_ai);
-  run!(set, backends_support::binding_surface::test_page_expose_function);
-  run!(set, backends_support::binding_surface::test_page_expose_binding);
-  run!(set, backends_support::binding_surface::test_context_expose_binding);
-  run!(set, backends_support::binding_surface::test_context_expose_function);
-  run!(
-    set,
-    backends_support::binding_surface::test_context_clear_cookies_filter
-  );
-}
-
 fn register_multi_page(set: &mut TestSet<'_>) {
   backends_support::multi_page::register(set);
 }
@@ -535,7 +506,7 @@ fn register_mcp_features(set: &mut TestSet<'_>) {
 
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
-// 17 categories × 4 backends = 68 `#[test]`s grouped into one module
+// 15 categories × 4 backends = 60 `#[test]`s grouped into one module
 // per backend. nextest reports them as
 // `backends::<backend>::<category>` and distributes them across cores.
 // A single failing category fails its own test, not the entire backend.
@@ -598,16 +569,8 @@ macro_rules! backend_module {
         run_category($backend, register_browser_type);
       }
       #[test]
-      fn binding_surface() {
-        run_category($backend, register_binding_surface);
-      }
-      #[test]
       fn multi_page() {
         run_category($backend, register_multi_page);
-      }
-      #[test]
-      fn page_api() {
-        run_category($backend, register_page_api);
       }
       #[test]
       fn session_bind() {

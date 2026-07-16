@@ -243,14 +243,86 @@ impl From<SetCookieParams> for CookieData {
 /// Options for clearing cookies (matches Playwright's `ClearNetworkCookieOptions`).
 /// All fields are optional filters -- only cookies matching ALL specified filters are cleared.
 /// If no filters are specified, all cookies are cleared.
+///
+/// Playwright: `context.clearCookies(options?: { name?: string | RegExp,
+/// domain?: string | RegExp, path?: string | RegExp })` — a string filter
+/// is an exact match, a `RegExp` filter `.test()`s the field
+/// (`/tmp/playwright/packages/playwright-core/src/server/browserContext.ts::clearCookies`).
 #[derive(Debug, Clone, Default)]
 pub struct ClearCookieOptions {
-  /// Filter by cookie name (exact match).
-  pub name: Option<String>,
-  /// Filter by domain (exact match).
-  pub domain: Option<String>,
-  /// Filter by path (exact match).
-  pub path: Option<String>,
+  /// Filter by cookie name.
+  pub name: Option<crate::options::StringOrRegex>,
+  /// Filter by domain.
+  pub domain: Option<crate::options::StringOrRegex>,
+  /// Filter by path.
+  pub path: Option<crate::options::StringOrRegex>,
+}
+
+impl ClearCookieOptions {
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self.name.is_none() && self.domain.is_none() && self.path.is_none()
+  }
+
+  /// Compile the filters once so per-cookie matching doesn't re-build
+  /// regexes.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::InvalidArgument`] when a regex
+  /// filter fails to compile.
+  pub fn compile(&self) -> Result<CompiledCookieFilter> {
+    fn field(f: Option<&crate::options::StringOrRegex>) -> Result<Option<CookieFieldMatcher>> {
+      match f {
+        None => Ok(None),
+        Some(crate::options::StringOrRegex::String(s)) => Ok(Some(CookieFieldMatcher::Exact(s.clone()))),
+        Some(crate::options::StringOrRegex::Regex { source, flags }) => Ok(Some(CookieFieldMatcher::Regex(
+          crate::url_matcher::compile_js_regex(source, flags)?,
+        ))),
+      }
+    }
+    Ok(CompiledCookieFilter {
+      name: field(self.name.as_ref())?,
+      domain: field(self.domain.as_ref())?,
+      path: field(self.path.as_ref())?,
+    })
+  }
+}
+
+/// One compiled `clearCookies` field filter: exact string equality or a
+/// JS-`RegExp`-derived regex test.
+#[derive(Debug)]
+enum CookieFieldMatcher {
+  Exact(String),
+  Regex(regex::Regex),
+}
+
+impl CookieFieldMatcher {
+  fn matches(&self, value: &str) -> bool {
+    match self {
+      Self::Exact(s) => s == value,
+      Self::Regex(re) => re.is_match(value),
+    }
+  }
+}
+
+/// Pre-compiled [`ClearCookieOptions`] — see [`ClearCookieOptions::compile`].
+#[derive(Debug)]
+pub struct CompiledCookieFilter {
+  name: Option<CookieFieldMatcher>,
+  domain: Option<CookieFieldMatcher>,
+  path: Option<CookieFieldMatcher>,
+}
+
+impl CompiledCookieFilter {
+  /// Whether a cookie matches ALL specified filters (unspecified fields
+  /// always match).
+  #[must_use]
+  pub fn matches(&self, cookie: &CookieData) -> bool {
+    self.name.as_ref().is_none_or(|m| m.matches(&cookie.name))
+      && self.domain.as_ref().is_none_or(|m| m.matches(&cookie.domain))
+      && self.path.as_ref().is_none_or(|m| m.matches(&cookie.path))
+  }
 }
 
 /// Backend-level screenshot options — the flat, Playwright-independent
@@ -522,10 +594,9 @@ pub struct BackendHoverArgs {
 
 /// Backend-ready tap arguments. Produced by
 /// [`crate::actions::tap_with_opts`] from the user's
-/// [`crate::options::TapOptions`]. Only CDP implements this natively
-/// via `Input.dispatchTouchEvent`; `BiDi` and `WebKit` return
-/// `FerriError::Unsupported` because neither exposes a public touch
-/// injection primitive.
+/// [`crate::options::TapOptions`]. CDP dispatches
+/// `Input.dispatchTouchEvent`, `WebKit` `Input.dispatchTapEvent`, and
+/// `BiDi` an `input.performActions` `touch` pointer sequence.
 #[derive(Debug, Clone, Copy)]
 pub struct BackendTapArgs {
   /// CDP modifier bitmask (same scheme as mouse/key events) carried on
@@ -1148,11 +1219,10 @@ impl AnyPage {
   }
 
   /// Dispatch a native tap at `(x, y)` — CDP `Input.dispatchTouchEvent`
-  /// (`touchStart` + `touchEnd`), matching Playwright's
-  /// `server/chromium/crInput.ts::RawTouchscreenImpl::tap`. `BiDi` and
-  /// `WebKit` do not expose a public touch injection primitive and
-  /// return a backend-level error with the `unsupported:` prefix;
-  /// callers should surface it as [`crate::error::FerriError::Unsupported`].
+  /// (`touchStart` + `touchEnd`, matching Playwright's
+  /// `server/chromium/crInput.ts::RawTouchscreenImpl::tap`), `WebKit`
+  /// `Input.dispatchTapEvent`, `BiDi` a `touch`-pointer
+  /// `input.performActions` sequence.
   pub async fn tap_at_with(&self, x: f64, y: f64, args: &BackendTapArgs) -> Result<()> {
     page_dispatch!(self, tap_at_with(x, y, args))
   }
@@ -1237,16 +1307,14 @@ impl AnyPage {
 
   /// Clear cookies matching the given filters. If no filters, clears all.
   pub async fn clear_cookies_filtered(&self, options: &ClearCookieOptions) -> Result<()> {
-    if options.name.is_none() && options.domain.is_none() && options.path.is_none() {
+    if options.is_empty() {
       return self.clear_cookies().await;
     }
     // Get all cookies, delete the ones that match the filters.
+    let filter = options.compile()?;
     let cookies = self.get_cookies().await?;
     for c in &cookies {
-      let name_match = options.name.as_ref().is_none_or(|n| &c.name == n);
-      let domain_match = options.domain.as_ref().is_none_or(|d| &c.domain == d);
-      let path_match = options.path.as_ref().is_none_or(|p| &c.path == p);
-      if name_match && domain_match && path_match {
+      if filter.matches(c) {
         self.delete_cookie(&c.name, Some(&c.domain)).await?;
       }
     }

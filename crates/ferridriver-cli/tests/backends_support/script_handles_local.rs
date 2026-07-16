@@ -803,41 +803,11 @@ pub fn test_script_fill_force(c: &mut McpClient) {
 // WebKit (no public NSTouchEvent synthesis) surface a typed Unsupported
 // error instead.
 pub fn test_script_tap_native(c: &mut McpClient) {
-  if c.backend == "bidi" {
-    // BiDi has no `pointerType='touch'` in stable yet. Tap must surface
-    // Unsupported — not a silent JS fallback.
-    c.nav(
-      "<button id='b' ontouchstart=\"document.getElementById('out').textContent='fired'\">b</button>\
-       <div id='out'>no</div>",
-    );
-    let v = c.script_value(
-      "try { await page.locator('#b').tap({ timeout: 2000 }); return { msg: 'no-throw' }; } \
-       catch (e) { return { msg: String(e.message || e) }; }",
-    );
-    let msg = v["msg"].as_str().unwrap_or("");
-    assert!(
-      msg.contains("unsupported") || msg.contains("Unsupported"),
-      "{}: tap should throw Unsupported, got: {v}",
-      c.backend
-    );
-    assert!(
-      msg.contains("tap"),
-      "{}: Unsupported message should mention tap, got: {v}",
-      c.backend
-    );
-    let after = c.script_value("return await page.evaluate('document.getElementById(\"out\").textContent');");
-    assert_eq!(
-      after,
-      json!("no"),
-      "{}: no JS-fallback tap should have fired; got {after}",
-      c.backend
-    );
-    return;
-  }
-
-  // CDP native path: Input.dispatchTouchEvent emits a trusted touchstart
-  // + touchend pair. Record event.isTrusted and whether the touch point
-  // lands inside the button rect; read each field back as a separate
+  // Native tap paths: CDP `Input.dispatchTouchEvent`, WebKit
+  // `Input.dispatchTapEvent`, BiDi `input.performActions` with a
+  // `touch` pointer source. All emit a trusted touchstart + touchend
+  // pair. Record event.isTrusted and whether the touch point lands
+  // inside the button rect; read each field back as a separate
   // `textContent` so we stay inside the single-level JSON.parse pattern
   // (QuickJS `page.evaluate` returns a JSON-stringified result).
   c.nav(
@@ -865,15 +835,19 @@ pub fn test_script_tap_native(c: &mut McpClient) {
   assert_eq!(
     v["trusted"],
     json!("true"),
-    "CDP tap should emit isTrusted=true touchstart; got: {v}"
+    "tap should emit isTrusted=true touchstart; got: {v}"
   );
   assert_eq!(
     v["inRect"],
     json!("true"),
-    "CDP tap should land inside button rect; got: {v}"
+    "tap should land inside button rect; got: {v}"
   );
 
   // Modifiers propagate to the touch event: tap + Shift → event.shiftKey.
+  // Firefox never applies key-source modifier state to touch-pointer
+  // events (the BiDi wire has no per-action modifier field), so on the
+  // bidi backend tap-with-modifiers must surface typed Unsupported
+  // instead of silently dropping the modifiers.
   c.nav(
     "<button id='b'>b</button><div id='out'>no</div>\
      <script>\
@@ -882,15 +856,29 @@ pub fn test_script_tap_native(c: &mut McpClient) {
        }, { passive: true });\
      </script>",
   );
-  let v = c.script_value(
-    "await page.locator('#b').tap({ modifiers: ['Shift'] });\
-     return await page.evaluate('document.getElementById(\"out\").textContent');",
-  );
-  assert_eq!(
-    v,
-    json!("shift"),
-    "tap modifiers:['Shift'] must set event.shiftKey on touchstart: {v}"
-  );
+  if c.backend == "bidi" {
+    let v = c.script_value(
+      "try { await page.locator('#b').tap({ modifiers: ['Shift'], timeout: 2000 }); return { msg: 'no-throw' }; } \
+       catch (e) { return { msg: String(e.message || e) }; }",
+    );
+    let msg = v["msg"].as_str().unwrap_or("");
+    assert!(
+      (msg.contains("unsupported") || msg.contains("Unsupported")) && msg.contains("modifiers"),
+      "bidi: tap with modifiers should throw typed Unsupported naming modifiers, got: {v}"
+    );
+    let after = c.script_value("return await page.evaluate('document.getElementById(\"out\").textContent');");
+    assert_eq!(after, json!("no"), "bidi: no touchstart should fire; got {after}");
+  } else {
+    let v = c.script_value(
+      "await page.locator('#b').tap({ modifiers: ['Shift'] });\
+       return await page.evaluate('document.getElementById(\"out\").textContent');",
+    );
+    assert_eq!(
+      v,
+      json!("shift"),
+      "tap modifiers:['Shift'] must set event.shiftKey on touchstart: {v}"
+    );
+  }
 
   // trial:true skips the touch dispatch but still presses modifiers.
   c.nav(

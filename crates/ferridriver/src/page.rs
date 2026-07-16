@@ -30,6 +30,13 @@ pub struct Page {
   default_navigation_timeout: AtomicU64,
   snapshot_tracker: Arc<AsyncMutex<snapshot::SnapshotTracker>>,
   mouse_position: Mutex<(f64, f64)>,
+  /// Emulated viewport, tracked client-side like Playwright's
+  /// `Page._viewportSize` so [`Self::viewport_size`] is a sync accessor
+  /// (`page.viewportSize(): null | { width, height }` never queries the
+  /// browser). `None` = no viewport emulation applied (`viewport: null`
+  /// or a page the runner never configured). Updated by
+  /// [`Self::set_viewport_size`] and [`Self::apply_context_options`].
+  viewport: Mutex<Option<(i64, i64)>>,
   context_ref: Option<crate::context::ContextRef>,
   /// Human-readable `reason` passed to the last `close({ reason })` call,
   /// surfaced on subsequent `TargetClosed` errors — Playwright parity.
@@ -84,6 +91,7 @@ impl Page {
       default_navigation_timeout: AtomicU64::new(u64::MAX),
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
       mouse_position: Mutex::new((0.0, 0.0)),
+      viewport: Mutex::new(None),
       context_ref: None,
       close_reason: Mutex::new(None),
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
@@ -111,6 +119,7 @@ impl Page {
       default_navigation_timeout: AtomicU64::new(u64::MAX),
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
       mouse_position: Mutex::new((0.0, 0.0)),
+      viewport: Mutex::new(None),
       context_ref: Some(context),
       close_reason: Mutex::new(None),
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
@@ -523,23 +532,20 @@ impl Page {
     }
   }
 
-  /// Get the current viewport size by querying the browser.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the JavaScript evaluation fails.
-  pub async fn viewport_size(&self) -> Result<(i64, i64)> {
-    let r = self
-      .inner
-      .evaluate("JSON.stringify({w:window.innerWidth,h:window.innerHeight})")
-      .await?;
-    let s = r
-      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-      .unwrap_or_default();
-    let parsed: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
-    let w = parsed.get("w").and_then(serde_json::Value::as_i64).unwrap_or(0);
-    let h = parsed.get("h").and_then(serde_json::Value::as_i64).unwrap_or(0);
-    Ok((w, h))
+  /// Playwright: `page.viewportSize(): null | { width: number, height:
+  /// number }` — a synchronous accessor over the client-tracked emulated
+  /// viewport (types.d.ts; client keeps `_viewportSize`, never queries
+  /// the browser). `None` when no viewport emulation is applied.
+  #[must_use]
+  pub fn viewport_size(&self) -> Option<(i64, i64)> {
+    *self.viewport.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  /// Seed the tracked viewport with the emulation the page was created
+  /// under (see [`crate::context::ContextRef::new_page`]'s
+  /// `effective_viewport`).
+  pub(crate) fn set_cached_viewport(&self, viewport: Option<(i64, i64)>) {
+    *self.viewport.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = viewport;
   }
 
   // ── Navigation ──────────────────────────────────────────────────────────
@@ -1917,7 +1923,9 @@ impl Page {
         height,
         ..Default::default()
       })
-      .await
+      .await?;
+    *self.viewport.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((width, height));
+    Ok(())
   }
 
   // ── Input devices ───────────────────────────────────────────────────────
@@ -2084,6 +2092,10 @@ impl Page {
   /// apply. The aggregated message lists each failing field by name.
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     Box::pin(self.inner.apply_context_options(opts)).await?;
+    // Track the emulated viewport for the sync `viewport_size` accessor
+    // (`viewport: null` opts out — the accessor then reports None).
+    *self.viewport.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+      opts.resolved_viewport().map(|vp| (vp.width, vp.height));
     // Also stash the bag in shared state so subsequent reads (e.g.
     // `page.goto` resolving against the context's `baseURL`,
     // `request` fixture's per-request base URL) see the same values
@@ -4258,36 +4270,21 @@ pub struct Touchscreen<'a> {
 }
 
 impl Touchscreen<'_> {
-  /// Tap at coordinates. Uses Touch/TouchEvent on platforms that support them,
-  /// falls back to `PointerEvent` + click on desktop (e.g. Playwright `WebKit`).
+  /// Tap at coordinates via the backend's native touch input — CDP
+  /// `Input.dispatchTouchEvent`, `WebKit` `Input.dispatchTapEvent`,
+  /// `BiDi` an `input.performActions` `touch` pointer sequence — producing a
+  /// trusted `touchstart`/`touchend` pair exactly like
+  /// `locator.tap()`'s dispatch (Playwright's `RawTouchscreen.tap`).
   ///
   /// # Errors
   ///
-  /// Returns an error if the tap event dispatch fails.
+  /// Returns an error if the backend dispatch fails.
   pub async fn tap(&self, x: f64, y: f64) -> Result<()> {
-    // Playwright WebKit exposes `Touch` and `TouchEvent` as
-    // constructors but throws "Illegal constructor" when JS tries to
-    // instantiate them — they're internal-only on both Linux and
-    // macOS. `typeof X !== 'undefined'` isn't enough; try the
-    // actual construction in a try/catch and fall through on throw.
-    self.page.inner.evaluate(&format!(
-      "(function(){{var el=document.elementFromPoint({x},{y})||document.body;\
-       var dispatched=false;\
-       try{{\
-         if(typeof Touch!=='undefined'&&typeof TouchEvent!=='undefined'){{\
-           var t=new Touch({{identifier:1,target:el,clientX:{x},clientY:{y}}});\
-           el.dispatchEvent(new TouchEvent('touchstart',{{touches:[t],changedTouches:[t],bubbles:true}}));\
-           el.dispatchEvent(new TouchEvent('touchend',{{touches:[],changedTouches:[t],bubbles:true}}));\
-           dispatched=true;\
-         }}\
-       }}catch(e){{}}\
-       if(!dispatched){{\
-         el.dispatchEvent(new PointerEvent('pointerdown',{{clientX:{x},clientY:{y},bubbles:true,isPrimary:true,pointerType:'touch'}}));\
-         el.dispatchEvent(new PointerEvent('pointerup',{{clientX:{x},clientY:{y},bubbles:true,isPrimary:true,pointerType:'touch'}}));\
-         el.click();\
-       }}}})()"
-    )).await?;
-    Ok(())
+    self
+      .page
+      .inner
+      .tap_at_with(x, y, &crate::backend::BackendTapArgs { modifiers_bitmask: 0 })
+      .await
   }
 }
 

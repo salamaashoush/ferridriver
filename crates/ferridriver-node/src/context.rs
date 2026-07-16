@@ -105,11 +105,9 @@ impl BrowserContext {
 
   /// Playwright: `context.clearCookies(options?)`. Without options
   /// clears every cookie; with `{ name?, domain?, path? }` only
-  /// cookies matching ALL specified filters are cleared.
-  ///
-  /// Filter values are exact-match strings — Playwright's TS API
-  /// accepts `string | RegExp` here too; regex filters are tracked
-  /// under "Section B" pending a Rust core extension.
+  /// cookies matching ALL specified filters are cleared. Each filter
+  /// is `string | RegExp` — exact match for strings, `.test()` for
+  /// regexes (Playwright's `server/browserContext.ts::clearCookies`).
   #[napi]
   pub async fn clear_cookies(&self, options: Option<crate::types::ClearCookieOptions>) -> Result<()> {
     match options {

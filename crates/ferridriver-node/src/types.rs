@@ -1754,26 +1754,28 @@ impl From<AriaSnapshotOptions> for ferridriver::options::AriaSnapshotOptions {
   }
 }
 
-/// Filter options for `context.clearCookies(options?)`. Each field is
-/// a string match (exact). The Playwright TS surface accepts
-/// `string | RegExp` here too; ferridriver's Rust core only supports
-/// the string form today (regex filtering would require touching
-/// every backend's cookie clear path) — that gap is tracked in
-/// `docs/PLAYWRIGHT-PARITY-BACKLOG.md`.
+/// Filter options for `context.clearCookies(options?)`. Playwright:
+/// `{ name?: string | RegExp, domain?: string | RegExp, path?: string |
+/// RegExp }` — a string filters by exact match, a `RegExp` `.test()`s
+/// the field. `JsRegExpLike` reads a real JS `RegExp` via its prototype
+/// getters, so no `{ source, flags }` wire shape leaks.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct ClearCookieOptions {
-  pub name: Option<String>,
-  pub domain: Option<String>,
-  pub path: Option<String>,
+  #[napi(ts_type = "string | RegExp")]
+  pub name: Option<napi::Either<String, JsRegExpLike>>,
+  #[napi(ts_type = "string | RegExp")]
+  pub domain: Option<napi::Either<String, JsRegExpLike>>,
+  #[napi(ts_type = "string | RegExp")]
+  pub path: Option<napi::Either<String, JsRegExpLike>>,
 }
 
 impl From<ClearCookieOptions> for ferridriver::backend::ClearCookieOptions {
   fn from(o: ClearCookieOptions) -> Self {
     Self {
-      name: o.name,
-      domain: o.domain,
-      path: o.path,
+      name: o.name.map(getby_input_to_rust),
+      domain: o.domain.map(getby_input_to_rust),
+      path: o.path.map(getby_input_to_rust),
     }
   }
 }

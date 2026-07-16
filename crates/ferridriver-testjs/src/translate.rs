@@ -342,13 +342,21 @@ async fn build_world_data(
   test_info: &Arc<TestInfo>,
   p: &TestFnParams,
 ) -> Result<TestWorldData, TestFailure> {
+  // The worker runs each project with its own merged config
+  // (`TestInfo.config_snapshot`); the translate-time `p.browser_config`
+  // is the root config and would report the wrong browserName/headless
+  // under `--project`/multi-project runs.
+  let effective_browser = test_info
+    .config_snapshot
+    .as_ref()
+    .map_or(&p.browser_config, |cfg| &cfg.browser);
   let mut world = TestWorldData {
     page: None,
     context: None,
     request: None,
     browser: None,
-    browser_name: p.browser_config.browser.clone(),
-    headless: p.browser_config.headless,
+    browser_name: effective_browser.browser.clone(),
+    headless: effective_browser.headless,
     is_mobile: p
       .world_use
       .get("isMobile")
@@ -700,13 +708,20 @@ fn lower_all_hooks(
         let test_info = Arc::new(TestInfo::new_anonymous());
         let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
         let browser = pool.get("browser").await.ok();
+        // The suite pool carries the worker's per-project test_info
+        // (config_snapshot = merged project config); the captured
+        // `browser_config` is the root config fallback.
+        let effective_browser = pool
+          .try_get_cached::<TestInfo>("test_info")
+          .and_then(|ti| ti.config_snapshot.as_ref().map(|cfg| cfg.browser.clone()))
+          .unwrap_or(browser_config);
         let world = TestWorldData {
           page: None,
           context: None,
           request: None,
           browser,
-          browser_name: browser_config.browser.clone(),
-          headless: browser_config.headless,
+          browser_name: effective_browser.browser.clone(),
+          headless: effective_browser.headless,
           is_mobile: false,
           has_touch: false,
           base_url,

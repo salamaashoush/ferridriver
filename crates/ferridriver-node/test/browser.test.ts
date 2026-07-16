@@ -825,9 +825,11 @@ for (const backend of BACKENDS) {
 
     // tap uses the backend's native touch input: CDP via
     // Input.dispatchTouchEvent, WebKit via the inspector protocol's
-    // Input.dispatchTapEvent — both produce a trusted touchstart inside
-    // the element rect. BiDi surfaces a typed Unsupported error
-    // (pointerType has no 'touch').
+    // Input.dispatchTapEvent, BiDi via an input.performActions touch
+    // pointer source — all produce a trusted touchstart inside the
+    // element rect. On BiDi only the modifiers variant throws typed
+    // Unsupported (Firefox drops key-source modifier state on
+    // touch-pointer events), so the Shift assertion below stays fenced.
     it("tap dispatches a trusted native touch event inside the element rect", async () => {
       // Both backends: the native path fires a trusted touchstart inside
       // the element rect. We goto() a data: URL (rather than setContent,
@@ -864,8 +866,20 @@ for (const backend of BACKENDS) {
         "</script>";
       await page.goto("data:text/html," + encodeURIComponent(shiftPageHtml));
       await page.waitForSelector("#b");
-      await page.locator("#b").tap({ modifiers: ["Shift"] });
-      expect(await page.locator("#out").innerText()).toBe("shift");
+      if (backend === "bidi") {
+        let msg = "";
+        try {
+          await page.locator("#b").tap({ modifiers: ["Shift"], timeout: 2000 });
+        } catch (e) {
+          msg = String((e as Error).message ?? e);
+        }
+        expect(msg.toLowerCase()).toContain("unsupported");
+        expect(msg).toContain("modifiers");
+        expect(await page.locator("#out").innerText()).toBe("none");
+      } else {
+        await page.locator("#b").tap({ modifiers: ["Shift"] });
+        expect(await page.locator("#out").innerText()).toBe("shift");
+      }
     });
 
     // Task 1.5 phase 2: `opts.timeout` wins over the page default for every
@@ -1195,10 +1209,14 @@ for (const backend of BACKENDS) {
 
     // ── Page.viewportSize ────────────────────────────────────────────
 
-    it("page.viewportSize returns dimensions", async () => {
-      const [w, h] = await page.viewportSize();
-      expect(w).toBeGreaterThan(0);
-      expect(h).toBeGreaterThan(0);
+    // Playwright shape: a SYNC accessor returning the tracked emulated
+    // viewport ({ width, height } | null) — never a live window query.
+    it("page.viewportSize returns the emulated viewport", async () => {
+      await page.setViewportSize({ width: 900, height: 600 });
+      const vs = page.viewportSize();
+      expect(vs).not.toBeNull();
+      expect(vs!.width).toBe(900);
+      expect(vs!.height).toBe(600);
     });
 
     // ── Page.goto with options ───────────────────────────────────────
@@ -1519,15 +1537,11 @@ for (const backend of BACKENDS) {
 
     // ── Locator.tap ──────────────────────────────────────────────────
 
-    // tap() now uses the backend's native touch input — CDP's
-    // Input.dispatchTouchEvent (touchend DOES fire). WebKit has no
-    // public touch-injection API so tap throws Unsupported; the fuller
-    // coverage is in the earlier "tap: CDP dispatches trusted native
-    // touch event" test.
+    // tap() uses the backend's native touch input — CDP's
+    // Input.dispatchTouchEvent, WebKit's Input.dispatchTapEvent — and
+    // touchend fires on both. The fuller coverage is in the earlier
+    // "tap dispatches a trusted native touch event" test.
     it("locator.tap fires tap events", async () => {
-      if (backend === "webkit") {
-        return;
-      }
       await page.setContent(`
         <button id="btn">tap me</button>
         <script>

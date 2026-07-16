@@ -1609,13 +1609,19 @@ impl Page {
 
   // ── Missing methods (batch add) ────────────────────────────────────────
 
-  #[napi]
-  pub async fn viewport_size(&self) -> Result<Vec<i32>> {
-    let (w, h) = self.inner.viewport_size().await.map_err(crate::error::to_napi)?;
-    let w32 = i32::try_from(w).map_err(|_| napi::Error::from_reason(format!("viewport width {w} exceeds i32::MAX")))?;
-    let h32 =
-      i32::try_from(h).map_err(|_| napi::Error::from_reason(format!("viewport height {h} exceeds i32::MAX")))?;
-    Ok(vec![w32, h32])
+  /// Playwright: `page.viewportSize(): null | { width: number, height:
+  /// number }` — a synchronous accessor over the tracked emulated
+  /// viewport (`/tmp/playwright/packages/playwright-core/src/client/page.ts`);
+  /// `null` when no viewport emulation is applied.
+  #[napi(ts_return_type = "{ width: number, height: number } | null")]
+  pub fn viewport_size(&self) -> Option<crate::context::NapiViewportSize> {
+    self
+      .inner
+      .viewport_size()
+      .map(|(w, h)| crate::context::NapiViewportSize {
+        width: f64::from(i32::try_from(w).unwrap_or(i32::MAX)),
+        height: f64::from(i32::try_from(h).unwrap_or(i32::MAX)),
+      })
   }
 
   #[napi]

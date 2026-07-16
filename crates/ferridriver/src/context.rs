@@ -380,6 +380,7 @@ impl ContextRef {
     // the listener. Sync after the eager `Page.getFrameTree` RTT was
     // dropped (`PERF_AUDIT` §M.4).
     let page = Page::with_context(any_page, self.clone());
+    page.set_cached_viewport(effective_viewport.as_ref().map(|vp| (vp.width, vp.height)));
 
     // Apply the BrowserContextOptions bag to the fresh page. Fields
     // without a backend implementation are silently skipped;
@@ -750,7 +751,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or clearing cookies fails.
   pub async fn clear_cookies_filtered(&self, options: &crate::backend::ClearCookieOptions) -> Result<()> {
-    if options.name.is_none() && options.domain.is_none() && options.path.is_none() {
+    if options.is_empty() {
       return self.clear_cookies().await;
     }
     let page = {
@@ -758,13 +759,11 @@ impl ContextRef {
       state.context(&self.name)?.active_page().cloned()
     };
     if let Some(page) = page {
+      let filter = options.compile()?;
       let cookies = page.get_cookies().await?;
       page.clear_cookies().await?;
       for c in cookies {
-        let name_match = options.name.as_ref().is_none_or(|n| &c.name == n);
-        let domain_match = options.domain.as_ref().is_none_or(|d| &c.domain == d);
-        let path_match = options.path.as_ref().is_none_or(|p| &c.path == p);
-        if !(name_match && domain_match && path_match) {
+        if !filter.matches(&c) {
           page.set_cookie(c).await?;
         }
       }

@@ -66,6 +66,43 @@ pub enum UrlMatcher {
   Predicate(UrlPredicate),
 }
 
+/// Compile a JS `RegExp` source/flags pair into a [`regex::Regex`].
+///
+/// JS flags are translated to `regex` crate inline flags at the front of
+/// the pattern. `i`, `m`, `s` are honored; `g` (global) has no meaning
+/// for the `regex` crate (it does not track match position across calls)
+/// and `u` (unicode) is on by default — both are silently dropped. `y`
+/// (sticky) has no equivalent and `d` (hasIndices) does not affect match
+/// semantics; unknown flags yield [`FerriError::InvalidArgument`] so a
+/// typo on the TS side surfaces instead of being silently ignored.
+///
+/// # Errors
+///
+/// Returns [`FerriError::InvalidArgument`] for unknown flags or when the
+/// resulting regex fails to compile.
+pub fn compile_js_regex(source: &str, flags: &str) -> Result<regex::Regex> {
+  let mut inline_flags = String::new();
+  for c in flags.chars() {
+    match c {
+      'i' | 'm' | 's' => inline_flags.push(c),
+      'g' | 'u' => {},
+      other => {
+        return Err(FerriError::invalid_argument(
+          "regex",
+          format!("unsupported JS regex flag {other:?} (supported: i, m, s, g, u)"),
+        ));
+      },
+    }
+  }
+  let pattern = if inline_flags.is_empty() {
+    source.to_string()
+  } else {
+    format!("(?{inline_flags}){source}")
+  };
+  regex::Regex::new(&pattern)
+    .map_err(|e| FerriError::invalid_argument("regex", format!("regex {source:?} failed to compile: {e}")))
+}
+
 impl UrlMatcher {
   /// Matcher that accepts every URL.
   #[must_use]
@@ -119,32 +156,7 @@ impl UrlMatcher {
   /// Returns [`FerriError::InvalidArgument`] for unknown flags or when the
   /// resulting regex fails to compile.
   pub fn regex_from_source(source: &str, flags: &str) -> Result<Self> {
-    let mut inline_flags = String::new();
-    for c in flags.chars() {
-      match c {
-        'i' | 'm' | 's' => inline_flags.push(c),
-        // `g` (global) has no meaning for Rust's `regex` crate — it does
-        // not track match position across calls. `u` (unicode) is on by
-        // default in the `regex` crate. Both are silently dropped.
-        'g' | 'u' => {},
-        // `y` (sticky) has no equivalent; `d` (hasIndices) does not affect
-        // match semantics. Reject rather than silently misbehave.
-        other => {
-          return Err(FerriError::invalid_argument(
-            "url",
-            format!("unsupported JS regex flag {other:?} (supported: i, m, s, g, u)"),
-          ));
-        },
-      }
-    }
-    let pattern = if inline_flags.is_empty() {
-      source.to_string()
-    } else {
-      format!("(?{inline_flags}){source}")
-    };
-    let regex = regex::Regex::new(&pattern)
-      .map_err(|e| FerriError::invalid_argument("url", format!("regex {source:?} failed to compile: {e}")))?;
-    Ok(Self::Regex(regex))
+    Ok(Self::Regex(compile_js_regex(source, flags)?))
   }
 
   /// Build a matcher from a predicate closure.
