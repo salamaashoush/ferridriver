@@ -705,6 +705,15 @@ fn artifact_dir_name(full_name: &str) -> String {
     .replace("..", "-")
 }
 
+/// `TestInfo.outputDir` / `snapshotDir` are user-facing and absolute in
+/// Playwright (`testInfo.outputDir: "Absolute path to a directory..."`);
+/// the config keeps its relative form for display. A relative dir also
+/// breaks consumers that resolve paths against a different working
+/// directory — e.g. the browser stat'ing a `setInputFiles` path.
+fn absolutize(p: std::path::PathBuf) -> std::path::PathBuf {
+  std::path::absolute(&p).unwrap_or(p)
+}
+
 impl Worker {
   pub fn new(id: u32, config: Arc<TestConfig>, event_bus: Option<EventBus>) -> Self {
     Self { id, config, event_bus }
@@ -723,17 +732,21 @@ impl Worker {
       worker_index: self.id,
       parallel_index: self.id,
       repeat_each_index: 0,
-      output_dir: self
-        .config
-        .output_dir
-        .join("__suite_hooks__")
-        .join(sanitize_filename(suite_key)),
-      snapshot_dir: self
-        .config
-        .snapshot_dir
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("__snapshots__")),
+      output_dir: absolutize(
+        self
+          .config
+          .output_dir
+          .join("__suite_hooks__")
+          .join(sanitize_filename(suite_key)),
+      ),
+      snapshot_dir: absolutize(
+        self
+          .config
+          .snapshot_dir
+          .as_ref()
+          .map(std::path::PathBuf::from)
+          .unwrap_or_else(|| std::path::PathBuf::from("__snapshots__")),
+      ),
       snapshot_path_template: self.config.snapshot_path_template.clone(),
       update_snapshots: self.config.update_snapshots,
       ignore_snapshots: self.config.ignore_snapshots,
@@ -1182,13 +1195,15 @@ impl Worker {
       worker_index: self.id,
       parallel_index: self.id,
       repeat_each_index: 0,
-      output_dir: self.config.output_dir.join(artifact_dir_name(&test_id.full_name())),
-      snapshot_dir: self
-        .config
-        .snapshot_dir
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("__snapshots__")),
+      output_dir: absolutize(self.config.output_dir.join(artifact_dir_name(&test_id.full_name()))),
+      snapshot_dir: absolutize(
+        self
+          .config
+          .snapshot_dir
+          .as_ref()
+          .map(std::path::PathBuf::from)
+          .unwrap_or_else(|| std::path::PathBuf::from("__snapshots__")),
+      ),
       snapshot_path_template: self.config.snapshot_path_template.clone(),
       update_snapshots: self.config.update_snapshots,
       ignore_snapshots: self.config.ignore_snapshots,

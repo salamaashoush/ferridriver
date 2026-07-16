@@ -126,10 +126,6 @@ fn register_observation(set: &mut TestSet<'_>) {
   backends_support::observation::register(set);
 }
 
-fn register_script_input(set: &mut TestSet<'_>) {
-  backends_support::script_input::register(set);
-}
-
 fn register_script_handles(set: &mut TestSet<'_>) {
   run!(set, backends_support::script_handles_local::test_script_click_at);
   run!(
@@ -253,12 +249,6 @@ fn register_script_handles(set: &mut TestSet<'_>) {
     set,
     backends_support::script_handles_local::test_script_keyboard_type_named_keys
   );
-}
-
-fn register_script_locators(set: &mut TestSet<'_>) {
-  backends_support::script_locators::register(set);
-  backends_support::accessible_description::register(set);
-  backends_support::aria_snapshot::register(set);
 }
 
 fn register_script_emulation_storage(set: &mut TestSet<'_>) {
@@ -506,7 +496,7 @@ fn register_mcp_features(set: &mut TestSet<'_>) {
 
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
-// 15 categories × 4 backends = 60 `#[test]`s grouped into one module
+// 13 categories × 4 backends = 52 `#[test]`s grouped into one module
 // per backend. nextest reports them as
 // `backends::<backend>::<category>` and distributes them across cores.
 // A single failing category fails its own test, not the entire backend.
@@ -529,16 +519,8 @@ macro_rules! backend_module {
         run_category($backend, register_observation);
       }
       #[test]
-      fn script_input() {
-        run_category($backend, register_script_input);
-      }
-      #[test]
       fn script_handles() {
         run_category($backend, register_script_handles);
-      }
-      #[test]
-      fn script_locators() {
-        run_category($backend, register_script_locators);
       }
       #[test]
       fn script_emulation_storage() {

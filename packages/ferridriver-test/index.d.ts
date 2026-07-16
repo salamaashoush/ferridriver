@@ -341,6 +341,7 @@ export interface ScreenshotOptions extends TimeoutOption {
 
 export interface GetByRoleOptions {
   checked?: boolean;
+  description?: string | RegExp;
   disabled?: boolean;
   exact?: boolean;
   expanded?: boolean;
@@ -442,7 +443,7 @@ export interface Locator {
   all(): Promise<Locator[]>;
   boundingBox(options?: TimeoutOption): Promise<{ x: number; y: number; width: number; height: number } | null>;
   screenshot(options?: ScreenshotOptions): Promise<Uint8Array>;
-  ariaSnapshot(options?: TimeoutOption): Promise<string>;
+  ariaSnapshot(options?: TimeoutOption & { boxes?: boolean }): Promise<string>;
 
   isVisible(options?: TimeoutOption): Promise<boolean>;
   isHidden(options?: TimeoutOption): Promise<boolean>;
@@ -450,6 +451,7 @@ export interface Locator {
   isDisabled(options?: TimeoutOption): Promise<boolean>;
   isChecked(options?: TimeoutOption): Promise<boolean>;
   isEditable(options?: TimeoutOption): Promise<boolean>;
+  isAttached(options?: TimeoutOption): Promise<boolean>;
 
   evaluate(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption): Promise<unknown>;
   evaluateAll(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
@@ -457,8 +459,23 @@ export interface Locator {
   elementHandle(options?: TimeoutOption): Promise<ElementHandle>;
   elementHandles(): Promise<ElementHandle[]>;
   waitFor(options?: WaitForSelectorOptions): Promise<void>;
-  highlight(): Promise<void>;
+  waitForFunction(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & { polling?: number | 'raf' }): Promise<JSHandle>;
+  // highlight returns a Disposable that removes the overlay; hideHighlight
+  // clears any overlay (ferridriver extensions over Playwright's void
+  // highlight, which it documents as debug-only).
+  highlight(options?: { style?: { outlineColor?: string; zIndex?: number } }): Promise<Disposable>;
+  hideHighlight(): Promise<void>;
   describe(description: string): Locator;
+  // Accessible-description surface (Playwright 1.58) plus ferridriver
+  // extensions mirrored from the NAPI binding: the canonicalizing
+  // normalize(), the selector/isStrict introspection getters,
+  // setStrict(), and rightClick() (= click({ button: 'right' })).
+  description(): string | null;
+  normalize(): Promise<Locator>;
+  readonly selector: string;
+  readonly isStrict: boolean;
+  setStrict(strict: boolean): Locator;
+  rightClick(options?: ClickOptions): Promise<void>;
 
   locator(selectorOrLocator: string | Locator, options?: LocatorFilterOptions): Locator;
   filter(options?: LocatorFilterOptions): Locator;
@@ -562,6 +579,9 @@ export interface Response {
 export interface Frame {
   name(): string;
   url(): string;
+  isMainFrame(): boolean;
+  isDetached(): boolean;
+  waitForSelector(selector: string, options?: WaitForSelectorOptions): Promise<ElementHandle | null>;
   goto(url: string, options?: GotoOptions): Promise<Response | null>;
   content(): Promise<string>;
   title(): Promise<string>;
@@ -916,6 +936,16 @@ export interface APIRequestContext {
 // The QuickJS environment provides Node-parity `Buffer` and the
 // web-platform text codecs (UTF-8 only) as globals.
 declare global {
+  // Sandboxed file access rooted at the runner's working directory
+  // (writes are additionally scoped -- see the engine's PathSandbox).
+  const fs: {
+    readFile(path: string): Promise<string>;
+    readFileBytes(path: string): Promise<number[]>;
+    writeFile(path: string, contents: string): Promise<void>;
+    readdir(path: string): Promise<string[]>;
+    exists(path: string): Promise<boolean>;
+  };
+
   class Buffer extends Uint8Array {
     static from(value: string | ArrayBuffer | Uint8Array | number[], encoding?: 'utf8' | 'utf-8' | 'base64' | 'hex'): Buffer;
     static isBuffer(value: unknown): value is Buffer;

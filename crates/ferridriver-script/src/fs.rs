@@ -2,7 +2,9 @@
 //!
 //! Every path passed in from JS is validated against a root directory:
 //!
-//! 1. Reject absolute paths — only paths relative to the root are accepted.
+//! 1. Absolute paths are accepted only when they already point inside the
+//!    root (e.g. `testInfo.outputPath()`); they are reduced to their
+//!    root-relative remainder. Everything else must be root-relative.
 //! 2. Reject any `..` component in the requested path.
 //! 3. Canonicalise the final path and verify the result stays inside the
 //!    canonicalised root (rejects symlinks that escape the root).
@@ -48,7 +50,7 @@ impl PathSandbox {
   ///
   /// The path must exist and, after canonicalisation, live under the root.
   pub fn resolve_read(&self, rel: &str) -> Result<PathBuf, ScriptError> {
-    let candidate = Self::syntactic_check(rel)?;
+    let candidate = self.syntactic_check(rel)?;
     let full = self.root.join(candidate);
     let canonical = std::fs::canonicalize(&full)
       .map_err(|e| ScriptError::sandbox(format!("fs: cannot resolve {}: {e}", full.display())))?;
@@ -67,7 +69,7 @@ impl PathSandbox {
   /// the parent directory; the final filename is appended unchanged and
   /// validated not to contain separators itself.
   pub fn resolve_write(&self, rel: &str) -> Result<PathBuf, ScriptError> {
-    let candidate = Self::syntactic_check(rel)?;
+    let candidate = self.syntactic_check(rel)?;
     let full = self.root.join(&candidate);
     let parent = full
       .parent()
@@ -104,13 +106,25 @@ impl PathSandbox {
     Ok(target)
   }
 
-  fn syntactic_check(rel: &str) -> Result<PathBuf, ScriptError> {
+  fn syntactic_check(&self, rel: &str) -> Result<PathBuf, ScriptError> {
     if rel.is_empty() {
       return Err(ScriptError::sandbox("fs: empty path"));
     }
-    let path = Path::new(rel);
+    let mut path = Path::new(rel);
     if path.is_absolute() {
-      return Err(ScriptError::sandbox(format!("fs: absolute paths not allowed: {rel}")));
+      // An absolute path is accepted only when it already points inside
+      // the sandbox root (e.g. `testInfo.outputPath()` hands tests an
+      // absolute path under the runner's cwd, Playwright-style). Reduce
+      // it to the root-relative remainder and validate that like any
+      // relative input.
+      match path.strip_prefix(&self.root) {
+        Ok(stripped) => path = stripped,
+        Err(_) => {
+          return Err(ScriptError::sandbox(format!(
+            "fs: absolute path outside script_root: {rel}"
+          )));
+        },
+      }
     }
     for component in path.components() {
       match component {
@@ -140,10 +154,31 @@ mod tests {
   }
 
   #[test]
-  fn rejects_absolute_path() {
+  fn rejects_absolute_path_outside_root() {
     let (_tmp, sb) = tmp_sandbox();
     assert!(sb.resolve_read("/etc/passwd").is_err());
-    assert!(sb.resolve_write("/tmp/out.txt").is_err());
+    assert!(sb.resolve_write("/etc/out.txt").is_err());
+  }
+
+  #[test]
+  fn accepts_absolute_path_inside_root() {
+    let (tmp, sb) = tmp_sandbox();
+    std::fs::write(tmp.path().join("inside.txt"), b"hello").unwrap();
+    let abs_read = sb.root().join("inside.txt");
+    let resolved = sb.resolve_read(abs_read.to_str().unwrap()).expect("read inside root");
+    assert!(resolved.starts_with(sb.root()));
+    let abs_write = sb.root().join("nested").join("out.txt");
+    let resolved = sb
+      .resolve_write(abs_write.to_str().unwrap())
+      .expect("write inside root");
+    assert!(resolved.starts_with(sb.root()));
+  }
+
+  #[test]
+  fn rejects_absolute_traversal_back_outside() {
+    let (_tmp, sb) = tmp_sandbox();
+    let sneaky = format!("{}/nested/../../escape.txt", sb.root().display());
+    assert!(sb.resolve_write(&sneaky).is_err());
   }
 
   #[test]
