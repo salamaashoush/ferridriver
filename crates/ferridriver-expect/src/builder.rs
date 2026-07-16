@@ -139,13 +139,16 @@ where
         .copied()
         .unwrap_or_else(|| self.intervals.last().copied().unwrap_or(1000));
       interval_idx += 1;
-      let sleep_dur = Duration::from_millis(interval_ms);
-      if tokio::time::Instant::now() + sleep_dur > deadline {
+      // Clamp the interval to the remaining budget so the final
+      // attempt lands AT the deadline instead of bailing early.
+      let now = tokio::time::Instant::now();
+      if now >= deadline {
         return Err(AssertionFailure::new(
           "expect.poll().to_equal() timed out".to_string(),
           Some(format!("Expected: {expected:?}\nReceived: {actual:?}")),
         ));
       }
+      let sleep_dur = Duration::from_millis(interval_ms).min(deadline - now);
       tokio::time::sleep(sleep_dur).await;
     }
   }
@@ -165,13 +168,16 @@ where
         .copied()
         .unwrap_or_else(|| self.intervals.last().copied().unwrap_or(1000));
       interval_idx += 1;
-      let sleep_dur = Duration::from_millis(interval_ms);
-      if tokio::time::Instant::now() + sleep_dur > deadline {
+      // Clamp the interval to the remaining budget so the final
+      // attempt lands AT the deadline instead of bailing early.
+      let now = tokio::time::Instant::now();
+      if now >= deadline {
         return Err(AssertionFailure::new(
           "expect.poll().to_satisfy() timed out".to_string(),
           Some(format!("Expected: {description}\nReceived: {actual:?}")),
         ));
       }
+      let sleep_dur = Duration::from_millis(interval_ms).min(deadline - now);
       tokio::time::sleep(sleep_dur).await;
     }
   }
@@ -234,10 +240,13 @@ where
           .copied()
           .unwrap_or_else(|| options.intervals.last().copied().unwrap_or(1000));
         interval_idx += 1;
-        let sleep_dur = Duration::from_millis(interval_ms);
-        if tokio::time::Instant::now() + sleep_dur > deadline {
+        // Clamp the interval to the remaining budget so the final
+        // attempt lands AT the deadline instead of bailing early.
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
           break e;
         }
+        let sleep_dur = Duration::from_millis(interval_ms).min(deadline - now);
         tokio::time::sleep(sleep_dur).await;
       },
     }

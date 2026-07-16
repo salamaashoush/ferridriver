@@ -1577,31 +1577,98 @@ impl PageJs {
   /// actionability wait (dismissing overlays/modals). Mirrors Playwright
   /// `client/page.ts:397`.
   ///
-  /// The JS handler runs cross-task via the session `AsyncContext` (same
-  /// bridge as `page.route`): the core checkpoint awaits a oneshot that the
-  /// spawned dispatch task fulfils once the handler (and any returned
-  /// promise) settles, so the original action only resumes afterwards.
+  /// The JS handler runs cross-task via the session VM's job queue (same
+  /// bridge as `page.route`): the triggering action is parked on a host
+  /// await, so the interpreter is free to run the queued handler job; the
+  /// core checkpoint awaits a oneshot the dispatch task fulfils once the
+  /// handler (and any returned promise) settles, so the original action
+  /// only resumes afterwards.
   #[qjs(rename = "addLocatorHandler")]
-  pub fn add_locator_handler(
+  pub fn add_locator_handler<'js>(
     &self,
-    ctx: rquickjs::Ctx<'_>,
-    _locator: rquickjs::Class<'_, LocatorJs>,
-    _handler: rquickjs::Function<'_>,
-    _options: Opt<rquickjs::Value<'_>>,
+    ctx: rquickjs::Ctx<'js>,
+    locator: rquickjs::Class<'js, LocatorJs>,
+    handler: rquickjs::Function<'js>,
+    options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    // The handler must run *during* an in-progress action's actionability
-    // wait. In the QuickJS scripting engine every action executes inside an
-    // exclusive `async_with` over the single session VM, so a nested
-    // handler callback can never acquire the VM until the action finishes --
-    // invoking it would deadlock. Playwright sidesteps this with a
-    // client/server split; ferridriver-script has none, so this is a typed
-    // Unsupported rather than a hang. The core + NAPI layers support it fully.
-    ferridriver::error::Result::<()>::Err(ferridriver::error::FerriError::unsupported(
-      "page.addLocatorHandler is not available in the QuickJS scripting engine \
-       (handlers cannot fire during an in-VM action without deadlocking the \
-       single-threaded VM); use the NAPI/core API for locator handlers",
-    ))
-    .into_js_with(&ctx)
+    let mut times: Option<u32> = None;
+    let mut no_wait_after = false;
+    if let Some(bag) = options.0.as_ref().and_then(rquickjs::Value::as_object) {
+      if let Ok(Some(t)) = bag.get::<_, Option<f64>>("times") {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+          times = Some(t as u32);
+        }
+      }
+      if let Ok(Some(n)) = bag.get::<_, Option<bool>>("noWaitAfter") {
+        no_wait_after = n;
+      }
+    }
+    let vm = self.vm.clone().ok_or_else(|| {
+      rquickjs::Error::new_from_js_message(
+        "page.addLocatorHandler",
+        "Error",
+        "page.addLocatorHandler requires the script engine's VM handle (install_page)".to_string(),
+      )
+    })?;
+    let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
+    let net = crate::bindings::fetch::active_net(&ctx);
+    let saved = SavedCallback::save_with_net(&ctx, handler, net);
+    with_page_callbacks(&ctx, |r| r.insert_locator_handler(id, saved))?;
+
+    let core_locator = locator.borrow().inner_ref().clone();
+    let rust_handler: ferridriver::locator_handler::LocatorHandlerFn = std::sync::Arc::new(move |loc| {
+      let vm = vm.clone();
+      Box::pin(async move {
+        let (tx, rx) = tokio::sync::oneshot::channel::<ferridriver::error::Result<()>>();
+        tokio::spawn(async move {
+          use rquickjs::class::Class;
+          let result: Result<rquickjs::Result<()>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
+            let f = with_page_callbacks(&ctx, |r| r.get_locator_handler(id))?.ok_or_else(|| {
+              rquickjs::Error::new_from_js_message(
+                "page.addLocatorHandler",
+                "Error",
+                "locator handler gone".to_string(),
+              )
+            })?;
+            let loc_class = Class::instance(ctx.clone(), LocatorJs::new(loc))?;
+            let _: rquickjs::Value<'_> = f.call_bracketed_async(&ctx, (loc_class,)).await?;
+            Ok(())
+          })
+          .await;
+          let mapped = match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(ferridriver::error::FerriError::evaluation(format!(
+              "locator handler failed: {e}"
+            ))),
+            Err(e) => Err(ferridriver::error::FerriError::evaluation(format!(
+              "locator handler dispatch failed: {}",
+              e.message
+            ))),
+          };
+          let _ = tx.send(mapped);
+        });
+        match rx.await {
+          Ok(r) => r,
+          Err(_) => Err(ferridriver::error::FerriError::evaluation(
+            "locator handler dispatch task dropped",
+          )),
+        }
+      })
+    });
+
+    self
+      .inner
+      .add_locator_handler(&core_locator, rust_handler, times, no_wait_after)
+      .into_js_with(&ctx)?;
+    self
+      .locator_handler_ids
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .entry(core_locator.selector().to_string())
+      .or_default()
+      .push(id);
+    Ok(())
   }
 
   /// `page.removeLocatorHandler(locator)`. Drops every handler registered for

@@ -221,7 +221,8 @@ export interface WebFirstMatchers {
   toContainTexts(expected: Array<string | RegExp>, options?: ExpectMatcherOptions): Promise<void>;
   toHaveValue(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
   toHaveValues(expected: Array<string | RegExp>, options?: ExpectMatcherOptions): Promise<void>;
-  toHaveAttribute(name: string, value?: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveAttribute(name: string, value: string | RegExp, options?: ExpectMatcherOptions & { ignoreCase?: boolean }): Promise<void>;
+  toHaveAttribute(name: string, options?: ExpectMatcherOptions): Promise<void>;
   toHaveClass(expected: string | RegExp | Array<string | RegExp>, options?: ExpectMatcherOptions): Promise<void>;
   toContainClass(expected: string, options?: ExpectMatcherOptions): Promise<void>;
   toHaveCSS(name: string, value: string | RegExp, options?: ExpectMatcherOptions & { pseudo?: string }): Promise<void>;
@@ -241,7 +242,7 @@ export interface WebFirstMatchers {
 export interface PageMatchers {
   toHaveTitle(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
   toContainTitle(expected: string, options?: ExpectMatcherOptions): Promise<void>;
-  toHaveURL(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveURL(expected: string | RegExp, options?: ExpectMatcherOptions & { ignoreCase?: boolean }): Promise<void>;
   toContainURL(expected: string, options?: ExpectMatcherOptions): Promise<void>;
   toHaveScreenshot(name?: string, options?: ScreenshotAssertionOptions): Promise<void>;
   toHaveScreenshot(options?: ScreenshotAssertionOptions): Promise<void>;
@@ -267,11 +268,14 @@ export interface Expect {
   (locator: Locator): LocatorAssertions;
   (page: Page): PageAssertions;
   (response: APIResponse): APIResponseMatchers & { not: APIResponseMatchers };
-  (fn: () => unknown | Promise<unknown>): ValueAssertions & { toPass(options?: { timeout?: number; intervals?: number[] }): Promise<void> };
+  (fn: () => unknown | Promise<unknown>): ValueAssertions & {
+    toPass(options?: { timeout?: number; intervals?: number[] }): Promise<void>;
+    not: GenericMatchers & { toPass(options?: { timeout?: number; intervals?: number[] }): Promise<void> };
+  };
   (value: unknown): ValueAssertions;
   soft(value: unknown): ValueAssertions;
   soft(locator: Locator): LocatorAssertions;
-  poll(fn: () => unknown | Promise<unknown>, options?: { timeout?: number }): PollAssertions;
+  poll(fn: () => unknown | Promise<unknown>, options?: { timeout?: number; intervals?: number[] }): PollAssertions;
   any(ctor: Function): unknown;
   anything(): unknown;
   arrayContaining(items: unknown[]): unknown;
@@ -469,7 +473,7 @@ export interface Locator {
   getByPlaceholder(text: string | RegExp, options?: GetByTextOptions): Locator;
   getByAltText(text: string | RegExp, options?: GetByTextOptions): Locator;
   getByTitle(text: string | RegExp, options?: GetByTextOptions): Locator;
-  getByTestId(testId: string): Locator;
+  getByTestId(testId: string | RegExp): Locator;
   frameLocator(selector: string): FrameLocator;
   contentFrame(): FrameLocator;
   page(): Page;
@@ -483,7 +487,7 @@ export interface FrameLocator {
   getByPlaceholder(text: string | RegExp, options?: GetByTextOptions): Locator;
   getByAltText(text: string | RegExp, options?: GetByTextOptions): Locator;
   getByTitle(text: string | RegExp, options?: GetByTextOptions): Locator;
-  getByTestId(testId: string): Locator;
+  getByTestId(testId: string | RegExp): Locator;
   frameLocator(selector: string): FrameLocator;
   first(): FrameLocator;
   last(): FrameLocator;
@@ -659,11 +663,18 @@ export interface Page {
   getByPlaceholder(text: string | RegExp, options?: GetByTextOptions): Locator;
   getByAltText(text: string | RegExp, options?: GetByTextOptions): Locator;
   getByTitle(text: string | RegExp, options?: GetByTextOptions): Locator;
-  getByTestId(testId: string): Locator;
+  getByTestId(testId: string | RegExp): Locator;
   frameLocator(selector: string): FrameLocator;
   frames(): Frame[];
   mainFrame(): Frame;
   frame(nameOrOptions: string | { name?: string; url?: string | RegExp }): Frame | null;
+
+  addLocatorHandler(
+    locator: Locator,
+    handler: (locator: Locator) => Promise<unknown> | unknown,
+    options?: { noWaitAfter?: boolean; times?: number },
+  ): void;
+  removeLocatorHandler(locator: Locator): void;
 
   click(selector: string, options?: ClickOptions): Promise<void>;
   dblclick(selector: string, options?: ClickOptions): Promise<void>;

@@ -88,10 +88,16 @@ where
           .unwrap_or_else(|| POLL_INTERVALS.last().copied().unwrap_or(1000));
         interval_idx += 1;
 
-        let sleep_dur = Duration::from_millis(interval_ms);
-        if tokio::time::Instant::now() + sleep_dur > deadline {
+        // Sleep the scheduled interval clamped to the remaining budget,
+        // then re-check — the final attempt lands AT the deadline. Bailing
+        // whenever the next full interval would cross the deadline gives
+        // up early (a 400ms timeout failed at ~170ms); Playwright polls
+        // until the deadline expires.
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
           break;
         }
+        let sleep_dur = Duration::from_millis(interval_ms).min(deadline - now);
         tokio::time::sleep(sleep_dur).await;
       },
     }

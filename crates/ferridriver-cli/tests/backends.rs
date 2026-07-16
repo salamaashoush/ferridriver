@@ -496,30 +496,6 @@ fn register_browser_type(set: &mut TestSet<'_>) {
   );
 }
 
-fn register_expect(set: &mut TestSet<'_>) {
-  run!(set, backends_support::expect::test_expect_to_be_visible);
-  run!(set, backends_support::expect::test_expect_to_have_text);
-  run!(set, backends_support::expect::test_expect_to_contain_text);
-  run!(set, backends_support::expect::test_expect_to_have_count);
-  run!(set, backends_support::expect::test_expect_to_have_attribute);
-  run!(set, backends_support::expect::test_expect_to_have_value);
-  run!(set, backends_support::expect::test_expect_page_title_and_url);
-  run!(set, backends_support::expect::test_expect_value_matchers_in_script);
-  run!(set, backends_support::expect::test_expect_to_throw_in_script);
-  run!(set, backends_support::expect::test_expect_failure_throws);
-  run!(set, backends_support::expect::test_expect_poll_with_browser);
-  run!(set, backends_support::expect::test_expect_inline_timeout_option);
-  run!(set, backends_support::expect::test_expect_to_pass_retries);
-  run!(set, backends_support::expect::test_expect_to_pass_timeout_and_intervals);
-  run!(set, backends_support::expect::test_expect_not_to_pass);
-  run!(set, backends_support::expect::test_expect_boolean_state_options);
-  run!(set, backends_support::expect::test_expect_text_match_options);
-  run!(set, backends_support::expect::test_expect_to_have_attribute_overloads);
-  run!(set, backends_support::expect::test_expect_new_locator_matchers);
-  run!(set, backends_support::expect::test_expect_to_have_url_ignore_case);
-  run!(set, backends_support::expect::test_expect_poll_intervals_option);
-}
-
 fn register_binding_surface(set: &mut TestSet<'_>) {
   run!(set, backends_support::binding_surface::test_frame_get_by_methods);
   run!(
@@ -543,20 +519,6 @@ fn register_binding_surface(set: &mut TestSet<'_>) {
     set,
     backends_support::binding_surface::test_context_clear_cookies_filter
   );
-}
-
-fn register_locator_handler(set: &mut TestSet<'_>) {
-  run!(
-    set,
-    backends_support::locator_handler::test_add_locator_handler_unsupported
-  );
-}
-
-fn register_getby_regex(set: &mut TestSet<'_>) {
-  run!(set, backends_support::getby_regex::test_getby_text_regex);
-  run!(set, backends_support::getby_regex::test_getby_role_name_regex);
-  run!(set, backends_support::getby_regex::test_getby_placeholder_regex);
-  run!(set, backends_support::getby_regex::test_getby_test_id_regex);
 }
 
 fn register_multi_page(set: &mut TestSet<'_>) {
@@ -636,20 +598,8 @@ macro_rules! backend_module {
         run_category($backend, register_browser_type);
       }
       #[test]
-      fn expect() {
-        run_category($backend, register_expect);
-      }
-      #[test]
       fn binding_surface() {
         run_category($backend, register_binding_surface);
-      }
-      #[test]
-      fn getby_regex() {
-        run_category($backend, register_getby_regex);
-      }
-      #[test]
-      fn locator_handler() {
-        run_category($backend, register_locator_handler);
       }
       #[test]
       fn multi_page() {

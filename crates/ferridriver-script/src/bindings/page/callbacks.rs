@@ -304,6 +304,14 @@ impl PageCallbacks {
     self.routes.retain(|_, e| &e.owner != owner);
   }
 
+  pub(crate) fn insert_locator_handler(&mut self, id: u64, cb: SavedCallback) {
+    self.locator_handlers.insert(id, cb);
+  }
+
+  pub(crate) fn get_locator_handler(&self, id: u64) -> Option<SavedCallback> {
+    self.locator_handlers.get(&id).cloned()
+  }
+
   pub(crate) fn remove_locator_handler(&mut self, id: u64) {
     self.locator_handlers.remove(&id);
   }

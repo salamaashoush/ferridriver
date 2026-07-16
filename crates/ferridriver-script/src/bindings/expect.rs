@@ -1385,10 +1385,13 @@ impl ExpectPollJs {
         .copied()
         .unwrap_or_else(|| self.intervals.last().copied().unwrap_or(1000));
       interval_idx += 1;
-      let sleep_dur = Duration::from_millis(interval_ms);
-      if tokio::time::Instant::now() + sleep_dur > deadline {
+      // Clamp the interval to the remaining budget so the final
+      // attempt lands AT the deadline instead of bailing early.
+      let now = tokio::time::Instant::now();
+      if now >= deadline {
         break dbg;
       }
+      let sleep_dur = Duration::from_millis(interval_ms).min(deadline - now);
       tokio::time::sleep(sleep_dur).await;
     };
     let last = final_dbg.as_str();
@@ -1424,10 +1427,13 @@ impl ExpectPollJs {
         .copied()
         .unwrap_or_else(|| self.intervals.last().copied().unwrap_or(1000));
       interval_idx += 1;
-      let sleep_dur = Duration::from_millis(interval_ms);
-      if tokio::time::Instant::now() + sleep_dur > deadline {
+      // Clamp the interval to the remaining budget so the final
+      // attempt lands AT the deadline instead of bailing early.
+      let now = tokio::time::Instant::now();
+      if now >= deadline {
         break actual;
       }
+      let sleep_dur = Duration::from_millis(interval_ms).min(deadline - now);
       tokio::time::sleep(sleep_dur).await;
     };
     Err(assertion_to_rq(
