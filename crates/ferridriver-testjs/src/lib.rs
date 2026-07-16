@@ -1,0 +1,315 @@
+//! TypeScript test-file front-end for the ferridriver test runner.
+//!
+//! Mirrors `ferridriver-bdd`'s role for `.test.ts`/`.spec.ts` files:
+//! discover files from `[test].testMatch`, rolldown-bundle them once to
+//! `QuickJS` bytecode, evaluate the bundle in a collection session to
+//! snapshot every `test`/`describe` registration, translate the
+//! snapshot into a core [`TestPlan`], and execute each body through a
+//! per-worker `QuickJS` session — all inside the single
+//! `ferridriver-test` `TestRunner` pipeline (workers, fixtures,
+//! retries, reporters, tracing).
+//!
+//! This is the only crate that depends on both `ferridriver-script`
+//! and `ferridriver-test`; it contains no rquickjs code — every VM
+//! interaction goes through the typed surface `ferridriver-script`
+//! exports (`collect_tests`, `run_test`, `run_standalone_hook`,
+//! [`ferridriver_script::TestHostBridge`]).
+
+mod bridge;
+mod translate;
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+
+use dashmap::DashMap;
+use ferridriver_script::{CollectedTests, CompiledBundle, bundle_and_compile_named, collect_tests, eval_bundle};
+use ferridriver_test::config::TestConfig;
+use ferridriver_test::model::TestPlan;
+use tokio::sync::OnceCell;
+
+pub use bridge::InfoBridge;
+pub use translate::translate_tests;
+
+/// Bundle module label — appears in stack frames before source-map
+/// remap and namespaces the bytecode disk cache.
+const BUNDLE_NAME: &str = "ferridriver-tests.js";
+
+/// The `[scripting]` sandbox caps the test VM runs with. Set once by
+/// the `ferridriver test` entry point from resolved config; unset ⇒
+/// locked down ([`ferridriver_script::ScriptCaps::default`]).
+static TEST_SCRIPT_CAPS: OnceLock<ferridriver_script::ScriptCaps> = OnceLock::new();
+
+/// Install the test VM sandbox caps. Call before the run; idempotent
+/// (first set wins).
+pub fn set_test_script_caps(caps: ferridriver_script::ScriptCaps) {
+  let _ = TEST_SCRIPT_CAPS.set(caps);
+}
+
+/// Declared sidecar specs the test VM exposes as
+/// `sidecars.connect(name)`. Same threading as
+/// [`set_test_script_caps`].
+static TEST_SIDECARS: OnceLock<Vec<ferridriver_script::sidecar::SidecarSpec>> = OnceLock::new();
+
+pub fn set_test_sidecars(sidecars: Vec<ferridriver_script::sidecar::SidecarSpec>) {
+  let _ = TEST_SIDECARS.set(sidecars);
+}
+
+/// Discover test entry files for the config's `testMatch` globs,
+/// resolved against `cwd` (and `testDir` when set). `.feature` globs
+/// belong to the BDD path and are skipped here; `testIgnore` prunes.
+#[must_use]
+pub fn discover_test_files(config: &TestConfig, cwd: &Path) -> Vec<PathBuf> {
+  let base = match &config.test_dir {
+    Some(dir) => {
+      let p = Path::new(dir);
+      if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) }
+    },
+    None => cwd.to_path_buf(),
+  };
+  let ignore: Vec<glob::Pattern> = config
+    .test_ignore
+    .iter()
+    .filter_map(|p| glob::Pattern::new(p).ok())
+    .collect();
+  let mut files = Vec::new();
+  for pat in &config.test_match {
+    if pat.ends_with(".feature") || pat.contains(".feature") {
+      continue;
+    }
+    let full = if Path::new(pat).is_absolute() {
+      pat.clone()
+    } else {
+      base.join(pat).to_string_lossy().into_owned()
+    };
+    if let Ok(entries) = glob::glob(&full) {
+      for entry in entries.flatten() {
+        if !ferridriver_script::is_source_file(&entry) {
+          continue;
+        }
+        let rel = entry.strip_prefix(cwd).unwrap_or(&entry);
+        if ignore.iter().any(|ig| ig.matches_path(rel) || ig.matches_path(&entry)) {
+          continue;
+        }
+        files.push(entry);
+      }
+    }
+  }
+  files.sort();
+  files.dedup();
+  files
+}
+
+/// A loaded per-worker test session: one `QuickJS` VM with the bundled
+/// test module evaluated (registrations live in the VM's registry).
+pub struct JsTestSession {
+  session: ferridriver_script::Session,
+}
+
+impl JsTestSession {
+  /// Create the worker session and evaluate the precompiled bundle.
+  /// The registration count is checked against the collection pass —
+  /// a mismatch means test files register nondeterministically
+  /// (registration inside conditionals on ambient state), which would
+  /// desync body indices from the plan.
+  ///
+  /// # Errors
+  ///
+  /// Fails when the session cannot be created, the bundle fails to
+  /// evaluate, or the registration count diverges from the plan's.
+  pub async fn load(bundle: Arc<CompiledBundle>, cwd: &Path, expected_tests: usize) -> anyhow::Result<Self> {
+    let sandbox = Arc::new(
+      ferridriver_script::PathSandbox::new(cwd)
+        .map_err(|e| anyhow::anyhow!("sandbox {}: {}", cwd.display(), e.message))?,
+    );
+    let run_ctx = ferridriver_script::RunContext {
+      vars: Arc::new(ferridriver_script::InMemoryVars::new()),
+      sandbox,
+      artifacts: None,
+      page: None,
+      browser_context: None,
+      request: None,
+      browser: None,
+      extensions: Vec::new(),
+      host: ferridriver_script::ExtensionHost::Test,
+      caps: TEST_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
+    };
+    let engine_config = ferridriver_script::ScriptEngineConfig {
+      sidecars: TEST_SIDECARS.get().cloned().unwrap_or_default(),
+      ..Default::default()
+    };
+    let session = ferridriver_script::Session::create(engine_config, &run_ctx)
+      .await
+      .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
+    let vm = session.vm_handle();
+    eval_bundle(&vm, &bundle)
+      .await
+      .map_err(|e| anyhow::anyhow!("test bundle failed to load: {}", bundle.format_error(&e)))?;
+    let collected = collect_tests(&vm)
+      .await
+      .map_err(|e| anyhow::anyhow!("collect tests: {}", e.message))?;
+    if collected.tests.len() != expected_tests {
+      anyhow::bail!(
+        "test registration is nondeterministic: collection saw {} tests, this worker registered {} — \
+         register tests unconditionally at module top level",
+        expected_tests,
+        collected.tests.len()
+      );
+    }
+    Ok(Self { session })
+  }
+
+  #[must_use]
+  pub fn session(&self) -> &ferridriver_script::Session {
+    &self.session
+  }
+
+  #[must_use]
+  pub fn vm_handle(&self) -> ferridriver_script::VmHandle {
+    self.session.vm_handle()
+  }
+}
+
+/// Per-plan worker-session pool: one `QuickJS` VM per worker index, owned
+/// by the plan that created it. A pool per run (instead of a process
+/// global) keeps concurrent `TestRunner` runs — parallel projects, the
+/// runner's own tests — from evicting each other's live VMs, and makes
+/// watch-mode invalidation trivial (new plan ⇒ new pool).
+pub struct SessionPool {
+  bundle: Arc<CompiledBundle>,
+  cwd: Arc<PathBuf>,
+  expected_tests: usize,
+  slots: DashMap<u32, Arc<OnceCell<Arc<JsTestSession>>>>,
+}
+
+impl SessionPool {
+  fn new(bundle: Arc<CompiledBundle>, cwd: PathBuf, expected_tests: usize) -> Self {
+    Self {
+      bundle,
+      cwd: Arc::new(cwd),
+      expected_tests,
+      slots: DashMap::new(),
+    }
+  }
+
+  pub(crate) async fn get(&self, worker_index: u32) -> Result<Arc<JsTestSession>, String> {
+    let cell = Arc::clone(
+      &self
+        .slots
+        .entry(worker_index)
+        .or_insert_with(|| Arc::new(OnceCell::new())),
+    );
+    let bundle = Arc::clone(&self.bundle);
+    let cwd = Arc::clone(&self.cwd);
+    let expected = self.expected_tests;
+    cell
+      .get_or_try_init(|| async move {
+        JsTestSession::load(bundle, &cwd, expected)
+          .await
+          .map(Arc::new)
+          .map_err(|e| e.to_string())
+      })
+      .await
+      .cloned()
+  }
+
+  /// Resume every suspended worker-scoped fixture and drop the cached
+  /// sessions. Call once after `TestRunner::run` returns.
+  pub async fn teardown(&self) {
+    let entries: Vec<(u32, Arc<OnceCell<Arc<JsTestSession>>>)> = {
+      let mut out = Vec::new();
+      for r in &self.slots {
+        out.push((*r.key(), Arc::clone(r.value())));
+      }
+      self.slots.clear();
+      out
+    };
+    for (worker, cell) in entries {
+      if let Some(session) = cell.get()
+        && let Err(e) = ferridriver_script::teardown_worker_fixtures(&session.vm_handle()).await
+      {
+        tracing::warn!(target: "ferridriver::testjs", worker, error = %e.message, "worker fixture teardown failed");
+      }
+    }
+  }
+}
+
+/// The compiled bundle + collection snapshot a plan is built from.
+pub struct TsTestSource {
+  pub bundle: Arc<CompiledBundle>,
+  pub collected: CollectedTests,
+  pub files: Vec<PathBuf>,
+}
+
+/// Discover, bundle and collect — everything up to translation. Returns
+/// `None` when no test files match (the caller decides whether that is
+/// an error).
+///
+/// # Errors
+///
+/// Fails when bundling, the collection session, or bundle evaluation
+/// fails.
+pub async fn load_ts_tests(config: &TestConfig, cwd: &Path) -> anyhow::Result<Option<TsTestSource>> {
+  let files = discover_test_files(config, cwd);
+  if files.is_empty() {
+    return Ok(None);
+  }
+  let bundle = Arc::new(
+    bundle_and_compile_named(&files, cwd, BUNDLE_NAME)
+      .await
+      .map_err(|e| anyhow::anyhow!("bundle test files: {}", e.message))?,
+  );
+
+  // Collection session: evaluate once, snapshot registrations. The
+  // session is discarded — workers build their own.
+  let sandbox = Arc::new(
+    ferridriver_script::PathSandbox::new(cwd)
+      .map_err(|e| anyhow::anyhow!("sandbox {}: {}", cwd.display(), e.message))?,
+  );
+  let run_ctx = ferridriver_script::RunContext {
+    vars: Arc::new(ferridriver_script::InMemoryVars::new()),
+    sandbox,
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    extensions: Vec::new(),
+    host: ferridriver_script::ExtensionHost::Test,
+    caps: TEST_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
+  };
+  let session = ferridriver_script::Session::create(ferridriver_script::ScriptEngineConfig::default(), &run_ctx)
+    .await
+    .map_err(|e| anyhow::anyhow!("collection session: {}", e.message))?;
+  let vm = session.vm_handle();
+  eval_bundle(&vm, &bundle)
+    .await
+    .map_err(|e| anyhow::anyhow!("test bundle failed to load: {}", bundle.format_error(&e)))?;
+  let collected = collect_tests(&vm)
+    .await
+    .map_err(|e| anyhow::anyhow!("collect tests: {}", e.message))?;
+  Ok(Some(TsTestSource {
+    bundle,
+    collected,
+    files,
+  }))
+}
+
+/// Discover + bundle + collect + translate in one call — the plan the
+/// `ferridriver test` CLI feeds to `TestRunner::run`, plus the session
+/// pool to tear down after the run.
+///
+/// # Errors
+///
+/// Propagates [`load_ts_tests`] and [`translate_tests`] failures.
+pub async fn build_ts_plan(config: &TestConfig, cwd: &Path) -> anyhow::Result<Option<(TestPlan, Arc<SessionPool>)>> {
+  let Some(source) = load_ts_tests(config, cwd).await? else {
+    return Ok(None);
+  };
+  let pool = Arc::new(SessionPool::new(
+    Arc::clone(&source.bundle),
+    cwd.to_path_buf(),
+    source.collected.tests.len(),
+  ));
+  let plan = translate_tests(&source, config, cwd, &pool)?;
+  Ok(Some((plan, pool)))
+}

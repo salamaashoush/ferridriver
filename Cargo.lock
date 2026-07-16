@@ -1630,6 +1630,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferridriver-testjs"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "dashmap",
+ "ferridriver",
+ "ferridriver-script",
+ "ferridriver-test",
+ "glob",
+ "rustc-hash",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
