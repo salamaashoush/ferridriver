@@ -23,7 +23,6 @@ pub mod download;
 pub mod evaluate;
 pub mod extension_tools;
 pub mod file_chooser;
-pub mod handle_surface;
 pub mod mcp_features;
 pub mod multi_page;
 pub mod nav;

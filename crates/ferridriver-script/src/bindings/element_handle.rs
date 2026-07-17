@@ -12,6 +12,24 @@ use rquickjs::class::Trace;
 use crate::bindings::convert::FerriResultCtxExt;
 use crate::bindings::convert::{extract_page_function, quickjs_arg_to_serialized, serialized_value_to_quickjs};
 
+/// Parse Playwright's `options?: { timeout?: number }` bag into a
+/// millisecond timeout.
+fn parse_timeout_options<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<Option<u64>> {
+  #[derive(serde::Deserialize, Default)]
+  #[serde(rename_all = "camelCase", default)]
+  struct JsTimeoutOpts {
+    timeout: Option<f64>,
+  }
+  let parsed: JsTimeoutOpts = match options.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => crate::bindings::convert::serde_from_js(ctx, v)?,
+    _ => JsTimeoutOpts::default(),
+  };
+  Ok(parsed.timeout.map(crate::bindings::convert::ms_f64_to_u64))
+}
+
 /// Extract `{ type?: 'png' | 'jpeg' | 'webp' }` from a user-supplied
 /// screenshot options bag. Defaults to PNG when the caller omits the
 /// bag or the `type` field. Matches Playwright's
@@ -368,16 +386,16 @@ impl ElementHandleJs {
 
   // ── Wait helpers ─────────────────────────────────────────────────────
 
-  /// Playwright: `elementHandle.waitForElementState(state, options?)`.
+  /// Playwright: `elementHandle.waitForElementState(state, options?: { timeout? })`.
   #[qjs(rename = "waitForElementState")]
-  pub async fn wait_for_element_state(
+  pub async fn wait_for_element_state<'js>(
     &self,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     state: String,
-    timeout: rquickjs::function::Opt<f64>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let st = ferridriver::ElementState::parse(&state).into_js_with(&ctx)?;
-    let timeout_ms = timeout.0.map(|ms| ms as u64);
+    let timeout_ms = parse_timeout_options(&ctx, options)?;
     self
       .inner
       .wait_for_element_state(st, timeout_ms)
@@ -385,15 +403,15 @@ impl ElementHandleJs {
       .into_js_with(&ctx)
   }
 
-  /// Playwright: `elementHandle.waitForSelector(selector, options?)`.
+  /// Playwright: `elementHandle.waitForSelector(selector, options?: { timeout? })`.
   #[qjs(rename = "waitForSelector")]
-  pub async fn wait_for_selector(
+  pub async fn wait_for_selector<'js>(
     &self,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     selector: String,
-    timeout: rquickjs::function::Opt<f64>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Option<ElementHandleJs>> {
-    let timeout_ms = timeout.0.map(|ms| ms as u64);
+    let timeout_ms = parse_timeout_options(&ctx, options)?;
     let maybe = self
       .inner
       .wait_for_selector(&selector, timeout_ms)

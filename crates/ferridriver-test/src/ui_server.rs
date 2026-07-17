@@ -324,6 +324,12 @@ impl UiServer {
   pub async fn start(artifacts_root: PathBuf, port: Option<u16>) -> ferridriver::error::Result<Self> {
     use ferridriver::FerriError;
 
+    // Attachment paths arrive absolute (worker absolutizes
+    // TestInfo.outputDir), so a relative root would never strip-prefix
+    // into a servable `/artifact/` urlPath. Normalize against the same
+    // cwd the worker used.
+    let artifacts_root = std::path::absolute(&artifacts_root).unwrap_or(artifacts_root);
+
     let (events, _) = broadcast::channel(4096);
     let (commands_tx, commands_rx) = mpsc::unbounded_channel();
     let state = Arc::new(UiState {

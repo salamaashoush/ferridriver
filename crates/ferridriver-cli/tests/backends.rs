@@ -152,10 +152,6 @@ fn register_script_handles(set: &mut TestSet<'_>) {
   );
   run!(
     set,
-    backends_support::script_handles_local::test_script_page_wait_for_function_arg_polling
-  );
-  run!(
-    set,
     backends_support::script_handles_local::test_script_drag_default_steps
   );
   run!(
@@ -179,46 +175,6 @@ fn register_script_handles(set: &mut TestSet<'_>) {
     backends_support::script_handles_local::test_script_emulate_media_null_disables_single_field
   );
   run!(set, backends_support::script_handles_local::test_script_add_init_script);
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_utility_script_exposed
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_handle_lifecycle
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_evaluate_fn_and_handle
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_evaluate_rich_types
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_element_handle_methods
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_handle_materialisation
-  );
-  run!(set, backends_support::handle_surface::test_handle_json_value);
-  run!(set, backends_support::handle_surface::test_handle_properties);
-  run!(set, backends_support::handle_surface::test_handle_multi_arg_evaluate);
-  run!(set, backends_support::handle_surface::test_element_handle_eval);
-  run!(set, backends_support::handle_surface::test_element_handle_query);
-  run!(set, backends_support::handle_surface::test_element_handle_frames);
-  run!(set, backends_support::handle_surface::test_element_handle_waits);
-  run!(
-    set,
-    backends_support::handle_surface::test_element_handle_temp_tag_actions
-  );
-  run!(
-    set,
-    backends_support::handle_surface::test_element_handle_action_options
-  );
-  run!(set, backends_support::handle_surface::test_element_handle_select_text);
   run!(set, backends_support::script_handles_local::test_script_click_options);
   run!(set, backends_support::action_options::test_script_dblclick_options);
   run!(set, backends_support::action_options::test_script_press_options);

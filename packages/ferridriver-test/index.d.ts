@@ -390,19 +390,65 @@ export interface Mouse {
 export interface JSHandle {
   jsonValue(): Promise<unknown>;
   evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  evaluateHandle(pageFunction: Function | string, arg?: unknown): Promise<JSHandle>;
+  getProperty(propertyName: string): Promise<JSHandle>;
+  // Plain object rather than Playwright's Map<string, JSHandle> — the
+  // documented ferridriver shape shared with the NAPI binding's
+  // Record<string, JSHandle>.
+  getProperties(): Promise<Record<string, JSHandle>>;
+  asElement(): ElementHandle | null;
+  isDisposed(): boolean;
   dispose(): Promise<void>;
 }
 
 export interface ElementHandle extends JSHandle {
+  asJSHandle(): JSHandle;
   click(options?: ClickOptions): Promise<void>;
+  dblclick(options?: ClickOptions): Promise<void>;
+  hover(options?: ClickOptions): Promise<void>;
+  tap(options?: ClickOptions): Promise<void>;
   fill(value: string, options?: FillOptions): Promise<void>;
+  press(key: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
+  type(text: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
+  check(options?: ClickOptions): Promise<void>;
+  uncheck(options?: ClickOptions): Promise<void>;
+  setChecked(checked: boolean, options?: ClickOptions): Promise<void>;
+  focus(): Promise<void>;
+  scrollIntoViewIfNeeded(): Promise<void>;
+  dispatchEvent(type: string, eventInit?: Record<string, unknown>): Promise<void>;
+  selectOption(
+    values: string | string[] | SelectOptionValues | SelectOptionValues[] | null,
+    options?: TimeoutOption & { force?: boolean }
+  ): Promise<string[]>;
+  selectText(): Promise<void>;
+  setInputFiles(
+    files: string | string[] | { name: string; mimeType: string; buffer: Uint8Array | Buffer } | Array<{ name: string; mimeType: string; buffer: Uint8Array | Buffer }>,
+    options?: TimeoutOption
+  ): Promise<void>;
   textContent(): Promise<string | null>;
   innerText(): Promise<string>;
   innerHTML(): Promise<string>;
+  inputValue(): Promise<string>;
   getAttribute(name: string): Promise<string | null>;
   isVisible(): Promise<boolean>;
+  isHidden(): Promise<boolean>;
+  isEnabled(): Promise<boolean>;
+  isDisabled(): Promise<boolean>;
+  isChecked(): Promise<boolean>;
+  isEditable(): Promise<boolean>;
   boundingBox(): Promise<{ x: number; y: number; width: number; height: number } | null>;
   screenshot(options?: ScreenshotOptions): Promise<Uint8Array>;
+  $(selector: string): Promise<ElementHandle | null>;
+  $$(selector: string): Promise<ElementHandle[]>;
+  $eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  $$eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  ownerFrame(): Promise<Frame | null>;
+  contentFrame(): Promise<Frame | null>;
+  waitForElementState(
+    state: 'visible' | 'hidden' | 'stable' | 'enabled' | 'disabled' | 'editable',
+    options?: TimeoutOption
+  ): Promise<void>;
+  waitForSelector(selector: string, options?: TimeoutOption): Promise<ElementHandle | null>;
 }
 
 export interface Locator {
@@ -750,6 +796,10 @@ export interface Page {
   clearPageErrors(): void;
   $(selector: string): Promise<ElementHandle | null>;
   $$(selector: string): Promise<ElementHandle[]>;
+  // querySelector/querySelectorAll are the NAPI-mirrored long names for
+  // $/$$ (ferridriver extension).
+  querySelector(selector: string): Promise<ElementHandle | null>;
+  querySelectorAll(selector: string): Promise<ElementHandle[]>;
   $eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
   $$eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
   addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown): Promise<void>;

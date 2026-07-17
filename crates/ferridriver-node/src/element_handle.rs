@@ -331,25 +331,27 @@ impl ElementHandle {
 
   // ── wait_for_* helpers ───────────────────────────────────────────────
 
-  /// Playwright: `elementHandle.waitForElementState(state, options?)`.
+  /// Playwright: `elementHandle.waitForElementState(state, options?: { timeout? })`.
   #[napi]
-  pub async fn wait_for_element_state(&self, state: String, timeout: Option<u32>) -> Result<()> {
+  pub async fn wait_for_element_state(
+    &self,
+    state: String,
+    options: Option<crate::types::ElementHandleWaitOptions>,
+  ) -> Result<()> {
     let st = ferridriver::ElementState::parse(&state).into_napi()?;
-    self
-      .inner
-      .wait_for_element_state(st, timeout.map(u64::from))
-      .await
-      .into_napi()
+    let timeout = options.and_then(|o| o.timeout).map(crate::types::f64_to_u64);
+    self.inner.wait_for_element_state(st, timeout).await.into_napi()
   }
 
-  /// Playwright: `elementHandle.waitForSelector(selector, options?)`.
+  /// Playwright: `elementHandle.waitForSelector(selector, options?: { timeout? })`.
   #[napi]
-  pub async fn wait_for_selector(&self, selector: String, timeout: Option<u32>) -> Result<Option<ElementHandle>> {
-    let maybe = self
-      .inner
-      .wait_for_selector(&selector, timeout.map(u64::from))
-      .await
-      .into_napi()?;
+  pub async fn wait_for_selector(
+    &self,
+    selector: String,
+    options: Option<crate::types::ElementHandleWaitOptions>,
+  ) -> Result<Option<ElementHandle>> {
+    let timeout = options.and_then(|o| o.timeout).map(crate::types::f64_to_u64);
+    let maybe = self.inner.wait_for_selector(&selector, timeout).await.into_napi()?;
     Ok(maybe.map(ElementHandle::wrap))
   }
 

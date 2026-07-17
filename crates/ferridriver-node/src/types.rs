@@ -154,6 +154,14 @@ pub struct WaitOptions {
   pub timeout: Option<f64>,
 }
 
+/// Playwright's `{ timeout?: number }` bag for
+/// `elementHandle.waitForElementState` / `elementHandle.waitForSelector`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct ElementHandleWaitOptions {
+  pub timeout: Option<f64>,
+}
+
 /// Playwright `PageWaitForFunctionOptions` — matches
 /// `{ polling?: number | 'raf', timeout?: number }`.
 #[napi(object)]
