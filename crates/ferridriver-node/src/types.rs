@@ -162,6 +162,15 @@ pub struct ElementHandleWaitOptions {
   pub timeout: Option<f64>,
 }
 
+/// Playwright's `geolocation` bag for `browserContext.setGeolocation`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct GeolocationOptions {
+  pub latitude: f64,
+  pub longitude: f64,
+  pub accuracy: Option<f64>,
+}
+
 /// Playwright `PageWaitForFunctionOptions` — matches
 /// `{ polling?: number | 'raf', timeout?: number }`.
 #[napi(object)]

@@ -692,6 +692,12 @@ export interface WebSocketRoute {
   connectToServer(): WebSocketRoute;
 }
 
+export interface WebError {
+  error(): Error;
+  page(): Page | null;
+  location(): { url: string; line: number; column: number };
+}
+
 export interface ConsoleMessage {
   type(): string;
   text(): string;
@@ -904,6 +910,11 @@ export interface Page {
   clock: Clock;
   context(): BrowserContext;
   opener(): Promise<Page | null>;
+  // ferridriver extensions: driver-side WebStorage accessors and a
+  // page-to-markdown snapshot.
+  readonly localStorage: WebStorage;
+  readonly sessionStorage: WebStorage;
+  markdown(): Promise<string>;
 }
 
 export interface Touchscreen {
@@ -941,6 +952,9 @@ export interface BrowserContext {
   cookies(urls?: string | string[]): Promise<Cookie[]>;
   addCookies(cookies: Cookie[]): Promise<void>;
   clearCookies(options?: { name?: string | RegExp; domain?: string | RegExp; path?: string | RegExp }): Promise<void>;
+  // ferridriver extension mirroring the NAPI binding.
+  deleteCookie(name: string, domain?: string): Promise<void>;
+  setStorageState(state: StorageState): Promise<void>;
   grantPermissions(permissions: string[], options?: { origin?: string }): Promise<void>;
   clearPermissions(): Promise<void>;
   setGeolocation(geolocation: { latitude: number; longitude: number; accuracy?: number } | null): Promise<void>;
@@ -1003,6 +1017,15 @@ export interface Browser {
   isConnected(): boolean;
   close(): Promise<void>;
   newBrowserCDPSession(): Promise<CDPSession>;
+  waitForEvent(event: string, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number }): Promise<unknown>;
+}
+
+export interface WebStorage {
+  getItem(name: string): Promise<string | null>;
+  setItem(name: string, value: string): Promise<void>;
+  removeItem(name: string): Promise<void>;
+  clear(): Promise<void>;
+  items(): Promise<Array<{ name: string; value: string }>>;
 }
 
 export interface APIResponse {

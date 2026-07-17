@@ -230,20 +230,29 @@ impl BrowserContextJs {
 
   // ── Emulation ─────────────────────────────────────────────────────────────
 
-  /// Override the geolocation reported to pages in this context.
+  /// Playwright: `browserContext.setGeolocation(geolocation | null)` —
+  /// `{ latitude, longitude, accuracy? }` sets the override, `null`
+  /// clears it.
   #[qjs(rename = "setGeolocation")]
-  pub async fn set_geolocation(
-    &self,
-    ctx: rquickjs::Ctx<'_>,
-    latitude: f64,
-    longitude: f64,
-    accuracy: f64,
-  ) -> rquickjs::Result<()> {
-    self
-      .inner
-      .set_geolocation(latitude, longitude, accuracy)
-      .await
-      .into_js_with(&ctx)
+  pub async fn set_geolocation<'js>(&self, ctx: Ctx<'js>, geolocation: Value<'js>) -> rquickjs::Result<()> {
+    let geo = if geolocation.is_null() || geolocation.is_undefined() {
+      None
+    } else {
+      #[derive(serde::Deserialize)]
+      #[serde(rename_all = "camelCase")]
+      struct JsGeolocation {
+        latitude: f64,
+        longitude: f64,
+        accuracy: Option<f64>,
+      }
+      let parsed: JsGeolocation = crate::bindings::convert::serde_from_js(&ctx, geolocation)?;
+      Some(ferridriver::options::Geolocation {
+        latitude: parsed.latitude,
+        longitude: parsed.longitude,
+        accuracy: parsed.accuracy.unwrap_or(1.0),
+      })
+    };
+    self.inner.set_geolocation(geo).await.into_js_with(&ctx)
   }
 
   /// Toggle offline mode for this context.
@@ -691,14 +700,13 @@ impl BrowserContextJs {
     &self,
     ctx: Ctx<'js>,
     event: String,
-    timeout_ms: Opt<f64>,
+    options: Opt<Value<'js>>,
   ) -> rquickjs::Result<Value<'js>> {
     use ferridriver::events::ContextEvent;
     use rquickjs::IntoJs;
     use rquickjs::class::Class;
-    let timeout = timeout_ms
-      .0
-      .map_or_else(|| self.inner.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
+    let timeout = crate::bindings::convert::parse_timeout_number_or_bag(&ctx, options)?
+      .unwrap_or_else(|| self.inner.default_timeout());
     let ev = self.inner.wait_for_event(&event, timeout).await.into_js_with(&ctx)?;
     match ev {
       ContextEvent::WebError(err) => {

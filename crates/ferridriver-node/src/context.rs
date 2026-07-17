@@ -184,13 +184,16 @@ impl BrowserContext {
 
   // ── Context-level emulation ──
 
-  #[napi]
-  pub async fn set_geolocation(&self, latitude: f64, longitude: f64, accuracy: Option<f64>) -> Result<()> {
-    self
-      .inner
-      .set_geolocation(latitude, longitude, accuracy.unwrap_or(1.0))
-      .await
-      .into_napi()
+  /// Playwright: `browserContext.setGeolocation(geolocation | null)` —
+  /// `null` clears the override.
+  #[napi(ts_args_type = "geolocation: { latitude: number; longitude: number; accuracy?: number } | null")]
+  pub async fn set_geolocation(&self, geolocation: Option<crate::types::GeolocationOptions>) -> Result<()> {
+    let geo = geolocation.map(|g| ferridriver::options::Geolocation {
+      latitude: g.latitude,
+      longitude: g.longitude,
+      accuracy: g.accuracy.unwrap_or(1.0),
+    });
+    self.inner.set_geolocation(geo).await.into_napi()
   }
 
   #[napi]

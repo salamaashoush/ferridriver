@@ -1094,22 +1094,15 @@ impl ContextRef {
     Ok(())
   }
 
-  /// Playwright: `browserContext.setGeolocation(geo)` — mutates the
-  /// options bag and re-applies to every open page.
+  /// Playwright: `browserContext.setGeolocation(geolocation | null)` —
+  /// mutates the options bag and re-applies to every open page; `None`
+  /// clears the override.
   ///
   /// # Errors
   ///
   /// Returns an error if re-application fails on any page.
-  pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: f64) -> Result<()> {
-    self
-      .mutate_options(|o| {
-        o.geolocation = Some(crate::options::Geolocation {
-          latitude: lat,
-          longitude: lng,
-          accuracy,
-        });
-      })
-      .await
+  pub async fn set_geolocation(&self, geolocation: Option<crate::options::Geolocation>) -> Result<()> {
+    self.mutate_options(|o| o.geolocation = geolocation).await
   }
 
   /// Playwright: `browserContext.setExtraHTTPHeaders(headers)`.

@@ -1605,7 +1605,7 @@ impl BidiPage {
         self
           .cmd(
             "emulation.setUserAgentOverride",
-            json!({"contexts": [&*self.context_id], "value": ua}),
+            json!({"contexts": [&*self.context_id], "userAgent": ua}),
           )
           .await
           .map(|_| ())
@@ -1686,12 +1686,14 @@ impl BidiPage {
     let offline_fut: OptionFuture<_> = opts
       .offline
       .map(|o| async move {
+        // Playwright's BiDi backend shape (bidiBrowser.ts:406):
+        // `networkConditions: { type: 'offline' } | null`.
         self
           .cmd(
             "emulation.setNetworkConditions",
             json!({
               "contexts": [&*self.context_id],
-              "offline": o, "latency": 0.0, "downloadThroughput": -1.0, "uploadThroughput": -1.0,
+              "networkConditions": if o { json!({"type": "offline"}) } else { serde_json::Value::Null },
             }),
           )
           .await

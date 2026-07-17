@@ -99,9 +99,9 @@ impl BrowserJs {
     &self,
     ctx: Ctx<'js>,
     event: String,
-    timeout_ms: Opt<f64>,
+    options: Opt<Value<'js>>,
   ) -> rquickjs::Result<Value<'js>> {
-    let timeout = timeout_ms.0.map_or(30000, crate::bindings::convert::ms_f64_to_u64);
+    let timeout = crate::bindings::convert::parse_timeout_number_or_bag(&ctx, options)?.unwrap_or(30000);
     let ev = self.inner.wait_for_event(&event, timeout).await.into_js_with(&ctx)?;
     match ev {
       ferridriver::events::BrowserEvent::Context(ctx_ref) => {

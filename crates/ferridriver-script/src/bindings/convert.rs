@@ -84,6 +84,29 @@ pub fn ms_f64_to_u64(ms: f64) -> u64 {
   }
 }
 
+/// Parse a `waitForEvent`-style trailing argument: a bare timeout
+/// number (documented ferridriver extension) or Playwright's
+/// `{ timeout }` options bag. Returns `None` when omitted so callers
+/// apply their own default.
+pub fn parse_timeout_number_or_bag<'js>(
+  ctx: &Ctx<'js>,
+  options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<Option<u64>> {
+  match options.0 {
+    Some(v) if v.is_number() => Ok(v.as_number().map(ms_f64_to_u64)),
+    Some(v) if v.is_object() => {
+      #[derive(serde::Deserialize, Default)]
+      #[serde(rename_all = "camelCase", default)]
+      struct JsTimeoutBag {
+        timeout: Option<f64>,
+      }
+      let parsed: JsTimeoutBag = serde_from_js(ctx, v)?;
+      Ok(parsed.timeout.map(ms_f64_to_u64))
+    },
+    _ => Ok(None),
+  }
+}
+
 /// Adapter: `Result<T, FerriError>` into `rquickjs::Result<T>`.
 pub trait FerriResultExt<T> {
   fn into_js(self) -> rquickjs::Result<T>;

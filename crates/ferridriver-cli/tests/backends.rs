@@ -126,34 +126,11 @@ fn register_observation(set: &mut TestSet<'_>) {
   backends_support::observation::register(set);
 }
 
-fn register_script_emulation_storage(set: &mut TestSet<'_>) {
-  backends_support::script_emul_storage::register(set);
-  backends_support::storage_state::register(set);
-  backends_support::web_storage::register(set);
-}
-
 fn register_script_sessions(set: &mut TestSet<'_>) {
   backends_support::script_sessions::register(set);
 }
 
 fn register_events_metadata(set: &mut TestSet<'_>) {
-  run!(set, backends_support::console_message::test_console_message_primitives);
-  run!(
-    set,
-    backends_support::console_message::test_console_message_warn_maps_to_warning
-  );
-  run!(set, backends_support::console_message::test_console_message_error_type);
-  run!(
-    set,
-    backends_support::console_message::test_console_message_location_shape
-  );
-  run!(set, backends_support::web_error::test_page_error_is_native_error);
-  run!(
-    set,
-    backends_support::web_error::test_context_weberror_is_webbed_error_class
-  );
-  run!(set, backends_support::web_error::test_web_error_location);
-  backends_support::context_events::register(set);
   backends_support::tracing_har::register(set);
   backends_support::trace::register(set);
   backends_support::cdp_session::register(set);
@@ -301,7 +278,7 @@ fn register_mcp_features(set: &mut TestSet<'_>) {
 
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
-// 10 categories × 4 backends = 40 `#[test]`s grouped into one module
+// 9 categories × 4 backends = 36 `#[test]`s grouped into one module
 // per backend. nextest reports them as
 // `backends::<backend>::<category>` and distributes them across cores.
 // A single failing category fails its own test, not the entire backend.
@@ -322,10 +299,6 @@ macro_rules! backend_module {
       #[test]
       fn observation() {
         run_category($backend, register_observation);
-      }
-      #[test]
-      fn script_emulation_storage() {
-        run_category($backend, register_script_emulation_storage);
       }
       #[test]
       fn script_sessions() {

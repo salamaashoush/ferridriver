@@ -1107,21 +1107,28 @@ impl McpServer {
 
   /// Enumerate files under `artifacts_root` (bounded) as `artifact://`
   /// resources for `resources/list`. Skips directories; caps the count so a
-  /// runaway output dir can't blow up the listing.
+  /// runaway output dir can't blow up the listing. Entries are ordered
+  /// newest-first before the cap is applied — `read_dir` order is
+  /// arbitrary, and truncating an arbitrary order silently drops the
+  /// artifacts a client just created once the directory outgrows the cap.
   async fn list_artifact_resources(&self, out: &mut Vec<Resource>) {
     const MAX: usize = 200;
+    /// Scan bound: enough to sort recency over years of accumulated
+    /// outputs without letting a runaway directory stall the listing.
+    const SCAN_MAX: usize = 4096;
     let Some(sandbox) = self.artifacts_sandbox.as_ref() else {
       return;
     };
     let root = sandbox.root().to_path_buf();
+    let mut found: Vec<(std::time::SystemTime, Resource)> = Vec::new();
     let mut stack = vec![root.clone()];
-    while let Some(dir) = stack.pop() {
+    'walk: while let Some(dir) = stack.pop() {
       let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
         continue;
       };
       while let Ok(Some(entry)) = entries.next_entry().await {
-        if out.len() >= MAX {
-          return;
+        if found.len() >= SCAN_MAX {
+          break 'walk;
         }
         let path = entry.path();
         let Ok(ft) = entry.file_type().await else { continue };
@@ -1131,14 +1138,20 @@ impl McpServer {
         }
         let Ok(rel) = path.strip_prefix(&root) else { continue };
         let rel = rel.to_string_lossy().replace('\\', "/");
-        let size = entry.metadata().await.ok().map(|m| m.len());
+        let meta = entry.metadata().await.ok();
+        let modified = meta
+          .as_ref()
+          .and_then(|m| m.modified().ok())
+          .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
         let mut r = Resource::new(format!("artifact://{rel}"), rel.clone()).with_mime_type(mime_for_path(&rel));
-        if let Some(size) = size {
+        if let Some(size) = meta.map(|m| m.len()) {
           r = r.with_size(size);
         }
-        out.push(r);
+        found.push((modified, r));
       }
     }
+    found.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    out.extend(found.into_iter().take(MAX).map(|(_, r)| r));
   }
 
   pub async fn context_guard(&self, context: &str) -> tokio::sync::OwnedMutexGuard<()> {
