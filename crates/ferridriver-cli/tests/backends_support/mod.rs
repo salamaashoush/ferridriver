@@ -8,7 +8,6 @@
 //! `pub mod` line below — `tests/backends.rs` will pick up the test
 //! functions via the module path.
 
-pub mod action_options;
 pub mod api_response;
 pub mod bdd;
 pub mod browser_context_options;
@@ -31,7 +30,6 @@ pub mod network;
 pub mod observation;
 pub mod route_web_socket;
 pub mod script_emul_storage;
-pub mod script_handles_local;
 pub mod script_sessions;
 pub mod session_bind;
 pub mod storage_state;

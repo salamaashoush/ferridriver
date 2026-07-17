@@ -126,87 +126,6 @@ fn register_observation(set: &mut TestSet<'_>) {
   backends_support::observation::register(set);
 }
 
-fn register_script_handles(set: &mut TestSet<'_>) {
-  run!(set, backends_support::script_handles_local::test_script_click_at);
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_mouse_click_coords
-  );
-  run!(set, backends_support::script_handles_local::test_script_drag_coords);
-  run!(set, backends_support::script_handles_local::test_script_drag_and_drop);
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_drag_and_drop_options
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_locator_drag_to_options
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_drag_and_drop_trial
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_drag_buttons_held
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_drag_default_steps
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_drag_native_html5
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_locator_drop_payload
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_locator_drop_rejected
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_emulate_media_all_fields
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_emulate_media_null_disables_single_field
-  );
-  run!(set, backends_support::script_handles_local::test_script_add_init_script);
-  run!(set, backends_support::script_handles_local::test_script_click_options);
-  run!(set, backends_support::action_options::test_script_dblclick_options);
-  run!(set, backends_support::action_options::test_script_press_options);
-  run!(set, backends_support::action_options::test_script_type_options);
-  run!(
-    set,
-    backends_support::action_options::test_script_set_input_files_polymorphism
-  );
-  run!(set, backends_support::script_handles_local::test_script_action_timeout);
-  run!(set, backends_support::script_handles_local::test_script_tap_native);
-  run!(set, backends_support::script_handles_local::test_script_fill_force);
-  run!(set, backends_support::script_handles_local::test_script_check_behavior);
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_dispatch_event_timeout
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_select_option_force
-  );
-  run!(set, backends_support::script_handles_local::test_script_mouse_wheel);
-  run!(set, backends_support::script_handles_local::test_script_keyboard_press);
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_screenshot_mask_locator
-  );
-  run!(
-    set,
-    backends_support::script_handles_local::test_script_keyboard_type_named_keys
-  );
-}
-
 fn register_script_emulation_storage(set: &mut TestSet<'_>) {
   backends_support::script_emul_storage::register(set);
   backends_support::storage_state::register(set);
@@ -452,7 +371,7 @@ fn register_mcp_features(set: &mut TestSet<'_>) {
 
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
-// 13 categories × 4 backends = 52 `#[test]`s grouped into one module
+// 12 categories × 4 backends = 48 `#[test]`s grouped into one module
 // per backend. nextest reports them as
 // `backends::<backend>::<category>` and distributes them across cores.
 // A single failing category fails its own test, not the entire backend.
@@ -473,10 +392,6 @@ macro_rules! backend_module {
       #[test]
       fn observation() {
         run_category($backend, register_observation);
-      }
-      #[test]
-      fn script_handles() {
-        run_category($backend, register_script_handles);
       }
       #[test]
       fn script_emulation_storage() {

@@ -337,6 +337,9 @@ export interface ScreenshotOptions extends TimeoutOption {
   clip?: { x: number; y: number; width: number; height: number };
   omitBackground?: boolean;
   path?: string;
+  scale?: 'css' | 'device';
+  mask?: Locator[];
+  maskColor?: string;
 }
 
 export interface GetByRoleOptions {
@@ -374,7 +377,9 @@ export interface Keyboard {
   press(key: string, options?: { delay?: number }): Promise<void>;
   down(key: string): Promise<void>;
   up(key: string): Promise<void>;
-  type(text: string, options?: { delay?: number }): Promise<void>;
+  // namedKeys is a ferridriver extension: `{Enter}` presses the named
+  // key, `{{` escapes a literal brace (default types braces verbatim).
+  type(text: string, options?: { delay?: number; namedKeys?: boolean }): Promise<void>;
   insertText(text: string): Promise<void>;
 }
 
@@ -457,9 +462,10 @@ export interface Locator {
   tap(options?: ClickOptions): Promise<void>;
   fill(value: string, options?: FillOptions): Promise<void>;
   clear(options?: FillOptions): Promise<void>;
-  press(key: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
+  press(key: string, options?: TimeoutOption & { delay?: number; noWaitAfter?: boolean }): Promise<void>;
   pressSequentially(text: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
   type(text: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
+  dispatchEvent(type: string, eventInit?: Record<string, unknown>, options?: TimeoutOption): Promise<void>;
   check(options?: ClickOptions): Promise<void>;
   uncheck(options?: ClickOptions): Promise<void>;
   setChecked(checked: boolean, options?: ClickOptions): Promise<void>;
@@ -475,7 +481,19 @@ export interface Locator {
     files: string | string[] | { name: string; mimeType: string; buffer: Uint8Array | Buffer } | Array<{ name: string; mimeType: string; buffer: Uint8Array | Buffer }>,
     options?: TimeoutOption
   ): Promise<void>;
-  dragTo(target: Locator, options?: TimeoutOption & { force?: boolean; sourcePosition?: { x: number; y: number }; targetPosition?: { x: number; y: number }; trial?: boolean }): Promise<void>;
+  // steps is a ferridriver extension (default 5): intermediate
+  // mousemoves so mousemove-tracked drag libraries cross their drag
+  // threshold; Playwright emits a single move.
+  dragTo(target: Locator, options?: TimeoutOption & { force?: boolean; sourcePosition?: { x: number; y: number }; targetPosition?: { x: number; y: number }; steps?: number; trial?: boolean }): Promise<void>;
+  // ferridriver extension: drop a DataTransfer payload (in-memory files
+  // and/or string data by MIME type) onto this element.
+  drop(
+    payload: {
+      files?: { name: string; mimeType: string; buffer: Uint8Array | Buffer } | Array<{ name: string; mimeType: string; buffer: Uint8Array | Buffer }>;
+      data?: Record<string, string>;
+    },
+    options?: TimeoutOption & { modifiers?: Array<'Alt' | 'Control' | 'ControlOrMeta' | 'Meta' | 'Shift'>; position?: { x: number; y: number } }
+  ): Promise<void>;
   scrollIntoViewIfNeeded(options?: TimeoutOption): Promise<void>;
 
   textContent(options?: TimeoutOption): Promise<string | null>;
@@ -770,8 +788,13 @@ export interface Page {
     files: string | string[] | { name: string; mimeType: string; buffer: Uint8Array | Buffer } | Array<{ name: string; mimeType: string; buffer: Uint8Array | Buffer }>,
     options?: TimeoutOption
   ): Promise<void>;
-  dragAndDrop(source: string, target: string, options?: TimeoutOption & { force?: boolean; sourcePosition?: { x: number; y: number }; targetPosition?: { x: number; y: number }; trial?: boolean }): Promise<void>;
+  dragAndDrop(source: string, target: string, options?: TimeoutOption & { force?: boolean; sourcePosition?: { x: number; y: number }; targetPosition?: { x: number; y: number }; steps?: number; trial?: boolean }): Promise<void>;
   tap(selector: string, options?: ClickOptions): Promise<void>;
+  // ferridriver extensions (NOT Playwright): coordinate click and an
+  // interpolated mouse move (Playwright equivalent: mouse.move with
+  // steps).
+  clickAt(x: number, y: number): Promise<void>;
+  moveMouseSmooth(fromX: number, fromY: number, toX: number, toY: number, steps: number): Promise<void>;
 
   textContent(selector: string, options?: TimeoutOption): Promise<string | null>;
   innerText(selector: string, options?: TimeoutOption): Promise<string>;
@@ -828,7 +851,7 @@ export interface Page {
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   viewportSize(): { width: number; height: number } | null;
   setExtraHTTPHeaders(headers: Record<string, string>): Promise<void>;
-  emulateMedia(options?: { media?: 'screen' | 'print' | null; colorScheme?: 'light' | 'dark' | 'no-preference' | null; reducedMotion?: 'reduce' | 'no-preference' | null; forcedColors?: 'active' | 'none' | null }): Promise<void>;
+  emulateMedia(options?: { media?: 'screen' | 'print' | null; colorScheme?: 'light' | 'dark' | 'no-preference' | null; reducedMotion?: 'reduce' | 'no-preference' | null; forcedColors?: 'active' | 'none' | null; contrast?: 'more' | 'less' | 'no-preference' | null }): Promise<void>;
   setDefaultTimeout(timeout: number): void;
   setDefaultNavigationTimeout(timeout: number): void;
 
