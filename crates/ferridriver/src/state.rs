@@ -177,6 +177,9 @@ pub type ContextInitScripts = HashMap<String, Vec<(u64, String)>>;
 /// All browser state -- manages multiple Chrome instances, each with contexts and pages.
 pub struct BrowserState {
   instances: HashMap<String, BrowserInstance>,
+  /// Instance name → browser generation whose popup pump is running
+  /// (see [`Self::claim_popup_pump`]).
+  popup_pumps: HashMap<String, u64>,
   /// Monotonic source for [`BrowserInstance::generation`]. Bumped on
   /// every instance (re)creation so consumers can detect a browser
   /// session swap under a reused instance name.
@@ -371,7 +374,56 @@ impl BrowserState {
       connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       persistent_context: false,
+      popup_pumps: HashMap::default(),
     }
+  }
+
+  /// Claim the popup pump for `instance`'s CURRENT browser generation.
+  /// Returns the browser handle exactly once per generation — the
+  /// caller spawns `context::spawn_popup_pump` with it; later calls
+  /// (and calls before the instance exists) return `None`. A relaunch
+  /// under the same name bumps the generation, so the next page open
+  /// starts a fresh pump against the new browser.
+  pub(crate) fn claim_popup_pump(&mut self, instance: &str) -> Option<AnyBrowser> {
+    let inst = self.instances.get(instance)?;
+    let generation = inst.generation;
+    let browser = inst.browser.clone();
+    match self.popup_pumps.get(instance) {
+      Some(claimed) if *claimed == generation => None,
+      _ => {
+        self.popup_pumps.insert(instance.to_string(), generation);
+        Some(browser)
+      },
+    }
+  }
+
+  /// Resolve which context of `instance` a backend context id belongs
+  /// to: `None` → the default context; `Some(id)` → the context whose
+  /// registered backend id matches. `None` result = unknown context
+  /// (already closed, or created outside this state).
+  pub(crate) fn context_name_for_backend_id(&self, instance: &str, backend_ctx_id: Option<&str>) -> Option<String> {
+    let inst = self.instances.get(instance)?;
+    match backend_ctx_id {
+      None => Some("default".to_string()),
+      Some(id) => inst
+        .contexts
+        .iter()
+        .find(|(_, ctx)| ctx.cdp_context_id.as_deref() == Some(id))
+        .map(|(name, _)| name.clone()),
+    }
+  }
+
+  /// Find the public wrapper of an open page in `instance` by its
+  /// backend target id (CDP targetId / `BiDi` context id / `WebKit`
+  /// pageProxyId). Used to wire `page.opener()` for popups.
+  pub(crate) fn find_page_by_backend_id(&self, instance: &str, backend_id: &str) -> Option<Arc<crate::page::Page>> {
+    let inst = self.instances.get(instance)?;
+    inst
+      .contexts
+      .values()
+      .flat_map(|ctx| ctx.pages.iter())
+      .find(|page| page.backend_target_id() == backend_id)
+      .and_then(|page| page.page_backref_handle().upgrade())
   }
 
   /// The backend kind this state was constructed with. Cached at

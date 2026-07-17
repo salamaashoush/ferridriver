@@ -14,6 +14,10 @@ use crate::error::{FerriError, Result};
 pub struct BidiBrowser {
   pub(crate) session: Arc<BidiSession>,
   child: Arc<tokio::sync::Mutex<Option<crate::backend::process::ChildGroup>>>,
+  /// Popup announcement subscriptions (see
+  /// [`crate::backend::PopupInfo`]) fed by the connect-time
+  /// `browsingContext.contextCreated` listener.
+  popup_taps: crate::backend::PopupTaps,
   /// Owned Firefox `--profile` directory for launched browsers. Held as
   /// `Arc<TempDir>` so cheap `Clone`s share ownership; the directory is
   /// removed when the last handle drops. `None` for `connect()` — we don't
@@ -84,23 +88,94 @@ impl BidiBrowser {
     // Determine if headless from flags
     let headless = flags.iter().any(|f| f == "--headless");
     let (session, child, profile_dir) = Box::pin(BidiSession::launch(browser_path, flags, headless)).await?;
+    let session = Arc::new(session);
+    let popup_taps = Self::spawn_popup_listener(&session);
     Ok(Self {
-      session: Arc::new(session),
+      session,
       child: Arc::new(tokio::sync::Mutex::new(Some(crate::backend::process::ChildGroup::new(
         child,
       )))),
+      popup_taps,
       profile_dir: Some(Arc::new(profile_dir)),
     })
   }
 
   /// Connect to an existing `BiDi` endpoint via WebSocket.
   pub async fn connect(ws_url: &str) -> Result<Self> {
-    let session = BidiSession::connect(ws_url).await?;
+    let session = Arc::new(BidiSession::connect(ws_url).await?);
+    let popup_taps = Self::spawn_popup_listener(&session);
     Ok(Self {
-      session: Arc::new(session),
+      session,
       child: Arc::new(tokio::sync::Mutex::new(None)),
+      popup_taps,
       profile_dir: None,
     })
+  }
+
+  pub(crate) fn popup_taps(&self) -> crate::backend::PopupTaps {
+    Arc::clone(&self.popup_taps)
+  }
+
+  /// Watch `browsingContext.contextCreated` for TOP-LEVEL contexts the
+  /// browser created on its own — `window.open` / `target=_blank`
+  /// popups carry `originalOpener` (the opener's navigable id), while
+  /// contexts our `new_page` creates via `browsingContext.create`
+  /// never do. Mirrors Playwright's
+  /// `bidiBrowser.ts::_onBrowsingContextCreated`, which resolves the
+  /// opener from the same field.
+  fn spawn_popup_listener(session: &Arc<BidiSession>) -> crate::backend::PopupTaps {
+    let taps: crate::backend::PopupTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut rx = session.transport.tap_events();
+    let session = Arc::clone(session);
+    let listener_taps = Arc::clone(&taps);
+    tokio::spawn(async move {
+      while let Some(event) = rx.recv().await {
+        if event.method != "browsingContext.contextCreated" {
+          continue;
+        }
+        let is_child = event.params.get("parent").and_then(|v| v.as_str()).is_some();
+        let Some(opener) = event.params.get("originalOpener").and_then(|v| v.as_str()) else {
+          continue;
+        };
+        if is_child {
+          continue;
+        }
+        let Some(context_id) = event.params.get("context").and_then(|v| v.as_str()) else {
+          continue;
+        };
+        let user_context = event
+          .params
+          .get("userContext")
+          .and_then(|v| v.as_str())
+          .unwrap_or("default")
+          .to_string();
+        let page = match BidiPage::create(session.clone(), context_id.to_string(), Some(&user_context)) {
+          Ok(p) => p,
+          Err(e) => {
+            debug!("popup page create failed for {context_id}: {e}");
+            continue;
+          },
+        };
+        // Claimed inline: BidiPage::create is pure construction (no
+        // wire round-trip), and readiness is the pump's business.
+        let delivered = crate::backend::push_popup(
+          &listener_taps,
+          crate::backend::PopupInfo {
+            page: crate::backend::AnyPage::Bidi(page),
+            browser_context_id: if user_context == "default" {
+              None
+            } else {
+              Some(user_context)
+            },
+            opener_target_id: Some(opener.to_string()),
+          },
+        );
+        if !delivered {
+          debug!("popup {context_id} observed with no pump subscribed");
+        }
+      }
+    });
+    taps
   }
 
   /// Create a new isolated user context. `proxy` is wired via

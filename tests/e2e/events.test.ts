@@ -207,6 +207,36 @@ describe('events', () => {
     }
   });
 
+  test('context_popup_page_event_and_opener', async ({ browser, baseURL }) => {
+    // A window.open popup is claimed by the backend popup listener
+    // (CDP openerId targets, BiDi originalOpener contexts, WebKit
+    // pageProxyCreated.openerId), registered into the context, and
+    // announced via 'page' — with page.opener() resolving to the
+    // opening page. The popup must be fully drivable (evaluate).
+    const ctx = await browser.newContext({});
+    try {
+      const opener = await ctx.newPage();
+      await opener.goto(`${baseURL}/fx/landed`);
+      const wait = ctx.waitForEvent('page', { timeout: 8000 }) as Promise<Page>;
+      await opener.evaluate(`void window.open('${baseURL}/fx/echo-headers')`);
+      const popup = await wait;
+      await popup.waitForURL('**/fx/echo-headers', { timeout: 8000 });
+      expect(popup.url().includes('/fx/echo-headers')).toBe(true);
+      expect((await ctx.pages()).length).toBe(2);
+      const found = await popup.opener();
+      expect(found != null).toBe(true);
+      expect(found!.url().includes('/fx/landed')).toBe(true);
+      const body = (await popup.evaluate(() => document.body.textContent)) as string;
+      expect(body.length).toBeGreaterThan(0);
+      await popup.close();
+      expect((await ctx.pages()).length).toBe(1);
+      // Non-popup pages have no opener.
+      expect((await opener.opener()) == null).toBe(true);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   test('context_pageclose', async ({ page, context }) => {
     await page.goto(dataUrl('<body>ctx-close</body>'));
     const newPage = await context.newPage();

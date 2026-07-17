@@ -67,6 +67,12 @@ pub struct Page {
   /// Registered `addLocatorHandler` callbacks. Consulted before every
   /// actionability retry (see [`crate::locator_handler::perform_checkpoint`]).
   locator_handlers: crate::locator_handler::LocatorHandlerRegistry,
+  /// Weak reference to the page that opened this one (`window.open` /
+  /// `target=_blank` popups). Set once by the popup pump; empty for
+  /// pages created via `newPage`. Backs [`Self::opener`] — Playwright's
+  /// `page.opener(): Promise<null | Page>`, which resolves `null` once
+  /// the opener has closed.
+  opener: std::sync::OnceLock<std::sync::Weak<Page>>,
 }
 
 impl Page {
@@ -98,6 +104,7 @@ impl Page {
       frame_cache,
       video: Mutex::new(None),
       locator_handlers: crate::locator_handler::LocatorHandlerRegistry::default(),
+      opener: std::sync::OnceLock::new(),
     });
     // Wire the backend's weak back-reference before the frame cache
     // starts seeding — the file-chooser listener (spawned in
@@ -126,6 +133,7 @@ impl Page {
       frame_cache,
       video: Mutex::new(None),
       locator_handlers: crate::locator_handler::LocatorHandlerRegistry::default(),
+      opener: std::sync::OnceLock::new(),
     });
     page.inner.set_page_backref(Arc::downgrade(&page));
     page.seed_frame_cache();
@@ -301,6 +309,26 @@ impl Page {
   #[must_use]
   pub fn context(&self) -> Option<&crate::context::ContextRef> {
     self.context_ref.as_ref()
+  }
+
+  /// Playwright: `page.opener(): Promise<null | Page>` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/page.ts`.
+  /// The page that opened this popup via `window.open` /
+  /// `target=_blank`; `None` for non-popup pages and once the opener
+  /// has closed.
+  #[must_use]
+  pub fn opener(&self) -> Option<Arc<Page>> {
+    self
+      .opener
+      .get()
+      .and_then(std::sync::Weak::upgrade)
+      .filter(|opener| !opener.is_closed())
+  }
+
+  /// Record the opener relationship — called once by the popup pump
+  /// right after the popup's wrapper is built.
+  pub(crate) fn set_opener(&self, opener: &Arc<Page>) {
+    let _ = self.opener.set(Arc::downgrade(opener));
   }
 
   /// `page.clock` — the owning context's fake-time controller

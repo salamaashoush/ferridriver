@@ -182,6 +182,8 @@ pub fn attach_listeners(page: &WebKitPage) {
     network_log: Arc::clone(&page.network_log),
     lifecycle: Arc::clone(&page.lifecycle),
     main_frame_id_cache: Arc::clone(&page.main_frame_id_cache),
+    engine_injected: page.engine_injected_flag(),
+    global_object_id: page.global_object_id_slot(),
     exposed_fns: page.exposed_fns.clone(),
     page_proxy_id: Arc::from(page.page_proxy_id()),
   };
@@ -408,6 +410,14 @@ struct TargetListenerCtx {
   network_log: Arc<arc_swap::ArcSwap<RwLock<Vec<NetworkRequest>>>>,
   lifecycle: Arc<super::page::LifecycleSignals>,
   main_frame_id_cache: Arc<std::sync::Mutex<Option<String>>>,
+  /// Realm caches invalidated on main-frame cross-document commits.
+  /// `goto`/`reload` reset them at call time, but browser-initiated
+  /// navigations (a popup's first document, page-side `location =`)
+  /// only surface here — without this reset the cached global anchor
+  /// points into the dead document and every evaluate fails with
+  /// "Missing injected script for given objectId".
+  engine_injected: Arc<std::sync::atomic::AtomicBool>,
+  global_object_id: Arc<std::sync::Mutex<Option<String>>>,
   /// Exposed-binding registry, shared with the page. `Runtime.bindingCalled`
   /// is dispatched here (not from a separate task pinned to one target
   /// session) so exposed functions keep working after a cross-process
@@ -491,6 +501,35 @@ async fn handle_binding_called(ctx: &TargetListenerCtx, params: &Value) {
   let _ = ctx.target().send(super::protocol::RUNTIME_EVALUATE, eval_params).await;
 }
 
+/// Main-document commit bookkeeping for `Page.frameNavigated`. Only
+/// main-frame commits feed the lifecycle latch — child frame commits
+/// would falsely mark navigation as complete on the page level. Also
+/// re-seeds the main-frame-id cache (a cross-process target swap
+/// cleared it) and drops the realm caches: `goto`/`reload` reset those
+/// at call time, but browser-initiated navigations (a popup's first
+/// document, page-side `location =`) only surface here — without the
+/// reset the cached global anchor points into the dead document and
+/// every evaluate fails with "Missing injected script for given
+/// objectId".
+fn handle_main_frame_commit(ctx: &TargetListenerCtx, params: &Value) {
+  if params.get("frame").and_then(|f| f.get("parentId")).is_some() {
+    return;
+  }
+  ctx.lifecycle.mark(crate::backend::NavLifecycle::Commit);
+  ctx.engine_injected.store(false, std::sync::atomic::Ordering::Relaxed);
+  *ctx
+    .global_object_id
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+  if let Some(new_main_id) = params.get("frame").and_then(|f| f.get("id")).and_then(Value::as_str) {
+    let mut slot = ctx
+      .main_frame_id_cache
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = Some(new_main_id.to_string());
+  }
+}
+
 async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::Envelope) {
   match env.method.as_deref() {
     Some("Runtime.bindingCalled") => {
@@ -557,26 +596,7 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
       handle_frame_attached(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
     },
     Some("Page.frameNavigated") => {
-      // Only main-document commits feed the lifecycle latch — child
-      // frame commits would falsely mark navigation as complete on the
-      // page level. Also re-seed the main-frame-id cache: a
-      // cross-process target swap cleared it, and the new target's
-      // first main-frame commit gives us the new id.
-      if env.params.get("frame").and_then(|f| f.get("parentId")).is_none() {
-        ctx.lifecycle.mark(crate::backend::NavLifecycle::Commit);
-        if let Some(new_main_id) = env
-          .params
-          .get("frame")
-          .and_then(|f| f.get("id"))
-          .and_then(Value::as_str)
-        {
-          let mut slot = ctx
-            .main_frame_id_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-          *slot = Some(new_main_id.to_string());
-        }
-      }
+      handle_main_frame_commit(ctx, &env.params);
       handle_frame_navigated(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
     },
     Some("Page.frameDetached") => {

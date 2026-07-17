@@ -312,6 +312,12 @@ impl ContextRef {
     {
       let mut state = self.state.write().await;
       Box::pin(state.ensure_instance(&self.key.instance)).await?;
+      // First page open of this browser generation also starts the
+      // instance's popup pump, so `window.open` popups from any page
+      // get registered, configured, and announced as `'page'` events.
+      if let Some(browser) = state.claim_popup_pump(&self.key.instance) {
+        spawn_popup_pump(self.state.clone(), self.key.instance.clone(), &browser);
+      }
     }
 
     // Read the (optional) `BrowserContextOptions` bag before the open —
@@ -469,9 +475,15 @@ impl ContextRef {
     // created in the context; a `waitForEvent('page')` registered
     // before this `newPage` call resolves with the same wrapper the
     // caller receives.
-    self.events.emit(crate::events::ContextEvent::Page(page.clone()));
+    self.emit_page_created(page.clone());
 
     Ok(page)
+  }
+
+  /// Fire `ContextEvent::Page` on this context's shared emitter — used
+  /// by [`Self::new_page`] and the popup pump.
+  pub(crate) fn emit_page_created(&self, page: Arc<Page>) {
+    self.events.emit(crate::events::ContextEvent::Page(page));
   }
 
   /// Attach a raw CDP session to `page`'s target. Playwright:
@@ -1542,6 +1554,121 @@ fn bind_source(binding: crate::events::ExposedBinding, context_key: String) -> c
 /// "apply the whole bag or don't".
 async fn apply_context_options(page: &Arc<Page>, opts: &crate::options::BrowserContextOptions) -> Result<()> {
   Box::pin(page.apply_context_options(opts)).await
+}
+
+/// Consume one instance's [`crate::backend::PopupInfo`] stream. Each
+/// browser-created popup is registered into its owning context,
+/// configured like a `new_page` page, wired to its opener, resumed
+/// (CDP parks popups paused), and announced as `ContextEvent::Page` —
+/// the state-layer half of Playwright's `crBrowser._onAttachedToTarget`
+/// / `bidiBrowser._onBrowsingContextCreated` /
+/// `wkBrowser._onPageProxyCreated` handling.
+pub(crate) fn spawn_popup_pump(
+  state: Arc<RwLock<BrowserState>>,
+  instance: Arc<str>,
+  browser: &crate::backend::AnyBrowser,
+) {
+  let mut rx = browser.tap_popups();
+  tokio::spawn(async move {
+    while let Some(popup) = rx.recv().await {
+      let state = state.clone();
+      let instance = instance.clone();
+      // Per-popup task: registration is a multi-await sequence and the
+      // pump must keep consuming (two rapid popups must not serialize
+      // behind each other's context configuration).
+      tokio::spawn(async move {
+        let backend_page = popup.page.clone();
+        if let Err(e) = register_popup(state, &instance, popup).await {
+          tracing::debug!("popup registration failed: {e}");
+          // Never leave a CDP popup parked on waitForDebuggerOnStart.
+          let _ = backend_page.resume_popup().await;
+        }
+      });
+    }
+  });
+}
+
+async fn register_popup(
+  state: Arc<RwLock<BrowserState>>,
+  instance: &Arc<str>,
+  popup: crate::backend::PopupInfo,
+) -> Result<()> {
+  let ctx_name = {
+    let s = state.read().await;
+    s.context_name_for_backend_id(instance, popup.browser_context_id.as_deref())
+  };
+  let Some(ctx_name) = ctx_name else {
+    // Unknown / already-closed context — let the popup run unmanaged
+    // rather than parked.
+    let _ = popup.page.resume_popup().await;
+    return Ok(());
+  };
+  let composite = if &**instance == "default" && ctx_name == "default" {
+    "default".to_string()
+  } else {
+    format!("{instance}:{ctx_name}")
+  };
+  let key = crate::state::SessionKey::parse(&composite);
+  {
+    let mut s = state.write().await;
+    s.register_opened_page(&key, popup.page.clone(), None)?;
+  }
+  let ctx_ref = ContextRef::new(state.clone(), composite.clone());
+  let page = Page::with_context(popup.page.clone(), ctx_ref.clone());
+
+  // While a CDP popup is still paused only protocol-level configuration
+  // may run — anything that evaluates into the live document
+  // (exposeBinding's registration eval, WebSocket-route install) would
+  // block until resume and deadlock the pump. Options, init scripts,
+  // and route interception are all pre-document protocol calls.
+  let ctx_opts = {
+    let s = state.read().await;
+    s.get_context_options(&composite)
+  };
+  if let Some(opts) = ctx_opts.as_ref() {
+    if let Err(e) = apply_context_options(&page, opts).await {
+      tracing::debug!("popup context options: {e}");
+    }
+  }
+  if let Err(e) = ctx_ref.apply_context_init_scripts(&page).await {
+    tracing::debug!("popup init scripts: {e}");
+  }
+  if let Err(e) = ctx_ref.apply_context_routes(&page).await {
+    tracing::debug!("popup routes: {e}");
+  }
+  if let Some(opener_id) = popup.opener_target_id.as_deref() {
+    let opener = {
+      let s = state.read().await;
+      s.find_page_by_backend_id(instance, opener_id)
+    };
+    if let Some(opener) = opener {
+      page.set_opener(&opener);
+    }
+  }
+  popup.page.resume_popup().await?;
+
+  // Evaluate-bearing configuration runs against the now-live document.
+  if let Err(e) = ctx_ref.apply_context_bindings(page.inner()).await {
+    tracing::debug!("popup bindings: {e}");
+  }
+  if let Err(e) = ctx_ref.apply_context_ws_routes(&page).await {
+    tracing::debug!("popup ws routes: {e}");
+  }
+  let record_opts = {
+    let s = state.read().await;
+    s.get_record_video(&composite)
+  };
+  if let Some(opts) = record_opts {
+    start_video_recording(&page, &opts);
+  }
+  if let Some(recorder) = crate::trace::recorder_for(&composite) {
+    crate::trace::record_page_open(&recorder, &crate::trace::trace_page_id(page.inner()));
+    if recorder.screenshots {
+      crate::trace::spawn_screencast_pump(&recorder, page.inner()).await;
+    }
+  }
+  ctx_ref.emit_page_created(page);
+  Ok(())
 }
 
 /// The viewport a backend should open a new page with: an explicit

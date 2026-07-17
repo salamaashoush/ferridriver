@@ -96,6 +96,10 @@ pub struct WebKitBrowser {
   /// per-context on the `WebKit` protocol, so every created context gets
   /// a `Playwright.setDownloadBehavior` pointing here.
   downloads_dir: Arc<std::path::PathBuf>,
+  /// Popup announcement subscriptions (see
+  /// [`crate::backend::PopupInfo`]) fed by the
+  /// `Playwright.pageProxyCreated` listener.
+  popup_taps: crate::backend::PopupTaps,
 }
 
 impl WebKitBrowser {
@@ -149,7 +153,7 @@ impl WebKitBrowser {
     let pages: Arc<Mutex<Vec<WebKitPage>>> = Arc::new(Mutex::new(Vec::new()));
     spawn_download_listener(&root, pages.clone(), downloads_dir.clone());
 
-    Ok(WebKitBrowser {
+    let browser = WebKitBrowser {
       conn,
       root,
       handle: Arc::new(ChildHandle {
@@ -161,7 +165,75 @@ impl WebKitBrowser {
       version,
       context_options: Arc::new(Mutex::new(rustc_hash::FxHashMap::default())),
       downloads_dir,
-    })
+      popup_taps: Arc::new(Mutex::new(Vec::new())),
+    };
+    browser.spawn_popup_listener();
+    Ok(browser)
+  }
+
+  pub(crate) fn popup_taps(&self) -> crate::backend::PopupTaps {
+    Arc::clone(&self.popup_taps)
+  }
+
+  /// Watch `Playwright.pageProxyCreated` for pages the BROWSER opened.
+  /// `openerId` is only set for `window.open()` pages (protocol doc),
+  /// so our own `Playwright.createPage` proxies — which fire the same
+  /// event without it — are left to the `new_page` flow. Mirrors
+  /// `wkBrowser.ts::_onPageProxyCreated`, which resolves the opener
+  /// from the same field.
+  fn spawn_popup_listener(&self) {
+    let mut rx = self.root.events();
+    let browser = self.clone();
+    tokio::spawn(async move {
+      while let Some(env) = rx.recv().await {
+        if env.method.as_deref() != Some("Playwright.pageProxyCreated") {
+          continue;
+        }
+        let Some(opener) = env.params.get("openerId").and_then(serde_json::Value::as_str) else {
+          continue;
+        };
+        let Some(proxy_id) = env.params.get("pageProxyId").and_then(serde_json::Value::as_str) else {
+          continue;
+        };
+        let context_id = env
+          .params
+          .get("browserContextId")
+          .and_then(serde_json::Value::as_str)
+          .map(std::string::ToString::to_string);
+        let opener = opener.to_string();
+        let proxy_id = proxy_id.to_string();
+        let b = browser.clone();
+        // Attach off the listener loop: it is a multi-command
+        // round-trip and this loop must keep consuming root events.
+        tokio::spawn(async move {
+          let proxy = b.conn.page_proxy_session(proxy_id.clone());
+          match WebKitPage::attach(&b, proxy, context_id.clone(), true).await {
+            Ok(page) => {
+              if let Ok(mut pages) = b.pages.lock() {
+                pages.push(page.clone());
+              }
+              // The launch-minted default context is "default" at the
+              // state layer; popups in it carry no context id upward.
+              let browser_context_id = context_id.filter(|id| *id != *b.default_context);
+              let delivered = crate::backend::push_popup(
+                &b.popup_taps,
+                crate::backend::PopupInfo {
+                  page: AnyPage::WebKit(page),
+                  browser_context_id,
+                  opener_target_id: Some(opener),
+                },
+              );
+              if !delivered {
+                tracing::debug!("webkit popup {proxy_id} observed with no pump subscribed");
+              }
+            },
+            Err(e) => {
+              tracing::debug!("webkit popup attach failed for {proxy_id}: {e}");
+            },
+          }
+        });
+      }
+    });
   }
 
   #[must_use]
@@ -318,7 +390,7 @@ impl WebKitBrowser {
     // the caller didn't name one) so the page can drive context-wide
     // browser-session commands like `Playwright.getAllCookies`.
     let resolved_ctx = browser_context_id.unwrap_or(&self.default_context).to_string();
-    let page = WebKitPage::attach(self, proxy, Some(resolved_ctx)).await?;
+    let page = WebKitPage::attach(self, proxy, Some(resolved_ctx), false).await?;
     if let Some(vp) = viewport {
       page.emulate_viewport(vp).await?;
     }

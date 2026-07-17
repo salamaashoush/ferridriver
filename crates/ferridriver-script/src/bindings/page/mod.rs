@@ -1164,6 +1164,27 @@ impl PageJs {
     rquickjs::IntoJs::into_js(instance, &ctx)
   }
 
+  /// Playwright: `page.opener(): Promise<null | Page>` — the page that
+  /// opened this popup via `window.open` / `target=_blank`; `null` for
+  /// non-popup pages and once the opener has closed. The lookup itself
+  /// is synchronous (a weak upgrade); `Promised` keeps Playwright's
+  /// promise-returning signature.
+  #[qjs(rename = "opener")]
+  pub fn opener<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<rquickjs::Value<'js>>> + 'js> {
+    let opener = self.inner.opener();
+    rquickjs::promise::Promised::from(async move {
+      let Some(opener) = opener else {
+        return Ok(rquickjs::Value::new_null(ctx.clone()));
+      };
+      let wrapper = pagejs_for_ctx(&ctx, opener);
+      let instance = rquickjs::class::Class::instance(ctx.clone(), wrapper)?;
+      rquickjs::IntoJs::into_js(instance, &ctx)
+    })
+  }
+
   /// ferridriver-specific (NOT Playwright): click at viewport
   /// coordinates without a selector. Playwright equivalent: `mouse.click(x, y)`.
   #[qjs(rename = "clickAt")]

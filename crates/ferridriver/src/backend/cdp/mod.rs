@@ -69,6 +69,11 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// (its initializer stores the same value and returns it synchronously).
   /// Example: `"HeadlessChrome/120.0.6099.109"`.
   version: Arc<str>,
+  /// Popup announcement subscriptions (see
+  /// [`crate::backend::PopupInfo`]). Arc-shared across browser clones
+  /// so a pump subscribed through any clone observes popups claimed by
+  /// the connect-time listener.
+  popup_taps: crate::backend::PopupTaps,
   /// Owned `--user-data-dir` for launched browsers. Held as `Arc<TempDir>` so
   /// cheap `Clone`s share ownership, and the directory is removed from disk
   /// when the last handle drops (after the `Child` is killed via
@@ -103,6 +108,7 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
           .clone(),
       ),
       version: Arc::clone(&self.version),
+      popup_taps: Arc::clone(&self.popup_taps),
       user_data_dir: self.user_data_dir.as_ref().map(Arc::clone),
     }
   }
@@ -295,56 +301,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       )
       .await?;
 
-    // Resume every auto-attached target the page-open flow does not
-    // claim. `setAutoAttach` pauses ALL new targets
-    // (`waitForDebuggerOnStart`); `create_page` resumes only the page
-    // target it created, so service workers, shared workers, and other
-    // worker targets would sit suspended forever — observed as
-    // `navigator.serviceWorker.register()` never resolving. Mirrors
-    // Playwright's `crBrowser.ts` attachedToTarget handling, which
-    // resumes every session it does not turn into a page. Lossless tap:
-    // a dropped attach event would wedge that worker for good.
-    {
-      let mut attach_rx = transport.tap_event_methods(&["Target.attachedToTarget"], None);
-      let resume_transport = Arc::clone(&transport);
-      tokio::spawn(async move {
-        while let Some(event) = attach_rx.recv().await {
-          let Some(params) = event.get("params") else { continue };
-          let target_type = params
-            .pointer("/targetInfo/type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-          let waiting = params
-            .get("waitingForDebugger")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-          // Page targets are owned by the new-page flow, which does its
-          // setup while the target is paused and resumes it itself.
-          if target_type == "page" || !waiting {
-            continue;
-          }
-          let Some(session_id) = params.get("sessionId").and_then(|v| v.as_str()) else {
-            continue;
-          };
-          // Fire-and-forget (Playwright's `_sendMayFail`): a worker can
-          // attach through two sessions (browser-level AND page-level
-          // auto-attach both see it), and a session Chrome never
-          // answers must not stall the other session's resume behind
-          // the 30s command timeout.
-          let session_id = session_id.to_string();
-          let transport = Arc::clone(&resume_transport);
-          tokio::spawn(async move {
-            let _ = transport
-              .send_command(
-                Some(&session_id),
-                "Runtime.runIfWaitingForDebugger",
-                &super::EMPTY_PARAMS,
-              )
-              .await;
-          });
-        }
-      });
-    }
+    let popup_taps = Self::spawn_attach_listener(&transport);
 
     Ok(Self {
       transport,
@@ -352,7 +309,211 @@ impl<T: CdpWrap> CdpBrowser<T> {
       attached_targets: std::sync::Mutex::new(FxHashMap::default()),
       version,
       user_data_dir: user_data_dir.map(|td| Arc::new(super::async_tempdir::AsyncTempDir::new(td))),
+      popup_taps,
     })
+  }
+
+  /// Resume every auto-attached target the page-open flow does not
+  /// claim. `setAutoAttach` pauses ALL new targets
+  /// (`waitForDebuggerOnStart`); `create_page` resumes only the page
+  /// target it created, so service workers, shared workers, and other
+  /// worker targets would sit suspended forever — observed as
+  /// `navigator.serviceWorker.register()` never resolving. Mirrors
+  /// Playwright's `crBrowser.ts` attachedToTarget handling, which
+  /// resumes every session it does not turn into a page. Lossless tap:
+  /// a dropped attach event would wedge that worker for good.
+  ///
+  /// Page targets carrying an `openerId` are BROWSER-created popups
+  /// (`window.open` / `target=_blank`) — `Target.createTarget` pages
+  /// never have one. Those are claimed: domains enabled while still
+  /// paused, then announced through the returned popup taps so the
+  /// state-level pump can register them into their context and resume
+  /// (Playwright's `crBrowser._onAttachedToTarget` → `CRPage` path).
+  fn spawn_attach_listener(transport: &Arc<T>) -> crate::backend::PopupTaps {
+    let popup_taps: crate::backend::PopupTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut attach_rx = transport.tap_event_methods(&["Target.attachedToTarget"], None);
+    let resume_transport = Arc::clone(transport);
+    let claim_taps = Arc::clone(&popup_taps);
+    tokio::spawn(async move {
+      // Popup targets already claimed — Chromium can announce the
+      // same related target through more than one auto-attach scope.
+      let mut claimed_popups: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+      while let Some(event) = attach_rx.recv().await {
+        let Some(params) = event.get("params") else { continue };
+        let target_type = params
+          .pointer("/targetInfo/type")
+          .and_then(|v| v.as_str())
+          .unwrap_or("");
+        let waiting = params
+          .get("waitingForDebugger")
+          .and_then(serde_json::Value::as_bool)
+          .unwrap_or(false);
+        let Some(session_id) = params.get("sessionId").and_then(|v| v.as_str()) else {
+          continue;
+        };
+        if target_type == "page" {
+          Self::maybe_claim_popup(
+            &resume_transport,
+            &claim_taps,
+            &mut claimed_popups,
+            params,
+            waiting,
+            session_id,
+          );
+          continue;
+        }
+        if !waiting {
+          continue;
+        }
+        // Fire-and-forget (Playwright's `_sendMayFail`): a worker can
+        // attach through two sessions (browser-level AND page-level
+        // auto-attach both see it), and a session Chrome never
+        // answers must not stall the other session's resume behind
+        // the 30s command timeout.
+        let session_id = session_id.to_string();
+        let transport = Arc::clone(&resume_transport);
+        tokio::spawn(async move {
+          let _ = transport
+            .send_command(
+              Some(&session_id),
+              "Runtime.runIfWaitingForDebugger",
+              &super::EMPTY_PARAMS,
+            )
+            .await;
+        });
+      }
+    });
+    popup_taps
+  }
+
+  /// One auto-attached page target: claim it as a popup when it carries
+  /// an `openerId` (browser-created); ignore it otherwise (the new-page
+  /// flow does its setup while the target is paused and resumes it
+  /// itself). The claim runs off the listener loop — `enable_domains`
+  /// is a multi-command round-trip and the loop must keep consuming
+  /// attach events.
+  fn maybe_claim_popup(
+    transport: &Arc<T>,
+    taps: &crate::backend::PopupTaps,
+    claimed: &mut rustc_hash::FxHashSet<String>,
+    params: &serde_json::Value,
+    waiting: bool,
+    session_id: &str,
+  ) {
+    let opener_id = params
+      .pointer("/targetInfo/openerId")
+      .and_then(|v| v.as_str())
+      .map(std::string::ToString::to_string);
+    let target_id = params
+      .pointer("/targetInfo/targetId")
+      .and_then(|v| v.as_str())
+      .unwrap_or("")
+      .to_string();
+    if !waiting || opener_id.is_none() || target_id.is_empty() || !claimed.insert(target_id.clone()) {
+      return;
+    }
+    let browser_context_id = params
+      .pointer("/targetInfo/browserContextId")
+      .and_then(|v| v.as_str())
+      .map(std::string::ToString::to_string);
+    let transport = Arc::clone(transport);
+    let taps = Arc::clone(taps);
+    let session_id = session_id.to_string();
+    tokio::spawn(async move {
+      let claimed_page = Self::claim_popup(&transport, &session_id, &target_id, browser_context_id.as_deref()).await;
+      let deliver_failed = match claimed_page {
+        Ok(page) => !crate::backend::push_popup(
+          &taps,
+          crate::backend::PopupInfo {
+            page: T::wrap_page(page),
+            browser_context_id,
+            opener_target_id: opener_id,
+          },
+        ),
+        Err(e) => {
+          tracing::debug!("popup claim failed for {target_id}: {e}");
+          true
+        },
+      };
+      if deliver_failed {
+        // No pump listening (core used without the state layer) or a
+        // failed claim — resume so the popup at least runs instead of
+        // staying parked on waitForDebuggerOnStart.
+        let _ = transport
+          .send_command(
+            Some(&session_id),
+            "Runtime.runIfWaitingForDebugger",
+            &super::EMPTY_PARAMS,
+          )
+          .await;
+      }
+    });
+  }
+
+  /// Build a fully initialized [`CdpPage`] for a popup target that
+  /// auto-attached paused. Mirrors the `new_page` setup (domain
+  /// enables, engine inject, lifecycle tracker, main-frame seed) minus
+  /// `Target.createTarget` and minus the resume — the popup pump
+  /// resumes after context configuration is applied.
+  async fn claim_popup(
+    transport: &Arc<T>,
+    session_id: &str,
+    target_id: &str,
+    browser_context_id: Option<&str>,
+  ) -> Result<CdpPage<T>> {
+    let inject_src = crate::selectors::build_lazy_inject_js();
+    let frame_tree_seed = Self::enable_domains(transport, Some(session_id), None, false, Some(&inject_src)).await?;
+    let injected_script = Arc::new(InjectedScriptManager::new());
+    injected_script
+      .injected
+      .store(true, std::sync::atomic::Ordering::Relaxed);
+    let page = CdpPage {
+      transport: Arc::clone(transport),
+      session_id: Some(Arc::from(session_id)),
+      target_id: Arc::from(target_id),
+      browser_context_id: browser_context_id.map(Arc::from),
+      events: crate::events::EventEmitter::new(),
+      frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+      frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
+      exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+      binding_initialized: Arc::new(tokio::sync::Mutex::new(false)),
+      closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+      fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
+      main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
+      last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
+      seeded_frame_tree: Arc::new(std::sync::Mutex::new(frame_tree_seed)),
+      last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
+      lifecycle: Arc::new(std::sync::Mutex::new(LifecycleState::new())),
+      lifecycle_notify: Arc::new(tokio::sync::Notify::new()),
+      injected_script,
+      nav_request_slot: crate::network::NavRequestSlot::new(),
+      dialog_manager: crate::dialog::DialogManager::new(),
+      file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+      file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      download_manager: crate::download::DownloadManager::new(),
+      download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      downloads_dir: new_downloads_dir()?,
+      page_backref: crate::backend::PageBackref::new(),
+      frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
+      listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+      fetch_interceptor: Arc::new(std::sync::Mutex::new(None)),
+      drag_manager: DragManagerState::new(),
+    };
+    page.transport.register_lifecycle_tracker(
+      page.session_id.as_deref().unwrap_or(""),
+      page.lifecycle.clone(),
+      page.lifecycle_notify.clone(),
+    );
+    let _ = page.main_frame_id.set(page.target_id.to_string());
+    Ok(page)
+  }
+
+  pub(crate) fn popup_taps(&self) -> crate::backend::PopupTaps {
+    Arc::clone(&self.popup_taps)
   }
 
   /// Retrieve all open page targets, attaching to any not yet tracked.
@@ -845,6 +1006,10 @@ impl CdpBrowser<ws::WsTransport> {
       child: Arc::new(tokio::sync::Mutex::new(None)),
       attached_targets: std::sync::Mutex::new(attached),
       version,
+      // Connect flow never sent the browser-level `Target.setAutoAttach`,
+      // so browser-created popups don't auto-attach here — the taps stay
+      // silent (same popup visibility as before this feature).
+      popup_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
       user_data_dir: None,
     })
   }
@@ -1194,7 +1359,7 @@ pub(crate) const UTILITY_EVAL_WRAPPER: &str = "function(isFn, retVal, expr, coun
 pub struct CdpPage<T: CdpTransport> {
   transport: Arc<T>,
   session_id: Option<Arc<str>>,
-  target_id: Arc<str>,
+  pub(crate) target_id: Arc<str>,
   /// Browser context ID for isolated contexts (used for `Target.disposeBrowserContext` on close).
   browser_context_id: Option<Arc<str>>,
   /// Event emitter for page events (console, dialog, network, frame lifecycle).
@@ -1577,6 +1742,18 @@ impl<T: CdpWrap> CdpPage<T> {
       .transport
       .send_command(self.session_id.as_deref(), method, &params)
       .await
+  }
+
+  /// Unpause a popup target parked by `Target.setAutoAttach`'s
+  /// `waitForDebuggerOnStart`. Called by the popup pump once context
+  /// configuration (init scripts, bindings, routes) has been applied,
+  /// so the popup's first document already sees them — the same
+  /// pause-configure-resume window Playwright's `CRPage` uses.
+  pub(crate) async fn resume_popup(&self) -> Result<()> {
+    self
+      .cmd("Runtime.runIfWaitingForDebugger", serde_json::json!({}))
+      .await?;
+    Ok(())
   }
 
   // ---- Navigation ----

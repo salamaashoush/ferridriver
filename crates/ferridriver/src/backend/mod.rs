@@ -654,7 +654,56 @@ pub enum AnyBrowser {
   Bidi(bidi::BidiBrowser),
 }
 
+/// A page the BROWSER created (a `window.open` / `target=_blank`
+/// popup), announced by the backend's popup listener. The state-level
+/// popup pump (see `context::spawn_popup_pump`) registers the page into
+/// its owning context, applies context configuration, wires the opener,
+/// resumes the target (CDP pauses popups via `waitForDebuggerOnStart`),
+/// and emits `ContextEvent::Page`.
+pub struct PopupInfo {
+  /// Fully constructed backend page (domains enabled, engine injected)
+  /// — NOT yet registered in the browser state and, on CDP, still
+  /// paused waiting for the debugger.
+  pub page: AnyPage,
+  /// Backend context id the popup belongs to (`None` = default
+  /// context). CDP `targetInfo.browserContextId`, `BiDi`
+  /// `event.userContext`, `WebKit` `pageProxyInfo.browserContextId`.
+  pub browser_context_id: Option<String>,
+  /// Backend id of the page that opened this popup, when the protocol
+  /// reports one — matched against [`AnyPage::backend_target_id`] to
+  /// resolve `page.opener()`.
+  pub opener_target_id: Option<String>,
+}
+
+/// Registry of live popup subscriptions a backend browser pushes
+/// [`PopupInfo`] into. Shared across browser clones.
+pub(crate) type PopupTaps = Arc<std::sync::Mutex<Vec<tokio::sync::mpsc::UnboundedSender<PopupInfo>>>>;
+
+pub(crate) fn push_popup(taps: &PopupTaps, info: PopupInfo) -> bool {
+  let mut taps = taps.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+  taps.retain(|tap| !tap.is_closed());
+  match taps.last() {
+    Some(tap) => tap.send(info).is_ok(),
+    None => false,
+  }
+}
+
 impl AnyBrowser {
+  /// Subscribe to browser-created pages (popups). Lossless unbounded
+  /// tap — the popup pump must never miss one (a missed CDP popup is a
+  /// target parked on `waitForDebuggerOnStart` forever).
+  pub(crate) fn tap_popups(&self) -> tokio::sync::mpsc::UnboundedReceiver<PopupInfo> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let taps = match self {
+      Self::CdpPipe(b) => b.popup_taps(),
+      Self::CdpRaw(b) => b.popup_taps(),
+      Self::WebKit(b) => b.popup_taps(),
+      Self::Bidi(b) => b.popup_taps(),
+    };
+    taps.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(tx);
+    rx
+  }
+
   /// Attach a raw [`crate::cdp_session::CdpSession`] to the browser
   /// target (`Target.attachToBrowserTarget`). Chromium-only, mirroring
   /// Playwright's `browser.newBrowserCDPSession()`.
@@ -929,6 +978,34 @@ impl AnyPage {
       AnyPage::CdpRaw(p) => p.page_backref.clone(),
       AnyPage::WebKit(p) => p.page_backref.clone(),
       AnyPage::Bidi(p) => p.page_backref.clone(),
+    }
+  }
+
+  /// Backend-native identity of this page's top-level target: CDP
+  /// `targetId`, `BiDi` browsing-context id, `WebKit` `pageProxyId`.
+  /// Used to correlate popups with their opener
+  /// ([`PopupInfo::opener_target_id`]).
+  pub(crate) fn backend_target_id(&self) -> String {
+    match self {
+      AnyPage::CdpPipe(p) => p.target_id.to_string(),
+      AnyPage::CdpRaw(p) => p.target_id.to_string(),
+      AnyPage::WebKit(p) => p.page_proxy_id().to_string(),
+      AnyPage::Bidi(p) => p.context_id.to_string(),
+    }
+  }
+
+  /// Unpause a browser-created popup once the popup pump has finished
+  /// registering it (context init scripts, bindings, routes applied).
+  /// CDP parks popups via `Target.setAutoAttach`'s
+  /// `waitForDebuggerOnStart`; `WebKit` popup targets arrive `isPaused`
+  /// and are held by `attach(defer_resume: true)`. `BiDi` popups run
+  /// freely — no-op there.
+  pub(crate) async fn resume_popup(&self) -> Result<()> {
+    match self {
+      AnyPage::CdpPipe(p) => p.resume_popup().await,
+      AnyPage::CdpRaw(p) => p.resume_popup().await,
+      AnyPage::WebKit(p) => p.resume_popup().await,
+      AnyPage::Bidi(_) => Ok(()),
     }
   }
 

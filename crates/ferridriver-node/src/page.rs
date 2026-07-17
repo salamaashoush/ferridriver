@@ -243,6 +243,17 @@ impl Page {
     Ok(crate::clock::Clock::wrap(ctx))
   }
 
+  /// Playwright: `page.opener(): Promise<null | Page>` — the page that
+  /// opened this popup via `window.open` / `target=_blank`; `null` for
+  /// non-popup pages and once the opener has closed. The lookup is a
+  /// synchronous weak upgrade; the yield keeps the promise-returning
+  /// Playwright signature without an unused-async lint.
+  #[napi(ts_return_type = "Promise<Page | null>")]
+  pub async fn opener(&self) -> Option<Page> {
+    tokio::task::yield_now().await;
+    self.inner.opener().map(Page::wrap)
+  }
+
   #[napi(js_name = "context")]
   pub fn context(&self) -> Result<crate::context::BrowserContext> {
     let ctx = self

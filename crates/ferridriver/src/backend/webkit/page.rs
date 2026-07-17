@@ -59,6 +59,9 @@ pub struct WebKitPage {
   target_id: Arc<ArcSwap<Arc<str>>>,
   context_id: Option<Arc<str>>,
   closed: Arc<AtomicBool>,
+  /// Set when `attach(defer_resume: true)` observed a paused popup
+  /// target; cleared (and `Target.resume` sent) by [`Self::resume_popup`].
+  popup_paused: Arc<AtomicBool>,
   /// Latch: the `window.__fd` selector engine has been injected.
   engine_injected: Arc<AtomicBool>,
   /// Cached `objectId` of the main-world global. `Runtime.callFunctionOn`
@@ -290,14 +293,19 @@ impl WebKitPage {
   /// Attach to a freshly-created page proxy: wait for the inner
   /// `Target.targetCreated`, open the target session, run the standard
   /// `*.enable` initialisation (mirrors `WKPage._initializeSessionMayThrow`).
+  /// `defer_resume`: when the target arrived paused, leave it paused
+  /// and let [`Self::resume_popup`] release it — the popup pump needs
+  /// the pause window to register listeners before the popup's first
+  /// navigation fires. `new_page` passes `false` (resume immediately).
   pub async fn attach(
     browser: &WebKitBrowser,
     proxy: Session,
     context_id: Option<String>,
+    defer_resume: bool,
   ) -> std::result::Result<Self, BrowserError> {
     let conn = browser.connection();
     let proxy_id = proxy.page_proxy_id().unwrap_or_default().to_string();
-    let target_id = wait_for_first_page_target(&proxy).await?;
+    let (target_id, is_paused) = wait_for_first_page_target(&proxy).await?;
     let target = conn.target_session(&proxy_id, &target_id);
 
     // Page agent before Runtime so executionContextCreated ordering holds.
@@ -368,6 +376,7 @@ impl WebKitPage {
       target_id: Arc::new(ArcSwap::from_pointee(Arc::<str>::from(target_id))),
       context_id: context_id.map(Arc::from),
       closed: Arc::new(AtomicBool::new(false)),
+      popup_paused: Arc::new(AtomicBool::new(false)),
       engine_injected: Arc::new(AtomicBool::new(false)),
       global_object_id: Arc::new(std::sync::Mutex::new(None)),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
@@ -404,7 +413,36 @@ impl WebKitPage {
     // `wait_for_lifecycle` wedge for the full timeout because no one
     // ever marks the lifecycle latches.
     super::events::attach_listeners(&page);
+    // Browser-created popup targets arrive paused (`isPaused`, like the
+    // provisional-target swap path) — resume only after the full
+    // session init above so the popup's first document already sees
+    // the bootstrap script and overrides (mirrors `WKPage`'s
+    // initialize-then-`Target.resume` order). With `defer_resume` the
+    // pause is held for [`Self::resume_popup`] instead.
+    if is_paused {
+      if defer_resume {
+        page.popup_paused.store(true, Ordering::SeqCst);
+      } else {
+        let _ = page
+          .proxy
+          .send("Target.resume", json!({ "targetId": &*page.target_id() }))
+          .await;
+      }
+    }
     Ok(page)
+  }
+
+  /// Release a popup target held paused by `attach(defer_resume:
+  /// true)`. Idempotent; no-op for pages that never deferred.
+  pub(crate) async fn resume_popup(&self) -> crate::error::Result<()> {
+    if self.popup_paused.swap(false, Ordering::SeqCst) {
+      self
+        .proxy
+        .send("Target.resume", json!({ "targetId": &*self.target_id() }))
+        .await
+        .map_err(|e| crate::error::FerriError::backend(format!("webkit Target.resume: {e}")))?;
+    }
+    Ok(())
   }
 
   #[must_use]
@@ -481,6 +519,14 @@ impl WebKitPage {
   #[must_use]
   pub(crate) fn interception_enabled(&self) -> bool {
     self.intercept_enabled.load(Ordering::SeqCst)
+  }
+
+  pub(crate) fn engine_injected_flag(&self) -> Arc<AtomicBool> {
+    Arc::clone(&self.engine_injected)
+  }
+
+  pub(crate) fn global_object_id_slot(&self) -> Arc<std::sync::Mutex<Option<String>>> {
+    Arc::clone(&self.global_object_id)
   }
 
   #[must_use]
@@ -2236,12 +2282,20 @@ async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crat
 }
 
 /// Wait for the first non-provisional `Target.targetCreated` of type
-/// `page` on the proxy session.
-async fn wait_for_first_page_target(proxy: &Session) -> std::result::Result<String, BrowserError> {
+/// `page` on the proxy session. Returns the target id plus whether the
+/// target arrived paused (`isPaused` — browser-created popups do; the
+/// caller resumes after session init).
+async fn wait_for_first_page_target(proxy: &Session) -> std::result::Result<(String, bool), BrowserError> {
   let mut rx = proxy.events();
   while let Some(env) = rx.recv().await {
     if let Some(id) = page_target_id(&env) {
-      return Ok(id);
+      let paused = env
+        .params
+        .get("targetInfo")
+        .and_then(|i| i.get("isPaused"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+      return Ok((id, paused));
     }
   }
   Err(BrowserError::Protocol("page proxy closed before target".into()))

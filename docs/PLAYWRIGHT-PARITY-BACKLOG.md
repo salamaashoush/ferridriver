@@ -9,13 +9,6 @@ record.
 ## API surface not yet mapped
 
 ### Page methods needing backend plumbing
-- `page.opener()` + browser-created popup tracking — needs opener/popup
-  target-relationship tracking (CDP `Target.targetCreated.openerId` plus
-  the BiDi/WebKit equivalents). No target-opener bookkeeping exists yet.
-  Consequences until it lands: `window.open` popups never register in the
-  context, so `context.pages()` does not list them and
-  `context.waitForEvent('page')` only fires for `context.newPage()`
-  (script-driven creation), not browser-initiated pages.
 - `page.request` getter — Playwright's `page.request === context.request`
   shares the context cookie jar / storage state. ferridriver's `request`
   global is a standalone `HttpClient`; a context-bound client wired to the
@@ -84,17 +77,23 @@ record.
   its websocket test-server (uiMode); the standalone vendored viewer only
   supports the postMessage snapshot-feed (a fresh blob URL per poll).
 
-## Script-sandbox gaps hit driving the real app.acme.com Sign flow
+## Popup tracking residuals
 
-Found live (ferridriver 0.5.0, `cdp-pipe`, `run_script` via MCP) while
-automating the the signing app signer flow on staging, 2026-07-16. Most items
-were fixed since; what remains:
+Popup/opener tracking landed (backend claim listeners + state-level
+popup pump): `window.open` pages register into their context, fire
+`'page'`, list in `context.pages()`, and resolve `page.opener()` on all
+four backends. What the pump does NOT yet guarantee:
 
-### `context.waitForEvent('page')` never fires for popups
-- The event now exists and fires for `context.newPage()`, but a
-  popup-opening click (`window.open` / `target=_blank`) still cannot be
-  raced against page creation — browser-created pages are not tracked
-  (see the `page.opener()` item above). Same root cause keeps popups
-  out of `context.pages()`.
+- Context init scripts / bindings on the popup's FIRST document are
+  deterministic only on CDP (popups arrive paused and are configured
+  before resume; WebKit holds `isPaused` similarly). BiDi popups run
+  freely, so their first document can miss init scripts — later
+  documents are covered.
+- Popups in the CDP `connect` flow (attach to an already-running
+  Chrome) are not claimed — that path never arms the browser-level
+  `Target.setAutoAttach`, so browser-created targets stay invisible
+  (same as before popup tracking).
+- `noopener` windows carry no opener id on CDP/WebKit and are not
+  claimed as popups there.
 
 <!-- Append new findings below as they are discovered. Remove items when they land — git history is the archive. -->

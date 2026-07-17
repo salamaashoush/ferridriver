@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import * as http from "node:http";
-import { type Browser } from "../index.js";
+import { type Browser, type Page } from "../index.js";
 import { launchForBackend } from "./_helpers.js";
 
 // Spawn an HTTP Basic-auth server: `user:pass` → 200 AUTHED, otherwise
@@ -327,6 +327,31 @@ for (const backend of BACKENDS) {
           navFailed = true;
         }
         expect(navFailed).toBe(true);
+      } finally {
+        await ctx.close();
+      }
+    });
+
+    it("window.open popup fires 'page', lists in pages(), resolves opener()", async () => {
+      const ctx = browser.newContext({});
+      try {
+        const opener = await ctx.newPage();
+        // Context route serves both documents — no external network,
+        // and the popup hitting it proves context routes apply to
+        // browser-created pages too.
+        await ctx.route("https://ferri-popup.test/**", (route) => {
+          route.fulfill({ status: 200, contentType: "text/html", body: "<body>SERVED</body>" });
+        });
+        await opener.goto("https://ferri-popup.test/");
+        const [popup] = await Promise.all([
+          ctx.waitForEvent("page", 8_000) as Promise<Page>,
+          opener.evaluate("void window.open('https://ferri-popup.test/pop')"),
+        ]);
+        expect(popup).toBeDefined();
+        expect((await ctx.pages()).length).toBe(2);
+        expect(await popup.opener()).not.toBeNull();
+        await popup.close();
+        expect((await ctx.pages()).length).toBe(1);
       } finally {
         await ctx.close();
       }
