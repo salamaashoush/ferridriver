@@ -100,6 +100,21 @@ pub struct WebKitBrowser {
   /// [`crate::backend::PopupInfo`]) fed by the
   /// `Playwright.pageProxyCreated` listener.
   popup_taps: crate::backend::PopupTaps,
+  /// Ownership ledger between `create_page` and the popup listener —
+  /// `noopener` windows fire `pageProxyCreated` WITHOUT `openerId`,
+  /// exactly like our own `Playwright.createPage` proxies, and the
+  /// event can beat the create response (see
+  /// [`crate::backend::CreateLedger`]).
+  create_ledger: Arc<crate::backend::CreateLedger<ParkedProxy>>,
+}
+
+/// A `pageProxyCreated` without `openerId` observed while a
+/// `Playwright.createPage` was in flight — held until the flush decides
+/// whether it is a `noopener` popup.
+#[derive(Clone)]
+struct ParkedProxy {
+  proxy_id: String,
+  context_id: Option<String>,
 }
 
 impl WebKitBrowser {
@@ -166,6 +181,7 @@ impl WebKitBrowser {
       context_options: Arc::new(Mutex::new(rustc_hash::FxHashMap::default())),
       downloads_dir,
       popup_taps: Arc::new(Mutex::new(Vec::new())),
+      create_ledger: Arc::new(crate::backend::CreateLedger::default()),
     };
     browser.spawn_popup_listener();
     Ok(browser)
@@ -184,54 +200,81 @@ impl WebKitBrowser {
   fn spawn_popup_listener(&self) {
     let mut rx = self.root.events();
     let browser = self.clone();
+    let mut flush_rx = self.create_ledger.take_flush_rx();
+    let flush_browser = self.clone();
+    tokio::spawn(async move {
+      while flush_rx.recv().await.is_some() {
+        for parked in flush_browser.create_ledger.take_unowned_parked() {
+          flush_browser.claim_popup_proxy(parked.proxy_id, parked.context_id, None);
+        }
+      }
+    });
     tokio::spawn(async move {
       while let Some(env) = rx.recv().await {
         if env.method.as_deref() != Some("Playwright.pageProxyCreated") {
           continue;
         }
-        let Some(opener) = env.params.get("openerId").and_then(serde_json::Value::as_str) else {
-          continue;
-        };
         let Some(proxy_id) = env.params.get("pageProxyId").and_then(serde_json::Value::as_str) else {
           continue;
         };
+        let opener = env
+          .params
+          .get("openerId")
+          .and_then(serde_json::Value::as_str)
+          .map(std::string::ToString::to_string);
         let context_id = env
           .params
           .get("browserContextId")
           .and_then(serde_json::Value::as_str)
           .map(std::string::ToString::to_string);
-        let opener = opener.to_string();
-        let proxy_id = proxy_id.to_string();
-        let b = browser.clone();
-        // Attach off the listener loop: it is a multi-command
-        // round-trip and this loop must keep consuming root events.
-        tokio::spawn(async move {
-          let proxy = b.conn.page_proxy_session(proxy_id.clone());
-          match WebKitPage::attach(&b, proxy, context_id.clone(), true).await {
-            Ok(page) => {
-              if let Ok(mut pages) = b.pages.lock() {
-                pages.push(page.clone());
-              }
-              // The launch-minted default context is "default" at the
-              // state layer; popups in it carry no context id upward.
-              let browser_context_id = context_id.filter(|id| *id != *b.default_context);
-              let delivered = crate::backend::push_popup(
-                &b.popup_taps,
-                crate::backend::PopupInfo {
-                  page: AnyPage::WebKit(page),
-                  browser_context_id,
-                  opener_target_id: Some(opener),
-                },
-              );
-              if !delivered {
-                tracing::debug!("webkit popup {proxy_id} observed with no pump subscribed");
-              }
-            },
-            Err(e) => {
-              tracing::debug!("webkit popup attach failed for {proxy_id}: {e}");
-            },
+        if opener.is_none() {
+          // No opener: either our own `Playwright.createPage` proxy or
+          // a `noopener` window — the ledger decides (park while a
+          // create is in flight; flush claims the leftovers).
+          let parked = ParkedProxy {
+            proxy_id: proxy_id.to_string(),
+            context_id: context_id.clone(),
+          };
+          if !browser.create_ledger.try_claim_ownerless(proxy_id, parked) {
+            continue;
           }
-        });
+        }
+        browser.claim_popup_proxy(proxy_id.to_string(), context_id, opener);
+      }
+    });
+  }
+
+  /// Attach one browser-created page proxy as a popup and announce it.
+  /// Spawned off the listener loop — attach is a multi-command
+  /// round-trip and the loop must keep consuming root events.
+  fn claim_popup_proxy(&self, proxy_id: String, context_id: Option<String>, opener: Option<String>) {
+    let b = self.clone();
+    tokio::spawn(async move {
+      let proxy = b.conn.page_proxy_session(proxy_id.clone());
+      match WebKitPage::attach(&b, proxy, context_id.clone(), true).await {
+        Ok(page) => {
+          if let Ok(mut pages) = b.pages.lock() {
+            pages.push(page.clone());
+          }
+          // The launch-minted default context is "default" at the
+          // state layer; popups in it carry no context id upward.
+          let browser_context_id = context_id.filter(|id| *id != *b.default_context);
+          let delivered = crate::backend::push_popup(
+            &b.popup_taps,
+            crate::backend::PopupInfo {
+              page: AnyPage::WebKit(page.clone()),
+              browser_context_id,
+              opener_target_id: opener,
+            },
+          );
+          if !delivered {
+            tracing::debug!("webkit popup {proxy_id} observed with no pump subscribed");
+            let _ = page.resume_popup().await;
+          }
+        },
+        Err(e) => {
+          tracing::debug!("webkit popup attach failed for {proxy_id}: {e}");
+        },
       }
     });
   }
@@ -352,14 +395,28 @@ impl WebKitBrowser {
     let params = CreatePageParams {
       browser_context_id: Some(browser_context_id.unwrap_or(&self.default_context).to_string()),
     };
+    // Ledger bracket: `pageProxyCreated` for this proxy can arrive
+    // before the response; while the create is in flight the popup
+    // listener parks no-opener proxies instead of claiming them.
+    self.create_ledger.begin_create();
     let resp = self
       .root
       .send(protocol::PLAYWRIGHT_CREATE_PAGE, serde_json::to_value(&params)?)
       .await
-      .map_err(BrowserError::from)?;
-    let parsed: CreatePageResult =
-      serde_json::from_value(resp).map_err(|e| FerriError::protocol("Playwright.createPage", e.to_string()))?;
-    Ok(self.conn.page_proxy_session(parsed.page_proxy_id))
+      .map_err(BrowserError::from);
+    let parsed: Result<CreatePageResult> = resp.map_err(FerriError::from).and_then(|r| {
+      serde_json::from_value(r).map_err(|e| FerriError::protocol("Playwright.createPage", e.to_string()))
+    });
+    match parsed {
+      Ok(parsed) => {
+        self.create_ledger.end_create(Some(&parsed.page_proxy_id));
+        Ok(self.conn.page_proxy_session(parsed.page_proxy_id))
+      },
+      Err(e) => {
+        self.create_ledger.end_create(None);
+        Err(e)
+      },
+    }
   }
 
   /// List all open pages.

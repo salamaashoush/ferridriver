@@ -79,21 +79,25 @@ record.
 
 ## Popup tracking residuals
 
-Popup/opener tracking landed (backend claim listeners + state-level
-popup pump): `window.open` pages register into their context, fire
-`'page'`, list in `context.pages()`, and resolve `page.opener()` on all
-four backends. What the pump does NOT yet guarantee:
+Popup/opener tracking covers `window.open` (including `noopener`) and
+the CDP connect flow on all four backends: registration, `'page'`
+event, `context.pages()`, `page.opener()`. Remaining known limits:
 
-- Context init scripts / bindings on the popup's FIRST document are
-  deterministic only on CDP (popups arrive paused and are configured
-  before resume; WebKit holds `isPaused` similarly). BiDi popups run
-  freely, so their first document can miss init scripts — later
-  documents are covered.
-- Popups in the CDP `connect` flow (attach to an already-running
-  Chrome) are not claimed — that path never arms the browser-level
-  `Target.setAutoAttach`, so browser-created targets stay invisible
-  (same as before popup tracking).
-- `noopener` windows carry no opener id on CDP/WebKit and are not
-  claimed as popups there.
+- CDP popups in a NEW browsing instance (`noopener`, cross-origin
+  COOP) answer no session command while parked on
+  `waitForDebuggerOnStart`, so the claim watchdog resumes them early
+  (~1s) and context config applies just-after-start instead of
+  before the first document. Their first document can therefore miss
+  context init scripts, and `page.url()` can lag until the next
+  navigation (the frame cache misses the pre-registration commit) —
+  `evaluate`/locators are unaffected. The fully-ordered fix is
+  Playwright's shape: queue the entire init + resume as ONE
+  wire-ordered batch (`crPage.ts:548`), which needs the popup claim
+  and context config folded into a single command burst.
+- BiDi popups run freely (no pause primitive in the spec), so their
+  first document can miss init scripts — Playwright has the same
+  limitation.
+- WebSocket-route install on popups is post-resume everywhere (its
+  mock installs by evaluating into the live document).
 
 <!-- Append new findings below as they are discovered. Remove items when they land — git history is the archive. -->

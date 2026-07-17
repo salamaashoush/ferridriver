@@ -688,6 +688,114 @@ pub(crate) fn push_popup(taps: &PopupTaps, info: PopupInfo) -> bool {
   }
 }
 
+/// Ownership ledger between a backend's page-create flow (which owns
+/// the targets it creates) and its browser-event listener (which must
+/// claim every OTHER page as a popup — including `noopener` windows,
+/// which carry no opener id and are otherwise indistinguishable from
+/// our own creates because the creation event can arrive before the
+/// create command's response returns the id).
+///
+/// Protocol: `begin_create` before sending the create command;
+/// `end_create(Some(id))` the moment the response yields the id (or
+/// `None` on error). A no-opener browser-created page claims
+/// immediately when nothing is in flight, parks otherwise; the last
+/// `end_create` flushes whatever no create took — every parked page is
+/// deterministically resolved within one create round-trip, no timers.
+pub(crate) struct CreateLedger<P> {
+  pending: std::sync::atomic::AtomicUsize,
+  owned: std::sync::Mutex<rustc_hash::FxHashSet<String>>,
+  parked: std::sync::Mutex<rustc_hash::FxHashMap<String, P>>,
+  flush_tx: tokio::sync::mpsc::UnboundedSender<()>,
+  flush_rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<()>>>,
+}
+
+impl<P> Default for CreateLedger<P> {
+  fn default() -> Self {
+    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel();
+    Self {
+      pending: std::sync::atomic::AtomicUsize::new(0),
+      owned: std::sync::Mutex::new(rustc_hash::FxHashSet::default()),
+      parked: std::sync::Mutex::new(rustc_hash::FxHashMap::default()),
+      flush_tx,
+      flush_rx: std::sync::Mutex::new(Some(flush_rx)),
+    }
+  }
+}
+
+impl<P> CreateLedger<P> {
+  pub(crate) fn begin_create(&self) {
+    self.pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+  }
+
+  pub(crate) fn end_create(&self, owned_id: Option<&str>) {
+    {
+      let mut owned = self.owned.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      if let Some(id) = owned_id {
+        owned.insert(id.to_string());
+        self
+          .parked
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .remove(id);
+      }
+    }
+    let remaining = self.pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) - 1;
+    if remaining == 0 {
+      let has_parked = !self
+        .parked
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_empty();
+      if has_parked {
+        let _ = self.flush_tx.send(());
+      }
+    }
+  }
+
+  /// Resolve a no-opener browser-created page: `true` → claim it as a
+  /// popup right now; `false` → either a completed create owns it (do
+  /// nothing) or it was parked for the flush to decide.
+  pub(crate) fn try_claim_ownerless(&self, id: &str, payload: P) -> bool {
+    let owned = self.owned.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if owned.contains(id) {
+      return false;
+    }
+    if self.pending.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+      return true;
+    }
+    self
+      .parked
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert(id.to_string(), payload);
+    false
+  }
+
+  /// Drain every parked page no create claimed.
+  pub(crate) fn take_unowned_parked(&self) -> Vec<P> {
+    let owned = self.owned.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    self
+      .parked
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .drain()
+      .filter(|(id, _)| !owned.contains(id))
+      .map(|(_, p)| p)
+      .collect()
+  }
+
+  /// One-shot receiver for the flush signal (listener side). A second
+  /// call returns a channel that never fires.
+  pub(crate) fn take_flush_rx(&self) -> tokio::sync::mpsc::UnboundedReceiver<()> {
+    self
+      .flush_rx
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .take()
+      .unwrap_or_else(|| tokio::sync::mpsc::unbounded_channel().1)
+  }
+}
+
 impl AnyBrowser {
   /// Subscribe to browser-created pages (popups). Lossless unbounded
   /// tap — the popup pump must never miss one (a missed CDP popup is a
@@ -1640,6 +1748,21 @@ impl AnyPage {
   /// the context layer, which knows the composite session key.
   pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
     page_dispatch!(self, expose_binding(name, binding))
+  }
+
+  /// [`Self::expose_binding`] for a popup whose first document has not
+  /// run yet. CDP/`WebKit` popups are held paused, so only the
+  /// paused-safe half (binding + init scripts) is sent — the first
+  /// document installs the channel at document-start. `BiDi` has no
+  /// pause primitive and its popup document is already live, so it
+  /// takes the normal path.
+  pub(crate) async fn expose_binding_pre_doc(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    match self {
+      AnyPage::CdpPipe(p) => p.expose_binding_pre_doc(name, binding).await,
+      AnyPage::CdpRaw(p) => p.expose_binding_pre_doc(name, binding).await,
+      AnyPage::WebKit(p) => p.expose_binding_pre_doc(name, binding).await,
+      AnyPage::Bidi(p) => p.expose_binding(name, binding).await,
+    }
   }
 
   pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {

@@ -74,6 +74,11 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// so a pump subscribed through any clone observes popups claimed by
   /// the connect-time listener.
   popup_taps: crate::backend::PopupTaps,
+  /// Ownership ledger between `new_page` and the attach listener (see
+  /// [`CreateLedger`]). Arc-shared across clones — `PageOpenPlan`
+  /// clones the browser, and its `new_page` must coordinate with the
+  /// original's listener.
+  create_ledger: Arc<CreateLedger>,
   /// Owned `--user-data-dir` for launched browsers. Held as `Arc<TempDir>` so
   /// cheap `Clone`s share ownership, and the directory is removed from disk
   /// when the last handle drops (after the `Child` is killed via
@@ -109,6 +114,7 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
       ),
       version: Arc::clone(&self.version),
       popup_taps: Arc::clone(&self.popup_taps),
+      create_ledger: Arc::clone(&self.create_ledger),
       user_data_dir: self.user_data_dir.as_ref().map(Arc::clone),
     }
   }
@@ -141,6 +147,19 @@ fn metrics_params_for(config: &crate::options::ViewportConfig) -> serde_json::Va
     "screenOrientation": orientation,
   })
 }
+
+/// A paused page target the attach listener could not attribute yet:
+/// no `openerId`, and at least one `Target.createTarget` in flight that
+/// may own it.
+#[derive(Clone)]
+struct ParkedTarget {
+  target: String,
+  session: String,
+  browser_context: Option<String>,
+  opener: Option<String>,
+}
+
+type CreateLedger = crate::backend::CreateLedger<ParkedTarget>;
 
 impl<T: CdpWrap> CdpBrowser<T> {
   /// Enable required CDP domains on a session so events and queries work.
@@ -301,7 +320,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       )
       .await?;
 
-    let popup_taps = Self::spawn_attach_listener(&transport);
+    let (popup_taps, create_ledger) = Self::spawn_attach_listener(&transport);
 
     Ok(Self {
       transport,
@@ -310,6 +329,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       version,
       user_data_dir: user_data_dir.map(|td| Arc::new(super::async_tempdir::AsyncTempDir::new(td))),
       popup_taps,
+      create_ledger,
     })
   }
 
@@ -323,17 +343,36 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// resumes every session it does not turn into a page. Lossless tap:
   /// a dropped attach event would wedge that worker for good.
   ///
-  /// Page targets carrying an `openerId` are BROWSER-created popups
-  /// (`window.open` / `target=_blank`) — `Target.createTarget` pages
-  /// never have one. Those are claimed: domains enabled while still
-  /// paused, then announced through the returned popup taps so the
-  /// state-level pump can register them into their context and resume
-  /// (Playwright's `crBrowser._onAttachedToTarget` → `CRPage` path).
-  fn spawn_attach_listener(transport: &Arc<T>) -> crate::backend::PopupTaps {
+  /// Page targets NOT owned by an in-flight `Target.createTarget` are
+  /// BROWSER-created popups. Targets with an `openerId` are claimed
+  /// outright (`createTarget` pages never carry one); no-opener page
+  /// targets (`noopener` windows) go through the [`CreateLedger`]: they
+  /// are claimed immediately when no create is in flight, otherwise
+  /// parked until every pending create has taken its own target and the
+  /// leftovers are flushed as popups. Claimed popups get domains
+  /// enabled while still paused, then ride the returned popup taps so
+  /// the state-level pump can register them and resume (Playwright's
+  /// `crBrowser._onAttachedToTarget` → `CRPage` path).
+  fn spawn_attach_listener(transport: &Arc<T>) -> (crate::backend::PopupTaps, Arc<CreateLedger>) {
     let popup_taps: crate::backend::PopupTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ledger = Arc::new(CreateLedger::default());
     let mut attach_rx = transport.tap_event_methods(&["Target.attachedToTarget"], None);
     let resume_transport = Arc::clone(transport);
     let claim_taps = Arc::clone(&popup_taps);
+    let claim_ledger = Arc::clone(&ledger);
+    // Flush channel: `end_create` (called from new_page, no transport
+    // access) signals the listener side to claim leftovers.
+    let mut flush_rx = ledger.take_flush_rx();
+    let flush_transport = Arc::clone(transport);
+    let flush_taps = Arc::clone(&popup_taps);
+    let flush_ledger = Arc::clone(&ledger);
+    tokio::spawn(async move {
+      while flush_rx.recv().await.is_some() {
+        for parked in flush_ledger.take_unowned_parked() {
+          Self::claim_parked_popup(&flush_transport, &flush_taps, parked);
+        }
+      }
+    });
     tokio::spawn(async move {
       // Popup targets already claimed — Chromium can announce the
       // same related target through more than one auto-attach scope.
@@ -355,6 +394,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
           Self::maybe_claim_popup(
             &resume_transport,
             &claim_taps,
+            &claim_ledger,
             &mut claimed_popups,
             params,
             waiting,
@@ -383,18 +423,24 @@ impl<T: CdpWrap> CdpBrowser<T> {
         });
       }
     });
-    popup_taps
+    (popup_taps, ledger)
   }
 
-  /// One auto-attached page target: claim it as a popup when it carries
-  /// an `openerId` (browser-created); ignore it otherwise (the new-page
-  /// flow does its setup while the target is paused and resumes it
-  /// itself). The claim runs off the listener loop — `enable_domains`
-  /// is a multi-command round-trip and the loop must keep consuming
-  /// attach events.
+  /// One auto-attached page target. Ownership resolution:
+  ///
+  /// * `openerId` present → browser-created popup, claim now.
+  /// * no opener, no `Target.createTarget` in flight → `noopener`
+  ///   popup, claim now.
+  /// * no opener, create(s) in flight → parked; the flush after the
+  ///   last create completes claims whatever no create took.
+  ///
+  /// Claims run off the listener loop — `enable_domains` is a
+  /// multi-command round-trip and the loop must keep consuming attach
+  /// events.
   fn maybe_claim_popup(
     transport: &Arc<T>,
     taps: &crate::backend::PopupTaps,
+    ledger: &Arc<CreateLedger>,
     claimed: &mut rustc_hash::FxHashSet<String>,
     params: &serde_json::Value,
     waiting: bool,
@@ -409,17 +455,40 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .and_then(|v| v.as_str())
       .unwrap_or("")
       .to_string();
-    if !waiting || opener_id.is_none() || target_id.is_empty() || !claimed.insert(target_id.clone()) {
+    if !waiting || target_id.is_empty() || claimed.contains(&target_id) {
       return;
     }
     let browser_context_id = params
       .pointer("/targetInfo/browserContextId")
       .and_then(|v| v.as_str())
       .map(std::string::ToString::to_string);
+    let parked = ParkedTarget {
+      target: target_id.clone(),
+      session: session_id.to_string(),
+      browser_context: browser_context_id,
+      opener: opener_id,
+    };
+    if parked.opener.is_none() && !ledger.try_claim_ownerless(&parked.target, parked.clone()) {
+      // Parked — a create in flight may own it; the flush decides.
+      return;
+    }
+    claimed.insert(target_id);
+    Self::claim_parked_popup(transport, taps, parked);
+  }
+
+  /// Claim one resolved popup target: build the paused [`CdpPage`] and
+  /// announce it, or resume the target if nothing is listening / the
+  /// claim failed (never leave it parked on `waitForDebuggerOnStart`).
+  fn claim_parked_popup(transport: &Arc<T>, taps: &crate::backend::PopupTaps, parked: ParkedTarget) {
     let transport = Arc::clone(transport);
     let taps = Arc::clone(taps);
-    let session_id = session_id.to_string();
     tokio::spawn(async move {
+      let ParkedTarget {
+        target: target_id,
+        session: session_id,
+        browser_context: browser_context_id,
+        opener: opener_id,
+      } = parked;
       let claimed_page = Self::claim_popup(&transport, &session_id, &target_id, browser_context_id.as_deref()).await;
       let deliver_failed = match claimed_page {
         Ok(page) => !crate::backend::push_popup(
@@ -462,7 +531,31 @@ impl<T: CdpWrap> CdpBrowser<T> {
     browser_context_id: Option<&str>,
   ) -> Result<CdpPage<T>> {
     let inject_src = crate::selectors::build_lazy_inject_js();
-    let frame_tree_seed = Self::enable_domains(transport, Some(session_id), None, false, Some(&inject_src)).await?;
+    // Same-process popups answer session commands while parked on
+    // waitForDebuggerOnStart — the pause window lets the pump configure
+    // the page before its first document runs. A popup in a NEW
+    // browsing instance (noopener, cross-origin COOP) answers NOTHING
+    // until resumed: Chrome does not spin the renderer up. Watchdog:
+    // when the enables get no answer, resume early and finish the
+    // setup against the running target (config degrades to
+    // applied-asap, still ordered before any awaited caller sees the
+    // page). Playwright avoids the stall by queueing its whole init +
+    // resume as one wire-ordered batch (crPage.ts:548).
+    let enable_fut = Self::enable_domains(transport, Some(session_id), None, false, Some(&inject_src));
+    tokio::pin!(enable_fut);
+    let timed = tokio::time::timeout(Duration::from_millis(1000), &mut enable_fut).await;
+    let frame_tree_seed = if let Ok(r) = timed {
+      r?
+    } else {
+      let _ = transport
+        .send_command(
+          Some(session_id),
+          "Runtime.runIfWaitingForDebugger",
+          &super::EMPTY_PARAMS,
+        )
+        .await;
+      enable_fut.await?
+    };
     let injected_script = Arc::new(InjectedScriptManager::new());
     injected_script
       .injected
@@ -664,6 +757,33 @@ impl<T: CdpWrap> CdpBrowser<T> {
   ///
   /// Follows Playwright's sequence: `Target.createTarget` → wait for auto-attach
   /// event (target is paused) → enable domains → `Runtime.runIfWaitingForDebugger`.
+  /// `Target.createTarget` wrapped in the [`CreateLedger`] bracket:
+  /// while the create is in flight the attach listener parks no-opener
+  /// page targets instead of claiming them as `noopener` popups — the
+  /// attach event can beat this response.
+  async fn create_owned_target(&self, browser_context_id: Option<&str>) -> Result<String> {
+    let create_params = if let Some(ctx_id) = browser_context_id {
+      serde_json::json!({"url": "about:blank", "browserContextId": ctx_id})
+    } else {
+      serde_json::json!({"url": "about:blank"})
+    };
+    self.create_ledger.begin_create();
+    let result = self
+      .transport
+      .send_command(None, "Target.createTarget", &create_params)
+      .await;
+    let target_id = result
+      .and_then(|r| {
+        r.get("targetId")
+          .and_then(|v| v.as_str())
+          .map(std::string::ToString::to_string)
+          .ok_or_else(|| FerriError::protocol("Target.createTarget", "response missing targetId"))
+      })
+      .inspect_err(|_| self.create_ledger.end_create(None))?;
+    self.create_ledger.end_create(Some(&target_id));
+    Ok(target_id)
+  }
+
   pub async fn new_page(
     &self,
     url: &str,
@@ -674,22 +794,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // broadcast drop here was a 30s new_page hang.
     let mut event_rx = self.transport.tap_event_methods(&["Target.attachedToTarget"], None);
 
-    let create_params = if let Some(ctx_id) = browser_context_id {
-      serde_json::json!({"url": "about:blank", "browserContextId": ctx_id})
-    } else {
-      serde_json::json!({"url": "about:blank"})
-    };
-
-    let result = self
-      .transport
-      .send_command(None, "Target.createTarget", &create_params)
-      .await?;
-
-    let target_id = result
-      .get("targetId")
-      .and_then(|v| v.as_str())
-      .ok_or_else(|| FerriError::protocol("Target.createTarget", "response missing targetId"))?
-      .to_string();
+    let target_id = self.create_owned_target(browser_context_id).await?;
 
     // Wait for Target.attachedToTarget event (from setAutoAttach in init).
     // The target is paused (waitForDebuggerOnStart) so we can set up everything.
@@ -941,6 +1046,24 @@ impl CdpBrowser<ws::WsTransport> {
       )
       .await?;
 
+    // Browser-level auto-attach, exactly like the launch flow (and
+    // Playwright's connectOverCDP): without it browser-created pages —
+    // window.open popups, user-opened tabs — never attach and stay
+    // invisible. Existing targets are unaffected (they attach below,
+    // unpaused); new ones flow through the popup claim listener.
+    transport
+      .send_command(
+        None,
+        "Target.setAutoAttach",
+        &serde_json::json!({
+          "autoAttach": true,
+          "waitForDebuggerOnStart": true,
+          "flatten": true,
+        }),
+      )
+      .await?;
+    let (popup_taps, create_ledger) = Self::spawn_attach_listener(&transport);
+
     // Find existing page targets
     let result = transport
       .send_command(None, "Target.getTargets", &super::EMPTY_PARAMS)
@@ -978,14 +1101,18 @@ impl CdpBrowser<ws::WsTransport> {
 
     // If no existing page, create one
     if !found_page {
+      // Same ledger bracket as `new_page` — auto-attach is armed, so
+      // this created target must not be mistaken for a noopener popup.
+      create_ledger.begin_create();
       let create_result = transport
         .send_command(None, "Target.createTarget", &serde_json::json!({"url": "about:blank"}))
-        .await?;
-      let target_id = create_result
-        .get("targetId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .await;
+      let target_id = match &create_result {
+        Ok(r) => r.get("targetId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        Err(_) => String::new(),
+      };
+      create_ledger.end_create(if target_id.is_empty() { None } else { Some(&target_id) });
+      create_result?;
       let attach = transport
         .send_command(
           None,
@@ -998,6 +1125,12 @@ impl CdpBrowser<ws::WsTransport> {
         .and_then(|v| v.as_str())
         .map(std::string::ToString::to_string);
       Box::pin(Self::enable_domains(&transport, sid.as_deref(), None, false, None)).await?;
+      // Auto-attach parked this fresh target on waitForDebuggerOnStart
+      // (the launch flow's new_page resumes inside its enable batch;
+      // this manual path must do it explicitly or the page stays frozen).
+      let _ = transport
+        .send_command(sid.as_deref(), "Runtime.runIfWaitingForDebugger", &super::EMPTY_PARAMS)
+        .await;
       attached.insert(target_id, sid);
     }
 
@@ -1006,10 +1139,8 @@ impl CdpBrowser<ws::WsTransport> {
       child: Arc::new(tokio::sync::Mutex::new(None)),
       attached_targets: std::sync::Mutex::new(attached),
       version,
-      // Connect flow never sent the browser-level `Target.setAutoAttach`,
-      // so browser-created popups don't auto-attach here — the taps stay
-      // silent (same popup visibility as before this feature).
-      popup_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
+      popup_taps,
+      create_ledger,
       user_data_dir: None,
     })
   }
@@ -5584,6 +5715,44 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
     self.add_init_script(&register_js).await?;
     self.evaluate(&register_js).await?;
+    Ok(())
+  }
+
+  /// [`Self::expose_binding`] for a page whose FIRST document has not
+  /// run yet (a popup parked on `waitForDebuggerOnStart`). Only the
+  /// paused-safe half is sent — `Runtime.addBinding` plus the
+  /// controller/registration init scripts, which the first document
+  /// executes at document-start. The live-document `Runtime.evaluate`
+  /// installs are skipped: they would block until resume and deadlock
+  /// the popup pump. Mirrors Playwright's `CRPage` binding install,
+  /// which is init-script-only for exactly this reason.
+  pub(crate) async fn expose_binding_pre_doc(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    {
+      let mut initialized = self.binding_initialized.lock().await;
+      if !*initialized {
+        self
+          .cmd("Runtime.addBinding", serde_json::json!({"name": "__fd_binding__"}))
+          .await?;
+        self.add_init_script(Self::BINDING_CONTROLLER_JS).await?;
+        // The first document runs the controller init script, so
+        // later `expose_binding` calls (post-resume) can evaluate
+        // `__fd_bc.add` into it directly.
+        *initialized = true;
+      }
+    }
+    self.exposed_fns.write().await.insert(name.to_string(), binding);
+    let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
+    self.add_init_script(&register_js).await?;
+    // Best-effort live-document install, spawned so a still-paused
+    // target cannot stall the pump: on the pause-held path the eval
+    // completes right after resume; on the watchdog-resumed path it
+    // covers the already-running document (the controller init script
+    // guards double-install).
+    let this = self.clone();
+    let controller_and_register = format!("{};{register_js}", Self::BINDING_CONTROLLER_JS);
+    tokio::spawn(async move {
+      let _ = this.evaluate(&controller_and_register).await;
+    });
     Ok(())
   }
 

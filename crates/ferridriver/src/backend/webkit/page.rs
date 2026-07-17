@@ -1968,6 +1968,41 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// [`Self::expose_binding`] for a popup target still held paused by
+  /// `attach(defer_resume: true)` — paused-safe half only
+  /// (`Runtime.addBinding` + init scripts); the live-document evaluates
+  /// would block until `Target.resume`. The popup's first document runs
+  /// the controller + registration at document start.
+  pub(crate) async fn expose_binding_pre_doc(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    if !self.binding_initialized.swap(true, Ordering::SeqCst) {
+      self
+        .target_session()
+        .send("Runtime.addBinding", json!({ "name": "__fd_binding__" }))
+        .await
+        .map_err(conn_err)?;
+      self
+        .add_init_script(
+          crate::backend::cdp::CdpPage::<crate::backend::cdp::pipe::PipeTransport>::BINDING_CONTROLLER_JS,
+        )
+        .await?;
+    }
+    self.exposed_fns.write().await.insert(name.to_string(), binding);
+    let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
+    self.add_init_script(&register_js).await?;
+    // Best-effort live-document install, spawned so the paused target
+    // cannot stall the pump — completes right after `Target.resume`
+    // (the controller init script guards double-install).
+    let this = self.clone();
+    let controller_and_register = format!(
+      "{};{register_js}",
+      crate::backend::cdp::CdpPage::<crate::backend::cdp::pipe::PipeTransport>::BINDING_CONTROLLER_JS
+    );
+    tokio::spawn(async move {
+      let _ = this.runtime_evaluate(&controller_and_register, true).await;
+    });
+    Ok(())
+  }
+
   pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
     self.exposed_fns.write().await.remove(name);
     let js = format!(

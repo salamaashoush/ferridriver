@@ -237,6 +237,38 @@ describe('events', () => {
     }
   });
 
+  test('context_noopener_popup_tracked', async ({ browser, baseURL }) => {
+    // noopener windows carry no JS opener, and on CDP they land in a
+    // fresh browsing instance whose session answers nothing while
+    // paused (the claim watchdog resumes early). They must still
+    // register, fire 'page', and be drivable. The protocol-level
+    // opener id survives noopener on every engine (CDP targetInfo,
+    // BiDi originalOpener, WebKit pageProxyCreated), so opener()
+    // resolves — same as Playwright's backends, which read the same
+    // fields. URL is asserted via evaluate, not page.url(): on the
+    // watchdog path the frame cache can lag the popup's first
+    // navigation.
+    const ctx = await browser.newContext({});
+    try {
+      const opener = await ctx.newPage();
+      await opener.goto(`${baseURL}/fx/landed`);
+      const wait = ctx.waitForEvent('page', { timeout: 8000 }) as Promise<Page>;
+      await opener.evaluate(`void window.open('${baseURL}/fx/echo-headers', '_blank', 'noopener')`);
+      const popup = await wait;
+      expect((await ctx.pages()).length).toBe(2);
+      expect((await popup.opener()) != null).toBe(true);
+      await popup
+        .waitForFunction(() => location.href.includes('/fx/echo-headers'), undefined, { timeout: 8000 })
+        .catch(() => null);
+      const href = (await popup.evaluate(() => location.href)) as string;
+      expect(href.includes('/fx/echo-headers')).toBe(true);
+      await popup.close();
+      expect((await ctx.pages()).length).toBe(1);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   test('context_pageclose', async ({ page, context }) => {
     await page.goto(dataUrl('<body>ctx-close</body>'));
     const newPage = await context.newPage();

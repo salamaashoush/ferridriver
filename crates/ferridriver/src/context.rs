@@ -535,6 +535,27 @@ impl ContextRef {
     Ok(())
   }
 
+  /// [`Self::apply_context_bindings`] via the paused-safe
+  /// [`AnyPage::expose_binding_pre_doc`] path — used by the popup pump
+  /// before resuming, so the popup's first document sees every
+  /// context-level binding from document-start.
+  async fn apply_context_bindings_pre_doc(&self, page: &AnyPage) -> Result<()> {
+    let composite = self.key.to_composite();
+    let bindings = {
+      let bindings_handle = self.state.read().await.context_bindings_handle();
+      let guard = bindings_handle.read().await;
+      guard
+        .get(&composite)
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())
+        .unwrap_or_default()
+    };
+    for (name, binding) in bindings {
+      let binding_for_page = bind_source(binding, composite.clone());
+      page.expose_binding_pre_doc(&name, binding_for_page).await?;
+    }
+    Ok(())
+  }
+
   /// Get all pages in this context as Page handles.
   ///
   /// # Errors
@@ -1613,14 +1634,18 @@ async fn register_popup(
     let mut s = state.write().await;
     s.register_opened_page(&key, popup.page.clone(), None)?;
   }
-  let ctx_ref = ContextRef::new(state.clone(), composite.clone());
+  // The browser handle keeps `popup.context().browser()` non-null,
+  // matching Playwright where a popup shares the opener's context.
+  let ctx_ref =
+    ContextRef::new(state.clone(), composite.clone()).with_browser(crate::Browser::from_shared_state(state.clone()));
   let page = Page::with_context(popup.page.clone(), ctx_ref.clone());
 
-  // While a CDP popup is still paused only protocol-level configuration
-  // may run — anything that evaluates into the live document
-  // (exposeBinding's registration eval, WebSocket-route install) would
-  // block until resume and deadlock the pump. Options, init scripts,
-  // and route interception are all pre-document protocol calls.
+  // While a CDP/WebKit popup is still paused only protocol-level
+  // configuration may run — anything that evaluates into the live
+  // document (WebSocket-route install) would block until resume and
+  // deadlock the pump. Options, init scripts, route interception, and
+  // the paused-safe binding install are all pre-document protocol
+  // calls, so the popup's first document sees them from the start.
   let ctx_opts = {
     let s = state.read().await;
     s.get_context_options(&composite)
@@ -1636,6 +1661,9 @@ async fn register_popup(
   if let Err(e) = ctx_ref.apply_context_routes(&page).await {
     tracing::debug!("popup routes: {e}");
   }
+  if let Err(e) = ctx_ref.apply_context_bindings_pre_doc(page.inner()).await {
+    tracing::debug!("popup bindings: {e}");
+  }
   if let Some(opener_id) = popup.opener_target_id.as_deref() {
     let opener = {
       let s = state.read().await;
@@ -1647,10 +1675,9 @@ async fn register_popup(
   }
   popup.page.resume_popup().await?;
 
-  // Evaluate-bearing configuration runs against the now-live document.
-  if let Err(e) = ctx_ref.apply_context_bindings(page.inner()).await {
-    tracing::debug!("popup bindings: {e}");
-  }
+  // WebSocket-route install still evaluates into the live document, so
+  // it runs post-resume (first-document sockets on paused backends stay
+  // a documented residual).
   if let Err(e) = ctx_ref.apply_context_ws_routes(&page).await {
     tracing::debug!("popup ws routes: {e}");
   }
