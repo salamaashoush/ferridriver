@@ -27,8 +27,8 @@ use futures::StreamExt as _;
 use crate::fetch;
 
 pub use crate::fetch::{
-  BridgeFuture, ContextBridge, ContextDefaults, MultipartField, MultipartValue, NetGuard, RedirectMode, RemoteAddr,
-  host_allowed, host_of, serialize_multipart,
+  BridgeFuture, ContextBridge, ContextDefaults, Credentials, MultipartField, MultipartValue, NetGuard, RedirectMode,
+  RemoteAddr, ResponseType, host_allowed, host_of, serialize_multipart,
 };
 
 /// Options for creating an `HttpClient`.
@@ -84,6 +84,10 @@ pub struct RequestOptions {
   /// Per-request override of the client-level `ignore_https_errors`.
   /// `None` = inherit the client (or context) default.
   pub ignore_https_errors: Option<bool>,
+  /// WHATWG `credentials` mode. `None` = the default (`SameOrigin` —
+  /// send stored cookies); `Some(Omit)` sends no cookies and bypasses
+  /// the cookie jar entirely.
+  pub credentials: Option<Credentials>,
   /// Sandbox network policy. `None`/inert ⇒ the unguarded fast path.
   /// `Some(active)` enforces the allow-list + metadata/private/scheme
   /// rules on the initial URL, every redirect hop, and every resolved
@@ -104,6 +108,7 @@ pub struct HttpResponse {
   server_addr: Option<RemoteAddr>,
   redirected: bool,
   unfollowed_redirect: bool,
+  response_type: ResponseType,
 }
 
 impl HttpResponse {
@@ -118,7 +123,7 @@ impl HttpResponse {
       redirected,
       unfollowed_redirect,
       server_addr,
-      ..
+      type_,
     } = response;
     let body_bytes = body.collect().await?;
     Ok(Self {
@@ -130,6 +135,7 @@ impl HttpResponse {
       server_addr,
       redirected,
       unfollowed_redirect,
+      response_type: type_,
     })
   }
 
@@ -231,6 +237,12 @@ impl HttpResponse {
     self.unfollowed_redirect
   }
 
+  /// WHATWG `Response.type` (basic / opaqueredirect / …).
+  #[must_use]
+  pub fn response_type(&self) -> ResponseType {
+    self.response_type
+  }
+
   /// Consume the response (Playwright compat, no-op in Rust since we own the bytes).
   pub fn dispose(self) {
     drop(self);
@@ -249,6 +261,7 @@ pub struct HttpStreamResponse {
   server_addr: Option<RemoteAddr>,
   redirected: bool,
   unfollowed_redirect: bool,
+  response_type: ResponseType,
   stream: fetch::ByteStream,
 }
 
@@ -273,7 +286,7 @@ impl HttpStreamResponse {
       redirected,
       unfollowed_redirect,
       server_addr,
-      ..
+      type_,
     } = response;
     Self {
       status_code: status,
@@ -283,6 +296,7 @@ impl HttpStreamResponse {
       server_addr,
       redirected,
       unfollowed_redirect,
+      response_type: type_,
       stream: body.into_stream(),
     }
   }
@@ -329,6 +343,12 @@ impl HttpStreamResponse {
   #[must_use]
   pub fn unfollowed_redirect(&self) -> bool {
     self.unfollowed_redirect
+  }
+
+  /// WHATWG `Response.type` (basic / opaqueredirect / …).
+  #[must_use]
+  pub fn response_type(&self) -> ResponseType {
+    self.response_type
   }
 
   /// Next body chunk, or `None` at end of stream.
@@ -475,7 +495,7 @@ impl HttpClient {
       headers,
       body,
       redirect: opts.redirect,
-      credentials: fetch::Credentials::default(),
+      credentials: opts.credentials.unwrap_or_default(),
       max_redirects: opts.max_redirects,
       max_retries: opts.max_retries.unwrap_or(0),
       timeout: opts.timeout.unwrap_or(self.default_timeout),

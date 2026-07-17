@@ -801,3 +801,141 @@ async fn json_arg_proto_key_does_not_pollute() {
     "Object.prototype not polluted"
   );
 }
+
+/// Router for the WHATWG redirect/credentials tests. Routes:
+/// - `/redirect` -> 302 `Location: /landed`
+/// - `/landed`   -> 200 "landed"
+/// - `/set`      -> 200 `Set-Cookie: sid=abc; Path=/`, body "set"
+/// - `/echo`     -> 200, body = the received `Cookie` header (or "none")
+fn spawn_router() -> (String, std::thread::JoinHandle<()>) {
+  let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+  let addr = listener.local_addr().expect("addr");
+  let url = format!("http://{addr}");
+  let h = std::thread::spawn(move || {
+    for stream in listener.incoming().take(16) {
+      let Ok(mut s) = stream else { break };
+      let mut buf = [0u8; 8192];
+      let n = s.read(&mut buf).unwrap_or(0);
+      let req = String::from_utf8_lossy(&buf[..n]);
+      let path = req
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("/")
+        .to_string();
+      let cookie = req
+        .lines()
+        .find_map(|l| l.strip_prefix("Cookie: ").or_else(|| l.strip_prefix("cookie: ")))
+        .map_or_else(|| "none".to_string(), |v| v.trim().to_string());
+      let resp = if path == "/redirect" {
+        "HTTP/1.1 302 Found\r\nLocation: /landed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+      } else if path == "/set" {
+        "HTTP/1.1 200 OK\r\nSet-Cookie: sid=abc; Path=/\r\nContent-Length: 3\r\nConnection: close\r\n\r\nset"
+          .to_string()
+      } else if path == "/echo" {
+        format!(
+          "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{cookie}",
+          cookie.len()
+        )
+      } else {
+        "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nlanded".to_string()
+      };
+      let _ = s.write_all(resp.as_bytes());
+      let _ = s.flush();
+    }
+  });
+  (url, h)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_follows_redirect_marks_type_basic_and_redirected() {
+  let (base, _h) = spawn_router();
+  let o = run(&format!(
+    r#"const r = await fetch("{base}/redirect");
+       return {{ status: r.status, redirected: r.redirected, type: r.type,
+                 url: r.url, body: await r.text() }};"#
+  ))
+  .await;
+  let v = val(&o);
+  assert_eq!(v["status"], 200);
+  assert_eq!(v["redirected"], true, "a followed hop sets redirected");
+  assert_eq!(v["type"], "basic");
+  assert!(
+    v["url"].as_str().unwrap().ends_with("/landed"),
+    "final url: {}",
+    v["url"]
+  );
+  assert_eq!(v["body"], "landed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_redirect_manual_yields_opaqueredirect() {
+  let (base, _h) = spawn_router();
+  let o = run(&format!(
+    r#"const r = await fetch("{base}/redirect", {{ redirect: "manual" }});
+       return {{ status: r.status, type: r.type, url: r.url, ok: r.ok }};"#
+  ))
+  .await;
+  let v = val(&o);
+  // WHATWG opaque-redirect filtered response: type opaqueredirect, status
+  // 0, empty url, not ok.
+  assert_eq!(v["type"], "opaqueredirect");
+  assert_eq!(v["status"], 0);
+  assert_eq!(v["url"], "");
+  assert_eq!(v["ok"], false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_redirect_error_rejects_with_typeerror() {
+  let (base, _h) = spawn_router();
+  let o = run(&format!(
+    r#"try {{ const r = await fetch("{base}/redirect", {{ redirect: "error" }}); return "no-throw:" + r.status; }}
+       catch (e) {{ return {{ name: e.name, msg: String(e.message || e) }}; }}"#
+  ))
+  .await;
+  let v = val(&o);
+  assert_ne!(v, "no-throw", "redirect:error must reject on a 3xx");
+  assert_eq!(v["name"], "TypeError", "a fetch network failure is a TypeError");
+  assert!(v["msg"].as_str().unwrap().contains("redirect"), "msg: {}", v["msg"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_signal_carried_on_request_instance_aborts() {
+  let (base, _h) = spawn_echo();
+  let o = run(&format!(
+    r#"const c = new AbortController();
+       c.abort();
+       const req = new Request("{base}/x", {{ signal: c.signal }});
+       try {{ await fetch(req); return "no-throw"; }}
+       catch (e) {{ return String(e.message || e); }}"#
+  ))
+  .await;
+  let v = val(&o);
+  let err = v.as_str().unwrap_or_default();
+  // The signal is carried on the Request instance (not init), so this
+  // rejects only if `fetch(request)` forwards it. (`AbortError` surfaces
+  // via message here — this runtime has no DOMException class yet.)
+  assert!(
+    err.to_lowercase().contains("abort"),
+    "a signal carried on the Request must reject fetch, got: {err}"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_credentials_omit_skips_stored_cookies() {
+  let (base, _h) = spawn_router();
+  let o = run(&format!(
+    r#"await fetch("{base}/set");
+       const withCreds = await (await fetch("{base}/echo")).text();
+       const omitted = await (await fetch("{base}/echo", {{ credentials: "omit" }})).text();
+       return {{ withCreds, omitted }};"#
+  ))
+  .await;
+  let v = val(&o);
+  // The jar-backed default sends the stored cookie; `omit` rides a
+  // jar-less client so none is sent.
+  assert_eq!(v["withCreds"], "sid=abc");
+  assert_eq!(v["omitted"], "none");
+}

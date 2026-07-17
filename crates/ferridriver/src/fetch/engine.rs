@@ -20,9 +20,10 @@ use super::headers::Headers;
 use super::model::{Credentials, RedirectMode, RemoteAddr, Request, Response, ResponseType};
 use super::net_guard::{GuardedResolver, NetGuard, check_url, preflight};
 
-/// reqwest client-cache key: `(ignore_https, dns-guard filter)`. All
-/// clients share the pool's redirect policy (`none`) and jar (if any).
-type ClientKey = (bool, Option<(bool, bool)>);
+/// reqwest client-cache key: `(ignore_https, dns-guard filter, attach jar)`.
+/// All clients share the pool's redirect policy (`none`); `attach jar`
+/// is `false` for a `credentials: omit` request so no cookies ride it.
+type ClientKey = (bool, Option<(bool, bool)>, bool);
 
 /// A cache of `reqwest::Client`s that differ only in TLS posture and the
 /// DNS-layer guard filter. Every client follows no redirects (the loop
@@ -60,15 +61,19 @@ impl ClientPool {
     }
   }
 
-  fn client(&self, ignore_https: bool, guard: Option<&NetGuard>) -> reqwest::Client {
+  fn client(&self, ignore_https: bool, guard: Option<&NetGuard>, use_jar: bool) -> reqwest::Client {
     let dns = guard.and_then(NetGuard::dns_filter);
-    if ignore_https == self.default_ignore_https && dns.is_none() {
+    // Attach the jar only when the request wants credentials AND the pool
+    // owns one (bridged pools have none — cookies ride the browser).
+    let attach_jar = use_jar && self.jar.is_some();
+    if ignore_https == self.default_ignore_https && dns.is_none() && attach_jar == self.jar.is_some() {
       return self.base.clone();
     }
+    let jar = attach_jar.then(|| self.jar.clone()).flatten();
     let mut cache = self.variants.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     cache
-      .entry((ignore_https, dns))
-      .or_insert_with(|| build_client(self.jar.as_ref(), ignore_https, dns))
+      .entry((ignore_https, dns, attach_jar))
+      .or_insert_with(|| build_client(jar.as_ref(), ignore_https, dns))
       .clone()
   }
 }
@@ -180,7 +185,9 @@ pub(crate) async fn send(
   if let Some(g) = guard {
     preflight(&resolved_url, g).map_err(FetchError::Blocked)?;
   }
-  let client = pool.client(ignore_https_errors, guard);
+  // `credentials: omit` rides a jar-less client so no stored cookie is
+  // sent and no `Set-Cookie` is stored.
+  let client = pool.client(ignore_https_errors, guard, credentials != Credentials::Omit);
 
   let explicit_cookie_header = headers.contains("cookie");
   let mut remaining = follow_budget(redirect, max_redirects);

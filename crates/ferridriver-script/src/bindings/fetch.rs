@@ -42,7 +42,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ferridriver::http_client::{HttpClient, RequestOptions};
+use ferridriver::http_client::{Credentials, HttpClient, RedirectMode, RequestOptions};
 use rquickjs::atom::PredefinedAtom;
 use rquickjs::function::{Func, Opt};
 use rquickjs::{Coerced, Ctx, IntoJs, Object, Value, class::Class, class::Trace};
@@ -346,10 +346,10 @@ pub struct FetchResponseJs {
 /// WHATWG `Request` (spec subset). Constructible (`new Request(input,
 /// init?)` where `input` is a URL string or another `Request`), with
 /// `url`/`method`/`headers`/`redirect`/`credentials`/`bodyUsed`
-/// accessors and `text`/`json`/`arrayBuffer`/`clone`. `signal` is
-/// accepted and stored but not yet wired (AbortController follow-up);
-/// `fetch` reads `url`/`method`/`headers`/`body`/`redirect` off a
-/// `Request` argument.
+/// accessors and `text`/`json`/`arrayBuffer`/`clone`. A `signal` passed
+/// in `init` is carried (as the native abort channel) and forwarded by
+/// `fetch(request)`; `fetch` reads `url`/`method`/`headers`/`body`/
+/// `redirect`/`credentials`/`signal` off a `Request` argument.
 #[derive(Trace)]
 #[rquickjs::class(rename = "Request")]
 pub struct FetchRequestJs {
@@ -367,6 +367,11 @@ pub struct FetchRequestJs {
   credentials: String,
   #[qjs(skip_trace)]
   body_used: bool,
+  /// The native abort channel of a `signal` passed in `init`, kept so
+  /// `fetch(request)` can drop the in-flight future on abort. Native
+  /// (`Arc<AbortInner>`), never a captured JS value — GC-safe.
+  #[qjs(skip_trace)]
+  signal_inner: Option<Arc<crate::bindings::abort::AbortInner>>,
 }
 
 // SAFETY: only owned `'static` data.
@@ -659,6 +664,7 @@ impl FetchResponseJs {
     url: String,
     headers: Vec<(String, String)>,
     redirected: bool,
+    type_: &'static str,
     stream: ferridriver::http_client::HttpStreamResponse,
   ) -> Self {
     Self {
@@ -668,9 +674,25 @@ impl FetchResponseJs {
       headers,
       body: Vec::new(),
       redirected,
-      type_: "basic",
+      type_,
       body_used: false,
       net: Some(Arc::new(tokio::sync::Mutex::new(Some(stream)))),
+    }
+  }
+
+  /// A WHATWG opaque-redirect filtered response (`redirect: manual` on a
+  /// 3xx): type "opaqueredirect", status 0, empty headers, null body.
+  fn opaque_redirect() -> Self {
+    Self {
+      status: 0,
+      status_text: String::new(),
+      url: String::new(),
+      headers: Vec::new(),
+      body: Vec::new(),
+      redirected: false,
+      type_: "opaqueredirect",
+      body_used: false,
+      net: None,
     }
   }
 
@@ -935,6 +957,7 @@ impl FetchRequestJs {
         redirect: o.redirect.clone(),
         credentials: o.credentials.clone(),
         body_used: false,
+        signal_inner: o.signal_inner.clone(),
       }
     } else {
       Self {
@@ -945,6 +968,7 @@ impl FetchRequestJs {
         redirect: "follow".to_string(),
         credentials: "same-origin".to_string(),
         body_used: false,
+        signal_inner: None,
       }
     };
     if let Some(o) = init.as_ref() {
@@ -956,6 +980,11 @@ impl FetchRequestJs {
       }
       if let Ok(c) = o.get::<_, String>("credentials") {
         req.credentials = c;
+      }
+      if let Ok(sig) = o.get::<_, Value<'js>>("signal")
+        && let Ok(s) = Class::<crate::bindings::abort::AbortSignalJs<'js>>::from_value(&sig)
+      {
+        req.signal_inner = Some(crate::bindings::abort::AbortSignalJs::inner_of(&s));
       }
       let (bytes, default_ct) = o
         .get::<_, Value<'_>>("body")
@@ -1041,6 +1070,7 @@ impl FetchRequestJs {
       redirect: self.redirect.clone(),
       credentials: self.credentials.clone(),
       body_used: false,
+      signal_inner: self.signal_inner.clone(),
     })
   }
 }
@@ -1128,27 +1158,38 @@ fn do_fetch<'js>(
       }
     }
     let headers = (!headers_vec.is_empty()).then_some(headers_vec);
-    // `init.redirect` (or the Request's) maps onto the per-request
-    // redirect cap: "follow" (default) keeps the client default;
-    // "manual"/"error" pin 0 so a 3xx is returned rather than followed.
-    // (A spec-exact "manual" opaque-redirect / "error" rejection is not
-    // distinguishable through reqwest's per-request policy; the 3xx is
-    // surfaced instead. Documented subset.)
+    // `init.redirect` (or the Request's) maps onto the WHATWG redirect
+    // mode: "follow" (default) follows up to the engine cap; "manual"
+    // returns an opaque-redirect Response for a 3xx; "error" rejects.
     let redirect = init
       .as_ref()
       .and_then(|o| o.get::<_, String>("redirect").ok())
       .or_else(|| req.as_ref().map(|r| r.borrow().redirect.clone()));
-    let max_redirects = match redirect.as_deref() {
-      Some("manual" | "error") => Some(0),
-      _ => None,
+    let redirect = match redirect.as_deref() {
+      Some("manual") => RedirectMode::Manual,
+      Some("error") => RedirectMode::Error,
+      _ => RedirectMode::Follow,
     };
-    // `init.signal` (an `AbortSignal`): grab its native channel so the
-    // request future can be dropped when it aborts.
+    // `init.credentials` (or the Request's): "omit" sends no cookies;
+    // "same-origin" (default) / "include" send them.
+    let credentials = init
+      .as_ref()
+      .and_then(|o| o.get::<_, String>("credentials").ok())
+      .or_else(|| req.as_ref().map(|r| r.borrow().credentials.clone()));
+    let credentials = match credentials.as_deref() {
+      Some("omit") => Credentials::Omit,
+      Some("include") => Credentials::Include,
+      _ => Credentials::SameOrigin,
+    };
+    // `signal`: an `AbortSignal` from `init`, else the one carried on the
+    // `Request` argument. Grab its native channel so the request future
+    // can be dropped when it aborts.
     let signal = init
       .as_ref()
       .and_then(|o| o.get::<_, Value<'_>>("signal").ok())
       .and_then(|v| Class::<crate::bindings::abort::AbortSignalJs<'js>>::from_value(&v).ok())
-      .map(|s| crate::bindings::abort::AbortSignalJs::inner_of(&s));
+      .map(|s| crate::bindings::abort::AbortSignalJs::inner_of(&s))
+      .or_else(|| req.as_ref().and_then(|r| r.borrow().signal_inner.clone()));
     let promised = rquickjs::promise::Promised::from(async move {
       if let Some(list) = net.as_deref()
         && let Err(msg) = net_check(list, &url)
@@ -1160,7 +1201,8 @@ fn do_fetch<'js>(
         headers,
         data,
         json_data,
-        max_redirects,
+        redirect,
+        credentials: Some(credentials),
         // Same sandbox policy as the `request` binding (one core
         // implementation): the active `allow.net` list is enforced on
         // the initial URL AND every redirect hop, and the cloud
@@ -1184,11 +1226,12 @@ fn do_fetch<'js>(
       }
       // Streamed: status/headers resolve here, the body is pulled
       // incrementally later (via Response.body / text() / json()).
+      // A network failure is a WHATWG `TypeError`.
       let fut = cx.fetch_stream(&url, Some(opts));
       let resp = match &signal {
         Some(sig) => {
           tokio::select! {
-            r = fut => r.map_err(|e| rquickjs::Error::new_from_js_message("fetch", "Error", e.to_string()))?,
+            r = fut => r.map_err(|e| rquickjs::Error::new_from_js_message("fetch", "TypeError", e.to_string()))?,
             () = sig.aborted() => {
               return Err(rquickjs::Error::new_from_js_message("fetch", "AbortError", sig.reason_message()));
             }
@@ -1196,18 +1239,21 @@ fn do_fetch<'js>(
         },
         None => fut
           .await
-          .map_err(|e| rquickjs::Error::new_from_js_message("fetch", "Error", e.to_string()))?,
+          .map_err(|e| rquickjs::Error::new_from_js_message("fetch", "TypeError", e.to_string()))?,
       };
-      let final_url = resp.url().to_string();
-      // Best-effort: a differing final URL means at least one hop was
-      // followed (the core does not yet expose a redirect count).
-      let redirected = !final_url.is_empty() && final_url != url;
+      // `redirect: manual` on a 3xx yields an opaque-redirect filtered
+      // response: type "opaqueredirect", status 0, empty headers, null
+      // body, url "" (WHATWG). The unread 3xx is dropped here.
+      if resp.unfollowed_redirect() {
+        return Ok(FetchResponseJs::opaque_redirect());
+      }
       let out = FetchResponseJs::from_stream(
         resp.status(),
         resp.status_text().to_string(),
-        final_url,
+        resp.url().to_string(),
         resp.headers().to_vec(),
-        redirected,
+        resp.redirected(),
+        resp.response_type().as_str(),
         resp,
       );
       Ok::<_, rquickjs::Error>(out)
