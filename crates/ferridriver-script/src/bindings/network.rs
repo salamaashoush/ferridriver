@@ -71,16 +71,16 @@ impl RequestJs {
     self.inner.post_data()
   }
 
-  /// Mirrors Playwright `request.postDataBuffer(): Buffer | null`.
-  /// QuickJS has no native `Buffer`, so the raw body bytes are returned
-  /// base64-encoded (same convention as `response.body()`); `null` when
-  /// the request has no post body.
+  /// Mirrors Playwright `request.postDataBuffer(): Buffer | null` —
+  /// raw body bytes as a `Uint8Array`, `null` when the request has no
+  /// post body.
   #[qjs(rename = "postDataBuffer")]
-  pub fn post_data_buffer(&self) -> Option<String> {
-    self
-      .inner
-      .post_data_buffer()
-      .map(|b| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b))
+  pub fn post_data_buffer<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    use rquickjs::IntoJs;
+    match self.inner.post_data_buffer() {
+      Some(b) => rquickjs::TypedArray::new(ctx.clone(), b.clone())?.into_js(&ctx),
+      None => Ok(Value::new_null(ctx)),
+    }
   }
 
   #[qjs(rename = "postDataJSON")]
@@ -283,11 +283,13 @@ impl ResponseJs {
 
   /// Response body as base64-encoded string. QuickJS does not have
   /// `Buffer`; scripts decode if they need raw bytes.
+  /// Mirrors Playwright `response.body(): Promise<Buffer>` — raw bytes
+  /// as a `Uint8Array`.
   #[qjs(rename = "body")]
   pub async fn body<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    use rquickjs::IntoJs;
     let bytes = self.inner.body().await.into_js_with(&ctx)?;
-    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-    serde_to_js(&ctx, &encoded)
+    rquickjs::TypedArray::new(ctx.clone(), bytes)?.into_js(&ctx)
   }
 
   #[qjs(rename = "text")]

@@ -1729,16 +1729,15 @@ impl PageJs {
   // failure, etc.
 
   /// `page.waitForRequest(string | RegExp | ((r: Request) => boolean |
-  /// Promise<boolean>), options?)`.
+  /// Promise<boolean>), options?: { timeout? })`.
   #[qjs(rename = "waitForRequest")]
   pub async fn wait_for_request<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
     url: rquickjs::Value<'js>,
-    timeout_ms: Opt<f64>,
+    options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::network::RequestJs> {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let timeout = timeout_ms.0.map(|t| t as u64);
+    let timeout = parse_wait_timeout(&ctx, options)?;
     if let Some(pred) = url.as_function() {
       let t = timeout.unwrap_or_else(|| self.inner.default_timeout());
       return wait_request_predicate(ctx.clone(), self.inner.clone(), pred.clone(), t).await;
@@ -1752,16 +1751,15 @@ impl PageJs {
   }
 
   /// `page.waitForResponse(string | RegExp | ((r: Response) => boolean |
-  /// Promise<boolean>), options?)`.
+  /// Promise<boolean>), options?: { timeout? })`.
   #[qjs(rename = "waitForResponse")]
   pub async fn wait_for_response<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
     url: rquickjs::Value<'js>,
-    timeout_ms: Opt<f64>,
+    options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::network::ResponseJs> {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let timeout = timeout_ms.0.map(|t| t as u64);
+    let timeout = parse_wait_timeout(&ctx, options)?;
     if let Some(pred) = url.as_function() {
       let t = timeout.unwrap_or_else(|| self.inner.default_timeout());
       return wait_response_predicate(ctx.clone(), self.inner.clone(), pred.clone(), t).await;

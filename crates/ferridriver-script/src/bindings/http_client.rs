@@ -347,6 +347,14 @@ impl HttpResponseJs {
     self.inner.header(&name).map(str::to_string)
   }
 
+  /// Playwright: `apiResponse.body(): Promise<Buffer>` — raw bytes as
+  /// a `Uint8Array`.
+  #[qjs(rename = "body")]
+  pub fn body<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    use rquickjs::IntoJs;
+    rquickjs::TypedArray::new(ctx.clone(), self.inner.body().to_vec())?.into_js(&ctx)
+  }
+
   /// Response body as UTF-8 text.
   #[qjs(rename = "text")]
   pub fn text(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {

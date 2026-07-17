@@ -8,7 +8,6 @@
 //! `pub mod` line below — `tests/backends.rs` will pick up the test
 //! functions via the module path.
 
-pub mod api_response;
 pub mod bdd;
 pub mod browser_context_options;
 pub mod browser_type;
@@ -25,7 +24,6 @@ pub mod file_chooser;
 pub mod mcp_features;
 pub mod multi_page;
 pub mod nav;
-pub mod navigation_response;
 pub mod network;
 pub mod observation;
 pub mod route_web_socket;

@@ -612,15 +612,19 @@ export interface Request {
   url(): string;
   method(): string;
   headers(): Record<string, string>;
-  headersArray(): Array<{ name: string; value: string }>;
+  allHeaders(): Promise<Record<string, string>>;
+  headersArray(): Promise<Array<{ name: string; value: string }>>;
   postData(): string | null;
   postDataJSON(): unknown;
+  postDataBuffer(): Uint8Array | null;
+  headerValue(name: string): Promise<string | null>;
   resourceType(): string;
   isNavigationRequest(): boolean;
   redirectedFrom(): Request | null;
   redirectedTo(): Request | null;
   frame(): Frame;
   response(): Promise<Response | null>;
+  existingResponse(): Promise<Response | null>;
   failure(): { errorText: string } | null;
   timing(): Record<string, number>;
 }
@@ -631,7 +635,11 @@ export interface Response {
   statusText(): string;
   ok(): boolean;
   headers(): Record<string, string>;
-  headersArray(): Array<{ name: string; value: string }>;
+  allHeaders(): Promise<Record<string, string>>;
+  headersArray(): Promise<Array<{ name: string; value: string }>>;
+  headerValue(name: string): Promise<string | null>;
+  headerValues(name: string): Promise<string[]>;
+  httpVersion(): Promise<string>;
   body(): Promise<Uint8Array>;
   text(): Promise<string>;
   json(): Promise<unknown>;
@@ -840,7 +848,11 @@ export interface Page {
   waitForRequest(urlOrPredicate: string | RegExp | ((request: Request) => boolean), options?: TimeoutOption): Promise<Request>;
   waitForResponse(urlOrPredicate: string | RegExp | ((response: Response) => boolean), options?: TimeoutOption): Promise<Response>;
 
-  route(url: string | RegExp | ((url: URL) => boolean), handler: (route: Route, request: Request) => void | Promise<void>, options?: { times?: number }): Promise<void>;
+  // Page-level route returns a Disposable that reverses the
+  // registration (a ferridriver extension mirroring Playwright's
+  // internal DisposableStub at client/page.ts:535).
+  route(url: string | RegExp | ((url: URL) => boolean), handler: (route: Route, request: Request) => void | Promise<void>, options?: { times?: number }): Promise<Disposable>;
+  routeFromHAR(har: string, options?: { notFound?: 'abort' | 'fallback'; url?: string | RegExp }): Promise<void>;
   unroute(url: string | RegExp | ((url: URL) => boolean), handler?: (route: Route, request: Request) => void | Promise<void>): Promise<void>;
   unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
   routeWebSocket(url: string | RegExp | ((url: URL) => boolean), handler: (ws: unknown) => void | Promise<void>): Promise<void>;
@@ -977,6 +989,8 @@ export interface APIResponse {
   ok(): boolean;
   headers(): Record<string, string>;
   headersArray(): Array<{ name: string; value: string }>;
+  header(name: string): string | null;
+  serverAddr(): { ipAddress: string; port: number } | null;
   body(): Promise<Uint8Array>;
   text(): Promise<string>;
   json(): Promise<unknown>;

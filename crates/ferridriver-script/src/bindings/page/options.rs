@@ -23,6 +23,24 @@ pub(crate) fn parse_goto_options<'js>(
   crate::bindings::convert::parse_opt_bag(ctx, value)
 }
 
+/// Parse Playwright's `options?: { timeout?: number }` bag into a
+/// millisecond timeout (used by `waitForRequest` / `waitForResponse`).
+pub(crate) fn parse_wait_timeout<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  options: Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<Option<u64>> {
+  #[derive(Deserialize, Default)]
+  #[serde(rename_all = "camelCase", default)]
+  struct JsWaitTimeout {
+    timeout: Option<f64>,
+  }
+  let parsed: JsWaitTimeout = match options.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(ctx, v)?,
+    _ => JsWaitTimeout::default(),
+  };
+  Ok(parsed.timeout.map(crate::bindings::convert::ms_f64_to_u64))
+}
+
 /// Parse the Playwright-shaped `emulateMedia` options bag from a
 /// `rquickjs::Value`. Unlike `serde_from_js`, this walks the JS object
 /// manually so we can distinguish three states for every field:

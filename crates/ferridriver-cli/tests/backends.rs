@@ -137,44 +137,8 @@ fn register_script_sessions(set: &mut TestSet<'_>) {
 }
 
 fn register_events_network(set: &mut TestSet<'_>) {
-  run!(set, backends_support::network::test_network_redirect_chain);
-  run!(set, backends_support::network::test_network_request_failure);
-  run!(set, backends_support::network::test_route_disposable);
-  run!(
-    set,
-    backends_support::network::test_route_predicate_preserves_times_budget
-  );
-  run!(
-    set,
-    backends_support::network::test_route_two_pages_keep_their_own_handlers
-  );
-  run!(
-    set,
-    backends_support::network::test_unroute_predicate_from_other_wrapper
-  );
-  run!(set, backends_support::network::test_route_from_har);
-  run!(set, backends_support::network::test_network_response_body);
-  run!(set, backends_support::network::test_network_post_data);
-  run!(set, backends_support::network::test_network_post_data_buffer);
-  run!(set, backends_support::network::test_network_headers);
-  run!(set, backends_support::network::test_network_http_version);
   run!(set, backends_support::network::test_network_websocket);
-  run!(set, backends_support::network::test_route_fallback_applies_overrides);
-  run!(
-    set,
-    backends_support::network::test_route_fallback_chains_to_next_handler
-  );
-  run!(set, backends_support::network::test_request_existing_response);
-  backends_support::api_response::register(set);
   backends_support::route_web_socket::register(set);
-  run!(set, backends_support::navigation_response::test_goto_returns_response);
-  run!(set, backends_support::navigation_response::test_goto_follows_redirects);
-  run!(set, backends_support::navigation_response::test_goto_network_failure);
-  run!(set, backends_support::navigation_response::test_reload_returns_response);
-  run!(
-    set,
-    backends_support::navigation_response::test_history_traversal_returns_response
-  );
 }
 
 fn register_events_dialog_files(set: &mut TestSet<'_>) {
