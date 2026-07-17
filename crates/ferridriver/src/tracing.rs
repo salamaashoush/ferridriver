@@ -148,7 +148,8 @@ impl Tracing {
     };
 
     let requests = self.network_log_slice(recorder.start_len).await;
-    flush_recorder(&recorder, &requests).await
+    let titles = collect_page_titles(&self.context_pages().await).await;
+    flush_recorder(&recorder, &requests, &titles).await
   }
 
   async fn network_log_len(&self) -> usize {
@@ -421,9 +422,29 @@ fn is_zip_path(path: &std::path::Path) -> bool {
 /// # Errors
 ///
 /// Errors if serialization or any filesystem write fails.
-pub(crate) async fn flush_recorder(recorder: &HarRecorder, requests: &[Request]) -> Result<()> {
+/// Snapshot each live page's `document.title` keyed by capture-time page
+/// guid, for `log.pages[].title`. Playwright captures the title from
+/// `document.title` at the page's load lifecycle events; snapshotting at
+/// flush yields the settled title (the final value Playwright's per-page
+/// entry would hold). Pages that error (closed, opaque origin) are
+/// skipped — their entry keeps the HAR "unknown" empty string.
+pub(crate) async fn collect_page_titles(pages: &[crate::backend::AnyPage]) -> rustc_hash::FxHashMap<String, String> {
+  let mut titles = rustc_hash::FxHashMap::default();
+  for page in pages {
+    if let Ok(Some(title)) = page.title().await {
+      titles.insert(page.page_guid(), title);
+    }
+  }
+  titles
+}
+
+pub(crate) async fn flush_recorder(
+  recorder: &HarRecorder,
+  requests: &[Request],
+  page_titles: &rustc_hash::FxHashMap<String, String>,
+) -> Result<()> {
   let mut attachments: Vec<(String, Vec<u8>)> = Vec::new();
-  let archive = build_har(requests, recorder, &mut attachments).await;
+  let archive = build_har(requests, recorder, page_titles, &mut attachments).await;
   let json = serde_json::to_string_pretty(&archive).map_err(|e| FerriError::backend(format!("serialize HAR: {e}")))?;
 
   if is_zip_path(&recorder.path) {
@@ -478,6 +499,7 @@ pub(crate) async fn flush_recorder(recorder: &HarRecorder, requests: &[Request])
 async fn build_har(
   requests: &[Request],
   recorder: &HarRecorder,
+  page_titles: &rustc_hash::FxHashMap<String, String>,
   attachments: &mut Vec<(String, Vec<u8>)>,
 ) -> HarArchive {
   let mut entries = Vec::new();
@@ -499,7 +521,7 @@ async fn build_har(
         pages.push(HarPageOut {
           started_date_time: entry.started_date_time.clone(),
           id: pageref.clone(),
-          title: String::new(),
+          title: page_titles.get(guid).cloned().unwrap_or_default(),
           page_timings: HarPageTimings {
             on_content_load: -1.0,
             on_load: -1.0,
@@ -527,36 +549,126 @@ async fn build_har(
   }
 }
 
+/// Peer/TLS metadata that harTracer stores on the entry (not the
+/// response object): serverIPAddress, `_serverPort`, `_securityDetails`.
+#[derive(Default)]
+struct ServerMeta {
+  server_ip_address: Option<String>,
+  server_port: Option<u16>,
+  security_details: Option<HarSecurityDetailsOut>,
+}
+
+/// Build the HAR `response` object plus the entry-level server metadata
+/// for a request. `None` response yields the HAR "no response" shape
+/// (`harTracer.ts` default response) and empty metadata.
+async fn build_response(
+  req: &Request,
+  recorder: &HarRecorder,
+  attachments: &mut Vec<(String, Vec<u8>)>,
+) -> (HarResponseOut, ServerMeta) {
+  let Some(resp) = req.response().await.ok().flatten() else {
+    return (HarResponseOut::empty(), ServerMeta::default());
+  };
+  // Prefer the raw (extra-info) headers: CDP strips `Set-Cookie` from the
+  // `responseReceived` headers, so response cookies live only here.
+  // Playwright reads these via `internalRawResponseHeaders`.
+  let resp_headers = resp.headers_array().await;
+  let headers: Vec<HarHeaderOut> = resp_headers
+    .iter()
+    .map(|h| HarHeaderOut {
+      name: h.name.clone(),
+      value: h.value.clone(),
+    })
+    .collect();
+  let mime_type = resp_headers
+    .iter()
+    .find(|h| h.name.eq_ignore_ascii_case("content-type"))
+    .map_or_else(|| "x-unknown".to_string(), |h| h.value.clone());
+  let content = build_content(&resp, &mime_type, recorder.content, attachments).await;
+  // Response cookies: parse each Set-Cookie header (harTracer.ts:640).
+  let cookies = resp_headers
+    .iter()
+    .filter(|h| h.name.eq_ignore_ascii_case("set-cookie"))
+    .filter_map(|h| har_parse_cookie(&h.value))
+    .collect();
+  let mut meta = ServerMeta::default();
+  if let Some(addr) = resp.server_addr().await {
+    meta.server_ip_address = Some(addr.ip_address);
+    meta.server_port = Some(addr.port);
+  }
+  // Only attach when the backend reported at least one field — an
+  // all-empty details object (WebKit reports one for plain http) would
+  // serialize to `{}`, which Playwright never emits.
+  meta.security_details = resp.security_details().await.and_then(|d| {
+    let out = HarSecurityDetailsOut {
+      protocol: d.protocol,
+      subject_name: d.subject_name,
+      issuer: d.issuer,
+      valid_from: d.valid_from,
+      valid_to: d.valid_to,
+    };
+    let empty = out.protocol.is_none()
+      && out.subject_name.is_none()
+      && out.issuer.is_none()
+      && out.valid_from.is_none()
+      && out.valid_to.is_none();
+    (!empty).then_some(out)
+  });
+  // Playwright uses the backend-reported protocol (`h2`, `http/1.1`),
+  // falling back to the HAR default when absent.
+  let http_version = resp.http_version().await.unwrap_or_else(|| "HTTP/1.1".to_string());
+  (
+    HarResponseOut {
+      status: resp.status(),
+      status_text: resp.status_text().to_string(),
+      http_version,
+      cookies,
+      headers,
+      content,
+      redirect_url: String::new(),
+      headers_size: -1,
+      body_size: -1,
+    },
+    meta,
+  )
+}
+
 async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Vec<(String, Vec<u8>)>) -> HarEntryOut {
-  let request_headers = header_pairs(&req.headers());
+  // Raw (extra-info) request headers when available — Playwright's
+  // `internalRawRequestHeaders`; the `Cookie` header only rides here on
+  // backends that strip it from the provisional set.
+  let raw_request_headers = req.headers_array().await;
+  let request_headers: Vec<HarHeaderOut> = raw_request_headers
+    .iter()
+    .map(|h| HarHeaderOut {
+      name: h.name.clone(),
+      value: h.value.clone(),
+    })
+    .collect();
+  let find_header = |name: &str| -> Option<String> {
+    raw_request_headers
+      .iter()
+      .find(|h| h.name.eq_ignore_ascii_case(name))
+      .map(|h| h.value.clone())
+  };
   let post_data = req.post_data().map(|text| HarPostData {
-    mime_type: header_value(&req.headers(), "content-type").unwrap_or_else(|| "application/octet-stream".to_string()),
+    mime_type: find_header("content-type").unwrap_or_else(|| "application/octet-stream".to_string()),
     text,
   });
 
-  let (response_out, response_present) = match req.response().await.ok().flatten() {
-    Some(resp) => {
-      let headers = header_pairs(&resp.headers());
-      let mime_type = header_value(&resp.headers(), "content-type").unwrap_or_else(|| "x-unknown".to_string());
-      let content = build_content(&resp, &mime_type, recorder.content, attachments).await;
-      (
-        HarResponseOut {
-          status: resp.status(),
-          status_text: resp.status_text().to_string(),
-          http_version: "HTTP/1.1".to_string(),
-          headers,
-          content,
-          redirect_url: String::new(),
-          headers_size: -1,
-          body_size: -1,
-        },
-        true,
-      )
-    },
-    None => (HarResponseOut::empty(), false),
-  };
+  // Request cookies come from the `Cookie:` header (harTracer.ts:304):
+  // each `;`-separated pair is one cookie.
+  let request_cookies = find_header("cookie")
+    .map(|value| value.split(';').filter_map(har_parse_cookie).collect())
+    .unwrap_or_default();
 
-  let _ = response_present;
+  let (response_out, server_meta) = build_response(req, recorder, attachments).await;
+  let ServerMeta {
+    server_ip_address,
+    server_port,
+    security_details,
+  } = server_meta;
+
   // `mode: minimal` omits timing detail (Playwright's slimMode sets
   // omitTiming, encoded as -1 per HAR convention); full derives the
   // phases from the backend timing samples exactly like
@@ -564,24 +676,33 @@ async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Ve
   // `receive = responseEnd - responseStart`, `send: 0`, `-1` when the
   // sample is absent.
   let timing = req.timing();
+  // Phase deltas from the backend samples, exactly like `harTracer.ts`
+  // (dns = domainLookupEnd - domainLookupStart, connect = connectEnd -
+  // connectStart, ssl = connectEnd - secureConnectionStart, wait =
+  // responseStart - requestStart). `-1` when a boundary sample is absent.
+  let phase = |end: f64, start: f64| -> f64 {
+    if end >= 0.0 && start >= 0.0 {
+      (end - start).max(0.0)
+    } else {
+      -1.0
+    }
+  };
   let timings = if recorder.mode == HarMode::Minimal {
     HarTimings {
+      dns: None,
+      connect: None,
+      ssl: None,
       send: -1.0,
       wait: -1.0,
       receive: -1.0,
     }
   } else {
-    let wait = if timing.response_start >= 0.0 && timing.request_start >= 0.0 {
-      (timing.response_start - timing.request_start).max(0.0)
-    } else {
-      -1.0
-    };
-    let receive = if timing.response_end >= 0.0 && timing.response_start >= 0.0 {
-      (timing.response_end - timing.response_start).max(0.0)
-    } else {
-      -1.0
-    };
+    let wait = phase(timing.response_start, timing.request_start);
+    let receive = phase(timing.response_end, timing.response_start);
     HarTimings {
+      dns: Some(phase(timing.domain_lookup_end, timing.domain_lookup_start)),
+      connect: Some(phase(timing.connect_end, timing.connect_start)),
+      ssl: Some(phase(timing.connect_end, timing.secure_connection_start)),
       send: 0.0,
       wait,
       receive,
@@ -595,10 +716,25 @@ async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Ve
   } else {
     now_iso8601()
   };
-  let total_time = if timing.response_end >= 0.0 {
-    timing.response_end
+  // Total = sum of the positive phases (`computeHarEntryTotalTime`).
+  let total_time = if recorder.mode == HarMode::Minimal {
+    if timing.response_end >= 0.0 {
+      timing.response_end
+    } else {
+      0.0
+    }
   } else {
-    0.0
+    [
+      timings.dns,
+      timings.connect,
+      timings.ssl,
+      Some(timings.wait),
+      Some(timings.receive),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|v| *v > 0.0)
+    .sum()
   };
 
   HarEntryOut {
@@ -609,6 +745,7 @@ async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Ve
       method: req.method().to_string(),
       url: req.url().to_string(),
       http_version: "HTTP/1.1".to_string(),
+      cookies: request_cookies,
       headers: request_headers,
       query_string: query_pairs(req.url()),
       post_data,
@@ -618,7 +755,65 @@ async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Ve
     response: response_out,
     cache: HarCache {},
     timings,
+    server_ip_address,
+    server_port,
+    security_details,
   }
+}
+
+/// Parse one cookie string (a request `Cookie:` segment or a full
+/// `Set-Cookie` value) into a HAR cookie, porting
+/// `harTracer.ts::parseCookie`: the first `name=value` pair is the
+/// cookie, subsequent `;`-separated pairs are attributes. `None` for an
+/// entirely blank input.
+fn har_parse_cookie(raw: &str) -> Option<HarCookieOut> {
+  let mut pairs = raw.split(';').map(|p| {
+    p.split_once('=').map_or_else(
+      || (p.trim().to_string(), String::new()),
+      |(k, v)| (k.trim().to_string(), v.trim().to_string()),
+    )
+  });
+  let (name, value) = pairs.next()?;
+  if name.is_empty() && value.is_empty() {
+    return None;
+  }
+  let mut cookie = HarCookieOut {
+    name,
+    value,
+    path: None,
+    domain: None,
+    expires: None,
+    http_only: None,
+    secure: None,
+    same_site: None,
+  };
+  for (attr, attr_value) in pairs {
+    match attr.to_ascii_lowercase().as_str() {
+      "domain" => cookie.domain = Some(attr_value),
+      "path" => cookie.path = Some(attr_value),
+      "expires" => {
+        cookie.expires = httpdate::parse_http_date(&attr_value).ok().map(|when| {
+          let ms = when
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+          epoch_ms_to_iso8601(ms)
+        });
+      },
+      "max-age" => {
+        if let Ok(secs) = attr_value.parse::<i64>() {
+          let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+          cookie.expires = Some(epoch_ms_to_iso8601(now.saturating_add(secs.saturating_mul(1000))));
+        }
+      },
+      "httponly" => cookie.http_only = Some(true),
+      "secure" => cookie.secure = Some(true),
+      "samesite" => cookie.same_site = Some(attr_value),
+      _ => {},
+    }
+  }
+  Some(cookie)
 }
 
 async fn build_content(
@@ -784,23 +979,6 @@ fn percent_decode(input: &str) -> String {
 /// `WebKit` and `BiDi` deliver them as sent (`Content-Type`), and a HAR
 /// recorded with `mimeType: x-unknown` replays as a download instead of
 /// a rendered document.
-fn header_value(headers: &crate::network::Headers, name: &str) -> Option<String> {
-  headers
-    .iter()
-    .find(|(k, _)| k.eq_ignore_ascii_case(name))
-    .map(|(_, v)| v.clone())
-}
-
-fn header_pairs(headers: &crate::network::Headers) -> Vec<HarHeaderOut> {
-  headers
-    .iter()
-    .map(|(name, value)| HarHeaderOut {
-      name: name.clone(),
-      value: value.clone(),
-    })
-    .collect()
-}
-
 /// Format the current wall-clock time as an ISO-8601 UTC string with
 /// millisecond precision (`YYYY-MM-DDTHH:MM:SS.mmmZ`). Uses the civil-
 /// from-days algorithm so no date dependency is needed.
@@ -894,6 +1072,14 @@ struct HarEntryOut {
   response: HarResponseOut,
   cache: HarCache,
   timings: HarTimings,
+  /// Resolved peer IP (`harTracer.ts:238`). Omitted when the backend
+  /// did not surface an address.
+  #[serde(rename = "serverIPAddress", skip_serializing_if = "Option::is_none")]
+  server_ip_address: Option<String>,
+  #[serde(rename = "_serverPort", skip_serializing_if = "Option::is_none")]
+  server_port: Option<u16>,
+  #[serde(rename = "_securityDetails", skip_serializing_if = "Option::is_none")]
+  security_details: Option<HarSecurityDetailsOut>,
 }
 
 #[derive(serde::Serialize)]
@@ -902,6 +1088,7 @@ struct HarRequestOut {
   url: String,
   #[serde(rename = "httpVersion")]
   http_version: String,
+  cookies: Vec<HarCookieOut>,
   headers: Vec<HarHeaderOut>,
   #[serde(rename = "queryString")]
   query_string: Vec<HarHeaderOut>,
@@ -911,6 +1098,41 @@ struct HarRequestOut {
   headers_size: i64,
   #[serde(rename = "bodySize")]
   body_size: i64,
+}
+
+/// A HAR cookie (`trace/src/har.ts::Cookie`). `expires` is an ISO-8601
+/// string, matching `harTracer.ts::parseCookie`.
+#[derive(serde::Serialize)]
+struct HarCookieOut {
+  name: String,
+  value: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  path: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  domain: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  expires: Option<String>,
+  #[serde(rename = "httpOnly", skip_serializing_if = "Option::is_none")]
+  http_only: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  secure: Option<bool>,
+  #[serde(rename = "sameSite", skip_serializing_if = "Option::is_none")]
+  same_site: Option<String>,
+}
+
+/// TLS certificate summary (`trace/src/har.ts::SecurityDetails`).
+#[derive(serde::Serialize)]
+struct HarSecurityDetailsOut {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  protocol: Option<String>,
+  #[serde(rename = "subjectName", skip_serializing_if = "Option::is_none")]
+  subject_name: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  issuer: Option<String>,
+  #[serde(rename = "validFrom", skip_serializing_if = "Option::is_none")]
+  valid_from: Option<f64>,
+  #[serde(rename = "validTo", skip_serializing_if = "Option::is_none")]
+  valid_to: Option<f64>,
 }
 
 #[derive(serde::Serialize)]
@@ -927,6 +1149,7 @@ struct HarResponseOut {
   status_text: String,
   #[serde(rename = "httpVersion")]
   http_version: String,
+  cookies: Vec<HarCookieOut>,
   headers: Vec<HarHeaderOut>,
   content: HarContentOut,
   #[serde(rename = "redirectURL")]
@@ -943,6 +1166,7 @@ impl HarResponseOut {
       status: 0,
       status_text: String::new(),
       http_version: "HTTP/1.1".to_string(),
+      cookies: Vec::new(),
       headers: Vec::new(),
       content: HarContentOut {
         size: 0,
@@ -984,7 +1208,56 @@ struct HarCache {}
 
 #[derive(serde::Serialize)]
 struct HarTimings {
+  /// DNS lookup phase (`harTracer.ts:606`). `None` in minimal mode.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  dns: Option<f64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  connect: Option<f64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  ssl: Option<f64>,
   send: f64,
   wait: f64,
   receive: f64,
+}
+
+#[cfg(test)]
+mod har_cookie_tests {
+  use super::har_parse_cookie;
+
+  #[test]
+  fn request_cookie_name_value_only() {
+    let c = har_parse_cookie(" sid=abc").expect("cookie");
+    assert_eq!(c.name, "sid");
+    assert_eq!(c.value, "abc");
+    assert!(c.path.is_none() && c.domain.is_none() && c.expires.is_none());
+  }
+
+  #[test]
+  fn set_cookie_attributes_parsed() {
+    let c = har_parse_cookie("sid=x; Domain=example.com; Path=/app; Secure; HttpOnly; SameSite=Lax").expect("cookie");
+    assert_eq!(c.name, "sid");
+    assert_eq!(c.domain.as_deref(), Some("example.com"));
+    assert_eq!(c.path.as_deref(), Some("/app"));
+    assert_eq!(c.secure, Some(true));
+    assert_eq!(c.http_only, Some(true));
+    assert_eq!(c.same_site.as_deref(), Some("Lax"));
+  }
+
+  #[test]
+  fn expires_becomes_iso8601() {
+    let c = har_parse_cookie("a=b; Expires=Wed, 01 Jan 2031 00:00:00 GMT").expect("cookie");
+    assert_eq!(c.expires.as_deref(), Some("2031-01-01T00:00:00.000Z"));
+  }
+
+  #[test]
+  fn max_age_is_relative_iso8601() {
+    let c = har_parse_cookie("a=b; Max-Age=3600").expect("cookie");
+    // Non-empty ISO string roughly one hour ahead of now.
+    assert!(c.expires.is_some_and(|e| e.ends_with('Z') && e.contains('T')));
+  }
+
+  #[test]
+  fn blank_segment_is_none() {
+    assert!(har_parse_cookie("   ").is_none());
+  }
 }

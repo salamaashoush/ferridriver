@@ -69,11 +69,32 @@ layers). Remaining gaps:
   gets no frames.
 
 ### HAR recording gaps
-- No cookies / `serverIPAddress` / `_securityDetails` sections.
-- `log.pages` entries carry empty `title` and `-1` `pageTimings` (the
-  network log tracks no page-load samples); Playwright fills these from
-  page lifecycle events.
-- WebSocket frames are not recorded (`_webSocketMessages`).
+Entry enrichment landed: request/response `cookies` (parsed from the raw
+Cookie / Set-Cookie headers), `serverIPAddress` + `_serverPort`,
+`_securityDetails`, response `httpVersion`, the `dns`/`connect`/`ssl`
+timing phases (full mode), and `log.pages[].title` (snapshotted at
+flush). Remaining gaps:
+
+- `log.pages[].pageTimings` still carry `-1` for `onContentLoad` /
+  `onLoad`. The recorder is post-hoc (rebuilds from the network log at
+  flush) and captures no DOMContentLoaded/load timestamps; filling these
+  needs the recorder to subscribe to page lifecycle events during
+  recording, keyed per page.
+- WebSocket frames are not recorded (`_webSocketMessages`). WS frames are
+  broadcast-only and transient (`network.rs::WebSocket`), so nothing the
+  post-hoc builder reads; capture needs the recorder to subscribe to
+  each live socket's frame stream and accumulate with page association.
+- `serverIPAddress`, `_serverPort`, and the `dns`/`connect`/`ssl` timing
+  phases come from the CDP Network domain only. Firefox/BiDi and WebKit
+  do not surface a peer address or timing samples (Playwright's HAR omits
+  them there too); those entries carry `-1` timings and no server fields.
+- WebKit request `cookies` are empty: the inspector `requestWillBeSent`
+  omits the Cookie header and offers no request extra-info / raw-header
+  fallback (Playwright's WebKit HAR has the same hole). CDP and BiDi
+  populate them.
+- Sizes (`headersSize`, `bodySize`, `_transferSize`, content
+  `compression`) are still `-1`; `_resourceType` / `_frameref` /
+  `_monotonicTime` entry annotations are not written.
 
 ### BiDi: native HTML5 drag delivers no `drop`
 - Firefox over BiDi starts a native drag from `input.performActions`

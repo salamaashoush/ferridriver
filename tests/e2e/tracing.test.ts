@@ -7,10 +7,19 @@
 
 import { test, describe, expect } from '@ferridriver/test';
 
+interface HarCookie {
+  name: string;
+  value: string;
+}
 interface HarFile {
   log: {
-    entries: Array<{ request: { url: string }; response: { status: number }; pageref?: string }>;
-    pages?: Array<{ id: string }>;
+    entries: Array<{
+      request: { url: string; cookies: HarCookie[] };
+      response: { status: number; httpVersion: string; cookies: HarCookie[] };
+      pageref?: string;
+      timings: Record<string, number>;
+    }>;
+    pages?: Array<{ id: string; title: string }>;
   };
 }
 
@@ -27,6 +36,33 @@ describe('tracing har', () => {
     const origin = new URL(baseURL!).host;
     expect(har.log.entries.some((e) => e.request.url.includes(origin))).toBe(true);
     expect(har.log.entries.some((e) => e.response.status === 200)).toBe(true);
+    // Enriched fields via the plain-HAR write path: every entry carries a
+    // (possibly empty) cookies array, an httpVersion, and a timings object
+    // — all backend-agnostic.
+    for (const e of har.log.entries) {
+      expect(Array.isArray(e.request.cookies)).toBe(true);
+      expect(Array.isArray(e.response.cookies)).toBe(true);
+      expect(typeof e.response.httpVersion).toBe('string');
+      expect(typeof e.timings.wait).toBe('number');
+    }
+  });
+
+  test('har_records_cookies_title_and_server_fields', async ({ page, context, baseURL }) => {
+    // A Set-Cookie response lands in response.cookies; the page's <title>
+    // lands in log.pages[].title. Runs on every backend project.
+    const harPath = test.info().outputPath('enriched.har');
+    await context.tracing.startHar(harPath);
+    // Record the Set-Cookie response first, then leave the page on a
+    // titled document — the title is snapshotted from the live page at
+    // flush, so the final document's title is what lands in log.pages.
+    await page.goto(`${baseURL}/fx/set-cookie?c=${encodeURIComponent('e2ehar=set; Path=/')}`);
+    await page.setContent('<!doctype html><title>HAR Title E2E</title><body>x</body>');
+    await context.tracing.stopHar();
+    const har = JSON.parse(await fs.readFile(harPath)) as HarFile;
+    const setCookieEntry = har.log.entries.find((e) => e.request.url.includes('/fx/set-cookie'));
+    expect(setCookieEntry?.response.cookies.some((c) => c.name === 'e2ehar' && c.value === 'set')).toBe(true);
+    // The settled page title is captured at flush.
+    expect(har.log.pages?.some((p) => p.title === 'HAR Title E2E')).toBe(true);
   });
 
   test('route_from_har_update_records_on_close', async ({ browser, baseURL }) => {

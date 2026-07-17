@@ -987,6 +987,11 @@ impl ContextRef {
       Some(log) => log.read().await.clone(),
       None => Vec::new(),
     };
+    let pages = {
+      let state = self.state.read().await;
+      state.context(&self.name).map(|c| c.pages.clone()).unwrap_or_default()
+    };
+    let titles = crate::tracing::collect_page_titles(&pages).await;
     for recorder in recorders {
       let slice = requests.get(recorder.start_len..).unwrap_or(&[]);
       match recorder.page_filter.as_deref() {
@@ -996,9 +1001,9 @@ impl ContextRef {
             .filter(|r| r.page_guid() == Some(page_guid))
             .cloned()
             .collect();
-          crate::tracing::flush_recorder(&recorder, &filtered).await?;
+          crate::tracing::flush_recorder(&recorder, &filtered, &titles).await?;
         },
-        None => crate::tracing::flush_recorder(&recorder, slice).await?,
+        None => crate::tracing::flush_recorder(&recorder, slice, &titles).await?,
       }
     }
     Ok(())

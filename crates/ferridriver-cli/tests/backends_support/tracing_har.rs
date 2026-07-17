@@ -21,6 +21,9 @@ pub fn test_tracing_har_zip_roundtrip(c: &mut McpClient) {
   let v = c.script_value_with_args(
     r"
     const [url, zipPath] = args;
+    // Pre-seed a cookie so the navigation request carries a Cookie
+    // header for HAR request.cookies to parse.
+    await context.addCookies([{ name: 'reqcookie', value: 'reqvalue', domain: '127.0.0.1', path: '/' }]);
     await context.tracing.startHar(zipPath);
     await page.goto(url);
     await context.tracing.stopHar();
@@ -64,6 +67,74 @@ pub fn test_tracing_har_zip_roundtrip(c: &mut McpClient) {
     .iter()
     .any(|e| e["response"]["content"]["mimeType"].as_str() == Some("text/html"));
   assert!(mime_ok, "recorded mimeType must survive header-case differences: {har}");
+
+  // The document entry carries the enriched HAR fields. `harTracer.ts`
+  // populates serverIPAddress/_serverPort from the peer address, cookies
+  // from Set-Cookie, httpVersion from the protocol, and dns/connect/ssl
+  // timing phases.
+  let doc = entries
+    .iter()
+    .find(|e| e["request"]["url"].as_str() == Some(&format!("http://127.0.0.1:{port}/page")))
+    .unwrap_or_else(|| panic!("document entry must be present: {har}"));
+  // Backend-agnostic: response cookies (Set-Cookie) and httpVersion.
+  let resp_cookies = doc["response"]["cookies"].as_array().expect("response.cookies array");
+  assert!(
+    resp_cookies
+      .iter()
+      .any(|c| c["name"].as_str() == Some("harcookie") && c["value"].as_str() == Some("harvalue")),
+    "Set-Cookie must be parsed into response.cookies: {doc}"
+  );
+  assert!(
+    doc["response"]["httpVersion"].as_str().is_some_and(|v| !v.is_empty()),
+    "response.httpVersion must be set: {doc}"
+  );
+  // Peer address and the dns/connect/ssl timing phases come from the CDP
+  // Network domain; Firefox/BiDi and WebKit's inspector protocol do not
+  // surface them (Playwright's own HAR omits them there too).
+  if c.backend.starts_with("cdp") {
+    assert_eq!(
+      doc["serverIPAddress"].as_str(),
+      Some("127.0.0.1"),
+      "CDP entry must carry serverIPAddress: {doc}"
+    );
+    assert_eq!(
+      doc["_serverPort"].as_u64(),
+      Some(u64::from(port)),
+      "CDP entry must carry _serverPort: {doc}"
+    );
+    let timings = &doc["timings"];
+    for phase in ["dns", "connect", "ssl", "send", "wait", "receive"] {
+      assert!(
+        timings.get(phase).is_some_and(serde_json::Value::is_number),
+        "timings.{phase} must be a number: {doc}"
+      );
+    }
+  }
+  // The document's page entry carries the captured <title>.
+  let pages = har["log"]["pages"].as_array().expect("log.pages array");
+  assert!(
+    pages.iter().any(|p| p["title"].as_str() == Some("HAR Fixture Title")),
+    "log.pages must carry the captured document title: {pages:?}"
+  );
+
+  // The navigation carries the pre-seeded cookie as a Cookie request
+  // header; HAR parses it into request.cookies. WebKit's inspector
+  // `requestWillBeSent` omits the Cookie header (no request extra-info
+  // event, unlike CDP) and offers no raw-header fallback, so its request
+  // cookies are unavailable — the same limitation Playwright's WebKit
+  // HAR carries.
+  if c.backend != "webkit" {
+    let request_cookie_seen = entries.iter().any(|e| {
+      e["request"]["url"].as_str() == Some(&format!("http://127.0.0.1:{port}/page"))
+        && e["request"]["cookies"]
+          .as_array()
+          .is_some_and(|cs| cs.iter().any(|c| c["name"].as_str() == Some("reqcookie")))
+    });
+    assert!(
+      request_cookie_seen,
+      "the Cookie request header must be parsed into request.cookies: {har}"
+    );
+  }
 
   // Replay offline: routeFromHAR(zip) must serve the recorded document
   // for the SAME url without touching the network (fresh URL fails).

@@ -69,12 +69,14 @@ fn serve_connection(mut stream: std::net::TcpStream) {
   }
   let path = request_line.split_whitespace().nth(1).unwrap_or("/");
   let body = if path.starts_with("/iframe") {
-    "<!doctype html><body>outer<iframe src=\"/inner\"></iframe></body>"
+    "<!doctype html><body>outer<iframe src=\"/inner\"></iframe></body>".to_string()
   } else {
-    "<!doctype html><body>backend-test</body>"
+    // A <title> and a Set-Cookie let the HAR validator assert
+    // log.pages[].title and response.cookies capture.
+    "<!doctype html><title>HAR Fixture Title</title><body>backend-test</body>".to_string()
   };
   let resp = format!(
-    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: harcookie=harvalue; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
     body.len(),
     body
   );
