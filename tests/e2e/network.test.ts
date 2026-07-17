@@ -172,40 +172,20 @@ describe('network', () => {
     }
   });
 
-  test('network_response_body', async ({ page, browserName }) => {
+  test('network_response_body', async ({ page }) => {
+    // BiDi bodies ride the session's network.addDataCollector
+    // registration (without it Firefox discards the bytes).
     await page.goto('/fx/landed');
-    const run = async () => {
-      const wait = page.waitForResponse('**/api/users', { timeout: 10000 });
-      await page.evaluate("fetch('/fx/api/users').then(r => r.text())");
-      const resp = await wait;
-      const text = await resp.text();
-      const json = (await resp.json()) as { users: string[] };
-      const headerValue = await resp.headerValue('content-type');
-      return { status: resp.status(), text, users: json.users, headerValue };
-    };
-    if (browserName === 'firefox') {
-      // Firefox discards body bytes for non-intercepted responses —
-      // Playwright's BiDi backend mirrors the same constraint. The body
-      // fetcher surfaces a typed Unsupported instead of dangling.
-      let msg = 'no-throw';
-      try {
-        await run();
-      } catch (e) {
-        msg = String((e as Error).message ?? e);
-      }
-      expect(
-        msg.includes('not supported') ||
-          msg.includes('Unsupported') ||
-          msg.includes('unsupported') ||
-          msg.includes('unavailable'),
-      ).toBe(true);
-      return;
-    }
-    const result = await run();
-    expect(result.status).toBe(200);
-    expect(result.text.includes('alice')).toBe(true);
-    expect(result.users.length).toBe(2);
-    expect(result.headerValue?.includes('application/json')).toBe(true);
+    const wait = page.waitForResponse('**/api/users', { timeout: 10000 });
+    await page.evaluate("fetch('/fx/api/users').then(r => r.text())");
+    const resp = await wait;
+    const text = await resp.text();
+    const json = (await resp.json()) as { users: string[] };
+    const headerValue = await resp.headerValue('content-type');
+    expect(resp.status()).toBe(200);
+    expect(text.includes('alice')).toBe(true);
+    expect(json.users.length).toBe(2);
+    expect(headerValue?.includes('application/json')).toBe(true);
   });
 
   test('network_post_data', async ({ page, browserName }) => {
@@ -274,15 +254,15 @@ describe('network', () => {
   });
 
   test('network_http_version', async ({ page, browserName }) => {
-    // httpVersion() always resolves to a string; CDP reports a real
-    // protocol version.
+    // httpVersion() always resolves to a string; CDP reports the real
+    // protocol version, BiDi surfaces ResponseData.protocol.
     await page.goto('/fx/landed');
     const wait = page.waitForResponse('**/api/users', { timeout: 10000 });
     await page.evaluate("fetch('/fx/api/users').then(r => r.text())");
     const resp = await wait;
     const hv = await resp.httpVersion();
     expect(typeof hv).toBe('string');
-    if (browserName === 'chromium') {
+    if (browserName === 'chromium' || browserName === 'firefox') {
       expect(hv.toLowerCase().includes('http')).toBe(true);
     }
   });

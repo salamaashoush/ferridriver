@@ -89,6 +89,25 @@ impl BidiSession {
       )
       .await?;
 
+    // Response bodies: without a registered data collector Firefox
+    // discards response bytes and `network.getData` answers "no such
+    // network data". Same registration + 20MB cap as Playwright's
+    // bidiBrowser.ts:81 (matching CDP's default buffer).
+    transport
+      .send_command(
+        "network.addDataCollector",
+        json!({"dataTypes": ["response"], "maxEncodedDataSize": 20_000_000}),
+      )
+      .await?;
+
+    // Auth challenges: intercept at the authRequired phase so stored
+    // httpCredentials can answer via `network.continueWithAuth`
+    // (bidiBrowser.ts:79). Unanswered challenges are cancelled by the
+    // authRequired handler, mirroring Playwright.
+    transport
+      .send_command("network.addIntercept", json!({"phases": ["authRequired"]}))
+      .await?;
+
     info!("BiDi session ready: {browser_name} {browser_version}");
     Ok(Self {
       session_id,

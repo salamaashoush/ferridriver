@@ -50,27 +50,20 @@ pub fn test_tracing_har_zip_roundtrip(c: &mut McpClient) {
     .iter()
     .filter_map(|e| e["response"]["content"]["_file"].as_str().map(String::from))
     .collect();
-  // Firefox discards response bytes for non-intercepted responses
-  // (`network.getData` → "no such network data"); Playwright's own BiDi
-  // backend has the same hole, so a BiDi-recorded archive legitimately
-  // carries no attached bodies. Every other backend must attach them.
-  let bodies_available = c.backend != "bidi";
-  if bodies_available {
+  assert!(
+    !file_refs.is_empty(),
+    "attach policy (zip default) must reference bodies via _file: {har}"
+  );
+  for name in &file_refs {
     assert!(
-      !file_refs.is_empty(),
-      "attach policy (zip default) must reference bodies via _file: {har}"
+      names.iter().any(|n| n == name),
+      "_file {name:?} must exist as a zip entry: {names:?}"
     );
-    for name in &file_refs {
-      assert!(
-        names.iter().any(|n| n == name),
-        "_file {name:?} must exist as a zip entry: {names:?}"
-      );
-    }
-    let mime_ok = entries
-      .iter()
-      .any(|e| e["response"]["content"]["mimeType"].as_str() == Some("text/html"));
-    assert!(mime_ok, "recorded mimeType must survive header-case differences: {har}");
   }
+  let mime_ok = entries
+    .iter()
+    .any(|e| e["response"]["content"]["mimeType"].as_str() == Some("text/html"));
+  assert!(mime_ok, "recorded mimeType must survive header-case differences: {har}");
 
   // Replay offline: routeFromHAR(zip) must serve the recorded document
   // for the SAME url without touching the network (fresh URL fails).
@@ -89,12 +82,10 @@ pub fn test_tracing_har_zip_roundtrip(c: &mut McpClient) {
     ",
     serde_json::json!([format!("http://127.0.0.1:{port}/page"), zip_path.to_string_lossy()]),
   );
-  if bodies_available {
-    assert!(
-      v["served"].as_str().is_some_and(|s| !s.trim().is_empty()),
-      "recorded body must be replayed from the zip: {v}"
-    );
-  }
+  assert!(
+    v["served"].as_str().is_some_and(|s| !s.trim().is_empty()),
+    "recorded body must be replayed from the zip: {v}"
+  );
   assert_eq!(
     v["missThrew"].as_bool(),
     Some(true),

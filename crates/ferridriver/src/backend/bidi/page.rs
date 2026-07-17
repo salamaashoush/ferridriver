@@ -291,6 +291,21 @@ pub struct BidiPage {
   /// on all future `BiDi` events and pins its managers/emitter until
   /// the browser exits.
   listener_tasks: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
+  /// Credentials answering `network.authRequired` challenges (context
+  /// option `httpCredentials` + `browserContext.setHTTPCredentials`).
+  /// Shared with [`BidiNetworkTracker`], which sends
+  /// `network.continueWithAuth` — the session registers a permanent
+  /// `authRequired`-phase intercept at connect, so unanswered
+  /// challenges are cancelled (surfacing the native 401) rather than
+  /// left paused.
+  pub(crate) http_credentials: Arc<std::sync::Mutex<Option<crate::options::HttpCredentials>>>,
+  /// Context-level permission grants. `BiDi`'s
+  /// `permissions.setPermission` requires a concrete origin, but our
+  /// context-level grant is origin-global — mirror Playwright's `BiDi`
+  /// backend (`bidiBrowser.ts::doGrantGlobalPermissionsForURL`) by
+  /// re-granting for each newly navigated origin from the event
+  /// listener.
+  pub(crate) permissions: Arc<std::sync::Mutex<BidiPermissions>>,
   /// Maps a retained `BiDi` reference (a `handle` UUID or a node
   /// `sharedId`) to the browsing context whose realm it was created in.
   ///
@@ -304,6 +319,18 @@ pub struct BidiPage {
   /// `HandleRemote::Bidi` wire shape carries no context, so we recover
   /// it here, inside the backend, keyed on the reference string.
   pub(crate) handle_realms: Arc<std::sync::Mutex<FxHashMap<String, Arc<str>>>>,
+}
+
+/// Permission-grant bookkeeping for one page's context. `global` is
+/// the context-wide grant list (from the `permissions` context option /
+/// `browserContext.grantPermissions`); `granted` records which
+/// permissions were actually sent to Firefox per origin, so navigations
+/// only re-grant what's missing and `clear_permissions` can reset
+/// exactly what was granted.
+#[derive(Default)]
+pub(crate) struct BidiPermissions {
+  global: Vec<String>,
+  granted: FxHashMap<String, Vec<String>>,
 }
 
 pub struct InjectedScriptManager {
@@ -411,6 +438,8 @@ impl BidiPage {
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       route_listener_started: Arc::new(AtomicBool::new(false)),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+      http_credentials: Arc::new(std::sync::Mutex::new(None)),
+      permissions: Arc::new(std::sync::Mutex::new(BidiPermissions::default())),
       handle_realms: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
     })
   }
@@ -1587,6 +1616,32 @@ impl BidiPage {
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     use futures::future::OptionFuture;
 
+    // Stored synchronously — the network tracker answers
+    // `network.authRequired` from this shared slot. A bag without the
+    // field leaves previously-set credentials alone (clearing rides the
+    // dedicated `set_http_credentials(None)` path, same as the other
+    // backends).
+    if let Some(c) = opts.http_credentials.clone()
+      && let Ok(mut slot) = self.http_credentials.lock()
+    {
+      *slot = Some(c);
+    }
+
+    let perms_fut: OptionFuture<_> = opts
+      .permissions
+      .as_ref()
+      .map(|p| async move {
+        if let Ok(mut state) = self.permissions.lock() {
+          state.global.clone_from(p);
+        }
+        // Grant for the current document's origin right away —
+        // `grant_permissions` can arrive after the page already
+        // navigated. Future navigations re-grant from the event
+        // listener (`browsingContext.navigationStarted`).
+        let url = self.url().await.ok().flatten().unwrap_or_default();
+        self.grant_global_permissions_for_url(&url).await
+      })
+      .into();
     let viewport_fut: OptionFuture<_> = opts
       .resolved_viewport()
       .map(|vp| async move { self.emulate_viewport(&vp).await })
@@ -1716,7 +1771,7 @@ impl BidiPage {
       })
       .into();
 
-    let (r_vp, r_ua, r_loc, r_tz, r_js, r_dl, r_hdr, r_med, r_geo, r_off, r_sw) = tokio::join!(
+    let (r_vp, r_ua, r_loc, r_tz, r_js, r_dl, r_hdr, r_med, r_geo, r_off, r_sw, r_perm) = tokio::join!(
       viewport_fut,
       ua_fut,
       locale_fut,
@@ -1728,6 +1783,7 @@ impl BidiPage {
       geo_fut,
       offline_fut,
       sw_fut,
+      perms_fut,
     );
 
     let mut errs: Vec<String> = Vec::new();
@@ -1743,6 +1799,7 @@ impl BidiPage {
       ("geolocation", r_geo),
       ("offline", r_off),
       ("serviceWorkers", r_sw),
+      ("permissions", r_perm),
     ] {
       if let Some(Err(e)) = r {
         errs.push(format!("{label}: {e}"));
@@ -1755,9 +1812,7 @@ impl BidiPage {
     for (label, present) in [
       ("bypassCSP", opts.bypass_csp.is_some()),
       ("ignoreHTTPSErrors", opts.ignore_https_errors.is_some()),
-      ("httpCredentials", opts.http_credentials.is_some()),
       ("screen", opts.screen.is_some()),
-      ("permissions", opts.permissions.is_some()),
       // browsingContext.setViewport has no touch-emulation field and
       // Firefox exposes no other command for it.
       ("hasTouch", opts.has_touch.is_some()),
@@ -1776,15 +1831,21 @@ impl BidiPage {
     }
   }
 
-  /// Backs [`crate::Page::set_http_credentials`]. Firefox's `BiDi`
-  /// implementation has no auth-challenge interception primitive, so
-  /// dynamic HTTP-credential mutation is surfaced as a typed Unsupported
-  /// per Rule 4 (matches the static `httpCredentials` gap above).
-  pub async fn set_http_credentials(&self, _creds: Option<crate::options::HttpCredentials>) -> Result<()> {
-    tokio::task::yield_now().await;
-    Err(FerriError::unsupported(
-      "BrowserContext.setHTTPCredentials is not supported on the bidi/Firefox backend: no network auth-challenge command exists",
-    ))
+  /// Backs [`crate::Page::set_http_credentials`]. The session-wide
+  /// `authRequired`-phase intercept (registered at connect) pauses every
+  /// auth challenge; the network tracker answers from this shared slot
+  /// via `network.continueWithAuth`, mirroring Playwright's
+  /// `bidiNetworkManager.ts::_onAuthRequired`. Passing `None` clears the
+  /// stored credentials so future challenges are cancelled (the 401
+  /// surfaces).
+  pub fn set_http_credentials(
+    &self,
+    creds: Option<crate::options::HttpCredentials>,
+  ) -> impl std::future::Future<Output = Result<()>> {
+    if let Ok(mut slot) = self.http_credentials.lock() {
+      *slot = creds;
+    }
+    std::future::ready(Ok(()))
   }
 
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
@@ -1866,13 +1927,74 @@ impl BidiPage {
     Ok(())
   }
 
-  /// `BiDi` has no Permissions API. Called from
-  /// [`crate::ContextRef::clear_permissions`] — returns typed error.
-  pub fn reset_permissions(&self) -> impl std::future::Future<Output = Result<()>> {
-    let _ = &self.context_id;
-    std::future::ready(Err(FerriError::unsupported(
-      "Permissions API not available in BiDi backend",
-    )))
+  /// Called from [`crate::ContextRef::clear_permissions`]. Resets every
+  /// (origin, permission) pair this page granted back to `"prompt"` and
+  /// drops the context-wide grant list — mirrors Playwright's
+  /// `bidiBrowser.ts::doClearPermissions`.
+  pub async fn reset_permissions(&self) -> Result<()> {
+    let granted: Vec<(String, Vec<String>)> = match self.permissions.lock() {
+      Ok(mut state) => {
+        state.global.clear();
+        state.granted.drain().collect()
+      },
+      Err(_) => Vec::new(),
+    };
+    for (origin, perms) in granted {
+      for perm in perms {
+        self.set_permission(&perm, "prompt", &origin).await?;
+      }
+    }
+    Ok(())
+  }
+
+  /// One W3C `permissions.setPermission` call (Firefox ships the
+  /// permissions extension module — `bidiBrowser.ts::_setPermission`).
+  async fn set_permission(&self, permission: &str, state: &str, origin: &str) -> Result<()> {
+    self
+      .session
+      .transport
+      .send_command(
+        "permissions.setPermission",
+        json!({
+          "descriptor": {"name": permission},
+          "state": state,
+          "origin": origin,
+          "userContext": &*self.user_context,
+        }),
+      )
+      .await
+      .map(|_| ())
+  }
+
+  /// Grant the context-wide permission list for `url`'s origin,
+  /// skipping pairs already granted. `BiDi` requires a concrete origin
+  /// per grant, so the origin-global context option is materialised
+  /// per navigated origin (Playwright's
+  /// `doGrantGlobalPermissionsForURL` model). Opaque origins (`data:`,
+  /// `about:blank`) never receive grants.
+  async fn grant_global_permissions_for_url(&self, url: &str) -> Result<()> {
+    let Some(origin) = permissions_origin(url) else {
+      return Ok(());
+    };
+    let missing: Vec<String> = match self.permissions.lock() {
+      Ok(state) => {
+        let already = state.granted.get(&origin);
+        state
+          .global
+          .iter()
+          .filter(|p| !already.is_some_and(|g| g.contains(p)))
+          .cloned()
+          .collect()
+      },
+      Err(_) => Vec::new(),
+    };
+    for perm in missing {
+      self.set_permission(&perm, "granted", &origin).await?;
+      if let Ok(mut state) = self.permissions.lock() {
+        state.granted.entry(origin.clone()).or_default().push(perm);
+      }
+    }
+    Ok(())
   }
 
   // ── Tracing ─────────────────────────────────────────────────────────────
@@ -1967,7 +2089,9 @@ impl BidiPage {
       self.session.clone(),
       self.context_id.clone(),
       self.nav_request_slot.clone(),
+      self.http_credentials.clone(),
     ));
+    let page_for_grants = self.clone();
 
     let main_listener = tokio::spawn(async move {
       // Child browsing contexts (iframes) of this page, tracked from
@@ -2095,6 +2219,19 @@ impl BidiPage {
             }
           },
           "browsingContext.navigationStarted" | "browsingContext.domContentLoaded" | "browsingContext.load" => {
+            // Materialise context-wide permission grants for the newly
+            // navigated origin (mirrors Playwright's
+            // `doGrantGlobalPermissionsForURL` on navigation commit).
+            // Awaited inline so the grant lands before this same loop
+            // emits `load` — `goto` resolves on that event, so page
+            // code observing the document never races the grant. The
+            // helper sends nothing when the origin is already granted.
+            if event.method == "browsingContext.navigationStarted" {
+              let nav_url = event.params.get("url").and_then(|v| v.as_str()).unwrap_or("");
+              if let Err(e) = page_for_grants.grant_global_permissions_for_url(nav_url).await {
+                tracing::debug!("permissions grant for {nav_url} failed: {e}");
+              }
+            }
             // Surface the main frame's cross-document navigation as
             // `FrameNavigated` (CDP gets this from `Page.frameNavigated`;
             // BiDi has no direct analogue). Keeps the frame cache's
@@ -2314,6 +2451,9 @@ impl BidiPage {
           },
           "network.fetchError" => {
             tracker.on_fetch_error(&event.params, &emitter).await;
+          },
+          "network.authRequired" => {
+            tracker.on_auth_required(&event.params).await;
           },
           "browsingContext.userPromptOpened" => {
             let prompt_type_str = event
@@ -3391,6 +3531,14 @@ struct BidiNetworkTracker {
   requests: tokio::sync::Mutex<FxHashMap<String, NetworkRequest>>,
   responses: tokio::sync::Mutex<FxHashMap<String, Response>>,
   nav_request_slot: crate::network::NavRequestSlot,
+  /// Shared with [`BidiPage::http_credentials`] — answers
+  /// `network.authRequired` challenges.
+  credentials: Arc<std::sync::Mutex<Option<crate::options::HttpCredentials>>>,
+  /// Request ids already answered with `provideCredentials`. A repeat
+  /// challenge for the same request means the credentials were wrong —
+  /// cancel instead of looping (Playwright's
+  /// `_attemptedAuthentications`). Cleared on request completion.
+  attempted_auth: tokio::sync::Mutex<rustc_hash::FxHashSet<String>>,
 }
 
 impl BidiNetworkTracker {
@@ -3398,6 +3546,7 @@ impl BidiNetworkTracker {
     session: Arc<super::session::BidiSession>,
     context_id: Arc<str>,
     nav_request_slot: crate::network::NavRequestSlot,
+    credentials: Arc<std::sync::Mutex<Option<crate::options::HttpCredentials>>>,
   ) -> Self {
     Self {
       session,
@@ -3405,6 +3554,8 @@ impl BidiNetworkTracker {
       requests: tokio::sync::Mutex::new(FxHashMap::default()),
       responses: tokio::sync::Mutex::new(FxHashMap::default()),
       nav_request_slot,
+      credentials,
+      attempted_auth: tokio::sync::Mutex::new(rustc_hash::FxHashSet::default()),
     }
   }
 
@@ -3550,7 +3701,71 @@ impl BidiNetworkTracker {
     if let Some(resp) = self.responses.lock().await.get(&request_id).cloned() {
       resp.finish_success().await;
     }
+    self.attempted_auth.lock().await.remove(&request_id);
     emitter.emit(PageEvent::RequestFinished(req));
+  }
+
+  /// The session-wide `authRequired`-phase intercept pauses every auth
+  /// challenge; this either answers it from the stored credentials or
+  /// cancels it (surfacing the 401). Model:
+  /// `bidiNetworkManager.ts::_onAuthRequired`. The
+  /// `network.continueWithAuth` round-trip is spawned so the event
+  /// listener never stalls behind it; a failure (e.g. the request died
+  /// while the answer was in flight) is logged, matching Playwright's
+  /// `sendMayFail`.
+  async fn on_auth_required(self: &Arc<Self>, params: &serde_json::Value) {
+    let Some(request_id) = params
+      .get("request")
+      .and_then(|r| r.get("request"))
+      .and_then(|v| v.as_str())
+    else {
+      return;
+    };
+    let is_basic = params
+      .get("response")
+      .and_then(|r| r.get("authChallenges"))
+      .and_then(|v| v.as_array())
+      .is_some_and(|challenges| {
+        challenges.iter().any(|c| {
+          c.get("scheme")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| s.starts_with("Basic"))
+        })
+      });
+    let creds = self.credentials.lock().ok().and_then(|slot| slot.clone());
+    let url = params
+      .get("request")
+      .and_then(|r| r.get("url"))
+      .and_then(|v| v.as_str())
+      .unwrap_or("");
+    let origin_matches = |c: &crate::options::HttpCredentials| match c.origin.as_deref() {
+      None => true,
+      Some(expected) => permissions_origin(url).is_some_and(|o| o.eq_ignore_ascii_case(expected)),
+    };
+    let answer = match creds {
+      Some(c) if is_basic && origin_matches(&c) => {
+        let mut attempted = self.attempted_auth.lock().await;
+        if attempted.insert(request_id.to_string()) {
+          json!({
+            "request": request_id,
+            "action": "provideCredentials",
+            "credentials": {"type": "password", "username": c.username, "password": c.password},
+          })
+        } else {
+          // Second challenge for the same request: the credentials
+          // were rejected — cancel so the 401 surfaces instead of
+          // retrying forever.
+          json!({"request": request_id, "action": "cancel"})
+        }
+      },
+      _ => json!({"request": request_id, "action": "cancel"}),
+    };
+    let session = self.session.clone();
+    tokio::spawn(async move {
+      if let Err(e) = session.transport.send_command("network.continueWithAuth", answer).await {
+        tracing::debug!("network.continueWithAuth failed: {e}");
+      }
+    });
   }
 
   async fn on_fetch_error(self: &Arc<Self>, params: &serde_json::Value, emitter: &EventEmitter) {
@@ -3574,6 +3789,7 @@ impl BidiNetworkTracker {
     if let Some(resp) = self.responses.lock().await.get(&request_id).cloned() {
       resp.finish_failure(error_text).await;
     }
+    self.attempted_auth.lock().await.remove(&request_id);
     emitter.emit(PageEvent::RequestFailed(req));
   }
 
@@ -3598,7 +3814,13 @@ impl BidiNetworkTracker {
       status,
       status_text,
       from_service_worker,
-      http_version: None,
+      // BiDi `ResponseData.protocol` (e.g. "http/1.1") — same source as
+      // Playwright's `_setHttpVersion(params.response.protocol)`.
+      http_version: resp
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from),
       headers,
       remote_addr: parse_bidi_remote_addr(resp),
       security_details: parse_bidi_security_details(resp),
@@ -3614,6 +3836,10 @@ impl BidiNetworkTracker {
       let session = session.clone();
       let request_id = request_id.clone();
       Box::pin(async move {
+        // Bytes are retained by the session's `network.addDataCollector`
+        // registration (connect-time, 20MB cap — bidiBrowser.ts:81);
+        // without it Firefox discards them and this command errors with
+        // "no such network data".
         let resp = session
           .transport
           .send_command(
@@ -3621,30 +3847,23 @@ impl BidiNetworkTracker {
             json!({"request": request_id, "dataType": "response"}),
           )
           .await
-          .map_err(|e| {
-            // Firefox discards response body bytes for non-intercepted
-            // responses; `network.getData` then returns "no such network
-            // data". Mirror Playwright's own BiDi backend behaviour and
-            // surface this as a typed `Unsupported` so callers can
-            // distinguish "Firefox dropped it" from a real protocol
-            // failure.
-            let msg = e.to_string();
-            if msg.contains("no such network data") {
-              crate::error::FerriError::Unsupported(
-                "Response body unavailable on BiDi without network interception (Firefox discards bytes after response)".into(),
-              )
-            } else {
-              crate::error::FerriError::Protocol {
-                method: "network.getData".into(),
-                message: msg,
-              }
-            }
+          .map_err(|e| crate::error::FerriError::Protocol {
+            method: "network.getData".into(),
+            message: e.to_string(),
           })?;
-        let bytes = resp.get("bytes").and_then(|b| b.get("value")).and_then(|v| v.as_str());
-        let data = bytes.unwrap_or("");
-        base64::engine::general_purpose::STANDARD
-          .decode(data)
-          .map_err(|e| crate::error::FerriError::Backend(format!("base64 decode: {e}")))
+        let bytes = resp.get("bytes");
+        let value = bytes
+          .and_then(|b| b.get("value"))
+          .and_then(|v| v.as_str())
+          .unwrap_or("");
+        // `bytes.type` is "string" (utf8 text) or "base64" — decode per
+        // tag like Playwright's `getResponseBody`.
+        match bytes.and_then(|b| b.get("type")).and_then(|v| v.as_str()) {
+          Some("string") => Ok(value.as_bytes().to_vec()),
+          _ => base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .map_err(|e| crate::error::FerriError::Backend(format!("base64 decode: {e}"))),
+        }
       })
     })
   }
@@ -3663,6 +3882,19 @@ impl BidiNetworkTracker {
       })
     })
   }
+}
+
+/// Serialized origin (`scheme://host[:port]`) for permission grants and
+/// credential-origin matching. Opaque origins (`data:`, `about:`,
+/// unparsable URLs) return `None` — grants/credentials never apply to
+/// them (Playwright skips `'null'` origins the same way).
+fn permissions_origin(url: &str) -> Option<String> {
+  let parsed = reqwest::Url::parse(url).ok()?;
+  let origin = parsed.origin();
+  if !origin.is_tuple() {
+    return None;
+  }
+  Some(origin.ascii_serialization())
 }
 
 fn parse_bidi_remote_addr(_resp: &serde_json::Value) -> Option<RemoteAddr> {

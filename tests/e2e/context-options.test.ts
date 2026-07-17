@@ -148,18 +148,7 @@ describe('context options', () => {
     }
   });
 
-  test('context_options_geolocation', async ({ browser, baseURL, browserName }) => {
-    if (browserName === 'firefox') {
-      // The permissions grant has no BiDi wire in the backend yet;
-      // geolocation without the grant can never resolve, so the option
-      // pair surfaces the typed permissions gap.
-      await expectOptionUnsupportedOnFirefox(
-        browser,
-        { geolocation: { latitude: 12.5, longitude: 34.75, accuracy: 1 }, permissions: ['geolocation'] },
-        'permissions',
-      );
-      return;
-    }
+  test('context_options_geolocation', async ({ browser, baseURL }) => {
     // Geolocation needs a secure context — data:/about: are opaque
     // origins, http://127.0.0.1 is secure in both engines.
     const ctx = await browser.newContext({
@@ -258,30 +247,12 @@ describe('context options', () => {
     }
   });
 
-  test('context_set_http_credentials', async ({ browser, baseURL, browserName }) => {
-    if (browserName === 'firefox') {
-      // Firefox/BiDi auth-challenge interception is not wired in the
-      // backend; the setter rejects with a typed Unsupported rather
-      // than silently no-oping.
-      const ctx = await browser.newContext({});
-      try {
-        await ctx.newPage();
-        let err = '';
-        try {
-          await ctx.setHTTPCredentials({ username: 'user', password: 'pass' });
-        } catch (e) {
-          err = String((e as Error).message ?? e);
-        }
-        expect(err.includes('not supported') || err.includes('Unsupported')).toBe(true);
-      } finally {
-        await ctx.close();
-      }
-      return;
-    }
+  test('context_set_http_credentials', async ({ browser, baseURL }) => {
     // With credentials set the backend answers the /fx/auth Basic
     // challenge (user:pass) -> 200 AUTHED; this only happens when the
     // credentials took effect. CDP answers via Fetch.authRequired,
-    // WebKit via Emulation.setAuthCredentials (wkPage parity).
+    // WebKit via Emulation.setAuthCredentials (wkPage parity), BiDi
+    // via the authRequired-phase intercept + network.continueWithAuth.
     const ctx = await browser.newContext({});
     try {
       const p = await ctx.newPage();
