@@ -1758,6 +1758,9 @@ impl BidiPage {
       ("httpCredentials", opts.http_credentials.is_some()),
       ("screen", opts.screen.is_some()),
       ("permissions", opts.permissions.is_some()),
+      // browsingContext.setViewport has no touch-emulation field and
+      // Firefox exposes no other command for it.
+      ("hasTouch", opts.has_touch.is_some()),
     ] {
       if present {
         errs.push(format!(

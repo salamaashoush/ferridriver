@@ -1471,15 +1471,22 @@ impl WebKitPage {
     Ok(())
   }
 
-  /// Backs [`crate::Page::set_http_credentials`]. The Playwright `WebKit`
-  /// inspector protocol exposes no `Fetch.authRequired`-equivalent hook,
-  /// so dynamic HTTP-credential mutation is surfaced as a typed
-  /// Unsupported per Rule 4 rather than silently dropped.
-  pub async fn set_http_credentials(&self, _creds: Option<crate::options::HttpCredentials>) -> Result<()> {
-    tokio::task::yield_now().await;
-    Err(crate::error::FerriError::Unsupported(
-      "BrowserContext.setHTTPCredentials is not supported on the webkit backend: the Playwright WebKit inspector protocol exposes no auth-challenge hook".into(),
-    ))
+  /// Backs [`crate::Page::set_http_credentials`]. Mirrors Playwright's
+  /// `wkPage.updateHttpCredentials` — `Emulation.setAuthCredentials` on
+  /// the page-proxy session; clearing sends empty strings (the wire has
+  /// no removal form, empty credentials disable the auto-answer).
+  pub async fn set_http_credentials(&self, creds: Option<crate::options::HttpCredentials>) -> Result<()> {
+    let creds = creds.unwrap_or_default();
+    let mut params = json!({ "username": creds.username, "password": creds.password });
+    if let Some(origin) = creds.origin.as_deref() {
+      params["origin"] = json!(origin);
+    }
+    self
+      .proxy_session()
+      .send("Emulation.setAuthCredentials", params)
+      .await
+      .map_err(conn_err)?;
+    Ok(())
   }
 
   async fn apply_runtime_overrides(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
@@ -1546,6 +1553,9 @@ impl WebKitPage {
           json!({ "origin": "*", "permissions": perms }),
         )
         .await;
+    }
+    if let Some(creds) = opts.http_credentials.as_ref() {
+      let _ = self.set_http_credentials(Some(creds.clone())).await;
     }
   }
 

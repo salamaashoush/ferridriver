@@ -139,113 +139,6 @@ fn register_events_metadata(set: &mut TestSet<'_>) {
   run!(set, backends_support::video::test_video_recording_lifecycle);
 }
 
-fn register_context_options(set: &mut TestSet<'_>) {
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_user_agent
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_locale
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_timezone
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_color_scheme
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_reduced_motion
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_forced_colors
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_viewport
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_javascript_enabled
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_geolocation
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_extra_http_headers
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_offline
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_device_scale_factor
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_has_touch
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_set_http_credentials
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_set_default_timeout
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_is_closed_and_browser
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_route_and_unroute
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_route_times_shared_across_pages
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_route_applies_to_future_page
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_route_scope_precedence_and_unroute_all
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_service_workers_block
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_screen
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_bypass_csp
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_base_url
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_storage_state
-  );
-  run!(
-    set,
-    backends_support::browser_context_options::test_context_options_proxy
-  );
-}
-
 fn register_browser_type(set: &mut TestSet<'_>) {
   run!(set, backends_support::browser_type::test_browser_type_name);
   run!(set, backends_support::browser_type::test_browser_type_executable_path);
@@ -278,7 +171,7 @@ fn register_mcp_features(set: &mut TestSet<'_>) {
 
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
-// 9 categories × 4 backends = 36 `#[test]`s grouped into one module
+// 8 categories × 4 backends = 32 `#[test]`s grouped into one module
 // per backend. nextest reports them as
 // `backends::<backend>::<category>` and distributes them across cores.
 // A single failing category fails its own test, not the entire backend.
@@ -307,10 +200,6 @@ macro_rules! backend_module {
       #[test]
       fn events_metadata() {
         run_category($backend, register_events_metadata);
-      }
-      #[test]
-      fn context_options() {
-        run_category($backend, register_context_options);
       }
       #[test]
       fn browser_type() {

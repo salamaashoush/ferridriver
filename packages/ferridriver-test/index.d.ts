@@ -955,6 +955,8 @@ export interface BrowserContext {
   // ferridriver extension mirroring the NAPI binding.
   deleteCookie(name: string, domain?: string): Promise<void>;
   setStorageState(state: StorageState): Promise<void>;
+  setHTTPCredentials(credentials: { username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' } | null): Promise<void>;
+  isClosed(): Promise<boolean>;
   grantPermissions(permissions: string[], options?: { origin?: string }): Promise<void>;
   clearPermissions(): Promise<void>;
   setGeolocation(geolocation: { latitude: number; longitude: number; accuracy?: number } | null): Promise<void>;
@@ -1006,6 +1008,7 @@ export interface BrowserContextOptions {
   storageState?: string | StorageState;
   proxy?: { server: string; bypass?: string; username?: string; password?: string };
   serviceWorkers?: 'allow' | 'block';
+  screen?: { width: number; height: number };
 }
 
 export interface Browser {

@@ -9,7 +9,6 @@
 //! functions via the module path.
 
 pub mod bdd;
-pub mod browser_context_options;
 pub mod browser_type;
 pub mod cdp_session;
 pub mod client;
