@@ -138,8 +138,13 @@ pub struct LocatorRef {
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct FilterOptions {
-  pub has_text: Option<String>,
-  pub has_not_text: Option<String>,
+  /// Playwright: `hasText?: string | RegExp`. Same prototype-chain
+  /// `RegExp` handling as [`RoleOptions::name`].
+  #[napi(ts_type = "string | RegExp")]
+  pub has_text: Option<napi::Either<String, JsRegExpLike>>,
+  /// Playwright: `hasNotText?: string | RegExp`.
+  #[napi(ts_type = "string | RegExp")]
+  pub has_not_text: Option<napi::Either<String, JsRegExpLike>>,
   pub has: Option<LocatorRef>,
   pub has_not: Option<LocatorRef>,
   pub visible: Option<bool>,
@@ -1343,8 +1348,8 @@ impl From<TextOptions> for ferridriver::options::TextOptions {
 impl From<FilterOptions> for ferridriver::options::FilterOptions {
   fn from(o: FilterOptions) -> Self {
     Self {
-      has_text: o.has_text,
-      has_not_text: o.has_not_text,
+      has_text: o.has_text.map(getby_input_to_rust),
+      has_not_text: o.has_not_text.map(getby_input_to_rust),
       has: o.has.map(|r| ferridriver::options::LocatorLike::Selector(r.selector)),
       has_not: o
         .has_not

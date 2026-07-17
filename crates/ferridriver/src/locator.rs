@@ -478,7 +478,10 @@ impl Locator {
   /// Filter this locator by text content, inner-locator presence/absence,
   /// or visibility. Option-to-selector encoding:
   ///
-  /// * `has_text` → ` >> internal:has-text=<escaped>` (plain-text clause).
+  /// * `has_text` → ` >> internal:has-text=<escaped>` — string is
+  ///   `"quoted"i` (case-insensitive substring), regex is `/source/flags`
+  ///   (`escapeForTextSelector` with `exact: false`, matching Playwright's
+  ///   `Locator` constructor).
   /// * `has_not_text` → ` >> internal:has-not-text=<escaped>`.
   /// * `has` (inner [`Locator`]) → ` >> internal:has=<JSON inner selector>`.
   /// * `has_not` (inner [`Locator`]) → ` >> internal:has-not=<JSON inner selector>`.
@@ -502,11 +505,15 @@ impl Locator {
     };
 
     if let Some(text) = &opts.has_text {
-      let _ = write!(suffix, "internal:has-text={}", json_quote(text));
+      let _ = write!(suffix, "internal:has-text={}", escape_for_text_selector(text, false));
     }
     if let Some(text) = &opts.has_not_text {
       push_sep(&mut suffix);
-      let _ = write!(suffix, "internal:has-not-text={}", json_quote(text));
+      let _ = write!(
+        suffix,
+        "internal:has-not-text={}",
+        escape_for_text_selector(text, false)
+      );
     }
     if let Some(inner) = &opts.has {
       push_sep(&mut suffix);

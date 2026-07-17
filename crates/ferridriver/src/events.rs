@@ -684,6 +684,13 @@ pub enum ContextEvent {
     page: Arc<crate::page::Page>,
     frame_id: String,
   },
+  /// A new page was created in this context. Mirrors Playwright's
+  /// `browserContext.on('page', (page: Page) => ...)` — fired from
+  /// `ContextRef::new_page` once the public wrapper exists. Pages the
+  /// BROWSER creates (window.open popups) are not yet tracked — that
+  /// needs target-relationship bookkeeping (see the parity backlog's
+  /// `page.opener()` item).
+  Page(Arc<crate::page::Page>),
   /// A page in this context was closed.
   /// `browserContext.on('pageclose', (page: Page) => ...)`.
   PageClose(Arc<crate::page::Page>),
@@ -701,6 +708,7 @@ impl EmitterEvent for ContextEvent {
         | ("frameattached", ContextEvent::FrameAttached { .. })
         | ("framedetached", ContextEvent::FrameDetached { .. })
         | ("framenavigated", ContextEvent::FrameNavigated { .. })
+        | ("page", ContextEvent::Page(_))
         | ("pageclose", ContextEvent::PageClose(_))
         | ("pageload", ContextEvent::PageLoad(_))
     )

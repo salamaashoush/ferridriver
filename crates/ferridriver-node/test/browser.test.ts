@@ -207,11 +207,21 @@ for (const backend of BACKENDS) {
     });
 
     it("filters locators", () => {
-      // Playwright encoding: filter({hasText}) → ` >> internal:has-text="..."`
-      // (see /tmp/playwright/packages/playwright-core/src/client/locator.ts:51).
+      // Playwright encoding: filter({hasText}) → ` >> internal:has-text="..."i`
+      // (escapeForTextSelector with exact:false — see
+      // /tmp/playwright/packages/playwright-core/src/client/locator.ts:51).
       const loc = page.locator("p").filter({ hasText: "information" });
-      expect(loc.selector).toContain("internal:has-text=");
-      expect(loc.selector).toContain("information");
+      expect(loc.selector).toContain('internal:has-text="information"i');
+    });
+
+    it("filters locators with RegExp text", async () => {
+      // hasText/hasNotText accept RegExp; serialized as /source/flags
+      // and honored end-to-end by the injected text engine.
+      const loc = page.locator("p").filter({ hasText: /more INFORMATION/i });
+      expect(loc.selector).toContain("internal:has-text=/more INFORMATION/i");
+      expect(await loc.count()).toBe(1);
+      expect(await page.locator("p").filter({ hasNotText: /information/i }).count()).toBe(0);
+      expect(await page.locator("p", { hasText: /^More information/ }).count()).toBe(1);
     });
 
     // ── Screenshots ───────────────────────────────────────────────────

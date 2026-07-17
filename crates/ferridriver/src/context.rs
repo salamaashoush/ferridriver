@@ -465,6 +465,12 @@ impl ContextRef {
       }
     }
 
+    // Playwright fires `browserContext.on('page')` for every page
+    // created in the context; a `waitForEvent('page')` registered
+    // before this `newPage` call resolves with the same wrapper the
+    // caller receives.
+    self.events.emit(crate::events::ContextEvent::Page(page.clone()));
+
     Ok(page)
   }
 

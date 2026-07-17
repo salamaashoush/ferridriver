@@ -266,6 +266,26 @@ describe('context options', () => {
     }
   });
 
+  test('context_pages_lists_open_tabs', async ({ browser, baseURL }) => {
+    // context.pages() returns every open page in creation order with
+    // live Page handles (url() reflects each tab's document).
+    const ctx = await browser.newContext({});
+    try {
+      const p1 = await ctx.newPage();
+      await p1.goto(`${baseURL}/fx/landed`);
+      expect((await ctx.pages()).length).toBe(1);
+      const p2 = await ctx.newPage();
+      const pages = await ctx.pages();
+      expect(pages.length).toBe(2);
+      const urls = pages.map((p) => p.url());
+      expect(urls.some((u) => u.includes('/fx/landed'))).toBe(true);
+      await p2.close();
+      expect((await ctx.pages()).length).toBe(1);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   test('context_set_default_timeout', async ({ browser }) => {
     const ctx = await browser.newContext({});
     try {

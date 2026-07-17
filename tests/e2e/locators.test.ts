@@ -349,6 +349,32 @@ describe('locators', () => {
     expect(await page.locator('css=.card >> has=.tag').count()).toBe(2);
   });
 
+  test('script_locator_filter_text_regex', async ({ page }) => {
+    // filter({ hasText / hasNotText }) accepts string | RegExp like
+    // Playwright — strings are case-insensitive substrings ("quoted"i),
+    // RegExp serializes as /source/flags for the injected text engine.
+    await page.goto(
+      dataUrl(
+        "<div class='row'>alpha Change</div>" +
+          "<div class='row'>beta keep</div>" +
+          "<div class='row'>gamma CHANGED</div>",
+      ),
+    );
+    expect(await page.locator('.row').filter({ hasText: /change/i }).count()).toBe(2);
+    expect(await page.locator('.row').filter({ hasText: /^beta keep$/ }).count()).toBe(1);
+    expect(await page.locator('.row').filter({ hasNotText: /change/i }).count()).toBe(1);
+    expect(await page.locator('.row').filter({ hasText: 'ALPHA' }).count()).toBe(1);
+    expect(
+      await page
+        .locator('.row')
+        .filter({ hasText: /change/i })
+        .filter({ hasNotText: /gamma/ })
+        .count(),
+    ).toBe(1);
+    // Same union on the locator(selector, options) form.
+    expect(await page.locator('.row', { hasText: /keep/i }).count()).toBe(1);
+  });
+
   test('locator_description_getter', async ({ page }) => {
     // locator.describe(x).description() round-trips (Playwright 1.58);
     // a plain locator has no description.

@@ -493,15 +493,15 @@ impl BrowserContext {
 
   // ── Context-level events ──
 
-  /// Register a context-level event listener. Supports `'weberror'`
-  /// plus the page-lifecycle mirror events (`'download'`,
+  /// Register a context-level event listener. Supports `'page'` and
+  /// `'weberror'` plus the page-lifecycle mirror events (`'download'`,
   /// `'frameattached'`, `'framedetached'`, `'framenavigated'`,
   /// `'pageclose'`, `'pageload'`). Playwright:
   /// `browserContext.on(event, listener)` — the callback receives a
   /// live class instance (WebError / Download / Frame / Page). Returns a
   /// numeric listener id for removal via [`Self::off`].
   #[napi(
-    ts_args_type = "event: 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void"
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void"
   )]
   pub fn on(&self, event: String, listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>) -> Result<f64> {
     let callback = build_context_event_callback(listener)?;
@@ -512,7 +512,7 @@ impl BrowserContext {
 
   /// One-shot variant of [`Self::on`]. Auto-removed after first match.
   #[napi(
-    ts_args_type = "event: 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void"
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void"
   )]
   pub fn once(&self, event: String, listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>) -> Result<f64> {
     let callback = build_context_event_callback(listener)?;
@@ -530,11 +530,12 @@ impl BrowserContext {
   }
 
   /// Wait for a context-level event. Playwright:
-  /// `browserContext.waitForEvent(event, options?)`. Supports
-  /// `'weberror'` plus the page-lifecycle mirror events; resolves with
-  /// the matching live class instance.
+  /// `browserContext.waitForEvent(event, options?)`. Supports `'page'`
+  /// (new page created via `newPage`) and `'weberror'` plus the
+  /// page-lifecycle mirror events; resolves with the matching live
+  /// class instance.
   #[napi(
-    ts_args_type = "event: 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', timeoutMs?: number",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', timeoutMs?: number",
     ts_return_type = "Promise<WebError | Download | Frame | Page>"
   )]
   pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<ContextEventArg> {
@@ -1024,7 +1025,7 @@ impl ContextEventArg {
       ContextEvent::FrameAttached { page, frame_id }
       | ContextEvent::FrameDetached { page, frame_id }
       | ContextEvent::FrameNavigated { page, frame_id } => Self::Frame { page, frame_id },
-      ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => Self::Page(page),
+      ContextEvent::Page(page) | ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => Self::Page(page),
     }
   }
 }

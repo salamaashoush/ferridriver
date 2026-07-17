@@ -53,6 +53,18 @@ pub enum Engine {
   HasText,
   HasNot,
   HasNotText,
+  /// Playwright-native `internal:has-text` engine emitted by
+  /// `locator.filter({ hasText })`. Accepts the full text-matcher body
+  /// (`"quoted"i` / `"quoted"s` / `/regex/flags` via the injected
+  /// `createTextMatcher`) — unlike the user-facing `has-text` CSS
+  /// engine, which is a lax string-only substring match. The two must
+  /// not be collapsed: routing this body to `has-text` silently drops
+  /// regex and case-sensitivity semantics.
+  InternalHasText,
+  /// Playwright-native `internal:has-not-text` engine
+  /// (`filter({ hasNotText })`). Same body format as
+  /// [`Engine::InternalHasText`].
+  InternalHasNotText,
   /// Playwright-compatible `internal:and` engine. Intersects the current
   /// scope with another locator's selector; both must match the same
   /// element. The body is the JSON-encoded inner selector string.
@@ -316,9 +328,11 @@ fn engine_by_name(name: &str) -> Option<Engine> {
     "nth" => Engine::Nth,
     "visible" => Engine::Visible,
     "has" | "internal:has" => Engine::Has,
-    "has-text" | "internal:has-text" => Engine::HasText,
+    "has-text" => Engine::HasText,
+    "internal:has-text" => Engine::InternalHasText,
     "has-not" | "internal:has-not" => Engine::HasNot,
-    "has-not-text" | "internal:has-not-text" => Engine::HasNotText,
+    "has-not-text" => Engine::HasNotText,
+    "internal:has-not-text" => Engine::InternalHasNotText,
     "internal:and" => Engine::InternalAnd,
     "internal:or" => Engine::InternalOr,
     "internal:text" => Engine::InternalText,
@@ -458,6 +472,8 @@ fn engine_str(engine: &Engine) -> &str {
     Engine::Visible => "visible",
     Engine::Has => "has",
     Engine::HasText => "has-text",
+    Engine::InternalHasText => "internal:has-text",
+    Engine::InternalHasNotText => "internal:has-not-text",
     Engine::HasNot => "has-not",
     Engine::HasNotText => "has-not-text",
     Engine::InternalAnd => "internal:and",

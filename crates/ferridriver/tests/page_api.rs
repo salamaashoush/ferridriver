@@ -320,6 +320,32 @@ async fn page_api_tests() {
     .await
     .unwrap();
   assert_eq!(count, 1, "filter has_text");
+  let count = page
+    .locator("css=div")
+    .filter(&FilterOptions {
+      has_text: Some(ferridriver::options::StringOrRegex::Regex {
+        source: "^keep$".into(),
+        flags: "i".into(),
+      }),
+      ..Default::default()
+    })
+    .count()
+    .await
+    .unwrap();
+  assert_eq!(count, 1, "filter has_text regex");
+  let count = page
+    .locator("css=div")
+    .filter(&FilterOptions {
+      has_not_text: Some(ferridriver::options::StringOrRegex::Regex {
+        source: "remove".into(),
+        flags: "i".into(),
+      }),
+      ..Default::default()
+    })
+    .count()
+    .await
+    .unwrap();
+  assert_eq!(count, 1, "filter has_not_text regex");
 
   // ── Viewport configuration ──
   page

@@ -331,5 +331,19 @@ for (const backend of BACKENDS) {
         await ctx.close();
       }
     });
+
+    it("waitForEvent('page') resolves with the page newPage creates", async () => {
+      const ctx = browser.newContext({});
+      try {
+        const [created, opened] = await Promise.all([ctx.waitForEvent("page", 5_000), ctx.newPage()]);
+        expect(created).toBeDefined();
+        const pages = await ctx.pages();
+        expect(pages.length).toBe(1);
+        await opened.close();
+        expect((await ctx.pages()).length).toBe(0);
+      } finally {
+        await ctx.close();
+      }
+    });
   });
 }

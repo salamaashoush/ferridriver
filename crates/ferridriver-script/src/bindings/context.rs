@@ -599,6 +599,24 @@ impl BrowserContextJs {
     rquickjs::IntoJs::into_js(instance, &ctx)
   }
 
+  /// Playwright: `browserContext.pages(): Page[]` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts`.
+  /// All open pages in this context (Rust core resolves them from the
+  /// browser state, so the list is a promise here).
+  #[qjs(rename = "pages")]
+  pub async fn pages<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    use rquickjs::IntoJs;
+    use rquickjs::class::Class;
+    let pages = self.inner.pages().await.into_js_with(&ctx)?;
+    let arr = rquickjs::Array::new(ctx.clone())?;
+    for (i, page) in pages.into_iter().enumerate() {
+      let wrapper = crate::bindings::page::pagejs_for_ctx(&ctx, page);
+      let instance = Class::instance(ctx.clone(), wrapper)?;
+      arr.set(i, instance)?;
+    }
+    arr.into_js(&ctx)
+  }
+
   // ── Video recording ────────────────────────────────────────────────────
 
   /// Playwright:
@@ -690,8 +708,9 @@ impl BrowserContextJs {
 
   // ── Context-level events ───────────────────────────────────────────────
 
-  /// Wait for the next context-scoped event. Supports `'weberror'` plus
-  /// the page-lifecycle mirror events (`'download'`, `'frameattached'`,
+  /// Wait for the next context-scoped event. Supports `'page'` (new
+  /// page created via `newPage`) and `'weberror'` plus the
+  /// page-lifecycle mirror events (`'download'`, `'frameattached'`,
   /// `'framedetached'`, `'framenavigated'`, `'pageclose'`, `'pageload'`),
   /// resolving with the matching live class instance. Playwright:
   /// `browserContext.waitForEvent(event, options?)`.
@@ -722,7 +741,7 @@ impl BrowserContextJs {
         crate::bindings::frame::FrameJs::new(page.frame_for_id(&frame_id)),
       )?
       .into_js(&ctx),
-      ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => {
+      ContextEvent::Page(page) | ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => {
         Class::instance(ctx.clone(), crate::bindings::page::pagejs_for_ctx(&ctx, page))?.into_js(&ctx)
       },
     }

@@ -14,8 +14,8 @@ use crate::bindings::convert::FerriResultCtxExt;
 /// JS API does (`has: Locator` officially, but users commonly pass
 /// plain `{ selector: '...' }` shapes in tests).
 pub(crate) struct ParsedLocatorOptions {
-  pub has_text: Option<String>,
-  pub has_not_text: Option<String>,
+  pub has_text: Option<ferridriver::options::StringOrRegex>,
+  pub has_not_text: Option<ferridriver::options::StringOrRegex>,
   pub has: Option<LocatorLike>,
   pub has_not: Option<LocatorLike>,
   pub visible: Option<bool>,
@@ -35,6 +35,24 @@ fn get_string<'js>(obj: &rquickjs::Object<'js>, key: &str) -> rquickjs::Result<O
       format!("{key}: expected string"),
     )),
   }
+}
+
+/// Pull a `string | RegExp` text matcher (`hasText` / `hasNotText`) from
+/// a JS object property, ignoring missing/null. Real `RegExp` instances
+/// resolve through their prototype `source`/`flags` getters.
+fn get_text_matcher<'js>(
+  obj: &rquickjs::Object<'js>,
+  key: &str,
+) -> rquickjs::Result<Option<ferridriver::options::StringOrRegex>> {
+  let v: rquickjs::Value<'js> = obj.get(key)?;
+  if v.is_undefined() || v.is_null() {
+    return Ok(None);
+  }
+  crate::bindings::page::options::string_or_regex_from_js(v)
+    .map(Some)
+    .map_err(|_| {
+      rquickjs::Error::new_from_js_message("filter options", "field", format!("{key}: expected string | RegExp"))
+    })
 }
 
 /// Pull a `LocatorLike` from a JS object property. Accepts either a
@@ -156,8 +174,8 @@ pub(crate) fn parse_locator_options_public<'js>(
     .as_object()
     .ok_or_else(|| rquickjs::Error::new_from_js_message("locator options", "", "expected an options object"))?;
   Ok(ParsedLocatorOptions {
-    has_text: get_string(obj, "hasText")?,
-    has_not_text: get_string(obj, "hasNotText")?,
+    has_text: get_text_matcher(obj, "hasText")?,
+    has_not_text: get_text_matcher(obj, "hasNotText")?,
     has: get_locator_like(ctx, obj, "has")?,
     has_not: get_locator_like(ctx, obj, "hasNot")?,
     visible: if allow_visible { get_bool(obj, "visible")? } else { None },

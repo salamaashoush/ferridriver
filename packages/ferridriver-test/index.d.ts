@@ -948,7 +948,9 @@ export interface StorageState {
 
 export interface BrowserContext {
   newPage(): Promise<Page>;
-  pages(): Page[];
+  // Playwright's pages() is synchronous; ferridriver resolves the list
+  // from the Rust browser state, so it is a promise here.
+  pages(): Promise<Page[]>;
   close(): Promise<void>;
   cookies(urls?: string | string[]): Promise<Cookie[]>;
   addCookies(cookies: Cookie[]): Promise<void>;

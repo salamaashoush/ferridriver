@@ -188,6 +188,25 @@ describe('events', () => {
     expect(loaded.url().includes('loadmark')).toBe(true);
   });
 
+  test('context_page_event', async ({ page, context, baseURL }) => {
+    // context.waitForEvent('page') resolves with the Page a concurrent
+    // newPage() creates — Playwright's browserContext.on('page'). The
+    // resolved wrapper is live (navigable, same context list).
+    await page.goto(dataUrl('<body>ctx-page</body>'));
+    const [created, opened] = await Promise.all([
+      context.waitForEvent('page', { timeout: 5000 }) as Promise<Page>,
+      context.newPage(),
+    ]);
+    try {
+      expect(typeof created.goto).toBe('function');
+      await created.goto(`${baseURL}/fx/landed`);
+      expect(created.url().includes('/fx/landed')).toBe(true);
+      expect((await context.pages()).length).toBe(2);
+    } finally {
+      await opened.close();
+    }
+  });
+
   test('context_pageclose', async ({ page, context }) => {
     await page.goto(dataUrl('<body>ctx-close</body>'));
     const newPage = await context.newPage();

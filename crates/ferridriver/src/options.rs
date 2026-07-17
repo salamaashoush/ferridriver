@@ -321,8 +321,11 @@ pub fn evaluation_script(
 /// * `visible` → ` >> visible=true|false`
 #[derive(Debug, Clone, Default)]
 pub struct FilterOptions {
-  pub has_text: Option<String>,
-  pub has_not_text: Option<String>,
+  /// Playwright: `hasText?: string | RegExp` — string is a
+  /// case-insensitive substring match, regex matches element text.
+  pub has_text: Option<StringOrRegex>,
+  /// Playwright: `hasNotText?: string | RegExp`.
+  pub has_not_text: Option<StringOrRegex>,
   pub has: Option<LocatorLike>,
   pub has_not: Option<LocatorLike>,
   /// When `Some(true)`, narrow to visible elements only. When `Some(false)`,
