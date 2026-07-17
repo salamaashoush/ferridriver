@@ -705,6 +705,7 @@ export interface Dialog {
   defaultValue(): string;
   accept(promptText?: string): Promise<void>;
   dismiss(): Promise<void>;
+  page(): Page | null;
 }
 
 export interface Download {
@@ -715,6 +716,7 @@ export interface Download {
   failure(): Promise<string | null>;
   cancel(): Promise<void>;
   delete(): Promise<void>;
+  page(): Page | null;
 }
 
 export interface FileChooser {

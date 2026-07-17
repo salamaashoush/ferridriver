@@ -153,6 +153,28 @@ fn fx_redirect(location: &str) -> Response<Body> {
   fx_build(302, "text/plain", Vec::new(), &[("location", location.to_string())])
 }
 
+/// Attachment that never completes: declares a large Content-Length and
+/// dribbles zero bytes until the client tears the connection down
+/// (which browsers do on `download.cancel()`). Keeps a download
+/// deterministically in-flight so cancel-vs-complete races always
+/// resolve as canceled. Bounded at ~30s as a safety cap.
+fn fx_download_hang() -> Response<Body> {
+  let stream = futures::stream::unfold(0u32, |i| async move {
+    if i >= 600 {
+      return None;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    Some((Ok::<_, std::io::Error>(vec![0u8; 1024]), i + 1))
+  });
+  Response::builder()
+    .status(200)
+    .header("content-type", "application/octet-stream")
+    .header("content-disposition", "attachment; filename=\"greeting.txt\"")
+    .header("content-length", "1048576")
+    .body(Body::from_stream(stream))
+    .unwrap_or_else(|_| fx_build(500, "text/plain", b"stream error".to_vec(), &[]))
+}
+
 fn percent_decode(s: &str) -> String {
   fn hex_val(b: u8) -> Option<u8> {
     match b {
@@ -319,6 +341,7 @@ async fn handle_fx(
         "attachment; filename=\"greeting.txt\"".to_string(),
       )],
     ),
+    "download-hang" => fx_download_hang(),
     "iframe" => fx_html("<!doctype html><body>outer<iframe src=\"/fx/inner\"></iframe></body>"),
     "inner" => fx_html("<!doctype html><body>inner</body>"),
     "proxy-info" => fx_json(&serde_json::json!({"url": format!("http://{}", state.proxy.addr)})),

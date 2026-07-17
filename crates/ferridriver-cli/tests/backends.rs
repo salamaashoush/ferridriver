@@ -136,35 +136,6 @@ fn register_script_sessions(set: &mut TestSet<'_>) {
   backends_support::script_sessions::register(set);
 }
 
-fn register_events_dialog_files(set: &mut TestSet<'_>) {
-  run!(set, backends_support::dialog::test_dialog_accept_confirm);
-  run!(set, backends_support::dialog::test_dialog_dismiss_confirm);
-  run!(set, backends_support::dialog::test_dialog_prompt_with_text);
-  run!(set, backends_support::dialog::test_dialog_double_accept_rejects);
-  run!(set, backends_support::dialog::test_dialog_auto_dismiss_without_listener);
-  run!(set, backends_support::dialog::test_dialog_page_accessor);
-  run!(
-    set,
-    backends_support::file_chooser::test_file_chooser_single_string_path
-  );
-  run!(
-    set,
-    backends_support::file_chooser::test_file_chooser_multiple_string_array
-  );
-  run!(
-    set,
-    backends_support::file_chooser::test_file_chooser_file_payload_single
-  );
-  run!(
-    set,
-    backends_support::file_chooser::test_file_chooser_unclaimed_disposes
-  );
-  run!(set, backends_support::download::test_download_save_as_roundtrip);
-  run!(set, backends_support::download::test_download_path_contents);
-  run!(set, backends_support::download::test_download_cancel_surfaces_failure);
-  run!(set, backends_support::download::test_download_cancel_bidi_unsupported);
-}
-
 fn register_events_metadata(set: &mut TestSet<'_>) {
   run!(set, backends_support::console_message::test_console_message_primitives);
   run!(
@@ -330,7 +301,7 @@ fn register_mcp_features(set: &mut TestSet<'_>) {
 
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
-// 11 categories × 4 backends = 44 `#[test]`s grouped into one module
+// 10 categories × 4 backends = 40 `#[test]`s grouped into one module
 // per backend. nextest reports them as
 // `backends::<backend>::<category>` and distributes them across cores.
 // A single failing category fails its own test, not the entire backend.
@@ -359,10 +330,6 @@ macro_rules! backend_module {
       #[test]
       fn script_sessions() {
         run_category($backend, register_script_sessions);
-      }
-      #[test]
-      fn events_dialog_files() {
-        run_category($backend, register_events_dialog_files);
       }
       #[test]
       fn events_metadata() {

@@ -92,6 +92,10 @@ pub struct WebKitBrowser {
   /// [`WebKitPage::attach`] to apply per-page overrides before the
   /// initial document becomes scriptable.
   context_options: Arc<Mutex<rustc_hash::FxHashMap<String, crate::options::BrowserContextOptions>>>,
+  /// Directory the browser writes downloads into; download behavior is
+  /// per-context on the `WebKit` protocol, so every created context gets
+  /// a `Playwright.setDownloadBehavior` pointing here.
+  downloads_dir: Arc<std::path::PathBuf>,
 }
 
 impl WebKitBrowser {
@@ -156,6 +160,7 @@ impl WebKitBrowser {
       default_context,
       version,
       context_options: Arc::new(Mutex::new(rustc_hash::FxHashMap::default())),
+      downloads_dir,
     })
   }
 
@@ -191,6 +196,22 @@ impl WebKitBrowser {
       .map_err(BrowserError::from)?;
     let parsed: CreateContextResult =
       serde_json::from_value(resp).map_err(|e| FerriError::protocol("Playwright.createContext", e.to_string()))?;
+    // Download behavior is per-context on the WebKit protocol
+    // (Playwright's WKBrowserContext.initialize sends it for every
+    // context) — without it, downloads in a fresh context are denied
+    // and terminate as 'cancelled'.
+    self
+      .root
+      .send(
+        "Playwright.setDownloadBehavior",
+        json!({
+          "behavior": "allow",
+          "downloadPath": self.downloads_dir.to_string_lossy(),
+          "browserContextId": parsed.browser_context_id.clone(),
+        }),
+      )
+      .await
+      .map_err(BrowserError::from)?;
     Ok(parsed.browser_context_id)
   }
 
@@ -360,6 +381,7 @@ impl WebKitBrowser {
 /// into per-page [`crate::download::Download`] handles.
 fn spawn_download_listener(root: &Session, pages: Arc<Mutex<Vec<WebKitPage>>>, downloads_dir: Arc<std::path::PathBuf>) {
   let mut rx = root.events();
+  let cancel_session = root.clone();
   tokio::spawn(async move {
     while let Some(env) = rx.recv().await {
       match env.method.as_deref() {
@@ -385,7 +407,23 @@ fn spawn_download_listener(root: &Session, pages: Arc<Mutex<Vec<WebKitPage>>>, d
           let Some(arc_page) = page.page_backref.upgrade() else {
             continue;
           };
-          let canceler: crate::download::DownloadCanceler = std::sync::Arc::new(|| Box::pin(async { Ok(()) }));
+          // Mirrors Playwright's `wkBrowser.ts::cancelDownload` —
+          // `Playwright.cancelDownload {uuid}` on the browser session;
+          // the terminal state then arrives via the regular
+          // `Playwright.downloadFinished` event with error 'canceled'.
+          let cancel_uuid = uuid.clone();
+          let session_for_cancel = cancel_session.clone();
+          let canceler: crate::download::DownloadCanceler = std::sync::Arc::new(move || {
+            let session = session_for_cancel.clone();
+            let uuid = cancel_uuid.clone();
+            Box::pin(async move {
+              session
+                .send("Playwright.cancelDownload", json!({ "uuid": uuid }))
+                .await
+                .map(|_| ())
+                .map_err(|e| crate::error::FerriError::Backend(format!("Playwright.cancelDownload: {e}")))
+            })
+          });
           let download =
             crate::download::Download::new(&arc_page, uuid, url, String::new(), (*downloads_dir).clone(), canceler);
           // Register internally only; do NOT fire `did_open` (which
