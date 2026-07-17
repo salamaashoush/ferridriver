@@ -672,6 +672,26 @@ export interface Frame {
   childFrames(): Frame[];
 }
 
+export interface WebSocket {
+  url(): string;
+  isClosed(): boolean;
+  // Accepts a bare timeout number (ferridriver extension mirroring
+  // page.waitForEvent) or Playwright's { timeout } bag.
+  waitForEvent(
+    event: 'framesent' | 'framereceived' | 'socketerror' | 'close',
+    optionsOrTimeout?: number | { timeout?: number },
+  ): Promise<{ event: string; payload: string | null; error: string | null }>;
+}
+
+export interface WebSocketRoute {
+  url(): string;
+  send(message: string | Uint8Array | Buffer): void;
+  close(options?: { code?: number; reason?: string }): void;
+  onMessage(handler: (message: string | Uint8Array) => void): void;
+  onClose(handler: (code?: number, reason?: string) => void): void;
+  connectToServer(): WebSocketRoute;
+}
+
 export interface ConsoleMessage {
   type(): string;
   text(): string;
@@ -855,7 +875,7 @@ export interface Page {
   routeFromHAR(har: string, options?: { notFound?: 'abort' | 'fallback'; url?: string | RegExp }): Promise<void>;
   unroute(url: string | RegExp | ((url: URL) => boolean), handler?: (route: Route, request: Request) => void | Promise<void>): Promise<void>;
   unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
-  routeWebSocket(url: string | RegExp | ((url: URL) => boolean), handler: (ws: unknown) => void | Promise<void>): Promise<void>;
+  routeWebSocket(url: string | RegExp | ((url: URL) => boolean), handler: (ws: WebSocketRoute) => void | Promise<void>): Promise<void>;
 
   screenshot(options?: ScreenshotOptions): Promise<Uint8Array>;
   pdf(options?: Record<string, unknown>): Promise<Uint8Array>;
@@ -932,6 +952,7 @@ export interface BrowserContext {
   exposeFunction(name: string, callback: Function): Promise<Disposable>;
   exposeBinding(name: string, callback: Function, options?: { handle?: boolean }): Promise<Disposable>;
   route(url: string | RegExp | ((url: URL) => boolean), handler: (route: Route, request: Request) => void | Promise<void>, options?: { times?: number }): Promise<void>;
+  routeWebSocket(url: string | RegExp | ((url: URL) => boolean), handler: (ws: WebSocketRoute) => void | Promise<void>): Promise<void>;
   unroute(url: string | RegExp | ((url: URL) => boolean), handler?: (route: Route, request: Request) => void | Promise<void>): Promise<void>;
   unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
   waitForEvent(event: string, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number }): Promise<unknown>;

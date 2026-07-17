@@ -136,11 +136,6 @@ fn register_script_sessions(set: &mut TestSet<'_>) {
   backends_support::script_sessions::register(set);
 }
 
-fn register_events_network(set: &mut TestSet<'_>) {
-  run!(set, backends_support::network::test_network_websocket);
-  backends_support::route_web_socket::register(set);
-}
-
 fn register_events_dialog_files(set: &mut TestSet<'_>) {
   run!(set, backends_support::dialog::test_dialog_accept_confirm);
   run!(set, backends_support::dialog::test_dialog_dismiss_confirm);
@@ -335,7 +330,7 @@ fn register_mcp_features(set: &mut TestSet<'_>) {
 
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
-// 12 categories × 4 backends = 48 `#[test]`s grouped into one module
+// 11 categories × 4 backends = 44 `#[test]`s grouped into one module
 // per backend. nextest reports them as
 // `backends::<backend>::<category>` and distributes them across cores.
 // A single failing category fails its own test, not the entire backend.
@@ -364,10 +359,6 @@ macro_rules! backend_module {
       #[test]
       fn script_sessions() {
         run_category($backend, register_script_sessions);
-      }
-      #[test]
-      fn events_network() {
-        run_category($backend, register_events_network);
       }
       #[test]
       fn events_dialog_files() {

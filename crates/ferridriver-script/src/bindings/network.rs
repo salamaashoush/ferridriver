@@ -392,14 +392,29 @@ impl WebSocketJs {
   }
 
   /// Mirrors Playwright `webSocket.waitForEvent(event, options?)`.
-  /// Resolves with `{ event, payload, error }`.
+  /// Accepts a bare timeout number (the same ferridriver extension as
+  /// `page.waitForEvent`) or the `{ timeout }` bag. Resolves with
+  /// `{ event, payload, error }`.
   #[qjs(rename = "waitForEvent")]
   pub async fn wait_for_event<'js>(
     &self,
     ctx: Ctx<'js>,
     event: String,
-    timeout_ms: Option<f64>,
+    options: rquickjs::function::Opt<Value<'js>>,
   ) -> rquickjs::Result<Value<'js>> {
+    let timeout_ms = match options.0 {
+      Some(v) if v.is_number() => v.as_number(),
+      Some(v) if v.is_object() => {
+        #[derive(serde::Deserialize, Default)]
+        #[serde(rename_all = "camelCase", default)]
+        struct JsWaitTimeout {
+          timeout: Option<f64>,
+        }
+        let parsed: JsWaitTimeout = crate::bindings::convert::serde_from_js(&ctx, v)?;
+        parsed.timeout
+      },
+      _ => None,
+    };
     let timeout = std::time::Duration::from_millis(timeout_ms.map_or(30_000, crate::bindings::convert::ms_f64_to_u64));
     let mut rx = self.inner.subscribe();
     let event_lc = event.to_ascii_lowercase();
