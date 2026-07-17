@@ -46,9 +46,13 @@ ferridriver-script       QuickJS engine: JS/TS step bodies + `ferridriver run` s
 ferridriver-expect       Auto-retrying assertions (Playwright poll schedule); thin shims in bindings
 ```
 
-There is no TypeScript CLI or test package. JavaScript/TypeScript BDD step
-files run natively (rolldown bundle -> QuickJS bytecode -> core
-`TestRunner`) via `ferridriver bdd --steps`. No Node/Bun in the run path.
+There is no TypeScript CLI. JavaScript/TypeScript test files
+(`tests/e2e/*.test.ts` via `ferridriver test`) and BDD step files (via
+`ferridriver bdd --steps`) run natively — rolldown bundle -> QuickJS
+bytecode -> core `TestRunner`. No Node/Bun in the run path.
+`packages/ferridriver-test` is a types-only package (`@ferridriver/test`)
+backing the native `import { test, expect } from '@ferridriver/test'`
+module.
 
 Dependency flow: `ferridriver-cli` -> `ferridriver-mcp` -> `ferridriver` <- `ferridriver-node`
 
@@ -141,20 +145,40 @@ backend/
 
 ## Testing
 
-All Rust. `just test` builds the CLI binary, runs all Rust workspace tests
-(including backend integration tests across all 4 backends), then runs the
-BDD feature suite through the `ferridriver` binary. Tests require a
-Chrome/Chromium binary (install with `ferridriver install --with-deps chromium`).
+`just test` runs the full gate in order: Rust workspace tests, the CLI
+integration binaries serially (including the per-backend MCP smoke
+suite `crates/ferridriver-cli/tests/mcp_smoke.rs`), the TypeScript e2e
+suite (`./target/debug/ferridriver test`, `tests/e2e/*.test.ts` across
+the 4 backend projects in `ferridriver.toml`), and the BDD feature
+suite. Tests require a Chrome/Chromium binary (install with
+`ferridriver install --with-deps chromium`) plus the Firefox/WebKit
+builds for the non-CDP projects, and the fixture web server binary
+(`ferridriver-fixtures`, built by the recipe) that `ferridriver.toml`
+wires in as a `webServer` command.
 
-The CLI backend tests use `FERRIDRIVER_BIN` env var pointing to the built binary (set
-automatically by `just test`). The backend test binary defaults to `target/debug/ferridriver`
-if the env var is not set.
+Browser BEHAVIOUR coverage lives in `tests/e2e/*.test.ts` — Playwright-
+shaped specs run natively by the QuickJS test runner on every backend
+project (`just test-e2e`, or `--project cdp-pipe|cdp-raw|bidi|webkit`
+to narrow). The Rust `mcp_smoke` suite retains only what the runner
+cannot cover: MCP tool dispatch, `run_script` session semantics, the
+DEFLATE-zip trace/HAR validators, multi-page + session binding, and the
+rmcp protocol features. Add browser-behaviour tests to `tests/e2e/`,
+not to the Rust harness.
+
+The CLI integration tests use the `FERRIDRIVER_BIN` env var pointing at
+the built binary (set automatically by `just test`) and default to
+`target/debug/ferridriver` when unset. They are serial-only
+(`--test-threads=1`): parallel browser storms starve each other.
 
 To run BDD features manually: `cargo run --bin ferridriver -- bdd --steps 'tests/steps/**/*.{js,ts}' tests/features/`
 
 The slimmed NAPI addon still has core-binding bun tests under
 `crates/ferridriver-node/test/`; build it with
 `cd crates/ferridriver-node && bun run build:debug` and run `bun test`.
+Type-check the e2e specs with `cd tests && bun x tsc --noEmit -p
+tsconfig.json`; the spec-facing types live in
+`packages/ferridriver-test/index.d.ts` and must be extended alongside
+any new binding surface.
 
 ## Git Commits
 
@@ -241,7 +265,7 @@ effect is a false completion. For every Playwright option you wire through,
 there must be an integration test that:
 
 1. Exercises the option via the public JS API (NAPI via `bun test`, QuickJS
-   via `run_script` in `crates/ferridriver-cli/tests/backends.rs`).
+   via a `tests/e2e/*.test.ts` spec run by `ferridriver test`).
 2. Observes a DOM-side or protocol-side effect that ONLY occurs when the
    option took effect (e.g. mousedown firing at `sourcePosition` rather than
    the element center, `trial: true` suppressing all mouse events, `steps`
@@ -372,10 +396,13 @@ Run every time, before every commit:
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cd crates/ferridriver-node && bun run build:debug && bun test
+FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver cargo test --workspace --exclude ferridriver-cli
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
-  cargo test -p ferridriver-cli --test backends -- --test-threads=1
+  cargo test -p ferridriver-cli -- --test-threads=1
+./target/debug/ferridriver test
+./target/debug/ferridriver bdd tests/features/
+cd crates/ferridriver-node && bun run build:debug && bun test
+cd tests && bun x tsc --noEmit -p tsconfig.json
 ```
 
 If a pre-existing test is failing, fix it in the same commit. "Pre-existing failure unrelated to this task" / "flagging for follow-up" is the pattern to kill.
@@ -403,7 +430,7 @@ If a pre-existing test is failing, fix it in the same commit. "Pre-existing fail
 - **`while let Ok(e) = rx.recv().await` on a tokio broadcast receiver is a latent kill-switch** — one `Lagged` error during an event storm exits the loop and silently disables the listener for the rest of the page's life. Use `crate::events::recv_tolerant` (skips `Lagged`, exits only on `Closed`).
 - **State-mutating protocol consumers must never ride tokio broadcast at all** — `Lagged` tolerance still LOSES the dropped events, and a lost `Fetch.requestPaused` / `executionContextCreated` / `downloadWillBegin` corrupts tracker state or hangs the page. Use the lossless wire-ordered taps: CDP `tap_event_methods`/`tap_event_domains`, `BidiTransport::tap_events`, WebKit route subscriptions (all unbounded mpsc). Broadcast is only for best-effort fanout (screencast frames, transient waits).
 - **A browser child spawned with `Stdio::piped()` stderr must have that pipe drained for its whole life** (`backend/process.rs::drain_child_stderr`). Chrome logs every renderer console message to stderr; at 64KB unread (~1000 `console.log`s) it blocks in `write(2)` on the thread that routes DevTools traffic and ALL CDP commands/events freeze — observed as `Runtime.evaluate` 30s timeouts. Playwright drains unconditionally (`processLauncher.ts`). Regression test: `page_api.rs::console_storm_is_lossless`.
-- **Backend integration tests are serial-only** (`cargo test -p ferridriver-cli --test backends -- --test-threads=1`). Under default parallelism (bare `cargo test`), dozens of concurrent browsers make Firefox exit with SIGKILL during startup and ~20/81 tests cascade-fail with "browser exited" — measured identically at a clean baseline, so don't attribute it to the diff under test.
+- **CLI integration tests are serial-only** (`cargo test -p ferridriver-cli -- --test-threads=1`, including the `mcp_smoke` suite). Under default parallelism (bare `cargo test`), dozens of concurrent browsers make Firefox exit with SIGKILL during startup and tests cascade-fail with "browser exited" — measured identically at a clean baseline, so don't attribute it to the diff under test.
 
 ### Response brevity
 

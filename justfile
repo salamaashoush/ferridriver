@@ -21,30 +21,39 @@ alias tf := test-fast
 check:
   cargo check --all-targets
 
-# Run all tests: build CLI binary, run all Rust crates (incl. all backends), BDD features
-# Backend integration tests run serially: under bare `cargo test`
+# Run all tests: Rust workspace, CLI infra + MCP smoke (serial), the
+# TS e2e suite (4 projects), and the BDD feature suite.
+# CLI integration tests run serially: under bare `cargo test`
 # parallelism, dozens of concurrent browsers starve each other and
-# Firefox dies mid-startup (~20/81 cascade failures at any commit).
+# Firefox dies mid-startup with cascade failures at any commit.
 test:
   cargo build --bin ferridriver --bin ferridriver-fixtures
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --workspace --exclude ferridriver-cli
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli -- --test-threads=1
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo run --bin ferridriver -- bdd tests/features/
+  ./target/debug/ferridriver test
+  ./target/debug/ferridriver bdd tests/features/
 
-# Run all tests with maximum parallelism
+# Run all tests with maximum parallelism (browser-heavy suites race;
+# see the serial `test` recipe for the trustworthy gate)
 test-fast:
   cargo build --bin ferridriver --bin ferridriver-fixtures
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --exclude ferridriver-cli & \
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_pipe" & \
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_raw" & \
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_bidi" & \
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_webkit" & \
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test mcp_smoke -- "cdp_pipe::" & \
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test mcp_smoke -- "cdp_raw::" & \
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test mcp_smoke -- "bidi::" & \
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test mcp_smoke -- "webkit::" & \
   wait
 
-# Run specific backend test (use underscores: cdp_ws, cdp_pipe, webkit, bidi)
+# Run one backend: the TS e2e project plus its MCP smoke module.
+# Accepts either naming (cdp-pipe/cdp_pipe, cdp-raw/cdp_raw, bidi, webkit).
 test-backend backend:
-  cargo build --bin ferridriver
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_{{backend}}" --nocapture
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cargo build --bin ferridriver --bin ferridriver-fixtures
+  project="$(echo "{{backend}}" | tr '_' '-')"
+  module="$(echo "{{backend}}" | tr '-' '_')"
+  ./target/debug/ferridriver test --project "$project"
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test mcp_smoke -- "${module}::" --test-threads=1
 
 # Lint (default-members; ferridriver-node excluded)
 lint:

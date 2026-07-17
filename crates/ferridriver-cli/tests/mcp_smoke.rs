@@ -11,23 +11,26 @@
   clippy::format_push_string,
   clippy::semicolon_if_nothing_returned
 )]
-//! Integration tests for ferridriver across all backends.
+//! MCP smoke suite: the retained per-backend coverage of the MCP wire
+//! itself, after the browser-behaviour e2e suite moved to
+//! `tests/e2e/*.test.ts` (run by `ferridriver test`).
 //!
-//! Architecture: ONE browser per backend, ALL tests run sequentially on it.
-//! This avoids spawning many browser processes per backend; each test navigates
-//! to a fresh page so state doesn't leak.
+//! What stays here and why:
+//! - tool dispatch (`navigate` / `evaluate` / `snapshot` / `screenshot`
+//!   / `search_page` / `diagnostics` / `page`) — MCP-session semantics
+//!   with no runner analogue;
+//! - `run_script` session state (`backends_support::script_sessions`) —
+//!   vars/globalThis persistence + poison-timeout VM recovery;
+//! - the zip validators (`backends_support::{tracing_har,trace}`) —
+//!   their payload entries are DEFLATE-compressed and the QuickJS
+//!   sandbox has no inflater, so content-level assertions live here;
+//! - multi-page, session binding, the `run_bdd` tool, extension tools,
+//!   and rmcp protocol features.
 //!
-//! The MCP surface is scripting-focused: observation via `navigate` / `snapshot`
-//! / `screenshot` / `evaluate` / `search_page` / `diagnostics` / `page`, and
-//! action via `run_script` with `page` / `context` / `request` globals.
-//!
-//! NOTE for next sessions: **do not extend this file further**. The
-//! shared MCP client and payload-extraction helpers live in
-//! `backends_support::client`. When you add a new group of tests,
-//! create a new file under `tests/backends_support/` named by the
-//! behaviour it exercises (not by session-local labels like phase /
-//! task / rule numbers) and register its functions in
-//! `run_all_tests` below.
+//! Architecture: ONE browser per (backend, category), tests sequential
+//! on it; each test navigates to a fresh page so state doesn't leak.
+//! Browser-behaviour coverage belongs in `tests/e2e/` — add here only
+//! when the behaviour is MCP-wire-specific.
 
 mod backends_support;
 
