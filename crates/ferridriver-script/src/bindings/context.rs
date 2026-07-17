@@ -51,6 +51,14 @@ impl BrowserContextJs {
     crate::bindings::clock::ClockJs::new(self.inner.clone())
   }
 
+  /// `context.request` — the context-bound HTTP client sharing this
+  /// context's cookies both ways (Playwright: `browserContext.request`;
+  /// `page.request` returns the same context-bound client).
+  #[qjs(get, rename = "request")]
+  pub fn request(&self) -> crate::bindings::http_client::HttpClientJs {
+    crate::bindings::http_client::HttpClientJs::new(Arc::new(self.inner.http_client()))
+  }
+
   /// Playwright: `browserContext.newCDPSession(page)`. Attaches a raw
   /// CDP session to the page's target. Chromium-only. Playwright also
   /// accepts an OOPIF `Frame`; ferridriver currently supports the

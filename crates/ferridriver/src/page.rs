@@ -311,6 +311,15 @@ impl Page {
     self.context_ref.as_ref()
   }
 
+  /// The context-bound HTTP client backing Playwright's `page.request`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:137`:
+  /// `this.request = this._browserContext.request`). `None` only for a
+  /// page constructed without a context handle.
+  #[must_use]
+  pub fn http_client(&self) -> Option<crate::http_client::HttpClient> {
+    self.context().map(crate::context::ContextRef::http_client)
+  }
+
   /// Playwright: `page.opener(): Promise<null | Page>` —
   /// `/tmp/playwright/packages/playwright-core/src/client/page.ts`.
   /// The page that opened this popup via `window.open` /

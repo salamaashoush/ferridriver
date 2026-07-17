@@ -264,6 +264,18 @@ impl Page {
     Ok(crate::context::BrowserContext::wrap(ctx))
   }
 
+  /// Playwright: `page.request` — the owning context's context-bound
+  /// API request client (`page.request` IS `context.request`). Cookies
+  /// flow both ways between these requests and the browser context.
+  #[napi(getter)]
+  pub fn request(&self) -> Result<crate::http_client::HttpClient> {
+    let client = self
+      .inner
+      .http_client()
+      .ok_or_else(|| napi::Error::from_reason("page has no associated browser context"))?;
+    Ok(crate::http_client::HttpClient::wrap(client))
+  }
+
   #[napi(getter)]
   pub fn keyboard(&self) -> Keyboard {
     Keyboard {

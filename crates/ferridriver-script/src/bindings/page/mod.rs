@@ -1155,6 +1155,19 @@ impl PageJs {
     rquickjs::IntoJs::into_js(instance, &ctx)
   }
 
+  /// `page.request` — the owning context's context-bound HTTP client
+  /// (Playwright: `page.request` IS `context.request`). Cookies flow
+  /// both ways between these requests and the browser context.
+  #[qjs(get, rename = "request")]
+  pub fn request<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let Some(client) = self.inner.http_client() else {
+      return Ok(rquickjs::Value::new_null(ctx.clone()));
+    };
+    let wrapper = crate::bindings::http_client::HttpClientJs::new(std::sync::Arc::new(client));
+    let instance = rquickjs::class::Class::instance(ctx.clone(), wrapper)?;
+    rquickjs::IntoJs::into_js(instance, &ctx)
+  }
+
   pub fn context<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     let Some(cref) = self.inner.context() else {
       return Ok(rquickjs::Value::new_null(ctx.clone()));

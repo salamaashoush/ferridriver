@@ -251,12 +251,17 @@ async fn handle_api_echo(
   Path(path): Path<String>,
   headers: HeaderMap,
   method: axum::http::Method,
+  RawQuery(query): RawQuery,
   body: axum::body::Bytes,
 ) -> Response<Body> {
   let body_text = String::from_utf8_lossy(&body).to_string();
   let parsed_json: serde_json::Value = serde_json::from_str(&body_text).unwrap_or(serde_json::Value::Null);
+  let url = match query {
+    Some(q) => format!("/_api/{path}?{q}"),
+    None => format!("/_api/{path}"),
+  };
   fx_json(&serde_json::json!({
-    "url": format!("/_api/{path}"),
+    "url": url,
     "method": method.to_string(),
     "headers": headers_json(&headers),
     "data": body_text,
@@ -307,6 +312,20 @@ async fn handle_fx(
         .map(|c| ("set-cookie", c))
         .collect();
       fx_build(200, "text/plain", b"cookie-set".to_vec(), &cookies)
+    },
+    // Sets cookies (each `c` param, verbatim) AND 302-redirects to `loc`
+    // (default `/fx/landed`) — proves redirect-hop Set-Cookie capture.
+    "set-cookie-redirect" => {
+      let mut extra: Vec<(&str, String)> = query_values(query.as_deref(), "c")
+        .into_iter()
+        .map(|c| ("set-cookie", c))
+        .collect();
+      let loc = query_values(query.as_deref(), "loc")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "/fx/landed".to_string());
+      extra.push(("location", loc));
+      fx_build(302, "text/plain", Vec::new(), &extra)
     },
     "auth" => {
       let authed = headers

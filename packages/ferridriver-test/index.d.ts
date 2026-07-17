@@ -908,6 +908,9 @@ export interface Page {
   mouse: Mouse;
   touchscreen: Touchscreen;
   clock: Clock;
+  // Context-bound API request client (page.request IS context.request):
+  // shares the browser context's cookies in both directions.
+  request: APIRequestContext;
   context(): BrowserContext;
   opener(): Promise<Page | null>;
   video(): Video | null;
@@ -986,6 +989,9 @@ export interface BrowserContext {
   browser(): Browser | null;
   clock: Clock;
   tracing: Tracing;
+  // Context-bound API request client sharing this context's cookies in
+  // both directions.
+  request: APIRequestContext;
   routeFromHAR(har: string, options?: { notFound?: 'abort' | 'fallback'; url?: string | RegExp; update?: boolean; updateContent?: 'embed' | 'attach' }): Promise<void>;
   // ferridriver extension: arm video recording for pages opened after
   // this call (Playwright takes recordVideo as a context-creation
@@ -1084,7 +1090,10 @@ export interface APIResponse {
 export interface APIRequestOptions {
   headers?: Record<string, string>;
   data?: string | Uint8Array | Buffer | object;
-  form?: Record<string, string>;
+  // ferridriver extension: explicit JSON body (Playwright routes
+  // serializable bodies through `data`).
+  json?: unknown;
+  form?: Record<string, string | number | boolean>;
   multipart?: Record<string, string | { name: string; mimeType: string; buffer: Uint8Array | Buffer }>;
   params?: Record<string, string | number | boolean>;
   timeout?: number;

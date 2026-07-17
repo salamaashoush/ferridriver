@@ -19,18 +19,24 @@ pub struct HttpClientOptions {
   pub ignore_https_errors: Option<bool>,
 }
 
-/// Per-request options.
+/// Per-request options. Mirrors Playwright's `APIRequestContext`
+/// option bag (`packages/playwright-core/types/types.d.ts`): `headers`
+/// a plain object, `params`/`form` plain objects with
+/// string/number/boolean values, `timeout` in milliseconds.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct FetchOptions {
   /// Extra headers for this request.
-  pub headers: Option<Vec<Vec<String>>>,
-  /// JSON request body (auto-serializes, sets Content-Type).
+  pub headers: Option<std::collections::HashMap<String, String>>,
+  /// Request body: a string is sent raw, any other serializable value
+  /// is sent as JSON (Playwright's `data` routing).
   pub data: Option<serde_json::Value>,
-  /// URL-encoded form data as `[[key, value], ...]`.
-  pub form: Option<Vec<Vec<String>>>,
-  /// Query string parameters as `[[key, value], ...]`.
-  pub params: Option<Vec<Vec<String>>>,
+  /// URL-encoded form data.
+  #[napi(ts_type = "Record<string, string | number | boolean>")]
+  pub form: Option<std::collections::HashMap<String, serde_json::Value>>,
+  /// Query string parameters.
+  #[napi(ts_type = "Record<string, string | number | boolean>")]
+  pub params: Option<std::collections::HashMap<String, serde_json::Value>>,
   /// Timeout in milliseconds.
   pub timeout: Option<f64>,
   /// Fail with error on 4xx/5xx.
@@ -39,52 +45,60 @@ pub struct FetchOptions {
   pub max_redirects: Option<i32>,
 }
 
+/// Lower a `params`/`form` scalar to its string form. Playwright's
+/// types admit `string | number | boolean` — anything else is a caller
+/// error.
+fn scalar_to_string(field: &str, key: &str, value: &serde_json::Value) -> Result<String> {
+  match value {
+    serde_json::Value::String(s) => Ok(s.clone()),
+    serde_json::Value::Number(n) => Ok(n.to_string()),
+    serde_json::Value::Bool(b) => Ok(b.to_string()),
+    other => Err(napi::Error::from_reason(format!(
+      "{field}[{key:?}] must be a string, number, or boolean (got {other})"
+    ))),
+  }
+}
+
+fn scalar_map_to_pairs(
+  field: &str,
+  map: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<Vec<(String, String)>> {
+  map
+    .iter()
+    .map(|(k, v)| scalar_to_string(field, k, v).map(|s| (k.clone(), s)))
+    .collect()
+}
+
 impl FetchOptions {
-  fn to_core(&self) -> ferridriver::http_client::RequestOptions {
-    ferridriver::http_client::RequestOptions {
+  fn to_core(&self) -> Result<ferridriver::http_client::RequestOptions> {
+    // Playwright's `data`: a string is a raw body, any other
+    // serializable value goes as JSON.
+    let (data, json_data) = match &self.data {
+      Some(serde_json::Value::String(s)) => (Some(s.clone().into_bytes()), None),
+      Some(value) => (None, Some(value.clone())),
+      None => (None, None),
+    };
+    Ok(ferridriver::http_client::RequestOptions {
       method: None,
-      headers: self.headers.as_ref().map(|h| {
-        h.iter()
-          .filter_map(|pair| {
-            if pair.len() == 2 {
-              Some((pair[0].clone(), pair[1].clone()))
-            } else {
-              None
-            }
-          })
-          .collect()
-      }),
-      json_data: self.data.clone(),
-      data: None,
-      form: self.form.as_ref().map(|f| {
-        f.iter()
-          .filter_map(|pair| {
-            if pair.len() == 2 {
-              Some((pair[0].clone(), pair[1].clone()))
-            } else {
-              None
-            }
-          })
-          .collect()
-      }),
-      params: self.params.as_ref().map(|p| {
-        p.iter()
-          .filter_map(|pair| {
-            if pair.len() == 2 {
-              Some((pair[0].clone(), pair[1].clone()))
-            } else {
-              None
-            }
-          })
-          .collect()
-      }),
+      headers: self
+        .headers
+        .as_ref()
+        .map(|h| h.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+      json_data,
+      data,
+      form: self.form.as_ref().map(|f| scalar_map_to_pairs("form", f)).transpose()?,
+      params: self
+        .params
+        .as_ref()
+        .map(|p| scalar_map_to_pairs("params", p))
+        .transpose()?,
       timeout: self.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
       fail_on_status_code: self.fail_on_status_code,
       max_redirects: self.max_redirects.map(|m| m as u32),
       // The Node binding is the trusted Playwright-in-Rust surface, not
       // the script sandbox — no network guard is imposed here.
       net_guard: None,
-    }
+    })
   }
 }
 
@@ -168,6 +182,12 @@ pub struct HttpClient {
   inner: ferridriver::http_client::HttpClient,
 }
 
+impl HttpClient {
+  pub(crate) fn wrap(inner: ferridriver::http_client::HttpClient) -> Self {
+    Self { inner }
+  }
+}
+
 #[napi]
 impl HttpClient {
   /// Create a new HTTP client.
@@ -202,7 +222,7 @@ impl HttpClient {
   /// Send a GET request.
   #[napi]
   pub async fn get(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core());
+    let opts = options.map(|o| o.to_core()).transpose()?;
     let resp = self.inner.get(&url, opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
@@ -210,7 +230,7 @@ impl HttpClient {
   /// Send a POST request.
   #[napi]
   pub async fn post(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core());
+    let opts = options.map(|o| o.to_core()).transpose()?;
     let resp = self.inner.post(&url, opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
@@ -218,7 +238,7 @@ impl HttpClient {
   /// Send a PUT request.
   #[napi]
   pub async fn put(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core());
+    let opts = options.map(|o| o.to_core()).transpose()?;
     let resp = self.inner.put(&url, opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
@@ -226,7 +246,7 @@ impl HttpClient {
   /// Send a DELETE request.
   #[napi]
   pub async fn delete(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core());
+    let opts = options.map(|o| o.to_core()).transpose()?;
     let resp = self.inner.delete(&url, opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
@@ -234,7 +254,7 @@ impl HttpClient {
   /// Send a PATCH request.
   #[napi]
   pub async fn patch(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core());
+    let opts = options.map(|o| o.to_core()).transpose()?;
     let resp = self.inner.patch(&url, opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
@@ -242,7 +262,7 @@ impl HttpClient {
   /// Send a HEAD request.
   #[napi]
   pub async fn head(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core());
+    let opts = options.map(|o| o.to_core()).transpose()?;
     let resp = self.inner.head(&url, opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
@@ -250,7 +270,7 @@ impl HttpClient {
   /// Send a generic HTTP request.
   #[napi]
   pub async fn fetch(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core());
+    let opts = options.map(|o| o.to_core()).transpose()?;
     let resp = self.inner.fetch(&url, opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }

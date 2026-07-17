@@ -8,45 +8,83 @@ use ferridriver::http_client::{HttpClient, HttpResponse, NetGuard, RequestOption
 use rquickjs::function::Opt;
 use rquickjs::promise::Promised;
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
+use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
 use crate::bindings::convert::FerriResultCtxExt;
 use crate::bindings::convert::serde_from_js;
 
-/// Shape of per-request options accepted from JS.
-///
-/// Mirrors `ferridriver::http_client::RequestOptions` but uses
-/// `serde::Deserialize` so callers can pass a plain object:
-/// `request.post('/api', { json: { x: 1 }, headers: { 'X-A': 'b' } })`.
+/// Shape of per-request options accepted from JS. Playwright's
+/// option-bag shapes (`packages/playwright-core/src/client/fetch.ts`,
+/// types `APIRequestContext.get(url, options)`): camelCase keys,
+/// `headers` a plain object, `params`/`form` plain objects with
+/// string/number/boolean values, `timeout` in milliseconds. `json` is a
+/// ferridriver extension (explicit JSON body; Playwright routes
+/// serializable bodies through `data`).
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 struct JsRequestOptions {
-  headers: Option<Vec<(String, String)>>,
-  data: Option<Vec<u8>>,
+  headers: Option<FxHashMap<String, String>>,
+  data: Option<serde_json::Value>,
   json: Option<serde_json::Value>,
-  form: Option<Vec<(String, String)>>,
-  params: Option<Vec<(String, String)>>,
-  /// Per-request timeout in milliseconds.
-  timeout_ms: Option<u64>,
+  form: Option<FxHashMap<String, serde_json::Value>>,
+  params: Option<FxHashMap<String, serde_json::Value>>,
+  timeout: Option<u64>,
   fail_on_status_code: Option<bool>,
   max_redirects: Option<u32>,
 }
 
+/// Lower a `params`/`form` scalar to its string form. Playwright's types
+/// admit `string | number | boolean` — anything else is a caller error.
+fn scalar_to_string(field: &str, key: &str, value: &serde_json::Value) -> Result<String, String> {
+  match value {
+    serde_json::Value::String(s) => Ok(s.clone()),
+    serde_json::Value::Number(n) => Ok(n.to_string()),
+    serde_json::Value::Bool(b) => Ok(b.to_string()),
+    other => Err(format!(
+      "{field}[{key:?}] must be a string, number, or boolean (got {other})"
+    )),
+  }
+}
+
+fn scalar_map_to_pairs(
+  field: &str,
+  map: FxHashMap<String, serde_json::Value>,
+) -> Result<Vec<(String, String)>, String> {
+  map
+    .into_iter()
+    .map(|(k, v)| scalar_to_string(field, &k, &v).map(|s| (k, s)))
+    .collect()
+}
+
 impl JsRequestOptions {
-  fn into_core(self) -> RequestOptions {
-    RequestOptions {
+  fn into_core(self) -> Result<RequestOptions, String> {
+    // Playwright's `data`: a string/Buffer is a raw body, any other
+    // serializable value is sent as JSON (client/fetch.ts
+    // `serializePostData` routing).
+    let (data, json_data) = match (self.data, self.json) {
+      (_, Some(json)) => (None, Some(json)),
+      (Some(serde_json::Value::String(s)), None) => (Some(s.into_bytes()), None),
+      (Some(value), None) if value.is_array() => match serde_json::from_value::<Vec<u8>>(value.clone()) {
+        Ok(bytes) => (Some(bytes), None),
+        Err(_) => (None, Some(value)),
+      },
+      (Some(value), None) => (None, Some(value)),
+      (None, None) => (None, None),
+    };
+    Ok(RequestOptions {
       method: None,
-      headers: self.headers,
-      data: self.data,
-      json_data: self.json,
-      form: self.form,
-      params: self.params,
-      timeout: self.timeout_ms.map(Duration::from_millis),
+      headers: self.headers.map(|h| h.into_iter().collect()),
+      data,
+      json_data,
+      form: self.form.map(|f| scalar_map_to_pairs("form", f)).transpose()?,
+      params: self.params.map(|p| scalar_map_to_pairs("params", p)).transpose()?,
+      timeout: self.timeout.map(Duration::from_millis),
       fail_on_status_code: self.fail_on_status_code,
       max_redirects: self.max_redirects,
       // Set by `with_guard` after parsing — never from JS input.
       net_guard: None,
-    }
+    })
   }
 }
 
@@ -54,7 +92,10 @@ fn parse_options<'js>(ctx: &Ctx<'js>, value: Opt<Value<'js>>) -> rquickjs::Resul
   match value.0 {
     Some(v) if !v.is_undefined() && !v.is_null() => {
       let parsed: JsRequestOptions = serde_from_js(ctx, v)?;
-      Ok(Some(parsed.into_core()))
+      let core = parsed
+        .into_core()
+        .map_err(|m| rquickjs::Error::new_from_js_message("options", "RequestOptions", m))?;
+      Ok(Some(core))
     },
     _ => Ok(None),
   }

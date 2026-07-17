@@ -28,6 +28,8 @@ tokio-tungstenite = "0.30"
 rustc-hash = "2"
 arc-swap = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "cookies", "rustls", "stream", "query", "form"] }
+httpdate = "1"
+serde_urlencoded = "0.7"
 bytes = "1"
 dashmap = { workspace = true }
 parking_lot = "0.12"

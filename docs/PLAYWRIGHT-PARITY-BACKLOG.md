@@ -9,10 +9,6 @@ record.
 ## API surface not yet mapped
 
 ### Page methods needing backend plumbing
-- `page.request` getter — Playwright's `page.request === context.request`
-  shares the context cookie jar / storage state. ferridriver's `request`
-  global is a standalone `HttpClient`; a context-bound client wired to the
-  context's cookie state does not exist yet.
 - `page.workers()` + a public `Worker` type — needs
   `Target.attachedToTarget` worker tracking on CDP/BiDi/WebKit and a new
   class across all three layers (core, NAPI, QuickJS).
@@ -24,6 +20,35 @@ record.
   per-frame targets yet.
 
 ## Partial implementations
+
+### Context-bound `request` (`page.request` / `context.request`)
+Cookie bridging (both directions, per redirect hop), live `baseURL` /
+`extraHTTPHeaders` / `userAgent` / `ignoreHTTPSErrors` defaults, and the
+WHATWG redirect method-rewrite are in (core `ContextBridge`, all three
+layers). Remaining gaps:
+
+- `httpCredentials` / `proxy` / `clientCertificates` context options are
+  not applied to context-bound requests (the `HttpClient` core has no
+  credential/proxy/client-cert support on any path).
+- When the context has no `userAgent` option, requests carry reqwest's
+  default UA — Playwright falls back to the browser's real UA.
+- Cookie persistence routes through the context's active page: a context
+  with zero open pages cannot store a response's `Set-Cookie` (dropped
+  with a logged warning; reads return empty). Playwright stores
+  context-level.
+- `request.storageState()` is not exposed on the client
+  (`context.storageState()` covers it).
+- `page.request === context.request` object identity is not preserved —
+  each access mints a wrapper over the same browser-backed state
+  (consistent with the `tracing` / `clock` getters).
+- `fetch(Request)` overload, `multipart`, `maxRetries`, and per-request
+  `ignoreHTTPSErrors` are still missing from the `request` option bag
+  (bound AND standalone; unknown option keys are silently ignored).
+  `data` routes strings raw and serializable values as JSON, but skips
+  Playwright's is-JSON-parsable validation for string bodies under a
+  JSON content-type.
+- No automatic response decompression (Playwright advertises
+  `gzip,deflate,br`; the reqwest build has no decompression features).
 
 ### Trace recording (`crates/ferridriver/src/trace.rs`)
 - Snapshots: documents already open in frames when tracing starts pick the

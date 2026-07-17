@@ -767,6 +767,25 @@ impl ContextRef {
     Ok(())
   }
 
+  /// The context-bound HTTP client backing Playwright's
+  /// `context.request` / `page.request`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:76`,
+  /// server: `server/fetch.ts::BrowserContextAPIRequestContext`). Shares
+  /// this context's cookie jar in both directions: outgoing requests
+  /// carry the context's matching cookies, and every `Set-Cookie` in a
+  /// response (including redirect hops) lands back in the browser.
+  /// `baseURL`, `extraHTTPHeaders`, `userAgent`, and
+  /// `ignoreHTTPSErrors` context options are read live per request.
+  ///
+  /// Each call mints a fresh handle; all state that matters (cookies,
+  /// options) lives in the browser/context, so every handle behaves
+  /// identically — the Playwright `page.request === context.request`
+  /// identity holds semantically, not by object identity.
+  #[must_use]
+  pub fn http_client(&self) -> crate::http_client::HttpClient {
+    crate::http_client::HttpClient::context_bound(std::sync::Arc::new(self.clone()))
+  }
+
   /// Clear all cookies in this context.
   ///
   /// # Errors
@@ -1791,6 +1810,48 @@ fn start_video_recording(page: &Arc<Page>, opts: &crate::options::RecordVideoOpt
       Err(e) => sink.finish_err(crate::FerriError::backend(format!("stop recording: {e}"))),
     }
   });
+}
+
+/// The browser side of the context-bound HTTP client
+/// ([`ContextRef::http_client`]): cookie reads/writes go through the
+/// context's cookie surface, defaults come live from the stored context
+/// options (so `setExtraHTTPHeaders` after client creation is visible,
+/// matching Playwright's per-request `_defaultOptions()` read).
+impl crate::http_client::ContextBridge for ContextRef {
+  fn defaults(&self) -> crate::http_client::BridgeFuture<'_, crate::http_client::ContextDefaults> {
+    Box::pin(async move {
+      let opts = {
+        let state = self.state.read().await;
+        state.get_context_options(&self.key.to_composite()).unwrap_or_default()
+      };
+      Ok(crate::http_client::ContextDefaults {
+        base_url: opts.base_url,
+        extra_http_headers: opts
+          .extra_http_headers
+          .map(|headers| headers.into_iter().collect())
+          .unwrap_or_default(),
+        user_agent: opts.user_agent,
+        ignore_https_errors: opts.ignore_https_errors.unwrap_or(false),
+      })
+    })
+  }
+
+  fn cookies(&self) -> crate::http_client::BridgeFuture<'_, Vec<CookieData>> {
+    Box::pin(async move {
+      match ContextRef::cookies(self).await {
+        Ok(cookies) => Ok(cookies),
+        // A context materializes in BrowserState on its first page open;
+        // until then (`browser.newContext()` + immediate `context.request`)
+        // its cookie jar is simply empty.
+        Err(crate::error::FerriError::InvalidArgument { .. }) => Ok(Vec::new()),
+        Err(e) => Err(e),
+      }
+    })
+  }
+
+  fn add_cookies(&self, cookies: Vec<CookieData>) -> crate::http_client::BridgeFuture<'_, ()> {
+    Box::pin(ContextRef::add_cookies(self, cookies))
+  }
 }
 
 #[cfg(test)]
