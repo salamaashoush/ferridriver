@@ -1,50 +1,12 @@
-//! Rule-9 integration test for `context.tracing.startHar()` / `stopHar()`
-//! (Playwright 1.60) through QuickJS `run_script`, on every backend.
-//!
-//! Asserts the navigated URL + a 200 response actually land in the written
-//! HAR's `log.entries`.
+//! Rule-9 integration test for the zip-packed HAR roundtrip through
+//! QuickJS `run_script`, on every backend. Lives here (not in
+//! `tests/e2e/tracing.test.ts` with the plain-HAR coverage) because the
+//! archive's payload entries are DEFLATE-compressed and the QuickJS
+//! sandbox has no inflater to validate their contents.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::needless_pass_by_value)]
 
 use super::client::McpClient;
-
-/// `context.tracing.startHar(path)` records the context's network into a
-/// HAR file written by `stopHar()`; the navigated URL + a 200 response
-/// land in `log.entries`.
-pub fn test_tracing_start_har(c: &mut McpClient) {
-  let port = super::spawn_html_server();
-  let har_path = std::env::temp_dir().join(format!("ferri-har-{}-{port}.har", std::process::id()));
-  let _ = std::fs::remove_file(&har_path);
-  let har_str = har_path.to_string_lossy().to_string();
-  let v = c.script_value_with_args(
-    r"
-    const [url, harPath] = args;
-    await context.tracing.startHar(harPath);
-    await page.goto(url);
-    await page.goto(url + '?second');
-    await context.tracing.stopHar();
-    return { done: true };
-    ",
-    serde_json::json!([format!("http://127.0.0.1:{port}/page"), har_str]),
-  );
-  assert_eq!(v["done"].as_bool(), Some(true), "record phase failed: {v}");
-  let contents = std::fs::read_to_string(&har_path).expect("HAR file should be written");
-  let har: serde_json::Value = serde_json::from_str(&contents).expect("HAR should be valid JSON");
-  let entries = har["log"]["entries"].as_array().expect("log.entries array");
-  let urls: Vec<String> = entries
-    .iter()
-    .filter_map(|e| e["request"]["url"].as_str().map(String::from))
-    .collect();
-  assert!(
-    urls.iter().any(|u| u.contains(&format!("127.0.0.1:{port}"))),
-    "HAR must contain the navigated URL: {urls:?}"
-  );
-  assert!(
-    entries.iter().any(|e| e["response"]["status"].as_i64() == Some(200)),
-    "HAR must record a 200 response: {contents}"
-  );
-  std::fs::remove_file(&har_path).ok();
-}
 
 /// `startHar` to a `.zip` path packs `har.har` plus `<sha1>.<ext>` body
 /// entries (default `attach` policy), and `routeFromHAR` replays the
@@ -141,118 +103,9 @@ pub fn test_tracing_har_zip_roundtrip(c: &mut McpClient) {
   std::fs::remove_file(&zip_path).ok();
 }
 
-/// `context.routeFromHAR(path, { update: true })` records instead of
-/// replaying; the HAR is written when the context closes.
-pub fn test_route_from_har_update_records_on_close(c: &mut McpClient) {
-  // WebKit: browser.newContext is unsupported (single-context backend);
-  // the default MCP context can't be closed mid-session.
-  if c.backend == "webkit" {
-    return;
-  }
-  let port = super::spawn_html_server();
-  let har_path = std::env::temp_dir().join(format!("ferri-har-upd-{}-{port}.har", std::process::id()));
-  let _ = std::fs::remove_file(&har_path);
-  let v = c.script_value_with_args(
-    r"
-    const [url, harPath] = args;
-    const ctx = await browser.newContext({});
-    const p = await ctx.newPage();
-    await ctx.routeFromHAR(harPath, { update: true, updateContent: 'embed' });
-    await p.goto(url);
-    await ctx.close();
-    return { done: true };
-    ",
-    serde_json::json!([format!("http://127.0.0.1:{port}/page"), har_path.to_string_lossy()]),
-  );
-  assert_eq!(v["done"].as_bool(), Some(true), "update phase failed: {v}");
-  let contents = std::fs::read_to_string(&har_path).expect("updated HAR should be written on context close");
-  let har: serde_json::Value = serde_json::from_str(&contents).expect("HAR should be valid JSON");
-  let entries = har["log"]["entries"].as_array().expect("log.entries array");
-  assert!(
-    entries.iter().any(|e| e["request"]["url"]
-      .as_str()
-      .is_some_and(|u| u.contains(&format!("127.0.0.1:{port}")))),
-    "updated HAR must contain the navigated URL: {contents}"
-  );
-  std::fs::remove_file(&har_path).ok();
-}
-
-/// `page.routeFromHAR(path, { update: true })` records only THAT page's
-/// traffic (Playwright's HarTracer page filter), written when the
-/// context closes; the HAR log carries a `pages` section and each entry
-/// a matching `pageref`.
-pub fn test_page_route_from_har_update_scopes_to_page(c: &mut McpClient) {
-  // WebKit: browser.newContext is unsupported (single-context backend);
-  // the default MCP context can't be closed mid-session.
-  if c.backend == "webkit" {
-    return;
-  }
-  let port = super::spawn_html_server();
-  let har_path = std::env::temp_dir().join(format!("ferri-har-pageupd-{}-{port}.har", std::process::id()));
-  let _ = std::fs::remove_file(&har_path);
-  let v = c.script_value_with_args(
-    r"
-    const [urlA, urlB, harPath] = args;
-    const ctx = await browser.newContext({});
-    const a = await ctx.newPage();
-    const b = await ctx.newPage();
-    await a.routeFromHAR(harPath, { update: true, updateContent: 'embed' });
-    await a.goto(urlA);
-    await b.goto(urlB);
-    await ctx.close();
-    return { done: true };
-    ",
-    serde_json::json!([
-      format!("http://127.0.0.1:{port}/page"),
-      format!("http://127.0.0.1:{port}/other"),
-      har_path.to_string_lossy()
-    ]),
-  );
-  assert_eq!(v["done"].as_bool(), Some(true), "update phase failed: {v}");
-  let contents = std::fs::read_to_string(&har_path).expect("page-scoped HAR should be written on context close");
-  let har: serde_json::Value = serde_json::from_str(&contents).expect("HAR should be valid JSON");
-  let entries = har["log"]["entries"].as_array().expect("log.entries array");
-  assert!(
-    entries
-      .iter()
-      .any(|e| e["request"]["url"].as_str().is_some_and(|u| u.ends_with("/page"))),
-    "page A's navigation must be recorded: {contents}"
-  );
-  assert!(
-    !entries
-      .iter()
-      .any(|e| e["request"]["url"].as_str().is_some_and(|u| u.ends_with("/other"))),
-    "page B's traffic must NOT appear in page A's recording: {contents}"
-  );
-  let pages = har["log"]["pages"].as_array().expect("log.pages array");
-  assert_eq!(
-    pages.len(),
-    1,
-    "one page entry for the single recorded page: {contents}"
-  );
-  let page_id = pages[0]["id"].as_str().expect("page id");
-  assert!(
-    entries.iter().all(|e| e["pageref"].as_str() == Some(page_id)),
-    "every entry must carry the recorded page's pageref: {contents}"
-  );
-  std::fs::remove_file(&har_path).ok();
-}
-
 pub fn register(set: &mut super::super::TestSet<'_>) {
-  set.run(
-    "backends_support::tracing_har::test_tracing_start_har",
-    test_tracing_start_har,
-  );
   set.run(
     "backends_support::tracing_har::test_tracing_har_zip_roundtrip",
     test_tracing_har_zip_roundtrip,
-  );
-  set.run(
-    "backends_support::tracing_har::test_route_from_har_update_records_on_close",
-    test_route_from_har_update_records_on_close,
-  );
-  set.run(
-    "backends_support::tracing_har::test_page_route_from_har_update_scopes_to_page",
-    test_page_route_from_har_update_scopes_to_page,
   );
 }

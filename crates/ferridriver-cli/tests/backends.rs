@@ -105,15 +105,6 @@ impl TestSet<'_> {
   }
 }
 
-// Macro shorthand: `run!(set, test_fn)` registers a single test by
-// stringifying its path. Replaces the old free `run!` macro inside
-// `run_all_tests`.
-macro_rules! run {
-  ($set:ident, $name:path) => {
-    $set.run(stringify!($name), $name)
-  };
-}
-
 fn register_nav(set: &mut TestSet<'_>) {
   backends_support::nav::register(set);
 }
@@ -133,28 +124,6 @@ fn register_script_sessions(set: &mut TestSet<'_>) {
 fn register_events_metadata(set: &mut TestSet<'_>) {
   backends_support::tracing_har::register(set);
   backends_support::trace::register(set);
-  backends_support::cdp_session::register(set);
-  backends_support::clock::register(set);
-  run!(set, backends_support::video::test_video_null_without_recording);
-  run!(set, backends_support::video::test_video_recording_lifecycle);
-}
-
-fn register_browser_type(set: &mut TestSet<'_>) {
-  run!(set, backends_support::browser_type::test_browser_type_name);
-  run!(set, backends_support::browser_type::test_browser_type_executable_path);
-  run!(set, backends_support::browser_type::test_browser_type_chromium_launch);
-  run!(
-    set,
-    backends_support::browser_type::test_browser_type_chromium_transport_ws
-  );
-  run!(
-    set,
-    backends_support::browser_type::test_browser_type_connect_over_cdp_chromium_only
-  );
-  run!(
-    set,
-    backends_support::browser_type::test_browser_type_launch_persistent_context
-  );
 }
 
 fn register_multi_page(set: &mut TestSet<'_>) {
@@ -171,7 +140,7 @@ fn register_mcp_features(set: &mut TestSet<'_>) {
 
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
-// 8 categories × 4 backends = 32 `#[test]`s grouped into one module
+// 7 categories × 4 backends = 28 `#[test]`s grouped into one module
 // per backend. nextest reports them as
 // `backends::<backend>::<category>` and distributes them across cores.
 // A single failing category fails its own test, not the entire backend.
@@ -200,10 +169,6 @@ macro_rules! backend_module {
       #[test]
       fn events_metadata() {
         run_category($backend, register_events_metadata);
-      }
-      #[test]
-      fn browser_type() {
-        run_category($backend, register_browser_type);
       }
       #[test]
       fn multi_page() {

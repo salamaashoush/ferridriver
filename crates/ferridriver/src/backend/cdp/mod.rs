@@ -229,13 +229,21 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // (`crPage.ts`) which also fires `DOM.enable` per session.
     let lifecycle_params = serde_json::json!({"enabled": true});
     let autoattach_params = serde_json::json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true});
-    let (r1, r2, r3, r4, r5, r6, r7, r8, r9) = tokio::join!(
+    // Focus emulation keeps the page believing it is focused for its
+    // whole life (Playwright's crPage._initialize sends the same).
+    // Without it a failed main-frame navigation (aborted route, DNS
+    // error) leaves the headless target unfocused, and Chromium then
+    // suppresses `Page.screencastFrame` delivery entirely — a
+    // screencast started afterwards records zero frames.
+    let focus_params = serde_json::json!({"enabled": true});
+    let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10) = tokio::join!(
       transport.send_command(session_id, "Page.enable", ep),
       transport.send_command(session_id, "Runtime.enable", ep),
       transport.send_command(session_id, "Network.enable", ep),
       transport.send_command(session_id, "DOM.enable", ep),
       transport.send_command(session_id, "Page.setLifecycleEventsEnabled", &lifecycle_params),
       transport.send_command(session_id, "Target.setAutoAttach", &autoattach_params),
+      transport.send_command(session_id, "Emulation.setFocusEmulationEnabled", &focus_params),
       vp_fut,
       inject_fut,
       unpause_fut,
@@ -249,6 +257,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     r7?;
     r8?;
     r9?;
+    r10?;
     Ok(None)
   }
 

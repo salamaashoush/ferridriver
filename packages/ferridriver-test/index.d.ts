@@ -880,7 +880,7 @@ export interface Page {
   // registration (a ferridriver extension mirroring Playwright's
   // internal DisposableStub at client/page.ts:535).
   route(url: string | RegExp | ((url: URL) => boolean), handler: (route: Route, request: Request) => void | Promise<void>, options?: { times?: number }): Promise<Disposable>;
-  routeFromHAR(har: string, options?: { notFound?: 'abort' | 'fallback'; url?: string | RegExp }): Promise<void>;
+  routeFromHAR(har: string, options?: { notFound?: 'abort' | 'fallback'; url?: string | RegExp; update?: boolean; updateContent?: 'embed' | 'attach' }): Promise<void>;
   unroute(url: string | RegExp | ((url: URL) => boolean), handler?: (route: Route, request: Request) => void | Promise<void>): Promise<void>;
   unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
   routeWebSocket(url: string | RegExp | ((url: URL) => boolean), handler: (ws: WebSocketRoute) => void | Promise<void>): Promise<void>;
@@ -910,6 +910,7 @@ export interface Page {
   clock: Clock;
   context(): BrowserContext;
   opener(): Promise<Page | null>;
+  video(): Video | null;
   // ferridriver extensions: driver-side WebStorage accessors and a
   // page-to-markdown snapshot.
   readonly localStorage: WebStorage;
@@ -982,6 +983,38 @@ export interface BrowserContext {
   newCDPSession(page: Page): Promise<CDPSession>;
   browser(): Browser | null;
   clock: Clock;
+  tracing: Tracing;
+  routeFromHAR(har: string, options?: { notFound?: 'abort' | 'fallback'; url?: string | RegExp; update?: boolean; updateContent?: 'embed' | 'attach' }): Promise<void>;
+  // ferridriver extension: arm video recording for pages opened after
+  // this call (Playwright takes recordVideo as a context-creation
+  // option only).
+  setRecordVideo(options: { dir: string; size?: { width: number; height: number } }): Promise<void>;
+}
+
+export interface Tracing {
+  start(options?: { title?: string; screenshots?: boolean; snapshots?: boolean; sources?: boolean }): Promise<void>;
+  startChunk(options?: { title?: string }): Promise<void>;
+  stopChunk(options?: { path?: string }): Promise<void>;
+  stop(options?: { path?: string }): Promise<void>;
+  // ferridriver extensions: standalone HAR recording without a full
+  // trace.
+  startHar(path: string): Promise<void>;
+  stopHar(): Promise<void>;
+}
+
+export interface Video {
+  path(): Promise<string>;
+  saveAs(path: string): Promise<void>;
+  delete(): Promise<void>;
+}
+
+export interface BrowserType {
+  name(): string;
+  executablePath(): string | null;
+  launch(options?: { headless?: boolean; args?: string[] }): Promise<Browser>;
+  connect(wsEndpoint: string): Promise<Browser>;
+  connectOverCDP(endpoint: string): Promise<Browser>;
+  launchPersistentContext(userDataDir: string, options?: BrowserContextOptions & { headless?: boolean; args?: string[] }): Promise<BrowserContext>;
 }
 
 export interface BrowserContextOptions {
@@ -1072,6 +1105,13 @@ export interface APIRequestContext {
 // The QuickJS environment provides Node-parity `Buffer` and the
 // web-platform text codecs (UTF-8 only) as globals.
 declare global {
+  // BrowserType factories: secondary browsers independent of the
+  // project's own backend. chromium accepts a transport override
+  // (pipe is the default CDP transport).
+  function chromium(options?: { transport?: 'pipe' | 'ws' }): BrowserType;
+  function firefox(): BrowserType;
+  function webkit(): BrowserType;
+
   // Sandboxed file access rooted at the runner's working directory
   // (writes are additionally scoped -- see the engine's PathSandbox).
   const fs: {

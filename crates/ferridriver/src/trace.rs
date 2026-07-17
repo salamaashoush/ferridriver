@@ -965,8 +965,24 @@ pub(crate) fn trace_page_id(page: &crate::backend::AnyPage) -> String {
 /// recording already holding the stream) degrades to a trace without
 /// frames for that page.
 pub(crate) async fn spawn_screencast_pump(recorder: &Arc<TraceRecorder>, page: &crate::backend::AnyPage) {
-  let Ok((mut rx, stop_tx)) = page.start_screencast(70, 800, 600).await else {
-    return;
+  // A just-failed main-frame navigation leaves the CDP session
+  // transiently "Not attached to an active page"; the state self-heals
+  // within milliseconds, so retry briefly instead of silently
+  // recording a frameless trace.
+  let mut attempt = 0;
+  let (mut rx, stop_tx) = loop {
+    match page.start_screencast(70, 800, 600).await {
+      Ok(started) => break started,
+      Err(e) if attempt < 5 => {
+        attempt += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
+        tracing::debug!(target: "ferridriver::trace", "start_screencast attempt {attempt} failed: {e}");
+      },
+      Err(e) => {
+        tracing::warn!(target: "ferridriver::trace", "screencast unavailable for trace: {e}");
+        return;
+      },
+    }
   };
   recorder.track_screencast_stop(stop_tx);
   let page_id = trace_page_id(page);

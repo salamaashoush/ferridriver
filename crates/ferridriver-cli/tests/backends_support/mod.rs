@@ -9,10 +9,7 @@
 //! functions via the module path.
 
 pub mod bdd;
-pub mod browser_type;
-pub mod cdp_session;
 pub mod client;
-pub mod clock;
 pub mod evaluate;
 pub mod extension_tools;
 pub mod mcp_features;
@@ -23,7 +20,6 @@ pub mod script_sessions;
 pub mod session_bind;
 pub mod trace;
 pub mod tracing_har;
-pub mod video;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
