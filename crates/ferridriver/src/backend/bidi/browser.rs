@@ -256,6 +256,10 @@ impl BidiBrowser {
   /// the `CdpBrowser::close` fast-path.
   pub async fn close(&mut self) -> Result<()> {
     if let Some(mut group) = self.child.lock().await.take() {
+      // Flag the transport first: the SIGKILLed Firefox never sends a
+      // WebSocket close frame, and without the flag the reader logs the
+      // resulting TCP reset as a spurious WARN on every teardown.
+      self.session.transport.start_close();
       // Group kill first (helpers die with the parent), then reap so
       // the enclosing runtime carries no zombie.
       group.shutdown().await;

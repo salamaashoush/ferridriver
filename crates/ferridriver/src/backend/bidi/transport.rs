@@ -6,7 +6,7 @@
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, trace, warn};
@@ -62,6 +62,12 @@ pub(crate) struct BidiTransport {
   /// route interception) use these; a broadcast `Lagged` drop there
   /// corrupts tracker state, see the CDP dispatcher's tap rationale.
   event_taps: Arc<std::sync::Mutex<Vec<mpsc::UnboundedSender<BidiEvent>>>>,
+  /// Set by [`Self::start_close`] before the browser process is killed.
+  /// Firefox dies without sending a WebSocket close frame, so the
+  /// reader sees a TCP reset (`ResetWithoutClosingHandshake`) — during
+  /// an intentional shutdown that's expected teardown, not an error
+  /// worth a WARN.
+  closing: Arc<AtomicBool>,
 }
 
 impl BidiTransport {
@@ -99,6 +105,9 @@ impl BidiTransport {
       Arc::new(std::sync::Mutex::new(Vec::new()));
     let event_taps2 = Arc::clone(&event_taps);
 
+    let closing = Arc::new(AtomicBool::new(false));
+    let closing2 = Arc::clone(&closing);
+
     // Reader task -- hot path uses json_scan for zero-alloc field extraction
     let pending2 = pending.clone();
     tokio::spawn(async move {
@@ -107,7 +116,11 @@ impl BidiTransport {
         let msg = match result {
           Ok(m) => m,
           Err(e) => {
-            warn!("BiDi WebSocket error: {e:?}");
+            if closing2.load(Ordering::Relaxed) {
+              debug!("BiDi WebSocket ended during shutdown: {e:?}");
+            } else {
+              warn!("BiDi WebSocket error: {e:?}");
+            }
             break;
           },
         };
@@ -179,7 +192,19 @@ impl BidiTransport {
       write_tx,
       event_tx,
       event_taps,
+      closing,
     })
+  }
+
+  /// Flag an intentional shutdown and offer the peer a WebSocket close
+  /// frame. Called right before the browser process is killed so the
+  /// reader logs the ensuing connection reset at debug instead of WARN.
+  /// The close frame is best-effort by design — the writer may already
+  /// be gone and the SIGKILL races frame delivery either way; the flag
+  /// is the load-bearing part.
+  pub fn start_close(&self) {
+    self.closing.store(true, Ordering::Relaxed);
+    let _ = self.write_tx.try_send(Message::Close(None));
   }
 
   /// Send a `BiDi` command and await the response.
