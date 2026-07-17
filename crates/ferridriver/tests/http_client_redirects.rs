@@ -1,25 +1,30 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-//! Per-request `max_redirects` is honoured (real, not a no-op), and the
-//! per-redirect-policy clients share one cookie jar so session cookies
-//! still persist. Browser-free: a tiny std-only HTTP server on loopback.
+//! Per-request `max_redirects` is honoured (real, not a no-op) by the
+//! engine's manual-redirect loop, and the standalone reqwest jar persists
+//! session cookies across requests. Browser-free: a tiny std-only HTTP
+//! server on loopback.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
-use ferridriver::http_client::{HttpClient, HttpClientOptions, RequestOptions};
+use ferridriver::http_client::{
+  HttpClient, HttpClientOptions, MultipartField, MultipartValue, RedirectMode, RequestOptions,
+};
 
 /// Minimal HTTP/1.1 test server. Routes:
 /// - `GET /redirect/<n>`: `n>0` → 302 to `/redirect/<n-1>`; `n==0` → 200 "done".
 /// - `GET /set`: 200, `Set-Cookie: sid=abc; Path=/`, body "set".
 /// - `GET /echo`: 200, body = the received `Cookie` header (or "none").
+/// - `POST /body-echo`: 200, body = the request body verbatim.
+/// - `GET /ct-echo`: 200, body = the received `Content-Type` header (or "none").
 fn spawn_server() -> String {
   let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
   let addr = listener.local_addr().expect("local addr");
   thread::spawn(move || {
     for stream in listener.incoming() {
       let Ok(stream) = stream else { continue };
-      handle(stream);
+      thread::spawn(move || handle(stream));
     }
   });
   format!("http://{addr}")
@@ -35,6 +40,8 @@ fn handle(mut stream: TcpStream) {
   let path = request_line.split_whitespace().nth(1).unwrap_or("/").to_string();
 
   let mut cookie = String::from("none");
+  let mut content_type = String::from("none");
+  let mut content_length = 0usize;
   loop {
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() {
@@ -46,6 +53,23 @@ fn handle(mut stream: TcpStream) {
     if let Some(v) = line.strip_prefix("Cookie: ").or_else(|| line.strip_prefix("cookie: ")) {
       cookie = v.trim().to_string();
     }
+    if let Some(v) = line
+      .strip_prefix("Content-Type: ")
+      .or_else(|| line.strip_prefix("content-type: "))
+    {
+      content_type = v.trim().to_string();
+    }
+    if let Some(v) = line
+      .strip_prefix("Content-Length: ")
+      .or_else(|| line.strip_prefix("content-length: "))
+    {
+      content_length = v.trim().parse().unwrap_or(0);
+    }
+  }
+
+  let mut body_bytes = vec![0u8; content_length];
+  if content_length > 0 {
+    let _ = reader.read_exact(&mut body_bytes);
   }
 
   let response = if let Some(rest) = path.strip_prefix("/redirect/") {
@@ -62,15 +86,16 @@ fn handle(mut stream: TcpStream) {
     http_ok("set", Some("sid=abc; Path=/"))
   } else if path == "/echo" {
     http_ok(&cookie, None)
+  } else if path == "/body-echo" {
+    http_ok(&String::from_utf8_lossy(&body_bytes), None)
+  } else if path == "/ct-echo" {
+    http_ok(&content_type, None)
   } else {
     http_ok("ok", None)
   };
 
   let _ = stream.write_all(response.as_bytes());
   let _ = stream.flush();
-  // Drain anything still inbound so the client sees a clean close.
-  let mut sink = Vec::new();
-  let _ = reader.get_mut().read_to_end(&mut sink);
 }
 
 fn http_ok(body: &str, set_cookie: Option<&str>) -> String {
@@ -127,8 +152,8 @@ async fn max_redirects_limit_exceeded_errors() {
   let err = client.get("/redirect/3", Some(opts(Some(2)))).await;
   assert!(err.is_err(), "exceeding the per-request cap must error, got {err:?}");
 
-  // Same client, generous cap → succeeds (proves it is per-request,
-  // and that the cached per-limit clients are independent).
+  // Same client, generous cap → succeeds (proves the cap is per-request,
+  // not a client-level policy).
   let ok = client
     .get("/redirect/3", Some(opts(Some(5))))
     .await
@@ -138,22 +163,152 @@ async fn max_redirects_limit_exceeded_errors() {
 }
 
 #[tokio::test]
-async fn cookie_jar_is_shared_across_redirect_policy_clients() {
+async fn redirect_manual_returns_the_3xx_unfollowed() {
   let base = spawn_server();
   let client = HttpClient::new(HttpClientOptions {
     base_url: Some(base),
     ..Default::default()
   });
-  // First call uses the max_redirects=0 client (a distinct reqwest
-  // Client); it must store the Set-Cookie into the shared jar.
+  let resp = client
+    .get(
+      "/redirect/3",
+      Some(RequestOptions {
+        redirect: RedirectMode::Manual,
+        ..Default::default()
+      }),
+    )
+    .await
+    .expect("request ok");
+  assert_eq!(resp.status(), 302, "manual must return the 3xx, not follow it");
+  assert!(resp.unfollowed_redirect(), "manual 3xx must be flagged unfollowed");
+  assert!(!resp.redirected(), "no hop was followed under manual");
+}
+
+#[tokio::test]
+async fn redirect_error_rejects_on_a_3xx() {
+  let base = spawn_server();
+  let client = HttpClient::new(HttpClientOptions {
+    base_url: Some(base),
+    ..Default::default()
+  });
+  let err = client
+    .get(
+      "/redirect/1",
+      Some(RequestOptions {
+        redirect: RedirectMode::Error,
+        ..Default::default()
+      }),
+    )
+    .await;
+  assert!(err.is_err(), "redirect: error must reject on a 3xx, got {err:?}");
+}
+
+#[tokio::test]
+async fn redirect_follow_marks_redirected() {
+  let base = spawn_server();
+  let client = HttpClient::new(HttpClientOptions {
+    base_url: Some(base),
+    ..Default::default()
+  });
+  let resp = client.get("/redirect/2", None).await.expect("request ok");
+  assert_eq!(resp.status(), 200);
+  assert_eq!(resp.text().expect("utf8"), "done");
+  assert!(resp.redirected(), "following a hop must set redirected");
+
+  // A no-redirect request must NOT be marked redirected (guards against
+  // the query-string false-positive: params add a query, not a hop).
+  let plain = client
+    .get(
+      "/echo",
+      Some(RequestOptions {
+        params: Some(vec![("a".into(), "1".into())]),
+        ..Default::default()
+      }),
+    )
+    .await
+    .expect("request ok");
+  assert!(!plain.redirected(), "appended params must not read as a redirect");
+}
+
+#[tokio::test]
+async fn multipart_body_serializes_to_form_data() {
+  let base = spawn_server();
+  let client = HttpClient::new(HttpClientOptions {
+    base_url: Some(base),
+    ..Default::default()
+  });
+  let resp = client
+    .post(
+      "/body-echo",
+      Some(RequestOptions {
+        multipart: Some(vec![
+          MultipartField {
+            name: "field".into(),
+            value: MultipartValue::Text("hello".into()),
+          },
+          MultipartField {
+            name: "upload".into(),
+            value: MultipartValue::File {
+              filename: "a.txt".into(),
+              content_type: "text/plain".into(),
+              bytes: b"file-bytes".to_vec(),
+            },
+          },
+        ]),
+        ..Default::default()
+      }),
+    )
+    .await
+    .expect("request ok");
+  let echoed = resp.text().expect("utf8");
+  assert!(
+    echoed.contains("Content-Disposition: form-data; name=\"field\""),
+    "text part: {echoed}"
+  );
+  assert!(echoed.contains("hello"), "text value: {echoed}");
+  assert!(
+    echoed.contains("filename=\"a.txt\"") && echoed.contains("Content-Type: text/plain"),
+    "file part headers: {echoed}"
+  );
+  assert!(echoed.contains("file-bytes"), "file bytes: {echoed}");
+
+  // The multipart boundary content-type reaches the server.
+  let ct = client
+    .post(
+      "/ct-echo",
+      Some(RequestOptions {
+        multipart: Some(vec![MultipartField {
+          name: "x".into(),
+          value: MultipartValue::Text("y".into()),
+        }]),
+        ..Default::default()
+      }),
+    )
+    .await
+    .expect("request ok");
+  assert!(
+    ct.text().expect("utf8").starts_with("multipart/form-data; boundary="),
+    "multipart content-type must carry the boundary"
+  );
+}
+
+#[tokio::test]
+async fn cookie_jar_persists_across_requests() {
+  let base = spawn_server();
+  let client = HttpClient::new(HttpClientOptions {
+    base_url: Some(base),
+    ..Default::default()
+  });
+  // First call (pinned to 0 redirects) stores the Set-Cookie into the
+  // standalone reqwest jar.
   let set = client.get("/set", Some(opts(Some(0)))).await.expect("set ok");
   assert_eq!(set.text().expect("utf8"), "set");
-  // Second call uses the default-policy client; if the jar were not
-  // shared it would send no cookie.
+  // Second call re-sends it from the jar (max_redirects is a per-request
+  // loop budget, not a distinct client — the jar is shared).
   let echo = client.get("/echo", None).await.expect("echo ok");
   assert_eq!(
     echo.text().expect("utf8"),
     "sid=abc",
-    "session cookie must persist across per-redirect-policy clients"
+    "session cookie must persist across requests"
   );
 }

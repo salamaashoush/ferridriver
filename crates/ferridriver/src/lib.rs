@@ -36,6 +36,7 @@ pub mod download;
 pub mod element_handle;
 pub mod error;
 pub mod events;
+pub mod fetch;
 pub mod file_chooser;
 pub mod frame;
 pub(crate) mod frame_cache;

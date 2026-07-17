@@ -84,6 +84,7 @@ impl JsRequestOptions {
       max_redirects: self.max_redirects,
       // Set by `with_guard` after parsing — never from JS input.
       net_guard: None,
+      ..Default::default()
     })
   }
 }

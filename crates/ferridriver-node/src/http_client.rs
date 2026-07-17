@@ -98,6 +98,7 @@ impl FetchOptions {
       // The Node binding is the trusted Playwright-in-Rust surface, not
       // the script sandbox — no network guard is imposed here.
       net_guard: None,
+      ..Default::default()
     })
   }
 }
