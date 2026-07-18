@@ -607,7 +607,7 @@ async fn formdata_surface() {
      const seen = []; fd.forEach((v, k) => seen.push(k)); \
      return { a: fd.get('a'), all: fd.getAll('a'), hasF: fd.has('f'), \
        fileIsBlob: fileVal instanceof Blob, fileText: await fileVal.text(), \
-       keys: fd.keys(), entriesLen: [...fd.entries()].length, seen, \
+       keys: [...fd.keys()], entriesLen: [...fd.entries()].length, seen, \
        isFD: fd instanceof FormData, removed: (fd.delete('a'), fd.has('a')) };",
   )
   .await;

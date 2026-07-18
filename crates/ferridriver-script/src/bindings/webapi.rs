@@ -1,5 +1,10 @@
 //! Native web-platform globals: `TextEncoder` / `TextDecoder` / `URL`
-//! plus `queueMicrotask` / `btoa` / `atob`.
+//! plus `queueMicrotask` / `btoa` / `atob` / `structuredClone` /
+//! `performance`.
+//!
+//! `TextEncoder` has `encodeInto`; `TextDecoder` honours `fatal`,
+//! `ignoreBOM`, `{ stream: true }` and label validation (UTF-8 only —
+//! any other label is a `RangeError` rather than a silent misdecode).
 //!
 //! These are real `#[rquickjs::class]` bindings (Rust is the source of
 //! truth), not JS shims dispatching to hidden `__ferri*` helpers.
@@ -10,8 +15,9 @@
 use base64::Engine as _;
 use base64::engine::GeneralPurpose;
 use base64::engine::general_purpose::GeneralPurposeConfig;
+use rquickjs::function::This;
 use rquickjs::function::{Func, Opt};
-use rquickjs::{Class, Ctx, Function, JsLifetime, TypedArray, Value, class::Trace};
+use rquickjs::{Class, Ctx, Function, JsLifetime, Object, TypedArray, Value, class::Trace};
 
 /// TextEncoder — UTF-8 only, matching the WHATWG default.
 #[derive(Trace, JsLifetime, Default)]
@@ -33,38 +39,192 @@ impl TextEncoder {
   pub fn encode<'js>(&self, ctx: Ctx<'js>, input: Opt<String>) -> rquickjs::Result<TypedArray<'js, u8>> {
     TypedArray::new(ctx, input.0.unwrap_or_default().into_bytes())
   }
+
+  /// `encodeInto(source, destination)` — writes UTF-8 into the caller's
+  /// `Uint8Array` and reports `{ read, written }`. Per spec a partial
+  /// code point is never written, so `read` counts whole UTF-16 units of
+  /// the prefix that fit.
+  #[qjs(rename = "encodeInto")]
+  pub fn encode_into<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    source: String,
+    destination: TypedArray<'js, u8>,
+  ) -> rquickjs::Result<Object<'js>> {
+    let capacity = destination.len();
+    let mut read = 0usize;
+    let mut written = 0usize;
+    for ch in source.chars() {
+      let need = ch.len_utf8();
+      if written + need > capacity {
+        break;
+      }
+      written += need;
+      read += ch.len_utf16();
+    }
+    // `TypedArray` derefs to the caller's buffer, so this writes through
+    // to the JS-visible array rather than a copy.
+    let raw = destination
+      .as_raw()
+      .ok_or_else(|| rquickjs::Exception::throw_type(&ctx, "encodeInto: destination is detached"))?;
+    // SAFETY: `raw.ptr`/`raw.len` come from the live `Uint8Array` this
+    // call was handed, and nothing re-enters JS between here and the
+    // copy, so the buffer cannot be detached or resized underneath it.
+    #[allow(unsafe_code)]
+    let dest = unsafe { std::slice::from_raw_parts_mut(raw.ptr.as_ptr(), raw.len) };
+    dest[..written].copy_from_slice(&source.as_bytes()[..written]);
+    let res = Object::new(ctx)?;
+    res.set("read", read)?;
+    res.set("written", written)?;
+    Ok(res)
+  }
 }
 
-/// TextDecoder — UTF-8, lossy (matches `fatal: false`, the default).
+/// Monotonic base for `performance.now()`, and the wall-clock instant it
+/// corresponds to (`performance.timeOrigin`). Both are fixed at first
+/// use, which is process start for any real session.
+static PROCESS_START: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+static TIME_ORIGIN: std::sync::LazyLock<f64> = std::sync::LazyLock::new(|| {
+  // Touch the monotonic base first so the two are taken together.
+  let _ = *PROCESS_START;
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_or(0.0, |d| d.as_secs_f64() * 1000.0)
+});
+
+/// The WHATWG encoding labels that map to UTF-8. Any other label is a
+/// `RangeError` rather than a silent misdecode — only UTF-8 is
+/// implemented, so claiming to honour e.g. `windows-1252` would corrupt
+/// data quietly.
+const UTF8_LABELS: [&str; 8] = [
+  "utf-8",
+  "utf8",
+  "unicode-1-1-utf-8",
+  "unicode11utf8",
+  "unicode20utf8",
+  "x-unicode20utf8",
+  "unicode-1-1-utf8",
+  "csutf8",
+];
+
+/// TextDecoder — UTF-8, with `fatal`, `ignoreBOM` and streaming.
 #[derive(Trace, JsLifetime)]
 #[rquickjs::class(rename = "TextDecoder")]
 pub struct TextDecoder {
-  encoding: String,
+  #[qjs(skip_trace)]
+  fatal: bool,
+  #[qjs(skip_trace)]
+  ignore_bom: bool,
+  /// Bytes of a code point split across a `{ stream: true }` call,
+  /// carried into the next `decode`.
+  #[qjs(skip_trace)]
+  pending: Vec<u8>,
+  /// Cleared after the first chunk: the BOM is only stripped at the
+  /// start of the stream.
+  #[qjs(skip_trace)]
+  at_start: bool,
+}
+
+/// Split `bytes` into the longest valid UTF-8 prefix and a trailing
+/// remainder that is a possible (incomplete) code point. Returns `None`
+/// for the remainder when the trailing bytes are genuinely invalid
+/// rather than merely truncated.
+fn split_incomplete(bytes: &[u8]) -> (usize, bool) {
+  match std::str::from_utf8(bytes) {
+    Ok(_) => (bytes.len(), true),
+    Err(e) => {
+      let valid = e.valid_up_to();
+      // `error_len() == None` means "unexpected end of input": the tail
+      // is a truncated code point, not a malformed one.
+      (valid, e.error_len().is_none())
+    },
+  }
 }
 
 #[rquickjs::methods]
 impl TextDecoder {
   #[qjs(constructor)]
-  pub fn new(label: Opt<String>) -> Self {
-    // We only implement utf-8; report it back regardless of label
-    // rather than pretending to honour an unsupported encoding.
-    let _ = label;
-    Self {
-      encoding: "utf-8".to_string(),
+  pub fn new(ctx: Ctx<'_>, label: Opt<String>, options: Opt<Object<'_>>) -> rquickjs::Result<Self> {
+    if let Some(label) = label.0 {
+      let normalized = label.trim().to_ascii_lowercase();
+      if !UTF8_LABELS.contains(&normalized.as_str()) {
+        return Err(rquickjs::Exception::throw_range(
+          &ctx,
+          &format!("TextDecoder constructor: the given encoding '{label}' is not supported"),
+        ));
+      }
     }
+    let flag = |name: &str| {
+      options
+        .0
+        .as_ref()
+        .and_then(|o| o.get::<_, bool>(name).ok())
+        .unwrap_or(false)
+    };
+    Ok(Self {
+      fatal: flag("fatal"),
+      ignore_bom: flag("ignoreBOM"),
+      pending: Vec::new(),
+      at_start: true,
+    })
   }
 
   #[qjs(get, rename = "encoding")]
-  pub fn encoding(&self) -> String {
-    self.encoding.clone()
+  pub fn encoding(&self) -> &'static str {
+    "utf-8"
   }
 
-  pub fn decode(&self, input: Opt<Value<'_>>) -> rquickjs::Result<String> {
-    let Some(v) = input.0 else {
-      return Ok(String::new());
-    };
-    let bytes = value_to_bytes(&v)?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+  #[qjs(get, rename = "fatal")]
+  pub fn fatal(&self) -> bool {
+    self.fatal
+  }
+
+  #[qjs(get, rename = "ignoreBOM")]
+  pub fn ignore_bom(&self) -> bool {
+    self.ignore_bom
+  }
+
+  /// `decode(input?, { stream? })`. With `stream: true` a code point
+  /// split across chunk boundaries is held back and prepended to the
+  /// next call; the final call (no `stream`) flushes, so a still-
+  /// incomplete tail is an error under `fatal` and U+FFFD otherwise.
+  pub fn decode(&mut self, ctx: Ctx<'_>, input: Opt<Value<'_>>, options: Opt<Object<'_>>) -> rquickjs::Result<String> {
+    let streaming = options
+      .0
+      .as_ref()
+      .and_then(|o| o.get::<_, bool>("stream").ok())
+      .unwrap_or(false);
+
+    let mut bytes = std::mem::take(&mut self.pending);
+    if let Some(v) = input.0 {
+      bytes.extend_from_slice(&value_to_bytes(&v)?);
+    }
+    if !self.ignore_bom && self.at_start && bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+      bytes.drain(..3);
+    }
+    if !bytes.is_empty() {
+      self.at_start = false;
+    }
+
+    let mut consume = bytes.len();
+    if streaming {
+      let (valid_up_to, truncated) = split_incomplete(&bytes);
+      if truncated {
+        // Hold the truncated tail back for the next chunk.
+        self.pending = bytes[valid_up_to..].to_vec();
+        consume = valid_up_to;
+      }
+    } else {
+      self.at_start = true;
+    }
+
+    let chunk = &bytes[..consume];
+    if self.fatal {
+      return std::str::from_utf8(chunk).map(str::to_owned).map_err(|_| {
+        rquickjs::Exception::throw_type(&ctx, "TextDecoder.decode: the encoded data was not valid UTF-8")
+      });
+    }
+    Ok(String::from_utf8_lossy(chunk).into_owned())
   }
 }
 
@@ -325,6 +485,167 @@ fn queue_microtask<'js>(ctx: Ctx<'js>, cb: Function<'js>) -> rquickjs::Result<()
   }
 }
 
+/// HTML `structuredClone(value)` — a deep clone by the structured-clone
+/// algorithm.
+///
+/// Handles cycles and repeated references (the same object reached twice
+/// stays the same object in the clone), `Array`, plain `Object`, `Map`,
+/// `Set`, `Date`, `RegExp`, `ArrayBuffer` and typed arrays. Functions,
+/// symbols and class instances are not cloneable and raise a
+/// `DataCloneError` `DOMException`, per spec — never a silent
+/// pass-through, which would alias the original.
+fn structured_clone<'js>(ctx: Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Value<'js>> {
+  let mut seen: Vec<(Value<'js>, Value<'js>)> = Vec::new();
+  clone_value(&ctx, &value, &mut seen)
+}
+
+fn data_clone_error(ctx: &Ctx<'_>, what: &str) -> rquickjs::Error {
+  let ex = ferridriver_jsstd::exceptions::DOMException::new_with_name(
+    ctx,
+    ferridriver_jsstd::exceptions::DOMExceptionName::DataCloneError,
+    format!("{what} could not be cloned"),
+  );
+  match ex.and_then(|ex| Class::instance(ctx.clone(), ex)) {
+    Ok(ex) => ctx.throw(ex.into_value()),
+    Err(e) => e,
+  }
+}
+
+fn clone_value<'js>(
+  ctx: &Ctx<'js>,
+  value: &Value<'js>,
+  seen: &mut Vec<(Value<'js>, Value<'js>)>,
+) -> rquickjs::Result<Value<'js>> {
+  if value.is_function() {
+    return Err(data_clone_error(ctx, "a function"));
+  }
+  if value.type_of() == rquickjs::Type::Symbol {
+    return Err(data_clone_error(ctx, "a symbol"));
+  }
+  let Some(obj) = value.as_object() else {
+    // Primitives are immutable: cloning is identity.
+    return Ok(value.clone());
+  };
+  if let Some((_, clone)) = seen.iter().find(|(orig, _)| orig.as_object() == Some(obj)) {
+    return Ok(clone.clone());
+  }
+
+  let globals = ctx.globals();
+  let is_a = |name: &str| -> rquickjs::Result<bool> {
+    let ctor: Value<'js> = globals.get(name)?;
+    Ok(obj.is_instance_of(&ctor))
+  };
+
+  // Dates and RegExps round-trip through their own constructors.
+  if is_a("Date")? {
+    let ctor: rquickjs::function::Constructor<'js> = globals.get("Date")?;
+    let time: f64 = obj
+      .get::<_, rquickjs::Function<'js>>("getTime")?
+      .call((This(obj.clone()),))?;
+    return ctor.construct::<_, Value<'js>>((time,));
+  }
+  if is_a("RegExp")? {
+    let ctor: rquickjs::function::Constructor<'js> = globals.get("RegExp")?;
+    let source: String = obj.get("source")?;
+    let flags: String = obj.get("flags")?;
+    return ctor.construct::<_, Value<'js>>((source, flags));
+  }
+  if let Some(buf) = rquickjs::ArrayBuffer::from_object(obj.clone()) {
+    let bytes = buf.as_bytes().unwrap_or_default().to_vec();
+    return Ok(rquickjs::ArrayBuffer::new(ctx.clone(), bytes)?.into_value());
+  }
+  if let Ok(ta) = TypedArray::<u8>::from_value(value.clone()) {
+    let bytes = ta.as_bytes().unwrap_or_default().to_vec();
+    return Ok(TypedArray::new(ctx.clone(), bytes)?.into_value());
+  }
+
+  if let Some(arr) = value.as_array() {
+    let out = rquickjs::Array::new(ctx.clone())?;
+    seen.push((value.clone(), out.clone().into_value()));
+    for i in 0..arr.len() {
+      let item: Value<'js> = arr.get(i)?;
+      out.set(i, clone_value(ctx, &item, seen)?)?;
+    }
+    return Ok(out.into_value());
+  }
+
+  if is_a("Map")? {
+    let ctor: rquickjs::function::Constructor<'js> = globals.get("Map")?;
+    let out: Value<'js> = ctor.construct(())?;
+    seen.push((value.clone(), out.clone()));
+    let out_obj = out.as_object().cloned().unwrap_or_else(|| obj.clone());
+    let set: rquickjs::Function<'js> = out_obj.get("set")?;
+    for entry in iterate_entries(ctx, obj)? {
+      let (k, v) = entry?;
+      set.call::<_, ()>((
+        This(out_obj.clone()),
+        clone_value(ctx, &k, seen)?,
+        clone_value(ctx, &v, seen)?,
+      ))?;
+    }
+    return Ok(out);
+  }
+  if is_a("Set")? {
+    let ctor: rquickjs::function::Constructor<'js> = globals.get("Set")?;
+    let out: Value<'js> = ctor.construct(())?;
+    seen.push((value.clone(), out.clone()));
+    let out_obj = out.as_object().cloned().unwrap_or_else(|| obj.clone());
+    let add: rquickjs::Function<'js> = out_obj.get("add")?;
+    for entry in iterate_entries(ctx, obj)? {
+      let (k, _) = entry?;
+      add.call::<_, ()>((This(out_obj.clone()), clone_value(ctx, &k, seen)?))?;
+    }
+    return Ok(out);
+  }
+
+  // Anything with a non-Object prototype (a class instance, including
+  // the native web classes) is not a cloneable "plain object".
+  let object_ctor: Value<'js> = globals.get("Object")?;
+  let proto = obj.get_prototype();
+  let object_proto = object_ctor
+    .as_object()
+    .and_then(|o| o.get::<_, Value<'js>>("prototype").ok())
+    .and_then(|v| v.as_object().cloned());
+  if proto.is_some() && proto != object_proto {
+    return Err(data_clone_error(ctx, "an object that is not a plain object"));
+  }
+
+  let out = Object::new(ctx.clone())?;
+  seen.push((value.clone(), out.clone().into_value()));
+  for key in obj.keys::<String>() {
+    let key = key?;
+    let v: Value<'js> = obj.get(&key)?;
+    out.set(key, clone_value(ctx, &v, seen)?)?;
+  }
+  Ok(out.into_value())
+}
+
+/// `[...target.entries()]` as `(key, value)` pairs — how a `Map`'s
+/// contents (and, with the value ignored, a `Set`'s) are read without
+/// assuming an internal representation.
+#[allow(clippy::type_complexity)]
+fn iterate_entries<'js>(
+  ctx: &Ctx<'js>,
+  target: &Object<'js>,
+) -> rquickjs::Result<Vec<rquickjs::Result<(Value<'js>, Value<'js>)>>> {
+  let entries: rquickjs::Function<'js> = target.get("entries")?;
+  let iter: Value<'js> = entries.call((This(target.clone()),))?;
+  let array_ctor: Value<'js> = ctx.globals().get("Array")?;
+  let from: rquickjs::Function<'js> = array_ctor
+    .as_object()
+    .ok_or_else(|| rquickjs::Exception::throw_type(ctx, "Array is not an object"))?
+    .get("from")?;
+  let list: rquickjs::Array<'js> = from.call((This(array_ctor), iter))?;
+  Ok(
+    (0..list.len())
+      .map(|i| {
+        let pair: rquickjs::Array<'js> = list.get(i)?;
+        Ok((pair.get(0)?, pair.get(1)?))
+      })
+      .collect(),
+  )
+}
+
 /// Install the native web-API classes + globals. Called once at
 /// `Session::create`; persists across executions like the rest of the
 /// browser-like runtime surface.
@@ -334,6 +655,19 @@ pub fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<TextEncoder>::define(&globals)?;
   Class::<TextDecoder>::define(&globals)?;
   Class::<Url>::define(&globals)?;
+
+  globals.set("structuredClone", Func::from(structured_clone))?;
+
+  // `performance.now()` — milliseconds (fractional) since the session's
+  // process start, plus the `timeOrigin` those are relative to. A
+  // monotonic `Instant` base, so it cannot go backwards across a wall-
+  // clock adjustment the way `Date.now()` deltas can.
+  {
+    let performance = Object::new(ctx.clone())?;
+    performance.set("now", Func::from(|| PROCESS_START.elapsed().as_secs_f64() * 1000.0))?;
+    performance.set("timeOrigin", *TIME_ORIGIN)?;
+    globals.set("performance", performance)?;
+  }
 
   // queueMicrotask: defer the callback onto the job queue (same
   // primitive setImmediate uses). Capability follows the registrar:

@@ -37,12 +37,14 @@ pub mod element_handle;
 pub mod expect;
 pub mod extensions;
 pub mod fetch;
+pub mod file;
 pub mod file_chooser;
 pub mod form_data;
 pub mod frame;
 pub mod frame_locator;
 pub mod http_client;
 pub mod js_handle;
+pub mod js_iterator;
 pub mod keyboard;
 pub mod locator;
 pub mod mouse;
@@ -151,6 +153,10 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   // implementation in `ferridriver-jsstd`.
   ferridriver_jsstd::init(ctx)?;
   Class::<crate::bindings::blob::BlobJs>::define(&g)?;
+  Class::<crate::bindings::file::FileJs>::define(&g)?;
+  // `File` inherits from `Blob` in the spec; rquickjs classes do not
+  // inherit, so the prototype chain is wired explicitly.
+  crate::bindings::file::install_file_prototype(ctx)?;
   Class::<crate::bindings::form_data::FormDataJs>::define(&g)?;
   Ok(())
 }

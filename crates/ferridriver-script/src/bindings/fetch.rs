@@ -396,16 +396,36 @@ unsafe impl rquickjs::JsLifetime<'_> for FetchRequestJs {
 /// and the default `content-type` the body type implies (string ->
 /// `text/plain;charset=UTF-8`, object -> JSON; `Headers`/null/undefined
 /// -> none). Caller applies the content-type only if not already set.
-fn extract_body<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> (Vec<u8>, Option<&'static str>) {
+fn extract_body<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> (Vec<u8>, Option<String>) {
   if v.is_undefined() || v.is_null() {
     return (Vec::new(), None);
   }
   if let Some(s) = v.as_string().and_then(|s| s.to_string().ok()) {
-    return (s.into_bytes(), Some("text/plain;charset=UTF-8"));
+    return (s.into_bytes(), Some("text/plain;charset=UTF-8".to_string()));
+  }
+  // A `FormData` body is multipart with a generated boundary, and a
+  // `Blob`/`File` body is its raw bytes typed by its own `type` — both
+  // would otherwise fall through to the JSON branch and serialize as
+  // `{}`.
+  if let Ok(fd) = Class::<crate::bindings::form_data::FormDataJs>::from_value(v) {
+    let (bytes, ct) = fd.borrow().to_multipart();
+    return (bytes, Some(ct));
+  }
+  if let Some((bytes, ct)) = crate::bindings::blob::BlobJs::from_js_blob(v) {
+    return (bytes, (!ct.is_empty()).then_some(ct));
+  }
+  if let Some(ta) = rquickjs::TypedArray::<u8>::from_value(v.clone())
+    .ok()
+    .and_then(|ta| ta.as_bytes().map(<[u8]>::to_vec))
+  {
+    return (ta, None);
+  }
+  if let Some(bytes) = rquickjs::ArrayBuffer::from_value(v.clone()).and_then(|ab| ab.as_bytes().map(<[u8]>::to_vec)) {
+    return (bytes, None);
   }
   if v.is_object() {
     if let Ok(j) = crate::bindings::convert::serde_from_js::<serde_json::Value>(ctx, v.clone()) {
-      return (j.to_string().into_bytes(), Some("application/json"));
+      return (j.to_string().into_bytes(), Some("application/json".to_string()));
     }
   }
   (Vec::new(), None)
@@ -413,7 +433,7 @@ fn extract_body<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> (Vec<u8>, Option<&'stati
 
 /// Parse a `Response`/`Request` `init` bag's `headers` into raw pairs
 /// and apply `default_ct` as `content-type` unless already present.
-fn init_headers(init: Option<&Object<'_>>, default_ct: Option<&'static str>) -> Vec<(String, String)> {
+fn init_headers(init: Option<&Object<'_>>, default_ct: Option<String>) -> Vec<(String, String)> {
   let mut pairs = init
     .and_then(|o| o.get::<_, Value<'_>>("headers").ok())
     .map(|v| header_pairs_from(&v))
@@ -421,7 +441,7 @@ fn init_headers(init: Option<&Object<'_>>, default_ct: Option<&'static str>) -> 
   if let Some(ct) = default_ct
     && !pairs.iter().any(|(k, _)| k == "content-type")
   {
-    pairs.push(("content-type".to_string(), ct.to_string()));
+    pairs.push(("content-type".to_string(), ct));
   }
   pairs
 }
@@ -876,7 +896,7 @@ impl<'js> FetchResponseJs<'js> {
       status,
       status_text,
       url: String::new(),
-      headers: init_headers(init.as_ref(), Some("application/json")),
+      headers: init_headers(init.as_ref(), Some("application/json".to_string())),
       body: json.to_string().into_bytes(),
       redirected: false,
       type_: "default",

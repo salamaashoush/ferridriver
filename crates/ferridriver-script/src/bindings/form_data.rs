@@ -1,18 +1,21 @@
 //! WHATWG `FormData` (spec subset, no deps; multipart serialization
 //! studied from the read-only llrt reference). `append`/`set`/`get`/
-//! `getAll`/`has`/`delete`/`keys`/`values`/`entries`/`forEach`; string
-//! or `Blob`/`File`-ish values. `entries`/`keys`/`values` return arrays
-//! (iterable: `for..of fd.entries()`, spread, `Array.from`, `forEach`);
-//! `[Symbol.iterator]` is the entries array. `fetch` with a `FormData`
-//! body serializes `multipart/form-data` in-binding (no core change).
+//! `getAll`/`has`/`delete`/`keys`/`values`/`entries`/`forEach`; string,
+//! `Blob` or `File` values. `entries`/`keys`/`values`/`[Symbol.iterator]`
+//! return real live iterators (see [`super::js_iterator`]). A file entry
+//! reads back as a `File` carrying the filename it was stored under, and
+//! appending a `File` supplies that filename without repeating it.
+//! `fetch` with a `FormData` body serializes `multipart/form-data`
+//! in-binding (no core change).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rquickjs::atom::PredefinedAtom;
-use rquickjs::function::Opt;
-use rquickjs::{Class, Ctx, Function, Value, class::Trace};
+use rquickjs::function::{Opt, This};
+use rquickjs::{Class, Ctx, Function, Object, Value, class::Trace};
 
 use crate::bindings::blob::BlobJs;
+use crate::bindings::js_iterator::live_iterator;
 
 #[derive(Clone)]
 enum FormEntry {
@@ -38,6 +41,19 @@ unsafe impl rquickjs::JsLifetime<'_> for FormDataJs {
 
 impl FormDataJs {
   fn coerce(value: &Value<'_>, filename: Option<String>) -> FormEntry {
+    // A `File` carries its own name, so `fd.append('f', file)` needs no
+    // explicit filename; an explicit one still wins, per spec.
+    if let Some((bytes, ct, name)) = crate::bindings::file::FileJs::from_js_file(value) {
+      return FormEntry::File {
+        bytes,
+        filename: filename.unwrap_or(name),
+        content_type: if ct.is_empty() {
+          "application/octet-stream".to_string()
+        } else {
+          ct
+        },
+      };
+    }
     if let Some((bytes, ct)) = BlobJs::from_js_blob(value) {
       return FormEntry::File {
         bytes,
@@ -58,16 +74,55 @@ impl FormDataJs {
     FormEntry::Text(s)
   }
 
+  /// Spec: a file entry reads back as a `File` (carrying the filename it
+  /// was stored under), a text entry as a string.
   fn entry_value<'js>(ctx: &Ctx<'js>, e: &FormEntry) -> rquickjs::Result<Value<'js>> {
     match e {
       FormEntry::Text(s) => Ok(rquickjs::String::from_str(ctx.clone(), s)?.into_value()),
       FormEntry::File {
-        bytes, content_type, ..
+        bytes,
+        content_type,
+        filename,
       } => {
-        let blob = Class::instance(ctx.clone(), BlobJs::new_parts(bytes.clone(), content_type.clone()))?;
-        Ok(blob.into_value())
+        let file = Class::instance(
+          ctx.clone(),
+          crate::bindings::file::FileJs::new_parts(bytes.clone(), content_type.clone(), filename.clone()),
+        )?;
+        Ok(file.into_value())
       },
     }
+  }
+
+  fn project_entry<'js>(
+    ctx: &Ctx<'js>,
+    parent: &Class<'js, Self>,
+    index: usize,
+  ) -> rquickjs::Result<Option<Value<'js>>> {
+    let Some((name, entry)) = parent.borrow().entries.get(index).cloned() else {
+      return Ok(None);
+    };
+    let pair = rquickjs::Array::new(ctx.clone())?;
+    pair.set(0, rquickjs::String::from_str(ctx.clone(), &name)?)?;
+    pair.set(1, Self::entry_value(ctx, &entry)?)?;
+    Ok(Some(pair.into_value()))
+  }
+
+  fn project_key<'js>(ctx: &Ctx<'js>, parent: &Class<'js, Self>, index: usize) -> rquickjs::Result<Option<Value<'js>>> {
+    let Some((name, _)) = parent.borrow().entries.get(index).cloned() else {
+      return Ok(None);
+    };
+    Ok(Some(rquickjs::String::from_str(ctx.clone(), &name)?.into_value()))
+  }
+
+  fn project_value<'js>(
+    ctx: &Ctx<'js>,
+    parent: &Class<'js, Self>,
+    index: usize,
+  ) -> rquickjs::Result<Option<Value<'js>>> {
+    let Some((_, entry)) = parent.borrow().entries.get(index).cloned() else {
+      return Ok(None);
+    };
+    Self::entry_value(ctx, &entry).map(Some)
   }
 
   /// `(multipart-body, content-type)` for a `fetch` `FormData` body.
@@ -173,32 +228,23 @@ impl FormDataJs {
   }
 
   #[qjs(rename = "keys")]
-  pub fn keys(&self) -> Vec<String> {
-    self.entries.iter().map(|(k, _)| k.clone()).collect()
+  pub fn keys<'js>(ctx: Ctx<'js>, this: This<Class<'js, Self>>) -> rquickjs::Result<Object<'js>> {
+    live_iterator(&ctx, this.0, Self::project_key)
   }
 
   #[qjs(rename = "values")]
-  pub fn values<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Vec<Value<'js>>> {
-    self.entries.iter().map(|(_, e)| Self::entry_value(&ctx, e)).collect()
+  pub fn values<'js>(ctx: Ctx<'js>, this: This<Class<'js, Self>>) -> rquickjs::Result<Object<'js>> {
+    live_iterator(&ctx, this.0, Self::project_value)
   }
 
   #[qjs(rename = "entries")]
-  pub fn entries<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Vec<Vec<Value<'js>>>> {
-    self
-      .entries
-      .iter()
-      .map(|(k, e)| {
-        Ok(vec![
-          rquickjs::String::from_str(ctx.clone(), k)?.into_value(),
-          Self::entry_value(&ctx, e)?,
-        ])
-      })
-      .collect()
+  pub fn entries<'js>(ctx: Ctx<'js>, this: This<Class<'js, Self>>) -> rquickjs::Result<Object<'js>> {
+    live_iterator(&ctx, this.0, Self::project_entry)
   }
 
   #[qjs(rename = PredefinedAtom::SymbolIterator)]
-  pub fn js_iter<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Vec<Vec<Value<'js>>>> {
-    self.entries(ctx)
+  pub fn js_iter<'js>(ctx: Ctx<'js>, this: This<Class<'js, Self>>) -> rquickjs::Result<Object<'js>> {
+    live_iterator(&ctx, this.0, Self::project_entry)
   }
 
   #[qjs(rename = "forEach")]

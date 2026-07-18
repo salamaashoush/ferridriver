@@ -36,12 +36,52 @@ impl BlobJs {
     &self.type_
   }
 
-  /// Bytes + mime of a JS value if it is a `Blob` instance.
+  /// Bytes + mime of a JS value if it is a `Blob` — or a `File`, which
+  /// IS a `Blob` per spec but is a distinct rquickjs class.
   pub fn from_js_blob(v: &Value<'_>) -> Option<(Vec<u8>, String)> {
-    Class::<BlobJs>::from_value(v)
-      .ok()
-      .map(|b| (b.borrow().data.clone(), b.borrow().type_.clone()))
+    if let Ok(b) = Class::<BlobJs>::from_value(v) {
+      let b = b.borrow();
+      return Some((b.data.clone(), b.type_.clone()));
+    }
+    crate::bindings::file::FileJs::from_js_file(v).map(|(bytes, ct, _)| (bytes, ct))
   }
+
+  /// The shared `slice()` body: a byte range with spec index
+  /// normalization (negative counts from the end). `File.slice()` yields
+  /// a plain `Blob`, so both classes route here.
+  pub fn slice_bytes(data: &[u8], start: Option<i64>, end: Option<i64>, content_type: Option<String>) -> BlobJs {
+    let len = i64::try_from(data.len()).unwrap_or(i64::MAX);
+    let norm = |v: i64| if v < 0 { (len + v).max(0) } else { v.min(len) };
+    let s = norm(start.unwrap_or(0)) as usize;
+    let e = norm(end.unwrap_or(len)) as usize;
+    BlobJs {
+      data: if s < e { data[s..e].to_vec() } else { Vec::new() },
+      type_: content_type.map(|t| t.to_ascii_lowercase()).unwrap_or_default(),
+    }
+  }
+}
+
+/// Flatten a `BlobPart` sequence into bytes. Shared with `File`.
+pub fn blob_parts(parts: Option<&Value<'_>>) -> Vec<u8> {
+  let mut data = Vec::new();
+  if let Some(arr) = parts.and_then(rquickjs::Value::as_array) {
+    for i in 0..arr.len() {
+      if let Ok(elem) = arr.get::<Value<'_>>(i) {
+        push_part(&mut data, &elem);
+      }
+    }
+  }
+  data
+}
+
+/// The `type` of a `Blob`/`File` options bag: lowercased, and dropped
+/// entirely when it is not ASCII-printable, per spec. Shared with `File`.
+pub fn normalize_type(options: Option<&Object<'_>>) -> String {
+  options
+    .and_then(|o| o.get::<_, String>("type").ok())
+    .map(|t| t.to_ascii_lowercase())
+    .filter(|t| t.chars().all(|c| ('\u{20}'..='\u{7e}').contains(&c)))
+    .unwrap_or_default()
 }
 
 /// Concatenate one `BlobPart` (string -> UTF-8, `Blob`/`Uint8Array`/
@@ -71,23 +111,10 @@ fn push_part(out: &mut Vec<u8>, elem: &Value<'_>) {
 impl BlobJs {
   #[qjs(constructor)]
   pub fn new<'js>(parts: Opt<Value<'js>>, options: Opt<Object<'js>>) -> Self {
-    let mut data = Vec::new();
-    if let Some(arr) = parts.0.as_ref().and_then(|v| v.as_array()) {
-      for i in 0..arr.len() {
-        if let Ok(elem) = arr.get::<Value<'js>>(i) {
-          push_part(&mut data, &elem);
-        }
-      }
+    Self {
+      data: blob_parts(parts.0.as_ref()),
+      type_: normalize_type(options.0.as_ref()),
     }
-    // Spec: a Blob's `type` is lowercased; invalid (non-ASCII-printable)
-    // becomes "".
-    let type_ = options
-      .0
-      .and_then(|o| o.get::<_, String>("type").ok())
-      .map(|t| t.to_ascii_lowercase())
-      .filter(|t| t.chars().all(|c| ('\u{20}'..='\u{7e}').contains(&c)))
-      .unwrap_or_default();
-    Self { data, type_ }
   }
 
   #[qjs(get, rename = "size")]
@@ -119,14 +146,7 @@ impl BlobJs {
   /// count from the end), per spec.
   #[qjs(rename = "slice")]
   pub fn slice(&self, start: Opt<i64>, end: Opt<i64>, content_type: Opt<String>) -> BlobJs {
-    let len = i64::try_from(self.data.len()).unwrap_or(i64::MAX);
-    let norm = |v: i64| if v < 0 { (len + v).max(0) } else { v.min(len) };
-    let s = norm(start.0.unwrap_or(0)) as usize;
-    let e = norm(end.0.unwrap_or(len)) as usize;
-    BlobJs {
-      data: if s < e { self.data[s..e].to_vec() } else { Vec::new() },
-      type_: content_type.0.map(|t| t.to_ascii_lowercase()).unwrap_or_default(),
-    }
+    Self::slice_bytes(&self.data, start.0, end.0, content_type.0)
   }
 
   /// `stream()` -> a `ReadableStream` of the blob bytes.
