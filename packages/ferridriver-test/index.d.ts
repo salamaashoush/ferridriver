@@ -1094,12 +1094,16 @@ export interface APIRequestOptions {
   // serializable bodies through `data`).
   json?: unknown;
   form?: Record<string, string | number | boolean>;
-  multipart?: Record<string, string | { name: string; mimeType: string; buffer: Uint8Array | Buffer }>;
+  multipart?: Record<
+    string,
+    string | number | boolean | { name: string; mimeType?: string; buffer: Uint8Array | Buffer | string }
+  >;
   params?: Record<string, string | number | boolean>;
   timeout?: number;
   failOnStatusCode?: boolean;
   ignoreHTTPSErrors?: boolean;
   maxRedirects?: number;
+  maxRetries?: number;
 }
 
 export interface APIRequestContext {

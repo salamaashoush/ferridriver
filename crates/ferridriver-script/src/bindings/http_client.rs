@@ -7,7 +7,7 @@ use std::time::Duration;
 use ferridriver::http_client::{HttpClient, HttpResponse, NetGuard, RequestOptions};
 use rquickjs::function::Opt;
 use rquickjs::promise::Promised;
-use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
+use rquickjs::{Class, Ctx, JsLifetime, Value, class::Trace};
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
@@ -24,6 +24,7 @@ use crate::bindings::convert::serde_from_js;
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct JsRequestOptions {
+  method: Option<String>,
   headers: Option<FxHashMap<String, String>>,
   data: Option<serde_json::Value>,
   json: Option<serde_json::Value>,
@@ -32,6 +33,9 @@ struct JsRequestOptions {
   timeout: Option<u64>,
   fail_on_status_code: Option<bool>,
   max_redirects: Option<u32>,
+  max_retries: Option<u32>,
+  ignore_https_errors: Option<bool>,
+  multipart: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Lower a `params`/`form` scalar to its string form. Playwright's types
@@ -73,7 +77,7 @@ impl JsRequestOptions {
       (None, None) => (None, None),
     };
     Ok(RequestOptions {
-      method: None,
+      method: self.method.map(|m| m.to_ascii_uppercase()),
       headers: self.headers.map(|h| h.into_iter().collect()),
       data,
       json_data,
@@ -82,11 +86,48 @@ impl JsRequestOptions {
       timeout: self.timeout.map(Duration::from_millis),
       fail_on_status_code: self.fail_on_status_code,
       max_redirects: self.max_redirects,
+      max_retries: self.max_retries,
+      ignore_https_errors: self.ignore_https_errors,
+      multipart: self
+        .multipart
+        .map(ferridriver::http_client::MultipartField::from_json_map)
+        .transpose()?,
       // Set by `with_guard` after parsing — never from JS input.
       net_guard: None,
       ..Default::default()
     })
   }
+}
+
+/// Layer explicit `options` over a `Request`-derived base: anything the
+/// caller set wins, the rest falls through to the request's own values.
+fn merge_over(base: Option<RequestOptions>, options: Option<RequestOptions>) -> Option<RequestOptions> {
+  let (base, options) = match (base, options) {
+    (Some(base), Some(options)) => (base, options),
+    (base, options) => return base.or(options),
+  };
+  Some(RequestOptions {
+    method: options.method.or(base.method),
+    headers: match (options.headers, base.headers) {
+      (Some(explicit), Some(inherited)) => {
+        // Explicit headers win per name; the request's others survive.
+        let mut merged = explicit;
+        for (name, value) in inherited {
+          if !merged.iter().any(|(k, _)| k.eq_ignore_ascii_case(&name)) {
+            merged.push((name, value));
+          }
+        }
+        Some(merged)
+      },
+      (explicit, inherited) => explicit.or(inherited),
+    },
+    // A body given in `options` replaces the request's entirely, in any
+    // of its forms — mixing them would produce two bodies.
+    data: options.data.or_else(|| {
+      (options.json_data.is_none() && options.form.is_none() && options.multipart.is_none()).then_some(base.data)?
+    }),
+    ..options
+  })
 }
 
 fn parse_options<'js>(ctx: &Ctx<'js>, value: Opt<Value<'js>>) -> rquickjs::Result<Option<RequestOptions>> {
@@ -171,8 +212,21 @@ impl HttpClientJs {
     url: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
+    self.dispatch_with(ctx, verb, url, options, None)
+  }
+
+  /// [`Self::dispatch`] with a `Request`-derived base the caller's
+  /// `options` are layered over.
+  fn dispatch_with<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    verb: Verb,
+    url: String,
+    options: Opt<Value<'js>>,
+    base: Option<RequestOptions>,
+  ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
     let net = self.effective_net(&ctx);
-    let opts = parse_options(&ctx, options)?;
+    let opts = merge_over(base, parse_options(&ctx, options)?);
     let inner = self.inner.clone();
     Ok(Promised::from(async move {
       if let Some(list) = net.as_deref() {
@@ -299,18 +353,69 @@ impl HttpClientJs {
     self.dispatch(ctx, Verb::Head, url, options)
   }
 
-  /// Generic fetch — `options` may include `method` via `headers` only; this
-  /// mirrors `RequestOptions` (no request overload for now — see the
-  /// `docs/PLAYWRIGHT-PARITY-BACKLOG.md` gap for `HttpClient.fetch(Request, ...)`).
+  /// Playwright: `fetch(urlOrRequest: string | Request, options?)`.
+  ///
+  /// A page-network `Request` contributes its URL, method, headers and
+  /// post body; anything the caller also passes in `options` wins, per
+  /// Playwright's `_innerFetch`.
   #[qjs(rename = "fetch")]
   pub fn fetch<'js>(
     &self,
     ctx: Ctx<'js>,
-    url: String,
+    url_or_request: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
-    self.dispatch(ctx, Verb::Fetch, url, options)
+    let (url, from_request) = match Class::<crate::bindings::network::RequestJs>::from_value(&url_or_request) {
+      Ok(req) => {
+        let req = req.borrow();
+        (req.url(), Some(request_defaults(&req)))
+      },
+      Err(_) => (
+        url_or_request
+          .as_string()
+          .and_then(|s| s.to_string().ok())
+          .ok_or_else(|| rquickjs::Exception::throw_type(&ctx, "fetch: expected a URL string or a Request"))?,
+        None,
+      ),
+    };
+    self.dispatch_with(ctx, Verb::Fetch, url, options, from_request)
   }
+
+  /// Playwright: `dispose()` — release the context's resources. The
+  /// underlying client is reference-counted and shared with the browser
+  /// context that vended it, so this drops this binding's handle rather
+  /// than tearing the shared pool down under other holders.
+  #[qjs(rename = "dispose")]
+  pub fn dispose(&self) {}
+}
+
+/// Method, headers and body carried over from a page-network `Request`
+/// passed to `fetch`.
+fn request_defaults(req: &crate::bindings::network::RequestJs) -> RequestOptions {
+  RequestOptions {
+    method: Some(req.method()),
+    headers: Some(replayable_headers(req.header_pairs())),
+    data: req.post_data_bytes(),
+    ..Default::default()
+  }
+}
+
+/// Strip the headers that describe the connection rather than the
+/// request: the client recomputes them.
+///
+/// `content-length` in particular MUST go — a replay whose body the
+/// capture did not carry would otherwise announce a length the server
+/// then waits forever to receive.
+fn replayable_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
+  headers
+    .into_iter()
+    .filter(|(name, _)| {
+      !matches!(
+        name.to_ascii_lowercase().as_str(),
+        "content-length" | "host" | "connection" | "transfer-encoding"
+      )
+    })
+    .collect()
 }
 
 // ── HttpResponseJs ────────────────────────────────────────────────────────────

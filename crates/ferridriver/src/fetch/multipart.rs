@@ -23,6 +23,65 @@ pub enum MultipartValue {
   },
 }
 
+impl MultipartField {
+  /// Lower Playwright's `multipart` option bag — a map of
+  /// `string | number | boolean | { name, mimeType, buffer }` — into
+  /// fields.
+  ///
+  /// `buffer` accepts a byte array or a string (the natural JSON shape of
+  /// a `Buffer` / `Uint8Array` crossing either binding boundary). Both
+  /// bindings call this so a `multipart` bag means exactly one thing.
+  ///
+  /// # Errors
+  ///
+  /// Returns a message naming the offending key when a value is neither
+  /// a scalar nor a well-formed file descriptor.
+  pub fn from_json_map<I>(fields: I) -> Result<Vec<Self>, String>
+  where
+    I: IntoIterator<Item = (String, serde_json::Value)>,
+  {
+    fields
+      .into_iter()
+      .map(|(name, value)| {
+        let value = match value {
+          serde_json::Value::String(s) => MultipartValue::Text(s),
+          serde_json::Value::Number(n) => MultipartValue::Text(n.to_string()),
+          serde_json::Value::Bool(b) => MultipartValue::Text(b.to_string()),
+          serde_json::Value::Object(obj) => {
+            let filename = obj
+              .get("name")
+              .and_then(serde_json::Value::as_str)
+              .ok_or_else(|| format!("multipart[{name:?}]: a file field needs a string `name`"))?
+              .to_string();
+            let content_type = obj
+              .get("mimeType")
+              .and_then(serde_json::Value::as_str)
+              .unwrap_or("application/octet-stream")
+              .to_string();
+            let bytes = match obj.get("buffer") {
+              Some(serde_json::Value::String(s)) => s.clone().into_bytes(),
+              Some(array @ serde_json::Value::Array(_)) => serde_json::from_value::<Vec<u8>>(array.clone())
+                .map_err(|_| format!("multipart[{name:?}]: `buffer` must be bytes or a string"))?,
+              _ => return Err(format!("multipart[{name:?}]: a file field needs a `buffer`")),
+            };
+            MultipartValue::File {
+              filename,
+              content_type,
+              bytes,
+            }
+          },
+          other => {
+            return Err(format!(
+              "multipart[{name:?}] must be a string, number, boolean, or {{ name, mimeType, buffer }} (got {other})"
+            ));
+          },
+        };
+        Ok(Self { name, value })
+      })
+      .collect()
+  }
+}
+
 /// Serialize `multipart/form-data` fields into a body + the matching
 /// `content-type` header value (with the boundary). Field names /
 /// filenames are written into the part headers verbatim (the caller

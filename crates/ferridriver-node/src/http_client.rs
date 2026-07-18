@@ -26,6 +26,8 @@ pub struct HttpClientOptions {
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct FetchOptions {
+  /// HTTP method override (`fetch` only; the verb helpers set it).
+  pub method: Option<String>,
   /// Extra headers for this request.
   pub headers: Option<std::collections::HashMap<String, String>>,
   /// Request body: a string is sent raw, any other serializable value
@@ -43,6 +45,16 @@ pub struct FetchOptions {
   pub fail_on_status_code: Option<bool>,
   /// Max redirects.
   pub max_redirects: Option<i32>,
+  /// Retry on a connection reset up to this many times.
+  pub max_retries: Option<i32>,
+  /// Per-request override of the client-level TLS posture.
+  pub ignore_https_errors: Option<bool>,
+  /// `multipart/form-data` body. A value is a scalar text field, or
+  /// `{ name, mimeType, buffer }` for a file part.
+  #[napi(
+    ts_type = "Record<string, string | number | boolean | { name: string, mimeType?: string, buffer: Buffer | string }>"
+  )]
+  pub multipart: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 /// Lower a `params`/`form` scalar to its string form. Playwright's
@@ -79,7 +91,7 @@ impl FetchOptions {
       None => (None, None),
     };
     Ok(ferridriver::http_client::RequestOptions {
-      method: None,
+      method: self.method.as_ref().map(|m| m.to_ascii_uppercase()),
       headers: self
         .headers
         .as_ref()
@@ -95,12 +107,70 @@ impl FetchOptions {
       timeout: self.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
       fail_on_status_code: self.fail_on_status_code,
       max_redirects: self.max_redirects.map(|m| m as u32),
+      max_retries: self.max_retries.map(|m| m as u32),
+      ignore_https_errors: self.ignore_https_errors,
+      multipart: self
+        .multipart
+        .as_ref()
+        .map(|m| {
+          ferridriver::http_client::MultipartField::from_json_map(m.iter().map(|(k, v)| (k.clone(), v.clone())))
+            .map_err(napi::Error::from_reason)
+        })
+        .transpose()?,
       // The Node binding is the trusted Playwright-in-Rust surface, not
       // the script sandbox — no network guard is imposed here.
       net_guard: None,
       ..Default::default()
     })
   }
+}
+
+/// Strip the headers that describe the connection rather than the
+/// request: the client recomputes them. `content-length` in particular
+/// MUST go — a replay whose body the capture did not carry would
+/// otherwise announce a length the server then waits forever to receive.
+fn replayable_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
+  headers
+    .into_iter()
+    .filter(|(name, _)| {
+      !matches!(
+        name.to_ascii_lowercase().as_str(),
+        "content-length" | "host" | "connection" | "transfer-encoding"
+      )
+    })
+    .collect()
+}
+
+/// Layer explicit `options` over a `Request`-derived base: anything the
+/// caller set wins, the rest falls through to the request's own values.
+/// Mirrors the QuickJS binding's `merge_over`.
+fn merge_over(
+  base: Option<ferridriver::http_client::RequestOptions>,
+  options: Option<ferridriver::http_client::RequestOptions>,
+) -> Option<ferridriver::http_client::RequestOptions> {
+  let (base, options) = match (base, options) {
+    (Some(base), Some(options)) => (base, options),
+    (base, options) => return base.or(options),
+  };
+  Some(ferridriver::http_client::RequestOptions {
+    method: options.method.or(base.method),
+    headers: match (options.headers, base.headers) {
+      (Some(explicit), Some(inherited)) => {
+        let mut merged = explicit;
+        for (name, value) in inherited {
+          if !merged.iter().any(|(k, _)| k.eq_ignore_ascii_case(&name)) {
+            merged.push((name, value));
+          }
+        }
+        Some(merged)
+      },
+      (explicit, inherited) => explicit.or(inherited),
+    },
+    data: options.data.or_else(|| {
+      (options.json_data.is_none() && options.form.is_none() && options.multipart.is_none()).then_some(base.data)?
+    }),
+    ..options
+  })
 }
 
 /// API response from an HTTP request.
@@ -268,10 +338,29 @@ impl HttpClient {
     Ok(HttpResponse { inner: resp })
   }
 
-  /// Send a generic HTTP request.
-  #[napi]
-  pub async fn fetch(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
-    let opts = options.map(|o| o.to_core()).transpose()?;
+  /// Mirrors Playwright `apiRequestContext.fetch(urlOrRequest, options?)`.
+  ///
+  /// A page-network `Request` contributes its URL, method, headers and
+  /// post body; anything also given in `options` wins.
+  #[napi(ts_args_type = "urlOrRequest: string | Request, options?: FetchOptions")]
+  pub async fn fetch(
+    &self,
+    url_or_request: napi::Either<String, &crate::network::Request>,
+    options: Option<FetchOptions>,
+  ) -> Result<HttpResponse> {
+    let (url, base) = match url_or_request {
+      napi::Either::A(url) => (url, None),
+      napi::Either::B(req) => (
+        req.url(),
+        Some(ferridriver::http_client::RequestOptions {
+          method: Some(req.method()),
+          headers: Some(replayable_headers(req.inner.headers().into_iter().collect())),
+          data: req.inner.post_data_buffer(),
+          ..Default::default()
+        }),
+      ),
+    };
+    let opts = merge_over(base, options.map(|o| o.to_core()).transpose()?);
     let resp = self.inner.fetch(&url, opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }

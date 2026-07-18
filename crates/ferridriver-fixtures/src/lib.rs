@@ -269,6 +269,16 @@ async fn handle_api_echo(
   }))
 }
 
+/// Method + headers + body in one reply, so a test can assert what a
+/// request actually carried without issuing it twice.
+fn fx_echo_request(method: &axum::http::Method, headers: &HeaderMap, body: &axum::body::Bytes) -> Response<Body> {
+  fx_json(&serde_json::json!({
+    "method": method.as_str(),
+    "headers": serde_json::Value::Object(headers_json(headers)),
+    "body": String::from_utf8_lossy(body),
+  }))
+}
+
 async fn handle_fx(
   State(state): State<Arc<ServerState>>,
   Path(path): Path<String>,
@@ -295,6 +305,7 @@ async fn handle_fx(
     "api/posts" => fx_json(&serde_json::json!({"posts": ["first"]})),
     "echo" => fx_build(200, "text/plain", body.to_vec(), &[]),
     "echo-headers" => fx_json(&serde_json::Value::Object(headers_json(&headers))),
+    "echo-request" => fx_echo_request(&method, &headers, &body),
     "multi-cookie" => fx_build(
       200,
       "text/plain",

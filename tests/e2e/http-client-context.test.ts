@@ -202,3 +202,75 @@ describe('context-bound request', () => {
     expect(cookieHeader).not.toContain('gone=1');
   });
 });
+
+describe('request option bags', () => {
+  test('multipart_option_sends_a_form_data_body', async ({ context, baseURL }) => {
+    const resp = await context.request.post(`${baseURL}/fx/echo-request`, {
+      multipart: {
+        field: 'plain',
+        count: 7,
+        file: { name: 'note.txt', mimeType: 'text/plain', buffer: 'file-bytes' },
+      },
+    });
+    expect(resp.status()).toBe(200);
+    const echoed = (await resp.json()) as { method: string; headers: Record<string, string>; body: string };
+    expect(echoed.method).toBe('POST');
+    expect(String(echoed.headers['content-type'] ?? '')).toContain('multipart/form-data; boundary=');
+    expect(echoed.body).toContain('name="field"');
+    expect(echoed.body).toContain('plain');
+    expect(echoed.body).toContain('7');
+    expect(echoed.body).toContain('filename="note.txt"');
+    expect(echoed.body).toContain('Content-Type: text/plain');
+    expect(echoed.body).toContain('file-bytes');
+  });
+
+  test('fetch_accepts_a_page_request_and_replays_it', async ({ page, context, baseURL }) => {
+    // Capture a real page-network Request, then replay it through the
+    // API client: its method, headers and body must ride along.
+    await page.goto(`${baseURL}/fx/landed`);
+    const [captured] = await Promise.all([
+      page.waitForRequest((r) => r.url().includes('/fx/echo-request')),
+      page.evaluate(
+        `fetch('/fx/echo-request', { method: 'PUT', headers: { 'x-from-page': 'yes' }, body: 'page-body' })`,
+      ),
+    ]);
+
+    const replayed = await context.request.fetch(captured);
+    const echoed = (await replayed.json()) as { method: string; headers: Record<string, string>; body: string };
+    expect(echoed.method).toBe('PUT');
+    expect(echoed.headers['x-from-page']).toBe('yes');
+    // Whatever body the capture carried is what gets replayed. Firefox
+    // (BiDi) does not surface post data for a page-initiated fetch, so
+    // `postData()` is null there and the replay is body-less — which is
+    // exactly what must NOT announce a stale content-length.
+    expect(echoed.body).toBe(captured.postData() ?? '');
+  });
+
+  test('fetch_options_override_the_request_they_replay', async ({ page, context, baseURL }) => {
+    await page.goto(`${baseURL}/fx/landed`);
+    const [captured] = await Promise.all([
+      page.waitForRequest((r) => r.url().includes('/fx/echo-request')),
+      page.evaluate(
+        `fetch('/fx/echo-request', { method: 'PUT', headers: { 'x-from-page': 'yes' }, body: 'page-body' })`,
+      ),
+    ]);
+
+    const replayed = await context.request.fetch(captured, {
+      method: 'POST',
+      headers: { 'x-from-page': 'overridden' },
+      data: 'new-body',
+    });
+    const echoed = (await replayed.json()) as { method: string; headers: Record<string, string>; body: string };
+    expect(echoed.method).toBe('POST');
+    expect(echoed.headers['x-from-page']).toBe('overridden');
+    expect(echoed.body).toBe('new-body');
+  });
+
+  test('dispose_leaves_the_shared_context_client_usable', async ({ context, baseURL }) => {
+    // Playwright's dispose() releases the caller's handle; the browser
+    // context that vended it keeps working.
+    await context.request.dispose();
+    const resp = await context.request.get(`${baseURL}/fx/landed`);
+    expect(await resp.text()).toBe('landed');
+  });
+});

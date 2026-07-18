@@ -41,12 +41,18 @@ layers). Remaining gaps:
 - `page.request === context.request` object identity is not preserved —
   each access mints a wrapper over the same browser-backed state
   (consistent with the `tracing` / `clock` getters).
-- `fetch(Request)` overload, `multipart`, `maxRetries`, and per-request
-  `ignoreHTTPSErrors` are still missing from the `request` option bag
-  (bound AND standalone; unknown option keys are silently ignored).
-  `data` routes strings raw and serializable values as JSON, but skips
+- `data` routes strings raw and serializable values as JSON, but skips
   Playwright's is-JSON-parsable validation for string bodies under a
   JSON content-type.
+- `maxRetries` and per-request `ignoreHTTPSErrors` reach the core engine
+  from both bindings but have no per-option integration test: proving
+  them needs a fixture that resets a connection mid-request and one that
+  serves a bad certificate, neither of which the axum fixture server can
+  do today.
+- `request.fetch(pageRequest)` replays the captured request's method and
+  headers, and its body where the backend captured one. Firefox (BiDi)
+  does not surface post data for a page-initiated `fetch`, so
+  `request.postData()` is null there and the replay is body-less.
 - No automatic response decompression (Playwright advertises
   `gzip,deflate,br`; the reqwest build has no decompression features).
 

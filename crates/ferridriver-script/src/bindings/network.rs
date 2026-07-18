@@ -42,6 +42,19 @@ impl RequestJs {
       page: Some(page),
     }
   }
+
+  /// Headers as ordered pairs, for `request.fetch(pageRequest)` to
+  /// replay them without a JS round-trip.
+  #[must_use]
+  pub fn header_pairs(&self) -> Vec<(String, String)> {
+    self.inner.headers().into_iter().collect()
+  }
+
+  /// Raw post body, for the same replay path.
+  #[must_use]
+  pub fn post_data_bytes(&self) -> Option<Vec<u8>> {
+    self.inner.post_data_buffer()
+  }
 }
 
 #[rquickjs::methods]
