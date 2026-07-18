@@ -349,7 +349,7 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
   // continuation keeps running on the VM — without the signal it would
   // be zombie work with no way to notice. Handlers pass it to
   // `fetch`/listeners exactly like any web `AbortSignal`.
-  let signal = crate::bindings::abort::AbortSignalJs::fresh_instance(&ctx)?;
+  let signal = crate::bindings::abort::fresh_instance(&ctx)?;
   arg.set("signal", signal.clone())?;
 
   // The same `allow.net` must also bind the global `fetch` and the
@@ -376,7 +376,12 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
           // Fire the handler's `ctx.signal` so its still-running JS
           // continuation (and any in-flight `fetch` holding the signal)
           // can stop instead of running on as zombie work.
-          let _ = crate::bindings::abort::AbortSignalJs::abort_native(&signal, &abort_ctx, "TimeoutError", &msg);
+          let _ = crate::bindings::abort::abort_native(
+            &signal,
+            &abort_ctx,
+            ferridriver_jsstd::exceptions::DOMExceptionName::TimeoutError,
+            &msg,
+          );
           Err(rquickjs::Error::new_from_js_message("extensions", "Error", msg))
         }
       },

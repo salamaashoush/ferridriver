@@ -17,19 +17,16 @@
 //! static `Response.json`/`error`/`redirect`. `fetch(url, { signal })`
 //! is wired to `AbortController`/`AbortSignal` (see [`super::abort`]):
 //! an already-aborted signal rejects before I/O and an in-flight abort
-//! drops the request future. `Response.body` is a `ReadableStream`
-//! that pulls chunks live off the socket (the body is NOT buffered;
-//! `text()`/`json()`/`arrayBuffer()` drain it on demand) — see
-//! [`super::streams`]. `Blob` and `FormData` (see [`super::blob`] /
-//! [`super::form_data`]) are accepted as bodies — a `Blob` sends its
-//! bytes + type, a `FormData` is serialized as `multipart/form-data`.
-//! Still a subset: `clone()` of a not-yet-read streamed `Response`
-//! throws (no stream tee); a `signal` on a `Request`
-//! instance is not yet forwarded (pass it via `init.signal`);
-//! `init.redirect` maps onto the per-request redirect
-//! cap (`manual`/`error` -> don't follow; a spec-exact opaque-redirect /
-//! rejection is not distinguishable through reqwest's per-request
-//! policy).
+//! drops the request future. `Response.body` is a WHATWG
+//! `ReadableStream` that pulls chunks live off the socket (the body is
+//! NOT buffered) — the same stream object on every access, drained by
+//! `text()`/`json()`/`arrayBuffer()`, and pipeable through a
+//! `TransformStream` into a `WritableStream`. `clone()` tees it, so both
+//! responses read the full payload off one socket even when nothing has
+//! been buffered yet. See [`super::streams`]. `Blob` and `FormData` (see
+//! [`super::blob`] / [`super::form_data`]) are accepted as bodies — a
+//! `Blob` sends its bytes + type, a `FormData` is serialized as
+//! `multipart/form-data`.
 //!
 //! Net policy: `fetch` is a facade over the SAME core a net-restricted
 //! tool's `request` wraps, so the `allow.net` allow-list must bind here
@@ -43,8 +40,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ferridriver::http_client::{Credentials, HttpClient, RedirectMode, RequestOptions};
+use ferridriver_jsstd::abort::AbortSignal;
+use ferridriver_jsstd::stream_web::ReadableStream;
 use rquickjs::atom::PredefinedAtom;
-use rquickjs::function::{Func, Opt};
+use rquickjs::function::{Func, Opt, This};
 use rquickjs::{Coerced, Ctx, IntoJs, Object, Value, class::Class, class::Trace};
 
 use crate::bindings::convert::json_to_js;
@@ -318,7 +317,7 @@ fn normalize_header_value(text: &str) -> String {
 /// only ever a return value, matching Playwright itself).
 #[derive(Trace)]
 #[rquickjs::class(rename = "Response")]
-pub struct FetchResponseJs {
+pub struct FetchResponseJs<'js> {
   #[qjs(skip_trace)]
   status: u16,
   #[qjs(skip_trace)]
@@ -340,7 +339,12 @@ pub struct FetchResponseJs {
   /// a `ReadableStream`. `None` for a constructed/`Response.json/error/
   /// redirect` (the bytes are in `body`).
   #[qjs(skip_trace)]
-  net: Option<Arc<tokio::sync::Mutex<Option<ferridriver::http_client::HttpStreamResponse>>>>,
+  net: Option<crate::bindings::streams::NetBody>,
+  /// The `Response.body` stream, created on first access (or by
+  /// `clone()`, which tees it). Once present it is the authoritative
+  /// body: `text()`/`json()`/`arrayBuffer()` drain it rather than the
+  /// raw source, so a tee'd branch reads its own copy.
+  body_stream: Option<Class<'js, ReadableStream<'js>>>,
 }
 
 /// WHATWG `Request` (spec subset). Constructible (`new Request(input,
@@ -380,8 +384,8 @@ unsafe impl rquickjs::JsLifetime<'_> for HeadersJs {
   type Changed<'to> = HeadersJs;
 }
 #[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for FetchResponseJs {
-  type Changed<'to> = FetchResponseJs;
+unsafe impl<'js> rquickjs::JsLifetime<'js> for FetchResponseJs<'js> {
+  type Changed<'to> = FetchResponseJs<'to>;
 }
 #[allow(unsafe_code)]
 unsafe impl rquickjs::JsLifetime<'_> for FetchRequestJs {
@@ -655,7 +659,7 @@ impl HeadersJs {
   }
 }
 
-impl FetchResponseJs {
+impl<'js> FetchResponseJs<'js> {
   /// The `Response` a `fetch()` resolves to: status/headers are known,
   /// the body streams from `stream` (not buffered).
   fn from_stream(
@@ -677,6 +681,7 @@ impl FetchResponseJs {
       type_,
       body_used: false,
       net: Some(Arc::new(tokio::sync::Mutex::new(Some(stream)))),
+      body_stream: None,
     }
   }
 
@@ -693,15 +698,70 @@ impl FetchResponseJs {
       type_: "opaqueredirect",
       body_used: false,
       net: None,
+      body_stream: None,
+    }
+  }
+
+  /// The `Response.body` stream, created on first access.
+  ///
+  /// A streamed `fetch` result shares the live response with the stream
+  /// (so neither buffers it); anything else streams the in-memory bytes.
+  fn ensure_body_stream(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Class<'js, ReadableStream<'js>>> {
+    if let Some(s) = &self.body_stream {
+      return Ok(s.clone());
+    }
+    let stream = match self.net.take() {
+      Some(net) => crate::bindings::streams::from_net(ctx, net)?,
+      None => crate::bindings::streams::from_bytes(ctx, std::mem::take(&mut self.body))?,
+    };
+    self.body_stream = Some(stream.clone());
+    Ok(stream)
+  }
+
+  /// Read a `ReadableStream` to completion through its public JS reader,
+  /// so a tee'd branch, a user-constructed stream and a live socket all
+  /// drain the same way.
+  async fn drain_stream(ctx: &Ctx<'js>, stream: Class<'js, ReadableStream<'js>>) -> rquickjs::Result<Vec<u8>> {
+    let obj = stream
+      .into_value()
+      .into_object()
+      .ok_or_else(|| rquickjs::Error::new_from_js_message("Response", "TypeError", "body is not a ReadableStream"))?;
+    let reader: Object<'js> = obj.get::<_, rquickjs::Function<'js>>("getReader")?.call((This(obj),))?;
+    let read: rquickjs::Function<'js> = reader.get("read")?;
+    let mut out = Vec::new();
+    loop {
+      let step: rquickjs::Promise<'js> = read.call((This(reader.clone()),))?;
+      let res: Object<'js> = step.into_future().await?;
+      if res.get::<_, bool>("done").unwrap_or(false) {
+        return Ok(out);
+      }
+      let chunk = chunk_bytes(&res.get::<_, Value<'js>>("value")?);
+      if out.len() + chunk.len() > MAX_FETCH_BODY_BYTES {
+        return Err(rquickjs::Exception::throw_type(
+          ctx,
+          &format!("response body exceeded {MAX_FETCH_BODY_BYTES} bytes"),
+        ));
+      }
+      out.extend_from_slice(&chunk);
     }
   }
 
   /// WHATWG "consume body": a second read is a `TypeError`. Drains the
-  /// live response to completion when this is a streamed `fetch` body,
-  /// else returns the in-memory bytes.
-  async fn consume(&mut self, ctx: &Ctx<'_>) -> rquickjs::Result<Vec<u8>> {
+  /// body stream when one has been vended (`.body`, or a `clone()` tee),
+  /// else the live response, else the in-memory bytes.
+  async fn consume(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Vec<u8>> {
     if self.body_used {
       return Err(rquickjs::Exception::throw_type(ctx, "Body has already been consumed"));
+    }
+    if let Some(stream) = self.body_stream.clone() {
+      if stream.borrow().is_readable_stream_locked() {
+        return Err(rquickjs::Exception::throw_type(ctx, "Body is locked to a reader"));
+      }
+      self.body_used = true;
+      return match tokio::time::timeout(FETCH_BODY_DRAIN_TIMEOUT, Self::drain_stream(ctx, stream)).await {
+        Ok(r) => r,
+        Err(_) => Err(rquickjs::Exception::throw_type(ctx, "response body read timed out")),
+      };
     }
     self.body_used = true;
     if let Some(net) = &self.net {
@@ -737,12 +797,29 @@ impl FetchResponseJs {
   }
 }
 
+/// Bytes behind a stream chunk (`Uint8Array`/`ArrayBuffer`/string).
+fn chunk_bytes(v: &Value<'_>) -> Vec<u8> {
+  if let Some(s) = v.as_string().and_then(|s| s.to_string().ok()) {
+    return s.into_bytes();
+  }
+  if let Ok(ta) = rquickjs::TypedArray::<u8>::from_value(v.clone()) {
+    let b: &[u8] = ta.as_ref();
+    return b.to_vec();
+  }
+  if let Some(ab) = rquickjs::ArrayBuffer::from_value(v.clone())
+    && let Some(b) = ab.as_bytes()
+  {
+    return b.to_vec();
+  }
+  Vec::new()
+}
+
 #[rquickjs::methods]
-impl FetchResponseJs {
+impl<'js> FetchResponseJs<'js> {
   /// `new Response(body?, init?)` — `init`: `{ status?, statusText?,
   /// headers? }`. `status` outside 200..=599 is a `RangeError`.
   #[qjs(constructor)]
-  pub fn new<'js>(ctx: Ctx<'js>, body: Opt<Value<'js>>, init: Opt<Object<'js>>) -> rquickjs::Result<Self> {
+  pub fn new(ctx: Ctx<'js>, body: Opt<Value<'js>>, init: Opt<Object<'js>>) -> rquickjs::Result<Self> {
     let init = init.0;
     let status = match init.as_ref().and_then(|o| o.get::<_, i64>("status").ok()) {
       Some(s) if !(200..=599).contains(&s) => {
@@ -778,12 +855,13 @@ impl FetchResponseJs {
       type_: "default",
       body_used: false,
       net: None,
+      body_stream: None,
     })
   }
 
   /// `Response.json(data, init?)` — JSON body + `application/json`.
   #[qjs(static, rename = "json")]
-  pub fn json_static<'js>(ctx: Ctx<'js>, data: Value<'js>, init: Opt<Object<'js>>) -> rquickjs::Result<Self> {
+  pub fn json_static(ctx: Ctx<'js>, data: Value<'js>, init: Opt<Object<'js>>) -> rquickjs::Result<Self> {
     let init = init.0;
     let json: serde_json::Value = crate::bindings::convert::serde_from_js(&ctx, data)?;
     let status = init
@@ -804,6 +882,7 @@ impl FetchResponseJs {
       type_: "default",
       body_used: false,
       net: None,
+      body_stream: None,
     })
   }
 
@@ -820,6 +899,7 @@ impl FetchResponseJs {
       type_: "error",
       body_used: false,
       net: None,
+      body_stream: None,
     }
   }
 
@@ -841,6 +921,7 @@ impl FetchResponseJs {
       type_: "default",
       body_used: false,
       net: None,
+      body_stream: None,
     })
   }
 
@@ -874,32 +955,28 @@ impl FetchResponseJs {
   }
 
   #[qjs(get, rename = "headers")]
-  pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, HeadersJs>> {
+  pub fn headers(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, HeadersJs>> {
     Class::instance(ctx, HeadersJs::from_pairs(self.headers.iter().cloned()))
   }
 
-  /// `Response.body` — a `ReadableStream`. For a streamed `fetch`
-  /// result the stream pulls chunks live off the socket (the body is
-  /// NOT buffered); for a constructed `Response` it is the in-memory
-  /// bytes. Empty/done once the body was consumed by
-  /// `text()`/`json()`/`arrayBuffer()`.
+  /// `Response.body` — the body `ReadableStream`. For a streamed
+  /// `fetch` result each pull takes the next chunk off the socket (the
+  /// body is NOT buffered); for a constructed `Response` it streams the
+  /// in-memory bytes. The same stream object is returned every time, and
+  /// `text()`/`json()`/`arrayBuffer()` drain it.
   #[qjs(get, rename = "body")]
-  pub fn body<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, crate::bindings::streams::ReadableStreamJs>> {
-    let stream = match &self.net {
-      Some(net) => crate::bindings::streams::ReadableStreamJs::from_net(net.clone()),
-      None => crate::bindings::streams::ReadableStreamJs::from_bytes(self.body.clone()),
-    };
-    Class::instance(ctx, stream)
+  pub fn body(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, ReadableStream<'js>>> {
+    self.ensure_body_stream(&ctx)
   }
 
   #[qjs(rename = "text")]
-  pub async fn text(&mut self, ctx: Ctx<'_>) -> rquickjs::Result<String> {
+  pub async fn text(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<String> {
     let b = self.consume(&ctx).await?;
     Ok(String::from_utf8_lossy(&b).into_owned())
   }
 
   #[qjs(rename = "json")]
-  pub async fn json<'js>(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub async fn json(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let b = self.consume(&ctx).await?;
     let v: serde_json::Value = serde_json::from_slice(&b)
       .map_err(|e| rquickjs::Error::new_from_js_message("Response.json", "Error", e.to_string()))?;
@@ -907,34 +984,39 @@ impl FetchResponseJs {
   }
 
   #[qjs(rename = "arrayBuffer")]
-  pub async fn array_buffer<'js>(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub async fn array_buffer(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let b = self.consume(&ctx).await?;
     rquickjs::ArrayBuffer::new(ctx.clone(), b).map(rquickjs::ArrayBuffer::into_value)
   }
 
+  /// `Response.clone()` — WHATWG "clone a response": the body stream is
+  /// tee'd, so BOTH responses can be read independently, including an
+  /// unread streamed `fetch` body (neither branch buffers ahead of its
+  /// own consumer).
   #[qjs(rename = "clone")]
-  pub fn clone_(&self, ctx: Ctx<'_>) -> rquickjs::Result<Self> {
-    if self.body_used {
-      return Err(rquickjs::Exception::throw_type(&ctx, "Cannot clone a used Response"));
-    }
-    if self.net.is_some() {
-      // Cloning would require teeing the live stream; not supported in
-      // this subset (the body has not been buffered).
-      return Err(rquickjs::Exception::throw_type(
-        &ctx,
-        "Cannot clone a streaming Response (body is not buffered)",
-      ));
-    }
+  pub fn clone_(this: This<Class<'js, Self>>, ctx: Ctx<'js>) -> rquickjs::Result<Self> {
+    let (branch1, branch2) = {
+      let mut me = this.borrow_mut();
+      if me.body_used {
+        return Err(rquickjs::Exception::throw_type(&ctx, "Cannot clone a used Response"));
+      }
+      let stream = me.ensure_body_stream(&ctx)?;
+      drop(me);
+      ferridriver_jsstd::stream_web::tee_readable_stream(ctx.clone(), stream)?
+    };
+    let mut me = this.borrow_mut();
+    me.body_stream = Some(branch1);
     Ok(Self {
-      status: self.status,
-      status_text: self.status_text.clone(),
-      url: self.url.clone(),
-      headers: self.headers.clone(),
-      body: self.body.clone(),
-      redirected: self.redirected,
-      type_: self.type_,
+      status: me.status,
+      status_text: me.status_text.clone(),
+      url: me.url.clone(),
+      headers: me.headers.clone(),
+      body: Vec::new(),
+      redirected: me.redirected,
+      type_: me.type_,
       body_used: false,
       net: None,
+      body_stream: Some(branch2),
     })
   }
 }
@@ -945,7 +1027,7 @@ impl FetchRequestJs {
   /// `Request`; `init`: `{ method?, headers?, body?, redirect?,
   /// credentials?, signal? }` (`signal` accepted, not yet wired).
   #[qjs(constructor)]
-  pub fn new<'js>(ctx: Ctx<'js>, input: Value<'js>, init: Opt<Object<'js>>) -> Self {
+  pub fn new<'js>(ctx: Ctx<'js>, input: Value<'js>, init: Opt<Object<'js>>) -> rquickjs::Result<Self> {
     let init = init.0;
     let mut req = if let Ok(other) = Class::<FetchRequestJs>::from_value(&input) {
       let o = other.borrow();
@@ -982,9 +1064,9 @@ impl FetchRequestJs {
         req.credentials = c;
       }
       if let Ok(sig) = o.get::<_, Value<'js>>("signal")
-        && let Ok(s) = Class::<crate::bindings::abort::AbortSignalJs<'js>>::from_value(&sig)
+        && let Ok(s) = Class::<AbortSignal<'js>>::from_value(&sig)
       {
-        req.signal_inner = Some(crate::bindings::abort::AbortSignalJs::inner_of(&s));
+        req.signal_inner = Some(crate::bindings::abort::native_channel(&ctx, &s)?);
       }
       let (bytes, default_ct) = o
         .get::<_, Value<'_>>("body")
@@ -1009,7 +1091,7 @@ impl FetchRequestJs {
         }
       };
     }
-    req
+    Ok(req)
   }
 
   #[qjs(get, rename = "url")]
@@ -1187,8 +1269,8 @@ fn do_fetch<'js>(
     let signal = init
       .as_ref()
       .and_then(|o| o.get::<_, Value<'_>>("signal").ok())
-      .and_then(|v| Class::<crate::bindings::abort::AbortSignalJs<'js>>::from_value(&v).ok())
-      .map(|s| crate::bindings::abort::AbortSignalJs::inner_of(&s))
+      .and_then(|v| Class::<AbortSignal<'js>>::from_value(&v).ok())
+      .and_then(|s| crate::bindings::abort::native_channel(&ctx, &s).ok())
       .or_else(|| req.as_ref().and_then(|r| r.borrow().signal_inner.clone()));
     let promised = rquickjs::promise::Promised::from(async move {
       if let Some(list) = net.as_deref()

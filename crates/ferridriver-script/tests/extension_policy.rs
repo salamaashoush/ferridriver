@@ -252,7 +252,7 @@ async fn none_ceiling_rejects_command_declaring_tools() {
 #[tokio::test(flavor = "multi_thread")]
 async fn timeout_fires_the_handler_abort_signal() {
   const SRC: &str = "defineTool({ name: 'slow', timeoutMs: 200, handler: ({ signal }) => new Promise(() => { \
-    signal.addEventListener('abort', (r) => { globalThis.__abort_name = r && r.name; }); }) });";
+    signal.addEventListener('abort', () => { globalThis.__abort_name = signal.reason.name; }); }) });";
   let (_ext_tmp, binding) = binding_from("slow.js", SRC).await;
   let (_tmp, ctx) = run_context(vec![binding], ExtensionPolicyConfig::default());
   let session = Session::create(ScriptEngineConfig::default(), &ctx)

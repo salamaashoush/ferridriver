@@ -143,13 +143,13 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   Class::<FrameLocatorJs>::define(&g)?;
   Class::<crate::bindings::page::TouchscreenJs>::define(&g)?;
   Class::<crate::bindings::fetch::HeadersJs>::define(&g)?;
-  Class::<crate::bindings::fetch::FetchResponseJs>::define(&g)?;
+  Class::<crate::bindings::fetch::FetchResponseJs<'js>>::define(&g)?;
   Class::<crate::bindings::fetch::FetchRequestJs>::define(&g)?;
-  Class::<crate::bindings::abort::AbortControllerJs<'js>>::define(&g)?;
-  Class::<crate::bindings::abort::AbortSignalJs<'js>>::define(&g)?;
-  Class::<crate::bindings::streams::ReadableStreamJs>::define(&g)?;
-  Class::<crate::bindings::streams::ReadableStreamDefaultReaderJs>::define(&g)?;
-  Class::<crate::bindings::streams::ReadableStreamDefaultControllerJs>::define(&g)?;
+  // `DOMException`, `Event`/`EventTarget`, `AbortController`/
+  // `AbortSignal` and the whole Streams surface (readable + writable +
+  // transform, BYOB, queuing strategies) come from the vendored
+  // implementation in `ferridriver-jsstd`.
+  ferridriver_jsstd::init(ctx)?;
   Class::<crate::bindings::blob::BlobJs>::define(&g)?;
   Class::<crate::bindings::form_data::FormDataJs>::define(&g)?;
   Ok(())

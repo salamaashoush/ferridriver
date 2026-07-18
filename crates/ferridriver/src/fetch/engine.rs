@@ -147,6 +147,158 @@ fn follow_budget(redirect: RedirectMode, max_redirects: Option<u32>) -> Option<u
   }
 }
 
+/// The `Cookie` header for one hop.
+///
+/// `credentials: omit` sends none. The context-bound path assembles it
+/// from the browser jar, except on the first hop when the caller set one
+/// explicitly. The standalone path leaves the header alone (the pool's
+/// reqwest jar fills it in).
+async fn hop_headers(
+  bridge: Option<&Arc<dyn ContextBridge>>,
+  credentials: Credentials,
+  headers: &Headers,
+  request_url: &reqwest::Url,
+  keep_explicit_cookie: bool,
+) -> Result<Headers, FetchError> {
+  let mut hop = headers.clone();
+  if credentials == Credentials::Omit {
+    hop.remove("cookie");
+    return Ok(hop);
+  }
+  let Some(bridge) = bridge else { return Ok(hop) };
+  if keep_explicit_cookie {
+    return Ok(hop);
+  }
+  hop.remove("cookie");
+  let context_cookies = bridge.cookies().await.map_err(|e| FetchError::Network(e.to_string()))?;
+  let value = context_cookies
+    .iter()
+    .filter(|c| cookie_matches_url(c, request_url))
+    .map(|c| format!("{}={}", c.name, c.value))
+    .collect::<Vec<_>>()
+    .join("; ");
+  if !value.is_empty() {
+    hop.set("cookie", value);
+  }
+  Ok(hop)
+}
+
+/// One hop over the wire, retrying a connection reset up to `max_retries`.
+#[allow(clippy::too_many_arguments)]
+async fn send_hop(
+  client: &reqwest::Client,
+  method: &reqwest::Method,
+  request_url: &reqwest::Url,
+  headers: &Headers,
+  body: Option<&bytes::Bytes>,
+  deadline: tokio::time::Instant,
+  max_retries: u32,
+  timeout_message: &str,
+) -> Result<reqwest::Response, FetchError> {
+  let mut attempt = 0u32;
+  loop {
+    let timeout_left = deadline
+      .checked_duration_since(tokio::time::Instant::now())
+      .filter(|d| !d.is_zero())
+      .ok_or_else(|| FetchError::Timeout(timeout_message.to_string()))?;
+    let mut builder = client
+      .request(method.clone(), request_url.clone())
+      .timeout(timeout_left);
+    for (k, v) in headers.iter() {
+      builder = builder.header(k, v);
+    }
+    if let Some(bytes) = body {
+      builder = builder.body(bytes.clone());
+    }
+    match builder.send().await {
+      Ok(response) => return Ok(response),
+      Err(e) if attempt < max_retries && is_connection_reset(&e) => {
+        attempt += 1;
+        tokio::time::sleep(retry_backoff(attempt)).await;
+      },
+      Err(e) => return Err(FetchError::Network(format!("request to {request_url} failed: {e}"))),
+    }
+  }
+}
+
+/// Write a hop's `Set-Cookie`s back into the browser context.
+///
+/// Playwright falls back to per-cookie adds when the batch fails
+/// (oversized values, or here: a context with no open page).
+async fn persist_set_cookies(
+  bridge: &Arc<dyn ContextBridge>,
+  request_url: &reqwest::Url,
+  response: &reqwest::Response,
+) {
+  let set_cookies = parse_set_cookie_headers(request_url, response.headers());
+  if set_cookies.is_empty() {
+    return;
+  }
+  let Err(batch_err) = bridge.add_cookies(set_cookies.clone()).await else {
+    return;
+  };
+  tracing::warn!("context-bound request: batch addCookies failed ({batch_err}), retrying individually");
+  for cookie in set_cookies {
+    let name = cookie.name.clone();
+    if let Err(e) = bridge.add_cookies(vec![cookie]).await {
+      tracing::warn!("context-bound request: dropping Set-Cookie {name:?}: {e}");
+    }
+  }
+}
+
+/// The absolute URL a 3xx points at, or `None` when it carries no
+/// `Location` (HTTP-redirect fetch step 4: return the response as-is).
+fn redirect_target(
+  request_url: &reqwest::Url,
+  response: &reqwest::Response,
+) -> Result<Option<reqwest::Url>, FetchError> {
+  let Some(location) = response
+    .headers()
+    .get(reqwest::header::LOCATION)
+    .and_then(|v| v.to_str().ok())
+  else {
+    return Ok(None);
+  };
+  request_url.join(location).map(Some).map_err(|_| {
+    FetchError::InvalidUrl(format!(
+      "uri requested responds with an invalid redirect URL: {location}"
+    ))
+  })
+}
+
+/// Apply HTTP-redirect fetch's request rewrites for one hop: 301/302
+/// POST and 303 non-GET/HEAD become body-less GETs, the `Cookie` header
+/// is always re-derived, and `Authorization` is dropped on a
+/// cross-origin hop (credentials are origin-scoped).
+fn rewrite_for_redirect(
+  status: u16,
+  request_url: &reqwest::Url,
+  next_url: &reqwest::Url,
+  method: &mut reqwest::Method,
+  body: &mut Option<bytes::Bytes>,
+  headers: &mut Headers,
+) {
+  let rewrite_to_get = ((status == 301 || status == 302) && *method == reqwest::Method::POST)
+    || (status == 303 && *method != reqwest::Method::GET && *method != reqwest::Method::HEAD);
+  if rewrite_to_get {
+    *method = reqwest::Method::GET;
+    *body = None;
+    for name in [
+      "content-encoding",
+      "content-language",
+      "content-length",
+      "content-location",
+      "content-type",
+    ] {
+      headers.remove(name);
+    }
+  }
+  headers.remove("cookie");
+  if next_url.origin() != request_url.origin() {
+    headers.remove("authorization");
+  }
+}
+
 /// Send a fully-resolved [`Request`] and return the [`Response`].
 ///
 /// `bridge` present ⇒ the context-bound path (cookies read from / written
@@ -201,119 +353,45 @@ pub(crate) async fn send(
       check_url(&request_url, g).map_err(FetchError::Blocked)?;
     }
 
-    let mut hop_headers = headers.clone();
-    if credentials == Credentials::Omit {
-      hop_headers.remove("cookie");
-    } else if let Some(bridge) = bridge {
-      // Context-bound: assemble the Cookie header from the browser jar,
-      // unless the caller set one explicitly on the first hop.
-      if !(first_hop && explicit_cookie_header) {
-        hop_headers.remove("cookie");
-        let context_cookies = bridge.cookies().await.map_err(|e| FetchError::Network(e.to_string()))?;
-        let value = context_cookies
-          .iter()
-          .filter(|c| cookie_matches_url(c, &request_url))
-          .map(|c| format!("{}={}", c.name, c.value))
-          .collect::<Vec<_>>()
-          .join("; ");
-        if !value.is_empty() {
-          hop_headers.set("cookie", value);
-        }
-      }
-    }
+    let hop = hop_headers(
+      bridge,
+      credentials,
+      &headers,
+      &request_url,
+      first_hop && explicit_cookie_header,
+    )
+    .await?;
 
-    // Send this hop, retrying on a connection reset up to `max_retries`.
-    let mut attempt = 0u32;
-    let response = loop {
-      let timeout_left = deadline
-        .checked_duration_since(tokio::time::Instant::now())
-        .filter(|d| !d.is_zero())
-        .ok_or_else(|| FetchError::Timeout(format!("{method_str} {resolved_url} timed out")))?;
-      let mut builder = client
-        .request(method.clone(), request_url.clone())
-        .timeout(timeout_left);
-      for (k, v) in hop_headers.iter() {
-        builder = builder.header(k, v);
-      }
-      if let Some(bytes) = &body {
-        builder = builder.body(bytes.clone());
-      }
-      match builder.send().await {
-        Ok(response) => break response,
-        Err(e) if attempt < max_retries && is_connection_reset(&e) => {
-          attempt += 1;
-          tokio::time::sleep(retry_backoff(attempt)).await;
-        },
-        Err(e) => {
-          return Err(FetchError::Network(format!("request to {request_url} failed: {e}")));
-        },
-      }
-    };
+    let response = send_hop(
+      &client,
+      &method,
+      &request_url,
+      &hop,
+      body.as_ref(),
+      deadline,
+      max_retries,
+      &format!("{method_str} {resolved_url} timed out"),
+    )
+    .await?;
 
-    // Context-bound: every hop's Set-Cookie goes back into the browser.
-    // Playwright falls back to per-cookie adds when the batch fails
-    // (oversized values, or here: a context with no open page).
     if let Some(bridge) = bridge {
-      let set_cookies = parse_set_cookie_headers(&request_url, response.headers());
-      if !set_cookies.is_empty()
-        && let Err(batch_err) = bridge.add_cookies(set_cookies.clone()).await
-      {
-        tracing::warn!("context-bound request: batch addCookies failed ({batch_err}), retrying individually");
-        for cookie in set_cookies {
-          let name = cookie.name.clone();
-          if let Err(e) = bridge.add_cookies(vec![cookie]).await {
-            tracing::warn!("context-bound request: dropping Set-Cookie {name:?}: {e}");
-          }
-        }
-      }
+      persist_set_cookies(bridge, &request_url, &response).await;
     }
 
     let status = response.status().as_u16();
-    let is_redirect = matches!(status, 301 | 302 | 303 | 307 | 308);
-    if is_redirect && let Some(budget) = remaining {
-      // HTTP-redirect fetch step 4: no Location = return the response.
-      let location = response
-        .headers()
-        .get(reqwest::header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-      let Some(location) = location else {
-        break 'redirects response;
-      };
+    if matches!(status, 301 | 302 | 303 | 307 | 308)
+      && let Some(budget) = remaining
+    {
       if budget == 0 {
         return Err(FetchError::TooManyRedirects(
           follow_budget(redirect, max_redirects).unwrap_or(0),
         ));
       }
-      let next_url = request_url.join(&location).map_err(|_| {
-        FetchError::InvalidUrl(format!(
-          "uri requested responds with an invalid redirect URL: {location}"
-        ))
-      })?;
-
-      // HTTP-redirect fetch step 13: 301/302 POST and 303 non-GET/HEAD
-      // become body-less GETs.
-      let rewrite_to_get = ((status == 301 || status == 302) && method == reqwest::Method::POST)
-        || (status == 303 && method != reqwest::Method::GET && method != reqwest::Method::HEAD);
-      if rewrite_to_get {
-        method = reqwest::Method::GET;
-        body = None;
-        for name in [
-          "content-encoding",
-          "content-language",
-          "content-length",
-          "content-location",
-          "content-type",
-        ] {
-          headers.remove(name);
-        }
-      }
-      headers.remove("cookie");
-      // Credentials are origin-scoped: drop Authorization when the
-      // redirect leaves the original origin.
-      if next_url.origin() != request_url.origin() {
-        headers.remove("authorization");
-      }
+      // HTTP-redirect fetch step 4: no Location = return the response.
+      let Some(next_url) = redirect_target(&request_url, &response)? else {
+        break 'redirects response;
+      };
+      rewrite_for_redirect(status, &request_url, &next_url, &mut method, &mut body, &mut headers);
       request_url = next_url;
       remaining = Some(budget - 1);
       first_hop = false;
@@ -324,43 +402,50 @@ pub(crate) async fn send(
     break 'redirects response;
   };
 
-  let final_is_redirect = response.status().is_redirection();
-  if redirect == RedirectMode::Error && final_is_redirect {
+  if redirect == RedirectMode::Error && response.status().is_redirection() {
     return Err(FetchError::RedirectRefused(format!(
       "{method_str} {resolved_url}: unexpected redirect (redirect: \"error\")"
     )));
   }
+  Ok(into_response(response, &request_url, redirect, hops_followed))
+}
 
+/// Turn the final reqwest response into the typed [`Response`], applying
+/// the WHATWG response-type filter (`manual` + 3xx = opaque redirect).
+fn into_response(
+  response: reqwest::Response,
+  request_url: &reqwest::Url,
+  redirect: RedirectMode,
+  hops_followed: u32,
+) -> Response {
   let status = response.status().as_u16();
   let status_text = response.status().canonical_reason().unwrap_or("Unknown").to_string();
   let server_addr = response.remote_addr().map(|addr| RemoteAddr {
     ip_address: addr.ip().to_string(),
     port: addr.port(),
   });
-  let response_headers: Headers = response
+  let headers: Headers = response
     .headers()
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
     .collect::<Vec<_>>()
     .into();
-  let unfollowed_redirect = redirect == RedirectMode::Manual && final_is_redirect;
-  let type_ = if unfollowed_redirect {
-    ResponseType::OpaqueRedirect
-  } else {
-    ResponseType::Basic
-  };
-
-  Ok(Response {
+  let unfollowed_redirect = redirect == RedirectMode::Manual && response.status().is_redirection();
+  Response {
     status,
     status_text,
     url: request_url.to_string(),
-    headers: response_headers,
+    headers,
     body: super::body::Body::from_response(response),
     redirected: hops_followed > 0,
     unfollowed_redirect,
     server_addr,
-    type_,
-  })
+    type_: if unfollowed_redirect {
+      ResponseType::OpaqueRedirect
+    } else {
+      ResponseType::Basic
+    },
+  }
 }
 
 #[cfg(test)]

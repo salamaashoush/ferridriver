@@ -1496,6 +1496,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferridriver-jsstd"
+version = "0.5.0"
+dependencies = [
+ "libc",
+ "memchr",
+ "rquickjs",
+ "simdutf8",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ferridriver-mcp"
 version = "0.5.0"
 dependencies = [
@@ -1550,6 +1563,7 @@ dependencies = [
  "ferridriver",
  "ferridriver-config",
  "ferridriver-expect",
+ "ferridriver-jsstd",
  "ferridriver-session",
  "futures",
  "getrandom 0.4.3",

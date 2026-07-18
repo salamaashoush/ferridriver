@@ -389,7 +389,7 @@ async fn abort_controller_signal_and_listeners() {
   let o = run(
     "const c = new AbortController(); const s = c.signal; \
      const before = s.aborted; let fired = null; let evt = 0; \
-     s.onabort = (r) => { fired = r && r.name; }; \
+     s.onabort = () => { fired = s.reason && s.reason.name; }; \
      s.addEventListener('abort', () => { evt++; }); \
      c.abort(); c.abort(); \
      return { before, after: s.aborted, fired, evt, reasonName: s.reason && s.reason.name, \
@@ -399,7 +399,11 @@ async fn abort_controller_signal_and_listeners() {
   let v = val(&o);
   assert_eq!(v["before"], serde_json::json!(false));
   assert_eq!(v["after"], serde_json::json!(true));
-  assert_eq!(v["fired"], serde_json::json!("AbortError"), "onabort got the reason");
+  assert_eq!(
+    v["fired"],
+    serde_json::json!("AbortError"),
+    "onabort fired and saw the DOMException reason on the signal"
+  );
   assert_eq!(
     v["evt"],
     serde_json::json!(1),
@@ -545,7 +549,7 @@ async fn readable_stream_constructible_and_locking() {
      let dbl = false; try { s.getReader(); } catch (e) { dbl = e instanceof TypeError; } \
      const a = await rd.read(); const b = await rd.read(); const end = await rd.read(); \
      rd.releaseLock(); const unlocked = s.locked; \
-     return { before, afterLock, dbl, a: Array.from(a.value), aDone: a.done, \
+     return { before, afterLock, dbl, a: a.value, aDone: a.done, \
        b: Array.from(b.value), endDone: end.done, unlocked, \
        isReader: rd instanceof ReadableStreamDefaultReader };",
   )
@@ -554,7 +558,11 @@ async fn readable_stream_constructible_and_locking() {
   assert_eq!(v["before"], serde_json::json!(false));
   assert_eq!(v["afterLock"], serde_json::json!(true), "getReader locks the stream");
   assert_eq!(v["dbl"], serde_json::json!(true), "second getReader -> TypeError");
-  assert_eq!(v["a"], serde_json::json!([97, 98]), "string chunk -> UTF-8 bytes");
+  assert_eq!(
+    v["a"],
+    serde_json::json!("ab"),
+    "a default ReadableStream passes chunks through untouched (no byte coercion)"
+  );
   assert_eq!(v["aDone"], serde_json::json!(false));
   assert_eq!(v["b"], serde_json::json!([99]), "Uint8Array chunk preserved");
   assert_eq!(v["endDone"], serde_json::json!(true), "closed stream ends");
@@ -938,4 +946,122 @@ async fn fetch_credentials_omit_skips_stored_cookies() {
   // jar-less client so none is sent.
   assert_eq!(v["withCreds"], "sid=abc");
   assert_eq!(v["omitted"], "none");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn response_body_is_one_stable_stream_and_text_drains_it() {
+  let (url, _h) = spawn_echo();
+  let o = run(&format!(
+    "const r = await fetch('{url}/s');\
+     const same = r.body === r.body;\
+     const t = await r.text();\
+     let second = null; try {{ await r.text(); }} catch (e) {{ second = e.message; }}\
+     return {{ same, hasBody: t.length > 0, used: r.bodyUsed, second }};"
+  ))
+  .await;
+  let v = val(&o);
+  assert_eq!(
+    v["same"],
+    serde_json::json!(true),
+    "`.body` returns the same stream object every time"
+  );
+  assert_eq!(v["hasBody"], serde_json::json!(true), "text() drained the stream");
+  assert_eq!(v["used"], serde_json::json!(true));
+  assert!(
+    v["second"]
+      .as_str()
+      .unwrap_or_default()
+      .contains("already been consumed"),
+    "a second read is a TypeError: {v}"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn response_text_after_get_reader_is_refused() {
+  let (url, _h) = spawn_echo();
+  let o = run(&format!(
+    "const r = await fetch('{url}/s'); r.body.getReader();\
+     try {{ await r.text(); return 'no throw'; }} catch (e) {{ return e.message; }}"
+  ))
+  .await;
+  assert!(
+    val(&o).as_str().unwrap_or_default().contains("locked"),
+    "a body locked to a reader cannot also be drained by text(): {}",
+    val(&o)
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clone_tees_an_unread_streamed_body() {
+  // The body has NOT been buffered when `clone()` runs — the two
+  // responses must each read the full payload off one socket via a tee.
+  let (url, _h) = spawn_chunked();
+  let o = run(&format!(
+    "const r = await fetch('{url}/c'); const c = r.clone();\
+     const [a, b] = await Promise.all([r.text(), c.text()]);\
+     return {{ a, b }};"
+  ))
+  .await;
+  let v = val(&o);
+  assert_eq!(
+    v["a"],
+    serde_json::json!("AAABBB"),
+    "the original still reads the whole body"
+  );
+  assert_eq!(
+    v["b"],
+    serde_json::json!("AAABBB"),
+    "the clone reads the same bytes from the tee'd branch"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clone_of_a_used_response_throws() {
+  let (url, _h) = spawn_echo();
+  let o = run(&format!(
+    "const r = await fetch('{url}/s'); await r.text();\
+     try {{ r.clone(); return 'no throw'; }} catch (e) {{ return e.message; }}"
+  ))
+  .await;
+  assert!(
+    val(&o).as_str().unwrap_or_default().contains("used Response"),
+    "cloning a consumed Response is a TypeError: {}",
+    val(&o)
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn response_body_pipes_through_a_transform_stream() {
+  let (url, _h) = spawn_chunked();
+  let o = run(&format!(
+    "const r = await fetch('{url}/c'); const dec = new TextDecoder();\
+     const t = new TransformStream({{ transform(chunk, c) {{ c.enqueue(dec.decode(chunk).toLowerCase()); }} }});\
+     const rd = r.body.pipeThrough(t).getReader();\
+     const out = []; for (;;) {{ const v = await rd.read(); if (v.done) break; out.push(v.value); }}\
+     return out.join('');"
+  ))
+  .await;
+  assert_eq!(
+    val(&o),
+    &serde_json::json!("aaabbb"),
+    "a live network body pipes through a TransformStream"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn abort_reason_is_a_dom_exception() {
+  let o = run(
+    "const ac = new AbortController(); ac.abort();\
+     return { name: ac.signal.reason.name, isDom: ac.signal.reason instanceof DOMException, \
+       aborted: ac.signal.aborted };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(
+    v["name"],
+    serde_json::json!("AbortError"),
+    "the default abort reason is a DOMException named AbortError"
+  );
+  assert_eq!(v["isDom"], serde_json::json!(true));
+  assert_eq!(v["aborted"], serde_json::json!(true));
 }

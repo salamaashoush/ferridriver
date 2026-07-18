@@ -1,0 +1,46 @@
+[package]
+name = "ferridriver-jsstd"
+description = "Vendored WHATWG Streams / Events / AbortController / DOMException implementation for the ferridriver QuickJS runtime (derived from awslabs/llrt, Apache-2.0)."
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+# Deliberately NOT `workspace = true`: this crate is vendored third-party
+# code kept close to upstream so it can be re-synced. Reformatting it to
+# the repo's house style (2-space indent, pedantic clippy) would make
+# every future diff against awslabs/llrt unreadable.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+
+[features]
+default = ["fs", "bytearray-buffer", "sleep-tokio"]
+fs = []
+bytearray-buffer = []
+# Upstream `llrt_abort` picks its sleep source between its own timers
+# module and tokio. Only the tokio arm is vendored; the feature name is
+# declared so the upstream `cfg` compiles out instead of warning.
+sleep-timers = []
+sleep-tokio = []
+
+[dependencies]
+memchr = "2"
+rquickjs = { version = "0.12", features = ["full-async", "parallel", "macro", "loader", "array-buffer"] }
+simdutf8 = { version = "0.1", features = ["std", "aarch64_neon"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+uuid = { version = "1", features = ["v4"] }

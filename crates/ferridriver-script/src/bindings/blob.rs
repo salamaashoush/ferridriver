@@ -131,10 +131,10 @@ impl BlobJs {
 
   /// `stream()` -> a `ReadableStream` of the blob bytes.
   #[qjs(rename = "stream")]
-  pub fn stream<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, crate::bindings::streams::ReadableStreamJs>> {
-    Class::instance(
-      ctx,
-      crate::bindings::streams::ReadableStreamJs::from_bytes(self.data.clone()),
-    )
+  pub fn stream<'js>(
+    &self,
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Class<'js, ferridriver_jsstd::stream_web::ReadableStream<'js>>> {
+    crate::bindings::streams::from_bytes(&ctx, self.data.clone())
   }
 }

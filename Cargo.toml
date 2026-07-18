@@ -57,6 +57,7 @@ ferridriver-script = { path = "crates/ferridriver-script", version = "0.5.0" }
 ferridriver-testjs = { path = "crates/ferridriver-testjs", version = "0.5.0" }
 ferridriver-config = { path = "crates/ferridriver-config", version = "0.5.0" }
 ferridriver-expect = { path = "crates/ferridriver-expect", version = "0.5.0" }
+ferridriver-jsstd = { path = "crates/ferridriver-jsstd", version = "0.5.0" }
 ferridriver-session = { path = "crates/ferridriver-session", version = "0.5.0" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
