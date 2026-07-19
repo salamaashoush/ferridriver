@@ -19,6 +19,9 @@ tower-http = { version = "0.7", features = ["fs", "cors"] }
 serde_json = { workspace = true }
 base64 = "0.22"
 futures = { workspace = true }
+flate2 = "1"
+brotli = "8"
+zstd = "0.13"
 
 [dev-dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }

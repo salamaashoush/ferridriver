@@ -57,8 +57,6 @@ layers). Remaining gaps:
   headers, and its body where the backend captured one. Firefox (BiDi)
   does not surface post data for a page-initiated `fetch`, so
   `request.postData()` is null there and the replay is body-less.
-- No automatic response decompression (Playwright advertises
-  `gzip,deflate,br`; the reqwest build has no decompression features).
 
 ### Trace recording (`crates/ferridriver/src/trace.rs`)
 - Snapshots: documents already open in frames when tracing starts pick the

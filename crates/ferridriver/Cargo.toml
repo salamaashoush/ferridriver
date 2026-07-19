@@ -27,7 +27,7 @@ tracing = { workspace = true }
 tokio-tungstenite = "0.30"
 rustc-hash = "2"
 arc-swap = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "cookies", "rustls", "stream", "query", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "cookies", "rustls", "stream", "query", "form", "gzip", "brotli", "deflate", "zstd"] }
 httpdate = "1"
 serde_urlencoded = "0.7"
 bytes = "1"

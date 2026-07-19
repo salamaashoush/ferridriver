@@ -153,6 +153,67 @@ fn fx_redirect(location: &str) -> Response<Body> {
   fx_build(302, "text/plain", Vec::new(), &[("location", location.to_string())])
 }
 
+/// Body compressed with one of the four HTTP content codings, served
+/// with the matching `Content-Encoding`. The plaintext embeds the
+/// `Accept-Encoding` the request carried, so one assertion covers both
+/// halves of transparent decompression: that the client advertised the
+/// codings, and that it decoded the reply.
+///
+/// The payload is deliberately repetitive so the encoded bytes are much
+/// shorter than the plaintext — a client that fails to decode cannot
+/// accidentally still parse it.
+fn fx_compressed(algo: &str, headers: &HeaderMap) -> Response<Body> {
+  use std::io::Write as _;
+
+  let accept_encoding = headers
+    .get("accept-encoding")
+    .and_then(|v| v.to_str().ok())
+    .unwrap_or("")
+    .to_string();
+  let plain = serde_json::json!({
+    "algo": algo,
+    "acceptEncoding": accept_encoding,
+    "payload": "ferridriver-compression-probe ".repeat(64),
+  })
+  .to_string();
+
+  let encoded = match algo {
+    "gzip" => {
+      let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+      e.write_all(plain.as_bytes()).and_then(|()| e.finish())
+    },
+    // HTTP `deflate` is the zlib wrapper (RFC 1950), not a raw stream.
+    "deflate" => {
+      let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+      e.write_all(plain.as_bytes()).and_then(|()| e.finish())
+    },
+    "br" => {
+      let mut out = Vec::new();
+      let mut e = brotli::CompressorWriter::new(&mut out, 4096, 5, 22);
+      e.write_all(plain.as_bytes()).map(|()| drop(e)).map(|()| out)
+    },
+    "zstd" => zstd::stream::encode_all(plain.as_bytes(), 3),
+    _ => {
+      return fx_build(
+        400,
+        "text/plain",
+        format!("unknown content coding: {algo}").into_bytes(),
+        &[],
+      );
+    },
+  };
+
+  match encoded {
+    Ok(bytes) => fx_build(
+      200,
+      "application/json",
+      bytes,
+      &[("content-encoding", algo.to_string())],
+    ),
+    Err(e) => fx_build(500, "text/plain", format!("encode failed: {e}").into_bytes(), &[]),
+  }
+}
+
 /// Attachment that never completes: declares a large Content-Length and
 /// dribbles zero bytes until the client tears the connection down
 /// (which browsers do on `download.cancel()`). Keeps a download
@@ -279,6 +340,31 @@ fn fx_echo_request(method: &axum::http::Method, headers: &HeaderMap, body: &axum
   }))
 }
 
+/// Each `c` query param becomes one Set-Cookie header verbatim:
+/// `/fx/set-cookie?c=name%3Dvalue%3B%20Path%3D%2F`.
+fn fx_set_cookie(query: Option<&str>) -> Response<Body> {
+  let cookies: Vec<(&str, String)> = query_values(query, "c")
+    .into_iter()
+    .map(|c| ("set-cookie", c))
+    .collect();
+  fx_build(200, "text/plain", b"cookie-set".to_vec(), &cookies)
+}
+
+/// Sets cookies (each `c` param, verbatim) AND 302-redirects to `loc`
+/// (default `/fx/landed`) — proves redirect-hop Set-Cookie capture.
+fn fx_set_cookie_redirect(query: Option<&str>) -> Response<Body> {
+  let mut extra: Vec<(&str, String)> = query_values(query, "c")
+    .into_iter()
+    .map(|c| ("set-cookie", c))
+    .collect();
+  let loc = query_values(query, "loc")
+    .into_iter()
+    .next()
+    .unwrap_or_else(|| "/fx/landed".to_string());
+  extra.push(("location", loc));
+  fx_build(302, "text/plain", Vec::new(), &extra)
+}
+
 async fn handle_fx(
   State(state): State<Arc<ServerState>>,
   Path(path): Path<String>,
@@ -306,6 +392,7 @@ async fn handle_fx(
     "echo" => fx_build(200, "text/plain", body.to_vec(), &[]),
     "echo-headers" => fx_json(&serde_json::Value::Object(headers_json(&headers))),
     "echo-request" => fx_echo_request(&method, &headers, &body),
+    _ if path.starts_with("compressed/") => fx_compressed(path.trim_start_matches("compressed/"), &headers),
     "multi-cookie" => fx_build(
       200,
       "text/plain",
@@ -315,29 +402,8 @@ async fn handle_fx(
         ("set-cookie", "b=2; Path=/".to_string()),
       ],
     ),
-    // Each `c` query param becomes one Set-Cookie header verbatim:
-    // `/fx/set-cookie?c=name%3Dvalue%3B%20Path%3D%2F`.
-    "set-cookie" => {
-      let cookies: Vec<(&str, String)> = query_values(query.as_deref(), "c")
-        .into_iter()
-        .map(|c| ("set-cookie", c))
-        .collect();
-      fx_build(200, "text/plain", b"cookie-set".to_vec(), &cookies)
-    },
-    // Sets cookies (each `c` param, verbatim) AND 302-redirects to `loc`
-    // (default `/fx/landed`) — proves redirect-hop Set-Cookie capture.
-    "set-cookie-redirect" => {
-      let mut extra: Vec<(&str, String)> = query_values(query.as_deref(), "c")
-        .into_iter()
-        .map(|c| ("set-cookie", c))
-        .collect();
-      let loc = query_values(query.as_deref(), "loc")
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| "/fx/landed".to_string());
-      extra.push(("location", loc));
-      fx_build(302, "text/plain", Vec::new(), &extra)
-    },
+    "set-cookie" => fx_set_cookie(query.as_deref()),
+    "set-cookie-redirect" => fx_set_cookie_redirect(query.as_deref()),
     "auth" => {
       let authed = headers
         .get("authorization")
