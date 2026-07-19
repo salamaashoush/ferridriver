@@ -58,6 +58,17 @@ layers). Remaining gaps:
   does not surface post data for a page-initiated `fetch`, so
   `request.postData()` is null there and the replay is body-less.
 
+### Web-platform globals are untyped in e2e specs
+`tests/tsconfig.json` sets `types: []` and no `lib` beyond the ES target,
+so `fetch` / `Request` / `Response` / `Headers` / `Blob` / `FormData` /
+`File` / `AbortController` / `ReadableStream` — all implemented by the
+QuickJS runtime — have no declarations a spec can call against. They work
+at runtime; only the types are missing, so specs must reach them through
+`page.evaluate` strings instead of directly. Declaring them under
+`declare global` in `packages/ferridriver-test/index.d.ts` is the fix;
+pulling in TypeScript's `DOM` lib is not (it would also declare `document`
+/ `window` in spec scope, where they do not exist).
+
 ### Trace recording (`crates/ferridriver/src/trace.rs`)
 - Snapshots: documents already open in frames when tracing starts pick the
   streamer up only on their next navigation (main frames are seeded

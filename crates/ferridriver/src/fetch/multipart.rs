@@ -117,6 +117,126 @@ pub fn serialize_multipart(fields: &[MultipartField], boundary: &str) -> (Vec<u8
   (body, format!("multipart/form-data; boundary={boundary}"))
 }
 
+/// The `boundary` parameter of a `multipart/form-data` content type, or
+/// `None` when the type is not multipart or declares no boundary.
+/// Handles the quoted form (`boundary="ab cd"`) and is case-insensitive
+/// on both the type and the parameter name.
+#[must_use]
+pub fn multipart_boundary_of(content_type: &str) -> Option<String> {
+  let (mime, params) = content_type.split_once(';')?;
+  if !mime.trim().eq_ignore_ascii_case("multipart/form-data") {
+    return None;
+  }
+  for param in params.split(';') {
+    let Some((k, v)) = param.split_once('=') else { continue };
+    if !k.trim().eq_ignore_ascii_case("boundary") {
+      continue;
+    }
+    let v = v.trim();
+    let v = v.strip_prefix('"').and_then(|r| r.strip_suffix('"')).unwrap_or(v);
+    if !v.is_empty() {
+      return Some(v.to_string());
+    }
+  }
+  None
+}
+
+/// Parse a `multipart/form-data` body back into fields — the inverse of
+/// [`serialize_multipart`], backing the WHATWG `formData()` body mixin.
+///
+/// A part with a `filename` parameter becomes [`MultipartValue::File`]
+/// (defaulting to `application/octet-stream` when it declares no type),
+/// anything else becomes [`MultipartValue::Text`]. Malformed parts are
+/// skipped rather than failing the whole parse: browsers are lenient
+/// here, and a body that round-trips through a server may lose the
+/// preamble/epilogue.
+#[must_use]
+pub fn parse_multipart(body: &[u8], boundary: &str) -> Vec<MultipartField> {
+  let delim = format!("--{boundary}");
+  let mut fields = Vec::new();
+
+  for part in split_on(body, delim.as_bytes()) {
+    // A part starts after the delimiter's CRLF and ends before the CRLF
+    // that precedes the next one; the closing delimiter carries a
+    // trailing `--`.
+    let part = part.strip_prefix(b"--".as_slice()).map_or(part, |_| &[][..]);
+    let part = part.strip_prefix(b"\r\n".as_slice()).unwrap_or(part);
+    let part = part.strip_suffix(b"\r\n".as_slice()).unwrap_or(part);
+    if part.is_empty() {
+      continue;
+    }
+    let Some(split) = find(part, b"\r\n\r\n") else { continue };
+    let (head, rest) = part.split_at(split);
+    let content = &rest[4..];
+
+    let head = String::from_utf8_lossy(head);
+    let mut name = None;
+    let mut filename = None;
+    let mut content_type = None;
+    for line in head.lines() {
+      let Some((key, value)) = line.split_once(':') else {
+        continue;
+      };
+      if key.trim().eq_ignore_ascii_case("content-type") {
+        content_type = Some(value.trim().to_string());
+      } else if key.trim().eq_ignore_ascii_case("content-disposition") {
+        name = header_param(value, "name");
+        filename = header_param(value, "filename");
+      }
+    }
+
+    let Some(name) = name else { continue };
+    fields.push(MultipartField {
+      name,
+      value: match filename {
+        Some(filename) => MultipartValue::File {
+          filename,
+          content_type: content_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+          bytes: content.to_vec(),
+        },
+        None => MultipartValue::Text(String::from_utf8_lossy(content).into_owned()),
+      },
+    });
+  }
+  fields
+}
+
+/// A quoted parameter of a header value (`name="file"` -> `file`).
+fn header_param(value: &str, param: &str) -> Option<String> {
+  for piece in value.split(';') {
+    let Some((k, v)) = piece.split_once('=') else { continue };
+    if !k.trim().eq_ignore_ascii_case(param) {
+      continue;
+    }
+    let v = v.trim();
+    return Some(
+      v.strip_prefix('"')
+        .and_then(|r| r.strip_suffix('"'))
+        .unwrap_or(v)
+        .to_string(),
+    );
+  }
+  None
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+  haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// The slices between each occurrence of `sep` (the leading segment
+/// before the first separator is dropped — it is the multipart preamble).
+fn split_on<'a>(mut haystack: &'a [u8], sep: &[u8]) -> Vec<&'a [u8]> {
+  let mut out = Vec::new();
+  let Some(first) = find(haystack, sep) else { return out };
+  haystack = &haystack[first + sep.len()..];
+  while let Some(at) = find(haystack, sep) {
+    out.push(&haystack[..at]);
+    haystack = &haystack[at + sep.len()..];
+  }
+  out.push(haystack);
+  out
+}
+
 /// A process-unique multipart boundary. Deterministic construction (no
 /// RNG dependency): a fixed prefix + a monotonic counter.
 #[must_use]
@@ -158,5 +278,73 @@ mod tests {
   #[test]
   fn boundaries_are_unique() {
     assert_ne!(multipart_boundary(), multipart_boundary());
+  }
+
+  #[test]
+  fn parse_multipart_round_trips_serialize_multipart() {
+    let fields = vec![
+      MultipartField {
+        name: "text".into(),
+        value: MultipartValue::Text("val".into()),
+      },
+      MultipartField {
+        name: "file".into(),
+        value: MultipartValue::File {
+          filename: "f.bin".into(),
+          content_type: "text/csv".into(),
+          // Bytes that are not valid UTF-8 must survive verbatim.
+          bytes: vec![0, 159, 146, 150, b'\r', b'\n'],
+        },
+      },
+    ];
+    let (body, content_type) = serialize_multipart(&fields, "BOUND");
+    let boundary = multipart_boundary_of(&content_type).expect("boundary");
+    let parsed = parse_multipart(&body, &boundary);
+
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].name, "text");
+    assert!(matches!(&parsed[0].value, MultipartValue::Text(t) if t == "val"));
+    assert_eq!(parsed[1].name, "file");
+    match &parsed[1].value {
+      MultipartValue::File {
+        filename,
+        content_type,
+        bytes,
+      } => {
+        assert_eq!(filename, "f.bin");
+        assert_eq!(content_type, "text/csv");
+        assert_eq!(bytes, &[0, 159, 146, 150, b'\r', b'\n']);
+      },
+      MultipartValue::Text(_) => panic!("expected a file part"),
+    }
+  }
+
+  #[test]
+  fn parse_multipart_defaults_file_type_and_skips_nameless_parts() {
+    let body = b"preamble\r\n\
+      --B\r\nContent-Disposition: form-data; name=\"a\"; filename=\"x\"\r\n\r\nAA\r\n\
+      --B\r\nContent-Disposition: form-data\r\n\r\nno-name\r\n\
+      --B\r\ngarbage-with-no-header-separator\r\n\
+      --B--\r\n";
+    let parsed = parse_multipart(body, "B");
+    assert_eq!(parsed.len(), 1, "nameless and malformed parts are skipped");
+    assert!(matches!(
+      &parsed[0].value,
+      MultipartValue::File { content_type, .. } if content_type == "application/octet-stream"
+    ));
+  }
+
+  #[test]
+  fn multipart_boundary_of_reads_quoted_and_bare_forms() {
+    assert_eq!(
+      multipart_boundary_of("multipart/form-data; boundary=abc").as_deref(),
+      Some("abc")
+    );
+    assert_eq!(
+      multipart_boundary_of("Multipart/Form-Data; charset=utf-8; BOUNDARY=\"a b\"").as_deref(),
+      Some("a b")
+    );
+    assert_eq!(multipart_boundary_of("application/json"), None);
+    assert_eq!(multipart_boundary_of("multipart/form-data"), None);
   }
 }

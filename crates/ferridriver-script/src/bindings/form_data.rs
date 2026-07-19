@@ -125,6 +125,43 @@ impl FormDataJs {
     Self::entry_value(ctx, &entry).map(Some)
   }
 
+  /// Build from parsed `multipart/form-data` fields — the read side of
+  /// the `formData()` body mixin. A part with a filename reads back as a
+  /// `File`, matching how `append(name, file)` stored it.
+  pub fn from_multipart_fields(fields: &[ferridriver::http_client::MultipartField]) -> Self {
+    use ferridriver::http_client::MultipartValue;
+    Self {
+      entries: fields
+        .iter()
+        .map(|f| {
+          let entry = match &f.value {
+            MultipartValue::Text(text) => FormEntry::Text(text.clone()),
+            MultipartValue::File {
+              filename,
+              content_type,
+              bytes,
+            } => FormEntry::File {
+              bytes: bytes.clone(),
+              filename: filename.clone(),
+              content_type: content_type.clone(),
+            },
+          };
+          (f.name.clone(), entry)
+        })
+        .collect(),
+    }
+  }
+
+  /// Build from an `application/x-www-form-urlencoded` body: `+` decodes
+  /// to a space and every entry is text (the format cannot carry files).
+  pub fn from_urlencoded(body: &str) -> Self {
+    Self {
+      entries: url::form_urlencoded::parse(body.as_bytes())
+        .map(|(k, v)| (k.into_owned(), FormEntry::Text(v.into_owned())))
+        .collect(),
+    }
+  }
+
   /// `(multipart-body, content-type)` for a `fetch` `FormData` body.
   pub fn to_multipart(&self) -> (Vec<u8>, String) {
     use std::io::Write as _;

@@ -46,7 +46,9 @@ use rquickjs::atom::PredefinedAtom;
 use rquickjs::function::{Func, Opt, This};
 use rquickjs::{Coerced, Ctx, IntoJs, Object, Value, class::Class, class::Trace};
 
+use crate::bindings::blob::BlobJs;
 use crate::bindings::convert::json_to_js;
+use crate::bindings::form_data::FormDataJs;
 use crate::bindings::http_client::net_check;
 
 /// Hard cap on a single buffered `fetch` body (`text`/`json`/
@@ -356,7 +358,7 @@ pub struct FetchResponseJs<'js> {
 /// `redirect`/`credentials`/`signal` off a `Request` argument.
 #[derive(Trace)]
 #[rquickjs::class(rename = "Request")]
-pub struct FetchRequestJs {
+pub struct FetchRequestJs<'js> {
   #[qjs(skip_trace)]
   url: String,
   #[qjs(skip_trace)]
@@ -371,11 +373,36 @@ pub struct FetchRequestJs {
   credentials: String,
   #[qjs(skip_trace)]
   body_used: bool,
+  /// Spec attributes ferridriver does not act on but must round-trip:
+  /// reading them back off a `Request` (or a `clone()`) has to return
+  /// what the caller passed in `init`.
+  #[qjs(skip_trace)]
+  cache: String,
+  #[qjs(skip_trace)]
+  mode: String,
+  #[qjs(skip_trace)]
+  referrer: String,
+  #[qjs(skip_trace)]
+  referrer_policy: String,
+  #[qjs(skip_trace)]
+  integrity: String,
+  #[qjs(skip_trace)]
+  keepalive: bool,
+  #[qjs(skip_trace)]
+  destination: String,
   /// The native abort channel of a `signal` passed in `init`, kept so
   /// `fetch(request)` can drop the in-flight future on abort. Native
   /// (`Arc<AbortInner>`), never a captured JS value — GC-safe.
   #[qjs(skip_trace)]
   signal_inner: Option<Arc<crate::bindings::abort::AbortInner>>,
+  /// The `signal` exactly as handed to the constructor, so the `signal`
+  /// getter returns the caller's own `AbortSignal` object rather than a
+  /// fresh one built from the native channel.
+  signal: Option<Class<'js, AbortSignal<'js>>>,
+  /// The `Request.body` stream, created on first access. Once present it
+  /// is the authoritative body and the body readers drain it, mirroring
+  /// `Response.body`.
+  body_stream: Option<Class<'js, ReadableStream<'js>>>,
 }
 
 // SAFETY: only owned `'static` data.
@@ -388,8 +415,8 @@ unsafe impl<'js> rquickjs::JsLifetime<'js> for FetchResponseJs<'js> {
   type Changed<'to> = FetchResponseJs<'to>;
 }
 #[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for FetchRequestJs {
-  type Changed<'to> = FetchRequestJs;
+unsafe impl<'js> rquickjs::JsLifetime<'js> for FetchRequestJs<'js> {
+  type Changed<'to> = FetchRequestJs<'to>;
 }
 
 /// Extract a request/response body from a JS value, returning the bytes
@@ -817,6 +844,110 @@ impl<'js> FetchResponseJs<'js> {
   }
 }
 
+impl<'js> BodyMixin<'js> for FetchResponseJs<'js> {
+  async fn consume_body(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Vec<u8>> {
+    self.consume(ctx).await
+  }
+
+  fn content_type(&self) -> Option<String> {
+    header_value(&self.headers, "content-type")
+  }
+}
+
+impl<'js> BodyMixin<'js> for FetchRequestJs<'js> {
+  async fn consume_body(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Vec<u8>> {
+    self.consume(ctx).await
+  }
+
+  fn content_type(&self) -> Option<String> {
+    header_value(&self.headers, "content-type")
+  }
+}
+
+/// Case-insensitive lookup over a raw header pair list.
+fn header_value(headers: &[(String, String)], name: &str) -> Option<String> {
+  headers
+    .iter()
+    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+    .map(|(_, v)| v.clone())
+}
+
+/// The WHATWG `Body` mixin, shared verbatim by `Request` and
+/// `Response` (spec: both objects expose the same readers over the same
+/// "consume body" step). Implementors supply only how to take the bytes
+/// and what content type describes them; every reader below is defined
+/// once here.
+///
+/// `#[rquickjs::methods]` cannot see methods that come from a trait (or
+/// a macro), so each class still registers six one-line delegators — but
+/// no reader logic is duplicated.
+pub(crate) trait BodyMixin<'js> {
+  /// WHATWG "consume body": yields the bytes, marks the body used, and
+  /// fails on a second read.
+  fn consume_body(&mut self, ctx: &Ctx<'js>) -> impl Future<Output = rquickjs::Result<Vec<u8>>>;
+
+  /// The `content-type` header value, which types the `Blob` from
+  /// `blob()` and selects the `formData()` parser.
+  fn content_type(&self) -> Option<String>;
+
+  async fn mixin_text(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<String> {
+    let b = self.consume_body(ctx).await?;
+    Ok(String::from_utf8_lossy(&b).into_owned())
+  }
+
+  async fn mixin_json(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let b = self.consume_body(ctx).await?;
+    let v: serde_json::Value =
+      serde_json::from_slice(&b).map_err(|e| rquickjs::Error::new_from_js_message("json", "Error", e.to_string()))?;
+    json_to_js(ctx, &v)
+  }
+
+  async fn mixin_array_buffer(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let b = self.consume_body(ctx).await?;
+    rquickjs::ArrayBuffer::new(ctx.clone(), b).map(rquickjs::ArrayBuffer::into_value)
+  }
+
+  /// Spec: `bytes()` resolves with a `Uint8Array` (not an `ArrayBuffer`).
+  async fn mixin_bytes(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let b = self.consume_body(ctx).await?;
+    Ok(rquickjs::TypedArray::new(ctx.clone(), b)?.into_value())
+  }
+
+  /// Spec: the blob's `type` is the body's content type, or `""`.
+  async fn mixin_blob(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let mime = self.content_type().unwrap_or_default();
+    let b = self.consume_body(ctx).await?;
+    Ok(Class::instance(ctx.clone(), BlobJs::new_parts(b, mime))?.into_value())
+  }
+
+  /// Spec: parses `multipart/form-data` and
+  /// `application/x-www-form-urlencoded`; any other type is a
+  /// `TypeError`.
+  async fn mixin_form_data(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let content_type = self.content_type().unwrap_or_default();
+    let boundary = ferridriver::http_client::multipart_boundary_of(&content_type);
+    let urlencoded = content_type
+      .split(';')
+      .next()
+      .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/x-www-form-urlencoded"));
+    if boundary.is_none() && !urlencoded {
+      return Err(rquickjs::Exception::throw_type(
+        ctx,
+        &format!("Could not parse content as FormData: unsupported content type {content_type:?}"),
+      ));
+    }
+
+    let bytes = self.consume_body(ctx).await?;
+    let form = match boundary {
+      Some(boundary) => {
+        FormDataJs::from_multipart_fields(&ferridriver::http_client::parse_multipart(&bytes, &boundary))
+      },
+      None => FormDataJs::from_urlencoded(&String::from_utf8_lossy(&bytes)),
+    };
+    Ok(Class::instance(ctx.clone(), form)?.into_value())
+  }
+}
+
 /// Bytes behind a stream chunk (`Uint8Array`/`ArrayBuffer`/string).
 fn chunk_bytes(v: &Value<'_>) -> Vec<u8> {
   if let Some(s) = v.as_string().and_then(|s| s.to_string().ok()) {
@@ -991,22 +1122,32 @@ impl<'js> FetchResponseJs<'js> {
 
   #[qjs(rename = "text")]
   pub async fn text(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<String> {
-    let b = self.consume(&ctx).await?;
-    Ok(String::from_utf8_lossy(&b).into_owned())
+    self.mixin_text(&ctx).await
   }
 
   #[qjs(rename = "json")]
   pub async fn json(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let b = self.consume(&ctx).await?;
-    let v: serde_json::Value = serde_json::from_slice(&b)
-      .map_err(|e| rquickjs::Error::new_from_js_message("Response.json", "Error", e.to_string()))?;
-    json_to_js(&ctx, &v)
+    self.mixin_json(&ctx).await
   }
 
   #[qjs(rename = "arrayBuffer")]
   pub async fn array_buffer(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let b = self.consume(&ctx).await?;
-    rquickjs::ArrayBuffer::new(ctx.clone(), b).map(rquickjs::ArrayBuffer::into_value)
+    self.mixin_array_buffer(&ctx).await
+  }
+
+  #[qjs(rename = "bytes")]
+  pub async fn bytes(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    self.mixin_bytes(&ctx).await
+  }
+
+  #[qjs(rename = "blob")]
+  pub async fn blob(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    self.mixin_blob(&ctx).await
+  }
+
+  #[qjs(rename = "formData")]
+  pub async fn form_data(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    self.mixin_form_data(&ctx).await
   }
 
   /// `Response.clone()` — WHATWG "clone a response": the body stream is
@@ -1041,15 +1182,69 @@ impl<'js> FetchResponseJs<'js> {
   }
 }
 
+impl<'js> FetchRequestJs<'js> {
+  /// The `Request.body` stream, created on first access — over the
+  /// in-memory bytes, since a `Request` is never backed by a live
+  /// socket.
+  ///
+  /// Unlike `Response`, the bytes are COPIED rather than moved into the
+  /// stream: `fetch(request)` reads them straight off the `Request`, so
+  /// moving them would make merely touching `.body` send an empty body.
+  /// Single-use semantics are unaffected — `consume()` prefers the
+  /// stream once one exists, and `fetch()` refuses a disturbed body.
+  fn ensure_body_stream(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Class<'js, ReadableStream<'js>>> {
+    if let Some(s) = &self.body_stream {
+      return Ok(s.clone());
+    }
+    let stream = crate::bindings::streams::from_bytes(ctx, self.body.clone())?;
+    self.body_stream = Some(stream.clone());
+    Ok(stream)
+  }
+
+  /// Whether the body has been read — consumed through a reader, or
+  /// drained/locked through the `.body` stream. Spec: fetching a
+  /// Request with a disturbed body is a `TypeError`.
+  fn body_is_disturbed(&self) -> bool {
+    if self.body_used {
+      return true;
+    }
+    self.body_stream.as_ref().is_some_and(|s| {
+      let s = s.borrow();
+      s.disturbed || s.is_readable_stream_locked()
+    })
+  }
+
+  /// WHATWG "consume body": a second read is a `TypeError`. Drains the
+  /// body stream when one has been vended (`.body`), else the bytes.
+  async fn consume(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Vec<u8>> {
+    if self.body_used {
+      return Err(rquickjs::Exception::throw_type(ctx, "Body has already been consumed"));
+    }
+    if let Some(stream) = self.body_stream.clone() {
+      if stream.borrow().is_readable_stream_locked() {
+        return Err(rquickjs::Exception::throw_type(ctx, "Body is locked to a reader"));
+      }
+      self.body_used = true;
+      return match tokio::time::timeout(FETCH_BODY_DRAIN_TIMEOUT, FetchResponseJs::drain_stream(ctx, stream)).await {
+        Ok(r) => r,
+        Err(_) => Err(rquickjs::Exception::throw_type(ctx, "request body read timed out")),
+      };
+    }
+    self.body_used = true;
+    Ok(std::mem::take(&mut self.body))
+  }
+}
+
 #[rquickjs::methods]
-impl FetchRequestJs {
+impl<'js> FetchRequestJs<'js> {
   /// `new Request(input, init?)` — `input` is a URL string or another
   /// `Request`; `init`: `{ method?, headers?, body?, redirect?,
-  /// credentials?, signal? }` (`signal` accepted, not yet wired).
+  /// credentials?, signal?, cache?, mode?, referrer?, referrerPolicy?,
+  /// integrity?, keepalive? }`.
   #[qjs(constructor)]
-  pub fn new<'js>(ctx: Ctx<'js>, input: Value<'js>, init: Opt<Object<'js>>) -> rquickjs::Result<Self> {
+  pub fn new(ctx: Ctx<'js>, input: Value<'js>, init: Opt<Object<'js>>) -> rquickjs::Result<Self> {
     let init = init.0;
-    let mut req = if let Ok(other) = Class::<FetchRequestJs>::from_value(&input) {
+    let mut req = if let Ok(other) = Class::<FetchRequestJs<'js>>::from_value(&input) {
       let o = other.borrow();
       Self {
         url: o.url.clone(),
@@ -1059,7 +1254,16 @@ impl FetchRequestJs {
         redirect: o.redirect.clone(),
         credentials: o.credentials.clone(),
         body_used: false,
+        cache: o.cache.clone(),
+        mode: o.mode.clone(),
+        referrer: o.referrer.clone(),
+        referrer_policy: o.referrer_policy.clone(),
+        integrity: o.integrity.clone(),
+        keepalive: o.keepalive,
+        destination: o.destination.clone(),
         signal_inner: o.signal_inner.clone(),
+        signal: o.signal.clone(),
+        body_stream: None,
       }
     } else {
       Self {
@@ -1070,7 +1274,19 @@ impl FetchRequestJs {
         redirect: "follow".to_string(),
         credentials: "same-origin".to_string(),
         body_used: false,
+        cache: "default".to_string(),
+        mode: "cors".to_string(),
+        referrer: "about:client".to_string(),
+        referrer_policy: String::new(),
+        integrity: String::new(),
+        keepalive: false,
+        // Spec: a Request built by script has an empty destination;
+        // only the fetch a browser initiates for a specific consumer
+        // (script/image/...) carries one.
+        destination: String::new(),
         signal_inner: None,
+        signal: None,
+        body_stream: None,
       }
     };
     if let Some(o) = init.as_ref() {
@@ -1083,10 +1299,29 @@ impl FetchRequestJs {
       if let Ok(c) = o.get::<_, String>("credentials") {
         req.credentials = c;
       }
+      if let Ok(v) = o.get::<_, String>("cache") {
+        req.cache = v;
+      }
+      if let Ok(v) = o.get::<_, String>("mode") {
+        req.mode = v;
+      }
+      if let Ok(v) = o.get::<_, String>("referrer") {
+        req.referrer = v;
+      }
+      if let Ok(v) = o.get::<_, String>("referrerPolicy") {
+        req.referrer_policy = v;
+      }
+      if let Ok(v) = o.get::<_, String>("integrity") {
+        req.integrity = v;
+      }
+      if let Ok(v) = o.get::<_, bool>("keepalive") {
+        req.keepalive = v;
+      }
       if let Ok(sig) = o.get::<_, Value<'js>>("signal")
         && let Ok(s) = Class::<AbortSignal<'js>>::from_value(&sig)
       {
         req.signal_inner = Some(crate::bindings::abort::native_channel(&ctx, &s)?);
+        req.signal = Some(s);
       }
       let (bytes, default_ct) = o
         .get::<_, Value<'_>>("body")
@@ -1100,7 +1335,7 @@ impl FetchRequestJs {
         if h.is_empty() {
           std::mem::take(&mut req.headers)
         } else {
-          if let Ok(existing) = Class::<FetchRequestJs>::from_value(&input) {
+          if let Ok(existing) = Class::<FetchRequestJs<'js>>::from_value(&input) {
             for (k, v) in &existing.borrow().headers {
               if !h.iter().any(|(hk, _)| hk == k) {
                 h.push((k.clone(), v.clone()));
@@ -1134,45 +1369,128 @@ impl FetchRequestJs {
   pub fn body_used(&self) -> bool {
     self.body_used
   }
+  #[qjs(get, rename = "cache")]
+  pub fn cache(&self) -> String {
+    self.cache.clone()
+  }
+  #[qjs(get, rename = "mode")]
+  pub fn mode(&self) -> String {
+    self.mode.clone()
+  }
+  #[qjs(get, rename = "referrer")]
+  pub fn referrer(&self) -> String {
+    self.referrer.clone()
+  }
+  #[qjs(get, rename = "referrerPolicy")]
+  pub fn referrer_policy(&self) -> String {
+    self.referrer_policy.clone()
+  }
+  #[qjs(get, rename = "integrity")]
+  pub fn integrity(&self) -> String {
+    self.integrity.clone()
+  }
+  #[qjs(get, rename = "keepalive")]
+  pub fn keepalive(&self) -> bool {
+    self.keepalive
+  }
+  #[qjs(get, rename = "destination")]
+  pub fn destination(&self) -> String {
+    self.destination.clone()
+  }
   #[qjs(get, rename = "headers")]
-  pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, HeadersJs>> {
+  pub fn headers(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, HeadersJs>> {
     Class::instance(ctx, HeadersJs::from_pairs(self.headers.iter().cloned()))
   }
 
-  #[qjs(rename = "text")]
-  pub fn text(&mut self, ctx: Ctx<'_>) -> rquickjs::Result<String> {
-    if self.body_used {
-      return Err(rquickjs::Exception::throw_type(&ctx, "Body has already been consumed"));
+  /// `Request.signal` — the `AbortSignal` passed in `init`. Spec always
+  /// exposes one, so a request built without a signal reports a fresh,
+  /// never-aborted instance.
+  #[qjs(get, rename = "signal")]
+  pub fn signal(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, AbortSignal<'js>>> {
+    if let Some(s) = &self.signal {
+      return Ok(s.clone());
     }
-    self.body_used = true;
-    Ok(String::from_utf8_lossy(&std::mem::take(&mut self.body)).into_owned())
+    let fresh = crate::bindings::abort::fresh_instance(&ctx)?;
+    self.signal = Some(fresh.clone());
+    Ok(fresh)
+  }
+
+  /// `Request.body` — the body `ReadableStream`, same object on every
+  /// access, drained by the body readers.
+  #[qjs(get, rename = "body")]
+  pub fn body(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, ReadableStream<'js>>> {
+    self.ensure_body_stream(&ctx)
+  }
+
+  #[qjs(rename = "text")]
+  pub async fn text(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<String> {
+    self.mixin_text(&ctx).await
   }
 
   #[qjs(rename = "json")]
-  pub fn json<'js>(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    if self.body_used {
-      return Err(rquickjs::Exception::throw_type(&ctx, "Body has already been consumed"));
-    }
-    self.body_used = true;
-    let v: serde_json::Value = serde_json::from_slice(&std::mem::take(&mut self.body))
-      .map_err(|e| rquickjs::Error::new_from_js_message("Request.json", "Error", e.to_string()))?;
-    json_to_js(&ctx, &v)
+  pub async fn json(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    self.mixin_json(&ctx).await
   }
 
+  #[qjs(rename = "arrayBuffer")]
+  pub async fn array_buffer(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    self.mixin_array_buffer(&ctx).await
+  }
+
+  #[qjs(rename = "bytes")]
+  pub async fn bytes(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    self.mixin_bytes(&ctx).await
+  }
+
+  #[qjs(rename = "blob")]
+  pub async fn blob(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    self.mixin_blob(&ctx).await
+  }
+
+  #[qjs(rename = "formData")]
+  pub async fn form_data(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    self.mixin_form_data(&ctx).await
+  }
+
+  /// WHATWG "clone a request". When a body stream has already been
+  /// vended the bytes live in it, so the stream is tee'd exactly as
+  /// `Response.clone()` does — otherwise the clone would come out with
+  /// an empty body.
   #[qjs(rename = "clone")]
-  pub fn clone_(&self, ctx: Ctx<'_>) -> rquickjs::Result<Self> {
-    if self.body_used {
-      return Err(rquickjs::Exception::throw_type(&ctx, "Cannot clone a used Request"));
+  pub fn clone_(this: This<Class<'js, Self>>, ctx: Ctx<'js>) -> rquickjs::Result<Self> {
+    {
+      let me = this.borrow();
+      if me.body_used {
+        return Err(rquickjs::Exception::throw_type(&ctx, "Cannot clone a used Request"));
+      }
     }
+    let branch2 = if this.borrow().body_stream.is_some() {
+      let stream = this.borrow_mut().ensure_body_stream(&ctx)?;
+      let (branch1, branch2) = ferridriver_jsstd::stream_web::tee_readable_stream(ctx.clone(), stream)?;
+      this.borrow_mut().body_stream = Some(branch1);
+      Some(branch2)
+    } else {
+      None
+    };
+    let me = this.borrow();
     Ok(Self {
-      url: self.url.clone(),
-      method: self.method.clone(),
-      headers: self.headers.clone(),
-      body: self.body.clone(),
-      redirect: self.redirect.clone(),
-      credentials: self.credentials.clone(),
+      url: me.url.clone(),
+      method: me.method.clone(),
+      headers: me.headers.clone(),
+      body: me.body.clone(),
+      redirect: me.redirect.clone(),
+      credentials: me.credentials.clone(),
       body_used: false,
-      signal_inner: self.signal_inner.clone(),
+      cache: me.cache.clone(),
+      mode: me.mode.clone(),
+      referrer: me.referrer.clone(),
+      referrer_policy: me.referrer_policy.clone(),
+      integrity: me.integrity.clone(),
+      keepalive: me.keepalive,
+      destination: me.destination.clone(),
+      signal_inner: me.signal_inner.clone(),
+      signal: me.signal.clone(),
+      body_stream: branch2,
     })
   }
 }
@@ -1202,7 +1520,17 @@ fn do_fetch<'js>(
     // `input` may be a URL string, a `Request` instance, or an object
     // with a `url`. A `Request` seeds method/headers/body/redirect; the
     // `init` bag overrides each.
-    let req = Class::<FetchRequestJs>::from_value(&input).ok();
+    let req = Class::<FetchRequestJs<'js>>::from_value(&input).ok();
+    // Spec: fetching a Request whose body was already read is a
+    // TypeError, rather than silently sending nothing.
+    if let Some(r) = req.as_ref()
+      && r.borrow().body_is_disturbed()
+    {
+      return Err(rquickjs::Exception::throw_type(
+        &ctx,
+        "Cannot fetch a Request whose body has already been read",
+      ));
+    }
     let url = req
       .as_ref()
       .map(|r| r.borrow().url.clone())

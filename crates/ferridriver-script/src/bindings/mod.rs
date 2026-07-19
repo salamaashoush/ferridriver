@@ -146,7 +146,7 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   Class::<crate::bindings::page::TouchscreenJs>::define(&g)?;
   Class::<crate::bindings::fetch::HeadersJs>::define(&g)?;
   Class::<crate::bindings::fetch::FetchResponseJs<'js>>::define(&g)?;
-  Class::<crate::bindings::fetch::FetchRequestJs>::define(&g)?;
+  Class::<crate::bindings::fetch::FetchRequestJs<'_>>::define(&g)?;
   // `DOMException`, `Event`/`EventTarget`, `AbortController`/
   // `AbortSignal` and the whole Streams surface (readable + writable +
   // transform, BYOB, queuing strategies) come from the vendored

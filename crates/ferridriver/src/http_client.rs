@@ -28,7 +28,7 @@ use crate::fetch;
 
 pub use crate::fetch::{
   BridgeFuture, ContextBridge, ContextDefaults, Credentials, MultipartField, MultipartValue, NetGuard, RedirectMode,
-  RemoteAddr, ResponseType, host_allowed, host_of, serialize_multipart,
+  RemoteAddr, ResponseType, host_allowed, host_of, multipart_boundary_of, parse_multipart, serialize_multipart,
 };
 
 /// Options for creating an `HttpClient`.

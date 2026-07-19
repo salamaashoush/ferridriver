@@ -1065,3 +1065,230 @@ async fn abort_reason_is_a_dom_exception() {
   assert_eq!(v["isDom"], serde_json::json!(true));
   assert_eq!(v["aborted"], serde_json::json!(true));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn response_body_mixin_blob_bytes_and_array_buffer() {
+  let (url, _h) = spawn_echo();
+  let o = run(&format!(
+    "const r1 = await fetch('{url}/x');\
+     const b = await r1.blob();\
+     const r2 = await fetch('{url}/x');\
+     const u8 = await r2.bytes();\
+     const r3 = await fetch('{url}/x');\
+     const ab = await r3.arrayBuffer();\
+     return {{ blobType: b.type, blobText: await b.text(), \
+       isU8: u8 instanceof Uint8Array, u8Len: u8.length, \
+       isAb: ab instanceof ArrayBuffer, abLen: ab.byteLength }};"
+  ))
+  .await;
+  let v = val(&o);
+  assert_eq!(
+    v["blobType"],
+    serde_json::json!("application/json"),
+    "blob() types the Blob from the response content-type"
+  );
+  assert!(
+    v["blobText"]
+      .as_str()
+      .unwrap_or_default()
+      .contains("\"method\":\"GET\""),
+    "blob() carries the body bytes: {v:?}"
+  );
+  assert_eq!(v["isU8"], serde_json::json!(true), "bytes() resolves a Uint8Array");
+  assert_eq!(v["isAb"], serde_json::json!(true));
+  assert_eq!(v["u8Len"], v["abLen"], "both readers see the same byte count");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_gains_the_full_body_mixin() {
+  let o = run(
+    "const r = new Request('http://x.test/', { method: 'POST', body: 'hello' });\
+     const ab = await r.arrayBuffer();\
+     const r2 = new Request('http://x.test/', { method: 'POST', body: 'hello' });\
+     const u8 = await r2.bytes();\
+     const r3 = new Request('http://x.test/', { method: 'POST', body: 'hello' });\
+     const b = await r3.blob();\
+     return { abLen: ab.byteLength, isU8: u8 instanceof Uint8Array, \
+       blobText: await b.text(), blobType: b.type, used: r3.bodyUsed };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["abLen"], serde_json::json!(5));
+  assert_eq!(v["isU8"], serde_json::json!(true));
+  assert_eq!(v["blobText"], serde_json::json!("hello"));
+  assert_eq!(
+    v["blobType"],
+    serde_json::json!("text/plain;charset=UTF-8"),
+    "a string body sets the content-type the Blob inherits"
+  );
+  assert_eq!(v["used"], serde_json::json!(true), "a mixin read marks the body used");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn form_data_mixin_round_trips_multipart_and_urlencoded() {
+  let o = run(
+    "const fd = new FormData(); fd.append('field', 'value');\
+     fd.append('file', new Blob(['filedata'], { type: 'text/plain' }), 'a.txt');\
+     const rq = new Request('http://x.test/', { method: 'POST', body: fd });\
+     const back = await rq.formData();\
+     const f = back.get('file');\
+     const enc = new Response('a=1&b=two+words&b=%40x', \
+       { headers: { 'content-type': 'application/x-www-form-urlencoded' } });\
+     const encBack = await enc.formData();\
+     return { field: back.get('field'), fileName: f.name, fileType: f.type, \
+       fileText: await f.text(), isFile: f instanceof File, \
+       a: encBack.get('a'), b: encBack.getAll('b') };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["field"], serde_json::json!("value"));
+  assert_eq!(v["fileName"], serde_json::json!("a.txt"), "the filename survives");
+  assert_eq!(v["fileType"], serde_json::json!("text/plain"));
+  assert_eq!(v["fileText"], serde_json::json!("filedata"));
+  assert_eq!(v["isFile"], serde_json::json!(true), "a file part reads back as a File");
+  assert_eq!(v["a"], serde_json::json!("1"));
+  assert_eq!(
+    v["b"],
+    serde_json::json!(["two words", "@x"]),
+    "urlencoded decodes + and %XX and keeps repeats"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn form_data_mixin_rejects_an_unsupported_content_type() {
+  let o = run(
+    "const r = new Response('{}', { headers: { 'content-type': 'application/json' } });\
+     try { await r.formData(); return { threw: false }; } \
+     catch (e) { return { threw: true, message: String(e.message ?? e) }; }",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["threw"], serde_json::json!(true));
+  assert!(
+    v["message"].as_str().unwrap_or_default().contains("FormData"),
+    "message names the failure: {v:?}"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_body_is_a_readable_stream_and_clone_tees_it() {
+  let o = run(
+    "const r = new Request('http://x.test/', { method: 'POST', body: 'streamed' });\
+     const isStream = r.body instanceof ReadableStream;\
+     const same = r.body === r.body;\
+     const copy = r.clone();\
+     const dec = new TextDecoder();\
+     const rd = r.body.getReader(); const first = await rd.read();\
+     return { isStream, same, mine: dec.decode(first.value), theirs: await copy.text() };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["isStream"], serde_json::json!(true));
+  assert_eq!(
+    v["same"],
+    serde_json::json!(true),
+    "the same stream object every access"
+  );
+  assert_eq!(v["mine"], serde_json::json!("streamed"));
+  assert_eq!(
+    v["theirs"],
+    serde_json::json!("streamed"),
+    "clone() tees, so a vended stream does not empty the clone"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_spec_attributes_round_trip_through_init_and_clone() {
+  let o = run(
+    "const ac = new AbortController();\
+     const r = new Request('http://x.test/p', { method: 'POST', body: 'b', cache: 'no-store', \
+       mode: 'same-origin', referrer: 'http://ref.test/', referrerPolicy: 'no-referrer', \
+       integrity: 'sha256-abc', keepalive: true, signal: ac.signal });\
+     const c = r.clone();\
+     return { cache: r.cache, mode: r.mode, referrer: r.referrer, \
+       referrerPolicy: r.referrerPolicy, integrity: r.integrity, keepalive: r.keepalive, \
+       destination: r.destination, signalIsSame: r.signal === ac.signal, \
+       clonedCache: c.cache, clonedIntegrity: c.integrity, clonedKeepalive: c.keepalive };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["cache"], serde_json::json!("no-store"));
+  assert_eq!(v["mode"], serde_json::json!("same-origin"));
+  assert_eq!(v["referrer"], serde_json::json!("http://ref.test/"));
+  assert_eq!(v["referrerPolicy"], serde_json::json!("no-referrer"));
+  assert_eq!(v["integrity"], serde_json::json!("sha256-abc"));
+  assert_eq!(v["keepalive"], serde_json::json!(true));
+  assert_eq!(
+    v["destination"],
+    serde_json::json!(""),
+    "a script-built Request has an empty destination"
+  );
+  assert_eq!(
+    v["signalIsSame"],
+    serde_json::json!(true),
+    "the signal getter returns the caller's own AbortSignal"
+  );
+  assert_eq!(v["clonedCache"], serde_json::json!("no-store"));
+  assert_eq!(v["clonedIntegrity"], serde_json::json!("sha256-abc"));
+  assert_eq!(v["clonedKeepalive"], serde_json::json!(true));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_defaults_match_the_spec() {
+  let o = run(
+    "const r = new Request('http://x.test/');\
+     return { cache: r.cache, mode: r.mode, referrer: r.referrer, integrity: r.integrity, \
+       keepalive: r.keepalive, hasSignal: r.signal instanceof AbortSignal, aborted: r.signal.aborted };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["cache"], serde_json::json!("default"));
+  assert_eq!(v["mode"], serde_json::json!("cors"));
+  assert_eq!(v["referrer"], serde_json::json!("about:client"));
+  assert_eq!(v["integrity"], serde_json::json!(""));
+  assert_eq!(v["keepalive"], serde_json::json!(false));
+  assert_eq!(
+    v["hasSignal"],
+    serde_json::json!(true),
+    "spec always exposes a signal, even with none passed"
+  );
+  assert_eq!(v["aborted"], serde_json::json!(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetching_a_request_still_sends_a_body_after_touching_dot_body() {
+  let (url, _h) = spawn_echo();
+  let o = run(&format!(
+    "const r = new Request('{url}/p', {{ method: 'POST', body: 'payload' }});\
+     const isStream = r.body instanceof ReadableStream;\
+     const echoed = await (await fetch(r)).json();\
+     return {{ isStream, body: echoed.body, method: echoed.method }};"
+  ))
+  .await;
+  let v = val(&o);
+  assert_eq!(v["isStream"], serde_json::json!(true));
+  assert_eq!(
+    v["body"],
+    serde_json::json!("payload"),
+    "merely vending .body must not empty the request"
+  );
+  assert_eq!(v["method"], serde_json::json!("POST"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetching_a_request_with_a_read_body_is_a_type_error() {
+  let (url, _h) = spawn_echo();
+  let o = run(&format!(
+    "const r = new Request('{url}/p', {{ method: 'POST', body: 'payload' }});\
+     await r.text();\
+     try {{ await fetch(r); return {{ threw: false }}; }}\
+     catch (e) {{ return {{ threw: true, message: String(e.message ?? e) }}; }}"
+  ))
+  .await;
+  let v = val(&o);
+  assert_eq!(v["threw"], serde_json::json!(true));
+  assert!(
+    v["message"].as_str().unwrap_or_default().contains("already been read"),
+    "message explains the refusal: {v:?}"
+  );
+}

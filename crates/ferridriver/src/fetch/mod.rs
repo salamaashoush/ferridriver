@@ -13,7 +13,7 @@
 //! - [`engine`] — the client pool and the one manual-redirect send loop.
 //! - [`net_guard`] — SSRF policy (allow-list, metadata/private blocking).
 //! - [`cookie`] — RFC 6265 parsing/matching for the context-bound path.
-//! - [`multipart`] — `multipart/form-data` serialization.
+//! - [`multipart`] — `multipart/form-data` serialization and parsing.
 //! - [`bridge`] — the two-way browser-context cookie/defaults bridge.
 
 pub mod body;
@@ -31,7 +31,7 @@ pub use bridge::{BridgeFuture, ContextBridge, ContextDefaults};
 pub use error::FetchError;
 pub use headers::Headers;
 pub use model::{Credentials, RedirectMode, RemoteAddr, Request, Response, ResponseType};
-pub use multipart::{MultipartField, MultipartValue, serialize_multipart};
+pub use multipart::{MultipartField, MultipartValue, multipart_boundary_of, parse_multipart, serialize_multipart};
 pub use net_guard::{NetGuard, host_allowed, host_of};
 
 pub(crate) use engine::{ClientPool, send};
