@@ -15,6 +15,11 @@ publish = false
 # every future diff against awslabs/llrt unreadable.
 [lints.rust]
 unsafe_code = "allow"
+# Upstream `llrt_abort` picks its sleep source between its own timers module
+# and tokio. Only the tokio arm is vendored, so `sleep-timers` is declared as
+# a known cfg rather than as a real feature: as a feature, `--all-features`
+# would switch on an arm calling the `timers` module that is not vendored.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("sleep-timers"))'] }
 
 [lints.clippy]
 correctness = { level = "deny", priority = -1 }
@@ -25,10 +30,6 @@ suspicious = { level = "deny", priority = -1 }
 default = ["fs", "bytearray-buffer", "sleep-tokio"]
 fs = []
 bytearray-buffer = []
-# Upstream `llrt_abort` picks its sleep source between its own timers
-# module and tokio. Only the tokio arm is vendored; the feature name is
-# declared so the upstream `cfg` compiles out instead of warning.
-sleep-timers = []
 sleep-tokio = []
 
 [dependencies]

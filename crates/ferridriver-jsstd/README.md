@@ -77,8 +77,11 @@ for ferridriver's convenience. Upstream candidates.
    these were crate-visible because each module was its own crate; nesting
    them under one crate narrowed them below what their own public API needs.
 
-5. **Feature gates** — `sleep-timers` is declared but never enabled (the
-   timers module is not vendored); `sleep-tokio` is on by default.
+5. **Feature gates** — `sleep-tokio` is on by default. `sleep-timers` is
+   deliberately *not* a Cargo feature (the timers module is not vendored, so
+   `--all-features` would otherwise enable an arm that cannot compile); it is
+   declared to rustc as a known-but-never-set cfg via `check-cfg` in
+   `Cargo.toml`, which keeps the upstream `cfg` arms compiling out silently.
 
 6. **Tests** — `abort::abort_signal::tests::test_abort_signal` is no longer
    gated on `sleep-timers`, so it covers the `sleep-tokio` path we build.
