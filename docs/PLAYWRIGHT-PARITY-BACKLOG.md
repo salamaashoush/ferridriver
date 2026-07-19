@@ -44,6 +44,10 @@ layers). Remaining gaps:
 - `data` routes strings raw and serializable values as JSON, but skips
   Playwright's is-JSON-parsable validation for string bodies under a
   JSON content-type.
+- NAPI exposes `status` / `statusText` / `url` on `HttpResponse` as
+  getters where Playwright's `APIResponse` has methods. The QuickJS
+  binding and `packages/ferridriver-test/index.d.ts` both use methods,
+  so only the NAPI surface diverges.
 - `maxRetries` and per-request `ignoreHTTPSErrors` reach the core engine
   from both bindings but have no per-option integration test: proving
   them needs a fixture that resets a connection mid-request and one that

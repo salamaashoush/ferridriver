@@ -73,6 +73,11 @@ pub enum FerriError {
   #[error("unsupported operation: {0}")]
   Unsupported(String),
 
+  /// A resource whose body was explicitly released was read again —
+  /// `apiResponse.dispose()` then `text()`/`json()`/`body()`.
+  #[error("{0} has been disposed")]
+  Disposed(&'static str),
+
   /// `page.evaluate` / `locator.evaluate` threw inside the page.
   #[error("evaluation error: {0}")]
   Evaluation(String),

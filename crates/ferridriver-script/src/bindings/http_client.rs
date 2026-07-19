@@ -488,10 +488,28 @@ impl HttpResponseJs {
     crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
   }
 
-  /// Value of a single header, or `null` if absent.
+  /// All response headers as a flat object: lowercased names, duplicates
+  /// combined (Playwright's `apiResponse.headers()`).
+  #[qjs(rename = "headers")]
+  pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let obj = rquickjs::Object::new(ctx.clone())?;
+    for (name, value) in self.inner.headers_object() {
+      obj.set(name, value)?;
+    }
+    Ok(obj.into_value())
+  }
+
+  /// Combined value of a single header, or `null` if absent.
   #[qjs(rename = "header")]
   pub fn header(&self, name: String) -> Option<String> {
-    self.inner.header(&name).map(str::to_string)
+    self.inner.header(&name)
+  }
+
+  /// Playwright: `apiResponse.dispose()` — release the buffered body.
+  /// Status, headers and URL stay readable; body accessors then throw.
+  #[qjs(rename = "dispose")]
+  pub fn dispose(&mut self) {
+    self.inner.dispose();
   }
 
   /// Playwright: `apiResponse.body(): Promise<Buffer>` — raw bytes as
@@ -499,7 +517,8 @@ impl HttpResponseJs {
   #[qjs(rename = "body")]
   pub fn body<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     use rquickjs::IntoJs;
-    rquickjs::TypedArray::new(ctx.clone(), self.inner.body().to_vec())?.into_js(&ctx)
+    let bytes = self.inner.body().into_js_with(&ctx)?.to_vec();
+    rquickjs::TypedArray::new(ctx.clone(), bytes)?.into_js(&ctx)
   }
 
   /// Response body as UTF-8 text.

@@ -103,12 +103,13 @@ pub struct HttpResponse {
   status_code: u16,
   status_text: String,
   response_url: String,
-  response_headers: Vec<(String, String)>,
+  response_headers: fetch::Headers,
   body_bytes: bytes::Bytes,
   server_addr: Option<RemoteAddr>,
   redirected: bool,
   unfollowed_redirect: bool,
   response_type: ResponseType,
+  disposed: bool,
 }
 
 impl HttpResponse {
@@ -130,12 +131,13 @@ impl HttpResponse {
       status_code: status,
       status_text,
       response_url: url,
-      response_headers: headers.into_pairs(),
+      response_headers: headers,
       body_bytes,
       server_addr,
       redirected,
       unfollowed_redirect,
       response_type: type_,
+      disposed: false,
     })
   }
 
@@ -163,30 +165,35 @@ impl HttpResponse {
     (200..300).contains(&self.status_code)
   }
 
-  /// Response headers as (name, value) pairs.
+  /// Response headers as (name, value) pairs, verbatim: duplicates and
+  /// original casing preserved (Playwright's `headersArray()`).
   #[must_use]
   pub fn headers(&self) -> &[(String, String)] {
-    &self.response_headers
+    self.response_headers.entries()
   }
 
-  /// Get a specific header value by name (case-insensitive).
+  /// Flattened header object: lowercased names, combined values
+  /// (Playwright's `headers()`).
   #[must_use]
-  pub fn header(&self, name: &str) -> Option<&str> {
-    let lower = name.to_lowercase();
-    self
-      .response_headers
-      .iter()
-      .find(|(k, _)| k.to_lowercase() == lower)
-      .map(|(_, v)| v.as_str())
+  pub fn headers_object(&self) -> Vec<(String, String)> {
+    self.response_headers.to_object()
+  }
+
+  /// Combined value of a header (case-insensitive), duplicates joined
+  /// with `, ` — `\n` for `set-cookie`. Playwright's `RawHeaders.get`.
+  #[must_use]
+  pub fn header(&self, name: &str) -> Option<String> {
+    self.response_headers.get(name)
   }
 
   /// Response body as UTF-8 string.
   ///
   /// # Errors
   ///
-  /// Returns an error if the body is not valid UTF-8.
+  /// Returns an error if the body is not valid UTF-8, or if the response
+  /// was disposed.
   pub fn text(&self) -> crate::error::Result<String> {
-    String::from_utf8(self.body_bytes.to_vec())
+    String::from_utf8(self.body()?.to_vec())
       .map_err(|e| crate::error::FerriError::evaluation(format!("response body is not UTF-8: {e}")))
   }
 
@@ -194,24 +201,32 @@ impl HttpResponse {
   ///
   /// # Errors
   ///
-  /// Returns an error if the body cannot be deserialized.
+  /// Returns an error if the body cannot be deserialized, or if the
+  /// response was disposed.
   pub fn json<T: serde::de::DeserializeOwned>(&self) -> crate::error::Result<T> {
-    serde_json::from_slice(&self.body_bytes).map_err(Into::into)
+    serde_json::from_slice(self.body()?).map_err(Into::into)
   }
 
   /// Response body as a JSON value.
   ///
   /// # Errors
   ///
-  /// Returns an error if the body is not valid JSON.
+  /// Returns an error if the body is not valid JSON, or if the response
+  /// was disposed.
   pub fn json_value(&self) -> crate::error::Result<serde_json::Value> {
     self.json()
   }
 
   /// Raw response body bytes.
-  #[must_use]
-  pub fn body(&self) -> &[u8] {
-    &self.body_bytes
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the response was disposed.
+  pub fn body(&self) -> crate::error::Result<&[u8]> {
+    if self.disposed {
+      return Err(crate::error::FerriError::Disposed("Response"));
+    }
+    Ok(&self.body_bytes)
   }
 
   /// Resolved peer address (`{ ipAddress, port }`), or `None` when the
@@ -243,9 +258,12 @@ impl HttpResponse {
     self.response_type
   }
 
-  /// Consume the response (Playwright compat, no-op in Rust since we own the bytes).
-  pub fn dispose(self) {
-    drop(self);
+  /// Playwright: `apiResponse.dispose()` — release the buffered body.
+  /// Status, headers and URL stay readable; `text()`/`json()`/`body()`
+  /// then fail with [`FerriError::Disposed`](crate::error::FerriError).
+  pub fn dispose(&mut self) {
+    self.body_bytes = bytes::Bytes::new();
+    self.disposed = true;
   }
 }
 
@@ -257,7 +275,7 @@ pub struct HttpStreamResponse {
   status_code: u16,
   status_text: String,
   response_url: String,
-  response_headers: Vec<(String, String)>,
+  response_headers: fetch::Headers,
   server_addr: Option<RemoteAddr>,
   redirected: bool,
   unfollowed_redirect: bool,
@@ -292,7 +310,7 @@ impl HttpStreamResponse {
       status_code: status,
       status_text,
       response_url: url,
-      response_headers: headers.into_pairs(),
+      response_headers: headers,
       server_addr,
       redirected,
       unfollowed_redirect,
@@ -321,9 +339,23 @@ impl HttpStreamResponse {
     (200..300).contains(&self.status_code)
   }
 
+  /// Response headers verbatim: duplicates and casing preserved.
   #[must_use]
   pub fn headers(&self) -> &[(String, String)] {
-    &self.response_headers
+    self.response_headers.entries()
+  }
+
+  /// Flattened header object: lowercased names, combined values.
+  #[must_use]
+  pub fn headers_object(&self) -> Vec<(String, String)> {
+    self.response_headers.to_object()
+  }
+
+  /// Combined value of a header (case-insensitive), duplicates joined
+  /// with `, ` — `\n` for `set-cookie`.
+  #[must_use]
+  pub fn header(&self, name: &str) -> Option<String> {
+    self.response_headers.get(name)
   }
 
   /// Resolved peer address, or `None` when the transport didn't surface
@@ -637,6 +669,92 @@ fn resolve_url(base_url: Option<&str>, url: &str) -> crate::error::Result<reqwes
         "invalid URL \"{url}\": no baseURL to resolve against"
       ))),
     },
+  }
+}
+
+#[cfg(test)]
+mod response_tests {
+  use super::*;
+
+  fn response(headers: Vec<(&str, &str)>, body: &[u8]) -> HttpResponse {
+    HttpResponse {
+      status_code: 200,
+      status_text: "OK".into(),
+      response_url: "http://example.test/".into(),
+      response_headers: fetch::Headers::from_pairs(
+        headers
+          .into_iter()
+          .map(|(k, v)| (k.to_string(), v.to_string()))
+          .collect(),
+      ),
+      body_bytes: bytes::Bytes::copy_from_slice(body),
+      server_addr: None,
+      redirected: false,
+      unfollowed_redirect: false,
+      response_type: ResponseType::Basic,
+      disposed: false,
+    }
+  }
+
+  #[test]
+  fn header_combines_duplicates_like_playwright_rawheaders() {
+    let r = response(
+      vec![
+        ("X-Dup", "one"),
+        ("Set-Cookie", "a=1"),
+        ("x-dup", "two"),
+        ("set-cookie", "b=2"),
+      ],
+      b"",
+    );
+    assert_eq!(r.header("x-dup").as_deref(), Some("one, two"));
+    assert_eq!(r.header("X-DUP").as_deref(), Some("one, two"), "case-insensitive");
+    assert_eq!(r.header("set-cookie").as_deref(), Some("a=1\nb=2"));
+    assert_eq!(r.header("absent"), None);
+  }
+
+  #[test]
+  fn headers_array_stays_verbatim_while_headers_object_flattens() {
+    let r = response(
+      vec![("Content-Type", "text/plain"), ("X-Dup", "one"), ("x-dup", "two")],
+      b"",
+    );
+    assert_eq!(
+      r.headers(),
+      [
+        ("Content-Type".to_string(), "text/plain".to_string()),
+        ("X-Dup".to_string(), "one".to_string()),
+        ("x-dup".to_string(), "two".to_string()),
+      ]
+    );
+    assert_eq!(
+      r.headers_object(),
+      vec![
+        ("content-type".to_string(), "text/plain".to_string()),
+        ("x-dup".to_string(), "one, two".to_string()),
+      ]
+    );
+  }
+
+  #[test]
+  fn dispose_releases_the_body_but_keeps_the_metadata() {
+    let mut r = response(vec![("content-type", "application/json")], br#"{"a":1}"#);
+    assert_eq!(r.text().expect("text before dispose"), r#"{"a":1}"#);
+
+    r.dispose();
+
+    assert!(matches!(r.body(), Err(crate::error::FerriError::Disposed("Response"))));
+    assert!(r.text().is_err());
+    assert!(r.json_value().is_err());
+    assert_eq!(
+      r.body().unwrap_err().to_string(),
+      "Response has been disposed",
+      "message mirrors Playwright's"
+    );
+    // Metadata survives disposal, as it does in Playwright.
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.url(), "http://example.test/");
+    assert_eq!(r.header("content-type").as_deref(), Some("application/json"));
   }
 }
 

@@ -189,11 +189,11 @@ async fn api_response_body_equals(world: &mut BrowserWorld, expected: String) {
 #[then("the API response header {string} should contain {string}")]
 async fn api_response_header_contains(world: &mut BrowserWorld, header: String, expected: String) {
   let resp = last_api_response(world)?;
-  let header_val = resp.header(&header).unwrap_or("");
+  let header_val = resp.header(&header).unwrap_or_default();
   if !header_val.contains(&expected) {
     return Err(StepError {
       message: format!("API response header \"{header}\" does not contain \"{expected}\" (got \"{header_val}\")"),
-      diff: Some((expected, header_val.to_string())),
+      diff: Some((expected, header_val)),
       pending: false,
     });
   }

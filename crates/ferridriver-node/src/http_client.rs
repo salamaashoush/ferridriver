@@ -216,16 +216,37 @@ impl HttpResponse {
     })
   }
 
-  /// Response headers as a JSON object.
-  #[napi]
+  /// Playwright: `apiResponse.headers(): { [key: string]: string }` —
+  /// lowercased names, duplicates combined.
+  #[napi(ts_return_type = "Record<string, string>")]
   pub fn headers(&self) -> serde_json::Value {
     let map: serde_json::Map<String, serde_json::Value> = self
       .inner
-      .headers()
-      .iter()
-      .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+      .headers_object()
+      .into_iter()
+      .map(|(k, v)| (k, serde_json::Value::String(v)))
       .collect();
     serde_json::Value::Object(map)
+  }
+
+  /// Playwright: `apiResponse.headersArray(): HeadersArray` — every
+  /// header verbatim, duplicates and original casing preserved.
+  #[napi(ts_return_type = "Array<{ name: string, value: string }>")]
+  pub fn headers_array(&self) -> serde_json::Value {
+    serde_json::Value::Array(
+      self
+        .inner
+        .headers()
+        .iter()
+        .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+        .collect(),
+    )
+  }
+
+  /// Combined value of a single header, or `null` when absent.
+  #[napi]
+  pub fn header(&self, name: String) -> Option<String> {
+    self.inner.header(&name)
   }
 
   /// Response body as string.
@@ -242,8 +263,15 @@ impl HttpResponse {
 
   /// Raw response body as Buffer.
   #[napi]
-  pub fn body(&self) -> napi::bindgen_prelude::Buffer {
-    self.inner.body().to_vec().into()
+  pub fn body(&self) -> Result<napi::bindgen_prelude::Buffer> {
+    self.inner.body().map(|b| b.to_vec().into()).into_napi()
+  }
+
+  /// Playwright: `apiResponse.dispose()` — release the buffered body.
+  /// Status, headers and URL stay readable; body accessors then throw.
+  #[napi]
+  pub fn dispose(&mut self) {
+    self.inner.dispose();
   }
 }
 

@@ -132,6 +132,24 @@ impl Headers {
     self.entries
   }
 
+  /// Flattened header object: lowercased names, each mapped to its
+  /// combined value, ordered by first appearance. Playwright's
+  /// `RawHeaders.headers()` (`client/network.ts:959`), which backs
+  /// `apiResponse.headers()`.
+  #[must_use]
+  pub fn to_object(&self) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, _) in &self.entries {
+      let lower = name.to_ascii_lowercase();
+      if out.iter().any(|(k, _)| *k == lower) {
+        continue;
+      }
+      let combined = self.get(&lower).unwrap_or_default();
+      out.push((lower, combined));
+    }
+    out
+  }
+
   #[must_use]
   pub fn is_empty(&self) -> bool {
     self.entries.is_empty()
@@ -158,6 +176,25 @@ mod tests {
     h.append("set-cookie", "y=2");
     assert_eq!(h.get("set-cookie").as_deref(), Some("x=1\ny=2"));
     assert_eq!(h.get_set_cookie(), vec!["x=1", "y=2"]);
+  }
+
+  #[test]
+  fn to_object_lowercases_combines_and_keeps_first_appearance_order() {
+    let h = Headers::from_pairs(vec![
+      ("Content-Type".into(), "text/plain".into()),
+      ("Set-Cookie".into(), "a=1".into()),
+      ("X-Dup".into(), "one".into()),
+      ("set-cookie".into(), "b=2".into()),
+      ("x-dup".into(), "two".into()),
+    ]);
+    assert_eq!(
+      h.to_object(),
+      vec![
+        ("content-type".to_string(), "text/plain".to_string()),
+        ("set-cookie".to_string(), "a=1\nb=2".to_string()),
+        ("x-dup".to_string(), "one, two".to_string()),
+      ]
+    );
   }
 
   #[test]
