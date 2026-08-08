@@ -33,8 +33,11 @@ bytearray-buffer = []
 sleep-tokio = []
 
 [dependencies]
+half = { version = "2", default-features = false }
 memchr = "2"
-rquickjs = { version = "0.12", features = ["full-async", "parallel", "macro", "loader", "array-buffer"] }
+# `half` backs `Float16Array`, which the vendored BYOB reader and
+# `ObjectBytes` handle as of the latest llrt sync.
+rquickjs = { version = "0.12", features = ["full-async", "parallel", "macro", "loader", "array-buffer", "half"] }
 simdutf8 = { version = "0.1", features = ["std", "aarch64_neon"] }
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -1,6 +1,10 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
+use core::fmt;
+use std::fmt::Debug;
+
 use crate::utils::{
+    object::define_subclass,
     option::Undefined,
     primordials::{BasePrimordials, Primordial},
 };
@@ -8,20 +12,46 @@ use rquickjs::{
     atom::PredefinedAtom,
     class::{
         impl_::{CloneTrait, CloneWrapper},
-        JsClass,
+        JsClass, Trace,
     },
-    function::{Constructor, Func, Opt},
-    object::Property,
-    prelude::This,
-    Class, Coerced, Ctx, Exception, FromJs, IntoJs, Object, Result, Value,
+    function::{Constructor, Opt},
+    object::{Accessor, Property},
+    prelude::{Func, This},
+    qjs, Class, Coerced, Ctx, Error, Exception, FromJs, IntoJs, JsLifetime, Object, Result, Value,
 };
 
-#[derive(rquickjs::class::Trace, rquickjs::JsLifetime)]
+#[derive(JsLifetime)]
+struct ExceptionPrimordials<'js> {
+    constructor_dom_exception: Constructor<'js>,
+    constructor_quota_exceeded_error: Constructor<'js>,
+}
+
+impl<'js> Primordial<'js> for ExceptionPrimordials<'js> {
+    fn new(ctx: &Ctx<'js>) -> Result<Self> {
+        let globals = ctx.globals();
+        Ok(Self {
+            constructor_dom_exception: globals.get(DOMException::NAME)?,
+            constructor_quota_exceeded_error: globals.get("QuotaExceededError")?,
+        })
+    }
+}
+
+#[derive(Trace, JsLifetime, Debug)]
 pub struct DOMException {
     name: String,
     message: String,
     stack: String,
     code: u8,
+}
+
+impl fmt::Display for DOMException {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DOMException")
+            .field("name", &self.name())
+            .field("message", &self.message())
+            .field("stack", &self.stack)
+            .finish()
+    }
 }
 
 fn add_constants(obj: &Object<'_>) -> Result<()> {
@@ -164,14 +194,90 @@ impl DOMException {
         self.code
     }
 
-    #[qjs(get)]
-    fn stack(&self) -> String {
-        self.stack.clone()
-    }
-
     #[qjs(prop, rename = PredefinedAtom::SymbolToStringTag, configurable)]
     pub fn to_string_tag() -> &'static str {
         stringify!(DOMException)
+    }
+}
+
+impl<'js> DOMException {
+    fn create(
+        ctx: &Ctx<'js>,
+        name: DOMExceptionName,
+        message: impl Into<String>,
+    ) -> Result<Value<'js>> {
+        let primordials = ExceptionPrimordials::get(ctx)?;
+        let ctor = match name {
+            DOMExceptionName::QuotaExceededError => &primordials.constructor_quota_exceeded_error,
+            _ => &primordials.constructor_dom_exception,
+        };
+        ctor.construct((message.into(), name.as_str()))
+    }
+
+    fn throw_value(ctx: &Ctx<'js>, value: Value<'js>) -> Error {
+        unsafe {
+            let dup = qjs::JS_DupValue(ctx.as_raw().as_ptr(), value.as_raw());
+            qjs::JS_Throw(ctx.as_raw().as_ptr(), dup);
+        }
+        Error::Exception
+    }
+
+    fn create_error(ctx: &Ctx<'js>, name: DOMExceptionName, message: impl Into<String>) -> Error {
+        let value = Self::create(ctx, name, message).expect("failed to create DOMException");
+        Self::throw_value(ctx, value)
+    }
+
+    pub fn not_supported_error(ctx: &Ctx<'js>, message: impl Into<String>) -> Error {
+        Self::create_error(ctx, DOMExceptionName::NotSupportedError, message)
+    }
+
+    pub fn type_mismatch_error(ctx: &Ctx<'js>, message: impl Into<String>) -> Error {
+        Self::create_error(ctx, DOMExceptionName::TypeMismatchError, message)
+    }
+
+    pub fn operation_error(ctx: &Ctx<'js>, message: impl Into<String>) -> Error {
+        Self::create_error(ctx, DOMExceptionName::OperationError, message)
+    }
+
+    pub fn quota_exceeded_error(ctx: &Ctx<'js>, message: impl Into<String>) -> Error {
+        Self::create_error(ctx, DOMExceptionName::QuotaExceededError, message)
+    }
+
+    pub fn data_error(ctx: &Ctx<'js>, message: impl Into<String>) -> Error {
+        Self::create_error(ctx, DOMExceptionName::DataError, message)
+    }
+
+    pub fn invalid_access_error(ctx: &Ctx<'js>, message: impl Into<String>) -> Error {
+        Self::create_error(ctx, DOMExceptionName::InvalidAccessError, message)
+    }
+
+    fn define_quota_exceeded_error(ctx: &Ctx<'js>) -> Result<()> {
+        let dom_exception: Constructor = ctx.globals().get(Self::NAME)?;
+        let quota_exceeded_error = define_subclass(
+            ctx,
+            "QuotaExceededError",
+            &dom_exception,
+            |ctx, message: Opt<Undefined<Coerced<String>>>| {
+                let message = match message.0 {
+                    Some(Undefined(Some(m))) => m.0,
+                    _ => String::new(),
+                };
+                Self::new_with_name(&ctx, DOMExceptionName::QuotaExceededError, message)
+            },
+        )?;
+        let null = Value::new_null(ctx.clone());
+        let proto: Object = quota_exceeded_error.get(PredefinedAtom::Prototype)?;
+        proto.prop(
+            "requested",
+            Property::from(null.clone()).enumerable().configurable(),
+        )?;
+        proto.prop("quota", Property::from(null).enumerable().configurable())?;
+        ctx.globals().prop(
+            "QuotaExceededError",
+            Property::from(quota_exceeded_error)
+                .writable()
+                .configurable(),
+        )
     }
 }
 
@@ -291,19 +397,58 @@ pub fn init(ctx: &Ctx<'_>) -> Result<()> {
     }
 
     let dom_ex_proto = Class::<DOMException>::prototype(ctx)?.unwrap();
-    let primordials = BasePrimordials::get(ctx)?;
-    dom_ex_proto.set_prototype(Some(&primordials.prototype_error))?;
+    dom_ex_proto.set_prototype(Some(&BasePrimordials::get(ctx)?.prototype_error))?;
+
+    DOMException::define_quota_exceeded_error(ctx)?;
+    ExceptionPrimordials::init(ctx)?;
 
     // `Error.isError(v)` only returns `true` for objects with QuickJS's
     // `[[ErrorData]]` internal slot (class id `JS_CLASS_ERROR`). There is
     // no public rquickjs API to tag a class-derived instance with that
     // slot, so we replace `Error.isError` with a version that also
-    // recognizes `DOMException` instances via `instanceof`.
-    primordials
+    // recognizes `DOMException` instances (and its subclasses) via
+    // `instanceof`.
+    BasePrimordials::get(ctx)?
         .constructor_error
         .set("isError", Func::from(is_error))?;
 
+    define_error_stack_accessor(ctx)?;
+
     Ok(())
+}
+
+// https://tc39.es/proposal-error-stack-accessor/ moves `stack` to an accessor
+// on `Error.prototype`, so DOMException inherits it instead of exposing its own.
+// QuickJS still gives plain Error instances an own `stack` data property, which
+// shadows this accessor, so the getter only runs for DOMException instances.
+fn define_error_stack_accessor<'js>(ctx: &Ctx<'js>) -> Result<()> {
+    let prototype_error = BasePrimordials::get(ctx)?.prototype_error.clone();
+    prototype_error.prop(
+        PredefinedAtom::Stack,
+        Accessor::new(
+            |this: This<Value<'js>>| -> Result<String> {
+                let stack = Class::<DOMException>::from_value(&this.0)
+                    .ok()
+                    .map(|cls| cls.borrow().stack.clone());
+                Ok(stack.unwrap_or_default())
+            },
+            |ctx: Ctx<'js>, this: This<Value<'js>>, value: Value<'js>| -> Result<()> {
+                // SetterThatIgnoresPrototypeProperties: never install on the
+                // home object itself.
+                let Some(obj) = this.0.as_object() else {
+                    return Ok(());
+                };
+                if *obj == BasePrimordials::get(&ctx)?.prototype_error {
+                    return Ok(());
+                }
+                obj.prop(
+                    PredefinedAtom::Stack,
+                    Property::from(value).writable().enumerable().configurable(),
+                )
+            },
+        )
+        .configurable(),
+    )
 }
 
 fn is_error<'js>(ctx: Ctx<'js>, value: Value<'js>) -> Result<bool> {

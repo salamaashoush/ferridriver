@@ -4,7 +4,7 @@ Vendored subset of [awslabs/llrt](https://github.com/awslabs/llrt) (Apache
 License 2.0), providing the WHATWG Streams implementation and the pieces it
 depends on for the ferridriver QuickJS runtime.
 
-Upstream version: `0.8.1-beta`.
+Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@46d4215` (2026-08-04).
 
 | upstream crate     | module here  |
 | ------------------ | ------------ |
@@ -53,6 +53,16 @@ Then re-apply the local deltas below.
 Everything here is a fix or a visibility widening, never a behaviour change
 for ferridriver's convenience. Upstream candidates.
 
+0. **Upstream regressions we do NOT take.** As of the 2026-08-04 sync,
+   upstream still ships the two transform-stream bugs listed in deltas 2
+   and 3 below — and has since changed
+   `transform_stream_error_writable_and_unblock_write` to take `_e` and
+   ignore it, moving further from the spec. A future re-sync must keep
+   OUR versions of `stream_web/transform/{controller,stream}.rs`,
+   `stream_web/writable/mod.rs` and the visibility widenings; taking
+   upstream wholesale reintroduces a hung `read()` and a `JS_FreeRuntime`
+   assertion at teardown.
+
 1. **`abort/abort_signal.rs`** — the `sleep-tokio` arm imports
    `CtxExtension` from `llrt_utils::ctx`, where it does not exist; it lives
    in `llrt_context`. Repointed at `crate::context`. (Upstream only builds
@@ -82,6 +92,11 @@ for ferridriver's convenience. Upstream candidates.
    `--all-features` would otherwise enable an arm that cannot compile); it is
    declared to rustc as a known-but-never-set cfg via `check-cfg` in
    `Cargo.toml`, which keeps the upstream `cfg` arms compiling out silently.
+
+7. **`rquickjs` `half` feature** — enabled because the synced
+   `utils/bytes.rs` and `stream_web/readable/byob_reader.rs` handle
+   `Float16Array`. Without it `PredefinedAtom::Float16Array` does not
+   exist and `f16` has no `TypedArrayItem` impl.
 
 6. **Tests** — `abort::abort_signal::tests::test_abort_signal` is no longer
    gated on `sleep-timers`, so it covers the `sleep-tokio` path we build.
