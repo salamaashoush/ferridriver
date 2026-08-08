@@ -124,6 +124,21 @@ async fn fetch_sends_non_u8_typed_array_and_dataview_bodies() {
   )
   .await;
   assert_eq!(seen["bytes"], serde_json::json!([1, 0]), "DataView: {seen}");
+
+  // `Uint8ClampedArray` and `Float16Array` only became readable when the
+  // vendored `ObjectBytes` was re-synced against llrt; before that they
+  // fell through to the JSON branch and corrupted the body.
+  let (url3, _h3) = spawn_echo_body();
+  let seen = post_body(&url3, "new Uint8ClampedArray([7, 8])").await;
+  assert_eq!(seen["bytes"], serde_json::json!([7, 8]), "Uint8ClampedArray: {seen}");
+
+  let (url4, _h4) = spawn_echo_body();
+  let seen = post_body(&url4, "new Float16Array([1])").await;
+  assert_eq!(
+    seen["bytes"].as_array().map(Vec::len),
+    Some(2),
+    "Float16Array is two bytes per element: {seen}"
+  );
 }
 
 #[tokio::test(flavor = "multi_thread")]
