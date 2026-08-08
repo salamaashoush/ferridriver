@@ -1367,6 +1367,9 @@ pub(crate) fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   // digest+HMAC — native Rust, see bindings/crypto.rs for the
   // documented algorithm coverage.
   crate::bindings::crypto::install(ctx)?;
+  // CompressionStream / DecompressionStream, over the vendored
+  // TransformStream.
+  crate::bindings::compression::install(ctx)?;
   Ok(())
 }
 
