@@ -5474,98 +5474,119 @@ impl<T: CdpWrap> CdpPage<T> {
           }
         }
 
-        let method = event.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        match method {
-          "Runtime.executionContextCreated" => {
-            if let Some(ctx) = event.get("params").and_then(|p| p.get("context")) {
-              let ctx_id = ctx.get("id").and_then(serde_json::Value::as_i64).unwrap_or(0);
-              if let Some(aux) = ctx.get("auxData") {
-                let frame_id = aux.get("frameId").and_then(|v| v.as_str()).unwrap_or("");
-                let is_default = aux
-                  .get("isDefault")
-                  .and_then(serde_json::Value::as_bool)
-                  .unwrap_or(false);
-                if is_default && !frame_id.is_empty() {
-                  frame_contexts.write().await.insert(frame_id.to_string(), ctx_id);
-                  contexts_notify.notify_waiters();
-                }
-              }
-            }
-          },
-          "Runtime.executionContextDestroyed" => {
-            if let Some(ctx_id) = event
-              .get("params")
-              .and_then(|p| p.get("executionContextId"))
-              .and_then(serde_json::Value::as_i64)
-            {
-              let mut contexts = frame_contexts.write().await;
-              contexts.retain(|_, &mut v| v != ctx_id);
-            }
-          },
-          "Runtime.executionContextsCleared" => {
-            frame_contexts.write().await.clear();
-            // Init scripts registered via `Page.addScriptToEvaluateOnNewDocument`
-            // are page-session-scoped, not context-scoped — they
-            // survive context clears (which happen on every navigation
-            // in Chrome). Resetting here forced a redundant
-            // re-registration RTT on every page navigation.
-          },
-          "Runtime.bindingCalled" => {
-            if let Some(params) = event.get("params") {
-              let contexts = frame_contexts.read().await;
-              if let Some(call) = Self::parse_binding_called(params, &contexts, &target_id) {
-                let _ = binding_tx.send(call);
-              }
-            }
-          },
-          "Page.frameAttached" => {
-            if let Some(params) = event.get("params") {
-              emitter.emit(crate::events::PageEvent::FrameAttached(super::FrameInfo {
-                frame_id: params.get("frameId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                parent_frame_id: params
-                  .get("parentFrameId")
-                  .and_then(|v| v.as_str())
-                  .map(std::string::ToString::to_string),
-                name: String::new(),
-                url: String::new(),
-              }));
-            }
-          },
-          "Page.frameDetached" => {
-            if let Some(fid) = event
-              .get("params")
-              .and_then(|p| p.get("frameId"))
-              .and_then(|v| v.as_str())
-            {
-              frame_contexts.write().await.remove(fid);
-              emitter.emit(crate::events::PageEvent::FrameDetached {
-                frame_id: fid.to_string(),
-              });
-            }
-          },
-          "Page.frameNavigated" => Self::emit_frame_navigated(&event, &emitter),
-          "Page.navigatedWithinDocument" => {
-            // Same-document navigation (history.pushState / replaceState /
-            // fragment). Chromium sends only { frameId, url } — without
-            // this, `page.url()` / `waitForURL` never see SPA route
-            // changes. Mirrors Playwright's
-            // `crPage.ts::_onFrameNavigatedWithinDocument`.
-            if let Some(params) = event.get("params") {
-              emitter.emit(crate::events::PageEvent::FrameNavigatedWithinDocument(
-                super::FrameInfo {
-                  frame_id: params.get("frameId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                  parent_frame_id: None,
-                  name: String::new(),
-                  url: params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                },
-              ));
-            }
-          },
-          _ => {},
-        }
+        Self::handle_tracker_event(
+          &event,
+          &frame_contexts,
+          &contexts_notify,
+          &emitter,
+          &target_id,
+          &binding_tx,
+        )
+        .await;
       }
     })
     .abort_handle()
+  }
+
+  /// Route one tapped `Runtime.*` / `Page.*` event into the frame-context
+  /// map, the exposed-binding queue, or the page emitter.
+  async fn handle_tracker_event(
+    event: &serde_json::Value,
+    frame_contexts: &Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
+    contexts_notify: &Arc<tokio::sync::Notify>,
+    emitter: &crate::events::EventEmitter,
+    target_id: &Arc<str>,
+    binding_tx: &tokio::sync::mpsc::UnboundedSender<BindingCall>,
+  ) {
+    let method = event.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    match method {
+      "Runtime.executionContextCreated" => {
+        if let Some(ctx) = event.get("params").and_then(|p| p.get("context")) {
+          let ctx_id = ctx.get("id").and_then(serde_json::Value::as_i64).unwrap_or(0);
+          if let Some(aux) = ctx.get("auxData") {
+            let frame_id = aux.get("frameId").and_then(|v| v.as_str()).unwrap_or("");
+            let is_default = aux
+              .get("isDefault")
+              .and_then(serde_json::Value::as_bool)
+              .unwrap_or(false);
+            if is_default && !frame_id.is_empty() {
+              frame_contexts.write().await.insert(frame_id.to_string(), ctx_id);
+              contexts_notify.notify_waiters();
+            }
+          }
+        }
+      },
+      "Runtime.executionContextDestroyed" => {
+        if let Some(ctx_id) = event
+          .get("params")
+          .and_then(|p| p.get("executionContextId"))
+          .and_then(serde_json::Value::as_i64)
+        {
+          let mut contexts = frame_contexts.write().await;
+          contexts.retain(|_, &mut v| v != ctx_id);
+        }
+      },
+      "Runtime.executionContextsCleared" => {
+        frame_contexts.write().await.clear();
+        // Init scripts registered via `Page.addScriptToEvaluateOnNewDocument`
+        // are page-session-scoped, not context-scoped — they
+        // survive context clears (which happen on every navigation
+        // in Chrome). Resetting here forced a redundant
+        // re-registration RTT on every page navigation.
+      },
+      "Runtime.bindingCalled" => {
+        if let Some(params) = event.get("params") {
+          let contexts = frame_contexts.read().await;
+          if let Some(call) = Self::parse_binding_called(params, &contexts, target_id) {
+            let _ = binding_tx.send(call);
+          }
+        }
+      },
+      "Page.frameAttached" => {
+        if let Some(params) = event.get("params") {
+          emitter.emit(crate::events::PageEvent::FrameAttached(super::FrameInfo {
+            frame_id: params.get("frameId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            parent_frame_id: params
+              .get("parentFrameId")
+              .and_then(|v| v.as_str())
+              .map(std::string::ToString::to_string),
+            name: String::new(),
+            url: String::new(),
+          }));
+        }
+      },
+      "Page.frameDetached" => {
+        if let Some(fid) = event
+          .get("params")
+          .and_then(|p| p.get("frameId"))
+          .and_then(|v| v.as_str())
+        {
+          frame_contexts.write().await.remove(fid);
+          emitter.emit(crate::events::PageEvent::FrameDetached {
+            frame_id: fid.to_string(),
+          });
+        }
+      },
+      "Page.frameNavigated" => Self::emit_frame_navigated(event, emitter),
+      "Page.navigatedWithinDocument" => {
+        // Same-document navigation (history.pushState / replaceState /
+        // fragment). Chromium sends only { frameId, url } — without
+        // this, `page.url()` / `waitForURL` never see SPA route
+        // changes. Mirrors Playwright's
+        // `crPage.ts::_onFrameNavigatedWithinDocument`.
+        if let Some(params) = event.get("params") {
+          emitter.emit(crate::events::PageEvent::FrameNavigatedWithinDocument(
+            super::FrameInfo {
+              frame_id: params.get("frameId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+              parent_frame_id: None,
+              name: String::new(),
+              url: params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            },
+          ));
+        }
+      },
+      _ => {},
+    }
   }
 
   /// Emit [`crate::events::PageEvent::FrameNavigated`] for a

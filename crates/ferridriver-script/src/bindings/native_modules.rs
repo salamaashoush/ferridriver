@@ -44,7 +44,11 @@ pub const NATIVE_MODULE_NAMES: &[&str] = &[
 /// [`crate::bundle::set_bundler_shims`]: the resolver, the throwaway
 /// compile runtimes and the rolldown externals all consult it from call
 /// sites spread across three crates.
-static MODULE_ALIASES: RwLock<Option<Arc<Vec<(String, String)>>>> = RwLock::new(None);
+/// Import specifier -> native module name, as configured by
+/// `[test.moduleAliases]`.
+type AliasTable = Arc<Vec<(String, String)>>;
+
+static MODULE_ALIASES: RwLock<Option<AliasTable>> = RwLock::new(None);
 
 /// Install the alias map (replacing any previous one). Must be called
 /// before anything bundles or creates a session.

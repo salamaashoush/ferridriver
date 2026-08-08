@@ -114,11 +114,10 @@ macro_rules! retry_resolve {
         // keep querying a dead frame for the rest of the deadline (and
         // an unknown frame id falls back to the main document, so the
         // selector silently matches the WRONG page).
-        let (__rframe, __rsel) = match $self.resolved().await {
-          ::std::result::Result::Ok(v) => v,
-          // The iframe itself is not there yet — same retry semantics as
-          // a missing element.
-          ::std::result::Result::Err(_) => continue,
+        // A failure here means the iframe itself is not there yet — same
+        // retry semantics as a missing element.
+        let ::std::result::Result::Ok((__rframe, __rsel)) = $self.resolved().await else {
+          continue;
         };
         let $page: &$crate::backend::AnyPage = __rframe.page_arc().inner();
         if let ::std::result::Result::Err(e) = $page.ensure_engine_injected().await {

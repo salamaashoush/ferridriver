@@ -390,9 +390,9 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
           locator.all_text_contents().await.unwrap_or_default()
         };
         // "To match an array" is "to contain an array" + equal length.
-        let matches = (!exact || received.len() == expected.len())
+        let is_match = (!exact || received.len() == expected.len())
           && matches_sequentially(&expected, &received, options.ignore_case, !exact);
-        if matches == is_not {
+        if is_match == is_not {
           let expected_desc: Vec<String> = expected.iter().map(StringOrRegex::description).collect();
           let received_desc: Vec<String> = received.iter().map(|r| format!("{r:?}")).collect();
           Err(MatchError::new(
