@@ -165,4 +165,30 @@ event, `context.pages()`, `page.opener()`. Remaining known limits:
 - WebSocket-route install on popups is post-resume everywhere (its
   mock installs by evaluating into the live document).
 
+## WHATWG fetch residuals
+
+The `BodyInit` union is extracted in one place
+(`bindings/body_init.rs`) for `fetch`, `new Request` and `new Response`;
+`Headers` and the `Request`/`Response` header fields are the core
+`fetch::Headers` list; the `fetch` global builds a core `WhatwgRequest`
+instead of borrowing the Playwright `RequestOptions` bag; and a
+`ReadableStream` request body is streamed onto the socket
+(`bindings/streams.rs::to_byte_stream` pumps it off the VM thread into
+`fetch::channel_stream`). Point-by-point spec behaviour is pinned by
+`tests/fetch_conformance.rs`, body handling by `tests/fetch_body_init.rs`.
+
+Remaining:
+
+- `Request` / `Response` still hold `Vec<u8>` bodies plus a separate
+  `net` handle rather than one `fetch::Body`. Collapsing them means
+  giving `fetch::Body` a peek/clone story the JS single-use rules can
+  sit on; the header half of this item is done.
+- A streamed request body cannot follow a redirect (the engine returns
+  `RedirectRefused`) — the stream is consumed by the first hop and
+  cannot be replayed. Browsers behave the same way, so this is a
+  documented limit rather than a gap.
+- `CompressionStream` / `DecompressionStream` cover the three formats the
+  Compression Streams spec defines (`gzip`, `deflate`, `deflate-raw`).
+  Brotli and zstd are deliberately absent — not in that spec.
+
 <!-- Append new findings below as they are discovered. Remove items when they land — git history is the archive. -->
