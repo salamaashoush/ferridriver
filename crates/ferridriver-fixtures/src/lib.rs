@@ -42,6 +42,18 @@ pub struct FixtureServerOptions {
 
 struct ServerState {
   proxy: Arc<ProxyState>,
+  reset: Arc<ResetState>,
+  reset_addr: SocketAddr,
+  tls_addr: SocketAddr,
+}
+
+/// Per-key budget of connections the reset listener still has to abort.
+/// `/fx/reset-arm?key=K&times=N` seeds it; each aborted connection spends
+/// one. Keyed so concurrent tests (and the four backend projects) never
+/// consume each other's budget.
+#[derive(Default)]
+struct ResetState {
+  remaining: Mutex<rustc_hash::FxHashMap<String, u32>>,
 }
 
 /// Request log for the proxy listener. `lines` records the raw request
@@ -56,8 +68,12 @@ struct ProxyState {
 pub struct FixtureServer {
   addr: SocketAddr,
   proxy_addr: SocketAddr,
+  reset_addr: SocketAddr,
+  tls_addr: SocketAddr,
   handle: tokio::task::JoinHandle<()>,
   proxy_handle: tokio::task::JoinHandle<()>,
+  reset_handle: tokio::task::JoinHandle<()>,
+  tls_handle: tokio::task::JoinHandle<()>,
 }
 
 impl FixtureServer {
@@ -75,7 +91,21 @@ impl FixtureServer {
     let proxy_addr = proxy.addr;
     let proxy_handle = tokio::spawn(run_proxy(proxy_listener, Arc::clone(&proxy)));
 
-    let state = Arc::new(ServerState { proxy });
+    let reset = Arc::new(ResetState::default());
+    let reset_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let reset_addr = reset_listener.local_addr()?;
+    let reset_handle = tokio::spawn(run_reset(reset_listener, Arc::clone(&reset)));
+
+    let tls_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let tls_addr = tls_listener.local_addr()?;
+    let tls_handle = tokio::spawn(run_tls(tls_listener));
+
+    let state = Arc::new(ServerState {
+      proxy,
+      reset,
+      reset_addr,
+      tls_addr,
+    });
     let mut app = Router::new()
       // Literal route wins over the wildcard, so the WS upgrade
       // extractor only runs for the echo endpoint.
@@ -97,8 +127,12 @@ impl FixtureServer {
     Ok(Self {
       addr,
       proxy_addr,
+      reset_addr,
+      tls_addr,
       handle,
       proxy_handle,
+      reset_handle,
+      tls_handle,
     })
   }
 
@@ -112,16 +146,32 @@ impl FixtureServer {
     format!("http://{}", self.proxy_addr)
   }
 
+  /// Origin of the listener that aborts connections (`/fx/endpoints`).
+  #[must_use]
+  pub fn reset_url(&self) -> String {
+    format!("http://{}", self.reset_addr)
+  }
+
+  /// Origin of the HTTPS listener holding a self-signed certificate.
+  #[must_use]
+  pub fn tls_url(&self) -> String {
+    format!("https://{}", self.tls_addr)
+  }
+
   /// Serve until aborted.
   pub async fn run_forever(self) {
-    let _ = tokio::join!(self.handle, self.proxy_handle);
+    let _ = tokio::join!(self.handle, self.proxy_handle, self.reset_handle, self.tls_handle);
   }
 
   pub async fn stop(self) {
     self.handle.abort();
     self.proxy_handle.abort();
+    self.reset_handle.abort();
+    self.tls_handle.abort();
     let _ = self.handle.await;
     let _ = self.proxy_handle.await;
+    let _ = self.reset_handle.await;
+    let _ = self.tls_handle.await;
   }
 }
 
@@ -340,6 +390,23 @@ fn fx_echo_request(method: &axum::http::Method, headers: &HeaderMap, body: &axum
   }))
 }
 
+/// Grant `key` a budget of `times` connection resets on the reset
+/// listener; arming itself never resets.
+fn fx_reset_arm(state: &ResetState, query: Option<&str>) -> Response<Body> {
+  let key = query_values(query, "key").into_iter().next().unwrap_or_default();
+  let times: u32 = query_values(query, "times")
+    .into_iter()
+    .next()
+    .and_then(|t| t.parse().ok())
+    .unwrap_or(1);
+  state
+    .remaining
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .insert(key.clone(), times);
+  fx_json(&serde_json::json!({ "key": key, "times": times }))
+}
+
 /// Each `c` query param becomes one Set-Cookie header verbatim:
 /// `/fx/set-cookie?c=name%3Dvalue%3B%20Path%3D%2F`.
 fn fx_set_cookie(query: Option<&str>) -> Response<Body> {
@@ -441,6 +508,13 @@ async fn handle_fx(
     "iframe" => fx_html("<!doctype html><body>outer<iframe src=\"/fx/inner\"></iframe></body>"),
     "inner" => fx_html("<!doctype html><body>inner</body>"),
     "proxy-info" => fx_json(&serde_json::json!({"url": format!("http://{}", state.proxy.addr)})),
+    // Origins of the auxiliary listeners, which bind ephemeral ports.
+    "endpoints" => fx_json(&serde_json::json!({
+      "proxy": format!("http://{}", state.proxy.addr),
+      "reset": format!("http://{}", state.reset_addr),
+      "tls": format!("https://{}", state.tls_addr),
+    })),
+    "reset-arm" => fx_reset_arm(&state.reset, query.as_deref()),
     "proxy-log" => {
       let mut lines = state
         .proxy
@@ -472,6 +546,116 @@ async fn ws_echo(mut socket: WebSocket) {
     if socket.send(reply).await.is_err() {
       break;
     }
+  }
+}
+
+/// Accept loop for the listener that aborts connections.
+///
+/// While a key has budget left (armed via `/fx/reset-arm`), the
+/// connection is closed with `SO_LINGER 0`, which sends a TCP RST rather
+/// than a FIN — the client sees ECONNRESET, the one error class
+/// Playwright's `maxRetries` retries. Once the budget is spent the same
+/// URL answers 200, so a test can prove that N retries turn failure into
+/// success and that N-1 do not.
+async fn run_reset(listener: tokio::net::TcpListener, state: Arc<ResetState>) {
+  loop {
+    let Ok((mut stream, _)) = listener.accept().await else {
+      break;
+    };
+    let state = Arc::clone(&state);
+    tokio::spawn(async move {
+      use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+      let mut buf = [0u8; 8192];
+      let n = stream.read(&mut buf).await.unwrap_or(0);
+      let request = String::from_utf8_lossy(&buf[..n]);
+      let target = request.lines().next().unwrap_or("").split_whitespace().nth(1);
+      let key = target
+        .and_then(|t| t.split_once('?'))
+        .map(|(_, q)| q)
+        .and_then(|q| query_values(Some(q), "key").into_iter().next())
+        .unwrap_or_default();
+
+      let should_reset = {
+        let mut remaining = state
+          .remaining
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match remaining.get_mut(&key) {
+          Some(left) if *left > 0 => {
+            *left -= 1;
+            true
+          },
+          _ => false,
+        }
+      };
+
+      if should_reset {
+        // Zero linger turns the close into an RST instead of a FIN, which
+        // is what makes the client report ECONNRESET. Set through socket2
+        // on the raw socket: tokio deprecates its own `set_linger`.
+        if let Ok(std_stream) = stream.into_std() {
+          let socket = socket2::Socket::from(std_stream);
+          let _ = socket.set_linger(Some(std::time::Duration::ZERO));
+          drop(socket);
+        }
+        return;
+      }
+      let _ = stream
+        .write_all(
+          b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nsurvived!",
+        )
+        .await;
+      let _ = stream.flush().await;
+    });
+  }
+}
+
+/// Accept loop for the HTTPS listener, holding a certificate generated
+/// at startup for `127.0.0.1` and signed by nobody — so every client
+/// rejects it unless it is explicitly told to ignore certificate errors.
+async fn run_tls(listener: tokio::net::TcpListener) {
+  let Ok(cert) = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string(), "localhost".to_string()]) else {
+    return;
+  };
+  let certs = vec![cert.cert.der().clone()];
+  let key = tokio_rustls::rustls::pki_types::PrivateKeyDer::try_from(cert.signing_key.serialize_der());
+  let Ok(key) = key else { return };
+  // Name the crypto provider rather than taking the process default:
+  // cargo unifies rustls features across the workspace build, so both
+  // `ring` (here) and `aws-lc-rs` (reqwest's) end up enabled and the
+  // automatic choice panics with "Could not automatically determine the
+  // process-level CryptoProvider".
+  let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+  let Ok(builder) =
+    tokio_rustls::rustls::ServerConfig::builder_with_provider(provider).with_safe_default_protocol_versions()
+  else {
+    return;
+  };
+  let Ok(config) = builder.with_no_client_auth().with_single_cert(certs, key) else {
+    return;
+  };
+  let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+
+  loop {
+    let Ok((stream, _)) = listener.accept().await else {
+      break;
+    };
+    let acceptor = acceptor.clone();
+    tokio::spawn(async move {
+      use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+      let Ok(mut tls) = acceptor.accept(stream).await else {
+        // Handshake rejected by the client (the untrusted-cert case).
+        return;
+      };
+      let mut buf = [0u8; 8192];
+      let _ = tls.read(&mut buf).await;
+      let _ = tls
+        .write_all(
+          b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nsecured!!",
+        )
+        .await;
+      let _ = tls.flush().await;
+    });
   }
 }
 
