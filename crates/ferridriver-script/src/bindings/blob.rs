@@ -6,6 +6,7 @@
 //! synchronously (await-transparent), consistent with the rest of the
 //! fetch subset.
 
+use rquickjs::atom::PredefinedAtom;
 use rquickjs::function::Opt;
 use rquickjs::{Class, Ctx, Object, TypedArray, Value, class::Trace};
 
@@ -109,6 +110,13 @@ fn push_part(out: &mut Vec<u8>, elem: &Value<'_>) {
 
 #[rquickjs::methods(rename_all = "camelCase")]
 impl BlobJs {
+  /// Spec: every platform object carries `Symbol.toStringTag`, so
+  /// `Object.prototype.toString.call(x)` reads `[object Blob]`.
+  #[qjs(prop, rename = PredefinedAtom::SymbolToStringTag, configurable)]
+  pub fn to_string_tag() -> &'static str {
+    "Blob"
+  }
+
   #[qjs(constructor)]
   pub fn new<'js>(parts: Opt<Value<'js>>, options: Opt<Object<'js>>) -> Self {
     Self {

@@ -28,7 +28,8 @@ use crate::fetch;
 
 pub use crate::fetch::{
   BridgeFuture, ContextBridge, ContextDefaults, Credentials, MultipartField, MultipartValue, NetGuard, RedirectMode,
-  RemoteAddr, ResponseType, host_allowed, host_of, multipart_boundary_of, parse_multipart, serialize_multipart,
+  RemoteAddr, ResponseType, host_allowed, host_of, multipart_boundary, multipart_boundary_of, parse_multipart,
+  serialize_multipart,
 };
 
 /// Options for creating an `HttpClient`.
@@ -93,6 +94,41 @@ pub struct RequestOptions {
   /// rules on the initial URL, every redirect hop, and every resolved
   /// address.
   pub net_guard: Option<NetGuard>,
+}
+
+/// A request assembled by the WHATWG `fetch` layer, for
+/// [`HttpClient::fetch_whatwg`].
+///
+/// Unlike [`RequestOptions`] this carries no body *forms* — the spec's
+/// "extract a body" step has already run, so `body` is final and
+/// `headers` already state its `content-type` (or deliberately state
+/// none).
+pub struct WhatwgRequest {
+  /// Absolute, or relative to the client's `baseURL`.
+  pub url: String,
+  pub method: String,
+  /// Fully assembled request headers, applied over the client/context
+  /// defaults.
+  pub headers: Vec<(String, String)>,
+  pub body: fetch::Body,
+  pub redirect: RedirectMode,
+  pub credentials: Credentials,
+  /// Sandbox network policy (`allow.net`, metadata blocking).
+  pub net_guard: Option<NetGuard>,
+  /// `None` uses the client default.
+  pub timeout: Option<Duration>,
+}
+
+/// Per-request defaults resolved from the browser context (when bound)
+/// or the client options.
+struct ResolvedDefaults {
+  base_url: Option<String>,
+  extra_headers: Vec<(String, String)>,
+  user_agent: Option<String>,
+  ignore_https_errors: bool,
+  /// Whether to seed Playwright's context-style `user-agent` + `accept`
+  /// base headers.
+  ctx_style: bool,
 }
 
 /// A buffered HTTP response (the Playwright `APIResponse` view over a
@@ -442,15 +478,16 @@ impl HttpClient {
     }
   }
 
-  /// Lower the Playwright option bag into a [`fetch::Request`], resolving
-  /// the URL/defaults live (from the context bridge when bound, else from
-  /// the client options) and materializing the body + content-type.
-  async fn build_request(&self, url: &str, opts: &RequestOptions) -> crate::error::Result<fetch::Request> {
-    // Effective per-request defaults. Bridged: read live from the
-    // browser context (so `setExtraHTTPHeaders` etc. take effect); plus a
-    // `user-agent` + `accept: */*` base like Playwright's `_sendRequest`.
-    // Standalone: from the client options; reqwest supplies UA/accept.
-    let (base_url, mut extra_headers, user_agent, ignore_default, ctx_style) = if let Some(bridge) = &self.bridge {
+  /// Effective per-request defaults. Bridged: read live from the browser
+  /// context (so `setExtraHTTPHeaders` etc. take effect); plus a
+  /// `user-agent` + `accept: */*` base like Playwright's `_sendRequest`.
+  /// Standalone: from the client options; reqwest supplies UA/accept.
+  ///
+  /// Shared by the Playwright option-bag path and the WHATWG `fetch`
+  /// path so both resolve the base URL, context headers and TLS posture
+  /// identically — only body/content-type handling differs between them.
+  async fn resolved_defaults(&self) -> crate::error::Result<ResolvedDefaults> {
+    let (base_url, mut extra_headers, user_agent, ignore_https_errors, ctx_style) = if let Some(bridge) = &self.bridge {
       let d = bridge.defaults().await?;
       (
         d.base_url,
@@ -469,8 +506,87 @@ impl HttpClient {
       )
     };
     extra_headers.extend(self.extra_headers.iter().cloned());
+    Ok(ResolvedDefaults {
+      base_url,
+      extra_headers,
+      user_agent,
+      ignore_https_errors,
+      ctx_style,
+    })
+  }
 
-    let mut request_url = resolve_url(base_url.as_deref(), url)?;
+  /// The default + context headers every request starts from, before the
+  /// caller's own.
+  fn base_headers(defaults: &ResolvedDefaults) -> fetch::Headers {
+    let mut headers = fetch::Headers::new();
+    if defaults.ctx_style {
+      if let Some(ua) = &defaults.user_agent {
+        headers.set("user-agent", ua.clone());
+      }
+      headers.set("accept", "*/*");
+    }
+    for (name, value) in &defaults.extra_headers {
+      headers.set(name, value.clone());
+    }
+    headers
+  }
+
+  /// Send a request assembled by the WHATWG `fetch` layer.
+  ///
+  /// The caller has already run the spec's "extract a body" step, so the
+  /// body and its `content-type` arrive decided. That is the whole point
+  /// of this entry point: [`Self::build_request`] applies Playwright's
+  /// `data` defaults (notably `content-type: application/octet-stream`),
+  /// which are right for `request.post(url, { data })` and wrong for
+  /// `fetch(url, { body: someArrayBuffer })` — where the spec sends no
+  /// `content-type` at all.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the URL cannot be resolved, the method is
+  /// invalid, or the request fails.
+  pub async fn fetch_whatwg(&self, request: WhatwgRequest) -> crate::error::Result<HttpStreamResponse> {
+    let defaults = self.resolved_defaults().await?;
+    let url = resolve_url(defaults.base_url.as_deref(), &request.url)?;
+    let method: reqwest::Method = request
+      .method
+      .parse()
+      .map_err(|_| crate::error::FerriError::Backend(format!("invalid HTTP method: {}", request.method)))?;
+
+    let mut headers = Self::base_headers(&defaults);
+    for (name, value) in request.headers {
+      headers.set(&name, value);
+    }
+
+    let response = fetch::send(
+      &self.pool,
+      self.bridge.as_ref(),
+      fetch::Request {
+        method,
+        url,
+        headers,
+        body: request.body,
+        redirect: request.redirect,
+        credentials: request.credentials,
+        max_redirects: None,
+        max_retries: 0,
+        timeout: request.timeout.unwrap_or(self.default_timeout),
+        ignore_https_errors: defaults.ignore_https_errors,
+        net_guard: request.net_guard,
+      },
+    )
+    .await?;
+    Ok(HttpStreamResponse::from_response(response))
+  }
+
+  /// Lower the Playwright option bag into a [`fetch::Request`], resolving
+  /// the URL/defaults live (from the context bridge when bound, else from
+  /// the client options) and materializing the body + content-type.
+  async fn build_request(&self, url: &str, opts: &RequestOptions) -> crate::error::Result<fetch::Request> {
+    let defaults = self.resolved_defaults().await?;
+    let ignore_default = defaults.ignore_https_errors;
+
+    let mut request_url = resolve_url(defaults.base_url.as_deref(), url)?;
     if let Some(params) = &opts.params {
       let mut qp = request_url.query_pairs_mut();
       for (k, v) in params {
@@ -485,16 +601,7 @@ impl HttpClient {
 
     // Default headers, then context extras, then per-request headers —
     // later writers replace earlier ones (fetch.ts:178).
-    let mut headers = fetch::Headers::new();
-    if ctx_style {
-      if let Some(ua) = &user_agent {
-        headers.set("user-agent", ua.clone());
-      }
-      headers.set("accept", "*/*");
-    }
-    for (k, v) in &extra_headers {
-      headers.set(k, v.clone());
-    }
+    let mut headers = Self::base_headers(&defaults);
     if let Some(request_headers) = &opts.headers {
       for (k, v) in request_headers {
         headers.set(k, v.clone());
@@ -643,6 +750,65 @@ impl HttpClient {
   /// Dispose the request context (Playwright compat).
   pub fn dispose(self) {
     drop(self);
+  }
+}
+
+impl RequestOptions {
+  /// Lower a Playwright `params` / `form` option map, whose values the
+  /// types admit as `string | number | boolean`, into ordered pairs.
+  ///
+  /// Both bindings call this so the two of them cannot disagree about
+  /// what a `params` bag means or word the rejection differently.
+  ///
+  /// # Errors
+  ///
+  /// Returns a message naming the offending key when a value is not a
+  /// scalar. `field` is the option name used in that message.
+  pub fn scalar_map_to_pairs<I>(field: &str, map: I) -> Result<Vec<(String, String)>, String>
+  where
+    I: IntoIterator<Item = (String, serde_json::Value)>,
+  {
+    map
+      .into_iter()
+      .map(|(key, value)| {
+        let text = match value {
+          serde_json::Value::String(s) => s,
+          serde_json::Value::Number(n) => n.to_string(),
+          serde_json::Value::Bool(b) => b.to_string(),
+          other => {
+            return Err(format!(
+              "{field}[{key:?}] must be a string, number, or boolean (got {other})"
+            ));
+          },
+        };
+        Ok((key, text))
+      })
+      .collect()
+  }
+
+  /// Playwright's `data` routing (`client/fetch.ts` `serializePostData`)
+  /// as the `(data, json_data)` pair [`RequestOptions`] carries: a
+  /// string is a raw body, a byte array is a raw body, and any other
+  /// serializable value is sent as JSON. An explicit `json` always wins.
+  ///
+  /// Shared so the NAPI and `QuickJS` bindings cannot route the same
+  /// `data` value to different bodies — which they did, NAPI JSON-ifying
+  /// the byte arrays `QuickJS` sent raw.
+  #[must_use]
+  pub fn split_data(
+    data: Option<serde_json::Value>,
+    json: Option<serde_json::Value>,
+  ) -> (Option<Vec<u8>>, Option<serde_json::Value>) {
+    match (data, json) {
+      (_, Some(json)) => (None, Some(json)),
+      (Some(serde_json::Value::String(s)), None) => (Some(s.into_bytes()), None),
+      (Some(value), None) if value.is_array() => match serde_json::from_value::<Vec<u8>>(value.clone()) {
+        Ok(bytes) => (Some(bytes), None),
+        Err(_) => (None, Some(value)),
+      },
+      (Some(value), None) => (None, Some(value)),
+      (None, None) => (None, None),
+    }
   }
 }
 

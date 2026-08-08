@@ -6,8 +6,10 @@
 //! empty query produced a bogus `("", "")` entry.
 
 use rquickjs::atom::PredefinedAtom;
-use rquickjs::function::{Func, Opt, This};
+use rquickjs::function::{Opt, This};
 use rquickjs::{Array, Class, Coerced, Ctx, Function, JsLifetime, Object, Value, class::Trace};
+
+use crate::bindings::js_iterator::live_iterator;
 
 #[derive(Default, Clone, Trace, JsLifetime)]
 #[rquickjs::class(rename = "URLSearchParams")]
@@ -25,6 +27,13 @@ impl UrlSearchParams {
       data: form_urlencoded_parse(query),
     }
   }
+
+  /// Reset the list to `query`. Used by `URL` when a write replaces the
+  /// whole query (`url.search = …`, `url.href = …`) so the live
+  /// `searchParams` object the caller already holds reflects it.
+  pub(crate) fn replace_from_query(&mut self, query: &str) {
+    self.data = form_urlencoded_parse(query);
+  }
 }
 
 /// Decode `a=1&b=%20x` into ordered pairs, handling `+` and `%XX`.
@@ -34,64 +43,51 @@ fn form_urlencoded_parse(query: &str) -> Vec<(String, String)> {
     .collect()
 }
 
-/// One `{ value, done }`-protocol iterator over the LIVE pair list
-/// (WHATWG semantics: mutations during iteration are observed —
-/// `for (const [k] of params) params.delete(k)` behaves like Node).
-///
-/// The parent instance is carried as a property on the iterator object
-/// (JS-traced) and re-read per `next()` call — the native closure
-/// captures no JS value, per the GC-cycle discipline.
-fn live_iterator<'js>(
-  ctx: Ctx<'js>,
-  parent: Class<'js, UrlSearchParams>,
-  project: fn(&Ctx<'js>, &(String, String)) -> rquickjs::Result<Value<'js>>,
-) -> rquickjs::Result<Object<'js>> {
-  let res = Object::new(ctx)?;
-  res.set("position", 0usize)?;
-  res.set("params", parent)?;
-  res.set(
-    PredefinedAtom::SymbolIterator,
-    Func::from(|it: This<Object<'js>>| -> rquickjs::Result<Object<'js>> { Ok(it.0) }),
-  )?;
-  res.set(
-    PredefinedAtom::Next,
-    Func::from(
-      move |ctx: Ctx<'js>, it: This<Object<'js>>| -> rquickjs::Result<Object<'js>> {
-        let position = it.get::<_, usize>("position")?;
-        let parent: Class<'js, UrlSearchParams> = it.get("params")?;
-        let entry = parent.borrow().data.get(position).cloned();
-        let res = Object::new(ctx.clone())?;
-        match entry {
-          None => res.set(PredefinedAtom::Done, true)?,
-          Some(entry) => {
-            res.set("value", project(&ctx, &entry)?)?;
-            it.set("position", position + 1)?;
-          },
-        }
-        Ok(res)
-      },
-    ),
-  )?;
-  Ok(res)
-}
-
-fn project_entry<'js>(ctx: &Ctx<'js>, (name, value): &(String, String)) -> rquickjs::Result<Value<'js>> {
+fn project_entry<'js>(
+  ctx: &Ctx<'js>,
+  parent: &Class<'js, UrlSearchParams>,
+  index: usize,
+) -> rquickjs::Result<Option<Value<'js>>> {
+  let Some((name, value)) = parent.borrow().data.get(index).cloned() else {
+    return Ok(None);
+  };
   let pair = Array::new(ctx.clone())?;
-  pair.set(0, rquickjs::String::from_str(ctx.clone(), name)?)?;
-  pair.set(1, rquickjs::String::from_str(ctx.clone(), value)?)?;
-  Ok(pair.into_value())
+  pair.set(0, rquickjs::String::from_str(ctx.clone(), &name)?)?;
+  pair.set(1, rquickjs::String::from_str(ctx.clone(), &value)?)?;
+  Ok(Some(pair.into_value()))
 }
 
-fn project_key<'js>(ctx: &Ctx<'js>, (name, _): &(String, String)) -> rquickjs::Result<Value<'js>> {
-  Ok(rquickjs::String::from_str(ctx.clone(), name)?.into_value())
+fn project_key<'js>(
+  ctx: &Ctx<'js>,
+  parent: &Class<'js, UrlSearchParams>,
+  index: usize,
+) -> rquickjs::Result<Option<Value<'js>>> {
+  let Some((name, _)) = parent.borrow().data.get(index).cloned() else {
+    return Ok(None);
+  };
+  Ok(Some(rquickjs::String::from_str(ctx.clone(), &name)?.into_value()))
 }
 
-fn project_value<'js>(ctx: &Ctx<'js>, (_, value): &(String, String)) -> rquickjs::Result<Value<'js>> {
-  Ok(rquickjs::String::from_str(ctx.clone(), value)?.into_value())
+fn project_value<'js>(
+  ctx: &Ctx<'js>,
+  parent: &Class<'js, UrlSearchParams>,
+  index: usize,
+) -> rquickjs::Result<Option<Value<'js>>> {
+  let Some((_, value)) = parent.borrow().data.get(index).cloned() else {
+    return Ok(None);
+  };
+  Ok(Some(rquickjs::String::from_str(ctx.clone(), &value)?.into_value()))
 }
 
 #[rquickjs::methods(rename_all = "camelCase")]
 impl UrlSearchParams {
+  /// Spec: every platform object carries `Symbol.toStringTag`, so
+  /// `Object.prototype.toString.call(x)` reads `[object URLSearchParams]`.
+  #[qjs(prop, rename = PredefinedAtom::SymbolToStringTag, configurable)]
+  pub fn to_string_tag() -> &'static str {
+    "URLSearchParams"
+  }
+
   /// `new URLSearchParams(init?)` — `init` is a query string (optional
   /// leading `?`), an array of `[name, value]` pairs, any iterable of
   /// pairs, or a plain record object.
@@ -149,19 +145,19 @@ impl UrlSearchParams {
 
   #[qjs(rename = PredefinedAtom::SymbolIterator)]
   pub fn iterate<'js>(&self, ctx: Ctx<'js>, this: This<Class<'js, UrlSearchParams>>) -> rquickjs::Result<Object<'js>> {
-    live_iterator(ctx, this.0, project_entry)
+    live_iterator(&ctx, this.0, project_entry)
   }
 
   pub fn entries<'js>(&self, ctx: Ctx<'js>, this: This<Class<'js, UrlSearchParams>>) -> rquickjs::Result<Object<'js>> {
-    live_iterator(ctx, this.0, project_entry)
+    live_iterator(&ctx, this.0, project_entry)
   }
 
   pub fn keys<'js>(&self, ctx: Ctx<'js>, this: This<Class<'js, UrlSearchParams>>) -> rquickjs::Result<Object<'js>> {
-    live_iterator(ctx, this.0, project_key)
+    live_iterator(&ctx, this.0, project_key)
   }
 
   pub fn values<'js>(&self, ctx: Ctx<'js>, this: This<Class<'js, UrlSearchParams>>) -> rquickjs::Result<Object<'js>> {
-    live_iterator(ctx, this.0, project_value)
+    live_iterator(&ctx, this.0, project_value)
   }
 
   pub fn append(&mut self, name: Coerced<String>, value: Coerced<String>) {

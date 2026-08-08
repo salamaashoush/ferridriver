@@ -34,55 +34,30 @@ struct JsRequestOptions {
   fail_on_status_code: Option<bool>,
   max_redirects: Option<u32>,
   max_retries: Option<u32>,
+  // serde's camelCase would spell this `ignoreHttpsErrors`; Playwright's
+  // option keeps the acronym upper-case, so it must be named explicitly
+  // or the key silently never binds and the client default wins.
+  #[serde(rename = "ignoreHTTPSErrors")]
   ignore_https_errors: Option<bool>,
   multipart: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-/// Lower a `params`/`form` scalar to its string form. Playwright's types
-/// admit `string | number | boolean` — anything else is a caller error.
-fn scalar_to_string(field: &str, key: &str, value: &serde_json::Value) -> Result<String, String> {
-  match value {
-    serde_json::Value::String(s) => Ok(s.clone()),
-    serde_json::Value::Number(n) => Ok(n.to_string()),
-    serde_json::Value::Bool(b) => Ok(b.to_string()),
-    other => Err(format!(
-      "{field}[{key:?}] must be a string, number, or boolean (got {other})"
-    )),
-  }
-}
-
-fn scalar_map_to_pairs(
-  field: &str,
-  map: FxHashMap<String, serde_json::Value>,
-) -> Result<Vec<(String, String)>, String> {
-  map
-    .into_iter()
-    .map(|(k, v)| scalar_to_string(field, &k, &v).map(|s| (k, s)))
-    .collect()
-}
-
 impl JsRequestOptions {
   fn into_core(self) -> Result<RequestOptions, String> {
-    // Playwright's `data`: a string/Buffer is a raw body, any other
-    // serializable value is sent as JSON (client/fetch.ts
-    // `serializePostData` routing).
-    let (data, json_data) = match (self.data, self.json) {
-      (_, Some(json)) => (None, Some(json)),
-      (Some(serde_json::Value::String(s)), None) => (Some(s.into_bytes()), None),
-      (Some(value), None) if value.is_array() => match serde_json::from_value::<Vec<u8>>(value.clone()) {
-        Ok(bytes) => (Some(bytes), None),
-        Err(_) => (None, Some(value)),
-      },
-      (Some(value), None) => (None, Some(value)),
-      (None, None) => (None, None),
-    };
+    let (data, json_data) = RequestOptions::split_data(self.data, self.json);
     Ok(RequestOptions {
       method: self.method.map(|m| m.to_ascii_uppercase()),
       headers: self.headers.map(|h| h.into_iter().collect()),
       data,
       json_data,
-      form: self.form.map(|f| scalar_map_to_pairs("form", f)).transpose()?,
-      params: self.params.map(|p| scalar_map_to_pairs("params", p)).transpose()?,
+      form: self
+        .form
+        .map(|f| RequestOptions::scalar_map_to_pairs("form", f))
+        .transpose()?,
+      params: self
+        .params
+        .map(|p| RequestOptions::scalar_map_to_pairs("params", p))
+        .transpose()?,
       timeout: self.timeout.map(Duration::from_millis),
       fail_on_status_code: self.fail_on_status_code,
       max_redirects: self.max_redirects,

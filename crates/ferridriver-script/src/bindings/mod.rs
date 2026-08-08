@@ -22,6 +22,7 @@ pub mod abort;
 pub mod artifacts;
 pub mod bdd;
 pub mod blob;
+pub mod body_init;
 pub mod browser;
 pub mod browser_type;
 pub mod cdp_session;

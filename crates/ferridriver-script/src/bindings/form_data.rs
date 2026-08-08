@@ -5,10 +5,10 @@
 //! return real live iterators (see [`super::js_iterator`]). A file entry
 //! reads back as a `File` carrying the filename it was stored under, and
 //! appending a `File` supplies that filename without repeating it.
-//! `fetch` with a `FormData` body serializes `multipart/form-data`
-//! in-binding (no core change).
-
-use std::sync::atomic::{AtomicU64, Ordering};
+//! A `FormData` used as a `fetch` body lowers to the core
+//! [`MultipartField`](ferridriver::http_client::MultipartField) list and
+//! is written by the core serializer — the same one the Playwright
+//! `multipart` option bag uses, so both produce identical bodies.
 
 use rquickjs::atom::PredefinedAtom;
 use rquickjs::function::{Opt, This};
@@ -162,48 +162,47 @@ impl FormDataJs {
     }
   }
 
+  /// The entries as core multipart fields — the same representation the
+  /// Playwright `multipart` option bag lowers into, so both reach the
+  /// wire through one serializer.
+  pub fn to_fields(&self) -> Vec<ferridriver::http_client::MultipartField> {
+    use ferridriver::http_client::{MultipartField, MultipartValue};
+    self
+      .entries
+      .iter()
+      .map(|(name, entry)| MultipartField {
+        name: name.clone(),
+        value: match entry {
+          FormEntry::Text(text) => MultipartValue::Text(text.clone()),
+          FormEntry::File {
+            bytes,
+            filename,
+            content_type,
+          } => MultipartValue::File {
+            filename: filename.clone(),
+            content_type: content_type.clone(),
+            bytes: bytes.clone(),
+          },
+        },
+      })
+      .collect()
+  }
+
   /// `(multipart-body, content-type)` for a `fetch` `FormData` body.
   pub fn to_multipart(&self) -> (Vec<u8>, String) {
-    use std::io::Write as _;
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .map_or(0, |d| d.as_nanos());
-    let boundary = format!(
-      "----ferridriverFormBoundary{:x}{:x}",
-      nanos,
-      SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    let mut body = Vec::new();
-    for (name, value) in &self.entries {
-      match value {
-        FormEntry::Text(text) => {
-          let _ = write!(
-            &mut body,
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{text}\r\n"
-          );
-        },
-        FormEntry::File {
-          bytes,
-          filename,
-          content_type,
-        } => {
-          let _ = write!(
-            &mut body,
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
-          );
-          body.extend_from_slice(bytes);
-          body.extend_from_slice(b"\r\n");
-        },
-      }
-    }
-    let _ = write!(&mut body, "--{boundary}--\r\n");
-    (body, format!("multipart/form-data; boundary={boundary}"))
+    ferridriver::http_client::serialize_multipart(&self.to_fields(), &ferridriver::http_client::multipart_boundary())
   }
 }
 
 #[rquickjs::methods(rename_all = "camelCase")]
 impl FormDataJs {
+  /// Spec: every platform object carries `Symbol.toStringTag`, so
+  /// `Object.prototype.toString.call(x)` reads `[object FormData]`.
+  #[qjs(prop, rename = PredefinedAtom::SymbolToStringTag, configurable)]
+  pub fn to_string_tag() -> &'static str {
+    "FormData"
+  }
+
   #[qjs(constructor)]
   pub fn new() -> Self {
     Self::default()

@@ -10,6 +10,7 @@
 //! A `File` used as a `FormData` value supplies the multipart `filename`
 //! without the caller repeating it (`fd.append('f', file)`).
 
+use rquickjs::atom::PredefinedAtom;
 use rquickjs::function::Opt;
 use rquickjs::{Class, Ctx, Object, TypedArray, Value, class::Trace};
 
@@ -66,6 +67,13 @@ pub fn install_file_prototype(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
 
 #[rquickjs::methods(rename_all = "camelCase")]
 impl FileJs {
+  /// Spec: every platform object carries `Symbol.toStringTag`, so
+  /// `Object.prototype.toString.call(x)` reads `[object File]`.
+  #[qjs(prop, rename = PredefinedAtom::SymbolToStringTag, configurable)]
+  pub fn to_string_tag() -> &'static str {
+    "File"
+  }
+
   /// `new File(fileBits, fileName, options?)` — `lastModified` defaults
   /// to now, per spec.
   #[qjs(constructor)]

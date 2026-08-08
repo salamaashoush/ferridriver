@@ -26,13 +26,14 @@ pub mod model;
 pub mod multipart;
 pub mod net_guard;
 
-pub use body::{Body, ByteStream};
+pub use body::{Body, ByteStream, channel_stream};
 pub use bridge::{BridgeFuture, ContextBridge, ContextDefaults};
 pub use error::FetchError;
 pub use headers::Headers;
 pub use model::{Credentials, RedirectMode, RemoteAddr, Request, Response, ResponseType};
-pub use multipart::{MultipartField, MultipartValue, multipart_boundary_of, parse_multipart, serialize_multipart};
+pub use multipart::{
+  MultipartField, MultipartValue, multipart_boundary, multipart_boundary_of, parse_multipart, serialize_multipart,
+};
 pub use net_guard::{NetGuard, host_allowed, host_of};
 
 pub(crate) use engine::{ClientPool, send};
-pub(crate) use multipart::multipart_boundary;

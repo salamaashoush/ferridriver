@@ -10,12 +10,18 @@ use napi_derive::napi;
 #[derive(Debug, Clone, Default)]
 pub struct HttpClientOptions {
   /// Base URL prepended to relative paths.
+  // napi camelCases these to `baseUrl` / `extraHttpHeaders` /
+  // `ignoreHttpsErrors`; Playwright keeps the acronyms upper-case, and a
+  // mis-spelled key binds to nothing and is silently ignored.
+  #[napi(js_name = "baseURL")]
   pub base_url: Option<String>,
   /// Default headers as `[[key, value], ...]`.
+  #[napi(js_name = "extraHTTPHeaders")]
   pub extra_http_headers: Option<Vec<Vec<String>>>,
   /// Default timeout in milliseconds.
   pub timeout: Option<f64>,
   /// Ignore HTTPS certificate errors.
+  #[napi(js_name = "ignoreHTTPSErrors")]
   pub ignore_https_errors: Option<bool>,
 }
 
@@ -48,6 +54,7 @@ pub struct FetchOptions {
   /// Retry on a connection reset up to this many times.
   pub max_retries: Option<i32>,
   /// Per-request override of the client-level TLS posture.
+  #[napi(js_name = "ignoreHTTPSErrors")]
   pub ignore_https_errors: Option<bool>,
   /// `multipart/form-data` body. A value is a scalar text field, or
   /// `{ name, mimeType, buffer }` for a file part.
@@ -57,39 +64,20 @@ pub struct FetchOptions {
   pub multipart: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
-/// Lower a `params`/`form` scalar to its string form. Playwright's
-/// types admit `string | number | boolean` — anything else is a caller
-/// error.
-fn scalar_to_string(field: &str, key: &str, value: &serde_json::Value) -> Result<String> {
-  match value {
-    serde_json::Value::String(s) => Ok(s.clone()),
-    serde_json::Value::Number(n) => Ok(n.to_string()),
-    serde_json::Value::Bool(b) => Ok(b.to_string()),
-    other => Err(napi::Error::from_reason(format!(
-      "{field}[{key:?}] must be a string, number, or boolean (got {other})"
-    ))),
-  }
-}
-
+/// Lower a Playwright `params` / `form` map through the ONE core
+/// implementation, so this binding and the QuickJS one cannot disagree
+/// about what a scalar bag means.
 fn scalar_map_to_pairs(
   field: &str,
   map: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<Vec<(String, String)>> {
-  map
-    .iter()
-    .map(|(k, v)| scalar_to_string(field, k, v).map(|s| (k.clone(), s)))
-    .collect()
+  ferridriver::http_client::RequestOptions::scalar_map_to_pairs(field, map.iter().map(|(k, v)| (k.clone(), v.clone())))
+    .map_err(napi::Error::from_reason)
 }
 
 impl FetchOptions {
   fn to_core(&self) -> Result<ferridriver::http_client::RequestOptions> {
-    // Playwright's `data`: a string is a raw body, any other
-    // serializable value goes as JSON.
-    let (data, json_data) = match &self.data {
-      Some(serde_json::Value::String(s)) => (Some(s.clone().into_bytes()), None),
-      Some(value) => (None, Some(value.clone())),
-      None => (None, None),
-    };
+    let (data, json_data) = ferridriver::http_client::RequestOptions::split_data(self.data.clone(), None);
     Ok(ferridriver::http_client::RequestOptions {
       method: self.method.as_ref().map(|m| m.to_ascii_uppercase()),
       headers: self

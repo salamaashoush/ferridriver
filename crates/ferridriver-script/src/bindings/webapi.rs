@@ -15,6 +15,7 @@
 use base64::Engine as _;
 use base64::engine::GeneralPurpose;
 use base64::engine::general_purpose::GeneralPurposeConfig;
+use rquickjs::atom::PredefinedAtom;
 use rquickjs::function::This;
 use rquickjs::function::{Func, Opt};
 use rquickjs::{Class, Ctx, Function, JsLifetime, Object, TypedArray, Value, class::Trace};
@@ -253,15 +254,66 @@ fn value_to_bytes(v: &Value<'_>) -> rquickjs::Result<Vec<u8>> {
 }
 
 /// WHATWG `URL`, backed by the `url` crate.
-#[derive(Trace, JsLifetime)]
+///
+/// `searchParams` is LIVE, per spec: the same `URLSearchParams` object is
+/// returned every time, and mutating it rewrites this URL's query. That
+/// is why the query-bearing reads (`href`, `search`, `toString`) sync
+/// from the params object first, and the query-bearing writes (`href`,
+/// `search`) push back into it.
+#[derive(Trace)]
 #[rquickjs::class(rename = "URL")]
-pub struct Url {
+pub struct Url<'js> {
   #[qjs(skip_trace)]
   inner: url::Url,
+  /// Vended lazily by the `searchParams` getter. Once it exists it is
+  /// the authority on the query.
+  params: Option<Class<'js, crate::bindings::url_search_params::UrlSearchParams>>,
+}
+
+#[allow(unsafe_code)]
+unsafe impl<'js> JsLifetime<'js> for Url<'js> {
+  type Changed<'to> = Url<'to>;
+}
+
+impl Url<'_> {
+  /// The query as the live `searchParams` object currently states it, or
+  /// `None` when no such object has been vended (then `inner` is
+  /// already authoritative).
+  fn live_query(&self) -> Option<String> {
+    self.params.as_ref().map(|params| params.borrow().to_js_string())
+  }
+
+  /// This URL serialized with any mutation made through the live
+  /// `searchParams` object applied. Overlaying rather than writing back
+  /// keeps every query-bearing read on `&self`.
+  fn serialized(&self) -> String {
+    match self.live_query() {
+      None => self.inner.as_str().to_string(),
+      Some(query) => {
+        let mut url = self.inner.clone();
+        url.set_query((!query.is_empty()).then_some(&query));
+        url.to_string()
+      },
+    }
+  }
+
+  /// Push this URL's query into the live `searchParams` object. Called
+  /// after every write that replaces the query wholesale.
+  fn sync_to_params(&self) {
+    let Some(params) = &self.params else { return };
+    params.borrow_mut().replace_from_query(self.inner.query().unwrap_or(""));
+  }
 }
 
 #[rquickjs::methods]
-impl Url {
+impl<'js> Url<'js> {
+  /// Spec: every platform object carries `Symbol.toStringTag`, so
+  /// `Object.prototype.toString.call(x)` reads `[object URL]`.
+  #[qjs(prop, rename = PredefinedAtom::SymbolToStringTag, configurable)]
+  pub fn to_string_tag() -> &'static str {
+    "URL"
+  }
+
   #[qjs(constructor)]
   pub fn new(url: String, base: Opt<String>) -> rquickjs::Result<Self> {
     let parsed = match base.0 {
@@ -272,12 +324,15 @@ impl Url {
         url::Url::parse(&url).map_err(|e| rquickjs::Error::new_from_js_message("URL", "TypeError", e.to_string()))?
       },
     };
-    Ok(Self { inner: parsed })
+    Ok(Self {
+      inner: parsed,
+      params: None,
+    })
   }
 
   #[qjs(get, rename = "href")]
   pub fn href(&self) -> String {
-    self.inner.as_str().to_string()
+    self.serialized()
   }
 
   /// `url.href = ...` reparses; an invalid value is a `TypeError`
@@ -287,6 +342,7 @@ impl Url {
   pub fn set_href(&mut self, value: String) -> rquickjs::Result<()> {
     self.inner =
       url::Url::parse(&value).map_err(|e| rquickjs::Error::new_from_js_message("URL", "TypeError", e.to_string()))?;
+    self.sync_to_params();
     Ok(())
   }
 
@@ -383,7 +439,10 @@ impl Url {
 
   #[qjs(get, rename = "search")]
   pub fn search(&self) -> String {
-    match self.inner.query() {
+    let query = self
+      .live_query()
+      .or_else(|| self.inner.query().map(ToString::to_string));
+    match query {
       Some(q) if !q.is_empty() => format!("?{q}"),
       _ => String::new(),
     }
@@ -393,6 +452,7 @@ impl Url {
   pub fn set_search(&mut self, value: String) {
     let q = value.strip_prefix('?').unwrap_or(&value);
     self.inner.set_query(if q.is_empty() { None } else { Some(q) });
+    self.sync_to_params();
   }
 
   #[qjs(get, rename = "hash")]
@@ -409,22 +469,33 @@ impl Url {
     self.inner.set_fragment(if f.is_empty() { None } else { Some(f) });
   }
 
-  /// Live-ish `URLSearchParams` over this URL's query (a snapshot —
-  /// mutations do not write back to the URL).
+  /// `URL.searchParams` — the LIVE parameter list. The same object is
+  /// returned on every access and mutating it rewrites this URL's query,
+  /// per spec.
   #[qjs(get, rename = "searchParams")]
-  pub fn search_params<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let params = crate::bindings::url_search_params::UrlSearchParams::from_query(self.inner.query().unwrap_or(""));
-    Ok(Class::instance(ctx, params)?.into_value())
+  pub fn search_params(
+    &mut self,
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Class<'js, crate::bindings::url_search_params::UrlSearchParams>> {
+    if let Some(params) = &self.params {
+      return Ok(params.clone());
+    }
+    let params = Class::instance(
+      ctx,
+      crate::bindings::url_search_params::UrlSearchParams::from_query(self.inner.query().unwrap_or("")),
+    )?;
+    self.params = Some(params.clone());
+    Ok(params)
   }
 
   #[qjs(rename = "toString")]
   pub fn to_js_string(&self) -> String {
-    self.inner.as_str().to_string()
+    self.serialized()
   }
 
   #[qjs(rename = "toJSON")]
   pub fn to_json(&self) -> String {
-    self.inner.as_str().to_string()
+    self.serialized()
   }
 }
 
@@ -654,7 +725,7 @@ pub fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
 
   Class::<TextEncoder>::define(&globals)?;
   Class::<TextDecoder>::define(&globals)?;
-  Class::<Url>::define(&globals)?;
+  Class::<Url<'_>>::define(&globals)?;
 
   globals.set("structuredClone", Func::from(structured_clone))?;
 

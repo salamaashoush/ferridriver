@@ -15,6 +15,43 @@ use super::error::FetchError;
 /// A boxed byte stream yielding chunks as they arrive.
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, FetchError>> + Send>>;
 
+/// Build a request-body stream fed by a channel.
+///
+/// The producer is whoever owns the source — for the WHATWG `fetch`
+/// global that is a pump running on the `QuickJS` thread, which cannot
+/// hand out a `Send` stream of its own. Core owns the wire types
+/// (`Bytes`, [`FetchError`]) so the binding layer sends plain
+/// `Vec<u8>` / `String` and needs no `bytes` dependency.
+///
+/// An `Err` from the producer fails the body rather than ending it, so a
+/// source that breaks mid-send cannot be mistaken for a complete
+/// payload.
+#[must_use]
+pub fn channel_stream(rx: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>) -> ByteStream {
+  futures::stream::unfold(rx, |mut rx| async move {
+    let chunk = rx.recv().await?;
+    let item = match chunk {
+      Ok(bytes) => Ok(Bytes::from(bytes)),
+      Err(message) => Err(FetchError::Body(message)),
+    };
+    Some((item, rx))
+  })
+  .boxed()
+}
+
+/// What a [`Body`] contributes to an outgoing request.
+///
+/// The distinction matters to the redirect loop: [`Self::Bytes`] can be
+/// re-sent on every hop and re-tried after a connection reset, while
+/// [`Self::Stream`] is consumed by the first hop and cannot be replayed.
+pub(crate) enum RequestPayload {
+  Empty,
+  Bytes(Bytes),
+  Stream(ByteStream),
+  /// A response body was handed to a request — a caller bug.
+  Invalid,
+}
+
 /// A fetch body. Single-use: reading it (buffer or stream) consumes it.
 pub struct Body(Inner);
 
@@ -47,13 +84,17 @@ impl Body {
     Self(Inner::Response(Box::new(response)))
   }
 
-  /// The buffered request bytes to send (and re-send across redirect
-  /// hops). A statically-empty body is `None`; a streamed/network body is
-  /// not a valid request payload here and also yields `None`.
-  pub(crate) fn into_request_bytes(self) -> Option<Bytes> {
+  /// The payload to put on the wire, distinguishing a replayable
+  /// buffered body from a single-use stream.
+  pub(crate) fn into_request_payload(self) -> RequestPayload {
     match self.0 {
-      Inner::Bytes(b) => Some(b),
-      Inner::Empty | Inner::Stream(_) | Inner::Response(_) => None,
+      Inner::Empty => RequestPayload::Empty,
+      Inner::Bytes(b) => RequestPayload::Bytes(b),
+      Inner::Stream(s) => RequestPayload::Stream(s),
+      // A live response is a RESPONSE body; it is never a request
+      // payload. Treating it as empty would send a silently bodyless
+      // request, so this is a caller bug worth surfacing.
+      Inner::Response(_) => RequestPayload::Invalid,
     }
   }
 

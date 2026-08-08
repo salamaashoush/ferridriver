@@ -14,6 +14,72 @@ pub struct Headers {
   entries: Vec<(String, String)>,
 }
 
+/// RFC 7230 token — a valid header field name (WHATWG "header name").
+#[must_use]
+pub fn is_valid_name(name: &str) -> bool {
+  !name.is_empty()
+    && name.bytes().all(|b| {
+      matches!(b,
+        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+'
+        | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+        | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z')
+    })
+}
+
+/// Whether an already-[normalized](normalize_value) value is a valid
+/// WHATWG "header value": HTAB, SP, VCHAR, form-feed or NBSP.
+#[must_use]
+pub fn is_valid_value(value: &str) -> bool {
+  value
+    .chars()
+    .all(|c| c == '\t' || c == ' ' || ('\u{21}'..='\u{7E}').contains(&c) || c == '\u{0C}' || c == '\u{00A0}')
+}
+
+/// WHATWG header value normalization (WPT `headers-normalize`): strip
+/// leading/trailing SP/HTAB, drop bare CR/LF, and treat an obs-fold
+/// (CRLF + SP/HTAB) as a single space; runs of inner whitespace collapse
+/// to the last one seen.
+#[must_use]
+pub fn normalize_value(text: &str) -> String {
+  let input = text.as_bytes();
+  let mut out: Vec<u8> = Vec::with_capacity(input.len());
+  let mut read = 0;
+  while read < input.len() && (input[read] == b' ' || input[read] == b'\t') {
+    read += 1;
+  }
+  let mut pending: Option<u8> = None;
+  while read < input.len() {
+    match input[read] {
+      b'\r'
+        if read + 2 < input.len()
+          && input[read + 1] == b'\n'
+          && (input[read + 2] == b' ' || input[read + 2] == b'\t') =>
+      {
+        pending = Some(input[read + 2]);
+        read += 3;
+      },
+      b'\r' | b'\n' => read += 1,
+      b' ' | b'\t' => {
+        pending = Some(input[read]);
+        read += 1;
+      },
+      byte => {
+        if let Some(ws) = pending.take()
+          && !out.is_empty()
+        {
+          out.push(ws);
+        }
+        out.push(byte);
+        read += 1;
+      },
+    }
+  }
+  while matches!(out.last(), Some(b' ' | b'\t')) {
+    out.pop();
+  }
+  String::from_utf8_lossy(&out).into_owned()
+}
+
 impl Headers {
   #[must_use]
   pub fn new() -> Self {
@@ -110,6 +176,41 @@ impl Headers {
   /// `append`).
   pub fn append(&mut self, name: impl Into<String>, value: impl Into<String>) {
     self.entries.push((name.into(), value.into()));
+  }
+
+  /// WHATWG "append", as the JS `Headers` class exposes it: `set-cookie`
+  /// is never combined and stays a separate entry; every other repeat
+  /// joins the existing value with `, ` in place. `name_lc` must already
+  /// be lowercased and `value` [normalized](normalize_value).
+  pub fn append_combined(&mut self, name_lc: String, value: String) {
+    if name_lc == "set-cookie" {
+      self.entries.push((name_lc, value));
+      return;
+    }
+    match self.position(&name_lc) {
+      Some(i) => self.entries[i].1 = format!("{}, {value}", self.entries[i].1),
+      None => self.entries.push((name_lc, value)),
+    }
+  }
+
+  /// Combined value of `name` joined with `, ` for EVERY header,
+  /// `set-cookie` included — what the WHATWG `Headers.get()` returns.
+  /// [`Self::get`] differs deliberately: it splits `set-cookie` with
+  /// `\n` to match Playwright's `RawHeaders`.
+  #[must_use]
+  pub fn get_joined(&self, name: &str) -> Option<String> {
+    let values = self.get_all(name);
+    (!values.is_empty()).then(|| values.join(", "))
+  }
+
+  /// The entries sorted by name — the order the WHATWG `Headers`
+  /// iterators yield. The sort is stable, so repeated `set-cookie`
+  /// entries keep insertion order.
+  #[must_use]
+  pub fn sorted_entries(&self) -> Vec<(String, String)> {
+    let mut sorted = self.entries.clone();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted
   }
 
   /// Remove every value stored under `name`.

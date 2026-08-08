@@ -240,7 +240,7 @@ fn split_on<'a>(mut haystack: &'a [u8], sep: &[u8]) -> Vec<&'a [u8]> {
 /// A process-unique multipart boundary. Deterministic construction (no
 /// RNG dependency): a fixed prefix + a monotonic counter.
 #[must_use]
-pub(crate) fn multipart_boundary() -> String {
+pub fn multipart_boundary() -> String {
   use std::sync::atomic::{AtomicU64, Ordering};
   static SEQ: AtomicU64 = AtomicU64::new(0);
   let n = SEQ.fetch_add(1, Ordering::Relaxed);

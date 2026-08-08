@@ -1,5 +1,6 @@
-//! The one `{ value, done }` iterator protocol used by the web-platform
-//! collection classes (`URLSearchParams`, `FormData`).
+//! The one `{ value, done }` iterator protocol used by every
+//! web-platform collection class (`Headers`, `URLSearchParams`,
+//! `FormData`).
 //!
 //! WHATWG iteration is LIVE: mutations made during a loop are observed,
 //! so `for (const [k] of params) params.delete(k)` behaves as it does in

@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use rustc_hash::FxHashMap;
 
+use super::body::{ByteStream, RequestPayload};
 use super::bridge::ContextBridge;
 use super::cookie::{cookie_matches_url, parse_set_cookie_headers};
 use super::error::FetchError;
@@ -98,7 +99,16 @@ fn build_client(
       block_private,
     }));
   }
-  builder.build().unwrap_or_else(|_| reqwest::Client::new())
+  builder.build().unwrap_or_else(|e| {
+    // A default client would follow redirects, and the engine drives
+    // redirects itself — so the fallback keeps `Policy::none()` and the
+    // failure is logged rather than swallowed into different behaviour.
+    tracing::error!("failed to build the HTTP client ({e}); falling back to a default TLS posture");
+    reqwest::Client::builder()
+      .redirect(reqwest::redirect::Policy::none())
+      .build()
+      .unwrap_or_else(|_| reqwest::Client::new())
+  })
 }
 
 /// Whether an error message denotes a connection reset (the only class
@@ -183,7 +193,12 @@ async fn hop_headers(
   Ok(hop)
 }
 
-/// One hop over the wire, retrying a connection reset up to `max_retries`.
+/// One hop over the wire, retrying a connection reset up to
+/// `max_retries`.
+///
+/// `stream` is a single-use body: it is moved into the first attempt, so
+/// a reset cannot be re-tried once it has been taken (retries are
+/// skipped rather than silently re-sending an empty body).
 #[allow(clippy::too_many_arguments)]
 async fn send_hop(
   client: &reqwest::Client,
@@ -191,6 +206,7 @@ async fn send_hop(
   request_url: &reqwest::Url,
   headers: &Headers,
   body: Option<&bytes::Bytes>,
+  mut stream: Option<ByteStream>,
   deadline: tokio::time::Instant,
   max_retries: u32,
   timeout_message: &str,
@@ -207,12 +223,15 @@ async fn send_hop(
     for (k, v) in headers.iter() {
       builder = builder.header(k, v);
     }
-    if let Some(bytes) = body {
+    let streamed = stream.is_some();
+    if let Some(stream) = stream.take() {
+      builder = builder.body(reqwest::Body::wrap_stream(stream));
+    } else if let Some(bytes) = body {
       builder = builder.body(bytes.clone());
     }
     match builder.send().await {
       Ok(response) => return Ok(response),
-      Err(e) if attempt < max_retries && is_connection_reset(&e) => {
+      Err(e) if !streamed && attempt < max_retries && is_connection_reset(&e) => {
         attempt += 1;
         tokio::time::sleep(retry_backoff(attempt)).await;
       },
@@ -331,7 +350,21 @@ pub(crate) async fn send(
 
   let method_str = method.to_string();
   let resolved_url = url.to_string();
-  let mut body = body.into_request_bytes();
+  // A buffered body is replayed on every hop; a streamed one is moved
+  // into the first hop and cannot be replayed, so a redirect that would
+  // need to re-send it is a network error (WHATWG: a request whose body
+  // is a `ReadableStream` cannot be redirected).
+  let (mut body, mut pending_stream) = match body.into_request_payload() {
+    RequestPayload::Empty => (None, None),
+    RequestPayload::Bytes(b) => (Some(b), None),
+    RequestPayload::Stream(s) => (None, Some(s)),
+    RequestPayload::Invalid => {
+      return Err(FetchError::Body(
+        "a response body cannot be sent as a request body".to_string(),
+      ));
+    },
+  };
+  let body_is_streamed = pending_stream.is_some();
 
   let guard = net_guard.as_ref().filter(|g| g.is_active());
   if let Some(g) = guard {
@@ -368,6 +401,7 @@ pub(crate) async fn send(
       &request_url,
       &hop,
       body.as_ref(),
+      pending_stream.take(),
       deadline,
       max_retries,
       &format!("{method_str} {resolved_url} timed out"),
@@ -391,6 +425,15 @@ pub(crate) async fn send(
       let Some(next_url) = redirect_target(&request_url, &response)? else {
         break 'redirects response;
       };
+      // A streamed body was consumed by the hop just sent. Following the
+      // redirect would re-send the request with NO body, which the
+      // server would silently accept as an empty payload — so refuse
+      // instead. 303 is exempt: it rewrites to a body-less GET anyway.
+      if body_is_streamed && status != 303 {
+        return Err(FetchError::RedirectRefused(format!(
+          "{method_str} {resolved_url}: cannot follow a redirect for a request with a streaming body"
+        )));
+      }
       rewrite_for_redirect(status, &request_url, &next_url, &mut method, &mut body, &mut headers);
       request_url = next_url;
       remaining = Some(budget - 1);
@@ -466,7 +509,7 @@ mod tests {
   fn retry_backoff_is_exponential() {
     assert_eq!(retry_backoff(1), Duration::from_millis(250));
     assert_eq!(retry_backoff(2), Duration::from_millis(500));
-    assert_eq!(retry_backoff(3), Duration::from_millis(1000));
+    assert_eq!(retry_backoff(3), Duration::from_secs(1));
   }
 
   #[test]
