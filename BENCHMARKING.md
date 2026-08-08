@@ -13,7 +13,7 @@ the comparison, in the same run, it must not be cited.
 
 ## Harnesses
 
-There are two independent harnesses measuring two different things.
+There are three independent harnesses measuring three different things.
 
 ### 1. Test-runner throughput and parallelism
 
@@ -48,6 +48,29 @@ test/benchmark.ts` from `crates/ferridriver-node`).
   `crates/ferridriver-node/test/benchmark-results.csv` with both median and
   mean columns per backend, so the aggregation is auditable and no single
   statistic can be cherry-picked.
+
+### 3. Whole-suite A/B on identical specs
+
+`scripts/bench-vs-playwright.sh <spec-dir> [runs] [workers]`.
+
+- Measures: wall-clock of a whole `ferridriver test` process against a
+  whole `playwright test` process, over the SAME spec files. The Playwright
+  compat work (`docs/playwright-compat.md`) is what makes this possible —
+  ferridriver runs Playwright-authored specs unmodified, so the two runners
+  can be pointed at one directory.
+- Both sides are configured BY THE SCRIPT, never by a spec's own
+  `playwright.config.ts`: same Chromium binary (Playwright's
+  `chrome-headless-shell`, so neither side ships its own), same worker
+  count, `fullyParallel` on both, reporters/video/trace off.
+- Runs are interleaved after one discarded warmup per side, and a
+  non-zero exit on either side aborts — a suite that quietly stopped
+  running cannot be reported as fast.
+
+The `fullyParallel` knob is the trap here. Playwright parallelises by
+FILE unless it is set; ferridriver parallelises by test. Benchmarking a
+single 96-test file without it pins Playwright to one worker and
+manufactures a ~4x that evaporates the moment it is turned on. The script
+sets it on both sides for that reason.
 
 ## Operations measured (per-operation harness)
 
@@ -168,3 +191,74 @@ until ALL of the following hold:
 Absent those, the honest summary is: faster on most synchronous
 content/locator/evaluate operations (~2-3x in local runs), at parity on
 screenshots, and slower on network navigation. Ship that, not a round number.
+
+## Whole-suite A/B, 2026-08-08 (macOS, M3 Pro 12-core, 36GB)
+
+`scripts/bench-vs-playwright.sh`, ferridriver 0.5.0 `release-fast` on
+cdp-pipe vs Playwright 1.62.1, both driving the same
+`chrome-headless-shell-1234`, workers=4, `fullyParallel` on both sides,
+n=5 interleaved runs after a warmup. Wall clock of the whole process.
+
+| workload | ferridriver | Playwright | ratio (median) |
+|---|---|---|---|
+| A. 2 tests (1 no-fixture, 1 page) — startup-dominated | 184ms | 988ms | **5.4x** |
+| B. 24 hermetic DOM tests (`setContent`, no network) | 974ms | 2006ms | **2.1x** |
+| C. 24 todomvc specs, unmodified corpus (network) | 2549ms | 3639ms | **1.4x** |
+| D. 96 hermetic DOM tests (startup amortized) | 3246ms | 4647ms | **1.4x** |
+| E. 96 tests, `{ page }` fixture, EMPTY body | 1512ms | 2531ms | **1.7x** |
+| F. 96 tests, NO fixtures (pure runner dispatch) | 61ms | 975ms | **16.0x** |
+
+Subtracting the workloads decomposes where the time actually goes
+(per test, at 4 workers):
+
+| cost | ferridriver | Playwright | ratio |
+|---|---|---|---|
+| process startup (F total, ~0 test cost) | 61ms | 975ms | 16.0x |
+| context + page per test (E − F) | 15.1ms | 16.2ms | 1.07x |
+| the DOM work itself (D − E) | 18.1ms | 22.0ms | 1.22x |
+
+**Read this honestly.** ferridriver's own runner — discovery, dispatch,
+fixtures, assertions, reporting — is roughly **16x** faster, because it
+is a Rust process with a QuickJS VM per worker rather than a Node process
+per worker. Everything downstream of that is the browser, and the browser
+does not care who is driving it: per-test context+page creation is at
+parity (1.07x) and the DOM work is 1.22x. So the headline for a real
+suite lands between 1.4x and 2.1x, and rises the shorter the suite is —
+that is startup amortizing, not the driver getting faster.
+
+Do NOT quote 16x as a suite figure, and do not quote the aggregate as a
+driver figure.
+
+### Worker scaling, workload D (96 hermetic DOM tests)
+
+| workers | ferridriver | Playwright | ratio |
+|---|---|---|---|
+| 1 | 8366ms | 13563ms | 1.62x |
+| 2 | 5206ms | 8456ms | 1.62x |
+| 4 | 3315ms | 5921ms | 1.79x |
+| 8 | 2497ms | 5186ms | 2.08x |
+| 12 | 2227ms | 5391ms | 2.42x |
+
+ferridriver takes 3.8x from 1 to 12 workers; Playwright takes 2.6x and
+then REGRESSES at 12. A ferridriver worker is a thread plus a QuickJS VM;
+a Playwright worker is a whole Node process, and on a 12-core box those
+processes start competing. The advantage therefore grows with parallelism
+— which also means a single-worker comparison understates it and a
+many-worker comparison flatters it. State the worker count with the ratio.
+
+### Where the remaining headroom is
+
+Per-test context+page creation is ~15ms (≈45% of a hermetic test) and is
+currently at parity with Playwright, because both pay the same CDP
+round-trips. It is the only cost big enough to move the suite numbers:
+
+- **Prewarm the next context while the current test runs.** Only valid
+  when the next test's creation-time options match (`use` bags vary per
+  test, and WebKit latches languages at target spawn), so it needs an
+  options-keyed pool, not a blind queue.
+- **Page reuse across tests**, which Playwright does not offer. Larger
+  win, but it trades isolation for speed and must be opt-in.
+
+Neither is implemented. Until one is, "way faster than Playwright" is
+true of the runner and not of a browser-bound suite, and the numbers
+above are what may be cited.

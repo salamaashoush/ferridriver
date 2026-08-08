@@ -117,6 +117,13 @@ compat-update *args:
   cargo build --bin ferridriver
   ./scripts/playwright-compat.sh --update-baseline {{args}}
 
+# Whole-suite A/B against Playwright Test on the SAME specs, same
+# Chromium, same worker count. Read BENCHMARKING.md before citing a
+# number from it. Usage: just bench-vs-playwright <spec-dir> [runs] [workers]
+bench-vs-playwright spec_dir runs="5" workers="4":
+  cargo build --profile release-fast --bin ferridriver
+  ./scripts/bench-vs-playwright.sh {{spec_dir}} {{runs}} {{workers}}
+
 # Run BDD feature tests via the Rust CLI
 bdd *args:
   cargo build -p ferridriver-fixtures
