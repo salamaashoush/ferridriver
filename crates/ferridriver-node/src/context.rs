@@ -726,16 +726,25 @@ pub struct VideoSizeJs {
 #[napi(object)]
 pub struct NapiBrowserContextOptions {
   pub accept_downloads: Option<bool>,
+  // napi's camelCase mangles these acronyms (`baseUrl`, `bypassCsp`,
+  // `extraHttpHeaders`, `ignoreHttpsErrors`) while Playwright — and the
+  // `ts_args_type` on `browser.newContext` — spell them upper-case. Left
+  // to infer, the declared option and the bound field disagree and the
+  // value is silently dropped.
+  #[napi(js_name = "baseURL")]
   pub base_url: Option<String>,
+  #[napi(js_name = "bypassCSP")]
   pub bypass_csp: Option<bool>,
   pub color_scheme: Option<String>,
   pub contrast: Option<String>,
   pub device_scale_factor: Option<f64>,
+  #[napi(js_name = "extraHTTPHeaders")]
   pub extra_http_headers: Option<HashMap<String, String>>,
   pub forced_colors: Option<String>,
   pub geolocation: Option<NapiGeolocation>,
   pub has_touch: Option<bool>,
   pub http_credentials: Option<NapiHttpCredentials>,
+  #[napi(js_name = "ignoreHTTPSErrors")]
   pub ignore_https_errors: Option<bool>,
   pub is_mobile: Option<bool>,
   pub java_script_enabled: Option<bool>,
