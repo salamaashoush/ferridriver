@@ -86,4 +86,35 @@ describe('browser type', () => {
       await ctx.close();
     }
   });
+  test('browser_contexts_lists_only_live_contexts', async ({ browserName }) => {
+    // `browser.contexts()` must reflect what is currently open, not
+    // everything ever opened. The registry behind it was append-only, so
+    // a closed context stayed listed for the life of the process — a
+    // wrong answer, and an unbounded allocation in any process that
+    // opens a context per session.
+    //
+    // Uses its own browser, like every other test in this file: creating
+    // and closing contexts on the shared worker browser perturbs the
+    // suite (it drives extra speculative preconnections at the fixture
+    // server, which is enough to fail a concurrent history-traversal
+    // navigation).
+    test.slow();
+    const factory = browserName === 'firefox' ? firefox() : browserName === 'webkit' ? webkit() : chromium();
+    const b = await factory.launch({ headless: true });
+    try {
+      const before = (await b.contexts()).length;
+      const a = await b.newContext();
+      const c = await b.newContext();
+      // Contexts materialize lazily, so open a page in one to prove the
+      // listing tracks a context that really exists in the browser.
+      await a.newPage();
+      expect((await b.contexts()).length).toBe(before + 2);
+      await a.close();
+      expect((await b.contexts()).length).toBe(before + 1);
+      await c.close();
+      expect((await b.contexts()).length).toBe(before);
+    } finally {
+      await b.close();
+    }
+  });
 });

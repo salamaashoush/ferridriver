@@ -1472,7 +1472,7 @@ impl Worker {
       page_for_artifacts = test_pool.try_get_cached::<ferridriver::Page>("page");
     }
     let test_failed = timeout_result.as_ref().is_err() || timeout_result.as_ref().is_ok_and(|r| r.is_err());
-    let screenshot = if test_failed {
+    let screenshot = if test_failed && self.config.screenshot_on_failure {
       if let Some(ref page) = page_for_artifacts {
         capture_screenshot(page).await
       } else {

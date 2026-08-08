@@ -227,6 +227,21 @@ impl Browser {
     crate::action::Action::new(move |opts| Box::pin(async move { Ok(this.new_context_impl(Some(opts), false)) }))
   }
 
+  /// Drop a context from the [`Self::contexts`] listing.
+  ///
+  /// Called when the context closes. Without this the registry is
+  /// append-only: a process that opens and closes a context per session —
+  /// which is what a test runner and a synthetic-monitoring loop both do —
+  /// reports every context it has ever created from `contexts()`, forever,
+  /// and holds the name strings for the life of the process.
+  pub(crate) fn unregister_context(&self, name: &str) {
+    let mut names = match self.context_names.lock() {
+      Ok(g) => g,
+      Err(poisoned) => poisoned.into_inner(),
+    };
+    names.retain(|entry| entry.name != name);
+  }
+
   /// Make a context from [`Self::new_context_unlisted`] visible to
   /// [`Self::contexts`] and fire the deferred `'context'` event. No-op
   /// for a context that is already listed.

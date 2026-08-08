@@ -962,6 +962,9 @@ impl ContextRef {
     }
     let persistent = state.persistent_context;
     state.remove_context(&self.name).await;
+    if let Some(browser) = &self.browser {
+      browser.unregister_context(&self.name);
+    }
     if persistent {
       // Persistent-context launch contract: closing the context closes
       // the underlying browser too. Playwright:
