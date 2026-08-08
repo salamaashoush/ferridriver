@@ -1,0 +1,10 @@
+# Vendored third-party sources (see README.md) — kept byte-close to
+# upstream llrt so a re-sync stays a mechanical diff.
+#
+# The workspace `rustfmt.toml` also lists this crate under `ignore`, but
+# that key is NIGHTLY-ONLY: on the stable channel this repo pins, rustfmt
+# prints a warning and formats the crate anyway. A per-crate config is
+# the stable-channel guard — rustfmt reads the file nearest the source it
+# is formatting, so `cargo fmt --all` finds this one and leaves the
+# vendor alone.
+disable_all_formatting = true

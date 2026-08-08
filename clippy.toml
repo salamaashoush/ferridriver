@@ -1,4 +1,9 @@
-msrv = "1.85.0"
+# Matches the `stable` channel pinned in rust-toolchain.toml. The repo
+# pins a channel rather than promising support for an older compiler, so
+# a lower number here is not a compatibility guarantee — it only hides
+# newer std APIs from clippy (which is what kept the deprecated
+# `AtomicU32::fetch_update` in place after its rename to `try_update`).
+msrv = "1.97.0"
 cognitive-complexity-threshold = 30
 too-many-lines-threshold = 100
 too-many-arguments-threshold = 7

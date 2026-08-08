@@ -27,7 +27,7 @@ perf = { level = "deny", priority = -1 }
 suspicious = { level = "deny", priority = -1 }
 
 [features]
-default = ["fs", "bytearray-buffer", "sleep-tokio"]
+default = ["fs", "sleep-tokio"]
 fs = []
 bytearray-buffer = []
 sleep-tokio = []

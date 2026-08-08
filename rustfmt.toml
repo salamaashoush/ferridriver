@@ -2,6 +2,11 @@ edition = "2024"
 # Vendored third-party sources (see crates/ferridriver-jsstd/README.md).
 # Reformatting them to the house style would make every future diff against
 # upstream llrt unreadable.
+#
+# `ignore` is nightly-only: on the stable channel this repo pins, rustfmt
+# warns and formats the crate regardless. The guard that actually holds is
+# `crates/ferridriver-jsstd/rustfmt.toml` (`disable_all_formatting`), which
+# rustfmt picks up as the config nearest those sources. Keep both.
 ignore = ["crates/ferridriver-jsstd"]
 max_width = 120
 hard_tabs = false

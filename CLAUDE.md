@@ -135,7 +135,8 @@ backend/
 
 ## Code Style & Linting
 
-- **Nightly Rust** toolchain, edition 2024
+- **Stable Rust** toolchain (pinned in `rust-toolchain.toml`), edition 2024. `clippy.toml`'s `msrv` tracks that pinned stable — the repo pins a channel rather than promising an older compiler, so lowering it only hides newer std APIs from clippy.
+- `cargo fmt` must never touch `crates/ferridriver-jsstd` (vendored llrt). The workspace `ignore` key is nightly-only; the guard that works on stable is that crate's own `rustfmt.toml` with `disable_all_formatting`.
 - **2-space indentation**, 120 char line width (see `rustfmt.toml`)
 - Clippy: `correctness`/`perf`/`suspicious` = **deny**, `style`/`complexity`/`pedantic` = warn
 - `unwrap_used`, `expect_used`, `todo`, `dbg_macro` = warn (relaxed in tests via `clippy.toml`)
