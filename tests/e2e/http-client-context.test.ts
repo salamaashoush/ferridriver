@@ -266,6 +266,27 @@ describe('request option bags', () => {
     expect(echoed.body).toBe('new-body');
   });
 
+  test('body_is_a_read_only_view_over_the_response_buffer', async ({ context, baseURL }) => {
+    // `body()` builds its Uint8Array directly over the response's own
+    // buffer rather than copying it. The buffer is shared, so it is
+    // handed out immutable — a write must throw instead of corrupting
+    // what `text()` and any other reader of this response still see.
+    const resp = await context.request.get(`${baseURL}/fx/landed`);
+    const bytes = await resp.body();
+    expect(new TextDecoder().decode(bytes)).toBe('landed');
+    expect(() => {
+      bytes[0] = 0;
+    }).toThrow();
+    expect(await resp.text()).toBe('landed');
+  });
+
+  test('fetch_rejects_an_argument_that_is_neither_a_url_nor_a_request', async ({ context }) => {
+    // The overload is an Either conversion, so a bad argument is
+    // rejected while binding the argument — synchronously, before any
+    // promise is created and before the network is touched.
+    expect(() => context.request.fetch(123 as never)).toThrow();
+  });
+
   test('dispose_leaves_the_shared_context_client_usable', async ({ context, baseURL }) => {
     // Playwright's dispose() releases the caller's handle; the browser
     // context that vended it keeps working.

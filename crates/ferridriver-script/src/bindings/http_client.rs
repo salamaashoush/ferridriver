@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use either::Either;
 use ferridriver::http_client::{HttpClient, HttpResponse, NetGuard, RequestOptions};
 use rquickjs::function::Opt;
 use rquickjs::promise::Promised;
@@ -333,25 +334,23 @@ impl HttpClientJs {
   /// A page-network `Request` contributes its URL, method, headers and
   /// post body; anything the caller also passes in `options` wins, per
   /// Playwright's `_innerFetch`.
+  /// The union is spelled as `Either`, which converts by trying a
+  /// `Request` first and falling back to a string — so an argument that
+  /// is neither is rejected by the conversion with rquickjs's own type
+  /// error, instead of by a hand-written downcast chain.
   #[qjs(rename = "fetch")]
   pub fn fetch<'js>(
     &self,
     ctx: Ctx<'js>,
-    url_or_request: Value<'js>,
+    url_or_request: Either<Class<'js, crate::bindings::network::RequestJs>, String>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
-    let (url, from_request) = match Class::<crate::bindings::network::RequestJs>::from_value(&url_or_request) {
-      Ok(req) => {
-        let req = req.borrow();
-        (req.url(), Some(request_defaults(&req)))
+    let (url, from_request) = match url_or_request {
+      Either::Left(request) => {
+        let request = request.borrow();
+        (request.url(), Some(request_defaults(&request)))
       },
-      Err(_) => (
-        url_or_request
-          .as_string()
-          .and_then(|s| s.to_string().ok())
-          .ok_or_else(|| rquickjs::Exception::throw_type(&ctx, "fetch: expected a URL string or a Request"))?,
-        None,
-      ),
+      Either::Right(url) => (url, None),
     };
     self.dispatch_with(ctx, Verb::Fetch, url, options, from_request)
   }
@@ -489,11 +488,18 @@ impl HttpResponseJs {
 
   /// Playwright: `apiResponse.body(): Promise<Buffer>` — raw bytes as
   /// a `Uint8Array`.
+  ///
+  /// The view is built directly over the response's own buffer instead
+  /// of copying it twice (slice -> `Vec` -> JS heap), which matters for
+  /// a large body. rquickjs keeps the `Bytes` alive for as long as the
+  /// `ArrayBuffer` lives, and marks it immutable — so writing through
+  /// the returned array throws rather than corrupting a buffer other
+  /// readers of the same response still share.
   #[qjs(rename = "body")]
   pub fn body<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    use rquickjs::IntoJs;
-    let bytes = self.inner.body().into_js_with(&ctx)?.to_vec();
-    rquickjs::TypedArray::new(ctx.clone(), bytes)?.into_js(&ctx)
+    let bytes = self.inner.body_shared().into_js_with(&ctx)?;
+    let buffer = rquickjs::ArrayBuffer::from_source_immutable(ctx.clone(), bytes)?;
+    Ok(rquickjs::TypedArray::<u8>::from_arraybuffer(buffer)?.into_value())
   }
 
   /// Response body as UTF-8 text.

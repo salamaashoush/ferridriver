@@ -16,6 +16,40 @@ use std::sync::Arc;
 
 use ferridriver_script::{Outcome, PathSandbox, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig};
 
+/// Read one complete HTTP/1.1 request: headers, then a body delimited by
+/// either `content-length` or the chunked terminator.
+fn read_request(sock: &mut std::net::TcpStream) -> Vec<u8> {
+  let mut raw = Vec::new();
+  let mut chunk = [0u8; 8192];
+  loop {
+    let read = match sock.read(&mut chunk) {
+      Ok(0) | Err(_) => return raw,
+      Ok(n) => n,
+    };
+    raw.extend_from_slice(&chunk[..read]);
+    let Some(head_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+      continue;
+    };
+    let head = String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase();
+    let body_len = raw.len() - (head_end + 4);
+    if head.contains("transfer-encoding: chunked") {
+      if raw.ends_with(b"0\r\n\r\n") {
+        return raw;
+      }
+    } else {
+      let declared = head
+        .split("content-length:")
+        .nth(1)
+        .and_then(|rest| rest.split("\r\n").next())
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+      if body_len >= declared {
+        return raw;
+      }
+    }
+  }
+}
+
 /// Echoes the request back as JSON: the raw body bytes plus the request
 /// head, so a test can assert both the payload and the `content-type`
 /// the body type implied.
@@ -26,9 +60,13 @@ fn spawn_echo_body() -> (String, std::thread::JoinHandle<()>) {
   let handle = std::thread::spawn(move || {
     for stream in listener.incoming().take(8) {
       let Ok(mut sock) = stream else { break };
-      let mut buf = vec![0u8; 65536];
-      let n = sock.read(&mut buf).unwrap_or(0);
-      let raw = &buf[..n];
+      // Read until the whole request has arrived. A single `read()` sees
+      // only the first TCP segment, so a chunked body — which is written
+      // one segment per chunk — would be silently truncated to its first
+      // chunk, and would pass or fail depending on whether the segments
+      // happened to coalesce.
+      let raw = read_request(&mut sock);
+      let raw = raw.as_slice();
       let split = raw.windows(4).position(|w| w == b"\r\n\r\n");
       // Kept verbatim: reqwest already writes header names lowercase,
       // and the multipart boundary is case-sensitive.

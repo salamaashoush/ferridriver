@@ -265,6 +265,23 @@ impl HttpResponse {
     Ok(&self.body_bytes)
   }
 
+  /// The body as a refcounted [`bytes::Bytes`] — a cheap clone that
+  /// shares the buffer rather than copying it.
+  ///
+  /// Lets a binding hand the body to its runtime without a copy (the
+  /// `QuickJS` layer builds an `ArrayBuffer` directly over this
+  /// allocation). Prefer [`Self::body`] when a plain slice will do.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the response was disposed.
+  pub fn body_shared(&self) -> crate::error::Result<bytes::Bytes> {
+    if self.disposed {
+      return Err(crate::error::FerriError::Disposed("Response"));
+    }
+    Ok(self.body_bytes.clone())
+  }
+
   /// Resolved peer address (`{ ipAddress, port }`), or `None` when the
   /// transport didn't surface one. Playwright:
   /// `apiResponse.serverAddr(): Promise<RemoteAddr | null>`.

@@ -55,6 +55,17 @@ test-backend backend:
   ./target/debug/ferridriver test --project "$project"
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test mcp_smoke -- "${module}::" --test-threads=1
 
+# Run a script/test target with the QuickJS leak dump on.
+#
+# QuickJS lists every object still alive when the runtime is freed, which
+# is how you find a native closure that captured a JS value: the
+# collector cannot see such a cycle, so the objects simply survive
+# teardown (and eventually trip an assertion). Pass a test filter, e.g.
+#   just leak-check fetch_body_init
+# Debug aid only — the flag is compiled into the QuickJS runtime.
+leak-check *args:
+  cargo test -p ferridriver-script --features js-dump-leaks {{args}} -- --nocapture --test-threads=1
+
 # Lint (default-members; ferridriver-node excluded)
 lint:
   cargo clippy --all-targets -- -D warnings

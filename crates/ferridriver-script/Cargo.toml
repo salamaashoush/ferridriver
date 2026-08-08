@@ -13,6 +13,15 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Opt-in QuickJS leak dump: makes `JS_FreeRuntime` list every object still
+# alive at teardown. The GC-cycle discipline (native closures must never
+# capture a JS value, or the collector cannot see the cycle) is otherwise
+# only observable as a crash, so this turns "did I strand something?" into
+# a readable list. Debug aid — never enable in a release build, it is a
+# compile-time flag on the QuickJS runtime itself.
+js-dump-leaks = ["rquickjs/dump-leaks"]
+
 [dependencies]
 ferridriver = { workspace = true }
 ferridriver-config = { workspace = true }
@@ -32,6 +41,7 @@ dashmap = { workspace = true }
 libc = { workspace = true }
 base64 = { workspace = true }
 url = "2"
+either = "1"
 
 # `CompressionStream` / `DecompressionStream`: the Compression Streams
 # spec defines exactly gzip / deflate / deflate-raw, all of which this
@@ -50,7 +60,19 @@ rquickjs-serde = "0.6"
 # Timers / URLSearchParams / the console renderer are native modules in
 # `bindings/` (formerly the rquickjs-extra crates, which capped rquickjs
 # at <0.12).
-rquickjs = { version = "0.12", features = ["full-async", "parallel", "macro", "loader", "array-buffer"] }
+rquickjs = { version = "0.12", features = [
+  "full-async",
+  "parallel",
+  "macro",
+  "loader",
+  "array-buffer",
+  # `Either<L, R>` converts from JS by trying L then falling back to R,
+  # which is exactly what a Playwright overload union needs.
+  "either",
+  # `ArrayBuffer::from_source_immutable` takes a `bytes::Bytes`
+  # directly, so a response body reaches JS without a `Vec` copy.
+  "bytes",
+] }
 
 # Step-file front-end: rolldown bundles + tree-shakes + transpiles TS to
 # one ESM module (resolving node_modules), which is compiled to QuickJS
@@ -73,4 +95,16 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 # Convert round-trip test drives rquickjs directly; it is a runtime dep
 # but integration tests are separate crates and cannot name a lib-only
 # dependency, so it is mirrored here.
-rquickjs = { version = "0.12", features = ["full-async", "parallel", "macro", "loader", "array-buffer"] }
+rquickjs = { version = "0.12", features = [
+  "full-async",
+  "parallel",
+  "macro",
+  "loader",
+  "array-buffer",
+  # `Either<L, R>` converts from JS by trying L then falling back to R,
+  # which is exactly what a Playwright overload union needs.
+  "either",
+  # `ArrayBuffer::from_source_immutable` takes a `bytes::Bytes`
+  # directly, so a response body reaches JS without a `Vec` copy.
+  "bytes",
+] }
