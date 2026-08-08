@@ -141,37 +141,23 @@ fn fixture_requests(collected: &CollectedTests, test_idx: usize, hook_idxs: &[us
     return DEFAULT_REQUESTS.iter().map(|s| (*s).to_string()).collect();
   }
 
-  // Expand custom fixtures through their deps (a fixture destructuring
-  // `{ page }` forces the pool to resolve `page`).
-  let set = collected
-    .fixture_sets
-    .get(test.fixture_set)
-    .cloned()
-    .unwrap_or_default();
-  let mut queue: Vec<String> = names.clone();
-  let mut seen_custom: Vec<usize> = Vec::new();
-  while let Some(name) = queue.pop() {
-    let Some(&idx) = set.iter().rev().find(|&&i| collected.fixtures[i].name == name) else {
-      continue;
-    };
-    if seen_custom.contains(&idx) {
-      continue;
-    }
-    seen_custom.push(idx);
-    for dep in &collected.fixtures[idx].deps {
-      if !names.contains(dep) {
+  // Every custom fixture the test pulls in (auto ones included), then
+  // the deps of those that resolve to no registration — those are the
+  // ones the pool has to provide. Resolution is super-scoped, so a
+  // `page` override depending on `{ page }` asks the pool for the
+  // built-in page rather than looping.
+  let slots = collected.fixture_slots(test.fixture_set);
+  let Ok(needed) = ferridriver_script::bindings::fixture_graph::resolution_order(&slots, &names, &|_| true) else {
+    // Malformed graph (cycle / self-reference with no base). Request
+    // everything so the VM-side resolver is the one that reports it.
+    return DEFAULT_REQUESTS.iter().map(|s| (*s).to_string()).collect();
+  };
+  for pos in needed {
+    for dep in &slots[pos].deps {
+      if ferridriver_script::bindings::fixture_graph::resolve_dep(&slots, dep, Some(pos)).is_none()
+        && !names.contains(dep)
+      {
         names.push(dep.clone());
-        queue.push(dep.clone());
-      }
-    }
-  }
-  // Auto fixtures' deps count too.
-  for &i in &set {
-    if collected.fixtures[i].auto {
-      for dep in &collected.fixtures[i].deps {
-        if !names.contains(dep) {
-          names.push(dep.clone());
-        }
       }
     }
   }
@@ -372,7 +358,8 @@ async fn build_world_data(
       .get("baseURL")
       .and_then(serde_json::Value::as_str)
       .map(String::from)
-      .or_else(|| p.base_url.clone()),
+      .or_else(|| p.base_url.clone())
+      .or_else(ferridriver_test::config::base_url_from_env),
     use_options: (*p.world_use).clone(),
     info: TestInfoData {
       title: p.title.as_str().to_string(),

@@ -515,6 +515,11 @@ const ENGINE_JS: &str = include_str!("injected/dist/engine.min.js");
 pub(crate) const MCP_SUPPORT_JS: &str = include_str!("injected/dist/mcp-support.min.js");
 pub(crate) const AX_SUPPORT_JS: &str = include_str!("injected/dist/ax-support.min.js");
 
+/// On-demand aria-template parser (`window.__fdAria`). Evaluated only by
+/// [`crate::Locator::match_aria_snapshot`] — it carries the `yaml`
+/// library, which has no business in the always-injected engine.
+pub(crate) const ARIA_SUPPORT_JS: &str = include_str!("injected/dist/aria-support.min.js");
+
 // ─── Query functions ────────────────────────────────────────────────────────
 
 /// Query all elements matching a rich selector inside the execution

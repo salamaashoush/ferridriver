@@ -655,37 +655,23 @@ pub fn parse_input_files<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Re
   ))
 }
 
-/// Parse one `FilePayload`. Playwright's `buffer` is a Node `Buffer`;
-/// the QuickJS equivalents are `Uint8Array` / `ArrayBuffer`, which have
-/// no serde sequence representation — extract their bytes directly and
-/// fall back to serde for plain number arrays.
+/// Parse one `FilePayload`. Playwright's `buffer` is a Node `Buffer`,
+/// which here is the node-compat [`crate::bindings::node_compat::BufferJs`]
+/// class — and it is neither a `Uint8Array` subclass nor serde-visible
+/// as a sequence, so `Buffer.from(...)` has to go through the shared
+/// byte extractor rather than serde.
 fn parse_file_payload<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<ferridriver::options::FilePayload> {
   if let Some(obj) = value.as_object() {
     let buffer: Value<'js> = obj.get("buffer")?;
-    if let Some(bytes) = binary_buffer_bytes(&buffer) {
+    if !buffer.is_undefined() && !buffer.is_null() {
       return Ok(ferridriver::options::FilePayload {
         name: obj.get("name")?,
         mime_type: obj.get("mimeType")?,
-        buffer: bytes,
+        buffer: crate::bindings::node_compat::value_to_bytes(ctx, &buffer, None)?,
       });
     }
   }
   serde_from_js(ctx, value)
-}
-
-fn binary_buffer_bytes(v: &Value<'_>) -> Option<Vec<u8>> {
-  if let Ok(ta) = rquickjs::TypedArray::<u8>::from_value(v.clone())
-    && let Some(b) = ta.as_bytes()
-  {
-    return Some(b.to_vec());
-  }
-  if let Some(obj) = v.as_object()
-    && let Some(buf) = rquickjs::ArrayBuffer::from_object(obj.clone())
-    && let Some(b) = buf.as_bytes()
-  {
-    return Some(b.to_vec());
-  }
-  None
 }
 
 /// Parse Playwright's `SetInputFilesOptions` JS bag into the core struct.

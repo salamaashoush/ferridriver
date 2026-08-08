@@ -103,6 +103,20 @@ test-e2e *args:
   cargo build --bin ferridriver --bin ferridriver-fixtures
   ./target/debug/ferridriver test {{args}}
 
+# Run Playwright's own example suites, UNMODIFIED, against ferridriver.
+# Every failure is a compat bug until docs/playwright-compat.md records it
+# as an intentional divergence. `--offline` skips the network-backed
+# examples; `--example <name>` narrows.
+compat *args:
+  cargo build --bin ferridriver
+  ./scripts/playwright-compat.sh {{args}}
+
+# Re-record the compat pass/fail baseline (after fixing a gap) or the
+# corpus checksum manifest (after pulling upstream).
+compat-update *args:
+  cargo build --bin ferridriver
+  ./scripts/playwright-compat.sh --update-baseline {{args}}
+
 # Run BDD feature tests via the Rust CLI
 bdd *args:
   cargo build -p ferridriver-fixtures

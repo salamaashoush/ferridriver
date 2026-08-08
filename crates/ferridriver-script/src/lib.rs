@@ -57,6 +57,7 @@ pub mod sidecar;
 pub mod vars;
 pub mod vm;
 
+pub use bindings::native_modules::{NATIVE_MODULE_NAMES, module_aliases, set_module_aliases};
 pub use bindings::registry::net_entry_subsumed;
 pub use bindings::{
   ArtifactsJs, BridgeFuture, BrowserContextJs, CollectedAnnotation, CollectedFileConfigure, CollectedFileUse,

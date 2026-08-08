@@ -50,6 +50,18 @@ impl PathSandbox {
   ///
   /// The path must exist and, after canonicalisation, live under the root.
   pub fn resolve_read(&self, rel: &str) -> Result<PathBuf, ScriptError> {
+    // A file this process downloaded through a browser is readable
+    // wherever the backend put it: `download.path()` hands the script an
+    // absolute path in a backend-owned temp dir, and reading it back is
+    // the standard way a spec inspects a download. Nothing else outside
+    // the root is reachable — the set only ever holds paths ferridriver
+    // itself produced.
+    if Path::new(rel).is_absolute()
+      && let Ok(canonical) = std::fs::canonicalize(rel)
+      && ferridriver::download::is_downloaded_file(&canonical)
+    {
+      return Ok(canonical);
+    }
     let candidate = self.syntactic_check(rel)?;
     let full = self.root.join(candidate);
     let canonical = std::fs::canonicalize(&full)

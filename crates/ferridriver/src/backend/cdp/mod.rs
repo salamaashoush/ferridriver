@@ -1676,6 +1676,18 @@ pub struct CdpPage<T: CdpTransport> {
 /// via the `Input.dragIntercepted` event, and re-dispatch the drag
 /// itself with `Input.dispatchDragEvent` (`dragEnter` / `dragOver` /
 /// `drop` / `dragCancel`).
+/// One page-side call of an exposed binding, parsed in the tracker loop
+/// and handed to the serial dispatch task in wire order.
+struct BindingCall {
+  fn_name: String,
+  seq: u64,
+  args: Vec<serde_json::Value>,
+  /// Execution context the call came from; the result is delivered back
+  /// into it, not the main frame's.
+  ctx_id: Option<i64>,
+  source: crate::events::BindingSource,
+}
+
 struct DragManagerState {
   /// `Input.DragData` captured from `Input.dragIntercepted` while a
   /// native drag is in flight; `None` when no drag is active. While
@@ -5435,6 +5447,25 @@ impl<T: CdpWrap> CdpPage<T> {
       // AND `Page.frameNavigated/Detached` exactly as they arrived on
       // the wire, and nothing is ever dropped.
       let mut rx = transport.tap_event_domains(&["Runtime", "Page"], session_id.as_deref());
+      // Exposed bindings run on ONE serial task fed in wire order. A
+      // page that calls the same exposed function twice must see the
+      // calls in that order (`page.exposeFunction('log', …)` plus a
+      // listener that records each call is a standard pattern); handing
+      // each call straight to `tokio::spawn` let the multi-threaded
+      // scheduler reorder them. The queue is unbounded, so a slow
+      // binding still never stalls frame-context tracking, and it
+      // closes with the tracker when `binding_tx` drops.
+      let (binding_tx, mut binding_rx) = tokio::sync::mpsc::unbounded_channel::<BindingCall>();
+      {
+        let fns = exposed_fns.clone();
+        let t = transport.clone();
+        let sid = session_id.clone();
+        tokio::spawn(async move {
+          while let Some(call) = binding_rx.recv().await {
+            Self::run_binding_call(call, &fns, &t, sid.as_ref()).await;
+          }
+        });
+      }
       while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
@@ -5482,14 +5513,9 @@ impl<T: CdpWrap> CdpPage<T> {
           "Runtime.bindingCalled" => {
             if let Some(params) = event.get("params") {
               let contexts = frame_contexts.read().await;
-              Self::dispatch_binding_called(
-                params,
-                &contexts,
-                &exposed_fns,
-                &target_id,
-                &transport,
-                session_id.as_ref(),
-              );
+              if let Some(call) = Self::parse_binding_called(params, &contexts, &target_id) {
+                let _ = binding_tx.send(call);
+              }
             }
           },
           "Page.frameAttached" => {
@@ -5639,21 +5665,18 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     Ok(())
   }
 
-  /// Handle one `Runtime.bindingCalled` from the tracker loop. The
-  /// frame resolution runs inline (ordered against context events); the
-  /// user callback + result delivery are spawned so a slow binding
-  /// (e.g. a WebSocket route handler doing its own evaluates) never
-  /// stalls frame-context tracking.
-  fn dispatch_binding_called(
+  /// Parse one `Runtime.bindingCalled` into a dispatchable call. Frame
+  /// resolution happens here, inline in the tracker loop, so it reads a
+  /// `frame_contexts` map that is exactly as up to date as the wire —
+  /// an iframe's first binding call must not resolve against a map that
+  /// has not seen its `executionContextCreated` yet.
+  fn parse_binding_called(
     params: &serde_json::Value,
     frame_contexts: &FxHashMap<String, i64>,
-    fns: &Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
     main_frame_id: &Arc<str>,
-    transport: &Arc<T>,
-    session_id: Option<&Arc<str>>,
-  ) {
+  ) -> Option<BindingCall> {
     if params.get("name").and_then(|v| v.as_str()) != Some("__fd_binding__") {
-      return;
+      return None;
     }
     let payload_str = params.get("payload").and_then(|v| v.as_str()).unwrap_or("{}");
     let payload: serde_json::Value = serde_json::from_str(payload_str).unwrap_or_default();
@@ -5676,36 +5699,84 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           .find_map(|(fid, &cid)| (cid == id).then(|| fid.clone()))
       })
       .unwrap_or_else(|| main_frame_id.to_string());
-    let source = crate::events::BindingSource {
-      context: String::new(),
-      page: main_frame_id.to_string(),
-      frame: source_frame,
-    };
+    Some(BindingCall {
+      fn_name,
+      seq,
+      args,
+      ctx_id,
+      source: crate::events::BindingSource {
+        context: String::new(),
+        page: main_frame_id.to_string(),
+        frame: source_frame,
+      },
+    })
+  }
 
-    let fns = fns.clone();
-    let t = transport.clone();
-    let sid = session_id.cloned();
-    tokio::spawn(async move {
-      let maybe_fn = fns.read().await.get(&fn_name).cloned();
-      let deliver_js = if let Some(callback) = maybe_fn {
-        let result = callback(source, args).await;
-        format!(
-          "globalThis.__fd_bc.resolve({}, {})",
-          seq,
-          serde_json::to_string(&result).unwrap_or_else(|_| "null".into())
-        )
-      } else {
-        format!("globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')")
-      };
-      // Resolve in the CALLING context — each frame has its own
-      // `__fd_bc` controller; delivering to the main frame's default
-      // context would leave an iframe caller's promise pending forever.
-      let mut eval_params = serde_json::json!({"expression": deliver_js});
-      if let Some(id) = ctx_id {
-        eval_params["contextId"] = serde_json::json!(id);
+  /// Invoke one exposed binding and hand its result back to the page.
+  ///
+  /// Called from the serial dispatch task, and it drives the callback up
+  /// to its FIRST SUSPENSION there before handing the rest off. That is
+  /// the whole trick: whatever a callback does synchronously (the common
+  /// case — `page.exposeFunction('log', msg => log.push(msg))` enqueues
+  /// its VM job on first poll) happens in wire order, while a callback
+  /// that awaits does not block the calls behind it. Awaiting each
+  /// callback to completion instead deadlocks the WebSocket router,
+  /// whose handler evaluates into the page and thereby provokes the NEXT
+  /// binding call before it returns.
+  async fn run_binding_call(
+    call: BindingCall,
+    fns: &Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
+    transport: &Arc<T>,
+    session_id: Option<&Arc<str>>,
+  ) {
+    let BindingCall {
+      fn_name,
+      seq,
+      args,
+      ctx_id,
+      source,
+    } = call;
+    // Resolve in the CALLING context — each frame has its own
+    // `__fd_bc` controller; delivering to the main frame's default
+    // context would leave an iframe caller's promise pending forever.
+    let deliver = {
+      let transport = transport.clone();
+      let sid = session_id.cloned();
+      move |deliver_js: String| {
+        let mut eval_params = serde_json::json!({"expression": deliver_js});
+        if let Some(id) = ctx_id {
+          eval_params["contextId"] = serde_json::json!(id);
+        }
+        tokio::spawn(async move {
+          let _ = transport
+            .send_command(sid.as_deref(), "Runtime.evaluate", &eval_params)
+            .await;
+        });
       }
-      let _ = t.send_command(sid.as_deref(), "Runtime.evaluate", &eval_params).await;
-    });
+    };
+    let Some(callback) = fns.read().await.get(&fn_name).cloned() else {
+      deliver(format!(
+        "globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')"
+      ));
+      return;
+    };
+    let resolve_js = move |result: &serde_json::Value| {
+      format!(
+        "globalThis.__fd_bc.resolve({}, {})",
+        seq,
+        serde_json::to_string(result).unwrap_or_else(|_| "null".into())
+      )
+    };
+    let mut fut = Box::pin(callback(source, args));
+    match futures::poll!(fut.as_mut()) {
+      std::task::Poll::Ready(result) => deliver(resolve_js(&result)),
+      std::task::Poll::Pending => {
+        tokio::spawn(async move {
+          let result = fut.await;
+          deliver(resolve_js(&result));
+        });
+      },
+    }
   }
 
   pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {

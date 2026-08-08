@@ -41,6 +41,7 @@ pub mod extensions;
 pub mod fetch;
 pub mod file;
 pub mod file_chooser;
+pub mod fixture_graph;
 pub mod form_data;
 pub mod frame;
 pub mod frame_locator;

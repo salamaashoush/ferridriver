@@ -46,6 +46,38 @@ use tokio::sync::watch;
 use crate::error::{FerriError, Result};
 use crate::page::Page;
 
+/// Files this process downloaded through a browser, canonicalised.
+///
+/// A download lands in a backend-owned temp directory, outside any
+/// script sandbox root — yet `fs.readFileSync(await download.path())`
+/// is the standard way a Playwright spec inspects one. The script
+/// sandbox consults this set so those exact files, and nothing else
+/// outside the root, are readable. Only paths ferridriver itself
+/// produced are ever added, and only for reading.
+static DOWNLOADED_FILES: std::sync::RwLock<Option<std::collections::HashSet<PathBuf>>> = std::sync::RwLock::new(None);
+
+fn register_downloaded_file(path: &Path) {
+  let Ok(canonical) = std::fs::canonicalize(path) else {
+    return;
+  };
+  if let Ok(mut guard) = DOWNLOADED_FILES.write() {
+    guard
+      .get_or_insert_with(std::collections::HashSet::default)
+      .insert(canonical);
+  }
+}
+
+/// Was `path` (already canonicalised by the caller) produced by a
+/// browser download in this process?
+#[must_use]
+pub fn is_downloaded_file(path: &Path) -> bool {
+  DOWNLOADED_FILES
+    .read()
+    .ok()
+    .and_then(|g| g.as_ref().map(|set| set.contains(path)))
+    .unwrap_or(false)
+}
+
 /// Terminal state of a download. [`DownloadStatus::Pending`] is the
 /// initial state; every other variant is terminal.
 #[derive(Debug, Clone)]
@@ -216,7 +248,10 @@ impl Download {
       .lock()
       .map_or_else(|_| self.inner.downloads_dir.clone(), |g| g.clone());
     let new_state = match error {
-      None => DownloadStatus::Finished { path },
+      None => {
+        register_downloaded_file(&path);
+        DownloadStatus::Finished { path }
+      },
       Some(e) => DownloadStatus::Failed { error: e },
     };
     self.inner.state_tx.send_replace(new_state);

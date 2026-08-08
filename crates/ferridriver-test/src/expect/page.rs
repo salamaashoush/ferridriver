@@ -66,16 +66,19 @@ impl PageSnapshotMatchers for Expect<'_, Arc<Page>> {
     poll_until_test(page, self.timeout, page_ctx("toMatchAriaSnapshot", is_not), || {
       let expected = expected.clone();
       async move {
-        let snapshot = page
-          .snapshot_for_ai()
+        // Page-scoped `to.match.aria` matches against `document.body`
+        // (`injectedScript.ts::expect`), through the same template
+        // matcher the locator form uses — a plain substring test on the
+        // rendered YAML accepted and rejected the wrong things.
+        let result = page
+          .locator("body")
+          .match_aria_snapshot(&expected)
           .await
           .map_err(|e| MatchError::new("(aria snapshot)", format!("error: {e}")))?;
-
-        let contains = snapshot.full.contains(&expected);
-        if contains == is_not {
+        if result.matches == is_not {
           Err(MatchError::new(
             format!("{}\n{expected}", if is_not { "not matching" } else { "matching" }),
-            snapshot.full[..snapshot.full.len().min(500)].to_string(),
+            result.received,
           ))
         } else {
           Ok(())

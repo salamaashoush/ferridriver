@@ -25,6 +25,7 @@ use rquickjs::{CatchResultExt, Ctx, Function, JsLifetime, Object, Persistent, Pr
 use rustc_hash::FxHashMap;
 
 use crate::bindings::convert::serde_from_js;
+use crate::bindings::fixture_graph::{self, FixtureSlot};
 use crate::bindings::registry::{as_function, rq};
 use crate::bindings::{install_browser_context_on, install_browser_on, install_page_on, install_request_on};
 use crate::engine::caught_to_script_error;
@@ -203,8 +204,11 @@ pub(crate) struct PendingFixture {
 }
 
 /// A worker-scoped custom fixture: value cached for every test in this
-/// VM, factory suspended until end-of-run teardown.
+/// VM, factory suspended until end-of-run teardown. Keyed by
+/// registration index, not name — an override and the super it shadows
+/// share a name but are two distinct fixtures with two distinct values.
 pub(crate) struct WorkerFixture {
+  pub(crate) name: String,
   pub(crate) value: Persistent<Value<'static>>,
   pub(crate) gate_resolve: Option<Persistent<Function<'static>>>,
   pub(crate) done_rx: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
@@ -236,7 +240,7 @@ pub(crate) struct TestRegistry {
   /// Suite nesting during registration (indices into `suites`).
   pub(crate) describe_stack: Vec<usize>,
   pub(crate) current: Option<CurrentTest>,
-  pub(crate) worker_fixtures: FxHashMap<String, WorkerFixture>,
+  pub(crate) worker_fixtures: FxHashMap<usize, WorkerFixture>,
 }
 
 impl TestRegistry {
@@ -600,10 +604,22 @@ fn interpolate_title(template: &str, row: &serde_json::Value) -> String {
 
 // ── test.extend fixture parsing ──────────────────────────────────────
 
-fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result<FixtureReg, rquickjs::Error> {
+/// A `test.extend` entry as written. `explicit_options` distinguishes
+/// the `[value, {…}]` tuple form from the bare-value form: Playwright
+/// INHERITS scope/auto/option from the registration being overridden
+/// when no options bag is given, and rejects a bag that contradicts it
+/// (`common/fixtures.ts::_appendFixtureList`).
+struct ParsedFixture {
+  reg: FixtureReg,
+  explicit_options: bool,
+  option_specified: bool,
+}
+
+fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result<ParsedFixture, rquickjs::Error> {
   let mut scope = JsFixtureScope::Test;
   let mut auto = false;
   let mut option = false;
+  let mut option_specified = false;
   let (factory_val, opts): (Value<'js>, Option<Object<'js>>) = if let Some(arr) = v.as_array() {
     let val: Value<'js> = arr.get(0)?;
     let o: Option<Object<'js>> = arr.get::<Value<'js>>(1).ok().and_then(Value::into_object);
@@ -624,6 +640,9 @@ fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result
       };
     }
     auto = o.get::<_, bool>("auto").unwrap_or(false);
+    option_specified = o
+      .get::<_, Value<'js>>("option")
+      .is_ok_and(|v| !v.is_undefined() && !v.is_null());
     option = o.get::<_, bool>("option").unwrap_or(false);
   }
   let (factory, static_value, deps) = match factory_val.as_function() {
@@ -633,15 +652,67 @@ fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result
     },
     None => (None, Some(Persistent::save(ctx, factory_val)), Vec::new()),
   };
-  Ok(FixtureReg {
-    name: name.to_string(),
-    scope,
-    auto,
-    option,
-    factory,
-    static_value,
-    deps,
+  Ok(ParsedFixture {
+    reg: FixtureReg {
+      name: name.to_string(),
+      scope,
+      auto,
+      option,
+      factory,
+      static_value,
+      deps,
+    },
+    explicit_options: opts.is_some(),
+    option_specified,
   })
+}
+
+fn scope_label(scope: JsFixtureScope) -> &'static str {
+  match scope {
+    JsFixtureScope::Worker => "worker",
+    JsFixtureScope::Test => "test",
+  }
+}
+
+/// Append one `test.extend` entry to a fixture set, applying
+/// Playwright's override rules against the registration it shadows.
+fn append_fixture(r: &mut TestRegistry, visible: &mut Vec<usize>, parsed: ParsedFixture) -> Result<(), ScriptError> {
+  let ParsedFixture {
+    mut reg,
+    explicit_options,
+    option_specified,
+  } = parsed;
+  if let Some(&prev) = visible.iter().rev().find(|&&i| r.fixtures[i].name == reg.name) {
+    let prev = &r.fixtures[prev];
+    if explicit_options {
+      if prev.scope != reg.scope {
+        return Err(ScriptError::internal(format!(
+          "Fixture \"{}\" has already been registered as a {{ scope: '{}' }} fixture.",
+          reg.name,
+          scope_label(prev.scope)
+        )));
+      }
+      if prev.auto != reg.auto {
+        return Err(ScriptError::internal(format!(
+          "Fixture \"{}\" has already been registered as a {{ auto: {} }} fixture.",
+          reg.name, prev.auto
+        )));
+      }
+      if option_specified && prev.option != reg.option {
+        return Err(ScriptError::internal(format!(
+          "Fixture \"{}\" has already been registered as a {{ option: {} }} fixture.",
+          reg.name, prev.option
+        )));
+      }
+    } else {
+      reg.scope = prev.scope;
+      reg.auto = prev.auto;
+      reg.option = prev.option;
+    }
+  }
+  r.fixtures.push(reg);
+  visible.push(r.fixtures.len() - 1);
+  Ok(())
 }
 
 // ── The test / describe object builders ──────────────────────────────
@@ -780,14 +851,14 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
       }
       let new_set = with_test_registry(&ctx, |r| {
         let mut visible = r.fixture_sets.get(set).cloned().unwrap_or_default();
-        for reg in new_regs {
-          r.fixtures.push(reg);
-          visible.push(r.fixtures.len() - 1);
+        for parsed in new_regs {
+          append_fixture(r, &mut visible, parsed)?;
         }
         r.fixture_sets.push(visible);
-        r.fixture_sets.len() - 1
+        Ok(r.fixture_sets.len() - 1)
       })
-      .map_err(|e| rq(&e))?;
+      .map_err(|e| rq(&e))?
+      .map_err(|e: ScriptError| rq(&e))?;
       make_test_object(&ctx, new_set)
     },
   )?;
@@ -1137,37 +1208,6 @@ fn se(e: impl std::fmt::Display) -> ScriptError {
   ScriptError::internal(e.to_string())
 }
 
-/// Depth-first topological visit for custom-fixture dependency order.
-fn visit_fixture(
-  idx: usize,
-  meta: &[(String, Vec<String>, bool)],
-  by_name: &dyn Fn(&str) -> Option<usize>,
-  needed: &[usize],
-  ordered: &mut Vec<usize>,
-  visiting: &mut Vec<usize>,
-) -> Result<(), ScriptError> {
-  if ordered.contains(&idx) {
-    return Ok(());
-  }
-  if visiting.contains(&idx) {
-    return Err(ScriptError::internal(format!(
-      "fixture dependency cycle involving `{}`",
-      meta[idx].0
-    )));
-  }
-  visiting.push(idx);
-  for dep in &meta[idx].1 {
-    if let Some(dep_idx) = by_name(dep)
-      && needed.contains(&dep_idx)
-    {
-      visit_fixture(dep_idx, meta, by_name, needed, ordered, visiting)?;
-    }
-  }
-  visiting.pop();
-  ordered.push(idx);
-  Ok(())
-}
-
 fn build_test_info<'js>(
   ctx: &Ctx<'js>,
   info: &TestInfoData,
@@ -1406,6 +1446,28 @@ fn set_current_test(
   })
 }
 
+/// The `test.extend` chain for a fixture set, in extend order — the
+/// input to [`fixture_graph`]'s Playwright-shaped resolution.
+pub(crate) fn fixture_slots(reg: &TestRegistry, fixture_set: usize) -> Vec<FixtureSlot> {
+  reg
+    .fixture_sets
+    .get(fixture_set)
+    .map(Vec::as_slice)
+    .unwrap_or_default()
+    .iter()
+    .map(|&i| {
+      let f = &reg.fixtures[i];
+      FixtureSlot {
+        reg: i,
+        name: f.name.clone(),
+        deps: f.deps.clone(),
+        auto: f.auto,
+        worker_scoped: f.scope == JsFixtureScope::Worker,
+      }
+    })
+    .collect()
+}
+
 /// Resolve the custom fixtures a test (plus its each-hooks) needs, in
 /// dependency order, running `use()`-handshake factories to their
 /// suspension point. Worker-scoped fixtures are set up once per VM and
@@ -1418,44 +1480,16 @@ async fn resolve_custom_fixtures<'js>(
   use_options: &serde_json::Value,
   source_label: &str,
 ) -> Result<(), ScriptError> {
-  // Names -> registration index within the set (last same-name wins).
-  let (set_indices, fixture_meta) = with_test_registry(ctx, |r| {
-    let indices = r.fixture_sets.get(fixture_set).cloned().unwrap_or_default();
-    let meta: Vec<(String, Vec<String>, bool)> = r
-      .fixtures
-      .iter()
-      .map(|f| (f.name.clone(), f.deps.clone(), f.auto))
-      .collect();
-    (indices, meta)
-  })?;
-  let by_name =
-    |name: &str| -> Option<usize> { set_indices.iter().rev().copied().find(|&i| fixture_meta[i].0 == name) };
+  let slots = with_test_registry(ctx, |r| fixture_slots(r, fixture_set))?;
+  // A name the runtime already put on the fixtures object IS the base
+  // implementation an override shadows (`page`, `context`, `request`,
+  // `browser`, the config scalars). That is the only thing separating a
+  // legitimate override from a self-reference with nothing under it.
+  let is_builtin = |name: &str| world_obj.contains_key(name).unwrap_or(false);
+  let ordered = fixture_graph::resolution_order(&slots, requested, &is_builtin).map_err(ScriptError::internal)?;
 
-  // Seed: requested custom names + every auto fixture in the set.
-  let mut needed: Vec<usize> = Vec::new();
-  let mut queue: Vec<usize> = requested.iter().filter_map(|n| by_name(n)).collect();
-  queue.extend(set_indices.iter().copied().filter(|&i| fixture_meta[i].2));
-  while let Some(idx) = queue.pop() {
-    if needed.contains(&idx) {
-      continue;
-    }
-    needed.push(idx);
-    for dep in &fixture_meta[idx].1 {
-      if let Some(dep_idx) = by_name(dep) {
-        queue.push(dep_idx);
-      }
-    }
-  }
-
-  // Topological order: dependencies before dependents.
-  let mut ordered: Vec<usize> = Vec::with_capacity(needed.len());
-  let mut visiting: Vec<usize> = Vec::new();
-  for &idx in &needed {
-    visit_fixture(idx, &fixture_meta, &by_name, &needed, &mut ordered, &mut visiting)?;
-  }
-
-  for idx in ordered {
-    resolve_one_fixture(ctx, world_obj, idx, use_options, source_label).await?;
+  for pos in ordered {
+    resolve_one_fixture(ctx, world_obj, slots[pos].reg, use_options, source_label).await?;
   }
   Ok(())
 }
@@ -1477,8 +1511,8 @@ async fn resolve_one_fixture<'js>(
   }
   let (name, option, plan) = with_test_registry(ctx, |r| {
     let f = &r.fixtures[reg_idx];
-    let plan = if r.worker_fixtures.contains_key(&f.name) {
-      Plan::CachedWorker(r.worker_fixtures[&f.name].value.clone())
+    let plan = if let Some(cached) = r.worker_fixtures.get(&reg_idx) {
+      Plan::CachedWorker(cached.value.clone())
     } else if let Some(factory) = &f.factory {
       Plan::Factory {
         factory: factory.clone(),
@@ -1510,7 +1544,7 @@ async fn resolve_one_fixture<'js>(
       Ok(())
     },
     Plan::Factory { factory, worker_scoped } => {
-      run_fixture_factory(ctx, world_obj, &name, factory, worker_scoped, source_label).await
+      run_fixture_factory(ctx, world_obj, reg_idx, &name, factory, worker_scoped, source_label).await
     },
   }
 }
@@ -1522,6 +1556,7 @@ async fn resolve_one_fixture<'js>(
 async fn run_fixture_factory<'js>(
   ctx: &Ctx<'js>,
   world_obj: &Object<'js>,
+  reg_idx: usize,
   name: &str,
   factory: Persistent<Function<'static>>,
   worker_scoped: bool,
@@ -1541,8 +1576,9 @@ async fn run_fixture_factory<'js>(
       let world = with_test_registry(&ctx, |r| {
         if worker_scoped {
           r.worker_fixtures.insert(
-            use_name.clone(),
+            reg_idx,
             WorkerFixture {
+              name: use_name.clone(),
               value: value_saved,
               gate_resolve: Some(resolve_saved),
               done_rx: None,
@@ -1617,7 +1653,7 @@ async fn run_fixture_factory<'js>(
   // Park the completion receiver for teardown.
   with_test_registry(ctx, |r| {
     if worker_scoped {
-      if let Some(w) = r.worker_fixtures.get_mut(name) {
+      if let Some(w) = r.worker_fixtures.get_mut(&reg_idx) {
         w.done_rx = Some(done_rx);
       }
     } else if let Some(c) = r.current.as_mut()
@@ -1664,11 +1700,15 @@ pub async fn teardown_worker_fixtures(vm: &crate::vm::VmHandle) -> Result<(), Sc
   crate::vm_with!(vm => |ctx| {
     let mut first_err: Option<ScriptError> = None;
     loop {
+      // Highest registration index first: within an extend chain that is
+      // reverse setup order, so an override is torn down before the
+      // super it shadows (hash order would be arbitrary).
       let entry = with_test_registry(&ctx, |r| {
-        let key = r.worker_fixtures.keys().next().cloned();
-        key.and_then(|k| r.worker_fixtures.remove_entry(&k))
+        let key = r.worker_fixtures.keys().copied().max();
+        key.and_then(|k| r.worker_fixtures.remove(&k))
       })?;
-      let Some((name, mut fixture)) = entry else { break };
+      let Some(mut fixture) = entry else { break };
+      let name = fixture.name.clone();
       if let Some(resolve) = fixture.gate_resolve.take() {
         let resolve = resolve.restore(&ctx).map_err(se)?;
         let called: rquickjs::Result<()> = resolve.call((Value::new_undefined(ctx.clone()),));
@@ -1954,6 +1994,33 @@ pub struct CollectedTests {
   pub file_use: Vec<CollectedFileUse>,
   pub file_configure: Vec<CollectedFileConfigure>,
   pub has_only: bool,
+}
+
+impl CollectedTests {
+  /// The `test.extend` chain behind a fixture set, in extend order —
+  /// the same input [`resolve_custom_fixtures`] builds from the live
+  /// registry, so the glue's pool-request computation and the VM-side
+  /// resolver can never disagree about which registration a name means.
+  #[must_use]
+  pub fn fixture_slots(&self, fixture_set: usize) -> Vec<FixtureSlot> {
+    self
+      .fixture_sets
+      .get(fixture_set)
+      .map(Vec::as_slice)
+      .unwrap_or_default()
+      .iter()
+      .map(|&i| {
+        let f = &self.fixtures[i];
+        FixtureSlot {
+          reg: i,
+          name: f.name.clone(),
+          deps: f.deps.clone(),
+          auto: f.auto,
+          worker_scoped: f.scope == JsFixtureScope::Worker,
+        }
+      })
+      .collect()
+  }
 }
 
 fn mode_str(mode: Option<CollectedSuiteMode>) -> Option<String> {

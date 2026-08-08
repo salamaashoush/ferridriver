@@ -103,6 +103,17 @@ pub(crate) fn bundler_shims() -> Arc<BundlerShims> {
     .unwrap_or_default()
 }
 
+/// Everything outside the entry files that can change a bundle's output
+/// for byte-identical sources: the `[bundler]` shims and the native
+/// module aliases. Every cache key folds this in.
+fn bundle_env_fingerprint() -> u64 {
+  use std::hash::{Hash, Hasher};
+  let mut h = std::collections::hash_map::DefaultHasher::new();
+  bundler_shims().fingerprint().hash(&mut h);
+  crate::bindings::native_modules::alias_fingerprint().hash(&mut h);
+  h.finish()
+}
+
 /// Virtual id of the synthetic entry that fans out to every requested
 /// entry file. rolldown emits ONE entry chunk per input; feeding it N
 /// step/extension files as N inputs produces N entry chunks, of which
@@ -132,7 +143,7 @@ impl Plugin for FerridriverRuntimePlugin {
     // import and the bytecode re-links by name against the loading
     // runtime's ModuleDefs (`bindings::native_modules`). Checked first
     // so an operator alias can never hijack the framework surface.
-    if crate::bindings::native_modules::NATIVE_MODULE_NAMES.contains(&args.specifier) {
+    if crate::bindings::native_modules::is_native_specifier(args.specifier) {
       return Ok(Some(HookResolveIdOutput {
         id: args.specifier.into(),
         external: Some(rolldown_common::ResolvedExternal::Bool(true)),
@@ -296,11 +307,8 @@ pub async fn bundle_and_compile_named(
   // written bytecode (QuickJS stores the module name), so two hosts
   // bundling the same files under different labels must not share an
   // entry.
-  let cache_key = crate::bytecode_cache::entry_key(
-    &format!("bundle:{module_name}"),
-    entry_paths,
-    bundler_shims().fingerprint(),
-  );
+  let cache_key =
+    crate::bytecode_cache::entry_key(&format!("bundle:{module_name}"), entry_paths, bundle_env_fingerprint());
   if let Some(hit) = crate::bytecode_cache::load(cache_key) {
     let source_map = hit
       .source_map_json
@@ -546,10 +554,10 @@ fn extension_cache() -> &'static ExtensionCache {
 }
 
 /// Cache key: the file's canonical path (rolldown resolution + relative
-/// imports depend on it) plus its byte content, plus the bundler-shims
-/// fingerprint (an alias/virtual-module edit changes the output for the
-/// same input bytes). SipHash via the std default hasher — adequate for
-/// an in-process content cache, no dep.
+/// imports depend on it) plus its byte content, plus
+/// [`bundle_env_fingerprint`] (a shim/alias edit changes the output for
+/// the same input bytes). SipHash via the std default hasher — adequate
+/// for an in-process content cache, no dep.
 fn cache_key(path: &Path, bytes: &[u8], shims_fp: u64) -> u64 {
   use std::hash::{Hash, Hasher};
   let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -584,7 +592,7 @@ pub async fn compile_and_extract_extensions(
     Failed(ScriptError),
   }
 
-  let shims_fp = bundler_shims().fingerprint();
+  let shims_fp = bundle_env_fingerprint();
   let mut bytes: Vec<Vec<u8>> = Vec::with_capacity(files.len());
   let mut slots: Vec<Slot> = Vec::with_capacity(files.len());
   for path in files {

@@ -21,7 +21,35 @@ pub enum StringOrRegex {
   Regex(Regex),
 }
 
+/// Playwright's `normalizeWhiteSpace` (`isomorphic/stringUtils.ts`):
+/// drop zero-width spaces and soft hyphens, trim, then collapse every
+/// whitespace run to a single space.
+#[must_use]
+pub fn normalize_white_space(text: &str) -> String {
+  let stripped: String = text.chars().filter(|c| *c != '\u{200b}' && *c != '\u{ad}').collect();
+  stripped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 impl StringOrRegex {
+  /// Playwright's `ExpectedTextMatcher.matches` with
+  /// `normalizeWhiteSpace: true` — the text matchers' array forms:
+  /// a string expectation compares NORMALIZED against NORMALIZED, a
+  /// RegExp is tested against the raw received text.
+  #[must_use]
+  pub fn matches_normalized(&self, actual: &str, ignore_case: bool, substring: bool) -> bool {
+    match self {
+      Self::String(expected) => {
+        let (mut exp, mut act) = (normalize_white_space(expected), normalize_white_space(actual));
+        if ignore_case {
+          exp = exp.to_lowercase();
+          act = act.to_lowercase();
+        }
+        if substring { act.contains(&exp) } else { act == exp }
+      },
+      Self::Regex(_) => self.matches_with(actual, ignore_case),
+    }
+  }
+
   pub fn matches(&self, actual: &str) -> bool {
     match self {
       Self::String(expected) => actual == expected,

@@ -5,5 +5,8 @@
     "crates/ferridriver-node",
     "packages/ferridriver-test",
     "site"
-  ]
+  ],
+  "devDependencies": {
+    "yaml": "^2.9.0"
+  }
 }

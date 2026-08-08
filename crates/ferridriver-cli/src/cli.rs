@@ -379,6 +379,13 @@ pub struct TestRunArgs {
   #[arg(long)]
   pub list: bool,
 
+  /// Serve an extra import specifier from a native module, repeatable:
+  /// `--module-alias @playwright/test=@ferridriver/test`. Merged on top
+  /// of `[test].moduleAliases`; lets a suite written against another
+  /// runner run byte-for-byte unmodified.
+  #[arg(long = "module-alias", value_name = "SPECIFIER=NATIVE_MODULE")]
+  pub module_alias: Vec<String>,
+
   #[command(flatten)]
   pub browser: BrowserArgs,
 }

@@ -186,6 +186,14 @@ pub struct TestConfig {
   pub profiles: BTreeMap<String, serde_json::Value>,
   #[serde(default)]
   pub has_bdd: bool,
+  /// Extra import specifiers the native module loader answers, mapped
+  /// onto the native module they alias — e.g. `"@playwright/test" =
+  /// "@ferridriver/test"`. Lets a suite written against another runner
+  /// be executed byte-for-byte unmodified. Targets must be native
+  /// modules (`ferridriver`, `@ferridriver/test`, `@cucumber/cucumber`,
+  /// `fs`, `path`, `buffer`, and their `node:` forms).
+  #[serde(default)]
+  pub module_aliases: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -607,6 +615,9 @@ pub struct CliOverrides {
   /// `--world-parameters <JSON>`: overrides `[test].worldParameters`;
   /// parsed and exposed to scenarios as `this.parameters`.
   pub world_parameters: Option<String>,
+  /// `--module-alias <specifier>=<native module>` (repeatable): merged
+  /// on top of `[test].moduleAliases`.
+  pub module_aliases: Vec<String>,
 }
 
 impl Default for TestConfig {
@@ -669,6 +680,7 @@ impl Default for TestConfig {
       world_parameters: serde_json::Value::Null,
       profiles: BTreeMap::new(),
       has_bdd: false,
+      module_aliases: BTreeMap::new(),
     }
   }
 }

@@ -1370,6 +1370,9 @@ pub(crate) fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   // CompressionStream / DecompressionStream, over the vendored
   // TransformStream.
   crate::bindings::compression::install(ctx)?;
+  // `require` for the native specifiers only — what a CommonJS source
+  // bundles down to for an external module.
+  crate::bindings::native_modules::install_require(ctx)?;
   Ok(())
 }
 
@@ -1457,6 +1460,41 @@ fn install_fs(ctx: &Ctx<'_>, sandbox: Arc<PathSandbox>) -> rquickjs::Result<()> 
             .map_err(|e| rquickjs::Error::new_from_js_message("fs", "readFileBytes", e.to_string()))
         }
       })),
+    )?;
+  }
+  // Node's sync reads. The jail check (`resolve_read`) is already
+  // synchronous, so these are the same path minus the await — and a
+  // spec that does `fs.readFileSync(await download.path())` is common
+  // enough that omitting them just breaks otherwise-portable suites.
+  // They block the interpreter thread for the duration of the read,
+  // exactly as `readFileSync` does in Node.
+  {
+    let sb = sandbox.clone();
+    obj.set(
+      "readFileSync",
+      Func::from(move |path: String| {
+        let resolved = sb.resolve_read(&path).map_err(|e| to_rq_error(&e))?;
+        std::fs::read_to_string(&resolved)
+          .map_err(|e| rquickjs::Error::new_from_js_message("fs", "readFileSync", e.to_string()))
+      }),
+    )?;
+  }
+  {
+    let sb = sandbox.clone();
+    obj.set(
+      "readFileBytesSync",
+      Func::from(move |path: String| {
+        let resolved = sb.resolve_read(&path).map_err(|e| to_rq_error(&e))?;
+        std::fs::read(&resolved)
+          .map_err(|e| rquickjs::Error::new_from_js_message("fs", "readFileBytesSync", e.to_string()))
+      }),
+    )?;
+  }
+  {
+    let sb = sandbox.clone();
+    obj.set(
+      "existsSync",
+      Func::from(move |path: String| sb.resolve_read(&path).is_ok_and(|p| p.exists())),
     )?;
   }
   {

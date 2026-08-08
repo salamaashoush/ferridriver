@@ -66,3 +66,4 @@ await build('./mcpSupport.ts', './dist/mcp-support.min.js', output => output);
 await build('./axSupport.ts', './dist/ax-support.min.js', output => output);
 await build('./webSocketMockEntry.ts', './dist/websocket-mock.min.js', output => output);
 await build('./clockEntry.ts', './dist/clock.min.js', output => output);
+await build('./ariaSupport.ts', './dist/aria-support.min.js', output => output);

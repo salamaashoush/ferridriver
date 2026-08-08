@@ -1132,6 +1132,9 @@ declare global {
   const fs: {
     readFile(path: string): Promise<string>;
     readFileBytes(path: string): Promise<number[]>;
+    readFileSync(path: string): string;
+    readFileBytesSync(path: string): number[];
+    existsSync(path: string): boolean;
     writeFile(path: string, contents: string): Promise<void>;
     readdir(path: string): Promise<string[]>;
     exists(path: string): Promise<boolean>;

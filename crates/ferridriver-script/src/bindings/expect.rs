@@ -352,6 +352,23 @@ fn parse_string_or_regex<'js>(_ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::
   ))
 }
 
+/// The `(string | RegExp)[]` half of the text matchers' overload.
+/// `None` when the argument is not an array, so the caller falls
+/// through to the single-value form.
+fn parse_string_or_regex_array<'js>(
+  ctx: &Ctx<'js>,
+  value: &Value<'js>,
+) -> rquickjs::Result<Option<Vec<StringOrRegex>>> {
+  let Some(arr) = value.as_array() else {
+    return Ok(None);
+  };
+  let mut out = Vec::with_capacity(arr.len());
+  for item in arr.iter::<Value<'js>>() {
+    out.push(parse_string_or_regex(ctx, &item?)?);
+  }
+  Ok(Some(out))
+}
+
 #[rquickjs::methods]
 impl ExpectJs {
   // ── modifiers ────────────────────────────────────────────────────
@@ -761,8 +778,9 @@ impl ExpectJs {
       .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
-  /// Playwright: `toHaveText(expected: string | RegExp,
-  /// options?: { ignoreCase?, timeout?, useInnerText? })`.
+  /// Playwright: `toHaveText(expected: string | RegExp | (string | RegExp)[],
+  /// options?: { ignoreCase?, timeout?, useInnerText? })`. The array
+  /// form asserts over EVERY element the locator resolves to.
   #[qjs(rename = "toHaveText")]
   pub async fn to_have_text<'js>(
     &self,
@@ -770,8 +788,16 @@ impl ExpectJs {
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let exp = parse_string_or_regex(&ctx, &expected)?;
     let o = opts_obj(&options);
+    if let Some(list) = parse_string_or_regex_array(&ctx, &expected)? {
+      return self
+        .for_call(o.as_ref())
+        .build_locator_expect()?
+        .to_have_text_array_with(&list, text_match_options(o.as_ref()))
+        .await
+        .map_err(|e| assertion_to_rq(&ctx, e));
+    }
+    let exp = parse_string_or_regex(&ctx, &expected)?;
     self
       .for_call(o.as_ref())
       .build_locator_expect()?
@@ -780,7 +806,7 @@ impl ExpectJs {
       .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
-  /// Playwright: `toContainText(expected: string | RegExp,
+  /// Playwright: `toContainText(expected: string | RegExp | (string | RegExp)[],
   /// options?: { ignoreCase?, timeout?, useInnerText? })`.
   #[qjs(rename = "toContainText")]
   pub async fn to_contain_text<'js>(
@@ -789,8 +815,16 @@ impl ExpectJs {
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let exp = parse_string_or_regex(&ctx, &expected)?;
     let o = opts_obj(&options);
+    if let Some(list) = parse_string_or_regex_array(&ctx, &expected)? {
+      return self
+        .for_call(o.as_ref())
+        .build_locator_expect()?
+        .to_contain_text_array_with(&list, text_match_options(o.as_ref()))
+        .await
+        .map_err(|e| assertion_to_rq(&ctx, e));
+    }
+    let exp = parse_string_or_regex(&ctx, &expected)?;
     self
       .for_call(o.as_ref())
       .build_locator_expect()?

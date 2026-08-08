@@ -62,29 +62,6 @@ macro_rules! retry_resolve {
     // Last call-log line, to collapse identical retry messages.
     let mut __trace_last_log = ::std::string::String::new();
     let __result = 'retry: {
-      // Resolve `frameLocator` enter-frame hops to the real child frame
-      // + trailing selector (no-op for plain selectors).
-      let (__rframe, __rsel) = match $self.resolved().await {
-        ::std::result::Result::Ok(v) => v,
-        ::std::result::Result::Err(e) => break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e)),
-      };
-      let $page: &$crate::backend::AnyPage = __rframe.page_arc().inner();
-      if let ::std::result::Result::Err(e) = $page.ensure_engine_injected().await {
-        break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
-      }
-      let __fd = "window.__fd";
-      let __sel_js = match $crate::selectors::build_selone_js(&__rsel, &__fd, $self.strict) {
-        ::std::result::Result::Ok(v) => v,
-        ::std::result::Result::Err(e) => break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e)),
-      };
-      // Pass `None` for main-frame locators so the backend skips a
-      // `frame_contexts` lookup; child frames thread their cached id.
-      let __frame_id: ::std::option::Option<&str> = if __rframe.is_main_frame() {
-        ::std::option::Option::None
-      } else {
-        ::std::option::Option::Some(__rframe.id())
-      };
-
       let __op_name: &str = $op;
       let __resolved_timeout: u64 = $timeout_ms.unwrap_or_else(|| $self.frame.page_arc().default_timeout());
       let __deadline: ::std::option::Option<::std::time::Instant> = if __resolved_timeout == 0 {
@@ -110,7 +87,7 @@ macro_rules! retry_resolve {
 
         // Action pre-checks: run registered locator handlers if any of their
         // overlays are currently visible (Playwright `performActionPreChecks`).
-        $crate::locator_handler::perform_checkpoint(__rframe.page_arc()).await;
+        $crate::locator_handler::perform_checkpoint($self.frame.page_arc()).await;
 
         let __delay_ms = Locator::RETRY_BACKOFFS_MS[__idx.min(Locator::RETRY_BACKOFFS_MS.len() - 1)];
         __idx = __idx.saturating_add(1);
@@ -129,6 +106,35 @@ macro_rules! retry_resolve {
             ::tokio::time::sleep(::std::time::Duration::from_millis(__sleep_ms)).await;
           }
         }
+
+        // Resolve `frameLocator` enter-frame hops to the real child frame
+        // + trailing selector (a no-op clone for plain selectors). This
+        // is INSIDE the loop because an `<iframe>` swaps documents: a
+        // chain resolved once, before the frame finished loading, would
+        // keep querying a dead frame for the rest of the deadline (and
+        // an unknown frame id falls back to the main document, so the
+        // selector silently matches the WRONG page).
+        let (__rframe, __rsel) = match $self.resolved().await {
+          ::std::result::Result::Ok(v) => v,
+          // The iframe itself is not there yet — same retry semantics as
+          // a missing element.
+          ::std::result::Result::Err(_) => continue,
+        };
+        let $page: &$crate::backend::AnyPage = __rframe.page_arc().inner();
+        if let ::std::result::Result::Err(e) = $page.ensure_engine_injected().await {
+          break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
+        }
+        let __sel_js = match $crate::selectors::build_selone_js(&__rsel, "window.__fd", $self.strict) {
+          ::std::result::Result::Ok(v) => v,
+          ::std::result::Result::Err(e) => break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e)),
+        };
+        // Pass `None` for main-frame locators so the backend skips a
+        // `frame_contexts` lookup; child frames thread their cached id.
+        let __frame_id: ::std::option::Option<&str> = if __rframe.is_main_frame() {
+          ::std::option::Option::None
+        } else {
+          ::std::option::Option::Some(__rframe.id())
+        };
 
         // Strict mode (the default) is folded into the same engine-side
         // `selOne(parts, strict)` call below — the JS throws
@@ -227,6 +233,14 @@ pub(crate) fn is_retryable_action_error(msg: &str) -> bool {
     // re-resolving until its deadline (Playwright retries the pointer
     // action on `hitTargetDescription` the same way).
     || msg.contains("intercepts pointer events")
+}
+
+/// Outcome of [`Locator::match_aria_snapshot`] — whether the template
+/// matched, plus the rendered live tree for the failure message.
+#[derive(Debug, Clone)]
+pub struct AriaSnapshotMatch {
+  pub matches: bool,
+  pub received: String,
 }
 
 /// A lazy element locator bound to a [`crate::Frame`]. Every Locator
@@ -1408,7 +1422,78 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or JS evaluation fails.
   pub async fn is_checked(&self) -> Result<bool> {
-    self.eval_bool("function() { return !!this.checked; }").await
+    // `this.checked` alone only sees `input[type=checkbox|radio]`.
+    // Playwright reads the state through `getCheckedWithoutMixed` after
+    // a `follow-label` retarget, so `aria-checked` roles (switch,
+    // menuitemcheckbox, treeitem, …) and labels wrapping their control
+    // report correctly (`injectedScript.ts::elementState`). A
+    // non-checkable element is an error there, not `false`.
+    let (rframe, _) = self.resolved().await?;
+    let fd = rframe.page_arc().inner().injected_script().await?;
+    let raw = self
+      .retry_eval_on_element(&format!("return JSON.stringify({fd}.getChecked(el));"))
+      .await?
+      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+      .unwrap_or_default();
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+      Ok(serde_json::Value::Bool(b)) => Ok(b),
+      _ => Err(crate::FerriError::protocol(
+        "isChecked",
+        "Not a checkbox or radio button",
+      )),
+    }
+  }
+
+  /// Playwright's `to.match.aria`: match a YAML aria template against
+  /// this element's live aria tree, with Playwright's containment
+  /// semantics (`injected/ariaSnapshot.ts::matchesExpectAriaTemplate` —
+  /// the expected template names a SUBSET; extra siblings, attributes
+  /// and depth are allowed unless the template says `/children: equal`).
+  ///
+  /// The YAML is parsed by the on-demand `aria-support` bundle, mirroring
+  /// Playwright's split between a server-side parse and an in-page match.
+  ///
+  /// # Errors
+  ///
+  /// Selector parsing, a malformed template, or JS evaluation failure.
+  pub async fn match_aria_snapshot(&self, expected_yaml: &str) -> Result<AriaSnapshotMatch> {
+    let (rframe, _) = self.resolved().await?;
+    let inner = rframe.page_arc().inner();
+    let frame_id = (!rframe.is_main_frame()).then(|| rframe.id().to_string());
+    let eval = async |js: &str| -> Result<Option<serde_json::Value>> {
+      match &frame_id {
+        Some(id) => inner.evaluate_in_frame(js, id).await,
+        None => inner.evaluate(js).await,
+      }
+    };
+    let installed = eval("typeof window.__fdAria !== 'undefined'")
+      .await?
+      .and_then(|v| v.as_bool())
+      .unwrap_or(false);
+    if !installed {
+      eval(crate::selectors::ARIA_SUPPORT_JS).await?;
+    }
+    let yaml_json = serde_json::to_string(expected_yaml).unwrap_or_else(|_| "\"\"".to_string());
+    let raw = self
+      .retry_eval_on_element(&format!(
+        "return JSON.stringify(window.__fd.matchAriaTemplate(el, window.__fdAria.parse({yaml_json})));"
+      ))
+      .await?
+      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+      .ok_or_else(|| crate::FerriError::protocol("toMatchAriaSnapshot", "element not found"))?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+      .map_err(|e| crate::FerriError::protocol("toMatchAriaSnapshot", format!("bad matcher result: {e}")))?;
+    Ok(AriaSnapshotMatch {
+      matches: parsed
+        .get("matches")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false),
+      received: parsed
+        .get("received")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string(),
+    })
   }
 
   /// Check if the element is attached to the DOM (exists in the document).

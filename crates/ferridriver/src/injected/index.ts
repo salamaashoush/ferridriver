@@ -8,6 +8,7 @@
  */
 
 import { InjectedScript } from './injectedScript';
+import { matchesExpectAriaTemplate } from './ariaSnapshot';
 import { isElementVisible, parentElementOrShadowHost, enclosingShadowRootOrDocument } from './domUtils';
 import { getAriaDisabled, getAriaRole, getCheckedWithoutMixed, getElementAccessibleName, getReadonly } from './roleUtils';
 import { escapeForTextSelector, escapeForAttributeSelector } from '@isomorphic/stringUtils';
@@ -593,13 +594,32 @@ if (!window.__fd) {
     getAriaRole,
     getAccessibleName: getElementAccessibleName,
     getAriaDisabled,
-    getChecked: getCheckedWithoutMixed,
+    // Playwright reads the checked state AFTER retargeting through
+    // `follow-label` (`injectedScript.ts::elementState`), so a locator
+    // that lands on a `<label>` (or on text inside one) reports the
+    // state of the control the label owns. Returns `'error'` for
+    // anything that is neither an input checkbox/radio nor an
+    // `aria-checked` role, exactly like `getCheckedWithoutMixed`.
+    getChecked: (node: Node) => {
+      const el = injected.retarget(node, 'follow-label');
+      return el ? getCheckedWithoutMixed(el) : 'error';
+    },
     getReadonly,
 
     // Playwright's aria snapshot (locator/page scoped). `node` is the
     // root resolved by Rust (strict resolution + auto-wait done
     // host-side — source of truth); delegates to the vendored
     // InjectedScript so the rendered YAML is byte-for-byte Playwright.
+    // Playwright's `to.match.aria`: a PARSED `AriaTemplateNode` matched
+    // against the live tree, containment semantics and all
+    // (`ariaSnapshot.ts::matchesExpectAriaTemplate`). The YAML -> template
+    // parse is not here — it needs the `yaml` library, so it lives in the
+    // on-demand `aria-support` bundle exactly like Playwright keeps it
+    // out of the injected script.
+    matchAriaTemplate: (node: Element, template: any) => {
+      const result = matchesExpectAriaTemplate(node, template);
+      return { matches: result.matches.length > 0, received: result.received.raw };
+    },
     ariaSnapshot: (node: Node, options?: { mode?: 'ai' | 'default'; depth?: number }) =>
       injected.ariaSnapshot(node, { mode: options?.mode || 'default', depth: options?.depth }),
     // Full result incl. `iframeRefs` / `iframeDepths` so the Rust core

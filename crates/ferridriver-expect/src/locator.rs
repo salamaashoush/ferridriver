@@ -91,6 +91,23 @@ pub struct TextMatchOptions {
   pub use_inner_text: bool,
 }
 
+/// Playwright's `InjectedScript._matchSequentially`: walk both lists
+/// once, advancing the expectation cursor on every match. Every
+/// expectation must be consumed, so the expectations have to appear in
+/// the received list in order (the array text/class matchers).
+fn matches_sequentially(expected: &[StringOrRegex], received: &[String], ignore_case: bool, substring: bool) -> bool {
+  let mut m = 0;
+  for r in received {
+    if m >= expected.len() {
+      break;
+    }
+    if expected[m].matches_normalized(r, ignore_case, substring) {
+      m += 1;
+    }
+  }
+  m == expected.len()
+}
+
 async fn fetch_text(locator: &Locator, use_inner_text: bool) -> String {
   if use_inner_text {
     locator.inner_text().await.unwrap_or_default()
@@ -321,6 +338,66 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
               expected.description()
             ),
             format!("\"{actual}\""),
+          ))
+        } else {
+          Ok(())
+        }
+      }
+    })
+    .await
+  }
+
+  /// Playwright: `toHaveText(expected: (string | RegExp)[], …)`.
+  /// `to.have.text.array` in `injectedScript.ts::expectArray`: the
+  /// locator must resolve to exactly as many elements as there are
+  /// expectations, matched in order.
+  pub async fn to_have_text_array_with(
+    &self,
+    expected: &[StringOrRegex],
+    options: TextMatchOptions,
+  ) -> Result<(), AssertionFailure> {
+    self.text_array("toHaveText", expected, options, true).await
+  }
+
+  /// Playwright: `toContainText(expected: (string | RegExp)[], …)`.
+  /// `to.contain.text.array`: no length requirement — the expectations
+  /// must appear as an in-order SUBSEQUENCE of the matched elements,
+  /// each by substring.
+  pub async fn to_contain_text_array_with(
+    &self,
+    expected: &[StringOrRegex],
+    options: TextMatchOptions,
+  ) -> Result<(), AssertionFailure> {
+    self.text_array("toContainText", expected, options, false).await
+  }
+
+  async fn text_array(
+    &self,
+    matcher: &'static str,
+    expected: &[StringOrRegex],
+    options: TextMatchOptions,
+    exact: bool,
+  ) -> Result<(), AssertionFailure> {
+    let locator: &Locator = self.subject.borrow();
+    let is_not = self.is_not;
+    let expected: Vec<StringOrRegex> = expected.to_vec();
+    poll_locator(locator, self.timeout, matcher, is_not, || {
+      let expected = expected.clone();
+      async move {
+        let received = if options.use_inner_text {
+          locator.all_inner_texts().await.unwrap_or_default()
+        } else {
+          locator.all_text_contents().await.unwrap_or_default()
+        };
+        // "To match an array" is "to contain an array" + equal length.
+        let matches = (!exact || received.len() == expected.len())
+          && matches_sequentially(&expected, &received, options.ignore_case, !exact);
+        if matches == is_not {
+          let expected_desc: Vec<String> = expected.iter().map(StringOrRegex::description).collect();
+          let received_desc: Vec<String> = received.iter().map(|r| format!("{r:?}")).collect();
+          Err(MatchError::new(
+            format!("{}[{}]", if is_not { "not " } else { "" }, expected_desc.join(", ")),
+            format!("[{}]", received_desc.join(", ")),
           ))
         } else {
           Ok(())
@@ -674,111 +751,22 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
 
   // ── Array text matchers ──
 
+  /// ferridriver-only alias kept for the Rust E2E surface. Playwright
+  /// spells this `toHaveText([...])`, so it delegates rather than
+  /// carrying a second implementation.
   pub async fn to_have_texts(&self, expected: &[impl Into<StringOrRegex> + Clone]) -> Result<(), AssertionFailure> {
     let expected: Vec<StringOrRegex> = expected.iter().map(|e| e.clone().into()).collect();
-    let locator: &Locator = self.subject.borrow();
-    let is_not = self.is_not;
-    poll_locator(locator, self.timeout, "toHaveTexts", is_not, || {
-      let expected = expected.clone();
-      async move {
-        let count = locator.count().await.unwrap_or(0);
-        let mut actuals = Vec::with_capacity(count);
-        for i in 0..count {
-          let text = locator
-            .evaluate(
-              &format!(
-                "() => document.querySelectorAll('{}')[{i}]?.textContent?.trim() || ''",
-                locator.selector().replace('\'', "\\'")
-              ),
-              ferridriver::protocol::SerializedArgument::default(),
-              None,
-            )
-            .await
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
-          actuals.push(text);
-        }
-
-        if actuals.len() != expected.len() {
-          let matches = false;
-          if matches == is_not {
-            return Ok(());
-          }
-          return Err(MatchError::new(
-            format!(
-              "{} texts: {:?}",
-              expected.len(),
-              expected.iter().map(|e| e.description()).collect::<Vec<_>>()
-            ),
-            format!("{} texts: {actuals:?}", actuals.len()),
-          ));
-        }
-
-        for (i, (exp, act)) in expected.iter().zip(actuals.iter()).enumerate() {
-          let matches = exp.matches(act);
-          if matches == is_not {
-            return Err(MatchError::new(
-              format!("{}[{i}] = {}", if is_not { "not " } else { "" }, exp.description()),
-              format!("[{i}] = \"{act}\""),
-            ));
-          }
-        }
-        Ok(())
-      }
-    })
-    .await
+    self
+      .to_have_text_array_with(&expected, TextMatchOptions::default())
+      .await
   }
 
-  pub async fn to_contain_texts(&self, expected: &[impl AsRef<str>]) -> Result<(), AssertionFailure> {
-    let expected: Vec<String> = expected.iter().map(|s| s.as_ref().to_string()).collect();
-    let locator: &Locator = self.subject.borrow();
-    let is_not = self.is_not;
-    poll_locator(locator, self.timeout, "toContainTexts", is_not, || {
-      let expected = expected.clone();
-      async move {
-        let count = locator.count().await.unwrap_or(0);
-        let mut actuals = Vec::with_capacity(count);
-        for i in 0..count {
-          let text = locator
-            .evaluate(
-              &format!(
-                "() => document.querySelectorAll('{}')[{i}]?.textContent?.trim() || ''",
-                locator.selector().replace('\'', "\\'")
-              ),
-              ferridriver::protocol::SerializedArgument::default(),
-              None,
-            )
-            .await
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
-          actuals.push(text);
-        }
-
-        if actuals.len() != expected.len() {
-          if is_not {
-            return Ok(());
-          }
-          return Err(MatchError::new(
-            format!("{} texts", expected.len()),
-            format!("{} texts", actuals.len()),
-          ));
-        }
-
-        for (i, (exp, act)) in expected.iter().zip(actuals.iter()).enumerate() {
-          let contains = act.contains(exp.as_str());
-          if contains == is_not {
-            return Err(MatchError::new(
-              format!("{}[{i}] containing \"{exp}\"", if is_not { "not " } else { "" }),
-              format!("[{i}] = \"{act}\""),
-            ));
-          }
-        }
-        Ok(())
-      }
-    })
-    .await
+  /// ferridriver-only alias for `toContainText([...])`.
+  pub async fn to_contain_texts(&self, expected: &[impl Into<StringOrRegex> + Clone]) -> Result<(), AssertionFailure> {
+    let expected: Vec<StringOrRegex> = expected.iter().map(|e| e.clone().into()).collect();
+    self
+      .to_contain_text_array_with(&expected, TextMatchOptions::default())
+      .await
   }
 
   // ── Count ──

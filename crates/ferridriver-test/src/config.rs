@@ -157,6 +157,19 @@ pub fn parse_common_cli_args() -> CliOverrides {
   overrides
 }
 
+/// `baseURL` as exported by the web-server startup path.
+///
+/// Playwright's webServer plugin sets `PLAYWRIGHT_TEST_BASE_URL` and its
+/// `baseURL` option fixture defaults to it
+/// (`plugins/webServerPlugin.ts`, `index.ts`). `FERRIDRIVER_BASE_URL` is
+/// the same channel: without this fallback a `webServer` that only
+/// declares a `staticDir`/`port` starts a server nothing resolves
+/// against, and `page.goto('/')` reaches the browser verbatim.
+#[must_use]
+pub fn base_url_from_env() -> Option<String> {
+  std::env::var("FERRIDRIVER_BASE_URL").ok().filter(|v| !v.is_empty())
+}
+
 /// Anchored, regex-escaped alternation matching exactly `ids` when run
 /// through the runner's grep filter.
 fn exact_id_alternation(ids: &[&str]) -> String {
@@ -394,6 +407,17 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
   if overrides.fail_on_flaky_tests {
     config.fail_on_flaky_tests = true;
   }
+  for spec in &overrides.module_aliases {
+    let (from, to) = spec.split_once('=').ok_or_else(|| {
+      FerriError::invalid_argument(
+        "module-alias",
+        format!("invalid --module-alias {spec:?} (expected <specifier>=<native module>)"),
+      )
+    })?;
+    config
+      .module_aliases
+      .insert(from.trim().to_string(), to.trim().to_string());
+  }
   if let Ok(t) = std::env::var("FERRIDRIVER_GLOBAL_TIMEOUT")
     && let Ok(v) = t.parse()
   {
@@ -434,5 +458,49 @@ fn json_merge(base: &mut serde_json::Value, overlay: &serde_json::Value) {
     (base, _) => {
       *base = overlay.clone();
     },
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{CliOverrides, TestConfig, resolve_config_from};
+
+  #[test]
+  fn module_alias_flags_merge_over_config() {
+    let mut config = TestConfig::default();
+    config
+      .module_aliases
+      .insert("@playwright/test".to_string(), "ferridriver".to_string());
+    let overrides = CliOverrides {
+      module_aliases: vec![
+        "@playwright/test = @ferridriver/test".to_string(),
+        "playwright=ferridriver".to_string(),
+      ],
+      ..Default::default()
+    };
+
+    let resolved = resolve_config_from(config, &overrides).expect("resolve");
+    assert_eq!(
+      resolved.module_aliases.get("@playwright/test").map(String::as_str),
+      Some("@ferridriver/test"),
+      "CLI flag wins over the config entry"
+    );
+    assert_eq!(
+      resolved.module_aliases.get("playwright").map(String::as_str),
+      Some("ferridriver")
+    );
+  }
+
+  #[test]
+  fn module_alias_flag_without_equals_is_rejected() {
+    let overrides = CliOverrides {
+      module_aliases: vec!["@playwright/test".to_string()],
+      ..Default::default()
+    };
+    let err = resolve_config_from(TestConfig::default(), &overrides).expect_err("must reject");
+    assert!(
+      err.to_string().contains("expected <specifier>=<native module>"),
+      "{err}"
+    );
   }
 }

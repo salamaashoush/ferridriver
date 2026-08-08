@@ -394,15 +394,13 @@ impl ElementHandle {
   ///
   /// See [`Self::inner_html`].
   pub async fn is_checked(&self) -> Result<bool> {
+    // Same funnel as `Locator::is_checked`: the injected
+    // `getChecked` retargets through `follow-label` and understands
+    // every `aria-checked` role, not just `aria-checked="true"` on the
+    // element itself.
+    let fd = self.page().inner().injected_script().await?;
     self
-      .eval_bool(
-        "el => {\
-          if (el.getAttribute && el.getAttribute('aria-checked') === 'true') return true;\
-          if (el.nodeName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) return el.checked;\
-          return false;\
-        }",
-        "isChecked",
-      )
+      .eval_bool(&format!("el => {fd}.getChecked(el) === true"), "isChecked")
       .await
   }
 

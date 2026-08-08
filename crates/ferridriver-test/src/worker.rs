@@ -404,7 +404,8 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
     .use_options
     .as_ref()
     .and_then(|opts| opts.get("baseURL").and_then(|v| v.as_str()).map(String::from))
-    .or_else(|| config.base_url.clone());
+    .or_else(|| config.base_url.clone())
+    .or_else(crate::config::base_url_from_env);
 
   if ctx_config.storage_state.is_none() {
     ctx_config.storage_state.clone_from(&config.storage_state);
@@ -428,7 +429,7 @@ fn build_suite_effective_context_config(config: &TestConfig) -> EffectiveContext
     context: ctx_config,
     default_viewport: config.browser.viewport.clone(),
     viewport_override: None,
-    request_base_url: config.base_url.clone(),
+    request_base_url: config.base_url.clone().or_else(crate::config::base_url_from_env),
   }
 }
 

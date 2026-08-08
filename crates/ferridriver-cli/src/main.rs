@@ -99,6 +99,15 @@ fn install_bundler_shims(config: &FerridriverConfig) {
   ));
 }
 
+/// Install `[test].moduleAliases` (already merged with `--module-alias`)
+/// into the process-global slot the native module resolver, the
+/// throwaway compile runtimes, and the rolldown externals all read.
+/// Must run before anything bundles.
+fn install_module_aliases(test: &ferridriver_test::config::TestConfig) -> anyhow::Result<()> {
+  ferridriver_script::set_module_aliases(test.module_aliases.iter().map(|(k, v)| (k.clone(), v.clone())))
+    .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
   let args = cli::Cli::parse();
@@ -414,6 +423,7 @@ async fn run_test_native(config: FerridriverConfig, args: cli::TestRunArgs) -> a
     forbid_only: args.forbid_only,
     list_only: args.list,
     extensions: config.extensions.paths().to_vec(),
+    module_aliases: args.module_alias,
     ..Default::default()
   };
   if args.browser.headless {
@@ -435,6 +445,7 @@ async fn run_test_native(config: FerridriverConfig, args: cli::TestRunArgs) -> a
 
   let test_config = ferridriver_test::config::resolve_config_from(config.test, &overrides)
     .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
+  install_module_aliases(&test_config)?;
 
   let exit_code = Box::pin(ferridriver_testjs::run_ts_tests_with(test_config, overrides)).await;
   if exit_code == 0 {
@@ -506,6 +517,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   if !args.features.is_empty() {
     test_config.features = args.features;
   }
+  install_module_aliases(&test_config)?;
 
   let exit_code = Box::pin(ferridriver_bdd::run_bdd_with(test_config, overrides)).await;
   if exit_code == 0 {
