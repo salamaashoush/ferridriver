@@ -32,6 +32,24 @@ struct EffectiveContextConfig {
   request_base_url: Option<String>,
 }
 
+impl EffectiveContextConfig {
+  /// Identity of the contexts this config produces, for
+  /// [`crate::context_pool`]. Everything `build_context_options` reads
+  /// goes in, so two tests share a key exactly when a context built for
+  /// one is a valid context for the other. Serializing rather than
+  /// hashing keeps a new config field from silently falling out of the
+  /// key the way a hand-written `Hash` impl would.
+  fn pool_key(&self, backend: ferridriver::backend::BackendKind) -> crate::context_pool::PoolKey {
+    let parts = serde_json::json!({
+      "backend": format!("{backend:?}"),
+      "context": &self.context,
+      "viewport": self.viewport_override.as_ref().or(self.default_viewport.as_ref()),
+      "baseUrl": &self.request_base_url,
+    });
+    parts.to_string()
+  }
+}
+
 enum TestBrowserState {
   Empty,
   Context(Arc<ferridriver::ContextRef>),
@@ -48,6 +66,13 @@ struct TestBrowserResources {
   output_dir: std::path::PathBuf,
   state: Mutex<TestBrowserState>,
   trace: Option<TraceSpec>,
+  pool: Arc<crate::context_pool::ContextPool>,
+  /// The test asked for the `page` fixture, so resolving `context` first
+  /// may as well take a pooled context+page pair — Playwright's `page`
+  /// fixture is `context.newPage()`, so the pair is what the test ends up
+  /// with either way. A test that wants only `context` must not be handed
+  /// a page it never opened, so it takes the un-pooled path.
+  wants_page: bool,
 }
 
 /// Per-test trace recording request: tracing starts the moment the
@@ -59,7 +84,7 @@ struct TraceSpec {
   composite: Arc<std::sync::Mutex<Option<String>>>,
 }
 
-fn is_retryable_bidi_page_error(err: &ferridriver::FerriError) -> bool {
+pub(crate) fn is_retryable_bidi_page_error(err: &ferridriver::FerriError) -> bool {
   let s = err.to_string();
   s.contains("DiscardedBrowsingContextError")
     || s.contains("BrowsingContext does no longer exist")
@@ -87,7 +112,7 @@ fn needs_alive_check(backend: ferridriver::backend::BackendKind) -> bool {
   matches!(backend, ferridriver::backend::BackendKind::Bidi)
 }
 
-async fn create_ready_page(
+pub(crate) async fn create_ready_page(
   ctx: &ferridriver::ContextRef,
   backend: ferridriver::backend::BackendKind,
 ) -> ferridriver::error::Result<Arc<ferridriver::Page>> {
@@ -104,6 +129,8 @@ impl TestBrowserResources {
     effective: EffectiveContextConfig,
     output_dir: std::path::PathBuf,
     trace: Option<TraceSpec>,
+    pool: Arc<crate::context_pool::ContextPool>,
+    wants_page: bool,
   ) -> Self {
     Self {
       handle,
@@ -111,7 +138,28 @@ impl TestBrowserResources {
       output_dir,
       state: Mutex::new(TestBrowserState::Empty),
       trace,
+      pool,
+      wants_page,
     }
+  }
+
+  /// Take a context+page pair for this test, from the pool when one was
+  /// pre-created with matching options and inline otherwise.
+  ///
+  /// Backends that share the persistent default context have nothing to
+  /// pool — there is only ever one container — so they fall through to
+  /// the un-pooled path.
+  async fn acquire_pooled(
+    &self,
+    browser: &Arc<ferridriver::Browser>,
+  ) -> Option<ferridriver::error::Result<(Arc<ferridriver::ContextRef>, Arc<ferridriver::Page>)>> {
+    if !browser.supports_isolated_contexts() {
+      return None;
+    }
+    let backend = browser.backend_kind();
+    let opts = build_context_options(&self.effective, &self.output_dir, backend);
+    let key = self.effective.pool_key(backend);
+    Some(Box::pin(self.pool.acquire(browser, &key, &opts, backend)).await)
   }
 
   /// Start the per-test trace on a freshly created context.
@@ -175,6 +223,17 @@ impl TestBrowserResources {
       TestBrowserState::Failed(err) => Err(err.clone()),
       TestBrowserState::Empty => {
         let browser = self.handle.get().await?;
+        if self.wants_page
+          && let Some(pooled) = Box::pin(self.acquire_pooled(&browser)).await
+        {
+          let (ctx, page) = pooled?;
+          self.start_tracing(&ctx).await;
+          *state = TestBrowserState::Page {
+            ctx: Arc::clone(&ctx),
+            page,
+          };
+          return Ok(ctx);
+        }
         let opts = build_context_options(&self.effective, &self.output_dir, browser.backend_kind());
         let ctx = Arc::new(new_test_context(&browser, opts).await?);
         self.start_tracing(&ctx).await;
@@ -204,6 +263,15 @@ impl TestBrowserResources {
       TestBrowserState::Empty => {
         let browser = self.handle.get().await?;
         let backend = browser.backend_kind();
+        if let Some(pooled) = Box::pin(self.acquire_pooled(&browser)).await {
+          let (ctx, page) = pooled?;
+          self.start_tracing(&ctx).await;
+          *state = TestBrowserState::Page {
+            ctx,
+            page: Arc::clone(&page),
+          };
+          return Ok(page);
+        }
         let opts = build_context_options(&self.effective, &self.output_dir, backend);
         let ctx = Arc::new(new_test_context(&browser, opts.clone()).await?);
         self.start_tracing(&ctx).await;
@@ -587,7 +655,7 @@ fn build_browser_fixture_defs(
         move |_pool| {
           let resources = Arc::clone(&resources);
           Box::pin(async move {
-            let ctx = resources.context().await?;
+            let ctx = Box::pin(resources.context()).await?;
             Ok(ctx as Arc<dyn std::any::Any + Send + Sync>)
           })
         }
@@ -609,7 +677,7 @@ fn build_browser_fixture_defs(
         move |_pool| {
           let resources = Arc::clone(&resources);
           Box::pin(async move {
-            let page = resources.page().await?;
+            let page = Box::pin(resources.page()).await?;
             Ok(page as Arc<dyn std::any::Any + Send + Sync>)
           })
         }
@@ -688,6 +756,9 @@ pub struct Worker {
   pub id: u32,
   config: Arc<TestConfig>,
   event_bus: Option<EventBus>,
+  /// Contexts pre-created for this worker's upcoming tests. Shared by
+  /// every test the worker runs; drained when the worker exits.
+  pool: Arc<crate::context_pool::ContextPool>,
 }
 
 /// Directory-safe name for a test's artifact folder under `outputDir`.
@@ -717,7 +788,13 @@ fn absolutize(p: std::path::PathBuf) -> std::path::PathBuf {
 
 impl Worker {
   pub fn new(id: u32, config: Arc<TestConfig>, event_bus: Option<EventBus>) -> Self {
-    Self { id, config, event_bus }
+    let pool = crate::context_pool::ContextPool::new(config.context_prewarm as usize);
+    Self {
+      id,
+      config,
+      event_bus,
+      pool,
+    }
   }
 
   fn create_suite_test_info(&self, suite_key: &str) -> Arc<TestInfo> {
@@ -883,6 +960,10 @@ impl Worker {
     }
     custom_fixture_pool.teardown_all().await;
 
+    // Close contexts pre-created for tests that never arrived, before
+    // the browser shuts down under them.
+    self.pool.drain().await;
+
     // Graceful browser close — only fires when the worker actually
     // launched a browser via `BrowserHandle::get`. Tests that never
     // touched a browser-dependent fixture skip the close handshake
@@ -996,6 +1077,8 @@ impl Worker {
         build_suite_effective_context_config(&self.config),
         suite_test_info.output_dir.clone(),
         None,
+        Arc::clone(&self.pool),
+        false,
       ));
       let suite_pool = custom_pool.child_with_defs(build_suite_fixture_defs(suite_resources), FixtureScope::Worker);
       suite_pool.inject("test_info", suite_test_info);
@@ -1240,6 +1323,8 @@ impl Worker {
       effective_config,
       test_info.output_dir.clone(),
       trace_spec,
+      Arc::clone(&self.pool),
+      fixture_requests.iter().any(|f| f == "page"),
     ));
     let test_pool = custom_pool.child_with_defs(build_test_fixture_defs(Arc::clone(&resources)), FixtureScope::Test);
     test_pool.inject("test_info", Arc::clone(&test_info));

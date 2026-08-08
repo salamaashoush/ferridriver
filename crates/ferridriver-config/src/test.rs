@@ -194,6 +194,26 @@ pub struct TestConfig {
   /// `fs`, `path`, `buffer`, and their `node:` forms).
   #[serde(default)]
   pub module_aliases: BTreeMap<String, String>,
+  /// How many browser contexts each worker keeps pre-created ahead of the
+  /// test that will use them.
+  ///
+  /// A context and its first page cost a renderer-process spawn (~40ms on
+  /// Chromium), which is why per-test browser setup costs the same in
+  /// every runner. Creating the next test's context while the current one
+  /// runs moves that spawn off the critical path. Each test still gets its
+  /// own fresh context, so isolation is unchanged.
+  ///
+  /// Off by default, because it only pays when the machine has spare
+  /// capacity. A renderer spawn is CPU-bound, and pre-creating one doubles
+  /// the live renderer count: a 96-test suite at 4 workers on 12 cores
+  /// goes from 2452ms to ~2000ms at `2` and 1855ms at `12` (peak memory
+  /// 4.1GB -> 6.6GB, thrashing past 16), while this repo's own suite at 6
+  /// workers gains nothing and turns flaky, because there is no idle core
+  /// for the pre-creation to run on.
+  ///
+  /// Set it when `workers` leaves cores idle; leave it at `0` otherwise.
+  #[serde(default)]
+  pub context_prewarm: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -681,6 +701,7 @@ impl Default for TestConfig {
       profiles: BTreeMap::new(),
       has_bdd: false,
       module_aliases: BTreeMap::new(),
+      context_prewarm: 0,
     }
   }
 }

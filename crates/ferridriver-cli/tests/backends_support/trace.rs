@@ -242,11 +242,28 @@ pub fn test_tracing_records_viewer_loadable_zip(c: &mut McpClient) {
   // Page lifecycle events (`event` lines, tracing.ts onPageOpen /
   // onPageClose): the mid-trace page open is recorded synchronously,
   // its close via the page's lossless event listener.
+  //
+  // `tracing.start` also records a `page` event for pages that already
+  // existed when it ran, so the context's first page is announced too —
+  // without that, a trace started on a context that already has a page
+  // (which is what the runner's pre-created contexts are) would carry
+  // actions whose `pageId` was never opened. The mid-trace page is the
+  // one that is BOTH opened and closed inside the recording.
   let events: Vec<&serde_json::Value> = lines.iter().filter(|e| e["type"] == "event").collect();
+  let closed_page_ids: Vec<&str> = events
+    .iter()
+    .filter(|e| e["method"] == "pageClosed")
+    .filter_map(|e| e["params"]["pageId"].as_str())
+    .collect();
   let opened = events
     .iter()
-    .find(|e| e["method"] == "page")
-    .expect("mid-trace newPage must record a 'page' event");
+    .find(|e| {
+      e["method"] == "page"
+        && e["params"]["pageId"]
+          .as_str()
+          .is_some_and(|id| closed_page_ids.contains(&id))
+    })
+    .expect("mid-trace newPage must record a 'page' event matched by a 'pageClosed': {events:?}");
   assert_eq!(opened["class"].as_str(), Some("BrowserContext"), "class: {opened}");
   let opened_page_id = opened["params"]["pageId"].as_str().expect("page event pageId");
   assert!(

@@ -81,7 +81,7 @@ impl Recorder {
       },
       ..Default::default()
     });
-    let ctx = browser.new_context_impl(ctx_opts);
+    let ctx = browser.new_context_impl(ctx_opts, true);
     let page = Box::pin(ctx.new_page()).await?;
     page.goto(&self.options.url).await?;
 

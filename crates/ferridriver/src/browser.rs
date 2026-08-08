@@ -55,7 +55,7 @@ pub struct Browser {
   /// `new_context`), so `contexts()` stays sync like Playwright's
   /// `browser.contexts()` — no `RwLock<BrowserState>` read, no
   /// per-page round-trip.
-  context_names: Arc<std::sync::Mutex<Vec<String>>>,
+  context_names: Arc<std::sync::Mutex<Vec<ContextEntry>>>,
   /// Shared handle to [`BrowserState::connected`] so `is_connected()`
   /// stays sync like Playwright's `browser.isConnected(): boolean`.
   connected: Arc<std::sync::atomic::AtomicBool>,
@@ -66,8 +66,23 @@ pub struct Browser {
   events: crate::events::BrowserEventEmitter,
 }
 
-fn default_context_registry() -> Arc<std::sync::Mutex<Vec<String>>> {
-  Arc::new(std::sync::Mutex::new(vec!["default".to_string()]))
+/// One entry in [`Browser::context_names`].
+///
+/// `listed` is false only between [`Browser::new_context_unlisted`] and
+/// [`Browser::publish_context`]. A context in that window exists in the
+/// browser but has no owner yet, so reporting it from `contexts()` — or
+/// announcing it via `browser.on('context')` — would show a caller a
+/// container it was never handed.
+struct ContextEntry {
+  name: String,
+  listed: bool,
+}
+
+fn default_context_registry() -> Arc<std::sync::Mutex<Vec<ContextEntry>>> {
+  Arc::new(std::sync::Mutex::new(vec![ContextEntry {
+    name: "default".to_string(),
+    listed: true,
+  }]))
 }
 
 impl Browser {
@@ -191,10 +206,49 @@ impl Browser {
   /// writer holds the outer `RwLock<BrowserState>`.
   pub fn new_context(&self) -> crate::action::Action<'static, crate::options::BrowserContextOptions, ContextRef> {
     let this = self.clone();
-    crate::action::Action::new(move |opts| Box::pin(async move { Ok(this.new_context_impl(Some(opts))) }))
+    crate::action::Action::new(move |opts| Box::pin(async move { Ok(this.new_context_impl(Some(opts), true)) }))
   }
 
-  pub(crate) fn new_context_impl(&self, options: Option<crate::options::BrowserContextOptions>) -> ContextRef {
+  /// Create a context that [`Self::contexts`] does not report and that
+  /// `browser.on('context')` does not announce until
+  /// [`Self::publish_context`] hands it to an owner.
+  ///
+  /// Exists for pre-creation: opening a context and its first page costs
+  /// a renderer-process spawn, so a caller that knows it will need one
+  /// shortly can pay that cost early, off the critical path. Until the
+  /// context is published it is the creator's private resource, and
+  /// nothing observing the browser should see it. Publishing is
+  /// idempotent; a context that is closed without ever being published
+  /// is never announced at all.
+  pub fn new_context_unlisted(
+    &self,
+  ) -> crate::action::Action<'static, crate::options::BrowserContextOptions, ContextRef> {
+    let this = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { Ok(this.new_context_impl(Some(opts), false)) }))
+  }
+
+  /// Make a context from [`Self::new_context_unlisted`] visible to
+  /// [`Self::contexts`] and fire the deferred `'context'` event. No-op
+  /// for a context that is already listed.
+  pub fn publish_context(&self, ctx: &ContextRef) {
+    {
+      let mut names = match self.context_names.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+      };
+      match names.iter_mut().find(|e| e.name == *ctx.name()) {
+        Some(entry) if !entry.listed => entry.listed = true,
+        _ => return,
+      }
+    }
+    self.emit_context_created(ctx.clone());
+  }
+
+  pub(crate) fn new_context_impl(
+    &self,
+    options: Option<crate::options::BrowserContextOptions>,
+    listed: bool,
+  ) -> ContextRef {
     static CTX_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = CTX_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = format!("context-{id}");
@@ -203,7 +257,10 @@ impl Browser {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
       };
-      names.push(name.clone());
+      names.push(ContextEntry {
+        name: name.clone(),
+        listed,
+      });
     }
     let ctx = ContextRef::new(self.state.clone(), name).with_browser(self.clone());
     if let Some(opts) = options {
@@ -226,20 +283,27 @@ impl Browser {
       };
       map.insert(composite, opts);
     }
-    // Playwright fires `browser.on('context')` for explicitly-created
-    // contexts (not the default one). `browserContext.ts` emits from
-    // `_browser._didCreateContext`; `new_context` is the equivalent
-    // choke point — `default_context()` deliberately does not emit.
-    //
-    // Emit on the next runtime tick rather than inline: `new_context` is
-    // synchronous, so a caller using the Playwright idiom
-    // `Promise.all([browser.waitForEvent('context'), browser.newContext()])`
-    // hasn't armed its (lazily-polled) waitForEvent subscription yet when
-    // this returns. Deferring lets that subscription land first, matching
-    // Playwright where newContext is async and the event fires after an
-    // await point. Listeners registered synchronously via `on`/`once`
-    // (which subscribe eagerly) still receive it.
-    let event = crate::events::BrowserEvent::Context(ctx.clone());
+    if listed {
+      self.emit_context_created(ctx.clone());
+    }
+    ctx
+  }
+
+  /// Fire `browser.on('context')` for an explicitly-created context (not
+  /// the default one). `browserContext.ts` emits from
+  /// `_browser._didCreateContext`; `new_context` is the equivalent choke
+  /// point — `default_context()` deliberately does not emit.
+  ///
+  /// Emit on the next runtime tick rather than inline: `new_context` is
+  /// synchronous, so a caller using the Playwright idiom
+  /// `Promise.all([browser.waitForEvent('context'), browser.newContext()])`
+  /// hasn't armed its (lazily-polled) waitForEvent subscription yet when
+  /// this returns. Deferring lets that subscription land first, matching
+  /// Playwright where newContext is async and the event fires after an
+  /// await point. Listeners registered synchronously via `on`/`once`
+  /// (which subscribe eagerly) still receive it.
+  fn emit_context_created(&self, ctx: ContextRef) {
+    let event = crate::events::BrowserEvent::Context(ctx);
     match tokio::runtime::Handle::try_current() {
       Ok(handle) => {
         let emitter = self.events.clone();
@@ -247,7 +311,6 @@ impl Browser {
       },
       Err(_) => self.events.emit(event),
     }
-    ctx
   }
 
   /// Browser-level event emitter (`browser.on('context', ...)`). Cheap
@@ -405,7 +468,8 @@ impl Browser {
     };
     names
       .iter()
-      .map(|name| ContextRef::new(self.state.clone(), name.clone()))
+      .filter(|entry| entry.listed)
+      .map(|entry| ContextRef::new(self.state.clone(), entry.name.clone()).with_browser(self.clone()))
       .collect()
   }
 

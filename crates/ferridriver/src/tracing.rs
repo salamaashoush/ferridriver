@@ -208,6 +208,15 @@ impl Tracing {
       network_len,
     )?);
     crate::trace::install_recorder(&composite, std::sync::Arc::clone(&recorder))?;
+    // Pages that predate the recorder still belong to the trace —
+    // Playwright's Snapshotter walks `context.pages()` on start
+    // (`packages/playwright-core/src/server/trace/recorder/snapshotter.ts`).
+    // Without this, the viewer has actions whose `pageId` was never
+    // opened, and every action a pre-existing page performs lands
+    // outside any page tab.
+    for page in self.context_pages().await {
+      crate::trace::record_page_open(&recorder, &crate::trace::trace_page_id(&page));
+    }
     if recorder.screenshots {
       self.start_screencast_pumps(&recorder).await;
     }
