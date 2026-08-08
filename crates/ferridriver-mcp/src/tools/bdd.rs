@@ -180,10 +180,10 @@ impl From<JsScenarioResult> for ScenarioJson {
           JsStepStatus::Failed(e) => ("failed", Some(e)),
           JsStepStatus::Undefined(e) => ("undefined", Some(e)),
         };
-        if let Some(ref e) = error {
-          if scenario_error.is_none() {
-            scenario_error = Some(format!("{}{}: {e}", s.keyword, s.text));
-          }
+        if let Some(ref e) = error
+          && scenario_error.is_none()
+        {
+          scenario_error = Some(format!("{}{}: {e}", s.keyword, s.text));
         }
         StepJson {
           keyword: s.keyword,

@@ -289,10 +289,10 @@ pub fn compare_screenshot_png_in(
 
   // Apply the pixel-budget options. A run that exceeds the threshold
   // can still pass if the absolute or fractional budget is generous.
-  if let Some(max_pixels) = options.max_diff_pixels {
-    if mismatch_count <= max_pixels {
-      return Ok(());
-    }
+  if let Some(max_pixels) = options.max_diff_pixels
+    && mismatch_count <= max_pixels
+  {
+    return Ok(());
   }
   if let Some(ratio) = options.max_diff_pixel_ratio {
     let allowed = (ratio.clamp(0.0, 1.0) * total_pixels as f64).round();

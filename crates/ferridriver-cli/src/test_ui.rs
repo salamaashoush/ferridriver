@@ -470,22 +470,22 @@ pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::
   loop {
     if cycle.is_none() {
       if let Some(command) = queued.pop_front() {
-        if command != UiCommand::Stop {
-          if let Some(scope) = plan_run(&command, &sidebar, &failed) {
-            state.set_watch_status("running");
-            state.publish_wire_event(&serde_json::json!({
-              "type": "runStarted",
-              "totalTests": scope.planned,
-              "workers": workers,
-            }));
-            sidebar.hellos_this_cycle.clear();
-            match spawner.spawn(CycleKind::Run, Some(scope)) {
-              Ok(started) => cycle = Some(started),
-              Err(e) => {
-                eprintln!("Failed to spawn test cycle: {e}");
-                state.set_watch_status("idle");
-              },
-            }
+        if command != UiCommand::Stop
+          && let Some(scope) = plan_run(&command, &sidebar, &failed)
+        {
+          state.set_watch_status("running");
+          state.publish_wire_event(&serde_json::json!({
+            "type": "runStarted",
+            "totalTests": scope.planned,
+            "workers": workers,
+          }));
+          sidebar.hellos_this_cycle.clear();
+          match spawner.spawn(CycleKind::Run, Some(scope)) {
+            Ok(started) => cycle = Some(started),
+            Err(e) => {
+              eprintln!("Failed to spawn test cycle: {e}");
+              state.set_watch_status("idle");
+            },
           }
         }
         continue;

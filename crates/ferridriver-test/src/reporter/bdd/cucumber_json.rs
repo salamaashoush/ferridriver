@@ -68,10 +68,10 @@ impl CucumberJsonReporter {
 }
 
 fn extract_keyword(step: &TestStep) -> String {
-  if let Some(meta) = &step.metadata {
-    if let Some(kw) = meta.get("bdd_keyword").and_then(|v| v.as_str()) {
-      return format!("{kw} ");
-    }
+  if let Some(meta) = &step.metadata
+    && let Some(kw) = meta.get("bdd_keyword").and_then(|v| v.as_str())
+  {
+    return format!("{kw} ");
   }
   step
     .title
@@ -82,10 +82,10 @@ fn extract_keyword(step: &TestStep) -> String {
 }
 
 fn extract_text(step: &TestStep) -> String {
-  if let Some(meta) = &step.metadata {
-    if let Some(text) = meta.get("bdd_text").and_then(|v| v.as_str()) {
-      return text.to_string();
-    }
+  if let Some(meta) = &step.metadata
+    && let Some(text) = meta.get("bdd_text").and_then(|v| v.as_str())
+  {
+    return text.to_string();
   }
   step.title.clone()
 }

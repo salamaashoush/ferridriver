@@ -622,10 +622,10 @@ async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> a
 /// extension, or top-level `import`/`export`). Plain scripts stay on the
 /// wrap-and-eval path where top-level `return` yields the result.
 fn needs_bundle(origin: &ScriptOrigin, source: &str) -> bool {
-  if let ScriptOrigin::File(p) = origin {
-    if ferridriver_script::is_typescript_path(p) {
-      return true;
-    }
+  if let ScriptOrigin::File(p) = origin
+    && ferridriver_script::is_typescript_path(p)
+  {
+    return true;
   }
   ferridriver_script::source_is_es_module(source)
 }

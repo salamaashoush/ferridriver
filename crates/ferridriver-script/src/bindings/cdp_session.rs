@@ -54,10 +54,10 @@ fn ensure_cdp_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<CdpPumpMsg> {
       // the pump (same policy as the page-event pump).
       let fut = async {
         let ret: rquickjs::Result<Value<'_>> = f.call((arg,));
-        if let Ok(v) = ret {
-          if let Some(promise) = v.as_promise() {
-            let _ = promise.clone().into_future::<Value<'_>>().await;
-          }
+        if let Ok(v) = ret
+          && let Some(promise) = v.as_promise()
+        {
+          let _ = promise.clone().into_future::<Value<'_>>().await;
         }
       };
       crate::bindings::fetch::bracket_net(

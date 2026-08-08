@@ -59,11 +59,11 @@ impl Drop for ChildHandle {
     if let Ok(mut g) = self.ipc.lock() {
       g.take();
     }
-    if let Ok(mut g) = self.child.lock() {
-      if let Some(mut c) = g.take() {
-        let _ = c.kill();
-        let _ = c.wait();
-      }
+    if let Ok(mut g) = self.child.lock()
+      && let Some(mut c) = g.take()
+    {
+      let _ = c.kill();
+      let _ = c.wait();
     }
   }
 }
@@ -486,11 +486,11 @@ impl WebKitBrowser {
       }
       tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    if let Ok(mut g) = self.handle.child.lock() {
-      if let Some(mut c) = g.take() {
-        let _ = c.kill();
-        let _ = c.wait();
-      }
+    if let Ok(mut g) = self.handle.child.lock()
+      && let Some(mut c) = g.take()
+    {
+      let _ = c.kill();
+      let _ = c.wait();
     }
     Ok(())
   }

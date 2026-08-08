@@ -709,10 +709,10 @@ impl Frame {
             30_000,
           ));
         }
-        if let Ok(Some(v)) = self.backend_eval_expr("document.readyState").await {
-          if v.as_str() == Some("complete") {
-            return Ok(());
-          }
+        if let Ok(Some(v)) = self.backend_eval_expr("document.readyState").await
+          && v.as_str() == Some("complete")
+        {
+          return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
       }

@@ -313,14 +313,14 @@ impl Request {
     let Some(body) = self.post_data() else {
       return Ok(None);
     };
-    if let Some(ct) = self.headers().get("content-type") {
-      if ct.contains("application/x-www-form-urlencoded") {
-        let mut entries = serde_json::Map::new();
-        for (k, v) in url_decode_form(&body) {
-          entries.insert(k, serde_json::Value::String(v));
-        }
-        return Ok(Some(serde_json::Value::Object(entries)));
+    if let Some(ct) = self.headers().get("content-type")
+      && ct.contains("application/x-www-form-urlencoded")
+    {
+      let mut entries = serde_json::Map::new();
+      for (k, v) in url_decode_form(&body) {
+        entries.insert(k, serde_json::Value::String(v));
       }
+      return Ok(Some(serde_json::Value::Object(entries)));
     }
     serde_json::from_str(&body)
       .map(Some)

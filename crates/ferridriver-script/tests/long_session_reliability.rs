@@ -76,7 +76,7 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
   let tmp = tempfile::tempdir().expect("tmp");
   let sandbox = Arc::new(PathSandbox::new(tmp.path()).expect("sandbox"));
 
-  let table = SessionTable::new(64, Some(Duration::from_secs(1800)));
+  let table = SessionTable::new(64, Some(Duration::from_mins(30)));
   let slot = table.acquire("mcp-1");
   let cfg = ScriptEngineConfig::default();
 

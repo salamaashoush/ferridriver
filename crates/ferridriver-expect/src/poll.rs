@@ -160,12 +160,12 @@ where
     None => None,
   };
   let result = poll_until(timeout, ctx, check).await;
-  if let Some(span) = span {
-    if let Some(page) = page {
-      page
-        .finish_expect_trace(span, result.as_ref().err().map(|e| e.message.clone()))
-        .await;
-    }
+  if let Some(span) = span
+    && let Some(page) = page
+  {
+    page
+      .finish_expect_trace(span, result.as_ref().err().map(|e| e.message.clone()))
+      .await;
   }
   result
 }

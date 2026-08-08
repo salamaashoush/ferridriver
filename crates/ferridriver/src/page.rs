@@ -184,16 +184,15 @@ impl Page {
           // viewer (snapshotter.ts::_annotateFrameHierarchy fires on
           // FrameAttached). Spawned: a bookkeeping listener must never
           // block on protocol round-trips.
-          if recorder.snapshots {
-            if let PageEvent::FrameAttached(info) = &event {
-              if let Some(parent_id) = info.parent_frame_id.clone() {
-                let inner = trace_inner.clone();
-                let child_id = info.frame_id.clone();
-                tokio::spawn(async move {
-                  let _ = crate::snapshotter::annotate_iframe(&inner, &child_id, &parent_id).await;
-                });
-              }
-            }
+          if recorder.snapshots
+            && let PageEvent::FrameAttached(info) = &event
+            && let Some(parent_id) = info.parent_frame_id.clone()
+          {
+            let inner = trace_inner.clone();
+            let child_id = info.frame_id.clone();
+            tokio::spawn(async move {
+              let _ = crate::snapshotter::annotate_iframe(&inner, &child_id, &parent_id).await;
+            });
           }
         }
         match event {
@@ -210,10 +209,10 @@ impl Page {
           PageEvent::FrameNavigated(info) => {
             // A main-frame navigation starts a new `since-navigation`
             // window for `consoleMessages()` / `pageErrors()`.
-            if info.parent_frame_id.is_none() {
-              if let Ok(mut o) = observed.lock() {
-                o.mark_navigation();
-              }
+            if info.parent_frame_id.is_none()
+              && let Ok(mut o) = observed.lock()
+            {
+              o.mark_navigation();
             }
             if let Ok(mut g) = cache.lock() {
               g.navigated(info);
@@ -268,23 +267,23 @@ impl Page {
       return Ok(());
     }
     if let Some(fid) = self.inner.peek_main_frame_id() {
-      if let Ok(mut g) = self.frame_cache.lock() {
-        if g.main_frame_id().is_none() {
-          g.attach(crate::backend::FrameInfo {
-            frame_id: fid,
-            parent_frame_id: None,
-            name: String::new(),
-            url: String::new(),
-          });
-        }
+      if let Ok(mut g) = self.frame_cache.lock()
+        && g.main_frame_id().is_none()
+      {
+        g.attach(crate::backend::FrameInfo {
+          frame_id: fid,
+          parent_frame_id: None,
+          name: String::new(),
+          url: String::new(),
+        });
       }
       return Ok(());
     }
     let infos = self.inner.get_frame_tree().await?;
-    if let Ok(mut g) = self.frame_cache.lock() {
-      if g.main_frame_id().is_none() {
-        g.seed(infos);
-      }
+    if let Ok(mut g) = self.frame_cache.lock()
+      && g.main_frame_id().is_none()
+    {
+      g.seed(infos);
     }
     Ok(())
   }
@@ -372,10 +371,10 @@ impl Page {
     span: Option<crate::trace::ActionSpan>,
   ) -> Option<crate::trace::ActionSpan> {
     let span = span?;
-    if let Some(name) = span.before_snapshot_name().map(str::to_string) {
-      if let Some(recorder) = self.active_trace_recorder() {
-        crate::snapshotter::capture_page_snapshot(&recorder, self, span.call_id(), &name).await;
-      }
+    if let Some(name) = span.before_snapshot_name().map(str::to_string)
+      && let Some(recorder) = self.active_trace_recorder()
+    {
+      crate::snapshotter::capture_page_snapshot(&recorder, self, span.call_id(), &name).await;
     }
     Some(span)
   }
@@ -400,12 +399,12 @@ impl Page {
   /// Finish a traced expect span: capture the after snapshot and record
   /// the assertion outcome.
   pub async fn finish_expect_trace(&self, mut span: crate::trace::ActionSpan, error: Option<String>) {
-    if span.snapshots_enabled() {
-      if let Some(recorder) = self.active_trace_recorder() {
-        let name = format!("after@{}", span.call_id());
-        crate::snapshotter::capture_page_snapshot(&recorder, self, span.call_id(), &name).await;
-        span.set_after_snapshot(name);
-      }
+    if span.snapshots_enabled()
+      && let Some(recorder) = self.active_trace_recorder()
+    {
+      let name = format!("after@{}", span.call_id());
+      crate::snapshotter::capture_page_snapshot(&recorder, self, span.call_id(), &name).await;
+      span.set_after_snapshot(name);
     }
     span.finish_message(error);
   }
@@ -479,12 +478,12 @@ impl Page {
     mut span: crate::trace::ActionSpan,
     error: Option<&crate::error::FerriError>,
   ) {
-    if span.snapshots_enabled() {
-      if let Some(recorder) = self.active_trace_recorder() {
-        let name = format!("after@{}", span.call_id());
-        crate::snapshotter::capture_page_snapshot(&recorder, self, span.call_id(), &name).await;
-        span.set_after_snapshot(name);
-      }
+    if span.snapshots_enabled()
+      && let Some(recorder) = self.active_trace_recorder()
+    {
+      let name = format!("after@{}", span.call_id());
+      crate::snapshotter::capture_page_snapshot(&recorder, self, span.call_id(), &name).await;
+      span.set_after_snapshot(name);
     }
     span.finish(error);
   }
@@ -523,10 +522,10 @@ impl Page {
         out.push((id, false));
       }
     }
-    if out.is_empty() {
-      if let Some(fid) = self.inner.peek_main_frame_id() {
-        out.push((std::sync::Arc::from(fid), true));
-      }
+    if out.is_empty()
+      && let Some(fid) = self.inner.peek_main_frame_id()
+    {
+      out.push((std::sync::Arc::from(fid), true));
     }
     out
   }
@@ -1844,10 +1843,10 @@ impl Page {
       _ => capture.await?,
     };
     if let Some(ref path) = opts.path {
-      if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-          let _ = tokio::fs::create_dir_all(parent).await;
-        }
+      if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+      {
+        let _ = tokio::fs::create_dir_all(parent).await;
       }
       tokio::fs::write(path, &bytes)
         .await
@@ -1889,10 +1888,10 @@ impl Page {
     let path = opts.path.clone();
     let bytes = self.inner.pdf(opts).await?;
     if let Some(path) = path {
-      if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-          tokio::fs::create_dir_all(parent).await?;
-        }
+      if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+      {
+        tokio::fs::create_dir_all(parent).await?;
       }
       tokio::fs::write(&path, &bytes).await?;
     }
@@ -2600,15 +2599,15 @@ impl Page {
       return Frame::new(Arc::clone(self), id);
     }
     if let Some(fid) = self.inner.peek_main_frame_id() {
-      if let Ok(mut g) = self.frame_cache.lock() {
-        if g.main_frame_id().is_none() {
-          g.attach(crate::backend::FrameInfo {
-            frame_id: fid.clone(),
-            parent_frame_id: None,
-            name: String::new(),
-            url: String::new(),
-          });
-        }
+      if let Ok(mut g) = self.frame_cache.lock()
+        && g.main_frame_id().is_none()
+      {
+        g.attach(crate::backend::FrameInfo {
+          frame_id: fid.clone(),
+          parent_frame_id: None,
+          name: String::new(),
+          url: String::new(),
+        });
       }
       return Frame::new(Arc::clone(self), Arc::from(fid));
     }
@@ -2640,15 +2639,15 @@ impl Page {
     self.with_frame_cache(|c| {
       for id in c.live_ids() {
         let Some(rec) = c.record(&id) else { continue };
-        if let Some(name) = &sel.name {
-          if rec.info.name != *name {
-            continue;
-          }
+        if let Some(name) = &sel.name
+          && rec.info.name != *name
+        {
+          continue;
         }
-        if let Some(url) = &sel.url {
-          if rec.info.url != *url {
-            continue;
-          }
+        if let Some(url) = &sel.url
+          && rec.info.url != *url
+        {
+          continue;
         }
         return Some(Frame::new(Arc::clone(self), id));
       }

@@ -333,10 +333,10 @@ impl WebKitPage {
     // initial document. Without this, `navigator.userAgent`,
     // `Intl.DateTimeFormat().resolvedOptions().timeZone`, etc. stay at
     // their default values for the lifetime of about:blank.
-    if let Some(ctx_id) = context_id.as_deref() {
-      if let Some(opts) = browser.context_options_for(ctx_id) {
-        apply_pre_page_overrides(&target, &proxy, &opts).await;
-      }
+    if let Some(ctx_id) = context_id.as_deref()
+      && let Some(opts) = browser.context_options_for(ctx_id)
+    {
+      apply_pre_page_overrides(&target, &proxy, &opts).await;
     }
     // File-chooser interception is enabled lazily through
     // [`Self::enable_file_chooser_intercept`] when a listener attaches,
@@ -823,10 +823,10 @@ impl WebKitPage {
     .map_err(|_| FerriError::timeout(format!("navigating to {url}"), timeout_ms))?
     .map_err(conn_err)?;
     let parsed: NavigateResult = serde_json::from_value(nav).unwrap_or_default();
-    if let Some(err) = parsed.error_text {
-      if !err.is_empty() {
-        return Err(FerriError::backend(format!("webkit navigate: {err}")));
-      }
+    if let Some(err) = parsed.error_text
+      && !err.is_empty()
+    {
+      return Err(FerriError::backend(format!("webkit navigate: {err}")));
     }
     if parsed.loader_id.is_some() {
       self.wait_for_lifecycle(lifecycle, timeout_ms).await?;
@@ -857,12 +857,11 @@ impl WebKitPage {
         if let Some(err) = signals.provisional_failure() {
           return Err(FerriError::backend(format!("webkit navigate: {err}")));
         }
-        if let Some((event_request_id, err)) = signals.failure() {
-          if let Some(req) = nav_slot.get() {
-            if event_request_id == req.id() {
-              return Err(FerriError::backend(format!("webkit navigate: {err}")));
-            }
-          }
+        if let Some((event_request_id, err)) = signals.failure()
+          && let Some(req) = nav_slot.get()
+          && event_request_id == req.id()
+        {
+          return Err(FerriError::backend(format!("webkit navigate: {err}")));
         }
         signals.notify.notified().await;
       }

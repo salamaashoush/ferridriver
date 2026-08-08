@@ -1622,10 +1622,10 @@ impl Locator {
       el.screenshot(format).await
     })?;
     if let Some(ref path) = opts.path {
-      if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-          let _ = tokio::fs::create_dir_all(parent).await;
-        }
+      if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+      {
+        let _ = tokio::fs::create_dir_all(parent).await;
       }
       tokio::fs::write(path, &bytes)
         .await

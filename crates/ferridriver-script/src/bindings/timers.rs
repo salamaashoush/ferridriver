@@ -32,10 +32,10 @@ pub struct Timeout {
 /// a live timer handle — so the argument is taken as a raw `Value` and
 /// only acted on when it is actually a [`Timeout`].
 fn clear_timeout(value: Rest<Value<'_>>) {
-  if let Some(v) = value.0.first() {
-    if let Ok(timeout) = Class::<Timeout>::from_value(v) {
-      timeout.borrow().abort.notify_one();
-    }
+  if let Some(v) = value.0.first()
+    && let Ok(timeout) = Class::<Timeout>::from_value(v)
+  {
+    timeout.borrow().abort.notify_one();
   }
 }
 

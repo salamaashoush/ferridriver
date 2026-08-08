@@ -179,15 +179,15 @@ pub fn collect_inputs(entry_paths: &[PathBuf], source_map_json: Option<&str>, cw
   for e in entry_paths {
     push(e.clone());
   }
-  if let Some(json) = source_map_json {
-    if let Ok(sm) = sourcemap::SourceMap::from_slice(json.as_bytes()) {
-      for src in sm.sources() {
-        // rolldown emits synthetic sources (e.g. `\0` virtual modules)
-        // that don't map to real files — skip anything missing.
-        let path = resolve_source(src, cwd);
-        if path.is_file() {
-          push(path);
-        }
+  if let Some(json) = source_map_json
+    && let Ok(sm) = sourcemap::SourceMap::from_slice(json.as_bytes())
+  {
+    for src in sm.sources() {
+      // rolldown emits synthetic sources (e.g. `\0` virtual modules)
+      // that don't map to real files — skip anything missing.
+      let path = resolve_source(src, cwd);
+      if path.is_file() {
+        push(path);
       }
     }
   }

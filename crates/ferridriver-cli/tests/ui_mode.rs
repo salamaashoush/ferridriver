@@ -69,7 +69,7 @@ fn wait_for_url(stdout: std::process::ChildStdout) -> String {
       let _ = tx.send(line);
     }
   });
-  let deadline = Instant::now() + Duration::from_secs(120);
+  let deadline = Instant::now() + Duration::from_mins(2);
   while Instant::now() < deadline {
     let Ok(line) = rx.recv_timeout(Duration::from_secs(1)) else {
       continue;
@@ -89,7 +89,7 @@ type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsSt
 /// Next JSON text frame from the websocket (2-minute cap per frame).
 async fn next_json(ws: &mut WsStream) -> serde_json::Value {
   loop {
-    let frame = tokio::time::timeout(Duration::from_secs(120), ws.next())
+    let frame = tokio::time::timeout(Duration::from_mins(2), ws.next())
       .await
       .expect("websocket frame timeout")
       .expect("websocket closed")

@@ -661,10 +661,10 @@ impl BrowserState {
 
     // Inject --window-size from viewport config so the browser window matches the
     // viewport dimensions. Skip if the user already supplied --window-size.
-    if !all_extra.iter().any(|a| a.starts_with("--window-size")) {
-      if let Some(ref vp) = self.default_viewport {
-        all_extra.push(format!("--window-size={},{}", vp.width, vp.height));
-      }
+    if !all_extra.iter().any(|a| a.starts_with("--window-size"))
+      && let Some(ref vp) = self.default_viewport
+    {
+      all_extra.push(format!("--window-size={},{}", vp.width, vp.height));
     }
 
     // Use resolved mode if available, otherwise fall back to default connect_mode.
@@ -1070,10 +1070,10 @@ impl BrowserState {
   pub async fn remove_context(&mut self, context: &str) {
     let key = SessionKey::parse(context);
     if let Some(inst) = self.instances.get_mut(&*key.instance) {
-      if let Ok(ctx) = inst.context(&key.context) {
-        if let Some(ref ctx_id) = ctx.cdp_context_id {
-          let _ = inst.browser.dispose_context(ctx_id).await;
-        }
+      if let Ok(ctx) = inst.context(&key.context)
+        && let Some(ref ctx_id) = ctx.cdp_context_id
+      {
+        let _ = inst.browser.dispose_context(ctx_id).await;
       }
       inst.remove_context(&key.context);
     }
@@ -1155,10 +1155,10 @@ impl BrowserState {
   /// Store a new ref map for the given context (atomic, no `&mut self` needed).
   pub fn set_ref_map(&self, context: &str, ref_map: HashMap<String, i64>) {
     let key = SessionKey::parse(context);
-    if let Some(inst) = self.instances.get(&*key.instance) {
-      if let Some(ctx) = inst.contexts.get(&*key.context) {
-        ctx.ref_map.store(std::sync::Arc::new(ref_map));
-      }
+    if let Some(inst) = self.instances.get(&*key.instance)
+      && let Some(ctx) = inst.contexts.get(&*key.context)
+    {
+      ctx.ref_map.store(std::sync::Arc::new(ref_map));
     }
   }
 
@@ -1585,17 +1585,17 @@ const CHROMIUM_SWITCHES: &[&str] = &[
 pub fn resolve_chromium(headless: bool) -> String {
   if headless {
     // Explicit headless shell path
-    if let Ok(p) = std::env::var("CHROMIUM_HEADLESS_SHELL_PATH") {
-      if std::path::Path::new(&p).exists() {
-        return p;
-      }
+    if let Ok(p) = std::env::var("CHROMIUM_HEADLESS_SHELL_PATH")
+      && std::path::Path::new(&p).exists()
+    {
+      return p;
     }
 
     // Explicit chrome path -- user chose a specific binary, respect it
-    if let Ok(p) = std::env::var("CHROMIUM_PATH") {
-      if std::path::Path::new(&p).exists() {
-        return p;
-      }
+    if let Ok(p) = std::env::var("CHROMIUM_PATH")
+      && std::path::Path::new(&p).exists()
+    {
+      return p;
     }
 
     // Auto-detect headless shell (Playwright cache, ferridriver cache)
@@ -1630,10 +1630,10 @@ pub fn detect_chromium_headless_shell() -> Option<String> {
 /// Detect Chrome/Chromium binary on the system.
 #[must_use]
 pub fn detect_chromium() -> String {
-  if let Ok(p) = std::env::var("CHROMIUM_PATH") {
-    if std::path::Path::new(&p).exists() {
-      return p;
-    }
+  if let Ok(p) = std::env::var("CHROMIUM_PATH")
+    && std::path::Path::new(&p).exists()
+  {
+    return p;
   }
 
   // Check for Playwright's bundled Chrome first (most up-to-date, best tested).
@@ -1646,24 +1646,24 @@ pub fn detect_chromium() -> String {
       .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.cache")))
       .map(|c| std::path::PathBuf::from(c).join("ms-playwright"))
   };
-  if let Some(pw_cache) = pw_cache {
-    if pw_cache.is_dir() {
-      // Find the latest chromium-* directory
-      if let Ok(entries) = std::fs::read_dir(&pw_cache) {
-        let mut candidates: Vec<_> = entries
-          .filter_map(std::result::Result::ok)
-          .filter(|e| e.file_name().to_string_lossy().starts_with("chromium-"))
-          .collect();
-        candidates.sort_by_key(|b| std::cmp::Reverse(b.file_name())); // newest first
-        for entry in candidates {
-          let chrome = entry.path().join("chrome-linux64/chrome");
-          if chrome.exists() {
-            return chrome.to_string_lossy().to_string();
-          }
-          let chrome_mac = entry.path().join("chrome-mac/Chromium.app/Contents/MacOS/Chromium");
-          if chrome_mac.exists() {
-            return chrome_mac.to_string_lossy().to_string();
-          }
+  if let Some(pw_cache) = pw_cache
+    && pw_cache.is_dir()
+  {
+    // Find the latest chromium-* directory
+    if let Ok(entries) = std::fs::read_dir(&pw_cache) {
+      let mut candidates: Vec<_> = entries
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("chromium-"))
+        .collect();
+      candidates.sort_by_key(|b| std::cmp::Reverse(b.file_name())); // newest first
+      for entry in candidates {
+        let chrome = entry.path().join("chrome-linux64/chrome");
+        if chrome.exists() {
+          return chrome.to_string_lossy().to_string();
+        }
+        let chrome_mac = entry.path().join("chrome-mac/Chromium.app/Contents/MacOS/Chromium");
+        if chrome_mac.exists() {
+          return chrome_mac.to_string_lossy().to_string();
         }
       }
     }
@@ -1753,10 +1753,10 @@ pub fn detect_chromium() -> String {
 /// Returns an error if no Firefox binary can be found.
 pub fn detect_firefox() -> Result<String> {
   // 1. Env var (highest priority)
-  if let Ok(p) = std::env::var("FIREFOX_PATH") {
-    if std::path::Path::new(&p).exists() {
-      return Ok(p);
-    }
+  if let Ok(p) = std::env::var("FIREFOX_PATH")
+    && std::path::Path::new(&p).exists()
+  {
+    return Ok(p);
   }
 
   // 2. ferridriver's own cache
@@ -1827,17 +1827,17 @@ pub fn detect_firefox() -> Result<String> {
 
   // 5. which/where fallback
   let cmd = if cfg!(windows) { "where" } else { "which" };
-  if let Ok(output) = std::process::Command::new(cmd).arg("firefox").output() {
-    if output.status.success() {
-      let p = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-      if !p.is_empty() && std::path::Path::new(&p).exists() {
-        return Ok(p);
-      }
+  if let Ok(output) = std::process::Command::new(cmd).arg("firefox").output()
+    && output.status.success()
+  {
+    let p = String::from_utf8_lossy(&output.stdout)
+      .lines()
+      .next()
+      .unwrap_or("")
+      .trim()
+      .to_string();
+    if !p.is_empty() && std::path::Path::new(&p).exists() {
+      return Ok(p);
     }
   }
 
@@ -1912,13 +1912,12 @@ fn find_playwright_headless_shell() -> Option<String> {
   if let Ok(entries) = std::fs::read_dir(&cache_dir) {
     for entry in entries.flatten() {
       let name = entry.file_name().to_string_lossy().to_string();
-      if let Some(rev_str) = name.strip_prefix(prefix) {
-        if let Ok(rev) = rev_str.parse::<u32>() {
-          if rev > best_rev {
-            best_rev = rev;
-            best_name = name;
-          }
-        }
+      if let Some(rev_str) = name.strip_prefix(prefix)
+        && let Ok(rev) = rev_str.parse::<u32>()
+        && rev > best_rev
+      {
+        best_rev = rev;
+        best_name = name;
       }
     }
   }
@@ -1975,13 +1974,12 @@ fn find_playwright_chrome() -> Option<String> {
   if let Ok(entries) = std::fs::read_dir(&cache_dir) {
     for entry in entries.flatten() {
       let name = entry.file_name().to_string_lossy().to_string();
-      if let Some(rev_str) = name.strip_prefix(prefix) {
-        if let Ok(rev) = rev_str.parse::<u32>() {
-          if rev > best_rev {
-            best_rev = rev;
-            best_name = name;
-          }
-        }
+      if let Some(rev_str) = name.strip_prefix(prefix)
+        && let Ok(rev) = rev_str.parse::<u32>()
+        && rev > best_rev
+      {
+        best_rev = rev;
+        best_name = name;
       }
     }
   }

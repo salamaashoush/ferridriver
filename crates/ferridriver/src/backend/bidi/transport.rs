@@ -226,7 +226,7 @@ impl BidiTransport {
     }
 
     // Await response with timeout
-    match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+    match tokio::time::timeout(std::time::Duration::from_mins(1), rx).await {
       Ok(Ok(result)) => result.map_err(|e| FerriError::protocol(method, e.to_string())),
       Ok(Err(_)) => Err(FerriError::backend("BiDi command response channel dropped")),
       Err(_) => {

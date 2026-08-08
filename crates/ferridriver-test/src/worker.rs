@@ -348,17 +348,17 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
     if let Some(v) = opts.get("ignoreHTTPSErrors").and_then(|v| v.as_bool()) {
       ctx_config.ignore_https_errors = v;
     }
-    if let Some(geo) = opts.get("geolocation").and_then(|v| v.as_object()) {
-      if let (Some(lat), Some(lon)) = (
+    if let Some(geo) = opts.get("geolocation").and_then(|v| v.as_object())
+      && let (Some(lat), Some(lon)) = (
         geo.get("latitude").and_then(|v| v.as_f64()),
         geo.get("longitude").and_then(|v| v.as_f64()),
-      ) {
-        ctx_config.geolocation = Some(crate::config::GeolocationConfig {
-          latitude: lat,
-          longitude: lon,
-          accuracy: geo.get("accuracy").and_then(|v| v.as_f64()),
-        });
-      }
+      )
+    {
+      ctx_config.geolocation = Some(crate::config::GeolocationConfig {
+        latitude: lat,
+        longitude: lon,
+        accuracy: geo.get("accuracy").and_then(|v| v.as_f64()),
+      });
     }
     if let Some(arr) = opts.get("permissions").and_then(|v| v.as_array()) {
       let perms: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
@@ -375,17 +375,17 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
         ctx_config.extra_http_headers = headers;
       }
     }
-    if let Some(creds) = opts.get("httpCredentials").and_then(|v| v.as_object()) {
-      if let (Some(user), Some(pass)) = (
+    if let Some(creds) = opts.get("httpCredentials").and_then(|v| v.as_object())
+      && let (Some(user), Some(pass)) = (
         creds.get("username").and_then(|v| v.as_str()),
         creds.get("password").and_then(|v| v.as_str()),
-      ) {
-        ctx_config.http_credentials = Some(crate::config::HttpCredentialsConfig {
-          username: user.to_string(),
-          password: pass.to_string(),
-          origin: creds.get("origin").and_then(|v| v.as_str()).map(String::from),
-        });
-      }
+      )
+    {
+      ctx_config.http_credentials = Some(crate::config::HttpCredentialsConfig {
+        username: user.to_string(),
+        password: pass.to_string(),
+        origin: creds.get("origin").and_then(|v| v.as_str()).map(String::from),
+      });
     }
   }
 
@@ -1433,8 +1433,8 @@ impl Worker {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-      if let Some(composite) = composite {
-        if let Some(mut span) = ferridriver::trace::begin_custom_action(
+      if let Some(composite) = composite
+        && let Some(mut span) = ferridriver::trace::begin_custom_action(
           &composite,
           ferridriver::trace::CustomAction {
             class: "Test",
@@ -1445,10 +1445,10 @@ impl Worker {
             backdate_ms: 0.0,
             stack: Vec::new(),
           },
-        ) {
-          span.attach("screenshot-on-failure", "image/png", png.clone());
-          span.finish_message(None);
-        }
+        )
+      {
+        span.attach("screenshot-on-failure", "image/png", png.clone());
+        span.finish_message(None);
       }
     }
     // Stop the per-test trace while the context is still alive: export
@@ -1585,21 +1585,21 @@ impl Worker {
 
     // Read runtime modifiers set by test body (via NAPI TestInfo.skip/fail/slow/setTimeout).
     // These are injected into the fixture pool by the NAPI test_fn closure.
-    if let Some(ref pool) = test_pool {
-      if let Ok(modifiers) = pool.get::<crate::TestModifiers>("__test_modifiers").await {
-        if modifiers.expected_failure.load(std::sync::atomic::Ordering::Relaxed) {
-          expected_status = ExpectedStatus::Fail;
-        }
-        // Runtime slow: annotate via test_info for reporters.
-        if modifiers.slow.load(std::sync::atomic::Ordering::Relaxed) {
-          test_info.annotate("slow", "test.slow() called at runtime").await;
-        }
-        // timeout_override: already elapsed for this attempt, but log for debugging.
-        if let Ok(guard) = modifiers.timeout_override.lock() {
-          if let Some(ms) = *guard {
-            tracing::debug!(target: "ferridriver::worker", "test.setTimeout({ms}ms) called at runtime");
-          }
-        }
+    if let Some(ref pool) = test_pool
+      && let Ok(modifiers) = pool.get::<crate::TestModifiers>("__test_modifiers").await
+    {
+      if modifiers.expected_failure.load(std::sync::atomic::Ordering::Relaxed) {
+        expected_status = ExpectedStatus::Fail;
+      }
+      // Runtime slow: annotate via test_info for reporters.
+      if modifiers.slow.load(std::sync::atomic::Ordering::Relaxed) {
+        test_info.annotate("slow", "test.slow() called at runtime").await;
+      }
+      // timeout_override: already elapsed for this attempt, but log for debugging.
+      if let Ok(guard) = modifiers.timeout_override.lock()
+        && let Some(ms) = *guard
+      {
+        tracing::debug!(target: "ferridriver::worker", "test.setTimeout({ms}ms) called at runtime");
       }
     }
 

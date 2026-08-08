@@ -451,12 +451,11 @@ pub fn extract_image_b64(resp: &Value) -> String {
 pub fn extract_script_payload(resp: &Value) -> Option<Value> {
   let contents = resp["result"]["content"].as_array()?;
   for c in contents {
-    if let Some(text) = c["text"].as_str() {
-      if let Ok(parsed) = serde_json::from_str::<Value>(text) {
-        if parsed.get("status").is_some() {
-          return Some(parsed);
-        }
-      }
+    if let Some(text) = c["text"].as_str()
+      && let Ok(parsed) = serde_json::from_str::<Value>(text)
+      && parsed.get("status").is_some()
+    {
+      return Some(parsed);
     }
   }
   None

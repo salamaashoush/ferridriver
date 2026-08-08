@@ -37,18 +37,18 @@ fn time_from_js<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Cloc
   if let Some(s) = value.as_string() {
     return Ok(ClockTime::Text(s.to_string()?));
   }
-  if let Some(obj) = value.as_object() {
-    if let Ok(get_time) = obj.get::<_, rquickjs::Function<'js>>("getTime") {
-      let ms: f64 = get_time.call((rquickjs::function::This(obj.clone()),))?;
-      if ms.is_finite() {
-        return Ok(ClockTime::Millis(ms));
-      }
-      return Err(crate::bindings::convert::throw_named(
-        ctx,
-        "Error",
-        "Invalid date".to_string(),
-      ));
+  if let Some(obj) = value.as_object()
+    && let Ok(get_time) = obj.get::<_, rquickjs::Function<'js>>("getTime")
+  {
+    let ms: f64 = get_time.call((rquickjs::function::This(obj.clone()),))?;
+    if ms.is_finite() {
+      return Ok(ClockTime::Millis(ms));
     }
+    return Err(crate::bindings::convert::throw_named(
+      ctx,
+      "Error",
+      "Invalid date".to_string(),
+    ));
   }
   Err(crate::bindings::convert::throw_named(
     ctx,

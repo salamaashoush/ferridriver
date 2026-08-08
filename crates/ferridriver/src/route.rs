@@ -329,7 +329,7 @@ fn take_next_handler(routes: &mut Vec<RegisteredRoute>, url: &str, tried: &[usiz
   let id = routes[idx].handler_id();
   let budget = routes[idx].remaining.clone();
   let exhausted = routes[idx].remaining.as_ref().is_some_and(|c| {
-    c.fetch_update(
+    c.try_update(
       std::sync::atomic::Ordering::AcqRel,
       std::sync::atomic::Ordering::Acquire,
       |n| n.checked_sub(1),

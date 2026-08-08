@@ -205,10 +205,10 @@ pub async fn run_bdd_with(
     config.features = feature_patterns;
   }
 
-  if let Ok(tags) = std::env::var("FERRIDRIVER_TAGS") {
-    if config.tags.is_none() {
-      config.tags = Some(tags);
-    }
+  if let Ok(tags) = std::env::var("FERRIDRIVER_TAGS")
+    && config.tags.is_none()
+  {
+    config.tags = Some(tags);
   }
 
   // BDD-specific CLI overrides.

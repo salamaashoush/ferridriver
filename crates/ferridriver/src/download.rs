@@ -205,10 +205,10 @@ impl Download {
   /// anything calls `path()` on a download dispatched via
   /// `page.on("download", ...)`.
   pub fn report_finished(&self, final_path: Option<PathBuf>, error: Option<String>) {
-    if let Some(p) = final_path {
-      if let Ok(mut g) = self.inner.local_path.lock() {
-        *g = p;
-      }
+    if let Some(p) = final_path
+      && let Ok(mut g) = self.inner.local_path.lock()
+    {
+      *g = p;
     }
     let path = self
       .inner
@@ -278,10 +278,10 @@ impl Download {
   /// filesystem error if the copy fails.
   pub async fn save_as(&self, target: &Path) -> Result<()> {
     let src = self.path().await?;
-    if let Some(parent) = target.parent() {
-      if !parent.as_os_str().is_empty() {
-        tokio::fs::create_dir_all(parent).await?;
-      }
+    if let Some(parent) = target.parent()
+      && !parent.as_os_str().is_empty()
+    {
+      tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::copy(&src, target).await?;
     Ok(())

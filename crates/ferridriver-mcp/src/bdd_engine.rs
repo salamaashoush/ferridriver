@@ -131,30 +131,32 @@ impl BddEngine {
     cwd: &Path,
   ) -> anyhow::Result<Arc<JsBddSession>> {
     // Fast path: same step-set, warm engine, unchanged sources -> no bundle.
-    if let Some(engine) = &self.engine {
-      if self.key == key && !self.sources_changed(globs, extensions, cwd) {
-        return Ok(Arc::clone(engine));
-      }
+    if let Some(engine) = &self.engine
+      && self.key == key
+      && !self.sources_changed(globs, extensions, cwd)
+    {
+      return Ok(Arc::clone(engine));
     }
 
     // Bundle (disk-cached) and decide reuse-vs-rebuild by content hash.
     let bundle = js::bundle_steps_with(globs, extensions, cwd).await?;
     let ch = content_hash(&bundle.bytecode);
-    if let Some(engine) = &self.engine {
-      if self.key == key && self.content_hash == ch {
-        // Same step-set + identical compiled output (e.g. a `touch`):
-        // refresh recorded mtimes so the fast path holds next time.
-        let engine = Arc::clone(engine);
-        self.record_inputs(&bundle, globs, extensions, cwd);
-        return Ok(engine);
-      }
+    if let Some(engine) = &self.engine
+      && self.key == key
+      && self.content_hash == ch
+    {
+      // Same step-set + identical compiled output (e.g. a `touch`):
+      // refresh recorded mtimes so the fast path holds next time.
+      let engine = Arc::clone(engine);
+      self.record_inputs(&bundle, globs, extensions, cwd);
+      return Ok(engine);
     }
 
     // Rebuild. Tear down the old engine's suite (AfterAll) first.
-    if let Some(old) = self.engine.take() {
-      if let Err(e) = old.after_all().await {
-        tracing::warn!(error = %e, "run_bdd: AfterAll on reload failed");
-      }
+    if let Some(old) = self.engine.take()
+      && let Err(e) = old.after_all().await
+    {
+      tracing::warn!(error = %e, "run_bdd: AfterAll on reload failed");
     }
     let session = Arc::new(JsBddSession::load(Arc::clone(&bundle), cwd, world_params).await?);
     self.key = key;

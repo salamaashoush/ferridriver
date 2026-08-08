@@ -119,10 +119,10 @@ async fn wait_for_text(
         timeout_ms,
       ));
     }
-    if let Ok(Some(content)) = loc.text_content().await {
-      if content.contains(text) {
-        return Ok(());
-      }
+    if let Ok(Some(content)) = loc.text_content().await
+      && content.contains(text)
+    {
+      return Ok(());
     }
     tokio::time::sleep(std::time::Duration::from_millis(16)).await;
   }

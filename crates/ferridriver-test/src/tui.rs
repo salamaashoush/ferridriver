@@ -390,18 +390,18 @@ impl WatchTui {
       }
 
       // ── Error ──
-      if entry.status == EntryStatus::Failed {
-        if let Some(ref err) = entry.error {
-          for err_line in err.lines().take(3) {
-            if !err_line.is_empty() {
-              lines.push(Line::from(vec![
-                Span::raw("      "),
-                Span::styled(
-                  truncate_str(err_line, width.saturating_sub(8)),
-                  Style::default().fg(CLR_FAIL).add_modifier(Modifier::DIM),
-                ),
-              ]));
-            }
+      if entry.status == EntryStatus::Failed
+        && let Some(ref err) = entry.error
+      {
+        for err_line in err.lines().take(3) {
+          if !err_line.is_empty() {
+            lines.push(Line::from(vec![
+              Span::raw("      "),
+              Span::styled(
+                truncate_str(err_line, width.saturating_sub(8)),
+                Style::default().fg(CLR_FAIL).add_modifier(Modifier::DIM),
+              ),
+            ]));
           }
         }
       }

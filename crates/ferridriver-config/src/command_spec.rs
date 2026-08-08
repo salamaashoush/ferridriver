@@ -224,13 +224,15 @@ fn subst(tpl: &str, mut repl: impl FnMut(&str) -> Result<String, String>) -> Res
   let b = tpl.as_bytes();
   let mut i = 0;
   while i < b.len() {
-    if b[i] == b'$' && i + 1 < b.len() && b[i + 1] == b'{' {
-      if let Some(end_rel) = tpl[i + 2..].find('}') {
-        let name = &tpl[i + 2..i + 2 + end_rel];
-        out.push_str(&repl(name)?);
-        i = i + 2 + end_rel + 1;
-        continue;
-      }
+    if b[i] == b'$'
+      && i + 1 < b.len()
+      && b[i + 1] == b'{'
+      && let Some(end_rel) = tpl[i + 2..].find('}')
+    {
+      let name = &tpl[i + 2..i + 2 + end_rel];
+      out.push_str(&repl(name)?);
+      i = i + 2 + end_rel + 1;
+      continue;
     }
     // push one UTF-8 char from i
     let ch = tpl[i..].chars().next().unwrap_or('\u{FFFD}');

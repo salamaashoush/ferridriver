@@ -21,12 +21,12 @@ pub fn run(c: &mut McpClient) {
 fn payload(resp: &Value) -> Value {
   let contents = resp["result"]["content"].as_array().expect("content array");
   for c in contents {
-    if let Some(t) = c["text"].as_str() {
-      if let Ok(v) = serde_json::from_str::<Value>(t) {
-        if v.get("status").is_some() && v.get("scenarios").is_some() {
-          return v;
-        }
-      }
+    if let Some(t) = c["text"].as_str()
+      && let Ok(v) = serde_json::from_str::<Value>(t)
+      && v.get("status").is_some()
+      && v.get("scenarios").is_some()
+    {
+      return v;
     }
   }
   panic!("no run_bdd payload in {resp}");

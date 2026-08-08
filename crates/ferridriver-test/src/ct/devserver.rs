@@ -194,12 +194,12 @@ fn extract_url(line: &str) -> Option<String> {
   }
 
   // Trunk-specific: "server listening at 0.0.0.0:8080"
-  if trimmed.contains("listening at") {
-    if let Some(addr_start) = trimmed.rfind("at ") {
-      let addr = trimmed[addr_start + 3..].trim().replace("0.0.0.0", "127.0.0.1");
-      if addr.contains(':') {
-        return Some(format!("http://{addr}"));
-      }
+  if trimmed.contains("listening at")
+    && let Some(addr_start) = trimmed.rfind("at ")
+  {
+    let addr = trimmed[addr_start + 3..].trim().replace("0.0.0.0", "127.0.0.1");
+    if addr.contains(':') {
+      return Some(format!("http://{addr}"));
     }
   }
 

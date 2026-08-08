@@ -75,10 +75,10 @@ fn ensure_ws_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<WsPumpMsg> {
           },
           WsPumpEvent::Close(code, reason) => f.call((code, reason)),
         };
-        if let Ok(v) = ret {
-          if let Some(promise) = v.as_promise() {
-            let _ = promise.clone().into_future::<Value<'_>>().await;
-          }
+        if let Ok(v) = ret
+          && let Some(promise) = v.as_promise()
+        {
+          let _ = promise.clone().into_future::<Value<'_>>().await;
         }
       };
       crate::bindings::fetch::bracket_net(
@@ -145,15 +145,15 @@ fn ws_message_from_js(value: &Value<'_>) -> WsMessage {
     return WsMessage::Text(s.to_string().unwrap_or_default());
   }
   if let Some(obj) = value.as_object() {
-    if let Some(buf) = rquickjs::ArrayBuffer::from_object(obj.clone()) {
-      if let Some(bytes) = buf.as_bytes() {
-        return WsMessage::Binary(bytes.to_vec());
-      }
+    if let Some(buf) = rquickjs::ArrayBuffer::from_object(obj.clone())
+      && let Some(bytes) = buf.as_bytes()
+    {
+      return WsMessage::Binary(bytes.to_vec());
     }
-    if let Ok(ta) = rquickjs::TypedArray::<u8>::from_object(obj.clone()) {
-      if let Some(bytes) = ta.as_bytes() {
-        return WsMessage::Binary(bytes.to_vec());
-      }
+    if let Ok(ta) = rquickjs::TypedArray::<u8>::from_object(obj.clone())
+      && let Some(bytes) = ta.as_bytes()
+    {
+      return WsMessage::Binary(bytes.to_vec());
     }
   }
   WsMessage::Text(String::new())

@@ -303,11 +303,11 @@ impl Video {
   pub async fn save_as(&self, dest: impl AsRef<Path>) -> crate::error::Result<()> {
     let source = self.path().await?;
     let dest = dest.as_ref().to_path_buf();
-    if let Some(parent) = dest.parent() {
-      if !parent.as_os_str().is_empty() {
-        std::fs::create_dir_all(parent)
-          .map_err(|e| FerriError::Backend(format!("video.saveAs create parent {}: {e}", parent.display())))?;
-      }
+    if let Some(parent) = dest.parent()
+      && !parent.as_os_str().is_empty()
+    {
+      std::fs::create_dir_all(parent)
+        .map_err(|e| FerriError::Backend(format!("video.saveAs create parent {}: {e}", parent.display())))?;
     }
     tokio::task::spawn_blocking(move || std::fs::copy(&source, &dest).map(|_| ()))
       .await

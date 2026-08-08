@@ -183,7 +183,7 @@ impl BrowserJs {
   /// and removes the registry entry for whatever this browser is bound under.
   /// A no-op if never bound.
   #[qjs(rename = "unbind")]
-  #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // QuickJS method must be async to return a JS Promise
+  #[allow(clippy::unused_async)] // QuickJS method must be async to return a JS Promise
   pub async fn unbind(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     ferridriver_session::unbind_browser(&self.inner)
       .map_err(|e| crate::bindings::convert::throw_named(&ctx, "Error", e.to_string()))?;

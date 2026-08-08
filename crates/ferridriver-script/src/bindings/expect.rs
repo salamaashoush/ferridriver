@@ -1117,7 +1117,7 @@ impl ExpectJs {
     // Playwright treats timeout 0 as "no deadline"; the retry loop needs
     // a finite instant, so unbounded is modeled as a year.
     let timeout = if timeout_ms == 0 {
-      Duration::from_secs(60 * 60 * 24 * 365)
+      Duration::from_hours(8760)
     } else {
       Duration::from_millis(timeout_ms)
     };

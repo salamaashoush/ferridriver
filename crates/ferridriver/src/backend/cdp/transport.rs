@@ -196,10 +196,10 @@ fn global_rtt_stats() -> &'static std::sync::Mutex<RttStats> {
 }
 
 extern "C" fn rtt_atexit_dump() {
-  if let Ok(stats) = global_rtt_stats().lock() {
-    if !stats.buckets.is_empty() {
-      stats.dump();
-    }
+  if let Ok(stats) = global_rtt_stats().lock()
+    && !stats.buckets.is_empty()
+  {
+    stats.dump();
   }
 }
 
@@ -211,10 +211,10 @@ pub fn dump_global_rtt_stats() {
   if !rtt_stats_enabled() {
     return;
   }
-  if let Ok(stats) = global_rtt_stats().lock() {
-    if !stats.buckets.is_empty() {
-      stats.dump();
-    }
+  if let Ok(stats) = global_rtt_stats().lock()
+    && !stats.buckets.is_empty()
+  {
+    stats.dump();
   }
 }
 

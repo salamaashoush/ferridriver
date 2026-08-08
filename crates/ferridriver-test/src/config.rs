@@ -185,12 +185,12 @@ fn apply_env_overrides(overrides: &mut CliOverrides) {
   // env-var alternation of hundreds of escaped ids can blow past the
   // kernel's env size limit (E2BIG), a file cannot. Wins over
   // FERRITEST_GREP when both are set.
-  if let Some(path) = env("FERRITEST_ID_FILE") {
-    if let Ok(contents) = std::fs::read_to_string(&path) {
-      let ids: Vec<&str> = contents.lines().filter(|line| !line.trim().is_empty()).collect();
-      if !ids.is_empty() {
-        overrides.grep = Some(exact_id_alternation(&ids));
-      }
+  if let Some(path) = env("FERRITEST_ID_FILE")
+    && let Ok(contents) = std::fs::read_to_string(&path)
+  {
+    let ids: Vec<&str> = contents.lines().filter(|line| !line.trim().is_empty()).collect();
+    if !ids.is_empty() {
+      overrides.grep = Some(exact_id_alternation(&ids));
     }
   }
   if let Some(v) = env("FERRITEST_TAG") {
@@ -255,20 +255,20 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
   }
 
   // Environment variable overrides.
-  if let Ok(w) = std::env::var("FERRIDRIVER_WORKERS") {
-    if let Ok(v) = w.parse() {
-      config.workers = v;
-    }
+  if let Ok(w) = std::env::var("FERRIDRIVER_WORKERS")
+    && let Ok(v) = w.parse()
+  {
+    config.workers = v;
   }
-  if let Ok(r) = std::env::var("FERRIDRIVER_RETRIES") {
-    if let Ok(v) = r.parse() {
-      config.retries = v;
-    }
+  if let Ok(r) = std::env::var("FERRIDRIVER_RETRIES")
+    && let Ok(v) = r.parse()
+  {
+    config.retries = v;
   }
-  if let Ok(t) = std::env::var("FERRIDRIVER_TIMEOUT") {
-    if let Ok(v) = t.parse() {
-      config.timeout = v;
-    }
+  if let Ok(t) = std::env::var("FERRIDRIVER_TIMEOUT")
+    && let Ok(v) = t.parse()
+  {
+    config.timeout = v;
   }
   if let Ok(b) = std::env::var("FERRIDRIVER_BACKEND") {
     config.browser.backend = b;
@@ -315,15 +315,15 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
   if let Some(ref url) = overrides.base_url {
     config.base_url = Some(url.clone());
   }
-  if let Some(w) = overrides.viewport_width {
-    if let Some(ref mut vp) = config.browser.viewport {
-      vp.width = w;
-    }
+  if let Some(w) = overrides.viewport_width
+    && let Some(ref mut vp) = config.browser.viewport
+  {
+    vp.width = w;
   }
-  if let Some(h) = overrides.viewport_height {
-    if let Some(ref mut vp) = config.browser.viewport {
-      vp.height = h;
-    }
+  if let Some(h) = overrides.viewport_height
+    && let Some(ref mut vp) = config.browser.viewport
+  {
+    vp.height = h;
   }
   if let Some(m) = overrides.is_mobile {
     config.browser.use_options.is_mobile = m;
@@ -394,10 +394,10 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
   if overrides.fail_on_flaky_tests {
     config.fail_on_flaky_tests = true;
   }
-  if let Ok(t) = std::env::var("FERRIDRIVER_GLOBAL_TIMEOUT") {
-    if let Ok(v) = t.parse() {
-      config.global_timeout = v;
-    }
+  if let Ok(t) = std::env::var("FERRIDRIVER_GLOBAL_TIMEOUT")
+    && let Ok(v) = t.parse()
+  {
+    config.global_timeout = v;
   }
   if let Ok(v) = std::env::var("FERRIDRIVER_VIDEO") {
     config.video.mode = VideoMode::parse_label(&v);

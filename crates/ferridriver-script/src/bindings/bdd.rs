@@ -158,10 +158,10 @@ fn pattern_of(a: &Value<'_>) -> Result<(String, bool), ScriptError> {
   if let Some(s) = a.as_string() {
     return Ok((s.to_string().map_err(|e| ScriptError::internal(e.to_string()))?, false));
   }
-  if let Some(o) = a.as_object() {
-    if let Ok(src) = o.get::<_, String>("source") {
-      return Ok((src, true));
-    }
+  if let Some(o) = a.as_object()
+    && let Ok(src) = o.get::<_, String>("source")
+  {
+    return Ok((src, true));
   }
   Err(ScriptError::internal(
     "step pattern must be a string or RegExp".to_string(),

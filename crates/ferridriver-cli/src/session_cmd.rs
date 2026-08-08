@@ -90,7 +90,7 @@ async fn open(args: SessionOpenArgs) -> anyhow::Result<()> {
 
   // Wait for the host to publish its descriptor (bounded — the browser
   // launch dominates this).
-  let descriptor = wait_for_descriptor(&registry, &args.id, std::time::Duration::from_secs(60)).await?;
+  let descriptor = wait_for_descriptor(&registry, &args.id, std::time::Duration::from_mins(1)).await?;
   println!(
     "session '{}' open (pid {}) at {}",
     args.id,

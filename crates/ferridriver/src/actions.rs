@@ -620,16 +620,16 @@ pub fn format_find_results(result: &FindResult, selector: &str) -> String {
   )];
   for el in &result.elements {
     let mut parts = vec![format!("[{}] <{}>", el.index, el.tag)];
-    if let Some(text) = &el.text {
-      if !text.is_empty() {
-        let display: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let display = if display.len() > 120 {
-          format!("{}...", &display[..120])
-        } else {
-          display
-        };
-        parts.push(format!("\"{display}\""));
-      }
+    if let Some(text) = &el.text
+      && !text.is_empty()
+    {
+      let display: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+      let display = if display.len() > 120 {
+        format!("{}...", &display[..120])
+      } else {
+        display
+      };
+      parts.push(format!("\"{display}\""));
     }
     if !el.attrs.is_empty() {
       let attr_strs: Vec<String> = el.attrs.iter().map(|(k, v)| format!("{k}=\"{v}\"")).collect();
@@ -1050,12 +1050,12 @@ async fn expect_hit_target(element: &AnyElement, x: f64, y: f64) -> Result<HitRe
   if raw.is_empty() || raw == "done" || raw == "\"done\"" {
     return Ok(HitResult::Done);
   }
-  if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
-    if let Some(desc) = parsed.get("hitTargetDescription").and_then(|v| v.as_str()) {
-      return Ok(HitResult::Missed {
-        description: desc.to_string(),
-      });
-    }
+  if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw)
+    && let Some(desc) = parsed.get("hitTargetDescription").and_then(|v| v.as_str())
+  {
+    return Ok(HitResult::Missed {
+      description: desc.to_string(),
+    });
   }
   Ok(HitResult::Done)
 }
@@ -1071,12 +1071,12 @@ async fn finalize_hit_interceptor(element: &AnyElement) -> Result<HitResult> {
     return Ok(HitResult::Done);
   }
   // Object form: { hitTargetDescription: "..." }.
-  if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
-    if let Some(desc) = parsed.get("hitTargetDescription").and_then(|v| v.as_str()) {
-      return Ok(HitResult::Missed {
-        description: desc.to_string(),
-      });
-    }
+  if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw)
+    && let Some(desc) = parsed.get("hitTargetDescription").and_then(|v| v.as_str())
+  {
+    return Ok(HitResult::Missed {
+      description: desc.to_string(),
+    });
   }
   Ok(HitResult::Done)
 }
@@ -1299,10 +1299,10 @@ pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result
       .and_then(|v| v.as_str().map(std::string::ToString::to_string))
       .unwrap_or_default();
 
-    if let Ok(result) = serde_json::from_str::<serde_json::Value>(&val) {
-      if result["actionable"].as_bool() == Some(true) {
-        return Ok(());
-      }
+    if let Ok(result) = serde_json::from_str::<serde_json::Value>(&val)
+      && result["actionable"].as_bool() == Some(true)
+    {
+      return Ok(());
     }
 
     // Yield to other tasks (allows parallel pages to make progress)

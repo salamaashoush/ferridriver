@@ -282,20 +282,20 @@ impl AllureReporter {
     }
 
     // Also handle screenshot-on-failure embedded in the error.
-    if let Some(ref err) = outcome.error {
-      if let Some(ref screenshot) = err.screenshot {
-        let attach_uuid = make_uuid();
-        let filename = format!("{attach_uuid}-attachment.png");
-        allure_attachments.push(AllureAttachment {
-          name: "Screenshot on failure".into(),
-          source: filename.clone(),
-          content_type: "image/png".into(),
-        });
-        pending_attachments.push(PendingAttachment {
-          filename,
-          body: AttachmentBody::Bytes(screenshot.clone()),
-        });
-      }
+    if let Some(ref err) = outcome.error
+      && let Some(ref screenshot) = err.screenshot
+    {
+      let attach_uuid = make_uuid();
+      let filename = format!("{attach_uuid}-attachment.png");
+      allure_attachments.push(AllureAttachment {
+        name: "Screenshot on failure".into(),
+        source: filename.clone(),
+        content_type: "image/png".into(),
+      });
+      pending_attachments.push(PendingAttachment {
+        filename,
+        body: AttachmentBody::Bytes(screenshot.clone()),
+      });
     }
 
     // Build labels from annotations.

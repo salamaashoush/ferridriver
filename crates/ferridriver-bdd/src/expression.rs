@@ -77,12 +77,12 @@ pub fn compile_with_custom(expression: &str, custom_types: &ParameterTypeRegistr
   let regex = if has_custom {
     let mut processed = expression.to_string();
     for info in &param_infos {
-      if let ParamType::Custom(ref name) = info.ty {
-        if let Some(custom) = custom_types.find(name) {
-          let placeholder = format!("{{{name}}}");
-          let replacement = format!("({})", custom.regex);
-          processed = processed.replacen(&placeholder, &replacement, 1);
-        }
+      if let ParamType::Custom(ref name) = info.ty
+        && let Some(custom) = custom_types.find(name)
+      {
+        let placeholder = format!("{{{name}}}");
+        let replacement = format!("({})", custom.regex);
+        processed = processed.replacen(&placeholder, &replacement, 1);
       }
     }
     // Now compile the processed expression (which has custom params replaced with

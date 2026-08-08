@@ -41,22 +41,21 @@ impl GithubReporter {
 #[async_trait]
 impl Reporter for GithubReporter {
   async fn on_event(&mut self, event: &ReporterEvent) {
-    if self.enabled {
-      if let ReporterEvent::TestFinished { test_id, outcome } = event {
-        if matches!(outcome.status, TestStatus::Failed | TestStatus::TimedOut) {
-          let title = test_id.full_name().replace(['\r', '\n'], " ");
-          let message = outcome
-            .error
-            .as_ref()
-            .map(|e| escape(&e.message))
-            .unwrap_or_else(|| "test failed".to_string());
-          let file = test_id.file.replace(['\r', '\n'], " ");
-          let line = test_id.line.unwrap_or(1);
-          // GitHub Actions workflow command syntax:
-          // ::error file={path},line={n},title={title}::{message}
-          println!("::error file={file},line={line},title={title}::{message}");
-        }
-      }
+    if self.enabled
+      && let ReporterEvent::TestFinished { test_id, outcome } = event
+      && matches!(outcome.status, TestStatus::Failed | TestStatus::TimedOut)
+    {
+      let title = test_id.full_name().replace(['\r', '\n'], " ");
+      let message = outcome
+        .error
+        .as_ref()
+        .map(|e| escape(&e.message))
+        .unwrap_or_else(|| "test failed".to_string());
+      let file = test_id.file.replace(['\r', '\n'], " ");
+      let line = test_id.line.unwrap_or(1);
+      // GitHub Actions workflow command syntax:
+      // ::error file={path},line={n},title={title}::{message}
+      println!("::error file={file},line={line},title={title}::{message}");
     }
     self.delegate.on_event(event).await;
   }

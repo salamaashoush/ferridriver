@@ -74,19 +74,19 @@ impl Default for FerritestArgs {
 }
 
 fn lit_str(nv: &syn::MetaNameValue) -> syn::Result<String> {
-  if let Expr::Lit(lit) = &nv.value {
-    if let Lit::Str(s) = &lit.lit {
-      return Ok(s.value());
-    }
+  if let Expr::Lit(lit) = &nv.value
+    && let Lit::Str(s) = &lit.lit
+  {
+    return Ok(s.value());
   }
   Err(syn::Error::new(nv.value.span(), "expected a string literal"))
 }
 
 fn lit_bool(nv: &syn::MetaNameValue) -> syn::Result<bool> {
-  if let Expr::Lit(lit) = &nv.value {
-    if let Lit::Bool(b) = &lit.lit {
-      return Ok(b.value());
-    }
+  if let Expr::Lit(lit) = &nv.value
+    && let Lit::Bool(b) = &lit.lit
+  {
+    return Ok(b.value());
   }
   Err(syn::Error::new(nv.value.span(), "expected a bool literal"))
 }
@@ -135,11 +135,11 @@ impl FerritestArgs {
         let ident = nv.path.get_ident().map(ToString::to_string).unwrap_or_default();
         match ident.as_str() {
           "retries" => {
-            if let Expr::Lit(lit) = &nv.value {
-              if let Lit::Int(i) = &lit.lit {
-                self.retries = Some(i.base10_parse()?);
-                return Ok(());
-              }
+            if let Expr::Lit(lit) = &nv.value
+              && let Lit::Int(i) = &lit.lit
+            {
+              self.retries = Some(i.base10_parse()?);
+              return Ok(());
             }
             return Err(syn::Error::new(nv.value.span(), "expected an integer literal"));
           },
@@ -550,11 +550,11 @@ impl Parse for FerritestEachArgs {
           };
           let mut list = Vec::new();
           for elem in &arr.elems {
-            if let Expr::Lit(lit) = elem {
-              if let Lit::Str(s) = &lit.lit {
-                list.push(s.value());
-                continue;
-              }
+            if let Expr::Lit(lit) = elem
+              && let Lit::Str(s) = &lit.lit
+            {
+              list.push(s.value());
+              continue;
             }
             return Err(syn::Error::new(elem.span(), "names entries must be string literals"));
           }
@@ -571,13 +571,13 @@ impl Parse for FerritestEachArgs {
         "ferritest_each requires `data = [...]`",
       ));
     };
-    if let Some(names) = &names {
-      if names.len() != data.len() {
-        return Err(syn::Error::new(
-          proc_macro2::Span::call_site(),
-          format!("names has {} entries but data has {} rows", names.len(), data.len()),
-        ));
-      }
+    if let Some(names) = &names
+      && names.len() != data.len()
+    {
+      return Err(syn::Error::new(
+        proc_macro2::Span::call_site(),
+        format!("names has {} entries but data has {} rows", names.len(), data.len()),
+      ));
     }
     Ok(Self { data, names, common })
   }
@@ -743,27 +743,27 @@ impl Parse for FixtureArgs {
           let ident = nv.path.get_ident().map(ToString::to_string).unwrap_or_default();
           match ident.as_str() {
             "scope" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Str(s) = &lit.lit {
-                  args.scope = match s.value().as_str() {
-                    "test" => FixtureScopeArg::Test,
-                    "worker" => FixtureScopeArg::Worker,
-                    "global" => FixtureScopeArg::Global,
-                    other => {
-                      return Err(syn::Error::new_spanned(
-                        &nv.value,
-                        format!("unknown fixture scope '{other}' (use \"test\", \"worker\", or \"global\")"),
-                      ));
-                    },
-                  };
-                }
+              if let syn::Expr::Lit(lit) = &nv.value
+                && let Lit::Str(s) = &lit.lit
+              {
+                args.scope = match s.value().as_str() {
+                  "test" => FixtureScopeArg::Test,
+                  "worker" => FixtureScopeArg::Worker,
+                  "global" => FixtureScopeArg::Global,
+                  other => {
+                    return Err(syn::Error::new_spanned(
+                      &nv.value,
+                      format!("unknown fixture scope '{other}' (use \"test\", \"worker\", or \"global\")"),
+                    ));
+                  },
+                };
               }
             },
             "timeout" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Str(s) = &lit.lit {
-                  args.timeout_ms = Some(parse_duration_str(&s.value())?);
-                }
+              if let syn::Expr::Lit(lit) = &nv.value
+                && let Lit::Str(s) = &lit.lit
+              {
+                args.timeout_ms = Some(parse_duration_str(&s.value())?);
               }
             },
             _ => {
@@ -978,19 +978,19 @@ impl Parse for SuiteArgs {
     for meta in metas {
       match &meta {
         Meta::NameValue(nv) if nv.path.is_ident("mode") => {
-          if let syn::Expr::Lit(lit) = &nv.value {
-            if let Lit::Str(s) = &lit.lit {
-              mode = match s.value().as_str() {
-                "serial" => SuiteModeArg::Serial,
-                "parallel" => SuiteModeArg::Parallel,
-                other => {
-                  return Err(syn::Error::new_spanned(
-                    &nv.value,
-                    format!("unknown suite mode '{other}' (use \"serial\" or \"parallel\")"),
-                  ));
-                },
-              };
-            }
+          if let syn::Expr::Lit(lit) = &nv.value
+            && let Lit::Str(s) = &lit.lit
+          {
+            mode = match s.value().as_str() {
+              "serial" => SuiteModeArg::Serial,
+              "parallel" => SuiteModeArg::Parallel,
+              other => {
+                return Err(syn::Error::new_spanned(
+                  &nv.value,
+                  format!("unknown suite mode '{other}' (use \"serial\" or \"parallel\")"),
+                ));
+              },
+            };
           }
         },
         _ => {

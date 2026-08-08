@@ -82,11 +82,11 @@ impl Reporter for HtmlReporter {
     match event {
       ReporterEvent::TestFinished { outcome, .. } => {
         let screenshot_base64 = outcome.attachments.iter().find_map(|a| {
-          if a.content_type == "image/png" {
-            if let crate::model::AttachmentBody::Bytes(ref data) = a.body {
-              use base64::Engine;
-              return Some(base64::engine::general_purpose::STANDARD.encode(data));
-            }
+          if a.content_type == "image/png"
+            && let crate::model::AttachmentBody::Bytes(ref data) = a.body
+          {
+            use base64::Engine;
+            return Some(base64::engine::general_purpose::STANDARD.encode(data));
           }
           None
         });

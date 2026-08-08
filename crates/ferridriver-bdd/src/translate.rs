@@ -279,18 +279,17 @@ pub fn scenario_annotations(scenario: &ScenarioExecution) -> Vec<TestAnnotation>
             reason: Some(format!("tagged @slow({cond})")),
             condition: Some(cond.to_string()),
           });
-        } else if let Some(rest) = tag.strip_prefix('@') {
-          if let Some(paren_pos) = rest.find('(') {
-            if rest.ends_with(')') {
-              let key = &rest[..paren_pos];
-              let value = &rest[paren_pos + 1..rest.len() - 1];
-              if !matches!(key, "fixme" | "skip" | "fail" | "slow" | "only" | "use") {
-                annotations.push(TestAnnotation::Info {
-                  type_name: key.to_string(),
-                  description: value.to_string(),
-                });
-              }
-            }
+        } else if let Some(rest) = tag.strip_prefix('@')
+          && let Some(paren_pos) = rest.find('(')
+          && rest.ends_with(')')
+        {
+          let key = &rest[..paren_pos];
+          let value = &rest[paren_pos + 1..rest.len() - 1];
+          if !matches!(key, "fixme" | "skip" | "fail" | "slow" | "only" | "use") {
+            annotations.push(TestAnnotation::Info {
+              type_name: key.to_string(),
+              description: value.to_string(),
+            });
           }
         }
       },

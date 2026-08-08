@@ -370,10 +370,10 @@ fn js_value_to_serialized(
         v: js_value_to_serialized(&val, alloc, handles, depth + 1)?,
       });
     }
-    if entries.is_empty() {
-      if let Some(handle) = handle_value_to_serialized(v, handles)? {
-        return Ok(handle);
-      }
+    if entries.is_empty()
+      && let Some(handle) = handle_value_to_serialized(v, handles)?
+    {
+      return Ok(handle);
     }
     return Ok(SerializedValue::Object { id, entries });
   }

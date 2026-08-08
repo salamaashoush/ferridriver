@@ -263,7 +263,7 @@ impl Browser {
   /// registry entry. Mirrors Playwright's `browser.unbind(): Promise<void>`.
   /// A no-op if the browser was never bound.
   #[napi]
-  #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // NAPI requires async to surface a JS Promise (Playwright parity)
+  #[allow(clippy::unused_async)] // NAPI requires async to surface a JS Promise (Playwright parity)
   pub async fn unbind(&self) -> Result<()> {
     ferridriver_session::unbind_browser(&self.inner).map_err(|e| napi::Error::from_reason(e.to_string()))
   }

@@ -76,7 +76,7 @@ fn wait_for_url(stdout: std::process::ChildStdout) -> String {
       let _ = tx.send(line);
     }
   });
-  let deadline = Instant::now() + Duration::from_secs(120);
+  let deadline = Instant::now() + Duration::from_mins(2);
   while Instant::now() < deadline {
     let Ok(line) = rx.recv_timeout(Duration::from_secs(1)) else {
       continue;
@@ -96,7 +96,7 @@ type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsSt
 /// targets before any hello arrives).
 async fn next_json(ws: &mut WsStream) -> serde_json::Value {
   loop {
-    let frame = tokio::time::timeout(Duration::from_secs(600), ws.next())
+    let frame = tokio::time::timeout(Duration::from_mins(10), ws.next())
       .await
       .expect("websocket frame timeout")
       .expect("websocket closed")
@@ -128,7 +128,7 @@ async fn http_get(host: &str, path: &str) -> (String, Vec<u8>) {
 async fn wait_for_sidebar(ws: &mut WsStream, needle: &str) -> String {
   let mut test_id = None;
   let mut idle = false;
-  let deadline = Instant::now() + Duration::from_secs(600);
+  let deadline = Instant::now() + Duration::from_mins(10);
   while Instant::now() < deadline {
     let msg = next_json(ws).await;
     match msg["type"].as_str() {
@@ -145,10 +145,8 @@ async fn wait_for_sidebar(ws: &mut WsStream, needle: &str) -> String {
       Some("watchStatus") => idle = msg["status"].as_str() == Some("idle"),
       _ => {},
     }
-    if idle {
-      if let Some(id) = test_id {
-        return id;
-      }
+    if idle && let Some(id) = test_id {
+      return id;
     }
   }
   panic!("sidebar never listed a test containing {needle:?}");

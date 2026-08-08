@@ -310,10 +310,10 @@ fn format_tree(ctx: &mut SnapshotCtx<'_>, idx: usize, depth: usize) {
   let node = &ctx.nodes[idx];
 
   // If filtering, skip nodes not in the relevant set
-  if let Some(relevant) = &ctx.relevant_nodes {
-    if !relevant.contains(node.node_id.as_str()) {
-      return;
-    }
+  if let Some(relevant) = &ctx.relevant_nodes
+    && !relevant.contains(node.node_id.as_str())
+  {
+    return;
   }
 
   if node.ignored {
@@ -441,13 +441,12 @@ fn write_node_value(output: &mut String, node: &AxNodeData, role: &str) {
   if matches!(role, "textbox" | "combobox" | "searchbox" | "spinbutton") {
     for prop in &node.properties {
       if prop.name == "value" {
-        if let Some(val) = &prop.value {
-          if let Some(s) = val.as_str() {
-            if !s.is_empty() {
-              let display_val = if s.len() > 50 { truncate_str(s, 50) } else { s };
-              let _ = write!(output, " [value=\"{display_val}\"]");
-            }
-          }
+        if let Some(val) = &prop.value
+          && let Some(s) = val.as_str()
+          && !s.is_empty()
+        {
+          let display_val = if s.len() > 50 { truncate_str(s, 50) } else { s };
+          let _ = write!(output, " [value=\"{display_val}\"]");
         }
         break;
       }
@@ -559,14 +558,14 @@ pub async fn build_snapshot_for_ai(
   if console_errors > 0 {
     let _ = writeln!(header, "- Console: {console_errors} errors");
   }
-  if let Ok(si) = scroll_res {
-    if si.scroll_height > 0 {
-      let _ = writeln!(
-        header,
-        "- Scroll: {}/{}px (viewport: {}px)",
-        si.scroll_y, si.scroll_height, si.viewport_height
-      );
-    }
+  if let Ok(si) = scroll_res
+    && si.scroll_height > 0
+  {
+    let _ = writeln!(
+      header,
+      "- Scroll: {}/{}px (viewport: {}px)",
+      si.scroll_y, si.scroll_height, si.viewport_height
+    );
   }
   header.push_str("\n### Snapshot\n");
 

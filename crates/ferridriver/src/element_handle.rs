@@ -622,10 +622,10 @@ impl ElementHandle {
       _ => capture.await?,
     };
     if let Some(ref path) = opts.path {
-      if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-          let _ = tokio::fs::create_dir_all(parent).await;
-        }
+      if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+      {
+        let _ = tokio::fs::create_dir_all(parent).await;
       }
       tokio::fs::write(path, &bytes)
         .await
@@ -946,13 +946,13 @@ impl ElementHandle {
     let backoffs_ms: [u64; 7] = [0, 0, 20, 50, 100, 100, 500];
     let mut idx: usize = 0;
     loop {
-      if let Some(d) = deadline {
-        if tokio::time::Instant::now() >= d {
-          return Err(FerriError::timeout(
-            format!("wait_for_element_state {state_literal}"),
-            resolved_timeout,
-          ));
-        }
+      if let Some(d) = deadline
+        && tokio::time::Instant::now() >= d
+      {
+        return Err(FerriError::timeout(
+          format!("wait_for_element_state {state_literal}"),
+          resolved_timeout,
+        ));
       }
       let delay_ms = backoffs_ms[idx.min(backoffs_ms.len() - 1)];
       idx = idx.saturating_add(1);
@@ -1016,13 +1016,13 @@ impl ElementHandle {
     let backoffs_ms: [u64; 7] = [0, 0, 20, 50, 100, 100, 500];
     let mut idx: usize = 0;
     loop {
-      if let Some(d) = deadline {
-        if tokio::time::Instant::now() >= d {
-          return Err(FerriError::timeout(
-            format!("wait_for_selector {selector}"),
-            resolved_timeout,
-          ));
-        }
+      if let Some(d) = deadline
+        && tokio::time::Instant::now() >= d
+      {
+        return Err(FerriError::timeout(
+          format!("wait_for_selector {selector}"),
+          resolved_timeout,
+        ));
       }
       let delay_ms = backoffs_ms[idx.min(backoffs_ms.len() - 1)];
       idx = idx.saturating_add(1);

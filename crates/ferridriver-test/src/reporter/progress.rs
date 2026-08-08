@@ -69,7 +69,7 @@ impl Reporter for ProgressReporter {
         };
         print!("{styled}");
         self.count += 1;
-        if self.count % 80 == 0 {
+        if self.count.is_multiple_of(80) {
           println!();
         }
         let _ = std::io::stdout().flush();
@@ -82,7 +82,7 @@ impl Reporter for ProgressReporter {
         flaky,
         duration,
       } => {
-        if self.count % 80 != 0 {
+        if !self.count.is_multiple_of(80) {
           println!();
         }
         let dur = format_duration(*duration);

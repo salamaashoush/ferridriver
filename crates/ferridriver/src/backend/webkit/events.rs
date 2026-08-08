@@ -24,13 +24,13 @@ pub fn parse_ax_nodes(arr: &[Value]) -> Vec<AxNodeData> {
   for item in arr {
     let mut properties = Vec::new();
     let mut push_str = |name: &str, key: &str| {
-      if let Some(v) = item.get(key).and_then(Value::as_str) {
-        if !v.is_empty() {
-          properties.push(AxProperty {
-            name: name.to_string(),
-            value: Some(Value::String(v.to_string())),
-          });
-        }
+      if let Some(v) = item.get(key).and_then(Value::as_str)
+        && !v.is_empty()
+      {
+        properties.push(AxProperty {
+          name: name.to_string(),
+          value: Some(Value::String(v.to_string())),
+        });
       }
     };
     push_str("checked", "checked");

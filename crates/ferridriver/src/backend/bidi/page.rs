@@ -43,28 +43,27 @@ const BINDING_CHANNEL: &str = "ferridriverBindingChannel";
 /// construction.
 fn bidi_remote_value_to_backing(arg: &serde_json::Value) -> crate::js_handle::JSHandleBacking {
   let ty = arg.get("type").and_then(|v| v.as_str()).unwrap_or("");
-  if ty == "node" {
-    if let Some(shared_id) = arg.get("sharedId").and_then(|v| v.as_str()) {
-      let handle = arg
-        .get("handle")
-        .and_then(|v| v.as_str())
-        .map(std::string::ToString::to_string);
-      return crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Bidi {
-        shared_id: shared_id.to_string(),
-        handle,
-      });
-    }
+  if ty == "node"
+    && let Some(shared_id) = arg.get("sharedId").and_then(|v| v.as_str())
+  {
+    let handle = arg
+      .get("handle")
+      .and_then(|v| v.as_str())
+      .map(std::string::ToString::to_string);
+    return crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Bidi {
+      shared_id: shared_id.to_string(),
+      handle,
+    });
   }
   if matches!(
     ty,
     "object" | "array" | "map" | "set" | "function" | "error" | "promise" | "symbol" | "window" | "weakmap" | "weakset"
-  ) {
-    if let Some(h) = arg.get("handle").and_then(|v| v.as_str()) {
-      return crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Bidi {
-        shared_id: String::new(),
-        handle: Some(h.to_string()),
-      });
-    }
+  ) && let Some(h) = arg.get("handle").and_then(|v| v.as_str())
+  {
+    return crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Bidi {
+      shared_id: String::new(),
+      handle: Some(h.to_string()),
+    });
   }
   // Primitive path — fall back to an inline value-backed handle.
   let serialized = match ty {
@@ -383,10 +382,10 @@ impl InjectedScriptManager {
   /// so a racing concurrent call is harmless — the membership check is
   /// a fast-path, not a correctness lock.
   async fn ensure_in(&self, page: &BidiPage, ctx: &str) -> Result<()> {
-    if let Ok(s) = self.injected.lock() {
-      if s.contains(ctx) {
-        return Ok(());
-      }
+    if let Ok(s) = self.injected.lock()
+      && s.contains(ctx)
+    {
+      return Ok(());
     }
     let full_check_js = crate::selectors::build_lazy_inject_js();
     page
@@ -591,10 +590,10 @@ impl BidiPage {
         .collect();
       let results = futures::future::join_all(futs).await;
       for (idx, result) in child_indices.into_iter().zip(results) {
-        if let Ok(Some(val)) = result {
-          if let Some(name) = val.as_str() {
-            frames[idx].name = name.to_string();
-          }
+        if let Ok(Some(val)) = result
+          && let Some(name) = val.as_str()
+        {
+          frames[idx].name = name.to_string();
         }
       }
     }
@@ -747,12 +746,11 @@ impl BidiPage {
     let ctx = self.context_id.clone();
     let timeout = tokio::time::timeout(std::time::Duration::from_secs(30), async move {
       while let Some(event) = rx.recv().await {
-        if event.method == "browsingContext.load" {
-          if let Some(c) = event.params.get("context").and_then(|v| v.as_str()) {
-            if c == &*ctx {
-              return Ok(());
-            }
-          }
+        if event.method == "browsingContext.load"
+          && let Some(c) = event.params.get("context").and_then(|v| v.as_str())
+          && c == &*ctx
+        {
+          return Ok(());
         }
       }
       Err(FerriError::backend("Event channel closed"))
@@ -895,12 +893,11 @@ impl BidiPage {
   async fn wait_context_ready(&self, ctx: &str) -> Result<()> {
     // Fast path: query readiness directly. A successful evaluate also
     // proves the context is reachable.
-    if let Ok(Some(v)) = self.eval_internal("document.readyState", ctx).await {
-      if let Some(s) = v.as_str() {
-        if s == "interactive" || s == "complete" {
-          return Ok(());
-        }
-      }
+    if let Ok(Some(v)) = self.eval_internal("document.readyState", ctx).await
+      && let Some(s) = v.as_str()
+      && (s == "interactive" || s == "complete")
+    {
+      return Ok(());
     }
     // Slow path: the child is still parsing — wait for its own
     // domContentLoaded/load event (BiDi reports child events with
@@ -969,11 +966,11 @@ impl BidiPage {
     // the child is parseable) before querying — covers freshly-attached
     // / `srcdoc` / `data:` children (Residual 2). Main context is
     // already injected by the caller's `ensure_engine_injected`.
-    if let Some(fid) = frame_id {
-      if fid != &*self.context_id {
-        self.wait_context_ready(fid).await?;
-        self.ensure_engine_injected_in(fid).await?;
-      }
+    if let Some(fid) = frame_id
+      && fid != &*self.context_id
+    {
+      self.wait_context_ready(fid).await?;
+      self.ensure_engine_injected_in(fid).await?;
     }
 
     let result = if is_function {
@@ -1241,13 +1238,13 @@ impl BidiPage {
     for item in &arr {
       let mut properties = Vec::new();
       // Extract rich properties from the JS helper
-      if let Some(checked) = item.get("checked").and_then(|v| v.as_str()) {
-        if !checked.is_empty() {
-          properties.push(AxProperty {
-            name: "checked".into(),
-            value: Some(serde_json::Value::String(checked.into())),
-          });
-        }
+      if let Some(checked) = item.get("checked").and_then(|v| v.as_str())
+        && !checked.is_empty()
+      {
+        properties.push(AxProperty {
+          name: "checked".into(),
+          value: Some(serde_json::Value::String(checked.into())),
+        });
       }
       if item
         .get("disabled")
@@ -1276,13 +1273,13 @@ impl BidiPage {
           value: Some(serde_json::json!(level)),
         });
       }
-      if let Some(expanded) = item.get("expanded").and_then(|v| v.as_str()) {
-        if !expanded.is_empty() {
-          properties.push(AxProperty {
-            name: "expanded".into(),
-            value: Some(serde_json::Value::String(expanded.into())),
-          });
-        }
+      if let Some(expanded) = item.get("expanded").and_then(|v| v.as_str())
+        && !expanded.is_empty()
+      {
+        properties.push(AxProperty {
+          name: "expanded".into(),
+          value: Some(serde_json::Value::String(expanded.into())),
+        });
       }
       if item
         .get("required")
@@ -1294,13 +1291,13 @@ impl BidiPage {
           value: Some(serde_json::Value::Bool(true)),
         });
       }
-      if let Some(url) = item.get("url").and_then(|v| v.as_str()) {
-        if !url.is_empty() {
-          properties.push(AxProperty {
-            name: "url".into(),
-            value: Some(serde_json::Value::String(url.into())),
-          });
-        }
+      if let Some(url) = item.get("url").and_then(|v| v.as_str())
+        && !url.is_empty()
+      {
+        properties.push(AxProperty {
+          name: "url".into(),
+          value: Some(serde_json::Value::String(url.into())),
+        });
       }
 
       nodes.push(AxNodeData {
@@ -1553,10 +1550,11 @@ impl BidiPage {
       // Cookie expiry is a Unix timestamp (seconds). Convert to a JSON integer
       // without a direct float-to-int cast by formatting and re-parsing.
       let rounded = expires.round();
-      if rounded.is_finite() && rounded >= 0.0 {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&format!("{rounded:.0}")) {
-          cookie_obj["expiry"] = v;
-        }
+      if rounded.is_finite()
+        && rounded >= 0.0
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&format!("{rounded:.0}"))
+      {
+        cookie_obj["expiry"] = v;
       }
     }
     if let Some(ref ss) = cookie.same_site {
@@ -2773,12 +2771,11 @@ impl BidiPage {
           event.method.as_str(),
           "browsingContext.load" | "browsingContext.domContentLoaded" | "browsingContext.navigationCommitted"
         );
-        if is_relevant {
-          if let Some(c) = event.params.get("context").and_then(|v| v.as_str()) {
-            if c == &*event_ctx {
-              event_notify2.notify_one();
-            }
-          }
+        if is_relevant
+          && let Some(c) = event.params.get("context").and_then(|v| v.as_str())
+          && c == &*event_ctx
+        {
+          event_notify2.notify_one();
         }
       }
     });
@@ -2804,15 +2801,15 @@ impl BidiPage {
           .await;
 
         if let Ok(result) = result {
-          if let Some(data_str) = result.get("data").and_then(|v| v.as_str()) {
-            if let Ok(jpeg_bytes) = base64::engine::general_purpose::STANDARD.decode(data_str) {
-              let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs_f64();
-              if tx.send((jpeg_bytes, ts)).is_err() {
-                break;
-              }
+          if let Some(data_str) = result.get("data").and_then(|v| v.as_str())
+            && let Ok(jpeg_bytes) = base64::engine::general_purpose::STANDARD.decode(data_str)
+          {
+            let ts = std::time::SystemTime::now()
+              .duration_since(std::time::UNIX_EPOCH)
+              .unwrap_or_default()
+              .as_secs_f64();
+            if tx.send((jpeg_bytes, ts)).is_err() {
+              break;
             }
           }
         } else {
@@ -3690,13 +3687,13 @@ impl BidiNetworkTracker {
     };
     // BiDi sometimes omits responseStarted (e.g. cache-served responses);
     // synthesise the Response here if necessary.
-    if req.existing_response().await.is_none() {
-      if let Some(resp) = params.get("response") {
-        let response = self.build_response(req.clone(), resp, &request_id);
-        self.responses.lock().await.insert(request_id.clone(), response.clone());
-        req.set_response(&response).await;
-        emitter.emit(PageEvent::Response(response));
-      }
+    if req.existing_response().await.is_none()
+      && let Some(resp) = params.get("response")
+    {
+      let response = self.build_response(req.clone(), resp, &request_id);
+      self.responses.lock().await.insert(request_id.clone(), response.clone());
+      req.set_response(&response).await;
+      emitter.emit(PageEvent::Response(response));
     }
     if let Some(resp) = self.responses.lock().await.get(&request_id).cloned() {
       resp.finish_success().await;
@@ -3958,13 +3955,12 @@ async fn execute_bidi_route_action(
         .iter()
         .map(|(k, v)| json!({"name": k, "value": {"type": "string", "value": v}}))
         .collect();
-      if let Some(ct) = &resp.content_type {
-        if !hdrs
+      if let Some(ct) = &resp.content_type
+        && !hdrs
           .iter()
           .any(|h| h.get("name").and_then(|n| n.as_str()) == Some("content-type"))
-        {
-          hdrs.push(json!({"name": "content-type", "value": {"type": "string", "value": ct}}));
-        }
+      {
+        hdrs.push(json!({"name": "content-type", "value": {"type": "string", "value": ct}}));
       }
       let _ = transport
         .send_command(

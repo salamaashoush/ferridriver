@@ -17,7 +17,7 @@ use ferridriver::state::ConnectMode;
 use serde::{Deserialize, Serialize};
 
 /// Default TTL for cached command outputs (5 minutes).
-pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
+pub const DEFAULT_CACHE_TTL: Duration = Duration::from_mins(5);
 
 /// Timeout for verifying a browser port is responsive.
 pub const DISCOVER_TCP_TIMEOUT: Duration = Duration::from_millis(500);
@@ -212,13 +212,13 @@ impl McpConfig {
       }
     }
 
-    if let Some(ref default) = self.browser.default_instance {
-      if let Some(ref profile_template) = default.discover_profile {
-        match discover_from_profile(profile_template, instance) {
-          ProfileDiscovery::Found(mode) => return Some(mode),
-          ProfileDiscovery::Stale => return None,
-          ProfileDiscovery::NotFound => {},
-        }
+    if let Some(ref default) = self.browser.default_instance
+      && let Some(ref profile_template) = default.discover_profile
+    {
+      match discover_from_profile(profile_template, instance) {
+        ProfileDiscovery::Found(mode) => return Some(mode),
+        ProfileDiscovery::Stale => return None,
+        ProfileDiscovery::NotFound => {},
       }
     }
 
@@ -244,19 +244,19 @@ impl McpConfig {
   fn discover_ws_via_command(&self, cmd: &str) -> Option<String> {
     let ttl = self.cache_ttl();
 
-    if let Some(url) = self.exec_ws_url(cmd, ttl) {
-      if ws_endpoint_is_live(&url) {
-        return Some(url);
-      }
+    if let Some(url) = self.exec_ws_url(cmd, ttl)
+      && ws_endpoint_is_live(&url)
+    {
+      return Some(url);
     }
 
     // First result was missing, malformed, or pointed at a dead port. Force a
     // fresh discover (browser may have just started or rebound to a new port).
     self.command_cache.evict(cmd);
-    if let Some(url) = self.exec_ws_url(cmd, ttl) {
-      if ws_endpoint_is_live(&url) {
-        return Some(url);
-      }
+    if let Some(url) = self.exec_ws_url(cmd, ttl)
+      && ws_endpoint_is_live(&url)
+    {
+      return Some(url);
     }
 
     // Still nothing live -- drop the entry so a transient outage doesn't get
@@ -325,10 +325,10 @@ fn discover_from_profile(profile_template: &str, instance: &str) -> ProfileDisco
   let path = lines.next().unwrap_or("/");
 
   let addr = format!("127.0.0.1:{port}");
-  if let Ok(sock_addr) = addr.parse() {
-    if TcpStream::connect_timeout(&sock_addr, DISCOVER_TCP_TIMEOUT).is_ok() {
-      return ProfileDiscovery::Found(ConnectMode::ConnectUrl(format!("ws://127.0.0.1:{port}{path}")));
-    }
+  if let Ok(sock_addr) = addr.parse()
+    && TcpStream::connect_timeout(&sock_addr, DISCOVER_TCP_TIMEOUT).is_ok()
+  {
+    return ProfileDiscovery::Found(ConnectMode::ConnectUrl(format!("ws://127.0.0.1:{port}{path}")));
   }
 
   ProfileDiscovery::Stale
@@ -353,10 +353,10 @@ impl CommandCache {
   fn get_or_exec(&self, command: &str, ttl: Duration) -> Result<Vec<String>, String> {
     {
       let cache = self.entries.lock().map_err(|e| format!("Cache lock poisoned: {e}"))?;
-      if let Some(entry) = cache.get(command) {
-        if entry.created.elapsed() < ttl {
-          return Ok(entry.lines.clone());
-        }
+      if let Some(entry) = cache.get(command)
+        && entry.created.elapsed() < ttl
+      {
+        return Ok(entry.lines.clone());
       }
     }
 
@@ -555,12 +555,12 @@ mod tests {
   #[test]
   fn command_cache_returns_cached_value() {
     let cache = CommandCache::default();
-    let result1 = cache.get_or_exec("echo hello", Duration::from_secs(60));
+    let result1 = cache.get_or_exec("echo hello", Duration::from_mins(1));
     assert_eq!(
       result1.as_ref().map(Vec::as_slice),
       Ok(["hello".to_string()].as_slice())
     );
-    let result2 = cache.get_or_exec("echo hello", Duration::from_secs(60));
+    let result2 = cache.get_or_exec("echo hello", Duration::from_mins(1));
     assert_eq!(result1, result2);
   }
 
@@ -893,7 +893,7 @@ mod tests {
   fn command_cache_ttl_respects_config() {
     let mut config = McpConfig::default();
     config.browser.command_cache_ttl = Some(60);
-    assert_eq!(config.cache_ttl(), Duration::from_secs(60));
+    assert_eq!(config.cache_ttl(), Duration::from_mins(1));
 
     config.browser.command_cache_ttl = None;
     assert_eq!(config.cache_ttl(), DEFAULT_CACHE_TTL);
@@ -920,7 +920,7 @@ mod tests {
   #[test]
   fn command_cache_different_commands_cached_separately() {
     let cache = CommandCache::default();
-    let ttl = Duration::from_secs(60);
+    let ttl = Duration::from_mins(1);
 
     let r1 = cache.get_or_exec("echo aaa", ttl).unwrap();
     let r2 = cache.get_or_exec("echo bbb", ttl).unwrap();

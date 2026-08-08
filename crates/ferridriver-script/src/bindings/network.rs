@@ -729,10 +729,10 @@ impl RouteJs {
       .and_then(|mut g| g.take())
       .ok_or_else(|| rquickjs::Error::new_from_js_message("Route", "Error", "Route already handled".to_string()))?;
     let mut headers: Vec<(String, String)> = headers_to_pairs(opts.headers);
-    if let Some(ct) = opts.content_type.clone() {
-      if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
-        headers.push(("content-type".to_string(), ct));
-      }
+    if let Some(ct) = opts.content_type.clone()
+      && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+    {
+      headers.push(("content-type".to_string(), ct));
     }
     let body_bytes = opts.body.unwrap_or_default().into_bytes();
     route.fulfill(FulfillResponse {

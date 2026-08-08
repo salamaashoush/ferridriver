@@ -22,10 +22,10 @@ impl RerunReporter {
 #[async_trait::async_trait]
 impl Reporter for RerunReporter {
   async fn on_event(&mut self, event: &ReporterEvent) {
-    if let ReporterEvent::TestFinished { test_id, outcome } = event {
-      if matches!(outcome.status, TestStatus::Failed | TestStatus::TimedOut) {
-        self.failed.push(test_id.file_location());
-      }
+    if let ReporterEvent::TestFinished { test_id, outcome } = event
+      && matches!(outcome.status, TestStatus::Failed | TestStatus::TimedOut)
+    {
+      self.failed.push(test_id.file_location());
     }
   }
 

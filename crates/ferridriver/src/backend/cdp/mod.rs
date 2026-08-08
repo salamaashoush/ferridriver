@@ -543,7 +543,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // resume as one wire-ordered batch (crPage.ts:548).
     let enable_fut = Self::enable_domains(transport, Some(session_id), None, false, Some(&inject_src));
     tokio::pin!(enable_fut);
-    let timed = tokio::time::timeout(Duration::from_millis(1000), &mut enable_fut).await;
+    let timed = tokio::time::timeout(Duration::from_secs(1), &mut enable_fut).await;
     let frame_tree_seed = if let Ok(r) = timed {
       r?
     } else {
@@ -801,16 +801,16 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let tid = target_id.clone();
     let sid = tokio::time::timeout(Duration::from_secs(30), async move {
       while let Some(event) = event_rx.recv().await {
-        if event.get("method").and_then(|m| m.as_str()) == Some("Target.attachedToTarget") {
-          if let Some(params) = event.get("params") {
-            let event_tid = params
-              .get("targetInfo")
-              .and_then(|i| i.get("targetId"))
-              .and_then(|v| v.as_str())
-              .unwrap_or("");
-            if event_tid == tid {
-              return Ok(params.get("sessionId").and_then(|v| v.as_str()).map(String::from));
-            }
+        if event.get("method").and_then(|m| m.as_str()) == Some("Target.attachedToTarget")
+          && let Some(params) = event.get("params")
+        {
+          let event_tid = params
+            .get("targetInfo")
+            .and_then(|i| i.get("targetId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+          if event_tid == tid {
+            return Ok(params.get("sessionId").and_then(|v| v.as_str()).map(String::from));
           }
         }
       }
@@ -1304,25 +1304,25 @@ fn cdp_get_exception_message(exception_details: &serde_json::Value) -> String {
     .and_then(|v| v.as_str())
     .unwrap_or("")
     .to_string();
-  if let Some(stack_trace) = exception_details.get("stackTrace") {
-    if let Some(frames) = stack_trace.get("callFrames").and_then(|v| v.as_array()) {
-      for frame in frames {
-        let url = frame.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        let line = frame.get("lineNumber").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        let column = frame
-          .get("columnNumber")
-          .and_then(serde_json::Value::as_u64)
-          .unwrap_or(0);
-        let function_name = frame.get("functionName").and_then(|v| v.as_str()).unwrap_or("");
-        let function_name = if function_name.is_empty() {
-          "<anonymous>"
-        } else {
-          function_name
-        };
-        // Write directly into the buffer to avoid an extra allocation;
-        // writes into a String are infallible.
-        let _ = write!(message, "\n    at {function_name} ({url}:{line}:{column})");
-      }
+  if let Some(stack_trace) = exception_details.get("stackTrace")
+    && let Some(frames) = stack_trace.get("callFrames").and_then(|v| v.as_array())
+  {
+    for frame in frames {
+      let url = frame.get("url").and_then(|v| v.as_str()).unwrap_or("");
+      let line = frame.get("lineNumber").and_then(serde_json::Value::as_u64).unwrap_or(0);
+      let column = frame
+        .get("columnNumber")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+      let function_name = frame.get("functionName").and_then(|v| v.as_str()).unwrap_or("");
+      let function_name = if function_name.is_empty() {
+        "<anonymous>"
+      } else {
+        function_name
+      };
+      // Write directly into the buffer to avoid an extra allocation;
+      // writes into a String are infallible.
+      let _ = write!(message, "\n    at {function_name} ({url}:{line}:{column})");
     }
   }
   message
@@ -1942,10 +1942,10 @@ impl<T: CdpWrap> CdpPage<T> {
     }
     let nav_result = self.cmd("Page.navigate", nav_params).await?;
 
-    if let Some(error_text) = nav_result.get("errorText").and_then(|v| v.as_str()) {
-      if !error_text.is_empty() {
-        return Err(FerriError::Backend(format!("Navigation failed: {error_text}")));
-      }
+    if let Some(error_text) = nav_result.get("errorText").and_then(|v| v.as_str())
+      && !error_text.is_empty()
+    {
+      return Err(FerriError::Backend(format!("Navigation failed: {error_text}")));
     }
 
     // Page.navigate returns the navigated frame's `frameId`. PERF_AUDIT
@@ -2613,12 +2613,11 @@ impl<T: CdpWrap> CdpPage<T> {
         .collect();
       let results = futures::future::join_all(futs).await;
       for (idx, result) in child_indices.into_iter().zip(results) {
-        if let Ok(Some(val)) = result {
-          if let Some(name) = val.as_str() {
-            if !name.is_empty() {
-              frames[idx].name = name.to_string();
-            }
-          }
+        if let Ok(Some(val)) = result
+          && let Some(name) = val.as_str()
+          && !name.is_empty()
+        {
+          frames[idx].name = name.to_string();
         }
       }
     }
@@ -3206,10 +3205,10 @@ impl<T: CdpWrap> CdpPage<T> {
           .unwrap_or_default()
           .as_secs_f64()
       });
-    if let Some(data_str) = params.get("data").and_then(|v| v.as_str()) {
-      if let Ok(jpeg_bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_str) {
-        let _ = frame_tx.send((jpeg_bytes, timestamp));
-      }
+    if let Some(data_str) = params.get("data").and_then(|v| v.as_str())
+      && let Ok(jpeg_bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_str)
+    {
+      let _ = frame_tx.send((jpeg_bytes, timestamp));
     }
     let ack_id = params.get("sessionId").and_then(serde_json::Value::as_i64).unwrap_or(0);
     let t = transport.clone();
@@ -3707,7 +3706,7 @@ impl<T: CdpWrap> CdpPage<T> {
       params.push(p);
     }
     let evals = params.into_iter().map(|p| self.cmd("Runtime.evaluate", p));
-    let joined = tokio::time::timeout(std::time::Duration::from_millis(1000), futures::future::join_all(evals));
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(1), futures::future::join_all(evals));
     match joined.await {
       Ok(results) => results
         .into_iter()
@@ -3780,7 +3779,7 @@ impl<T: CdpWrap> CdpPage<T> {
     if expecting && drag_data.is_none() {
       // An un-prevented dragstart means Chromium WILL emit
       // `Input.dragIntercepted`; the cap only guards a crashed renderer.
-      let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2000);
+      let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
       loop {
         drag_data = take_slot();
         if drag_data.is_some() {
@@ -4951,10 +4950,10 @@ impl<T: CdpWrap> CdpPage<T> {
           session_id.as_deref(),
         );
         while let Some(event) = rx.recv().await {
-          if let Some(ref expected_sid) = session_id {
-            if event.get("sessionId").and_then(|v| v.as_str()) != Some(&**expected_sid) {
-              continue;
-            }
+          if let Some(ref expected_sid) = session_id
+            && event.get("sessionId").and_then(|v| v.as_str()) != Some(&**expected_sid)
+          {
+            continue;
           }
           let ev = match event.get("method").and_then(|m| m.as_str()) {
             Some("Page.loadEventFired") => crate::events::PageEvent::Load,
@@ -5331,10 +5330,10 @@ impl<T: CdpWrap> CdpPage<T> {
         // flatten-mode behaviour varies by Chrome version and we want
         // to cover both.
         let event_sid = event.get("sessionId").and_then(|v| v.as_str());
-        if let (Some(expected), Some(got)) = (session_id.as_deref(), event_sid) {
-          if got != expected {
-            continue;
-          }
+        if let (Some(expected), Some(got)) = (session_id.as_deref(), event_sid)
+          && got != expected
+        {
+          continue;
         }
         let method = event.get("method").and_then(|m| m.as_str()).unwrap_or("");
         match method {
@@ -6065,13 +6064,12 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           .iter()
           .map(|(k, v)| serde_json::json!({"name": k, "value": v}))
           .collect();
-        if let Some(ct) = &resp.content_type {
-          if !hdrs
+        if let Some(ct) = &resp.content_type
+          && !hdrs
             .iter()
             .any(|h| h.get("name").and_then(|n| n.as_str()) == Some("content-type"))
-          {
-            hdrs.push(serde_json::json!({"name": "content-type", "value": ct}));
-          }
+        {
+          hdrs.push(serde_json::json!({"name": "content-type", "value": ct}));
         }
         let _ = transport
           .send_command(

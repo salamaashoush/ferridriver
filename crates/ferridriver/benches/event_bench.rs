@@ -168,7 +168,7 @@ async fn nonmatching_wakeups(n: u64) {
   emitter.emit(PageEvent::Load);
 
   let all_seen = || counters.iter().all(|c| c.count.load(Ordering::Acquire) >= 1);
-  let deadline = Instant::now() + Duration::from_secs(60);
+  let deadline = Instant::now() + Duration::from_mins(1);
   while !all_seen() && Instant::now() < deadline {
     tokio::time::sleep(Duration::from_millis(2)).await;
   }
@@ -298,7 +298,7 @@ async fn e2e_console_storm(n: u64, chunk: u64) {
       issued += batch;
     }
     let counters = [Arc::clone(&counter)];
-    let received = quiesce_sum(&counters, Duration::from_secs(1), Duration::from_secs(60)).await;
+    let received = quiesce_sum(&counters, Duration::from_secs(1), Duration::from_mins(1)).await;
     let drain_ns = last_stamp_ns(&counters).saturating_sub(start_offset_ns);
     let lost = n.saturating_sub(received);
     println!(

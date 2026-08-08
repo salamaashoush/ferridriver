@@ -29,7 +29,7 @@ pub const DEFAULT_MAX_CONSOLE_BYTES: usize = 1_048_576;
 pub const DEFAULT_MAX_CONSOLE_ENTRY_BYTES: usize = 8_192;
 
 /// Default per-script wall-clock timeout (5 minutes).
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// Extra slack past the script deadline before the tokio-level backstop
 /// fires. The interrupt handler is the preferred kill (it halts the
@@ -66,7 +66,7 @@ pub const DEFAULT_MAX_SESSION_VMS: usize = 64;
 /// Default idle TTL: a session VM untouched this long is reaped on the
 /// next `SessionTable::acquire`, independent of cap pressure, so a
 /// long-running server does not pin dead sessions' memory indefinitely.
-pub const DEFAULT_SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
+pub const DEFAULT_SESSION_IDLE_TTL: Duration = Duration::from_mins(30);
 
 /// Configuration for the script engine.
 #[derive(Debug, Clone)]
@@ -877,10 +877,10 @@ impl Session {
 
     // Remap the failure location back to the original source.
     let eval_result = eval_result.map_err(|mut e| {
-      if let Some(line) = e.line {
-        if let Some((src, sl, sc)) = bundle.remap(line, e.column.unwrap_or(1)) {
-          e.message = format!("{} (at {src}:{sl}:{sc})", e.message);
-        }
+      if let Some(line) = e.line
+        && let Some((src, sl, sc)) = bundle.remap(line, e.column.unwrap_or(1))
+      {
+        e.message = format!("{} (at {src}:{sl}:{sc})", e.message);
       }
       e
     });
@@ -1066,10 +1066,10 @@ fn format_console_value(out: &mut String, value: &Value<'_>, depth: usize, max_d
         }
         // Node prints the stack under the message; keep it at top level
         // only so nested Errors don't explode container output.
-        if depth == 0 {
-          if let Some(stack) = ex.stack().filter(|s| !s.is_empty()) {
-            let _ = write!(out, "\n{stack}");
-          }
+        if depth == 0
+          && let Some(stack) = ex.stack().filter(|s| !s.is_empty())
+        {
+          let _ = write!(out, "\n{stack}");
         }
       }
     },
@@ -1323,12 +1323,12 @@ pub(crate) fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rq
         // consumes the following arguments; everything left over is
         // appended space-separated.
         let mut start = 0usize;
-        if let Some(first) = args.0.first() {
-          if let Some(fmt) = first.as_string() {
-            let fmt = fmt.to_string()?;
-            if fmt.contains('%') {
-              start = format_console_printf(&mut msg, &fmt, &args.0[1..], MAX_DEPTH)?;
-            }
+        if let Some(first) = args.0.first()
+          && let Some(fmt) = first.as_string()
+        {
+          let fmt = fmt.to_string()?;
+          if fmt.contains('%') {
+            start = format_console_printf(&mut msg, &fmt, &args.0[1..], MAX_DEPTH)?;
           }
         }
         for (i, v) in args.0.iter().enumerate().skip(start) {

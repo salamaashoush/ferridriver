@@ -232,10 +232,10 @@ fn to_snake_case_fn_name(expression: &str) -> String {
 
   let truncated = &trimmed[..60];
   // Try to cut at the last underscore to avoid splitting a word.
-  if let Some(last_underscore) = truncated.rfind('_') {
-    if last_underscore > 30 {
-      return truncated[..last_underscore].to_string();
-    }
+  if let Some(last_underscore) = truncated.rfind('_')
+    && last_underscore > 30
+  {
+    return truncated[..last_underscore].to_string();
   }
   truncated.to_string()
 }

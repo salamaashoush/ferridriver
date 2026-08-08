@@ -176,10 +176,10 @@ impl TestRunner {
       // keeping Arc<EventBusInner> alive after JoinHandle::await returns.
       bus.close();
 
-      if let Some(driver_handle) = driver_handle {
-        if let Ok(reporters) = driver_handle.await {
-          self.reporters = reporters;
-        }
+      if let Some(driver_handle) = driver_handle
+        && let Ok(reporters) = driver_handle.await
+      {
+        self.reporters = reporters;
       }
 
       exit_code
@@ -244,10 +244,10 @@ impl TestRunner {
         let mut frontier: Vec<usize> = wanted.iter().copied().collect();
         while let Some(idx) = frontier.pop() {
           for dep_name in &projects[idx].dependencies {
-            if let Some(dep_idx) = projects.iter().position(|p| &p.name == dep_name) {
-              if wanted.insert(dep_idx) {
-                frontier.push(dep_idx);
-              }
+            if let Some(dep_idx) = projects.iter().position(|p| &p.name == dep_name)
+              && wanted.insert(dep_idx)
+            {
+              frontier.push(dep_idx);
             }
           }
         }
@@ -255,10 +255,10 @@ impl TestRunner {
       // Always pull in declared teardowns of kept projects.
       let kept: Vec<usize> = wanted.iter().copied().collect();
       for idx in kept {
-        if let Some(t) = &projects[idx].teardown {
-          if let Some(t_idx) = projects.iter().position(|p| &p.name == t) {
-            wanted.insert(t_idx);
-          }
+        if let Some(t) = &projects[idx].teardown
+          && let Some(t_idx) = projects.iter().position(|p| &p.name == t)
+        {
+          wanted.insert(t_idx);
         }
       }
       wanted
@@ -285,10 +285,10 @@ impl TestRunner {
     // state, regardless of pass/fail — modelled below as a teardown with all
     // remaining projects as prerequisites.
     let mut scheduled: Vec<usize> = sorted.clone();
-    if let Some(td_idx) = cli_teardown_idx {
-      if !scheduled.contains(&td_idx) {
-        scheduled.push(td_idx);
-      }
+    if let Some(td_idx) = cli_teardown_idx
+      && !scheduled.contains(&td_idx)
+    {
+      scheduled.push(td_idx);
     }
 
     // Pre-compute each scheduled project's prerequisites and whether it is a
@@ -320,17 +320,17 @@ impl TestRunner {
         let mut reqs: Vec<(usize, bool)> = Vec::new();
         // Normal dependencies must pass.
         for dep_name in &projects[idx].dependencies {
-          if let Some(dep_idx) = projects.iter().position(|p| &p.name == dep_name) {
-            if scheduled.contains(&dep_idx) {
-              reqs.push((dep_idx, true));
-            }
+          if let Some(dep_idx) = projects.iter().position(|p| &p.name == dep_name)
+            && scheduled.contains(&dep_idx)
+          {
+            reqs.push((dep_idx, true));
           }
         }
         // Teardown parent must merely be terminal.
-        if let Some(&parent_idx) = teardown_parent.get(&idx) {
-          if scheduled.contains(&parent_idx) {
-            reqs.push((parent_idx, false));
-          }
+        if let Some(&parent_idx) = teardown_parent.get(&idx)
+          && scheduled.contains(&parent_idx)
+        {
+          reqs.push((parent_idx, false));
         }
         // CLI-supplied teardown waits on every other scheduled project.
         if Some(idx) == cli_teardown_idx {
@@ -354,15 +354,15 @@ impl TestRunner {
     } else {
       match crate::server::WebServerManager::start(&self.config.web_server).await {
         Ok(mgr) => {
-          if let Some(url) = mgr.first_url() {
-            if self.config.base_url.is_none() {
-              // SAFETY: set once here before any worker threads spawn.
-              #[allow(unsafe_code)]
-              unsafe {
-                std::env::set_var("FERRIDRIVER_BASE_URL", &url)
-              };
-              tracing::info!(target: "ferridriver::runner", "webServer base_url={url}");
-            }
+          if let Some(url) = mgr.first_url()
+            && self.config.base_url.is_none()
+          {
+            // SAFETY: set once here before any worker threads spawn.
+            #[allow(unsafe_code)]
+            unsafe {
+              std::env::set_var("FERRIDRIVER_BASE_URL", &url)
+            };
+            tracing::info!(target: "ferridriver::runner", "webServer base_url={url}");
           }
           Some(mgr)
         },
@@ -556,10 +556,10 @@ impl TestRunner {
       });
     }
     bus.close();
-    if let Some(driver_handle) = driver_handle {
-      if let Ok(reporters) = driver_handle.await {
-        self.reporters = reporters;
-      }
+    if let Some(driver_handle) = driver_handle
+      && let Ok(reporters) = driver_handle.await
+    {
+      self.reporters = reporters;
     }
 
     if let Some(mgr) = web_server_manager {
@@ -613,14 +613,14 @@ impl TestRunner {
     }
 
     // ── Forbid-only check ──
-    if self.config.forbid_only || self.overrides.forbid_only {
-      if let Err(e) = crate::discovery::check_forbid_only(&plan) {
-        eprint!("{e}");
-        return ExecuteSummary {
-          exit_code: 1,
-          ..Default::default()
-        };
-      }
+    if (self.config.forbid_only || self.overrides.forbid_only)
+      && let Err(e) = crate::discovery::check_forbid_only(&plan)
+    {
+      eprint!("{e}");
+      return ExecuteSummary {
+        exit_code: 1,
+        ..Default::default()
+      };
     }
 
     // ── Only filtering: if any test/suite has Only, keep only those ──
@@ -691,16 +691,16 @@ impl TestRunner {
     let web_server_manager = if !self.config.web_server.is_empty() {
       match crate::server::WebServerManager::start(&self.config.web_server).await {
         Ok(mgr) => {
-          if let Some(url) = mgr.first_url() {
-            if self.config.base_url.is_none() {
-              // SAFETY: set_var is called before worker threads are spawned,
-              // so no concurrent reads can race.
-              #[allow(unsafe_code)]
-              unsafe {
-                std::env::set_var("FERRIDRIVER_BASE_URL", &url)
-              };
-              tracing::info!(target: "ferridriver::runner", "webServer base_url={url}");
-            }
+          if let Some(url) = mgr.first_url()
+            && self.config.base_url.is_none()
+          {
+            // SAFETY: set_var is called before worker threads are spawned,
+            // so no concurrent reads can race.
+            #[allow(unsafe_code)]
+            unsafe {
+              std::env::set_var("FERRIDRIVER_BASE_URL", &url)
+            };
+            tracing::info!(target: "ferridriver::runner", "webServer base_url={url}");
           }
           Some(mgr)
         },
@@ -1496,10 +1496,10 @@ impl TestRunner {
     }
     bus.close();
 
-    if let Some(handle) = driver_handle {
-      if let Ok(reporters) = handle.await {
-        self.reporters = reporters;
-      }
+    if let Some(handle) = driver_handle
+      && let Ok(reporters) = handle.await
+    {
+      self.reporters = reporters;
     }
     let _ = forwarder.await;
 

@@ -464,10 +464,10 @@ impl ContextRef {
       // The context init script only reaches the page's NEXT documents;
       // its initial about:blank predates registration on some backends,
       // so install the snapshot streamer into it directly.
-      if recorder.snapshots {
-        if let Err(e) = page.inner().evaluate(&crate::snapshotter::install_source()).await {
-          tracing::debug!(target: "ferridriver::trace", "snapshot streamer eval skipped: {e}");
-        }
+      if recorder.snapshots
+        && let Err(e) = page.inner().evaluate(&crate::snapshotter::install_source()).await
+      {
+        tracing::debug!(target: "ferridriver::trace", "snapshot streamer eval skipped: {e}");
       }
     }
 
@@ -696,21 +696,21 @@ impl ContextRef {
 
     let state = crate::options::StorageState { cookies, origins };
 
-    if let Some(opts) = opts {
-      if let Some(path) = opts.path {
-        let json = serde_json::to_string_pretty(&state)
-          .map_err(|e| crate::error::FerriError::Backend(format!("storageState: serialize JSON: {e}")))?;
-        if let Some(parent) = path.parent() {
-          if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-              crate::error::FerriError::Backend(format!("storageState: mkdir {}: {e}", parent.display()))
-            })?;
-          }
-        }
-        tokio::fs::write(&path, json)
+    if let Some(opts) = opts
+      && let Some(path) = opts.path
+    {
+      let json = serde_json::to_string_pretty(&state)
+        .map_err(|e| crate::error::FerriError::Backend(format!("storageState: serialize JSON: {e}")))?;
+      if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+      {
+        tokio::fs::create_dir_all(parent)
           .await
-          .map_err(|e| crate::error::FerriError::Backend(format!("storageState: write {}: {e}", path.display())))?;
+          .map_err(|e| crate::error::FerriError::Backend(format!("storageState: mkdir {}: {e}", parent.display())))?;
       }
+      tokio::fs::write(&path, json)
+        .await
+        .map_err(|e| crate::error::FerriError::Backend(format!("storageState: write {}: {e}", path.display())))?;
     }
 
     Ok(state)
@@ -1674,10 +1674,10 @@ async fn register_popup(
     let s = state.read().await;
     s.get_context_options(&composite)
   };
-  if let Some(opts) = ctx_opts.as_ref() {
-    if let Err(e) = apply_context_options(&page, opts).await {
-      tracing::debug!("popup context options: {e}");
-    }
+  if let Some(opts) = ctx_opts.as_ref()
+    && let Err(e) = apply_context_options(&page, opts).await
+  {
+    tracing::debug!("popup context options: {e}");
   }
   if let Err(e) = ctx_ref.apply_context_init_scripts(&page).await {
     tracing::debug!("popup init scripts: {e}");

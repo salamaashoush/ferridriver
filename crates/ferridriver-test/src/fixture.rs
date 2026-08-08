@@ -224,10 +224,10 @@ impl FixturePool {
 
       // Check if this fixture belongs to a parent scope.
       if let Some(def) = pool.inner.defs.get(name.as_str()) {
-        if scope_rank(def.scope) > scope_rank(pool.inner.scope) {
-          if let Some(parent) = &pool.inner.parent {
-            return parent.get::<T>(&name).await;
-          }
+        if scope_rank(def.scope) > scope_rank(pool.inner.scope)
+          && let Some(parent) = &pool.inner.parent
+        {
+          return parent.get::<T>(&name).await;
         }
       } else if let Some(parent) = &pool.inner.parent {
         return parent.get::<T>(&name).await;
@@ -353,10 +353,10 @@ fn ensure_resolved(
 
     // Check parent scope.
     if let Some(def) = pool.inner.defs.get(name.as_str()) {
-      if scope_rank(def.scope) > scope_rank(pool.inner.scope) {
-        if let Some(parent) = &pool.inner.parent {
-          return ensure_resolved(parent, &name).await;
-        }
+      if scope_rank(def.scope) > scope_rank(pool.inner.scope)
+        && let Some(parent) = &pool.inner.parent
+      {
+        return ensure_resolved(parent, &name).await;
       }
     } else if let Some(parent) = &pool.inner.parent {
       return ensure_resolved(parent, &name).await;

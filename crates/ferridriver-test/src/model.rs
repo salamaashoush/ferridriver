@@ -533,7 +533,6 @@ impl TestInfo {
   /// `.feature` file line, a `test.step` call site). The location flows
   /// into the step's trace span as its stack frame — the viewer's
   /// Source tab — and into the recorded [`TestStep::location`].
-  #[allow(clippy::unused_async_trait_impl)] // async signature held for the awaiting reporter API
   pub async fn begin_step_at(
     &self,
     title: impl Into<String>,
@@ -577,7 +576,6 @@ impl TestInfo {
   }
 
   /// Begin a nested step (child of a parent step).
-  #[allow(clippy::unused_async_trait_impl)] // async signature held for the awaiting reporter API
   pub async fn begin_child_step(
     &self,
     title: impl Into<String>,

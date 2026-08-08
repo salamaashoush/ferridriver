@@ -729,12 +729,11 @@ impl<'de> Visitor<'de> for SerializedValueVisitor {
     // `{"$serde_json::private::Number": "<literal>"}` instead of
     // `visit_f64`. Decode that back to a number before tag dispatch so
     // the wire stays AP-agnostic.
-    if bag.len() == 1 {
-      if let Some(serde_json::Value::String(lit)) = bag.get(AP_NUMBER_SENTINEL) {
-        if let Ok(n) = lit.parse::<f64>() {
-          return Ok(SerializedValue::Number(n));
-        }
-      }
+    if bag.len() == 1
+      && let Some(serde_json::Value::String(lit)) = bag.get(AP_NUMBER_SENTINEL)
+      && let Ok(n) = lit.parse::<f64>()
+    {
+      return Ok(SerializedValue::Number(n));
     }
     decode_tagged_object(bag).map_err(de::Error::custom)
   }

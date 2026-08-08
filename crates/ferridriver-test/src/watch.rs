@@ -150,10 +150,10 @@ fn classify_change(path: &Path, root: &Path, test_globs: &[glob::Pattern]) -> Ch
   let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
   // Config files — check filename directly, no allocation.
-  if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-    if name == "ferridriver.config.toml" || name == "ferridriver.config.json" {
-      return ChangeKind::Config;
-    }
+  if let Some(name) = path.file_name().and_then(|n| n.to_str())
+    && (name == "ferridriver.config.toml" || name == "ferridriver.config.json")
+  {
+    return ChangeKind::Config;
   }
 
   // Feature files.

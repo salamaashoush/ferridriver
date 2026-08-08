@@ -100,17 +100,17 @@ impl Parse for HookArgs {
           let ident = nv.path.get_ident().map(ToString::to_string).unwrap_or_default();
           match ident.as_str() {
             "tags" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Str(s) = &lit.lit {
-                  tags = Some(s.value());
-                }
+              if let syn::Expr::Lit(lit) = &nv.value
+                && let Lit::Str(s) = &lit.lit
+              {
+                tags = Some(s.value());
               }
             },
             "order" => {
-              if let syn::Expr::Lit(lit) = &nv.value {
-                if let Lit::Int(i) = &lit.lit {
-                  order = i.base10_parse()?;
-                }
+              if let syn::Expr::Lit(lit) = &nv.value
+                && let Lit::Int(i) = &lit.lit
+              {
+                order = i.base10_parse()?;
               }
             },
             _ => {
@@ -154,41 +154,41 @@ fn generate_step(kind: &str, attr: TokenStream, item: TokenStream) -> TokenStrea
   let special_params = ["table", "data_table", "docstring", "doc_string"];
   for arg in inputs.iter().skip(1) {
     // skip `world`
-    if let FnArg::Typed(pat_type) = arg {
-      if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
-        // Skip special parameters (data table, docstring) -- they are bound separately.
-        if special_params.contains(&pat_ident.ident.to_string().as_str()) {
-          continue;
-        }
-        let param_name = &pat_ident.ident;
-        let param_type = &pat_type.ty;
-        let idx = param_idx;
-
-        let extraction = type_to_extraction(param_type, idx);
-        param_extractions.push(quote! {
-          let #param_name: #param_type = #extraction;
-        });
-        param_names.push(quote! { #param_name });
-        param_idx += 1;
+    if let FnArg::Typed(pat_type) = arg
+      && let Pat::Ident(pat_ident) = pat_type.pat.as_ref()
+    {
+      // Skip special parameters (data table, docstring) -- they are bound separately.
+      if special_params.contains(&pat_ident.ident.to_string().as_str()) {
+        continue;
       }
+      let param_name = &pat_ident.ident;
+      let param_type = &pat_type.ty;
+      let idx = param_idx;
+
+      let extraction = type_to_extraction(param_type, idx);
+      param_extractions.push(quote! {
+        let #param_name: #param_type = #extraction;
+      });
+      param_names.push(quote! { #param_name });
+      param_idx += 1;
     }
   }
 
   // Check if the function takes a data_table parameter (Option<&DataTable>).
   let has_table = inputs.iter().any(|arg| {
-    if let FnArg::Typed(pat_type) = arg {
-      if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
-        return pat_ident.ident == "data_table" || pat_ident.ident == "table";
-      }
+    if let FnArg::Typed(pat_type) = arg
+      && let Pat::Ident(pat_ident) = pat_type.pat.as_ref()
+    {
+      return pat_ident.ident == "data_table" || pat_ident.ident == "table";
     }
     false
   });
 
   let has_docstring = inputs.iter().any(|arg| {
-    if let FnArg::Typed(pat_type) = arg {
-      if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
-        return pat_ident.ident == "docstring" || pat_ident.ident == "doc_string";
-      }
+    if let FnArg::Typed(pat_type) = arg
+      && let Pat::Ident(pat_ident) = pat_type.pat.as_ref()
+    {
+      return pat_ident.ident == "docstring" || pat_ident.ident == "doc_string";
     }
     false
   });
@@ -426,18 +426,18 @@ impl Parse for ParamTypeArgs {
     for meta in metas {
       if let Meta::NameValue(nv) = &meta {
         let ident = nv.path.get_ident().map(ToString::to_string).unwrap_or_default();
-        if let syn::Expr::Lit(lit) = &nv.value {
-          if let Lit::Str(s) = &lit.lit {
-            match ident.as_str() {
-              "name" => name = Some(s.value()),
-              "regex" => regex = Some(s.value()),
-              _ => {
-                return Err(syn::Error::new_spanned(
-                  &nv.path,
-                  format!("unknown param_type attribute: {ident} (expected name, regex)"),
-                ));
-              },
-            }
+        if let syn::Expr::Lit(lit) = &nv.value
+          && let Lit::Str(s) = &lit.lit
+        {
+          match ident.as_str() {
+            "name" => name = Some(s.value()),
+            "regex" => regex = Some(s.value()),
+            _ => {
+              return Err(syn::Error::new_spanned(
+                &nv.path,
+                format!("unknown param_type attribute: {ident} (expected name, regex)"),
+              ));
+            },
           }
         }
       }

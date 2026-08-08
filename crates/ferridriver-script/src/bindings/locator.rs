@@ -78,10 +78,10 @@ fn get_locator_like<'js>(
   // Fallback: a plain `{ selector: '...' }` object — works but skips
   // the same-page check (no `Page` reference available).
   let _ = ctx;
-  if let Some(obj) = v.as_object() {
-    if let Some(sel) = get_string(obj, "selector")? {
-      return Ok(Some(LocatorLike::Selector(sel)));
-    }
+  if let Some(obj) = v.as_object()
+    && let Some(sel) = get_string(obj, "selector")?
+  {
+    return Ok(Some(LocatorLike::Selector(sel)));
   }
   Err(rquickjs::Error::new_from_js_message(
     "filter options",

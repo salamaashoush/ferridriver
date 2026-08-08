@@ -1217,10 +1217,10 @@ impl McpServer {
       .page_wrappers
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(cached) = cache.get(context) {
-      if cached.inner().same_backend_page(&any_page) {
-        return Arc::clone(cached);
-      }
+    if let Some(cached) = cache.get(context)
+      && cached.inner().same_backend_page(&any_page)
+    {
+      return Arc::clone(cached);
     }
     let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
     let page = Page::with_context(any_page, ctx_ref);
@@ -1442,7 +1442,6 @@ fn tool_call_span(tool: &str, meta: Option<&rmcp::model::Meta>) -> tracing::Span
 #[tool_handler(router = self.tool_router)]
 // list_prompts / get_prompt are async by the ServerHandler trait contract;
 // they currently have no internal await but must keep the trait's signature.
-#[allow(clippy::unused_async_trait_impl)]
 impl ServerHandler for McpServer {
   fn get_info(&self) -> ServerInfo {
     ServerInfo::new(

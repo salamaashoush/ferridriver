@@ -124,7 +124,6 @@ impl Plugin for FerridriverRuntimePlugin {
     "ferridriver-runtime".into()
   }
 
-  #[allow(clippy::unused_async_trait_impl)] // rolldown Plugin trait requires async
   async fn resolve_id(&self, _ctx: &PluginContext, args: &HookResolveIdArgs<'_>) -> HookResolveIdReturn {
     if args.specifier == MULTI_ENTRY_ID && self.multi_entry.is_some() {
       return Ok(Some(HookResolveIdOutput::from_id(MULTI_ENTRY_ID)));
@@ -161,7 +160,6 @@ impl Plugin for FerridriverRuntimePlugin {
     Ok(None)
   }
 
-  #[allow(clippy::unused_async_trait_impl)] // rolldown Plugin trait requires async
   async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
     if args.id == MULTI_ENTRY_ID
       && let Some(src) = &self.multi_entry
@@ -262,14 +260,14 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<(Strin
     .map_err(|e| ScriptError::internal(format!("rolldown bundle: {e:?}")))?;
 
   for asset in &out.assets {
-    if let Output::Chunk(chunk) = asset {
-      if chunk.is_entry {
-        let code = chunk.code.clone();
-        return Ok(match &chunk.map {
-          Some(m) => (code, Some(m.to_json_string())),
-          None => (code, None),
-        });
-      }
+    if let Output::Chunk(chunk) = asset
+      && chunk.is_entry
+    {
+      let code = chunk.code.clone();
+      return Ok(match &chunk.map {
+        Some(m) => (code, Some(m.to_json_string())),
+        None => (code, None),
+      });
     }
   }
   Err(ScriptError::internal("rolldown produced no entry chunk".to_string()))

@@ -232,17 +232,16 @@ impl StepRegistry {
                 .iter()
                 .skip(self.steps.iter().position(|d| std::ptr::eq(d, def)).unwrap_or(0) + 1)
               {
-                if let Some(caps) = remaining.regex.captures(text) {
-                  if expression::extract_params_with_custom(
+                if let Some(caps) = remaining.regex.captures(text)
+                  && expression::extract_params_with_custom(
                     &caps,
                     &remaining.param_types,
                     &remaining.param_infos,
                     Some(&self.param_types),
                   )
                   .is_ok()
-                  {
-                    all.push((remaining.location.clone(), remaining.expression.clone()));
-                  }
+                {
+                  all.push((remaining.location.clone(), remaining.expression.clone()));
                 }
               }
               tracing::warn!(target: "ferridriver::bdd::step", text, count = all.len(), "step AMBIGUOUS");
