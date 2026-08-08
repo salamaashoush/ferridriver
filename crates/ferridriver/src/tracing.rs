@@ -347,10 +347,10 @@ impl Tracing {
     for req in &requests {
       let entry = build_entry(req, &ephemeral, &mut attachments).await;
       if let Ok(mut value) = serde_json::to_value(&entry) {
-        if let Some(content) = value.pointer_mut("/response/content").and_then(|c| c.as_object_mut()) {
-          if let Some(file) = content.remove("_file") {
-            content.insert("_sha1".to_string(), file);
-          }
+        if let Some(content) = value.pointer_mut("/response/content").and_then(|c| c.as_object_mut())
+          && let Some(file) = content.remove("_file")
+        {
+          content.insert("_sha1".to_string(), file);
         }
         if let Some(obj) = value.as_object_mut() {
           // Capture time (epoch ms) mapped onto the recorder's
@@ -633,6 +633,61 @@ async fn build_response(
   )
 }
 
+/// Derive the HAR `timings` object and total time for an entry from the
+/// backend timing samples. `minimal` mode omits the phase detail
+/// (Playwright's slimMode / omitTiming, `-1` per HAR convention); `full`
+/// derives dns/connect/ssl/wait/receive exactly like `harTracer.ts`
+/// (`dns = domainLookupEnd - domainLookupStart`, etc.; `-1` when a
+/// boundary sample is absent). Total = sum of the positive phases
+/// (`computeHarEntryTotalTime`).
+fn build_timings(mode: HarMode, timing: &crate::network::RequestTiming) -> (HarTimings, f64) {
+  let phase = |end: f64, start: f64| -> f64 {
+    if end >= 0.0 && start >= 0.0 {
+      (end - start).max(0.0)
+    } else {
+      -1.0
+    }
+  };
+  if mode == HarMode::Minimal {
+    let total = if timing.response_end >= 0.0 {
+      timing.response_end
+    } else {
+      0.0
+    };
+    return (
+      HarTimings {
+        dns: None,
+        connect: None,
+        ssl: None,
+        send: -1.0,
+        wait: -1.0,
+        receive: -1.0,
+      },
+      total,
+    );
+  }
+  let timings = HarTimings {
+    dns: Some(phase(timing.domain_lookup_end, timing.domain_lookup_start)),
+    connect: Some(phase(timing.connect_end, timing.connect_start)),
+    ssl: Some(phase(timing.connect_end, timing.secure_connection_start)),
+    send: 0.0,
+    wait: phase(timing.response_start, timing.request_start),
+    receive: phase(timing.response_end, timing.response_start),
+  };
+  let total = [
+    timings.dns,
+    timings.connect,
+    timings.ssl,
+    Some(timings.wait),
+    Some(timings.receive),
+  ]
+  .into_iter()
+  .flatten()
+  .filter(|v| *v > 0.0)
+  .sum();
+  (timings, total)
+}
+
 async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Vec<(String, Vec<u8>)>) -> HarEntryOut {
   // Raw (extra-info) request headers when available — Playwright's
   // `internalRawRequestHeaders`; the `Cookie` header only rides here on
@@ -669,45 +724,8 @@ async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Ve
     security_details,
   } = server_meta;
 
-  // `mode: minimal` omits timing detail (Playwright's slimMode sets
-  // omitTiming, encoded as -1 per HAR convention); full derives the
-  // phases from the backend timing samples exactly like
-  // `harTracer.ts`: `wait = responseStart - requestStart`,
-  // `receive = responseEnd - responseStart`, `send: 0`, `-1` when the
-  // sample is absent.
   let timing = req.timing();
-  // Phase deltas from the backend samples, exactly like `harTracer.ts`
-  // (dns = domainLookupEnd - domainLookupStart, connect = connectEnd -
-  // connectStart, ssl = connectEnd - secureConnectionStart, wait =
-  // responseStart - requestStart). `-1` when a boundary sample is absent.
-  let phase = |end: f64, start: f64| -> f64 {
-    if end >= 0.0 && start >= 0.0 {
-      (end - start).max(0.0)
-    } else {
-      -1.0
-    }
-  };
-  let timings = if recorder.mode == HarMode::Minimal {
-    HarTimings {
-      dns: None,
-      connect: None,
-      ssl: None,
-      send: -1.0,
-      wait: -1.0,
-      receive: -1.0,
-    }
-  } else {
-    let wait = phase(timing.response_start, timing.request_start);
-    let receive = phase(timing.response_end, timing.response_start);
-    HarTimings {
-      dns: Some(phase(timing.domain_lookup_end, timing.domain_lookup_start)),
-      connect: Some(phase(timing.connect_end, timing.connect_start)),
-      ssl: Some(phase(timing.connect_end, timing.secure_connection_start)),
-      send: 0.0,
-      wait,
-      receive,
-    }
-  };
+  let (timings, total_time) = build_timings(recorder.mode, &timing);
   let started_date_time = if timing.start_time > 0.0 {
     // Epoch ms stay far below 2^53 — exact in f64, in-range for i64.
     #[allow(clippy::cast_possible_truncation)]
@@ -715,26 +733,6 @@ async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Ve
     epoch_ms_to_iso8601(ms)
   } else {
     now_iso8601()
-  };
-  // Total = sum of the positive phases (`computeHarEntryTotalTime`).
-  let total_time = if recorder.mode == HarMode::Minimal {
-    if timing.response_end >= 0.0 {
-      timing.response_end
-    } else {
-      0.0
-    }
-  } else {
-    [
-      timings.dns,
-      timings.connect,
-      timings.ssl,
-      Some(timings.wait),
-      Some(timings.receive),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|v| *v > 0.0)
-    .sum()
   };
 
   HarEntryOut {
