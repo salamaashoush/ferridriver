@@ -262,6 +262,8 @@ pub struct BidiPage {
   /// `Arc<TempDir>` so the directory lives as long as any `Download`
   /// referencing a file under it.
   pub downloads_dir: Arc<tempfile::TempDir>,
+  /// This page's own folder inside `downloads_dir`. See `create`.
+  pub downloads_subdir: Arc<std::path::PathBuf>,
   /// Weak back-reference to the outer [`crate::page::Page`]. Same
   /// purpose as the CDP page's field — the file-chooser listener
   /// upgrades it to build the `ElementHandle`.
@@ -408,14 +410,23 @@ impl InjectedScriptManager {
 impl BidiPage {
   /// Create a new `BidiPage` and enable required domains (inject engine, etc.).
   /// This is the `BiDi` equivalent of CDP's `enable_domains()`.
-  pub(crate) fn create(session: Arc<BidiSession>, context_id: String, user_context: Option<&str>) -> Result<Self> {
+  pub(crate) fn create(
+    session: Arc<BidiSession>,
+    context_id: String,
+    user_context: Option<&str>,
+    downloads_dir: Arc<tempfile::TempDir>,
+  ) -> Self {
     // BiDi handles navigation-aware injection via script.addPreloadScript.
     // Domain enables are deferred (lazy injection), unlike CDP's upfront enable_domains().
-    let downloads_dir = tempfile::Builder::new()
-      .prefix("ferridriver-downloads-")
-      .tempdir()
-      .map_err(|e| FerriError::backend(format!("downloads tempdir: {e}")))?;
-    Ok(Self {
+    //
+    // Each page downloads into its own subdirectory of the browser's
+    // temp dir. Firefox derives `suggestedFilename` by scanning the
+    // destination folder for a free name, so two pages sharing one
+    // folder turn a second `greeting.txt` into `greeting(1).txt`.
+    let downloads_subdir = downloads_dir.path().join(&context_id);
+    let _ = std::fs::create_dir_all(&downloads_subdir);
+    Self {
+      downloads_subdir: Arc::new(downloads_subdir),
       session,
       context_id: Arc::from(context_id),
       user_context: Arc::from(user_context.unwrap_or("default")),
@@ -430,7 +441,7 @@ impl BidiPage {
       dialog_manager: crate::dialog::DialogManager::new(),
       file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
       download_manager: crate::download::DownloadManager::new(),
-      downloads_dir: Arc::new(downloads_dir),
+      downloads_dir,
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
       frame_listener_started: Arc::new(AtomicBool::new(false)),
@@ -440,7 +451,7 @@ impl BidiPage {
       http_credentials: Arc::new(std::sync::Mutex::new(None)),
       permissions: Arc::new(std::sync::Mutex::new(BidiPermissions::default())),
       handle_realms: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
-    })
+    }
   }
 
   fn track_listener(&self, handle: tokio::task::AbortHandle) {
@@ -2054,12 +2065,12 @@ impl BidiPage {
     // detached task because `attach_listeners` is synchronous.
     {
       let session = self.session.clone();
-      let downloads_dir = self.downloads_dir.clone();
+      let downloads_subdir = self.downloads_subdir.clone();
       tokio::spawn(async move {
         let params = serde_json::json!({
           "downloadBehavior": {
             "type": "allowed",
-            "destinationFolder": downloads_dir.path().to_string_lossy(),
+            "destinationFolder": downloads_subdir.to_string_lossy(),
           },
         });
         let _ = session
@@ -2075,7 +2086,7 @@ impl BidiPage {
     let dialog_manager = self.dialog_manager.clone();
     let file_chooser_manager = self.file_chooser_manager.clone();
     let download_manager = self.download_manager.clone();
-    let downloads_dir = self.downloads_dir.clone();
+    let downloads_subdir = self.downloads_subdir.clone();
     let page_backref = self.page_backref.clone();
     let closed = self.closed.clone();
     let emitter = self.events.clone();
@@ -2625,14 +2636,8 @@ impl BidiPage {
               })
             });
 
-            let download = crate::download::Download::new(
-              &page,
-              navigation,
-              url,
-              suggested,
-              downloads_dir.path().to_path_buf(),
-              canceler,
-            );
+            let download =
+              crate::download::Download::new(&page, navigation, url, suggested, (*downloads_subdir).clone(), canceler);
             download_manager.did_open(&download);
           },
           "browsingContext.downloadEnd" => {

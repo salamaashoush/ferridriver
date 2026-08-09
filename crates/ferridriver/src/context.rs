@@ -309,12 +309,18 @@ impl ContextRef {
   ///
   /// Returns an error if page creation fails.
   pub async fn new_page(&self) -> Result<Arc<Page>> {
-    {
+    // The launch runs off the state lock: holding the write guard
+    // across a browser spawn stalls every other session in the process,
+    // including ones on a different instance.
+    Box::pin(BrowserState::ensure_instance_shared(&self.state, &self.key.instance)).await?;
+    // First page open of this browser generation also starts the
+    // instance's popup pump, so `window.open` popups from any page get
+    // registered, configured, and announced as `'page'` events. The
+    // read-lock check keeps the steady-state page open off the global
+    // write guard — with N workers opening pages, that guard is the one
+    // thing they all have to queue behind.
+    if !self.state.read().await.popup_pump_claimed(&self.key.instance) {
       let mut state = self.state.write().await;
-      Box::pin(state.ensure_instance(&self.key.instance)).await?;
-      // First page open of this browser generation also starts the
-      // instance's popup pump, so `window.open` popups from any page
-      // get registered, configured, and announced as `'page'` events.
       if let Some(browser) = state.claim_popup_pump(&self.key.instance) {
         spawn_popup_pump(self.state.clone(), self.key.instance.clone(), &browser);
       }

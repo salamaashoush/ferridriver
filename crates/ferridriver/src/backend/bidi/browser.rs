@@ -18,15 +18,15 @@ pub struct BidiBrowser {
   /// [`crate::backend::PopupInfo`]) fed by the connect-time
   /// `browsingContext.contextCreated` listener.
   popup_taps: crate::backend::PopupTaps,
-  /// Owned Firefox `--profile` directory for launched browsers. Held as
-  /// `Arc<TempDir>` so cheap `Clone`s share ownership; the directory is
-  /// removed when the last handle drops. `None` for `connect()` — we don't
-  /// own the profile of a browser someone else launched.
-  #[allow(
-    dead_code,
-    reason = "held so TempDir::Drop removes the profile dir on last Arc release"
-  )]
-  profile_dir: Option<Arc<tempfile::TempDir>>,
+  /// Owned Firefox `--profile` directory for launched browsers. Removed
+  /// by `close()`, or by the last handle drop if nobody closed. `None`
+  /// for `connect()` — we don't own the profile of a browser someone
+  /// else launched.
+  profile_dir: Option<Arc<crate::backend::async_tempdir::AsyncTempDir>>,
+  /// One downloads directory per browser, shared by every page. Per
+  /// page it cost a mkdir on each open and leaked a directory whenever
+  /// teardown was skipped.
+  downloads_dir: Arc<tempfile::TempDir>,
 }
 
 impl BidiBrowser {
@@ -89,26 +89,30 @@ impl BidiBrowser {
     let headless = flags.iter().any(|f| f == "--headless");
     let (session, child, profile_dir) = Box::pin(BidiSession::launch(browser_path, flags, headless)).await?;
     let session = Arc::new(session);
-    let popup_taps = Self::spawn_popup_listener(&session);
+    let downloads_dir = new_downloads_dir()?;
+    let popup_taps = Self::spawn_popup_listener(&session, &downloads_dir);
+    let mut group = crate::backend::process::ChildGroup::recorded(child, Some(profile_dir.path()), true);
+    group.own_dir(downloads_dir.path());
     Ok(Self {
       session,
-      child: Arc::new(tokio::sync::Mutex::new(Some(crate::backend::process::ChildGroup::new(
-        child,
-      )))),
+      child: Arc::new(tokio::sync::Mutex::new(Some(group))),
       popup_taps,
-      profile_dir: Some(Arc::new(profile_dir)),
+      profile_dir: Some(Arc::new(crate::backend::async_tempdir::AsyncTempDir::new(profile_dir))),
+      downloads_dir,
     })
   }
 
   /// Connect to an existing `BiDi` endpoint via WebSocket.
   pub async fn connect(ws_url: &str) -> Result<Self> {
     let session = Arc::new(BidiSession::connect(ws_url).await?);
-    let popup_taps = Self::spawn_popup_listener(&session);
+    let downloads_dir = new_downloads_dir()?;
+    let popup_taps = Self::spawn_popup_listener(&session, &downloads_dir);
     Ok(Self {
       session,
       child: Arc::new(tokio::sync::Mutex::new(None)),
       popup_taps,
       profile_dir: None,
+      downloads_dir,
     })
   }
 
@@ -123,10 +127,14 @@ impl BidiBrowser {
   /// never do. Mirrors Playwright's
   /// `bidiBrowser.ts::_onBrowsingContextCreated`, which resolves the
   /// opener from the same field.
-  fn spawn_popup_listener(session: &Arc<BidiSession>) -> crate::backend::PopupTaps {
+  fn spawn_popup_listener(
+    session: &Arc<BidiSession>,
+    downloads_dir: &Arc<tempfile::TempDir>,
+  ) -> crate::backend::PopupTaps {
     let taps: crate::backend::PopupTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut rx = session.transport.tap_events();
     let session = Arc::clone(session);
+    let downloads_dir = Arc::clone(downloads_dir);
     let listener_taps = Arc::clone(&taps);
     tokio::spawn(async move {
       while let Some(event) = rx.recv().await {
@@ -149,13 +157,12 @@ impl BidiBrowser {
           .and_then(|v| v.as_str())
           .unwrap_or("default")
           .to_string();
-        let page = match BidiPage::create(session.clone(), context_id.to_string(), Some(&user_context)) {
-          Ok(p) => p,
-          Err(e) => {
-            debug!("popup page create failed for {context_id}: {e}");
-            continue;
-          },
-        };
+        let page = BidiPage::create(
+          session.clone(),
+          context_id.to_string(),
+          Some(&user_context),
+          Arc::clone(&downloads_dir),
+        );
         // Claimed inline: BidiPage::create is pure construction (no
         // wire round-trip), and readiness is the pump's business.
         let delivered = crate::backend::push_popup(
@@ -266,7 +273,8 @@ impl BidiBrowser {
         self.session.clone(),
         context_id.to_string(),
         user_context,
-      )?));
+        Arc::clone(&self.downloads_dir),
+      )));
     }
     Ok(pages)
   }
@@ -308,7 +316,12 @@ impl BidiBrowser {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), wait_for_created).await;
 
     debug!("BiDi new page: context={context_id}");
-    let page = BidiPage::create(self.session.clone(), context_id, user_context_id)?;
+    let page = BidiPage::create(
+      self.session.clone(),
+      context_id,
+      user_context_id,
+      Arc::clone(&self.downloads_dir),
+    );
     page.wait_until_ready().await?;
 
     if let Some(viewport) = viewport {
@@ -339,7 +352,17 @@ impl BidiBrowser {
       // the enclosing runtime carries no zombie.
       group.shutdown().await;
     }
+    if let Some(dir) = self.profile_dir.as_ref() {
+      dir.remove_now().await;
+    }
     Ok(())
+  }
+
+  /// Whether the launched Firefox is still running. `None` when this
+  /// handle connected to a browser it did not launch.
+  pub(crate) fn child_is_running(&self) -> Option<bool> {
+    let mut guard = self.child.try_lock().ok()?;
+    guard.as_mut().map(crate::backend::process::ChildGroup::is_running)
   }
 }
 
@@ -354,4 +377,15 @@ fn parse_bidi_proxy(server: &str) -> (&'static str, String, bool, Option<i64>) {
     "socks4" => ("manual", host_port, true, Some(4)),
     _ => ("manual", host_port, false, None),
   }
+}
+
+/// One temp downloads directory per browser. `Playwright.setDownloadBehavior`
+/// equivalents are per browser too, and download filenames are unique.
+fn new_downloads_dir() -> Result<Arc<tempfile::TempDir>> {
+  Ok(Arc::new(
+    tempfile::Builder::new()
+      .prefix("ferridriver-downloads-")
+      .tempdir()
+      .map_err(|e| FerriError::backend(format!("downloads tempdir: {e}")))?,
+  ))
 }

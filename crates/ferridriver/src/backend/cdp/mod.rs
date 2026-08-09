@@ -62,8 +62,11 @@ impl CdpWrap for ws::WsTransport {
 pub struct CdpBrowser<T: CdpTransport> {
   transport: Arc<T>,
   child: Arc<tokio::sync::Mutex<Option<super::process::ChildGroup>>>,
-  /// Track targetId -> sessionId for already-attached targets.
-  attached_targets: std::sync::Mutex<FxHashMap<String, Option<String>>>,
+  /// Track targetId -> sessionId for already-attached targets. Shared
+  /// across clones: it is a cache of what the browser told us, and the
+  /// attach listener (which has no `self`) prunes it on detach — a
+  /// per-clone copy would keep growing one dead entry per page opened.
+  attached_targets: AttachedTargets,
   /// Product version string captured from CDP `Browser.getVersion().product`
   /// at handshake time. Matches what Playwright surfaces via `browser.version()`
   /// (its initializer stores the same value and returns it synchronously).
@@ -85,6 +88,11 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// `kill_on_drop(true)`). `None` for `connect()` — we don't own the dir
   /// of a browser someone else launched.
   user_data_dir: Option<Arc<super::async_tempdir::AsyncTempDir>>,
+  /// One downloads directory per browser, shared by every page it
+  /// opens. Chrome names downloads uniquely (`allowAndName`), so a
+  /// per-page directory bought nothing and cost a mkdir on every page
+  /// open plus a leaked directory whenever teardown was skipped.
+  downloads_dir: Arc<tempfile::TempDir>,
   /// Abort handles for the two attach-listener tasks.
   ///
   /// Both hold an `Arc` clone of the transport while parked on one of its
@@ -100,11 +108,13 @@ impl<T: CdpTransport> CdpBrowser<T> {
   ///
   /// False once the transport hits EOF, which is what a crash or an
   /// OOM-kill looks like from here.
+  #[must_use]
   pub fn is_alive(&self) -> bool {
     !self.transport.is_disconnected()
   }
 
   /// Product version string captured at handshake.
+  #[must_use]
   pub fn version(&self) -> &str {
     &self.version
   }
@@ -121,17 +131,12 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
     Self {
       transport: Arc::clone(&self.transport),
       child: Arc::clone(&self.child),
-      attached_targets: std::sync::Mutex::new(
-        self
-          .attached_targets
-          .lock()
-          .unwrap_or_else(std::sync::PoisonError::into_inner)
-          .clone(),
-      ),
+      attached_targets: Arc::clone(&self.attached_targets),
       version: Arc::clone(&self.version),
       popup_taps: Arc::clone(&self.popup_taps),
       create_ledger: Arc::clone(&self.create_ledger),
       user_data_dir: self.user_data_dir.as_ref().map(Arc::clone),
+      downloads_dir: Arc::clone(&self.downloads_dir),
       attach_tasks: Arc::clone(&self.attach_tasks),
     }
   }
@@ -163,6 +168,19 @@ fn metrics_params_for(config: &crate::options::ViewportConfig) -> serde_json::Va
     "screenHeight": config.height,
     "screenOrientation": orientation,
   })
+}
+
+/// Shared targetId -> sessionId cache. See [`CdpBrowser::attached_targets`].
+type AttachedTargets = Arc<std::sync::Mutex<FxHashMap<String, Option<String>>>>;
+
+/// The handles the attach listener needs to turn an announced target
+/// into a claimed popup.
+struct AttachCtx<T: CdpTransport> {
+  transport: Arc<T>,
+  taps: crate::backend::PopupTaps,
+  downloads_dir: Arc<tempfile::TempDir>,
+  ledger: Arc<CreateLedger>,
+  attached: AttachedTargets,
 }
 
 /// A paused page target the attach listener could not attribute yet:
@@ -337,14 +355,22 @@ impl<T: CdpWrap> CdpBrowser<T> {
       )
       .await?;
 
-    let (popup_taps, create_ledger, attach_tasks) = Self::spawn_attach_listener(&transport);
+    let downloads_dir = new_downloads_dir()?;
+    let mut child = child;
+    if let Some(ref mut group) = child {
+      group.own_dir(downloads_dir.path());
+    }
+    let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
+    let (popup_taps, create_ledger, attach_tasks) =
+      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets);
 
     Ok(Self {
       transport,
       child: Arc::new(tokio::sync::Mutex::new(child)),
-      attached_targets: std::sync::Mutex::new(FxHashMap::default()),
+      attached_targets,
       version,
       user_data_dir: user_data_dir.map(|td| Arc::new(super::async_tempdir::AsyncTempDir::new(td))),
+      downloads_dir,
       popup_taps,
       create_ledger,
       attach_tasks: Arc::new(attach_tasks),
@@ -373,6 +399,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// `crBrowser._onAttachedToTarget` → `CRPage` path).
   fn spawn_attach_listener(
     transport: &Arc<T>,
+    downloads_dir: &Arc<tempfile::TempDir>,
+    attached: &AttachedTargets,
   ) -> (
     crate::backend::PopupTaps,
     Arc<CreateLedger>,
@@ -380,20 +408,33 @@ impl<T: CdpWrap> CdpBrowser<T> {
   ) {
     let popup_taps: crate::backend::PopupTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
     let ledger = Arc::new(CreateLedger::default());
-    let mut attach_rx = transport.tap_event_methods(&["Target.attachedToTarget"], None);
+    let mut attach_rx = transport.tap_event_methods(
+      &[
+        "Target.attachedToTarget",
+        "Target.detachedFromTarget",
+        "Target.targetDestroyed",
+      ],
+      None,
+    );
     let resume_transport = Arc::clone(transport);
-    let claim_taps = Arc::clone(&popup_taps);
-    let claim_ledger = Arc::clone(&ledger);
+    let claim_ctx = AttachCtx {
+      transport: Arc::clone(transport),
+      taps: Arc::clone(&popup_taps),
+      downloads_dir: Arc::clone(downloads_dir),
+      ledger: Arc::clone(&ledger),
+      attached: Arc::clone(attached),
+    };
     // Flush channel: `end_create` (called from new_page, no transport
     // access) signals the listener side to claim leftovers.
     let mut flush_rx = ledger.take_flush_rx();
+    let flush_downloads = Arc::clone(downloads_dir);
     let flush_transport = Arc::clone(transport);
     let flush_taps = Arc::clone(&popup_taps);
     let flush_ledger = Arc::clone(&ledger);
     let flush_task = tokio::spawn(async move {
       while flush_rx.recv().await.is_some() {
         for parked in flush_ledger.take_unowned_parked() {
-          Self::claim_parked_popup(&flush_transport, &flush_taps, parked);
+          Self::claim_parked_popup(&flush_transport, &flush_taps, &flush_downloads, parked);
         }
       }
     });
@@ -403,6 +444,18 @@ impl<T: CdpWrap> CdpBrowser<T> {
       let mut claimed_popups: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
       while let Some(event) = attach_rx.recv().await {
         let Some(params) = event.get("params") else { continue };
+        // A target that went away must leave the session cache, or the
+        // map grows by one dead entry for every page ever opened.
+        if event.get("method").and_then(|m| m.as_str()) != Some("Target.attachedToTarget") {
+          if let Some(target_id) = params.get("targetId").and_then(|v| v.as_str()) {
+            claim_ctx
+              .attached
+              .lock()
+              .unwrap_or_else(std::sync::PoisonError::into_inner)
+              .remove(target_id);
+          }
+          continue;
+        }
         let target_type = params
           .pointer("/targetInfo/type")
           .and_then(|v| v.as_str())
@@ -415,15 +468,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
           continue;
         };
         if target_type == "page" {
-          Self::maybe_claim_popup(
-            &resume_transport,
-            &claim_taps,
-            &claim_ledger,
-            &mut claimed_popups,
-            params,
-            waiting,
-            session_id,
-          );
+          Self::maybe_claim_popup(&claim_ctx, &mut claimed_popups, params, waiting, session_id);
           continue;
         }
         if !waiting {
@@ -466,9 +511,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// multi-command round-trip and the loop must keep consuming attach
   /// events.
   fn maybe_claim_popup(
-    transport: &Arc<T>,
-    taps: &crate::backend::PopupTaps,
-    ledger: &Arc<CreateLedger>,
+    ctx: &AttachCtx<T>,
     claimed: &mut rustc_hash::FxHashSet<String>,
     params: &serde_json::Value,
     waiting: bool,
@@ -496,20 +539,26 @@ impl<T: CdpWrap> CdpBrowser<T> {
       browser_context: browser_context_id,
       opener: opener_id,
     };
-    if parked.opener.is_none() && !ledger.try_claim_ownerless(&parked.target, parked.clone()) {
+    if parked.opener.is_none() && !ctx.ledger.try_claim_ownerless(&parked.target, parked.clone()) {
       // Parked — a create in flight may own it; the flush decides.
       return;
     }
     claimed.insert(target_id);
-    Self::claim_parked_popup(transport, taps, parked);
+    Self::claim_parked_popup(&ctx.transport, &ctx.taps, &ctx.downloads_dir, parked);
   }
 
   /// Claim one resolved popup target: build the paused [`CdpPage`] and
   /// announce it, or resume the target if nothing is listening / the
   /// claim failed (never leave it parked on `waitForDebuggerOnStart`).
-  fn claim_parked_popup(transport: &Arc<T>, taps: &crate::backend::PopupTaps, parked: ParkedTarget) {
+  fn claim_parked_popup(
+    transport: &Arc<T>,
+    taps: &crate::backend::PopupTaps,
+    downloads_dir: &Arc<tempfile::TempDir>,
+    parked: ParkedTarget,
+  ) {
     let transport = Arc::clone(transport);
     let taps = Arc::clone(taps);
+    let downloads_dir = Arc::clone(downloads_dir);
     tokio::spawn(async move {
       let ParkedTarget {
         target: target_id,
@@ -517,7 +566,14 @@ impl<T: CdpWrap> CdpBrowser<T> {
         browser_context: browser_context_id,
         opener: opener_id,
       } = parked;
-      let claimed_page = Self::claim_popup(&transport, &session_id, &target_id, browser_context_id.as_deref()).await;
+      let claimed_page = Self::claim_popup(
+        &transport,
+        &downloads_dir,
+        &session_id,
+        &target_id,
+        browser_context_id.as_deref(),
+      )
+      .await;
       let deliver_failed = match claimed_page {
         Ok(page) => !crate::backend::push_popup(
           &taps,
@@ -554,6 +610,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// resumes after context configuration is applied.
   async fn claim_popup(
     transport: &Arc<T>,
+    downloads_dir: &Arc<tempfile::TempDir>,
     session_id: &str,
     target_id: &str,
     browser_context_id: Option<&str>,
@@ -615,7 +672,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       download_manager: crate::download::DownloadManager::new(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      downloads_dir: new_downloads_dir()?,
+      downloads_dir: Arc::clone(downloads_dir),
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -730,7 +787,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         download_manager: crate::download::DownloadManager::new(),
         download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        downloads_dir: new_downloads_dir()?,
+        downloads_dir: Arc::clone(&self.downloads_dir),
         page_backref: crate::backend::PageBackref::new(),
         frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
         frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -914,7 +971,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       download_manager: crate::download::DownloadManager::new(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      downloads_dir: new_downloads_dir()?,
+      downloads_dir: Arc::clone(&self.downloads_dir),
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -964,7 +1021,23 @@ impl<T: CdpWrap> CdpBrowser<T> {
       // the enclosing runtime doesn't carry a zombie.
       group.shutdown().await;
     }
+    // Reclaim the profile directory here rather than leaving it to the
+    // last `Arc` drop: at process teardown the runtime may never run
+    // the deferred removal, which leaked one multi-megabyte Chromium
+    // profile per session.
+    if let Some(dir) = self.user_data_dir.as_ref() {
+      dir.remove_now().await;
+    }
     Ok(())
+  }
+
+  /// Whether the launched browser process is still running. `None` when
+  /// this handle did not launch the process (`connect`) or the child
+  /// lock is momentarily held, in which case the caller falls back to
+  /// the transport's own liveness signal.
+  pub(crate) fn child_is_running(&self) -> Option<bool> {
+    let mut guard = self.child.try_lock().ok()?;
+    guard.as_mut().map(super::process::ChildGroup::is_running)
   }
 }
 
@@ -987,13 +1060,9 @@ impl CdpBrowser<pipe::PipeTransport> {
       .tempdir()
       .map_err(|e| FerriError::Backend(format!("create user-data-dir: {e}")))?;
 
-    let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir.path(), flags)?;
-    Self::init(
-      Arc::new(transport),
-      Some(super::process::ChildGroup::new(child)),
-      Some(user_data_dir),
-    )
-    .await
+    let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir.path(), flags, true)?;
+    let group = super::process::ChildGroup::recorded(child, Some(user_data_dir.path()), true);
+    Self::init(Arc::new(transport), Some(group), Some(user_data_dir)).await
   }
 
   /// Launch Chrome with a caller-supplied `--user-data-dir`. The
@@ -1007,8 +1076,9 @@ impl CdpBrowser<pipe::PipeTransport> {
     flags: &[String],
     user_data_dir: &std::path::Path,
   ) -> Result<Self> {
-    let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir, flags)?;
-    Self::init(Arc::new(transport), Some(super::process::ChildGroup::new(child)), None).await
+    let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir, flags, false)?;
+    let group = super::process::ChildGroup::recorded(child, Some(user_data_dir), false);
+    Self::init(Arc::new(transport), Some(group), None).await
   }
 }
 
@@ -1034,13 +1104,9 @@ impl CdpBrowser<ws::WsTransport> {
       .tempdir()
       .map_err(|e| FerriError::Backend(format!("create user-data-dir: {e}")))?;
 
-    let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir.path(), flags)).await?;
-    Self::init(
-      Arc::new(transport),
-      Some(super::process::ChildGroup::new(child)),
-      Some(user_data_dir),
-    )
-    .await
+    let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir.path(), flags, true)).await?;
+    let group = super::process::ChildGroup::recorded(child, Some(user_data_dir.path()), true);
+    Self::init(Arc::new(transport), Some(group), Some(user_data_dir)).await
   }
 
   /// Launch Chrome over WebSocket with a caller-supplied
@@ -1051,8 +1117,47 @@ impl CdpBrowser<ws::WsTransport> {
     flags: &[String],
     user_data_dir: &std::path::Path,
   ) -> Result<Self> {
-    let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir, flags)).await?;
-    Self::init(Arc::new(transport), Some(super::process::ChildGroup::new(child)), None).await
+    let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir, flags, false)).await?;
+    let group = super::process::ChildGroup::recorded(child, Some(user_data_dir), false);
+    Self::init(Arc::new(transport), Some(group), None).await
+  }
+
+  /// Attach to the first existing page target of a browser we just
+  /// connected to, recording its session in `attached`. Returns whether
+  /// one was found.
+  async fn attach_first_existing_page(
+    transport: &Arc<ws::WsTransport>,
+    targets: &serde_json::Value,
+    attached: &mut FxHashMap<String, Option<String>>,
+  ) -> Result<bool> {
+    let Some(targets) = targets.get("targetInfos").and_then(|t| t.as_array()) else {
+      return Ok(false);
+    };
+    for target in targets {
+      if target.get("type").and_then(|v| v.as_str()) != Some("page") {
+        continue;
+      }
+      let target_id = target
+        .get("targetId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+      let attach = transport
+        .send_command(
+          None,
+          "Target.attachToTarget",
+          &serde_json::json!({"targetId": target_id, "flatten": true}),
+        )
+        .await?;
+      let sid = attach
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string);
+      Box::pin(Self::enable_domains(transport, sid.as_deref(), None, false, None)).await?;
+      attached.insert(target_id, sid);
+      return Ok(true);
+    }
+    Ok(false)
   }
 
   /// Connect to a running Chrome instance via WebSocket URL.
@@ -1093,7 +1198,10 @@ impl CdpBrowser<ws::WsTransport> {
         }),
       )
       .await?;
-    let (popup_taps, create_ledger, attach_tasks) = Self::spawn_attach_listener(&transport);
+    let downloads_dir = new_downloads_dir()?;
+    let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
+    let (popup_taps, create_ledger, attach_tasks) =
+      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets);
 
     // Find existing page targets
     let result = transport
@@ -1101,34 +1209,7 @@ impl CdpBrowser<ws::WsTransport> {
       .await?;
 
     let mut attached = FxHashMap::default();
-    let mut found_page = false;
-
-    if let Some(targets) = result.get("targetInfos").and_then(|t| t.as_array()) {
-      for target in targets {
-        if target.get("type").and_then(|v| v.as_str()) == Some("page") {
-          let target_id = target
-            .get("targetId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-          let attach = transport
-            .send_command(
-              None,
-              "Target.attachToTarget",
-              &serde_json::json!({"targetId": target_id, "flatten": true}),
-            )
-            .await?;
-          let sid = attach
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .map(std::string::ToString::to_string);
-          Box::pin(Self::enable_domains(&transport, sid.as_deref(), None, false, None)).await?;
-          attached.insert(target_id, sid);
-          found_page = true;
-          break; // take first page
-        }
-      }
-    }
+    let found_page = Self::attach_first_existing_page(&transport, &result, &mut attached).await?;
 
     // If no existing page, create one
     if !found_page {
@@ -1165,10 +1246,17 @@ impl CdpBrowser<ws::WsTransport> {
       attached.insert(target_id, sid);
     }
 
+    // Hand the targets discovered above to the shared cache the attach
+    // listener prunes.
+    *attached_targets
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = attached;
+
     Ok(Self {
       transport,
+      downloads_dir,
       child: Arc::new(tokio::sync::Mutex::new(None)),
-      attached_targets: std::sync::Mutex::new(attached),
+      attached_targets,
       version,
       attach_tasks: Arc::new(attach_tasks),
       popup_taps,
@@ -5954,6 +6042,9 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       for handle in guard.drain(..) {
         handle.abort();
       }
+    }
+    if let Some(sid) = self.session_id.as_deref() {
+      self.transport.unregister_session(sid);
     }
   }
 

@@ -269,6 +269,13 @@ pub trait CdpTransport: Send + Sync + 'static {
     state: Arc<std::sync::Mutex<super::LifecycleState>>,
     notify: Arc<tokio::sync::Notify>,
   );
+
+  /// Release everything the dispatcher holds for a page session that is
+  /// going away. Taps are otherwise only pruned when an event of that
+  /// exact method arrives, and the lifecycle tracker was never removed
+  /// at all — both grew by an entry per page for the life of the
+  /// browser.
+  fn unregister_session(&self, session_id: &str);
 }
 
 // ── Shared dispatch state ──────────────────────────────────────────────────
@@ -455,6 +462,28 @@ impl CdpDispatcher {
       .insert(session_id.to_string(), LifecycleTracker { state, notify });
   }
 
+  /// Drop the lifecycle tracker and every tap belonging to
+  /// `session_id`. See [`CdpTransport::unregister_session`].
+  pub fn unregister_session(&self, session_id: &str) {
+    if session_id.is_empty() {
+      return;
+    }
+    self.lifecycle_trackers.remove(session_id);
+    let drop_session = |taps: &mut Vec<EventTap>| taps.retain(|t| t.session.as_deref() != Some(session_id));
+    for mut entry in self.method_taps.iter_mut() {
+      drop_session(entry.value_mut());
+    }
+    for mut entry in self.domain_taps.iter_mut() {
+      drop_session(entry.value_mut());
+    }
+    drop_session(
+      &mut self
+        .wildcard_taps
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+  }
+
   pub fn subscribe_events(&self) -> broadcast::Receiver<Arc<serde_json::Value>> {
     self.event_tx.subscribe()
   }
@@ -514,12 +543,23 @@ impl CdpDispatcher {
   }
 
   /// Build a CDP command as NUL-terminated JSON bytes and register a response receiver.
+  ///
+  /// Fails immediately once the transport is known to be dead. Without
+  /// that check a command issued after the browser exited is queued to a
+  /// writer task that has already stopped reading, and the caller waits
+  /// the full 30s response timeout for an answer that can never come —
+  /// which is exactly what every call did after an external browser kill.
   pub fn build_command(
     &self,
     session_id: Option<&str>,
     method: &str,
     params: &serde_json::Value,
   ) -> Result<(u64, Vec<u8>, oneshot::Receiver<CdpResult>)> {
+    if self.is_disconnected() {
+      return Err(FerriError::target_closed(Some(format!(
+        "browser connection is closed (sending {method})"
+      ))));
+    }
     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
     let params_str = serde_json::to_string(params).map_err(|e| FerriError::Backend(format!("Serialize: {e}")))?;
     let mut data = if let Some(sid) = session_id {

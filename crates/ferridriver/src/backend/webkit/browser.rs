@@ -52,6 +52,9 @@ struct ChildHandle {
   child: Mutex<Option<Child>>,
   /// Parent halves of the two socketpairs. Dropping closes them.
   ipc: Mutex<Option<(UnixStream, UnixStream)>>,
+  /// Temp downloads directory, removed with the browser. Nothing else
+  /// owned it, so every run left one behind.
+  downloads_dir: std::path::PathBuf,
 }
 
 impl Drop for ChildHandle {
@@ -62,9 +65,14 @@ impl Drop for ChildHandle {
     if let Ok(mut g) = self.child.lock()
       && let Some(mut c) = g.take()
     {
+      // The launcher puts the child in its own session, so this takes
+      // the whole `pw_run.sh` → WebKit → helper tree with it. Killing
+      // only the direct child would leave the real browser running.
+      crate::backend::process::kill_process_group(c.id());
       let _ = c.kill();
       let _ = c.wait();
     }
+    let _ = std::fs::remove_dir_all(&self.downloads_dir);
   }
 }
 
@@ -174,6 +182,7 @@ impl WebKitBrowser {
       handle: Arc::new(ChildHandle {
         child: Mutex::new(Some(child)),
         ipc: Mutex::new(Some((parent_read, parent_write))),
+        downloads_dir: (*downloads_dir).clone(),
       }),
       pages,
       default_context,
@@ -489,10 +498,24 @@ impl WebKitBrowser {
     if let Ok(mut g) = self.handle.child.lock()
       && let Some(mut c) = g.take()
     {
+      crate::backend::process::kill_process_group(c.id());
       let _ = c.kill();
       let _ = c.wait();
     }
     Ok(())
+  }
+
+  /// Whether the spawned `WebKit` child is still running. Drives
+  /// `AnyBrowser::is_alive`, so a browser that died out from under the
+  /// session is relaunched instead of failing every later call.
+  pub(crate) fn child_is_running(&self) -> bool {
+    self
+      .handle
+      .child
+      .lock()
+      .ok()
+      .and_then(|mut g| g.as_mut().map(|c| c.try_wait().ok().flatten().is_none()))
+      .unwrap_or(true)
   }
 
   /// `Playwright.getInfo` — `{ os }`.

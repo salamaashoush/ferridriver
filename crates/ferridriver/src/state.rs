@@ -155,7 +155,12 @@ impl BrowserInstance {
 // ── BrowserState ────────────────────────────────────────────────────────────
 
 /// Callback type for per-instance chrome args.
-pub type InstanceArgsFn = Box<dyn Fn(&str) -> Vec<String> + Send + Sync>;
+///
+/// `Arc`, not `Box`: the launch path clones it out from under the state
+/// lock and runs it on the blocking pool. Implementations shell out
+/// (`instanceArgsCommand`), and calling that while holding the state's
+/// write guard froze every other session for the duration.
+pub type InstanceArgsFn = Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
 
 /// Callback type for resolving how to connect to a browser instance.
 ///
@@ -166,7 +171,10 @@ pub type InstanceArgsFn = Box<dyn Fn(&str) -> Vec<String> + Send + Sync>;
 /// while launching fresh browsers for others.
 ///
 /// Return `None` to fall through to the default `connect_mode`.
-pub type InstanceResolverFn = Box<dyn Fn(&str) -> Option<ConnectMode> + Send + Sync>;
+///
+/// `Arc` for the same reason as [`InstanceArgsFn`]: resolution probes
+/// TCP endpoints and may shell out, so it runs off the state lock.
+pub type InstanceResolverFn = Arc<dyn Fn(&str) -> Option<ConnectMode> + Send + Sync>;
 
 /// Per-context WebSocket-route registry map: composite session key →
 /// `context.routeWebSocket` handlers in registration order.
@@ -190,6 +198,10 @@ pub struct BrowserState {
   /// Instance name → browser generation whose popup pump is running
   /// (see [`Self::claim_popup_pump`]).
   popup_pumps: HashMap<String, u64>,
+  /// Per-instance launch serialization, read through a shared guard by
+  /// [`Self::ensure_instance_shared`]. Sync mutex so the permit can be
+  /// taken while only holding the state's read lock.
+  launch_permits: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
   /// Monotonic source for [`BrowserInstance::generation`]. Bumped on
   /// every instance (re)creation so consumers can detect a browser
   /// session swap under a reused instance name.
@@ -385,7 +397,21 @@ impl BrowserState {
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       persistent_context: false,
       popup_pumps: HashMap::default(),
+      launch_permits: Arc::new(std::sync::Mutex::new(HashMap::default())),
     }
+  }
+
+  /// Whether `instance`'s popup pump is already running for its current
+  /// browser generation. Lets the page-open path skip the write lock in
+  /// the steady state: every page open used to take the global write
+  /// guard purely to re-answer this question, which serialized parallel
+  /// workers against each other on a map lookup.
+  #[must_use]
+  pub(crate) fn popup_pump_claimed(&self, instance: &str) -> bool {
+    let Some(inst) = self.instances.get(instance) else {
+      return false;
+    };
+    self.popup_pumps.get(instance) == Some(&inst.generation)
   }
 
   /// Claim the popup pump for `instance`'s CURRENT browser generation.
@@ -592,9 +618,189 @@ impl BrowserState {
 
   // ── Instance management ─────────────────────────────────────────────────
 
-  /// Launch a fresh browser process for the configured `backend_kind`.
-  /// Extracted from [`Self::ensure_instance`] to keep the per-backend
-  /// match arms out of the ensure-instance hot path.
+  /// Everything a launch needs from the state, snapshotted so the
+  /// launch itself can run without holding the lock.
+  fn launch_spec(&self) -> LaunchSpec {
+    LaunchSpec {
+      backend_kind: self.backend_kind,
+      headless: self.headless,
+      chromium_path: self.chromium_path.clone(),
+      user_data_dir: self.user_data_dir.clone(),
+      connect_mode: self.connect_mode.clone(),
+      base_args: self.extra_args.clone(),
+      default_viewport: self.default_viewport.clone(),
+      args_fn: self.instance_args_fn.clone(),
+      resolver_fn: self.instance_resolver_fn.clone(),
+    }
+  }
+
+  /// Per-instance launch permit. Two sessions racing to first-use the
+  /// same instance must not each spawn a browser, and the loser has to
+  /// wait for the winner rather than for the global write lock.
+  fn launch_permit(&self, instance: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = self
+      .launch_permits
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(
+      map
+        .entry(instance.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
+  }
+
+  /// Whether `instance` exists and its browser is still reachable.
+  #[must_use]
+  pub fn instance_is_live(&self, instance: &str) -> bool {
+    self.instances.get(instance).is_some_and(|i| i.browser.is_alive())
+  }
+
+  /// Ensure `instance` is up, doing the launch off the state lock.
+  ///
+  /// [`Self::ensure_instance`] holds the caller's write guard across
+  /// the whole launch — process spawn, protocol handshake, and any
+  /// configured args/discovery subprocess — which stalls every other
+  /// session in the server, including ones on a different browser. This
+  /// takes the write lock only to install the finished instance.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the browser process fails to start or the
+  /// connection fails.
+  pub async fn ensure_instance_shared(state: &Arc<tokio::sync::RwLock<Self>>, instance: &str) -> Result<()> {
+    if state.read().await.instance_is_live(instance) {
+      return Ok(());
+    }
+    let permit = state.read().await.launch_permit(instance);
+    let _permit = permit.lock().await;
+    {
+      // The winner of the race installed it while we waited.
+      let guard = state.read().await;
+      if guard.instance_is_live(instance) {
+        return Ok(());
+      }
+      if guard.instances.contains_key(instance) {
+        tracing::warn!(
+          target: "ferridriver::state",
+          instance,
+          "browser instance is gone; relaunching",
+        );
+      }
+    }
+
+    let spec = state.read().await.launch_spec();
+    let (mode, all_extra) = spec.resolve_off_lock(instance).await;
+    let browser = match &mode {
+      ConnectMode::Launch => spec.launch_browser(&all_extra).await?,
+      other => connect_browser(other).await?,
+    };
+    let adopt_pages = !matches!(mode, ConnectMode::Launch);
+
+    let mut guard = state.write().await;
+    Box::pin(guard.install_instance(instance, browser, adopt_pages)).await
+  }
+
+  /// Evict a dead entry, adopt existing pages when connecting, and
+  /// register `browser` as `instance_name`.
+  async fn install_instance(&mut self, instance_name: &str, browser: AnyBrowser, adopt_pages: bool) -> Result<()> {
+    self.evict_instance(instance_name).await;
+    let mut inst = BrowserInstance {
+      browser,
+      contexts: HashMap::default(),
+      generation: 0,
+    };
+    // Adopt existing pages into the "default" context of this instance.
+    // When connecting to an existing browser, skip viewport override to
+    // preserve the user's current window size. For launch mode, pages
+    // are created on demand by the caller (the test runner creates
+    // isolated contexts, MCP creates pages lazily).
+    if adopt_pages {
+      let existing_pages = Box::pin(inst.browser.pages()).await.unwrap_or_default();
+      let ctx = inst.context_mut("default");
+      for page in existing_pages {
+        page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+        ctx.pages.push(page);
+      }
+    }
+    inst.generation = self.next_instance_generation();
+    self.instances.insert(instance_name.to_string(), inst);
+    self.connected.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+  }
+
+  /// Drop a live-or-dead instance entry, releasing its pages' listener
+  /// tasks and closing its browser.
+  async fn evict_instance(&mut self, instance_name: &str) {
+    let Some(mut dead) = self.instances.remove(instance_name) else {
+      return;
+    };
+    for ctx in dead.contexts.values() {
+      for page in &ctx.pages {
+        page.dispose_local();
+      }
+    }
+    dead.contexts.clear();
+    let _ = dead.browser.close().await;
+  }
+}
+
+/// Immutable snapshot of the launch-relevant state, taken under a read
+/// guard so the launch runs unlocked.
+struct LaunchSpec {
+  backend_kind: BackendKind,
+  headless: bool,
+  chromium_path: String,
+  user_data_dir: Option<String>,
+  connect_mode: ConnectMode,
+  base_args: Vec<String>,
+  default_viewport: Option<crate::options::ViewportConfig>,
+  args_fn: Option<InstanceArgsFn>,
+  resolver_fn: Option<InstanceResolverFn>,
+}
+
+impl LaunchSpec {
+  /// Resolve the connect mode and the full flag list for `instance`.
+  ///
+  /// Both callbacks are operator-supplied and routinely spawn a
+  /// subprocess or probe a TCP port, so they run on the blocking pool:
+  /// on an async worker they stall unrelated tasks, and the args
+  /// command for the dev gateway instance takes hundreds of ms.
+  async fn resolve_off_lock(&self, instance: &str) -> (ConnectMode, Vec<String>) {
+    let args_fn = self.args_fn.clone();
+    let resolver_fn = self.resolver_fn.clone();
+    let mut all_extra = self.base_args.clone();
+    let name = instance.to_string();
+    // With no callbacks configured (the test runner, plain `launch()`)
+    // there is nothing to run off-thread; skip the blocking-pool hop.
+    let (extra, mode) = if args_fn.is_none() && resolver_fn.is_none() {
+      (Vec::new(), None)
+    } else {
+      match tokio::task::spawn_blocking(move || {
+        let extra = args_fn.map(|f| f(&name)).unwrap_or_default();
+        let mode = resolver_fn.and_then(|f| f(&name));
+        (extra, mode)
+      })
+      .await
+      {
+        Ok(pair) => pair,
+        Err(e) => {
+          tracing::warn!(target: "ferridriver::state", error = %e, "instance args/resolver task failed");
+          (Vec::new(), None)
+        },
+      }
+    };
+    all_extra.extend(extra);
+
+    // Match the browser window to the viewport unless the caller
+    // already pinned a size.
+    if !all_extra.iter().any(|a| a.starts_with("--window-size"))
+      && let Some(ref vp) = self.default_viewport
+    {
+      all_extra.push(format!("--window-size={},{}", vp.width, vp.height));
+    }
+    (mode.unwrap_or_else(|| self.connect_mode.clone()), all_extra)
+  }
+
   async fn launch_browser(&self, all_extra: &[String]) -> Result<AnyBrowser> {
     Ok(match self.backend_kind {
       BackendKind::CdpPipe => {
@@ -647,109 +853,57 @@ impl BrowserState {
       },
     })
   }
+}
 
+/// Attach to a browser someone else is running. `ConnectUrl` and
+/// `AutoConnect` both speak CDP over a WebSocket.
+async fn connect_browser(mode: &ConnectMode) -> Result<AnyBrowser> {
+  use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
+  let ws_url = match mode {
+    ConnectMode::ConnectUrl(url) if url.starts_with("ws://") || url.starts_with("wss://") => url.clone(),
+    ConnectMode::ConnectUrl(url) => discover_ws_from_http(url).await?,
+    ConnectMode::AutoConnect { channel, user_data_dir } => discover_chrome_ws(channel, user_data_dir.as_deref())?,
+    ConnectMode::Launch => return Err(FerriError::backend("connect_browser called with Launch mode")),
+  };
+  Ok(AnyBrowser::CdpRaw(
+    Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url)).await?,
+  ))
+}
+
+impl BrowserState {
   /// Ensure a browser instance is launched. If it already exists, no-op.
+  ///
+  /// Holds the caller's `&mut` borrow for the whole launch; server code
+  /// that shares the state behind an `RwLock` should call
+  /// [`Self::ensure_instance_shared`] instead.
   ///
   /// # Errors
   ///
   /// Returns an error if the browser process fails to start or connection fails.
   pub async fn ensure_instance(&mut self, instance_name: &str) -> Result<()> {
-    if let Some(inst) = self.instances.get(instance_name) {
-      if inst.browser.is_alive() {
-        return Ok(());
-      }
+    if self.instance_is_live(instance_name) {
+      return Ok(());
+    }
+    if self.instances.contains_key(instance_name) {
       // The browser died (crash, OOM-kill, external SIGKILL). Without this
       // the entry stays and every later session routed to this name gets
       // `TargetClosed` forever, because the only thing that ever removed
-      // an instance was an explicit shutdown. Evict and relaunch instead —
-      // its contexts are gone with the process, so release their local
-      // resources rather than leaving the listener tasks parked.
+      // an instance was an explicit shutdown.
       tracing::warn!(
         target: "ferridriver::state",
         instance = instance_name,
         "browser instance is gone; relaunching",
       );
-      if let Some(mut dead) = self.instances.remove(instance_name) {
-        for ctx in dead.contexts.values() {
-          for page in &ctx.pages {
-            page.dispose_local();
-          }
-        }
-        dead.contexts.clear();
-        let _ = dead.browser.close().await;
-      }
     }
 
-    // Check if the instance resolver can provide a connection mode.
-    // This lets consumers route specific instances to existing browsers
-    // (e.g. "staging" -> connect to browser managed by another tool).
-    let resolved_mode = self.instance_resolver_fn.as_ref().and_then(|f| f(instance_name));
-
-    // Build flags: base + per-instance
-    let mut all_extra = self.extra_args.clone();
-    if let Some(ref f) = self.instance_args_fn {
-      all_extra.extend(f(instance_name));
-    }
-
-    // Inject --window-size from viewport config so the browser window matches the
-    // viewport dimensions. Skip if the user already supplied --window-size.
-    if !all_extra.iter().any(|a| a.starts_with("--window-size"))
-      && let Some(ref vp) = self.default_viewport
-    {
-      all_extra.push(format!("--window-size={},{}", vp.width, vp.height));
-    }
-
-    // Use resolved mode if available, otherwise fall back to default connect_mode.
-    let effective_mode = resolved_mode.as_ref().unwrap_or(&self.connect_mode);
-
-    let browser = match effective_mode {
-      // ConnectUrl and AutoConnect always use CdpRaw (WebSocket)
-      ConnectMode::ConnectUrl(url) => {
-        use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
-        let ws_url = if url.starts_with("ws://") || url.starts_with("wss://") {
-          url.clone()
-        } else {
-          discover_ws_from_http(url).await?
-        };
-        AnyBrowser::CdpRaw(Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url)).await?)
-      },
-      ConnectMode::AutoConnect { channel, user_data_dir } => {
-        use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
-        let ws_url = discover_chrome_ws(channel, user_data_dir.as_deref())?;
-        AnyBrowser::CdpRaw(Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url)).await?)
-      },
-      ConnectMode::Launch => self.launch_browser(&all_extra).await?,
+    let spec = self.launch_spec();
+    let (mode, all_extra) = spec.resolve_off_lock(instance_name).await;
+    let browser = match &mode {
+      ConnectMode::Launch => spec.launch_browser(&all_extra).await?,
+      other => connect_browser(other).await?,
     };
-
-    let mut inst = BrowserInstance {
-      browser,
-      contexts: HashMap::default(),
-      generation: 0,
-    };
-
-    // Adopt existing pages into the "default" context of this instance.
-    // When connecting to an existing browser, skip viewport override to preserve
-    // the user's current window size. Only apply viewport for freshly launched browsers.
-    let is_connect = matches!(
-      effective_mode,
-      ConnectMode::ConnectUrl(_) | ConnectMode::AutoConnect { .. }
-    );
-    // For connect mode, adopt existing pages into the default context.
-    // For launch mode, skip default page creation — pages are created on demand
-    // by the caller (test runner creates isolated contexts, MCP creates pages lazily).
-    if is_connect {
-      let existing_pages = Box::pin(inst.browser.pages()).await.unwrap_or_default();
-      let ctx = inst.context_mut("default");
-      for page in existing_pages {
-        page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
-        ctx.pages.push(page);
-      }
-    }
-
-    inst.generation = self.next_instance_generation();
-    self.instances.insert(instance_name.to_string(), inst);
-    self.connected.store(true, std::sync::atomic::Ordering::Relaxed);
-    Ok(())
+    let adopt_pages = !matches!(mode, ConnectMode::Launch);
+    Box::pin(self.install_instance(instance_name, browser, adopt_pages)).await
   }
 
   /// Backwards-compat: ensure the "default" instance.
@@ -1073,6 +1227,16 @@ impl BrowserState {
   pub fn active_page(&self, context: &str) -> Result<&AnyPage> {
     let key = SessionKey::parse(context);
     let inst = self.instance(&key.instance)?;
+    // A browser killed from outside leaves its pages in place, and
+    // handing one back sends every later command down a dead transport
+    // (one 30s timeout per call) instead of relaunching. The instance is
+    // evicted and rebuilt by the caller's cold-start path.
+    if !inst.browser.is_alive() {
+      return Err(FerriError::target_closed(Some(format!(
+        "browser for instance '{}' is gone",
+        key.instance
+      ))));
+    }
     let ctx = inst.context(&key.context)?;
     ctx
       .active_page()
@@ -1145,10 +1309,18 @@ impl BrowserState {
   pub async fn remove_context(&mut self, context: &str) {
     let key = SessionKey::parse(context);
     if let Some(inst) = self.instances.get_mut(&*key.instance) {
-      if let Ok(ctx) = inst.context(&key.context)
-        && let Some(ref ctx_id) = ctx.cdp_context_id
-      {
-        let _ = inst.browser.dispose_context(ctx_id).await;
+      let ctx_id = inst.context(&key.context).ok().and_then(|c| c.cdp_context_id.clone());
+      // One call kills a real browser context and all its pages
+      // (Playwright's doClose). The default context has no backend
+      // context of its own, so its tabs have to be closed one by one —
+      // dropping the handles alone left them open in the browser.
+      if let Some(id) = ctx_id {
+        let _ = inst.browser.dispose_context(&id).await;
+      } else {
+        let pages: Vec<AnyPage> = inst.context(&key.context).map(|c| c.pages.clone()).unwrap_or_default();
+        for page in pages {
+          let _ = page.close_page(crate::options::PageCloseOptions::default()).await;
+        }
       }
       inst.remove_context(&key.context);
     }
@@ -1174,26 +1346,34 @@ impl BrowserState {
     Ok(())
   }
 
+  /// Close one page of a context: ask the browser to close the target,
+  /// release the page's local resources, and drop it from the context.
+  ///
+  /// Dropping the handle alone is not enough — the tab stays open in
+  /// the browser and its listener tasks stay parked on the transport,
+  /// so a session that opened and "closed" pages accumulated both.
+  ///
   /// # Errors
   ///
-  /// Returns an error if this is the last page, context does not exist, or index is out of range.
-  pub fn close_page(&mut self, context: &str, page_idx: usize) -> Result<()> {
+  /// Returns an error if the context does not exist or the index is out of range.
+  pub async fn close_page(&mut self, context: &str, page_idx: usize) -> Result<()> {
     let key = SessionKey::parse(context);
     let inst = self.instance_mut(&key.instance)?;
     let ctx = inst.context_mut_checked(&key.context)?;
-    if ctx.pages.len() <= 1 {
-      return Err(FerriError::invalid_argument(
-        "page",
-        "Cannot close the last page in a context",
-      ));
-    }
     if page_idx >= ctx.pages.len() {
       return Err(FerriError::Backend(format!("Page index {page_idx} out of range")));
     }
-    ctx.pages.remove(page_idx);
+    let page = ctx.pages.remove(page_idx);
     if ctx.active_page_idx >= ctx.pages.len() {
-      ctx.active_page_idx = ctx.pages.len() - 1;
+      ctx.active_page_idx = ctx.pages.len().saturating_sub(1);
     }
+    // A page whose target is already gone (crashed, closed from the
+    // page itself) still needs its local teardown, so the close failure
+    // is logged rather than propagated.
+    if let Err(e) = page.close_page(crate::options::PageCloseOptions::default()).await {
+      tracing::debug!(target: "ferridriver::state", error = %e, "close_page: backend close failed");
+    }
+    page.dispose_local();
     Ok(())
   }
 
@@ -1333,8 +1513,10 @@ impl BrowserState {
 
   pub async fn shutdown(&mut self) {
     self.connected.store(false, std::sync::atomic::Ordering::Relaxed);
-    for (_, mut inst) in self.instances.drain() {
-      for ctx in inst.contexts.values() {
+    let mut composites = Vec::new();
+    for (name, mut inst) in self.instances.drain() {
+      for (ctx_name, ctx) in &inst.contexts {
+        composites.push(format!("{name}:{ctx_name}"));
         for page in &ctx.pages {
           page.dispose_local();
         }
@@ -1342,6 +1524,36 @@ impl BrowserState {
       inst.contexts.clear();
       let _ = inst.browser.close().await;
     }
+    // Every per-context registry is keyed by composite session key and
+    // nothing else drops those entries on a browser-wide shutdown; a
+    // long-lived server that cycles browsers would keep the storage
+    // state, HAR recorders and route tables of every dead context.
+    for composite in composites {
+      self.purge_context_registries(&composite).await;
+    }
+    self.popup_pumps.clear();
+  }
+
+  /// Close one browser instance, leaving the others running. Returns
+  /// `false` if no instance by that name is live.
+  ///
+  /// The next session routed to the name launches a fresh browser, so
+  /// this is also how an operator picks up changed per-instance chrome
+  /// args without taking down every other instance in the server.
+  pub async fn close_instance(&mut self, instance: &str) -> bool {
+    let Some(inst) = self.instances.get(instance) else {
+      return false;
+    };
+    let composites: Vec<String> = inst.contexts.keys().map(|c| format!("{instance}:{c}")).collect();
+    self.evict_instance(instance).await;
+    for composite in composites {
+      self.purge_context_registries(&composite).await;
+    }
+    self.popup_pumps.remove(instance);
+    if self.instances.is_empty() {
+      self.connected.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    true
   }
 
   #[must_use]
@@ -2171,7 +2383,7 @@ mod tests {
   #[test]
   fn test_instance_resolver_returns_connect_url() {
     let mut state = test_state(BackendKind::CdpPipe);
-    state.set_instance_resolver_fn(Box::new(|instance| match instance {
+    state.set_instance_resolver_fn(Arc::new(|instance| match instance {
       "staging" => Some(ConnectMode::ConnectUrl(
         "ws://127.0.0.1:9222/devtools/browser/abc".to_owned(),
       )),
@@ -2191,9 +2403,9 @@ mod tests {
   fn test_instance_args_fn_independent_of_resolver() {
     let mut state = test_state(BackendKind::CdpPipe);
 
-    state.set_instance_args_fn(Box::new(|instance| vec![format!("--window-name={instance}")]));
+    state.set_instance_args_fn(Arc::new(|instance| vec![format!("--window-name={instance}")]));
 
-    state.set_instance_resolver_fn(Box::new(|_| None));
+    state.set_instance_resolver_fn(Arc::new(|_| None));
 
     // Both callbacks set independently
     let args = state.instance_args_fn.as_ref().unwrap()("dev");
@@ -2213,7 +2425,7 @@ mod tests {
     };
 
     let mut state = test_state(BackendKind::CdpRaw);
-    state.set_instance_resolver_fn(Box::new(move |instance| {
+    state.set_instance_resolver_fn(Arc::new(move |instance| {
       if instance == "test-resolved" {
         Some(ConnectMode::ConnectUrl(format!(
           "ws://127.0.0.1:{port}/devtools/browser/test"
@@ -2245,7 +2457,7 @@ mod tests {
     let counter = Arc::clone(&call_count);
 
     let mut state = test_state(BackendKind::CdpPipe);
-    state.set_instance_resolver_fn(Box::new(move |_| {
+    state.set_instance_resolver_fn(Arc::new(move |_| {
       counter.fetch_add(1, Ordering::Relaxed);
       None // Fall through to default
     }));
