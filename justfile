@@ -103,6 +103,51 @@ test-e2e *args:
   cargo build --bin ferridriver --bin ferridriver-fixtures
   ./target/debug/ferridriver test {{args}}
 
+# Stress the MCP server: concurrent load across sessions, page/context/
+# instance churn, and a browser killed behind its back. An agent session
+# drives one tool at a time, so none of this is reachable in normal use —
+# which is exactly why the bugs live here. Non-zero exit on any failed
+# call, any browser outliving the server, or a server that had to be
+# killed. `--backend cdp-raw|webkit|bidi` to switch protocol.
+stress *args:
+  cargo build --bin ferridriver
+  python3 scripts/stress/stress.py {{args}}
+
+# Adversarial variant: two things happening to one session at once
+# (32 callers on one context, close under load), plus deliberately
+# expensive calls (4000-node DOM, 3000-line console storm). Looks for a
+# wedged server rather than a slow one.
+stress-adversarial *args:
+  cargo build --bin ferridriver
+  python3 scripts/stress/adversarial.py {{args}}
+
+# Soak: N session lifecycles through one server. fds, threads and temp
+# dirs must stay FLAT; resident memory should flatten after the early
+# climb. Default 1000 cycles, roughly a minute.
+stress-soak *args:
+  cargo build --bin ferridriver
+  python3 scripts/stress/soak.py {{args}}
+
+# Does a browser ever outlive its server? Ends the server by stdin EOF,
+# SIGTERM and SIGKILL in turn and counts what is left. Expect zero
+# survivors on every backend.
+stress-orphans *args:
+  cargo build --bin ferridriver
+  python3 scripts/stress/orphans.py {{args}}
+
+# Every stress harness across every backend. Minutes, not seconds.
+stress-all:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cargo build --bin ferridriver
+  for backend in cdp-pipe cdp-raw webkit bidi; do
+    echo "=== $backend ==="
+    python3 scripts/stress/orphans.py --backend "$backend"
+    python3 scripts/stress/adversarial.py --backend "$backend"
+  done
+  python3 scripts/stress/stress.py --rounds 20 --workers 12
+  python3 scripts/stress/soak.py --cycles 1000
+
 # Run Playwright's own example suites, UNMODIFIED, against ferridriver.
 # Every failure is a compat bug until docs/playwright-compat.md records it
 # as an intentional divergence. `--offline` skips the network-backed
