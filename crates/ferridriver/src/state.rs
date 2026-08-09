@@ -138,7 +138,17 @@ impl BrowserInstance {
   }
 
   fn remove_context(&mut self, name: &str) {
-    self.contexts.remove(name);
+    // Dropping the context drops its `Vec<AnyPage>`, but a page's
+    // listener tasks are detached: they park on transport-wide taps and
+    // hold `Arc` clones of the transport, so dropping the handle does not
+    // stop them. Release them explicitly, or every context that closes
+    // leaves ~10 tasks awake for the life of the process and keeps the
+    // transport (and its fd) alive after the browser is gone.
+    if let Some(ctx) = self.contexts.remove(name) {
+      for page in &ctx.pages {
+        page.dispose_local();
+      }
+    }
   }
 }
 
@@ -1256,6 +1266,11 @@ impl BrowserState {
   pub async fn shutdown(&mut self) {
     self.connected.store(false, std::sync::atomic::Ordering::Relaxed);
     for (_, mut inst) in self.instances.drain() {
+      for ctx in inst.contexts.values() {
+        for page in &ctx.pages {
+          page.dispose_local();
+        }
+      }
       inst.contexts.clear();
       let _ = inst.browser.close().await;
     }

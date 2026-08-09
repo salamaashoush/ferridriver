@@ -3075,6 +3075,20 @@ impl BidiPage {
     Ok(())
   }
 
+  /// Release this page's local resources without a protocol round trip —
+  /// see the CDP `dispose_local` for why context teardown needs this.
+  pub fn dispose_local(&self) {
+    if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+      return;
+    }
+    self.events.emit(crate::events::PageEvent::Close);
+    if let Ok(mut guard) = self.listener_tasks.lock() {
+      for handle in guard.drain(..) {
+        handle.abort();
+      }
+    }
+  }
+
   #[must_use]
   pub fn is_closed(&self) -> bool {
     self.closed.load(Ordering::Relaxed)

@@ -2253,6 +2253,18 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// Release this page's local resources without a protocol round trip —
+  /// see the CDP `dispose_local` for why context teardown needs this.
+  pub fn dispose_local(&self) {
+    if self.closed.swap(true, Ordering::Relaxed) {
+      return;
+    }
+    let conn = self.proxy.connection_handle();
+    conn.close_route(Some(&self.proxy_id), Some(&self.target_id()));
+    conn.close_route(Some(&self.proxy_id), None);
+    self.events.emit(crate::events::PageEvent::Close);
+  }
+
   #[must_use]
   pub fn is_closed(&self) -> bool {
     self.closed.load(Ordering::Relaxed)

@@ -85,6 +85,14 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// `kill_on_drop(true)`). `None` for `connect()` — we don't own the dir
   /// of a browser someone else launched.
   user_data_dir: Option<Arc<super::async_tempdir::AsyncTempDir>>,
+  /// Abort handles for the two attach-listener tasks.
+  ///
+  /// Both hold an `Arc` clone of the transport while parked on one of its
+  /// taps, so neither can end on its own: the transport keeps the tasks
+  /// alive and the tasks keep the transport alive. Closing the browser has
+  /// to cut that cycle, or the transport, its reader/writer tasks and its
+  /// connection fd survive every closed browser.
+  attach_tasks: Arc<Vec<tokio::task::AbortHandle>>,
 }
 
 impl<T: CdpTransport> CdpBrowser<T> {
@@ -116,6 +124,7 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
       popup_taps: Arc::clone(&self.popup_taps),
       create_ledger: Arc::clone(&self.create_ledger),
       user_data_dir: self.user_data_dir.as_ref().map(Arc::clone),
+      attach_tasks: Arc::clone(&self.attach_tasks),
     }
   }
 }
@@ -320,7 +329,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       )
       .await?;
 
-    let (popup_taps, create_ledger) = Self::spawn_attach_listener(&transport);
+    let (popup_taps, create_ledger, attach_tasks) = Self::spawn_attach_listener(&transport);
 
     Ok(Self {
       transport,
@@ -330,6 +339,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       user_data_dir: user_data_dir.map(|td| Arc::new(super::async_tempdir::AsyncTempDir::new(td))),
       popup_taps,
       create_ledger,
+      attach_tasks: Arc::new(attach_tasks),
     })
   }
 
@@ -353,7 +363,13 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// enabled while still paused, then ride the returned popup taps so
   /// the state-level pump can register them and resume (Playwright's
   /// `crBrowser._onAttachedToTarget` → `CRPage` path).
-  fn spawn_attach_listener(transport: &Arc<T>) -> (crate::backend::PopupTaps, Arc<CreateLedger>) {
+  fn spawn_attach_listener(
+    transport: &Arc<T>,
+  ) -> (
+    crate::backend::PopupTaps,
+    Arc<CreateLedger>,
+    Vec<tokio::task::AbortHandle>,
+  ) {
     let popup_taps: crate::backend::PopupTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
     let ledger = Arc::new(CreateLedger::default());
     let mut attach_rx = transport.tap_event_methods(&["Target.attachedToTarget"], None);
@@ -366,14 +382,14 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let flush_transport = Arc::clone(transport);
     let flush_taps = Arc::clone(&popup_taps);
     let flush_ledger = Arc::clone(&ledger);
-    tokio::spawn(async move {
+    let flush_task = tokio::spawn(async move {
       while flush_rx.recv().await.is_some() {
         for parked in flush_ledger.take_unowned_parked() {
           Self::claim_parked_popup(&flush_transport, &flush_taps, parked);
         }
       }
     });
-    tokio::spawn(async move {
+    let attach_task = tokio::spawn(async move {
       // Popup targets already claimed — Chromium can announce the
       // same related target through more than one auto-attach scope.
       let mut claimed_popups: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
@@ -423,7 +439,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
         });
       }
     });
-    (popup_taps, ledger)
+    (
+      popup_taps,
+      ledger,
+      vec![flush_task.abort_handle(), attach_task.abort_handle()],
+    )
   }
 
   /// One auto-attached page target. Ownership resolution:
@@ -928,6 +948,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// the CDP roundtrip cost (~5-10ms RTT) outweighs the value of
   /// letting chrome flush its `IndexedDB` / profile state on exit.
   pub async fn close(&mut self) -> Result<()> {
+    for handle in self.attach_tasks.iter() {
+      handle.abort();
+    }
     if let Some(mut group) = self.child.lock().await.take() {
       // Group kill first (helpers die with the parent), then reap so
       // the enclosing runtime doesn't carry a zombie.
@@ -1062,7 +1085,7 @@ impl CdpBrowser<ws::WsTransport> {
         }),
       )
       .await?;
-    let (popup_taps, create_ledger) = Self::spawn_attach_listener(&transport);
+    let (popup_taps, create_ledger, attach_tasks) = Self::spawn_attach_listener(&transport);
 
     // Find existing page targets
     let result = transport
@@ -1139,6 +1162,7 @@ impl CdpBrowser<ws::WsTransport> {
       child: Arc::new(tokio::sync::Mutex::new(None)),
       attached_targets: std::sync::Mutex::new(attached),
       version,
+      attach_tasks: Arc::new(attach_tasks),
       popup_taps,
       create_ledger,
       user_data_dir: None,
@@ -5898,6 +5922,31 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       }
     }
     Ok(())
+  }
+
+  /// Release everything this page holds on OUR side, without telling the
+  /// browser anything.
+  ///
+  /// Used when the browser is already tearing the page down for us —
+  /// `Target.disposeBrowserContext` kills every page in the context in one
+  /// call, so sending `Target.closeTarget` per page would just add a
+  /// round-trip per page to every context close. What that CDP call does
+  /// NOT do is stop our own listeners: each page parks ~10 tasks on
+  /// transport-wide taps, and every one holds an `Arc` clone of the
+  /// transport. Left running they wake on every future CDP event for the
+  /// life of the process, pin the page's emitter/logs/managers, and keep
+  /// the transport (and its connection fd) alive after the browser is
+  /// gone.
+  pub fn dispose_local(&self) {
+    if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+      return;
+    }
+    self.events.emit(crate::events::PageEvent::Close);
+    if let Ok(mut guard) = self.listener_tasks.lock() {
+      for handle in guard.drain(..) {
+        handle.abort();
+      }
+    }
   }
 
   #[must_use]

@@ -1728,6 +1728,19 @@ impl AnyPage {
     page_dispatch!(self, close_page(opts))
   }
 
+  /// Release the page's local resources (listener tasks, routes, emitter
+  /// Close) without asking the browser to close it. For callers that have
+  /// already destroyed the page browser-side — context disposal kills
+  /// every page in one call — this is the other half of the teardown.
+  pub fn dispose_local(&self) {
+    match self {
+      Self::CdpPipe(p) => p.dispose_local(),
+      Self::CdpRaw(p) => p.dispose_local(),
+      Self::WebKit(p) => p.dispose_local(),
+      Self::Bidi(p) => p.dispose_local(),
+    }
+  }
+
   #[must_use]
   pub fn is_closed(&self) -> bool {
     match self {
