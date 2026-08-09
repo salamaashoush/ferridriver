@@ -857,6 +857,20 @@ impl AnyBrowser {
   /// # Errors
   ///
   /// Returns an error if context creation fails.
+  /// Whether the browser is still reachable.
+  ///
+  /// CDP knows for certain: its transport records EOF. `BiDi` and `WebKit`
+  /// have no equivalent signal wired up yet and report `true`, which is
+  /// the behaviour every backend had before this existed — so this never
+  /// makes a live browser look dead, it only lets CDP notice a dead one.
+  pub fn is_alive(&self) -> bool {
+    match self {
+      Self::CdpPipe(b) => b.is_alive(),
+      Self::CdpRaw(b) => b.is_alive(),
+      Self::WebKit(_) | Self::Bidi(_) => true,
+    }
+  }
+
   pub async fn new_context(&self, options: Option<&crate::options::BrowserContextOptions>) -> Result<String> {
     let proxy = options.and_then(|o| o.proxy.as_ref());
     match self {

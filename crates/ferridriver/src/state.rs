@@ -654,8 +654,30 @@ impl BrowserState {
   ///
   /// Returns an error if the browser process fails to start or connection fails.
   pub async fn ensure_instance(&mut self, instance_name: &str) -> Result<()> {
-    if self.instances.contains_key(instance_name) {
-      return Ok(());
+    if let Some(inst) = self.instances.get(instance_name) {
+      if inst.browser.is_alive() {
+        return Ok(());
+      }
+      // The browser died (crash, OOM-kill, external SIGKILL). Without this
+      // the entry stays and every later session routed to this name gets
+      // `TargetClosed` forever, because the only thing that ever removed
+      // an instance was an explicit shutdown. Evict and relaunch instead —
+      // its contexts are gone with the process, so release their local
+      // resources rather than leaving the listener tasks parked.
+      tracing::warn!(
+        target: "ferridriver::state",
+        instance = instance_name,
+        "browser instance is gone; relaunching",
+      );
+      if let Some(mut dead) = self.instances.remove(instance_name) {
+        for ctx in dead.contexts.values() {
+          for page in &ctx.pages {
+            page.dispose_local();
+          }
+        }
+        dead.contexts.clear();
+        let _ = dead.browser.close().await;
+      }
     }
 
     // Check if the instance resolver can provide a connection mode.

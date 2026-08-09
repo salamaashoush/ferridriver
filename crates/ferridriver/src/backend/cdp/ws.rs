@@ -123,6 +123,10 @@ impl WsTransport {
 }
 
 impl super::transport::CdpTransport for WsTransport {
+  fn is_disconnected(&self) -> bool {
+    self.dispatcher.is_disconnected()
+  }
+
   #[tracing::instrument(skip(self, session_id, params), fields(method))]
   async fn send_command(
     &self,

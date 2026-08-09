@@ -96,6 +96,14 @@ pub struct CdpBrowser<T: CdpTransport> {
 }
 
 impl<T: CdpTransport> CdpBrowser<T> {
+  /// Whether this browser's connection is still up.
+  ///
+  /// False once the transport hits EOF, which is what a crash or an
+  /// OOM-kill looks like from here.
+  pub fn is_alive(&self) -> bool {
+    !self.transport.is_disconnected()
+  }
+
   /// Product version string captured at handshake.
   pub fn version(&self) -> &str {
     &self.version

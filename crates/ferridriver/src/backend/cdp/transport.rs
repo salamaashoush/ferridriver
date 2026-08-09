@@ -220,6 +220,9 @@ pub fn dump_global_rtt_stats() {
 
 /// Trait abstracting CDP transport medium (pipes vs WebSocket).
 pub trait CdpTransport: Send + Sync + 'static {
+  /// Whether the browser connection has ended (EOF on the pipe/socket).
+  fn is_disconnected(&self) -> bool;
+
   fn send_command(
     &self,
     session_id: Option<&str>,
@@ -277,6 +280,8 @@ pub(crate) struct LifecycleTracker {
 
 /// Shared CDP message dispatch state. Embedded by both `PipeTransport` and `WsTransport`.
 pub(crate) struct CdpDispatcher {
+  /// Set once by the reader task on EOF — see [`Self::is_disconnected`].
+  disconnected: std::sync::atomic::AtomicBool,
   pub next_id: AtomicU64,
   pub pending: Arc<PendingMap>,
   /// Per-session lifecycle trackers (keyed by sessionId). Sharded
@@ -380,6 +385,7 @@ impl CdpDispatcher {
   pub fn new() -> Self {
     let (event_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
     Self {
+      disconnected: std::sync::atomic::AtomicBool::new(false),
       next_id: AtomicU64::new(1),
       pending: Arc::new(DashMap::default()),
       lifecycle_trackers: Arc::new(DashMap::default()),
@@ -478,7 +484,18 @@ impl CdpDispatcher {
   /// Drain every in-flight `send_command` oneshot and deliver a
   /// `target_closed` error. Called by the reader task on EOF / error
   /// so callers don't block on responses that will never arrive.
+  /// Whether the connection to the browser has ended.
+  ///
+  /// Set once by the reader task on EOF. A browser that crashed or was
+  /// OOM-killed leaves its instance entry behind otherwise, and every
+  /// later session routed to that name gets `TargetClosed` forever
+  /// instead of a fresh browser.
+  pub fn is_disconnected(&self) -> bool {
+    self.disconnected.load(std::sync::atomic::Ordering::Relaxed)
+  }
+
   pub fn fail_all_pending(&self, reason: &str) {
+    self.disconnected.store(true, std::sync::atomic::Ordering::Relaxed);
     // `DashMap::iter_mut` would hold shard locks; collect keys first.
     let keys: Vec<u64> = self.pending.iter().map(|e| *e.key()).collect();
     for id in keys {
