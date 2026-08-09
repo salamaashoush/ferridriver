@@ -292,6 +292,18 @@ impl McpClient {
     extract_script_payload(&resp).expect("script response should carry a JSON payload")
   }
 
+  /// Run a script that is expected to fail: assert the call comes back
+  /// as a tool execution error (`isError: true`, the MCP way to report
+  /// a failed operation) and return its structured payload.
+  pub fn script_failing(&mut self, source: &str) -> Value {
+    let resp = self.call_tool("run_script", json!({"source": source, "args": []}));
+    assert!(
+      is_error(&resp),
+      "a script that throws must come back as a tool error: {resp}"
+    );
+    extract_script_payload(&resp).expect("script response should carry a JSON payload")
+  }
+
   /// Run a script expecting success; return the `value` from the payload.
   pub fn script_value(&mut self, source: &str) -> Value {
     let payload = self.script(source);
@@ -307,13 +319,15 @@ impl McpClient {
   }
 
   /// Run a script with a wall-clock timeout (ms) and return the parsed
-  /// payload. Used to drive the poisoning-timeout recovery path.
+  /// payload. Used to drive the poisoning-timeout recovery path, so it
+  /// deliberately does not assert success: blowing the deadline is a
+  /// failed operation and comes back as a tool error. Callers assert on
+  /// the payload's `status` instead.
   pub fn script_with_timeout(&mut self, source: &str, timeout_ms: u64) -> Value {
     let resp = self.call_tool(
       "run_script",
       json!({"source": source, "args": [], "timeout_ms": timeout_ms}),
     );
-    ok(&resp, "run_script");
     extract_script_payload(&resp).expect("script response should carry a JSON payload")
   }
 }

@@ -1024,8 +1024,30 @@ impl McpServer {
     self.custom_ext.downcast_ref::<T>()
   }
 
+  /// Build the error a tool handler returns when the operation it was
+  /// asked to perform failed.
+  ///
+  /// Carries `INTERNAL_ERROR` only as an in-process marker: [`call_tool`]
+  /// turns it into a `CallToolResult` with `isError: true` before it
+  /// reaches the wire, per the MCP split between protocol errors (the
+  /// request could not be processed) and tool execution errors (the
+  /// tool ran and failed). Handlers keep using `?`, and the model still
+  /// gets to see — and react to — the failure.
+  ///
+  /// [`call_tool`]: McpServer::call_tool
   pub fn err(msg: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(msg.to_string(), None)
+  }
+
+  /// Report a failed operation as a tool execution error.
+  ///
+  /// A navigation timeout or a missing element is not "the server
+  /// broke": it is a result the model can act on (retry, re-snapshot,
+  /// pick another selector). Sending it as JSON-RPC `-32603` told the
+  /// host the server malfunctioned and, in hosts that abort a turn on
+  /// protocol errors, denied the model the chance to recover.
+  pub(crate) fn tool_failure(error: &ErrorData) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(error.message.to_string())])
   }
 
   /// Drop every cache keyed by `context`, including the page wrapper.
@@ -1515,6 +1537,13 @@ impl ServerHandler for McpServer {
   /// client's trace/span ids into the ferridriver → CDP spans, giving one
   /// correlated trace across the whole automation. Dispatch itself is
   /// identical to the generated version (`ToolCallContext` → router).
+  ///
+  /// It is also the single place the two MCP error channels are sorted
+  /// out. A handler that fails an operation reports it as a tool
+  /// execution error (`isError: true`, message in `content`) so the
+  /// model sees it and can adapt; only errors that mean "this request
+  /// could not be processed at all" — an unknown tool, arguments the
+  /// declared schema rejects — stay JSON-RPC errors for the host.
   async fn call_tool(
     &self,
     request: rmcp::model::CallToolRequestParams,
@@ -1525,7 +1554,11 @@ impl ServerHandler for McpServer {
     // empty — read the trace context from the context, not the request.
     let span = tool_call_span(request.name.as_ref(), Some(&context.meta));
     let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-    self.tool_router.call(tcc).instrument(span).await
+    match self.tool_router.call(tcc).instrument(span).await {
+      Ok(result) => Ok(result),
+      Err(e) if e.code == rmcp::model::ErrorCode::INTERNAL_ERROR => Ok(Self::tool_failure(&e)),
+      Err(e) => Err(e),
+    }
   }
 
   async fn list_resources(

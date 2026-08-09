@@ -9,6 +9,7 @@
 
 pub mod bdd;
 pub mod client;
+pub mod error_convention;
 pub mod evaluate;
 pub mod extension_tools;
 pub mod mcp_features;

@@ -21,8 +21,9 @@ pub fn test_snapshot(c: &mut McpClient) {
 
 pub fn test_snapshot_scroll_info(c: &mut McpClient) {
   c.nav("<div style='height:3000px'>tall</div>");
-  // Scroll via a run_script call before snapshotting.
-  c.script("window.scrollBy(0, 500); return null;");
+  // Scroll the PAGE: `window` is not a global of the script sandbox, so
+  // this has to go through `page.evaluate` to reach the document.
+  c.script("await page.evaluate('window.scrollBy(0, 500)'); return null;");
   let t = c.tool_text("snapshot", json!({}));
   assert!(t.contains("Scroll:"), "snapshot should show scroll position: {t}");
 }

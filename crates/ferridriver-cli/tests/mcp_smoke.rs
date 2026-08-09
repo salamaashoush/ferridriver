@@ -139,6 +139,7 @@ fn register_session_bind(set: &mut TestSet<'_>) {
 
 fn register_mcp_features(set: &mut TestSet<'_>) {
   backends_support::mcp_features::register(set);
+  backends_support::error_convention::register(set);
 }
 
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────

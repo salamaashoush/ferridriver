@@ -45,7 +45,7 @@ pub fn test_script_globals_persist_across_calls(c: &mut McpClient) {
 pub fn test_script_throw_keeps_session_state(c: &mut McpClient) {
   c.nav("<body></body>");
   let _ = c.script_value("globalThis.keep = 'alive'; return null;");
-  let err = c.script("throw new Error('boom');");
+  let err = c.script_failing("throw new Error('boom');");
   assert_eq!(err["status"].as_str(), Some("error"), "expected error: {err}");
   // A plain JS throw must NOT poison the session — state survives.
   let v = c.script_value("return globalThis.keep;");
@@ -101,7 +101,7 @@ pub fn test_script_console_captured(c: &mut McpClient) {
 
 pub fn test_script_error_surfaces_structured(c: &mut McpClient) {
   c.nav("<body></body>");
-  let payload = c.script("throw new Error('boom');");
+  let payload = c.script_failing("throw new Error('boom');");
   assert_eq!(payload["status"].as_str(), Some("error"));
   assert!(
     payload["error"]["message"].as_str().unwrap_or("").contains("boom"),

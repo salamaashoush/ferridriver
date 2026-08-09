@@ -215,6 +215,7 @@ impl McpServer {
 
     // On error, also surface a short human-readable summary so LLMs that skim
     // tool output see the failure reason without parsing JSON.
+    let failed = matches!(result.outcome, ferridriver_script::Outcome::Error { .. });
     if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
       let summary = format!("[{}] {} ({}ms)", error.kind, error.message, result.duration_ms);
       contents.insert(0, ContentBlock::text(summary));
@@ -222,8 +223,13 @@ impl McpServer {
 
     McpServer::emit_progress(&peer, token.as_ref(), 1.0, Some(1.0), "done").await;
 
-    // We always return success at the MCP layer and let the caller inspect
-    // `status` in the payload; a thrown script error is not an MCP error.
+    // A script that threw is a tool execution error: `isError` is what a
+    // client checks to know the call failed. The payload is unchanged —
+    // `status` still carries the same detail — so callers that parse it
+    // keep working and callers that only check `isError` start working.
+    if failed {
+      return Ok(CallToolResult::error(contents));
+    }
     Ok(CallToolResult::success(contents))
   }
 }
