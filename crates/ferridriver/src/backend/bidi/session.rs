@@ -170,6 +170,12 @@ impl BidiSession {
     command.arg("--no-remote");
     if headless {
       command.arg("--headless");
+      // The flag alone still lets macOS realise native widgets: a right
+      // click with no `preventDefault` painted a real Firefox context
+      // menu over the user's desktop, which then outlived the browser
+      // when the run was killed with the menu open. `MOZ_HEADLESS` is
+      // the switch Firefox itself checks for full headless widgetry.
+      command.env("MOZ_HEADLESS", "1");
     }
 
     // Translate Chrome-style --window-size=W,H to Firefox's --width/--height flags,

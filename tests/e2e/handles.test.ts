@@ -228,9 +228,13 @@ describe('handles', () => {
   test('element_handle_action_options', async ({ page }) => {
     // click({ button: 'right' }) — the mousedown handler records the
     // numeric button; right button is 2. A no-option click would record 0.
+    // `return false` on contextmenu: without it the browser performs its
+    // default action for a right click, and Firefox paints a real native
+    // menu — over the user's desktop, and still there if the run dies
+    // while it is open. Every other right-click test suppresses it too.
     await page.goto(
       dataUrl(
-        "<button id='b'>b</button>" +
+        "<button id='b' oncontextmenu='return false'>b</button>" +
           "<script>window.__btn=-1;document.getElementById('b').addEventListener('mousedown',function(e){window.__btn=e.button;});</script>",
       ),
     );
