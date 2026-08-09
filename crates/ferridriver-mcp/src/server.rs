@@ -102,13 +102,16 @@ impl SharedState {
   }
 
   /// Invalidate caches for a context (after `close_page`, new page, etc.).
+  ///
+  /// The per-context serialization lock deliberately survives: dropping
+  /// it while a tool call holds the guard means the next caller mints a
+  /// fresh mutex and runs concurrently with the guard holder, which is
+  /// exactly what the lock exists to prevent. Cold-starting a context
+  /// invalidates from inside such a guard, so this was reachable. The
+  /// entries are one small `Arc` per distinct session name.
   pub(crate) fn invalidate_context(&self, context: &str) {
     self.ref_maps.remove(context);
     self.log_handles.remove(context);
-    // Drop the per-context serialization lock too; otherwise context_locks
-    // grows unbounded as contexts are created and destroyed. Any guard
-    // currently held keeps its Arc<Mutex> alive, so in-flight work is safe.
-    self.context_locks.remove(context);
   }
 
   /// Invalidate all caches (after shutdown).
@@ -426,12 +429,12 @@ impl McpServer {
     );
     // Wire per-instance args callback from config trait.
     let config_clone = Arc::clone(&config);
-    browser_state.set_instance_args_fn(Box::new(move |instance| {
+    browser_state.set_instance_args_fn(Arc::new(move |instance| {
       config_clone.chrome_args_for_instance(instance)
     }));
     // Wire per-instance connection resolver from config trait.
     let config_clone = Arc::clone(&config);
-    browser_state.set_instance_resolver_fn(Box::new(move |instance| config_clone.resolve_instance(instance)));
+    browser_state.set_instance_resolver_fn(Arc::new(move |instance| config_clone.resolve_instance(instance)));
     let state = SharedState::new(browser_state);
 
     // Scripting engine + sandbox. The sandbox needs an existing canonical
@@ -1025,6 +1028,55 @@ impl McpServer {
     ErrorData::internal_error(msg.to_string(), None)
   }
 
+  /// Drop every cache keyed by `context`, including the page wrapper.
+  /// Prefer this over `state.invalidate_context` from tool code: the
+  /// wrapper cache lives on the server, so invalidating only the state
+  /// caches leaves a wrapper pointing at a page that is going away.
+  pub(crate) fn invalidate_context(&self, context: &str) {
+    self.state.invalidate_context(context);
+    self
+      .page_wrappers
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(context);
+  }
+
+  /// Drop every per-context cache, including page wrappers. Used after
+  /// a change that can invalidate more contexts than the caller can
+  /// name (closing a whole instance, shutting the server down).
+  pub(crate) fn invalidate_all_caches(&self) {
+    self.state.invalidate_all();
+    self
+      .page_wrappers
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clear();
+  }
+
+  /// Release everything the server holds for `context` after its
+  /// browser-side state is gone: the caches, and the script session
+  /// (its `QuickJS` VM, `vars`, and HTTP client). Without the session
+  /// drop, closing a context left a warm VM alive until the LRU cap or
+  /// the idle TTL got to it.
+  pub(crate) fn release_context(&self, context: &str) {
+    self.invalidate_context(context);
+    self.sessions.remove(context);
+  }
+
+  /// Close every browser this server launched and drop all per-context
+  /// caches. Idempotent, and safe to call while tool calls are in
+  /// flight — they fail with `TargetClosed` rather than hanging.
+  ///
+  /// The transports are pipes for `cdp-pipe` / `webkit`, so those
+  /// browsers exit on their own when the process dies. A `cdp-raw`
+  /// Chrome or a `bidi` Firefox does not: it is reparented to pid 1 and
+  /// stays, which is why every exit path has to come through here.
+  pub async fn shutdown_browsers(&self) {
+    self.state.write().await.shutdown().await;
+    self.invalidate_all_caches();
+    self.sessions.clear();
+  }
+
   /// Build the JSON snapshot returned by the `network` MCP resource.
   /// Extracted from `read_resource` because async lock + per-request
   /// snapshotting pushed that handler over the line-count threshold.
@@ -1187,7 +1239,7 @@ impl McpServer {
     self.config.instance_health(instance).map_err(Self::err)?;
     let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
     let page = Box::pin(ctx_ref.new_page()).await.map_err(Self::err)?;
-    self.state.invalidate_context(context);
+    self.invalidate_context(context);
     Ok(page.inner().clone())
   }
 

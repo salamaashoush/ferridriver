@@ -311,6 +311,13 @@ impl SessionTable {
     self.map.remove(name);
   }
 
+  /// End every session whose name satisfies `pred`. Used when a whole
+  /// browser instance closes and every session routed to it — under
+  /// names only the caller can map — has to go with it.
+  pub fn remove_matching(&self, pred: impl Fn(&str) -> bool) {
+    self.map.retain(|name, _| !pred(name));
+  }
+
   /// End every session (server shutdown).
   pub fn clear(&self) {
     self.map.clear();

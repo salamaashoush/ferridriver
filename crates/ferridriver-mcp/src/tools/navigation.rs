@@ -18,6 +18,10 @@ impl McpServer {
   )]
   async fn connect(&self, Parameters(p): Parameters<ConnectParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_opt());
+    // Same serialization every other tool takes: without it a connect
+    // racing a navigate on the same session has both sides cold-start
+    // the context and open a page apiece.
+    let _guard = self.session_guard(s).await;
     // Parse the composite session key to get the instance name.
     // "staging:admin" -> instance="staging", context="admin"
     // The connect operation targets the browser instance, not the context.
@@ -29,7 +33,7 @@ impl McpServer {
         let mut state = self.state.write().await;
         let count = Box::pin(state.connect_to_url(instance, url)).await.map_err(Self::err)?;
         drop(state);
-        self.state.invalidate_context(s);
+        self.invalidate_context(s);
         count
       };
       let page = Box::pin(self.page(s)).await?;
@@ -45,7 +49,7 @@ impl McpServer {
           .await
           .map_err(Self::err)?;
         drop(state);
-        self.state.invalidate_context(s);
+        self.invalidate_context(s);
         count
       };
       let page = Box::pin(self.page(s)).await?;
@@ -103,7 +107,7 @@ impl McpServer {
   #[tool(
     name = "page",
     title = "Manage Tabs",
-    description = "Manage pages (tabs) and sessions. Actions: list (show all tabs with URLs), select (switch to tab by index -- invalidates old refs), new (open tab), close (close tab by index), back, forward, reload, close_browser. Use 'list' to find tabs, then 'select' to switch.",
+    description = "Manage pages (tabs) and sessions. Actions: list (show all tabs with URLs), select (switch to tab by index -- invalidates old refs), new (open tab), close (close tab by index), back, forward, reload, close_context (close one session's context: its tabs, cookies and storage, leaving the browser up), close_instance (close one browser process and its contexts, leaving other instances alone -- also how you pick up changed per-instance chrome flags), close_browser (close every browser this server launched). Use 'list' to find tabs, then 'select' to switch.",
     annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
   )]
   async fn page_manage(&self, Parameters(p): Parameters<PageParams>) -> Result<CallToolResult, ErrorData> {
@@ -138,7 +142,7 @@ impl McpServer {
         if url != "about:blank" {
           page.goto(url).await.map_err(Self::err)?;
         }
-        self.state.invalidate_context(s);
+        self.invalidate_context(s);
         let snap = self.snap(&page, s).await;
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
           "Opened new page in session '{s}'.\n\n{snap}"
@@ -151,9 +155,9 @@ impl McpServer {
           .page_index
           .ok_or_else(|| Self::err("'page_index' required for close"))?;
         let mut state = self.state.write().await;
-        state.close_page(s, idx).map_err(Self::err)?;
+        Box::pin(state.close_page(s, idx)).await.map_err(Self::err)?;
         drop(state);
-        self.state.invalidate_context(s);
+        self.invalidate_context(s);
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
           "Closed page {idx} in session '{s}'."
         ))]))
@@ -166,9 +170,13 @@ impl McpServer {
           .ok_or_else(|| Self::err("'page_index' required for select"))?;
         let mut state = self.state.write().await;
         state.select_page(s, idx).map_err(Self::err)?;
-        let any_page = state.active_page(s).map_err(Self::err)?.clone();
         drop(state);
-        let page = ferridriver::Page::new(any_page);
+        // Route through `page()` so the switch lands on the context's
+        // cached wrapper: minting a bare `Page` here dropped the
+        // wrapper-level state (default timeouts, emulateMedia merge)
+        // and left the cache pointing at the previous tab.
+        self.invalidate_context(s);
+        let page = Box::pin(self.page(s)).await?;
         Box::pin(self.action_ok(&page, s, &format!("Switched to page {idx}."))).await
       },
       "list" => {
@@ -185,13 +193,46 @@ impl McpServer {
         }
         Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
       },
+      "close_context" => {
+        let s = sess(p.session.as_opt());
+        let _guard = self.session_guard(s).await;
+        let mut state = self.state.write().await;
+        Box::pin(state.remove_context(s)).await;
+        drop(state);
+        self.release_context(s);
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+          "Closed context '{s}'. Its pages, cookies and storage are gone; the browser stays up."
+        ))]))
+      },
+      "close_instance" => {
+        let s = sess(p.session.as_opt());
+        let _guard = self.session_guard(s).await;
+        let instance = ferridriver::state::SessionKey::parse(s).instance;
+        let closed = self.state.write().await.close_instance(&instance).await;
+        self.invalidate_all_caches();
+        // Session names are free-form, so match the way they are routed:
+        // everything before ':' (or the whole name for the default
+        // instance) selects the browser that just went away.
+        self
+          .sessions
+          .remove_matching(|name| *ferridriver::state::SessionKey::parse(name).instance == *instance);
+        let msg = if closed {
+          format!(
+            "Closed browser instance '{instance}'. Other instances keep running; \
+             the next call on '{instance}' launches a fresh browser with current flags."
+          )
+        } else {
+          format!("No live browser instance '{instance}'.")
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))
+      },
       "close_browser" => {
-        self.state.write().await.shutdown().await;
-        self.state.invalidate_all();
+        self.shutdown_browsers().await;
         Ok(CallToolResult::success(vec![ContentBlock::text("Browser closed.")]))
       },
       other => Err(Self::err(format!(
-        "Unknown action '{other}'. Use: back, forward, reload, new, close, select, list, close_browser."
+        "Unknown action '{other}'. Use: back, forward, reload, new, close, select, list, \
+         close_context, close_instance, close_browser."
       ))),
     }
   }

@@ -364,7 +364,9 @@ pub struct UploadFileParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PageParams {
-  #[schemars(description = "Action: back, forward, reload, new, close, select, list, close_browser.")]
+  #[schemars(
+    description = "Action: back, forward, reload, new, close, select, list, close_context, close_instance, close_browser."
+  )]
   pub action: String,
   #[schemars(description = "URL for 'new' action.")]
   pub url: Option<String>,
