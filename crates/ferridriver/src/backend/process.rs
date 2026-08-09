@@ -117,15 +117,55 @@ pub fn kill_process_group(_pid: u32) {
 pub struct ChildGroup {
   pid: u32,
   child: tokio::process::Child,
+  /// On-disk record of this browser, removed once the process is
+  /// killed. Left behind when our own process dies without running
+  /// `Drop` (SIGKILL, panic-abort) — exactly the case
+  /// [`sweep_stale_browsers`] reclaims on the next start.
+  record: Option<ProcRecord>,
 }
 
 impl ChildGroup {
   #[must_use]
   pub fn new(child: tokio::process::Child) -> Self {
+    Self::recorded(child, None, false)
+  }
+
+  /// Like [`Self::new`], but also writes a launch record so a later run
+  /// can reclaim this browser if our process dies without teardown.
+  /// `profile_dir` is the browser's `--user-data-dir` / `--profile`;
+  /// `owns_profile_dir` marks it as ours to delete (a temp dir), false
+  /// for a caller-supplied persistent directory.
+  #[must_use]
+  pub fn recorded(child: tokio::process::Child, profile_dir: Option<&std::path::Path>, owns_profile_dir: bool) -> Self {
     // `id()` is `None` only after the child has been polled to
     // completion; fresh children always have an id.
     let pid = child.id().unwrap_or(0);
-    Self { pid, child }
+    let record = if pid == 0 {
+      None
+    } else {
+      // Two layers, because they cover different deaths: the record
+      // survives a hard kill and is reclaimed by the next start, the
+      // watchdog acts immediately but only while it is alive itself.
+      super::reaper::watch(pid);
+      ProcRecord::write(pid, profile_dir, owns_profile_dir)
+    };
+    Self { pid, child, record }
+  }
+
+  /// Add a temp directory to this launch's cleanup set. Removed when
+  /// the browser is torn down, and reclaimed by
+  /// [`sweep_stale_browsers`] if this process never gets to.
+  pub fn own_dir(&mut self, dir: &std::path::Path) {
+    if let Some(record) = self.record.as_mut() {
+      record.own_dir(dir);
+    }
+  }
+
+  /// Whether the browser process is still running. `false` once it has
+  /// exited, so a dead-browser check never has to depend on a
+  /// backend-specific transport signal.
+  pub fn is_running(&mut self) -> bool {
+    self.pid != 0 && matches!(self.child.try_wait(), Ok(None))
   }
 
   /// Kill the whole process group, then reap the parent. The group
@@ -138,6 +178,21 @@ impl ChildGroup {
       kill_process_group(self.pid);
     }
     let _ = self.child.kill().await;
+    super::reaper::forget(self.pid);
+    // Off-worker removal of the (multi-megabyte) profile dir; dropping
+    // the record afterwards deletes the registry entry.
+    if let Some(mut record) = self.record.take() {
+      let dirs = std::mem::take(&mut record.owned_dirs);
+      if !dirs.is_empty() {
+        let _ = tokio::task::spawn_blocking(move || {
+          for dir in dirs {
+            let _ = std::fs::remove_dir_all(dir);
+          }
+        })
+        .await;
+      }
+      drop(record);
+    }
   }
 }
 
@@ -149,5 +204,331 @@ impl Drop for ChildGroup {
     if self.pid != 0 && matches!(self.child.try_wait(), Ok(None)) {
       kill_process_group(self.pid);
     }
+    super::reaper::forget(self.pid);
+  }
+}
+
+// ── Launch registry ─────────────────────────────────────────────────────────
+//
+// Killing the browser on teardown covers every path where this process
+// gets to run code. It does not cover SIGKILL, `panic = "abort"`, or a
+// host crash — and only the pipe-transport backends (chromium over fd
+// 3/4, webkit over pw_run.sh) exit by themselves when the parent
+// vanishes. A websocket-transport Chrome or a BiDi Firefox survives
+// indefinitely, reparented to pid 1, holding its profile directory and
+// (headed, on macOS) a dock tile with no window. So every launch drops
+// a record on disk and the next process start reclaims what the
+// previous one leaked.
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BrowserRecord {
+  owner_pid: u32,
+  browser_pid: u32,
+  /// Identifies the process at sweep time; present even when the
+  /// directory belongs to the caller and must not be deleted.
+  profile_dir: Option<String>,
+  /// Temp directories this browser owns: its profile when we made it,
+  /// plus the downloads directory.
+  #[serde(default)]
+  owned_dirs: Vec<String>,
+}
+
+/// A launch-record file, deleted when the browser it describes is
+/// killed through [`ChildGroup`].
+///
+/// It also owns the browser's temp directories, so they and the record
+/// that would let a later run reclaim them disappear together. Leaving
+/// removal to the handle holding the `TempDir` meant a browser that was
+/// dropped rather than closed deferred the removal to a runtime that
+/// was already shutting down: the record went away, the directory did
+/// not, and nothing was left pointing at it.
+pub struct ProcRecord {
+  path: std::path::PathBuf,
+  record: BrowserRecord,
+  owned_dirs: Vec<std::path::PathBuf>,
+}
+
+impl Drop for ProcRecord {
+  fn drop(&mut self) {
+    for dir in std::mem::take(&mut self.owned_dirs) {
+      let _ = std::fs::remove_dir_all(dir);
+    }
+    let _ = std::fs::remove_file(&self.path);
+  }
+}
+
+fn registry_dir() -> Option<std::path::PathBuf> {
+  let dir = dirs::cache_dir()?.join("ferridriver").join("procs");
+  std::fs::create_dir_all(&dir).ok()?;
+  Some(dir)
+}
+
+/// Start tracking a browser the instant it is spawned, before any
+/// protocol handshake.
+///
+/// Registration used to happen when the [`ChildGroup`] was built, which
+/// is after the launcher has connected and completed its handshake. For
+/// a `BiDi` Firefox that window is seconds long, and a process killed
+/// inside it left a browser nothing knew about — no watchdog entry, no
+/// record for the next start to sweep. Called again by
+/// [`ChildGroup::recorded`], which is harmless: the record path is
+/// derived from the pid, and the watchdog drops every copy of a pid
+/// when it is unwatched.
+pub fn track_spawned(pid: u32, profile_dir: Option<&std::path::Path>, owns_profile_dir: bool) {
+  if pid == 0 {
+    return;
+  }
+  super::reaper::watch(pid);
+  let _ = ProcRecord::write_file(pid, profile_dir, owns_profile_dir);
+}
+
+impl ProcRecord {
+  /// Write the record file and return its path plus the dirs it owns.
+  fn write_file(
+    browser_pid: u32,
+    profile_dir: Option<&std::path::Path>,
+    owns_profile_dir: bool,
+  ) -> Option<(std::path::PathBuf, Vec<std::path::PathBuf>)> {
+    let dir = registry_dir()?;
+    let owner_pid = std::process::id();
+    let owned_dirs: Vec<std::path::PathBuf> = if owns_profile_dir {
+      profile_dir.map(std::path::Path::to_path_buf).into_iter().collect()
+    } else {
+      Vec::new()
+    };
+    let record = BrowserRecord {
+      owner_pid,
+      browser_pid,
+      profile_dir: profile_dir.map(|p| p.to_string_lossy().into_owned()),
+      owned_dirs: owned_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+    };
+    let path = dir.join(format!("{owner_pid}-{browser_pid}.json"));
+    std::fs::write(&path, serde_json::to_vec(&record).ok()?).ok()?;
+    Some((path, owned_dirs))
+  }
+
+  /// Take ownership of the record for `browser_pid`, so teardown
+  /// removes both the file and the temp dirs it names.
+  fn write(browser_pid: u32, profile_dir: Option<&std::path::Path>, owns_profile_dir: bool) -> Option<Self> {
+    let (path, owned_dirs) = Self::write_file(browser_pid, profile_dir, owns_profile_dir)?;
+    let record = BrowserRecord {
+      owner_pid: std::process::id(),
+      browser_pid,
+      profile_dir: profile_dir.map(|p| p.to_string_lossy().into_owned()),
+      owned_dirs: owned_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+    };
+    Some(Self {
+      path,
+      record,
+      owned_dirs,
+    })
+  }
+
+  /// Hand another temp directory to this record, so it is removed with
+  /// the browser and reclaimed by the sweep if the process is killed.
+  fn own_dir(&mut self, dir: &std::path::Path) {
+    self.owned_dirs.push(dir.to_path_buf());
+    self.record.owned_dirs.push(dir.to_string_lossy().into_owned());
+    if let Ok(bytes) = serde_json::to_vec(&self.record) {
+      let _ = std::fs::write(&self.path, bytes);
+    }
+  }
+}
+
+/// Whether `pid` names a live process. A recycled pid reads as live,
+/// which keeps the sweep conservative: it never kills on a maybe.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn process_is_live(pid: u32) -> bool {
+  #[allow(clippy::cast_possible_wrap)]
+  let pid = pid as i32;
+  // SAFETY: signal 0 performs the existence/permission check only and
+  // delivers nothing.
+  unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+}
+
+#[cfg(not(unix))]
+fn process_is_live(_pid: u32) -> bool {
+  true
+}
+
+/// The command line of `pid`, or `None` if it cannot be read. Used to
+/// confirm a recorded pid is still the browser we launched before
+/// signalling it: pids get recycled, and a stale record must never take
+/// down an unrelated process.
+fn process_command(pid: u32) -> Option<String> {
+  let out = std::process::Command::new("ps")
+    .args(["-p", &pid.to_string(), "-o", "command="])
+    .output()
+    .ok()?;
+  out
+    .status
+    .success()
+    .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn browser_matches(record: &BrowserRecord) -> bool {
+  let Some(cmd) = process_command(record.browser_pid) else {
+    return false;
+  };
+  match record.profile_dir {
+    Some(ref dir) => cmd.contains(dir.as_str()),
+    None => cmd.contains("--inspector-pipe") || cmd.contains("--remote-debugging"),
+  }
+}
+
+/// Reclaim browsers launched by ferridriver processes that are no
+/// longer running: kill the process group and remove the temp profile
+/// directory it was holding. Returns the number of browsers killed.
+///
+///
+/// Safe against pid reuse: a recorded browser is signalled only when
+/// its live command line still names the profile directory from the
+/// record (a random temp path) or, for launches with no profile of
+/// their own, still looks like an automation browser.
+pub fn sweep_stale_browsers() -> usize {
+  let Some(dir) = registry_dir() else {
+    return 0;
+  };
+  let Ok(entries) = std::fs::read_dir(&dir) else {
+    return 0;
+  };
+  let mut reclaimed = 0;
+  for entry in entries.flatten() {
+    let path = entry.path();
+    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+      continue;
+    }
+    let Ok(bytes) = std::fs::read(&path) else { continue };
+    let Ok(record) = serde_json::from_slice::<BrowserRecord>(&bytes) else {
+      let _ = std::fs::remove_file(&path);
+      continue;
+    };
+    if record.owner_pid == std::process::id() || process_is_live(record.owner_pid) {
+      continue;
+    }
+    if process_is_live(record.browser_pid) && browser_matches(&record) {
+      tracing::info!(
+        target: "ferridriver::process",
+        browser_pid = record.browser_pid,
+        owner_pid = record.owner_pid,
+        "reclaiming a browser leaked by a dead ferridriver process",
+      );
+      kill_process_group(record.browser_pid);
+      reclaimed += 1;
+    }
+    for dir in &record.owned_dirs {
+      let _ = std::fs::remove_dir_all(dir);
+    }
+    let _ = std::fs::remove_file(&path);
+  }
+  reclaimed
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// A pid that has exited and been reaped, so `process_is_live` is
+  /// false for it. Kernel pid reuse could in principle hand it to
+  /// someone else, which is exactly why the sweep also checks the
+  /// command line before signalling anything.
+  fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("true").spawn().expect("spawn true");
+    let pid = child.id();
+    let _ = child.wait();
+    pid
+  }
+
+  fn write_record(owner_pid: u32, browser_pid: u32, profile: Option<&std::path::Path>, owns: bool) -> PathBuf2 {
+    let dir = registry_dir().expect("registry dir");
+    let record = BrowserRecord {
+      owner_pid,
+      browser_pid,
+      profile_dir: profile.map(|p| p.to_string_lossy().into_owned()),
+      owned_dirs: if owns {
+        profile.map(|p| p.to_string_lossy().into_owned()).into_iter().collect()
+      } else {
+        Vec::new()
+      },
+    };
+    let path = dir.join(format!("{owner_pid}-{browser_pid}.json"));
+    std::fs::write(&path, serde_json::to_vec(&record).expect("encode")).expect("write record");
+    path
+  }
+
+  type PathBuf2 = std::path::PathBuf;
+
+  #[test]
+  fn sweep_reclaims_the_profile_dir_of_a_dead_owner() {
+    let owner = dead_pid();
+    let browser = dead_pid();
+    let profile = std::env::temp_dir().join(format!("ferridriver-sweep-test-{owner}"));
+    std::fs::create_dir_all(profile.join("Default")).expect("profile dir");
+    let record = write_record(owner, browser, Some(&profile), true);
+
+    sweep_stale_browsers();
+
+    assert!(!record.exists(), "the record of a dead owner is removed");
+    assert!(!profile.exists(), "an owned profile dir is removed with its owner");
+  }
+
+  #[test]
+  fn sweep_keeps_a_profile_dir_it_does_not_own() {
+    let owner = dead_pid();
+    let browser = dead_pid();
+    let profile = std::env::temp_dir().join(format!("ferridriver-sweep-keep-{owner}"));
+    std::fs::create_dir_all(&profile).expect("profile dir");
+    let record = write_record(owner, browser, Some(&profile), false);
+
+    sweep_stale_browsers();
+
+    assert!(!record.exists(), "the record is still removed");
+    assert!(
+      profile.exists(),
+      "a caller-supplied persistent profile is never deleted"
+    );
+    let _ = std::fs::remove_dir_all(&profile);
+  }
+
+  #[test]
+  fn sweep_leaves_records_of_live_owners_alone() {
+    let profile = std::env::temp_dir().join(format!("ferridriver-sweep-live-{}", std::process::id()));
+    std::fs::create_dir_all(&profile).expect("profile dir");
+    // Our own pid is live by definition, so this record must survive.
+    let record = write_record(std::process::id(), dead_pid(), Some(&profile), true);
+
+    sweep_stale_browsers();
+
+    assert!(record.exists(), "a live owner's browser is not reclaimed");
+    assert!(profile.exists(), "a live owner keeps its profile dir");
+    let _ = std::fs::remove_file(&record);
+    let _ = std::fs::remove_dir_all(&profile);
+  }
+
+  #[test]
+  fn a_record_is_written_at_launch_and_removed_on_shutdown() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+      let profile = std::env::temp_dir().join(format!("ferridriver-record-test-{}", std::process::id()));
+      std::fs::create_dir_all(&profile).expect("profile dir");
+      let child = tokio::process::Command::new("sleep")
+        .arg("30")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn sleep");
+      let pid = child.id().expect("pid");
+      let mut group = ChildGroup::recorded(child, Some(&profile), false);
+      let path = registry_dir()
+        .expect("registry")
+        .join(format!("{owner}-{pid}.json", owner = std::process::id()));
+      assert!(path.exists(), "launch writes a record");
+      assert!(group.is_running(), "the child is alive");
+
+      group.shutdown().await;
+      assert!(!path.exists(), "teardown removes the record");
+      assert!(!group.is_running(), "the child is reaped");
+      let _ = std::fs::remove_dir_all(&profile);
+    });
   }
 }

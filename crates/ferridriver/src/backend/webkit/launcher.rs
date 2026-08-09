@@ -108,10 +108,18 @@ pub fn spawn(config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<Child
   #[allow(unsafe_code)]
   unsafe {
     use std::os::unix::process::CommandExt;
-    cmd.pre_exec(move || pre_exec_setup_fds(read_fd, write_fd));
+    cmd.pre_exec(move || {
+      // Own session + process group: `pw_run.sh` is a shell wrapper, so
+      // killing the direct child would leave the real WebKit process
+      // and its helpers behind. `crate::backend::process::kill_process_group`
+      // takes the whole group down on teardown instead.
+      libc::setsid();
+      pre_exec_setup_fds(read_fd, write_fd)
+    });
   }
 
   let child = cmd.spawn()?;
+  crate::backend::process::track_spawned(child.id(), config.user_data_dir.as_deref(), false);
   Ok(child)
 }
 

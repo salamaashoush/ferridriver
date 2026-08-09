@@ -114,6 +114,18 @@ async fn main() -> anyhow::Result<()> {
 
   ferridriver_test::logging::init(args.verbose);
 
+  // Reclaim browsers (and their profile dirs) left behind by an earlier
+  // ferridriver process that died without teardown. Every subcommand
+  // launches browsers, so every subcommand cleans up after the last one.
+  // Awaited, not fire-and-forget: a short command would otherwise exit
+  // before the sweep ran, and the leftovers would survive every run.
+  let reclaimed = tokio::task::spawn_blocking(ferridriver::backend::process::sweep_stale_browsers)
+    .await
+    .unwrap_or(0);
+  if reclaimed > 0 {
+    tracing::info!(count = reclaimed, "reclaimed browsers leaked by earlier runs");
+  }
+
   // Load the unified config exactly once. Each subcommand reads the
   // section it cares about from this single document.
   let config = FerridriverConfig::load(args.config.as_deref())?;
@@ -706,7 +718,7 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
     .with_test_config(test_config);
   server.load_extensions(&extensions).await;
   match args.transport.transport {
-    cli::Transport::Stdio => ferridriver_mcp::mcp::serve_stdio_with(server).await,
-    cli::Transport::Http => ferridriver_mcp::mcp::serve_http_with(server, args.transport.port).await,
+    cli::Transport::Stdio => Box::pin(ferridriver_mcp::mcp::serve_stdio_with(server)).await,
+    cli::Transport::Http => Box::pin(ferridriver_mcp::mcp::serve_http_with(server, args.transport.port)).await,
   }
 }

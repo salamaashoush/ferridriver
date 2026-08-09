@@ -82,6 +82,7 @@ impl WsTransport {
     chromium_path: &str,
     user_data_dir: &Path,
     extra_flags: &[String],
+    owns_user_data_dir: bool,
   ) -> Result<(Self, tokio::process::Child)> {
     let mut command = tokio::process::Command::new(chromium_path);
     command.arg(format!("--user-data-dir={}", user_data_dir.display()));
@@ -112,6 +113,8 @@ impl WsTransport {
     let mut child = command
       .spawn()
       .map_err(|e| FerriError::Backend(format!("Chrome launch: {e}")))?;
+    // Track before the port-file wait + websocket connect below.
+    crate::backend::process::track_spawned(child.id().unwrap_or(0), Some(user_data_dir), owns_user_data_dir);
     crate::backend::process::drain_child_stderr(&mut child);
 
     let port_file = user_data_dir.join("DevToolsActivePort");
@@ -208,6 +211,10 @@ impl super::transport::CdpTransport for WsTransport {
     notify: Arc<tokio::sync::Notify>,
   ) {
     self.dispatcher.register_lifecycle_tracker(session_id, state, notify);
+  }
+
+  fn unregister_session(&self, session_id: &str) {
+    self.dispatcher.unregister_session(session_id);
   }
 }
 

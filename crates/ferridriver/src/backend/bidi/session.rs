@@ -206,6 +206,10 @@ impl BidiSession {
 
     debug!("Launching Firefox for BiDi: {firefox_path}");
     let mut child = command.spawn().map_err(|e| format!("Firefox launch: {e}"))?;
+    // Track before the BiDi handshake below. Firefox does not exit when
+    // its parent dies, and the handshake takes long enough that a kill
+    // landing inside it used to strand a whole browser.
+    crate::backend::process::track_spawned(child.id().unwrap_or(0), Some(profile_dir.path()), true);
 
     // Firefox prints "WebDriver BiDi listening on ws://127.0.0.1:PORT" to stderr
     let ws_url = discover_bidi_ws_url(&mut child).await?;

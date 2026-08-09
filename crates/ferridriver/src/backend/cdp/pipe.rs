@@ -29,6 +29,7 @@ impl PipeTransport {
     chromium_path: &str,
     user_data_dir: &Path,
     extra_flags: &[String],
+    owns_user_data_dir: bool,
   ) -> Result<(Self, tokio::process::Child)> {
     let mut command = tokio::process::Command::new(chromium_path);
     command.arg(format!("--user-data-dir={}", user_data_dir.display()));
@@ -44,6 +45,9 @@ impl PipeTransport {
       .kill_on_drop(true);
 
     let (mut child, reader, writer) = spawn_with_pipes(&mut command, chromium_path)?;
+    // Track before the handshake: a process killed between spawn and
+    // `ChildGroup` would otherwise leave a browser nothing knows about.
+    crate::backend::process::track_spawned(child.id().unwrap_or(0), Some(user_data_dir), owns_user_data_dir);
     crate::backend::process::drain_child_stderr(&mut child);
 
     let dispatcher = Arc::new(CdpDispatcher::new());
@@ -203,6 +207,10 @@ impl super::transport::CdpTransport for PipeTransport {
     notify: Arc<tokio::sync::Notify>,
   ) {
     self.dispatcher.register_lifecycle_tracker(session_id, state, notify);
+  }
+
+  fn unregister_session(&self, session_id: &str) {
+    self.dispatcher.unregister_session(session_id);
   }
 }
 

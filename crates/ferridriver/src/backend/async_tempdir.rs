@@ -11,28 +11,51 @@
 //! back to a sync removal when not (e.g. test harness teardown).
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 pub struct AsyncTempDir {
-  /// `None` only between `into_path` and `Drop` — invariant `Some`
-  /// when constructed.
-  inner: Option<tempfile::TempDir>,
+  /// The path to remove, taken by whichever of [`AsyncTempDir::remove_now`]
+  /// or `Drop` runs first. Behind a `Mutex` because the browser handle
+  /// is shared through an `Arc`: a `close()` on any clone must be able
+  /// to reclaim the directory without waiting for the last clone to go
+  /// away, and `Drop` must then be a no-op.
+  path: Mutex<Option<PathBuf>>,
 }
 
 impl AsyncTempDir {
   pub fn new(inner: tempfile::TempDir) -> Self {
-    Self { inner: Some(inner) }
+    // `keep` consumes the `TempDir` and disables its auto-removal,
+    // handing back the raw `PathBuf` so we own the scheduling.
+    Self {
+      path: Mutex::new(Some(inner.keep())),
+    }
+  }
+
+  fn take(&self) -> Option<PathBuf> {
+    self
+      .path
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .take()
+  }
+
+  /// Remove the directory now, off the async worker thread, and wait
+  /// for it. Called from the browser's `close()` so teardown does not
+  /// depend on `Drop` running — a process killed by a signal never
+  /// drops anything, and a Chromium profile dir is megabytes.
+  pub async fn remove_now(&self) {
+    let Some(path) = self.take() else {
+      return;
+    };
+    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&path)).await;
   }
 }
 
 impl Drop for AsyncTempDir {
   fn drop(&mut self) {
-    let Some(inner) = self.inner.take() else {
+    let Some(path) = self.take() else {
       return;
     };
-    // `into_path` consumes the `TempDir` and disables its auto-removal,
-    // handing back the raw `PathBuf` so we can schedule the rm
-    // ourselves.
-    let path: PathBuf = inner.keep();
     // Try to defer to the tokio blocking pool. If we're not inside a
     // runtime (e.g. plain `#[test]`), fall back to a sync removal so
     // the directory still gets cleaned up.

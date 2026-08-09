@@ -13,7 +13,8 @@
 pub(crate) mod async_tempdir;
 pub mod cdp;
 pub(crate) mod json_scan;
-pub(crate) mod process;
+pub mod process;
+pub mod reaper;
 pub mod webkit;
 
 pub mod bidi;
@@ -859,15 +860,18 @@ impl AnyBrowser {
   /// Returns an error if context creation fails.
   /// Whether the browser is still reachable.
   ///
-  /// CDP knows for certain: its transport records EOF. `BiDi` and `WebKit`
-  /// have no equivalent signal wired up yet and report `true`, which is
-  /// the behaviour every backend had before this existed — so this never
-  /// makes a live browser look dead, it only lets CDP notice a dead one.
+  /// CDP knows from its transport (EOF on the pipe / socket). `BiDi`
+  /// and `WebKit` have no equivalent protocol signal, so they answer
+  /// from the child process instead: a browser that exited is dead
+  /// however it died. A handle that did not launch the process
+  /// (`connect`) has nothing to check and reports alive, as before.
+  #[must_use]
   pub fn is_alive(&self) -> bool {
     match self {
-      Self::CdpPipe(b) => b.is_alive(),
-      Self::CdpRaw(b) => b.is_alive(),
-      Self::WebKit(_) | Self::Bidi(_) => true,
+      Self::CdpPipe(b) => b.is_alive() && b.child_is_running().unwrap_or(true),
+      Self::CdpRaw(b) => b.is_alive() && b.child_is_running().unwrap_or(true),
+      Self::WebKit(b) => b.child_is_running(),
+      Self::Bidi(b) => b.child_is_running().unwrap_or(true),
     }
   }
 
