@@ -376,6 +376,64 @@ reset measures 3.2ms against 42ms for a fresh context+page. It is not
 implemented here, and until it is, 3x is not available without changing
 what a test can assume about its own isolation.
 
+### Chromium density flags: a memory lever, not a speed lever
+
+`--in-process-gpu` plus `--enable-features=NetworkServiceInProcess2` folds
+the GPU and network services into the browser process. Playwright sets
+neither — grepping all of `playwright-core/src/` for them returns nothing —
+so this is a deliberate divergence, taken for density rather than fidelity.
+
+Per browser, subtracting this machine's idle baseline (~20 Chrome processes,
+3113MB) so only the launched browser is counted:
+
+| | processes | RSS |
+|---|---|---|
+| Playwright's switch set | 4 | 182MB |
+| + both flags | 2 | 110MB |
+
+**-2 processes and -72MB per browser**, about 40% of its footprint. At a
+thousand browser-per-session hosts that is 182GB against 110GB.
+
+Fidelity is unchanged, checked through ferridriver's own API rather than
+assumed: `page.route` intercepts and fulfils identically (1 hit, status 200,
+routed body rendered), WebGL reports the same
+`WebGL 1.0 (OpenGL ES 2.0 Chromium) | WebKit WebGL`, and the screenshot is
+byte-identical at 6646 bytes. Network interception was the one most likely
+to break, since moving the network service in-process is exactly where the
+`Fetch.requestPaused` plumbing could shift. It does not.
+
+**It does not make a suite faster.** Measured on this 12-core box:
+
+| workload | baseline | with flags |
+|---|---|---|
+| 96 hermetic DOM tests, 4 workers, `contextPrewarm = 0` | 2392ms | 2378ms |
+| 96 hermetic DOM tests, 4 workers, `contextPrewarm = 2` | 2051ms | 1992ms |
+| repo suite, 6 workers, 4 backend projects | 65964ms | 64214ms |
+
+Medians of five for the first two, single run for the suite. Every delta is
+inside run-to-run noise, and the suite's peak RSS actually measured *higher*
+with the flags (6592MB vs 6719MB) because only the two Chromium projects
+carry them and the peak falls elsewhere. The reason is simple: freed memory
+only buys wall clock when memory is the binding constraint, and a developer
+machine with 36GB running one suite is not memory-bound. A cloud host packing
+browsers until it runs out of RAM is.
+
+So this belongs in a deployment's config, not in ferridriver's defaults, and
+it needs no new API — `[test.browser] args` (or `launch({ args })`) already
+carries it:
+
+```toml
+[test.browser]
+args = ["--in-process-gpu", "--enable-features=NetworkServiceInProcess2"]
+```
+
+The trade is crash isolation: a GPU or network-service crash now takes the
+browser process with it instead of being contained. That is acceptable under
+browser-per-session, where the browser is already the blast radius, and only
+because a dead browser is now evicted and relaunched rather than poisoning
+its instance name — before that fix this flag would have converted a
+recoverable GPU crash into a permanently dead instance.
+
 ### Measured negative results
 
 Recorded so they are not re-investigated:
