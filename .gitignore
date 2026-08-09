@@ -41,3 +41,7 @@ bench/results/
 
 # Local Catchpoint transaction scripts (contain staging credentials)
 /catchpoint-tests/
+
+# Python bytecode from the stress harnesses
+__pycache__/
+*.pyc
