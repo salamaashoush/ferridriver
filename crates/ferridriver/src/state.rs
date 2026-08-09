@@ -1075,6 +1075,49 @@ impl BrowserState {
     inst.context_mut_checked(&key.context)
   }
 
+  /// Drop every per-context registry entry for `composite`.
+  ///
+  /// Twelve registries are keyed by composite session key, and context
+  /// names come from a process-wide counter that never reuses a value, so
+  /// without this each one grows by an entry for every context the process
+  /// ever opens. The costs are not uniform: a `storageState` bag holds the
+  /// session's cookies and localStorage (dead auth material kept in RAM),
+  /// and a `routeFromHAR(update:true)` recorder holds the whole parsed HAR
+  /// — megabytes per context.
+  ///
+  /// Callers must have already drained anything with an exit action:
+  /// `ContextRef::close_impl` flushes HAR updates before it gets here.
+  /// Live `ContextRef` clones are unaffected — they hold their own `Arc`
+  /// clones of the closed-flag and emitter rather than reading the map.
+  async fn purge_context_registries(&self, composite: &str) {
+    fn drop_key<T>(map: &Arc<std::sync::Mutex<HashMap<String, T>>>, key: &str) {
+      map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(key);
+    }
+    drop_key(&self.context_events, composite);
+    drop_key(&self.context_closed, composite);
+    drop_key(&self.record_video, composite);
+    drop_key(&self.context_options, composite);
+    drop_key(&self.har_recorders, composite);
+    drop_key(&self.context_har_updates, composite);
+    self
+      .clock_installed
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(composite);
+    self
+      .storage_state_hydrated
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(composite);
+    self.context_bindings.write().await.remove(composite);
+    self.context_ws_routes.write().await.remove(composite);
+    self.context_routes.write().await.remove(composite);
+    self.context_init_scripts.write().await.remove(composite);
+  }
+
   /// Remove a context. If it has a CDP browser context ID, dispose it
   /// (one CDP call kills the context + all pages, matching Playwright's doClose).
   pub async fn remove_context(&mut self, context: &str) {
@@ -1087,6 +1130,9 @@ impl BrowserState {
       }
       inst.remove_context(&key.context);
     }
+    // Registries are keyed by composite, and callers pass a bare context
+    // name — purging with the raw argument would silently match nothing.
+    self.purge_context_registries(&key.to_composite()).await;
   }
 
   /// # Errors
