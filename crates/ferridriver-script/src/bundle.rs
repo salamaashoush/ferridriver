@@ -787,7 +787,7 @@ async fn compile_extract_one(
         cfg_default.max_console_bytes,
         cfg_default.max_console_entry_bytes,
       ));
-      crate::engine::install_console(&ctx, console.clone())
+      crate::console_fmt::install_console(&ctx, console.clone())
         .map_err(|e| ScriptError::internal(format!("install console: {e}")))?;
       // Manifest extraction is the MCP tool path: expose
       // `ferridriver.host = 'mcp'` so an extension's host-gated

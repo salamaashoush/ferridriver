@@ -22,12 +22,20 @@ fn bin() -> String {
   })
 }
 
-/// Run `ferridriver run <extra…>` with `stdin` piped; returns
-/// (success, stdout, stderr).
+/// Run `ferridriver run --json <extra…>` with `stdin` piped; returns
+/// (success, stdout, stderr). `--json` is what a machine consumer passes:
+/// one result document on stdout, console buffered inside it.
 fn run(extra: &[&str], stdin: Option<&str>) -> (bool, String, String) {
+  run_with(&["--json"], extra, stdin)
+}
+
+/// Run `ferridriver run <flags…> <extra…>` with `stdin` piped; returns
+/// (success, stdout, stderr).
+fn run_with(flags: &[&str], extra: &[&str], stdin: Option<&str>) -> (bool, String, String) {
   let mut cmd = Command::new(bin());
   cmd
     .arg("run")
+    .args(flags)
     .args(extra)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -92,6 +100,181 @@ fn script_error_exits_nonzero() {
   let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
   assert_eq!(v["status"], "error");
   assert!(stderr.contains("boom-run"), "stderr summary: {stderr}");
+}
+
+// ── default (streaming) vs `--json` (buffered document) ──────────────
+
+#[test]
+fn default_splits_console_across_streams_the_way_node_does() {
+  let (ok, stdout, stderr) = run_with(
+    &[],
+    &[
+      "-e",
+      "console.log('out-log'); console.info('out-info'); console.debug('out-debug'); \
+       console.warn('err-warn'); console.error('err-error'); return 'done';",
+    ],
+    None,
+  );
+  assert!(ok, "exit ok; stderr={stderr}");
+  let out: Vec<&str> = stdout.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+  let err: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+  assert_eq!(
+    out,
+    vec!["out-log", "out-info", "out-debug", "done"],
+    "log/info/debug and the return value go to stdout, in order: {stdout:?}"
+  );
+  assert_eq!(
+    err,
+    vec!["err-warn", "err-error"],
+    "warn/error go to stderr: {stderr:?}"
+  );
+  assert!(
+    !stdout.contains("duration_ms"),
+    "no result document without --json: {stdout:?}"
+  );
+}
+
+/// Every method on <https://nodejs.org/api/console.html> is present, except the
+/// `Console` constructor — it binds a console to caller-supplied writable
+/// streams, and the sandbox exposes no such stream to bind.
+#[test]
+fn console_covers_the_node_api_surface() {
+  let (ok, stdout, stderr) = run(
+    &[
+      "-e",
+      "const names = ['log','info','warn','error','debug','trace','dir','dirxml','table', \
+       'group','groupCollapsed','groupEnd','count','countReset','time','timeEnd','timeLog', \
+       'assert','clear','profile','profileEnd','timeStamp']; \
+       return names.filter(n => typeof console[n] !== 'function');",
+    ],
+    None,
+  );
+  assert!(ok, "exit ok; stderr={stderr}");
+  let v: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
+  assert_eq!(v["value"], serde_json::json!([]), "no console method is missing: {v}");
+}
+
+#[test]
+fn console_timer_and_dir_match_node_semantics() {
+  let (ok, stdout, stderr) = run(
+    &[
+      "-e",
+      "console.time('t'); console.time('t'); console.timeEnd('nope'); \
+       console.dir({ n: 1 }); console.dirxml('x'); console.profile(); return null;",
+    ],
+    None,
+  );
+  assert!(ok, "exit ok; stderr={stderr}");
+  let v: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
+  let console = v["console"].as_array().expect("console array");
+  let lines: Vec<(&str, &str)> = console
+    .iter()
+    .map(|e| {
+      (
+        e["level"].as_str().unwrap_or_default(),
+        e["message"].as_str().unwrap_or_default(),
+      )
+    })
+    .collect();
+  assert_eq!(
+    lines,
+    vec![
+      ("warn", "Label 't' already exists for console.time()"),
+      ("warn", "No such label 'nope' for console.timeEnd()"),
+      // `dir` defaults to colors:false, so no escape codes even on a terminal.
+      ("log", "{ n: 1 }"),
+      ("log", "x"),
+    ],
+    "Node's own warning text, and `profile` is a silent no-op: {v}"
+  );
+}
+
+#[test]
+fn default_sends_trace_and_failed_assert_to_stderr() {
+  let (ok, stdout, stderr) = run_with(
+    &[],
+    &[
+      "-e",
+      "console.trace('tracing'); console.assert(false, 'nope'); return null;",
+    ],
+    None,
+  );
+  assert!(ok, "exit ok; stderr={stderr}");
+  assert!(stdout.trim().is_empty(), "neither writes to stdout: {stdout:?}");
+  assert!(stderr.contains("Trace: tracing"), "trace on stderr: {stderr}");
+  assert!(
+    stderr.contains("Assertion failed: nope"),
+    "failed assert on stderr: {stderr}"
+  );
+}
+
+#[test]
+fn default_prints_console_before_the_script_finishes() {
+  // The whole point of streaming: the line is readable while the script is
+  // still parked on its await, not only once the process exits.
+  let mut child = Command::new(bin())
+    .args([
+      "run",
+      "-e",
+      "console.log('early'); await new Promise(r => setTimeout(r, 30000)); return 1;",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("spawn ferridriver run");
+
+  let mut stdout = std::io::BufReader::new(child.stdout.take().expect("stdout piped"));
+  let mut line = String::new();
+  let read = std::io::BufRead::read_line(&mut stdout, &mut line);
+  let _ = child.kill();
+  let _ = child.wait();
+  assert!(read.is_ok(), "read stdout line: {read:?}");
+  assert_eq!(line.trim(), "early", "first console line arrives mid-script");
+}
+
+#[test]
+fn default_reports_errors_on_stderr_with_no_json_anywhere() {
+  let (ok, stdout, stderr) = run_with(
+    &[],
+    &["-e", "console.log('before'); throw new Error('boom-stream');"],
+    None,
+  );
+  assert!(!ok, "a thrown error must exit nonzero");
+  assert_eq!(
+    stdout.trim(),
+    "before",
+    "the streamed log stays on stdout; the failure does not: {stdout:?}"
+  );
+  assert!(stderr.contains("boom-stream"), "error summary on stderr: {stderr}");
+  assert!(
+    !stderr.contains("\"status\"") && !stdout.contains("\"status\""),
+    "the failure is a message, not a document: {stderr}"
+  );
+}
+
+#[test]
+fn json_buffers_console_in_order_with_timestamps() {
+  let (ok, stdout, stderr) = run(
+    &[
+      "-e",
+      "console.log('a'); await new Promise(r => setTimeout(r, 120)); console.error('b'); return 1;",
+    ],
+    None,
+  );
+  assert!(ok, "exit ok; stderr={stderr}");
+  assert!(stderr.trim().is_empty(), "--json streams nothing: {stderr:?}");
+  let v: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
+  let console = v["console"].as_array().expect("console array");
+  assert_eq!(console.len(), 2, "{v}");
+  assert_eq!(console[0]["level"], "log");
+  assert_eq!(console[0]["message"], "a");
+  assert_eq!(console[1]["level"], "error");
+  assert_eq!(console[1]["message"], "b");
+  let (first, second) = (
+    console[0]["ts_ms"].as_u64().expect("ts_ms"),
+    console[1]["ts_ms"].as_u64().expect("ts_ms"),
+  );
+  assert!(second >= first + 100, "ts_ms tracks the await: {first} -> {second}");
 }
 
 #[test]

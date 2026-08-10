@@ -1122,14 +1122,78 @@ pub(crate) fn record_page_open(recorder: &Arc<TraceRecorder>, page_id: &str) {
 
 // ── Action spans ───────────────────────────────────────────────────────
 
+/// Identity of a traced action, handed to an [`ActionObserver`].
+#[derive(Clone)]
+pub struct ActionInfo {
+  /// `call@N` id, unique within the process.
+  pub call_id: String,
+  /// API class (`Page`, `Locator`, `Expect`, ...).
+  pub class: String,
+  /// Method name (`goto`, `click`, `toBeVisible`, ...).
+  pub method: String,
+  /// Display title (`page.goto`).
+  pub title: String,
+  /// Call parameters as recorded in the trace.
+  pub params: serde_json::Value,
+}
+
+/// Live view of the action stream, independent of trace recording.
+///
+/// `ferridriver run --trace` installs one to print each browser action as it
+/// starts and finishes; unlike [`TraceRecorder`] it needs no
+/// `context.tracing.start()` and writes no zip.
+pub trait ActionObserver: Send + Sync + 'static {
+  fn action_begin(&self, action: &ActionInfo);
+  fn action_end(&self, action: &ActionInfo, elapsed: std::time::Duration, error: Option<&str>);
+  /// One call-log line (`waiting for locator(...)`) while the action runs.
+  fn action_log(&self, action: &ActionInfo, message: &str);
+}
+
+/// Set once by the host before any script runs; every later probe is the
+/// atomic below, so an unobserved process pays a relaxed load per action.
+static ACTION_OBSERVER: std::sync::RwLock<Option<Arc<dyn ActionObserver>>> = std::sync::RwLock::new(None);
+static ACTION_OBSERVER_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Install the process-wide action observer, replacing any previous one.
+pub fn set_action_observer(observer: Arc<dyn ActionObserver>) {
+  *ACTION_OBSERVER
+    .write()
+    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
+  ACTION_OBSERVER_INSTALLED.store(true, Ordering::Release);
+}
+
+fn action_observer() -> Option<Arc<dyn ActionObserver>> {
+  if !ACTION_OBSERVER_INSTALLED.load(Ordering::Acquire) {
+    return None;
+  }
+  ACTION_OBSERVER
+    .read()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone()
+}
+
+/// An observed action's start state, carried by the span until it closes.
+struct ObservedAction {
+  observer: Arc<dyn ActionObserver>,
+  info: ActionInfo,
+  started: Instant,
+}
+
 /// An in-flight traced action. [`begin_action`] /
 /// [`begin_custom_action`] write the `before` event immediately (live
 /// exports show the action while it runs); [`ActionSpan::finish`]
 /// writes the `after` event. Snapshot names are decided up front —
 /// exactly like Playwright, where the `before` line references
 /// `before@<callId>` before the async capture lands.
+///
+/// A span also exists with no recorder at all when only an
+/// [`ActionObserver`] is installed: every recorder-bound method then no-ops
+/// and the span exists purely to report the action's start and outcome.
 pub struct ActionSpan {
-  recorder: Arc<TraceRecorder>,
+  recorder: Option<Arc<TraceRecorder>>,
+  /// Boxed so an unobserved span — every span in a normal run — stays small
+  /// enough not to bloat the futures that hold one across an await.
+  observed: Option<Box<ObservedAction>>,
   call_id: String,
   /// `before@<callId>` when the recorder captures snapshots and the
   /// action is page-bound.
@@ -1150,7 +1214,7 @@ impl ActionSpan {
   /// capture round-trips entirely when off.
   #[must_use]
   pub fn snapshots_enabled(&self) -> bool {
-    self.recorder.snapshots
+    self.recorder.as_ref().is_some_and(|r| r.snapshots)
   }
 
   /// Snapshot name the `before` event referenced (`None` when the
@@ -1171,29 +1235,40 @@ impl ActionSpan {
   /// parent to restore.
   #[must_use]
   pub fn make_current_parent(&self) -> Option<String> {
-    self.recorder.swap_current_parent(Some(self.call_id.clone()))
+    self
+      .recorder
+      .as_ref()
+      .and_then(|r| r.swap_current_parent(Some(self.call_id.clone())))
   }
 
   /// Restore the previous enclosing parent, then emit the event.
   pub fn finish_message_restoring(self, error: Option<String>, previous_parent: Option<String>) {
-    self.recorder.swap_current_parent(previous_parent);
+    if let Some(recorder) = self.recorder.as_ref() {
+      recorder.swap_current_parent(previous_parent);
+    }
     self.finish_message(error);
   }
 
   /// Append one line to this action's call log (the viewer's Log pane).
   pub fn log(&self, message: impl Into<String>) {
-    self.recorder.push_event(&TraceEvent::Log(LogEvent {
+    let message = message.into();
+    if let Some(observed) = &self.observed {
+      observed.observer.action_log(&observed.info, &message);
+    }
+    let Some(recorder) = self.recorder.as_ref() else { return };
+    recorder.push_event(&TraceEvent::Log(LogEvent {
       call_id: self.call_id.clone(),
-      time: self.recorder.monotonic_ms(),
-      message: message.into(),
+      time: recorder.monotonic_ms(),
+      message,
     }));
   }
 
   /// Emit the `input` marker: input-time snapshot name and/or the
   /// viewport point the input was dispatched at.
   pub fn mark_input(&self, input_snapshot: Option<String>, point: Option<(f64, f64)>) {
-    self.recorder.bump_screencast_burst();
-    self.recorder.push_event(&TraceEvent::Input(InputActionEvent {
+    let Some(recorder) = self.recorder.as_ref() else { return };
+    recorder.bump_screencast_burst();
+    recorder.push_event(&TraceEvent::Input(InputActionEvent {
       call_id: self.call_id.clone(),
       input_snapshot,
       point,
@@ -1203,10 +1278,11 @@ impl ActionSpan {
   /// Attach `bytes` to this action (the viewer's Attachments tab); the
   /// body is stored as a sha1-named resource.
   pub fn attach(&mut self, name: impl Into<String>, content_type: impl Into<String>, bytes: Vec<u8>) {
+    let Some(recorder) = self.recorder.as_ref() else { return };
     let content_type = content_type.into();
     let ext = attachment_extension(&content_type);
     let sha1 = format!("{}.{ext}", crate::tracing::sha1_hex(&bytes));
-    self.recorder.push_resource(&TraceResource {
+    recorder.push_resource(&TraceResource {
       name: sha1.clone(),
       bytes,
     });
@@ -1232,9 +1308,17 @@ impl ActionSpan {
   }
 
   fn finish_error_info(self, error: Option<ActionErrorInfo>) {
-    self.recorder.bump_screencast_burst();
-    let end_time = self.recorder.monotonic_ms();
-    self.recorder.push_event(&TraceEvent::After(AfterActionEvent {
+    if let Some(observed) = &self.observed {
+      observed.observer.action_end(
+        &observed.info,
+        observed.started.elapsed(),
+        error.as_ref().map(|e| e.message.as_str()),
+      );
+    }
+    let Some(recorder) = self.recorder.as_ref() else { return };
+    recorder.bump_screencast_burst();
+    let end_time = recorder.monotonic_ms();
+    recorder.push_event(&TraceEvent::After(AfterActionEvent {
       call_id: self.call_id,
       end_time,
       error,
@@ -1295,12 +1379,48 @@ pub(crate) fn begin_action(
   page_id: Option<String>,
   params: serde_json::Value,
 ) -> Option<ActionSpan> {
-  let recorder = recorder_for(composite?)?;
+  let recorder = composite.and_then(recorder_for);
+  let observer = action_observer();
+  // Neither recording nor observing: the common case, and the only cost is
+  // the map probe plus one relaxed atomic load.
+  if recorder.is_none() && observer.is_none() {
+    return None;
+  }
+  let title = format!("{}.{method}", class.to_ascii_lowercase());
+  let call_id = recorder
+    .as_ref()
+    .map_or_else(next_unrecorded_call_id, |r| r.next_call_id());
+  let watch = observer.map(|observer| {
+    Box::new(ObservedAction {
+      observer,
+      info: ActionInfo {
+        call_id: call_id.clone(),
+        class: class.to_string(),
+        method: method.to_string(),
+        title: title.clone(),
+        params: params.clone(),
+      },
+      started: Instant::now(),
+    })
+  });
+  if let Some(watch) = &watch {
+    watch.observer.action_begin(&watch.info);
+  }
+
+  let Some(recorder) = recorder else {
+    return Some(ActionSpan {
+      recorder: None,
+      observed: watch,
+      call_id,
+      before_snapshot: None,
+      after_snapshot: None,
+      attachments: Vec::new(),
+    });
+  };
+
   recorder.bump_screencast_burst();
   let start_time = recorder.monotonic_ms();
-  let call_id = recorder.next_call_id();
   let parent_id = recorder.current_parent();
-  let title = format!("{}.{method}", class.to_ascii_lowercase());
   // Snapshot names are fixed up front; the capture lands as a later
   // `frame-snapshot` line (same contract as Playwright's async
   // `captureSnapshot` — a failed capture leaves a dangling name the
@@ -1319,12 +1439,20 @@ pub(crate) fn begin_action(
     stack: Vec::new(),
   }));
   Some(ActionSpan {
-    recorder,
+    recorder: Some(recorder),
+    observed: watch,
     call_id,
     before_snapshot,
     after_snapshot: None,
     attachments: Vec::new(),
   })
+}
+
+/// Call ids for spans that exist only for an observer: no recorder owns the
+/// counter, so they draw from a process-global one.
+fn next_unrecorded_call_id() -> String {
+  static NEXT: AtomicU64 = AtomicU64::new(1);
+  format!("call@{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// A non-protocol action injected into a trace by an external runner
@@ -1371,7 +1499,8 @@ pub fn begin_custom_action(composite: &str, action: CustomAction) -> Option<Acti
     stack: action.stack,
   }));
   Some(ActionSpan {
-    recorder,
+    recorder: Some(recorder),
+    observed: None,
     call_id,
     before_snapshot: None,
     after_snapshot: None,

@@ -489,6 +489,24 @@ pub struct RunArgs {
   #[arg(long)]
   pub timeout_ms: Option<u64>,
 
+  /// Print one machine-readable JSON result document on stdout, with every
+  /// `console.*` call buffered inside its `console` array, and stream
+  /// nothing while the script runs. This is the mode to parse.
+  ///
+  /// Without this flag -- terminal or pipe alike -- console output streams
+  /// as it happens on the stream Node uses (`log`/`info`/`debug` to stdout,
+  /// `warn`/`error`/`trace` to stderr), followed by the script's return
+  /// value on stdout.
+  #[arg(long)]
+  pub json: bool,
+
+  /// Log every Playwright-level action (`page.*`, `locator.*`, `expect.*`)
+  /// to stderr as it starts and finishes, with its parameters, call log and
+  /// duration. Independent of `context.tracing.start()` — nothing is
+  /// recorded to a trace zip.
+  #[arg(long)]
+  pub trace: bool,
+
   /// Extension file(s), directory(ies), or ESM package specifiers to
   /// load, exposing their `tool` registrations to scripts as `tools.*`.
   /// Repeatable; merged with the `extensions` list from `ferridriver.toml`.

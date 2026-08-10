@@ -41,6 +41,11 @@ impl fmt::Display for ScriptErrorKind {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ScriptError {
   pub kind: ScriptErrorKind,
+  /// The thrown value's JS constructor name (`TypeError`, ...) when the
+  /// failure came from a JS exception. Hosts render `name: message` the way
+  /// every JS runtime does; `None` for engine-level failures.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub name: Option<String>,
   pub message: String,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub stack: Option<String>,
@@ -57,6 +62,7 @@ impl ScriptError {
   pub fn internal(message: impl Into<String>) -> Self {
     Self {
       kind: ScriptErrorKind::Internal,
+      name: None,
       message: message.into(),
       stack: None,
       line: None,
@@ -69,6 +75,7 @@ impl ScriptError {
   pub fn timeout(elapsed_ms: u64, limit_ms: u64) -> Self {
     Self {
       kind: ScriptErrorKind::Timeout,
+      name: None,
       message: format!("script exceeded timeout: {elapsed_ms}ms > {limit_ms}ms"),
       stack: None,
       line: None,
@@ -81,6 +88,7 @@ impl ScriptError {
   pub fn memory_limit(limit_bytes: usize) -> Self {
     Self {
       kind: ScriptErrorKind::MemoryLimit,
+      name: None,
       message: format!("script exceeded memory limit of {limit_bytes} bytes"),
       stack: None,
       line: None,
@@ -93,6 +101,7 @@ impl ScriptError {
   pub fn sandbox(message: impl Into<String>) -> Self {
     Self {
       kind: ScriptErrorKind::SandboxViolation,
+      name: None,
       message: message.into(),
       stack: None,
       line: None,

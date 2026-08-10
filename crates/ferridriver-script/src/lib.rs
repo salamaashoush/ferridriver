@@ -45,6 +45,7 @@ pub mod bundle;
 pub mod bytecode_cache;
 pub mod command_spec;
 pub mod console;
+pub mod console_fmt;
 pub mod discover;
 pub mod engine;
 pub mod error;
@@ -73,7 +74,7 @@ pub use bundle::{
   compile_and_extract_extensions, eval_bundle, is_typescript_path, source_is_es_module,
 };
 pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
-pub use console::ConsoleCapture;
+pub use console::{ConsoleCapture, ConsoleSink};
 pub use discover::{SOURCE_EXTENSIONS, is_source_file, walk_source_files};
 pub use engine::{
   ExtensionHost, RunContext, RunOptions, ScriptCaps, ScriptEngine, ScriptEngineConfig, Session, SessionRun,

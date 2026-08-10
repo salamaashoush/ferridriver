@@ -191,4 +191,44 @@ Remaining:
   Compression Streams spec defines (`gzip`, `deflate`, `deflate-raw`).
   Brotli and zstd are deliberately absent — not in that spec.
 
+## Node `console` residuals
+
+`crates/ferridriver-script/src/console_fmt.rs` implements every method on
+<https://nodejs.org/api/console.html> and the `util.format` specifiers
+(`%s %d %i %f %j %o %O %c %%`), each verified against Node v22 output.
+The value renderer is `util.inspect`-shaped but is not a port of it.
+
+Remaining, in rough order of how visible each one is:
+
+- **No layout engine.** Node breaks a rendering across lines once it
+  exceeds `breakLength` (80) and column-aligns long numeric arrays
+  (`groupArrayElements`); we always emit one line. A wide object prints
+  as one long line, and a 100-element array as one very long line. This
+  is the largest single remaining piece — Node's `reduceToSingleString`
+  plus the grouping pass — and it is cosmetic, not incorrect.
+- **No circular-reference tracking.** Node prints
+  `<ref *1> { n: 1, self: [Circular *1] }`; we repeat the structure until
+  the depth cap and show `{ n: 1, self: { n: 1, self: [Object] } }`.
+  Bounded (it cannot hang) but misleading. The blocker is object
+  identity: rquickjs keeps `Value::get_ptr` `pub(crate)`, so this needs a
+  JS-side `Map` of ancestors threaded through the renderer.
+- `ArrayBuffer` renders as `ArrayBuffer { byteLength: 8 }` rather than
+  Node's `[Uint8Contents]: <00 00 …>` form.
+- No `showHidden` / `showProxy` / getter evaluation / symbol-keyed
+  properties, and no `numericSeparator` or `maxStringLength`. `%o` accepts
+  Node's depth but not its `showHidden`.
+- A rejected promise shows `<rejected> Error: x` without the stack; the
+  renderer only prints stacks for a top-level error.
+- **`console.Console` is deliberately absent.** It binds a console to
+  caller-supplied writable streams, and the sandbox exposes no writable
+  stream to bind — implementing it would mean accepting the argument and
+  ignoring it. Its options bag (`inspectOptions`, `colorMode`,
+  `groupIndentation`, `ignoreErrors`) goes with it; group indentation is
+  fixed at Node's default of 2.
+- Extension-authored ANSI is stripped along with page-bridged output:
+  every JS-supplied string passes through `strip_ansi` so page content
+  cannot smuggle terminal control codes into logs. An extension that
+  colours its own output (box-craft's catchpoint plugin does) loses it.
+  Distinguishing the two sources needs a trusted-output channel.
+
 <!-- Append new findings below as they are discovered. Remove items when they land — git history is the archive. -->

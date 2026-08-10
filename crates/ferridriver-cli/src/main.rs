@@ -12,6 +12,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod cli;
+mod run_console;
 mod session_cmd;
 mod test_ui;
 
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use clap::Parser;
 use ferridriver_config::FerridriverConfig;
 use ferridriver_mcp::McpServer;
+use ferridriver_script::ConsoleSink;
 
 /// Discover + compile extension files into extension bindings for the `run`
 /// path. `roots` are files or directories (directories are scanned shallowly
@@ -611,8 +613,16 @@ async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> a
   };
   let script_args: Vec<serde_json::Value> = args.script_args.into_iter().map(serde_json::Value::String).collect();
 
+  if args.trace {
+    ferridriver::trace::set_action_observer(Arc::new(run_console::StepLogger));
+  }
+
+  // Default is Node-shaped streaming; `--json` keeps the buffered document
+  // machine consumers parse. The choice is the flag alone, not stdout's
+  // TTY-ness, so a pipeline gets the same bytes a terminal does.
   let engine_config = ferridriver_script::ScriptEngineConfig {
     sidecars,
+    console_sink: (!args.json).then(|| Arc::new(run_console::StreamingConsole) as Arc<dyn ConsoleSink>),
     ..Default::default()
   };
   let session = ferridriver_script::Session::create(engine_config, &ctx)
@@ -634,10 +644,17 @@ async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> a
     session.execute(&source, &script_args, opts, &ctx).await.result
   };
 
-  println!("{}", serde_json::to_string_pretty(&result)?);
-  if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
-    eprintln!("[{}] {} ({}ms)", error.kind, error.message, result.duration_ms);
-    std::process::exit(1);
+  if args.json {
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
+      eprintln!("[{}] {} ({}ms)", error.kind, error.message, result.duration_ms);
+      std::process::exit(1);
+    }
+  } else {
+    run_console::print_result(&result);
+    if result.is_err() {
+      std::process::exit(1);
+    }
   }
   Ok(())
 }

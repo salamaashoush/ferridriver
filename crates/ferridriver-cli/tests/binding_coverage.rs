@@ -26,7 +26,7 @@ fn bin() -> String {
 
 fn run_script(src: &str) -> serde_json::Value {
   let mut child = Command::new(bin())
-    .args(["run", "--timeout-ms", "120000", "-"])
+    .args(["run", "--json", "--timeout-ms", "120000", "-"])
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())

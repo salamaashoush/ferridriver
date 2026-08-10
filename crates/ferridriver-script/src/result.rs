@@ -11,6 +11,8 @@ pub enum ConsoleLevel {
   Warn,
   Error,
   Debug,
+  /// `console.trace` — the message plus the capture-site stack.
+  Trace,
   /// Emitted by the engine itself (e.g., truncation notices).
   System,
 }

@@ -1600,6 +1600,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "clap",
+ "console",
  "ferridriver",
  "ferridriver-bdd",
  "ferridriver-config",

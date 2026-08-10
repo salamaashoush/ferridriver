@@ -351,9 +351,11 @@ impl Page {
   /// page's context is being traced. Callers pass the final outcome to
   /// [`crate::trace::ActionSpan::finish`].
   pub(crate) fn trace_span(&self, method: &str, params: serde_json::Value) -> Option<crate::trace::ActionSpan> {
-    let composite = self.context_ref.as_ref()?.composite();
+    // A context-less page can still be observed (`run --trace`); only the
+    // zip recorder is keyed by composite.
+    let composite = self.context_ref.as_ref().map(super::context::ContextRef::composite);
     crate::trace::begin_action(
-      Some(&composite),
+      composite.as_deref(),
       "Page",
       method,
       Some(format!("page@{}", self.backend_page_id())),
@@ -385,9 +387,9 @@ impl Page {
   /// appears in the trace with DOM snapshots exactly like a page
   /// action. `None` when the context is not being traced.
   pub async fn begin_expect_trace(&self, matcher: &str, params: serde_json::Value) -> Option<crate::trace::ActionSpan> {
-    let composite = self.context()?.composite();
+    let composite = self.context().map(crate::context::ContextRef::composite);
     let span = crate::trace::begin_action(
-      Some(&composite),
+      composite.as_deref(),
       "Expect",
       matcher,
       Some(format!("page@{}", self.backend_page_id())),

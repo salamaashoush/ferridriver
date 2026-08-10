@@ -10,11 +10,37 @@
 //!
 //! When a limit is hit, a single `system`-level entry is appended noting
 //! truncation and no further entries are recorded.
+//!
+//! A capture built with [`ConsoleCapture::with_sink`] instead forwards every
+//! entry to the sink as it happens and retains nothing — the streaming shape a
+//! human at a terminal wants, where the limits above (which exist to bound a
+//! single result document) would only mangle the output.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::result::{ConsoleEntry, ConsoleLevel};
+
+/// Receiver for console entries as they are produced.
+///
+/// Installed via [`ConsoleCapture::with_sink`] / `ScriptEngineConfig::console_sink`
+/// by hosts that want live output instead of a buffer drained at the end.
+/// `emit` runs on the VM thread inside the `console.*` call, so it must not
+/// block for long.
+pub trait ConsoleSink: std::fmt::Debug + Send + Sync + 'static {
+  fn emit(&self, entry: &ConsoleEntry);
+
+  /// Whether rendered values may carry ANSI styling. Node colours
+  /// `util.inspect` output only when the stream is a terminal — and `log` and
+  /// `error` go to different streams, so the answer is per level. A sink
+  /// writing to a pipe (and the buffered no-sink path) answers `false`.
+  fn styled_for(&self, _level: ConsoleLevel) -> bool {
+    false
+  }
+
+  /// `console.clear()`. Default no-op, like Node's on a non-terminal stream.
+  fn clear(&self) {}
+}
 
 /// Thread-safe capture buffer.
 ///
@@ -26,6 +52,7 @@ pub struct ConsoleCapture {
   max_total_bytes: usize,
   max_entry_bytes: usize,
   started: Instant,
+  sink: Option<Arc<dyn ConsoleSink>>,
   inner: Mutex<ConsoleInner>,
 }
 
@@ -43,12 +70,24 @@ impl ConsoleCapture {
       max_total_bytes,
       max_entry_bytes,
       started: Instant::now(),
+      sink: None,
       inner: Mutex::new(ConsoleInner {
         entries: Vec::new(),
         total_bytes: 0,
         truncated: false,
       }),
     }
+  }
+
+  /// Stream entries to `sink` as they happen instead of buffering them.
+  ///
+  /// [`Self::drain`] then always returns empty: nothing is retained, and the
+  /// count / byte / per-entry limits do not apply, so a streamed message is
+  /// never clamped mid-line.
+  #[must_use]
+  pub fn with_sink(mut self, sink: Arc<dyn ConsoleSink>) -> Self {
+    self.sink = Some(sink);
+    self
   }
 
   /// Record one entry.
@@ -59,6 +98,16 @@ impl ConsoleCapture {
   /// noting truncation and all further calls are silently dropped.
   pub fn push(&self, level: ConsoleLevel, message: impl Into<String>) {
     let mut message = message.into();
+
+    if let Some(sink) = &self.sink {
+      sink.emit(&ConsoleEntry {
+        level,
+        message,
+        ts_ms: self.started.elapsed().as_millis() as u64,
+      });
+      return;
+    }
+
     if message.len() > self.max_entry_bytes {
       message.truncate(self.max_entry_bytes);
       message.push('…');
@@ -110,6 +159,20 @@ impl ConsoleCapture {
   #[must_use]
   pub fn elapsed_ms(&self) -> u64 {
     self.started.elapsed().as_millis() as u64
+  }
+
+  /// Whether the installed sink renders ANSI styling for `level` — see
+  /// [`ConsoleSink::styled_for`]. Always `false` for a buffered capture.
+  #[must_use]
+  pub fn styled_for(&self, level: ConsoleLevel) -> bool {
+    self.sink.as_ref().is_some_and(|s| s.styled_for(level))
+  }
+
+  /// Forward `console.clear()` to the sink.
+  pub fn clear(&self) {
+    if let Some(sink) = &self.sink {
+      sink.clear();
+    }
   }
 }
 
@@ -167,6 +230,35 @@ mod tests {
     // First fits (15 <= 20), second would exceed (15+15=30 > 20) so truncation fires.
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[1].level, ConsoleLevel::System);
+  }
+
+  #[test]
+  fn sink_streams_every_entry_and_retains_nothing() {
+    #[derive(Debug, Default)]
+    struct Collect(Mutex<Vec<(ConsoleLevel, String)>>);
+    impl ConsoleSink for Collect {
+      fn emit(&self, entry: &ConsoleEntry) {
+        if let Ok(mut v) = self.0.lock() {
+          v.push((entry.level, entry.message.clone()));
+        }
+      }
+    }
+
+    let sink = Arc::new(Collect::default());
+    // Limits that would truncate after one short entry: streaming ignores them.
+    let cap = ConsoleCapture::new(1, 4, 4).with_sink(sink.clone());
+    cap.push(ConsoleLevel::Log, "first message");
+    cap.push(ConsoleLevel::Warn, "second message");
+
+    let seen = sink.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    assert_eq!(
+      seen,
+      vec![
+        (ConsoleLevel::Log, "first message".to_string()),
+        (ConsoleLevel::Warn, "second message".to_string()),
+      ]
+    );
+    assert!(cap.drain().is_empty());
   }
 
   #[test]

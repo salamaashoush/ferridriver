@@ -62,6 +62,7 @@ fn declared_sidecar_is_reachable_from_a_script() {
     .current_dir(dir.path())
     .args([
       "run",
+      "--json",
       "-e",
       "const sc = await sidecars.connect('echo'); const r = await sc.send('ping'); await sc.close(); return r;",
     ])
@@ -104,7 +105,14 @@ fn gateway_extension_drives_sidecar_over_the_real_binary() {
 
   let out = Command::new(ferridriver_bin())
     .current_dir(dir.path())
-    .args(["run", "--extension", gateway_fixture().to_str().unwrap(), "-e", script])
+    .args([
+      "run",
+      "--json",
+      "--extension",
+      gateway_fixture().to_str().unwrap(),
+      "-e",
+      script,
+    ])
     .output()
     .expect("spawn ferridriver run");
 
@@ -131,6 +139,7 @@ fn unknown_sidecar_name_is_rejected_when_not_declared() {
     .current_dir(dir.path())
     .args([
       "run",
+      "--json",
       "-e",
       "try { await sidecars.connect('echo'); return 'no-throw'; } catch (e) { return String(e.message || e); }",
     ])
