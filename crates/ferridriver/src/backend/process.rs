@@ -231,6 +231,13 @@ struct BrowserRecord {
   /// plus the downloads directory.
   #[serde(default)]
   owned_dirs: Vec<String>,
+  /// The browser's start time as `ps` reports it. Pids are recycled, and
+  /// (pid, start time) is the pair that identifies a process across that:
+  /// without it a stale record can name someone else's browser. Absent on
+  /// records written by an older build, which fall back to matching the
+  /// command line alone.
+  #[serde(default)]
+  start_time: Option<String>,
 }
 
 /// A launch-record file, deleted when the browser it describes is
@@ -301,6 +308,7 @@ impl ProcRecord {
       browser_pid,
       profile_dir: profile_dir.map(|p| p.to_string_lossy().into_owned()),
       owned_dirs: owned_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+      start_time: process_start_time(browser_pid),
     };
     let path = dir.join(format!("{owner_pid}-{browser_pid}.json"));
     std::fs::write(&path, serde_json::to_vec(&record).ok()?).ok()?;
@@ -316,6 +324,7 @@ impl ProcRecord {
       browser_pid,
       profile_dir: profile_dir.map(|p| p.to_string_lossy().into_owned()),
       owned_dirs: owned_dirs.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+      start_time: process_start_time(browser_pid),
     };
     Some(Self {
       path,
@@ -356,6 +365,27 @@ fn process_is_live(_pid: u32) -> bool {
 /// confirm a recorded pid is still the browser we launched before
 /// signalling it: pids get recycled, and a stale record must never take
 /// down an unrelated process.
+/// One `ps` field for `pid`, or `None` when the process is gone or `ps`
+/// itself could not be run.
+fn process_field(pid: u32, field: &str) -> Option<String> {
+  let out = std::process::Command::new("ps")
+    .args(["-p", &pid.to_string(), "-o", field])
+    .output()
+    .ok()?;
+  out
+    .status
+    .success()
+    .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    .filter(|s| !s.is_empty())
+}
+
+/// The process's start time as `ps` reports it (second resolution). Paired
+/// with the pid it survives pid recycling, which a command line alone does
+/// not: two automation browsers look identical.
+fn process_start_time(pid: u32) -> Option<String> {
+  process_field(pid, "lstart=")
+}
+
 fn process_command(pid: u32) -> Option<String> {
   let out = std::process::Command::new("ps")
     .args(["-p", &pid.to_string(), "-o", "command="])
@@ -367,25 +397,73 @@ fn process_command(pid: u32) -> Option<String> {
     .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn browser_matches(record: &BrowserRecord) -> bool {
+/// What a live pid from a record turned out to be.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Identity {
+  /// The browser this record describes; safe to signal.
+  Ours,
+  /// A different process wearing a recycled pid; must not be signalled.
+  NotOurs,
+  /// `ps` told us nothing. Neither killing nor cleaning up is justified —
+  /// the next sweep asks again.
+  Unknown,
+}
+
+/// Decide whether the live process at `record.browser_pid` is the browser the
+/// record describes.
+///
+/// A pid alone proves nothing: the kernel recycles them, and one automation
+/// browser's command line looks like any other's. The start time pins the pid
+/// to a single process — `(pid, start time)` is unique — and the command-line
+/// check stays on top of it as a second signal, so a pid recycled within the
+/// same second is still rejected.
+fn identify_browser(record: &BrowserRecord) -> Identity {
+  if let Some(recorded) = record.start_time.as_deref() {
+    match process_start_time(record.browser_pid) {
+      Some(live) if live != recorded => return Identity::NotOurs,
+      Some(_) => {},
+      None => return Identity::Unknown,
+    }
+  }
   let Some(cmd) = process_command(record.browser_pid) else {
-    return false;
+    return Identity::Unknown;
   };
-  match record.profile_dir {
+  let looks_right = match record.profile_dir {
     Some(ref dir) => cmd.contains(dir.as_str()),
     None => cmd.contains("--inspector-pipe") || cmd.contains("--remote-debugging"),
-  }
+  };
+  if looks_right { Identity::Ours } else { Identity::NotOurs }
+}
+
+/// Whether a recorded directory is somewhere we are willing to delete
+/// recursively. Every directory we own is a temp dir we created, so anything
+/// outside the temp root or our own cache directory is a corrupt or tampered
+/// record, not ours to remove.
+fn is_reclaimable_dir(path: &std::path::Path) -> bool {
+  let Ok(target) = path.canonicalize() else {
+    return false;
+  };
+  [
+    Some(std::env::temp_dir()),
+    dirs::cache_dir().map(|c| c.join("ferridriver")),
+  ]
+  .into_iter()
+  .flatten()
+  .filter_map(|root| root.canonicalize().ok())
+  .any(|root| target.starts_with(&root) && target != root)
 }
 
 /// Reclaim browsers launched by ferridriver processes that are no
 /// longer running: kill the process group and remove the temp profile
 /// directory it was holding. Returns the number of browsers killed.
 ///
+/// Browsers owned by a LIVE process — another MCP session, a parallel test
+/// run — are never touched: the record is skipped while its owner is alive.
 ///
-/// Safe against pid reuse: a recorded browser is signalled only when
-/// its live command line still names the profile directory from the
-/// record (a random temp path) or, for launches with no profile of
-/// their own, still looks like an automation browser.
+/// Safe against pid reuse: a recorded browser is signalled only once its
+/// start time still matches the record and its command line still names the
+/// record's profile directory. A pid we cannot identify is left alone, along
+/// with the record, for the next sweep to re-examine.
 pub fn sweep_stale_browsers() -> usize {
   let Some(dir) = registry_dir() else {
     return 0;
@@ -407,7 +485,19 @@ pub fn sweep_stale_browsers() -> usize {
     if record.owner_pid == std::process::id() || process_is_live(record.owner_pid) {
       continue;
     }
-    if process_is_live(record.browser_pid) && browser_matches(&record) {
+    let identity = if process_is_live(record.browser_pid) {
+      identify_browser(&record)
+    } else {
+      // Already gone: nothing to signal, and its leftovers are ours to clear.
+      Identity::NotOurs
+    };
+    if identity == Identity::Unknown {
+      // Keep the record: deleting it would strand the browser it names, and
+      // deleting its directories would pull the profile out from under a
+      // browser that may still be running.
+      continue;
+    }
+    if identity == Identity::Ours {
       tracing::info!(
         target: "ferridriver::process",
         browser_pid = record.browser_pid,
@@ -418,7 +508,10 @@ pub fn sweep_stale_browsers() -> usize {
       reclaimed += 1;
     }
     for dir in &record.owned_dirs {
-      let _ = std::fs::remove_dir_all(dir);
+      let dir = std::path::Path::new(dir);
+      if is_reclaimable_dir(dir) {
+        let _ = std::fs::remove_dir_all(dir);
+      }
     }
     let _ = std::fs::remove_file(&path);
   }
@@ -451,6 +544,7 @@ mod tests {
       } else {
         Vec::new()
       },
+      start_time: process_start_time(browser_pid),
     };
     let path = dir.join(format!("{owner_pid}-{browser_pid}.json"));
     std::fs::write(&path, serde_json::to_vec(&record).expect("encode")).expect("write record");
@@ -471,6 +565,132 @@ mod tests {
 
     assert!(!record.exists(), "the record of a dead owner is removed");
     assert!(!profile.exists(), "an owned profile dir is removed with its owner");
+  }
+
+  /// A live process group that looks like an automation browser to
+  /// `browser_matches`, in its own session so signalling it cannot reach the
+  /// test runner. Returns (group leader pid, non-leader child pid); the
+  /// child's pgid is the leader, so it is not a group leader itself.
+  fn spawn_fake_browser_group() -> (u32, std::process::Child) {
+    use std::io::BufRead as _;
+    use std::os::unix::process::CommandExt as _;
+
+    let mut cmd = std::process::Command::new("sh");
+    // The inner `sh` carries the automation marker in its argv and is a
+    // plain child, so `pgid(child) == leader != child`.
+    cmd
+      .arg("-c")
+      .arg("sh -c 'sleep 300' --remote-debugging-port=59999 & echo $!; sleep 300")
+      .stdout(std::process::Stdio::piped())
+      .stderr(std::process::Stdio::null());
+    #[allow(unsafe_code)]
+    unsafe {
+      // SAFETY: `setsid` is async-signal-safe and the closure allocates
+      // nothing. Own session so the group kill under test cannot reach us.
+      cmd.pre_exec(|| {
+        libc::setsid();
+        Ok(())
+      });
+    }
+    let mut leader = cmd.spawn().expect("spawn fake browser group");
+    let mut line = String::new();
+    let stdout = leader.stdout.take().expect("stdout piped");
+    std::io::BufReader::new(stdout)
+      .read_line(&mut line)
+      .expect("read child pid");
+    let child: u32 = line.trim().parse().expect("child pid");
+    (child, leader)
+  }
+
+  fn kill_group(leader: &mut std::process::Child) {
+    kill_process_group(leader.id());
+    let _ = leader.kill();
+    let _ = leader.wait();
+  }
+
+  /// `kill(pid, 0)` answers "live" for a killed-but-unreaped child, so tests
+  /// that assert a process survived a sweep have to ask `ps` for its state.
+  fn is_running(pid: u32) -> bool {
+    process_field(pid, "stat=").is_some_and(|state| !state.starts_with('Z'))
+  }
+
+  /// Give the group kill a moment to land before asking.
+  fn settle() {
+    std::thread::sleep(std::time::Duration::from_millis(200));
+  }
+
+  /// `killpg` addresses a group by id, and a group's id is the pid of its
+  /// leader — so a recycled pid that is merely a group MEMBER of someone
+  /// else's group cannot be signalled through it. Pinned, because the
+  /// blast radius of getting this wrong is another session's browsers.
+  #[test]
+  fn sweep_never_group_kills_a_pid_that_is_not_its_own_group_leader() {
+    let (non_leader, mut leader) = spawn_fake_browser_group();
+    let record = write_record(dead_pid(), non_leader, None, false);
+
+    sweep_stale_browsers();
+    settle();
+
+    let survived = is_running(non_leader);
+    kill_group(&mut leader);
+    let _ = std::fs::remove_file(&record);
+    assert!(survived, "a non-leader pid must never be group-killed by the sweep");
+  }
+
+  /// With no profile directory to match on, the only thing separating our
+  /// browser from anyone else's is the recorded start time: a recycled pid
+  /// landing on an unrelated automation browser must be spared.
+  #[test]
+  fn sweep_spares_a_recycled_pid_whose_start_time_differs() {
+    let (_, mut leader) = spawn_fake_browser_group();
+    let victim = leader.id();
+    let dir = registry_dir().expect("registry dir");
+    let owner = dead_pid();
+    let record_path = dir.join(format!("{owner}-{victim}.json"));
+    let record = BrowserRecord {
+      owner_pid: owner,
+      browser_pid: victim,
+      profile_dir: None,
+      owned_dirs: Vec::new(),
+      // The browser this record described started at a different time; the
+      // pid has since been recycled onto someone else's browser.
+      start_time: Some("Thu Jan  1 00:00:00 1970".to_string()),
+    };
+    std::fs::write(&record_path, serde_json::to_vec(&record).expect("encode")).expect("write record");
+
+    sweep_stale_browsers();
+    settle();
+
+    let survived = is_running(victim);
+    kill_group(&mut leader);
+    let _ = std::fs::remove_file(&record_path);
+    assert!(survived, "a pid whose start time does not match the record is not ours");
+  }
+
+  #[test]
+  fn sweep_kills_a_recorded_browser_whose_start_time_matches() {
+    let (_, mut leader) = spawn_fake_browser_group();
+    let victim = leader.id();
+    let dir = registry_dir().expect("registry dir");
+    let owner = dead_pid();
+    let record_path = dir.join(format!("{owner}-{victim}.json"));
+    let record = BrowserRecord {
+      owner_pid: owner,
+      browser_pid: victim,
+      profile_dir: None,
+      owned_dirs: Vec::new(),
+      start_time: process_start_time(victim),
+    };
+    assert!(record.start_time.is_some(), "ps reports a start time");
+    std::fs::write(&record_path, serde_json::to_vec(&record).expect("encode")).expect("write record");
+
+    sweep_stale_browsers();
+    settle();
+
+    let killed = !is_running(victim);
+    kill_group(&mut leader);
+    let _ = std::fs::remove_file(&record_path);
+    assert!(killed, "our own leaked browser is still reclaimed");
   }
 
   #[test]
