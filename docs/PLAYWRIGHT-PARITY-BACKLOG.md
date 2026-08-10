@@ -231,4 +231,30 @@ Remaining, in rough order of how visible each one is:
   colours its own output (box-craft's catchpoint plugin does) loses it.
   Distinguishing the two sources needs a trusted-output channel.
 
+## e2e suite: load-correlated roaming flake
+
+`ferridriver test` fails one test per run, roughly a third of the time,
+and it is a different test each time. Measured 2026-08-10 on macOS, 6
+workers, by running the full suite repeatedly on the same machine:
+
+| Build | Runs | Green | Failing test |
+|---|---|---|---|
+| `feat/run-console-streaming` | 5 | 3 | `network > request_existing_response`, `network > route_from_har` (30s timeout) |
+| clean `main` | 3 | 2 | `events > context_popup_page_event_and_opener` (8s timeout) |
+
+Comparable rates on both sides, so it is not something the console /
+sweep work introduced — the point of measuring a clean baseline was to
+settle exactly that. Every red run is also a slow run (95.5s and 102.7s
+against ~70s for green ones), and each failing test passes 4/4 across all
+backends when run in isolation.
+
+The common shape is a wait that expires under contention — a navigation
+response that arrives late, a `waitForURL` that misses its window. That
+points at the suite's worker count versus the machine rather than at any
+one test, but it has not been root-caused. Before blaming a diff for an
+e2e failure, re-run: one red run out of three proves nothing on its own.
+
+Related: the BDD suite has its own known load-correlated hang, same
+advice.
+
 <!-- Append new findings below as they are discovered. Remove items when they land — git history is the archive. -->
