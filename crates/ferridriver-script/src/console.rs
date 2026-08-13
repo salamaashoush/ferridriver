@@ -53,6 +53,7 @@ pub struct ConsoleCapture {
   max_entry_bytes: usize,
   started: Instant,
   sink: Option<Arc<dyn ConsoleSink>>,
+  secrets: ferridriver::response::Secrets,
   inner: Mutex<ConsoleInner>,
 }
 
@@ -71,6 +72,7 @@ impl ConsoleCapture {
       max_entry_bytes,
       started: Instant::now(),
       sink: None,
+      secrets: ferridriver::response::Secrets::default(),
       inner: Mutex::new(ConsoleInner {
         entries: Vec::new(),
         total_bytes: 0,
@@ -90,6 +92,14 @@ impl ConsoleCapture {
     self
   }
 
+  /// Redact these values out of every message before it is recorded or
+  /// forwarded.
+  #[must_use]
+  pub fn with_secrets(mut self, secrets: ferridriver::response::Secrets) -> Self {
+    self.secrets = secrets;
+    self
+  }
+
   /// Record one entry.
   ///
   /// `message` is clamped to `max_entry_bytes`, and the entry is only
@@ -98,6 +108,13 @@ impl ConsoleCapture {
   /// noting truncation and all further calls are silently dropped.
   pub fn push(&self, level: ConsoleLevel, message: impl Into<String>) {
     let mut message = message.into();
+
+    // Before the sink and before the buffer: a script that logs a credential
+    // must not leak it down either path, and truncation below would otherwise
+    // be able to cut a secret in half and defeat the match.
+    if let std::borrow::Cow::Owned(redacted) = self.secrets.redact(&message) {
+      message = redacted;
+    }
 
     if let Some(sink) = &self.sink {
       sink.emit(&ConsoleEntry {

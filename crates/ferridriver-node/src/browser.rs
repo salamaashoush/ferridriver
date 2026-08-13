@@ -234,14 +234,16 @@ impl Browser {
     self.inner.is_connected()
   }
 
-  /// Publish this browser under a named session so other processes (the
-  /// `ferridriver` CLI, another agent) can attach to it. Mirrors Playwright's
+  /// Publish this browser under a named session. Mirrors Playwright's
   /// `browser.bind(title, options): Promise<{ endpoint }>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/browser.ts:132`).
   ///
-  /// `title` is the session id. `host`/`port` bind over TCP (`ws://`
-  /// endpoint); otherwise a Unix-domain socket is used. Returns the resolved
-  /// endpoint clients connect to.
+  /// Not available from this binding. A session's whole protocol is "run this
+  /// script", so a host has to carry a script engine — and this addon is the
+  /// core browser surface, deliberately without one. Rather than publish a
+  /// registry entry no client can drive, this rejects and points at the two
+  /// hosts that can: the CLI (`ferridriver session open`) and a ferridriver
+  /// script (`browser.bind()` inside `ferridriver run`).
   #[napi(
     ts_args_type = "title: string, options?: {
     workspaceDir?: string;
@@ -251,17 +253,20 @@ impl Browser {
   }",
     ts_return_type = "Promise<{ endpoint: string }>"
   )]
+  #[allow(clippy::unused_async)] // NAPI requires async to surface a JS Promise (Playwright parity)
   pub async fn bind(&self, title: String, options: Option<NapiBindOptions>) -> Result<BindResult> {
-    let opts = options.unwrap_or_default();
-    let endpoint = ferridriver_session::bind_global(&self.inner, &title, opts.into_core(), None)
-      .await
-      .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-    Ok(BindResult { endpoint })
+    let _ = (title, options);
+    Err(napi::Error::from_reason(
+      "browser.bind() is not available from the Node binding: a bound session runs scripts, and this addon \
+       carries no script engine. Open the session with `ferridriver session open <id>`, or call browser.bind() \
+       from a script run by `ferridriver run`.",
+    ))
   }
 
   /// Stop accepting new connections for the bound session and remove its
   /// registry entry. Mirrors Playwright's `browser.unbind(): Promise<void>`.
-  /// A no-op if the browser was never bound.
+  /// A no-op — [`Self::bind`] never binds from this addon — kept so code
+  /// written against the Playwright shape still runs.
   #[napi]
   #[allow(clippy::unused_async)] // NAPI requires async to surface a JS Promise (Playwright parity)
   pub async fn unbind(&self) -> Result<()> {
@@ -269,7 +274,9 @@ impl Browser {
   }
 }
 
-/// Options for [`Browser::bind`]. Field names mirror Playwright's option bag.
+/// Options for [`Browser::bind`]. Field names mirror Playwright's option bag,
+/// so code written against it still type-checks even though this addon's
+/// `bind` refuses.
 #[napi(object)]
 #[derive(Default)]
 pub struct NapiBindOptions {
@@ -277,17 +284,6 @@ pub struct NapiBindOptions {
   pub metadata: Option<serde_json::Value>,
   pub host: Option<String>,
   pub port: Option<u32>,
-}
-
-impl NapiBindOptions {
-  fn into_core(self) -> ferridriver_session::BindOptions {
-    ferridriver_session::BindOptions {
-      workspace_dir: self.workspace_dir,
-      metadata: self.metadata,
-      host: self.host,
-      port: self.port.and_then(|p| u16::try_from(p).ok()),
-    }
-  }
 }
 
 /// The `{ endpoint }` object returned by [`Browser::bind`].

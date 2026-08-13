@@ -93,6 +93,14 @@ pub struct ScriptEngineConfig {
   /// `ScriptResult.console` stays empty. `None` (the default) keeps the
   /// buffered form every machine consumer reads.
   pub console_sink: Option<Arc<dyn crate::console::ConsoleSink>>,
+  /// Values redacted from everything a run hands back: console entries,
+  /// the returned value, and the failure. Redacting at the engine means a
+  /// host cannot forget to do it on one of the three paths.
+  pub secrets: ferridriver::response::Secrets,
+  /// Ceiling on the artifacts root, enforced by whichever host owns the
+  /// output directory. Carried here so a session published by
+  /// `browser.bind()` inherits the ceiling of the VM that bound it.
+  pub artifacts_budget: Option<ferridriver::response::OutputBudget>,
 }
 
 impl Default for ScriptEngineConfig {
@@ -109,6 +117,8 @@ impl Default for ScriptEngineConfig {
       session_idle_ttl: Some(DEFAULT_SESSION_IDLE_TTL),
       sidecars: Vec::new(),
       console_sink: None,
+      secrets: ferridriver::response::Secrets::default(),
+      artifacts_budget: None,
     }
   }
 }
@@ -540,6 +550,15 @@ impl Session {
     let session = context.session.clone();
     let sidecars = config.sidecars.clone();
     let ud_vm = vm.clone();
+    // Snapshot for the `browser.bind()` script host (see the userdata store
+    // below). The engine config goes without its console sink: that sink
+    // belongs to THIS process's stdout, and a session host routes each run's
+    // output to whichever client asked for it.
+    let (env_sandbox, env_artifacts, env_extensions) = (sandbox.clone(), artifacts.clone(), extensions.clone());
+    let env_engine = ScriptEngineConfig {
+      console_sink: None,
+      ..config.clone()
+    };
     let install: Result<Result<(), ScriptError>, ScriptError> = vm_with!(vm => |ctx| {
       // Stash the session's VM-loop handle so script-minted pages can
       // thread it into PageJs (route/exposeFunction cross-task
@@ -564,6 +583,19 @@ impl Session {
         session: session.clone(),
         settings: caps.extension_settings.clone(),
       });
+      // The scripting environment itself, so `browser.bind()` can publish a
+      // session that runs scripts with the SAME sandboxes, caps and
+      // extensions this VM has — a bound browser nobody can script is not a
+      // session, it is a registry entry.
+      let _ = ctx.store_userdata(crate::session_host::ScriptEnvUd(std::sync::Arc::new(
+        crate::session_host::SessionScriptConfig {
+          sandbox: env_sandbox,
+          artifacts: env_artifacts,
+          caps: caps.clone(),
+          extensions: env_extensions,
+          engine: env_engine,
+        },
+      )));
       // Native route-handler registry (context userdata): session-once
       // so `page.route` works on ANY page (script-launched
       // `context.newPage()`, not just the MCP-prebound one whose
@@ -734,7 +766,8 @@ impl Session {
       self.config.max_console_entries,
       self.config.max_console_bytes,
       self.config.max_console_entry_bytes,
-    );
+    )
+    .with_secrets(self.config.secrets.clone());
     Arc::new(match &self.config.console_sink {
       Some(sink) => capture.with_sink(sink.clone()),
       None => capture,
@@ -768,9 +801,14 @@ impl Session {
     let duration = elapsed_ms(started);
     let drained = console.drain();
     match eval_result {
-      Ok(value) => SessionRun {
-        result: ScriptResult::ok(value, duration, drained),
-        poisoned: false,
+      Ok(mut value) => {
+        // Console entries were redacted as they were pushed; the returned
+        // value has never been through a chokepoint until now.
+        self.config.secrets.redact_json(&mut value);
+        SessionRun {
+          result: ScriptResult::ok(value, duration, drained),
+          poisoned: false,
+        }
       },
       Err(mut err) => {
         let timed_out = self.timeout.timed_out.load(Ordering::Relaxed);
@@ -779,6 +817,7 @@ impl Session {
         if timed_out {
           err = ScriptError::timeout(duration, timeout.as_millis() as u64);
         }
+        err.redact(&self.config.secrets);
         SessionRun {
           result: ScriptResult::err(err, duration, drained),
           poisoned,

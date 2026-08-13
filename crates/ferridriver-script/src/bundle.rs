@@ -352,7 +352,43 @@ pub async fn bundle_and_compile_named(
   let bundled = Box::pin(bundle_source(entry_paths, cwd)).await?;
   let (code, map_json, modules) = (bundled.code, bundled.source_map_json, bundled.modules);
 
-  let name = module_name.clone();
+  let compiled = compile_bundled_source(&code, &module_name, map_json.as_deref()).await?;
+
+  let inputs = crate::bytecode_cache::input_set(entry_paths, &modules);
+  crate::bytecode_cache::store(
+    cache_key,
+    &compiled.bytecode,
+    &module_name,
+    map_json.as_deref(),
+    None,
+    &inputs,
+  );
+
+  Ok(compiled)
+}
+
+/// Compile already-bundled ESM `code` to `QuickJS` bytecode.
+///
+/// Split out of [`bundle_and_compile_named`] because bundling and compiling
+/// can happen in different processes: a session client bundles (its working
+/// directory is the one relative imports resolve against) and the session host
+/// compiles (its `QuickJS` build is the one that will load the bytecode), so
+/// bytecode never crosses the wire between differently-built binaries.
+///
+/// Does not touch the disk cache — the caller owns the key, because only it
+/// knows which inputs the code was built from.
+///
+/// # Errors
+///
+/// Returns [`ScriptError`] if the module fails to declare (a syntax error, or
+/// an import the native loader cannot resolve) or to serialize.
+pub async fn compile_bundled_source(
+  code: &str,
+  module_name: &str,
+  source_map_json: Option<&str>,
+) -> Result<CompiledBundle, ScriptError> {
+  let name = module_name.to_string();
+  let code = code.to_string();
   let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("bytecode runtime: {e}")))?;
   // QuickJS resolves the module graph EAGERLY at declare, and the
   // bundle keeps native specifiers external — so even this throwaway
@@ -385,14 +421,10 @@ pub async fn bundle_and_compile_named(
     })
     .await?;
 
-  let inputs = crate::bytecode_cache::input_set(entry_paths, &modules);
-  crate::bytecode_cache::store(cache_key, &bytecode, &module_name, map_json.as_deref(), None, &inputs);
-
-  let source_map = map_json.and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok());
   Ok(CompiledBundle {
-    module_name,
+    module_name: module_name.to_string(),
     bytecode: Arc::from(bytecode.into_boxed_slice()),
-    source_map,
+    source_map: source_map_json.and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok()),
   })
 }
 

@@ -109,6 +109,53 @@ pub fn test_script_error_surfaces_structured(c: &mut McpClient) {
   );
 }
 
+/// Code echo: an exploratory run hands back the source that reproduces it.
+pub fn test_script_code_echo(c: &mut McpClient) {
+  c.nav("<button id='go'>Go</button>");
+
+  let resp = c.call_tool(
+    "run_script",
+    json!({
+      "source": "await page.locator('#go').click(); return 'clicked';",
+      "code_language": "ts",
+    }),
+  );
+  super::client::ok(&resp, "run_script");
+  let payload = super::client::extract_script_payload(&resp).expect("payload");
+  assert_eq!(payload["status"].as_str(), Some("ok"), "{payload}");
+  let code: Vec<String> = payload["code"]
+    .as_array()
+    .expect("code array when code_language is set")
+    .iter()
+    .map(|v| v.as_str().unwrap_or_default().to_string())
+    .collect();
+  assert!(
+    code.iter().any(|line| line == "await page.locator('#go').click();"),
+    "generated code missing the click: {code:?}"
+  );
+
+  // Another language is another vocabulary over the same actions.
+  let resp = c.call_tool(
+    "run_script",
+    json!({
+      "source": "await page.locator('#go').click(); return 'clicked';",
+      "code_language": "rust",
+    }),
+  );
+  let payload = super::client::extract_script_payload(&resp).expect("payload");
+  assert!(
+    payload["code"].as_array().is_some_and(|lines| lines
+      .iter()
+      .any(|l| l.as_str() == Some("page.locator(\"#go\").click().await?;"))),
+    "rust echo missing: {payload}"
+  );
+
+  // Without the parameter there is no code key at all: an agent that did not
+  // ask pays neither the observer nor the tokens.
+  let payload = c.script("await page.locator('#go').click(); return 'clicked';");
+  assert!(payload.get("code").is_none(), "code emitted unasked: {payload}");
+}
+
 pub fn register(set: &mut crate::TestSet<'_>) {
   set.run(
     "backends_support::script_sessions::test_script_bound_args",
@@ -141,5 +188,9 @@ pub fn register(set: &mut crate::TestSet<'_>) {
   set.run(
     "backends_support::script_sessions::test_script_error_surfaces_structured",
     test_script_error_surfaces_structured,
+  );
+  set.run(
+    "backends_support::script_sessions::test_script_code_echo",
+    test_script_code_echo,
   );
 }

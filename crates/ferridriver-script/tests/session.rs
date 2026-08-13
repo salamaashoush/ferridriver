@@ -16,7 +16,7 @@ use ferridriver_script::{
 const DEMO_PLUGIN: &str = "defineTool({ name: 'demo', handler: async ({ args }) => { \
   globalThis.__n = (globalThis.__n || 0) + 1; return { n: globalThis.__n, got: args }; } });";
 
-const APP_PLUGIN: &str =
+const NAMESPACED_PLUGIN: &str =
   "defineTool({ name: 'acme.login', handler: async ({ args }) => ({ ok: true, user: args.user }) });";
 
 /// Bundle + compile the demo plugin through the production pipeline
@@ -92,7 +92,7 @@ async fn run_demo_plugin_twice() {
 async fn dotted_tool_names_are_projected_as_namespaces() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("acme.js");
-  std::fs::write(&path, APP_PLUGIN).expect("write plugin");
+  std::fs::write(&path, NAMESPACED_PLUGIN).expect("write plugin");
   let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");

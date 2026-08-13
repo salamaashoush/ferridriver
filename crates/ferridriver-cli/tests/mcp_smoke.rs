@@ -106,6 +106,27 @@ impl TestSet<'_> {
       eprintln!("  FAIL {name}");
     }
   }
+
+  /// Run a test that launches its own server instead of sharing the
+  /// category's client — what a test needs when the behaviour under test is
+  /// configured (a secrets file, an artifacts ceiling) and the shared client
+  /// was launched without a config. It receives the backend name.
+  fn run_owned(&mut self, name: &'static str, body: fn(&str)) {
+    if let Some(f) = self.filter
+      && !name.contains(f)
+    {
+      return;
+    }
+    if self.verbose {
+      eprintln!("=== RUN {} {}", self.backend, name);
+    }
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(self.backend))).is_ok() {
+      *self.passed += 1;
+    } else {
+      self.failures.push(name.to_string());
+      eprintln!("  FAIL {name}");
+    }
+  }
 }
 
 fn register_nav(set: &mut TestSet<'_>) {
@@ -137,6 +158,10 @@ fn register_session_bind(set: &mut TestSet<'_>) {
   backends_support::session_bind::register(set);
 }
 
+fn register_response_contract(set: &mut TestSet<'_>) {
+  backends_support::response_contract::register(set);
+}
+
 fn register_mcp_features(set: &mut TestSet<'_>) {
   backends_support::mcp_features::register(set);
   backends_support::error_convention::register(set);
@@ -144,7 +169,7 @@ fn register_mcp_features(set: &mut TestSet<'_>) {
 
 // ─── Per-(backend, category) #[test] entry points ──────────────────────────
 //
-// 7 categories × 4 backends = 28 `#[test]`s grouped into one module
+// 8 categories × 4 backends = 32 `#[test]`s grouped into one module
 // per backend. nextest reports them as
 // `backends::<backend>::<category>` and distributes them across cores.
 // A single failing category fails its own test, not the entire backend.
@@ -181,6 +206,10 @@ macro_rules! backend_module {
       #[test]
       fn session_bind() {
         run_category($backend, register_session_bind);
+      }
+      #[test]
+      fn response_contract() {
+        run_category($backend, register_response_contract);
       }
     }
   };

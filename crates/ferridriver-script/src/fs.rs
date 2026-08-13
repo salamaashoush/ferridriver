@@ -18,10 +18,18 @@ use crate::error::ScriptError;
 
 /// Enforces sandbox containment for paths used by the `fs` module.
 ///
-/// Cheap to clone — only holds the canonicalised root.
+/// Cheap to clone — the canonicalised root plus a shared handle to the
+/// write record.
 #[derive(Debug, Clone)]
 pub struct PathSandbox {
   root: PathBuf,
+  /// Every path this sandbox has handed out for writing.
+  ///
+  /// Recorded because an output directory under a size ceiling has to know
+  /// which files the CURRENT run produced: sweeping them would delete the
+  /// screenshot a caller is being handed the path to. Shared across clones —
+  /// a clone is the same sandbox, so it is the same record.
+  written: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>>,
 }
 
 impl PathSandbox {
@@ -37,13 +45,26 @@ impl PathSandbox {
         canonical.display()
       )));
     }
-    Ok(Self { root: canonical })
+    Ok(Self {
+      root: canonical,
+      written: std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new())),
+    })
   }
 
   /// Root directory that all paths must stay inside.
   #[must_use]
   pub fn root(&self) -> &Path {
     &self.root
+  }
+
+  /// Paths handed out by [`Self::resolve_write`] so far.
+  #[must_use]
+  pub fn written(&self) -> std::collections::BTreeSet<PathBuf> {
+    self
+      .written
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
   }
 
   /// Validate a path for a **read** operation.
@@ -114,6 +135,9 @@ impl PathSandbox {
         "fs: refusing to write through symlink: {}",
         target.display()
       )));
+    }
+    if let Ok(mut written) = self.written.lock() {
+      written.insert(target.clone());
     }
     Ok(target)
   }

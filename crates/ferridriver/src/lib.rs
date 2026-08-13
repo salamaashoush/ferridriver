@@ -50,6 +50,7 @@ pub mod observed;
 pub mod options;
 pub mod page;
 pub mod protocol;
+pub mod response;
 pub(crate) mod snapshotter;
 pub mod url_matcher;
 pub mod web_error;

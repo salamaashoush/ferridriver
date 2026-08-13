@@ -19,6 +19,7 @@ pub mod mcp_features;
 pub mod multi_page;
 pub mod nav;
 pub mod observation;
+pub mod response_contract;
 pub mod script_sessions;
 pub mod session_bind;
 pub mod trace;

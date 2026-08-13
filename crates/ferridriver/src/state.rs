@@ -872,7 +872,7 @@ impl LaunchSpec {
   /// Both callbacks are operator-supplied and routinely spawn a
   /// subprocess or probe a TCP port, so they run on the blocking pool:
   /// on an async worker they stall unrelated tasks, and the args
-  /// command for the dev gateway instance takes hundreds of ms.
+  /// command for an operator-supplied gateway instance takes hundreds of ms.
   ///
   /// # Errors
   ///

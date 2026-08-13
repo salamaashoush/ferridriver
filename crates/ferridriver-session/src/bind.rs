@@ -17,7 +17,7 @@ use ferridriver::Browser;
 
 use crate::Result;
 use crate::browser_dispatch::{BrowserDispatcher, browser_name_for, dispatcher_for};
-use crate::dispatch::ScriptHook;
+use crate::dispatch::ScriptHost;
 use crate::registry::{Registry, SessionDescriptor};
 use crate::server::{Endpoint, SessionServer};
 
@@ -140,7 +140,9 @@ impl Drop for BoundSession {
 /// registry descriptor. The returned [`BoundSession`] owns the server task;
 /// keep it alive for as long as the session should be reachable.
 ///
-/// `script_hook`, when supplied, enables the `run-script` verb for clients.
+/// `script_host` runs the scripts clients send. A session bound without one
+/// answers every command with a "scripting is not available" error, so only a
+/// caller that deliberately wants an inert registry entry passes `None`.
 ///
 /// # Errors
 ///
@@ -150,10 +152,10 @@ pub async fn bind(
   browser: &Browser,
   id: &str,
   options: BindOptions,
-  script_hook: Option<Arc<dyn ScriptHook>>,
+  script_host: Option<Arc<dyn ScriptHost>>,
 ) -> Result<BoundSession> {
   let registry = Registry::open()?;
-  bind_in(&registry, browser, id, options, script_hook).await
+  bind_in(&registry, browser, id, options, script_host).await
 }
 
 /// Bind `browser` under `id` and park the binding in the process-global table,
@@ -169,9 +171,9 @@ pub async fn bind_global(
   browser: &Browser,
   id: &str,
   options: BindOptions,
-  script_hook: Option<Arc<dyn ScriptHook>>,
+  script_host: Option<Arc<dyn ScriptHost>>,
 ) -> Result<String> {
-  let session = bind(browser, id, options, script_hook).await?;
+  let session = bind(browser, id, options, script_host).await?;
   let endpoint = session.endpoint().to_string();
   browser_bindings()
     .lock()
@@ -228,11 +230,11 @@ pub async fn bind_in(
   browser: &Browser,
   id: &str,
   options: BindOptions,
-  script_hook: Option<Arc<dyn ScriptHook>>,
+  script_host: Option<Arc<dyn ScriptHost>>,
 ) -> Result<BoundSession> {
   let mut dispatcher: BrowserDispatcher = dispatcher_for(browser);
-  if let Some(hook) = script_hook {
-    dispatcher = dispatcher.with_script_hook(hook);
+  if let Some(host) = script_host {
+    dispatcher = dispatcher.with_script_host(host);
   }
   let browser_name = browser_name_for(browser.backend_kind()).to_string();
   bind_dispatcher(registry, id, Arc::new(dispatcher), browser_name, options).await
@@ -267,6 +269,7 @@ pub async fn bind_dispatcher(
     endpoint: resolved_endpoint.clone(),
     pid: std::process::id(),
     browser_name,
+    version: crate::WIRE_VERSION.to_string(),
     workspace_dir: options.workspace_dir,
     metadata: options.metadata,
   };
@@ -300,9 +303,49 @@ pub fn unbind_id(registry: &Registry, id: &str) -> Result<()> {
   registry.remove(id)
 }
 
+/// `sockaddr_un.sun_path` is 104 bytes on macOS and 108 on Linux, NUL
+/// included. Staying under the smaller one keeps a session bindable on either.
+#[cfg(unix)]
+const MAX_SOCKET_PATH: usize = 100;
+
 #[cfg(unix)]
 fn default_socket_endpoint(registry: &Registry, id: &str) -> Endpoint {
-  Endpoint::Unix(registry.dir().join(format!("{id}.sock")))
+  let direct = registry.dir().join(format!("{id}.sock"));
+  if direct.as_os_str().len() <= MAX_SOCKET_PATH {
+    return Endpoint::Unix(direct);
+  }
+  // A deep registry directory (or a long id) would overflow `sun_path` and
+  // fail the bind outright. Fall back to a short hashed name in a per-user
+  // runtime directory; the descriptor carries the resolved path, so discovery
+  // is unaffected.
+  Endpoint::Unix(hashed_socket_path(registry, id).unwrap_or(direct))
+}
+
+/// `<runtime-dir>/ferridriver/<hash>.sock`, where the runtime dir is
+/// `$XDG_RUNTIME_DIR` (per-user, `0700` by systemd) or the OS temp dir (which
+/// is already per-user on macOS). The `ferridriver` subdirectory is created
+/// `0700` either way, because on BSD-derived kernels the socket file's own
+/// mode is not consulted on connect — the directory is the boundary.
+#[cfg(unix)]
+fn hashed_socket_path(registry: &Registry, id: &str) -> Option<std::path::PathBuf> {
+  use std::hash::{Hash as _, Hasher as _};
+  use std::os::unix::fs::PermissionsExt as _;
+
+  let root = std::env::var_os("XDG_RUNTIME_DIR")
+    .map(std::path::PathBuf::from)
+    .filter(|p| p.is_dir())
+    .unwrap_or_else(std::env::temp_dir)
+    .join("ferridriver");
+  std::fs::create_dir_all(&root).ok()?;
+  std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).ok()?;
+
+  // FxHasher is seed-free, so every process derives the same name for the
+  // same (registry dir, id) pair.
+  let mut hasher = rustc_hash::FxHasher::default();
+  registry.dir().hash(&mut hasher);
+  id.hash(&mut hasher);
+  let path = root.join(format!("{:016x}.sock", hasher.finish()));
+  (path.as_os_str().len() <= MAX_SOCKET_PATH).then_some(path)
 }
 
 #[cfg(not(unix))]
@@ -384,6 +427,39 @@ mod tests {
     }
     // Give the drop's removal a tick.
     assert!(registry.get("ephemeral").unwrap().is_none());
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn a_registry_too_deep_for_sun_path_still_binds() {
+    // A registry directory long enough that `<dir>/<id>.sock` would blow
+    // past `sun_path` — bind must fall back rather than fail.
+    let tmp = tempfile::tempdir().unwrap();
+    let deep = tmp.path().join("a".repeat(60)).join("b".repeat(60));
+    let registry = Registry::open_at(&deep).unwrap();
+    assert!(
+      deep.join("deep-session.sock").as_os_str().len() > MAX_SOCKET_PATH,
+      "the fixture must actually exceed the limit"
+    );
+
+    let session = bind_dispatcher(
+      &registry,
+      "deep-session",
+      Arc::new(EchoDispatcher),
+      "chromium".into(),
+      BindOptions::default(),
+    )
+    .await
+    .expect("a deep registry path must not make a session unbindable");
+
+    assert!(
+      session.endpoint().len() <= MAX_SOCKET_PATH,
+      "fallback endpoint is still too long: {}",
+      session.endpoint()
+    );
+    // And it is reachable: the descriptor carries the resolved path.
+    let client = SessionClient::attach(&registry, "deep-session").await;
+    assert!(client.is_ok(), "fallback socket must be connectable");
   }
 
   #[tokio::test]

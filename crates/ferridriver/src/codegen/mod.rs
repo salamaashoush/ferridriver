@@ -5,6 +5,7 @@
 //!
 //! Usage: `ferridriver codegen <url> [--language rust|typescript|gherkin]`
 
+pub mod echo;
 pub mod emitter;
 pub mod recorder;
 
@@ -70,6 +71,17 @@ impl OutputLanguage {
       "typescript" | "ts" => Self::TypeScript,
       "gherkin" | "feature" | "bdd" => Self::Gherkin,
       _ => Self::Rust,
+    }
+  }
+
+  /// The emitter that writes this language's scaffolding around a body of
+  /// recorded or echoed action lines.
+  #[must_use]
+  pub fn emitter(self) -> std::sync::Arc<dyn emitter::CodeEmitter> {
+    match self {
+      Self::Rust => std::sync::Arc::new(emitter::RustEmitter),
+      Self::TypeScript => std::sync::Arc::new(emitter::TypeScriptEmitter),
+      Self::Gherkin => std::sync::Arc::new(emitter::GherkinEmitter::new()),
     }
   }
 }

@@ -3,6 +3,7 @@
   "extensions",
   "bdd-js-api",
   "run-script",
+  "named-sessions",
   "sandbox",
   "capabilities",
   "sidecars",

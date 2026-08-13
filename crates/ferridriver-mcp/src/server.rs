@@ -189,6 +189,30 @@ pub trait McpServerConfig: Send + Sync + 'static {
     std::path::PathBuf::from(".ferridriver/artifacts")
   }
 
+  /// Ceiling on the total size of [`Self::artifacts_root`], in bytes.
+  ///
+  /// A server that stays up for days accumulates screenshots and traces
+  /// from calls whose results were read and forgotten. When set, each call
+  /// that writes an artifact sweeps the directory back under the ceiling by
+  /// deleting least-recently-modified files — never the ones it just wrote.
+  ///
+  /// Default: no ceiling.
+  fn artifacts_max_bytes(&self) -> Option<u64> {
+    None
+  }
+
+  /// Values that must not reach a caller verbatim, as `name -> value`.
+  ///
+  /// Every response the server renders — a returned value, a console line, a
+  /// page URL, echoed code — has these replaced by `<secret>NAME</secret>`,
+  /// and echoed code reads them from the environment instead. A convenience
+  /// rather than a security boundary: only declared values are matched.
+  ///
+  /// Default: none, so nothing is redacted.
+  fn secrets(&self) -> ferridriver::response::Secrets {
+    ferridriver::response::Secrets::default()
+  }
+
   /// Engine-level defaults (timeout, memory, console limits) for `run_script`.
   fn script_engine_config(&self) -> ferridriver_script::ScriptEngineConfig {
     ferridriver_script::ScriptEngineConfig::default()
@@ -402,6 +426,12 @@ pub struct McpServer {
   /// in that case scripts just don't get an `artifacts` binding and must
   /// use `fs` for output (which pollutes the script source directory).
   pub(crate) artifacts_sandbox: Option<Arc<ferridriver_script::PathSandbox>>,
+  /// Ceiling on the artifacts root, swept after each call that writes one.
+  /// `None` lets the directory grow without bound.
+  pub(crate) artifacts_budget: Option<ferridriver::response::OutputBudget>,
+  /// Resolved once at construction: reading a dotenv file per tool call
+  /// would put a filesystem read on every response's hot path.
+  pub(crate) secrets: ferridriver::response::Secrets,
   /// All live script sessions: one persistent `QuickJS` VM + its
   /// session-scoped `vars` + the browser generation it was built
   /// against, per session name, behind one lock each. Shared by
@@ -566,6 +596,11 @@ impl McpServer {
       },
     };
 
+    let artifacts_budget = config
+      .artifacts_max_bytes()
+      .map(ferridriver::response::OutputBudget::new);
+    let secrets = config.secrets();
+
     Self {
       state,
       page_wrappers: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
@@ -575,6 +610,8 @@ impl McpServer {
       script_engine,
       script_sandbox,
       artifacts_sandbox,
+      artifacts_budget,
+      secrets,
       sessions,
       script_caps: ferridriver_script::ScriptCaps::default(),
       extension_registry: Arc::new(arc_swap::ArcSwap::from_pointee(LoadedExtensions::default())),
@@ -1394,6 +1431,19 @@ impl McpServer {
       tokio::fs::create_dir_all(parent).await.ok()?;
     }
     tokio::fs::write(&resolved, bytes).await.ok()?;
+    // Sweep after the write, protecting exactly the file just written: the
+    // link handed back below must still resolve when the caller follows it.
+    if let Some(budget) = self.artifacts_budget {
+      let keep = std::collections::BTreeSet::from([resolved.clone()]);
+      let evicted = budget.enforce(sandbox.root(), &keep).await;
+      if evicted.files > 0 {
+        tracing::info!(
+          files = evicted.files,
+          bytes = evicted.bytes,
+          "artifacts budget: evicted least-recently-modified outputs"
+        );
+      }
+    }
     let uri = format!("artifact://{rel}");
     let link = Resource::new(uri, rel)
       .with_mime_type(mime.to_string())

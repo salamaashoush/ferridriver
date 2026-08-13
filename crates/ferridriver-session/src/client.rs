@@ -1,17 +1,17 @@
 //! The session client: connect to a bound browser's endpoint and issue
 //! command frames.
 //!
-//! Used by the `ferridriver` CLI (`attach`, `-s <id> <verb>`) and by any host
-//! that wants to drive another process's bound browser. One client owns one
-//! connection; calls are issued sequentially (the CLI runs a single verb per
-//! invocation, so no pipelining is needed).
+//! Used by the `ferridriver` CLI (`run --session`, `session attach`) and by any
+//! host that wants to drive another process's bound browser. One client owns
+//! one connection; calls are issued sequentially (the CLI runs a single command
+//! per invocation, so no pipelining is needed).
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 
-use crate::protocol::{Command, Response};
+use crate::protocol::{Command, Event, Response, ServerFrame};
 use crate::registry::Registry;
 use crate::server::Endpoint;
 use crate::transport::{read_frame, write_frame};
@@ -66,6 +66,17 @@ impl SessionClient {
     let descriptor = registry
       .get(id)?
       .ok_or_else(|| SessionError::NotFound(id.to_string()))?;
+    if descriptor.version != crate::WIRE_VERSION {
+      return Err(SessionError::VersionMismatch {
+        id: id.to_string(),
+        theirs: if descriptor.version.is_empty() {
+          "an older build".to_string()
+        } else {
+          descriptor.version.clone()
+        },
+        ours: crate::WIRE_VERSION.to_string(),
+      });
+    }
     match Self::connect(&descriptor.endpoint).await {
       Ok(client) => Ok(client),
       Err(SessionError::Io(_)) => Err(SessionError::Unreachable(id.to_string())),
@@ -73,7 +84,8 @@ impl SessionClient {
     }
   }
 
-  /// Send one command and await its response.
+  /// Send one command and await its response, discarding any events it
+  /// streams. Use [`SessionClient::call_with_events`] to observe them.
   ///
   /// # Errors
   ///
@@ -81,29 +93,48 @@ impl SessionClient {
   /// answering, or [`SessionError::Io`] / [`SessionError::Json`] on a
   /// transport / decode failure.
   pub async fn call(&mut self, command: Command) -> Result<Response> {
+    self.call_with_events(command, |_| {}).await
+  }
+
+  /// Send one command, handing each streamed [`Event`] to `on_event` as it
+  /// arrives, and await the terminating response.
+  ///
+  /// `on_event` runs on the read path, so it must not block: the CLI prints
+  /// the console line and returns.
+  ///
+  /// # Errors
+  ///
+  /// Same as [`SessionClient::call`].
+  pub async fn call_with_events<F>(&mut self, command: Command, on_event: F) -> Result<Response>
+  where
+    F: FnMut(Event),
+  {
     match &mut self.stream {
       #[cfg(unix)]
-      Stream::Unix(s) => call_on(s, &mut self.pending, command).await,
-      Stream::Tcp(s) => call_on(s, &mut self.pending, command).await,
+      Stream::Unix(s) => call_on(s, &mut self.pending, command, on_event).await,
+      Stream::Tcp(s) => call_on(s, &mut self.pending, command, on_event).await,
     }
   }
 }
 
-async fn call_on<S>(stream: &mut S, pending: &mut Vec<u8>, command: Command) -> Result<Response>
+async fn call_on<S, F>(stream: &mut S, pending: &mut Vec<u8>, command: Command, mut on_event: F) -> Result<Response>
 where
   S: AsyncRead + AsyncWrite + Unpin,
+  F: FnMut(Event),
 {
   let id = command.id;
   write_frame(stream, &command).await?;
   loop {
-    let response: Option<Response> = read_frame(stream, pending).await?;
-    let Some(response) = response else {
+    let frame: Option<ServerFrame> = read_frame(stream, pending).await?;
+    let Some(frame) = frame else {
       return Err(SessionError::ConnectionClosed);
     };
-    // The CLI issues one call per connection, but tolerate a stray earlier
-    // frame by matching on id rather than assuming strict lockstep.
-    if response.id == id {
-      return Ok(response);
+    match frame {
+      // The CLI issues one call per connection, but tolerate a stray earlier
+      // frame by matching on id rather than assuming strict lockstep.
+      ServerFrame::Event(event) if event.id == id => on_event(event),
+      ServerFrame::Response(response) if response.id == id => return Ok(response),
+      _ => {},
     }
   }
 }

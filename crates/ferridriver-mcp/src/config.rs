@@ -77,8 +77,30 @@ impl McpServerConfig for ferridriver_config::FerridriverConfig {
     ferridriver_config::FerridriverConfig::artifacts_root(self)
   }
 
+  fn artifacts_max_bytes(&self) -> Option<u64> {
+    self.artifacts_max_bytes
+  }
+
+  /// A secrets source that cannot be read is reported and treated as empty:
+  /// the server has already started, and refusing every tool call is a worse
+  /// answer than a logged failure the operator can act on. The CLI resolves
+  /// the same config before starting and fails there instead.
+  fn secrets(&self) -> ferridriver::response::Secrets {
+    match self.secrets.resolve() {
+      Ok(pairs) => ferridriver::response::Secrets::new(pairs),
+      Err(e) => {
+        tracing::error!(error = %e, "secrets unavailable; responses will NOT be redacted");
+        ferridriver::response::Secrets::default()
+      },
+    }
+  }
+
   fn script_engine_config(&self) -> ferridriver_script::ScriptEngineConfig {
-    let mut cfg = ferridriver_script::ScriptEngineConfig::default();
+    let mut cfg = ferridriver_script::ScriptEngineConfig {
+      secrets: McpServerConfig::secrets(self),
+      artifacts_budget: self.artifacts_max_bytes.map(ferridriver::response::OutputBudget::new),
+      ..Default::default()
+    };
     let engine = &self.engine;
     if let Some(ms) = engine.timeout_ms {
       cfg.default_timeout = std::time::Duration::from_millis(ms);

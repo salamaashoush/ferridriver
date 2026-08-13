@@ -52,6 +52,7 @@ pub mod error;
 pub mod fs;
 pub mod modules;
 pub mod result;
+pub mod session_host;
 pub mod session_procs;
 pub mod session_table;
 pub mod sidecar;
@@ -70,8 +71,8 @@ pub use bindings::{
   run_test, set_scenario_world, teardown_worker_fixtures,
 };
 pub use bundle::{
-  CompiledBundle, CompiledExtension, bundle_and_compile, bundle_and_compile_named, bundle_source,
-  compile_and_extract_extensions, eval_bundle, is_typescript_path, source_is_es_module,
+  BundledSource, CompiledBundle, CompiledExtension, bundle_and_compile, bundle_and_compile_named, bundle_source,
+  compile_and_extract_extensions, compile_bundled_source, eval_bundle, is_typescript_path, source_is_es_module,
 };
 pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
 pub use console::{ConsoleCapture, ConsoleSink};
@@ -83,6 +84,7 @@ pub use error::{ScriptError, ScriptErrorKind};
 pub use ferridriver_config::ExtensionSpec;
 pub use fs::PathSandbox;
 pub use result::{ConsoleEntry, ConsoleLevel, Outcome, ScriptResult, ScriptSuccess};
+pub use session_host::{SessionScriptConfig, SessionScriptHost};
 pub use session_procs::SessionProcs;
 pub use session_table::{BrowserSession, SessionTable};
 pub use vars::{InMemoryVars, VarsStore};

@@ -1,32 +1,52 @@
-//! `ferridriver session` subcommand: open / host / attach / list / exec /
-//! close / close-all.
+//! `ferridriver session` subcommand: open / host / attach / list / close /
+//! close-all, plus the client half of `ferridriver run --session`.
 //!
 //! These drive ferridriver's named-session layer (`ferridriver-session`) from
 //! the terminal — the token-efficient counterpart to the MCP server for
 //! coding agents. `open` launches a browser and binds it under an id in a
-//! detached host process; the other verbs are thin
-//! [`ferridriver_session::SessionClient`] calls resolved through the registry.
-
-use std::io::Read as _;
+//! detached host process; that host serves one thing, a script run, so
+//! everything a client wants to do goes through
+//! [`ferridriver_session::ScriptRequest`] rather than a verb table that would
+//! forever lag behind the scripting API.
 
 use anyhow::Context as _;
 use ferridriver::backend::BackendKind;
 use ferridriver::browser_type::BrowserType;
 use ferridriver::options::{BrowserKind, LaunchOptions};
-use ferridriver_session::{BindOptions, Command, Registry, SessionClient, bind_in};
+use ferridriver_config::FerridriverConfig;
+use ferridriver_session::{BindOptions, Command, RUN_VERB, Registry, ScriptRequest, SessionClient, bind_in};
 
 use crate::cli::{
-  BrowserArgs, SessionArgs, SessionCommand, SessionExecArgs, SessionHostArgs, SessionListArgs, SessionOpenArgs,
-  SessionTargetArgs,
+  BrowserArgs, SessionArgs, SessionCommand, SessionHostArgs, SessionListArgs, SessionOpenArgs, SessionTargetArgs,
 };
 
-pub async fn run(args: SessionArgs) -> anyhow::Result<()> {
+/// The script `session attach` runs to render a session's current state. It is
+/// an ordinary script for the same reason everything else is: there is one
+/// path into a session, and `attach` must not be a privileged exception to it.
+const ATTACH_SNAPSHOT: &str = "return await page.snapshotForAI();";
+
+/// How this invocation was configured, so `open` can hand the same stack to
+/// the host it spawns.
+///
+/// The host discovers the layered config from its working directory on its
+/// own, but an explicit `-c/--config` (and `--no-inherit`) exists only as
+/// arguments to THIS process — without forwarding them, a session opened with
+/// `-c` runs with a different configuration than the command that opened it,
+/// silently.
+#[derive(Clone, Copy)]
+pub struct ConfigOrigin<'a> {
+  pub explicit: Option<&'a std::path::Path>,
+  pub inherit: bool,
+}
+
+pub async fn run(config: FerridriverConfig, origin: ConfigOrigin<'_>, args: SessionArgs) -> anyhow::Result<()> {
   match args.command {
-    SessionCommand::Open(a) => open(a).await,
-    SessionCommand::Host(a) => host(a).await,
+    SessionCommand::Open(a) => open(a, origin).await,
+    // Boxed: hosting carries the whole resolved scripting environment, which
+    // would otherwise make this match arm's future the size of the enum.
+    SessionCommand::Host(a) => Box::pin(host(config, a)).await,
     SessionCommand::Attach(a) => attach(a).await,
     SessionCommand::List(a) => list(&a),
-    SessionCommand::Exec(a) => exec(a).await,
     SessionCommand::Close(a) => close(&a),
     SessionCommand::CloseAll => close_all(),
   }
@@ -58,7 +78,7 @@ async fn launch_browser(browser: &BrowserArgs) -> anyhow::Result<ferridriver::Br
 
 /// `open`: spawn a detached `session host` process and wait until its
 /// descriptor appears in the registry, then print the endpoint.
-async fn open(args: SessionOpenArgs) -> anyhow::Result<()> {
+async fn open(args: SessionOpenArgs, origin: ConfigOrigin<'_>) -> anyhow::Result<()> {
   let registry = Registry::open()?;
   // If a session with this id is already live, refuse rather than clobber.
   if registry.get(&args.id)?.is_some() {
@@ -71,6 +91,13 @@ async fn open(args: SessionOpenArgs) -> anyhow::Result<()> {
 
   let exe = std::env::current_exe().context("resolving the ferridriver executable")?;
   let mut cmd = std::process::Command::new(exe);
+  // Global flags come before the subcommand.
+  if let Some(path) = origin.explicit {
+    cmd.arg("--config").arg(path);
+  }
+  if !origin.inherit {
+    cmd.arg("--no-inherit");
+  }
   cmd.arg("session").arg("host").arg(&args.id);
   if let Some(url) = &args.url {
     cmd.arg(url);
@@ -81,6 +108,15 @@ async fn open(args: SessionOpenArgs) -> anyhow::Result<()> {
   }
   if let Some(path) = &args.browser.executable_path {
     cmd.arg("--executable-path").arg(path);
+  }
+  for extension in &args.extensions {
+    cmd.arg("--extension").arg(extension);
+  }
+  // The host resolves relative extension specs and the `fs` sandbox root
+  // against ITS working directory, so it must start in the one the user
+  // typed the command in.
+  if let Ok(cwd) = std::env::current_dir() {
+    cmd.current_dir(cwd);
   }
   // Detach: the host owns the browser and outlives this invocation.
   cmd.stdin(std::process::Stdio::null());
@@ -120,7 +156,7 @@ async fn wait_for_descriptor(
 
 /// `host`: the long-lived foreground process. Launch, bind, navigate, serve
 /// until killed. `open` spawns this detached.
-async fn host(args: SessionHostArgs) -> anyhow::Result<()> {
+async fn host(config: FerridriverConfig, args: SessionHostArgs) -> anyhow::Result<()> {
   let browser = launch_browser(&args.browser).await?;
   // Open the first page (and navigate it if a url was given) so an attaching
   // client sees a ready page immediately.
@@ -129,8 +165,22 @@ async fn host(args: SessionHostArgs) -> anyhow::Result<()> {
     page.goto(url).await.with_context(|| format!("navigating to {url}"))?;
   }
 
+  let cwd = std::env::current_dir()?;
+  let setup = crate::script_setup::resolve(&config, &cwd, &args.extensions).await?;
+  let script_host = std::sync::Arc::new(ferridriver_script::SessionScriptHost::new(
+    std::sync::Arc::clone(browser.state()),
+    &args.id,
+    ferridriver_script::SessionScriptConfig {
+      sandbox: setup.sandbox,
+      artifacts: setup.artifacts,
+      caps: setup.caps,
+      extensions: setup.extensions,
+      engine: setup.engine,
+    },
+  ));
+
   let registry = Registry::open()?;
-  let session = bind_in(&registry, &browser, &args.id, BindOptions::default(), None)
+  let session = bind_in(&registry, &browser, &args.id, BindOptions::default(), Some(script_host))
     .await
     .context("binding the session")?;
   tracing::info!(id = %args.id, endpoint = %session.endpoint(), "session host serving");
@@ -173,14 +223,150 @@ async fn shutdown_signal() {
   }
 }
 
-/// `attach`: connect and print the current snapshot.
+/// `attach`: connect and print the session's current snapshot.
 async fn attach(args: SessionTargetArgs) -> anyhow::Result<()> {
+  let result = run_on_session(
+    &args.id,
+    None,
+    ScriptRequest::source(ATTACH_SNAPSHOT),
+    false,
+    &RunSinks::default(),
+  )
+  .await?;
+  match result.outcome {
+    ferridriver_script::Outcome::Ok { success } => {
+      match success.value {
+        serde_json::Value::String(text) => println!("{text}"),
+        other => println!("{other}"),
+      }
+      Ok(())
+    },
+    ferridriver_script::Outcome::Error { error } => {
+      anyhow::bail!("snapshotting session '{}': {}", args.id, error.message)
+    },
+  }
+}
+
+/// Run one script against a live session, streaming its console to this
+/// process's stdout/stderr as the host produces it.
+///
+/// `json` suppresses the streaming render and folds the streamed console into
+/// the returned result instead, so `--json` still emits one document with
+/// every line in it — the host always streams, the client decides how to show
+/// it.
+/// Where a session run's side channels land in this process.
+pub struct RunSinks {
+  /// Accumulates the generated source the host streamed.
+  pub code: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+  /// Whether to also print each line as it arrives.
+  pub echo_code: bool,
+  /// Receives the page the host reported, when the request asked for it.
+  pub page: std::sync::Arc<std::sync::Mutex<Option<ferridriver::response::PageState>>>,
+}
+
+impl Default for RunSinks {
+  fn default() -> Self {
+    Self {
+      code: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+      echo_code: false,
+      page: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    }
+  }
+}
+
+pub async fn run_on_session(
+  id: &str,
+  context: Option<&str>,
+  request: ScriptRequest,
+  json: bool,
+  sinks: &RunSinks,
+) -> anyhow::Result<ferridriver_script::ScriptResult> {
   let registry = Registry::open()?;
-  let mut client = SessionClient::attach(&registry, &args.id)
+  let mut client = SessionClient::attach(&registry, id)
     .await
-    .with_context(|| format!("attaching to session '{}'", args.id))?;
-  let reply = client.call(Command::new(1, "snapshot", serde_json::json!({}))).await?;
-  print_reply(&reply, None)
+    .with_context(|| format!("attaching to session '{id}'"))?;
+
+  let command = Command::new(1, RUN_VERB, serde_json::to_value(&request)?).with_context(context.map(str::to_string));
+
+  let mut streamed: Vec<ferridriver_script::ConsoleEntry> = Vec::new();
+  let reply = client
+    .call_with_events(command, |event| match event.payload {
+      ferridriver_session::EventPayload::Console { level, message, ts_ms } => {
+        let entry = ferridriver_script::ConsoleEntry {
+          level: console_level(&level),
+          message,
+          ts_ms,
+        };
+        if json {
+          streamed.push(entry);
+        } else {
+          crate::run_console::print_entry(&entry);
+        }
+      },
+      ferridriver_session::EventPayload::Code { line } => {
+        if sinks.echo_code {
+          eprintln!("{line}");
+        }
+        if let Ok(mut code) = sinks.code.lock() {
+          code.push(line);
+        }
+      },
+      ferridriver_session::EventPayload::Page {
+        url,
+        title,
+        console_errors,
+        console_warnings,
+        page_errors,
+      } => {
+        if let Ok(mut page) = sinks.page.lock() {
+          *page = Some(ferridriver::response::PageState {
+            url,
+            title,
+            console_errors,
+            console_warnings,
+            page_errors,
+          });
+        }
+      },
+      // Action lines are a live view for a human, never part of the result
+      // document — `--json` never asks for them in the first place.
+      ferridriver_session::EventPayload::Action {
+        phase,
+        title,
+        params,
+        duration_ms,
+        error,
+        message,
+        ..
+      } => match phase {
+        ferridriver_session::ActionPhase::Begin => {
+          crate::run_console::print_action_begin(&title, params.as_ref().unwrap_or(&serde_json::Value::Null));
+        },
+        ferridriver_session::ActionPhase::Log => {
+          crate::run_console::print_action_log(message.as_deref().unwrap_or_default());
+        },
+        ferridriver_session::ActionPhase::End => {
+          #[allow(clippy::cast_precision_loss)] // display only, and milliseconds never reach 2^53
+          let ms = duration_ms.unwrap_or_default() as f64;
+          crate::run_console::print_action_end(&title, ms, error.as_deref());
+        },
+      },
+    })
+    .await?;
+
+  if !reply.ok {
+    anyhow::bail!("{}", reply.error.as_deref().unwrap_or("session run failed"));
+  }
+  let mut result: ferridriver_script::ScriptResult =
+    serde_json::from_str(&reply.text).context("decoding the session's run result")?;
+  result.console.extend(streamed);
+  Ok(result)
+}
+
+/// Decode a wire console level. An unknown level means a newer host is talking
+/// to an older client; render it rather than dropping the line.
+fn console_level(level: &str) -> ferridriver_script::ConsoleLevel {
+  serde_json::from_value(serde_json::Value::String(level.to_string())).unwrap_or(ferridriver_script::ConsoleLevel::Log)
 }
 
 /// `list`: read the registry and print live sessions.
@@ -200,50 +386,6 @@ fn list(args: &SessionListArgs) -> anyhow::Result<()> {
     println!("{:<20} {:<10} {:<8} {}", s.id, s.browser_name, s.pid, s.endpoint);
   }
   Ok(())
-}
-
-/// `exec`: run one verb against a live session.
-async fn exec(args: SessionExecArgs) -> anyhow::Result<()> {
-  let registry = Registry::open()?;
-  let mut client = SessionClient::attach(&registry, &args.id)
-    .await
-    .with_context(|| format!("attaching to session '{}'", args.id))?;
-
-  let command = build_command(&args)?;
-  let reply = client.call(command).await?;
-  print_reply(&reply, args.output.as_deref())
-}
-
-/// Translate exec CLI flags into a session [`Command`].
-fn build_command(args: &SessionExecArgs) -> anyhow::Result<Command> {
-  let mut params = serde_json::Map::new();
-  let mut put = |k: &str, v: &Option<String>| {
-    if let Some(v) = v {
-      params.insert(k.to_string(), serde_json::Value::String(v.clone()));
-    }
-  };
-  put("selector", &args.selector);
-  put("ref", &args.r#ref);
-  put("value", &args.value);
-  put("key", &args.key);
-  put("url", &args.url);
-  put("expression", &args.expression);
-
-  // `run-script` reads its source from --source (or stdin via `-`).
-  if args.verb == "run-script" {
-    let source = match args.source.as_deref() {
-      Some("-") => {
-        let mut s = String::new();
-        std::io::stdin().read_to_string(&mut s)?;
-        s
-      },
-      Some(src) => src.to_string(),
-      None => anyhow::bail!("run-script requires --source <code> (or --source - to read stdin)"),
-    };
-    params.insert("source".to_string(), serde_json::Value::String(source));
-  }
-
-  Ok(Command::new(1, args.verb.clone(), serde_json::Value::Object(params)).with_context(args.context.clone()))
 }
 
 /// `close`: stop the session. The browser is owned by the detached host
@@ -300,32 +442,6 @@ fn terminate_owner(pid: u32) {
 fn terminate_owner(_pid: u32) {
   // On non-unix the host is reaped via the registry prune + its own exit;
   // a portable signal path can be added when a Windows host ships.
-}
-
-/// Render a session reply to stdout. Binary `data` is written to `output`
-/// when provided, otherwise the base64 blob is printed.
-fn print_reply(reply: &ferridriver_session::Response, output: Option<&std::path::Path>) -> anyhow::Result<()> {
-  if !reply.ok {
-    anyhow::bail!("{}", reply.error.as_deref().unwrap_or("session command failed"));
-  }
-  if let Some(data) = &reply.data {
-    use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD
-      .decode(data)
-      .context("decoding session binary payload")?;
-    if let Some(path) = output {
-      std::fs::write(path, &bytes).with_context(|| format!("writing {}", path.display()))?;
-      println!("{} ({} bytes) -> {}", reply.text, bytes.len(), path.display());
-    } else {
-      // No output file: print the status line, then the base64 so it is
-      // still scriptable.
-      println!("{}", reply.text);
-      println!("{data}");
-    }
-  } else {
-    println!("{}", reply.text);
-  }
-  Ok(())
 }
 
 fn backend_name(browser: &BrowserArgs) -> &'static str {

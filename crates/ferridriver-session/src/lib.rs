@@ -15,9 +15,10 @@
 //!   through a [`Dispatcher`]; [`client`] is the matching call/response side.
 //!
 //! The crate depends only on `ferridriver` core, so it sits below the
-//! scripting and binding layers without a cycle. The host (`ferridriver-mcp`,
-//! the CLI, the NAPI/QuickJS bindings) supplies a [`Dispatcher`] that maps
-//! command verbs onto live browser state.
+//! scripting and binding layers without a cycle. The host (the CLI, the
+//! `QuickJS` binding) supplies a [`Dispatcher`] that maps commands onto live
+//! browser state, and a [`ScriptHost`] that runs the scripts those commands
+//! carry.
 
 pub mod bind;
 pub mod browser_dispatch;
@@ -31,14 +32,23 @@ pub mod transport;
 pub use bind::{
   BindOptions, BoundSession, bind, bind_dispatcher, bind_global, bind_in, unbind, unbind_browser, unbind_id,
 };
-pub use browser_dispatch::{BROWSER_VERBS, BrowserDispatcher, browser_name_for, dispatcher_for, parse_session_key};
+pub use browser_dispatch::{BrowserDispatcher, browser_name_for, dispatcher_for, page_for, parse_session_key};
 pub use client::SessionClient;
-pub use dispatch::{Dispatcher, ScriptHook};
-pub use protocol::{Command, Response};
+pub use dispatch::{ActionDetail, Dispatcher, EventSink, PageCounts, ScriptHost};
+pub use protocol::{
+  ActionPhase, Command, Event, EventPayload, RUN_VERB, Response, ScriptKind, ScriptRequest, ServerFrame,
+};
 pub use registry::{Registry, SessionDescriptor};
 pub use server::{Endpoint, SessionServer};
 
 use thiserror::Error;
+
+/// The build identity stamped into every descriptor and checked on attach.
+///
+/// Frames carry no version of their own: a session is a live process, so the
+/// only skew that can happen is a client from one build talking to a host from
+/// another, and the descriptor is read before the first frame is written.
+pub const WIRE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Errors surfaced by the session layer.
 #[derive(Debug, Error)]
@@ -49,6 +59,9 @@ pub enum SessionError {
   /// The registry entry exists but its endpoint refused a connection.
   #[error("session '{0}' is not reachable (stale or shutting down)")]
   Unreachable(String),
+  /// The session was bound by a different ferridriver build.
+  #[error("session '{id}' was opened by ferridriver {theirs}, this is {ours}; close and reopen it")]
+  VersionMismatch { id: String, theirs: String, ours: String },
   /// A command verb the dispatcher does not implement.
   #[error("unknown command verb: '{0}'")]
   UnknownVerb(String),

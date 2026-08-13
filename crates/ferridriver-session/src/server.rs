@@ -14,8 +14,8 @@ use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
-use crate::dispatch::Dispatcher;
-use crate::protocol::Command;
+use crate::dispatch::{Dispatcher, EventSink};
+use crate::protocol::{Command, ServerFrame};
 use crate::transport::{read_frame, write_frame};
 use crate::{Result, SessionError};
 
@@ -87,6 +87,13 @@ impl SessionServer {
           std::fs::create_dir_all(parent)?;
         }
         let listener = UnixListener::bind(&path)?;
+        // A peer that reaches this socket runs scripts in this process. The
+        // registry directory is already owner-only; the socket mode is the
+        // second half of that boundary on platforms that enforce it.
+        {
+          use std::os::unix::fs::PermissionsExt as _;
+          std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(Self {
           endpoint_string: path.to_string_lossy().into_owned(),
           listener: Listener::Unix(listener, path),
@@ -156,6 +163,10 @@ impl Drop for Listener {
 
 /// Read commands from one connection and answer each via the dispatcher,
 /// until the peer hangs up.
+///
+/// A command's events are written as they are emitted — that is what makes a
+/// remote `run` stream its console like a local one — and the response frame
+/// always comes last.
 pub(crate) async fn serve_connection<S>(stream: S, dispatcher: Arc<dyn Dispatcher>) -> Result<()>
 where
   S: AsyncRead + AsyncWrite + Unpin,
@@ -169,8 +180,30 @@ where
       Err(e) => return Err(e),
     };
     let Some(command) = command else { break };
-    let response = dispatcher.dispatch(command).await;
-    write_frame(&mut writer, &response).await?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let sink = EventSink::new(command.id, tx);
+    let mut dispatch = std::pin::pin!(dispatcher.dispatch(command, sink));
+    // `events_open` is what keeps this from spinning: a dispatcher that drops
+    // its sink early closes the channel, and an always-ready `None` branch
+    // would otherwise be re-polled on every loop iteration.
+    let mut events_open = true;
+    let response = loop {
+      tokio::select! {
+        biased;
+        event = rx.recv(), if events_open => match event {
+          Some(event) => write_frame(&mut writer, &ServerFrame::Event(event)).await?,
+          None => events_open = false,
+        },
+        response = &mut dispatch => break response,
+      }
+    };
+    // Events emitted in the same poll that completed the dispatch are still
+    // queued; the sink is dropped with the future, so this drains and ends.
+    while let Ok(event) = rx.try_recv() {
+      write_frame(&mut writer, &ServerFrame::Event(event)).await?;
+    }
+    write_frame(&mut writer, &ServerFrame::Response(response)).await?;
   }
   Ok(())
 }
@@ -220,6 +253,47 @@ mod tests {
       .await
       .unwrap();
     assert!(again.ok);
+  }
+
+  #[tokio::test]
+  async fn events_arrive_before_the_response() {
+    use crate::protocol::EventPayload;
+
+    let (endpoint, _h) = spawn_echo_server().await;
+    let mut client = SessionClient::connect(&endpoint).await.unwrap();
+    let mut seen: Vec<(String, String)> = Vec::new();
+    let resp = client
+      .call_with_events(Command::new(4, "chatty", serde_json::json!({})), |event| {
+        assert_eq!(event.id, 4);
+        let EventPayload::Console { level, message, .. } = event.payload else {
+          panic!("echo dispatcher only emits console events");
+        };
+        seen.push((level, message));
+      })
+      .await
+      .unwrap();
+    assert!(resp.ok);
+    assert_eq!(
+      seen,
+      vec![
+        ("log".to_string(), "first".to_string()),
+        ("error".to_string(), "second".to_string())
+      ]
+    );
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn unix_socket_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("s.sock");
+    let _server = SessionServer::bind(Endpoint::Unix(sock.clone()), Arc::new(EchoDispatcher))
+      .await
+      .unwrap();
+    let mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "session socket must not be reachable by other users");
   }
 
   #[cfg(unix)]

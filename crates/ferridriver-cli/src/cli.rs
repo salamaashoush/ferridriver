@@ -199,9 +199,6 @@ pub enum SessionCommand {
   /// List all live sessions discoverable in the registry.
   List(SessionListArgs),
 
-  /// Run a single verb against a live session and print the result.
-  Exec(SessionExecArgs),
-
   /// Close a session: prune its registry entry (and stop its server if this
   /// process owns it).
   Close(SessionTargetArgs),
@@ -218,6 +215,13 @@ pub struct SessionOpenArgs {
   /// URL to open in the session's first page (defaults to `about:blank`).
   pub url: Option<String>,
 
+  /// Extension file(s), directory(ies), or ESM package specifiers the
+  /// session's scripts get as `tools.*`. Repeatable; merged with the
+  /// `extensions` list from `ferridriver.toml`. The host loads these once,
+  /// so every `ferridriver run --session <id>` sees them.
+  #[arg(long = "extension")]
+  pub extensions: Vec<String>,
+
   #[command(flatten)]
   pub browser: BrowserArgs,
 }
@@ -229,6 +233,10 @@ pub struct SessionHostArgs {
 
   /// URL to open in the session's first page.
   pub url: Option<String>,
+
+  /// Extensions to load for this session's scripts (see `session open`).
+  #[arg(long = "extension")]
+  pub extensions: Vec<String>,
 
   #[command(flatten)]
   pub browser: BrowserArgs,
@@ -245,54 +253,6 @@ pub struct SessionListArgs {
   /// Emit JSON instead of a human-readable table.
   #[arg(long)]
   pub json: bool,
-}
-
-#[derive(Args)]
-pub struct SessionExecArgs {
-  /// Session id.
-  pub id: String,
-
-  /// Verb to run (snapshot, goto, click, fill, press, hover, eval,
-  /// screenshot, title, url, run-script, ...).
-  pub verb: String,
-
-  /// Browser context within the session (the `:context` half of a session
-  /// key). Defaults to the session's default context.
-  #[arg(long)]
-  pub context: Option<String>,
-
-  /// CSS selector for element verbs (click / fill / hover / press).
-  #[arg(long)]
-  pub selector: Option<String>,
-
-  /// Ref from the last snapshot for element verbs (alternative to selector).
-  #[arg(long = "ref")]
-  pub r#ref: Option<String>,
-
-  /// Value for `fill`.
-  #[arg(long)]
-  pub value: Option<String>,
-
-  /// Key for `press` (e.g. `Enter`, `Control+a`).
-  #[arg(long)]
-  pub key: Option<String>,
-
-  /// URL for `goto`.
-  #[arg(long)]
-  pub url: Option<String>,
-
-  /// Expression for `eval`.
-  #[arg(long)]
-  pub expression: Option<String>,
-
-  /// Script source for `run-script` (or `-` to read from stdin).
-  #[arg(long)]
-  pub source: Option<String>,
-
-  /// Write binary results (screenshot) to this file instead of printing a
-  /// base64 blob.
-  #[arg(long)]
-  pub output: Option<PathBuf>,
 }
 
 // ── mcp subcommand ──────────────────────────────────────────────────────
@@ -609,15 +569,53 @@ pub struct RunArgs {
   /// Log every Playwright-level action (`page.*`, `locator.*`, `expect.*`)
   /// to stderr as it starts and finishes, with its parameters, call log and
   /// duration. Independent of `context.tracing.start()` — nothing is
-  /// recorded to a trace zip.
+  /// recorded to a trace zip. Not available with `--session`, where the
+  /// actions run in the host process.
   #[arg(long)]
   pub trace: bool,
 
   /// Extension file(s), directory(ies), or ESM package specifiers to
   /// load, exposing their `tool` registrations to scripts as `tools.*`.
   /// Repeatable; merged with the `extensions` list from `ferridriver.toml`.
+  /// Not accepted with `--session`, where the host owns the extension set.
+  /// Rejected at run time rather than by clap, so the error can point at
+  /// `session open` instead of just naming the conflict.
   #[arg(long = "extension")]
   pub extensions: Vec<String>,
+
+  /// Run against a live session instead of launching a browser: the script
+  /// gets that session's `page` / `context` / `request` globals, and its
+  /// state (cookies, storage, `vars`, open pages) persists between runs.
+  /// Open one with `ferridriver session open <id>`.
+  #[arg(long, short = 's')]
+  pub session: Option<String>,
+
+  /// Browser context within the session (the `:context` half of a session
+  /// key). Defaults to the session's default context.
+  #[arg(long, requires = "session")]
+  pub context: Option<String>,
+
+  /// Emit the source that reproduces every action the script performs, in
+  /// `ts` (default), `rust`, or `gherkin`. Lines go to stderr as they happen,
+  /// or into the `--json` document; `--code-out` writes a runnable file.
+  #[arg(long, num_args = 0..=1, default_missing_value = "ts", value_name = "LANGUAGE")]
+  pub code: Option<String>,
+
+  /// Write the generated source to this file, wrapped in the language's
+  /// test scaffolding. Implies `--code`.
+  #[arg(long, value_name = "FILE")]
+  pub code_out: Option<PathBuf>,
+
+  /// After the run, print the agent-facing response: the result, the source
+  /// reproducing what ran (with `--code`), and the page the session is left
+  /// on, as `### `-titled sections. With `--json` the same parts are folded
+  /// into the result document under `report` instead of printed.
+  ///
+  /// The page section needs a page this process can read, so it appears for
+  /// `--session` runs; a local run's script owns its own browser and this
+  /// process never holds a handle to it.
+  #[arg(long)]
+  pub report: bool,
 
   /// Positional args exposed to the script as the `args` global
   /// (strings). Pass after `--`.

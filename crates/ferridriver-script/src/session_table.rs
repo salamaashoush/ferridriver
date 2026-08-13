@@ -311,6 +311,15 @@ impl SessionTable {
     self.map.remove(name);
   }
 
+  /// Whether a session record for `name` currently exists. Lets a host keep
+  /// its own per-session side tables (console routers, observers) bounded by
+  /// the same lifetime this table enforces, instead of by every name a client
+  /// has ever addressed.
+  #[must_use]
+  pub fn contains(&self, name: &str) -> bool {
+    self.map.contains_key(name)
+  }
+
   /// End every session whose name satisfies `pred`. Used when a whole
   /// browser instance closes and every session routed to it — under
   /// names only the caller can map — has to go with it.

@@ -3,7 +3,7 @@
 use crate::error::ScriptError;
 
 /// Severity of a captured console entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ConsoleLevel {
   Log,
@@ -18,7 +18,7 @@ pub enum ConsoleLevel {
 }
 
 /// One captured `console.*` call from inside the script.
-#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ConsoleEntry {
   pub level: ConsoleLevel,
   pub message: String,
@@ -30,7 +30,7 @@ pub struct ConsoleEntry {
 ///
 /// `value` is the JSON-serialized return of the script's top-level expression
 /// (or `null` if nothing was returned).
-#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ScriptSuccess {
   pub value: serde_json::Value,
 }
@@ -39,7 +39,7 @@ pub struct ScriptSuccess {
 ///
 /// Regardless of success or failure, `console` and `duration_ms` are populated.
 /// On failure, `outcome` carries a structured `ScriptError`.
-#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ScriptResult {
   #[serde(flatten)]
   pub outcome: Outcome,
@@ -48,7 +48,7 @@ pub struct ScriptResult {
 }
 
 /// Tagged-union representation of success vs failure for JSON output.
-#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
   Ok {

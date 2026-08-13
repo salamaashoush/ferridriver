@@ -31,9 +31,15 @@ fn run(extra: &[&str], stdin: Option<&str>) -> (bool, String, String) {
 
 /// Run `ferridriver run <flags…> <extra…>` with `stdin` piped; returns
 /// (success, stdout, stderr).
+///
+/// Config inheritance is off. Without it the machine and user layers still
+/// apply, so a developer whose own `~/.config/ferridriver` loads an extension
+/// (one that injects a `page`, say) sees these tests pass on a surface CI does
+/// not have.
 fn run_with(flags: &[&str], extra: &[&str], stdin: Option<&str>) -> (bool, String, String) {
   let mut cmd = Command::new(bin());
   cmd
+    .arg("--no-inherit")
     .arg("run")
     .args(flags)
     .args(extra)
@@ -358,4 +364,205 @@ fn inline_eval_with_static_import_runs_as_module() {
   assert!(ok, "exit ok; stderr={stderr}");
   let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
   assert_eq!(v["value"], 42, "{v}");
+}
+
+/// A standalone script owns its browser: `ferridriver run` binds `page` only
+/// for a session run, so every local script that drives one opens it the way
+/// the generated scaffolding does.
+const OPEN_PAGE: &str = "const browser = await chromium().launch(); const page = await browser.newPage(); ";
+
+#[test]
+fn code_echo_renders_the_actions_a_local_run_performed() {
+  let script = &format!(
+    "{OPEN_PAGE}\
+     await page.goto('data:text/html,<button>go</button>'); \
+     await page.locator('button').click(); \
+     return 'done';"
+  );
+
+  // TypeScript is the default language, and the lines are the ones a reader
+  // would paste into a spec.
+  let (ok, stdout, stderr) = run_with(&["--code"], &["-e", script], None);
+  assert!(ok, "run failed: {stdout}{stderr}");
+  assert!(
+    stderr.contains("await page.goto('data:text/html,<button>go</button>');"),
+    "goto not echoed: {stderr}"
+  );
+  assert!(
+    stderr.contains("await page.locator('button').click();"),
+    "click not echoed: {stderr}"
+  );
+
+  // The Rust surface is a different vocabulary, not a different order.
+  let (ok, _o, stderr) = run_with(&["--code", "rust"], &["-e", script], None);
+  assert!(ok, "rust run failed: {stderr}");
+  assert!(
+    stderr.contains("page.locator(\"button\").click().await?;"),
+    "rust line missing: {stderr}"
+  );
+
+  // And nothing is echoed when the flag is absent.
+  let (ok, _o, stderr) = run_with(&[], &["-e", script], None);
+  assert!(ok, "plain run failed: {stderr}");
+  assert!(!stderr.contains("locator"), "code echoed without --code: {stderr}");
+}
+
+#[test]
+fn code_out_writes_a_file_that_replays_standalone() {
+  let dir = tempfile::tempdir().unwrap();
+  let generated = dir.path().join("generated.ts");
+
+  let recording = format!(
+    "{OPEN_PAGE}\
+     await page.goto('data:text/html,<button>go</button>'); \
+     await page.locator('button').click(); \
+     return 'done';"
+  );
+  let (ok, _o, stderr) = run_with(&["--code-out", generated.to_str().unwrap()], &["-e", &recording], None);
+  assert!(ok, "recording run failed: {stderr}");
+
+  let source = std::fs::read_to_string(&generated).unwrap();
+  assert!(source.contains("await page.goto("), "no navigation in file:\n{source}");
+  assert!(
+    source.contains("await page.locator('button').click();"),
+    "no action in file:\n{source}"
+  );
+  // One vocabulary: the scaffolding and the recorded lines drive the same
+  // binding, or the file would not run.
+  assert!(!source.contains("__page"), "mixed receivers in file:\n{source}");
+
+  // The real proof: run what was written.
+  let (ok, _o, stderr) = run_with(&[], &[generated.to_str().unwrap()], None);
+  assert!(ok, "generated file failed to replay: {stderr}");
+}
+
+/// `ferridriver --config <cfg> --no-inherit run <flags…> <extra…>` — the
+/// global flags precede the subcommand, so `run_with` (which starts at `run`)
+/// cannot express them.
+///
+/// `--no-inherit` keeps the test hermetic: without it the machine and user
+/// config layers still apply, and a developer's own `~/.config/ferridriver`
+/// (extensions, a different backend) would decide what these assertions see.
+fn run_configured(config: &std::path::Path, flags: &[&str], extra: &[&str]) -> (bool, String, String) {
+  let out = Command::new(bin())
+    .arg("--config")
+    .arg(config)
+    .arg("--no-inherit")
+    .arg("run")
+    .args(flags)
+    .args(extra)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .expect("spawn ferridriver run");
+  (
+    out.status.success(),
+    String::from_utf8_lossy(&out.stdout).into_owned(),
+    String::from_utf8_lossy(&out.stderr).into_owned(),
+  )
+}
+
+#[test]
+fn report_renders_the_response_sections_for_a_local_run() {
+  let script = &format!(
+    "{OPEN_PAGE}\
+     await page.goto('data:text/html,<button>go</button>'); \
+     await page.locator('button').click(); \
+     return 'done';"
+  );
+
+  let (ok, stdout, stderr) = run_with(&["--report", "--code"], &["-e", script], None);
+  assert!(ok, "reported run failed: {stdout}{stderr}");
+  assert!(stdout.contains("### Result\ndone"), "no result section: {stdout}");
+  assert!(stdout.contains("### Ran ferridriver code"), "no code section: {stdout}");
+  assert!(
+    stdout.contains("await page.locator('button').click();"),
+    "code section is empty: {stdout}"
+  );
+  // A local run's script owns its own browser, so this process holds no page
+  // to read state from and the section is honestly absent.
+  assert!(
+    !stdout.contains("### Page"),
+    "a local run cannot report a page it has no handle to: {stdout}"
+  );
+
+  // Without --report, stdout is the bare value, as it has always been.
+  let (ok, stdout, stderr) = run_with(&[], &["-e", script], None);
+  assert!(ok, "plain run failed: {stderr}");
+  assert_eq!(stdout.trim(), "done", "sections rendered without --report: {stdout}");
+}
+
+#[test]
+fn declared_secrets_are_redacted_from_a_local_run_and_its_generated_code() {
+  const SECRET: &str = "s3cr3t-local-4c19";
+  let dir = tempfile::tempdir().unwrap();
+  std::fs::write(dir.path().join(".env.secrets"), format!("APP_PASSWORD={SECRET}\n")).unwrap();
+  let config = dir.path().join("ferridriver.toml");
+  std::fs::write(&config, "[secrets]\nfile = \"./.env.secrets\"\n").unwrap();
+
+  let script = format!(
+    "{OPEN_PAGE}\
+     await page.goto('data:text/html,<input id=pw>'); \
+     await page.locator('#pw').fill(args[0]); \
+     console.log('the password is ' + args[0]); \
+     return 'signed in with ' + args[0];"
+  );
+  let (ok, stdout, stderr) = run_configured(&config, &["--json", "--code"], &["-e", &script, "--", SECRET]);
+  assert!(ok, "run failed: {stdout}{stderr}");
+
+  let both = format!("{stdout}{stderr}");
+  assert!(!both.contains(SECRET), "the declared secret leaked: {both}");
+
+  let doc: serde_json::Value = serde_json::from_str(&stdout).expect("json document");
+  assert_eq!(
+    doc["value"], "signed in with <secret>APP_PASSWORD</secret>",
+    "returned value not redacted: {doc}"
+  );
+  assert!(
+    doc["console"].as_array().is_some_and(|c| c
+      .iter()
+      .any(|e| e["message"] == "the password is <secret>APP_PASSWORD</secret>")),
+    "console entry not redacted: {doc}"
+  );
+  assert!(
+    doc["code"].as_array().is_some_and(|lines| lines
+      .iter()
+      .any(|l| l == "await page.locator('#pw').fill(process.env['APP_PASSWORD']);")),
+    "the echoed fill did not become an environment read: {doc}"
+  );
+}
+
+#[test]
+fn the_artifacts_ceiling_evicts_the_least_recently_written_output() {
+  let dir = tempfile::tempdir().unwrap();
+  let config = dir.path().join("ferridriver.toml");
+  // A ceiling of one byte makes the sweep deterministic: anything the current
+  // run did not write is over budget.
+  std::fs::write(&config, "artifactsRoot = \"./artifacts\"\nartifactsMaxBytes = 1\n").unwrap();
+  let artifacts = dir.path().join("artifacts");
+
+  let write = |name: &str| {
+    // A plain array, which is also what `page.screenshot()` hands back.
+    let source = format!("await artifacts.writeBytes('{name}', new Array(64).fill(1)); return '{name}';");
+    run_configured(&config, &["--json"], &["-e", &source])
+  };
+
+  let (ok, out, err) = write("first.bin");
+  assert!(ok, "first artifact run failed: {out}{err}");
+  assert!(
+    artifacts.join("first.bin").exists(),
+    "the run's own artifact must survive its own sweep"
+  );
+
+  let (ok, out, err) = write("second.bin");
+  assert!(ok, "second artifact run failed: {out}{err}");
+  assert!(
+    artifacts.join("second.bin").exists(),
+    "the newest artifact must survive"
+  );
+  assert!(
+    !artifacts.join("first.bin").exists(),
+    "the older artifact should have been evicted once the ceiling was passed"
+  );
 }

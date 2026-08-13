@@ -83,6 +83,15 @@ pub struct FerridriverConfig {
   /// [`Self::script_root`] so outputs never land in the source tree.
   /// Defaults to `.ferridriver/artifacts`.
   pub artifacts_root: Option<String>,
+  /// Ceiling on the total size of [`Self::artifacts_root`], in bytes.
+  /// When a call would push the directory past it, least-recently-
+  /// modified files are deleted until it fits again — never the ones
+  /// that call just wrote. Unset means no ceiling, which is right for a
+  /// one-shot `ferridriver run` and wrong for a server that stays up for
+  /// days. Defaults to `None`.
+  pub artifacts_max_bytes: Option<u64>,
+  /// Values that must never reach a caller verbatim.
+  pub secrets: SecretsConfig,
   /// Scripting-engine limits (per-call timeout, memory ceiling, console
   /// caps, session-VM pool).
   pub engine: EngineConfig,
@@ -104,6 +113,86 @@ pub struct FerridriverConfig {
   /// whichever repository the process happens to run in.
   #[serde(skip)]
   pub extension_bases: BTreeMap<String, PathBuf>,
+}
+
+/// Where the secret values come from.
+///
+/// Names, not values, live in the config document — a credential committed
+/// next to the code it authenticates is the failure this is meant to reduce.
+/// Both sources produce the same `name -> value` map; the responses that
+/// carry them are redacted by name.
+///
+/// ```toml
+/// [secrets]
+/// file = ".env.secrets"
+/// env = ["APP_PASSWORD", "API_TOKEN"]
+/// ```
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SecretsConfig {
+  /// A dotenv file (`NAME=value` per line) read at startup. Relative to
+  /// the config file that declared it. A missing file is an error, not a
+  /// silent empty map: an operator who names a secrets file and gets no
+  /// redaction has to be told.
+  pub file: Option<String>,
+  /// Environment variable names whose values are secret. A name that is
+  /// not set in the environment contributes nothing.
+  pub env: Vec<String>,
+}
+
+impl SecretsConfig {
+  /// Resolve to the `name -> value` pairs, reading the dotenv file and the
+  /// named environment variables.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if a configured [`Self::file`] cannot be read or
+  /// parsed.
+  pub fn resolve(&self) -> anyhow::Result<Vec<(String, String)>> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    if let Some(file) = self.file.as_deref() {
+      let path = PathBuf::from(shellexpand::tilde(file).into_owned());
+      let text =
+        std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("[secrets] reading {}: {e}", path.display()))?;
+      pairs.extend(parse_dotenv(&text));
+    }
+    for name in &self.env {
+      if let Ok(value) = std::env::var(name) {
+        pairs.push((name.clone(), value));
+      }
+    }
+    Ok(pairs)
+  }
+}
+
+/// Parse the dotenv subset a secrets file needs: `NAME=value` per line,
+/// `#` comments, an optional `export ` prefix, and single- or
+/// double-quoted values (quotes stripped, no escape processing — a
+/// credential is a literal).
+fn parse_dotenv(text: &str) -> Vec<(String, String)> {
+  let mut out = Vec::new();
+  for line in text.lines() {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+      continue;
+    }
+    let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+    let Some((name, value)) = line.split_once('=') else {
+      continue;
+    };
+    let name = name.trim();
+    if name.is_empty() {
+      continue;
+    }
+    let value = value.trim();
+    let value = value
+      .strip_prefix('"')
+      .and_then(|v| v.strip_suffix('"'))
+      .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+      .unwrap_or(value);
+    out.push((name.to_string(), value.to_string()));
+  }
+  out
 }
 
 /// Scripting-engine limits. Every field is optional so the engine's own
@@ -212,7 +301,7 @@ pub struct ExtensionsDetailed {
   /// Extension paths/specs — same values the shorthand array carries.
   pub paths: Vec<String>,
   /// Per-extension settings, keyed by the extension's namespace (the
-  /// part before the first `.` in its tool names, e.g. `box` for
+  /// part before the first `.` in its tool names, e.g. `acme` for
   /// `acme.login`) or by a full tool name for tool-specific values.
   /// Delivered to a handler as `settings`.
   ///
@@ -490,6 +579,64 @@ mod tests {
     let root = FerridriverConfig::default();
     assert_eq!(root.mcp.server_name(), "ferridriver");
     assert!(root.test.test_match.is_empty());
+  }
+
+  #[test]
+  fn dotenv_parsing_covers_the_shapes_a_secrets_file_uses() {
+    let pairs = parse_dotenv(
+      "# a comment\n\
+       \n\
+       APP_PASSWORD=hunter2\n\
+       export API_TOKEN=\"tok-123\"\n\
+       QUOTED='single'\n\
+       SPACED = padded \n\
+       WITH_EQUALS=a=b\n\
+       =novalue\n\
+       novalue\n",
+    );
+    assert_eq!(
+      pairs,
+      vec![
+        ("APP_PASSWORD".to_string(), "hunter2".to_string()),
+        ("API_TOKEN".to_string(), "tok-123".to_string()),
+        ("QUOTED".to_string(), "single".to_string()),
+        ("SPACED".to_string(), "padded".to_string()),
+        // Only the first `=` separates; the rest is the value.
+        ("WITH_EQUALS".to_string(), "a=b".to_string()),
+      ]
+    );
+  }
+
+  #[test]
+  fn a_secrets_file_is_anchored_to_its_own_config_and_a_missing_one_is_an_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join(".env.secrets"), "API_TOKEN=tok-123\n").unwrap();
+    std::fs::write(
+      dir.path().join("ferridriver.toml"),
+      "[secrets]\nfile = \".env.secrets\"\nenv = [\"FERRIDRIVER_TEST_SECRET_UNSET\"]\n",
+    )
+    .unwrap();
+
+    let root = FerridriverConfig::load_from(&dir.path().join("ferridriver.toml")).unwrap();
+    assert_eq!(
+      root.secrets.file.as_deref(),
+      Some(dir.path().join(".env.secrets").to_string_lossy().as_ref()),
+      "resolved against the declaring config, not the process cwd"
+    );
+    assert_eq!(
+      root.secrets.resolve().unwrap(),
+      vec![("API_TOKEN".to_string(), "tok-123".to_string())],
+      "an env name that is not set contributes nothing"
+    );
+
+    let missing = SecretsConfig {
+      file: Some(dir.path().join("absent.env").to_string_lossy().into_owned()),
+      env: Vec::new(),
+    };
+    let err = missing
+      .resolve()
+      .expect_err("a named-but-missing secrets file is reported");
+    assert!(err.to_string().contains("[secrets] reading"), "{err}");
   }
 
   #[test]

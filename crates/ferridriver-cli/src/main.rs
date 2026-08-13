@@ -17,6 +17,7 @@ mod ext_cmd;
 mod ext_typecheck;
 mod ext_types;
 mod run_console;
+mod script_setup;
 mod session_cmd;
 mod test_ui;
 
@@ -26,67 +27,6 @@ use clap::Parser;
 use ferridriver_config::FerridriverConfig;
 use ferridriver_mcp::McpServer;
 use ferridriver_script::ConsoleSink;
-
-/// Discover + compile extension files into extension bindings for the `run`
-/// path. `roots` are files or directories (directories are scanned shallowly
-/// for `.js`/`.mjs`/`.ts`/`.mts`). Discovery / compile failures are logged
-/// and skipped so a single bad extension never aborts the run.
-async fn load_run_extensions(roots: &[ferridriver_script::ExtensionSpec]) -> Vec<ferridriver_script::ExtensionBinding> {
-  if roots.is_empty() {
-    return Vec::new();
-  }
-  let (mut files, errors) = ferridriver_script::discover::resolve_extension_specs_with_bases(roots);
-  for (spec, e) in errors {
-    tracing::warn!(extension = %spec, error = %e.message, "extension discovery failed; skipping");
-  }
-  if files.is_empty() {
-    return Vec::new();
-  }
-  // rolldown resolves the bundle entry from an absolute id; a relative
-  // path (e.g. `extensions = ["gateway.ts"]` in ferridriver.toml) would
-  // fail with UnresolvedEntry. Canonicalize, dropping any that vanished.
-  files = files
-    .into_iter()
-    .filter_map(|f| match std::fs::canonicalize(&f) {
-      Ok(abs) => Some(abs),
-      Err(e) => {
-        tracing::warn!(path = %f.display(), error = %e, "extension path not found; skipping");
-        None
-      },
-    })
-    .collect();
-  let (compiled, failures) = ferridriver_script::compile_and_extract_extensions(&files).await;
-  for (path, err) in failures {
-    tracing::warn!(path = %path.display(), error = %err.message, "extension compile failed; skipping");
-  }
-  compiled
-    .into_iter()
-    .map(|cp| ferridriver_script::ExtensionBinding {
-      bytecode: cp.bytecode,
-      name: cp.path.display().to_string(),
-    })
-    .collect()
-}
-
-/// Lower the declared `[[sidecars]]` config entries into the scripting
-/// engine's `SidecarSpec`s. Shared by the `run`, `mcp`, and `bdd` paths so
-/// the same config table drives every host.
-fn sidecar_specs(config: &FerridriverConfig) -> Vec<ferridriver_script::sidecar::SidecarSpec> {
-  config
-    .sidecars
-    .iter()
-    .map(|s| ferridriver_script::sidecar::SidecarSpec {
-      name: s.name.clone(),
-      command: s.command.clone(),
-      env: s
-        .env
-        .as_ref()
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_default(),
-      cwd: s.cwd.clone(),
-    })
-    .collect()
-}
 
 /// Install the config's `[bundler]` shims (import aliases + virtual
 /// modules) into the process-global slot every bundle path reads.
@@ -152,7 +92,13 @@ async fn main() -> anyhow::Result<()> {
     cli::Command::Run(run_args) => Box::pin(run_script_cli(config, run_args)).await,
     cli::Command::Install(install_args) => Box::pin(run_install(install_args)).await,
     cli::Command::Codegen(codegen_args) => Box::pin(run_codegen(codegen_args)).await,
-    cli::Command::Session(session_args) => Box::pin(session_cmd::run(session_args)).await,
+    cli::Command::Session(session_args) => {
+      let origin = session_cmd::ConfigOrigin {
+        explicit: args.config.as_deref(),
+        inherit: !args.no_inherit,
+      };
+      Box::pin(session_cmd::run(config, origin, session_args)).await
+    },
     cli::Command::Config(config_args) => config_cmd::run_config(args.config.as_deref(), !args.no_inherit, &config_args),
     cli::Command::Doctor(doctor_args) => {
       Box::pin(config_cmd::run_doctor(
@@ -428,7 +374,7 @@ async fn run_test_native(config: FerridriverConfig, args: cli::TestRunArgs) -> a
     .with_extension_policy(config.extensions.policy())
     .with_extension_settings(config.extensions.settings()),
   );
-  ferridriver_testjs::set_test_sidecars(sidecar_specs(&config));
+  ferridriver_testjs::set_test_sidecars(script_setup::sidecar_specs(&config));
 
   let mut overrides = ferridriver_test::config::CliOverrides {
     test_files: args.files,
@@ -486,7 +432,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
     .with_extension_policy(config.extensions.policy())
     .with_extension_settings(config.extensions.settings()),
   );
-  ferridriver_bdd::js::set_bdd_sidecars(sidecar_specs(&config));
+  ferridriver_bdd::js::set_bdd_sidecars(script_setup::sidecar_specs(&config));
   let mut overrides = ferridriver_test::config::CliOverrides {
     bdd_tags: args.tags,
     project_filter: args.project,
@@ -550,7 +496,7 @@ enum ScriptOrigin {
 async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::Result<()> {
   use std::io::Read as _;
 
-  let (source, origin) = match (args.eval, args.script.as_deref()) {
+  let (source, origin) = match (args.eval.clone(), args.script.as_deref()) {
     (Some(code), _) => (code, ScriptOrigin::Inline),
     (None, Some("-")) => {
       let mut s = String::new();
@@ -565,46 +511,75 @@ async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> a
   };
 
   let cwd = std::env::current_dir()?;
-  let sandbox = Arc::new(
-    ferridriver_script::PathSandbox::new(&cwd)
-      .map_err(|e| anyhow::anyhow!("sandbox init ({}): {}", cwd.display(), e.message))?,
-  );
+  let script_args: Vec<serde_json::Value> = args
+    .script_args
+    .iter()
+    .cloned()
+    .map(serde_json::Value::String)
+    .collect();
+
+  // `--code-out` implies `--code`: a file to write is a language to render.
+  let code_language = args
+    .code
+    .as_deref()
+    .or(args.code_out.as_ref().map(|_| "ts"))
+    .map(ferridriver::codegen::OutputLanguage::parse_cli);
+  let collected_code = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+  // Against a live session the browser, the extensions and the sandboxes all
+  // belong to the host process; this process only bundles (so relative
+  // imports resolve against the directory the user typed the command in) and
+  // renders. Its actions happen in the host, which streams them back as
+  // events, so no local observer is installed for that path at all.
+  if let Some(id) = args.session.as_deref() {
+    return run_against_session(
+      id,
+      &args,
+      &origin,
+      &source,
+      &cwd,
+      script_args,
+      code_language,
+      &collected_code,
+    )
+    .await;
+  }
+
   // Config comes from the global `-c/--config` (already loaded and
   // shimmed in `main`), falling back to a discovered ferridriver.toml —
   // the same document the MCP server reads. Threading it here fixes
   // `run -c` dropping the config's `extensions:` / scripting settings.
-  let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
-    &file_config.scripting.allow_env,
-    file_config.scripting.allow.commands.clone(),
-  )
-  .with_extension_policy(file_config.extensions.policy())
-  .with_extension_settings(file_config.extensions.settings());
-  let sidecars = sidecar_specs(&file_config);
+  let setup = script_setup::resolve(&file_config, &cwd, &args.extensions).await?;
+  // Read off before the struct is spread into the run context below.
+  let setup_secrets = setup.secrets.clone();
+  let artifacts_budget = setup.artifacts_budget;
+  let artifacts_sandbox = setup.artifacts.clone();
 
-  // Extensions: config `extensions` plus any `--extension` specs. Their
-  // `tool` registrations become `tools.*` callables in the script.
-  // Config entries keep their declaring layer's directory; `--extension`
-  // specs are relative to where the user typed the command.
-  let mut extension_roots = file_config.extension_specs();
-  let cli_base = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-  extension_roots.extend(args.extensions.iter().map(|spec| ferridriver_script::ExtensionSpec {
-    spec: spec.clone(),
-    base_dir: cli_base.clone(),
-  }));
-  let extensions = load_run_extensions(&extension_roots).await;
+  // Installed AFTER the config resolves, because the echoed source has to
+  // know the declared secrets: an observer registered earlier would render
+  // the credential it was configured to hide.
+  if args.trace || code_language.is_some() {
+    ferridriver::trace::set_action_observer(Arc::new(run_console::RunObserver {
+      trace: args.trace,
+      code: code_language,
+      echo_code: args.code_out.is_none(),
+      collected: Arc::clone(&collected_code),
+      secrets: setup_secrets.clone(),
+    }));
+  }
 
   let ctx = ferridriver_script::RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
-    sandbox,
-    artifacts: None,
+    sandbox: setup.sandbox,
+    artifacts: setup.artifacts,
     page: None,
     browser_context: None,
     request: None,
     browser: None,
-    extensions,
+    extensions: setup.extensions,
     host: ferridriver_script::ExtensionHost::Script,
-    caps,
-    // `ferridriver run` has no session key; extensions see
+    caps: setup.caps,
+    // A local `ferridriver run` has no session key; extensions see
     // `session: undefined` and must not assume one.
     session: None,
   };
@@ -615,19 +590,13 @@ async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> a
     stack_size: None,
     gc_threshold: None,
   };
-  let script_args: Vec<serde_json::Value> = args.script_args.into_iter().map(serde_json::Value::String).collect();
-
-  if args.trace {
-    ferridriver::trace::set_action_observer(Arc::new(run_console::StepLogger));
-  }
 
   // Default is Node-shaped streaming; `--json` keeps the buffered document
   // machine consumers parse. The choice is the flag alone, not stdout's
   // TTY-ness, so a pipeline gets the same bytes a terminal does.
   let engine_config = ferridriver_script::ScriptEngineConfig {
-    sidecars,
     console_sink: (!args.json).then(|| Arc::new(run_console::StreamingConsole) as Arc<dyn ConsoleSink>),
-    ..Default::default()
+    ..setup.engine
   };
   let session = ferridriver_script::Session::create(engine_config, &ctx)
     .await
@@ -648,19 +617,304 @@ async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> a
     session.execute(&source, &script_args, opts, &ctx).await.result
   };
 
-  if args.json {
-    println!("{}", serde_json::to_string_pretty(&result)?);
+  finish_code(&collected_code, code_language, args.code_out.as_deref())?;
+  sweep_artifacts(artifacts_budget, artifacts_sandbox.as_deref()).await;
+  // A local run's script launches and owns its own browser, so this process
+  // never holds a page to read state from.
+  let report = args
+    .report
+    .then(|| RunReport::collect(code_language, &collected_code, None, setup_secrets));
+  report_code_result(&result, args.json, &collected_code, report.as_ref())
+}
+
+/// Write the generated source to `out`, wrapped in the language's test
+/// scaffolding so the file runs as-is. Without `out` the lines have already
+/// been streamed as they happened and there is nothing left to do.
+fn finish_code(
+  collected: &Arc<std::sync::Mutex<Vec<String>>>,
+  language: Option<ferridriver::codegen::OutputLanguage>,
+  out: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+  let (Some(language), Some(path)) = (language, out) else {
+    return Ok(());
+  };
+  let lines = collected
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone();
+  let emitter = language.emitter();
+  // No opening navigation in the scaffolding: unlike the interactive recorder
+  // — which navigates before recording starts — an echoed run already has its
+  // `goto` among the lines. The file is exactly the actions that happened, in
+  // the order they happened, and a run that started on the session's current
+  // page correctly begins there.
+  let mut file = emitter.header("");
+  for line in &lines {
+    file.push_str(line);
+    file.push('\n');
+  }
+  file.push_str(&emitter.footer());
+  std::fs::write(path, file).map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+  eprintln!("wrote {} ({} action(s))", path.display(), lines.len());
+  Ok(())
+}
+
+/// Run a script against a live session: this process bundles and renders, the
+/// host owns the browser, the extensions and the sandboxes.
+#[allow(clippy::too_many_arguments)] // every one is a distinct piece of the run
+async fn run_against_session(
+  id: &str,
+  args: &cli::RunArgs,
+  origin: &ScriptOrigin,
+  source: &str,
+  cwd: &std::path::Path,
+  script_args: Vec<serde_json::Value>,
+  code_language: Option<ferridriver::codegen::OutputLanguage>,
+  collected_code: &Arc<std::sync::Mutex<Vec<String>>>,
+) -> anyhow::Result<()> {
+  if !args.extensions.is_empty() {
+    anyhow::bail!(
+      "--extension cannot be combined with --session: a session's extensions are loaded by its host. \
+       Pass --extension to `ferridriver session open` instead."
+    );
+  }
+  let mut request = build_script_request(origin, source, cwd, script_args, args.timeout_ms).await?;
+  request.trace = args.trace;
+  request.code_language = args.code.clone().or(args.code_out.as_ref().map(|_| "ts".to_string()));
+  request.page_state = args.report;
+  let sinks = session_cmd::RunSinks {
+    code: Arc::clone(collected_code),
+    // Streaming code to stderr would interleave with a file's contents to
+    // no one's benefit; when a file is the destination, that is the only
+    // destination.
+    echo_code: args.code_out.is_none(),
+    ..Default::default()
+  };
+  let result = session_cmd::run_on_session(id, args.context.as_deref(), request, args.json, &sinks).await?;
+  finish_code(collected_code, code_language, args.code_out.as_deref())?;
+  // The host redacted everything it sent, so the client renders it as-is.
+  let report = args.report.then(|| {
+    let page = sinks
+      .page
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone();
+    RunReport::collect(
+      code_language,
+      collected_code,
+      page,
+      ferridriver::response::Secrets::default(),
+    )
+  });
+  report_code_result(&result, args.json, collected_code, report.as_ref())
+}
+
+/// Bring the artifacts root back under its configured ceiling, protecting
+/// what this run just wrote — the script produced those outputs deliberately,
+/// and deleting them on the way out would make the ceiling delete the very
+/// thing the run was for.
+async fn sweep_artifacts(
+  budget: Option<ferridriver::response::OutputBudget>,
+  artifacts: Option<&ferridriver_script::PathSandbox>,
+) {
+  let (Some(budget), Some(artifacts)) = (budget, artifacts) else {
+    return;
+  };
+  let evicted = budget.enforce(artifacts.root(), &artifacts.written()).await;
+  if evicted.files > 0 {
+    tracing::info!(
+      files = evicted.files,
+      bytes = evicted.bytes,
+      "artifacts budget: evicted least-recently-modified outputs"
+    );
+  }
+}
+
+/// What `--report` renders around a finished run.
+struct RunReport {
+  /// The language the echoed lines are written in; `None` when `--code` was
+  /// not asked for, in which case there is no code section.
+  language: Option<ferridriver::codegen::OutputLanguage>,
+  code: Vec<String>,
+  /// The page the run finished on. Reported by a session host; a local run's
+  /// script owns its own browser, so this process has no handle to read.
+  page: Option<ferridriver::response::PageState>,
+  secrets: ferridriver::response::Secrets,
+}
+
+impl RunReport {
+  fn collect(
+    language: Option<ferridriver::codegen::OutputLanguage>,
+    collected: &Arc<std::sync::Mutex<Vec<String>>>,
+    page: Option<ferridriver::response::PageState>,
+    secrets: ferridriver::response::Secrets,
+  ) -> Self {
+    Self {
+      language,
+      code: collected
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone(),
+      page,
+      secrets,
+    }
+  }
+}
+
+/// Assemble the response contract for a finished run.
+///
+/// The order is the order an agent reads in: what went wrong, what came back,
+/// what reproduces it, where the browser now is.
+fn build_response(result: &ferridriver_script::ScriptResult, report: &RunReport) -> ferridriver::response::Response {
+  let mut response = ferridriver::response::Response::new().with_secrets(report.secrets.clone());
+  match &result.outcome {
+    ferridriver_script::Outcome::Error { error } => {
+      let name = error.name.clone().unwrap_or_else(|| error.kind.to_string());
+      response.error(vec![format!("{name}: {}", error.message)]);
+    },
+    ferridriver_script::Outcome::Ok { success } => match &success.value {
+      serde_json::Value::Null => {},
+      serde_json::Value::String(s) => response.result(s.lines().map(str::to_string).collect()),
+      value => response.result(
+        serde_json::to_string_pretty(value)
+          .unwrap_or_else(|_| value.to_string())
+          .lines()
+          .map(str::to_string)
+          .collect(),
+      ),
+    },
+  }
+  if let Some(language) = report.language {
+    response.code(report.code.clone(), language);
+  }
+  if let Some(page) = &report.page {
+    response.page(page);
+  }
+  response
+}
+
+/// [`report_result`], with the generated source folded into the `--json`
+/// document so a machine consumer still reads exactly one object, and the
+/// `--report` sections rendered when the caller asked for them.
+fn report_code_result(
+  result: &ferridriver_script::ScriptResult,
+  json: bool,
+  collected: &Arc<std::sync::Mutex<Vec<String>>>,
+  report: Option<&RunReport>,
+) -> anyhow::Result<()> {
+  let lines = collected
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone();
+
+  if let Some(report) = report {
+    let response = build_response(result, report);
+    if json {
+      let mut document = serde_json::to_value(result)?;
+      if let Some(object) = document.as_object_mut() {
+        if !lines.is_empty() {
+          object.insert("code".to_string(), serde_json::json!(lines));
+        }
+        object.insert("report".to_string(), response.to_json());
+      }
+      println!("{}", serde_json::to_string_pretty(&document)?);
+    } else {
+      // Console already streamed while the script ran; the sections are what
+      // is left to say about it.
+      print!("{}", response.render());
+    }
+    if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
+      eprintln!("[{}] {} ({}ms)", error.kind, error.message, result.duration_ms);
+      std::process::exit(1);
+    }
+    return Ok(());
+  }
+
+  if !json || lines.is_empty() {
+    return report_result(result, json);
+  }
+  let mut document = serde_json::to_value(result)?;
+  if let Some(object) = document.as_object_mut() {
+    object.insert("code".to_string(), serde_json::json!(lines));
+  }
+  println!("{}", serde_json::to_string_pretty(&document)?);
+  if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
+    eprintln!("[{}] {} ({}ms)", error.kind, error.message, result.duration_ms);
+    std::process::exit(1);
+  }
+  Ok(())
+}
+
+/// Print a run's result and exit non-zero when the script failed.
+fn report_result(result: &ferridriver_script::ScriptResult, json: bool) -> anyhow::Result<()> {
+  if json {
+    println!("{}", serde_json::to_string_pretty(result)?);
     if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
       eprintln!("[{}] {} ({}ms)", error.kind, error.message, result.duration_ms);
       std::process::exit(1);
     }
   } else {
-    run_console::print_result(&result);
+    run_console::print_result(result);
     if result.is_err() {
       std::process::exit(1);
     }
   }
   Ok(())
+}
+
+/// Turn the resolved script source into the request a session host runs.
+///
+/// Module sources are bundled HERE, not host-side: relative imports and
+/// `node_modules` resolve against the directory the command was typed in, and
+/// only this process knows it. The host compiles what comes back, so bytecode
+/// built by one binary is never loaded by another.
+async fn build_script_request(
+  origin: &ScriptOrigin,
+  source: &str,
+  cwd: &std::path::Path,
+  args: Vec<serde_json::Value>,
+  timeout_ms: Option<u64>,
+) -> anyhow::Result<ferridriver_session::ScriptRequest> {
+  if !needs_bundle(origin, source) {
+    return Ok(ferridriver_session::ScriptRequest {
+      kind: ferridriver_session::ScriptKind::Source,
+      code: source.to_string(),
+      source_map: None,
+      module_name: None,
+      args,
+      timeout_ms,
+      trace: false,
+      code_language: None,
+      page_state: false,
+    });
+  }
+  let (entry, bundle_cwd, _tmp) = bundle_entry(origin, source, cwd)?;
+  let bundled = ferridriver_script::bundle_source(std::slice::from_ref(&entry), &bundle_cwd)
+    .await
+    .map_err(|e| anyhow::anyhow!("bundle {}: {}", entry.display(), e.message))?;
+  Ok(ferridriver_session::ScriptRequest {
+    kind: ferridriver_session::ScriptKind::Module,
+    code: bundled.code,
+    source_map: bundled.source_map_json,
+    module_name: Some(module_label(origin)),
+    args,
+    timeout_ms,
+    trace: false,
+    code_language: None,
+    page_state: false,
+  })
+}
+
+/// Stack-frame label for a module run: the script's own file name, so a host
+/// -side error reads like a local one.
+fn module_label(origin: &ScriptOrigin) -> String {
+  match origin {
+    ScriptOrigin::File(path) => path.file_name().map_or_else(
+      || "ferridriver-run.js".to_string(),
+      |n| n.to_string_lossy().into_owned(),
+    ),
+    ScriptOrigin::Inline => "ferridriver-run.js".to_string(),
+  }
 }
 
 /// True when the source must run as a bundled ES module (TypeScript file
@@ -712,7 +966,7 @@ async fn run_mcp(mut config: FerridriverConfig, args: cli::McpArgs) -> anyhow::R
   // The mcp section drives chrome args, instances, and server metadata.
   // CLI flags fall back when the [mcp] section is empty so the user can
   // launch the server with no config file at all.
-  let sidecars = sidecar_specs(&config);
+  let sidecars = script_setup::sidecar_specs(&config);
   let extensions = config.extension_specs();
   let extension_policy = config.extensions.policy();
   let extension_settings = config.extensions.settings();

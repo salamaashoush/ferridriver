@@ -1152,9 +1152,22 @@ pub trait ActionObserver: Send + Sync + 'static {
 /// Set once by the host before any script runs; every later probe is the
 /// atomic below, so an unobserved process pays a relaxed load per action.
 static ACTION_OBSERVER: std::sync::RwLock<Option<Arc<dyn ActionObserver>>> = std::sync::RwLock::new(None);
+
+/// Per-session observers, keyed by composite session key.
+///
+/// A process that hosts several sessions at once (a bound browser serving
+/// attached clients) needs each client to see ITS actions and no one else's.
+/// Actions already carry the composite they belong to, so scoping is a lookup
+/// rather than any new plumbing through the call sites.
+static SESSION_ACTION_OBSERVERS: std::sync::RwLock<Option<rustc_hash::FxHashMap<String, Arc<dyn ActionObserver>>>> =
+  std::sync::RwLock::new(None);
+
+/// True when a global or any session observer exists. Keeps the unobserved
+/// hot path at one relaxed load rather than two lock acquisitions.
 static ACTION_OBSERVER_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Install the process-wide action observer, replacing any previous one.
+/// A session-scoped observer wins over this one for that session's actions.
 pub fn set_action_observer(observer: Arc<dyn ActionObserver>) {
   *ACTION_OBSERVER
     .write()
@@ -1162,9 +1175,67 @@ pub fn set_action_observer(observer: Arc<dyn ActionObserver>) {
   ACTION_OBSERVER_INSTALLED.store(true, Ordering::Release);
 }
 
-fn action_observer() -> Option<Arc<dyn ActionObserver>> {
+/// Observe only the actions of session `composite`, until the returned guard
+/// drops.
+///
+/// Replaces any observer already scoped to that session — a session runs one
+/// script at a time, so two live observers on one key would mean a bug, not a
+/// second audience.
+#[must_use]
+pub fn observe_session_actions(composite: &str, observer: Arc<dyn ActionObserver>) -> SessionObserverGuard {
+  {
+    let mut guard = SESSION_ACTION_OBSERVERS
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard
+      .get_or_insert_with(rustc_hash::FxHashMap::default)
+      .insert(composite.to_string(), observer);
+  }
+  ACTION_OBSERVER_INSTALLED.store(true, Ordering::Release);
+  SessionObserverGuard {
+    composite: composite.to_string(),
+  }
+}
+
+/// Removes its session's action observer on drop.
+pub struct SessionObserverGuard {
+  composite: String,
+}
+
+impl Drop for SessionObserverGuard {
+  fn drop(&mut self) {
+    let mut guard = SESSION_ACTION_OBSERVERS
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(map) = guard.as_mut() {
+      map.remove(&self.composite);
+      if map.is_empty() {
+        *guard = None;
+        // Only clear the fast-path flag when no global observer remains
+        // either, or a `run --trace` in the same process would go silent.
+        let global_present = ACTION_OBSERVER
+          .read()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .is_some();
+        if !global_present {
+          ACTION_OBSERVER_INSTALLED.store(false, Ordering::Release);
+        }
+      }
+    }
+  }
+}
+
+fn action_observer(composite: Option<&str>) -> Option<Arc<dyn ActionObserver>> {
   if !ACTION_OBSERVER_INSTALLED.load(Ordering::Acquire) {
     return None;
+  }
+  if let Some(composite) = composite {
+    let scoped = SESSION_ACTION_OBSERVERS
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(observer) = scoped.as_ref().and_then(|map| map.get(composite)) {
+      return Some(Arc::clone(observer));
+    }
   }
   ACTION_OBSERVER
     .read()
@@ -1380,7 +1451,7 @@ pub(crate) fn begin_action(
   params: serde_json::Value,
 ) -> Option<ActionSpan> {
   let recorder = composite.and_then(recorder_for);
-  let observer = action_observer();
+  let observer = action_observer(composite);
   // Neither recording nor observing: the common case, and the only cost is
   // the map probe plus one relaxed atomic load.
   if recorder.is_none() && observer.is_none() {
@@ -1511,6 +1582,73 @@ pub fn begin_custom_action(composite: &str, action: CustomAction) -> Option<Acti
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Records which observer saw which action, for the scoping tests.
+  #[derive(Debug)]
+  struct Recording(&'static str, std::sync::Mutex<Vec<String>>);
+
+  impl ActionObserver for Recording {
+    fn action_begin(&self, action: &ActionInfo) {
+      if let Ok(mut seen) = self.1.lock() {
+        seen.push(format!("{}:{}", self.0, action.title));
+      }
+    }
+    fn action_end(&self, _action: &ActionInfo, _elapsed: std::time::Duration, _error: Option<&str>) {}
+    fn action_log(&self, _action: &ActionInfo, _message: &str) {}
+  }
+
+  fn recording(tag: &'static str) -> Arc<Recording> {
+    Arc::new(Recording(tag, std::sync::Mutex::new(Vec::new())))
+  }
+
+  fn seen(r: &Arc<Recording>) -> Vec<String> {
+    r.1.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+  }
+
+  // One test, not three: the observer registry is process-global, so
+  // separate #[test] fns would race each other under the default harness.
+  #[test]
+  fn session_observers_scope_actions_and_unregister_on_drop() {
+    let unobserved = begin_action(Some("s:a"), "Page", "goto", None, serde_json::json!({}));
+    assert!(unobserved.is_none(), "no observer, no recorder => no span at all");
+
+    let a = recording("a");
+    let b = recording("b");
+    let guard_a = observe_session_actions("s:a", a.clone());
+    let guard_b = observe_session_actions("s:b", b.clone());
+
+    drop(begin_action(Some("s:a"), "Page", "goto", None, serde_json::json!({})));
+    drop(begin_action(Some("s:b"), "Page", "click", None, serde_json::json!({})));
+    // A session with no observer of its own, and no global: unobserved.
+    drop(begin_action(Some("s:c"), "Page", "fill", None, serde_json::json!({})));
+
+    assert_eq!(seen(&a), vec!["a:page.goto".to_string()]);
+    assert_eq!(seen(&b), vec!["b:page.click".to_string()]);
+
+    // A global observer catches sessions that have no scoped one, while the
+    // scoped ones keep winning for theirs.
+    let global = recording("g");
+    set_action_observer(global.clone());
+    drop(begin_action(Some("s:c"), "Page", "fill", None, serde_json::json!({})));
+    drop(begin_action(Some("s:a"), "Page", "reload", None, serde_json::json!({})));
+    assert_eq!(seen(&global), vec!["g:page.fill".to_string()]);
+    assert_eq!(seen(&a), vec!["a:page.goto".to_string(), "a:page.reload".to_string()]);
+
+    // Dropping a guard unregisters exactly its session.
+    drop(guard_a);
+    drop(begin_action(Some("s:a"), "Page", "close", None, serde_json::json!({})));
+    assert_eq!(
+      seen(&global),
+      vec!["g:page.fill".to_string(), "g:page.close".to_string()],
+      "an unscoped session falls back to the global observer"
+    );
+    drop(guard_b);
+
+    *ACTION_OBSERVER
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    ACTION_OBSERVER_INSTALLED.store(false, Ordering::Release);
+  }
 
   #[test]
   fn context_options_is_first_line_with_version_8() {

@@ -9,6 +9,9 @@
 //! The descriptor is intentionally small and matches the data Playwright's
 //! own browser registry exposes (title, endpoint, workspace dir, metadata) so
 //! the CLI surface lines up, without copying its storage format.
+//!
+//! Attaching to a session means running code in the owner's process, so the
+//! directory — which also holds each session's socket — is owner-only.
 
 use std::path::{Path, PathBuf};
 
@@ -28,6 +31,12 @@ pub struct SessionDescriptor {
   pub pid: u32,
   /// Browser engine: `chromium`, `firefox`, or `webkit`.
   pub browser_name: String,
+  /// ferridriver version of the process that bound the session. A client
+  /// speaking a different build's wire gets a "reopen the session" message
+  /// instead of a decode failure. Empty when read from a descriptor written
+  /// before the field existed.
+  #[serde(default)]
+  pub version: String,
   /// Working directory associated with the session, for dashboards that
   /// group sessions by project. `None` when unset.
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,6 +79,7 @@ impl Registry {
   pub fn open_at(dir: impl Into<PathBuf>) -> Result<Self> {
     let dir = dir.into();
     std::fs::create_dir_all(&dir)?;
+    restrict_to_owner(&dir)?;
     Ok(Self { dir })
   }
 
@@ -162,6 +172,23 @@ impl Registry {
 
 /// Default registry directory: `<user-cache>/ferridriver/sessions`, falling
 /// back to the system temp dir when no cache dir is resolvable (headless CI).
+/// Restrict `dir` to its owner (`0700`). A session socket lives inside it and
+/// a client that reaches that socket can run arbitrary code in the owning
+/// process, so directory traversal is the access boundary.
+#[cfg(unix)]
+fn restrict_to_owner(dir: &Path) -> Result<()> {
+  use std::os::unix::fs::PermissionsExt as _;
+  std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+  Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_to_owner(_dir: &Path) -> Result<()> {
+  // Windows sessions bind loopback TCP rather than a socket file in this
+  // directory; the descriptor inherits the user profile's ACL.
+  Ok(())
+}
+
 fn default_registry_dir() -> PathBuf {
   dirs::cache_dir()
     .unwrap_or_else(std::env::temp_dir)
@@ -179,6 +206,7 @@ mod tests {
       endpoint: format!("/tmp/ferri-{id}.sock"),
       pid: 4242,
       browser_name: "chromium".into(),
+      version: crate::WIRE_VERSION.to_string(),
       workspace_dir: Some("/work/proj".into()),
       metadata: Some(serde_json::json!({ "owner": "agent" })),
     }

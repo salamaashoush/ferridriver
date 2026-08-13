@@ -37,19 +37,36 @@ use crate::selectors;
 /// Polling schedule: `[0, 0, 20, 50, 100, 100, 500]`, clamped at the last
 /// value on overflow.
 macro_rules! retry_resolve {
-  ($self:expr, $timeout_ms:expr, $op:expr, |$el:ident, $page:ident| $body:expr) => {{
+  // Actions whose arguments a reader (or a generated test) needs pass them as
+  // the fourth argument; an action that takes none uses the short form. The
+  // trace and the echoed source both render exactly these, so an argument
+  // omitted here is an argument missing from the code the run hands back.
+  ($self:expr, $timeout_ms:expr, $op:expr, |$el:ident, $page:ident| $body:expr) => {
+    retry_resolve!($self, $timeout_ms, $op, ::serde_json::json!({}), |$el, $page| $body)
+  };
+  ($self:expr, $timeout_ms:expr, $op:expr, $extra:expr, |$el:ident, $page:ident| $body:expr) => {{
     // Trace span for the whole retried action — every exit path below
     // funnels through `break 'retry` so the span always closes with the
     // final outcome (timeout / strict violation / success / hard error).
     let __trace_page = $self.frame.page_arc();
     let __trace_span = {
       let __trace_composite = __trace_page.context().map(|c| c.composite());
+      let mut __trace_params = ::serde_json::json!({ "selector": $self.selector });
+      if let (
+        ::std::option::Option::Some(__dst),
+        ::std::option::Option::Some(__src),
+      ) = (__trace_params.as_object_mut(), ($extra).as_object())
+      {
+        for (__k, __v) in __src {
+          __dst.insert(__k.clone(), __v.clone());
+        }
+      }
       $crate::trace::begin_action(
         __trace_composite.as_deref(),
         "Locator",
         $op,
         ::std::option::Option::Some(format!("page@{}", __trace_page.backend_page_id())),
-        ::serde_json::json!({ "selector": $self.selector }),
+        __trace_params,
       )
     };
     let __trace_span = __trace_page.snapshot_before(__trace_span).await;
@@ -678,13 +695,19 @@ impl Locator {
     let opts = opts.unwrap_or_default();
     let force = opts.is_force();
     let opts_ref = &opts;
-    retry_resolve!(self, opts_ref.timeout, "fill", |el, page| async move {
-      // `actions::fill(..., force)` runs `checkElementStates(['visible',
-      // 'enabled','editable'])` internally when `force` is false and
-      // returns the `error:not<state>` marker the retry loop knows to
-      // keep polling on. `force=true` jumps straight to the DOM write.
-      actions::fill(&el, page, value, force).await
-    })
+    retry_resolve!(
+      self,
+      opts_ref.timeout,
+      "fill",
+      ::serde_json::json!({ "value": value }),
+      |el, page| async move {
+        // `actions::fill(..., force)` runs `checkElementStates(['visible',
+        // 'enabled','editable'])` internally when `force` is false and
+        // returns the `error:not<state>` marker the retry loop knows to
+        // keep polling on. `force=true` jumps straight to the DOM write.
+        actions::fill(&el, page, value, force).await
+      }
+    )
   }
 
   /// Clear the value of an input or textarea element.
@@ -774,20 +797,26 @@ impl Locator {
     let opts = opts.unwrap_or_default();
     let delay_ms = opts.resolved_delay_ms();
     let timeout_ms = opts.timeout;
-    retry_resolve!(self, timeout_ms, "type", |el, page| async move {
-      actions::wait_for_actionable(&el, page).await.ok();
-      if delay_ms > 0 {
-        // With a per-char delay, fall back to the character-by-character
-        // keyboard dispatch (same code path `pressSequentially` uses).
-        for ch in text.chars() {
-          page.press_key(&ch.to_string()).await?;
-          tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    retry_resolve!(
+      self,
+      timeout_ms,
+      "type",
+      ::serde_json::json!({ "text": text }),
+      |el, page| async move {
+        actions::wait_for_actionable(&el, page).await.ok();
+        if delay_ms > 0 {
+          // With a per-char delay, fall back to the character-by-character
+          // keyboard dispatch (same code path `pressSequentially` uses).
+          for ch in text.chars() {
+            page.press_key(&ch.to_string()).await?;
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+          }
+          Ok(())
+        } else {
+          el.type_str(text).await
         }
-        Ok(())
-      } else {
-        el.type_str(text).await
       }
-    })
+    )
   }
 
   /// Press a key or key combination (e.g. "Enter", "Control+a").
@@ -805,24 +834,30 @@ impl Locator {
     let opts = opts.unwrap_or_default();
     let delay_ms = opts.resolved_delay_ms();
     let timeout_ms = opts.timeout;
-    retry_resolve!(self, timeout_ms, "press", |el, page| async move {
-      actions::wait_for_actionable(&el, page).await.ok();
-      // Focus the element before dispatching keys so the event lands at
-      // the intended target (`_press` → `_focus` → `keyboard.press`).
-      // Without this the key dispatches to whatever's currently focused,
-      // usually the body, and the element under the locator never sees
-      // it.
-      el.call_js_fn("function() { this.focus(); }").await?;
-      if delay_ms > 0 {
-        // With a delay, press is equivalent to keyDown + sleep(delay)
-        // + keyUp so the page observes the held-key interval.
-        page.key_down(key).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-        page.key_up(key).await
-      } else {
-        page.press_key(key).await
+    retry_resolve!(
+      self,
+      timeout_ms,
+      "press",
+      ::serde_json::json!({ "key": key }),
+      |el, page| async move {
+        actions::wait_for_actionable(&el, page).await.ok();
+        // Focus the element before dispatching keys so the event lands at
+        // the intended target (`_press` → `_focus` → `keyboard.press`).
+        // Without this the key dispatches to whatever's currently focused,
+        // usually the body, and the element under the locator never sees
+        // it.
+        el.call_js_fn("function() { this.focus(); }").await?;
+        if delay_ms > 0 {
+          // With a delay, press is equivalent to keyDown + sleep(delay)
+          // + keyUp so the page observes the held-key interval.
+          page.key_down(key).await?;
+          tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+          page.key_up(key).await
+        } else {
+          page.press_key(key).await
+        }
       }
-    })
+    )
   }
 
   /// Hover over the element matched by this locator.
@@ -1048,22 +1083,28 @@ impl Locator {
     // `error:not<state>` retriable marker until the deadline fires.
     // `force: true` skips the pre-check and goes straight to the
     // injected `selectOptions` call.
-    retry_resolve!(self, timeout_ms, "selectOption", |el, page| async move {
-      if !force {
-        let fd = page.injected_script().await?;
-        let state_raw = el
-          .call_js_fn_value(&format!(
-            "function() {{ return {fd}.checkElementStates(this, ['visible', 'enabled']); }}"
-          ))
-          .await?
-          .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-          .unwrap_or_else(|| "error:notconnected".to_string());
-        if state_raw != "done" {
-          return Err(crate::error::FerriError::backend(state_raw));
+    retry_resolve!(
+      self,
+      timeout_ms,
+      "selectOption",
+      ::serde_json::json!({ "values": values_ref }),
+      |el, page| async move {
+        if !force {
+          let fd = page.injected_script().await?;
+          let state_raw = el
+            .call_js_fn_value(&format!(
+              "function() {{ return {fd}.checkElementStates(this, ['visible', 'enabled']); }}"
+            ))
+            .await?
+            .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+            .unwrap_or_else(|| "error:notconnected".to_string());
+          if state_raw != "done" {
+            return Err(crate::error::FerriError::backend(state_raw));
+          }
         }
+        actions::select_options(&el, page, values_ref).await
       }
-      actions::select_options(&el, page, values_ref).await
-    })
+    )
   }
 
   /// Set file paths on a file input element.
@@ -1151,9 +1192,13 @@ impl Locator {
     // retryable error that re-resolves fresh instead of escaping as a
     // raw "Object id doesn't reference a Node".
     let paths_ref = &paths;
-    retry_resolve!(self, Some(timeout_ms), "setInputFiles", |el, page| async move {
-      page.set_input_files_element(&el, paths_ref).await
-    })
+    retry_resolve!(
+      self,
+      Some(timeout_ms),
+      "setInputFiles",
+      ::serde_json::json!({ "files": paths_ref }),
+      |el, page| async move { page.set_input_files_element(&el, paths_ref).await }
+    )
   }
 
   /// Scroll the element into the visible area of the viewport.
@@ -1235,9 +1280,13 @@ impl Locator {
       }}"
     );
     let js_ref = js.as_str();
-    retry_resolve!(self, timeout_ms, "dispatchEvent", |el, _page| async move {
-      el.call_js_fn(js_ref).await
-    })
+    retry_resolve!(
+      self,
+      timeout_ms,
+      "dispatchEvent",
+      ::serde_json::json!({ "type": event_type }),
+      |el, _page| async move { el.call_js_fn(js_ref).await }
+    )
   }
 
   // ── Content & state ───────────────────────────────────────────────────────
@@ -1812,9 +1861,13 @@ impl Locator {
     // (Playwright resolves each with its own `_retryPointerAction`, source
     // first), so a node that detaches mid-drag is re-resolved rather than
     // surfacing a hard error.
-    let src = retry_resolve!(self, opts.timeout, "dragTo", |el, _page| async move {
-      el.call_js_fn_value(RECT_JS).await
-    })?
+    let src = retry_resolve!(
+      self,
+      opts.timeout,
+      "dragTo",
+      ::serde_json::json!({ "target": target.selector }),
+      |el, _page| async move { el.call_js_fn_value(RECT_JS).await }
+    )?
     .ok_or_else(|| crate::error::FerriError::Backend("no source bounding box".into()))?;
     let tgt = retry_resolve!(target, opts.timeout, "dragTo", |el, _page| async move {
       el.call_js_fn_value(RECT_JS).await
@@ -2113,16 +2166,22 @@ impl Locator {
   ) -> Result<crate::protocol::SerializedValue> {
     let timeout_ms = options.and_then(|o| o.timeout);
     let fn_source = fn_source.to_string();
-    retry_resolve!(self, timeout_ms, "evaluate", |el, _page| async {
-      let page_arc = Arc::clone(self.frame.page_arc());
-      let handle = crate::element_handle::ElementHandle::from_any_element(page_arc, el).await?;
-      let result = handle
-        .as_js_handle()
-        .evaluate(&fn_source, arg.clone(), is_function)
-        .await;
-      let _ = handle.dispose().await;
-      result
-    })
+    retry_resolve!(
+      self,
+      timeout_ms,
+      "evaluate",
+      ::serde_json::json!({ "expression": fn_source }),
+      |el, _page| async {
+        let page_arc = Arc::clone(self.frame.page_arc());
+        let handle = crate::element_handle::ElementHandle::from_any_element(page_arc, el).await?;
+        let result = handle
+          .as_js_handle()
+          .evaluate(&fn_source, arg.clone(), is_function)
+          .await;
+        let _ = handle.dispose().await;
+        result
+      }
+    )
   }
 
   /// Playwright: `locator.waitForFunction(pageFunction, arg?, options?): Promise<void>`
@@ -2215,16 +2274,22 @@ impl Locator {
   ) -> Result<crate::js_handle::JSHandle> {
     let timeout_ms = options.and_then(|o| o.timeout);
     let fn_source = fn_source.to_string();
-    retry_resolve!(self, timeout_ms, "evaluateHandle", |el, _page| async {
-      let page_arc = Arc::clone(self.frame.page_arc());
-      let handle = crate::element_handle::ElementHandle::from_any_element(page_arc, el).await?;
-      let result = handle
-        .as_js_handle()
-        .evaluate_handle(&fn_source, arg.clone(), is_function)
-        .await;
-      let _ = handle.dispose().await;
-      result
-    })
+    retry_resolve!(
+      self,
+      timeout_ms,
+      "evaluateHandle",
+      ::serde_json::json!({ "expression": fn_source }),
+      |el, _page| async {
+        let page_arc = Arc::clone(self.frame.page_arc());
+        let handle = crate::element_handle::ElementHandle::from_any_element(page_arc, el).await?;
+        let result = handle
+          .as_js_handle()
+          .evaluate_handle(&fn_source, arg.clone(), is_function)
+          .await;
+        let _ = handle.dispose().await;
+        result
+      }
+    )
   }
 
   /// Playwright: `locator.evaluateAll(pageFunction, arg?): Promise<R>`

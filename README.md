@@ -302,6 +302,40 @@ See [site/docs/mcp/tools.md](./site/docs/mcp/tools.md) and
 [docs/extensions.md](./docs/extensions.md) for the full surface and the
 plugin/extension contract.
 
+## Named sessions
+
+The same scripting surface from a terminal, against a browser that stays
+open between commands. `session open` publishes a browser under an id; every
+`run --session` then sees the pages, cookies, storage and `globalThis` the
+last one left behind.
+
+```bash
+ferridriver session open work https://example.com
+ferridriver run --session work --eval "return page.url()"
+ferridriver run --session work login.ts -- alice@example.com
+ferridriver session list
+ferridriver session close work
+```
+
+The session protocol carries one command — run this script — so there is no
+verb table to drift behind the scripting API. TypeScript and relative
+imports work exactly as they do locally: the client bundles (its working
+directory is the one imports resolve against) and the host compiles and
+runs, so bytecode never crosses between differently-built binaries. Console
+output, browser actions (`--trace`) and generated source (`--code`) all
+stream back as the script produces them.
+
+Codegen by doing: every action a script performs can be rendered as
+TypeScript, Rust `#[ferritest]`, or Gherkin, and `--code-out` writes a file
+that runs unchanged both standalone and against the session.
+
+```bash
+ferridriver run -s work --code-out login.ts --eval "await page.goto('/login'); await page.locator('#email').fill('a@b.c')"
+ferridriver run login.ts
+```
+
+See [site/docs/scripting/named-sessions.md](./site/docs/scripting/named-sessions.md).
+
 ## Backends
 
 | Backend     | Browser            | Transport                                    | Default? |

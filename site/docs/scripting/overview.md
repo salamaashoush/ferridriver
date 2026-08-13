@@ -63,6 +63,10 @@ source files (.js / .ts / .mjs / .tsx / ...)
   both. See [`/scripting/extensions`](/scripting/extensions).
 - **Standalone scripts** — one-off automation runs from the CLI
   (`ferridriver run`).
+- **Named sessions** — the same scripts against a browser that stays
+  open between commands, so state accumulates across runs
+  (`ferridriver run --session <id>`). See
+  [`/scripting/named-sessions`](/scripting/named-sessions).
 
 ## Pages in this section
 
@@ -73,6 +77,9 @@ source files (.js / .ts / .mjs / .tsx / ...)
   `DataTable`, parameter types.
 - [`run_script` reference](/scripting/run-script) — the MCP action
   path: parameters, return shape, globals.
+- [Named sessions](/scripting/named-sessions) — `ferridriver run
+  --session`: a browser that outlives the command, streamed console,
+  where bundling and compiling each happen.
 - [Sandbox](/scripting/sandbox) — `process`, `fetch`, `fs`,
   `AbortController`, `ReadableStream`, `Blob`, `FormData`, what is
   absent.

@@ -171,7 +171,17 @@ impl BrowserJs {
       },
       _ => ferridriver_session::BindOptions::default(),
     };
-    let endpoint = ferridriver_session::bind_global(&self.inner, &title, opts, None)
+    // Publish with a script host built from this VM's own environment, so the
+    // session an attaching client gets can actually run scripts — with the
+    // same sandbox roots, caps and extensions this script has.
+    let host = ctx.userdata::<crate::session_host::ScriptEnvUd>().map(|env| {
+      std::sync::Arc::new(crate::session_host::SessionScriptHost::new(
+        std::sync::Arc::clone(self.inner.state()),
+        &title,
+        env.0.as_ref().clone(),
+      )) as std::sync::Arc<dyn ferridriver_session::ScriptHost>
+    });
+    let endpoint = ferridriver_session::bind_global(&self.inner, &title, opts, host)
       .await
       .map_err(|e| crate::bindings::convert::throw_named(&ctx, "Error", e.to_string()))?;
     let result = rquickjs::Object::new(ctx.clone())?;

@@ -3,7 +3,7 @@
 use std::fmt;
 
 /// Kind of failure a script can produce.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptErrorKind {
   /// Source failed to parse.
@@ -38,7 +38,7 @@ impl fmt::Display for ScriptErrorKind {
 /// `line`, `column`, and `source_snippet` are filled in whenever the `QuickJS`
 /// runtime exposes them (syntax and runtime errors); they are `None` for
 /// engine-level failures like timeouts.
-#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ScriptError {
   pub kind: ScriptErrorKind,
   /// The thrown value's JS constructor name (`TypeError`, ...) when the
@@ -58,6 +58,29 @@ pub struct ScriptError {
 }
 
 impl ScriptError {
+  /// Replace declared secret values everywhere this error carries text.
+  ///
+  /// `source_snippet` is the reason this cannot be left to the caller: it
+  /// quotes the script's own source around the throwing line, so a failure
+  /// inside `page.fill('#pw', 'hunter2')` prints the credential back even
+  /// when neither the message nor the stack mentions it.
+  pub fn redact(&mut self, secrets: &ferridriver::response::Secrets) {
+    if secrets.is_empty() {
+      return;
+    }
+    let apply = |text: &mut String| {
+      if let std::borrow::Cow::Owned(redacted) = secrets.redact(text) {
+        *text = redacted;
+      }
+    };
+    apply(&mut self.message);
+    for field in [&mut self.name, &mut self.stack, &mut self.source_snippet] {
+      if let Some(text) = field.as_mut() {
+        apply(text);
+      }
+    }
+  }
+
   #[must_use]
   pub fn internal(message: impl Into<String>) -> Self {
     Self {

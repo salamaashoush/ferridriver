@@ -41,9 +41,9 @@
 //! # Path anchoring
 //!
 //! A relative path inside a config file is resolved against THAT
-//! FILE's directory, before merging. `extensions = ["./box.ts"]` in
+//! FILE's directory, before merging. `extensions = ["./acme.ts"]` in
 //! `~/.config/ferridriver/config.yaml` therefore means
-//! `~/.config/ferridriver/box.ts` no matter which repository the
+//! `~/.config/ferridriver/acme.ts` no matter which repository the
 //! process runs in. Globs (`testMatch`, `steps`, `features`) are left
 //! alone: they stay relative to the run's `testDir`/cwd, matching
 //! Playwright.
@@ -647,6 +647,9 @@ fn anchor_paths(value: &mut Value, dir: &Path) {
           "alias" => anchor_map_values(child, dir),
           "paths" => anchor_extension_specs(child, dir),
           "virtualModules" | "virtual_modules" => {},
+          // `file` is too common a leaf name to anchor globally, so the
+          // secrets table anchors its own member.
+          "secrets" => anchor_member(child, "file", dir),
           // Anchoring matches a LEAF KEY NAME at any depth, so a
           // caller-keyed map must be skipped whole: an instance's env
           // variable (or a request header) literally named `cwd` /
@@ -665,6 +668,13 @@ fn anchor_paths(value: &mut Value, dir: &Path) {
       }
     },
     _ => {},
+  }
+}
+
+/// Anchor exactly one named member of an object, leaving its siblings alone.
+fn anchor_member(value: &mut Value, member: &str, dir: &Path) {
+  if let Some(child) = value.as_object_mut().and_then(|map| map.get_mut(member)) {
+    anchor_in_place(child, dir);
   }
 }
 

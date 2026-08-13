@@ -165,9 +165,23 @@ mod tests {
     let status = reaper.wait().expect("reaper exits on EOF");
     assert!(status.success(), "reaper exited cleanly");
 
-    // The watched leader is gone; the forgotten one is untouched.
-    let killed = watched.try_wait().expect("try_wait");
+    // The reaper's exit means it SENT the signal, not that the kernel has
+    // delivered it and reaped the child — so poll rather than assert on the
+    // instant after. (Asserting immediately made this test fail under load.)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut killed = None;
+    while std::time::Instant::now() < deadline {
+      killed = watched.try_wait().expect("try_wait");
+      if killed.is_some() {
+        break;
+      }
+      std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(killed.is_some(), "watched process group was killed");
+    // Already exited; this only reaps the zombie the poll left behind.
+    let _ = watched.wait();
+    // The forgotten leader survived that whole window, which is a stronger
+    // statement than "had not died yet the moment the reaper exited".
     assert!(
       forgotten.try_wait().expect("try_wait").is_none(),
       "a forgotten pid must not be signalled"

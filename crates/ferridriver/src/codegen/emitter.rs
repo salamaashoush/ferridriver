@@ -28,14 +28,16 @@ pub struct RustEmitter;
 
 impl CodeEmitter for RustEmitter {
   fn header(&self, url: &str) -> String {
+    // An empty url means the caller's own lines carry the navigation (the
+    // action echo records the `goto` it saw); only the interactive recorder,
+    // which navigates before recording starts, supplies one here.
+    let navigation = if url.is_empty() {
+      String::new()
+    } else {
+      format!("  page.goto(\"{}\").await?;\n", escape_rust(url))
+    };
     format!(
-      r#"use ferridriver_test::prelude::*;
-
-#[ferritest]
-async fn recorded_test(page: Arc<Page>) {{
-  page.goto("{}").await?;
-"#,
-      escape_rust(url)
+      "use ferridriver_test::prelude::*;\n\n#[ferritest]\nasync fn recorded_test(page: Arc<Page>) {{\n{navigation}"
     )
   }
 
@@ -91,55 +93,60 @@ pub struct TypeScriptEmitter;
 
 impl CodeEmitter for TypeScriptEmitter {
   fn header(&self, url: &str) -> String {
-    // Adaptive preamble: reuse the live `page` global when present (MCP
-    // `run_script` injects it), otherwise launch a browser. The same file
-    // therefore runs standalone via `ferridriver run <file>` and against a
-    // live session via the MCP `run_script` tool. `typeof page` is safe even
-    // when `page` is undeclared, and the `? page :` branch only evaluates
-    // when it exists.
+    // Adaptive preamble: reuse the live `page` global when present (a session
+    // run and the MCP `run_script` tool both inject one), otherwise launch a
+    // browser and define it. Either way the body below is written against
+    // plain `page` — the same vocabulary a script author, the action echo,
+    // and this recorder all use, so lines from any of them paste together.
+    let navigation = if url.is_empty() {
+      String::new()
+    } else {
+      format!("await page.goto('{}');\n", escape_js(url))
+    };
     format!(
       "// Recorded with `ferridriver codegen`.\n\
        // Run standalone: `ferridriver run <file>`.\n\
-       // Replay on a live session: the MCP `run_script` tool (reuses `page`).\n\
-       const __browser = typeof page !== 'undefined' ? null : await chromium().launch();\n\
-       const __page = typeof page !== 'undefined' ? page : await __browser.newPage();\n\
-       await __page.goto('{}');\n",
-      escape_js(url)
+       // Replay on a live session: `ferridriver run --session <id> <file>`.\n\
+       if (typeof page === 'undefined') {{\n\
+       \x20 globalThis.__browser = await chromium().launch();\n\
+       \x20 globalThis.page = await globalThis.__browser.newPage();\n\
+       }}\n\
+       {navigation}"
     )
   }
 
   fn action(&self, action: &Action) -> String {
     match action {
       Action::Navigate { url } => {
-        format!("await __page.goto('{}');\n", escape_js(url))
+        format!("await page.goto('{}');\n", escape_js(url))
       },
       Action::Click { locator, .. } => {
-        format!("await __page.{locator}.click();\n")
+        format!("await page.{locator}.click();\n")
       },
       Action::Dblclick { locator, .. } => {
-        format!("await __page.{locator}.dblclick();\n")
+        format!("await page.{locator}.dblclick();\n")
       },
       Action::Fill { locator, value, .. } => {
-        format!("await __page.{}.fill('{}');\n", locator, escape_js(value))
+        format!("await page.{}.fill('{}');\n", locator, escape_js(value))
       },
       Action::Press { locator, key, .. } => {
-        format!("await __page.{}.press('{}');\n", locator, escape_js(key))
+        format!("await page.{}.press('{}');\n", locator, escape_js(key))
       },
       Action::Select { locator, value, .. } => {
-        format!("await __page.{}.selectOption('{}');\n", locator, escape_js(value))
+        format!("await page.{}.selectOption('{}');\n", locator, escape_js(value))
       },
       Action::Check { locator, .. } => {
-        format!("await __page.{locator}.check();\n")
+        format!("await page.{locator}.check();\n")
       },
       Action::Uncheck { locator, .. } => {
-        format!("await __page.{locator}.uncheck();\n")
+        format!("await page.{locator}.uncheck();\n")
       },
     }
   }
 
   fn footer(&self) -> String {
     // Close only the browser we launched; an injected session `page` lives on.
-    "if (__browser) await __browser.close();\n".into()
+    "if (globalThis.__browser) await globalThis.__browser.close();\n".into()
   }
 }
 
@@ -172,7 +179,14 @@ impl GherkinEmitter {
 
 impl CodeEmitter for GherkinEmitter {
   fn header(&self, url: &str) -> String {
-    format!("Feature: Recorded test\n\n  Scenario: User interaction recording\n    Given I navigate to \"{url}\"\n")
+    // As in the other emitters, an empty url means the body already carries
+    // the navigation step.
+    let given = if url.is_empty() {
+      String::new()
+    } else {
+      format!("    Given I navigate to \"{url}\"\n")
+    };
+    format!("Feature: Recorded test\n\n  Scenario: User interaction recording\n{given}")
   }
 
   fn action(&self, action: &Action) -> String {
@@ -219,10 +233,12 @@ mod tests {
     let e = TypeScriptEmitter;
 
     let header = e.header("https://example.com");
-    // Reuses an injected MCP `page`; otherwise launches its own browser.
-    assert!(header.contains("typeof page !== 'undefined' ? page : await __browser.newPage()"));
-    assert!(header.contains("typeof page !== 'undefined' ? null : await chromium().launch()"));
-    assert!(header.contains("await __page.goto('https://example.com');"));
+    // Reuses an injected session `page`; otherwise launches its own browser
+    // and defines one — either way the body drives plain `page`.
+    assert!(header.contains("if (typeof page === 'undefined')"));
+    assert!(header.contains("globalThis.__browser = await chromium().launch();"));
+    assert!(header.contains("globalThis.page = await globalThis.__browser.newPage();"));
+    assert!(header.contains("await page.goto('https://example.com');"));
     // No dead test-runner import — it must run under `ferridriver run` / MCP.
     assert!(!header.contains("import { test }"));
 
@@ -230,15 +246,27 @@ mod tests {
       selector: "internal:role=button".into(),
       locator: "getByRole('button', { name: 'Go' })".into(),
     });
-    assert_eq!(click, "await __page.getByRole('button', { name: 'Go' }).click();\n");
+    assert_eq!(click, "await page.getByRole('button', { name: 'Go' }).click();\n");
 
     let fill = e.action(&Action::Fill {
       selector: "#email".into(),
       locator: "getByLabel('Email')".into(),
       value: "a@b.com".into(),
     });
-    assert_eq!(fill, "await __page.getByLabel('Email').fill('a@b.com');\n");
+    assert_eq!(fill, "await page.getByLabel('Email').fill('a@b.com');\n");
 
-    assert!(e.footer().contains("if (__browser) await __browser.close();"));
+    assert!(
+      e.footer()
+        .contains("if (globalThis.__browser) await globalThis.__browser.close();")
+    );
+  }
+
+  #[test]
+  fn a_headerless_recording_skips_the_opening_navigation() {
+    // A session recording starts wherever the session already is, so an empty
+    // url must not emit `goto('')`.
+    let header = TypeScriptEmitter.header("");
+    assert!(header.contains("if (typeof page === 'undefined')"));
+    assert!(!header.contains("goto("), "empty url must not navigate: {header}");
   }
 }

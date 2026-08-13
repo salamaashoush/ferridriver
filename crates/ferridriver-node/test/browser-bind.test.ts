@@ -1,7 +1,10 @@
-// NAPI `browser.bind()` / `browser.unbind()` coverage. Binds a live browser
-// over a loopback TCP endpoint, then connects a raw socket and speaks the
-// session NUL-JSON command protocol to prove the bound server actually drives
-// the browser. Mirrors Playwright's `browser.bind(title, { host, port })`.
+// NAPI `browser.bind()` / `browser.unbind()` coverage.
+//
+// A bound session's protocol is "run this script", so hosting one requires a
+// script engine — which this addon deliberately does not carry (it is the core
+// browser surface). `bind()` therefore refuses instead of publishing a registry
+// entry no client could drive, and says which hosts can: the CLI
+// (`ferridriver session open`) and a script run by `ferridriver run`.
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { type Browser } from "../index.js";
@@ -10,51 +13,6 @@ import { launchForBackend } from "./_helpers.js";
 const BACKENDS: string[] = process.env.FERRIDRIVER_BACKEND
   ? [process.env.FERRIDRIVER_BACKEND]
   : ["cdp-pipe"];
-
-// Speak one NUL-delimited-JSON command over a TCP endpoint and await the reply.
-async function callSession(
-  endpoint: string,
-  command: Record<string, unknown>,
-): Promise<{ ok: boolean; text: string; error?: string }> {
-  const url = new URL(endpoint); // ws://host:port
-  const chunks: Uint8Array[] = [];
-  let resolveReply: (v: { ok: boolean; text: string; error?: string }) => void;
-  let rejectReply: (e: unknown) => void;
-  const reply = new Promise<{ ok: boolean; text: string; error?: string }>(
-    (res, rej) => {
-      resolveReply = res;
-      rejectReply = rej;
-    },
-  );
-
-  const socket = await Bun.connect({
-    hostname: url.hostname,
-    port: Number(url.port),
-    socket: {
-      data(_sock, data: Uint8Array) {
-        chunks.push(data);
-        // A reply is one frame terminated by a NUL byte.
-        const nul = data.indexOf(0);
-        if (nul !== -1) {
-          const joined = Buffer.concat(chunks);
-          const end = joined.indexOf(0);
-          const json = joined.subarray(0, end).toString("utf8");
-          resolveReply(JSON.parse(json));
-        }
-      },
-      error(_sock, err) {
-        rejectReply(err);
-      },
-    },
-  });
-
-  socket.write(Buffer.from(JSON.stringify(command) + "\0"));
-  try {
-    return await reply;
-  } finally {
-    socket.end();
-  }
-}
 
 for (const backend of BACKENDS) {
   describe(`browser.bind [${backend}]`, () => {
@@ -65,29 +23,22 @@ for (const backend of BACKENDS) {
     });
 
     afterAll(async () => {
-      await browser.unbind().catch(() => {});
       await browser.close();
     });
 
-    it("bind returns a ws endpoint and the bound server drives the browser", async () => {
+    it("refuses to bind and points at the hosts that can", async () => {
       const page = await browser.newPage();
       await page.setContent("<h1 id=greet>bound!</h1>");
 
-      const { endpoint } = await browser.bind("napi-test", {
-        host: "127.0.0.1",
-        port: 0,
-      });
-      expect(endpoint).toStartWith("ws://127.0.0.1:");
+      const bind = browser.bind("napi-test", { host: "127.0.0.1", port: 0 });
+      await expect(bind).rejects.toThrow(/no script engine/);
+      await expect(bind).rejects.toThrow(/ferridriver session open/);
+    });
 
-      // A url verb over the session socket reaches this exact browser.
-      const reply = await callSession(endpoint, {
-        id: 1,
-        verb: "snapshot",
-        args: {},
-      });
-      expect(reply.ok).toBe(true);
-      expect(reply.text).toContain("bound!");
-
+    it("does not leave a session behind after a refused bind", async () => {
+      await browser.bind("napi-leak-check").catch(() => {});
+      // unbind is the observable proof: it resolves because there is nothing
+      // bound to tear down.
       await browser.unbind();
     });
 
