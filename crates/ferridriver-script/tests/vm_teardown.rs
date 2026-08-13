@@ -24,6 +24,7 @@ fn make_ctx(dir: &std::path::Path) -> RunContext {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::engine::ScriptCaps::default(),
+    session: None,
   }
 }
 

@@ -59,30 +59,64 @@ pub struct SessionKey {
   pub context: Arc<str>,
 }
 
+/// The configured instance names a bare session key may name.
+///
+/// Owned by [`BrowserState`], not by a process global: parsing that
+/// depends on install order is untestable without a lock, and one
+/// process may drive two states (a test runner and an embedded MCP
+/// server) whose configs define different instances.
+pub type KnownInstances = Arc<[Box<str>]>;
+
 impl SessionKey {
-  /// Parse a composite key string.
+  /// Parse a composite key string, with no instance vocabulary.
   ///
   /// - `"default"` → instance="default", context="default"
-  /// - `"myctx"` → instance="default", context="myctx"
   /// - `"staging:admin"` → instance="staging", context="admin"
+  /// - `"myctx"` → instance="default", context="myctx"
+  ///
+  /// A bare name is a CONTEXT here. Use
+  /// [`BrowserState::session_key`] (or [`Self::parse_with`]) wherever the
+  /// configured instance names are reachable, so a bare key that names
+  /// one selects that instance.
   #[must_use]
   pub fn parse(raw: &str) -> Self {
+    Self::parse_with(raw, &[])
+  }
+
+  /// [`Self::parse`], resolving a bare name against the configured
+  /// instance names.
+  ///
+  /// Without the vocabulary a bare key was ALWAYS read as a context on
+  /// the `default` instance, so `session: "staging"` silently drove an
+  /// unconfigured browser while looking like it had selected the staging
+  /// environment — a mistake so common that consumers resorted to
+  /// documenting it in their server instructions.
+  #[must_use]
+  pub fn parse_with(raw: &str, known_instances: &[Box<str>]) -> Self {
     if let Some((inst, ctx)) = raw.split_once(':') {
-      SessionKey {
+      return SessionKey {
         instance: Arc::from(inst),
         context: Arc::from(ctx),
-      }
-    } else if raw == "default" {
-      SessionKey {
+      };
+    }
+    if raw == "default" {
+      return SessionKey {
         instance: Arc::from("default"),
         context: Arc::from("default"),
-      }
-    } else {
-      // Backwards compat: bare name → default instance, name as context
-      SessionKey {
-        instance: Arc::from("default"),
-        context: Arc::from(raw),
-      }
+      };
+    }
+    // A bare name that NAMES a configured instance means that
+    // instance, not a context on `default`. Anything else keeps the
+    // original "bare name is a context" behaviour.
+    if known_instances.iter().any(|known| &**known == raw) {
+      return SessionKey {
+        instance: Arc::from(raw),
+        context: Arc::from("default"),
+      };
+    }
+    SessionKey {
+      instance: Arc::from("default"),
+      context: Arc::from(raw),
     }
   }
 
@@ -154,13 +188,22 @@ impl BrowserInstance {
 
 // ── BrowserState ────────────────────────────────────────────────────────────
 
-/// Callback type for per-instance chrome args.
+/// Callback type for per-instance launch settings.
+///
+/// Returns the full override set for an instance (args, profile
+/// directory, binary, headless, backend, environment,
+/// `ignoreDefaultArgs`) or an error that ABORTS the launch. Aborting
+/// matters: a consumer whose environment lookup fails for an instance
+/// name is saying "this instance is not real", and launching a browser
+/// anyway lands the caller on an unconfigured environment that looks
+/// like the right one.
 ///
 /// `Arc`, not `Box`: the launch path clones it out from under the state
 /// lock and runs it on the blocking pool. Implementations shell out
 /// (`instanceArgsCommand`), and calling that while holding the state's
 /// write guard froze every other session for the duration.
-pub type InstanceArgsFn = Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
+pub type InstanceOverridesFn =
+  Arc<dyn Fn(&str) -> std::result::Result<crate::options::InstanceOverrides, String> + Send + Sync>;
 
 /// Callback type for resolving how to connect to a browser instance.
 ///
@@ -172,7 +215,7 @@ pub type InstanceArgsFn = Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
 ///
 /// Return `None` to fall through to the default `connect_mode`.
 ///
-/// `Arc` for the same reason as [`InstanceArgsFn`]: resolution probes
+/// `Arc` for the same reason as [`InstanceOverridesFn`]: resolution probes
 /// TCP endpoints and may shell out, so it runs off the state lock.
 pub type InstanceResolverFn = Arc<dyn Fn(&str) -> Option<ConnectMode> + Send + Sync>;
 
@@ -212,10 +255,13 @@ pub struct BrowserState {
   /// Base Chrome flags applied to ALL instances.
   pub extra_args: Vec<String>,
   /// Per-instance additional chrome args. Called with instance name when launching.
-  instance_args_fn: Option<InstanceArgsFn>,
+  instance_overrides_fn: Option<InstanceOverridesFn>,
   /// Per-instance connect mode resolver. Called before launching to check if
   /// an existing browser should be connected to instead.
   instance_resolver_fn: Option<InstanceResolverFn>,
+  /// Instance names a bare session key may select. Empty ⇒ every bare
+  /// key is a context on `default`.
+  known_instances: KnownInstances,
   /// Whether to run headless.
   pub headless: bool,
   /// Custom user data directory.
@@ -326,7 +372,7 @@ pub struct BrowserState {
   pub persistent_context: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ConnectMode {
   /// Launch a new browser (default)
   Launch,
@@ -375,8 +421,9 @@ impl BrowserState {
       connect_mode,
       backend_kind: plan.backend,
       extra_args: plan.args,
-      instance_args_fn: None,
+      instance_overrides_fn: None,
       instance_resolver_fn: None,
+      known_instances: Arc::from(Vec::new()),
       headless: plan.headless,
       user_data_dir: plan.user_data_dir,
       default_viewport: plan.default_viewport,
@@ -600,10 +647,12 @@ impl BrowserState {
     self.close_reason.as_deref()
   }
 
-  /// Set a callback for per-instance additional chrome args.
-  /// Called with the instance name when launching a new Chrome process.
-  pub fn set_instance_args_fn(&mut self, f: InstanceArgsFn) {
-    self.instance_args_fn = Some(f);
+  /// Set a callback for per-instance launch settings (args, profile
+  /// directory, binary, headless, backend, environment). Called with
+  /// the instance name before a browser is launched for it; an `Err`
+  /// aborts the launch.
+  pub fn set_instance_overrides_fn(&mut self, f: InstanceOverridesFn) {
+    self.instance_overrides_fn = Some(f);
   }
 
   /// Set a callback to resolve how to connect to a specific instance.
@@ -614,6 +663,24 @@ impl BrowserState {
   /// the discovery logic (reading `DevToolsActivePort` files, querying a registry, etc.).
   pub fn set_instance_resolver_fn(&mut self, f: InstanceResolverFn) {
     self.instance_resolver_fn = Some(f);
+  }
+
+  /// Declare the instance names a bare session key may select.
+  pub fn set_known_instances(&mut self, names: impl IntoIterator<Item = String>) {
+    self.known_instances = names.into_iter().map(String::into_boxed_str).collect();
+  }
+
+  /// The declared instance names, for diagnostics and for hosts that
+  /// must parse a session key away from the state lock.
+  #[must_use]
+  pub fn known_instances(&self) -> KnownInstances {
+    Arc::clone(&self.known_instances)
+  }
+
+  /// Parse a session key against THIS state's instance vocabulary.
+  #[must_use]
+  pub fn session_key(&self, raw: &str) -> SessionKey {
+    SessionKey::parse_with(raw, &self.known_instances)
   }
 
   // ── Instance management ─────────────────────────────────────────────────
@@ -629,7 +696,7 @@ impl BrowserState {
       connect_mode: self.connect_mode.clone(),
       base_args: self.extra_args.clone(),
       default_viewport: self.default_viewport.clone(),
-      args_fn: self.instance_args_fn.clone(),
+      overrides_fn: self.instance_overrides_fn.clone(),
       resolver_fn: self.instance_resolver_fn.clone(),
     }
   }
@@ -689,9 +756,9 @@ impl BrowserState {
     }
 
     let spec = state.read().await.launch_spec();
-    let (mode, all_extra) = spec.resolve_off_lock(instance).await;
+    let (mode, effective) = spec.resolve_off_lock(instance).await?;
     let browser = match &mode {
-      ConnectMode::Launch => spec.launch_browser(&all_extra).await?,
+      ConnectMode::Launch => spec.launch_browser(&effective).await?,
       other => connect_browser(other).await?,
     };
     let adopt_pages = !matches!(mode, ConnectMode::Launch);
@@ -754,105 +821,193 @@ struct LaunchSpec {
   connect_mode: ConnectMode,
   base_args: Vec<String>,
   default_viewport: Option<crate::options::ViewportConfig>,
-  args_fn: Option<InstanceArgsFn>,
+  overrides_fn: Option<InstanceOverridesFn>,
   resolver_fn: Option<InstanceResolverFn>,
 }
 
+/// One instance's launch inputs after per-instance overrides are applied
+/// to the state's base plan.
+#[derive(Debug)]
+struct EffectiveLaunch {
+  backend_kind: BackendKind,
+  headless: bool,
+  chromium_path: String,
+  user_data_dir: Option<String>,
+  args: Vec<String>,
+  env: rustc_hash::FxHashMap<String, String>,
+  ignore_default_args: Option<crate::options::IgnoreDefaultArgs>,
+}
+
+impl EffectiveLaunch {
+  /// Refuse `ignoreDefaultArgs` on a backend that has no default switch
+  /// list to drop.
+  ///
+  /// Only the Chromium launch path injects a switch set
+  /// ([`CHROMIUM_SWITCHES`]); the Firefox and `WebKit` paths pass just the
+  /// structural transport flags (`--remote-debugging-port`, `--profile`,
+  /// `--inspector-pipe`, `--user-data-dir`), which are not defaults a
+  /// caller may drop without breaking the connection. Saying so is the
+  /// point: accepting the option and applying it nowhere is how a caller
+  /// believes a switch was dropped when it never was.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`FerriError::Unsupported`] naming the backend.
+  fn reject_ignore_default_args(&self, backend: &str) -> Result<()> {
+    if self.ignore_default_args.is_none() {
+      return Ok(());
+    }
+    Err(FerriError::unsupported(format!(
+      "ignoreDefaultArgs is not supported on the {backend} backend: ferridriver injects no default \
+       switch list there, only the transport flags the connection needs. Drop the option, or set it \
+       on the Chromium instances only."
+    )))
+  }
+}
+
 impl LaunchSpec {
-  /// Resolve the connect mode and the full flag list for `instance`.
+  /// Resolve the connect mode and the effective launch inputs for
+  /// `instance`.
   ///
   /// Both callbacks are operator-supplied and routinely spawn a
   /// subprocess or probe a TCP port, so they run on the blocking pool:
   /// on an async worker they stall unrelated tasks, and the args
   /// command for the dev gateway instance takes hundreds of ms.
-  async fn resolve_off_lock(&self, instance: &str) -> (ConnectMode, Vec<String>) {
-    let args_fn = self.args_fn.clone();
+  ///
+  /// # Errors
+  ///
+  /// Propagates an overrides-callback error, which aborts the launch
+  /// instead of silently starting an unconfigured browser.
+  async fn resolve_off_lock(&self, instance: &str) -> Result<(ConnectMode, EffectiveLaunch)> {
+    let overrides_fn = self.overrides_fn.clone();
     let resolver_fn = self.resolver_fn.clone();
-    let mut all_extra = self.base_args.clone();
     let name = instance.to_string();
+
     // With no callbacks configured (the test runner, plain `launch()`)
     // there is nothing to run off-thread; skip the blocking-pool hop.
-    let (extra, mode) = if args_fn.is_none() && resolver_fn.is_none() {
-      (Vec::new(), None)
+    let (overrides, mode) = if overrides_fn.is_none() && resolver_fn.is_none() {
+      (crate::options::InstanceOverrides::default(), None)
     } else {
-      match tokio::task::spawn_blocking(move || {
-        let extra = args_fn.map(|f| f(&name)).unwrap_or_default();
+      let joined = tokio::task::spawn_blocking(move || {
+        let overrides = overrides_fn.map_or_else(|| Ok(crate::options::InstanceOverrides::default()), |f| f(&name));
         let mode = resolver_fn.and_then(|f| f(&name));
-        (extra, mode)
+        (overrides, mode)
       })
-      .await
-      {
-        Ok(pair) => pair,
+      .await;
+      match joined {
+        Ok((Ok(overrides), mode)) => (overrides, mode),
+        Ok((Err(message), _)) => return Err(FerriError::backend(message)),
         Err(e) => {
-          tracing::warn!(target: "ferridriver::state", error = %e, "instance args/resolver task failed");
-          (Vec::new(), None)
+          return Err(FerriError::backend(format!(
+            "instance overrides/resolver task failed for '{instance}': {e}"
+          )));
         },
       }
     };
-    all_extra.extend(extra);
+
+    let mut args = self.base_args.clone();
+    args.extend(overrides.args);
 
     // Match the browser window to the viewport unless the caller
     // already pinned a size.
-    if !all_extra.iter().any(|a| a.starts_with("--window-size"))
+    if !args.iter().any(|a| a.starts_with("--window-size"))
       && let Some(ref vp) = self.default_viewport
     {
-      all_extra.push(format!("--window-size={},{}", vp.width, vp.height));
+      args.push(format!("--window-size={},{}", vp.width, vp.height));
     }
-    (mode.unwrap_or_else(|| self.connect_mode.clone()), all_extra)
+
+    let effective = EffectiveLaunch {
+      backend_kind: overrides.backend.unwrap_or(self.backend_kind),
+      headless: overrides.headless.unwrap_or(self.headless),
+      chromium_path: overrides.executable_path.unwrap_or_else(|| self.chromium_path.clone()),
+      user_data_dir: overrides.user_data_dir.or_else(|| self.user_data_dir.clone()),
+      args,
+      env: overrides.env,
+      ignore_default_args: overrides.ignore_default_args,
+    };
+    Ok((mode.unwrap_or_else(|| self.connect_mode.clone()), effective))
   }
 
-  async fn launch_browser(&self, all_extra: &[String]) -> Result<AnyBrowser> {
-    Ok(match self.backend_kind {
+  async fn launch_browser(&self, eff: &EffectiveLaunch) -> Result<AnyBrowser> {
+    Ok(match eff.backend_kind {
       BackendKind::CdpPipe => {
         use crate::backend::cdp::{CdpBrowser, pipe::PipeTransport};
-        let flags = chrome_flags(self.headless, all_extra);
-        let browser = match &self.user_data_dir {
+        let flags = chrome_flags_with(eff.headless, &eff.args, eff.ignore_default_args.as_ref());
+        let browser = match &eff.user_data_dir {
           Some(dir) => {
             CdpBrowser::<PipeTransport>::launch_with_flags_in_dir(
-              &self.chromium_path,
+              &eff.chromium_path,
               &flags,
               std::path::Path::new(dir),
+              &eff.env,
             )
             .await?
           },
-          None => CdpBrowser::<PipeTransport>::launch_with_flags(&self.chromium_path, &flags).await?,
+          None => CdpBrowser::<PipeTransport>::launch_with_flags(&eff.chromium_path, &flags, &eff.env).await?,
         };
         AnyBrowser::CdpPipe(browser)
       },
       BackendKind::CdpRaw => {
         use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
-        let flags = chrome_flags(self.headless, all_extra);
-        let browser = match &self.user_data_dir {
+        let flags = chrome_flags_with(eff.headless, &eff.args, eff.ignore_default_args.as_ref());
+        let browser = match &eff.user_data_dir {
           Some(dir) => {
             Box::pin(CdpBrowser::<WsTransport>::launch_with_flags_in_dir(
-              &self.chromium_path,
+              &eff.chromium_path,
               &flags,
               std::path::Path::new(dir),
+              &eff.env,
             ))
             .await?
           },
-          None => CdpBrowser::<WsTransport>::launch_with_flags(&self.chromium_path, &flags).await?,
+          None => CdpBrowser::<WsTransport>::launch_with_flags(&eff.chromium_path, &flags, &eff.env).await?,
         };
         AnyBrowser::CdpRaw(browser)
       },
       BackendKind::WebKit => {
         use crate::backend::webkit::{LaunchConfig, WebKitBrowser};
+        eff.reject_ignore_default_args("webkit")?;
         let config = LaunchConfig {
-          headless: self.headless,
+          headless: eff.headless,
+          env: eff.env.clone(),
+          user_data_dir: eff.user_data_dir.as_ref().map(std::path::PathBuf::from),
+          extra_args: eff.args.clone(),
           ..LaunchConfig::default()
         };
         AnyBrowser::WebKit(Box::pin(WebKitBrowser::launch(&config)).await?)
       },
       BackendKind::Bidi => {
         use crate::backend::bidi::BidiBrowser;
-        let mut flags = all_extra.to_vec();
-        if self.headless {
+        eff.reject_ignore_default_args("bidi")?;
+        let mut flags = eff.args.clone();
+        if eff.headless {
           flags.push("--headless".into());
         }
-        AnyBrowser::Bidi(Box::pin(BidiBrowser::launch_with_flags(&self.chromium_path, &flags)).await?)
+        AnyBrowser::Bidi(
+          Box::pin(BidiBrowser::launch_with_flags(
+            &eff.chromium_path,
+            &flags,
+            &eff.env,
+            eff.user_data_dir.as_deref().map(std::path::Path::new),
+          ))
+          .await?,
+        )
       },
     })
   }
+}
+
+/// Ask a resolver about the full session key, then about the instance
+/// half of a composite key (`"staging:default"` → `"staging"`).
+fn resolve_with_prefix(resolver: &InstanceResolverFn, instance_name: &str) -> Option<ConnectMode> {
+  if let Some(mode) = resolver(instance_name) {
+    return Some(mode);
+  }
+  let prefix = instance_name.split(':').next()?;
+  if prefix == instance_name {
+    return None;
+  }
+  resolver(prefix)
 }
 
 /// Attach to a browser someone else is running. `ConnectUrl` and
@@ -897,9 +1052,9 @@ impl BrowserState {
     }
 
     let spec = self.launch_spec();
-    let (mode, all_extra) = spec.resolve_off_lock(instance_name).await;
+    let (mode, effective) = spec.resolve_off_lock(instance_name).await?;
     let browser = match &mode {
-      ConnectMode::Launch => spec.launch_browser(&all_extra).await?,
+      ConnectMode::Launch => spec.launch_browser(&effective).await?,
       other => connect_browser(other).await?,
     };
     let adopt_pages = !matches!(mode, ConnectMode::Launch);
@@ -977,7 +1132,7 @@ impl BrowserState {
     channel: &str,
     user_data_dir: Option<&str>,
   ) -> Result<usize> {
-    if let Some(resolved) = self.resolve_via_instance_fn(instance_name) {
+    if let Some(resolved) = self.resolve_via_instance_fn_off_thread(instance_name).await {
       return self.connect_with_resolved_mode(instance_name, resolved).await;
     }
 
@@ -985,23 +1140,22 @@ impl BrowserState {
     Box::pin(self.connect_to_url(instance_name, &ws_url)).await
   }
 
-  /// Try the instance resolver with the full name, then with the prefix before `:`.
-  fn resolve_via_instance_fn(&self, instance_name: &str) -> Option<ConnectMode> {
-    let resolver = self.instance_resolver_fn.as_ref()?;
-
-    // Try full name first
-    if let Some(mode) = resolver(instance_name) {
-      return Some(mode);
+  /// [`Self::resolve_via_instance_fn`] on the blocking pool.
+  ///
+  /// The resolver shells out (a discover command may poll for a browser)
+  /// and TCP-probes endpoints. The launch path already moved it off the
+  /// reactor; this path called it inline, so one cold `connect` stalled
+  /// every other task on that worker thread.
+  async fn resolve_via_instance_fn_off_thread(&self, instance_name: &str) -> Option<ConnectMode> {
+    let resolver = self.instance_resolver_fn.clone()?;
+    let name = instance_name.to_string();
+    match tokio::task::spawn_blocking(move || resolve_with_prefix(&resolver, &name)).await {
+      Ok(mode) => mode,
+      Err(e) => {
+        tracing::warn!(target: "ferridriver::state", error = %e, "instance resolver task failed");
+        None
+      },
     }
-
-    // Try prefix before ':' (composite keys like "staging:default")
-    if let Some(prefix) = instance_name.split(':').next()
-      && prefix != instance_name
-    {
-      return resolver(prefix);
-    }
-
-    None
   }
 
   /// Connect using a resolved mode from the instance resolver.
@@ -1054,7 +1208,7 @@ impl BrowserState {
   /// Create a new page in the given context. Returns the `AnyPage` directly
   /// (no second lookup needed).
   pub async fn open_page(&mut self, context: &str, url: &str) -> Result<AnyPage> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     Box::pin(self.open_page_keyed(&key, url)).await
   }
 
@@ -1106,6 +1260,11 @@ impl BrowserState {
 
     let inst = self.instance_mut(&key.instance)?;
     let ctx = inst.context_mut(&key.context);
+    // Opening a tab is the one moment a `&mut` on the context is
+    // guaranteed, so it is where the tabs the browser already closed get
+    // dropped. Otherwise a long session's `pages` only ever grows and
+    // every command scans past the corpses.
+    ctx.prune_closed_pages();
     if let Some(id) = browser_context_id {
       ctx.cdp_context_id = Some(id);
     }
@@ -1225,7 +1384,7 @@ impl BrowserState {
   ///
   /// Returns an error if the instance, context, or page does not exist.
   pub fn active_page(&self, context: &str) -> Result<&AnyPage> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     let inst = self.instance(&key.instance)?;
     // A browser killed from outside leaves its pages in place, and
     // handing one back sends every later command down a dead transport
@@ -1238,16 +1397,28 @@ impl BrowserState {
       ))));
     }
     let ctx = inst.context(&key.context)?;
-    ctx
-      .active_page()
-      .ok_or_else(|| FerriError::invalid_argument("context", format!("no pages in context '{context}'")))
+    if let Some(page) = ctx.active_page() {
+      return Ok(page);
+    }
+    // Distinguish "never had a page" from "every page has been closed": the
+    // latter is a live context whose tabs are gone, and reporting it as an
+    // invalid argument sent callers looking for a bad context name.
+    if !ctx.pages.is_empty() {
+      return Err(FerriError::target_closed(Some(format!(
+        "every page in context '{context}' has been closed"
+      ))));
+    }
+    Err(FerriError::invalid_argument(
+      "context",
+      format!("no pages in context '{context}'"),
+    ))
   }
 
   /// # Errors
   ///
   /// Returns an error if the instance or context does not exist.
   pub fn context(&self, context: &str) -> Result<&BrowserContext> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     let inst = self.instance(&key.instance)?;
     inst.context(&key.context)
   }
@@ -1256,7 +1427,7 @@ impl BrowserState {
   ///
   /// Returns an error if the instance or context does not exist.
   pub fn context_mut_checked(&mut self, context: &str) -> Result<&mut BrowserContext> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     let inst = self.instance_mut(&key.instance)?;
     inst.context_mut_checked(&key.context)
   }
@@ -1307,7 +1478,7 @@ impl BrowserState {
   /// Remove a context. If it has a CDP browser context ID, dispose it
   /// (one CDP call kills the context + all pages, matching Playwright's doClose).
   pub async fn remove_context(&mut self, context: &str) {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     if let Some(inst) = self.instances.get_mut(&*key.instance) {
       let ctx_id = inst.context(&key.context).ok().and_then(|c| c.cdp_context_id.clone());
       // One call kills a real browser context and all its pages
@@ -1333,7 +1504,7 @@ impl BrowserState {
   ///
   /// Returns an error if the context does not exist or the page index is out of range.
   pub fn select_page(&mut self, context: &str, page_idx: usize) -> Result<()> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     let inst = self.instance_mut(&key.instance)?;
     let ctx = inst.context_mut_checked(&key.context)?;
     if page_idx >= ctx.pages.len() {
@@ -1357,7 +1528,7 @@ impl BrowserState {
   ///
   /// Returns an error if the context does not exist or the index is out of range.
   pub async fn close_page(&mut self, context: &str, page_idx: usize) -> Result<()> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     let inst = self.instance_mut(&key.instance)?;
     let ctx = inst.context_mut_checked(&key.context)?;
     if page_idx >= ctx.pages.len() {
@@ -1412,7 +1583,7 @@ impl BrowserState {
 
   /// Store a new ref map for the given context (atomic, no `&mut self` needed).
   pub fn set_ref_map(&self, context: &str, ref_map: HashMap<String, i64>) {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     if let Some(inst) = self.instances.get(&*key.instance)
       && let Some(ctx) = inst.contexts.get(&*key.context)
     {
@@ -1422,7 +1593,7 @@ impl BrowserState {
 
   #[must_use]
   pub fn ref_map(&self, context: &str) -> HashMap<String, i64> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     self
       .instances
       .get(&*key.instance)
@@ -1434,7 +1605,7 @@ impl BrowserState {
   /// Get an `Arc` handle to a context's ref map `ArcSwap` for lock-free access.
   #[must_use]
   pub fn ref_map_handle(&self, context: &str) -> Option<std::sync::Arc<arc_swap::ArcSwap<HashMap<String, i64>>>> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     self
       .instances
       .get(&*key.instance)
@@ -1445,7 +1616,7 @@ impl BrowserState {
   /// Get `Arc` handles to a context's log collections for lock-free access.
   #[must_use]
   pub fn log_handles(&self, context: &str) -> Option<ContextLogHandles> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     self
       .instances
       .get(&*key.instance)
@@ -1466,7 +1637,7 @@ impl BrowserState {
     level: Option<&str>,
     limit: usize,
   ) -> Result<Vec<ConsoleMessage>> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     let inst = self.instance(&key.instance)?;
     let ctx = inst.context(&key.context)?;
     Ok(ctx.console_messages(level, limit).await)
@@ -1476,7 +1647,7 @@ impl BrowserState {
   ///
   /// Returns an error if the instance or context does not exist.
   pub async fn network_requests(&self, context: &str, limit: usize) -> Result<Vec<Request>> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     let inst = self.instance(&key.instance)?;
     let ctx = inst.context(&key.context)?;
     Ok(ctx.network_requests(limit).await)
@@ -1486,10 +1657,15 @@ impl BrowserState {
   ///
   /// Returns an error if the instance or context does not exist, or page discovery fails.
   pub async fn refresh_pages(&mut self, context: &str) -> Result<usize> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     let inst = self.instance_mut(&key.instance)?;
     let current_pages = Box::pin(inst.browser.pages()).await?;
     let ctx = inst.context_mut_checked(&key.context)?;
+    // A refresh exists to reconcile with what the browser actually has
+    // open, so the closed tabs go first — counting them would make
+    // `current_pages.len() > existing_count` false and silently skip the
+    // adoption of pages that really are new.
+    ctx.prune_closed_pages();
 
     let existing_count = ctx.pages.len();
     if current_pages.len() > existing_count {
@@ -1505,7 +1681,7 @@ impl BrowserState {
   ///
   /// Returns an error if the instance or context does not exist.
   pub async fn dialog_messages(&self, context: &str, limit: usize) -> Result<Vec<DialogEvent>> {
-    let key = SessionKey::parse(context);
+    let key = self.session_key(context);
     let inst = self.instance(&key.instance)?;
     let ctx = inst.context(&key.context)?;
     Ok(ctx.dialog_messages(limit).await)
@@ -1774,25 +1950,71 @@ fn chrome_default_user_data_dir(channel: &str) -> Result<std::path::PathBuf> {
 /// Build Chrome flags matching Playwright's launch sequence exactly.
 /// Order: chromiumSwitches → headless flags → sandbox → user args.
 pub fn chrome_flags(headless: bool, extra_args: &[String]) -> Vec<String> {
+  chrome_flags_with(headless, extra_args, None)
+}
+
+/// [`chrome_flags`] with Playwright's `ignoreDefaultArgs`.
+///
+/// Every built-in switch is a policy decision that can conflict with a
+/// caller's environment (a proxy that needs background networking, an
+/// extension that needs the sandbox). Playwright has always let a
+/// caller drop them; ferridriver carried the option on `LaunchPlan` and
+/// then applied it nowhere, so the flags were unconditional.
+#[must_use]
+pub fn chrome_flags_with(
+  headless: bool,
+  extra_args: &[String],
+  ignore: Option<&crate::options::IgnoreDefaultArgs>,
+) -> Vec<String> {
+  use crate::options::IgnoreDefaultArgs;
+
+  let drop_all = matches!(ignore, Some(IgnoreDefaultArgs::All));
+  let dropped: &[String] = match ignore {
+    Some(IgnoreDefaultArgs::Some(list)) => list,
+    _ => &[],
+  };
+  // Compare on the switch NAME so `--foo=bar` is dropped by `--foo`.
+  let is_dropped = |flag: &str| {
+    let name = flag.split('=').next().unwrap_or(flag);
+    dropped.iter().any(|d| {
+      let d_name = d.split('=').next().unwrap_or(d);
+      d_name == name
+    })
+  };
+
   let mut flags: Vec<String> = Vec::with_capacity(40 + extra_args.len());
 
   // 1. Base chromiumSwitches (from Playwright's chromiumSwitches.ts)
-  for f in CHROMIUM_SWITCHES {
-    flags.push((*f).into());
+  if !drop_all {
+    for f in CHROMIUM_SWITCHES {
+      if !is_dropped(f) {
+        flags.push((*f).into());
+      }
+    }
   }
 
   // 2. Always added after base switches
-  flags.push("--enable-unsafe-swiftshader".into());
+  if !drop_all && !is_dropped("--enable-unsafe-swiftshader") {
+    flags.push("--enable-unsafe-swiftshader".into());
+  }
 
   // 3. Headless flags (Playwright adds these when headless=true).
   // Playwright passes bare `--headless` too — Chrome maps to
   // `--headless=old` on full chrome. The 2x perf gap on Regular
   // Chrome lives elsewhere, not in this flag (verified via
   // playwright-core/lib/server/chromium/chromium.js:288).
-  if headless {
-    flags.push("--headless".into());
-    flags.push("--hide-scrollbars".into());
-    flags.push("--mute-audio".into());
+  //
+  // Filtered by `ignoreDefaultArgs` like every other section: Playwright
+  // builds the headless switches inside `defaultArgs()`, so
+  // `ignoreDefaultArgs: true` drops them there too. Gating only sections
+  // 1/2/4 left the caller with a browser that was still forced headless
+  // (and still colour-scheme-pinned) after asking for no defaults at all.
+  if headless && !drop_all {
+    for f in ["--headless", "--hide-scrollbars", "--mute-audio"] {
+      if !is_dropped(f) {
+        flags.push(f.into());
+      }
+    }
     // `preferredColorScheme=1` pins Blink's "no override" baseline to
     // light. Without it, headless Chrome inherits the host's GTK / KDE
     // dark-mode setting, which causes `matchMedia('(prefers-color-scheme:
@@ -1803,15 +2025,20 @@ pub fn chrome_flags(headless: bool, extra_args: &[String]) -> Vec<String> {
     // light-mode hosts otherwise. Playwright's own chromiumSwitches
     // skip this because their CI runs on light-mode hosts; we cover
     // both.
-    flags.push(
-      "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4,preferredColorScheme=1".into(),
-    );
+    if !is_dropped("--blink-settings") {
+      flags.push(
+        "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4,preferredColorScheme=1".into(),
+      );
+    }
   }
 
   // 4. Sandbox control (Playwright disables by default unless chromiumSandbox=true)
-  flags.push("--no-sandbox".into());
+  if !drop_all && !is_dropped("--no-sandbox") {
+    flags.push("--no-sandbox".into());
+  }
 
-  // 5. User-provided args
+  // 5. User-provided args. Never filtered: `ignoreDefaultArgs` names
+  // DEFAULTS to drop, so an explicitly-passed arg still wins.
   for arg in extra_args {
     flags.push(arg.clone());
   }
@@ -2400,19 +2627,233 @@ mod tests {
   }
 
   #[test]
-  fn test_instance_args_fn_independent_of_resolver() {
+  fn bare_session_key_selects_a_configured_instance() {
+    let mut state = test_state(BackendKind::CdpPipe);
+    state.set_known_instances(["staging".to_string(), "dev".to_string()]);
+
+    // The whole point: `session: "staging"` used to mean "a context
+    // named staging on the default instance", i.e. a browser with no
+    // environment mapping at all.
+    let key = state.session_key("staging");
+    assert_eq!(&*key.instance, "staging");
+    assert_eq!(&*key.context, "default");
+
+    // A name that is NOT an instance keeps the context meaning.
+    let key = state.session_key("my-scratch-session");
+    assert_eq!(&*key.instance, "default");
+    assert_eq!(&*key.context, "my-scratch-session");
+
+    // Composite keys are unaffected.
+    let key = state.session_key("staging:admin");
+    assert_eq!(&*key.instance, "staging");
+    assert_eq!(&*key.context, "admin");
+
+    // `default` stays the default pair.
+    let key = state.session_key("default");
+    assert_eq!(&*key.instance, "default");
+    assert_eq!(&*key.context, "default");
+  }
+
+  /// The vocabulary is per-state, so two states in one process disagree
+  /// about a bare key without either one leaking into the other — which
+  /// a process-global registry could not express.
+  #[test]
+  fn the_instance_vocabulary_is_per_state() {
+    let mut with_staging = test_state(BackendKind::CdpPipe);
+    with_staging.set_known_instances(["staging".to_string()]);
+    let plain = test_state(BackendKind::CdpPipe);
+
+    assert_eq!(&*with_staging.session_key("staging").instance, "staging");
+    assert_eq!(&*plain.session_key("staging").instance, "default");
+    assert_eq!(&*plain.session_key("staging").context, "staging");
+    // The bare, vocabulary-free parse keeps the context meaning too.
+    assert_eq!(&*SessionKey::parse("staging").context, "staging");
+  }
+
+  #[test]
+  fn test_instance_overrides_fn_independent_of_resolver() {
     let mut state = test_state(BackendKind::CdpPipe);
 
-    state.set_instance_args_fn(Arc::new(|instance| vec![format!("--window-name={instance}")]));
+    state.set_instance_overrides_fn(Arc::new(|instance| {
+      Ok(crate::options::InstanceOverrides {
+        args: vec![format!("--window-name={instance}")],
+        user_data_dir: Some(format!("/profiles/{instance}")),
+        headless: Some(true),
+        ..Default::default()
+      })
+    }));
 
     state.set_instance_resolver_fn(Arc::new(|_| None));
 
     // Both callbacks set independently
-    let args = state.instance_args_fn.as_ref().unwrap()("dev");
-    assert_eq!(args, vec!["--window-name=dev"]);
+    let overrides = state.instance_overrides_fn.as_ref().unwrap()("dev").expect("overrides");
+    assert_eq!(overrides.args, vec!["--window-name=dev"]);
+    assert_eq!(overrides.user_data_dir.as_deref(), Some("/profiles/dev"));
+    assert_eq!(overrides.headless, Some(true));
 
     let resolved = state.instance_resolver_fn.as_ref().unwrap()("dev");
     assert!(resolved.is_none());
+  }
+
+  #[tokio::test(flavor = "multi_thread")]
+  async fn per_instance_overrides_reach_the_effective_launch() {
+    let mut state = test_state(BackendKind::CdpPipe);
+    state.headless = false;
+    state.set_instance_overrides_fn(Arc::new(|instance| {
+      Ok(crate::options::InstanceOverrides {
+        args: vec!["--instance-flag".into()],
+        user_data_dir: Some(format!("/profiles/{instance}")),
+        executable_path: Some("/bin/other-chrome".into()),
+        headless: Some(true),
+        backend: Some(BackendKind::CdpRaw),
+        env: [("APP_ENV".to_string(), instance.to_string())].into_iter().collect(),
+        ignore_default_args: Some(crate::options::IgnoreDefaultArgs::Some(vec!["--no-sandbox".into()])),
+      })
+    }));
+
+    let spec = state.launch_spec();
+    let (mode, eff) = spec.resolve_off_lock("staging").await.expect("resolve");
+
+    assert!(matches!(mode, ConnectMode::Launch));
+    assert!(eff.args.contains(&"--instance-flag".to_string()));
+    assert_eq!(eff.user_data_dir.as_deref(), Some("/profiles/staging"));
+    assert_eq!(eff.chromium_path, "/bin/other-chrome");
+    assert!(eff.headless, "instance override beats the state default");
+    assert_eq!(eff.backend_kind, BackendKind::CdpRaw);
+    assert_eq!(eff.env.get("APP_ENV").map(String::as_str), Some("staging"));
+
+    // `ignoreDefaultArgs` must actually drop the switch.
+    let flags = chrome_flags_with(eff.headless, &eff.args, eff.ignore_default_args.as_ref());
+    assert!(!flags.iter().any(|f| f == "--no-sandbox"), "dropped: {flags:?}");
+    assert!(flags.iter().any(|f| f == "--instance-flag"), "user args survive");
+  }
+
+  #[tokio::test(flavor = "multi_thread")]
+  async fn overrides_callback_error_aborts_the_launch() {
+    let mut state = test_state(BackendKind::CdpPipe);
+    state.set_instance_overrides_fn(Arc::new(|instance| {
+      Err(format!("no environment mapped for '{instance}'"))
+    }));
+
+    let spec = state.launch_spec();
+    // Silently launching an unconfigured browser is the failure this
+    // prevents: the caller would be on the wrong environment.
+    let err = spec.resolve_off_lock("bogus").await.expect_err("must abort");
+    assert!(err.to_string().contains("no environment mapped"), "{err}");
+  }
+
+  #[test]
+  fn ignore_default_args_all_drops_every_builtin() {
+    let flags = chrome_flags_with(
+      false,
+      &["--keep-me".to_string()],
+      Some(&crate::options::IgnoreDefaultArgs::All),
+    );
+    assert_eq!(flags, vec!["--keep-me"]);
+  }
+
+  /// The headless switches are part of Playwright's `defaultArgs()`, so
+  /// `ignoreDefaultArgs: true` drops them too. Gating only the other
+  /// sections left a caller who asked for no defaults with a browser
+  /// still forced headless and still colour-scheme-pinned.
+  #[test]
+  fn ignore_default_args_all_drops_the_headless_switches_too() {
+    let flags = chrome_flags_with(
+      true,
+      &["--keep-me".to_string()],
+      Some(&crate::options::IgnoreDefaultArgs::All),
+    );
+    assert_eq!(flags, vec!["--keep-me"], "got: {flags:?}");
+  }
+
+  #[test]
+  fn a_named_headless_switch_can_be_dropped_on_its_own() {
+    let flags = chrome_flags_with(
+      true,
+      &[],
+      Some(&crate::options::IgnoreDefaultArgs::Some(vec![
+        "--hide-scrollbars".to_string(),
+      ])),
+    );
+    assert!(!flags.iter().any(|f| f == "--hide-scrollbars"), "got: {flags:?}");
+    assert!(flags.iter().any(|f| f == "--headless"), "the rest survive");
+  }
+
+  /// `ignoreDefaultArgs` filters a Chromium switch list that the Firefox
+  /// and `WebKit` launch paths do not have, so accepting it there and
+  /// applying it nowhere would tell the caller a switch was dropped when
+  /// nothing was.
+  #[tokio::test(flavor = "multi_thread")]
+  async fn ignore_default_args_is_refused_on_the_backends_without_defaults() {
+    for backend in [BackendKind::Bidi, BackendKind::WebKit] {
+      let mut state = test_state(backend);
+      state.set_instance_overrides_fn(Arc::new(|_| {
+        Ok(crate::options::InstanceOverrides {
+          ignore_default_args: Some(crate::options::IgnoreDefaultArgs::All),
+          ..Default::default()
+        })
+      }));
+      let spec = state.launch_spec();
+      let (_, eff) = spec.resolve_off_lock("x").await.expect("resolve");
+      let Err(err) = spec.launch_browser(&eff).await else {
+        panic!("{backend:?} must refuse ignoreDefaultArgs rather than drop it");
+      };
+      assert!(
+        matches!(err, FerriError::Unsupported { .. }),
+        "{backend:?} must report Unsupported, got {err}"
+      );
+      assert!(err.to_string().contains("ignoreDefaultArgs"), "{err}");
+    }
+  }
+
+  /// An instance's profile directory and args have to reach EVERY
+  /// backend's launch config, not just the Chromium ones — a config that
+  /// is accepted, validated and then dropped is worse than a rejected
+  /// one.
+  #[tokio::test(flavor = "multi_thread")]
+  async fn webkit_carries_the_instance_profile_and_args() {
+    let mut state = test_state(BackendKind::WebKit);
+    state.set_instance_overrides_fn(Arc::new(|instance| {
+      Ok(crate::options::InstanceOverrides {
+        args: vec!["--instance-flag".into()],
+        user_data_dir: Some(format!("/profiles/{instance}")),
+        ..Default::default()
+      })
+    }));
+    let spec = state.launch_spec();
+    let (_, eff) = spec.resolve_off_lock("staging").await.expect("resolve");
+
+    // The launch itself needs a real WebKit build, so assert on the
+    // config the launch would be given.
+    let config = crate::backend::webkit::LaunchConfig {
+      headless: eff.headless,
+      env: eff.env.clone(),
+      user_data_dir: eff.user_data_dir.as_ref().map(std::path::PathBuf::from),
+      extra_args: eff.args.clone(),
+      ..Default::default()
+    };
+    assert_eq!(
+      config.user_data_dir.as_deref(),
+      Some(std::path::Path::new("/profiles/staging"))
+    );
+    assert!(config.extra_args.contains(&"--instance-flag".to_string()));
+  }
+
+  #[test]
+  fn ignore_default_args_matches_on_switch_name() {
+    // A default carrying a value is dropped by its bare name.
+    let flags = chrome_flags_with(
+      false,
+      &[],
+      Some(&crate::options::IgnoreDefaultArgs::Some(vec![
+        "--disable-features".to_string(),
+      ])),
+    );
+    assert!(
+      !flags.iter().any(|f| f.starts_with("--disable-features")),
+      "got: {flags:?}"
+    );
+    assert!(flags.iter().any(|f| f == "--no-sandbox"), "others survive");
   }
 
   #[tokio::test]

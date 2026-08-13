@@ -16,8 +16,7 @@ use crate::shard;
 use crate::worker::{Worker, WorkerTestResult};
 
 use ferridriver::Browser;
-use ferridriver::backend::BackendKind;
-use ferridriver::options::{BrowserKind, LaunchPlan};
+use ferridriver::options::LaunchPlan;
 use ferridriver::state::{BrowserState, ConnectMode};
 
 /// Aggregate outcome of one `execute()` pass. The multi-project orchestrator
@@ -853,7 +852,16 @@ impl TestRunner {
     let (result_tx, mut result_rx) = mpsc::channel::<WorkerTestResult>(256);
 
     let mut worker_handles = Vec::new();
-    let launch_plan = build_launch_plan(&self.config.browser);
+    let launch_plan = match build_launch_plan(&self.config.browser) {
+      Ok(plan) => plan,
+      Err(message) => {
+        eprintln!("Error: {message}");
+        return ExecuteSummary {
+          exit_code: 1,
+          ..ExecuteSummary::default()
+        };
+      },
+    };
     let worker_event_bus = reporting_enabled.then(|| event_bus.clone());
 
     for worker_id in 0..num_workers {
@@ -1051,7 +1059,13 @@ impl TestRunner {
     self.export_base_url_env();
 
     // Launch browser once — reuse across all watch cycles.
-    let launch_plan = build_launch_plan(&self.config.browser);
+    let launch_plan = match build_launch_plan(&self.config.browser) {
+      Ok(plan) => plan,
+      Err(message) => {
+        eprintln!("Error: {message}");
+        return 1;
+      },
+    };
     let browser = match launch_with_plan(launch_plan).await {
       Ok(b) => Arc::new(b),
       Err(e) => {
@@ -1304,7 +1318,13 @@ impl TestRunner {
     println!("\n  ferridriver UI mode\n\n  http://{addr}\n");
 
     // Launch browser once — reuse across all UI-triggered runs.
-    let launch_plan = build_launch_plan(&self.config.browser);
+    let launch_plan = match build_launch_plan(&self.config.browser) {
+      Ok(plan) => plan,
+      Err(message) => {
+        eprintln!("Error: {message}");
+        return 1;
+      },
+    };
     let browser = match launch_with_plan(launch_plan).await {
       Ok(b) => Arc::new(b),
       Err(e) => {
@@ -1676,20 +1696,17 @@ fn filter_plan_for_project(plan: &mut TestPlan, config: &TestConfig, project: &P
   plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
 }
 
-fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> LaunchPlan {
-  // BrowserConfig is already normalized (browser↔backend consistent).
-  let backend = match browser_config.backend.as_str() {
-    "cdp-raw" => BackendKind::CdpRaw,
-    "webkit" => BackendKind::WebKit,
-    "bidi" => BackendKind::Bidi,
-    _ => BackendKind::CdpPipe,
-  };
-
-  let kind = match browser_config.browser.as_str() {
-    "firefox" => BrowserKind::Firefox,
-    "webkit" => BrowserKind::WebKit,
-    _ => BrowserKind::Chromium,
-  };
+/// Build the launch plan for a run.
+///
+/// # Errors
+///
+/// Returns a message when the configured instance cannot be resolved
+/// (unusable name, failing args command, proxy credentials).
+fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> Result<LaunchPlan, String> {
+  // BrowserConfig is already normalized (browser↔backend consistent)
+  // and validated at load, so the mapping cannot silently downgrade an
+  // unrecognised backend here.
+  let (backend, kind) = browser_config.resolve_kinds();
 
   let mut args = browser_config.args.clone();
   // Proxy launch args.
@@ -1712,11 +1729,23 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> LaunchPla
   // defaults to `!process.env.PWDEBUG`).
   let headless = browser_config.headless || std::env::var("CI").is_ok();
 
-  LaunchPlan {
-    backend,
+  // Instance overrides, when the config (or the project) selected a
+  // named instance. This is what lets a suite run against the same
+  // environment an MCP session drives, instead of hard-coding that
+  // environment's flags into `args`.
+  let overrides = browser_config.instance_overrides()?;
+  args.extend(overrides.args);
+
+  Ok(LaunchPlan {
+    backend: overrides.backend.unwrap_or(backend),
     kind,
-    headless,
-    executable_path: browser_config.executable_path.clone(),
+    headless: overrides.headless.unwrap_or(headless),
+    executable_path: overrides
+      .executable_path
+      .or_else(|| browser_config.executable_path.clone()),
+    user_data_dir: overrides.user_data_dir,
+    env: (!overrides.env.is_empty()).then_some(overrides.env),
+    ignore_default_args: overrides.ignore_default_args,
     args,
     default_viewport: browser_config
       .viewport
@@ -1727,7 +1756,7 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> LaunchPla
         ..Default::default()
       }),
     ..Default::default()
-  }
+  })
 }
 
 /// Launch a browser using the runner's internal `LaunchPlan`. Wraps

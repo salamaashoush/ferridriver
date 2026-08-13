@@ -88,6 +88,15 @@ impl McpClient {
         "RUST_LOG",
         std::env::var("RUST_LOG").unwrap_or_else(|_| "ferridriver=debug,ferridriver_mcp=debug".into()),
       )
+      // Hermetic config: the child's cwd is inside this repository, so
+      // without this it inherits the repo-root `ferridriver.toml` —
+      // whose `[test].steps` glob points at the e2e suite's TypeScript
+      // steps and makes `run_bdd` select the JS step engine instead of
+      // the built-in Rust steps these tests assert on. A test that
+      // depended on "no config exists above my cwd" was only ever
+      // accidentally hermetic. Cases that WANT a config pass one
+      // explicitly via `--config`, which still layers on top.
+      .env("FERRIDRIVER_NO_INHERIT", "1")
       // Put the MCP child (and every Chrome / Firefox / WebKit host
       // it spawns) into its own process group, with the child as
       // group leader. `Drop` then `kill(-pgid, …)`s the whole tree

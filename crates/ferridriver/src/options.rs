@@ -1874,6 +1874,34 @@ pub enum IgnoreDefaultArgs {
   Some(Vec<String>),
 }
 
+/// Launch settings that apply to ONE named browser instance, layered
+/// over the state's base plan.
+///
+/// A consumer (the MCP server's config, the test runner's project
+/// routing) supplies these per instance name. Before this, the callback
+/// could only contribute extra arguments, so an instance could not have
+/// its own profile directory, binary, headless mode, backend or
+/// environment — which is why every launch got a throwaway profile and
+/// lost its cookies on restart.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct InstanceOverrides {
+  /// Extra browser arguments, appended to the base args.
+  pub args: Vec<String>,
+  /// `--user-data-dir` to launch with (persistent profile).
+  pub user_data_dir: Option<String>,
+  /// Browser binary for this instance.
+  pub executable_path: Option<String>,
+  /// Headless override.
+  pub headless: Option<bool>,
+  /// Backend override: instances may run different engines in one
+  /// process, since each instance owns its own browser handle.
+  pub backend: Option<crate::backend::BackendKind>,
+  /// Extra environment variables for the browser process.
+  pub env: rustc_hash::FxHashMap<String, String>,
+  /// Built-in switches to drop for this instance.
+  pub ignore_default_args: Option<IgnoreDefaultArgs>,
+}
+
 /// Connect-to-server options bag for `browserType.connect(wsEndpoint, options)`.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectOptions {

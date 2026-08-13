@@ -33,9 +33,16 @@ async fn extension_files_merge_into_the_step_bundle() {
   )
   .expect("write extension file");
 
-  let bundle = bundle_steps_with(&["steps/**/*.js".to_string()], &["./ext".to_string()], &dir)
-    .await
-    .expect("bundle steps + extensions");
+  let bundle = bundle_steps_with(
+    &["steps/**/*.js".to_string()],
+    &[ferridriver_script::ExtensionSpec {
+      spec: "./ext".to_string(),
+      base_dir: dir.clone(),
+    }],
+    &dir,
+  )
+  .await
+  .expect("bundle steps + extensions");
   let session = JsBddSession::load(bundle, &dir, serde_json::Value::Null)
     .await
     .expect("load bundle into BDD session");

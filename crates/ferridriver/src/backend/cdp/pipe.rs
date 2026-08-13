@@ -30,8 +30,13 @@ impl PipeTransport {
     user_data_dir: &Path,
     extra_flags: &[String],
     owns_user_data_dir: bool,
+    env: &rustc_hash::FxHashMap<String, String>,
   ) -> Result<(Self, tokio::process::Child)> {
     let mut command = tokio::process::Command::new(chromium_path);
+    // Per-instance environment, merged onto the inherited one: an
+    // instance may need a different proxy, locale or vendor-specific
+    // variable than its siblings in the same process.
+    command.envs(env);
     command.arg(format!("--user-data-dir={}", user_data_dir.display()));
     command.arg("--remote-debugging-pipe");
     for flag in extra_flags {

@@ -1,32 +1,35 @@
 //! MCP server configuration types.
 //!
-//! Loaded from the `[mcp]` table of the unified `ferridriver.toml`. Provides
-//! data fields plus pure helper methods. The `McpServerConfig` trait
-//! implementation that wires this into the live MCP server lives in
-//! `ferridriver-mcp::config` (where the trait is defined).
+//! Loaded from the `[mcp]` table of the unified `ferridriver.toml`.
+//! Provides data fields plus pure helper methods. The `McpServerConfig`
+//! trait implementation that wires this into the live MCP server lives
+//! in `ferridriver-mcp::config` (where the trait is defined).
+//!
+//! Instance routing (per-instance launch settings and the external
+//! args/discover commands) lives in [`crate::browser`] and is shared
+//! with `[test.browser]`, so a suite and an MCP session can target the
+//! same environment through the same declarations.
 
-use std::collections::HashMap;
-use std::net::TcpStream;
-use std::path::Path;
-use std::process::Command;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
 
 use ferridriver::backend::BackendKind;
+use ferridriver::options::InstanceOverrides;
 use ferridriver::state::ConnectMode;
 use serde::{Deserialize, Serialize};
 
-/// Default TTL for cached command outputs (5 minutes).
-pub const DEFAULT_CACHE_TTL: Duration = Duration::from_mins(5);
+use crate::browser::{
+  CommandCache, IgnoreDefaultArgsConfig, InstanceConfig, ProxyConfig, RoutingView, instance_overrides_from,
+};
+use crate::command_spec::CommandSpec;
 
-/// Timeout for verifying a browser port is responsive.
-pub const DISCOVER_TCP_TIMEOUT: Duration = Duration::from_millis(500);
+pub use crate::browser::{DEFAULT_CACHE_TTL, DISCOVER_TCP_TIMEOUT, ws_endpoint_is_live};
 
 /// Default MCP server name returned by `get_info`.
 pub const DEFAULT_SERVER_NAME: &str = "ferridriver";
 
-/// Root MCP-section configuration loaded from a unified `ferridriver.{toml,yaml,json}`
-/// file under the `[mcp]` table.
+/// Root MCP-section configuration loaded from a unified
+/// `ferridriver.{toml,yaml,json}` file under the `[mcp]` table.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct McpConfig {
@@ -44,9 +47,69 @@ pub struct McpConfig {
   instructions_cache: std::sync::OnceLock<String>,
 }
 
+/// Which browser backend drives an instance.
+///
+/// A typed enum, not a string: a misspelled backend used to fall
+/// through to `cdp-pipe` silently, so a config asking for Firefox
+/// quietly drove Chrome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackendChoice {
+  CdpPipe,
+  CdpRaw,
+  Bidi,
+  #[serde(rename = "webkit")]
+  WebKit,
+}
+
+impl BackendChoice {
+  /// The wire spelling, for diagnostics and for handing back to
+  /// consumers that still take a string.
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::CdpPipe => "cdp-pipe",
+      Self::CdpRaw => "cdp-raw",
+      Self::Bidi => "bidi",
+      Self::WebKit => "webkit",
+    }
+  }
+
+  /// Every accepted spelling, for error messages.
+  pub const ALL: &'static [&'static str] = &["cdp-pipe", "cdp-raw", "bidi", "webkit"];
+
+  /// Parse a wire spelling.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error naming the bad value and listing the valid ones.
+  /// Callers must not fall back to a default: picking `cdp-pipe` for a
+  /// typo is how a run silently drives the wrong engine.
+  pub fn parse(value: &str) -> anyhow::Result<Self> {
+    match value {
+      "cdp-pipe" => Ok(Self::CdpPipe),
+      "cdp-raw" => Ok(Self::CdpRaw),
+      "bidi" => Ok(Self::Bidi),
+      "webkit" => Ok(Self::WebKit),
+      other => anyhow::bail!("unknown backend {other:?} (expected one of {})", Self::ALL.join(", ")),
+    }
+  }
+
+  /// The engine-level backend this choice selects.
+  #[must_use]
+  pub fn kind(self) -> BackendKind {
+    match self {
+      Self::CdpPipe => BackendKind::CdpPipe,
+      Self::CdpRaw => BackendKind::CdpRaw,
+      Self::Bidi => BackendKind::Bidi,
+      Self::WebKit => BackendKind::WebKit,
+    }
+  }
+}
+
 /// MCP server metadata configuration.
 #[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct ServerConfig {
   /// Server name for MCP `get_info` (default: "ferridriver").
   pub name: Option<String>,
@@ -54,54 +117,67 @@ pub struct ServerConfig {
   pub instructions: Option<String>,
   /// Additional instructions appended to the default ferridriver instructions.
   /// Ignored if `instructions` is set.
+  #[serde(alias = "extra_instructions")]
   pub extra_instructions: Option<String>,
 }
 
 /// Browser launch and per-instance configuration.
+///
+/// Keys are camelCase on the wire, matching every other section; the
+/// `snake_case` spellings this section used to require are accepted as
+/// aliases so existing files keep working.
 #[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct BrowserConfig {
-  /// Browser backend: "cdp-pipe" (default), "cdp-raw", "bidi".
-  pub backend: Option<String>,
+  /// Browser backend (default `cdp-pipe`).
+  pub backend: Option<BackendChoice>,
   /// Run browsers in headless mode.
   pub headless: Option<bool>,
-  /// Path to Chrome/Chromium executable.
+  /// Path to the browser executable.
+  #[serde(alias = "executable_path")]
   pub executable_path: Option<String>,
   /// Default viewport dimensions for new pages.
   pub viewport: Option<ViewportDef>,
-  /// Base Chrome arguments applied to ALL browser instances.
+  /// Base browser arguments applied to ALL instances.
+  #[serde(alias = "chrome_args")]
   pub chrome_args: Vec<String>,
-  /// External command to get per-instance Chrome args.
-  /// `${INSTANCE}` is replaced with the instance name.
-  /// Output: one arg per line, or JSON array of strings.
-  pub instance_args_command: Option<String>,
-  /// External command to discover a running browser instance.
-  /// `${INSTANCE}` is replaced with the instance name.
-  /// Output: a `ws://` URL on the first line, or empty for "not found".
-  pub instance_discover_command: Option<String>,
+  /// Profile directory every instance launches with unless it names its
+  /// own. Without one, each launch gets a throwaway profile, so logins
+  /// do not survive a server restart and an external browser manager
+  /// can never find the process again.
+  #[serde(alias = "user_data_dir")]
+  pub user_data_dir: Option<String>,
+  /// Environment variables for every browser process.
+  pub env: BTreeMap<String, String>,
+  /// Proxy applied to every instance.
+  pub proxy: Option<ProxyConfig>,
+  /// Built-in switches to drop for every instance.
+  #[serde(alias = "ignore_default_args")]
+  pub ignore_default_args: Option<IgnoreDefaultArgsConfig>,
+  /// Command producing per-instance browser args. A bare string is a
+  /// shell line (with `${INSTANCE}` safely quoted); an argv array or a
+  /// full spec object avoids the shell entirely and can set `timeoutMs`
+  /// / `output`.
+  #[serde(alias = "instance_args_command")]
+  pub instance_args_command: Option<CommandSpec>,
+  /// Command discovering a running browser for an instance. Output: a
+  /// `ws(s)://` URL (plain text, a JSON array, or an object with
+  /// `wsEndpoint` / `webSocketDebuggerUrl` / `url`).
+  #[serde(alias = "instance_discover_command")]
+  pub instance_discover_command: Option<CommandSpec>,
   /// Cache TTL in seconds for command outputs (default: 300).
+  #[serde(alias = "command_cache_ttl")]
   pub command_cache_ttl: Option<u64>,
   /// Static per-instance overrides (keyed by instance name).
   pub instances: HashMap<String, InstanceConfig>,
-  /// Default config for instances not listed in `instances`.
+  /// Defaults for instances not listed in `instances`.
+  #[serde(alias = "default_instance")]
   pub default_instance: Option<InstanceConfig>,
-}
-
-/// Per-instance configuration.
-#[derive(Debug, Default, Clone, Deserialize, Serialize)]
-#[serde(default)]
-pub struct InstanceConfig {
-  /// Additional Chrome arguments for this instance.
-  pub chrome_args: Vec<String>,
-  /// Explicit WebSocket URL to connect to (skip launch).
-  pub connect_url: Option<String>,
-  /// Path to Chrome profile directory for `DevToolsActivePort` discovery.
-  /// `${INSTANCE}` is replaced with the instance name. Supports `~` expansion.
-  pub discover_profile: Option<String>,
 }
 
 /// Viewport dimensions.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ViewportDef {
   pub width: Option<i64>,
   pub height: Option<i64>,
@@ -109,15 +185,14 @@ pub struct ViewportDef {
 
 impl McpConfig {
   /// Resolve the `BackendKind` from config (defaults to `CdpPipe`).
+  ///
+  /// No platform gate: the `WebKit` backend drives Playwright's
+  /// cross-platform build over `pw_run.sh`, so it is selectable on
+  /// Linux as well as macOS. Gating it to macOS turned `backend =
+  /// "webkit"` into a silent `cdp-pipe` run everywhere else.
   #[must_use]
   pub fn backend_kind(&self) -> BackendKind {
-    match self.browser.backend.as_deref() {
-      Some("cdp-raw") => BackendKind::CdpRaw,
-      Some("bidi") => BackendKind::Bidi,
-      #[cfg(target_os = "macos")]
-      Some("webkit") => BackendKind::WebKit,
-      _ => BackendKind::CdpPipe,
-    }
+    self.browser.backend.map_or(BackendKind::CdpPipe, BackendChoice::kind)
   }
 
   /// Whether headless mode is enabled (defaults to false).
@@ -134,149 +209,117 @@ impl McpConfig {
       .map_or(DEFAULT_CACHE_TTL, Duration::from_secs)
   }
 
-  /// Base Chrome args applied to every browser instance.
+  /// Base browser args applied to every instance.
   #[must_use]
   pub fn chrome_args(&self) -> Vec<String> {
     self.browser.chrome_args.clone()
   }
 
-  /// Resolve Chrome args for a named instance: static per-instance args
-  /// followed by dynamic args returned by `instance_args_command`.
-  #[must_use]
-  pub fn chrome_args_for_instance(&self, instance: &str) -> Vec<String> {
-    let mut args = Vec::new();
-
-    if let Some(ic) = self.browser.instances.get(instance) {
-      args.extend(ic.chrome_args.iter().cloned());
-    } else if let Some(ref default) = self.browser.default_instance {
-      args.extend(default.chrome_args.iter().cloned());
-    }
-
-    if let Some(ref cmd_template) = self.browser.instance_args_command {
-      let cmd = cmd_template.replace("${INSTANCE}", instance);
-      match self.command_cache.get_or_exec(&cmd, self.cache_ttl()) {
-        Ok(lines) => args.extend(lines),
-        Err(e) => tracing::warn!("instance_args_command failed for '{instance}': {e}"),
-      }
-    }
-
-    args
-  }
-
-  /// Check that an instance can be started, before a browser is launched for it.
+  /// The section-wide launch settings, before per-instance overrides.
   ///
-  /// When `instance_args_command` is configured (the env-mapped setup), a hard
-  /// failure of that command for `instance` (nonzero exit) means the instance
-  /// name is wrong -- almost always a session key with no `:` that resolved to
-  /// the `default` instance, so the command ran against a non-existent env.
-  /// Returns an actionable error in that case so the caller can surface it
-  /// instead of silently launching an unmapped browser on the wrong environment.
-  ///
-  /// No-ops (returns `Ok`) when no args command is configured, or when the
-  /// command succeeds or merely yields no output.
+  /// `instance` is the name `${INSTANCE}` expands to in the section's own
+  /// paths. It must be the instance actually being launched, not a fixed
+  /// `"default"`: a section-level `userDataDir = "~/p/${INSTANCE}"` then
+  /// resolved to `~/p/default` for every instance, so two instances
+  /// launched Chrome against ONE profile directory — which Chrome
+  /// refuses, and which loses whichever instance's cookies got there
+  /// first.
   ///
   /// # Errors
   ///
-  /// Returns `Err` with an actionable message when a configured
-  /// `instance_args_command` exits non-zero for `instance`.
-  pub fn instance_health(&self, instance: &str) -> Result<(), String> {
-    let Some(cmd_template) = &self.browser.instance_args_command else {
-      return Ok(());
-    };
-    let cmd = cmd_template.replace("${INSTANCE}", instance);
-    match self.command_cache.get_or_exec(&cmd, self.cache_ttl()) {
-      Ok(_) => Ok(()),
-      Err(e) => Err(format!(
-        "cannot start instance '{instance}': its args command failed ({e}). \
-         If you meant an environment, set the session to '<env>:<context>' \
-         (e.g. 'staging:admin') -- a session with no ':' selects the 'default' \
-         instance, which has no environment mapping."
-      )),
+  /// Returns an error when the section-level proxy declares credentials.
+  pub fn base_overrides(&self, instance: &str) -> Result<InstanceOverrides, String> {
+    instance_overrides_from(
+      &InstanceConfig {
+        args: self.browser.chrome_args.clone(),
+        user_data_dir: self.browser.user_data_dir.clone(),
+        executable_path: self.browser.executable_path.clone(),
+        headless: self.browser.headless,
+        backend: self.browser.backend,
+        env: self.browser.env.clone(),
+        proxy: self.browser.proxy.clone(),
+        ignore_default_args: self.browser.ignore_default_args.clone(),
+        ..Default::default()
+      },
+      instance,
+    )
+  }
+
+  /// Instance names this config defines, for session-key resolution and
+  /// diagnostics.
+  #[must_use]
+  pub fn instance_names(&self) -> Vec<String> {
+    let mut names: Vec<String> = self.browser.instances.keys().cloned().collect();
+    names.sort();
+    names
+  }
+
+  fn routing(&self) -> RoutingView<'_> {
+    RoutingView {
+      instances: &self.browser.instances,
+      default_instance: self.browser.default_instance.as_ref(),
+      args_command: self.browser.instance_args_command.as_ref(),
+      discover_command: self.browser.instance_discover_command.as_ref(),
+      cache: &self.command_cache,
+      cache_ttl: self.cache_ttl(),
     }
   }
 
-  /// Resolve a `ConnectMode` for the given instance: static `connect_url`,
-  /// then profile discovery, then `instance_discover_command`.
+  /// Every launch setting for `instance`: section defaults, the
+  /// instance's own overrides, then whatever the args command adds.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the instance name is unusable, its args
+  /// command hard-fails, or a proxy declares credentials. The launch is
+  /// aborted rather than started against an unconfigured environment.
+  pub fn instance_overrides(&self, instance: &str) -> Result<InstanceOverrides, String> {
+    let mut merged = self.base_overrides(instance)?;
+    let per_instance = self.routing().overrides_for(instance)?;
+
+    merged.args.extend(per_instance.args);
+    if per_instance.user_data_dir.is_some() {
+      merged.user_data_dir = per_instance.user_data_dir;
+    }
+    if per_instance.executable_path.is_some() {
+      merged.executable_path = per_instance.executable_path;
+    }
+    if per_instance.headless.is_some() {
+      merged.headless = per_instance.headless;
+    }
+    if per_instance.backend.is_some() {
+      merged.backend = per_instance.backend;
+    }
+    if per_instance.ignore_default_args.is_some() {
+      merged.ignore_default_args = per_instance.ignore_default_args;
+    }
+    merged.env.extend(per_instance.env);
+    Ok(merged)
+  }
+
+  /// Check that an instance can be started, before a browser is
+  /// launched for it.
+  ///
+  /// # Errors
+  ///
+  /// Returns an actionable message when the name is not a usable
+  /// instance.
+  pub fn instance_health(&self, instance: &str) -> Result<(), String> {
+    self.routing().health(instance)
+  }
+
+  /// Resolve a `ConnectMode` for `instance`: static `connect_url`, then
+  /// profile discovery, then the discover command.
   #[must_use]
   pub fn resolve_instance(&self, instance: &str) -> Option<ConnectMode> {
-    if let Some(ic) = self.browser.instances.get(instance) {
-      if let Some(ref url) = ic.connect_url {
-        return Some(ConnectMode::ConnectUrl(url.clone()));
-      }
-      if let Some(ref profile_template) = ic.discover_profile {
-        match discover_from_profile(profile_template, instance) {
-          ProfileDiscovery::Found(mode) => return Some(mode),
-          ProfileDiscovery::Stale => return None,
-          ProfileDiscovery::NotFound => {},
-        }
-      }
-    }
-
-    if let Some(ref default) = self.browser.default_instance
-      && let Some(ref profile_template) = default.discover_profile
-    {
-      match discover_from_profile(profile_template, instance) {
-        ProfileDiscovery::Found(mode) => return Some(mode),
-        ProfileDiscovery::Stale => return None,
-        ProfileDiscovery::NotFound => {},
-      }
-    }
-
-    if let Some(ref cmd_template) = self.browser.instance_discover_command {
-      let cmd = cmd_template.replace("${INSTANCE}", instance);
-      if let Some(url) = self.discover_ws_via_command(&cmd) {
-        return Some(ConnectMode::ConnectUrl(url));
-      }
-    }
-
-    None
+    self.routing().resolve_connect(instance)
   }
 
-  /// Run a discover command and return a *live* CDP WebSocket URL.
-  ///
-  /// A browser can restart and bind a new port within the cache TTL, and it may
-  /// not be up yet on the first call. Both cases would otherwise poison the
-  /// command cache (a stale or empty entry served for the whole TTL). So the
-  /// happy path is cached, but the cached URL is always TCP-probed, and any
-  /// miss (dead port, empty/malformed output) evicts the entry and re-runs the
-  /// command once. A failure is never cached: the next call rediscovers. Returns
-  /// `None` only when no live `ws(s)://` endpoint exists even after a refresh.
-  fn discover_ws_via_command(&self, cmd: &str) -> Option<String> {
-    let ttl = self.cache_ttl();
-
-    if let Some(url) = self.exec_ws_url(cmd, ttl)
-      && ws_endpoint_is_live(&url)
-    {
-      return Some(url);
-    }
-
-    // First result was missing, malformed, or pointed at a dead port. Force a
-    // fresh discover (browser may have just started or rebound to a new port).
-    self.command_cache.evict(cmd);
-    if let Some(url) = self.exec_ws_url(cmd, ttl)
-      && ws_endpoint_is_live(&url)
-    {
-      return Some(url);
-    }
-
-    // Still nothing live -- drop the entry so a transient outage doesn't get
-    // cached as "no browser" for the rest of the TTL.
-    self.command_cache.evict(cmd);
-    None
-  }
-
-  /// Execute a discover command and extract its first `ws(s)://` line, if any.
-  fn exec_ws_url(&self, cmd: &str, ttl: Duration) -> Option<String> {
-    match self.command_cache.get_or_exec(cmd, ttl) {
-      Ok(lines) => {
-        let url = lines.first()?.trim();
-        (url.starts_with("ws://") || url.starts_with("wss://")).then(|| url.to_string())
-      },
-      Err(e) => {
-        tracing::warn!("instance_discover_command failed: {e}");
-        None
-      },
-    }
+  /// Drop every cached instance-command result. For an operator whose
+  /// environment changed (new DNS mapping, restarted browser) and who
+  /// should not have to wait out the TTL.
+  pub fn flush_command_cache(&self) {
+    self.command_cache.flush();
   }
 
   /// MCP server display name from config or the default.
@@ -285,8 +328,8 @@ impl McpConfig {
     self.server.name.as_deref().unwrap_or(DEFAULT_SERVER_NAME)
   }
 
-  /// Resolve final server instructions, blending defaults with config-provided
-  /// overrides or extras.
+  /// Resolve final server instructions, blending defaults with
+  /// config-provided overrides or extras.
   pub fn server_instructions<'a>(&'a self, defaults: &str) -> &'a str {
     self.instructions_cache.get_or_init(|| {
       if let Some(ref full) = self.server.instructions {
@@ -300,175 +343,23 @@ impl McpConfig {
   }
 }
 
-/// Result of attempting to discover a browser via a Chrome profile directory.
-enum ProfileDiscovery {
-  Found(ConnectMode),
-  Stale,
-  NotFound,
-}
-
-/// Read `DevToolsActivePort` from a Chrome profile directory and return a
-/// `ConnectMode` if the browser is responding.
-fn discover_from_profile(profile_template: &str, instance: &str) -> ProfileDiscovery {
-  let template = profile_template.replace("${INSTANCE}", instance);
-  let expanded = shellexpand::tilde(&template);
-  let profile_dir = Path::new(expanded.as_ref());
-
-  let port_file = profile_dir.join("DevToolsActivePort");
-  let Ok(content) = std::fs::read_to_string(&port_file) else {
-    return ProfileDiscovery::NotFound;
-  };
-  let mut lines = content.lines();
-  let Some(port) = lines.next().and_then(|l| l.parse::<u16>().ok()) else {
-    return ProfileDiscovery::NotFound;
-  };
-  let path = lines.next().unwrap_or("/");
-
-  let addr = format!("127.0.0.1:{port}");
-  if let Ok(sock_addr) = addr.parse()
-    && TcpStream::connect_timeout(&sock_addr, DISCOVER_TCP_TIMEOUT).is_ok()
-  {
-    return ProfileDiscovery::Found(ConnectMode::ConnectUrl(format!("ws://127.0.0.1:{port}{path}")));
-  }
-
-  ProfileDiscovery::Stale
-}
-
-/// TTL-based cache for external command outputs.
-///
-/// Same command string (after `${INSTANCE}` substitution) returns cached output
-/// within the TTL window, avoiding repeated subprocess spawns.
-#[derive(Debug, Default)]
-struct CommandCache {
-  entries: Mutex<HashMap<String, CacheEntry>>,
-}
-
-#[derive(Debug, Clone)]
-struct CacheEntry {
-  lines: Vec<String>,
-  created: Instant,
-}
-
-impl CommandCache {
-  fn get_or_exec(&self, command: &str, ttl: Duration) -> Result<Vec<String>, String> {
-    {
-      let cache = self.entries.lock().map_err(|e| format!("Cache lock poisoned: {e}"))?;
-      if let Some(entry) = cache.get(command)
-        && entry.created.elapsed() < ttl
-      {
-        return Ok(entry.lines.clone());
-      }
-    }
-
-    let lines = exec_command(command)?;
-
-    {
-      let mut cache = self.entries.lock().map_err(|e| format!("Cache lock poisoned: {e}"))?;
-      cache.insert(
-        command.to_string(),
-        CacheEntry {
-          lines: lines.clone(),
-          created: Instant::now(),
-        },
-      );
-    }
-
-    Ok(lines)
-  }
-
-  /// Drop a cached entry so the next `get_or_exec` re-runs the command.
-  fn evict(&self, command: &str) {
-    if let Ok(mut cache) = self.entries.lock() {
-      cache.remove(command);
-    }
-  }
-}
-
-/// TCP-probe a `ws(s)://host:port/...` URL to confirm a browser is still
-/// listening there. Treats an unparseable/portless authority as not live so a
-/// caller can refuse a bogus endpoint rather than hang connecting to it.
-fn ws_endpoint_is_live(url: &str) -> bool {
-  use std::net::ToSocketAddrs;
-
-  let Some(rest) = url.strip_prefix("ws://").or_else(|| url.strip_prefix("wss://")) else {
-    return false;
-  };
-  let authority = rest.split('/').next().unwrap_or("");
-  if authority.is_empty() {
-    return false;
-  }
-
-  match authority.to_socket_addrs() {
-    Ok(addrs) => addrs
-      .into_iter()
-      .any(|addr| TcpStream::connect_timeout(&addr, DISCOVER_TCP_TIMEOUT).is_ok()),
-    Err(_) => false,
-  }
-}
-
-/// Execute a shell command and return its stdout lines.
-///
-/// Supported output formats (probed in order):
-/// - JSON array of strings: `["--flag1", "--flag2"]`
-/// - JSON object with an `args` field holding the array: `{"args": ["--flag1"], ...}`
-///   (matches the shape emitted by `acme-gateway browser args --json`).
-/// - Plain text: one arg per line.
-fn exec_command(command: &str) -> Result<Vec<String>, String> {
-  let output = Command::new("sh")
-    .args(["-c", command])
-    .output()
-    .map_err(|e| format!("Failed to execute command: {e}"))?;
-
-  if !output.status.success() {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format!("Command failed (exit {}): {stderr}", output.status));
-  }
-
-  let stdout = String::from_utf8_lossy(&output.stdout);
-  let trimmed = stdout.trim();
-
-  if trimmed.is_empty() {
-    return Ok(Vec::new());
-  }
-
-  if trimmed.starts_with('[')
-    && let Ok(arr) = serde_json::from_str::<Vec<String>>(trimmed)
-  {
-    return Ok(arr);
-  }
-
-  if trimmed.starts_with('{')
-    && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
-    && let Some(arr) = value.get("args").and_then(|v| v.as_array())
-  {
-    let strs: Option<Vec<String>> = arr.iter().map(|v| v.as_str().map(str::to_string)).collect();
-    if let Some(strs) = strs {
-      return Ok(strs);
-    }
-  }
-
-  Ok(
-    trimmed
-      .lines()
-      .map(|l| l.trim().to_string())
-      .filter(|l| !l.is_empty())
-      .collect(),
-  )
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
 
-  // Serialize tests that bind ephemeral 127.0.0.1:0 ports. Several assert a
-  // just-freed port is dead; without this, a sibling test binding :0 can grab
-  // that exact freed port and make the assertion flake.
+  const TEST_DEFAULTS: &str = "Browser automation via the Model Context Protocol.";
+
+  /// See `browser::tests::port_guard`: ephemeral-port reuse across
+  /// parallel tests makes a "this port is dead" assertion flaky.
   static PORT_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
   fn port_guard() -> std::sync::MutexGuard<'static, ()> {
     PORT_GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
   }
 
-  const TEST_DEFAULTS: &str = "Browser automation via the Model Context Protocol.";
+  fn spec(json: &str) -> CommandSpec {
+    serde_json::from_str(json).expect("spec")
+  }
 
   #[test]
   fn default_config_has_sane_defaults() {
@@ -476,7 +367,7 @@ mod tests {
     assert_eq!(config.server_name(), "ferridriver");
     assert_eq!(config.server_instructions(TEST_DEFAULTS), TEST_DEFAULTS);
     assert!(config.chrome_args().is_empty());
-    assert!(config.chrome_args_for_instance("dev").is_empty());
+    assert!(config.instance_overrides("dev").expect("overrides").args.is_empty());
     assert!(config.resolve_instance("dev").is_none());
     assert_eq!(config.backend_kind(), BackendKind::CdpPipe);
     assert!(!config.headless());
@@ -500,34 +391,146 @@ mod tests {
   }
 
   #[test]
-  fn static_instance_args() {
+  fn backend_parsing() {
     let mut config = McpConfig::default();
+    assert_eq!(config.backend_kind(), BackendKind::CdpPipe);
+    config.browser.backend = Some(BackendChoice::CdpRaw);
+    assert_eq!(config.backend_kind(), BackendKind::CdpRaw);
+    config.browser.backend = Some(BackendChoice::Bidi);
+    assert_eq!(config.backend_kind(), BackendKind::Bidi);
+  }
+
+  #[test]
+  fn webkit_backend_is_selectable_on_every_platform() {
+    let mut config = McpConfig::default();
+    config.browser.backend = Some(BackendChoice::WebKit);
+    // Playwright's WebKit build is cross-platform; the old macOS-only
+    // arm turned this into a silent cdp-pipe run on Linux.
+    assert_eq!(config.backend_kind(), BackendKind::WebKit);
+  }
+
+  #[test]
+  fn unknown_backend_is_rejected_not_defaulted() {
+    let err = BackendChoice::parse("chrom-pipe").expect_err("must reject");
+    let msg = err.to_string();
+    assert!(msg.contains("chrom-pipe"), "names the bad value: {msg}");
+    assert!(msg.contains("cdp-pipe"), "lists valid values: {msg}");
+  }
+
+  #[test]
+  fn backend_wire_spellings_round_trip() {
+    for name in BackendChoice::ALL {
+      let parsed = BackendChoice::parse(name).expect("parse");
+      assert_eq!(parsed.as_str(), *name);
+      let json = serde_json::to_string(&parsed).expect("serialize");
+      assert_eq!(json, format!("\"{name}\""), "serde spelling must match parse");
+    }
+  }
+
+  #[test]
+  fn section_defaults_flow_into_every_instance() {
+    let mut config = McpConfig::default();
+    config.browser.chrome_args = vec!["--base".into()];
+    config.browser.user_data_dir = Some("/profiles/shared".into());
+    config.browser.executable_path = Some("/bin/chrome".into());
+    config.browser.headless = Some(true);
+    config.browser.env.insert("SHARED".into(), "1".into());
+
+    let o = config.instance_overrides("anything").expect("overrides");
+    assert_eq!(o.args, ["--base"]);
+    assert_eq!(o.user_data_dir.as_deref(), Some("/profiles/shared"));
+    assert_eq!(o.executable_path.as_deref(), Some("/bin/chrome"));
+    assert_eq!(o.headless, Some(true));
+    assert_eq!(o.env.get("SHARED").map(String::as_str), Some("1"));
+  }
+
+  #[test]
+  fn instance_overrides_beat_section_defaults() {
+    let mut config = McpConfig::default();
+    config.browser.chrome_args = vec!["--base".into()];
+    config.browser.headless = Some(true);
+    config.browser.user_data_dir = Some("/profiles/shared".into());
     config.browser.instances.insert(
       "staging".into(),
       InstanceConfig {
-        chrome_args: vec!["--proxy-server=localhost:8080".into()],
+        args: vec!["--staging".into()],
+        headless: Some(false),
+        user_data_dir: Some("/profiles/${INSTANCE}".into()),
+        backend: Some(BackendChoice::CdpRaw),
+        env: BTreeMap::from([("APP_ENV".to_string(), "staging".to_string())]),
         ..Default::default()
       },
     );
-    assert_eq!(
-      config.chrome_args_for_instance("staging"),
-      vec!["--proxy-server=localhost:8080"]
-    );
-    assert!(config.chrome_args_for_instance("unknown").is_empty());
+
+    let o = config.instance_overrides("staging").expect("overrides");
+    assert_eq!(o.args, ["--base", "--staging"], "section args come first");
+    assert_eq!(o.headless, Some(false));
+    assert_eq!(o.user_data_dir.as_deref(), Some("/profiles/staging"));
+    assert_eq!(o.backend, Some(BackendKind::CdpRaw));
+    assert_eq!(o.env.get("APP_ENV").map(String::as_str), Some("staging"));
   }
 
   #[test]
-  fn default_instance_fallback() {
+  fn default_instance_applies_to_unlisted_names() {
     let mut config = McpConfig::default();
     config.browser.default_instance = Some(InstanceConfig {
-      chrome_args: vec!["--default-flag".into()],
+      args: vec!["--default-flag".into()],
       ..Default::default()
     });
-    assert_eq!(config.chrome_args_for_instance("any"), vec!["--default-flag"]);
+    assert_eq!(
+      config.instance_overrides("whatever").expect("overrides").args,
+      ["--default-flag"]
+    );
   }
 
   #[test]
-  fn static_connect_url() {
+  fn args_command_output_is_appended() {
+    let mut config = McpConfig::default();
+    config.browser.chrome_args = vec!["--base".into()];
+    config.browser.instance_args_command = Some(spec(r#""echo --user-agent=Bot-${INSTANCE}""#));
+    let o = config.instance_overrides("staging").expect("overrides");
+    assert_eq!(o.args, ["--base", "--user-agent=Bot-staging"]);
+  }
+
+  #[test]
+  fn args_command_failure_aborts_instead_of_launching_unconfigured() {
+    let mut config = McpConfig::default();
+    config.browser.instance_args_command = Some(spec(r#""echo bad >&2; exit 2""#));
+    // Previously a warn-only path: the browser launched with no
+    // environment mapping and the caller never knew.
+    assert!(config.instance_overrides("default").is_err());
+    let err = config.instance_health("default").expect_err("must fail");
+    assert!(err.contains("<env>:<context>"), "{err}");
+  }
+
+  #[test]
+  fn instance_name_from_a_session_key_cannot_inject_a_command() {
+    let mut config = McpConfig::default();
+    config.browser.instance_args_command = Some(spec(r#""echo --env ${INSTANCE}""#));
+    // The name arrives from a caller-supplied session key.
+    let err = config
+      .instance_overrides("staging; touch /tmp/ferridriver-pwned")
+      .expect_err("must reject");
+    assert!(err.contains("only letters"), "{err}");
+    assert!(
+      !std::path::Path::new("/tmp/ferridriver-pwned").exists(),
+      "command must not have run"
+    );
+  }
+
+  #[test]
+  fn instance_names_are_reported_sorted() {
+    let mut config = McpConfig::default();
+    config
+      .browser
+      .instances
+      .insert("staging".into(), InstanceConfig::default());
+    config.browser.instances.insert("dev".into(), InstanceConfig::default());
+    assert_eq!(config.instance_names(), ["dev", "staging"]);
+  }
+
+  #[test]
+  fn static_connect_url_is_returned() {
     let mut config = McpConfig::default();
     config.browser.instances.insert(
       "remote".into(),
@@ -536,357 +539,50 @@ mod tests {
         ..Default::default()
       },
     );
-    let mode = config.resolve_instance("remote");
-    assert!(matches!(mode, Some(ConnectMode::ConnectUrl(url)) if url.contains("192.168.1.50")));
-  }
-
-  #[test]
-  fn backend_parsing() {
-    let mut config = McpConfig::default();
-    assert_eq!(config.backend_kind(), BackendKind::CdpPipe);
-    config.browser.backend = Some("cdp-raw".into());
-    assert_eq!(config.backend_kind(), BackendKind::CdpRaw);
-    config.browser.backend = Some("bidi".into());
-    assert_eq!(config.backend_kind(), BackendKind::Bidi);
-    config.browser.backend = Some("unknown".into());
-    assert_eq!(config.backend_kind(), BackendKind::CdpPipe);
-  }
-
-  #[test]
-  fn command_cache_returns_cached_value() {
-    let cache = CommandCache::default();
-    let result1 = cache.get_or_exec("echo hello", Duration::from_mins(1));
-    assert_eq!(
-      result1.as_ref().map(Vec::as_slice),
-      Ok(["hello".to_string()].as_slice())
-    );
-    let result2 = cache.get_or_exec("echo hello", Duration::from_mins(1));
-    assert_eq!(result1, result2);
-  }
-
-  #[test]
-  fn command_json_output_parsing() {
-    let result = exec_command(r#"echo '["--flag1", "--flag2"]'"#);
-    assert_eq!(result, Ok(vec!["--flag1".to_string(), "--flag2".to_string()]));
-  }
-
-  #[test]
-  fn command_line_output_parsing() {
-    let result = exec_command("echo flag1 && echo flag2");
-    assert_eq!(result, Ok(vec!["flag1".to_string(), "flag2".to_string()]));
-  }
-
-  #[test]
-  fn command_empty_output() {
-    let result = exec_command("echo ''");
-    assert_eq!(result, Ok(Vec::new()));
-  }
-
-  #[test]
-  fn instance_args_command_substitutes_instance_name() {
-    let mut config = McpConfig::default();
-    config.browser.instance_args_command = Some("echo '--user-agent=Test-${INSTANCE}'".into());
-    let args = config.chrome_args_for_instance("staging");
-    assert_eq!(args, vec!["--user-agent=Test-staging"]);
-    let args2 = config.chrome_args_for_instance("production");
-    assert_eq!(args2, vec!["--user-agent=Test-production"]);
-  }
-
-  #[test]
-  fn instance_args_command_json_output() {
-    let mut config = McpConfig::default();
-    config.browser.instance_args_command = Some(r#"printf '["--dns-prefetch-disable","--tag=dev"]'"#.into());
-    let args = config.chrome_args_for_instance("dev");
-    assert_eq!(args, vec!["--dns-prefetch-disable", "--tag=dev"]);
-  }
-
-  #[test]
-  fn instance_args_command_json_object_with_args_field() {
-    let mut config = McpConfig::default();
-    config.browser.instance_args_command = Some(
-      r#"printf '{"environment":"staging","args":["--no-first-run","--host-resolver-rules=MAP a.acme.com 1.2.3.4"]}'"#
-        .into(),
-    );
-    let args = config.chrome_args_for_instance("staging");
-    assert_eq!(
-      args,
-      vec!["--no-first-run", "--host-resolver-rules=MAP a.acme.com 1.2.3.4"]
-    );
-  }
-
-  #[test]
-  fn instance_args_command_merges_with_static_args() {
-    let mut config = McpConfig::default();
-    config.browser.instances.insert(
-      "staging".into(),
-      InstanceConfig {
-        chrome_args: vec!["--proxy-server=localhost:8080".into()],
-        ..Default::default()
-      },
-    );
-    config.browser.instance_args_command = Some("echo '--user-agent=Bot-${INSTANCE}'".into());
-
-    let args = config.chrome_args_for_instance("staging");
-    assert_eq!(args.len(), 2);
-    assert_eq!(args[0], "--proxy-server=localhost:8080");
-    assert_eq!(args[1], "--user-agent=Bot-staging");
-  }
-
-  #[test]
-  fn instance_args_command_default_instance_plus_command() {
-    let mut config = McpConfig::default();
-    config.browser.default_instance = Some(InstanceConfig {
-      chrome_args: vec!["--default-flag".into()],
-      ..Default::default()
-    });
-    config.browser.instance_args_command = Some("echo '--dynamic-flag'".into());
-    let args = config.chrome_args_for_instance("unknown-env");
-    assert_eq!(args, vec!["--default-flag", "--dynamic-flag"]);
-  }
-
-  #[test]
-  fn instance_args_command_failure_is_non_fatal() {
-    let mut config = McpConfig::default();
-    config.browser.instance_args_command = Some("false".into());
-    config.browser.instances.insert(
-      "dev".into(),
-      InstanceConfig {
-        chrome_args: vec!["--static-flag".into()],
-        ..Default::default()
-      },
-    );
-    let args = config.chrome_args_for_instance("dev");
-    assert_eq!(args, vec!["--static-flag"]);
-  }
-
-  #[test]
-  fn discover_command_returns_ws_url() {
-    let _net = port_guard();
-    // A reachable port is required: discovery validates endpoint liveness.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let mut config = McpConfig::default();
-    config.browser.instance_discover_command = Some(format!("echo 'ws://127.0.0.1:{port}/devtools/browser/abc'"));
-    let mode = config.resolve_instance("any");
     assert!(matches!(
-      mode,
+      config.resolve_instance("remote"),
+      Some(ConnectMode::ConnectUrl(url)) if url.contains("192.168.1.50")
+    ));
+  }
+
+  #[test]
+  fn discover_command_returns_a_live_endpoint() {
+    let _net = port_guard();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let mut config = McpConfig::default();
+    config.browser.instance_discover_command =
+      Some(spec(&format!(r#""echo ws://127.0.0.1:{port}/devtools/browser/abc""#)));
+    assert!(matches!(
+      config.resolve_instance("any"),
       Some(ConnectMode::ConnectUrl(url)) if url == format!("ws://127.0.0.1:{port}/devtools/browser/abc")
     ));
   }
 
   #[test]
-  fn discover_command_substitutes_instance() {
+  fn discover_command_rejects_a_dead_endpoint() {
     let _net = port_guard();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let mut config = McpConfig::default();
-    config.browser.instance_discover_command = Some(format!("echo 'ws://127.0.0.1:{port}/${{INSTANCE}}'"));
-    let mode = config.resolve_instance("staging");
-    assert!(matches!(
-      mode,
-      Some(ConnectMode::ConnectUrl(url)) if url == format!("ws://127.0.0.1:{port}/staging")
-    ));
-  }
-
-  #[test]
-  fn discover_command_rejects_dead_endpoint() {
-    let _net = port_guard();
-    // Bind then drop to obtain a port guaranteed not to be listening.
     let port = {
-      let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-      l.local_addr().unwrap().port()
+      let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+      l.local_addr().expect("addr").port()
     };
     let mut config = McpConfig::default();
-    config.browser.instance_discover_command = Some(format!("echo 'ws://127.0.0.1:{port}/devtools/browser/abc'"));
-    assert!(
-      config.resolve_instance("any").is_none(),
-      "an unreachable discovered endpoint must not be returned"
-    );
+    config.browser.instance_discover_command = Some(spec(&format!(r#""echo ws://127.0.0.1:{port}/x""#)));
+    assert!(config.resolve_instance("any").is_none());
   }
 
   #[test]
   fn discover_command_ignores_non_ws_output() {
     let mut config = McpConfig::default();
-    config.browser.instance_discover_command = Some("echo 'not-a-ws-url'".into());
-    assert!(config.resolve_instance("dev").is_none());
-  }
-
-  #[test]
-  fn discover_command_empty_output_returns_none() {
-    let mut config = McpConfig::default();
-    config.browser.instance_discover_command = Some("echo ''".into());
+    config.browser.instance_discover_command = Some(spec(r#""echo not-a-ws-url""#));
     assert!(config.resolve_instance("dev").is_none());
   }
 
   #[test]
   fn discover_command_failure_returns_none() {
     let mut config = McpConfig::default();
-    config.browser.instance_discover_command = Some("false".into());
+    config.browser.instance_discover_command = Some(spec(r#""false""#));
     assert!(config.resolve_instance("dev").is_none());
-  }
-
-  #[test]
-  fn static_connect_url_takes_priority_over_discover_command() {
-    let mut config = McpConfig::default();
-    config.browser.instances.insert(
-      "staging".into(),
-      InstanceConfig {
-        connect_url: Some("ws://static-host:9222/browser".into()),
-        ..Default::default()
-      },
-    );
-    config.browser.instance_discover_command = Some("echo 'ws://dynamic-host:9222/browser'".into());
-    let mode = config.resolve_instance("staging");
-    assert!(matches!(
-      mode,
-      Some(ConnectMode::ConnectUrl(url)) if url == "ws://static-host:9222/browser"
-    ));
-  }
-
-  #[test]
-  fn unknown_instance_falls_through_to_discover_command() {
-    let _net = port_guard();
-    let mut config = McpConfig::default();
-    config.browser.instances.insert(
-      "staging".into(),
-      InstanceConfig {
-        connect_url: Some("ws://staging-host:9222/browser".into()),
-        ..Default::default()
-      },
-    );
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    config.browser.instance_discover_command = Some(format!("echo 'ws://127.0.0.1:{port}/${{INSTANCE}}'"));
-
-    // Static connect_url wins for "staging" and is returned without a liveness
-    // probe (the user pinned it explicitly).
-    let staging = config.resolve_instance("staging");
-    assert!(matches!(
-      staging,
-      Some(ConnectMode::ConnectUrl(url)) if url.contains("staging-host")
-    ));
-
-    let prod = config.resolve_instance("production");
-    assert!(matches!(
-      prod,
-      Some(ConnectMode::ConnectUrl(url)) if url == format!("ws://127.0.0.1:{port}/production")
-    ));
-  }
-
-  #[test]
-  fn no_discovery_returns_none_for_launch_fallback() {
-    let config = McpConfig::default();
-    assert!(config.resolve_instance("anything").is_none());
-  }
-
-  #[test]
-  fn instance_health_ok_when_no_args_command() {
-    let config = McpConfig::default();
-    assert!(config.instance_health("default").is_ok());
-    assert!(config.instance_health("staging").is_ok());
-  }
-
-  #[test]
-  fn instance_health_ok_when_args_command_succeeds() {
-    let mut config = McpConfig::default();
-    config.browser.instance_args_command = Some("echo '[\"--flag\"]'".into());
-    assert!(config.instance_health("staging").is_ok());
-  }
-
-  #[test]
-  fn instance_health_errors_when_args_command_hard_fails() {
-    // Mirrors `acme-gateway browser args --env default` rejecting a bad env:
-    // nonzero exit -> instance_health surfaces an actionable error.
-    let mut config = McpConfig::default();
-    config.browser.instance_args_command = Some("echo 'bad env' >&2; exit 2".into());
-    let err = config.instance_health("default").unwrap_err();
-    assert!(err.contains("instance 'default'"), "names the bad instance: {err}");
-    assert!(
-      err.contains("<env>:<context>"),
-      "suggests the correct session form: {err}"
-    );
-  }
-
-  #[test]
-  fn ws_endpoint_is_live_true_for_listening_port() {
-    let _net = port_guard();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    assert!(ws_endpoint_is_live(&format!(
-      "ws://127.0.0.1:{port}/devtools/browser/x"
-    )));
-  }
-
-  #[test]
-  fn ws_endpoint_is_live_false_for_dead_port() {
-    let _net = port_guard();
-    let port = {
-      let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-      l.local_addr().unwrap().port()
-    };
-    assert!(!ws_endpoint_is_live(&format!(
-      "ws://127.0.0.1:{port}/devtools/browser/x"
-    )));
-  }
-
-  #[test]
-  fn ws_endpoint_is_live_false_for_non_ws_and_portless() {
-    assert!(!ws_endpoint_is_live("http://127.0.0.1:9222/"));
-    assert!(!ws_endpoint_is_live("ws://127.0.0.1/devtools"));
-    assert!(!ws_endpoint_is_live("ws:///devtools"));
-    assert!(!ws_endpoint_is_live(""));
-  }
-
-  #[test]
-  fn discover_command_evicts_stale_cache_entry() {
-    let _net = port_guard();
-    // First discovery caches a live endpoint; after the listener drops, a second
-    // resolve within TTL must not return the now-dead cached endpoint.
-    let mut config = McpConfig::default();
-    let cmd;
-    let port;
-    {
-      let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-      port = listener.local_addr().unwrap().port();
-      cmd = format!("echo 'ws://127.0.0.1:{port}/devtools/browser/abc'");
-      config.browser.instance_discover_command = Some(cmd.clone());
-      config.browser.command_cache_ttl = Some(300);
-      let live = config.resolve_instance("any");
-      assert!(live.is_some(), "first resolve should find the live endpoint");
-    } // listener dropped -> port now dead
-
-    assert!(
-      config.resolve_instance("any").is_none(),
-      "stale cached endpoint must be re-validated and rejected"
-    );
-  }
-
-  #[test]
-  fn discover_command_does_not_cache_failure() {
-    let _net = port_guard();
-    // Command emits a ws URL only once a sentinel file exists, simulating a
-    // browser that is not up on the first resolve but appears before the second.
-    // A negative result must not be cached for the TTL.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    // Port is unique per run, so the sentinel path won't collide with other tests.
-    let sentinel = std::env::temp_dir().join(format!("ferridriver-discover-test-{port}"));
-    let _ = std::fs::remove_file(&sentinel);
-
-    let mut config = McpConfig::default();
-    config.browser.command_cache_ttl = Some(300);
-    config.browser.instance_discover_command = Some(format!(
-      "test -f '{}' && echo 'ws://127.0.0.1:{port}/devtools/browser/abc' || true",
-      sentinel.display()
-    ));
-
-    assert!(config.resolve_instance("any").is_none(), "browser not up yet");
-    std::fs::write(&sentinel, b"").unwrap();
-    assert!(
-      config.resolve_instance("any").is_some(),
-      "must rediscover after the browser comes up (failure must not be cached)"
-    );
-    let _ = std::fs::remove_file(&sentinel);
   }
 
   #[test]
@@ -894,100 +590,25 @@ mod tests {
     let mut config = McpConfig::default();
     config.browser.command_cache_ttl = Some(60);
     assert_eq!(config.cache_ttl(), Duration::from_mins(1));
-
     config.browser.command_cache_ttl = None;
     assert_eq!(config.cache_ttl(), DEFAULT_CACHE_TTL);
   }
 
   #[test]
-  fn command_cache_expires_after_ttl() {
-    let cache = CommandCache::default();
-    let short_ttl = Duration::from_millis(50);
-
-    let result1 = cache.get_or_exec("echo first", short_ttl);
-    assert!(result1.is_ok());
-
-    std::thread::sleep(Duration::from_millis(100));
-
-    let result2 = cache.get_or_exec("echo first", short_ttl);
-    assert_eq!(result1, result2);
-
-    let entries = cache.entries.lock().unwrap();
-    let entry = entries.get("echo first").unwrap();
-    assert!(entry.created.elapsed() < Duration::from_millis(50));
-  }
-
-  #[test]
-  fn command_cache_different_commands_cached_separately() {
-    let cache = CommandCache::default();
-    let ttl = Duration::from_mins(1);
-
-    let r1 = cache.get_or_exec("echo aaa", ttl).unwrap();
-    let r2 = cache.get_or_exec("echo bbb", ttl).unwrap();
-    assert_eq!(r1, vec!["aaa"]);
-    assert_eq!(r2, vec!["bbb"]);
-
-    let entries = cache.entries.lock().unwrap();
-    assert_eq!(entries.len(), 2);
-  }
-
-  #[test]
-  fn config_resolve_uses_instance_not_composite_key() {
+  fn resolution_uses_the_instance_not_the_composite_key() {
     let mut config = McpConfig::default();
     config.browser.instances.insert(
       "staging".into(),
       InstanceConfig {
         connect_url: Some("ws://staging-browser:9222".into()),
+        args: vec!["--staging-flag".into()],
         ..Default::default()
       },
     );
     assert!(config.resolve_instance("staging").is_some());
+    // A composite key is not an instance name (and `:` is not even a
+    // legal character in one).
     assert!(config.resolve_instance("staging:admin").is_none());
-  }
-
-  #[test]
-  fn instance_args_uses_instance_not_composite_key() {
-    let mut config = McpConfig::default();
-    config.browser.instances.insert(
-      "staging".into(),
-      InstanceConfig {
-        chrome_args: vec!["--staging-flag".into()],
-        ..Default::default()
-      },
-    );
-    assert_eq!(config.chrome_args_for_instance("staging"), vec!["--staging-flag"]);
-    assert!(config.chrome_args_for_instance("staging:admin").is_empty());
-  }
-
-  #[test]
-  fn discover_profile_nonexistent_path_returns_none() {
-    let result = discover_from_profile("/nonexistent/path/${INSTANCE}/profile", "dev");
-    assert!(matches!(result, ProfileDiscovery::NotFound));
-  }
-
-  #[test]
-  fn discover_profile_stale_port_file_returns_some_none() {
-    let dir = std::env::temp_dir().join("ferridriver-config-test-stale-profile");
-    let _ = std::fs::create_dir_all(&dir);
-    std::fs::write(dir.join("DevToolsActivePort"), "59999\n/devtools/browser/fake").unwrap();
-
-    let result = discover_from_profile(dir.to_str().unwrap(), "dev");
-    let _ = std::fs::remove_dir_all(&dir);
-
-    assert!(matches!(result, ProfileDiscovery::Stale));
-  }
-
-  #[test]
-  fn discover_profile_instance_substitution() {
-    let dir = std::env::temp_dir().join("ferridriver-config-test-inst-sub");
-    let staging_dir = dir.join("staging");
-    let _ = std::fs::create_dir_all(&staging_dir);
-    std::fs::write(staging_dir.join("DevToolsActivePort"), "59998\n/devtools/browser/abc").unwrap();
-
-    let template = format!("{}/${{INSTANCE}}", dir.display());
-    let result = discover_from_profile(&template, "staging");
-    let _ = std::fs::remove_dir_all(&dir);
-
-    assert!(matches!(result, ProfileDiscovery::Stale));
+    assert!(config.instance_overrides("staging:admin").is_err());
   }
 }

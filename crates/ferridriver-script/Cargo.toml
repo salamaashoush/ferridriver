@@ -33,6 +33,10 @@ tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `ScriptResult` is the wire contract of the MCP `run_script` tool, which
+# publishes it as an `outputSchema`; deriving the schema from the type keeps
+# the two from drifting.
+schemars = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

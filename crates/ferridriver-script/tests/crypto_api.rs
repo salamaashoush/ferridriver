@@ -24,6 +24,7 @@ fn engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   (ScriptEngine::new(ScriptEngineConfig::default()), tmp, context)
 }

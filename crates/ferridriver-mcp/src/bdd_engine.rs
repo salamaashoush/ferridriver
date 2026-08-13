@@ -28,12 +28,16 @@ use ferridriver_script::CompiledBundle;
 /// Stable hash of the resolved step-set (sorted globs + sorted extensions +
 /// world parameters). A change means a different engine must be loaded.
 #[must_use]
-pub fn logical_key(globs: &[String], extensions: &[String], world_params: &serde_json::Value) -> u64 {
+pub fn logical_key(
+  globs: &[String],
+  extensions: &[ferridriver_config::ExtensionSpec],
+  world_params: &serde_json::Value,
+) -> u64 {
   let mut h = std::collections::hash_map::DefaultHasher::new();
   let mut g: Vec<&String> = globs.iter().collect();
   g.sort();
   g.hash(&mut h);
-  let mut e: Vec<&String> = extensions.iter().collect();
+  let mut e: Vec<&ferridriver_config::ExtensionSpec> = extensions.iter().collect();
   e.sort();
   e.hash(&mut h);
   world_params.to_string().hash(&mut h);
@@ -86,9 +90,9 @@ impl BddEngine {
     }
   }
 
-  fn discover_entries(globs: &[String], extensions: &[String], cwd: &Path) -> Vec<PathBuf> {
+  fn discover_entries(globs: &[String], extensions: &[ferridriver_config::ExtensionSpec], cwd: &Path) -> Vec<PathBuf> {
     let mut entries = discover_step_files(globs, cwd);
-    entries.extend(discover_extension_files(extensions, cwd));
+    entries.extend(discover_extension_files(extensions));
     entries.sort();
     entries.dedup();
     entries
@@ -96,14 +100,20 @@ impl BddEngine {
 
   /// True when the entry set changed or any recorded input's mtime moved.
   /// Stats only (no content reads) — the cheap change signal.
-  fn sources_changed(&self, globs: &[String], extensions: &[String], cwd: &Path) -> bool {
+  fn sources_changed(&self, globs: &[String], extensions: &[ferridriver_config::ExtensionSpec], cwd: &Path) -> bool {
     if Self::discover_entries(globs, extensions, cwd) != self.entries {
       return true;
     }
     self.inputs.iter().any(|(p, t)| mtime(p) != *t)
   }
 
-  fn record_inputs(&mut self, bundle: &CompiledBundle, globs: &[String], extensions: &[String], cwd: &Path) {
+  fn record_inputs(
+    &mut self,
+    bundle: &CompiledBundle,
+    globs: &[String],
+    extensions: &[ferridriver_config::ExtensionSpec],
+    cwd: &Path,
+  ) {
     self.entries = Self::discover_entries(globs, extensions, cwd);
     // Inputs = entries ∪ transitive bundle sources, so edits are caught
     // even when the source map is absent (then `source_files` is empty).
@@ -126,7 +136,7 @@ impl BddEngine {
     &mut self,
     key: u64,
     globs: &[String],
-    extensions: &[String],
+    extensions: &[ferridriver_config::ExtensionSpec],
     world_params: serde_json::Value,
     cwd: &Path,
   ) -> anyhow::Result<Arc<JsBddSession>> {
@@ -173,7 +183,13 @@ mod tests {
 
   fn key(g: &[&str], e: &[&str]) -> u64 {
     let g: Vec<String> = g.iter().map(|s| (*s).to_string()).collect();
-    let e: Vec<String> = e.iter().map(|s| (*s).to_string()).collect();
+    let e: Vec<ferridriver_config::ExtensionSpec> = e
+      .iter()
+      .map(|s| ferridriver_config::ExtensionSpec {
+        spec: (*s).to_string(),
+        base_dir: std::path::PathBuf::from("/base"),
+      })
+      .collect();
     logical_key(&g, &e, &serde_json::Value::Null)
   }
 

@@ -280,6 +280,7 @@ async fn profile_concurrent_quickjs() {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let cfg = ScriptEngineConfig {
     sidecars: vec![bench_spec()],
@@ -366,6 +367,7 @@ async fn bench_batching() {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let cfg = ScriptEngineConfig {
     sidecars: vec![bench_spec()],

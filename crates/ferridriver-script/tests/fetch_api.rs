@@ -101,6 +101,7 @@ async fn run(src: &str) -> Outcome {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   ScriptEngine::new(ScriptEngineConfig::default())
     .run(src, &[], RunOptions::default(), ctx)
@@ -789,6 +790,7 @@ async fn json_arg_proto_key_does_not_pollute() {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let args = vec![serde_json::json!({ "__proto__": { "polluted": true } })];
   let out = ScriptEngine::new(ScriptEngineConfig::default())

@@ -12,6 +12,18 @@ use tracing::{debug, info};
 use super::transport::BidiTransport;
 use crate::error::{FerriError, Result};
 
+/// The profile directory a launched Firefox is using.
+///
+/// A caller-supplied `userDataDir` is a PERSISTENT profile: ferridriver
+/// must not remove it on teardown, or the logins and cookies the caller
+/// asked to keep vanish with the browser. Only the throwaway profile
+/// ferridriver creates for itself is owned.
+pub(crate) struct LaunchedProfile {
+  pub path: std::path::PathBuf,
+  /// `Some` only for the throwaway profile, whose `Drop` removes it.
+  pub owned: Option<tempfile::TempDir>,
+}
+
 /// A `BiDi` session -- holds the transport and session metadata.
 #[derive(Clone)]
 pub(crate) struct BidiSession {
@@ -129,23 +141,41 @@ impl BidiSession {
   /// Firefox natively supports `BiDi`: launch with `--remote-debugging-port`,
   /// read the `BiDi` WebSocket URL from stderr, connect directly.
   ///
-  /// Returns `(session, child, profile_dir)`. The caller must keep
-  /// `profile_dir` alive for the lifetime of the browser — its `Drop` removes
-  /// the directory from disk. Firefox is launched with `kill_on_drop(true)`
-  /// so the process dies before the dir vanishes.
+  /// `user_data_dir` selects a PERSISTENT profile: the directory is
+  /// created if missing and never removed, so cookies and logins survive
+  /// a restart. Without it a throwaway profile is created and owned.
+  ///
+  /// Returns `(session, child, profile)`. The caller must keep
+  /// `profile` alive for the lifetime of the browser — the owned variant's
+  /// `Drop` removes the directory from disk. Firefox is launched with
+  /// `kill_on_drop(true)` so the process dies before the dir vanishes.
   pub async fn launch_firefox(
     firefox_path: &str,
     flags: &[String],
     headless: bool,
-  ) -> Result<(Self, tokio::process::Child, tempfile::TempDir)> {
-    // Prefix the profile dir so test-harness cleanup can `pkill -f`
-    // any leaked Firefox processes by their `--profile` arg —
+    env: &rustc_hash::FxHashMap<String, String>,
+    user_data_dir: Option<&std::path::Path>,
+  ) -> Result<(Self, tokio::process::Child, LaunchedProfile)> {
+    // Prefix the throwaway profile dir so test-harness cleanup can
+    // `pkill -f` any leaked Firefox processes by their `--profile` arg —
     // mirrors the `ferridriver-pipe-` / `ferridriver-raw-` prefixes
     // used by the CDP launches in `backend::cdp::mod`.
-    let profile_dir = tempfile::Builder::new()
-      .prefix("ferridriver-firefox-")
-      .tempdir()
-      .map_err(|e| format!("tempdir: {e}"))?;
+    let profile_dir = if let Some(dir) = user_data_dir {
+      std::fs::create_dir_all(dir).map_err(|e| format!("user data dir {}: {e}", dir.display()))?;
+      LaunchedProfile {
+        path: dir.to_path_buf(),
+        owned: None,
+      }
+    } else {
+      let owned = tempfile::Builder::new()
+        .prefix("ferridriver-firefox-")
+        .tempdir()
+        .map_err(|e| format!("tempdir: {e}"))?;
+      LaunchedProfile {
+        path: owned.path().to_path_buf(),
+        owned: Some(owned),
+      }
+    };
 
     // Pre-create the per-profile downloads dir and pin Firefox to it
     // via `browser.download.dir` + `folderList=2`. Without these prefs
@@ -157,16 +187,17 @@ impl BidiSession {
     // first free suffix). `browser.setDownloadBehavior`'s
     // `destinationFolder` only redirects the on-disk write, not the
     // suggested-filename deduplication scan.
-    let downloads_dir = profile_dir.path().join("downloads");
+    let downloads_dir = profile_dir.path.join("downloads");
     std::fs::create_dir_all(&downloads_dir).map_err(|e| format!("downloads dir: {e}"))?;
 
     // Write automation preferences to user.js in the profile directory.
     // Matches Playwright's firefoxPreferences + Puppeteer's essentials.
-    write_firefox_prefs(profile_dir.path(), &downloads_dir).map_err(|e| format!("write prefs: {e}"))?;
+    write_firefox_prefs(&profile_dir.path, &downloads_dir).map_err(|e| format!("write prefs: {e}"))?;
 
     let mut command = tokio::process::Command::new(firefox_path);
+    command.envs(env);
     command.arg("--remote-debugging-port").arg("0");
-    command.arg("--profile").arg(profile_dir.path());
+    command.arg("--profile").arg(&profile_dir.path);
     command.arg("--no-remote");
     if headless {
       command.arg("--headless");
@@ -215,7 +246,11 @@ impl BidiSession {
     // Track before the BiDi handshake below. Firefox does not exit when
     // its parent dies, and the handshake takes long enough that a kill
     // landing inside it used to strand a whole browser.
-    crate::backend::process::track_spawned(child.id().unwrap_or(0), Some(profile_dir.path()), true);
+    crate::backend::process::track_spawned(
+      child.id().unwrap_or(0),
+      Some(&profile_dir.path),
+      profile_dir.owned.is_some(),
+    );
 
     // Firefox prints "WebDriver BiDi listening on ws://127.0.0.1:PORT" to stderr
     let ws_url = discover_bidi_ws_url(&mut child).await?;
@@ -233,10 +268,12 @@ impl BidiSession {
     browser_path: &str,
     flags: &[String],
     headless: bool,
-  ) -> Result<(Self, tokio::process::Child, tempfile::TempDir)> {
+    env: &rustc_hash::FxHashMap<String, String>,
+    user_data_dir: Option<&std::path::Path>,
+  ) -> Result<(Self, tokio::process::Child, LaunchedProfile)> {
     let path_lower = browser_path.to_lowercase();
     if path_lower.contains("firefox") {
-      Box::pin(Self::launch_firefox(browser_path, flags, headless)).await
+      Box::pin(Self::launch_firefox(browser_path, flags, headless, env, user_data_dir)).await
     } else {
       Err(FerriError::unsupported(format!(
         "BiDi backend requires Firefox (found: {browser_path}). \

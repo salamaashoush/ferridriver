@@ -323,6 +323,29 @@ impl SessionTable {
     self.map.clear();
   }
 
+  /// Discard every live VM while keeping each session's durable tier
+  /// (`vars`, persistent processes, HTTP client + cookie jar). The next
+  /// call for a session rebuilds its VM from the host's CURRENT extension
+  /// set, which is how a reload reaches sessions that are already open —
+  /// [`Self::clear`] would reach them too, but by throwing away the state
+  /// the durable tier exists to protect.
+  ///
+  /// Takes each slot's lock, so a session with a call in flight is waited
+  /// for rather than yanked out from under it. Returns how many VMs were
+  /// dropped.
+  pub async fn drop_all_vms(&self) -> usize {
+    let slots: Vec<Arc<AsyncMutex<BrowserSession>>> = self.map.iter().map(|e| Arc::clone(e.value())).collect();
+    let mut dropped = 0;
+    for slot in slots {
+      let mut guard = slot.lock().await;
+      if guard.has_vm() {
+        guard.drop_vm();
+        dropped += 1;
+      }
+    }
+    dropped
+  }
+
   /// Number of live session records (durable tier), warm or not.
   #[must_use]
   pub fn len(&self) -> usize {
@@ -366,6 +389,7 @@ mod tests {
       extensions: Vec::new(),
       host: crate::engine::ExtensionHost::Script,
       caps: crate::engine::ScriptCaps::default(),
+      session: None,
     };
     (tmp, ctx)
   }

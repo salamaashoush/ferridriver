@@ -22,6 +22,10 @@ ferridriver-test = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 jsonschema = { workspace = true }
+# `requires.commands` in an extension package manifest names programs
+# that must be on PATH; resolving them at load is what makes a missing
+# binary a load-time message instead of a first-call failure.
+which = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -209,11 +209,27 @@ pub struct CompiledBundle {
   source_map: Option<sourcemap::SourceMap>,
 }
 
+/// The result of one rolldown bundle.
+pub struct BundledSource {
+  pub code: String,
+  /// Hidden source map JSON, for translating bundled positions back to
+  /// source in stack traces.
+  pub source_map_json: Option<String>,
+  /// Every module the entry chunk was built from, straight out of
+  /// rolldown's module graph.
+  ///
+  /// NOT derived from the source map: a module whose every binding is
+  /// inlined leaves no mapping tokens and vanishes from the map's
+  /// `sources`, so a source-map-derived input set silently omitted
+  /// exactly the small helper modules extensions are made of — and the
+  /// bytecode caches then treated an edited helper as unchanged.
+  pub modules: Vec<PathBuf>,
+}
+
 /// rolldown-bundle + tree-shake + transpile the step entry files (and
 /// their `node_modules`/shared imports) into a single ESM module.
-/// Returns the bundled code and the (hidden) source map JSON. Exposed
-/// for diagnostics/tests; production uses [`bundle_and_compile`].
-pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<(String, Option<String>), ScriptError> {
+/// Exposed for diagnostics/tests; production uses [`bundle_and_compile`].
+pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<BundledSource, ScriptError> {
   if entry_paths.is_empty() {
     return Err(ScriptError::internal("no step entry files".to_string()));
   }
@@ -274,10 +290,23 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<(Strin
     if let Output::Chunk(chunk) = asset
       && chunk.is_entry
     {
-      let code = chunk.code.clone();
-      return Ok(match &chunk.map {
-        Some(m) => (code, Some(m.to_json_string())),
-        None => (code, None),
+      let modules = chunk
+        .module_ids
+        .iter()
+        .map(|id| PathBuf::from(id.to_string()))
+        .filter(|p| p.is_file())
+        .collect();
+      // Assigned imperatively rather than through `Option::map`: the
+      // map's type lives in a transitive crate this one does not depend on
+      // directly, so it cannot be named for a method-path closure.
+      let mut source_map_json = None;
+      if let Some(m) = chunk.map.as_ref() {
+        source_map_json = Some(m.to_json_string());
+      }
+      return Ok(BundledSource {
+        code: chunk.code.clone(),
+        source_map_json,
+        modules,
       });
     }
   }
@@ -320,7 +349,8 @@ pub async fn bundle_and_compile_named(
     });
   }
 
-  let (code, map_json) = Box::pin(bundle_source(entry_paths, cwd)).await?;
+  let bundled = Box::pin(bundle_source(entry_paths, cwd)).await?;
+  let (code, map_json, modules) = (bundled.code, bundled.source_map_json, bundled.modules);
 
   let name = module_name.clone();
   let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("bytecode runtime: {e}")))?;
@@ -355,7 +385,7 @@ pub async fn bundle_and_compile_named(
     })
     .await?;
 
-  let inputs = crate::bytecode_cache::collect_inputs(entry_paths, map_json.as_deref(), cwd);
+  let inputs = crate::bytecode_cache::input_set(entry_paths, &modules);
   crate::bytecode_cache::store(cache_key, &bytecode, &module_name, map_json.as_deref(), None, &inputs);
 
   let source_map = map_json.and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok());
@@ -533,11 +563,27 @@ pub struct CompiledExtension {
   pub manifests_json: String,
 }
 
+/// One in-process cache entry: the compiled bytecode, its manifests, and
+/// the transitive input set the bundle was built from (with that set's
+/// content fingerprint).
+///
+/// The inputs are what make the entry safe to reuse. Keying on the ENTRY
+/// file's own bytes alone served stale bytecode the moment an imported
+/// helper changed — the entry's bytes were identical, so a reload
+/// (`ferridriver_extensions action: "reload"`, `ext dev --watch`) kept
+/// handing out code compiled from the old helper.
+struct CachedExtension {
+  bytecode: Arc<[u8]>,
+  manifests_json: String,
+  inputs: Vec<PathBuf>,
+  inputs_fingerprint: u64,
+}
+
 /// Process-scoped content-hash cache: `hash(canonical path + bytes)` ->
-/// (bytecode, manifests JSON). A extension file whose content+path is
-/// unchanged skips rolldown + compile entirely on any later
+/// [`CachedExtension`]. A extension file whose whole transitive input set
+/// is unchanged skips rolldown + compile entirely on any later
 /// `compile_and_extract_extensions` call (reload, the same file discovered
-/// under two roots, repeated `box-craft setup`). Bounded by the number
+/// under two roots, a repeated host setup). Bounded by the number
 /// of distinct extension files a process ever loads (tiny) so no eviction
 /// is needed.
 ///
@@ -546,11 +592,31 @@ pub struct CompiledExtension {
 /// whose ABI tag (QuickJS version, arch, endianness, pointer width) +
 /// transitive input hashes are what keep the `unsafe Module::load`
 /// paths sound for bytecode another process wrote.
-type ExtensionCache = std::sync::Mutex<rustc_hash::FxHashMap<u64, (Arc<[u8]>, String)>>;
+type ExtensionCache = std::sync::Mutex<rustc_hash::FxHashMap<u64, CachedExtension>>;
 static EXTENSION_BYTECODE_CACHE: std::sync::OnceLock<ExtensionCache> = std::sync::OnceLock::new();
 
 fn extension_cache() -> &'static ExtensionCache {
   EXTENSION_BYTECODE_CACHE.get_or_init(|| std::sync::Mutex::new(rustc_hash::FxHashMap::default()))
+}
+
+/// Record a compile in the in-process tier together with the input set
+/// its freshness depends on. An unreadable input means "cannot vouch for
+/// this" — the entry is simply not cached rather than cached as stale.
+fn remember_extension(key: u64, bytecode: &Arc<[u8]>, manifests_json: &str, inputs: Vec<PathBuf>) {
+  let Some(fingerprint) = crate::bytecode_cache::inputs_fingerprint(&inputs) else {
+    return;
+  };
+  if let Ok(mut cache) = extension_cache().lock() {
+    cache.insert(
+      key,
+      CachedExtension {
+        bytecode: bytecode.clone(),
+        manifests_json: manifests_json.to_string(),
+        inputs,
+        inputs_fingerprint: fingerprint,
+      },
+    );
+  }
 }
 
 /// Cache key: the file's canonical path (rolldown resolution + relative
@@ -599,7 +665,14 @@ pub async fn compile_and_extract_extensions(
     match std::fs::read(path) {
       Ok(b) => {
         let inmem_key = cache_key(path, &b, shims_fp);
-        let cached = extension_cache().lock().ok().and_then(|c| c.get(&inmem_key).cloned());
+        let cached = extension_cache().lock().ok().and_then(|c| {
+          let hit = c.get(&inmem_key)?;
+          // Same question the disk tier asks: did ANY input change?
+          if crate::bytecode_cache::inputs_fingerprint(&hit.inputs) != Some(hit.inputs_fingerprint) {
+            return None;
+          }
+          Some((hit.bytecode.clone(), hit.manifests_json.clone()))
+        });
         let disk_key = crate::bytecode_cache::entry_key("extension", std::slice::from_ref(path), shims_fp);
         match cached {
           // 1. In-memory (same process).
@@ -610,9 +683,10 @@ pub async fn compile_and_extract_extensions(
             Some(entry) => {
               let bc: Arc<[u8]> = Arc::from(entry.bytecode.into_boxed_slice());
               let mj = entry.aux.unwrap_or_else(|| "[]".to_string());
-              if let Ok(mut cache) = extension_cache().lock() {
-                cache.insert(inmem_key, (bc.clone(), mj.clone()));
-              }
+              // Reuse the input set the disk manifest recorded rather
+              // than re-deriving it; it is what that bytecode's freshness
+              // was just validated against.
+              remember_extension(inmem_key, &bc, &mj, entry.inputs);
               slots.push(Slot::Hit(bc, mj));
             },
             // 3. Cold: bundle + compile below.
@@ -647,15 +721,18 @@ pub async fn compile_and_extract_extensions(
   }))
   .await;
 
-  // Compiled code (+ source map, for the disk cache's transitive input
-  // set) per missed position. None = bundle failed.
+  // Compiled code (+ source map for stack traces, + the module graph for
+  // the caches' transitive input set) per missed position. Absent = the
+  // bundle failed.
   let mut bundled_code: rustc_hash::FxHashMap<usize, String> = rustc_hash::FxHashMap::default();
   let mut bundled_map: rustc_hash::FxHashMap<usize, Option<String>> = rustc_hash::FxHashMap::default();
+  let mut bundled_modules: rustc_hash::FxHashMap<usize, Vec<PathBuf>> = rustc_hash::FxHashMap::default();
   for (i, res) in bundles {
     match res {
-      Ok((code, map)) => {
-        bundled_code.insert(i, code);
-        bundled_map.insert(i, map);
+      Ok(b) => {
+        bundled_code.insert(i, b.code);
+        bundled_map.insert(i, b.source_map_json);
+        bundled_modules.insert(i, b.modules);
       },
       Err(e) => slots[i] = Slot::Failed(e),
     }
@@ -706,16 +783,14 @@ pub async fn compile_and_extract_extensions(
       match compile_extract_one(&actx, &module_name, code).await {
         Ok((bc, mj)) => {
           let bc: Arc<[u8]> = Arc::from(bc.into_boxed_slice());
-          if let Ok(mut cache) = extension_cache().lock() {
-            cache.insert(inmem_key, (bc.clone(), mj.clone()));
-          }
-          // Persist for the next process. Inputs = this extension file plus
-          // its transitive imports (from the source map), so an edited
-          // helper invalidates the entry on the next load.
-          let cwd = files[i].parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+          // Inputs = this extension file plus its transitive imports (from
+          // the source map), so an edited helper invalidates the entry in
+          // BOTH tiers.
           let map = bundled_map.get(&i).cloned().flatten();
-          let inputs = crate::bytecode_cache::collect_inputs(std::slice::from_ref(&files[i]), map.as_deref(), &cwd);
+          let modules = bundled_modules.get(&i).cloned().unwrap_or_default();
+          let inputs = crate::bytecode_cache::input_set(std::slice::from_ref(&files[i]), &modules);
           crate::bytecode_cache::store(disk_key, &bc, &module_name, map.as_deref(), Some(&mj), &inputs);
+          remember_extension(inmem_key, &bc, &mj, inputs);
           slots[i] = Slot::Hit(bc, mj);
         },
         Err(e) => slots[i] = Slot::Failed(e),

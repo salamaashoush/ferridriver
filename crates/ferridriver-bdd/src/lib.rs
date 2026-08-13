@@ -252,14 +252,20 @@ pub async fn run_bdd_with(
   } else {
     overrides.bdd_steps.clone()
   };
-  let extensions: Vec<String> = if overrides.extensions.is_empty() {
+  let extensions: Vec<ferridriver_script::ExtensionSpec> = if overrides.extensions.is_empty() {
+    // The env fallback has no declaring file, so its entries resolve
+    // against the process cwd.
+    let base = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     std::env::var("FERRIDRIVER_EXTENSIONS")
       .ok()
       .map(|s| {
         s.split(',')
           .map(str::trim)
           .filter(|s| !s.is_empty())
-          .map(String::from)
+          .map(|spec| ferridriver_script::ExtensionSpec {
+            spec: spec.to_string(),
+            base_dir: base.clone(),
+          })
           .collect()
       })
       .unwrap_or_default()
@@ -327,7 +333,7 @@ pub async fn run_bdd_with(
 async fn build_bdd_plan(
   config: &ferridriver_test::config::TestConfig,
   js_globs: &[String],
-  extensions: &[String],
+  extensions: &[ferridriver_script::ExtensionSpec],
   only_features: Option<&[std::path::PathBuf]>,
 ) -> Result<ferridriver_test::model::TestPlan, String> {
   use std::sync::Arc;

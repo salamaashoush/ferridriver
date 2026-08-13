@@ -45,9 +45,10 @@ async fn typescript_steps_run_and_unused_export_is_tree_shaken() {
   // 1. Tree-shaking: bundle the .ts entry; the used helper survives,
   //    the never-imported export (+ its marker) is dropped.
   let entry = dir.join("steps.ts");
-  let (code, _map) = ferridriver_script::bundle_source(&[entry], &dir)
+  let code = ferridriver_script::bundle_source(&[entry], &dir)
     .await
-    .expect("rolldown bundle .ts");
+    .expect("rolldown bundle .ts")
+    .code;
   assert!(
     !code.contains("TREE_SHAKE_ME_AWAY_MARKER_9F3A"),
     "unused export must be tree-shaken out of the bundle:\n{code}"

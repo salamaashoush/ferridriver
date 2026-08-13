@@ -45,6 +45,7 @@ fn run_context(extensions: Vec<ExtensionBinding>, policy: ExtensionPolicyConfig)
     extensions,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ScriptCaps::default().with_extension_policy(policy),
+    session: None,
   };
   (tmp, ctx)
 }

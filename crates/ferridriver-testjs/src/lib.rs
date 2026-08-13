@@ -132,6 +132,7 @@ impl JsTestSession {
       extensions: Vec::new(),
       host: ferridriver_script::ExtensionHost::Test,
       caps: TEST_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
+      session: None,
     };
     let engine_config = ferridriver_script::ScriptEngineConfig {
       sidecars: TEST_SIDECARS.get().cloned().unwrap_or_default(),
@@ -276,6 +277,7 @@ pub async fn load_ts_tests(config: &TestConfig, cwd: &Path) -> anyhow::Result<Op
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Test,
     caps: TEST_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
+    session: None,
   };
   let session = ferridriver_script::Session::create(ferridriver_script::ScriptEngineConfig::default(), &run_ctx)
     .await

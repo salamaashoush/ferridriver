@@ -35,7 +35,8 @@ pub fn parse_common_cli_args() -> CliOverrides {
   let mut i = 1;
   while i < args.len() {
     match args[i].as_str() {
-      "--headless" => overrides.headless = true,
+      "--headless" => overrides.headless_override = Some(true),
+      "--headed" => overrides.headless_override = Some(false),
       "--workers" | "-j" => {
         i += 1;
         overrides.workers = args.get(i).and_then(|v| v.parse().ok());
@@ -181,8 +182,8 @@ fn apply_env_overrides(overrides: &mut CliOverrides) {
   fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
   }
-  if env("FERRITEST_HEADLESS").is_some_and(|v| v != "0" && v != "false") {
-    overrides.headless = true;
+  if let Some(v) = env("FERRITEST_HEADLESS") {
+    overrides.headless_override = Some(v != "0" && v != "false");
   }
   if let Some(v) = env("FERRITEST_BACKEND") {
     overrides.backend = Some(v);
@@ -307,8 +308,8 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
       })
       .collect();
   }
-  if overrides.headless {
-    config.browser.headless = true;
+  if let Some(headless) = overrides.headless_override {
+    config.browser.headless = headless;
   }
   if let Some(ref b) = overrides.browser {
     config.browser.browser.clone_from(b);

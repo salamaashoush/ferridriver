@@ -24,3 +24,11 @@ dirs = { workspace = true }
 tracing = { workspace = true }
 shellexpand = { workspace = true }
 config = { workspace = true }
+serde_ignored = "0.1"
+# Names the exact field path in a deserialization error. serde alone
+# reports `invalid type: string, expected a sequence` with no clue which
+# key it means, which is useless in an extension author's package.json.
+serde_path_to_error = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

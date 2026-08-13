@@ -26,10 +26,19 @@ pub struct Cli {
   #[arg(short, long, action = clap::ArgAction::Count, global = true)]
   pub verbose: u8,
 
-  /// Config file path. Auto-searches `ferridriver.toml` (TOML/YAML/JSON
-  /// inferred from extension) if not specified.
+  /// Config file path, applied on top of the discovered config layers
+  /// (machine, user, repository, cwd). Format inferred from the
+  /// extension.
   #[arg(short, long, global = true)]
   pub config: Option<PathBuf>,
+
+  /// Ignore every config layer except `--config` (or, without it, the
+  /// config in the current directory). For reproducible runs that must
+  /// not pick up machine-, user- or repository-level settings. Also
+  /// settable as `FERRIDRIVER_NO_INHERIT=1` (read by the loader, so it
+  /// applies to child processes too).
+  #[arg(long, global = true)]
+  pub no_inherit: bool,
 
   #[command(subcommand)]
   pub command: Command,
@@ -558,15 +567,22 @@ pub struct CodegenArgs {
 /// Browser backend and connection options.
 #[derive(Args, Clone)]
 pub struct BrowserArgs {
-  /// Browser backend to use.
-  #[arg(long, default_value = "cdp-pipe")]
-  pub backend: Backend,
+  /// Browser backend to use. Unset means "whatever the config says",
+  /// falling back to `cdp-pipe`; there is deliberately no clap default,
+  /// because a default is indistinguishable from an explicit choice and
+  /// the config could then never be overridden on the command line.
+  #[arg(long)]
+  pub backend: Option<Backend>,
 
   /// Run the browser without a visible window. Off by default because
   /// MCP's canonical use case is an interactive debugging / agent
   /// session where the user wants to watch the browser.
-  #[arg(long)]
+  #[arg(long, overrides_with = "headed")]
   pub headless: bool,
+
+  /// Force a visible window, overriding `headless = true` in the config.
+  #[arg(long, overrides_with = "headless")]
+  pub headed: bool,
 
   /// Path to Chrome/Chromium binary.
   #[arg(long)]
@@ -585,9 +601,54 @@ pub struct BrowserArgs {
   pub user_data_dir: Option<String>,
 }
 
+/// The browser settings a run will actually use, after CLI flags are
+/// applied on top of the config file.
+///
+/// Lives beside [`BrowserArgs`] because it IS the precedence rule for
+/// those flags: `ferridriver mcp` and `ferridriver config` both read it,
+/// so a report can never describe a resolution the server does not
+/// perform.
+pub struct EffectiveBrowser {
+  pub backend: ferridriver::backend::BackendKind,
+  pub headless: bool,
+}
+
+/// Apply CLI-over-config precedence for the browser flags.
+pub fn effective_browser(args: &BrowserArgs, mcp: &ferridriver_config::mcp::McpConfig) -> EffectiveBrowser {
+  let cli_backend = args.backend_kind();
+  let cli_headless = args.headless_override();
+  EffectiveBrowser {
+    backend: cli_backend.unwrap_or_else(|| mcp.backend_kind()),
+    headless: cli_headless.unwrap_or_else(|| mcp.headless()),
+  }
+}
+
 impl BrowserArgs {
-  pub fn backend_kind(&self) -> BackendKind {
-    backend_to_kind(&self.backend)
+  /// The backend the user asked for on the command line, if any.
+  /// `None` means "defer to the config file".
+  pub fn backend_kind(&self) -> Option<BackendKind> {
+    self.backend.as_ref().map(backend_to_kind)
+  }
+
+  /// The backend wire name the user asked for, for the string-typed
+  /// `[test]` override path.
+  pub fn backend_name(&self) -> Option<&'static str> {
+    self.backend.as_ref().map(|b| match b {
+      Backend::CdpPipe => "cdp-pipe",
+      Backend::CdpRaw => "cdp-raw",
+      Backend::WebKit => "webkit",
+      Backend::Bidi => "bidi",
+    })
+  }
+
+  /// Explicit headed/headless choice, or `None` when neither flag was
+  /// passed and the config decides.
+  pub fn headless_override(&self) -> Option<bool> {
+    match (self.headless, self.headed) {
+      (true, _) => Some(true),
+      (_, true) => Some(false),
+      _ => None,
+    }
   }
 
   pub fn connect_mode(&self) -> ConnectMode {

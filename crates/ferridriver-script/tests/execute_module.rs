@@ -23,6 +23,7 @@ fn ctx(dir: &std::path::Path) -> RunContext {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   }
 }
 

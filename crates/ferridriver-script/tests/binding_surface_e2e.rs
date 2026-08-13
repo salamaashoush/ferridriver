@@ -101,6 +101,7 @@ async fn harness() -> H {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await

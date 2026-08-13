@@ -230,6 +230,34 @@ pub struct BrowserConfig {
   /// Playwright `use` block: per-project context defaults.
   #[serde(default, rename = "use")]
   pub use_options: ContextConfig,
+
+  // ── Instance routing (shared schema with `[mcp.browser]`) ──
+  /// Which named instance this browser launches as. A project may
+  /// override it, so one suite can run against several environments.
+  ///
+  /// Instances give the test runner the environment selection the MCP
+  /// server always had: before this, a suite could only hard-code an
+  /// environment's flags into `args`.
+  #[serde(default)]
+  pub instance: Option<String>,
+  /// Per-instance launch settings, keyed by instance name.
+  #[serde(default)]
+  pub instances: std::collections::HashMap<String, crate::browser::InstanceConfig>,
+  /// Defaults for instances not listed in `instances`.
+  #[serde(default, alias = "default_instance")]
+  pub default_instance: Option<crate::browser::InstanceConfig>,
+  /// Command producing per-instance browser args (`${INSTANCE}`).
+  #[serde(default, alias = "instance_args_command")]
+  pub instance_args_command: Option<crate::command_spec::CommandSpec>,
+  /// Command discovering a running browser for an instance.
+  #[serde(default, alias = "instance_discover_command")]
+  pub instance_discover_command: Option<crate::command_spec::CommandSpec>,
+  /// Cache TTL in seconds for instance-command output.
+  #[serde(default, alias = "command_cache_ttl")]
+  pub command_cache_ttl: Option<u64>,
+  /// Runtime cache for the instance commands.
+  #[serde(skip)]
+  pub command_cache: std::sync::Arc<crate::browser::CommandCache>,
 }
 
 // Each bool field is an independent feature flag set in user TOML —
@@ -325,7 +353,7 @@ impl BrowserConfig {
   /// Rules:
   /// - `backend = "bidi"` implies `browser = "firefox"` (`BiDi` is Firefox-only)
   /// - `browser = "firefox"` implies `backend = "bidi"` (Firefox only speaks `BiDi`)
-  /// - `browser = "webkit"` implies `backend = "webkit"` on macOS
+  /// - `browser = "webkit"` implies `backend = "webkit"`
   /// - Everything else defaults to `browser = "chromium"`, `backend = "cdp-pipe"`
   pub fn normalize(&mut self) {
     match self.backend.as_str() {
@@ -335,13 +363,103 @@ impl BrowserConfig {
       "webkit" => {
         self.browser = "webkit".into();
       },
+      // No platform gate on webkit: Playwright's WebKit build runs on
+      // Linux and macOS alike, and gating it here silently ran
+      // Chromium for `browser = "webkit"` on Linux.
       _ => match self.browser.as_str() {
         "firefox" => self.backend = "bidi".into(),
-        #[cfg(target_os = "macos")]
         "webkit" => self.backend = "webkit".into(),
         _ => {},
       },
     }
+  }
+
+  /// Every accepted `browser` spelling.
+  pub const BROWSERS: &'static [&'static str] = &["chromium", "firefox", "webkit"];
+
+  /// Reject an unknown `browser` or `backend` spelling.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error naming the bad value and the valid ones. Without
+  /// this, a typo fell through every `match` to Chromium over
+  /// `cdp-pipe` and the run looked successful on the wrong engine.
+  pub fn validate(&self) -> anyhow::Result<()> {
+    crate::mcp::BackendChoice::parse(&self.backend)?;
+    if !Self::BROWSERS.contains(&self.browser.as_str()) {
+      anyhow::bail!(
+        "unknown browser {:?} (expected one of {})",
+        self.browser,
+        Self::BROWSERS.join(", ")
+      );
+    }
+    Ok(())
+  }
+
+  /// Instance-routing view over this section, so `[test.browser]` and
+  /// `[mcp.browser]` resolve instances through one implementation.
+  #[must_use]
+  pub fn routing(&self) -> crate::browser::RoutingView<'_> {
+    crate::browser::RoutingView {
+      instances: &self.instances,
+      default_instance: self.default_instance.as_ref(),
+      args_command: self.instance_args_command.as_ref(),
+      discover_command: self.instance_discover_command.as_ref(),
+      cache: &self.command_cache,
+      cache_ttl: self
+        .command_cache_ttl
+        .map_or(crate::browser::DEFAULT_CACHE_TTL, std::time::Duration::from_secs),
+    }
+  }
+
+  /// Launch overrides for the instance this config selects, or the
+  /// section defaults when it names none.
+  ///
+  /// # Errors
+  ///
+  /// Propagates an unusable instance name or a failing args command,
+  /// which must abort the run rather than silently launch a browser
+  /// against the wrong environment.
+  pub fn instance_overrides(&self) -> Result<ferridriver::options::InstanceOverrides, String> {
+    let Some(instance) = self.instance.as_deref() else {
+      return Ok(ferridriver::options::InstanceOverrides::default());
+    };
+    self.routing().health(instance)?;
+    self.routing().overrides_for(instance)
+  }
+
+  /// How to reach the selected instance, when it is already running.
+  #[must_use]
+  pub fn resolve_instance(&self) -> Option<ferridriver::state::ConnectMode> {
+    self.routing().resolve_connect(self.instance.as_deref()?)
+  }
+
+  /// The engine-level backend and browser this config selects.
+  ///
+  /// The single mapping every host reads: the test runner previously
+  /// carried two independent copies of this `match` (`runner.rs` and
+  /// `fixture.rs`), each silently defaulting an unrecognised value to
+  /// Chromium over `cdp-pipe`.
+  #[must_use]
+  pub fn resolve_kinds(&self) -> (ferridriver::backend::BackendKind, ferridriver::options::BrowserKind) {
+    use ferridriver::backend::BackendKind;
+    use ferridriver::options::BrowserKind;
+
+    let backend = match crate::mcp::BackendChoice::parse(&self.backend) {
+      Ok(choice) => choice.kind(),
+      Err(e) => {
+        // Unreachable for a config that came through `validate`; loud
+        // rather than silent for one built in memory.
+        tracing::error!(backend = %self.backend, "{e}; falling back to cdp-pipe");
+        BackendKind::CdpPipe
+      },
+    };
+    let kind = match self.browser.as_str() {
+      "firefox" => BrowserKind::Firefox,
+      "webkit" => BrowserKind::WebKit,
+      _ => BrowserKind::Chromium,
+    };
+    (backend, kind)
   }
 }
 
@@ -361,6 +479,13 @@ impl Default for BrowserConfig {
       viewport: Some(ViewportConfig::default()),
       slow_mo: None,
       use_options: ContextConfig::default(),
+      instance: None,
+      instances: std::collections::HashMap::new(),
+      default_instance: None,
+      instance_args_command: None,
+      instance_discover_command: None,
+      command_cache_ttl: None,
+      command_cache: std::sync::Arc::default(),
     }
   }
 }
@@ -566,9 +691,10 @@ pub struct CliOverrides {
   pub grep: Option<String>,
   pub grep_invert: Option<String>,
   pub tag: Option<String>,
-  /// `--headless`: force headless mode regardless of config. Default config
-  /// runs headed, so this is the only direction the CLI flag goes.
-  pub headless: bool,
+  /// Explicit `--headless` / `--headed` choice. `None` leaves the
+  /// config's value alone; a bool overrides it in EITHER direction, so
+  /// `--headed` can win over a config that pins `headless = true`.
+  pub headless_override: Option<bool>,
   pub shard: Option<ShardArg>,
   pub config_path: Option<String>,
   pub output_dir: Option<String>,
@@ -631,7 +757,7 @@ pub struct CliOverrides {
   /// Top-level `extensions` paths (files or dirs). Their `Given/When/Then`
   /// step definitions are bundled alongside `bdd_steps` so one extension
   /// can serve both the MCP server (`tool`) and the test runner.
-  pub extensions: Vec<String>,
+  pub extensions: Vec<crate::ExtensionSpec>,
   /// `--world-parameters <JSON>`: overrides `[test].worldParameters`;
   /// parsed and exposed to scenarios as `this.parameters`.
   pub world_parameters: Option<String>,

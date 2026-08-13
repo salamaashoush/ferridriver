@@ -103,12 +103,13 @@ impl McpServer {
     history) or use `page.waitForEvent(event, { predicate })` inside one script. \
     Returns structured JSON: { status: 'ok'|'error', value?, error?, duration_ms, console[] }. \
     On `error`, the payload includes message, stack, line, column, and a source snippet around the failure. \
-    Pair with snapshot/screenshot tools when the LLM needs to ground selectors before acting."
+    Pair with snapshot/screenshot tools when the LLM needs to ground selectors before acting.",
+    output_schema = rmcp::handler::server::tool::schema_for_output::<ferridriver_script::ScriptResult>()
   )]
   async fn run_script(
     &self,
     Parameters(p): Parameters<RunScriptParams>,
-    meta: rmcp::model::Meta,
+    meta: rmcp::model::RequestMetaObject,
     peer: rmcp::service::Peer<rmcp::RoleServer>,
   ) -> Result<CallToolResult, ErrorData> {
     let session = sess(p.session.as_ref()).to_string();
@@ -207,7 +208,8 @@ impl McpServer {
         .await
     };
 
-    let json = serde_json::to_string_pretty(&result).map_err(|e| McpServer::err(format!("serialize result: {e}")))?;
+    let value = serde_json::to_value(&result).map_err(|e| McpServer::err(format!("serialize result: {e}")))?;
+    let json = serde_json::to_string_pretty(&value).map_err(|e| McpServer::err(format!("serialize result: {e}")))?;
 
     // Build the return: one JSON text block is the mechanical payload the
     // caller (often an LLM) parses. Well-formed per ScriptResult's schema.
@@ -227,9 +229,14 @@ impl McpServer {
     // client checks to know the call failed. The payload is unchanged —
     // `status` still carries the same detail — so callers that parse it
     // keep working and callers that only check `isError` start working.
-    if failed {
-      return Ok(CallToolResult::error(contents));
-    }
-    Ok(CallToolResult::success(contents))
+    // Either way it also travels as structured content, which a client
+    // validates against the tool's declared `outputSchema`.
+    let mut out = if failed {
+      CallToolResult::error(contents)
+    } else {
+      CallToolResult::success(contents)
+    };
+    out.structured_content = Some(value);
+    Ok(out)
   }
 }

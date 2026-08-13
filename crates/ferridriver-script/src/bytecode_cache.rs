@@ -41,6 +41,10 @@ pub struct CacheEntry {
   pub source_map_json: Option<String>,
   /// Caller-specific sidecar (extension manifests JSON) — `None` for BDD.
   pub aux: Option<String>,
+  /// The input paths this entry's freshness was validated against, so a
+  /// caller promoting the entry into an in-process tier can carry the
+  /// same set instead of re-deriving it.
+  pub inputs: Vec<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -159,39 +163,49 @@ pub fn entry_key(kind: &str, entry_paths: &[PathBuf], salt: u64) -> u64 {
   h.finish()
 }
 
-/// Resolve a source-map `sources` entry to an absolute path under `cwd`.
-fn resolve_source(src: &str, cwd: &Path) -> PathBuf {
-  let p = Path::new(src);
-  if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) }
-}
-
-/// Collect the transitive input set for a bundle: the entry files plus
-/// every `sources` entry in the source map, canonicalized and deduped.
+/// The transitive input set for a bundle: the entry files plus every
+/// module rolldown reported in the chunk's graph, canonicalized and
+/// deduped.
+///
+/// The module graph — not the source map — is the authority. A helper
+/// module whose bindings are all inlined leaves no mapping tokens and so
+/// never appears in the map's `sources`, which made the input set omit
+/// exactly the files an extension author edits most; both cache tiers
+/// then answered "unchanged" for a changed tree.
 #[must_use]
-pub fn collect_inputs(entry_paths: &[PathBuf], source_map_json: Option<&str>, cwd: &Path) -> Vec<PathBuf> {
+pub fn input_set(entry_paths: &[PathBuf], modules: &[PathBuf]) -> Vec<PathBuf> {
   let mut out: Vec<PathBuf> = Vec::new();
-  let mut push = |p: PathBuf| {
-    let c = std::fs::canonicalize(&p).unwrap_or(p);
+  let mut push = |p: &Path| {
+    let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     if !out.contains(&c) {
       out.push(c);
     }
   };
   for e in entry_paths {
-    push(e.clone());
+    push(e);
   }
-  if let Some(json) = source_map_json
-    && let Ok(sm) = sourcemap::SourceMap::from_slice(json.as_bytes())
-  {
-    for src in sm.sources() {
-      // rolldown emits synthetic sources (e.g. `\0` virtual modules)
-      // that don't map to real files — skip anything missing.
-      let path = resolve_source(src, cwd);
-      if path.is_file() {
-        push(path);
-      }
+  for m in modules {
+    if m.is_file() {
+      push(m);
     }
   }
   out
+}
+
+/// Content fingerprint over a transitive input set, for an in-process
+/// cache tier that has to answer the same freshness question [`load`]
+/// answers on disk: has ANY input changed, not just the entry file.
+///
+/// `None` when an input cannot be read — the source moved, so the cached
+/// compile must not be reused.
+#[must_use]
+pub fn inputs_fingerprint(inputs: &[PathBuf]) -> Option<u64> {
+  let mut h = std::collections::hash_map::DefaultHasher::new();
+  for p in inputs {
+    p.hash(&mut h);
+    hash_bytes(&std::fs::read(p).ok()?).hash(&mut h);
+  }
+  Some(h.finish())
 }
 
 fn paths(key: u64) -> Option<(PathBuf, PathBuf)> {
@@ -224,6 +238,7 @@ pub fn load(key: u64) -> Option<CacheEntry> {
     bytecode,
     source_map_json: manifest.source_map_json,
     aux: manifest.aux,
+    inputs: manifest.inputs.iter().map(|(p, _)| PathBuf::from(p)).collect(),
   })
 }
 

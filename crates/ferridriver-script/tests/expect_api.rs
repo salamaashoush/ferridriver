@@ -30,6 +30,7 @@ fn make_engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
     extensions: Vec::new(),
     host: ExtensionHost::Script,
     caps: ScriptCaps::default(),
+    session: None,
   };
   let engine = ScriptEngine::new(ScriptEngineConfig::default());
   (engine, tmp, context)

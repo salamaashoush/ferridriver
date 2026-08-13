@@ -427,6 +427,8 @@ pub fn tool_names(ctx: &Ctx<'_>) -> Result<Vec<String>, ScriptError> {
 /// registration index. Used by the native `tools.<name>` dispatch in
 /// `extensions.rs` — the analogue of `invoke_step`'s registry lookup.
 pub(crate) struct ToolDispatch<'js> {
+  /// Manifest name, for settings lookup and log attribution.
+  pub name: String,
   pub handler: Function<'js>,
   pub allowed_commands: std::sync::Arc<std::collections::BTreeMap<String, crate::command_spec::CommandSpec>>,
   /// Effective net policy (`None` = unrestricted, `Some` = default-deny
@@ -443,12 +445,13 @@ pub(crate) fn tool_index_by_name(ctx: &Ctx<'_>, name: &str) -> Result<Option<usi
 }
 
 pub(crate) fn tool_dispatch<'js>(ctx: &Ctx<'js>, idx: usize) -> Result<ToolDispatch<'js>, ScriptError> {
-  let (saved, allowed_commands, allowed_net, timeout_ms) = with_registry(ctx, |reg| {
+  let (name, saved, allowed_commands, allowed_net, timeout_ms) = with_registry(ctx, |reg| {
     reg
       .tools
       .get(idx)
       .map(|t| {
         (
+          t.name.clone(),
           t.handler.clone(),
           t.allowed_commands.clone(),
           t.allowed_net.clone(),
@@ -459,6 +462,7 @@ pub(crate) fn tool_dispatch<'js>(ctx: &Ctx<'js>, idx: usize) -> Result<ToolDispa
   })??;
   let handler = saved.restore(ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
   Ok(ToolDispatch {
+    name,
     handler,
     allowed_commands,
     allowed_net,

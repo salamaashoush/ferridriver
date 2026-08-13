@@ -7,7 +7,7 @@
 //! One test fn so the process-global cache dir / env vars aren't raced by
 //! parallel tests.
 
-use ferridriver_script::bytecode_cache::{collect_inputs, entry_key, load, store};
+use ferridriver_script::bytecode_cache::{entry_key, input_set, inputs_fingerprint, load, store};
 
 #[test]
 fn disk_cache_roundtrip_invalidation_and_disable() {
@@ -23,8 +23,8 @@ fn disk_cache_roundtrip_invalidation_and_disable() {
   std::fs::write(&helper, "export const h = 1;").expect("write helper");
 
   let key = entry_key("bundle", std::slice::from_ref(&entry), 0);
-  // Inputs include the transitive helper (collect_inputs would derive
-  // this from the source map in production; here we pass both directly).
+  // In production these come from rolldown's module graph
+  // (`input_set(entries, modules)`); here we pass both directly.
   let inputs = vec![entry.clone(), helper.clone()];
 
   // The kind discriminator namespaces consumers: the same entry as a
@@ -82,7 +82,31 @@ fn disk_cache_roundtrip_invalidation_and_disable() {
   assert!(load(key).is_none(), "disabled cache must not load");
   unsafe { std::env::remove_var("FERRIDRIVER_NO_BYTECODE_CACHE") };
 
-  // collect_inputs at least returns the entry file itself.
-  let collected = collect_inputs(std::slice::from_ref(&entry), None, src.path());
+  // 5. `input_set` unions the entries with the reported module graph and
+  // drops modules that are not real files (rolldown reports synthetic
+  // ids for virtual modules).
+  let collected = input_set(
+    std::slice::from_ref(&entry),
+    &[helper.clone(), std::path::PathBuf::from("\0virtual:shim")],
+  );
   assert!(collected.iter().any(|p| p.ends_with("a.js")), "entry must be an input");
+  assert!(
+    collected.iter().any(|p| p.ends_with("helper.js")),
+    "a graph module must be an input"
+  );
+  assert_eq!(collected.len(), 2, "the synthetic id is dropped: {collected:?}");
+
+  // 6. the in-process fingerprint over that set moves with any input.
+  let before = inputs_fingerprint(&collected).expect("fingerprint");
+  std::fs::write(&helper, "export const h = 99;").expect("edit helper");
+  assert_ne!(
+    inputs_fingerprint(&collected),
+    Some(before),
+    "an edited input must change the fingerprint"
+  );
+  std::fs::remove_file(&helper).expect("rm helper");
+  assert!(
+    inputs_fingerprint(&collected).is_none(),
+    "an unreadable input cannot be vouched for"
+  );
 }

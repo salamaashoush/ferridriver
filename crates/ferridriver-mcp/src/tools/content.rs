@@ -65,16 +65,13 @@ impl McpServer {
     let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
-    let mime = match p.format.as_deref() {
-      Some("jpeg" | "jpg") => "image/jpeg",
-      Some("webp") => "image/webp",
-      _ => "image/png",
-    };
+    let format = p.format.unwrap_or_default();
+    let mime = format.mime();
     let bytes = if let Some(sel) = &p.selector {
       page.screenshot_element(sel).await.map_err(Self::err)?
     } else {
       let opts = ScreenshotOptions {
-        format: p.format.as_deref().map(ferridriver::options::ScreenshotFormat::from),
+        format: Some(format.into()),
         quality: p.quality,
         full_page: p.full_page,
         ..Default::default()
@@ -85,11 +82,7 @@ impl McpServer {
     let mut out = vec![ContentBlock::image(b64, mime)];
     // Persist the capture under artifacts_root and hand back a resource link
     // so the caller can re-fetch it on demand (no re-capture, no re-inlining).
-    let ext = match mime {
-      "image/jpeg" => "jpg",
-      "image/webp" => "webp",
-      _ => "png",
-    };
+    let ext = format.extension();
     let stamp = std::time::SystemTime::now()
       .duration_since(std::time::UNIX_EPOCH)
       .map_or(0, |d| d.as_millis());

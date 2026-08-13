@@ -84,20 +84,35 @@ impl BidiBrowser {
 
   /// Launch a browser with `BiDi` support.
   /// Auto-detects Firefox vs Chrome from the binary path.
-  pub async fn launch_with_flags(browser_path: &str, flags: &[String]) -> Result<Self> {
+  ///
+  /// `user_data_dir` selects a persistent profile ferridriver does not
+  /// own; without it a throwaway profile is created and removed on
+  /// teardown.
+  pub async fn launch_with_flags(
+    browser_path: &str,
+    flags: &[String],
+    env: &rustc_hash::FxHashMap<String, String>,
+    user_data_dir: Option<&std::path::Path>,
+  ) -> Result<Self> {
     // Determine if headless from flags
     let headless = flags.iter().any(|f| f == "--headless");
-    let (session, child, profile_dir) = Box::pin(BidiSession::launch(browser_path, flags, headless)).await?;
+    let (session, child, profile) =
+      Box::pin(BidiSession::launch(browser_path, flags, headless, env, user_data_dir)).await?;
     let session = Arc::new(session);
     let downloads_dir = new_downloads_dir()?;
     let popup_taps = Self::spawn_popup_listener(&session, &downloads_dir);
-    let mut group = crate::backend::process::ChildGroup::recorded(child, Some(profile_dir.path()), true);
+    let owns_profile = profile.owned.is_some();
+    let mut group = crate::backend::process::ChildGroup::recorded(child, Some(&profile.path), owns_profile);
     group.own_dir(downloads_dir.path());
     Ok(Self {
       session,
       child: Arc::new(tokio::sync::Mutex::new(Some(group))),
       popup_taps,
-      profile_dir: Some(Arc::new(crate::backend::async_tempdir::AsyncTempDir::new(profile_dir))),
+      // A persistent profile is the caller's, so nothing here may delete
+      // it — that is the whole point of asking for one.
+      profile_dir: profile
+        .owned
+        .map(|dir| Arc::new(crate::backend::async_tempdir::AsyncTempDir::new(dir))),
       downloads_dir,
     })
   }

@@ -47,12 +47,12 @@ const FILES: &[(&str, &str)] = &[
   ),
   (
     "ui.js",
-    "defineTool({ name: 'box.click', description: 'click', exposeAsMcpTool: true, async handler() { return 1; } });\n\
-     defineTool({ name: 'box.type', description: 'type', exposeAsMcpTool: true, async handler() { return 2; } });",
+    "defineTool({ name: 'acme.click', description: 'click', exposeAsMcpTool: true, async handler() { return 1; } });\n\
+     defineTool({ name: 'acme.type', description: 'type', exposeAsMcpTool: true, async handler() { return 2; } });",
   ),
   (
     "sign.js",
-    "defineTool({ name: 'box.sign', description: 'sign', exposeAsMcpTool: true, async handler() { return 'signed'; } });",
+    "defineTool({ name: 'acme.sign', description: 'sign', exposeAsMcpTool: true, async handler() { return 'signed'; } });",
   ),
 ];
 
@@ -119,6 +119,7 @@ async fn plugin_path_bench() {
     extensions: bindings(&compiled),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let n_sessions = 50;
   let sess_t = Instant::now();

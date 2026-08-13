@@ -27,12 +27,11 @@ use ferridriver_script::ConsoleSink;
 /// path. `roots` are files or directories (directories are scanned shallowly
 /// for `.js`/`.mjs`/`.ts`/`.mts`). Discovery / compile failures are logged
 /// and skipped so a single bad extension never aborts the run.
-async fn load_run_extensions(roots: &[String]) -> Vec<ferridriver_script::ExtensionBinding> {
+async fn load_run_extensions(roots: &[ferridriver_script::ExtensionSpec]) -> Vec<ferridriver_script::ExtensionBinding> {
   if roots.is_empty() {
     return Vec::new();
   }
-  let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-  let (mut files, errors) = ferridriver_script::discover::resolve_extension_specs(roots, &cwd);
+  let (mut files, errors) = ferridriver_script::discover::resolve_extension_specs_with_bases(roots);
   for (spec, e) in errors {
     tracing::warn!(extension = %spec, error = %e.message, "extension discovery failed; skipping");
   }
@@ -130,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
 
   // Load the unified config exactly once. Each subcommand reads the
   // section it cares about from this single document.
-  let config = FerridriverConfig::load(args.config.as_deref())?;
+  let config = FerridriverConfig::load_layered(args.config.as_deref(), !args.no_inherit)?;
   install_bundler_shims(&config);
 
   match args.command {
@@ -319,7 +318,7 @@ fn run_test(args: &cli::RustTestArgs) -> anyhow::Result<()> {
 /// group (cargo, harness binaries, browsers) and exit.
 async fn run_test_watch(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::Result<()> {
   let overrides = ferridriver_test::config::CliOverrides {
-    headless: args.headless,
+    headless_override: args.headless.then_some(true),
     backend: args.backend.clone(),
     workers: args.workers.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
     tag: args.tag.clone(),
@@ -412,7 +411,8 @@ async fn run_test_native(config: FerridriverConfig, args: cli::TestRunArgs) -> a
       &config.scripting.allow_env,
       config.scripting.allow.commands.clone(),
     )
-    .with_extension_policy(config.extensions.policy()),
+    .with_extension_policy(config.extensions.policy())
+    .with_extension_settings(config.extensions.settings()),
   );
   ferridriver_testjs::set_test_sidecars(sidecar_specs(&config));
 
@@ -436,21 +436,12 @@ async fn run_test_native(config: FerridriverConfig, args: cli::TestRunArgs) -> a
     repeat_each: args.repeat_each,
     forbid_only: args.forbid_only,
     list_only: args.list,
-    extensions: config.extensions.paths().to_vec(),
+    extensions: config.extension_specs(),
     module_aliases: args.module_alias,
     ..Default::default()
   };
-  if args.browser.headless {
-    overrides.headless = true;
-  }
-  if !matches!(args.browser.backend, cli::Backend::CdpPipe) {
-    overrides.backend = match args.browser.backend {
-      cli::Backend::CdpPipe => Some("cdp-pipe".into()),
-      cli::Backend::CdpRaw => Some("cdp-raw".into()),
-      cli::Backend::WebKit => Some("webkit".into()),
-      cli::Backend::Bidi => Some("bidi".into()),
-    };
-  }
+  overrides.headless_override = args.browser.headless_override();
+  overrides.backend = args.browser.backend_name().map(str::to_string);
   overrides.executable_path = args.browser.executable_path;
   if let Some(ref spec) = args.shard {
     overrides.shard =
@@ -478,7 +469,8 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
       &config.scripting.allow_env,
       config.scripting.allow.commands.clone(),
     )
-    .with_extension_policy(config.extensions.policy()),
+    .with_extension_policy(config.extensions.policy())
+    .with_extension_settings(config.extensions.settings()),
   );
   ferridriver_bdd::js::set_bdd_sidecars(sidecar_specs(&config));
   let mut overrides = ferridriver_test::config::CliOverrides {
@@ -495,7 +487,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
     bdd_language: args.language,
     bdd_steps: args.steps,
     world_parameters: args.world_parameters,
-    extensions: config.extensions.paths().to_vec(),
+    extensions: config.extension_specs(),
     workers: args.workers.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
     reporter: args.reporter,
     ..Default::default()
@@ -503,20 +495,8 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   // `--headless` opts into headless. Default config is headed, so leaving
   // the flag unset means visible windows -- matching the new CLI
   // convention where the user watches tests run by default.
-  if args.browser.headless {
-    overrides.headless = true;
-  }
-  // Likewise, only override backend / executable_path when the user supplied
-  // a non-default value. clap fills in defaults for `--backend`, so use the
-  // raw arg presence by checking the user-relevant flags.
-  if !matches!(args.browser.backend, cli::Backend::CdpPipe) {
-    overrides.backend = match args.browser.backend {
-      cli::Backend::CdpPipe => Some("cdp-pipe".into()),
-      cli::Backend::CdpRaw => Some("cdp-raw".into()),
-      cli::Backend::WebKit => Some("webkit".into()),
-      cli::Backend::Bidi => Some("bidi".into()),
-    };
-  }
+  overrides.headless_override = args.browser.headless_override();
+  overrides.backend = args.browser.backend_name().map(str::to_string);
   overrides.executable_path = args.browser.executable_path;
 
   if let Some(ref spec) = args.shard {
@@ -583,13 +563,20 @@ async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> a
     &file_config.scripting.allow_env,
     file_config.scripting.allow.commands.clone(),
   )
-  .with_extension_policy(file_config.extensions.policy());
+  .with_extension_policy(file_config.extensions.policy())
+  .with_extension_settings(file_config.extensions.settings());
   let sidecars = sidecar_specs(&file_config);
 
   // Extensions: config `extensions` plus any `--extension` specs. Their
   // `tool` registrations become `tools.*` callables in the script.
-  let mut extension_roots = file_config.extensions.paths().to_vec();
-  extension_roots.extend(args.extensions.iter().cloned());
+  // Config entries keep their declaring layer's directory; `--extension`
+  // specs are relative to where the user typed the command.
+  let mut extension_roots = file_config.extension_specs();
+  let cli_base = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+  extension_roots.extend(args.extensions.iter().map(|spec| ferridriver_script::ExtensionSpec {
+    spec: spec.clone(),
+    base_dir: cli_base.clone(),
+  }));
   let extensions = load_run_extensions(&extension_roots).await;
 
   let ctx = ferridriver_script::RunContext {
@@ -603,6 +590,9 @@ async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> a
     extensions,
     host: ferridriver_script::ExtensionHost::Script,
     caps,
+    // `ferridriver run` has no session key; extensions see
+    // `session: undefined` and must not assume one.
+    session: None,
   };
 
   let opts = ferridriver_script::RunOptions {
@@ -704,32 +694,28 @@ fn bundle_entry(
   }
 }
 
-async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Result<()> {
+async fn run_mcp(mut config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Result<()> {
   // The mcp section drives chrome args, instances, and server metadata.
   // CLI flags fall back when the [mcp] section is empty so the user can
   // launch the server with no config file at all.
   let sidecars = sidecar_specs(&config);
-  let extensions = config.extensions.paths().to_vec();
+  let extensions = config.extension_specs();
   let extension_policy = config.extensions.policy();
+  let extension_settings = config.extensions.settings();
   let test_config = config.test.clone();
-  let scripting = config.scripting;
-  let mcp = config.mcp;
-  let backend = if mcp.browser.backend.is_some() {
-    mcp.backend_kind()
-  } else {
-    args.browser.backend_kind()
-  };
-  let headless = if mcp.browser.headless.is_some() {
-    mcp.headless()
-  } else {
-    args.browser.headless
-  };
+  let scripting = std::mem::take(&mut config.scripting);
+  // CLI flags beat the config file. The old order was inverted, so
+  // `--headless` / `--backend` were silently dropped whenever the
+  // config set those keys at all.
+  let effective = cli::effective_browser(&args.browser, &config.mcp);
+  let (backend, headless) = (effective.backend, effective.headless);
   let connect_mode = args.browser.connect_mode();
 
   let caps =
     ferridriver_script::ScriptCaps::resolve_with_commands(&scripting.allow_env, scripting.allow.commands.clone())
-      .with_extension_policy(extension_policy);
-  let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(mcp))
+      .with_extension_policy(extension_policy)
+      .with_extension_settings(extension_settings);
+  let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(config))
     .with_script_caps(caps)
     .with_sidecars(sidecars)
     .with_test_config(test_config);

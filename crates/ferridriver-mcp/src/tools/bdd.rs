@@ -104,20 +104,65 @@ pub struct RunBddParams {
 
 // ── Unified result shape (Rust + JS paths map into this) ────────────────────
 
-#[derive(Serialize)]
+/// How a single step ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum StepOutcome {
+  Passed,
+  Failed,
+  /// Not run, because an earlier step in the scenario failed.
+  Skipped,
+  /// Matched a step definition that is not implemented yet.
+  Pending,
+  /// No step definition matched.
+  Undefined,
+}
+
+impl From<ferridriver_bdd::scenario::StepStatus> for StepOutcome {
+  fn from(value: ferridriver_bdd::scenario::StepStatus) -> Self {
+    use ferridriver_bdd::scenario::StepStatus;
+    match value {
+      StepStatus::Passed => Self::Passed,
+      StepStatus::Failed => Self::Failed,
+      StepStatus::Skipped => Self::Skipped,
+      StepStatus::Pending => Self::Pending,
+      StepStatus::Undefined => Self::Undefined,
+    }
+  }
+}
+
+/// How a whole scenario ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ScenarioOutcome {
+  Passed,
+  Failed,
+  Skipped,
+  Undefined,
+}
+
+/// Whether the run as a whole passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum RunOutcome {
+  Passed,
+  Failed,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
 struct StepJson {
   keyword: String,
   text: String,
-  status: String,
+  status: StepOutcome,
   duration_ms: u128,
   #[serde(skip_serializing_if = "Option::is_none")]
   error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct ScenarioJson {
   name: String,
-  status: String,
+  status: ScenarioOutcome,
   duration_ms: u128,
   tags: Vec<String>,
   steps: Vec<StepJson>,
@@ -125,9 +170,11 @@ struct ScenarioJson {
   error: Option<String>,
 }
 
-#[derive(Serialize)]
+/// The `run_bdd` payload, published as the tool's `outputSchema` and returned
+/// as structured content alongside the human summary.
+#[derive(Serialize, schemars::JsonSchema)]
 struct BddRunResult {
-  status: &'static str,
+  status: RunOutcome,
   total: usize,
   passed: usize,
   failed: usize,
@@ -136,13 +183,29 @@ struct BddRunResult {
   scenarios: Vec<ScenarioJson>,
 }
 
+impl BddRunResult {
+  /// A run that matched nothing. Nothing failed, so it reports `passed` with
+  /// zero scenarios — the prose block says why the set was empty.
+  fn empty() -> Self {
+    Self {
+      status: RunOutcome::Passed,
+      total: 0,
+      passed: 0,
+      failed: 0,
+      skipped: 0,
+      duration_ms: 0,
+      scenarios: Vec::new(),
+    }
+  }
+}
+
 impl From<ScenarioResult> for ScenarioJson {
   fn from(r: ScenarioResult) -> Self {
     let status = match r.status {
-      ScenarioStatus::Passed => "passed",
-      ScenarioStatus::Failed => "failed",
-      ScenarioStatus::Skipped => "skipped",
-      ScenarioStatus::Undefined => "undefined",
+      ScenarioStatus::Passed => ScenarioOutcome::Passed,
+      ScenarioStatus::Failed => ScenarioOutcome::Failed,
+      ScenarioStatus::Skipped => ScenarioOutcome::Skipped,
+      ScenarioStatus::Undefined => ScenarioOutcome::Undefined,
     };
     let steps = r
       .steps
@@ -150,14 +213,14 @@ impl From<ScenarioResult> for ScenarioJson {
       .map(|s| StepJson {
         keyword: s.keyword,
         text: s.text,
-        status: format!("{:?}", s.status).to_lowercase(),
+        status: s.status.into(),
         duration_ms: s.duration.as_millis(),
         error: s.error,
       })
       .collect();
     ScenarioJson {
       name: r.scenario_name,
-      status: status.to_string(),
+      status,
       duration_ms: r.duration.as_millis(),
       tags: r.tags,
       steps,
@@ -174,11 +237,11 @@ impl From<JsScenarioResult> for ScenarioJson {
       .into_iter()
       .map(|s| {
         let (status, error) = match s.status {
-          JsStepStatus::Passed => ("passed", None),
-          JsStepStatus::Skipped => ("skipped", None),
-          JsStepStatus::Pending => ("pending", None),
-          JsStepStatus::Failed(e) => ("failed", Some(e)),
-          JsStepStatus::Undefined(e) => ("undefined", Some(e)),
+          JsStepStatus::Passed => (StepOutcome::Passed, None),
+          JsStepStatus::Skipped => (StepOutcome::Skipped, None),
+          JsStepStatus::Pending => (StepOutcome::Pending, None),
+          JsStepStatus::Failed(e) => (StepOutcome::Failed, Some(e)),
+          JsStepStatus::Undefined(e) => (StepOutcome::Undefined, Some(e)),
         };
         if let Some(ref e) = error
           && scenario_error.is_none()
@@ -188,7 +251,7 @@ impl From<JsScenarioResult> for ScenarioJson {
         StepJson {
           keyword: s.keyword,
           text: s.text,
-          status: status.to_string(),
+          status,
           duration_ms: s.duration.as_millis(),
           error,
         }
@@ -196,7 +259,11 @@ impl From<JsScenarioResult> for ScenarioJson {
       .collect();
     ScenarioJson {
       name: r.name,
-      status: if r.passed { "passed".into() } else { "failed".into() },
+      status: if r.passed {
+        ScenarioOutcome::Passed
+      } else {
+        ScenarioOutcome::Failed
+      },
       duration_ms: 0,
       tags: r.tags,
       steps,
@@ -226,12 +293,13 @@ impl McpServer {
     Supports tags, grep (scenario-name filter), dry_run, fail_fast, strict, step_timeout, language, and \
     world_parameters. Scenarios run sequentially on the shared page (state is reset between scenarios). \
     Returns { status, total, passed, failed, skipped, duration_ms, scenarios[] } with per-step results; a \
-    short human summary is prepended."
+    short human summary is prepended.",
+    output_schema = rmcp::handler::server::tool::schema_for_output::<BddRunResult>()
   )]
   async fn run_bdd(
     &self,
     Parameters(p): Parameters<RunBddParams>,
-    meta: rmcp::model::Meta,
+    meta: rmcp::model::RequestMetaObject,
     peer: rmcp::service::Peer<rmcp::RoleServer>,
   ) -> Result<CallToolResult, ErrorData> {
     let progress = meta.get_progress_token();
@@ -259,9 +327,10 @@ impl McpServer {
       let files = FeatureSet::discover(&globs, &self.test_config.test_ignore)
         .map_err(|e| McpServer::err(format!("feature discovery: {e}")))?;
       if files.is_empty() {
-        return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-          "run_bdd: no .feature files matched {globs:?}"
-        ))]));
+        return Ok(finish(
+          format!("run_bdd: no .feature files matched {globs:?}"),
+          &BddRunResult::empty(),
+        ));
       }
       FeatureSet::parse_with_language(files, p.language.as_deref())
         .map_err(|e| McpServer::err(format!("feature parse: {e}")))?
@@ -278,9 +347,10 @@ impl McpServer {
       scenarios.retain(|s| parsed.matches(&s.tags));
     }
     if scenarios.is_empty() {
-      return Ok(CallToolResult::success(vec![ContentBlock::text(
-        "run_bdd: no scenarios matched the given filters",
-      )]));
+      return Ok(finish(
+        "run_bdd: no scenarios matched the given filters".to_string(),
+        &BddRunResult::empty(),
+      ));
     }
 
     // ── 3. Dry run: report the plan without executing or touching the browser. ──
@@ -289,7 +359,7 @@ impl McpServer {
         .iter()
         .map(|s| ScenarioJson {
           name: s.name.clone(),
-          status: "skipped".into(),
+          status: ScenarioOutcome::Skipped,
           duration_ms: 0,
           tags: s.tags.clone(),
           steps: s
@@ -298,7 +368,7 @@ impl McpServer {
             .map(|st| StepJson {
               keyword: st.keyword.clone(),
               text: st.text.clone(),
-              status: "skipped".into(),
+              status: StepOutcome::Skipped,
               duration_ms: 0,
               error: None,
             })
@@ -308,7 +378,7 @@ impl McpServer {
         .collect();
       let total = plan.len();
       let result = BddRunResult {
-        status: "passed",
+        status: RunOutcome::Passed,
         total,
         passed: 0,
         failed: 0,
@@ -430,16 +500,20 @@ impl McpServer {
     }
 
     // ── 6. Aggregate + return. ──
-    let passed = out.iter().filter(|s| s.status == "passed").count();
+    let passed = out.iter().filter(|s| s.status == ScenarioOutcome::Passed).count();
     let failed = out
       .iter()
-      .filter(|s| s.status == "failed" || s.status == "undefined")
+      .filter(|s| matches!(s.status, ScenarioOutcome::Failed | ScenarioOutcome::Undefined))
       .count();
     let total = out.len();
     let skipped = total - passed - failed;
     let duration_ms: u128 = out.iter().map(|s| s.duration_ms).sum();
     let result = BddRunResult {
-      status: if failed == 0 { "passed" } else { "failed" },
+      status: if failed == 0 {
+        RunOutcome::Passed
+      } else {
+        RunOutcome::Failed
+      },
       total,
       passed,
       failed,
@@ -459,10 +533,16 @@ fn as_progress(n: usize) -> f64 {
   f64::from(u32::try_from(n).unwrap_or(u32::MAX))
 }
 
-/// Build the tool result: human summary block + machine-readable JSON block.
+/// Build the tool result: human summary block, the same payload as a JSON text
+/// block for clients that only read `content`, and as `structuredContent` for
+/// those that validate it against the tool's `outputSchema`.
 fn finish(summary: String, result: &BddRunResult) -> CallToolResult {
-  let json = serde_json::to_string_pretty(result).unwrap_or_else(|e| format!("{{\"error\":\"serialize: {e}\"}}"));
-  CallToolResult::success(vec![ContentBlock::text(summary), ContentBlock::text(json)])
+  let value =
+    serde_json::to_value(result).unwrap_or_else(|e| serde_json::json!({ "error": format!("serialize: {e}") }));
+  let json = serde_json::to_string_pretty(&value).unwrap_or_else(|e| format!("{{\"error\":\"serialize: {e}\"}}"));
+  let mut out = CallToolResult::success(vec![ContentBlock::text(summary), ContentBlock::text(json)]);
+  out.structured_content = Some(value);
+  out
 }
 
 fn bdd_summary(r: &BddRunResult) -> String {
@@ -477,7 +557,7 @@ fn bdd_summary(r: &BddRunResult) -> String {
     r.duration_ms,
   );
   for s in &r.scenarios {
-    if s.status == "failed" || s.status == "undefined" {
+    if matches!(s.status, ScenarioOutcome::Failed | ScenarioOutcome::Undefined) {
       let err = s.error.as_deref().and_then(|e| e.lines().next()).unwrap_or("");
       let _ = write!(out, "\n  [FAIL] {}: {err}", s.name);
     }

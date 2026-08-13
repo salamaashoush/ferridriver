@@ -6,7 +6,7 @@
 //! supposed to notice the parent IPC pipe closing and exit on their own.
 //! In practice, on macOS this is flaky: helpers can linger for seconds
 //! or get stuck, showing up as "automation Chrome zombies" in tools like
-//! `acme-gateway browser zombies` that pgrep `--remote-debugging` etc.
+//! `devgate browser zombies` that pgrep `--remote-debugging` etc.
 //!
 //! Defence: every browser spawn calls `setsid()` in `pre_exec`, making
 //! the parent its own session-and-process-group leader. Every helper
@@ -109,7 +109,7 @@ pub fn kill_process_group(_pid: u32) {
 /// inherits the group and dies together on teardown. Without this,
 /// SIGKILL to the parent leaves renderer/GPU/zygote subprocesses
 /// behind on macOS — visible as "automation Chrome zombies" in
-/// `acme-gateway browser zombies`.
+/// `devgate browser zombies`.
 ///
 /// The inner `Child` still has `kill_on_drop(true)` set, so the parent
 /// PID is also killed directly (belt + suspenders). The group kill

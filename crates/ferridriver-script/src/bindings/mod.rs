@@ -83,7 +83,10 @@ pub use dialog::DialogJs;
 pub use disposable::DisposableJs;
 pub use download::DownloadJs;
 pub use element_handle::ElementHandleJs;
-pub use extensions::{ExtensionBinding, ExtensionCommandsJs, install_extensions, invoke_tool_by_name};
+pub use extensions::{
+  ExtensionBinding, ExtensionCommandsJs, FORWARDED_CONTEXT_KEYS, TOOL_CONTEXT_KEYS, install_extensions,
+  invoke_tool_by_name,
+};
 pub use file_chooser::FileChooserJs;
 pub use frame::FrameJs;
 pub use frame_locator::FrameLocatorJs;

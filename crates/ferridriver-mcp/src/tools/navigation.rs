@@ -1,4 +1,4 @@
-use crate::params::{ConnectParams, NavigateParams, PageParams};
+use crate::params::{ConnectParams, NavigateParams, PageAction, PageParams};
 use crate::server::{McpServer, sess};
 use rmcp::{
   ErrorData,
@@ -25,7 +25,7 @@ impl McpServer {
     // Parse the composite session key to get the instance name.
     // "staging:admin" -> instance="staging", context="admin"
     // The connect operation targets the browser instance, not the context.
-    let key = ferridriver::state::SessionKey::parse(s);
+    let key = self.state.session_key(s).await;
     let instance = &*key.instance;
 
     if let Some(url) = &p.url {
@@ -42,7 +42,7 @@ impl McpServer {
         "Connected to browser at {url}. Found {page_count} existing page(s) in session '{s}'.\n\n{snap}"
       ))]))
     } else if p.auto_discover.unwrap_or(false) {
-      let channel = p.channel.as_deref().unwrap_or("stable");
+      let channel = p.channel.unwrap_or_default().as_str();
       let page_count = {
         let mut state = self.state.write().await;
         let count = Box::pin(state.connect_auto(instance, channel, p.user_data_dir.as_deref()))
@@ -73,7 +73,7 @@ impl McpServer {
   async fn navigate(
     &self,
     Parameters(p): Parameters<NavigateParams>,
-    meta: rmcp::model::Meta,
+    meta: rmcp::model::RequestMetaObject,
     peer: rmcp::service::Peer<rmcp::RoleServer>,
   ) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_opt());
@@ -89,11 +89,7 @@ impl McpServer {
     .await;
     let page = Box::pin(self.page(s)).await?;
     let opts = ferridriver::options::GotoOptions {
-      wait_until: Some(
-        p.wait_until
-          .as_deref()
-          .map_or(ferridriver::options::LoadState::Commit, Into::into),
-      ),
+      wait_until: Some(p.wait_until.unwrap_or_default().into()),
       timeout: None,
       referer: None,
     };
@@ -111,29 +107,29 @@ impl McpServer {
     annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
   )]
   async fn page_manage(&self, Parameters(p): Parameters<PageParams>) -> Result<CallToolResult, ErrorData> {
-    match p.action.as_str() {
-      "back" => {
+    match p.action {
+      PageAction::Back => {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
         page.go_back().await.map_err(Self::err)?;
         Box::pin(self.action_ok(&page, s, "Navigated back.")).await
       },
-      "forward" => {
+      PageAction::Forward => {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
         page.go_forward().await.map_err(Self::err)?;
         Box::pin(self.action_ok(&page, s, "Navigated forward.")).await
       },
-      "reload" => {
+      PageAction::Reload => {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
         page.reload().await.map_err(Self::err)?;
         Box::pin(self.action_ok(&page, s, "Page reloaded.")).await
       },
-      "new" => {
+      PageAction::New => {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let url = p.url.as_deref().unwrap_or("about:blank");
@@ -148,7 +144,7 @@ impl McpServer {
           "Opened new page in session '{s}'.\n\n{snap}"
         ))]))
       },
-      "close" => {
+      PageAction::Close => {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let idx = p
@@ -162,7 +158,7 @@ impl McpServer {
           "Closed page {idx} in session '{s}'."
         ))]))
       },
-      "select" => {
+      PageAction::Select => {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let idx = p
@@ -179,7 +175,7 @@ impl McpServer {
         let page = Box::pin(self.page(s)).await?;
         Box::pin(self.action_ok(&page, s, &format!("Switched to page {idx}."))).await
       },
-      "list" => {
+      PageAction::List => {
         let state = self.state.read().await;
         let contexts = state.list_contexts().await;
         drop(state);
@@ -193,7 +189,7 @@ impl McpServer {
         }
         Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
       },
-      "close_context" => {
+      PageAction::CloseContext => {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let mut state = self.state.write().await;
@@ -204,18 +200,21 @@ impl McpServer {
           "Closed context '{s}'. Its pages, cookies and storage are gone; the browser stays up."
         ))]))
       },
-      "close_instance" => {
+      PageAction::CloseInstance => {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
-        let instance = ferridriver::state::SessionKey::parse(s).instance;
+        let known = self.state.known_instances().await;
+        let instance = ferridriver::state::SessionKey::parse_with(s, &known).instance;
         let closed = self.state.write().await.close_instance(&instance).await;
         self.invalidate_all_caches();
         // Session names are free-form, so match the way they are routed:
         // everything before ':' (or the whole name for the default
-        // instance) selects the browser that just went away.
+        // instance) selects the browser that just went away. Resolved
+        // against the same vocabulary, or a bare key naming an instance
+        // would keep a VM bound to the browser that just died.
         self
           .sessions
-          .remove_matching(|name| *ferridriver::state::SessionKey::parse(name).instance == *instance);
+          .remove_matching(|name| *ferridriver::state::SessionKey::parse_with(name, &known).instance == *instance);
         let msg = if closed {
           format!(
             "Closed browser instance '{instance}'. Other instances keep running; \
@@ -226,14 +225,10 @@ impl McpServer {
         };
         Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))
       },
-      "close_browser" => {
+      PageAction::CloseBrowser => {
         self.shutdown_browsers().await;
         Ok(CallToolResult::success(vec![ContentBlock::text("Browser closed.")]))
       },
-      other => Err(Self::err(format!(
-        "Unknown action '{other}'. Use: back, forward, reload, new, close, select, list, \
-         close_context, close_instance, close_browser."
-      ))),
     }
   }
 }

@@ -151,8 +151,157 @@ impl ExtensionCommandsJs {
   }
 }
 
+/// Session capabilities a handler's context takes straight from the VM
+/// globals the engine already installed.
+pub const FORWARDED_CONTEXT_KEYS: &[&str] = &["vars", "fs", "artifacts", "sidecars", "browser"];
+
+/// Every key `run_tool` puts on a handler's context object.
+///
+/// This is the canonical list: the `@ferridriver/extension` type
+/// declaration is checked against it, and the live probe suite asserts a
+/// handler actually receives each one — so a new capability cannot ship
+/// with a type that omits it, or a type nothing installs.
+pub const TOOL_CONTEXT_KEYS: &[&str] = &[
+  "args",
+  "page",
+  "context",
+  "request",
+  "commands",
+  "session",
+  "settings",
+  "log",
+  "signal",
+  "vars",
+  "fs",
+  "artifacts",
+  "sidecars",
+  "browser",
+];
+
 fn rq(e: &ScriptError) -> rquickjs::Error {
   rquickjs::Error::new_from_js_message("extensions", "Error", e.message.clone())
+}
+
+/// Log target every extension event carries, so an operator can filter
+/// exactly these (`RUST_LOG=ferridriver::extension=debug`) without
+/// turning on the rest of the engine.
+const EXTENSION_LOG_TARGET: &str = "ferridriver::extension";
+
+/// Emit one extension event at a runtime-chosen level.
+///
+/// A `tracing` level is part of the macro call site, so each level needs
+/// its own macro invocation. Routing through the macros (rather than
+/// printing) is what makes `-v`, `FERRIDRIVER_DEBUG` and `RUST_LOG`
+/// apply to extension output exactly as they do to the engine's own.
+fn emit_extension_log(level: ExtensionLogLevel, tool: &str, message: &str, fields: Option<&str>) {
+  match (level, fields) {
+    (ExtensionLogLevel::Error, Some(f)) => {
+      tracing::error!(target: EXTENSION_LOG_TARGET, tool, fields = f, "{message}");
+    },
+    (ExtensionLogLevel::Error, None) => tracing::error!(target: EXTENSION_LOG_TARGET, tool, "{message}"),
+    (ExtensionLogLevel::Warn, Some(f)) => {
+      tracing::warn!(target: EXTENSION_LOG_TARGET, tool, fields = f, "{message}");
+    },
+    (ExtensionLogLevel::Warn, None) => tracing::warn!(target: EXTENSION_LOG_TARGET, tool, "{message}"),
+    (ExtensionLogLevel::Info, Some(f)) => {
+      tracing::info!(target: EXTENSION_LOG_TARGET, tool, fields = f, "{message}");
+    },
+    (ExtensionLogLevel::Info, None) => tracing::info!(target: EXTENSION_LOG_TARGET, tool, "{message}"),
+    (ExtensionLogLevel::Debug, Some(f)) => {
+      tracing::debug!(target: EXTENSION_LOG_TARGET, tool, fields = f, "{message}");
+    },
+    (ExtensionLogLevel::Debug, None) => tracing::debug!(target: EXTENSION_LOG_TARGET, tool, "{message}"),
+    (ExtensionLogLevel::Trace, Some(f)) => {
+      tracing::trace!(target: EXTENSION_LOG_TARGET, tool, fields = f, "{message}");
+    },
+    (ExtensionLogLevel::Trace, None) => tracing::trace!(target: EXTENSION_LOG_TARGET, tool, "{message}"),
+  }
+}
+
+/// Levels `log` exposes, matching `tracing`'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtensionLogLevel {
+  Error,
+  Warn,
+  Info,
+  Debug,
+  Trace,
+}
+
+impl ExtensionLogLevel {
+  /// Whether a subscriber would record this level for the extension
+  /// target. Exposed to JS as `log.enabled(level)` so a handler can skip
+  /// building an expensive payload nobody will read.
+  fn enabled(self) -> bool {
+    match self {
+      Self::Error => tracing::event_enabled!(target: EXTENSION_LOG_TARGET, tracing::Level::ERROR),
+      Self::Warn => tracing::event_enabled!(target: EXTENSION_LOG_TARGET, tracing::Level::WARN),
+      Self::Info => tracing::event_enabled!(target: EXTENSION_LOG_TARGET, tracing::Level::INFO),
+      Self::Debug => tracing::event_enabled!(target: EXTENSION_LOG_TARGET, tracing::Level::DEBUG),
+      Self::Trace => tracing::event_enabled!(target: EXTENSION_LOG_TARGET, tracing::Level::TRACE),
+    }
+  }
+
+  fn parse(name: &str) -> Option<Self> {
+    match name.to_ascii_lowercase().as_str() {
+      "error" => Some(Self::Error),
+      "warn" | "warning" => Some(Self::Warn),
+      "info" => Some(Self::Info),
+      "debug" => Some(Self::Debug),
+      "trace" => Some(Self::Trace),
+      _ => None,
+    }
+  }
+}
+
+/// Build the handler's `log`: callable (info) with one method per level.
+///
+/// `log(msg)` is the common case; `log.debug(msg)` / `log.error(msg,
+/// fields)` cover the rest. Every path goes through `tracing`, so the
+/// operator's existing filter controls extension output too — an
+/// info-only logger would have made `--verbose` and `RUST_LOG`
+/// meaningless for extensions.
+fn extension_logger<'js>(ctx: &Ctx<'js>, tool: &str) -> rquickjs::Result<Value<'js>> {
+  let level_fn = |level: ExtensionLogLevel| -> rquickjs::Result<Function<'js>> {
+    let tool = tool.to_string();
+    Function::new(
+      ctx.clone(),
+      move |inner: Ctx<'js>, message: String, extra: Opt<Value<'js>>| -> rquickjs::Result<()> {
+        // Structured fields arrive as one JSON blob: `tracing` field
+        // names are static, so a dynamic key set cannot be expanded
+        // into individual fields.
+        let fields = match extra.0 {
+          Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js::<serde_json::Value>(&inner, v)
+            .ok()
+            .map(|json| json.to_string()),
+          _ => None,
+        };
+        emit_extension_log(level, &tool, &message, fields.as_deref());
+        Ok(())
+      },
+    )
+  };
+
+  let base = level_fn(ExtensionLogLevel::Info)?;
+  // A JS function IS an object, so the per-level methods hang off the
+  // callable itself: `log(msg)` and `log.debug(msg)` are one binding.
+  let obj: &Object<'js> = &base;
+  for (name, level) in [
+    ("error", ExtensionLogLevel::Error),
+    ("warn", ExtensionLogLevel::Warn),
+    ("info", ExtensionLogLevel::Info),
+    ("debug", ExtensionLogLevel::Debug),
+    ("trace", ExtensionLogLevel::Trace),
+  ] {
+    obj.set(name, level_fn(level)?)?;
+  }
+  obj.set(
+    "enabled",
+    Function::new(ctx.clone(), |level: String| {
+      ExtensionLogLevel::parse(&level).is_some_and(ExtensionLogLevel::enabled)
+    })?,
+  )?;
+  Ok(base.into_value())
 }
 
 /// Install loaded extensions: load+evaluate each file's bytecode (which
@@ -314,6 +463,74 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
     "context",
     g.get::<_, Value<'js>>("context").unwrap_or_else(|_| undef.clone()),
   )?;
+
+  // Session-scoped capabilities the VM already installed as globals.
+  // A handler used to get a strict subset of what a plain `run_script`
+  // could reach, which forced extension authors into workarounds: no
+  // `vars` meant module-level mutable state that silently vanished when
+  // the session VM was reaped, and no `sidecars` meant a fresh process
+  // spawn per call for work a long-lived helper already served.
+  for name in FORWARDED_CONTEXT_KEYS {
+    if let Ok(value) = g.get::<_, Value<'js>>(*name) {
+      arg.set(*name, value)?;
+    }
+  }
+
+  // Copy what the handler context needs out of userdata and DROP the
+  // guard before anything awaits. `Ctx::userdata` hands back a borrow
+  // guard; holding one across the handler's execution blocks any nested
+  // `store_userdata` for the whole call (the net-policy bracket does
+  // exactly that), which deadlocks instead of failing.
+  let (session_key, settings_json) = {
+    let env = ctx.userdata::<crate::engine::ExtensionEnvUd>();
+    match env.as_ref() {
+      Some(e) => {
+        let namespace = d.name.split('.').next().unwrap_or(d.name.as_str());
+        let settings = e
+          .settings
+          .get(d.name.as_str())
+          .or_else(|| e.settings.get(namespace))
+          .cloned();
+        (e.session.clone(), settings)
+      },
+      None => (None, None),
+    }
+  };
+
+  // `session`: which browser session (and therefore which environment)
+  // this handler is driving. Without it a tool had to take the
+  // environment as an argument, and an argument that disagreed with the
+  // session key silently drove the wrong environment.
+  //
+  // The host hands over an already-resolved `<instance>:<context>` key, so
+  // splitting it needs no knowledge of which instance names that host's
+  // config defines.
+  let session_value = match session_key {
+    Some(key) => {
+      let parsed = ferridriver::state::SessionKey::parse(&key);
+      let obj = Object::new(ctx.clone())?;
+      obj.set("key", key.as_str())?;
+      obj.set("instance", &*parsed.instance)?;
+      obj.set("context", &*parsed.context)?;
+      obj.into_value()
+    },
+    None => undef.clone(),
+  };
+  arg.set("session", session_value)?;
+
+  // `settings`: the operator's `[extensions.settings.<name>]` block for
+  // this tool. A tool-specific entry wins over its namespace's entry, so
+  // `acme.login` can be tuned without splitting the `acme` block.
+  let settings_value = match &settings_json {
+    Some(value) => json_to_js(&ctx, value)?,
+    None => Object::new(ctx.clone())?.into_value(),
+  };
+  arg.set("settings", settings_value)?;
+
+  // `log`: diagnostics attributed to the tool, so an extension does not
+  // have to choose between `console.log` (captured per call, invisible
+  // to the operator) and nothing.
+  arg.set("log", extension_logger(&ctx, &d.name)?)?;
 
   // The tool's EFFECTIVE `allow.net` (declared manifest intersected
   // with the operator ceiling at registration; `None` ⇒ unrestricted,

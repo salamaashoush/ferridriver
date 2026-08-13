@@ -27,11 +27,15 @@
 //!
 //! # Search order
 //!
-//! 1. Explicit path passed by the caller.
-//! 2. `./ferridriver.{toml,yaml,yml,json}` in the current working directory.
-//! 3. `~/.config/ferridriver/config.{toml,yaml,yml,json}`.
+//! Files LAYER, lowest precedence first: machine, user, git root,
+//! cwd, `*.local.*`, then `-c/--config`, then `FERRIDRIVER_*__*`
+//! environment overrides. See [`layer`] for the full stack, the merge
+//! rules, and how relative paths are anchored to their own file.
 
+pub mod browser;
 pub mod command_spec;
+pub mod extension_manifest;
+pub mod layer;
 pub mod mcp;
 pub mod test;
 
@@ -67,16 +71,79 @@ pub struct FerridriverConfig {
   /// extensions, `ferridriver run` scripts). Top-level because every
   /// host that bundles consumes it.
   pub bundler: BundlerConfig,
+  /// Root of the scripting sandbox: every `fs` call and every dynamic
+  /// `import` a script makes is confined here. Relative to the config
+  /// file that set it. Defaults to `.ferridriver/scripts`.
+  ///
+  /// Previously only settable by implementing `McpServerConfig` in
+  /// Rust, which meant an operator could not move it at all.
+  pub script_root: Option<String>,
+  /// Root for script outputs (screenshots, PDFs, traces, downloads),
+  /// exposed to scripts as `artifacts`. Kept separate from
+  /// [`Self::script_root`] so outputs never land in the source tree.
+  /// Defaults to `.ferridriver/artifacts`.
+  pub artifacts_root: Option<String>,
+  /// Scripting-engine limits (per-call timeout, memory ceiling, console
+  /// caps, session-VM pool).
+  pub engine: EngineConfig,
   /// MCP server configuration.
   pub mcp: mcp::McpConfig,
   /// Test runner configuration.
   pub test: test::TestConfig,
-  /// Directory of the config file this document was loaded from (set by
-  /// [`Self::load_from`]); `None` for a default/in-memory config.
-  /// Relative paths inside the document (e.g. `bundler.alias` targets)
-  /// resolve against it.
+  /// Directory of the highest-precedence config FILE that contributed
+  /// to this document; `None` for a default/in-memory config. Paths
+  /// inside the document are already anchored to their own layer's
+  /// directory, so this is for diagnostics and for resolving values a
+  /// caller supplies later (not for re-resolving document paths).
   #[serde(skip)]
   pub source_dir: Option<PathBuf>,
+  /// Base directory each `extensions` entry was declared in, keyed by
+  /// the entry as written. A package specifier (`@acme/ext`) resolves
+  /// through `node_modules` starting here, so an extension declared in
+  /// the user layer finds the user layer's packages rather than
+  /// whichever repository the process happens to run in.
+  #[serde(skip)]
+  pub extension_bases: BTreeMap<String, PathBuf>,
+}
+
+/// Scripting-engine limits. Every field is optional so the engine's own
+/// defaults stay the single source of truth for what "unset" means.
+///
+/// The session-VM knobs matter to any long-lived MCP server: a session
+/// VM holds an extension's module state, and when the pool evicts or
+/// reaps one, that state is gone. An operator who needs sessions to
+/// survive a long idle gap can now say so.
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct EngineConfig {
+  /// Wall-clock ceiling for one script/tool call, in milliseconds.
+  pub timeout_ms: Option<u64>,
+  /// Memory ceiling for a session VM, in bytes.
+  pub max_memory_bytes: Option<usize>,
+  /// Total captured console bytes per call.
+  pub max_console_bytes: Option<usize>,
+  /// Captured bytes per single console entry.
+  pub max_console_entry_bytes: Option<usize>,
+  /// How many session VMs stay warm before the least-recently-used idle
+  /// one is evicted.
+  pub max_session_vms: Option<usize>,
+  /// Seconds a session may sit untouched before its VM (and its
+  /// durable `vars`) are reaped. `0` disables reaping.
+  pub session_idle_ttl_secs: Option<u64>,
+}
+
+/// One `extensions` entry plus the directory it was declared in.
+///
+/// The base directory is what makes a layered `extensions` list work:
+/// a relative path means "next to the file that declared it", and a
+/// package specifier walks `node_modules` from there.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExtensionSpec {
+  /// The entry exactly as configured (already absolute when it was a
+  /// relative path; still a bare specifier when it named a package).
+  pub spec: String,
+  /// Directory of the config layer that declared it.
+  pub base_dir: PathBuf,
 }
 
 /// The `extensions` key: either the shorthand list of paths or the
@@ -127,6 +194,15 @@ impl ExtensionsConfig {
       Self::Detailed(d) => d.policy.clone(),
     }
   }
+
+  /// Per-extension settings (empty for the shorthand shape).
+  #[must_use]
+  pub fn settings(&self) -> BTreeMap<String, serde_json::Value> {
+    match self {
+      Self::Paths(_) => BTreeMap::new(),
+      Self::Detailed(d) => d.settings.clone(),
+    }
+  }
 }
 
 /// The detailed `[extensions]` table.
@@ -135,6 +211,15 @@ impl ExtensionsConfig {
 pub struct ExtensionsDetailed {
   /// Extension paths/specs — same values the shorthand array carries.
   pub paths: Vec<String>,
+  /// Per-extension settings, keyed by the extension's namespace (the
+  /// part before the first `.` in its tool names, e.g. `box` for
+  /// `acme.login`) or by a full tool name for tool-specific values.
+  /// Delivered to a handler as `settings`.
+  ///
+  /// Extensions previously had no configuration channel at all, so an
+  /// author had to smuggle deployment values through tool arguments or
+  /// an allow-listed environment variable.
+  pub settings: BTreeMap<String, serde_json::Value>,
   /// Operator policy ceiling applied to every loaded extension.
   pub policy: ExtensionPolicyConfig,
 }
@@ -179,7 +264,7 @@ pub enum ExtensionCommandsCeiling {
 /// "@wdio/utils" = "./shims/wdio-utils.ts"
 ///
 /// [bundler.virtualModules]
-/// "box:env" = "export const env = 'staging';"
+/// "acme:env" = "export const env = 'staging';"
 /// ```
 #[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
@@ -246,66 +331,129 @@ pub struct ScriptingAllow {
 }
 
 pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
+pub use extension_manifest::{ExtensionManifest, ExtensionRequires};
 
 impl FerridriverConfig {
-  /// Load the unified configuration document.
+  /// Load the unified configuration by resolving the whole layer
+  /// stack against the real process environment.
   ///
-  /// If `explicit` is `Some`, that path is read directly and the format is
-  /// inferred from the file extension. Otherwise the standard search paths
-  /// are tried; if none exist, `Self::default()` is returned.
+  /// `explicit` is the `-c/--config` path. It is applied ON TOP of the
+  /// discovered layers rather than replacing them, so a project can
+  /// pin a couple of settings without losing the operator's
+  /// user-level extensions and browser instances.
+  ///
+  /// Warnings (unknown keys, an unreadable `extends`) are logged here;
+  /// callers that want to render them should use
+  /// [`layer::resolve`] directly.
   ///
   /// # Errors
   ///
-  /// Returns an error if a file is found but cannot be read or parsed.
+  /// Returns an error if a config file cannot be read or parsed, or if
+  /// the merged document violates the schema.
   pub fn load(explicit: Option<&Path>) -> anyhow::Result<Self> {
-    let path = match explicit {
-      Some(p) => Some(p.to_path_buf()),
-      None => find_default_path(),
-    };
-
-    let Some(path) = path else {
-      return Ok(Self::default());
-    };
-
-    Self::load_from(&path)
+    Self::load_layered(explicit, true)
   }
 
-  /// Load the unified configuration from an explicit file path.
+  /// Like [`Self::load`], but the caller states whether the discovered
+  /// layers participate. `inherit = false` (CLI `--no-inherit`) keeps
+  /// only `explicit`, or the cwd's own file when there is none.
   ///
   /// # Errors
   ///
-  /// Returns an error if the file cannot be read or parsed.
+  /// Same as [`Self::load`].
+  pub fn load_layered(explicit: Option<&Path>, inherit: bool) -> anyhow::Result<Self> {
+    let mut opts = layer::LoadOptions::from_process(explicit);
+    // A false argument must not re-enable inheritance that the
+    // environment already switched off.
+    opts.inherit = opts.inherit && inherit;
+    let resolved = layer::resolve(&opts)?;
+    for w in &resolved.warnings {
+      tracing::warn!(source = %w.source, "{}", w.message);
+    }
+    for l in &resolved.layers {
+      tracing::debug!(kind = l.kind.label(), path = %l.path.display(), "config layer applied");
+    }
+    Ok(resolved.config)
+  }
+
+  /// Load ONE config file, with no inheritance.
+  ///
+  /// Paths inside the file are still anchored to the file's own
+  /// directory and unknown keys are still reported, but no machine,
+  /// user, project or environment layer participates. For the normal
+  /// operator-facing path use [`Self::load`].
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the file cannot be read or parsed, or if its
+  /// contents violate the schema.
   pub fn load_from(path: &Path) -> anyhow::Result<Self> {
-    let content =
-      std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("failed to read config {}: {e}", path.display()))?;
-
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("toml");
-    let mut cfg: FerridriverConfig = match ext {
-      "toml" => toml::from_str(&content).map_err(|e| anyhow::anyhow!("invalid TOML config {}: {e}", path.display()))?,
-      "yaml" | "yml" => {
-        serde_yaml::from_str(&content).map_err(|e| anyhow::anyhow!("invalid YAML config {}: {e}", path.display()))?
-      },
-      "json" => {
-        serde_json::from_str(&content).map_err(|e| anyhow::anyhow!("invalid JSON config {}: {e}", path.display()))?
-      },
-      other => anyhow::bail!("unsupported config format: {other} (expected toml/yaml/yml/json)"),
-    };
-
-    cfg
-      .validate()
-      .map_err(|e| anyhow::anyhow!("invalid config {}: {e}", path.display()))?;
-    cfg.source_dir = path.parent().map(Path::to_path_buf);
-
+    let resolved = layer::resolve(&layer::LoadOptions {
+      explicit: Some(path.to_path_buf()),
+      cwd: path.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf),
+      user_config_dir: None,
+      machine_config_dir: None,
+      env: BTreeMap::new(),
+      inherit: false,
+    })?;
+    for w in &resolved.warnings {
+      tracing::warn!(source = %w.source, "{}", w.message);
+    }
     tracing::debug!("loaded ferridriver config from {}", path.display());
-    Ok(cfg)
+    Ok(resolved.config)
+  }
+
+  /// Scripting sandbox root, with the documented default applied.
+  #[must_use]
+  pub fn script_root(&self) -> PathBuf {
+    self
+      .script_root
+      .as_deref()
+      .map_or_else(|| PathBuf::from(".ferridriver/scripts"), PathBuf::from)
+  }
+
+  /// Artifacts root, with the documented default applied.
+  #[must_use]
+  pub fn artifacts_root(&self) -> PathBuf {
+    self
+      .artifacts_root
+      .as_deref()
+      .map_or_else(|| PathBuf::from(".ferridriver/artifacts"), PathBuf::from)
+  }
+
+  /// Every configured extension entry paired with the directory its
+  /// declaring layer lives in, for resolvers that need a base for
+  /// `node_modules` lookups. Entries declared before layering
+  /// (constructed in memory) fall back to `source_dir`, then the cwd.
+  #[must_use]
+  pub fn extension_specs(&self) -> Vec<ExtensionSpec> {
+    let fallback = self
+      .source_dir
+      .clone()
+      .or_else(|| std::env::current_dir().ok())
+      .unwrap_or_else(|| PathBuf::from("."));
+    self
+      .extensions
+      .paths()
+      .iter()
+      .map(|spec| ExtensionSpec {
+        base_dir: self
+          .extension_bases
+          .get(spec)
+          .cloned()
+          .unwrap_or_else(|| fallback.clone()),
+        spec: spec.clone(),
+      })
+      .collect()
   }
 
   /// Validate cross-field invariants the serde layer can't express.
   ///
   /// # Errors
   ///
-  /// Returns an error if two sidecars share a `name`, or a sidecar has an
-  /// empty `command`.
+  /// Returns an error if two sidecars share a `name`, a sidecar has an
+  /// empty `command`, or a `[test]` browser/backend spelling is not
+  /// recognised (including inside a project).
   pub fn validate(&self) -> anyhow::Result<()> {
     let mut seen = std::collections::HashSet::new();
     for s in &self.sidecars {
@@ -316,33 +464,21 @@ impl FerridriverConfig {
         anyhow::bail!("duplicate sidecar name '{}'", s.name);
       }
     }
-    Ok(())
-  }
-}
 
-/// Search the cwd and `~/.config/ferridriver/` for the canonical config file.
-#[must_use]
-pub fn find_default_path() -> Option<PathBuf> {
-  let exts = ["toml", "yaml", "yml", "json"];
-
-  for ext in &exts {
-    let p = PathBuf::from(format!("ferridriver.{ext}"));
-    if p.exists() {
-      return Some(p);
-    }
-  }
-
-  if let Some(cd) = dirs::config_dir() {
-    let dir = cd.join("ferridriver");
-    for ext in &exts {
-      let p = dir.join(format!("config.{ext}"));
-      if p.exists() {
-        return Some(p);
+    self
+      .test
+      .browser
+      .validate()
+      .map_err(|e| anyhow::anyhow!("[test.browser]: {e}"))?;
+    for project in &self.test.projects {
+      if let Some(browser) = &project.browser {
+        browser
+          .validate()
+          .map_err(|e| anyhow::anyhow!("[test] project '{}': {e}", project.name))?;
       }
     }
+    Ok(())
   }
-
-  None
 }
 
 #[cfg(test)]
@@ -368,7 +504,7 @@ mod tests {
 "@wdio/utils" = "./shims/wdio-utils.ts"
 
 [bundler.virtualModules]
-"box:env" = "export const env = 'staging';"
+"acme:env" = "export const env = 'staging';"
 "#,
     )
     .unwrap();
@@ -376,12 +512,14 @@ mod tests {
     let root = FerridriverConfig::load_from(&path).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 
+    // Anchored to the config file's own directory at load, so a
+    // consumer never has to guess which cwd the value meant.
     assert_eq!(
       root.bundler.alias.get("@wdio/utils").map(String::as_str),
-      Some("./shims/wdio-utils.ts")
+      Some(dir.join("shims/wdio-utils.ts").to_string_lossy().as_ref())
     );
     assert_eq!(
-      root.bundler.virtual_modules.get("box:env").map(String::as_str),
+      root.bundler.virtual_modules.get("acme:env").map(String::as_str),
       Some("export const env = 'staging';")
     );
     assert_eq!(root.source_dir.as_deref(), Some(dir.as_path()));
@@ -483,7 +621,7 @@ test:
   fn serde_json_roundtrip_populated() {
     let mut root = FerridriverConfig::default();
     root.mcp.server.name = Some("custom".into());
-    root.mcp.browser.backend = Some("cdp-raw".into());
+    root.mcp.browser.backend = Some(mcp::BackendChoice::CdpRaw);
     root.mcp.browser.headless = Some(true);
     root.mcp.browser.chrome_args = vec!["--no-sandbox".into()];
     root.test.workers = 4;
@@ -499,7 +637,7 @@ test:
     assert_eq!(json, json2, "populated config should round-trip");
 
     assert_eq!(parsed.mcp.server.name.as_deref(), Some("custom"));
-    assert_eq!(parsed.mcp.browser.backend.as_deref(), Some("cdp-raw"));
+    assert_eq!(parsed.mcp.browser.backend, Some(mcp::BackendChoice::CdpRaw));
     assert_eq!(parsed.mcp.browser.headless, Some(true));
     assert_eq!(parsed.test.workers, 4);
     assert!(parsed.test.browser.headless);
@@ -593,7 +731,13 @@ command = []
     let root = FerridriverConfig::load_from(&path).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 
-    assert_eq!(root.extensions.paths(), ["./ext", "./tools/login.ts"]);
+    assert_eq!(
+      root.extensions.paths(),
+      [
+        dir.join("ext").to_string_lossy().into_owned(),
+        dir.join("tools/login.ts").to_string_lossy().into_owned()
+      ]
+    );
     assert_eq!(root.extensions.policy(), ExtensionPolicyConfig::default());
     assert_eq!(root.extensions.policy().net, None);
     assert_eq!(root.extensions.policy().commands, ExtensionCommandsCeiling::Any);
@@ -620,7 +764,10 @@ commands = "argvOnly"
     let root = FerridriverConfig::load_from(&path).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 
-    assert_eq!(root.extensions.paths(), ["./ext"]);
+    assert_eq!(
+      root.extensions.paths(),
+      [dir.join("ext").to_string_lossy().into_owned()]
+    );
     let policy = root.extensions.policy();
     assert_eq!(
       policy.net.as_deref(),
@@ -662,6 +809,7 @@ commands = "none"
 
     let detailed = ExtensionsConfig::Detailed(ExtensionsDetailed {
       paths: vec!["./a".into()],
+      settings: BTreeMap::new(),
       policy: ExtensionPolicyConfig {
         net: Some(vec!["*.acme.com".into()]),
         commands: ExtensionCommandsCeiling::ArgvOnly,

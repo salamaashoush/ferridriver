@@ -186,6 +186,7 @@ async fn harness(source: &str) -> Harness {
     extensions: Vec::new(),
     host: ExtensionHost::Test,
     caps: ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &context)
     .await

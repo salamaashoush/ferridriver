@@ -302,6 +302,11 @@ pub fn dispatcher_for(browser: &Browser) -> BrowserDispatcher {
 
 /// Parse a session key into its `instance:context` halves. Re-exported so the
 /// CLI and hosts share ferridriver core's parsing.
+///
+/// Vocabulary-free: a bare name is a CONTEXT. The session CLI addresses
+/// browsers it bound itself and has no config document declaring instance
+/// names — a host that does have one resolves keys through
+/// `BrowserState::session_key` instead.
 #[must_use]
 pub fn parse_session_key(s: &str) -> SessionKey {
   SessionKey::parse(s)

@@ -122,8 +122,8 @@ pub fn discover_step_files(globs: &[String], cwd: &Path) -> Vec<PathBuf> {
 /// [`ferridriver_script::SOURCE_EXTENSIONS`] files (same rule the MCP
 /// plugin loader uses, so one extension serves both hosts). A file the
 /// user named explicitly is taken as-is regardless of extension.
-pub fn discover_extension_files(paths: &[String], cwd: &Path) -> Vec<PathBuf> {
-  let (files, errors) = ferridriver_script::discover::resolve_extension_specs(paths, cwd);
+pub fn discover_extension_files(specs: &[ferridriver_script::ExtensionSpec]) -> Vec<PathBuf> {
+  let (files, errors) = ferridriver_script::discover::resolve_extension_specs_with_bases(specs);
   for (spec, err) in errors {
     tracing::warn!(extension = %spec, error = %err.message, "extension discovery failed; skipping");
   }
@@ -142,11 +142,11 @@ pub async fn bundle_steps(globs: &[String], cwd: &Path) -> anyhow::Result<Arc<Co
 /// are available to the test runner exactly like a step file's.
 pub async fn bundle_steps_with(
   globs: &[String],
-  extensions: &[String],
+  extensions: &[ferridriver_script::ExtensionSpec],
   cwd: &Path,
 ) -> anyhow::Result<Arc<CompiledBundle>> {
   let mut files = discover_step_files(globs, cwd);
-  files.extend(discover_extension_files(extensions, cwd));
+  files.extend(discover_extension_files(extensions));
   files.sort();
   files.dedup();
   if files.is_empty() {
@@ -234,6 +234,7 @@ impl JsBddSession {
       // the MCP server. Unset (macro/harness path with no config) ⇒
       // locked down — the safe default.
       caps: BDD_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
+      session: None,
     };
 
     let engine_config = ScriptEngineConfig {

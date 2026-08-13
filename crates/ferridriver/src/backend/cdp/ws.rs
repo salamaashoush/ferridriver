@@ -83,8 +83,10 @@ impl WsTransport {
     user_data_dir: &Path,
     extra_flags: &[String],
     owns_user_data_dir: bool,
+    env: &rustc_hash::FxHashMap<String, String>,
   ) -> Result<(Self, tokio::process::Child)> {
     let mut command = tokio::process::Command::new(chromium_path);
+    command.envs(env);
     command.arg(format!("--user-data-dir={}", user_data_dir.display()));
     command.arg("--remote-debugging-port=0");
     for flag in extra_flags {

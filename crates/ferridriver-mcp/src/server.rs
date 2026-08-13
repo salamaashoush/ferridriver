@@ -12,9 +12,10 @@ use rmcp::{
   ErrorData, RoleServer, ServerHandler,
   handler::server::router::tool::ToolRouter,
   model::{
-    CallToolResult, ContentBlock, GetPromptRequestParams, GetPromptResult, ListPromptsResult, ListResourcesResult,
-    PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, ReadResourceRequestParams, ReadResourceResult,
-    Resource, ResourceContents, Role, ServerCapabilities, ServerInfo,
+    CallToolResponse, CallToolResult, ContentBlock, GetPromptRequestParams, GetPromptResponse, GetPromptResult,
+    ListPromptsResult, ListResourcesResult, PaginatedRequestParams, Prompt, PromptArgument, PromptMessage,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, Role,
+    ServerCapabilities, ServerInfo,
   },
   service::RequestContext,
   tool_handler,
@@ -73,8 +74,20 @@ impl SharedState {
   /// browser-session swap (relaunch/reconnect) so a stale script VM is
   /// discarded rather than left holding handles into a dead session.
   pub(crate) async fn instance_generation(&self, context: &str) -> Option<u64> {
-    let key = ferridriver::state::SessionKey::parse(context);
-    self.inner.read().await.instance_generation(key.instance.as_ref())
+    let state = self.inner.read().await;
+    let key = state.session_key(context);
+    state.instance_generation(key.instance.as_ref())
+  }
+
+  /// Parse a session key against the state's configured instance names.
+  pub(crate) async fn session_key(&self, raw: &str) -> ferridriver::state::SessionKey {
+    self.inner.read().await.session_key(raw)
+  }
+
+  /// The configured instance names, for a caller that must parse several
+  /// keys without retaking the lock each time.
+  pub(crate) async fn known_instances(&self) -> ferridriver::state::KnownInstances {
+    self.inner.read().await.known_instances()
   }
 
   /// Get a cached `ArcSwap` handle for storing `ref_map`s (wait-free store).
@@ -189,15 +202,44 @@ pub trait McpServerConfig: Send + Sync + 'static {
     Vec::new()
   }
 
-  /// Additional Chrome arguments for a specific browser instance.
+  /// Launch settings for a specific browser instance: extra arguments,
+  /// profile directory, executable, headless, backend and environment.
   ///
-  /// Called when launching a new Chrome process for the given instance name.
-  /// The instance name comes from the composite session key `"<instance>:<context>"`.
-  /// Override to inject per-instance flags like DNS resolver rules, cert flags.
+  /// Called before launching a browser for the given instance name,
+  /// which comes from the composite session key
+  /// `"<instance>:<context>"`. Override to inject per-instance DNS
+  /// resolver rules, a persistent profile, or an environment.
   ///
-  /// Default: no additional args (all instances get the same base flags).
-  fn chrome_args_for_instance(&self, _instance: &str) -> Vec<String> {
+  /// # Errors
+  ///
+  /// Return `Err` to ABORT the launch (e.g. the instance name maps to no
+  /// environment). Launching anyway would put the caller on a browser
+  /// that looks configured and is not.
+  fn instance_overrides(&self, _instance: &str) -> Result<ferridriver::options::InstanceOverrides, String> {
+    Ok(ferridriver::options::InstanceOverrides::default())
+  }
+
+  /// Instance names this config defines, so a bare session key that
+  /// names one selects that instance instead of being read as a context
+  /// on `default`.
+  fn instance_names(&self) -> Vec<String> {
     Vec::new()
+  }
+
+  /// Section-level launch settings, resolved WITHOUT running any
+  /// operator command.
+  ///
+  /// Read once while the server is being constructed, which is a
+  /// synchronous path on the async runtime — [`Self::instance_overrides`]
+  /// may shell out for up to its command timeout and would stall the
+  /// reactor before the server ever serves.
+  fn base_overrides(&self) -> ferridriver::options::InstanceOverrides {
+    ferridriver::options::InstanceOverrides::default()
+  }
+
+  /// Default viewport for new pages.
+  fn default_viewport(&self) -> Option<ferridriver::options::ViewportConfig> {
+    None
   }
 
   /// Resolve how to connect to a browser instance by name.
@@ -311,6 +353,25 @@ against source-level injection.";
 pub struct DefaultConfig;
 impl McpServerConfig for DefaultConfig {}
 
+/// The loaded extension set: the registry AND the tool list built from
+/// it, published together.
+///
+/// One `ArcSwap`, not two. Held separately, a `call_tool` landing between
+/// the two stores saw the new registry with the previous listing (or the
+/// reverse), so a reload could advertise a tool the registry no longer
+/// had — which is exactly the window a reload exists to close.
+#[derive(Default)]
+pub(crate) struct LoadedExtensions {
+  pub registry: crate::extension::ExtensionRegistry,
+  /// The `tools/list` entries, kept beside the static tool router rather
+  /// than inside it: `ToolRouter` routes are fixed once the server is
+  /// serving, and an authoring loop needs the promoted set to change
+  /// without a restart. Dispatch for these names goes straight to
+  /// [`McpServer::invoke_extension_tool`], the same path the router's
+  /// dynamic route used.
+  pub promoted: Vec<rmcp::model::Tool>,
+}
+
 // ── McpServer ───────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -352,9 +413,16 @@ pub struct McpServer {
   /// compat). Default = locked down; set by [`McpServer::with_script_caps`]
   /// from the operator's `[scripting]` config.
   pub(crate) script_caps: ferridriver_script::ScriptCaps,
-  /// Extensions discovered + parsed at startup. Empty by default; populated
-  /// by [`McpServer::load_extensions`].
-  pub(crate) extensions: crate::extension::ExtensionRegistry,
+  /// Extensions discovered + parsed at startup, swappable so a reload
+  /// can replace the whole set from a `&self` tool handler. Empty by
+  /// default; populated by [`McpServer::load_extensions`] and replaced by
+  /// [`McpServer::reload_extensions`].
+  pub(crate) extension_registry: Arc<arc_swap::ArcSwap<LoadedExtensions>>,
+  /// Serialises reloads. Two concurrent `action: "reload"` calls would
+  /// otherwise both bundle and both publish, and the loser's set could
+  /// land last — advertising tools built from a source tree nobody asked
+  /// for.
+  reload_lock: Arc<tokio::sync::Mutex<()>>,
   /// Resolved `[test]` config (feature/step globs, browser, workers,
   /// retries, reporters, ...). Default = `TestConfig::default()`; set by
   /// [`McpServer::with_test_config`] from the operator's `ferridriver.toml`.
@@ -365,7 +433,7 @@ pub struct McpServer {
   /// startup by [`McpServer::load_extensions`]. The `run_bdd` tool bundles
   /// these alongside step globs so one extension serves MCP tools AND BDD
   /// step definitions, exactly like the CLI.
-  pub(crate) extension_specs: Vec<String>,
+  pub(crate) extension_specs: Vec<ferridriver_config::ExtensionSpec>,
   /// The single cached BDD step engine for the `run_bdd` JS path — loaded
   /// once, reused across calls and browser sessions, reloaded on a step-set
   /// or source change. The lock is the build+run guard. See
@@ -417,21 +485,39 @@ impl McpServer {
       BackendKind::WebKit => ferridriver::options::BrowserKind::WebKit,
       _ => ferridriver::options::BrowserKind::Chromium,
     };
+    // The base plan carries every launch setting the config expresses.
+    // `executable_path` and `viewport` were config keys the server never
+    // read, so both were silently inert.
+    //
+    // `args` stays EMPTY: `instance_overrides` returns the complete arg
+    // set for an instance (section `chromeArgs` + proxy flags + the
+    // instance's own + whatever the args command adds), and the launch
+    // path concatenates the plan's args with the callback's. Passing
+    // `chrome_args()` here too put every base flag in the command line
+    // twice — invisible for last-wins switches, wrong for repeatable ones
+    // like `--host-resolver-rules`.
+    let base = config.base_overrides();
     let mut browser_state = BrowserState::with_plan(
       mode,
       ferridriver::options::LaunchPlan {
         backend,
         kind,
         headless,
-        args: config.chrome_args(),
+        args: Vec::new(),
+        executable_path: base.executable_path.clone(),
+        user_data_dir: base.user_data_dir.clone(),
+        default_viewport: config.default_viewport(),
         ..Default::default()
       },
     );
-    // Wire per-instance args callback from config trait.
+
+    // A bare session key that names a configured instance must select
+    // that instance rather than a context on `default`.
+    browser_state.set_known_instances(config.instance_names());
+
+    // Wire per-instance launch settings from the config trait.
     let config_clone = Arc::clone(&config);
-    browser_state.set_instance_args_fn(Arc::new(move |instance| {
-      config_clone.chrome_args_for_instance(instance)
-    }));
+    browser_state.set_instance_overrides_fn(Arc::new(move |instance| config_clone.instance_overrides(instance)));
     // Wire per-instance connection resolver from config trait.
     let config_clone = Arc::clone(&config);
     browser_state.set_instance_resolver_fn(Arc::new(move |instance| config_clone.resolve_instance(instance)));
@@ -491,7 +577,8 @@ impl McpServer {
       artifacts_sandbox,
       sessions,
       script_caps: ferridriver_script::ScriptCaps::default(),
-      extensions: crate::extension::ExtensionRegistry::default(),
+      extension_registry: Arc::new(arc_swap::ArcSwap::from_pointee(LoadedExtensions::default())),
+      reload_lock: Arc::new(tokio::sync::Mutex::new(())),
       test_config: ferridriver_test::config::TestConfig::default(),
       extension_specs: Vec::new(),
       bdd_engine: Arc::new(Mutex::new(crate::bdd_engine::BddEngine::new())),
@@ -506,27 +593,131 @@ impl McpServer {
   ///
   /// Failed extensions are logged and skipped -- one broken file should
   /// not prevent the server from starting. Successfully loaded tools are
-  /// stored in `self.extensions` and become available as `run_script`
+  /// stored in the extension registry and become available as `run_script`
   /// bindings (and, when `exposeAsMcpTool`, as MCP tools).
-  pub async fn load_extensions(&mut self, specs: &[String]) {
+  pub async fn load_extensions(&mut self, specs: &[ferridriver_config::ExtensionSpec]) {
     // Record the specs so the BDD path can re-bundle them as step sources
     // even though run_script consumes them as already-loaded extensions.
     self.extension_specs = specs.to_vec();
     if specs.is_empty() {
       return;
     }
+    self.load_extension_specs().await;
+  }
+
+  /// Re-run discovery + load for the specs recorded at startup, replace
+  /// the registry and the promoted tool set, and discard every live
+  /// session VM so open sessions pick the new bytecode up on their next
+  /// call (their durable `vars` / processes / cookies survive).
+  ///
+  /// Editing an extension previously meant restarting the MCP client,
+  /// which drops every browser session with it — the authoring loop cost
+  /// far more than the edit.
+  ///
+  /// Returns `(tool_count, dropped_vm_count)`.
+  pub async fn reload_extensions(&self) -> (usize, usize) {
+    // Serialised: concurrent reloads would both bundle and both publish,
+    // and whichever finished last would win regardless of which source
+    // tree the caller meant.
+    let _serial = self.reload_lock.lock().await;
+    self.load_extension_specs().await;
+    let dropped = self.sessions.drop_all_vms().await;
+    let count = self.extensions().registry.tool_count();
+    tracing::info!(tools = count, dropped_vms = dropped, "reloaded extensions");
+    (count, dropped)
+  }
+
+  /// The currently-loaded extension set: registry and advertised tools,
+  /// as one consistent snapshot.
+  pub(crate) fn extensions(&self) -> Arc<LoadedExtensions> {
+    self.extension_registry.load_full()
+  }
+
+  /// The base args the launch path starts from, so a test can assert the
+  /// plan and the per-instance callback do not both contribute them.
+  #[cfg(test)]
+  pub(crate) fn launch_plan_args_for_test(&self) -> Vec<String> {
+    self
+      .state
+      .inner
+      .try_read()
+      .map(|s| s.extra_args.clone())
+      .unwrap_or_default()
+  }
+
+  /// Publish a registry directly, promoting its tools the same way a load
+  /// would. Test-only: the real path always goes through
+  /// [`Self::load_extension_specs`].
+  #[cfg(test)]
+  pub(crate) fn publish_extensions_for_test(&self, registry: crate::extension::ExtensionRegistry) {
+    let promoted = self.promoted_tool_list(&registry);
+    self
+      .extension_registry
+      .store(Arc::new(LoadedExtensions { registry, promoted }));
+  }
+
+  /// Replace the registry (and the promoted tool set) from
+  /// `self.extension_specs`. Shared by startup and reload so the two can
+  /// never resolve, gate or promote differently.
+  async fn load_extension_specs(&self) {
+    let specs = self.extension_specs.clone();
 
     // Discover every file across all configured roots, then bundle +
     // compile + extract the whole set in ONE batch runtime (rolldown ->
     // QuickJS bytecode; TypeScript and extension-local imports resolved).
     // Failures are logged AND recorded on the registry so the
     // `ferridriver_extensions` tool can report them without a restart.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let (files, discovery_errors) = crate::extension::discover_specs(specs, &cwd);
+    let (resolved, discovery_errors) = crate::extension::resolve_specs(&specs);
     let mut failures: Vec<(String, String)> = Vec::new();
+    let mut policy_warnings: Vec<(String, String)> = Vec::new();
     for e in discovery_errors {
       tracing::warn!(error = %e, "extension discovery failed; skipping path");
       failures.push((e.source_label(), e.to_string()));
+    }
+
+    // A package states its host preconditions in `package.json`
+    // (`ferridriver.requires` / `ferridriver.settings`). Checking them
+    // here is what turns a missing binary, an unlisted `allowEnv` name,
+    // a host outside the operator ceiling, an undeclared sidecar or a
+    // mistyped settings key into one message naming the package and the
+    // config key that fixes it — instead of a failure on the first call.
+    let sidecar_names: Vec<String> = self
+      .script_engine
+      .config()
+      .sidecars
+      .iter()
+      .map(|s| s.name.clone())
+      .collect();
+    let issues = crate::extension::requirements::check(
+      &resolved,
+      &crate::extension::RequirementEnv {
+        policy: &self.script_caps.extension_policy,
+        allow_env: &self.script_caps.allow_env,
+        sidecars: &sidecar_names,
+        settings: &self.script_caps.extension_settings,
+      },
+    );
+    let blocked = crate::extension::requirements::blocked_specs(&resolved, &issues);
+    for issue in issues {
+      if issue.blocking {
+        tracing::error!(source = %issue.source, "extension package requirement unmet: {}", issue.message);
+        failures.push((issue.source, issue.message));
+      } else {
+        tracing::warn!(source = %issue.source, "{}", issue.message);
+        policy_warnings.push((issue.source, issue.message));
+      }
+    }
+
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for r in &resolved {
+      if blocked.contains(&r.spec) {
+        continue;
+      }
+      for f in &r.files {
+        if !files.contains(f) {
+          files.push(f.clone());
+        }
+      }
     }
 
     let (loaded, errors) = if files.is_empty() {
@@ -541,14 +732,31 @@ impl McpServer {
     for lp in &loaded {
       let tool_names: Vec<&str> = lp.tools.iter().map(|t| t.name.as_str()).collect();
       tracing::info!(path = %lp.path.display(), tools = ?tool_names, "loaded extension file");
+      if lp.tools.is_empty() {
+        // Legitimate for an entry that only contributes BDD steps or
+        // script-host globals — and the only signal when a `defineTool`
+        // call did not run (a guard that was never true, a top-level
+        // throw before it).
+        let message = "declares no tools; loaded for its BDD steps / script-host contributions. \
+                       If it was meant to register a tool, its defineTool(...) call never ran."
+          .to_string();
+        tracing::warn!(path = %lp.path.display(), "{message}");
+        policy_warnings.push((lp.path.display().to_string(), message));
+      }
     }
 
-    let warnings = self.policy_conflicts(&loaded);
+    let mut warnings = self.policy_conflicts(&loaded);
     for (source, message) in &warnings {
       tracing::warn!(source = %source, "{message}");
     }
-    self.extensions = crate::extension::ExtensionRegistry::with_warnings(loaded, failures, warnings);
-    self.promote_extension_tools();
+    warnings.append(&mut policy_warnings);
+    let registry = crate::extension::ExtensionRegistry::with_warnings(loaded, failures, warnings);
+    let promoted = self.promoted_tool_list(&registry);
+    // Registry and listing published in ONE store, so no call can observe
+    // a listing that disagrees with the registry behind it.
+    self
+      .extension_registry
+      .store(Arc::new(LoadedExtensions { registry, promoted }));
   }
 
   /// Lint every loaded manifest against the operator extension policy
@@ -614,17 +822,18 @@ impl McpServer {
     warnings
   }
 
-  /// Register a dynamic tool route for each extension manifest that declares
-  /// `exposeAsMcpTool: true`. The tool's name, description, and `inputSchema`
-  /// come from the manifest. The dispatcher synthesises a one-line script
-  /// that awaits the matching binding (`await tools.<namespace>(args[0])`)
-  /// so the tool path and the `run_script` binding path share one handler.
-  fn promote_extension_tools(&mut self) {
-    use rmcp::handler::server::router::tool::ToolRoute;
+  /// The `tools/list` entries for every extension manifest that declares
+  /// `exposeAsMcpTool: true`. Name, description and schemas come from the
+  /// manifest; dispatch goes to [`Self::invoke_extension_tool`], so the
+  /// tool path and the `run_script` binding path share one handler.
+  ///
+  /// Built as a plain list (not `ToolRouter` routes) because the set has
+  /// to be replaceable while the server is serving — see
+  /// [`LoadedExtensions::promoted`].
+  fn promoted_tool_list(&self, registry: &crate::extension::ExtensionRegistry) -> Vec<rmcp::model::Tool> {
     use rmcp::model::Tool;
 
-    let promoted: Vec<_> = self
-      .extensions
+    let promoted: Vec<_> = registry
       .promoted_tools()
       .map(|t| {
         let name = t.name.clone();
@@ -663,30 +872,35 @@ impl McpServer {
       })
       .collect();
 
+    let mut out: Vec<Tool> = Vec::with_capacity(promoted.len());
     for tool in promoted {
       let name = tool.name.to_string();
-      // register_tool already rejects duplicate names within a load
-      // batch; this guards the remaining collision: a extension name that
-      // shadows a built-in tool (or a name added by an earlier,
-      // separately-loaded batch). Skip + warn rather than silently
-      // letting `add_route` clobber a route.
+      // `register_tool` already rejects duplicate names within a load
+      // batch; this guards the remaining collision: an extension name
+      // that shadows a built-in tool. Skip + warn rather than shadowing
+      // a built-in, which would silently change what `navigate` means.
       if self.tool_router.has_route(&name) {
-        tracing::warn!(name = %name, "extension tool name collides with an existing tool; not promoting");
+        tracing::warn!(name = %name, "extension tool name collides with a built-in tool; not promoting");
         continue;
       }
-      let tool_name = name.clone();
-
-      let route = ToolRoute::<Self>::new_dyn(tool, move |ctx| {
-        let tool_name = tool_name.clone();
-        Box::pin(async move {
-          let args_obj = ctx.arguments.clone().unwrap_or_default();
-          let args_value = serde_json::Value::Object(args_obj);
-          ctx.service.invoke_extension_tool(&tool_name, args_value).await
-        })
-      });
-      self.tool_router.add_route(route);
+      if out.iter().any(|t| t.name == tool.name) {
+        tracing::warn!(name = %name, "duplicate promoted extension tool name; keeping the first");
+        continue;
+      }
       tracing::info!(name = %name, "promoted extension to MCP tool");
+      out.push(tool);
     }
+    out
+  }
+
+  /// The promoted extension tool advertised under `name`, if any.
+  fn promoted_extension_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
+    self.extensions().promoted.iter().find(|t| t.name == name).cloned()
+  }
+
+  /// Names of the currently-advertised extension tools, in list order.
+  pub(crate) fn promoted_tool_names(&self) -> Vec<String> {
+    self.extensions().promoted.iter().map(|t| t.name.to_string()).collect()
   }
 
   /// Invoke a extension by manifest name with the given argument object.
@@ -710,7 +924,9 @@ impl McpServer {
   ) -> Result<rmcp::model::CallToolResult, ErrorData> {
     use rmcp::model::{CallToolResult, ContentBlock};
 
-    if self.extensions.get_tool(tool_name).is_none() {
+    let loaded = self.extensions();
+    let registry = &loaded.registry;
+    if registry.get_tool(tool_name).is_none() {
       return Err(Self::err(format!("unknown extension: {tool_name}")));
     }
     // Enforce the declared inputSchema before doing any work (browser
@@ -719,7 +935,7 @@ impl McpServer {
     // validator was compiled once at load ([`crate::extension::ExtensionRegistry::new`]);
     // an invalid schema is the extension author's bug and is surfaced
     // loudly rather than silently skipped.
-    if let Some(compiled) = self.extensions.validator(tool_name) {
+    if let Some(compiled) = registry.validator(tool_name) {
       match compiled {
         Err(msg) => return Ok(CallToolResult::error(vec![ContentBlock::text(msg.clone())])),
         Ok(validator) => {
@@ -797,7 +1013,9 @@ impl McpServer {
       ferridriver_script::Outcome::Ok { success } => success,
     };
     let mut out = CallToolResult::success(contents);
-    if let Some(compiled) = self.extensions.output_validator(tool_name) {
+    let loaded = self.extensions();
+    let registry = &loaded.registry;
+    if let Some(compiled) = registry.output_validator(tool_name) {
       match compiled {
         Err(msg) => return Ok(CallToolResult::error(vec![ContentBlock::text(msg.clone())])),
         Ok(validator) => {
@@ -818,8 +1036,9 @@ impl McpServer {
   /// shape. Shared by `run_script` and `invoke_extension_tool` so the mapping
   /// lives in exactly one place.
   pub(crate) fn extension_bindings(&self) -> Vec<ferridriver_script::ExtensionBinding> {
-    self
-      .extensions
+    let loaded = self.extensions();
+    let registry = &loaded.registry;
+    registry
       .files()
       .iter()
       .map(|f| ferridriver_script::ExtensionBinding {
@@ -862,6 +1081,9 @@ impl McpServer {
       extensions: self.extension_bindings(),
       host: ferridriver_script::ExtensionHost::Mcp,
       caps: self.script_caps.clone(),
+      // Already resolved to `<instance>:<context>`, so the script host
+      // never has to know this server's instance vocabulary to split it.
+      session: Some(self.state.session_key(session).await.to_composite()),
     })
   }
 
@@ -1257,8 +1479,19 @@ impl McpServer {
     // Cold start: validate the target instance before launching so a bad session
     // key (e.g. a bare env name resolving to the 'default' instance) fails loudly
     // instead of silently launching an unmapped browser on the wrong environment.
-    let instance = context.split_once(':').map_or("default", |(i, _)| i);
-    self.config.instance_health(instance).map_err(Self::err)?;
+    // Parse through `SessionKey` rather than splitting by hand: a bare
+    // key that names a configured instance selects that instance, and a
+    // hand-rolled split silently sent every bare key to `default`.
+    let key = self.state.session_key(context).await;
+    // `instance_health` may run the operator's args command, which shells
+    // out under its own timeout; off the reactor so a cold start does not
+    // stall every other session's tasks on this worker.
+    let config = Arc::clone(&self.config);
+    let instance = key.instance.to_string();
+    tokio::task::spawn_blocking(move || config.instance_health(&instance))
+      .await
+      .map_err(|e| Self::err(format!("instance health check failed: {e}")))?
+      .map_err(Self::err)?;
     let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
     let page = Box::pin(ctx_ref.new_page()).await.map_err(Self::err)?;
     self.invalidate_context(context);
@@ -1502,15 +1735,25 @@ fn parse_traceparent(tp: &str) -> Option<(&str, &str)> {
 
 /// Build the dispatch span for a tool call, linked to the caller's trace when
 /// `_meta.traceparent` (SEP-414) carries a valid W3C trace context.
-fn tool_call_span(tool: &str, meta: Option<&rmcp::model::Meta>) -> tracing::Span {
-  if let Some((trace_id, parent_span_id)) = meta
-    .and_then(rmcp::model::Meta::get_traceparent)
-    .and_then(parse_traceparent)
-  {
+fn tool_call_span(tool: &str, meta: Option<&rmcp::model::RequestMetaObject>) -> tracing::Span {
+  if let Some((trace_id, parent_span_id)) = meta.and_then(|m| m.get_traceparent()).and_then(parse_traceparent) {
     tracing::info_span!("mcp.call_tool", tool, trace_id, parent_span_id)
   } else {
     tracing::info_span!("mcp.call_tool", tool)
   }
+}
+
+/// How long a client may treat a tool listing as fresh. Bounded rather than
+/// indefinite so a client that misses the `tools/list_changed` notification
+/// still picks a reloaded extension's tools up on its own.
+const TOOL_LIST_TTL_MS: u64 = 5 * 60 * 1000;
+
+/// Whether this peer negotiated a protocol version that defines the SEP-2549
+/// `ttlMs` / `cacheScope` hints. Older peers get the listing without them.
+fn supports_cache_hints(context: &RequestContext<RoleServer>) -> bool {
+  context
+    .protocol_version()
+    .is_some_and(|version| version >= rmcp::model::ProtocolVersion::V_2026_07_28)
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -1524,6 +1767,10 @@ impl ServerHandler for McpServer {
       // never emitted `notifications/message` anyway.
       ServerCapabilities::builder()
         .enable_tools()
+        // Extensions reload without a restart, so the advertised tool set
+        // can change mid-session; a client that does not know that would
+        // keep calling a tool that no longer exists.
+        .enable_tool_list_changed()
         .enable_resources()
         .enable_prompts()
         .build(),
@@ -1548,17 +1795,67 @@ impl ServerHandler for McpServer {
     &self,
     request: rmcp::model::CallToolRequestParams,
     context: RequestContext<RoleServer>,
-  ) -> Result<CallToolResult, ErrorData> {
+  ) -> Result<CallToolResponse, ErrorData> {
     // The serve loop moves the request's `_meta` into `context.meta` before
     // dispatch (so the progress token isn't lost), leaving `request.meta`
     // empty — read the trace context from the context, not the request.
     let span = tool_call_span(request.name.as_ref(), Some(&context.meta));
+
+    // Promoted extension tools live outside the static router (their set
+    // changes on reload), so dispatch them here. Built-ins win: a
+    // colliding extension name is never promoted in the first place.
+    if !self.tool_router.has_route(request.name.as_ref())
+      && self.promoted_extension_tool(request.name.as_ref()).is_some()
+    {
+      let name = request.name.to_string();
+      let args = serde_json::Value::Object(request.arguments.unwrap_or_default());
+      return match self.invoke_extension_tool(&name, args).instrument(span).await {
+        Ok(result) => Ok(result.into()),
+        Err(e) if e.code == rmcp::model::ErrorCode::INTERNAL_ERROR => Ok(Self::tool_failure(&e).into()),
+        Err(e) => Err(e),
+      };
+    }
+
     let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
     match self.tool_router.call(tcc).instrument(span).await {
       Ok(result) => Ok(result),
-      Err(e) if e.code == rmcp::model::ErrorCode::INTERNAL_ERROR => Ok(Self::tool_failure(&e)),
+      Err(e) if e.code == rmcp::model::ErrorCode::INTERNAL_ERROR => Ok(Self::tool_failure(&e).into()),
       Err(e) => Err(e),
     }
+  }
+
+  /// Manual `list_tools` (replaces the one `#[tool_handler]` would
+  /// generate) so the reloadable extension tools are advertised beside
+  /// the static router's built-ins.
+  async fn list_tools(
+    &self,
+    _request: Option<PaginatedRequestParams>,
+    context: RequestContext<RoleServer>,
+  ) -> Result<rmcp::model::ListToolsResult, ErrorData> {
+    let mut tools = self.tool_router.list_all();
+    tools.extend(self.extensions().promoted.iter().cloned());
+    let result = rmcp::model::ListToolsResult::with_all_items(tools);
+    // The listing is worth caching — the built-ins are compiled in and an
+    // extension reload publishes `tools/list_changed`, which invalidates the
+    // client's copy — but the hints are only spec-legal for a peer that
+    // negotiated 2026-07-28.
+    Ok(if supports_cache_hints(&context) {
+      result
+        .with_ttl_ms(TOOL_LIST_TTL_MS)
+        .with_cache_scope(rmcp::model::CacheScope::Public)
+    } else {
+      result
+    })
+  }
+
+  /// Same reason as [`Self::list_tools`]: a promoted extension tool must
+  /// be discoverable by name, not just in the list.
+  fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
+    self
+      .tool_router
+      .get(name)
+      .cloned()
+      .or_else(|| self.promoted_extension_tool(name))
   }
 
   async fn list_resources(
@@ -1632,7 +1929,32 @@ impl ServerHandler for McpServer {
     &self,
     request: ReadResourceRequestParams,
     _context: RequestContext<RoleServer>,
-  ) -> Result<ReadResourceResult, ErrorData> {
+  ) -> Result<ReadResourceResponse, ErrorData> {
+    Box::pin(self.read_resource_contents(request)).await.map(Into::into)
+  }
+
+  async fn list_prompts(
+    &self,
+    _request: Option<PaginatedRequestParams>,
+    _context: RequestContext<RoleServer>,
+  ) -> Result<ListPromptsResult, ErrorData> {
+    Ok(ListPromptsResult::with_all_items(Self::prompt_definitions()))
+  }
+
+  async fn get_prompt(
+    &self,
+    request: GetPromptRequestParams,
+    _context: RequestContext<RoleServer>,
+  ) -> Result<GetPromptResponse, ErrorData> {
+    Self::prompt_messages(&request).map(Into::into)
+  }
+}
+
+impl McpServer {
+  /// The body of [`ServerHandler::read_resource`], kept as an inherent method
+  /// so every arm can build a plain [`ReadResourceResult`]; the trait boundary
+  /// widens it to the MRTR response enum once.
+  async fn read_resource_contents(&self, request: ReadResourceRequestParams) -> Result<ReadResourceResult, ErrorData> {
     let uri = &request.uri;
     if let Some(rel) = uri.strip_prefix("artifact://") {
       return self.read_artifact_resource(rel, uri).await;
@@ -1718,12 +2040,10 @@ impl ServerHandler for McpServer {
     }
   }
 
-  async fn list_prompts(
-    &self,
-    _request: Option<PaginatedRequestParams>,
-    _context: RequestContext<RoleServer>,
-  ) -> Result<ListPromptsResult, ErrorData> {
-    let prompts = vec![
+  /// The prompts this server advertises. Compiled in, so the listing is the
+  /// same on every call.
+  fn prompt_definitions() -> Vec<Prompt> {
+    vec![
       Prompt::new(
         "debug-page",
         Some("Analyze the page for errors, broken elements, and console issues"),
@@ -1769,20 +2089,13 @@ impl ServerHandler for McpServer {
             .with_required(true),
         ]),
       ),
-    ];
-    let result = ListPromptsResult {
-      prompts,
-      ..Default::default()
-    };
-    Ok(result)
+    ]
   }
 
-  async fn get_prompt(
-    &self,
-    request: GetPromptRequestParams,
-    _context: RequestContext<RoleServer>,
-  ) -> Result<GetPromptResult, ErrorData> {
-    let args = request.arguments.unwrap_or_default();
+  /// The body of [`ServerHandler::get_prompt`]: builds the messages for one
+  /// named prompt, which the trait boundary widens to the MRTR response enum.
+  fn prompt_messages(request: &GetPromptRequestParams) -> Result<GetPromptResult, ErrorData> {
+    let args = request.arguments.clone().unwrap_or_default();
     let get_arg = |key: &str| -> String { args.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string() };
     let url = get_arg("url");
 
@@ -1949,8 +2262,8 @@ mod tests {
 
   #[test]
   fn extension_tool_result_validates_output_schema_and_ships_structured_content() {
-    let mut server = test_server();
-    server.extensions = crate::extension::ExtensionRegistry::new(
+    let server = test_server();
+    server.publish_extensions_for_test(crate::extension::ExtensionRegistry::new(
       vec![loaded_extension(serde_json::json!({
         "name": "typed",
         "outputSchema": {
@@ -1961,7 +2274,7 @@ mod tests {
         }
       }))],
       Vec::new(),
-    );
+    ));
 
     let good = ferridriver_script::ScriptResult::ok(serde_json::json!({ "ok": true }), 3, Vec::new());
     let reply = server.extension_tool_result("typed", &good).expect("reply");
@@ -2074,6 +2387,29 @@ mod tests {
     // Every built-in tool should carry a human title.
     for t in &tools {
       assert!(t.title.is_some(), "tool {} is missing a title", t.name);
+    }
+  }
+
+  // The two tools whose payload is a documented JSON object publish it as an
+  // `outputSchema`, so a client can validate the structured content instead of
+  // trusting the prose in the description.
+  #[test]
+  fn the_json_returning_tools_publish_an_output_schema() {
+    let tools = super::McpServer::tool_router().list_all();
+    for (name, required_key) in [("run_script", "duration_ms"), ("run_bdd", "scenarios")] {
+      let tool = tools
+        .iter()
+        .find(|t| t.name == name)
+        .unwrap_or_else(|| panic!("tool {name} not found"));
+      let schema = tool
+        .output_schema
+        .as_ref()
+        .unwrap_or_else(|| panic!("tool {name} must declare an output schema"));
+      let rendered = serde_json::to_string(schema).expect("schema serializes");
+      assert!(
+        rendered.contains(required_key),
+        "{name} output schema must describe {required_key}: {rendered}"
+      );
     }
   }
 

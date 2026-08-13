@@ -1046,11 +1046,20 @@ impl<T: CdpWrap> CdpBrowser<T> {
 impl CdpBrowser<pipe::PipeTransport> {
   /// Launch Chrome with `--remote-debugging-pipe` and communicate over fd 3/4.
   pub async fn launch(chromium_path: &str) -> Result<Self> {
-    Self::launch_with_flags(chromium_path, &crate::state::chrome_flags(true, &[])).await
+    Self::launch_with_flags(
+      chromium_path,
+      &crate::state::chrome_flags(true, &[]),
+      &rustc_hash::FxHashMap::default(),
+    )
+    .await
   }
 
   /// Launch Chrome with custom flags and communicate over fd 3/4.
-  pub async fn launch_with_flags(chromium_path: &str, flags: &[String]) -> Result<Self> {
+  pub async fn launch_with_flags(
+    chromium_path: &str,
+    flags: &[String],
+    env: &rustc_hash::FxHashMap<String, String>,
+  ) -> Result<Self> {
     // Hold the user-data-dir as a `TempDir` so it's removed from disk when the
     // browser handle drops. The Child owned by the CDP browser has
     // `kill_on_drop(true)` set in `pipe::PipeTransport::spawn`, so the Chrome
@@ -1060,7 +1069,7 @@ impl CdpBrowser<pipe::PipeTransport> {
       .tempdir()
       .map_err(|e| FerriError::Backend(format!("create user-data-dir: {e}")))?;
 
-    let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir.path(), flags, true)?;
+    let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir.path(), flags, true, env)?;
     let group = super::process::ChildGroup::recorded(child, Some(user_data_dir.path()), true);
     Self::init(Arc::new(transport), Some(group), Some(user_data_dir)).await
   }
@@ -1075,8 +1084,9 @@ impl CdpBrowser<pipe::PipeTransport> {
     chromium_path: &str,
     flags: &[String],
     user_data_dir: &std::path::Path,
+    env: &rustc_hash::FxHashMap<String, String>,
   ) -> Result<Self> {
-    let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir, flags, false)?;
+    let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir, flags, false, env)?;
     let group = super::process::ChildGroup::recorded(child, Some(user_data_dir), false);
     Self::init(Arc::new(transport), Some(group), None).await
   }
@@ -1090,12 +1100,17 @@ impl CdpBrowser<ws::WsTransport> {
     Box::pin(Self::launch_with_flags(
       chromium_path,
       &crate::state::chrome_flags(true, &[]),
+      &rustc_hash::FxHashMap::default(),
     ))
     .await
   }
 
   /// Launch Chrome with custom flags and communicate over WebSocket.
-  pub async fn launch_with_flags(chromium_path: &str, flags: &[String]) -> Result<Self> {
+  pub async fn launch_with_flags(
+    chromium_path: &str,
+    flags: &[String],
+    env: &rustc_hash::FxHashMap<String, String>,
+  ) -> Result<Self> {
     // Held as a `TempDir` so the dir is removed from disk when the browser
     // handle drops. The Child spawned by `WsTransport::spawn` has
     // `kill_on_drop(true)` set, so Chrome dies before the directory vanishes.
@@ -1104,7 +1119,14 @@ impl CdpBrowser<ws::WsTransport> {
       .tempdir()
       .map_err(|e| FerriError::Backend(format!("create user-data-dir: {e}")))?;
 
-    let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir.path(), flags, true)).await?;
+    let (transport, child) = Box::pin(ws::WsTransport::spawn(
+      chromium_path,
+      user_data_dir.path(),
+      flags,
+      true,
+      env,
+    ))
+    .await?;
     let group = super::process::ChildGroup::recorded(child, Some(user_data_dir.path()), true);
     Self::init(Arc::new(transport), Some(group), Some(user_data_dir)).await
   }
@@ -1116,8 +1138,9 @@ impl CdpBrowser<ws::WsTransport> {
     chromium_path: &str,
     flags: &[String],
     user_data_dir: &std::path::Path,
+    env: &rustc_hash::FxHashMap<String, String>,
   ) -> Result<Self> {
-    let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir, flags, false)).await?;
+    let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir, flags, false, env)).await?;
     let group = super::process::ChildGroup::recorded(child, Some(user_data_dir), false);
     Self::init(Arc::new(transport), Some(group), None).await
   }
@@ -4911,7 +4934,7 @@ impl<T: CdpWrap> CdpPage<T> {
     let emitter1 = self.events.clone();
     let emitter2 = self.events.clone();
     let emitter3 = self.events.clone();
-    let mut tasks: Vec<tokio::task::AbortHandle> = Vec::with_capacity(9);
+    let mut tasks: Vec<tokio::task::AbortHandle> = Vec::with_capacity(10);
 
     tasks.push(Self::spawn_console_listener(
       transport.clone(),
@@ -4984,6 +5007,12 @@ impl<T: CdpWrap> CdpPage<T> {
       self.events.clone(),
       self.exposed_fns.clone(),
       self.target_id.clone(),
+    ));
+    tasks.push(Self::spawn_target_gone_listener(
+      self.transport.clone(),
+      self.target_id.clone(),
+      self.closed.clone(),
+      self.events.clone(),
     ));
 
     if let Ok(mut guard) = self.listener_tasks.lock() {
@@ -5097,6 +5126,45 @@ impl<T: CdpWrap> CdpPage<T> {
       })
       .abort_handle(),
     ]
+  }
+
+  /// Mark the page closed when the browser destroys its target.
+  ///
+  /// `closed` was only ever set by our own `close_page` / `dispose_local`, so a
+  /// target that went away on its own -- tab closed in the browser UI,
+  /// `window.close()`, target detached or crashed -- left `is_closed()` false.
+  /// The stale page then stayed the context's active page and every later
+  /// command went to a dead CDP session, surfacing as
+  /// `Session with given id not found` on some unrelated later call instead of
+  /// as a lost page. Marking it here lets the context skip it and reopen.
+  ///
+  /// These are browser-level events (no `sessionId` filter), so the tap is
+  /// unfiltered and matched on `targetId` instead.
+  fn spawn_target_gone_listener(
+    transport: Arc<T>,
+    target_id: Arc<str>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    emitter: crate::events::EventEmitter,
+  ) -> tokio::task::AbortHandle {
+    tokio::spawn(async move {
+      let mut rx = transport.tap_event_methods(&["Target.targetDestroyed", "Target.detachedFromTarget"], None);
+      while let Some(event) = rx.recv().await {
+        let matches_target = event
+          .get("params")
+          .and_then(|p| p.get("targetId"))
+          .and_then(|v| v.as_str())
+          .is_some_and(|id| id == &*target_id);
+        if !matches_target {
+          continue;
+        }
+        // `swap` so the Close event fires once even if both events arrive.
+        if !closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+          emitter.emit(crate::events::PageEvent::Close);
+        }
+        return;
+      }
+    })
+    .abort_handle()
   }
 
   fn spawn_web_error_listener(

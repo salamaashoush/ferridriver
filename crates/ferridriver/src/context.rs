@@ -72,9 +72,49 @@ impl BrowserContext {
   }
 
   /// Get the active page in this context.
+  ///
+  /// A closed page is skipped: closing a tab (or losing its target) leaves the
+  /// `AnyPage` in place, and handing that back sends every later command to a
+  /// dead CDP session -- surfacing as `Session with given id not found` on the
+  /// next call rather than as a lost context. Falls back to the most recently
+  /// opened live page so a context that still has other tabs keeps working, and
+  /// reports `None` once nothing is open so callers can rebuild.
+  ///
+  /// Read-only, so it cannot drop the dead entries it skips;
+  /// [`Self::prune_closed_pages`] does that at the `&mut` entry points
+  /// (opening a page, refreshing the list).
   #[must_use]
   pub fn active_page(&self) -> Option<&AnyPage> {
-    self.pages.get(self.active_page_idx)
+    if let Some(page) = self.pages.get(self.active_page_idx)
+      && !page.is_closed()
+    {
+      return Some(page);
+    }
+    self.pages.iter().rev().find(|page| !page.is_closed())
+  }
+
+  /// Drop closed pages, keeping the active index on the same page when it
+  /// survived and on the newest live one when it did not.
+  ///
+  /// Closed pages were only ever removed by an explicit `close_page`, so a
+  /// context whose tabs were closed in the browser UI (or by
+  /// `window.close()`) grew a `Vec` of corpses for its whole life and paid
+  /// a scan past them on every command.
+  pub(crate) fn prune_closed_pages(&mut self) {
+    if !self.pages.iter().any(AnyPage::is_closed) {
+      return;
+    }
+    let active_survives = self.pages.get(self.active_page_idx).is_some_and(|p| !p.is_closed());
+    let live_before_active = self.pages[..self.active_page_idx.min(self.pages.len())]
+      .iter()
+      .filter(|p| !p.is_closed())
+      .count();
+    self.pages.retain(|page| !page.is_closed());
+    self.active_page_idx = if active_survives {
+      live_before_active
+    } else {
+      self.pages.len().saturating_sub(1)
+    };
   }
 
   // -- Cookies (operate on active page) ------------------------------------
@@ -223,9 +263,9 @@ pub struct ContextRef {
 
 impl ContextRef {
   pub fn new(state: Arc<RwLock<BrowserState>>, name: String) -> Self {
-    let key = SessionKey::parse(&name);
     // Look up (or initialise) the shared emitter for this composite
-    // key. Uses `try_read` because `ContextRef::new` must be callable
+    // key, and resolve the key against the state's own instance names.
+    // Uses `try_read` because `ContextRef::new` must be callable
     // from sync contexts (e.g. `Browser::default_context`). In the
     // common case the state lock is uncontended at construction time;
     // if `try_read` fails (concurrent writer) we fall back to a
@@ -234,12 +274,17 @@ impl ContextRef {
     // only, matching the old behaviour. `get_or_create_context_events`
     // itself uses a `std::sync::Mutex` so it doesn't need the tokio
     // read guard to stay alive beyond the call.
-    let (events, closed) = match state.try_read() {
-      Ok(s) => (
-        s.get_or_create_context_events(&key.to_composite()),
-        s.get_or_create_context_closed(&key.to_composite()),
-      ),
+    let (key, events, closed) = match state.try_read() {
+      Ok(s) => {
+        let key = s.session_key(&name);
+        (
+          key.clone(),
+          s.get_or_create_context_events(&key.to_composite()),
+          s.get_or_create_context_closed(&key.to_composite()),
+        )
+      },
       Err(_) => (
+        SessionKey::parse(&name),
         crate::events::ContextEventEmitter::new(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
       ),

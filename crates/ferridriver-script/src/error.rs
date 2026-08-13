@@ -3,7 +3,7 @@
 use std::fmt;
 
 /// Kind of failure a script can produce.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptErrorKind {
   /// Source failed to parse.
@@ -38,7 +38,7 @@ impl fmt::Display for ScriptErrorKind {
 /// `line`, `column`, and `source_snippet` are filled in whenever the `QuickJS`
 /// runtime exposes them (syntax and runtime errors); they are `None` for
 /// engine-level failures like timeouts.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct ScriptError {
   pub kind: ScriptErrorKind,
   /// The thrown value's JS constructor name (`TypeError`, ...) when the

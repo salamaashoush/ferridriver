@@ -25,6 +25,7 @@ async fn run(src: &str) -> Outcome {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   ScriptEngine::new(ScriptEngineConfig::default())
     .run(src, &[], RunOptions::default(), ctx)

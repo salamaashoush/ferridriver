@@ -13,7 +13,9 @@
 pub mod loader;
 pub mod manifest;
 pub mod registry;
+pub mod requirements;
 
-pub use loader::{ExtensionLoadError, LoadedExtension, discover, discover_specs, load_all};
+pub use loader::{ExtensionLoadError, LoadedExtension, discover, discover_specs, load_all, resolve_specs};
 pub use manifest::{ToolAllow, ToolManifest};
 pub use registry::ExtensionRegistry;
+pub use requirements::{RequirementEnv, RequirementIssue};

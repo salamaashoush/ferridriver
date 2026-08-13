@@ -41,6 +41,7 @@ fn ctx(sandbox_tmp: &std::path::Path, b: ExtensionBinding) -> RunContext {
     extensions: vec![b],
     host: ferridriver_script::ExtensionHost::Mcp,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   }
 }
 

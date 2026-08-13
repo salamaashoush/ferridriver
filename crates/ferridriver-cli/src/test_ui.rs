@@ -399,7 +399,7 @@ pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::
     );
   }
   let overrides = ferridriver_test::config::CliOverrides {
-    headless: args.headless,
+    headless_override: args.headless.then_some(true),
     backend: args.backend.clone(),
     workers: args.workers.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
     tag: args.tag.clone(),

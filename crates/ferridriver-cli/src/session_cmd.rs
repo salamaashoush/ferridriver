@@ -17,7 +17,7 @@ use ferridriver_session::{BindOptions, Command, Registry, SessionClient, bind_in
 
 use crate::cli::{
   BrowserArgs, SessionArgs, SessionCommand, SessionExecArgs, SessionHostArgs, SessionListArgs, SessionOpenArgs,
-  SessionTargetArgs, backend_to_kind,
+  SessionTargetArgs,
 };
 
 pub async fn run(args: SessionArgs) -> anyhow::Result<()> {
@@ -42,7 +42,7 @@ fn browser_kind_for(backend: BackendKind) -> BrowserKind {
 
 /// Launch a browser for the given CLI browser args.
 async fn launch_browser(browser: &BrowserArgs) -> anyhow::Result<ferridriver::Browser> {
-  let backend = backend_to_kind(&browser.backend);
+  let backend = browser.backend_kind().unwrap_or(BackendKind::CdpPipe);
   let kind = browser_kind_for(backend);
   let factory = BrowserType::with_backend(kind, backend);
   let options = LaunchOptions {
@@ -329,7 +329,7 @@ fn print_reply(reply: &ferridriver_session::Response, output: Option<&std::path:
 }
 
 fn backend_name(browser: &BrowserArgs) -> &'static str {
-  match backend_to_kind(&browser.backend) {
+  match browser.backend_kind().unwrap_or(BackendKind::CdpPipe) {
     BackendKind::CdpPipe => "cdp-pipe",
     BackendKind::CdpRaw => "cdp-raw",
     BackendKind::WebKit => "webkit",

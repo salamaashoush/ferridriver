@@ -194,6 +194,12 @@ pub struct RunContext {
   /// Opt-in sandbox relaxations resolved from config (the env
   /// allow-list). Default = fully locked down.
   pub caps: ScriptCaps,
+  /// The session key this VM serves (`"<instance>:<context>"`), when the
+  /// host has one. Surfaced to scripts and to extension handlers as
+  /// `session`, so a tool can tell WHICH environment it is driving
+  /// instead of taking that as an argument and silently disagreeing with
+  /// the browser it was handed.
+  pub session: Option<String>,
 }
 
 /// Resolved, ready-to-install sandbox relaxations. Built by the host
@@ -205,6 +211,12 @@ pub struct ScriptCaps {
   /// allow-list intersected with the real environment. Empty ⇒
   /// `process.env` is an empty object.
   pub env: std::collections::BTreeMap<String, String>,
+  /// The names the operator allow-listed (`[scripting].allowEnv`),
+  /// before intersecting with the real environment. Kept alongside
+  /// [`Self::env`] because "not allow-listed" and "allow-listed but
+  /// unset" are different diagnoses for an extension that declares an
+  /// environment requirement, and `env` alone cannot tell them apart.
+  pub allow_env: Vec<String>,
   /// First-party command grants exposed as `commands` /
   /// `ferridriver.commands` outside extension handlers.
   pub commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
@@ -213,9 +225,19 @@ pub struct ScriptCaps {
   /// effective grants are its declared `allow` intersected with this.
   /// Default = fully open (manifests keep their declared authority).
   pub extension_policy: ferridriver_config::ExtensionPolicyConfig,
+  /// Per-extension settings (`[extensions.settings.<name>]`), keyed by
+  /// namespace or full tool name. Surfaced to a handler as `settings`.
+  pub extension_settings: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl ScriptCaps {
+  /// Attach the operator's per-extension settings.
+  #[must_use]
+  pub fn with_extension_settings(mut self, settings: std::collections::BTreeMap<String, serde_json::Value>) -> Self {
+    self.extension_settings = settings;
+    self
+  }
+
   /// Resolve from an operator allow-list: only the named variables, and
   /// only those actually present in the process environment, are
   /// captured. A name not in the environment is silently absent (same
@@ -228,8 +250,10 @@ impl ScriptCaps {
       .collect();
     Self {
       env,
+      allow_env: allow_env.to_vec(),
       commands: std::collections::BTreeMap::new(),
       extension_policy: ferridriver_config::ExtensionPolicyConfig::default(),
+      extension_settings: std::collections::BTreeMap::new(),
     }
   }
 
@@ -279,6 +303,21 @@ pub(crate) struct SessionProcsUd(pub(crate) std::sync::Arc<crate::session_procs:
 #[allow(unsafe_code)]
 unsafe impl rquickjs::JsLifetime<'_> for SessionProcsUd {
   type Changed<'to> = SessionProcsUd;
+}
+
+/// The session key this VM serves plus the operator's per-extension
+/// settings, stashed as userdata so `tools.<name>` dispatch can build a
+/// handler's `session` / `settings` without threading them through every
+/// call.
+pub(crate) struct ExtensionEnvUd {
+  pub(crate) session: Option<String>,
+  pub(crate) settings: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+// SAFETY: owned data only; no borrowed JS values.
+#[allow(unsafe_code)]
+unsafe impl rquickjs::JsLifetime<'_> for ExtensionEnvUd {
+  type Changed<'to> = ExtensionEnvUd;
 }
 
 /// Sandboxed `QuickJS` scripting engine.
@@ -498,6 +537,7 @@ impl Session {
     let host = context.host;
     let caps = context.caps.clone();
     let caps_for_session = caps.clone();
+    let session = context.session.clone();
     let sidecars = config.sidecars.clone();
     let ud_vm = vm.clone();
     let install: Result<Result<(), ScriptError>, ScriptError> = vm_with!(vm => |ctx| {
@@ -519,6 +559,11 @@ impl Session {
       let _ = ctx.store_userdata(crate::bindings::registry::ExtensionPolicyUd(
         caps.extension_policy.clone(),
       ));
+      // Session identity + per-extension settings for tool dispatch.
+      let _ = ctx.store_userdata(ExtensionEnvUd {
+        session: session.clone(),
+        settings: caps.extension_settings.clone(),
+      });
       // Native route-handler registry (context userdata): session-once
       // so `page.route` works on ANY page (script-launched
       // `context.newPage()`, not just the MCP-prebound one whose

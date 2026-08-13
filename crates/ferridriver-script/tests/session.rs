@@ -53,6 +53,7 @@ async fn run_demo_plugin_twice() {
     extensions: vec![binding],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -90,7 +91,7 @@ async fn run_demo_plugin_twice() {
 #[tokio::test(flavor = "multi_thread")]
 async fn dotted_tool_names_are_projected_as_namespaces() {
   let tmp = tempfile::tempdir().expect("tempdir");
-  let path = tmp.path().join("box.js");
+  let path = tmp.path().join("acme.js");
   std::fs::write(&path, APP_PLUGIN).expect("write plugin");
   let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
@@ -111,6 +112,7 @@ async fn dotted_tool_names_are_projected_as_namespaces() {
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -183,6 +185,7 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -230,6 +233,7 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -311,6 +315,7 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -393,6 +398,7 @@ async fn fetch_net_policy_does_not_leak_between_concurrent_tools() {
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -459,6 +465,7 @@ async fn extension_branches_on_ferridriver_host_flag() {
       }],
       host,
       caps: ferridriver_script::ScriptCaps::default(),
+      session: None,
     };
     (sb, ctx)
   };
@@ -512,6 +519,7 @@ fn make_ctx() -> (tempfile::TempDir, RunContext) {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   (tmp, ctx)
 }
@@ -960,6 +968,7 @@ async fn per_tool_timeout_ms_is_enforced_for_every_caller() {
     extensions: vec![binding],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -1026,6 +1035,7 @@ async fn plugin_top_level_await_registers_tools_in_session() {
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -1078,6 +1088,7 @@ async fn broken_plugin_is_skipped_without_killing_the_session() {
     extensions,
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -1246,6 +1257,7 @@ async fn allow_net_capability_binds_the_global_request_binding() {
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -1345,6 +1357,7 @@ async fn allow_net_follows_timer_callbacks_registered_by_a_restricted_tool() {
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -1436,6 +1449,7 @@ async fn extraction_environment_matches_session_for_top_level_globals() {
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -1472,6 +1486,7 @@ async fn execute_tool_invokes_natively_and_reports_missing_tools() {
     extensions: vec![binding],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -1539,6 +1554,7 @@ async fn execute_tool_propagates_handler_failures_and_timeouts() {
     extensions: vec![binding],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await

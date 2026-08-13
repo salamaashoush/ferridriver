@@ -63,6 +63,7 @@ fn ctx(tmp: &tempfile::TempDir) -> RunContext {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   }
 }
 

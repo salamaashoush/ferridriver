@@ -16,6 +16,8 @@
 //! content cannot smuggle terminal control codes into the output while our
 //! own styling survives.
 
+use std::fmt::Write as _;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -540,7 +542,11 @@ fn quote_js_string(text: &str) -> String {
         out.push('\\');
         out.push(c);
       },
-      c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+      c if (c as u32) < 0x20 => {
+        // `write!` into the buffer instead of allocating a throwaway
+        // String per control character.
+        let _ = write!(out, "\\x{:02x}", c as u32);
+      },
       c => out.push(c),
     }
   }

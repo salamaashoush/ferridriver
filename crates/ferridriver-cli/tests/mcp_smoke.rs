@@ -210,6 +210,23 @@ fn extension_tools() {
   backends_support::extension_tools::run();
 }
 
+#[test]
+fn extension_context() {
+  backends_support::extension_context::run();
+}
+
+// Extension PACKAGES: multi-entry `ferridriver.entries` resolution and the
+// `requires` / `settings` gate. Config + loader behaviour, so one backend.
+#[test]
+fn extension_package() {
+  backends_support::extension_package::run();
+}
+
+#[test]
+fn instances() {
+  backends_support::instances::run();
+}
+
 // rmcp-2.x server features (tool annotations/titles, artifact:// resource
 // links, progress notifications) are protocol-level, not backend-specific,
 // so they run once on cdp-pipe.

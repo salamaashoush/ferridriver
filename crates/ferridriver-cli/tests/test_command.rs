@@ -63,6 +63,11 @@ fn run_failing_suite(screenshot_on_failure: bool) -> bool {
 
   let out = Command::new(bin())
     .arg("test")
+    // The config below is complete on its own; without this the
+    // repository's own ferridriver.toml layers in underneath (the
+    // probe's cwd is inside the repo) and its project matrix and
+    // fixture web server decide the outcome instead.
+    .arg("--no-inherit")
     .arg("-c")
     .arg(dir.join("ferridriver.toml"))
     .output()

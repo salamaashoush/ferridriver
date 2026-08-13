@@ -158,9 +158,15 @@ pub async fn serve_http_with(server: McpServer, port: u16) -> anyhow::Result<()>
   reclaim_leaked_browsers().await;
   let handle = server.clone();
   let ct = tokio_util::sync::CancellationToken::new();
+  // The 3.0 rename of `stateful_mode`, and it only governs peers older than
+  // 2026-07-28 — SEP-2567 removed sessions, so a peer that negotiates
+  // 2026-07-28 is served statelessly whatever this says. Those older peers
+  // keep their session and standalone GET stream because the server pushes
+  // messages at them: progress during navigate/run_script/run_bdd, and
+  // `tools/list_changed` when an extension reloads.
   let config = StreamableHttpServerConfig::default()
     .with_cancellation_token(ct.child_token())
-    .with_stateful_mode(true);
+    .with_legacy_session_mode(true);
 
   let svc = StreamableHttpService::new(
     move || Ok(server.clone()),

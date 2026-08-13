@@ -23,6 +23,7 @@ fn ctx(dir: &std::path::Path) -> RunContext {
     extensions: Vec::new(),
     host: ExtensionHost::Test,
     caps: ScriptCaps::default(),
+    session: None,
   }
 }
 

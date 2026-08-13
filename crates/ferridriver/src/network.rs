@@ -560,6 +560,22 @@ impl Request {
       "failure": self.failure(),
     })
   }
+
+  /// Compact JSON snapshot: method, status, and URL only.
+  ///
+  /// The full [`Self::to_diagnostic_json`] record carries every request and
+  /// response header, which on a real page adds up to hundreds of kilobytes
+  /// across the log. Most questions asked of the network log ("where did this
+  /// asset load from", "did this call 404") need only these three fields.
+  pub async fn to_summary_json(&self) -> serde_json::Value {
+    let state = self.inner.state.read().await;
+    serde_json::json!({
+      "method": self.inner.method,
+      "status": state.response.as_ref().map(|r| r.status),
+      "url": self.inner.url,
+      "failure": self.failure(),
+    })
+  }
 }
 
 /// Construction parameters for a new `Request`.

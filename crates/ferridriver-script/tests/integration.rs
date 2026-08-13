@@ -62,6 +62,7 @@ async fn harness() -> Harness {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   };
   let engine = ScriptEngine::new(ScriptEngineConfig::default());
 

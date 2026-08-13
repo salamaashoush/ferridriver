@@ -15,8 +15,7 @@ use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 
 use ferridriver::Browser;
-use ferridriver::backend::BackendKind;
-use ferridriver::options::{BrowserKind, LaunchPlan};
+use ferridriver::options::LaunchPlan;
 use ferridriver::state::{BrowserState, ConnectMode};
 
 use crate::config::BrowserConfig;
@@ -444,17 +443,7 @@ pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> ferridriver::error:
 pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, FixtureDef> {
   let mut defs = FxHashMap::default();
 
-  let backend = match browser_config.backend.as_str() {
-    "cdp-raw" => BackendKind::CdpRaw,
-    "webkit" => BackendKind::WebKit,
-    "bidi" => BackendKind::Bidi,
-    _ => BackendKind::CdpPipe,
-  };
-  let kind = match browser_config.browser.as_str() {
-    "firefox" => BrowserKind::Firefox,
-    "webkit" => BrowserKind::WebKit,
-    _ => BrowserKind::Chromium,
-  };
+  let (backend, kind) = browser_config.resolve_kinds();
   let headless = browser_config.headless;
   let executable_path = browser_config.executable_path.clone();
   let args = browser_config.args.clone();

@@ -23,6 +23,7 @@ fn ctx(dir: &std::path::Path) -> RunContext {
     extensions: Vec::new(),
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
+    session: None,
   }
 }
 
@@ -42,7 +43,7 @@ async fn alias_and_virtual_modules_resolve_in_bundles() {
     .alias
     .insert("@wdio/utils".to_string(), "wdio-shim.ts".to_string());
   config.virtual_modules.insert(
-    "box:env".to_string(),
+    "acme:env".to_string(),
     "export const env = 'staging'; export default env;".to_string(),
   );
   set_bundler_shims(BundlerShims::from_config(&config, dir.path()));
@@ -51,7 +52,7 @@ async fn alias_and_virtual_modules_resolve_in_bundles() {
   std::fs::write(
     &entry,
     "import { keys } from '@wdio/utils';\n\
-     import { env } from 'box:env';\n\
+     import { env } from 'acme:env';\n\
      export default `${keys('Enter')}|${env}`;\n",
   )
   .expect("entry");

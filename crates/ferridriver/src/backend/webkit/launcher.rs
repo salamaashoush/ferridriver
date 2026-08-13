@@ -17,6 +17,9 @@ use thiserror::Error;
 #[derive(Debug, Default, Clone)]
 pub struct LaunchConfig {
   pub headless: bool,
+  /// Extra environment for the `pw_run.sh` child, merged onto the
+  /// inherited environment.
+  pub env: rustc_hash::FxHashMap<String, String>,
   pub user_data_dir: Option<PathBuf>,
   pub proxy_server: Option<String>,
   pub proxy_bypass_list: Option<String>,
@@ -82,6 +85,7 @@ pub fn binary_revision() -> String {
 pub fn spawn(config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<Child, LaunchError> {
   let binary = locate_binary()?;
   let mut cmd = Command::new(&binary);
+  cmd.envs(&config.env);
   cmd.arg("--inspector-pipe");
   if config.headless {
     cmd.arg("--headless");

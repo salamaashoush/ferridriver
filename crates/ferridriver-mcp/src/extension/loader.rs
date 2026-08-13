@@ -29,7 +29,8 @@ use super::manifest::ToolManifest;
 /// module bytecode each session VM loads.
 #[derive(Debug, Clone)]
 pub struct LoadedExtension {
-  /// One manifest per tool declared in the file. At least one.
+  /// One manifest per tool declared in the file. May be empty: an entry
+  /// can contribute only BDD steps or script-host globals.
   pub tools: Vec<ToolManifest>,
   /// Precompiled `QuickJS` bytecode of the rolldown-bundled module,
   /// shared (`Arc`) so handing it to a session VM is a refcount bump.
@@ -54,9 +55,6 @@ pub enum ExtensionLoadError {
     path: PathBuf,
     error: serde_json::Error,
   },
-  ManifestNoTools {
-    path: PathBuf,
-  },
 }
 
 impl std::fmt::Display for ExtensionLoadError {
@@ -65,11 +63,6 @@ impl std::fmt::Display for ExtensionLoadError {
       Self::Io { path, error } => write!(f, "read {}: {error}", path.display()),
       Self::Bundle { path, message } => write!(f, "bundle {}: {message}", path.display()),
       Self::ManifestInvalid { path, error } => write!(f, "{}: manifest invalid: {error}", path.display()),
-      Self::ManifestNoTools { path } => write!(
-        f,
-        "{}: no tools declared — the file never called defineTool(...)",
-        path.display()
-      ),
     }
   }
 }
@@ -82,10 +75,9 @@ impl ExtensionLoadError {
   #[must_use]
   pub fn source_label(&self) -> String {
     match self {
-      Self::Io { path, .. }
-      | Self::Bundle { path, .. }
-      | Self::ManifestInvalid { path, .. }
-      | Self::ManifestNoTools { path } => path.display().to_string(),
+      Self::Io { path, .. } | Self::Bundle { path, .. } | Self::ManifestInvalid { path, .. } => {
+        path.display().to_string()
+      },
     }
   }
 }
@@ -93,6 +85,9 @@ impl ExtensionLoadError {
 /// Bundle + compile + extract every discovered extension file in one batch.
 /// Returns the successfully loaded extensions and a per-file error list so
 /// the caller can log and skip broken files without aborting startup.
+///
+/// A file that compiles but declares no tools is returned as loaded with an
+/// empty tool list: it may be contributing BDD steps or script-host globals.
 ///
 /// The returned `LoadedExtension`s preserve input file order, which the
 /// server keeps when building `ExtensionBinding`s — sessions evaluate the
@@ -118,10 +113,11 @@ pub async fn load_all(files: &[PathBuf]) -> (Vec<LoadedExtension>, Vec<Extension
         continue;
       },
     };
-    if tools.is_empty() {
-      errors.push(ExtensionLoadError::ManifestNoTools { path: cp.path });
-      continue;
-    }
+    // A file with no tools is NOT a failure: an extension entry may exist
+    // only to contribute BDD steps or script-host globals, and dropping it
+    // meant those contributions never ran at all. The host warns about the
+    // toolless file instead, so a `defineTool` that silently failed to
+    // register is still visible.
     loaded.push(LoadedExtension {
       tools,
       bytecode: cp.bytecode,
@@ -161,9 +157,32 @@ pub fn discover(path: &Path) -> Result<Vec<PathBuf>, ExtensionLoadError> {
 
 /// Resolve configured extension specifiers (paths or ESM packages) to
 /// concrete entry files.
+///
+/// Each spec carries the directory of the config layer that declared
+/// it, so a user-level entry resolves against the user config dir
+/// rather than the process cwd.
 #[must_use]
-pub fn discover_specs(specs: &[String], cwd: &Path) -> (Vec<PathBuf>, Vec<ExtensionLoadError>) {
-  let (files, errors) = ferridriver_script::discover::resolve_extension_specs(specs, cwd);
+pub fn discover_specs(specs: &[ferridriver_config::ExtensionSpec]) -> (Vec<PathBuf>, Vec<ExtensionLoadError>) {
+  let (resolved, errors) = resolve_specs(specs);
+  let mut files = Vec::new();
+  for r in resolved {
+    for f in r.files {
+      if !files.contains(&f) {
+        files.push(f);
+      }
+    }
+  }
+  (files, errors)
+}
+
+/// Like [`discover_specs`], but keeping each spec's package identity and
+/// its `ferridriver` package manifest so the host can check the declared
+/// requirements (see [`super::requirements`]) before loading.
+#[must_use]
+pub fn resolve_specs(
+  specs: &[ferridriver_config::ExtensionSpec],
+) -> (Vec<ferridriver_script::ResolvedExtension>, Vec<ExtensionLoadError>) {
+  let (resolved, errors) = ferridriver_script::discover::resolve_extensions(specs);
   let errors = errors
     .into_iter()
     .map(|(spec, e)| ExtensionLoadError::Bundle {
@@ -171,7 +190,7 @@ pub fn discover_specs(specs: &[String], cwd: &Path) -> (Vec<PathBuf>, Vec<Extens
       message: e.message,
     })
     .collect();
-  (files, errors)
+  (resolved, errors)
 }
 
 #[cfg(test)]
@@ -229,7 +248,11 @@ mod tests {
     let dir = scratch("specs");
     std::fs::write(dir.join("ok.js"), "defineTool({ name: 't', handler: () => 1 });").unwrap();
     // A bare name is a package specifier; a path spec needs `./`.
-    let (files, errors) = discover_specs(&["./ok.js".to_string(), "no-such-package-xyz".to_string()], &dir);
+    let spec = |s: &str| ferridriver_config::ExtensionSpec {
+      spec: s.to_string(),
+      base_dir: dir.clone(),
+    };
+    let (files, errors) = discover_specs(&[spec("./ok.js"), spec("no-such-package-xyz")]);
     assert_eq!(files.len(), 1, "the resolvable spec survives: {files:?}");
     assert_eq!(errors.len(), 1, "the bogus spec is recorded: {errors:?}");
     assert!(errors[0].source_label().contains("no-such-package-xyz"));
@@ -252,27 +275,32 @@ mod tests {
     let files = vec![dir.join("good.js"), dir.join("broken.js"), dir.join("empty.js")];
     let (loaded, errors) = load_all(&files).await;
 
-    assert_eq!(loaded.len(), 1, "only the good file loads: {loaded:?}");
-    let tool = &loaded[0].tools[0];
+    assert_eq!(loaded.len(), 2, "the good file AND the toolless one load: {loaded:?}");
+    let toolless = loaded
+      .iter()
+      .find(|l| l.path.ends_with("empty.js"))
+      .unwrap_or_else(|| panic!("empty.js must load: {loaded:?}"));
+    assert!(
+      toolless.tools.is_empty(),
+      "a file may contribute steps/globals instead of tools"
+    );
+    assert!(!toolless.bytecode.is_empty(), "its top-level code must still run");
+
+    let good = loaded
+      .iter()
+      .find(|l| l.path.ends_with("good.js"))
+      .unwrap_or_else(|| panic!("good.js must load: {loaded:?}"));
+    let tool = &good.tools[0];
     assert_eq!(tool.name, "good.tool");
     assert_eq!(tool.title.as_deref(), Some("Good"));
     assert!(tool.expose_as_mcp_tool);
     assert!(tool.output_schema.is_some());
     assert_eq!(tool.annotations.as_ref().and_then(|a| a.read_only_hint), Some(true));
-    assert!(!loaded[0].bytecode.is_empty());
+    assert!(!good.bytecode.is_empty());
 
-    assert_eq!(errors.len(), 2, "broken + toolless: {errors:?}");
-    let by_label = |needle: &str| {
-      errors
-        .iter()
-        .find(|e| e.source_label().contains(needle))
-        .unwrap_or_else(|| panic!("no error for {needle}: {errors:?}"))
-    };
-    assert!(matches!(by_label("broken.js"), ExtensionLoadError::Bundle { .. }));
-    assert!(matches!(
-      by_label("empty.js"),
-      ExtensionLoadError::ManifestNoTools { .. }
-    ));
+    assert_eq!(errors.len(), 1, "only the unparseable file fails: {errors:?}");
+    assert!(errors[0].source_label().contains("broken.js"), "{errors:?}");
+    assert!(matches!(errors[0], ExtensionLoadError::Bundle { .. }));
     let _ = std::fs::remove_dir_all(&dir);
   }
 }

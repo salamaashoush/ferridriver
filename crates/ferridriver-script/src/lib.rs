@@ -63,11 +63,11 @@ pub use bindings::registry::net_entry_subsumed;
 pub use bindings::{
   ArtifactsJs, BridgeFuture, BrowserContextJs, CollectedAnnotation, CollectedFileConfigure, CollectedFileUse,
   CollectedFixture, CollectedRegistry, CollectedSuite, CollectedTest, CollectedTestHook, CollectedTests,
-  ExtensionBinding, ExtensionCommandsJs, HookArg, HttpClientJs, HttpResponseJs, JsArg, JsFixtureScope, KeyboardJs,
-  LocatorJs, MouseJs, PageJs, RunTestSpec, ScenarioWorld, ScriptAttachment, SnapshotTarget, StepOutcome,
-  TEST_SKIP_SENTINEL, TestHostBridge, TestInfoData, TestWorldData, collect_registry, collect_tests, drain_attachments,
-  install_extensions, invoke_hook, invoke_step, reset_world, run_standalone_hook, run_test, set_scenario_world,
-  teardown_worker_fixtures,
+  ExtensionBinding, ExtensionCommandsJs, FORWARDED_CONTEXT_KEYS, HookArg, HttpClientJs, HttpResponseJs, JsArg,
+  JsFixtureScope, KeyboardJs, LocatorJs, MouseJs, PageJs, RunTestSpec, ScenarioWorld, ScriptAttachment, SnapshotTarget,
+  StepOutcome, TEST_SKIP_SENTINEL, TOOL_CONTEXT_KEYS, TestHostBridge, TestInfoData, TestWorldData, collect_registry,
+  collect_tests, drain_attachments, install_extensions, invoke_hook, invoke_step, reset_world, run_standalone_hook,
+  run_test, set_scenario_world, teardown_worker_fixtures,
 };
 pub use bundle::{
   CompiledBundle, CompiledExtension, bundle_and_compile, bundle_and_compile_named, bundle_source,
@@ -75,11 +75,12 @@ pub use bundle::{
 };
 pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
 pub use console::{ConsoleCapture, ConsoleSink};
-pub use discover::{SOURCE_EXTENSIONS, is_source_file, walk_source_files};
+pub use discover::{ResolvedExtension, SOURCE_EXTENSIONS, is_source_file, walk_source_files};
 pub use engine::{
   ExtensionHost, RunContext, RunOptions, ScriptCaps, ScriptEngine, ScriptEngineConfig, Session, SessionRun,
 };
 pub use error::{ScriptError, ScriptErrorKind};
+pub use ferridriver_config::ExtensionSpec;
 pub use fs::PathSandbox;
 pub use result::{ConsoleEntry, ConsoleLevel, Outcome, ScriptResult, ScriptSuccess};
 pub use session_procs::SessionProcs;
