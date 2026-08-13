@@ -12,6 +12,10 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod cli;
+mod config_cmd;
+mod ext_cmd;
+mod ext_typecheck;
+mod ext_types;
 mod run_console;
 mod session_cmd;
 mod test_ui;
@@ -149,6 +153,16 @@ async fn main() -> anyhow::Result<()> {
     cli::Command::Install(install_args) => Box::pin(run_install(install_args)).await,
     cli::Command::Codegen(codegen_args) => Box::pin(run_codegen(codegen_args)).await,
     cli::Command::Session(session_args) => Box::pin(session_cmd::run(session_args)).await,
+    cli::Command::Config(config_args) => config_cmd::run_config(args.config.as_deref(), !args.no_inherit, &config_args),
+    cli::Command::Doctor(doctor_args) => {
+      Box::pin(config_cmd::run_doctor(
+        args.config.as_deref(),
+        !args.no_inherit,
+        doctor_args,
+      ))
+      .await
+    },
+    cli::Command::Ext(ext_args) => Box::pin(ext_cmd::run(config, ext_args)).await,
   }
 }
 

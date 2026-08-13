@@ -40,6 +40,14 @@ regex = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 mimalloc = { workspace = true }
+which = { workspace = true }
+# `ext dev --watch` polls one file watcher per extension root; a
+# dynamic set of roots needs `select_all`, not a fixed `tokio::select!`.
+futures = { workspace = true }
+toml = "1"
+# `ext check` writes a generated tsconfig + the embedded type
+# declarations into a scratch dir for the TypeScript pass.
+tempfile = "3"
 
 [dev-dependencies]
 serde_json = { workspace = true }

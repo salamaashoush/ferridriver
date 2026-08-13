@@ -1,0 +1,18 @@
+{
+  "name": "@ferridriver/extension",
+  "version": "0.5.0",
+  "description": "Type declarations for ferridriver extensions (defineTool, the handler context, and the package.json `ferridriver` manifest)",
+  "license": "MIT",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts"
+    }
+  },
+  "peerDependencies": {
+    "@ferridriver/test": "0.5.0"
+  },
+  "files": [
+    "index.d.ts"
+  ]
+}

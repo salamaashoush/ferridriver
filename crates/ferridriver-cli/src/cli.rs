@@ -74,6 +74,103 @@ pub enum Command {
 
   /// Manage and drive named browser sessions (bind / attach / list / close).
   Session(SessionArgs),
+
+  /// Show the resolved configuration: which files layered, what each
+  /// key resolved to, and where that value came from.
+  Config(ConfigArgs),
+
+  /// Check that this setup will actually work: config found, extensions
+  /// loadable, instance commands runnable, browsers installed.
+  Doctor(DoctorArgs),
+
+  /// Author extensions: load them and report what they register.
+  Ext(ExtArgs),
+}
+
+// ── ext subcommand ──────────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct ExtArgs {
+  #[command(subcommand)]
+  pub command: ExtCommand,
+}
+
+#[derive(Subcommand)]
+pub enum ExtCommand {
+  /// Verify extensions once: resolve, type-check, load, and report every
+  /// tool, capability, unmet requirement and error. Exits non-zero when
+  /// something is wrong, so it works as a pre-commit / CI gate.
+  Check(ExtCheckArgs),
+
+  /// The authoring loop: `check` re-run on every save.
+  Dev(ExtCheckArgs),
+
+  /// Write the `@ferridriver/extension` (and `@ferridriver/test`) type
+  /// declarations this binary type-checks against, so an editor resolves
+  /// the same surface. No npm install needed.
+  Types(ExtTypesArgs),
+}
+
+#[derive(Args)]
+pub struct ExtCheckArgs {
+  /// Extension files, directories, packages, or package specifiers.
+  /// Defaults to the `extensions` list from the resolved config.
+  pub paths: Vec<String>,
+
+  /// Re-run whenever a file under an extension's root changes. Implied by
+  /// `ext dev`.
+  #[arg(long, short = 'w')]
+  pub watch: bool,
+
+  /// Skip the TypeScript pass (only resolve + load).
+  #[arg(long)]
+  pub no_typecheck: bool,
+
+  /// Emit JSON instead of the human-readable report.
+  #[arg(long)]
+  pub json: bool,
+}
+
+#[derive(Args)]
+pub struct ExtTypesArgs {
+  /// Directory to write `@ferridriver/extension/` and
+  /// `@ferridriver/test/` into. Defaults to `./node_modules`, which is
+  /// where TypeScript already looks.
+  #[arg(long, short = 'o')]
+  pub out: Option<PathBuf>,
+}
+
+// ── config subcommand ───────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct ConfigArgs {
+  /// Emit JSON instead of the human-readable report.
+  #[arg(long)]
+  pub json: bool,
+
+  /// Print only the merged document, without the layer/provenance report.
+  #[arg(long)]
+  pub resolved: bool,
+
+  /// Browser flags, so the report shows the SAME effective values a
+  /// `ferridriver mcp` with these flags would run with.
+  #[command(flatten)]
+  pub browser: BrowserArgs,
+}
+
+// ── doctor subcommand ───────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct DoctorArgs {
+  /// Emit JSON instead of the human-readable report.
+  #[arg(long)]
+  pub json: bool,
+
+  /// Also run each configured instance's args/discover command. Off by
+  /// default because those shell out (and a discover command may block
+  /// while it waits for a browser).
+  #[arg(long)]
+  pub instances: bool,
 }
 
 // ── session subcommand ──────────────────────────────────────────────────
@@ -611,6 +708,10 @@ pub struct BrowserArgs {
 pub struct EffectiveBrowser {
   pub backend: ferridriver::backend::BackendKind,
   pub headless: bool,
+  /// Whether the value came from the command line rather than the file,
+  /// so `ferridriver config` can say which one is in force.
+  pub backend_from_cli: bool,
+  pub headless_from_cli: bool,
 }
 
 /// Apply CLI-over-config precedence for the browser flags.
@@ -620,6 +721,8 @@ pub fn effective_browser(args: &BrowserArgs, mcp: &ferridriver_config::mcp::McpC
   EffectiveBrowser {
     backend: cli_backend.unwrap_or_else(|| mcp.backend_kind()),
     headless: cli_headless.unwrap_or_else(|| mcp.headless()),
+    backend_from_cli: cli_backend.is_some(),
+    headless_from_cli: cli_headless.is_some(),
   }
 }
 
