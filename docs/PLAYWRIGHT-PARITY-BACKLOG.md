@@ -228,7 +228,7 @@ Remaining, in rough order of how visible each one is:
 - Extension-authored ANSI is stripped along with page-bridged output:
   every JS-supplied string passes through `strip_ansi` so page content
   cannot smuggle terminal control codes into logs. An extension that
-  colours its own output (box-craft's catchpoint plugin does) loses it.
+  colours its own output (some host tools do) loses it.
   Distinguishing the two sources needs a trusted-output channel.
 
 ## e2e suite: load-correlated roaming flake

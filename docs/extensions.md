@@ -112,16 +112,31 @@ defineTool(manifest, async (ctx) => { ... });
 
 The handler receives one object:
 
-| Field      | Type                  | Notes |
-|------------|-----------------------|-------|
-| `args`     | the caller's argument | For a promoted tool, the MCP `arguments` object. |
-| `page`     | `Page` \| undefined   | The live browser page for the session. |
-| `context`  | `BrowserContext` \| undefined | The session's browser context. |
-| `request`  | `HttpClient` \| undefined | HTTP client. Net-restricted per the effective `allow.net`. |
-| `commands` | `ExtensionCommands`   | `.run(name, vars?)` — runs a declared shell template. |
-| `signal`   | `AbortSignal`         | Fires when `timeoutMs` expires (see below). |
+| Field       | Type                  | Notes |
+|-------------|-----------------------|-------|
+| `args`      | the caller's argument | For a promoted tool, the MCP `arguments` object. |
+| `page`      | `Page`                | The live browser page for the session. |
+| `context`   | `BrowserContext`      | The session's browser context. |
+| `browser`   | `Browser`             | The browser the session runs on. |
+| `request`   | `APIRequestContext`   | HTTP client. Net-restricted per the effective `allow.net`. |
+| `commands`  | `Commands`            | `.run(name, vars?)` — runs a declared command template. |
+| `vars`      | `Vars`                | Session-scoped string store; survives VM rebuilds. |
+| `fs`        | `Fs`                  | Sandboxed filesystem, confined to `scriptRoot`. |
+| `artifacts` | `Artifacts`           | Output sandbox (`artifactsRoot`) for screenshots/PDFs/traces. |
+| `sidecars`  | `Sidecars`            | `.connect(name)` for a declared `[[sidecars]]` process. |
+| `settings`  | your settings type    | The operator's `[extensions.settings.<key>]` block. |
+| `session`   | `SessionRef \| undefined` | `{ key, instance, context }` — WHICH browser (and therefore which environment) this call drives. |
+| `log`       | `Log`                 | `log(msg)` plus `log.error/warn/info/debug/trace` and `log.enabled(level)`, all through the host's `tracing` filter. |
+| `signal`    | `AbortSignal`         | Fires when `timeoutMs` expires (see below). |
 
 Return any JSON-serialisable value; it becomes the tool result.
+
+Derive an environment from `session.instance` rather than taking one as an
+argument: the instance selects the browser process, so an argument that
+disagrees with it drives the wrong environment while reporting success.
+
+The `@ferridriver/extension` types declare all of it (see "The authoring
+loop"), and `ferridriver ext check` verifies your handler against them.
 
 ### Cancellation: `signal`
 
@@ -433,6 +448,154 @@ Then` are available to tests exactly like a step file's.
 Both discovery paths (MCP extension loader and BDD runner) share one
 accepted-extension set and one recursive walk, so a `.tsx`/`.cts`
 extension is visible identically to both hosts.
+
+### Extension packages: the `ferridriver` field in `package.json`
+
+Anything past a couple of files wants to be a **package**: a directory
+(or a `node_modules` entry) with a `package.json`. A package is named
+once in the config — as a path or as a bare specifier — and declares
+everything else itself:
+
+```json
+{
+  "name": "@acme/ferridriver-acme",
+  "type": "module",
+  "ferridriver": {
+    "entries": ["./src/login.ts", "./src/sign.ts"],
+    "requires": {
+      "commands": ["acme-cli"],
+      "env": ["ACME_HOME"],
+      "net": ["*.acme.com"],
+      "sidecars": ["acme-gate"]
+    },
+    "settings": {
+      "acme": {
+        "type": "object",
+        "properties": { "origin": { "type": "string" } },
+        "required": ["origin"],
+        "additionalProperties": false
+      }
+    }
+  }
+}
+```
+
+```toml
+extensions = ["./plugins/acme"]        # or "@acme/ferridriver-acme"
+```
+
+- **`entries`** — the modules to load as extensions, in declaration
+  order. Each is a path relative to the package directory: a file (the
+  extension may be omitted) or a directory, scanned recursively.
+  Everything else in the package is reachable only as an import of an
+  entry. That is the point: a shared `lib/` gets bundled through the
+  imports instead of being loaded as an extension of its own and warned
+  about for declaring no tools. Without `entries`, Node's own
+  single-entry chain applies (`exports` -> `module` -> `main` ->
+  `index.*`), which can only ever name one module.
+- **`requires`** — what the host must already provide. Declarations, not
+  grants: per-tool authority still comes from `defineTool`'s `allow`,
+  clamped by `[extensions.policy]`. An unmet requirement stops the
+  package from loading and says which config key fixes it, rather than
+  failing on the first tool call:
+  - `commands` — programs that must be on `PATH`.
+  - `env` — names the operator must list in `[scripting].allowEnv`
+    (allow-listed but unset is a warning, not a block).
+  - `net` — hosts that must fit inside the `[extensions.policy]` net
+    ceiling.
+  - `sidecars` — names some `[[sidecars]]` entry must declare.
+- **`settings`** — a JSON Schema per `[extensions.settings.<key>]`
+  block the package reads, keyed the way settings resolve (tool
+  namespace, or a full tool name). Validated against the operator's
+  actual config at load, with an absent block validated as `{}` so a
+  required field is reported. A mistyped key becomes an error instead of
+  an `undefined` the handler reads at runtime.
+
+`ferridriver config` prints each package's entry count, declared entries
+and unmet requirements; `ferridriver doctor` fails on them.
+
+### The authoring loop
+
+**`ferridriver ext check [PATH...]`** verifies the extensions (the paths
+given, or the configured `extensions`) and prints what the host sees:
+
+- the entry files each spec resolved to and the package's declared entries;
+- unmet `requires` and settings-schema violations;
+- **TypeScript diagnostics** for every `.ts` entry and everything it
+  imports;
+- every tool with its capabilities and schemas, and any bundle error.
+
+It exits non-zero when something is wrong, so it works as a pre-commit or
+CI gate. `--json` emits the same report as data.
+
+**`ferridriver ext dev [PATH...]`** is the same pass in a watch loop,
+re-run on every save — including a `package.json` edit that changes the
+entry set.
+
+```
+ferridriver ext check ./plugins/acme      # once
+ferridriver ext dev ./plugins/acme        # on every save
+```
+
+The type pass needs no setup. The declarations are embedded in the binary
+(so they always match the runtime that will load the extension) and are
+compiled with `tsgo`, resolved in this order: `FERRIDRIVER_TSGO`, `tsgo`
+or `tsc` on `PATH`, either one in a `node_modules/.bin` above the
+extension, then `npx`/`bunx` fetching `@typescript/native-preview` (cached
+after the first run). `FERRIDRIVER_TS_NO_DOWNLOAD=1` blocks the fetch;
+`--no-typecheck` skips the pass. When no compiler can be found the report
+says so instead of quietly passing.
+
+An author `tsconfig.json` next to the package is inherited (`extends`), so
+its options still apply — the runtime-describing options are then applied
+on top.
+
+For editor support without an install, `ferridriver ext types` writes the
+same declarations into `./node_modules` (or `--out <dir>`):
+
+```
+ferridriver ext types
+```
+
+```ts
+import type { ToolContext } from '@ferridriver/extension';
+// `defineTool`, `tools`, `vars`, `fs`, ... are globals; nothing to import.
+```
+
+Typing a tool's argument and result is what makes the check useful:
+
+```ts
+interface LoginArgs { user: string }
+
+defineTool<LoginArgs, { url: string }>({
+  name: 'acme.login',
+  description: 'Log a user in',
+  exposeAsTool: true,
+  inputSchema: { type: 'object', properties: { user: { type: 'string' } }, required: ['user'] },
+  async handler({ args, page, vars }) {
+    vars.set('user', args.user);           // `args.usr` is an error
+    await page.goto('https://app.acme.com'); // `page.gotoo` is an error
+    return { url: page.url() };             // returning a number is an error
+  },
+});
+```
+
+A third type parameter types the `[extensions.settings.<key>]` block the
+handler reads: `defineTool<Args, Result, { origin: string }>`.
+
+**`ferridriver_extensions` with `action: "reload"`** does the same
+re-resolve/re-bundle inside a running MCP server and installs the result:
+
+- the promoted tool set is replaced and `tools/list_changed` is sent when
+  the advertised names actually changed;
+- every live session VM is dropped, so the next call on an open session
+  runs the new code — while that session's `vars`, cookies and persistent
+  processes survive;
+- the reply reports `added` / `removed` / `droppedSessionVms` alongside the
+  usual registry report.
+
+Restarting the MCP client was previously the only way to pick up an edit,
+and it tore down every browser session with it.
 
 ---
 
