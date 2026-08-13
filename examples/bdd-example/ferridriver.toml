@@ -1,0 +1,22 @@
+# Config for the BDD harness example.
+#
+# Config files layer: this example sits inside the ferridriver repo, so
+# the repository-root `ferridriver.toml` applies as an outer layer. That
+# root config exists to drive the repo's own e2e suite — it declares a
+# fixture web server and a four-backend project matrix — none of which
+# this example wants. Arrays replace rather than append, so clearing the
+# two collections here is what detaches the example from them.
+#
+# The example previously relied on no config existing anywhere, which
+# only held while the loader read a single file.
+
+[test]
+features = ["features/**/*.feature"]
+projects = []
+webServer = []
+# This example's steps are Rust (`#[given]`/`#[then]` via inventory). A
+# non-empty `steps` glob would select the JS/TS step engine instead.
+steps = []
+
+[test.browser]
+headless = true

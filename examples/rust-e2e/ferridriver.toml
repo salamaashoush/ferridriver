@@ -1,0 +1,17 @@
+# Config for the Rust e2e example package.
+#
+# Config files layer, so the repository-root `ferridriver.toml` applies
+# here as an outer layer. That root config drives the repo's own
+# TypeScript e2e suite: a fixture web server plus a four-backend project
+# matrix. Inheriting either would run this example's tests once per
+# project and block on a fixture server it does not use.
+#
+# Arrays replace rather than append, so clearing both collections is
+# what detaches this package from them.
+
+[test]
+projects = []
+webServer = []
+
+[test.browser]
+headless = true
