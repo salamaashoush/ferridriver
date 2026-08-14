@@ -1,11 +1,6 @@
 use crate::params::{DiagnosticsKind, DiagnosticsParams};
-use crate::server::{McpServer, sess};
-use rmcp::{
-  ErrorData,
-  handler::server::wrapper::Parameters,
-  model::{CallToolResult, ContentBlock},
-  tool, tool_router,
-};
+use crate::server::McpServer;
+use rmcp::{ErrorData, handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
 use std::fmt::Write;
 
 /// The newest `limit` items whose projected text contains `needle`, in original
@@ -42,88 +37,93 @@ impl McpServer {
     annotations(read_only_hint = true, open_world_hint = false)
   )]
   async fn diagnostics(&self, Parameters(p): Parameters<DiagnosticsParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_opt());
     match p.r#type {
       DiagnosticsKind::Console => {
-        let _guard = self.session_guard(s).await;
-        let handles = self
-          .state
-          .log_handles_for(s)
-          .await
-          .ok_or_else(|| Self::err(format!("Context '{s}' not found")))?;
-        let limit = p.limit.unwrap_or(50);
-        let level = p.level.unwrap_or_default();
-        let needle = p.filter.as_deref().map(str::to_lowercase);
-        let log = handles.console.read().await;
-        let matched = newest_matching(
-          log.iter().filter(|m| level.accepts(m.type_str())),
-          needle.as_deref(),
-          limit,
-          |m| m.text(),
-        );
-        let msgs: Vec<serde_json::Value> = matched
-          .into_iter()
-          .map(|m| {
-            serde_json::json!({
-              "type": m.type_str(),
-              "text": m.text(),
-            })
+        self
+          .on_session(p.session.as_opt(), async |s| {
+            let handles = self
+              .state
+              .log_handles_for(&s)
+              .await
+              .ok_or_else(|| Self::err(format!("Context '{s}' not found")))?;
+            let limit = p.limit.unwrap_or(50);
+            let level = p.level.unwrap_or_default();
+            let needle = p.filter.as_deref().map(str::to_lowercase);
+            let log = handles.console.read().await;
+            let matched = newest_matching(
+              log.iter().filter(|m| level.accepts(m.type_str())),
+              needle.as_deref(),
+              limit,
+              |m| m.text(),
+            );
+            let msgs: Vec<serde_json::Value> = matched
+              .into_iter()
+              .map(|m| {
+                serde_json::json!({
+                  "type": m.type_str(),
+                  "text": m.text(),
+                })
+              })
+              .collect();
+            drop(log);
+            Ok(self.ok_text(serde_json::to_string_pretty(&msgs).unwrap_or_default()))
           })
-          .collect();
-        drop(log);
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-          serde_json::to_string_pretty(&msgs).unwrap_or_default(),
-        )]))
+          .await
       },
       DiagnosticsKind::Network => {
-        let _guard = self.session_guard(s).await;
-        let handles = self
-          .state
-          .log_handles_for(s)
-          .await
-          .ok_or_else(|| Self::err(format!("Context '{s}' not found")))?;
-        let limit = p.limit.unwrap_or(50);
-        let needle = p.filter.as_deref().map(str::to_lowercase);
-        let log = handles.network.read().await;
-        let reqs: Vec<_> = newest_matching(log.iter(), needle.as_deref(), limit, |req| req.url())
-          .into_iter()
-          .cloned()
-          .collect();
-        drop(log);
+        self
+          .on_session(p.session.as_opt(), async |s| {
+            let handles = self
+              .state
+              .log_handles_for(&s)
+              .await
+              .ok_or_else(|| Self::err(format!("Context '{s}' not found")))?;
+            let limit = p.limit.unwrap_or(50);
+            let needle = p.filter.as_deref().map(str::to_lowercase);
+            let log = handles.network.read().await;
+            let reqs: Vec<_> = newest_matching(log.iter(), needle.as_deref(), limit, |req| req.url())
+              .into_iter()
+              .cloned()
+              .collect();
+            drop(log);
 
-        // Full records carry every request and response header, which runs to
-        // hundreds of KB on a real page.
-        let summary = p.summary.unwrap_or(false);
-        let mut snapshots = Vec::with_capacity(reqs.len());
-        for req in &reqs {
-          if summary {
-            snapshots.push(req.to_summary_json().await);
-          } else {
-            snapshots.push(req.to_diagnostic_json().await);
-          }
-        }
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-          serde_json::to_string_pretty(&snapshots).unwrap_or_default(),
-        )]))
+            // Full records carry every request and response header, which runs to
+            // hundreds of KB on a real page.
+            let summary = p.summary.unwrap_or(false);
+            let mut snapshots = Vec::with_capacity(reqs.len());
+            for req in &reqs {
+              if summary {
+                snapshots.push(req.to_summary_json().await);
+              } else {
+                snapshots.push(req.to_diagnostic_json().await);
+              }
+            }
+            Ok(self.ok_text(serde_json::to_string_pretty(&snapshots).unwrap_or_default()))
+          })
+          .await
       },
       DiagnosticsKind::TraceStart => {
-        let _guard = self.session_guard(s).await;
-        let page = Box::pin(self.page(s)).await?;
-        page.start_tracing().await.map_err(Self::err)?;
-        Ok(CallToolResult::success(vec![ContentBlock::text("Trace started.")]))
+        self
+          .on_page(p.session.as_opt(), async |page, _s| {
+            page.start_tracing().await.map_err(Self::err)?;
+            Ok(self.ok_text("Trace started."))
+          })
+          .await
       },
       DiagnosticsKind::TraceStop => {
-        let _guard = self.session_guard(s).await;
-        let page = Box::pin(self.page(s)).await?;
-        page.stop_tracing().await.map_err(Self::err)?;
-        let metrics = page.metrics().await.map_err(Self::err)?;
-        let mut out = String::from("Trace stopped.\n\n### Performance Metrics\n");
-        for m in &metrics {
-          if m.value > 0.0 {
-            let _ = writeln!(out, "- {}: {:.2}", m.name, m.value);
-          }
-        }
-        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
+        self
+          .on_page(p.session.as_opt(), async |page, _s| {
+            page.stop_tracing().await.map_err(Self::err)?;
+            let metrics = page.metrics().await.map_err(Self::err)?;
+            let mut out = String::from("Trace stopped.\n\n### Performance Metrics\n");
+            for m in &metrics {
+              if m.value > 0.0 {
+                let _ = writeln!(out, "- {}: {:.2}", m.name, m.value);
+              }
+            }
+            Ok(self.ok_text(out))
+          })
+          .await
       },
     }
   }

@@ -152,6 +152,35 @@ pub fn test_response_contract(backend: &str) {
     "the echoed fill did not become an environment read"
   );
 
+  // ── Redaction covers the non-script tools too ────────────────────────────
+  //
+  // The engine redacts what a script hands back, which covers `run_script`
+  // and nothing else. `evaluate`, `snapshot` and `search_page` read the page
+  // directly, so they need the reply to be redacted on the way out — a
+  // credential sitting in the DOM would otherwise come straight back.
+  let evaluated = c.call_tool(
+    "evaluate",
+    json!({ "expression": "document.getElementById('pw').value" }),
+  );
+  ok(&evaluated, "evaluate");
+  let text = all_text(&evaluated);
+  assert!(
+    !text.contains(SECRET_VALUE),
+    "evaluate returned the declared secret verbatim: {text}"
+  );
+  assert!(
+    text.contains(&format!("<secret>{SECRET_NAME}</secret>")),
+    "evaluate did not read back the filled value at all, so the check above proves nothing: {text}"
+  );
+
+  // Same for the snapshot tool, which serialises the whole a11y tree.
+  let searched = c.call_tool("search_page", json!({ "pattern": SECRET_VALUE }));
+  ok(&searched, "search_page");
+  assert!(
+    !all_text(&searched).contains(SECRET_VALUE),
+    "search_page echoed the declared secret back in its match output"
+  );
+
   // ── The artifacts ceiling evicts the old, never the just-written ─────────
   let first = c.call_tool("screenshot", json!({}));
   ok(&first, "screenshot 1");

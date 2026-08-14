@@ -9,10 +9,10 @@ response contract their tools return. The goal is not to copy that surface but
 to beat it where our architecture is genuinely stronger: one scripting engine
 instead of a verb table.
 
-## Working tree
+## Where it landed
 
-Everything below is **uncommitted**: 53 files changed, ~3170 insertions,
-~907 deletions. New files:
+Committed as `feat(agent): script-carrying sessions, code echo, response
+contract` (52 files). The files that carry the design:
 
 ```
 crates/ferridriver/src/response.rs                       the shared builder
@@ -23,6 +23,11 @@ crates/ferridriver-cli/tests/backends_support/response_contract.rs
 site/docs/scripting/named-sessions.md
 docs/agent-surface-handover.md                           this file
 ```
+
+The repository's history was rewritten separately (`git filter-repo`) to drop
+vendor-specific names from every commit and to remove an accidentally
+committed `.claude` memory file — every SHA changed, and `main` is the only
+branch that survives.
 
 ## What shipped
 
@@ -180,20 +185,55 @@ suite now runs `--no-inherit` and those scripts launch their own browser.
 Left for later, from Playwright's version of this: a snapshot section written
 to a file and referenced by path, and console as a link.
 
+## The tool layer: measured, then fixed without a registry
+
+The earlier plan here was a shared tool registry —
+`{name, schema, capability, handler(ctx, params) -> Response}` in core, with
+MCP, CLI one-shots and script `tools.*` all binding to it, on the grounds that
+"MCP tools, script bindings and the session path are three implementations".
+
+Measuring it first killed that plan, and the measurement is worth keeping:
+
+- The session path stopped being a third implementation when it collapsed to
+  `RUN_VERB`.
+- There is **no duplicated logic** to hoist. MCP tools and script bindings are
+  both already thin over core — handlers ran 18–47 lines, of which one was the
+  core call.
+- What *was* duplicated is ceremony: 20 `session_guard`, 17 `sess(p.session…)`,
+  14 `self.page(s)` — the same three-line preamble seventeen times, in an order
+  that is load-bearing (resolving the page before taking the guard races a
+  concurrent call on a cold context into opening two pages).
+
+So the fix is two helpers on `McpServer`, not an abstraction layer:
+
+- `on_page(session, |page, s| …)` — resolve, guard, page, in that order, once.
+  Also the single home for the `Box::pin` that `clippy::large_futures` wants.
+- `on_session(session, |s| …)` — same, for tools that act on the context
+  itself (list, close, read logs) and must not launch a browser to do it.
+
+Counts after: `session_guard` 20 → 4, `self.page(` 14 → 4, `sess(p.session` 17
+→ 4. The remaining four are `connect` (which must connect *before* a page
+exists) and `run_script` (which holds its guard across a longer span).
+
+**This also closed a real hole.** Redaction was wired at the script engine, so
+it covered `run_script` and nothing else — `evaluate`, `snapshot`,
+`search_page` and the extension-tool path returned raw `ContentBlock::text`,
+and a credential sitting in the DOM came straight back. Every reply now goes
+through `McpServer::text` / `ok_text`, which redacts. Regression test:
+`response_contract` reads the filled password back through `evaluate` on all
+four backends and asserts both that the raw value is absent and that the
+redaction marker is present (so it cannot pass vacuously).
+
+What a registry would still add, and why none of it is pulling yet: built-ins
+callable from scripts (redundant — scripts have `page.snapshotForAI()`); CLI
+one-shots (anti-thesis — `run --session` already covers the whole API, and a
+command table is what we deleted); capability gating for built-ins (the one
+real item, speculative until an operator asks). Revisit if a second non-MCP
+host appears.
+
 ## Remaining work, ranked
 
-### 1. One tool registry
-
-MCP tools (11), script bindings, and the session path are three separate
-implementations. Playwright's CLI command *is* the MCP tool
-(`cli-daemon/daemon.ts:93` — `parseCliCommand` → `backend.callTool`), which is
-what makes 88 commands cheap for them.
-
-Shape: `{name, schema, capability, handler(ctx, params) -> Response}` in Rust
-core, with MCP, `ferridriver <cmd>` one-shots, and script `tools.*` all binding
-to it. Prerequisite for cheaply closing item 4.
-
-### 2. `ferridriver test --debug`
+### 1. `ferridriver test --debug`
 
 Pause a worker, bind the live test context as `tw-XXXX` (the machinery all
 exists now: `bind_in` with a real host), print the attach line. The agent then
@@ -205,7 +245,7 @@ protocol verbs (that would undo the whole "one verb" property). The natural
 fit is a script-callable binding on the paused session, e.g.
 `await testDebug.resume()`.
 
-### 3. `init-skills` / `init-agents`
+### 2. `init-skills` / `init-agents`
 
 Embed a SKILL.md plus planner/generator/healer agent definitions in the binary
 and write them into `.claude/skills/…` on demand. A single static binary beats
@@ -213,7 +253,7 @@ and write them into `.claude/skills/…` on demand. A single static binary beats
 `packages/playwright-core/src/tools/skills/playwright-cli/SKILL.md` (12K, plus
 nine reference docs) for the shape and depth expected.
 
-### 4. Small surface wins
+### 3. Small surface wins
 
 Trace CLI over our zips (`ferridriver trace actions|console|errors|…`),
 snapshot `find` with context, `generate-locator`, `highlight`, `--mobile`

@@ -1,5 +1,5 @@
 use crate::params::{EvaluateParams, ScreenshotParams_, SearchPageParams, SnapshotParams};
-use crate::server::{McpServer, sess};
+use crate::server::McpServer;
 use base64::Engine;
 use ferridriver::options::ScreenshotOptions;
 use rmcp::{
@@ -23,32 +23,31 @@ impl McpServer {
     annotations(read_only_hint = true, open_world_hint = false)
   )]
   async fn snapshot(&self, Parameters(p): Parameters<SnapshotParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_opt());
-    let _guard = self.session_guard(s).await;
-    let page = Box::pin(self.page(s)).await?;
-    let opts = ferridriver::snapshot::SnapshotOptions {
-      depth: p.depth,
-      track: p.track,
-    };
-    match page.snapshot_for_ai().options(opts).await {
-      Ok(result) => {
-        if let Some(handle) = self.state.ref_map_handle(s).await {
-          handle.store(std::sync::Arc::new(result.ref_map));
-        } else {
-          let state = self.state.read().await;
-          state.set_ref_map(s, result.ref_map);
+    self
+      .on_page(p.session.as_opt(), async |page, s| {
+        let opts = ferridriver::snapshot::SnapshotOptions {
+          depth: p.depth,
+          track: p.track,
+        };
+        match page.snapshot_for_ai().options(opts).await {
+          Ok(result) => {
+            if let Some(handle) = self.state.ref_map_handle(&s).await {
+              handle.store(std::sync::Arc::new(result.ref_map));
+            } else {
+              let state = self.state.read().await;
+              state.set_ref_map(&s, result.ref_map);
+            }
+            let mut text = result.full;
+            if let Some(inc) = result.incremental {
+              text.push_str("\n### Changes since last snapshot\n");
+              text.push_str(&inc);
+            }
+            Ok(self.ok_text(text))
+          },
+          Err(e) => Ok(self.ok_text(format!("[snapshot error: {e}]"))),
         }
-        let mut text = result.full;
-        if let Some(inc) = result.incremental {
-          text.push_str("\n### Changes since last snapshot\n");
-          text.push_str(&inc);
-        }
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
-      },
-      Err(e) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-        "[snapshot error: {e}]"
-      ))])),
-    }
+      })
+      .await
   }
 
   #[tool(
@@ -62,36 +61,38 @@ impl McpServer {
     annotations(read_only_hint = true, open_world_hint = false)
   )]
   async fn screenshot(&self, Parameters(p): Parameters<ScreenshotParams_>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_opt());
-    let _guard = self.session_guard(s).await;
-    let page = Box::pin(self.page(s)).await?;
-    let format = p.format.unwrap_or_default();
-    let mime = format.mime();
-    let bytes = if let Some(sel) = &p.selector {
-      page.screenshot_element(sel).await.map_err(Self::err)?
-    } else {
-      let opts = ScreenshotOptions {
-        format: Some(format.into()),
-        quality: p.quality,
-        full_page: p.full_page,
-        ..Default::default()
-      };
-      page.screenshot().options(opts).await.map_err(Self::err)?
-    };
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let mut out = vec![ContentBlock::image(b64, mime)];
-    // Persist the capture under artifacts_root and hand back a resource link
-    // so the caller can re-fetch it on demand (no re-capture, no re-inlining).
-    let ext = format.extension();
-    let stamp = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .map_or(0, |d| d.as_millis());
-    let safe = s.replace([':', '/', '\\'], "_");
-    let rel = format!("screenshots/{safe}-{stamp}.{ext}");
-    if let Some(link) = self.persist_artifact(&rel, &bytes, mime).await {
-      out.push(link);
-    }
-    Ok(CallToolResult::success(out))
+    self
+      .on_page(p.session.as_opt(), async |page, s| {
+        let format = p.format.unwrap_or_default();
+        let mime = format.mime();
+        let bytes = if let Some(sel) = &p.selector {
+          page.screenshot_element(sel).await.map_err(Self::err)?
+        } else {
+          let opts = ScreenshotOptions {
+            format: Some(format.into()),
+            quality: p.quality,
+            full_page: p.full_page,
+            ..Default::default()
+          };
+          page.screenshot().options(opts).await.map_err(Self::err)?
+        };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let mut out = vec![ContentBlock::image(b64, mime)];
+        // Persist the capture under artifacts_root and hand back a resource
+        // link so the caller can re-fetch it on demand (no re-capture, no
+        // re-inlining).
+        let ext = format.extension();
+        let stamp = std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .map_or(0, |d| d.as_millis());
+        let safe = s.replace([':', '/', '\\'], "_");
+        let rel = format!("screenshots/{safe}-{stamp}.{ext}");
+        if let Some(link) = self.persist_artifact(&rel, &bytes, mime).await {
+          out.push(link);
+        }
+        Ok(CallToolResult::success(out))
+      })
+      .await
   }
 
   #[tool(
@@ -105,22 +106,23 @@ impl McpServer {
     annotations(read_only_hint = false, open_world_hint = true)
   )]
   async fn evaluate(&self, Parameters(p): Parameters<EvaluateParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_opt());
-    let _guard = self.session_guard(s).await;
-    let page = Box::pin(self.page(s)).await?;
-    let result = page
-      .evaluate(
-        p.expression.as_str(),
-        ferridriver::protocol::SerializedArgument::default(),
-        None,
-      )
+    self
+      .on_page(p.session.as_opt(), async |page, _s| {
+        let result = page
+          .evaluate(
+            p.expression.as_str(),
+            ferridriver::protocol::SerializedArgument::default(),
+            None,
+          )
+          .await
+          .map_err(Self::err)?;
+        let val = result.to_json_like().map_or_else(
+          || result.as_string_lossy(),
+          |v| serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()),
+        );
+        Ok(self.ok_text(val))
+      })
       .await
-      .map_err(Self::err)?;
-    let val = result.to_json_like().map_or_else(
-      || result.as_string_lossy(),
-      |v| serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()),
-    );
-    Ok(CallToolResult::success(vec![ContentBlock::text(val)]))
   }
 
   #[tool(
@@ -132,22 +134,21 @@ impl McpServer {
     annotations(read_only_hint = true, open_world_hint = false)
   )]
   async fn search_page(&self, Parameters(p): Parameters<SearchPageParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_opt());
-    let _guard = self.session_guard(s).await;
-    let page = Box::pin(self.page(s)).await?;
-    let opts = ferridriver::actions::SearchOptions {
-      pattern: p.pattern.clone(),
-      regex: p.regex.unwrap_or(false),
-      case_sensitive: p.case_sensitive.unwrap_or(false),
-      context_chars: p.context_chars.unwrap_or(150),
-      css_scope: p.selector.clone(),
-      max_results: p.max_results.unwrap_or(25),
-    };
-    let result = ferridriver::actions::search_page(page.inner(), &opts)
+    self
+      .on_page(p.session.as_opt(), async |page, _s| {
+        let opts = ferridriver::actions::SearchOptions {
+          pattern: p.pattern.clone(),
+          regex: p.regex.unwrap_or(false),
+          case_sensitive: p.case_sensitive.unwrap_or(false),
+          context_chars: p.context_chars.unwrap_or(150),
+          css_scope: p.selector.clone(),
+          max_results: p.max_results.unwrap_or(25),
+        };
+        let result = ferridriver::actions::search_page(page.inner(), &opts)
+          .await
+          .map_err(Self::err)?;
+        Ok(self.ok_text(ferridriver::actions::format_search_results(&result, &p.pattern)))
+      })
       .await
-      .map_err(Self::err)?;
-    Ok(CallToolResult::success(vec![ContentBlock::text(
-      ferridriver::actions::format_search_results(&result, &p.pattern),
-    )]))
   }
 }

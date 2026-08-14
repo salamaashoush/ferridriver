@@ -959,7 +959,7 @@ impl McpServer {
     tool_name: &str,
     args_obj: serde_json::Value,
   ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-    use rmcp::model::{CallToolResult, ContentBlock};
+    use rmcp::model::CallToolResult;
 
     let loaded = self.extensions();
     let registry = &loaded.registry;
@@ -974,7 +974,7 @@ impl McpServer {
     // loudly rather than silently skipped.
     if let Some(compiled) = registry.validator(tool_name) {
       match compiled {
-        Err(msg) => return Ok(CallToolResult::error(vec![ContentBlock::text(msg.clone())])),
+        Err(msg) => return Ok(CallToolResult::error(vec![self.text(msg.clone())])),
         Ok(validator) => {
           // `session` is the reserved routing key (browser-session
           // selection), not part of the tool's declared contract —
@@ -990,7 +990,7 @@ impl McpServer {
             other => std::borrow::Cow::Borrowed(other),
           };
           if let Err(msg) = validate_tool_args(tool_name, validator, &validate_target) {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(msg)]));
+            return Ok(CallToolResult::error(vec![self.text(msg)]));
           }
         },
       }
@@ -1037,14 +1037,14 @@ impl McpServer {
     tool_name: &str,
     result: &ferridriver_script::ScriptResult,
   ) -> Result<rmcp::model::CallToolResult, ErrorData> {
-    use rmcp::model::{CallToolResult, ContentBlock};
+    use rmcp::model::CallToolResult;
 
     let json = serde_json::to_string_pretty(result).map_err(|e| Self::err(format!("serialize result: {e}")))?;
-    let mut contents = vec![ContentBlock::text(json)];
+    let mut contents = vec![self.text(json)];
     let success = match &result.outcome {
       ferridriver_script::Outcome::Error { error } => {
         let summary = format!("[{:?}] {} ({}ms)", error.kind, error.message, result.duration_ms);
-        contents.insert(0, ContentBlock::text(summary));
+        contents.insert(0, self.text(summary));
         return Ok(CallToolResult::error(contents));
       },
       ferridriver_script::Outcome::Ok { success } => success,
@@ -1054,10 +1054,10 @@ impl McpServer {
     let registry = &loaded.registry;
     if let Some(compiled) = registry.output_validator(tool_name) {
       match compiled {
-        Err(msg) => return Ok(CallToolResult::error(vec![ContentBlock::text(msg.clone())])),
+        Err(msg) => return Ok(CallToolResult::error(vec![self.text(msg.clone())])),
         Ok(validator) => {
           if let Some(messages) = schema_violations(validator, &success.value) {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+            return Ok(CallToolResult::error(vec![self.text(format!(
               "`{tool_name}` returned a value that does not match its declared outputSchema \
                (the extension author's bug):\n- {messages}"
             ))]));
@@ -1667,9 +1667,70 @@ impl McpServer {
   /// (soft failures produce inline error text instead).
   pub async fn action_ok(&self, page: &Page, context: &str, msg: &str) -> Result<CallToolResult, ErrorData> {
     let snap = self.snap(page, context).await;
-    Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-      "{msg}\n\n{snap}"
-    ))]))
+    Ok(self.ok_text(format!("{msg}\n\n{snap}")))
+  }
+
+  /// Resolve `session`, hold its lock for the whole call, and hand the live
+  /// page to `f`.
+  ///
+  /// Every page-driving tool needs these three steps in this order, and the
+  /// order is load-bearing: resolving the page before taking the guard races
+  /// a concurrent call on the same context, which opens a second page on a
+  /// cold one. Doing it once here is what keeps that true across every
+  /// handler instead of in each of them.
+  ///
+  /// The page future is boxed because it is large enough to trip
+  /// `clippy::large_futures` at the call site — once here rather than at
+  /// each of them.
+  ///
+  /// # Errors
+  ///
+  /// Propagates a failure to launch or attach the context's browser, and
+  /// whatever `f` returns.
+  pub(crate) async fn on_page<F, Fut, T>(&self, session: Option<&String>, f: F) -> Result<T, ErrorData>
+  where
+    F: FnOnce(Arc<Page>, String) -> Fut,
+    Fut: std::future::Future<Output = Result<T, ErrorData>>,
+  {
+    let context = sess(session).to_string();
+    let _guard = self.session_guard(&context).await;
+    let page = Box::pin(self.page(&context)).await?;
+    f(page, context).await
+  }
+
+  /// Resolve `session` and hold its lock for the whole call, without
+  /// opening a page.
+  ///
+  /// [`Self::on_page`] for the tools that drive one; this for the tools that
+  /// act on the context itself (listing, closing, reading its logs), where
+  /// resolving a page would launch a browser the call does not need.
+  ///
+  /// # Errors
+  ///
+  /// Whatever `f` returns.
+  pub(crate) async fn on_session<F, Fut, T>(&self, session: Option<&String>, f: F) -> Result<T, ErrorData>
+  where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<T, ErrorData>>,
+  {
+    let context = sess(session).to_string();
+    let _guard = self.session_guard(&context).await;
+    f(context).await
+  }
+
+  /// A text content block with declared secrets redacted.
+  ///
+  /// Tools build their replies through this rather than `ContentBlock::text`
+  /// directly: redaction that covers only some replies is not redaction, and
+  /// a page's own text (an evaluated value, a snapshot, a search hit) is a
+  /// routine place for a credential to surface.
+  pub(crate) fn text(&self, body: impl Into<String>) -> ContentBlock {
+    ContentBlock::text(self.secrets.redact(&body.into()).into_owned())
+  }
+
+  /// A success reply carrying one redacted text block.
+  pub(crate) fn ok_text(&self, body: impl Into<String>) -> CallToolResult {
+    CallToolResult::success(vec![self.text(body)])
   }
 
   /// Emit an MCP progress notification for the in-flight tool call (SEP-2575).

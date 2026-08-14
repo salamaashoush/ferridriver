@@ -20,12 +20,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rmcp::{
-  ErrorData,
-  handler::server::wrapper::Parameters,
-  model::{CallToolResult, ContentBlock},
-  tool, tool_router,
-};
+use rmcp::{ErrorData, handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
 use ferridriver_bdd::executor::ScenarioExecutor;
@@ -328,6 +323,7 @@ impl McpServer {
         .map_err(|e| McpServer::err(format!("feature discovery: {e}")))?;
       if files.is_empty() {
         return Ok(finish(
+          self,
           format!("run_bdd: no .feature files matched {globs:?}"),
           &BddRunResult::empty(),
         ));
@@ -348,6 +344,7 @@ impl McpServer {
     }
     if scenarios.is_empty() {
       return Ok(finish(
+        self,
         "run_bdd: no scenarios matched the given filters".to_string(),
         &BddRunResult::empty(),
       ));
@@ -386,7 +383,11 @@ impl McpServer {
         duration_ms: 0,
         scenarios: plan,
       };
-      return Ok(finish(format!("BDD dry-run: {total} scenario(s) parsed"), &result));
+      return Ok(finish(
+        self,
+        format!("BDD dry-run: {total} scenario(s) parsed"),
+        &result,
+      ));
     }
 
     // ── 4. Build a BrowserWorld from the session's live handles. ──
@@ -522,7 +523,7 @@ impl McpServer {
       scenarios: out,
     };
     let summary = bdd_summary(&result);
-    Ok(finish(summary, &result))
+    Ok(finish(self, summary, &result))
   }
 }
 
@@ -536,11 +537,11 @@ fn as_progress(n: usize) -> f64 {
 /// Build the tool result: human summary block, the same payload as a JSON text
 /// block for clients that only read `content`, and as `structuredContent` for
 /// those that validate it against the tool's `outputSchema`.
-fn finish(summary: String, result: &BddRunResult) -> CallToolResult {
+fn finish(server: &McpServer, summary: String, result: &BddRunResult) -> CallToolResult {
   let value =
     serde_json::to_value(result).unwrap_or_else(|e| serde_json::json!({ "error": format!("serialize: {e}") }));
   let json = serde_json::to_string_pretty(&value).unwrap_or_else(|e| format!("{{\"error\":\"serialize: {e}\"}}"));
-  let mut out = CallToolResult::success(vec![ContentBlock::text(summary), ContentBlock::text(json)]);
+  let mut out = CallToolResult::success(vec![server.text(summary), server.text(json)]);
   out.structured_content = Some(value);
   out
 }

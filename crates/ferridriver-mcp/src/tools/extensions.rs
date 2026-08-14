@@ -13,12 +13,7 @@
 //! open sessions pick the new code up on their next call while keeping
 //! their `vars`, cookies and persistent processes.
 
-use rmcp::{
-  ErrorData,
-  handler::server::wrapper::Parameters,
-  model::{CallToolResult, ContentBlock},
-  tool, tool_router,
-};
+use rmcp::{ErrorData, handler::server::wrapper::Parameters, model::CallToolResult, tool, tool_router};
 use serde::Deserialize;
 
 use crate::server::McpServer;
@@ -102,7 +97,7 @@ impl McpServer {
     }
 
     let json = self.render_extensions_report(include_schema, reloaded)?;
-    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    Ok(self.ok_text(json))
   }
 }
 
