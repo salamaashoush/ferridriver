@@ -38,6 +38,7 @@ statistics = ["system"]
 network = ["sysinfo/network", "system"]
 
 [dependencies]
+base64 = { workspace = true }
 half = { version = "2", default-features = false }
 home = { version = "0.5", default-features = false }
 memchr = "2"

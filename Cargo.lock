@@ -1651,6 +1651,7 @@ dependencies = [
 name = "ferridriver-jsstd"
 version = "0.5.0"
 dependencies = [
+ "base64 0.23.1",
  "half",
  "home",
  "libc",

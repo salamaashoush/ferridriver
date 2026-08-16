@@ -117,33 +117,7 @@ impl CryptoKeyJs {
 /// Copy the bytes of a `BufferSource` (ArrayBuffer or any view over
 /// one). Copies because the QuickJS heap may move under a later
 /// allocation; every consumer here digests immediately anyway.
-pub(crate) fn buffer_source_bytes(ctx: &Ctx<'_>, value: &Value<'_>) -> rquickjs::Result<Vec<u8>> {
-  if let Some(ab) = ArrayBuffer::from_value(value.clone()) {
-    return ab
-      .as_bytes()
-      .map(<[u8]>::to_vec)
-      .ok_or_else(|| throw_named(ctx, "TypeError", "detached ArrayBuffer"));
-  }
-  if let Some(obj) = value.as_object() {
-    let buffer: rquickjs::Result<ArrayBuffer<'_>> = obj.get("buffer");
-    if let Ok(ab) = buffer {
-      let offset: usize = obj.get("byteOffset")?;
-      let len: usize = obj.get("byteLength")?;
-      let bytes = ab
-        .as_bytes()
-        .ok_or_else(|| throw_named(ctx, "TypeError", "detached ArrayBuffer"))?;
-      return bytes
-        .get(offset..offset + len)
-        .map(<[u8]>::to_vec)
-        .ok_or_else(|| throw_named(ctx, "TypeError", "view out of bounds"));
-    }
-  }
-  Err(throw_named(
-    ctx,
-    "TypeError",
-    "expected an ArrayBuffer or ArrayBuffer view",
-  ))
-}
+pub(crate) use ferridriver_jsstd::node::bytes::buffer_source_bytes;
 
 /// Parse `'SHA-256'` or `{ name: 'SHA-256' }` (and the HMAC import
 /// shape's nested `hash`) into a [`HashAlgo`].

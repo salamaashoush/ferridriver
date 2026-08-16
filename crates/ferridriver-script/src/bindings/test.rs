@@ -1356,7 +1356,7 @@ fn parse_attach_args<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> rquickjs::Resu
     let body = args
       .get(2)
       .ok_or_else(|| rq(&ScriptError::internal("testInfo.attach: missing body".to_string())))?;
-    let bytes = crate::bindings::node_compat::value_to_bytes(ctx, body, None)?;
+    let bytes = ferridriver_jsstd::node::bytes::value_to_bytes(ctx, body, None)?;
     return Ok((name, content_type, AttachSource::Bytes(bytes)));
   }
   // Option bag: (name, { body?, contentType?, path? }).
@@ -1383,7 +1383,7 @@ fn parse_attach_args<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> rquickjs::Resu
   } else {
     "application/octet-stream"
   };
-  let bytes = crate::bindings::node_compat::value_to_bytes(ctx, &body, None)?;
+  let bytes = ferridriver_jsstd::node::bytes::value_to_bytes(ctx, &body, None)?;
   Ok((
     name,
     content_type.unwrap_or_else(|| default_ct.to_string()),

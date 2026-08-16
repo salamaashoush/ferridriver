@@ -108,15 +108,13 @@ fn lock(coder: &SharedCoder) -> std::sync::MutexGuard<'_, Option<Coder>> {
 /// `TypeError` — a string is NOT encoded implicitly, because the caller
 /// would silently get UTF-8 where they may have meant something else.
 fn buffer_source_bytes<'js>(ctx: &Ctx<'js>, chunk: &Value<'js>) -> rquickjs::Result<Vec<u8>> {
-  if let Some(obj) = chunk.as_object()
-    && let Some(bytes) = ferridriver_jsstd::utils::bytes::ObjectBytes::from_array_buffer(obj)?
-  {
-    return bytes.into_bytes(ctx);
-  }
-  Err(rquickjs::Exception::throw_type(
-    ctx,
-    "Failed to execute 'write': chunk could not be converted to a BufferSource",
-  ))
+  // The shared extractor, with this call site's spec wording on failure.
+  ferridriver_jsstd::node::bytes::buffer_source_bytes(ctx, chunk).map_err(|_| {
+    rquickjs::Exception::throw_type(
+      ctx,
+      "Failed to execute 'write': chunk could not be converted to a BufferSource",
+    )
+  })
 }
 
 /// Hand `bytes` to the transform controller, skipping an empty step (the

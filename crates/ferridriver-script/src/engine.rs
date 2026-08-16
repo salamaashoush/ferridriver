@@ -685,7 +685,7 @@ impl Session {
         .globals()
         .set(
           "Buffer",
-          crate::bindings::node_compat::buffer_constructor(&ctx)
+          ferridriver_jsstd::node::buffer::buffer_constructor(&ctx)
             .map_err(|e| ScriptError::internal(format!("failed to install Buffer: {e}")))?,
         )
         .map_err(|e| ScriptError::internal(format!("failed to install Buffer: {e}")))?;

@@ -36,19 +36,7 @@ pub fn ferri_throw(ctx: &Ctx<'_>, e: &FerriError) -> rquickjs::Error {
 /// `Error::new_from_js_message` cannot do this: it surfaces in scripts
 /// as a `TypeError` with a mangled "Error converting from js ..."
 /// message and a fixed name.
-pub fn throw_named<'js>(ctx: &Ctx<'js>, name: &str, message: impl Into<String>) -> rquickjs::Error {
-  let message = message.into();
-  let built: rquickjs::Result<Value<'js>> = (|| {
-    let ctor: rquickjs::function::Constructor<'js> = ctx.globals().get("Error")?;
-    let err: Object<'js> = ctor.construct((message.as_str(),))?;
-    err.set("name", name)?;
-    Ok(err.into_value())
-  })();
-  match built {
-    Ok(v) => ctx.throw(v),
-    Err(_) => rquickjs::Exception::throw_message(ctx, &message),
-  }
-}
+pub use ferridriver_jsstd::node::throw_named;
 
 /// Adapter: `Result<T, FerriError>` into `rquickjs::Result<T>` with a
 /// properly-named thrown `Error` (see [`ferri_throw`]). Preferred over
@@ -656,7 +644,7 @@ pub fn parse_input_files<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Re
 }
 
 /// Parse one `FilePayload`. Playwright's `buffer` is a Node `Buffer`,
-/// which here is the node-compat [`crate::bindings::node_compat::BufferJs`]
+/// which here is [`ferridriver_jsstd::node::buffer::BufferJs`]
 /// class — and it is neither a `Uint8Array` subclass nor serde-visible
 /// as a sequence, so `Buffer.from(...)` has to go through the shared
 /// byte extractor rather than serde.
@@ -667,7 +655,7 @@ fn parse_file_payload<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Resul
       return Ok(ferridriver::options::FilePayload {
         name: obj.get("name")?,
         mime_type: obj.get("mimeType")?,
-        buffer: crate::bindings::node_compat::value_to_bytes(ctx, &buffer, None)?,
+        buffer: ferridriver_jsstd::node::bytes::value_to_bytes(ctx, &buffer, None)?,
       });
     }
   }

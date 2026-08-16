@@ -577,7 +577,7 @@ const PATH_EXPORTS: &[&str] = &[
 ];
 
 fn path_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-  let obj = crate::bindings::node_compat::path_object(ctx)?;
+  let obj = ferridriver_jsstd::node::path::path_object(ctx)?;
   let ns = Object::new(ctx.clone())?;
   ns.set("default", obj.clone())?;
   for name in PATH_MEMBERS {
@@ -596,14 +596,14 @@ impl ModuleDef for PathModule {
   }
 }
 
-/// `import { Buffer } from 'node:buffer'` — the documented [`crate::bindings::node_compat::BufferJs`]
+/// `import { Buffer } from 'node:buffer'` — the documented [`ferridriver_jsstd::node::buffer::BufferJs`]
 /// subset.
 pub struct BufferModule;
 
 const BUFFER_EXPORTS: &[&str] = &["default", "Buffer"];
 
 fn buffer_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-  let ctor = crate::bindings::node_compat::buffer_constructor(ctx)?;
+  let ctor = ferridriver_jsstd::node::buffer::buffer_constructor(ctx)?;
   let default = Object::new(ctx.clone())?;
   default.set("Buffer", ctor.clone())?;
   let ns = Object::new(ctx.clone())?;

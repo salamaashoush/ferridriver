@@ -39,6 +39,9 @@ implementation of each surface:
 | `node::url` | `fileURLToPath` / `pathToFileURL` / `format` over the runtime's own `URL` |
 | `node::process` | The module form of the host's `process` global |
 | `node::timers` | The module form of the host's timers, plus `timers/promises` |
+| `node::path` | The `path` module, moved out of `ferridriver-script`'s `node_compat` |
+| `node::buffer` | The `Buffer` class, moved out of the same place |
+| `node::bytes` | The one JS-value-to-`Vec<u8>` walk: `BufferSource`, `Buffer`, byte arrays, encoded strings. `crypto`, the compression streams, `Buffer.from` and `setInputFiles` all read through it — there were three separate walks before |
 
 `src/node/` carries its own `rustfmt.toml` re-enabling formatting (the crate
 disables it for the vendored subtree) and follows the repo's house style. It

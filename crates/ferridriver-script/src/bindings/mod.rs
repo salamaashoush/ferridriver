@@ -54,7 +54,6 @@ pub mod locator;
 pub mod mouse;
 pub mod native_modules;
 pub mod network;
-pub mod node_compat;
 pub mod page;
 pub mod process;
 pub mod registry;
