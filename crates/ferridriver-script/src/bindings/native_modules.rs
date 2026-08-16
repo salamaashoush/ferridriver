@@ -22,40 +22,29 @@ use rquickjs::{Ctx, Module, Object, Value};
 /// Every specifier served natively. One list so the engine loaders, the
 /// throwaway compile runtimes, and the rolldown externals can never
 /// drift apart.
-pub const NATIVE_MODULE_NAMES: &[&str] = &[
+/// The specifiers ferridriver itself serves. Everything else native comes
+/// from [`ferridriver_jsstd::modules`], which owns the Node / web module
+/// surface — one list, so the ES loader, the `require` table and the
+/// rolldown externals cannot drift apart.
+const FERRIDRIVER_MODULE_NAMES: &[&str] = &[
   "ferridriver",
   "@ferridriver/test",
   "@cucumber/cucumber",
   "fs",
   "node:fs",
-  "path",
-  "node:path",
-  "buffer",
-  "node:buffer",
-  "os",
-  "node:os",
-  "util",
-  "node:util",
-  "events",
-  "node:events",
-  "assert",
-  "node:assert",
-  "assert/strict",
-  "node:assert/strict",
-  "url",
-  "node:url",
-  "process",
-  "node:process",
-  "timers",
-  "node:timers",
-  "timers/promises",
-  "node:timers/promises",
-  "crypto",
-  "node:crypto",
 ];
 
+/// Every specifier served natively, ferridriver's own plus jsstd's.
+pub fn native_module_names() -> Vec<&'static str> {
+  let mut names: Vec<&'static str> = FERRIDRIVER_MODULE_NAMES.to_vec();
+  for module in ferridriver_jsstd::modules::modules() {
+    names.extend_from_slice(module.specifiers);
+  }
+  names
+}
+
 /// Extra specifiers the native loader answers, each mapped onto one of
-/// [`NATIVE_MODULE_NAMES`]. Configured via `[test].moduleAliases`, this
+/// [`native_module_names`]. Configured via `[test].moduleAliases`, this
 /// is what lets an UNMODIFIED upstream suite keep its own framework
 /// import (`@playwright/test`) and still link against the native test
 /// surface.
@@ -80,15 +69,15 @@ static MODULE_ALIASES: RwLock<Option<AliasTable>> = RwLock::new(None);
 pub fn set_module_aliases(aliases: impl IntoIterator<Item = (String, String)>) -> Result<(), String> {
   let list: Vec<(String, String)> = aliases.into_iter().collect();
   for (from, to) in &list {
-    if NATIVE_MODULE_NAMES.contains(&from.as_str()) {
+    if native_module_names().contains(&from.as_str()) {
       return Err(format!(
         "module alias `{from}`: cannot alias a specifier the runtime already serves natively"
       ));
     }
-    if !NATIVE_MODULE_NAMES.contains(&to.as_str()) {
+    if !native_module_names().contains(&to.as_str()) {
       return Err(format!(
         "module alias `{from}` -> `{to}`: `{to}` is not a native module (expected one of {})",
-        NATIVE_MODULE_NAMES.join(", ")
+        native_module_names().join(", ")
       ));
     }
   }
@@ -111,7 +100,7 @@ pub fn module_aliases() -> Arc<Vec<(String, String)>> {
 /// alias target when it is aliased, otherwise `None`.
 #[must_use]
 pub fn canonical_native_name(specifier: &str) -> Option<String> {
-  if NATIVE_MODULE_NAMES.contains(&specifier) {
+  if native_module_names().contains(&specifier) {
     return Some(specifier.to_string());
   }
   module_aliases()
@@ -147,8 +136,8 @@ pub fn alias_fingerprint() -> u64 {
 #[must_use]
 pub fn resolver() -> BuiltinResolver {
   let mut r = BuiltinResolver::default();
-  for name in NATIVE_MODULE_NAMES {
-    r.add_module(*name);
+  for name in native_module_names() {
+    r.add_module(name);
   }
   for (from, _) in module_aliases().iter() {
     r.add_module(from.as_str());
@@ -175,49 +164,22 @@ impl NativeModuleLoader {
 
 #[must_use]
 pub fn loader() -> NativeModuleLoader {
-  NativeModuleLoader {
-    modules: vec![
-      ("ferridriver", NativeModuleLoader::declare_fn::<FerridriverModule>()),
-      (
-        "@ferridriver/test",
-        NativeModuleLoader::declare_fn::<FerridriverTestModule>(),
-      ),
-      ("@cucumber/cucumber", NativeModuleLoader::declare_fn::<CucumberModule>()),
-      ("fs", NativeModuleLoader::declare_fn::<FsModule>()),
-      ("node:fs", NativeModuleLoader::declare_fn::<FsModule>()),
-      ("path", NativeModuleLoader::declare_fn::<PathModule>()),
-      ("node:path", NativeModuleLoader::declare_fn::<PathModule>()),
-      ("buffer", NativeModuleLoader::declare_fn::<BufferModule>()),
-      ("node:buffer", NativeModuleLoader::declare_fn::<BufferModule>()),
-      ("os", NativeModuleLoader::declare_fn::<OsModule>()),
-      ("node:os", NativeModuleLoader::declare_fn::<OsModule>()),
-      ("util", NativeModuleLoader::declare_fn::<UtilModule>()),
-      ("node:util", NativeModuleLoader::declare_fn::<UtilModule>()),
-      ("events", NativeModuleLoader::declare_fn::<EventsModule>()),
-      ("node:events", NativeModuleLoader::declare_fn::<EventsModule>()),
-      ("assert", NativeModuleLoader::declare_fn::<AssertModule>()),
-      ("node:assert", NativeModuleLoader::declare_fn::<AssertModule>()),
-      ("assert/strict", NativeModuleLoader::declare_fn::<AssertStrictModule>()),
-      (
-        "node:assert/strict",
-        NativeModuleLoader::declare_fn::<AssertStrictModule>(),
-      ),
-      ("url", NativeModuleLoader::declare_fn::<UrlModule>()),
-      ("node:url", NativeModuleLoader::declare_fn::<UrlModule>()),
-      ("process", NativeModuleLoader::declare_fn::<ProcessModule>()),
-      ("node:process", NativeModuleLoader::declare_fn::<ProcessModule>()),
-      ("timers", NativeModuleLoader::declare_fn::<TimersModule>()),
-      ("node:timers", NativeModuleLoader::declare_fn::<TimersModule>()),
-      (
-        "timers/promises",
-        NativeModuleLoader::declare_fn::<TimersPromisesModule>(),
-      ),
-      (
-        "node:timers/promises",
-        NativeModuleLoader::declare_fn::<TimersPromisesModule>(),
-      ),
-    ],
+  let mut modules: Vec<(&'static str, DeclareFn)> = vec![
+    ("ferridriver", NativeModuleLoader::declare_fn::<FerridriverModule>()),
+    (
+      "@ferridriver/test",
+      NativeModuleLoader::declare_fn::<FerridriverTestModule>(),
+    ),
+    ("@cucumber/cucumber", NativeModuleLoader::declare_fn::<CucumberModule>()),
+    ("fs", NativeModuleLoader::declare_fn::<FsModule>()),
+    ("node:fs", NativeModuleLoader::declare_fn::<FsModule>()),
+  ];
+  for module in ferridriver_jsstd::modules::modules() {
+    for specifier in module.specifiers {
+      modules.push((specifier, module.declare));
+    }
   }
+  NativeModuleLoader { modules }
 }
 
 impl Loader for NativeModuleLoader {
@@ -274,19 +236,17 @@ pub fn namespace<'js>(ctx: &Ctx<'js>, specifier: &str) -> rquickjs::Result<Optio
     "@ferridriver/test" => test_namespace(ctx)?,
     "@cucumber/cucumber" => cucumber_namespace(ctx)?,
     "fs" | "node:fs" => fs_namespace(ctx)?,
-    "path" | "node:path" => path_namespace(ctx)?,
-    "buffer" | "node:buffer" => buffer_namespace(ctx)?,
-    "os" | "node:os" => os_namespace(ctx)?,
-    "util" | "node:util" => ferridriver_jsstd::node::util::util_object(ctx)?,
-    "events" | "node:events" => events_namespace(ctx)?,
-    "assert" | "node:assert" => ferridriver_jsstd::node::assert::assert_object(ctx, false)?,
-    "assert/strict" | "node:assert/strict" => ferridriver_jsstd::node::assert::assert_object(ctx, true)?,
-    "url" | "node:url" => ferridriver_jsstd::node::url::url_object(ctx)?,
-    "process" | "node:process" => ferridriver_jsstd::node::process::process_object(ctx)?,
-    "timers" | "node:timers" => ferridriver_jsstd::node::timers::timers_object(ctx)?,
-    "timers/promises" | "node:timers/promises" => ferridriver_jsstd::node::timers::timers_promises_object(ctx)?,
-    "crypto" | "node:crypto" => crypto_namespace(ctx)?,
-    _ => return Ok(None),
+    // Everything else native is jsstd's, and its own table says how each
+    // one builds the object `require` hands back.
+    other => {
+      let Some(module) = ferridriver_jsstd::modules::modules()
+        .into_iter()
+        .find(|module| module.specifiers.contains(&other))
+      else {
+        return Ok(None);
+      };
+      (module.namespace)(ctx)?
+    },
   };
   Ok(Some(ns))
 }
@@ -331,7 +291,7 @@ pub fn install_require<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
           &ctx,
           &format!(
             "require('{specifier}') is not available: only the runtime's native modules ({}) can be require()d",
-            NATIVE_MODULE_NAMES.join(", ")
+            native_module_names().join(", ")
           ),
         )),
       }
@@ -546,335 +506,5 @@ impl ModuleDef for FsModule {
 
   fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
     export_from(exports, &fs_namespace(ctx)?, FS_EXPORTS)
-  }
-}
-
-/// `import path from 'node:path'` — pure-computation POSIX-style subset
-/// (the sandbox is always a unix-style path space).
-pub struct PathModule;
-
-const PATH_MEMBERS: &[&str] = &[
-  "join",
-  "resolve",
-  "dirname",
-  "basename",
-  "extname",
-  "normalize",
-  "relative",
-  "isAbsolute",
-  "sep",
-  "delimiter",
-];
-const PATH_EXPORTS: &[&str] = &[
-  "default",
-  "join",
-  "resolve",
-  "dirname",
-  "basename",
-  "extname",
-  "normalize",
-  "relative",
-  "isAbsolute",
-  "sep",
-  "delimiter",
-];
-
-fn path_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-  let obj = ferridriver_jsstd::node::path::path_object(ctx)?;
-  let ns = Object::new(ctx.clone())?;
-  ns.set("default", obj.clone())?;
-  for name in PATH_MEMBERS {
-    ns.set(*name, obj.get::<_, Value<'js>>(*name)?)?;
-  }
-  Ok(ns)
-}
-
-impl ModuleDef for PathModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    declare_all(decl, PATH_EXPORTS)
-  }
-
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    export_from(exports, &path_namespace(ctx)?, PATH_EXPORTS)
-  }
-}
-
-/// `import { createHash } from 'node:crypto'` — the vendored llrt crypto
-/// module. `require('crypto')` reads the same members off the `crypto`
-/// global the runtime installs.
-pub use ferridriver_jsstd::crypto::CryptoModule;
-
-const CRYPTO_MEMBERS: &[&str] = &[
-  "createHash",
-  "createHmac",
-  "getRandomValues",
-  "randomBytes",
-  "randomFill",
-  "randomFillSync",
-  "randomInt",
-  "randomUUID",
-  "subtle",
-  "webcrypto",
-];
-
-fn crypto_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-  let global: Object<'js> = ctx.globals().get("crypto")?;
-  let ns = Object::new(ctx.clone())?;
-  for name in CRYPTO_MEMBERS {
-    if let Ok(value) = global.get::<_, Value<'js>>(*name)
-      && !value.is_undefined()
-    {
-      ns.set(*name, value)?;
-    }
-  }
-  ns.set("webcrypto", global)?;
-  Ok(ns)
-}
-
-/// `import { Buffer } from 'node:buffer'` — the vendored llrt `Buffer`,
-/// which subclasses `Uint8Array`.
-pub use ferridriver_jsstd::buffer::BufferModule;
-
-/// `require('buffer')`: the same members the ES module exports, read off
-/// the globals the runtime installed.
-fn buffer_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-  let ns = Object::new(ctx.clone())?;
-  for name in ["Buffer", "atob", "btoa"] {
-    if let Ok(value) = ctx.globals().get::<_, Value<'js>>(name)
-      && !value.is_undefined()
-    {
-      ns.set(name, value)?;
-    }
-  }
-  let constants = Object::new(ctx.clone())?;
-  constants.set("MAX_LENGTH", u32::MAX)?;
-  constants.set("MAX_STRING_LENGTH", (1_u32 << 30) - 1)?;
-  ns.set("constants", constants)?;
-  Ok(ns)
-}
-
-/// `import os from 'node:os'` — host introspection, served by the
-/// vendored `llrt_os` (see `ferridriver-jsstd`).
-pub struct OsModule;
-
-const OS_MEMBERS: &[&str] = &[
-  "arch",
-  "availableParallelism",
-  "cpus",
-  "devNull",
-  "endianness",
-  "EOL",
-  "freemem",
-  "getPriority",
-  "homedir",
-  "hostname",
-  "loadavg",
-  "machine",
-  "networkInterfaces",
-  "platform",
-  "release",
-  "setPriority",
-  "tmpdir",
-  "totalmem",
-  "type",
-  "uptime",
-  "userInfo",
-  "version",
-];
-
-fn os_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-  ferridriver_jsstd::os::os_object(ctx)
-}
-
-impl ModuleDef for OsModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    decl.declare("default")?;
-    declare_all(decl, OS_MEMBERS)
-  }
-
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    let object = os_namespace(ctx)?;
-    export_node_module(ctx, exports, &object, OS_MEMBERS)
-  }
-}
-
-/// Export a node module: `default` is the module object, and every member
-/// it actually carries is a named export. Members are read off the object
-/// rather than assumed, because some depend on globals a given host does
-/// not install.
-fn export_node_module<'js>(
-  ctx: &Ctx<'js>,
-  exports: &Exports<'js>,
-  object: &Object<'js>,
-  members: &[&str],
-) -> rquickjs::Result<()> {
-  exports.export("default", object.clone())?;
-  for name in members {
-    let value = object
-      .get::<_, Value<'js>>(*name)
-      .unwrap_or_else(|_| Value::new_undefined(ctx.clone()));
-    exports.export(*name, value)?;
-  }
-  Ok(())
-}
-
-/// `import util from 'node:util'` — formatting, the promise/callback
-/// wrappers and `util.types`.
-pub struct UtilModule;
-
-impl ModuleDef for UtilModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    decl.declare("default")?;
-    declare_all(decl, ferridriver_jsstd::node::util::UTIL_MEMBERS)
-  }
-
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    let object = ferridriver_jsstd::node::util::util_object(ctx)?;
-    export_node_module(ctx, exports, &object, ferridriver_jsstd::node::util::UTIL_MEMBERS)
-  }
-}
-
-/// `import assert from 'node:assert'`, and its always-strict twin.
-pub struct AssertModule;
-/// `import assert from 'node:assert/strict'`.
-pub struct AssertStrictModule;
-
-impl ModuleDef for AssertModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    decl.declare("default")?;
-    declare_all(decl, ferridriver_jsstd::node::assert::ASSERT_MEMBERS)
-  }
-
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    let object = ferridriver_jsstd::node::assert::assert_object(ctx, false)?;
-    export_node_module(ctx, exports, &object, ferridriver_jsstd::node::assert::ASSERT_MEMBERS)
-  }
-}
-
-impl ModuleDef for AssertStrictModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    decl.declare("default")?;
-    declare_all(decl, ferridriver_jsstd::node::assert::ASSERT_MEMBERS)
-  }
-
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    let object = ferridriver_jsstd::node::assert::assert_object(ctx, true)?;
-    export_node_module(ctx, exports, &object, ferridriver_jsstd::node::assert::ASSERT_MEMBERS)
-  }
-}
-
-/// `import { fileURLToPath } from 'node:url'`.
-pub struct UrlModule;
-
-impl ModuleDef for UrlModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    decl.declare("default")?;
-    declare_all(decl, ferridriver_jsstd::node::url::URL_MEMBERS)
-  }
-
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    let object = ferridriver_jsstd::node::url::url_object(ctx)?;
-    export_node_module(ctx, exports, &object, ferridriver_jsstd::node::url::URL_MEMBERS)
-  }
-}
-
-/// `import process from 'node:process'` — the module form of the global.
-pub struct ProcessModule;
-
-impl ModuleDef for ProcessModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    decl.declare("default")?;
-    declare_all(decl, ferridriver_jsstd::node::process::PROCESS_MEMBERS)
-  }
-
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    let object = ferridriver_jsstd::node::process::process_object(ctx)?;
-    export_node_module(ctx, exports, &object, ferridriver_jsstd::node::process::PROCESS_MEMBERS)
-  }
-}
-
-/// `import { setTimeout } from 'node:timers'`, and the promise twin.
-pub struct TimersModule;
-/// `import { setTimeout } from 'node:timers/promises'`.
-pub struct TimersPromisesModule;
-
-impl ModuleDef for TimersModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    decl.declare("default")?;
-    declare_all(decl, ferridriver_jsstd::node::timers::TIMERS_MEMBERS)
-  }
-
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    let object = ferridriver_jsstd::node::timers::timers_object(ctx)?;
-    export_node_module(ctx, exports, &object, ferridriver_jsstd::node::timers::TIMERS_MEMBERS)
-  }
-}
-
-impl ModuleDef for TimersPromisesModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    decl.declare("default")?;
-    declare_all(decl, ferridriver_jsstd::node::timers::TIMERS_PROMISES_MEMBERS)
-  }
-
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    let object = ferridriver_jsstd::node::timers::timers_promises_object(ctx)?;
-    export_node_module(
-      ctx,
-      exports,
-      &object,
-      ferridriver_jsstd::node::timers::TIMERS_PROMISES_MEMBERS,
-    )
-  }
-}
-
-/// `import { EventEmitter } from 'node:events'` — the vendored llrt
-/// emitter, which the `EventTarget` globals already share.
-pub struct EventsModule;
-
-/// Key under which the per-context `EventEmitter` constructor is
-/// remembered. A symbol on `globalThis`, so it stays out of
-/// `Object.keys` and cannot collide with a suite's own globals.
-const EVENT_EMITTER_KEY: &str = "ferridriver.node.events.EventEmitter";
-
-fn events_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-  use ferridriver_jsstd::events::{Emitter as _, EventEmitter};
-
-  let symbol: Object<'js> = ctx.globals().get("Symbol")?;
-  let symbol_for: rquickjs::Function<'js> = symbol.get("for")?;
-  let key: Value<'js> = symbol_for.call((EVENT_EMITTER_KEY,))?;
-
-  // One constructor per context, whichever path asks first: a second
-  // `create_constructor` hands back a different function object, and
-  // `require('events') === (await import('events')).EventEmitter` — plus
-  // every `instanceof` across the two — would be false.
-  if let Ok(existing) = ctx.globals().get::<_, Object<'js>>(key.clone()) {
-    return Ok(existing);
-  }
-
-  let ctor = rquickjs::Class::<EventEmitter<'js>>::create_constructor(ctx)?
-    .ok_or_else(|| rquickjs::Error::new_loading("events"))?;
-  EventEmitter::add_event_emitter_prototype(ctx)?;
-  let ctor = ctor
-    .as_object()
-    .cloned()
-    .ok_or_else(|| rquickjs::Error::new_loading("events"))?;
-
-  // Node's `module.exports` for this module IS the class, with the named
-  // export hanging off it — so `require('events')` can be extended.
-  ctor.set("EventEmitter", ctor.clone())?;
-  ctx.globals().set(key, ctor.clone())?;
-  Ok(ctor)
-}
-
-impl ModuleDef for EventsModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    decl.declare("default")?;
-    decl.declare("EventEmitter")?;
-    Ok(())
-  }
-
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    let object = events_namespace(ctx)?;
-    export_node_module(ctx, exports, &object, &["EventEmitter"])
   }
 }

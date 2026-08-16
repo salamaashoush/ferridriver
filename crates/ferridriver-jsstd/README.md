@@ -26,6 +26,21 @@ deliberately not vendored: ferridriver has its own, over `reqwest`. `os` is
 vendored because ferridriver has nothing equivalent and the module is pure
 host introspection with no overlap with the automation stack.
 
+## What a host installs
+
+Two entry points, and nothing else to remember:
+
+- `jsstd::init(ctx)` — every global this crate provides: `DOMException`,
+  `Event` / `EventTarget`, `AbortController` / `AbortSignal`, the Streams
+  surface, `Buffer` / `Blob` / `File`.
+- `jsstd::modules::modules()` — every Node / web MODULE it serves, each
+  entry carrying its specifiers, the `ModuleDef` the ES loader declares,
+  and the object `require()` returns: `path`, `buffer`, `os`, `util`,
+  `events`, `assert` (+ `/strict`), `url`, `process`, `timers` (+
+  `/promises`), `crypto`. The host merges that list into its own loader,
+  its `require` table and its bundler's external list, so the three
+  cannot drift apart.
+
 ## `src/node/` — ferridriver-authored
 
 Not everything Node exposes has a usable upstream in llrt. `llrt_util` is

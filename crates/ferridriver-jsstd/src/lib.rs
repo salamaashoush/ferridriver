@@ -32,6 +32,7 @@ pub mod encoding;
 pub mod events;
 pub mod exceptions;
 pub mod json;
+pub mod modules;
 /// Node modules ferridriver implements itself, because upstream llrt has
 /// none or only a stub. Written to the repo's style, but compiled under
 /// this crate's relaxed lints: pedantic's `needless_pass_by_value` is
