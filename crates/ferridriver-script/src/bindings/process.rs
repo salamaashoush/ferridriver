@@ -32,8 +32,11 @@ pub fn install(ctx: &Ctx<'_>, caps: &ScriptCaps, cwd: &str) -> rquickjs::Result<
   p.set("env", env)?;
 
   // -- inert platform identity --------------------------------------
-  p.set("platform", std::env::consts::OS)?; // "linux" | "macos" | ...
-  p.set("arch", std::env::consts::ARCH)?; // "x86_64" | "aarch64" | ...
+  // Node's spelling, not Rust's: a suite branching on `process.platform
+  // === 'darwin'` (or comparing it to `os.platform()`) must see one
+  // answer, so both read the same constants.
+  p.set("platform", ferridriver_jsstd::utils::sysinfo::PLATFORM)?;
+  p.set("arch", ferridriver_jsstd::utils::sysinfo::ARCH)?;
   let fv = env!("CARGO_PKG_VERSION");
   p.set("version", format!("ferridriver-{fv}"))?;
   let versions = Object::new(ctx.clone())?;

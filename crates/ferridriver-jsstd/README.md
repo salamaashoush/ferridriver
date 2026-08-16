@@ -35,6 +35,10 @@ implementation of each surface:
 | `node::inspect` | The `util.inspect` / `util.format` renderer, moved out of `ferridriver-script`'s `console` so `console.log`, `util.format` and `util.inspect` cannot drift apart |
 | `node::deep_equal` | Structural equality for `util.isDeepStrictEqual` (and `assert.deepStrictEqual` when it lands) |
 | `node::util` | The `util` module |
+| `node::assert` | The `assert` module (upstream `llrt_assert` is a single `ok`) |
+| `node::url` | `fileURLToPath` / `pathToFileURL` / `format` over the runtime's own `URL` |
+| `node::process` | The module form of the host's `process` global |
+| `node::timers` | The module form of the host's timers, plus `timers/promises` |
 
 `src/node/` carries its own `rustfmt.toml` re-enabling formatting (the crate
 disables it for the vendored subtree) and follows the repo's house style. It

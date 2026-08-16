@@ -46,6 +46,10 @@ source files (.js / .ts / .mjs / .tsx / ...)
   | `os`     | `platform` / `arch` / `type` / `release` / `version` / `machine` / `endianness` / `EOL` / `devNull` / `homedir` / `tmpdir` / `hostname` / `availableParallelism` / `cpus` / `totalmem` / `freemem` / `uptime` / `loadavg` / `userInfo` / `getPriority` / `setPriority` / `networkInterfaces`. No `os.constants` |
   | `util`   | `format` / `formatWithOptions` / `inspect` (the same renderer `console` uses) / `promisify` / `callbackify` / `deprecate` / `inherits` / `types.*` / `isDeepStrictEqual`, plus the `TextEncoder` / `TextDecoder` globals |
   | `events` | `EventEmitter` — the same class `require('events')` returns, so a subclass built either way passes `instanceof` |
+  | `assert` | The callable `assert`, `ok` / `equal` / `strictEqual` / `deepEqual` / `deepStrictEqual` (and the `not…` twins) / `match` / `doesNotMatch` / `throws` / `doesNotThrow` / `rejects` / `doesNotReject` / `fail` / `ifError`, plus `assert.strict` and `assert/strict`. Failures throw an `AssertionError` carrying `actual` / `expected` / `operator` / `code` |
+  | `url`    | The `URL` / `URLSearchParams` globals, plus `fileURLToPath` / `pathToFileURL` / `format`. No legacy `url.parse` |
+  | `process` | The `process` global itself — `import process from 'node:process'` and `globalThis.process` are one object |
+  | `timers` | The runtime's `setTimeout` / `setInterval` / `setImmediate` and their `clear…` twins; `timers/promises` adds the promise-returning `setTimeout` / `setImmediate` |
 
   Anything else Node ships (`child_process`, `net`, `http`, `worker_threads`, …)
   is absent by design.

@@ -29,6 +29,39 @@ pub fn deep_equal<'js>(a: &Value<'js>, b: &Value<'js>, mode: Mode) -> rquickjs::
   equal_at(a, b, mode, 0)
 }
 
+/// `===`: `Object.is` on primitives (so `NaN` matches itself and `0` does
+/// not match `-0`), identity on everything else.
+#[must_use]
+pub fn strict_equal<'js>(a: &Value<'js>, b: &Value<'js>) -> bool {
+  if a.type_of() != b.type_of() {
+    return false;
+  }
+  match a.type_of() {
+    Type::Int | Type::Float => number_eq(a, b, Mode::Strict),
+    Type::String => a
+      .as_string()
+      .and_then(|s| s.to_string().ok())
+      .eq(&b.as_string().and_then(|s| s.to_string().ok())),
+    Type::Bool => a.as_bool() == b.as_bool(),
+    Type::Undefined | Type::Null | Type::Uninitialized => true,
+    _ => a == b,
+  }
+}
+
+/// `==`: strict equality, plus the primitive coercions.
+#[must_use]
+pub fn loose_equal<'js>(a: &Value<'js>, b: &Value<'js>) -> bool {
+  if a.type_of() == b.type_of() {
+    // `==` and `===` differ only across types, except that `NaN` is equal
+    // to nothing under either.
+    return match a.type_of() {
+      Type::Int | Type::Float => number_eq(a, b, Mode::Loose),
+      _ => strict_equal(a, b),
+    };
+  }
+  loose_primitive_eq(a, b)
+}
+
 fn equal_at<'js>(a: &Value<'js>, b: &Value<'js>, mode: Mode, depth: usize) -> rquickjs::Result<bool> {
   if depth > MAX_DEPTH {
     return Ok(false);
@@ -73,15 +106,35 @@ fn number_eq(a: &Value<'_>, b: &Value<'_>, mode: Mode) -> bool {
   }
 }
 
-/// The only cross-type comparison `assert.deepEqual` performs: a primitive
-/// against a primitive through `==`.
+/// `==` across types: the numeric coercion JS performs for
+/// number/string/boolean pairs, plus `null == undefined`. Objects are NOT
+/// coerced through `valueOf` / `toString` — Node's `assert.equal` on an
+/// object against a primitive is a comparison nobody writes on purpose.
 fn loose_primitive_eq(a: &Value<'_>, b: &Value<'_>) -> bool {
-  match (a.as_number(), b.as_number()) {
+  let nullish = |v: &Value<'_>| v.is_null() || v.is_undefined();
+  if nullish(a) || nullish(b) {
+    return nullish(a) && nullish(b);
+  }
+  match (coerce_number(a), coerce_number(b)) {
     (Some(x), Some(y)) => x == y,
-    _ => match (a.as_string(), b.as_string()) {
-      (Some(x), Some(y)) => x.to_string().ok() == y.to_string().ok(),
-      _ => a.is_null() && b.is_undefined() || a.is_undefined() && b.is_null(),
+    _ => false,
+  }
+}
+
+/// `ToNumber` for the primitive types `==` coerces.
+fn coerce_number(value: &Value<'_>) -> Option<f64> {
+  match value.type_of() {
+    Type::Int | Type::Float => value.as_number(),
+    Type::Bool => value.as_bool().map(|b| if b { 1.0 } else { 0.0 }),
+    Type::String => {
+      let text = value.as_string()?.to_string().ok()?;
+      let trimmed = text.trim();
+      if trimmed.is_empty() {
+        return Some(0.0);
+      }
+      trimmed.parse::<f64>().ok()
     },
+    _ => None,
   }
 }
 
