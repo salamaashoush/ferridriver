@@ -395,7 +395,8 @@ impl Page {
       Some(format!("page@{}", self.backend_page_id())),
       params,
     );
-    self.snapshot_before(span).await
+    let span = self.snapshot_before(span).await;
+    crate::trace::open_action(span).await
   }
 
   /// Finish a traced expect span: capture the after snapshot and record
@@ -472,6 +473,53 @@ impl Page {
       None
     };
     span.mark_input(input_snapshot, point);
+  }
+
+  /// Run `op` as a traced page action: open the span (with its before
+  /// snapshot), await the call, finish with the after snapshot. The
+  /// viewer shows it as `page.<method>`, and the debugger's gate stops
+  /// on it like any other action.
+  ///
+  /// Costs nothing when nobody is recording, observing or gating —
+  /// [`crate::trace::begin_action`] returns `None` and the future is
+  /// awaited as-is.
+  pub(crate) fn traced<'a, T: 'a>(
+    &'a self,
+    method: &'a str,
+    params: serde_json::Value,
+    op: impl std::future::Future<Output = Result<T>> + 'a,
+  ) -> impl std::future::Future<Output = Result<T>> + 'a {
+    self.traced_as("Page", method, params, op)
+  }
+
+  /// [`Self::traced`] for the smaller surfaces hanging off a page
+  /// (`Keyboard`, `Mouse`, `Touchscreen`): same span, own title.
+  /// Boxed rather than `async fn`: every wrapped call would otherwise
+  /// carry the span machinery inside its own state machine, and the
+  /// futures of the whole page API would grow by kilobytes each.
+  pub(crate) fn traced_as<'a, T: 'a>(
+    &'a self,
+    class: &'static str,
+    method: &'a str,
+    params: serde_json::Value,
+    op: impl std::future::Future<Output = Result<T>> + 'a,
+  ) -> impl std::future::Future<Output = Result<T>> + 'a {
+    Box::pin(async move {
+      let composite = self.context_ref.as_ref().map(super::context::ContextRef::composite);
+      let span = crate::trace::begin_action(
+        composite.as_deref(),
+        class,
+        method,
+        Some(format!("page@{}", self.backend_page_id())),
+        params,
+      );
+      let span = crate::trace::open_action(self.snapshot_before(span).await).await;
+      let result = crate::trace::within_action(op).await;
+      if let Some(span) = span {
+        self.snapshot_after_and_finish(span, result.as_ref().err()).await;
+      }
+      result
+    })
   }
 
   /// Capture the "after" DOM snapshot, stamp it, and finish the span.
@@ -600,6 +648,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
+  #[track_caller]
   pub fn goto(
     self: &Arc<Self>,
     url: &str,
@@ -623,7 +672,7 @@ impl Page {
     let resolved = self.resolve_with_base_url(url).await;
     tracing::debug!(target: "ferridriver::action", action = "goto", url = %resolved, "page.goto");
     let trace_span = self.trace_span("goto", serde_json::json!({ "url": resolved }));
-    let trace_span = self.snapshot_before(trace_span).await;
+    let trace_span = crate::trace::open_action(self.snapshot_before(trace_span).await).await;
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let referer = opts.as_ref().and_then(|o| o.referer.as_deref());
     let pre_nav = self.observed_lens();
@@ -712,6 +761,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
+  #[track_caller]
   pub fn go_back(&self) -> crate::action::Action<'_, GotoOptions, Option<crate::network::Response>> {
     let page = self;
     crate::action::Action::new(move |opts| Box::pin(async move { page.go_back_impl(Some(opts)).await }))
@@ -721,7 +771,7 @@ impl Page {
   pub(crate) async fn go_back_impl(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let trace_span = self.trace_span("goBack", serde_json::json!({}));
-    let trace_span = self.snapshot_before(trace_span).await;
+    let trace_span = crate::trace::open_action(self.snapshot_before(trace_span).await).await;
     let result = self.inner.go_back(lifecycle, timeout).await;
     if let Some(span) = trace_span {
       self.snapshot_after_and_finish(span, result.as_ref().err()).await;
@@ -735,6 +785,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
+  #[track_caller]
   pub fn go_forward(&self) -> crate::action::Action<'_, GotoOptions, Option<crate::network::Response>> {
     let page = self;
     crate::action::Action::new(move |opts| Box::pin(async move { page.go_forward_impl(Some(opts)).await }))
@@ -744,7 +795,7 @@ impl Page {
   pub(crate) async fn go_forward_impl(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let trace_span = self.trace_span("goForward", serde_json::json!({}));
-    let trace_span = self.snapshot_before(trace_span).await;
+    let trace_span = crate::trace::open_action(self.snapshot_before(trace_span).await).await;
     let result = self.inner.go_forward(lifecycle, timeout).await;
     if let Some(span) = trace_span {
       self.snapshot_after_and_finish(span, result.as_ref().err()).await;
@@ -758,6 +809,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the reload fails or the wait condition times out.
+  #[track_caller]
   pub fn reload(&self) -> crate::action::Action<'_, GotoOptions, Option<crate::network::Response>> {
     let page = self;
     crate::action::Action::new(move |opts| Box::pin(async move { page.reload_impl(Some(opts)).await }))
@@ -767,7 +819,7 @@ impl Page {
   pub(crate) async fn reload_impl(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let trace_span = self.trace_span("reload", serde_json::json!({}));
-    let trace_span = self.snapshot_before(trace_span).await;
+    let trace_span = crate::trace::open_action(self.snapshot_before(trace_span).await).await;
     let pre_nav = self.observed_lens();
     let result = self.inner.reload(lifecycle, timeout).await;
     if let Some(span) = trace_span {
@@ -829,7 +881,11 @@ impl Page {
   ///
   /// Returns an error if the title cannot be retrieved from the backend.
   pub async fn title(&self) -> Result<String> {
-    self.inner.title().await.map(std::option::Option::unwrap_or_default)
+    self
+      .traced("title", serde_json::json!({}), async {
+        self.inner.title().await.map(std::option::Option::unwrap_or_default)
+      })
+      .await
   }
 
   // ── Locators (delegate to mainFrame — Playwright parity) ───────────
@@ -982,14 +1038,18 @@ impl Page {
     self: &Arc<Self>,
     selector: &str,
   ) -> Result<Option<crate::element_handle::ElementHandle>> {
-    match self.inner.find_element(selector).await {
-      Ok(element) => {
-        let handle = crate::element_handle::ElementHandle::from_any_element(Arc::clone(self), element).await?;
-        Ok(Some(handle))
-      },
-      Err(err) if is_element_not_found(&err) => Ok(None),
-      Err(err) => Err(err),
-    }
+    self
+      .traced("$", serde_json::json!({ "selector": selector }), async {
+        match self.inner.find_element(selector).await {
+          Ok(element) => {
+            let handle = crate::element_handle::ElementHandle::from_any_element(Arc::clone(self), element).await?;
+            Ok(Some(handle))
+          },
+          Err(err) if is_element_not_found(&err) => Ok(None),
+          Err(err) => Err(err),
+        }
+      })
+      .await
   }
 
   /// Playwright: `page.querySelectorAll(selector): Promise<ElementHandle[]>`.
@@ -1044,8 +1104,13 @@ impl Page {
     is_function: Option<bool>,
   ) -> Result<crate::protocol::SerializedValue> {
     self
-      .main_frame()
-      .eval_on_selector(selector, fn_source, arg, is_function)
+      .traced(
+        "$eval",
+        serde_json::json!({ "selector": selector, "expression": fn_source }),
+        self
+          .main_frame()
+          .eval_on_selector(selector, fn_source, arg, is_function),
+      )
       .await
   }
 
@@ -1064,8 +1129,13 @@ impl Page {
     is_function: Option<bool>,
   ) -> Result<crate::protocol::SerializedValue> {
     self
-      .main_frame()
-      .eval_on_selector_all(selector, fn_source, arg, is_function)
+      .traced(
+        "$$eval",
+        serde_json::json!({ "selector": selector, "expression": fn_source }),
+        self
+          .main_frame()
+          .eval_on_selector_all(selector, fn_source, arg, is_function),
+      )
       .await
   }
 
@@ -1085,7 +1155,13 @@ impl Page {
     arg: crate::protocol::SerializedArgument,
     is_function: Option<bool>,
   ) -> Result<crate::protocol::SerializedValue> {
-    self.main_frame().evaluate(fn_source, arg, is_function).await
+    self
+      .traced(
+        "evaluate",
+        serde_json::json!({ "expression": fn_source }),
+        self.main_frame().evaluate(fn_source, arg.clone(), is_function),
+      )
+      .await
   }
 
   /// Typed evaluate: run `fn_source` in the page and deserialize the
@@ -1132,7 +1208,13 @@ impl Page {
     arg: crate::protocol::SerializedArgument,
     is_function: Option<bool>,
   ) -> Result<crate::js_handle::JSHandle> {
-    self.main_frame().evaluate_handle(fn_source, arg, is_function).await
+    self
+      .traced(
+        "evaluateHandle",
+        serde_json::json!({ "expression": fn_source }),
+        self.main_frame().evaluate_handle(fn_source, arg.clone(), is_function),
+      )
+      .await
   }
 
   // ── Action methods (delegate to mainFrame — Playwright parity) ─────
@@ -1149,6 +1231,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the click fails.
+  #[track_caller]
   pub fn click(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, crate::options::ClickOptions, ()> {
     let page = Arc::clone(self);
     let selector = selector.to_string();
@@ -1170,6 +1253,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the double-click fails.
+  #[track_caller]
   pub fn dblclick(
     self: &Arc<Self>,
     selector: &str,
@@ -1194,6 +1278,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not fillable.
+  #[track_caller]
   pub fn fill(
     self: &Arc<Self>,
     selector: &str,
@@ -1221,6 +1306,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or typing fails.
+  #[track_caller]
   pub fn r#type(
     self: &Arc<Self>,
     selector: &str,
@@ -1247,6 +1333,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the key press fails.
+  #[track_caller]
   pub fn press(
     self: &Arc<Self>,
     selector: &str,
@@ -1273,6 +1360,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the hover fails.
+  #[track_caller]
   pub fn hover(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, crate::options::HoverOptions, ()> {
     let page = Arc::clone(self);
     let selector = selector.to_string();
@@ -1293,6 +1381,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the option cannot be selected.
+  #[track_caller]
   pub fn select_option(
     self: &Arc<Self>,
     selector: &str,
@@ -1321,6 +1410,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or file setting fails.
+  #[track_caller]
   pub fn set_input_files(
     self: &Arc<Self>,
     selector: &str,
@@ -1349,6 +1439,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not checkable.
+  #[track_caller]
   pub fn check(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
     let page = Arc::clone(self);
     let selector = selector.to_string();
@@ -1369,6 +1460,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not uncheckable.
+  #[track_caller]
   pub fn uncheck(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
     let page = Arc::clone(self);
     let selector = selector.to_string();
@@ -1391,6 +1483,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not checkable.
+  #[track_caller]
   pub fn set_checked(
     self: &Arc<Self>,
     selector: &str,
@@ -1422,6 +1515,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the tap fails.
+  #[track_caller]
   pub fn tap(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, crate::options::TapOptions, ()> {
     let page = Arc::clone(self);
     let selector = selector.to_string();
@@ -1445,7 +1539,9 @@ impl Page {
   ///
   /// Returns an error if the content cannot be retrieved.
   pub async fn content(&self) -> Result<String> {
-    self.inner.content().await
+    self
+      .traced("content", serde_json::json!({}), self.inner.content())
+      .await
   }
 
   /// Set the page's HTML content.
@@ -1454,6 +1550,16 @@ impl Page {
   ///
   /// Returns an error if the content cannot be set.
   pub async fn set_content(self: &Arc<Self>, html: &str) -> Result<()> {
+    self
+      .traced("setContent", serde_json::json!({ "html": html }), async {
+        self.set_content_impl(html).await
+      })
+      .await
+  }
+
+  /// Implementation of [`Self::set_content`], untraced: the load wait it
+  /// performs is part of `setContent`, not an action of its own.
+  async fn set_content_impl(self: &Arc<Self>, html: &str) -> Result<()> {
     self.inner.set_content(html).await?;
     // Playwright `page.setContent` defaults to `waitUntil: 'load'`.
     // Wait for the injected document to finish loading so its
@@ -1579,6 +1685,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wait times out.
+  #[track_caller]
   pub fn wait_for_selector(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, WaitOptions, ()> {
     let page = Arc::clone(self);
     let selector = selector.to_string();
@@ -1601,12 +1708,23 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wait times out.
+  #[track_caller]
   pub fn wait_for_url(
     self: &Arc<Self>,
     matcher: crate::url_matcher::UrlMatcher,
   ) -> crate::action::Action<'static, crate::options::WaitForUrlOptions, ()> {
     let page = Arc::clone(self);
-    crate::action::Action::new(move |opts| Box::pin(async move { page.wait_for_url_impl(&matcher, opts).await }))
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        page
+          .traced(
+            "waitForURL",
+            serde_json::json!({ "url": matcher.describe() }),
+            page.wait_for_url_impl(&matcher, opts),
+          )
+          .await
+      })
+    })
   }
 
   /// Implementation of [`Self::wait_for_url`]. The URL is tracked
@@ -1667,7 +1785,12 @@ impl Page {
   }
 
   pub async fn wait_for_timeout(&self, ms: u64) {
-    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    let _ = self
+      .traced("waitForTimeout", serde_json::json!({ "timeout": ms }), async {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        Ok(())
+      })
+      .await;
   }
 
   /// Wait for a specific load state. Supported states:
@@ -1680,6 +1803,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wait times out before the load state is reached.
+  #[track_caller]
   pub fn wait_for_load_state(
     self: &Arc<Self>,
     state: Option<&str>,
@@ -1687,7 +1811,15 @@ impl Page {
     let page = Arc::clone(self);
     let state = state.map(str::to_string);
     crate::action::Action::new(move |opts| {
-      Box::pin(async move { page.wait_for_load_state_impl(state.as_deref(), opts).await })
+      Box::pin(async move {
+        page
+          .traced(
+            "waitForLoadState",
+            serde_json::json!({ "state": state.clone().unwrap_or_else(|| "load".to_string()) }),
+            page.wait_for_load_state_impl(state.as_deref(), opts),
+          )
+          .await
+      })
     })
   }
 
@@ -1794,9 +1926,16 @@ impl Page {
   /// Returns [`crate::error::FerriError::Timeout`] if the capture
   /// exceeds `opts.timeout` milliseconds; otherwise propagates any
   /// backend-specific failure.
+  #[track_caller]
   pub fn screenshot(&self) -> crate::action::Action<'_, ScreenshotOptions, Vec<u8>> {
     let page = self;
-    crate::action::Action::new(move |opts| Box::pin(async move { page.screenshot_impl(opts).await }))
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        page
+          .traced("screenshot", serde_json::json!({}), page.screenshot_impl(opts))
+          .await
+      })
+    })
   }
 
   /// Implementation of [`Self::screenshot`].
@@ -1880,9 +2019,12 @@ impl Page {
   /// Returns an error if PDF generation is not supported by the active
   /// backend (`WebKit` has no printToPDF analogue), if the paper format is
   /// unknown, if CDP rejects the parameters, or if writing to `path` fails.
+  #[track_caller]
   pub fn pdf(&self) -> crate::action::Action<'_, crate::options::PdfOptions, Vec<u8>> {
     let page = self;
-    crate::action::Action::new(move |opts| Box::pin(async move { page.pdf_impl(opts).await }))
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move { page.traced("pdf", serde_json::json!({}), page.pdf_impl(opts)).await })
+    })
   }
 
   /// Implementation of [`Self::pdf`].
@@ -1918,9 +2060,16 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the accessibility snapshot cannot be built.
+  #[track_caller]
   pub fn snapshot_for_ai(&self) -> crate::action::Action<'_, snapshot::SnapshotOptions, snapshot::SnapshotForAI> {
     let page = self;
-    crate::action::Action::new(move |opts| Box::pin(async move { page.snapshot_for_ai_impl(opts).await }))
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        page
+          .traced("snapshotForAI", serde_json::json!({}), page.snapshot_for_ai_impl(opts))
+          .await
+      })
+    })
   }
 
   /// Implementation of [`Self::snapshot_for_ai`].
@@ -1936,9 +2085,16 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the accessibility snapshot cannot be built.
+  #[track_caller]
   pub fn aria_snapshot(&self) -> crate::action::Action<'_, snapshot::SnapshotOptions, String> {
     let page = self;
-    crate::action::Action::new(move |opts| Box::pin(async move { page.aria_snapshot_impl(opts).await }))
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        page
+          .traced("ariaSnapshot", serde_json::json!({}), page.aria_snapshot_impl(opts))
+          .await
+      })
+    })
   }
 
   /// Implementation of [`Self::aria_snapshot`].
@@ -1955,15 +2111,23 @@ impl Page {
   /// Returns an error if the viewport emulation fails.
   pub async fn set_viewport_size(&self, width: i64, height: i64) -> Result<()> {
     self
-      .inner
-      .emulate_viewport(&crate::options::ViewportConfig {
-        width,
-        height,
-        ..Default::default()
-      })
-      .await?;
-    *self.viewport.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((width, height));
-    Ok(())
+      .traced(
+        "setViewportSize",
+        serde_json::json!({ "viewportSize": { "width": width, "height": height } }),
+        async {
+          self
+            .inner
+            .emulate_viewport(&crate::options::ViewportConfig {
+              width,
+              height,
+              ..Default::default()
+            })
+            .await?;
+          *self.viewport.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((width, height));
+          Ok(())
+        },
+      )
+      .await
   }
 
   // ── Input devices ───────────────────────────────────────────────────────
@@ -2039,6 +2203,7 @@ impl Page {
   ///
   /// Returns an error if either element cannot be found or the
   /// drag-and-drop operation fails.
+  #[track_caller]
   pub fn drag_and_drop(
     self: &Arc<Self>,
     source_selector: &str,
@@ -2192,9 +2357,16 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the backend rejects the media emulation.
+  #[track_caller]
   pub fn emulate_media(&self) -> crate::action::Action<'_, crate::options::EmulateMediaOptions, ()> {
     let page = self;
-    crate::action::Action::new(move |opts| Box::pin(async move { page.emulate_media_impl(&opts).await }))
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        page
+          .traced("emulateMedia", serde_json::json!({}), page.emulate_media_impl(&opts))
+          .await
+      })
+    })
   }
 
   /// Implementation of [`Self::emulate_media`].
@@ -2237,7 +2409,13 @@ impl Page {
   ///
   /// Returns an error if the headers cannot be set.
   pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<()> {
-    self.inner.set_extra_http_headers(headers).await
+    self
+      .traced(
+        "setExtraHTTPHeaders",
+        serde_json::json!({ "headers": headers.keys().collect::<Vec<_>>() }),
+        self.inner.set_extra_http_headers(headers),
+      )
+      .await
   }
 
   /// Set (or clear) the HTTP credentials answered to auth challenges.
@@ -2435,6 +2613,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the event dispatch fails.
+  #[track_caller]
   pub fn dispatch_event(
     self: &Arc<Self>,
     selector: &str,
@@ -2564,8 +2743,12 @@ impl Page {
   ///
   /// Returns an error if the page cannot be focused.
   pub async fn bring_to_front(&self) -> Result<()> {
-    let _ = self.inner.evaluate("window.focus()").await;
-    Ok(())
+    self
+      .traced("bringToFront", serde_json::json!({}), async {
+        let _ = self.inner.evaluate("window.focus()").await;
+        Ok(())
+      })
+      .await
   }
 
   // ── Frames (sync, Playwright parity — task 3.8) ──────────────────────
@@ -3230,6 +3413,7 @@ impl Page {
   /// Returns an error if the HAR file cannot be read/parsed, the route
   /// cannot be installed, or (`update: true`) the page is not bound to
   /// a context whose close can flush the recording.
+  #[track_caller]
   pub fn route_from_har(
     &self,
     path: &std::path::Path,
@@ -3827,6 +4011,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the page cannot be closed.
+  #[track_caller]
   pub fn close(&self) -> crate::action::Action<'_, crate::options::PageCloseOptions, ()> {
     let page = self;
     crate::action::Action::new(move |opts| Box::pin(async move { page.close_impl(Some(opts)).await }))
@@ -3973,7 +4158,15 @@ impl<'a> Keyboard<'a> {
   ///
   /// Returns an error if the key down dispatch fails.
   pub async fn down(&self, key: &str) -> Result<()> {
-    self.page.key_down(key).await
+    self
+      .page
+      .traced_as(
+        "Keyboard",
+        "down",
+        serde_json::json!({ "key": key }),
+        self.page.key_down(key),
+      )
+      .await
   }
 
   /// Dispatch a keyUp event for a previously held key.
@@ -3982,7 +4175,15 @@ impl<'a> Keyboard<'a> {
   ///
   /// Returns an error if the key up dispatch fails.
   pub async fn up(&self, key: &str) -> Result<()> {
-    self.page.key_up(key).await
+    self
+      .page
+      .traced_as(
+        "Keyboard",
+        "up",
+        serde_json::json!({ "key": key }),
+        self.page.key_up(key),
+      )
+      .await
   }
 
   /// Press a key or key combination (e.g., "Enter", "Control+a", "Shift+ArrowDown").
@@ -3993,6 +4194,7 @@ impl<'a> Keyboard<'a> {
   /// # Errors
   ///
   /// Returns an error if the key press dispatch fails.
+  #[track_caller]
   pub fn press(&self, key: &str) -> crate::action::Action<'a, KeyboardPressOptions, ()> {
     let page = self.page;
     let key = key.to_string();
@@ -4001,6 +4203,18 @@ impl<'a> Keyboard<'a> {
 
   /// Implementation of [`Self::press`].
   pub(crate) async fn press_impl(&self, key: &str, opts: Option<KeyboardPressOptions>) -> Result<()> {
+    self
+      .page
+      .traced_as(
+        "Keyboard",
+        "press",
+        serde_json::json!({ "key": key }),
+        self.press_untraced(key, opts),
+      )
+      .await
+  }
+
+  async fn press_untraced(&self, key: &str, opts: Option<KeyboardPressOptions>) -> Result<()> {
     match opts.and_then(|o| o.delay) {
       // Playwright `delay` waits between keydown and keyup. Combos
       // ("Control+a") keep the atomic `press_key` path.
@@ -4026,6 +4240,7 @@ impl<'a> Keyboard<'a> {
   /// # Errors
   ///
   /// Returns an error if the typing dispatch fails.
+  #[track_caller]
   pub fn r#type(&self, text: &str) -> crate::action::Action<'a, KeyboardTypeOptions, ()> {
     let page = self.page;
     let text = text.to_string();
@@ -4034,6 +4249,18 @@ impl<'a> Keyboard<'a> {
 
   /// Implementation of [`Self::r#type`].
   pub(crate) async fn type_impl(&self, text: &str, opts: Option<KeyboardTypeOptions>) -> Result<()> {
+    self
+      .page
+      .traced_as(
+        "Keyboard",
+        "type",
+        serde_json::json!({ "text": text }),
+        self.type_untraced(text, opts),
+      )
+      .await
+  }
+
+  async fn type_untraced(&self, text: &str, opts: Option<KeyboardTypeOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let delay = opts.delay;
     let named_keys = opts.named_keys.unwrap_or(false);
@@ -4060,7 +4287,15 @@ impl<'a> Keyboard<'a> {
   ///
   /// Returns an error if the text insertion fails.
   pub async fn insert_text(&self, text: &str) -> Result<()> {
-    self.page.inner.insert_text(text).await
+    self
+      .page
+      .traced_as(
+        "Keyboard",
+        "insertText",
+        serde_json::json!({ "text": text }),
+        self.page.inner.insert_text(text),
+      )
+      .await
   }
 }
 
@@ -4077,6 +4312,7 @@ impl<'a> Mouse<'a> {
   /// # Errors
   ///
   /// Returns an error if the click dispatch fails.
+  #[track_caller]
   pub fn click(&self, x: f64, y: f64) -> crate::action::Action<'a, MouseClickOptions, ()> {
     let page = self.page;
     crate::action::Action::new(move |opts| Box::pin(async move { Self { page }.click_impl(x, y, Some(opts)).await }))
@@ -4084,6 +4320,18 @@ impl<'a> Mouse<'a> {
 
   /// Implementation of [`Self::click`].
   pub(crate) async fn click_impl(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<()> {
+    self
+      .page
+      .traced_as(
+        "Mouse",
+        "click",
+        serde_json::json!({ "x": x, "y": y }),
+        self.click_untraced(x, y, opts),
+      )
+      .await
+  }
+
+  async fn click_untraced(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<()> {
     let button = opts.as_ref().and_then(|o| o.button).unwrap_or_default().as_cdp();
     let count = opts.as_ref().and_then(|o| o.click_count).unwrap_or(1);
     match opts.as_ref().and_then(|o| o.delay) {
@@ -4105,6 +4353,7 @@ impl<'a> Mouse<'a> {
   /// # Errors
   ///
   /// Returns an error if the mouse move dispatch fails.
+  #[track_caller]
   pub fn r#move(&self, x: f64, y: f64) -> crate::action::Action<'a, MouseMoveOptions, ()> {
     let page = self.page;
     crate::action::Action::new(move |opts: MouseMoveOptions| {
@@ -4113,6 +4362,18 @@ impl<'a> Mouse<'a> {
   }
 
   pub(crate) async fn move_impl(&self, x: f64, y: f64, steps: Option<u32>) -> Result<()> {
+    self
+      .page
+      .traced_as(
+        "Mouse",
+        "move",
+        serde_json::json!({ "x": x, "y": y }),
+        self.move_untraced(x, y, steps),
+      )
+      .await
+  }
+
+  async fn move_untraced(&self, x: f64, y: f64, steps: Option<u32>) -> Result<()> {
     match steps {
       Some(step_count) => {
         let (from_x, from_y) = *self
@@ -4131,6 +4392,7 @@ impl<'a> Mouse<'a> {
   /// # Errors
   ///
   /// Returns an error if the click dispatch fails.
+  #[track_caller]
   pub fn dblclick(&self, x: f64, y: f64) -> crate::action::Action<'a, MouseClickOptions, ()> {
     let page = self.page;
     crate::action::Action::new(move |opts| Box::pin(async move { Self { page }.dblclick_impl(x, y, Some(opts)).await }))
@@ -4138,6 +4400,18 @@ impl<'a> Mouse<'a> {
 
   /// Implementation of [`Self::dblclick`].
   pub(crate) async fn dblclick_impl(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<()> {
+    self
+      .page
+      .traced_as(
+        "Mouse",
+        "dblclick",
+        serde_json::json!({ "x": x, "y": y }),
+        self.dblclick_untraced(x, y, opts),
+      )
+      .await
+  }
+
+  async fn dblclick_untraced(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<()> {
     let button = opts.as_ref().and_then(|o| o.button).unwrap_or_default().as_cdp();
     self.page.move_mouse(x, y).await?;
     self.page.mouse_down(x, y, button).await?;
@@ -4155,6 +4429,7 @@ impl<'a> Mouse<'a> {
   /// # Errors
   ///
   /// Returns an error if the mouse down dispatch fails.
+  #[track_caller]
   pub fn down(&self) -> crate::action::Action<'a, MouseDownOptions, ()> {
     let page = self.page;
     crate::action::Action::new(move |opts| Box::pin(async move { Self { page }.down_impl(Some(opts)).await }))
@@ -4162,6 +4437,13 @@ impl<'a> Mouse<'a> {
 
   /// Implementation of [`Self::down`].
   pub(crate) async fn down_impl(&self, opts: Option<MouseDownOptions>) -> Result<()> {
+    self
+      .page
+      .traced_as("Mouse", "down", serde_json::json!({}), self.down_untraced(opts))
+      .await
+  }
+
+  async fn down_untraced(&self, opts: Option<MouseDownOptions>) -> Result<()> {
     let button = opts.as_ref().and_then(|o| o.button).unwrap_or_default().as_cdp();
     let (x, y) = *self
       .page
@@ -4176,6 +4458,7 @@ impl<'a> Mouse<'a> {
   /// # Errors
   ///
   /// Returns an error if the mouse up dispatch fails.
+  #[track_caller]
   pub fn up(&self) -> crate::action::Action<'a, MouseUpOptions, ()> {
     let page = self.page;
     crate::action::Action::new(move |opts| Box::pin(async move { Self { page }.up_impl(Some(opts)).await }))
@@ -4183,6 +4466,13 @@ impl<'a> Mouse<'a> {
 
   /// Implementation of [`Self::up`].
   pub(crate) async fn up_impl(&self, opts: Option<MouseUpOptions>) -> Result<()> {
+    self
+      .page
+      .traced_as("Mouse", "up", serde_json::json!({}), self.up_untraced(opts))
+      .await
+  }
+
+  async fn up_untraced(&self, opts: Option<MouseUpOptions>) -> Result<()> {
     let button = opts.as_ref().and_then(|o| o.button).unwrap_or_default().as_cdp();
     let (x, y) = *self
       .page
@@ -4198,7 +4488,15 @@ impl<'a> Mouse<'a> {
   ///
   /// Returns an error if the wheel event dispatch fails.
   pub async fn wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
-    self.page.mouse_wheel(delta_x, delta_y).await
+    self
+      .page
+      .traced_as(
+        "Mouse",
+        "wheel",
+        serde_json::json!({ "deltaX": delta_x, "deltaY": delta_y }),
+        self.page.mouse_wheel(delta_x, delta_y),
+      )
+      .await
   }
 }
 
@@ -4320,8 +4618,15 @@ impl Touchscreen<'_> {
   pub async fn tap(&self, x: f64, y: f64) -> Result<()> {
     self
       .page
-      .inner
-      .tap_at_with(x, y, &crate::backend::BackendTapArgs { modifiers_bitmask: 0 })
+      .traced_as(
+        "Touchscreen",
+        "tap",
+        serde_json::json!({ "x": x, "y": y }),
+        self
+          .page
+          .inner
+          .tap_at_with(x, y, &crate::backend::BackendTapArgs { modifiers_bitmask: 0 }),
+      )
       .await
   }
 }

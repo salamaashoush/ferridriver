@@ -488,12 +488,25 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `click` error.
+  #[track_caller]
   pub fn click(&self) -> crate::action::Action<'static, crate::options::ClickOptions, ()> {
     let handle = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { handle.click_impl(Some(opts)).await }))
   }
 
   pub(crate) async fn click_impl(&self, opts: Option<crate::options::ClickOptions>) -> Result<()> {
+    self
+      .page()
+      .traced_as(
+        "ElementHandle",
+        "click",
+        serde_json::json!({}),
+        self.click_untraced(opts),
+      )
+      .await
+  }
+
+  async fn click_untraced(&self, opts: Option<crate::options::ClickOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
     let locator = self.page().locator(&Self::temp_selector(&nonce));
@@ -509,12 +522,25 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `dblclick` error.
+  #[track_caller]
   pub fn dblclick(&self) -> crate::action::Action<'static, crate::options::DblClickOptions, ()> {
     let handle = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { handle.dblclick_impl(Some(opts)).await }))
   }
 
   pub(crate) async fn dblclick_impl(&self, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
+    self
+      .page()
+      .traced_as(
+        "ElementHandle",
+        "dblclick",
+        serde_json::json!({}),
+        self.dblclick_untraced(opts),
+      )
+      .await
+  }
+
+  async fn dblclick_untraced(&self, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
     let locator = self.page().locator(&Self::temp_selector(&nonce));
@@ -530,12 +556,25 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `hover` error.
+  #[track_caller]
   pub fn hover(&self) -> crate::action::Action<'static, crate::options::HoverOptions, ()> {
     let handle = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { handle.hover_impl(Some(opts)).await }))
   }
 
   pub(crate) async fn hover_impl(&self, opts: Option<crate::options::HoverOptions>) -> Result<()> {
+    self
+      .page()
+      .traced_as(
+        "ElementHandle",
+        "hover",
+        serde_json::json!({}),
+        self.hover_untraced(opts),
+      )
+      .await
+  }
+
+  async fn hover_untraced(&self, opts: Option<crate::options::HoverOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
     let locator = self.page().locator(&Self::temp_selector(&nonce));
@@ -552,6 +591,7 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `type` error.
+  #[track_caller]
   pub fn type_str(&self, text: &str) -> crate::action::Action<'static, crate::options::TypeOptions, ()> {
     let handle = self.clone();
     let text = text.to_string();
@@ -559,6 +599,18 @@ impl ElementHandle {
   }
 
   pub(crate) async fn type_str_impl(&self, text: &str, opts: Option<crate::options::TypeOptions>) -> Result<()> {
+    self
+      .page()
+      .traced_as(
+        "ElementHandle",
+        "type",
+        serde_json::json!({ "text": text }),
+        self.type_str_untraced(text, opts),
+      )
+      .await
+  }
+
+  async fn type_str_untraced(&self, text: &str, opts: Option<crate::options::TypeOptions>) -> Result<()> {
     self.ensure_live()?;
     let nonce = self.temp_tag().await?;
     let locator = self.page().locator(&Self::temp_selector(&nonce));
@@ -573,12 +625,17 @@ impl ElementHandle {
   ///
   /// Forwards page-side / protocol error.
   pub async fn focus(&self) -> Result<()> {
-    self.ensure_live()?;
     self
-      .js_handle
-      .evaluate("el => { el.focus(); }", empty_arg(), Some(true))
+      .page()
+      .traced_as("ElementHandle", "focus", serde_json::json!({}), async {
+        self.ensure_live()?;
+        self
+          .js_handle
+          .evaluate("el => { el.focus(); }", empty_arg(), Some(true))
+          .await
+          .map(|_| ())
+      })
       .await
-      .map(|_| ())
   }
 
   /// Playwright: `elementHandle.scrollIntoViewIfNeeded()`. Delegates
@@ -588,8 +645,18 @@ impl ElementHandle {
   ///
   /// Forwards the backend's scroll error.
   pub async fn scroll_into_view_if_needed(&self) -> Result<()> {
-    self.ensure_live()?;
-    self.any_element().scroll_into_view().await
+    self
+      .page()
+      .traced_as(
+        "ElementHandle",
+        "scrollIntoViewIfNeeded",
+        serde_json::json!({}),
+        async {
+          self.ensure_live()?;
+          self.any_element().scroll_into_view().await
+        },
+      )
+      .await
   }
 
   /// Playwright: `elementHandle.screenshot(opts?): Promise<Buffer>`.
@@ -599,6 +666,7 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards the backend's screenshot error.
+  #[track_caller]
   pub fn screenshot(&self) -> crate::action::Action<'static, crate::options::ElementScreenshotOptions, Vec<u8>> {
     let handle = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { handle.screenshot_impl(opts).await }))
@@ -1098,6 +1166,7 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `fill` error.
+  #[track_caller]
   pub fn fill(&self, value: &str) -> crate::action::Action<'static, crate::options::FillOptions, ()> {
     let handle = self.clone();
     let value = value.to_string();
@@ -1119,6 +1188,7 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `check` error.
+  #[track_caller]
   pub fn check(&self) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
     let handle = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { handle.check_impl(Some(opts)).await }))
@@ -1139,6 +1209,7 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `uncheck` error.
+  #[track_caller]
   pub fn uncheck(&self) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
     let handle = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { handle.uncheck_impl(Some(opts)).await }))
@@ -1159,6 +1230,7 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `set_checked` error.
+  #[track_caller]
   pub fn set_checked(&self, checked: bool) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
     let handle = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { handle.set_checked_impl(checked, Some(opts)).await }))
@@ -1179,6 +1251,7 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `tap` error.
+  #[track_caller]
   pub fn tap(&self) -> crate::action::Action<'static, crate::options::TapOptions, ()> {
     let handle = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { handle.tap_impl(Some(opts)).await }))
@@ -1199,6 +1272,7 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `press` error.
+  #[track_caller]
   pub fn press(&self, key: &str) -> crate::action::Action<'static, crate::options::PressOptions, ()> {
     let handle = self.clone();
     let key = key.to_string();
@@ -1222,6 +1296,7 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `dispatch_event` error.
+  #[track_caller]
   pub fn dispatch_event(
     &self,
     event_type: &str,
@@ -1254,6 +1329,7 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `select_option` error.
+  #[track_caller]
   pub fn select_option(
     &self,
     values: impl Into<crate::options::SelectOptionValues>,
@@ -1318,6 +1394,7 @@ impl ElementHandle {
   /// # Errors
   ///
   /// Forwards Locator's `set_input_files` error.
+  #[track_caller]
   pub fn set_input_files(
     &self,
     files: impl Into<crate::options::InputFiles>,

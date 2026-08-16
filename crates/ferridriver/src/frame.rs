@@ -113,6 +113,25 @@ impl Frame {
     arg: crate::protocol::SerializedArgument,
     is_function: Option<bool>,
   ) -> Result<crate::protocol::SerializedValue> {
+    self
+      .page
+      .traced_as(
+        "Frame",
+        "evaluate",
+        serde_json::json!({ "expression": fn_source }),
+        self.evaluate_untraced(fn_source, arg, is_function),
+      )
+      .await
+  }
+
+  /// [`Self::evaluate`] without a trace action of its own — what a
+  /// public method that already opened one calls.
+  pub(crate) async fn evaluate_untraced(
+    &self,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::protocol::SerializedValue> {
     let frame_id = if self.is_main_frame() { None } else { Some(&*self.id) };
     let empty = matches!(
       arg.value,
@@ -142,6 +161,25 @@ impl Frame {
   ///
   /// See [`Self::evaluate`].
   pub async fn evaluate_handle(
+    &self,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::js_handle::JSHandle> {
+    self
+      .page
+      .traced_as(
+        "Frame",
+        "evaluateHandle",
+        serde_json::json!({ "expression": fn_source }),
+        self.evaluate_handle_untraced(fn_source, arg, is_function),
+      )
+      .await
+  }
+
+  /// [`Self::evaluate_handle`] without a trace action of its own — the
+  /// selector probes `$eval` / `$$eval` run are part of those calls.
+  pub(crate) async fn evaluate_handle_untraced(
     &self,
     fn_source: &str,
     arg: crate::protocol::SerializedArgument,
@@ -282,7 +320,7 @@ impl Frame {
         return r; }}"
     );
     let match_handle = self
-      .evaluate_handle(&probe, crate::protocol::SerializedArgument::default(), Some(true))
+      .evaluate_handle_untraced(&probe, crate::protocol::SerializedArgument::default(), Some(true))
       .await?;
     let result = match_handle.evaluate(fn_source, arg, is_function).await;
     let _ = match_handle.dispose().await;
@@ -311,7 +349,7 @@ impl Frame {
     self.page.inner.ensure_engine_injected().await?;
     let probe = format!("() => window.__fd.selAll({parts_json})");
     let array_handle = self
-      .evaluate_handle(&probe, crate::protocol::SerializedArgument::default(), Some(true))
+      .evaluate_handle_untraced(&probe, crate::protocol::SerializedArgument::default(), Some(true))
       .await?;
     let result = array_handle.evaluate(fn_source, arg, is_function).await;
     let _ = array_handle.dispose().await;
@@ -487,11 +525,16 @@ impl Frame {
   ///
   /// Returns an error if JS evaluation fails.
   pub async fn content(&self) -> Result<String> {
-    let r = self.backend_eval_expr("document.documentElement.outerHTML").await?;
-    Ok(
-      r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
-        .unwrap_or_default(),
-    )
+    self
+      .page
+      .traced_as("Frame", "content", serde_json::json!({}), async {
+        let r = self.backend_eval_expr("document.documentElement.outerHTML").await?;
+        Ok(
+          r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
+            .unwrap_or_default(),
+        )
+      })
+      .await
   }
 
   /// Get the frame's title.
@@ -500,11 +543,16 @@ impl Frame {
   ///
   /// Returns an error if JS evaluation fails.
   pub async fn title(&self) -> Result<String> {
-    let r = self.backend_eval_expr("document.title").await?;
-    Ok(
-      r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
-        .unwrap_or_default(),
-    )
+    self
+      .page
+      .traced_as("Frame", "title", serde_json::json!({}), async {
+        let r = self.backend_eval_expr("document.title").await?;
+        Ok(
+          r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
+            .unwrap_or_default(),
+        )
+      })
+      .await
   }
 
   // ── Navigation (frame-scoped) ────────────────────────────────────────
@@ -515,6 +563,18 @@ impl Frame {
   ///
   /// Returns an error if navigation fails.
   pub async fn goto(&self, url: &str) -> Result<Option<crate::network::Response>> {
+    self
+      .page
+      .traced_as(
+        "Frame",
+        "goto",
+        serde_json::json!({ "url": url }),
+        self.goto_untraced(url),
+      )
+      .await
+  }
+
+  async fn goto_untraced(&self, url: &str) -> Result<Option<crate::network::Response>> {
     if self.is_main_frame() {
       self.page.goto_impl(url, None).await
     } else {
@@ -541,6 +601,7 @@ impl Frame {
   ///
   /// Returns an error if the element does not reach the requested state
   /// within the timeout.
+  #[track_caller]
   pub fn wait_for_selector(
     &self,
     selector: &str,
@@ -634,11 +695,16 @@ impl Frame {
   ///
   /// Returns an error if JS evaluation fails.
   pub async fn set_content(&self, html: &str) -> Result<()> {
-    let escaped = crate::steps::js_escape(html);
     self
-      .backend_eval_expr(&format!("document.documentElement.innerHTML = '{escaped}'"))
-      .await?;
-    Ok(())
+      .page
+      .traced_as("Frame", "setContent", serde_json::json!({ "html": html }), async {
+        let escaped = crate::steps::js_escape(html);
+        self
+          .backend_eval_expr(&format!("document.documentElement.innerHTML = '{escaped}'"))
+          .await?;
+        Ok(())
+      })
+      .await
   }
 
   /// Add a `<script>` tag to this frame.
@@ -647,6 +713,23 @@ impl Frame {
   ///
   /// Returns an error if script injection fails.
   pub async fn add_script_tag(
+    &self,
+    url: Option<&str>,
+    content: Option<&str>,
+    script_type: Option<&str>,
+  ) -> Result<()> {
+    self
+      .page
+      .traced_as(
+        "Frame",
+        "addScriptTag",
+        serde_json::json!({ "url": url }),
+        self.add_script_tag_untraced(url, content, script_type),
+      )
+      .await
+  }
+
+  async fn add_script_tag_untraced(
     &self,
     url: Option<&str>,
     content: Option<&str>,
@@ -674,6 +757,18 @@ impl Frame {
   ///
   /// Returns an error if style injection fails.
   pub async fn add_style_tag(&self, url: Option<&str>, content: Option<&str>) -> Result<()> {
+    self
+      .page
+      .traced_as(
+        "Frame",
+        "addStyleTag",
+        serde_json::json!({ "url": url }),
+        self.add_style_tag_untraced(url, content),
+      )
+      .await
+  }
+
+  async fn add_style_tag_untraced(&self, url: Option<&str>, content: Option<&str>) -> Result<()> {
     if let Some(url) = url {
       self.backend_eval_expr(&format!(
                 "(function(){{return new Promise(function(r,j){{var l=document.createElement('link');\
@@ -738,6 +833,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the click fails.
+  #[track_caller]
   pub fn click(&self, selector: &str) -> crate::action::Action<'static, crate::options::ClickOptions, ()> {
     let frame = self.clone();
     let selector = selector.to_string();
@@ -753,6 +849,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the dblclick fails.
+  #[track_caller]
   pub fn dblclick(&self, selector: &str) -> crate::action::Action<'static, crate::options::DblClickOptions, ()> {
     let frame = self.clone();
     let selector = selector.to_string();
@@ -772,6 +869,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the hover fails.
+  #[track_caller]
   pub fn hover(&self, selector: &str) -> crate::action::Action<'static, crate::options::HoverOptions, ()> {
     let frame = self.clone();
     let selector = selector.to_string();
@@ -789,6 +887,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the tap fails.
+  #[track_caller]
   pub fn tap(&self, selector: &str) -> crate::action::Action<'static, crate::options::TapOptions, ()> {
     let frame = self.clone();
     let selector = selector.to_string();
@@ -815,6 +914,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not fillable.
+  #[track_caller]
   pub fn fill(&self, selector: &str, value: &str) -> crate::action::Action<'static, crate::options::FillOptions, ()> {
     let frame = self.clone();
     let selector = selector.to_string();
@@ -838,6 +938,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or typing fails.
+  #[track_caller]
   pub fn r#type(&self, selector: &str, text: &str) -> crate::action::Action<'static, crate::options::TypeOptions, ()> {
     let frame = self.clone();
     let selector = selector.to_string();
@@ -859,6 +960,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the key press fails.
+  #[track_caller]
   pub fn press(&self, selector: &str, key: &str) -> crate::action::Action<'static, crate::options::PressOptions, ()> {
     let frame = self.clone();
     let selector = selector.to_string();
@@ -880,6 +982,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not checkable.
+  #[track_caller]
   pub fn check(&self, selector: &str) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
     let frame = self.clone();
     let selector = selector.to_string();
@@ -895,6 +998,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not uncheckable.
+  #[track_caller]
   pub fn uncheck(&self, selector: &str) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
     let frame = self.clone();
     let selector = selector.to_string();
@@ -910,6 +1014,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not checkable.
+  #[track_caller]
   pub fn set_checked(
     &self,
     selector: &str,
@@ -937,6 +1042,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found or the option cannot
   /// be selected.
+  #[track_caller]
   pub fn select_option(
     &self,
     selector: &str,
@@ -964,6 +1070,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or file setting fails.
+  #[track_caller]
   pub fn set_input_files(
     &self,
     selector: &str,
@@ -996,6 +1103,7 @@ impl Frame {
   ///
   /// Returns an error if either element cannot be found or the
   /// drag-and-drop operation fails.
+  #[track_caller]
   pub fn drag_and_drop(
     &self,
     source: &str,
@@ -1032,6 +1140,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the dispatch fails.
+  #[track_caller]
   pub fn dispatch_event(
     &self,
     selector: &str,

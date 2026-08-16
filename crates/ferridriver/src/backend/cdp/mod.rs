@@ -2132,16 +2132,44 @@ impl<T: CdpWrap> CdpPage<T> {
     self
       .await_loader_lifecycle(&nav_loader_id, target_event, timeout_ms)
       .await?;
-    Ok(self.await_nav_response().await)
+    // `Page.navigate` answers with a loaderId only when it created a
+    // document; a fragment jump has none and no request to wait for.
+    let grace = Self::nav_grace_for(!nav_loader_id.is_empty());
+    Ok(self.await_nav_response(grace).await)
   }
 
   /// Resolve the main-document `Response` captured by the network
   /// listener for the most recent navigation. Returns `None` for
   /// same-document navigations (no new request was issued) or when
   /// the underlying request ended in failure.
-  async fn await_nav_response(&self) -> Option<Response> {
-    let req = self.nav_request_slot.get()?;
+  ///
+  /// `grace` is how long to wait for the document request to be seen:
+  /// non-zero only when a new document committed, since the request and
+  /// the lifecycle reach us on separate consumers and the request can be
+  /// processed second. A same-document navigation never issues one, so
+  /// waiting there would only slow it down.
+  async fn await_nav_response(&self, grace: std::time::Duration) -> Option<Response> {
+    let req = self.nav_request_slot.wait(grace).await?;
     req.response().await.ok().flatten()
+  }
+
+  /// The grace a navigation that committed `expected_loader_id` gets;
+  /// zero when the document did not change.
+  fn nav_grace_for(new_document: bool) -> std::time::Duration {
+    if new_document {
+      crate::network::NAV_REQUEST_GRACE
+    } else {
+      std::time::Duration::ZERO
+    }
+  }
+
+  fn current_loader_id(&self) -> String {
+    self
+      .lifecycle
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .current_loader_id
+      .clone()
   }
 
   pub async fn wait_for_navigation(&self) -> Result<()> {
@@ -2220,7 +2248,8 @@ impl<T: CdpWrap> CdpPage<T> {
     self
       .await_loader_change(&pre_loader_id, target_event, timeout_ms)
       .await?;
-    Ok(self.await_nav_response().await)
+    let grace = Self::nav_grace_for(self.current_loader_id() != pre_loader_id);
+    Ok(self.await_nav_response(grace).await)
   }
 
   pub async fn go_back(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
@@ -2271,7 +2300,8 @@ impl<T: CdpWrap> CdpPage<T> {
     self
       .await_loader_change(&pre_loader_id, target_event, timeout_ms)
       .await?;
-    Ok(self.await_nav_response().await)
+    let grace = Self::nav_grace_for(self.current_loader_id() != pre_loader_id);
+    Ok(self.await_nav_response(grace).await)
   }
 
   /// Wait until the page's main-frame [`LifecycleState`] has both
@@ -2498,6 +2528,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// can race the map update. Erroring instead of falling back keeps a
   /// frame-scoped evaluate from silently running in the MAIN frame —
   /// wrong-realm results are far worse than a typed failure.
+  /// The frame's default context if it is already known — no waiting.
+  async fn peek_frame_context(&self, frame_id: &str) -> Option<i64> {
+    self.frame_contexts.read().await.get(frame_id).copied()
+  }
+
   async fn resolve_frame_context(&self, frame_id: &str) -> Result<i64> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
@@ -2813,13 +2848,17 @@ impl<T: CdpWrap> CdpPage<T> {
       .get("backendNodeId")
       .and_then(serde_json::Value::as_i64)
       .ok_or_else(|| FerriError::protocol("DOM.getFrameOwner", "no backendNodeId for frame owner"))?;
-    let ctx_id = self.resolve_frame_context(parent_frame_id).await?;
-    let resolved = self
-      .cmd(
-        "DOM.resolveNode",
-        serde_json::json!({ "backendNodeId": backend_node_id, "executionContextId": ctx_id }),
-      )
-      .await?;
+    // Resolve the owner element in the parent's world when we know it,
+    // and otherwise let the protocol pick the node's own frame — the
+    // main frame's context id is frequently absent from the map (its
+    // creation event predates the tracker), and WAITING for one that
+    // will never arrive cost the full resolve timeout on every snapshot
+    // of every action on a page with an iframe.
+    let mut params = serde_json::json!({ "backendNodeId": backend_node_id });
+    if let Some(ctx_id) = self.peek_frame_context(parent_frame_id).await {
+      params["executionContextId"] = serde_json::json!(ctx_id);
+    }
+    let resolved = self.cmd("DOM.resolveNode", params).await?;
     let object_id = resolved
       .get("object")
       .and_then(|o| o.get("objectId"))
@@ -2846,6 +2885,17 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>> {
+    // The main frame's default context often never reaches the map: its
+    // `Runtime.executionContextCreated` fires while the page is being
+    // set up, before the tracker subscribes, and `setContent` replaces
+    // the document without minting a new one. Waiting for it costs the
+    // full resolve timeout and then fails — an evaluate in the main
+    // frame is a plain evaluate, which is what the default context is.
+    if self.peek_main_frame_id().as_deref() == Some(frame_id)
+      && !self.frame_contexts.read().await.contains_key(frame_id)
+    {
+      return self.evaluate(expression).await;
+    }
     let ctx_id = self.resolve_frame_context(frame_id).await?;
     let result = self
       .cmd(

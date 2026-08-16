@@ -16,10 +16,12 @@ mod config_cmd;
 mod ext_cmd;
 mod ext_typecheck;
 mod ext_types;
+mod merge_cmd;
 mod run_console;
 mod script_setup;
 mod session_cmd;
 mod test_ui;
+mod trace_cmd;
 
 use std::sync::Arc;
 
@@ -109,6 +111,8 @@ async fn main() -> anyhow::Result<()> {
       .await
     },
     cli::Command::Ext(ext_args) => Box::pin(ext_cmd::run(config, ext_args)).await,
+    cli::Command::Trace(trace_args) => Box::pin(trace_cmd::run(&config, trace_args)).await,
+    cli::Command::MergeReports(merge_args) => Box::pin(merge_cmd::run(config, merge_args)).await,
   }
 }
 
@@ -408,6 +412,12 @@ async fn run_test_native(config: FerridriverConfig, args: cli::TestRunArgs) -> a
       Some(ferridriver_test::config::ShardArg::parse(spec).map_err(|e| anyhow::anyhow!("invalid --shard: {e}"))?);
   }
 
+  // Resolved before `config.test` is moved below.
+  if let Some(mode) = args.debug {
+    let setup = script_setup::resolve(&config, &std::env::current_dir()?, &[]).await?;
+    ferridriver_test::debug_session::install(mode, setup.into_session_script(), &mut overrides);
+  }
+
   let test_config = ferridriver_test::config::resolve_config_from(config.test, &overrides)
     .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
   install_module_aliases(&test_config)?;
@@ -462,6 +472,12 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   if let Some(ref spec) = args.shard {
     overrides.shard =
       Some(ferridriver_test::config::ShardArg::parse(spec).map_err(|e| anyhow::anyhow!("invalid --shard: {e}"))?);
+  }
+
+  // Resolved before `config.test` is moved below.
+  if let Some(mode) = args.debug {
+    let setup = script_setup::resolve(&config, &std::env::current_dir()?, &[]).await?;
+    ferridriver_test::debug_session::install(mode, setup.into_session_script(), &mut overrides);
   }
 
   let mut test_config = ferridriver_test::config::resolve_config_from(config.test, &overrides)

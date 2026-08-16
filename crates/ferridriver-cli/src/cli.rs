@@ -85,6 +85,130 @@ pub enum Command {
 
   /// Author extensions: load them and report what they register.
   Ext(ExtArgs),
+
+  /// Read recorded traces: open one in the viewer, print one in the
+  /// terminal, or list what a run left behind.
+  Trace(TraceArgs),
+
+  /// Merge the `blob` reports of several shards into one report.
+  ///
+  /// Each shard runs with `--reporter blob`, writing a `report-N.zip`;
+  /// this replays every event in those blobs through the reporters you
+  /// name, producing the single HTML / JUnit / JSON report the run would
+  /// have produced unsharded.
+  #[command(name = "merge-reports")]
+  MergeReports(MergeReportsArgs),
+}
+
+// ── merge-reports ───────────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct MergeReportsArgs {
+  /// Directory holding the shards' blob zips, or the zips themselves.
+  #[arg(default_value = ".")]
+  pub inputs: Vec<std::path::PathBuf>,
+
+  /// Reporter to produce from the merged stream, repeatable. Defaults to
+  /// `list` plus whatever the config declares.
+  #[arg(long)]
+  pub reporter: Vec<String>,
+
+  /// Where the merged report's files are written. Defaults to the
+  /// config's `outputDir`.
+  #[arg(long)]
+  pub output_dir: Option<std::path::PathBuf>,
+}
+
+// ── trace subcommand ────────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct TraceArgs {
+  #[command(subcommand)]
+  pub command: TraceCommand,
+}
+
+#[derive(Subcommand)]
+pub enum TraceCommand {
+  /// Open a trace in the embedded viewer: actions, DOM snapshots, network,
+  /// console, source. Serves the viewer from this binary — no download, no
+  /// node, works offline.
+  View(TraceViewArgs),
+
+  /// Print a trace in the terminal: the call tree with timings, what failed
+  /// and what it was waiting for, plus console and network summaries.
+  Show(TraceShowArgs),
+
+  /// List the traces under a directory, newest first.
+  Ls(TraceLsArgs),
+}
+
+#[derive(Args)]
+pub struct TraceViewArgs {
+  /// Trace to open: a `trace.zip`, a directory of trace files, or an
+  /// `http(s)` URL. Defaults to the newest trace under the test output
+  /// directory.
+  pub trace: Option<String>,
+
+  /// Port to serve the viewer on (an ephemeral one by default).
+  #[arg(long)]
+  pub port: Option<u16>,
+
+  /// Address to bind. Anything other than loopback exposes the traces on
+  /// this machine to the network.
+  #[arg(long, default_value = "127.0.0.1")]
+  pub host: String,
+
+  /// Print the URL and keep serving instead of opening a browser.
+  #[arg(long)]
+  pub no_open: bool,
+}
+
+#[derive(Args)]
+pub struct TraceShowArgs {
+  /// Trace to print: a `trace.zip` or a directory of trace files. Defaults
+  /// to the newest trace under the test output directory.
+  pub trace: Option<PathBuf>,
+
+  /// Only the failures: failing calls, console errors, failed requests.
+  #[arg(long)]
+  pub errors: bool,
+
+  /// Emit the whole model as JSON.
+  #[arg(long)]
+  pub json: bool,
+
+  /// Stop after this many calls.
+  #[arg(long)]
+  pub limit: Option<usize>,
+
+  /// Sections to leave out. Repeatable: `--hide logs --hide network`.
+  #[arg(long = "hide", value_enum)]
+  pub hide: Vec<TraceSection>,
+
+  /// Colorize: `auto` (a terminal), `always`, or `never`.
+  #[arg(long, default_value = "auto")]
+  pub color: String,
+}
+
+/// A section of a printed trace.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TraceSection {
+  /// Per-call log lines (what a retrying call was waiting for).
+  Logs,
+  /// Console messages from the page.
+  Console,
+  /// Network requests.
+  Network,
+}
+
+#[derive(Args)]
+pub struct TraceLsArgs {
+  /// Directory to scan. Defaults to the test output directory.
+  pub dir: Option<PathBuf>,
+
+  /// Emit JSON instead of a table.
+  #[arg(long)]
+  pub json: bool,
 }
 
 // ── ext subcommand ──────────────────────────────────────────────────────
@@ -309,6 +433,14 @@ pub struct BddArgs {
   #[arg(long, requires = "ui")]
   pub ui_port: Option<u16>,
 
+  /// Stop the scenario and publish its live browser as a session, so a
+  /// script can drive exactly the state the step is in. `--debug` stops in
+  /// front of the first API call a step makes and steps from there;
+  /// `--debug=fail` stops at the first failing scenario instead, before
+  /// teardown. See `ferridriver test --debug`.
+  #[arg(long, value_name = "WHERE", num_args = 0..=1, default_missing_value = "start")]
+  pub debug: Option<ferridriver_test::debug::DebugMode>,
+
   /// Stop after the first failing scenario.
   #[arg(long)]
   pub fail_fast: bool,
@@ -338,9 +470,16 @@ pub struct BddArgs {
   #[arg(long)]
   pub shard: Option<String>,
 
-  /// Reporter name, repeatable (e.g. `--reporter terminal --reporter junit`).
-  /// Each name is matched exactly; file reporters write into the run's output
-  /// directory. Set paths/options with `[[test.reporter]]` in the config file.
+  /// Reporter name, repeatable (e.g. `--reporter line --reporter junit`).
+  ///
+  /// Terminal: `list` (default), `line`, `dot`, `progress`, `github`,
+  /// `tap`, `tap-flat`, `teamcity`, `usage`, `null`.
+  /// Files: `json`, `junit`, `html`, `blob`, `markdown`, `ctrf`,
+  /// `allure`, `rerun`, `cucumber-json`, `messages`.
+  ///
+  /// File reporters write into the run's output directory; set paths and
+  /// per-reporter options with `[[test.reporter]]` in the config file, or
+  /// point one at a path with `FERRIDRIVER_<NAME>_OUTPUT_FILE`.
   #[arg(long)]
   pub reporter: Vec<String>,
 
@@ -392,7 +531,16 @@ pub struct TestRunArgs {
   #[arg(long)]
   pub timeout: Option<u64>,
 
-  /// Reporter name, repeatable (e.g. `--reporter list --reporter junit`).
+  /// Reporter name, repeatable (e.g. `--reporter line --reporter junit`).
+  ///
+  /// Terminal: `list` (default), `line`, `dot`, `progress`, `github`,
+  /// `tap`, `tap-flat`, `teamcity`, `usage`, `null`.
+  /// Files: `json`, `junit`, `html`, `blob`, `markdown`, `ctrf`,
+  /// `allure`, `rerun`, `cucumber-json`, `messages`.
+  ///
+  /// File reporters write into the run's output directory; set paths and
+  /// per-reporter options with `[[test.reporter]]` in the config file, or
+  /// point one at a path with `FERRIDRIVER_<NAME>_OUTPUT_FILE`.
   #[arg(long)]
   pub reporter: Vec<String>,
 
@@ -403,6 +551,21 @@ pub struct TestRunArgs {
   /// Run only the tests of these projects (repeatable).
   #[arg(long)]
   pub project: Vec<String>,
+
+  /// Stop the test and publish its live browser as a session, so a script
+  /// can drive exactly the state the test is in:
+  ///
+  ///   ferridriver run --session <id> --context <ctx> --eval "…"
+  ///
+  /// `--debug` stops in front of the test's first API call and steps from
+  /// there (`testDebug.stepOver()`, `testDebug.pauseAt('spec.ts:42')`,
+  /// `testDebug.resume()`). `--debug=fail` instead stops at the first
+  /// failure, before teardown, with the page still on it.
+  ///
+  /// Forces one worker and stops after one failure: a parked worker beside
+  /// running ones makes the output unreadable and the browser contended.
+  #[arg(long, value_name = "WHERE", num_args = 0..=1, default_missing_value = "start")]
+  pub debug: Option<ferridriver_test::debug::DebugMode>,
 
   /// Watch mode: re-run on file changes.
   #[arg(long)]

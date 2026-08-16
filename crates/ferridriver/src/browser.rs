@@ -204,6 +204,7 @@ impl Browser {
   /// itself is a plain `std::sync::Mutex` clone-handle on `self` so
   /// the underlying setter stays sync regardless of whether an async
   /// writer holds the outer `RwLock<BrowserState>`.
+  #[track_caller]
   pub fn new_context(&self) -> crate::action::Action<'static, crate::options::BrowserContextOptions, ContextRef> {
     let this = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { Ok(this.new_context_impl(Some(opts), true)) }))
@@ -220,6 +221,7 @@ impl Browser {
   /// nothing observing the browser should see it. Publishing is
   /// idempotent; a context that is closed without ever being published
   /// is never announced at all.
+  #[track_caller]
   pub fn new_context_unlisted(
     &self,
   ) -> crate::action::Action<'static, crate::options::BrowserContextOptions, ContextRef> {
@@ -451,6 +453,7 @@ impl Browser {
   /// # Errors
   ///
   /// Returns an error if the browser cannot be closed cleanly.
+  #[track_caller]
   pub fn close(&self) -> crate::action::Action<'static, crate::options::BrowserCloseOptions, ()> {
     let this = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { this.close_impl(Some(opts)).await }))

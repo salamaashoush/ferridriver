@@ -594,6 +594,12 @@ pub struct RequestInit {
   pub raw_headers_fn: Option<RawHeadersFn>,
 }
 
+/// How long a navigation waits for its document request to be seen after
+/// the lifecycle says the navigation finished. Long enough to cover the
+/// gap between two event consumers, short enough that a navigation with
+/// no request at all (same-document, back/forward cache) is not held up.
+pub const NAV_REQUEST_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Shared slot for the most recent main-document navigation `Request`.
 ///
 /// Filled by backend network listeners whenever a request with
@@ -608,6 +614,7 @@ pub struct RequestInit {
 #[derive(Clone, Default)]
 pub struct NavRequestSlot {
   inner: Arc<std::sync::Mutex<Option<Request>>>,
+  filled: Arc<tokio::sync::Notify>,
 }
 
 impl NavRequestSlot {
@@ -620,11 +627,38 @@ impl NavRequestSlot {
     if let Ok(mut guard) = self.inner.lock() {
       *guard = Some(request);
     }
+    self.filled.notify_waiters();
   }
 
   #[must_use]
   pub fn get(&self) -> Option<Request> {
     self.inner.lock().ok().and_then(|g| g.clone())
+  }
+
+  /// The navigation request, waiting up to `timeout` for one to land.
+  ///
+  /// The lifecycle events a navigation waiter watches and the network
+  /// events that fill this slot reach us on separate consumers, so a
+  /// document request that went out FIRST can still be processed after
+  /// the `load` that followed it — reading the slot once made
+  /// `goBack()` return `None` for a navigation that plainly had a
+  /// response. A navigation that genuinely issues no request (a
+  /// same-document jump, a back/forward-cache restore) costs the wait
+  /// and then answers `None` as before.
+  pub async fn wait(&self, timeout: std::time::Duration) -> Option<Request> {
+    if let Some(request) = self.get() {
+      return Some(request);
+    }
+    let notified = self.filled.notified();
+    tokio::pin!(notified);
+    // Arm before the second look: a `set` racing between the two would
+    // otherwise notify nobody and leave this waiting out the timeout.
+    notified.as_mut().enable();
+    if let Some(request) = self.get() {
+      return Some(request);
+    }
+    let _ = tokio::time::timeout(timeout, notified).await;
+    self.get()
   }
 
   pub fn clear(&self) {

@@ -49,6 +49,7 @@ pub mod network;
 pub mod observed;
 pub mod options;
 pub mod page;
+pub mod pause;
 pub mod protocol;
 pub mod response;
 pub(crate) mod snapshotter;

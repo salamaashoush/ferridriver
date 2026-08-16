@@ -49,6 +49,34 @@ pub struct TracingStartOptions {
   /// Embed each source file referenced by an action's stack frames as a
   /// `resources/src@<sha1>.txt` entry (the viewer's Source tab).
   pub sources: bool,
+  /// Whether the recording can be read while it is still being made
+  /// (Playwright's `live` option).
+  pub streaming: TraceStreaming,
+}
+
+/// When a recording's events reach the file.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TraceStreaming {
+  /// Buffered: nothing is guaranteed on disk until the trace is
+  /// exported. What a plain run wants — the trace is read from its zip.
+  #[default]
+  Buffered,
+  /// Flushed per event, so a viewer polling the loose files sees the
+  /// recording as it happens. Playwright's `tracing.start({ live: true })`.
+  Live,
+}
+
+impl TraceStreaming {
+  /// From the JS-facing `live?: boolean`.
+  #[must_use]
+  pub fn from_live(live: bool) -> Self {
+    if live { Self::Live } else { Self::Buffered }
+  }
+
+  #[must_use]
+  pub fn is_live(self) -> bool {
+    self == Self::Live
+  }
 }
 
 /// One frame of an action's call stack (`trace.ts` `StackFrame`). The
@@ -59,6 +87,26 @@ pub struct StackFrame {
   pub file: String,
   pub line: u32,
   pub column: u32,
+}
+
+/// `file:line` — how a location is written everywhere a person reads one
+/// (the `--trace` stream, the `--debug` banner, `pauseAt`'s argument).
+/// The column stays a field for the trace, which records all three.
+impl std::fmt::Display for StackFrame {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "{}:{}", self.file, self.line)
+  }
+}
+
+/// Options bag for `tracing.startChunk`.
+///
+/// Playwright: `startChunk({ name?, title? })`. `name` renames the
+/// recording's stream — a runner gives each test its own name so a live
+/// viewer can address it; `title` is what the viewer labels the chunk.
+#[derive(Default, Clone)]
+pub struct TracingChunkOptions {
+  pub name: Option<String>,
+  pub title: Option<String>,
 }
 
 /// Options bag for `tracing.stop` / `tracing.stopChunk`.
@@ -92,6 +140,19 @@ pub enum TraceEvent {
   /// DOM snapshot of one frame (`frame-snapshot` type). Carries the
   /// fully built snapshot object (see `crate::snapshotter`).
   FrameSnapshot(serde_json::Value),
+  /// A failure that belongs to the run rather than to one call
+  /// (`error` type) — an assertion message, a timeout, an unhandled
+  /// panic. The viewer's Errors tab is built from these plus the
+  /// per-action errors.
+  Error(TraceErrorEvent),
+}
+
+/// A run-level failure recorded into the trace
+/// (`testTracing.ts::appendForError`).
+#[derive(Clone)]
+pub struct TraceErrorEvent {
+  pub message: String,
+  pub stack: Vec<StackFrame>,
 }
 
 #[derive(Clone)]
@@ -106,6 +167,14 @@ pub struct BeforeActionEvent {
   /// Call id of the enclosing action (nests actions in the viewer's
   /// tree, e.g. test steps under their parent step).
   pub parent_id: Option<String>,
+  /// Id of the reporter-visible test step this action belongs to.
+  ///
+  /// It is how a trace action and a test-runner step are the same thing
+  /// to a UI that has both: the viewer keys its step data off it
+  /// (`traceModel.hasStepData`), and a runner emitting steps over the
+  /// wire uses the same ids. Trace v8 requires it on every action, so a
+  /// plain browser call carries its own call id here.
+  pub step_id: Option<String>,
   /// `before@<callId>` snapshot name (viewer's Before pane).
   pub before_snapshot: Option<String>,
   /// Call-site stack frames (viewer's Source tab / action location).
@@ -223,33 +292,87 @@ pub struct TraceResource {
   pub bytes: Vec<u8>,
 }
 
+/// Where a recording's loose files live, and who is responsible for
+/// removing them.
+#[derive(Clone, Debug)]
+pub struct TraceLocation {
+  /// Directory holding `<name>.trace`, `<name>.network` and `resources/`.
+  pub dir: std::path::PathBuf,
+  /// Stream name — Playwright's `traceName`. A live viewer finds a
+  /// recording by asking for `<name>.json`, so a runner names its traces
+  /// after the test id.
+  pub name: String,
+  /// Whether the recorder owns `dir` and deletes it when the recording
+  /// ends. False when a caller supplied `tracesDir`: those files are the
+  /// caller's (the live viewer is still reading them).
+  pub owned: bool,
+}
+
+impl TraceLocation {
+  /// A private directory under the system temp dir, removed when the
+  /// recording ends.
+  #[must_use]
+  pub fn temporary() -> Self {
+    static NEXT_SPOOL_ID: AtomicU64 = AtomicU64::new(1);
+    Self {
+      dir: std::env::temp_dir().join(format!(
+        "ferridriver-trace-{}-{}",
+        std::process::id(),
+        NEXT_SPOOL_ID.fetch_add(1, Ordering::Relaxed)
+      )),
+      name: "trace".to_string(),
+      owned: true,
+    }
+  }
+
+  /// Files under a caller-supplied `tracesDir`, left in place afterwards.
+  #[must_use]
+  pub fn in_dir(dir: std::path::PathBuf, name: String) -> Self {
+    Self {
+      dir,
+      name,
+      owned: false,
+    }
+  }
+
+  fn trace_file(&self) -> std::path::PathBuf {
+    self.dir.join(format!("{}.trace", self.name))
+  }
+
+  fn network_file(&self) -> std::path::PathBuf {
+    self.dir.join(format!("{}.network", self.name))
+  }
+}
+
 /// On-disk spool for an in-flight recording: events append to a
-/// buffered `trace.trace` JSONL file, resources land under
-/// `resources/` as they arrive. Memory stays flat no matter how long
-/// the recording runs (screencast frames alone would otherwise grow
-/// unbounded); export streams the spool into the final zip.
+/// `<name>.trace` JSONL file, resources land under `resources/` as they
+/// arrive. Memory stays flat no matter how long the recording runs
+/// (screencast frames alone would otherwise grow unbounded); export
+/// streams the spool into the final zip.
+///
+/// A live recording is read straight out of this directory by the trace
+/// viewer — that is what `live` buys: every line is flushed as it is
+/// written, so a poll never sees a half-written event.
 struct TraceSpool {
-  dir: std::path::PathBuf,
+  location: TraceLocation,
   trace: std::io::BufWriter<std::fs::File>,
+  streaming: TraceStreaming,
   /// sha1-style resource names already written (dedup).
   written_resources: rustc_hash::FxHashSet<String>,
 }
 
 impl TraceSpool {
-  fn create(first_line: &str) -> Result<Self> {
-    static NEXT_SPOOL_ID: AtomicU64 = AtomicU64::new(1);
-    let dir = std::env::temp_dir().join(format!(
-      "ferridriver-trace-{}-{}",
-      std::process::id(),
-      NEXT_SPOOL_ID.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(dir.join("resources"))
-      .map_err(|e| FerriError::backend(format!("create trace spool {}: {e}", dir.display())))?;
-    let file = std::fs::File::create(dir.join("trace.trace"))
+  fn create(location: TraceLocation, streaming: TraceStreaming, first_line: &str) -> Result<Self> {
+    std::fs::create_dir_all(location.dir.join("resources"))
+      .map_err(|e| FerriError::backend(format!("create trace spool {}: {e}", location.dir.display())))?;
+    let file = std::fs::File::create(location.trace_file())
       .map_err(|e| FerriError::backend(format!("create trace spool file: {e}")))?;
+    // A live recording has a reader (the viewer's descriptor poll) that
+    // must never be handed a truncated last line.
     let mut spool = Self {
-      dir,
+      location,
       trace: std::io::BufWriter::new(file),
+      streaming,
       written_resources: rustc_hash::FxHashSet::default(),
     };
     spool.write_line(first_line);
@@ -260,19 +383,27 @@ impl TraceSpool {
     use std::io::Write;
     let _ = self.trace.write_all(line.as_bytes());
     let _ = self.trace.write_all(b"\n");
+    if self.streaming.is_live() {
+      let _ = self.trace.flush();
+    }
   }
 
   fn write_resource(&mut self, resource: &TraceResource) {
     if !self.written_resources.insert(resource.name.clone()) {
       return;
     }
-    let _ = std::fs::write(self.dir.join("resources").join(&resource.name), &resource.bytes);
+    let _ = std::fs::write(
+      self.location.dir.join("resources").join(&resource.name),
+      &resource.bytes,
+    );
   }
 }
 
 impl Drop for TraceSpool {
   fn drop(&mut self) {
-    let _ = std::fs::remove_dir_all(&self.dir);
+    if self.location.owned {
+      let _ = std::fs::remove_dir_all(&self.location.dir);
+    }
   }
 }
 
@@ -286,14 +417,19 @@ pub struct TraceRecorder {
   origin: Instant,
   /// Wall-clock anchor paired with `origin` (epoch ms).
   wall_origin: f64,
-  /// Trace title (`context-options.title`).
-  title: Option<String>,
+  /// Trace title (`context-options.title`). Per-chunk: `startChunk`
+  /// relabels the recording without restarting it, which is how a test
+  /// runner titles each test's chunk of one long-lived recording.
+  title: std::sync::Mutex<Option<String>>,
   /// Whether screencast frames are being captured.
   pub screenshots: bool,
   /// Whether DOM snapshots are being captured around actions.
   pub snapshots: bool,
   /// Whether source files referenced by action stacks are embedded.
   pub sources: bool,
+  /// Whether every event is flushed as it is written, for a reader
+  /// watching the recording as it happens.
+  streaming: TraceStreaming,
   /// Monotonic-ms deadline until which the screencast throttle is
   /// lifted (Playwright's around-action burst, `tracing.ts:783-837`:
   /// `temporarilyDisableThrottling` on before/input/after call).
@@ -310,6 +446,10 @@ pub struct TraceRecorder {
   /// Call id of the live enclosing span (a test step): actions recorded
   /// while set nest under it in the viewer's tree.
   current_parent: std::sync::Mutex<Option<String>>,
+  /// Open `tracing.group()` calls, innermost last. A group is an action
+  /// like any other in the trace — the stack is what makes everything
+  /// recorded until `groupEnd()` a child of it.
+  group_stack: std::sync::Mutex<Vec<String>>,
   /// Shutdown senders for per-page screencast pumps.
   screencast_stops: std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
   /// Browser name recorded in `context-options`.
@@ -331,6 +471,8 @@ pub struct TraceRecorder {
 static NEXT_SNAPSHOT_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 impl TraceRecorder {
+  /// Start recording into `location`.
+  ///
   /// # Errors
   ///
   /// Errors if the on-disk spool cannot be created.
@@ -339,6 +481,7 @@ impl TraceRecorder {
     browser_name: String,
     context_options: serde_json::Value,
     network_len: usize,
+    location: TraceLocation,
   ) -> Result<Self> {
     let origin = Instant::now();
     let wall_origin = now_epoch_ms();
@@ -352,22 +495,46 @@ impl TraceRecorder {
     Ok(Self {
       origin,
       wall_origin,
-      title: options.title.clone(),
+      title: std::sync::Mutex::new(options.title.clone()),
       screenshots: options.screenshots,
       snapshots: options.snapshots,
       sources: options.sources,
+      streaming: options.streaming,
       screencast_burst_until_ms: AtomicU64::new(0),
       sources_embedded: std::sync::Mutex::new(rustc_hash::FxHashSet::default()),
-      spool: std::sync::Mutex::new(TraceSpool::create(&first_line)?),
+      spool: std::sync::Mutex::new(TraceSpool::create(location, options.streaming, &first_line)?),
       network_start_len: AtomicU64::new(network_len as u64),
       next_call_id: AtomicU64::new(1),
       current_parent: std::sync::Mutex::new(None),
+      group_stack: std::sync::Mutex::new(Vec::new()),
       screencast_stops: std::sync::Mutex::new(Vec::new()),
       browser_name,
       context_options,
       spool_version: AtomicU64::new(0),
       snapshot_epoch: AtomicU64::new(NEXT_SNAPSHOT_EPOCH.fetch_add(1, Ordering::Relaxed)),
     })
+  }
+
+  /// Title of the current chunk, as the viewer shows it.
+  #[must_use]
+  pub fn title(&self) -> Option<String> {
+    self
+      .title
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
+  }
+
+  /// Where this recording is being written, and under what name — what a
+  /// runner hands a viewer so it can follow the trace as it grows.
+  #[must_use]
+  pub fn location(&self) -> TraceLocation {
+    self
+      .spool
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .location
+      .clone()
   }
 
   /// Current snapshot-history epoch (see the field doc).
@@ -386,12 +553,70 @@ impl TraceRecorder {
     std::mem::replace(&mut *guard, parent)
   }
 
+  /// What a newly recorded action nests under: the live span when one is
+  /// open (a test step), otherwise the innermost `tracing.group()`.
   fn current_parent(&self) -> Option<String> {
-    self
+    let span = self
       .current_parent
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .clone()
+      .clone();
+    span.or_else(|| self.current_group())
+  }
+
+  fn current_group(&self) -> Option<String> {
+    self
+      .group_stack
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .last()
+      .cloned()
+  }
+
+  /// Open a `tracing.group()`: a titled action everything recorded until
+  /// [`Self::end_group`] nests under (`tracing.ts::group`).
+  pub fn begin_group(&self, name: String, stack: Vec<StackFrame>) {
+    for frame in &stack {
+      self.embed_source(&frame.file);
+    }
+    let call_id = self.next_call_id();
+    let parent_id = self.current_parent();
+    self.push_event(&TraceEvent::Before(BeforeActionEvent {
+      call_id: call_id.clone(),
+      start_time: self.monotonic_ms(),
+      class: "Tracing".to_string(),
+      method: "tracingGroup".to_string(),
+      title: name,
+      params: serde_json::json!({}),
+      page_id: None,
+      parent_id,
+      step_id: Some(call_id.clone()),
+      before_snapshot: None,
+      stack,
+    }));
+    self
+      .group_stack
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(call_id);
+  }
+
+  /// Close the innermost open group. A no-op when none is open, matching
+  /// `tracing.ts::_groupEnd`.
+  pub fn end_group(&self) {
+    let call_id = self
+      .group_stack
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .pop();
+    let Some(call_id) = call_id else { return };
+    self.push_event(&TraceEvent::After(AfterActionEvent {
+      call_id,
+      end_time: self.monotonic_ms(),
+      error: None,
+      after_snapshot: None,
+      attachments: Vec::new(),
+    }));
   }
 
   /// Milliseconds since the recorder's monotonic origin.
@@ -499,20 +724,31 @@ impl TraceRecorder {
 
   /// Reset chunk-local state (`tracing.startChunk` — network sha1s
   /// persist in Playwright, but chunk events/resources restart): the
-  /// old spool is replaced (and its directory removed on drop). The
-  /// fresh `context-options` line carries the CURRENT monotonic time —
-  /// the chunk's events start there, not at 0 (`tracing.ts` stamps
-  /// `monotonicTime()` per chunk; a 0 would show a dead lead-in on the
-  /// viewer timeline).
-  pub fn start_chunk(&self, network_len: usize) {
+  /// old spool is replaced (and its directory removed on drop, when the
+  /// recorder owns it). The fresh `context-options` line carries the
+  /// CURRENT monotonic time — the chunk's events start there, not at 0
+  /// (`tracing.ts` stamps `monotonicTime()` per chunk; a 0 would show a
+  /// dead lead-in on the viewer timeline).
+  ///
+  /// `name` renames the stream for the new chunk (Playwright's
+  /// `startChunk({ name })`), keeping the same directory; `title`
+  /// relabels it in the viewer.
+  pub fn start_chunk(&self, network_len: usize, name: Option<String>, title: Option<String>) {
+    if let Some(title) = title {
+      *self.title.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(title);
+    }
     let first_line = context_options_line(
       &self.browser_name,
       self.wall_origin,
       self.monotonic_ms(),
-      self.title.as_deref(),
+      self.title().as_deref(),
       &self.context_options,
     );
-    if let Ok(fresh) = TraceSpool::create(&first_line) {
+    let mut location = self.location();
+    if let Some(name) = name {
+      location.name = name;
+    }
+    if let Ok(fresh) = TraceSpool::create(location, self.streaming, &first_line) {
       let mut guard = self.spool.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
       *guard = fresh;
     }
@@ -553,7 +789,9 @@ impl TraceRecorder {
       .map_err(|e| FerriError::backend(format!("stat trace spool: {e}")))?
       .len();
     Ok(SpoolSnapshot {
-      dir: spool.dir.clone(),
+      trace_file: spool.location.trace_file(),
+      network_file: spool.location.network_file(),
+      resources_dir: spool.location.dir.join("resources"),
       trace_len,
       resources: spool.written_resources.iter().cloned().collect(),
     })
@@ -569,10 +807,29 @@ impl TraceRecorder {
   ///
   /// Errors if serialization or the zip write fails.
   pub fn export(&self, path: &std::path::Path, network_entries: &[serde_json::Value]) -> Result<()> {
+    // Written beside the trace first: a recording left on disk (a live
+    // directory, a run that is inspected before its zip is opened) is
+    // then a complete trace on its own, network tab included.
+    self.persist_network(network_entries);
     let snapshot = self.snapshot_spool()?;
     let file = std::fs::File::create(path)
       .map_err(|e| FerriError::backend(format!("create trace zip {}: {e}", path.display())))?;
     write_trace_zip(&snapshot, file, network_entries)
+  }
+
+  /// Write the chunk's network stream to `<name>.network`.
+  fn persist_network(&self, entries: &[serde_json::Value]) {
+    let path = self.location().network_file();
+    let mut body = String::new();
+    for entry in entries {
+      use std::fmt::Write as _;
+      let _ = writeln!(
+        body,
+        "{}",
+        serde_json::json!({ "type": "resource-snapshot", "snapshot": entry })
+      );
+    }
+    let _ = std::fs::write(path, body);
   }
 
   /// [`Self::export`] into an in-memory buffer — the live-trace endpoint
@@ -593,7 +850,9 @@ impl TraceRecorder {
 /// Frozen extent of a spool at export time (see
 /// [`TraceRecorder::snapshot_spool`]).
 struct SpoolSnapshot {
-  dir: std::path::PathBuf,
+  trace_file: std::path::PathBuf,
+  network_file: std::path::PathBuf,
+  resources_dir: std::path::PathBuf,
   trace_len: u64,
   resources: Vec<String>,
 }
@@ -621,21 +880,30 @@ fn write_trace_zip<W: std::io::Write + std::io::Seek>(
   let zip_err = |e: zip::result::ZipError| FerriError::backend(format!("write trace zip: {e}"));
   let io_err = |e: std::io::Error| FerriError::backend(format!("write trace zip: {e}"));
 
+  // Canonical entry names inside the archive, whatever the loose files on
+  // disk were called: a single-context zip is `trace.trace` +
+  // `trace.network` (`tracing.ts::_exportZip`).
   writer.start_file("trace.trace", deflated).map_err(zip_err)?;
-  let trace_file = std::fs::File::open(snapshot.dir.join("trace.trace"))
-    .map_err(|e| FerriError::backend(format!("open trace spool: {e}")))?;
+  let trace_file =
+    std::fs::File::open(&snapshot.trace_file).map_err(|e| FerriError::backend(format!("open trace spool: {e}")))?;
   // Copy only the frozen extent — the recorder may have appended since.
   let mut trace_file = std::io::Read::take(trace_file, snapshot.trace_len);
   std::io::copy(&mut trace_file, &mut writer).map_err(io_err)?;
 
   writer.start_file("trace.network", deflated).map_err(zip_err)?;
-  for entry in network_entries {
-    let wrapped = serde_json::json!({ "type": "resource-snapshot", "snapshot": entry });
-    writer.write_all(wrapped.to_string().as_bytes()).map_err(io_err)?;
-    writer.write_all(b"\n").map_err(io_err)?;
+  // The finished network stream is on disk next to the trace; a live
+  // snapshot has none yet and serializes what it was handed (nothing).
+  if let Ok(mut network) = std::fs::File::open(&snapshot.network_file) {
+    std::io::copy(&mut network, &mut writer).map_err(io_err)?;
+  } else {
+    for entry in network_entries {
+      let wrapped = serde_json::json!({ "type": "resource-snapshot", "snapshot": entry });
+      writer.write_all(wrapped.to_string().as_bytes()).map_err(io_err)?;
+      writer.write_all(b"\n").map_err(io_err)?;
+    }
   }
 
-  let resources_dir = snapshot.dir.join("resources");
+  let resources_dir = &snapshot.resources_dir;
   for name in &snapshot.resources {
     // A resource can vanish under a concurrent `start_chunk` swap (the
     // old spool dir is removed); a live snapshot just skips it.
@@ -692,6 +960,23 @@ fn process_alive(pid: u32) -> bool {
   rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// Platform string in the form the viewer's metadata pane (and every
+/// Playwright trace ever recorded) uses: node's `process.platform`, not
+/// Rust's `std::env::consts::OS`.
+fn trace_platform() -> &'static str {
+  match std::env::consts::OS {
+    "macos" => "darwin",
+    "windows" => "win32",
+    other => other,
+  }
+}
+
+/// What produced the trace, shown in the viewer's metadata pane where
+/// Playwright puts its own version.
+fn recorder_version() -> String {
+  format!("ferridriver/{}", env!("CARGO_PKG_VERSION"))
+}
+
 /// First trace line: `context-options` with `version: 8` (the loader
 /// mis-modernizes everything as v6 without it). `monotonic` anchors
 /// the chunk's start on the timeline (0 for a fresh recording, the
@@ -708,7 +993,8 @@ fn context_options_line(
     "type": "context-options",
     "origin": "library",
     "browserName": browser_name,
-    "platform": std::env::consts::OS,
+    "platform": trace_platform(),
+    "playwrightVersion": recorder_version(),
     "wallTime": wall_origin + monotonic,
     "monotonicTime": monotonic,
     "title": title.unwrap_or_default(),
@@ -738,6 +1024,7 @@ fn serialize_before(b: &BeforeActionEvent) -> String {
   obj.insert("params".into(), b.params.clone());
   insert_opt(&mut obj, "pageId", b.page_id.clone().map(Into::into));
   insert_opt(&mut obj, "parentId", b.parent_id.clone().map(Into::into));
+  insert_opt(&mut obj, "stepId", b.step_id.clone().map(Into::into));
   insert_opt(&mut obj, "beforeSnapshot", b.before_snapshot.clone().map(Into::into));
   if !b.stack.is_empty() {
     obj.insert(
@@ -837,6 +1124,16 @@ fn serialize_event(event: &TraceEvent) -> String {
       "snapshot": snapshot,
     })
     .to_string(),
+    TraceEvent::Error(error) => serde_json::json!({
+      "type": "error",
+      "message": error.message,
+      "stack": error
+        .stack
+        .iter()
+        .map(|frame| serde_json::json!({ "file": frame.file, "line": frame.line, "column": frame.column }))
+        .collect::<Vec<_>>(),
+    })
+    .to_string(),
     TraceEvent::ScreencastFrame(f) => serde_json::json!({
       "type": "screencast-frame",
       "pageId": f.page_id,
@@ -871,6 +1168,11 @@ fn now_epoch_ms() -> f64 {
 static RECORDERS: std::sync::LazyLock<std::sync::RwLock<rustc_hash::FxHashMap<String, Arc<TraceRecorder>>>> =
   std::sync::LazyLock::new(|| std::sync::RwLock::new(rustc_hash::FxHashMap::default()));
 
+/// True while any composite is being recorded. Lets [`call_origins_wanted`]
+/// answer without taking the recorder lock — it is asked once per API call
+/// from the host language, including in processes that never trace.
+static RECORDING_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Install a recorder for `composite`. Errors if one is already active.
 pub(crate) fn install_recorder(composite: &str, recorder: Arc<TraceRecorder>) -> Result<()> {
   let mut guard = RECORDERS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -878,6 +1180,7 @@ pub(crate) fn install_recorder(composite: &str, recorder: Arc<TraceRecorder>) ->
     return Err(FerriError::backend("Tracing has been already started".to_string()));
   }
   guard.insert(composite.to_string(), recorder);
+  RECORDING_ACTIVE.store(true, Ordering::Release);
   Ok(())
 }
 
@@ -893,10 +1196,10 @@ pub(crate) fn recorder_for(composite: &str) -> Option<Arc<TraceRecorder>> {
 
 /// Remove and return the recorder for `composite`.
 pub(crate) fn take_recorder(composite: &str) -> Option<Arc<TraceRecorder>> {
-  RECORDERS
-    .write()
-    .unwrap_or_else(std::sync::PoisonError::into_inner)
-    .remove(composite)
+  let mut guard = RECORDERS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+  let taken = guard.remove(composite);
+  RECORDING_ACTIVE.store(!guard.is_empty(), Ordering::Release);
+  taken
 }
 
 /// Result of a live-trace snapshot request (see
@@ -1135,6 +1438,165 @@ pub struct ActionInfo {
   pub title: String,
   /// Call parameters as recorded in the trace.
   pub params: serde_json::Value,
+  /// Where the call was written, when the host captured a call site.
+  pub location: Option<StackFrame>,
+  /// Which script issued the call — see [`CallOrigin::script`].
+  pub script: Option<Arc<str>>,
+}
+
+// ── Call origin ────────────────────────────────────────────────────────
+
+/// What a host knows about an API call that core cannot work out for
+/// itself: where it was written, and who wrote it.
+#[derive(Clone, Default)]
+pub struct CallOrigin {
+  /// Source position of the call, already mapped back to the file the
+  /// user wrote (not the bundle the engine ran).
+  pub location: Option<StackFrame>,
+  /// Identity of the script that issued the call.
+  ///
+  /// A paused test and the client inspecting it drive the same browser
+  /// through the same context, so a gate cannot tell them apart by
+  /// anything the action itself carries. Pausing the inspecting client
+  /// would deadlock it — nobody is left to resume — so the gate skips
+  /// calls it recognises as its own.
+  pub script: Option<Arc<str>>,
+}
+
+tokio::task_local! {
+  /// Set while an API action is open on this task.
+  ///
+  /// A public method that delegates to another public method
+  /// (`page.setContent` waiting through `waitForLoadState`,
+  /// `page.evaluate` going through the main frame) must record ONE
+  /// action, not a nest of them — Playwright suppresses the inner calls
+  /// the same way, by noticing its api zone is already entered.
+  static IN_ACTION: ();
+}
+
+/// Run `fut` as the body of an open API action: actions opened inside it
+/// are the SAME call and record nothing of their own.
+pub(crate) async fn within_action<F: std::future::Future>(fut: F) -> F::Output {
+  if IN_ACTION.try_with(|()| ()).is_ok() {
+    return fut.await;
+  }
+  IN_ACTION.scope((), fut).await
+}
+
+/// Whether an API action is already open on this task.
+fn action_in_progress() -> bool {
+  IN_ACTION.try_with(|()| ()).is_ok()
+}
+
+tokio::task_local! {
+  /// Origin of the API call the current future is performing.
+  ///
+  /// The host scopes this at the language boundary, where the caller's
+  /// stack is still live; core reads it several awaits later, inside
+  /// [`begin_action`]. A task-local and not a slot because
+  /// `Promise.all([a.click(), b.click()])` puts two call sites in flight
+  /// at once, and each future has to keep its own.
+  static CALL_ORIGIN: CallOrigin;
+}
+
+/// Run `fut` with `origin` as the call origin of the actions it opens.
+///
+/// Not an `async fn`: that would be a state machine holding `fut` in more
+/// than one state, which doubles the size of every action future it wraps —
+/// and browser-action futures are already big enough to trip
+/// `clippy::large_futures` on their own.
+pub fn with_call_origin<F: std::future::Future>(
+  origin: CallOrigin,
+  fut: F,
+) -> impl std::future::Future<Output = F::Output> {
+  CALL_ORIGIN.scope(origin, fut)
+}
+
+/// Whether anything would read a call origin.
+///
+/// Capturing one costs the host a stack walk per call (`new Error().stack`
+/// in the script engine), so hosts ask before paying for it.
+#[must_use]
+pub fn call_origins_wanted() -> bool {
+  RECORDING_ACTIVE.load(Ordering::Acquire)
+    || ACTION_GATE_INSTALLED.load(Ordering::Acquire)
+    || ACTION_OBSERVER_INSTALLED.load(Ordering::Acquire)
+}
+
+fn current_call_origin() -> CallOrigin {
+  CALL_ORIGIN.try_with(Clone::clone).unwrap_or_default()
+}
+
+/// The Rust call site of whoever called this.
+///
+/// The script engine reads a JS stack; a Rust test has `#[track_caller]`,
+/// which is exact and free. Chains through any `#[track_caller]` caller, so
+/// a builder method marked with it reports the line the user wrote rather
+/// than its own body.
+///
+/// Yields nothing when an origin is already in scope. The host that set it
+/// knows the caller's real language: under a script, the Rust builder's
+/// `#[track_caller]` site is a file inside `ferridriver-script`, and
+/// reporting that instead of the user's `.ts` line is worse than reporting
+/// nothing.
+#[must_use]
+#[track_caller]
+pub fn call_origin_here() -> CallOrigin {
+  if !call_origins_wanted() || CALL_ORIGIN.try_with(|_| ()).is_ok() {
+    return CallOrigin::default();
+  }
+  let caller = std::panic::Location::caller();
+  CallOrigin {
+    location: Some(StackFrame {
+      file: caller.file().to_string(),
+      line: caller.line(),
+      column: caller.column(),
+    }),
+    script: None,
+  }
+}
+
+// ── Action gate ────────────────────────────────────────────────────────
+
+/// A pause point in front of every action.
+///
+/// `ferridriver test --debug` installs one to hold a test between its API
+/// calls. An [`ActionObserver`] only watches; a gate decides when the
+/// action gets to run, which is why it is async and why it is a separate
+/// trait rather than another observer method.
+#[async_trait::async_trait]
+pub trait ActionGate: Send + Sync + 'static {
+  /// Called with the action about to run. Returning is what releases it.
+  async fn before_action(&self, action: &ActionInfo);
+}
+
+static ACTION_GATE: std::sync::RwLock<Option<Arc<dyn ActionGate>>> = std::sync::RwLock::new(None);
+
+/// Fast path: an ungated process pays one relaxed load per action rather
+/// than a lock acquisition.
+static ACTION_GATE_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Install the process's action gate, replacing any previous one.
+pub fn set_action_gate(gate: Arc<dyn ActionGate>) {
+  *ACTION_GATE.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate);
+  ACTION_GATE_INSTALLED.store(true, Ordering::Release);
+}
+
+/// Remove the action gate. Actions already blocked on it are the gate's
+/// own problem to release — clearing it only stops new ones from waiting.
+pub fn clear_action_gate() {
+  *ACTION_GATE.write().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+  ACTION_GATE_INSTALLED.store(false, Ordering::Release);
+}
+
+fn action_gate() -> Option<Arc<dyn ActionGate>> {
+  if !ACTION_GATE_INSTALLED.load(Ordering::Acquire) {
+    return None;
+  }
+  ACTION_GATE
+    .read()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone()
 }
 
 /// Live view of the action stream, independent of trace recording.
@@ -1246,7 +1708,6 @@ fn action_observer(composite: Option<&str>) -> Option<Arc<dyn ActionObserver>> {
 /// An observed action's start state, carried by the span until it closes.
 struct ObservedAction {
   observer: Arc<dyn ActionObserver>,
-  info: ActionInfo,
   started: Instant,
 }
 
@@ -1262,9 +1723,15 @@ struct ObservedAction {
 /// and the span exists purely to report the action's start and outcome.
 pub struct ActionSpan {
   recorder: Option<Arc<TraceRecorder>>,
+  /// Built once when anything is watching (an observer, a gate, or both)
+  /// and shared by them, so an action that is watched twice is still
+  /// described once.
+  info: Option<Arc<ActionInfo>>,
   /// Boxed so an unobserved span — every span in a normal run — stays small
   /// enough not to bloat the futures that hold one across an await.
   observed: Option<Box<ObservedAction>>,
+  /// Holds the action until the gate lets it run ([`ActionSpan::open`]).
+  gate: Option<Arc<dyn ActionGate>>,
   call_id: String,
   /// `before@<callId>` when the recorder captures snapshots and the
   /// action is page-bound.
@@ -1323,8 +1790,8 @@ impl ActionSpan {
   /// Append one line to this action's call log (the viewer's Log pane).
   pub fn log(&self, message: impl Into<String>) {
     let message = message.into();
-    if let Some(observed) = &self.observed {
-      observed.observer.action_log(&observed.info, &message);
+    if let (Some(observed), Some(info)) = (&self.observed, &self.info) {
+      observed.observer.action_log(info, &message);
     }
     let Some(recorder) = self.recorder.as_ref() else { return };
     recorder.push_event(&TraceEvent::Log(LogEvent {
@@ -1379,9 +1846,9 @@ impl ActionSpan {
   }
 
   fn finish_error_info(self, error: Option<ActionErrorInfo>) {
-    if let Some(observed) = &self.observed {
+    if let (Some(observed), Some(info)) = (&self.observed, &self.info) {
       observed.observer.action_end(
-        &observed.info,
+        info,
         observed.started.elapsed(),
         error.as_ref().map(|e| e.message.as_str()),
       );
@@ -1450,38 +1917,52 @@ pub(crate) fn begin_action(
   page_id: Option<String>,
   params: serde_json::Value,
 ) -> Option<ActionSpan> {
-  let recorder = composite.and_then(recorder_for);
-  let observer = action_observer(composite);
-  // Neither recording nor observing: the common case, and the only cost is
-  // the map probe plus one relaxed atomic load.
-  if recorder.is_none() && observer.is_none() {
+  // An inner call of an action already in flight is that action, not a
+  // new one.
+  if action_in_progress() {
     return None;
   }
-  let title = format!("{}.{method}", class.to_ascii_lowercase());
+  let recorder = composite.and_then(recorder_for);
+  let observer = action_observer(composite);
+  let gate = action_gate();
+  // Neither recording, observing nor gating: the common case, and the only
+  // cost is the map probe plus two relaxed atomic loads.
+  if recorder.is_none() && observer.is_none() && gate.is_none() {
+    return None;
+  }
+  // `BrowserContext` reads as `browserContext`, not `browsercontext`:
+  // only the first letter drops (Playwright's apiName is the client
+  // class's own camelCase name).
+  let title = format!("{}.{method}", lower_first(class));
   let call_id = recorder
     .as_ref()
     .map_or_else(next_unrecorded_call_id, |r| r.next_call_id());
+  let origin = current_call_origin();
+  let info = Arc::new(ActionInfo {
+    call_id: call_id.clone(),
+    class: class.to_string(),
+    method: method.to_string(),
+    title: title.clone(),
+    params: params.clone(),
+    location: origin.location.clone(),
+    script: origin.script,
+  });
   let watch = observer.map(|observer| {
     Box::new(ObservedAction {
       observer,
-      info: ActionInfo {
-        call_id: call_id.clone(),
-        class: class.to_string(),
-        method: method.to_string(),
-        title: title.clone(),
-        params: params.clone(),
-      },
       started: Instant::now(),
     })
   });
   if let Some(watch) = &watch {
-    watch.observer.action_begin(&watch.info);
+    watch.observer.action_begin(&info);
   }
 
   let Some(recorder) = recorder else {
     return Some(ActionSpan {
       recorder: None,
+      info: Some(info),
       observed: watch,
+      gate,
       call_id,
       before_snapshot: None,
       after_snapshot: None,
@@ -1497,6 +1978,10 @@ pub(crate) fn begin_action(
   // `captureSnapshot` — a failed capture leaves a dangling name the
   // viewer tolerates).
   let before_snapshot = (recorder.snapshots && page_id.is_some()).then(|| format!("before@{call_id}"));
+  let stack: Vec<StackFrame> = origin.location.into_iter().collect();
+  for frame in &stack {
+    recorder.embed_source(&frame.file);
+  }
   recorder.push_event(&TraceEvent::Before(BeforeActionEvent {
     call_id: call_id.clone(),
     start_time,
@@ -1506,17 +1991,47 @@ pub(crate) fn begin_action(
     params,
     page_id,
     parent_id,
+    // A browser call is its own step unless a runner claims it as part of
+    // one; v8 wants the field present either way.
+    step_id: Some(call_id.clone()),
     before_snapshot: before_snapshot.clone(),
-    stack: Vec::new(),
+    stack,
   }));
   Some(ActionSpan {
     recorder: Some(recorder),
+    info: Some(info),
     observed: watch,
+    gate,
     call_id,
     before_snapshot,
     after_snapshot: None,
     attachments: Vec::new(),
   })
+}
+
+/// Hold the action at the gate, if one is installed, before it runs.
+///
+/// Threaded through the three places a span is opened rather than folded
+/// into [`begin_action`] so the pause lands after the before-snapshot is
+/// captured: a client that attaches while the action is held should see
+/// the same page the trace recorded, not one frame earlier.
+pub(crate) async fn open_action(span: Option<ActionSpan>) -> Option<ActionSpan> {
+  if let Some(span) = &span
+    && let (Some(gate), Some(info)) = (&span.gate, &span.info)
+  {
+    gate.before_action(info).await;
+  }
+  span
+}
+
+/// A class name as it reads in an API call: `Page` -> `page`,
+/// `BrowserContext` -> `browserContext`.
+fn lower_first(class: &str) -> String {
+  let mut chars = class.chars();
+  match chars.next() {
+    Some(first) => first.to_ascii_lowercase().to_string() + chars.as_str(),
+    None => String::new(),
+  }
 }
 
 /// Call ids for spans that exist only for an observer: no recorder owns the
@@ -1537,12 +2052,32 @@ pub struct CustomAction {
   pub params: serde_json::Value,
   /// Call id of the enclosing action, for nesting.
   pub parent_id: Option<String>,
+  /// Reporter-visible step id this action IS, when the caller has one —
+  /// what lets a UI line its test-step tree up with the trace. Defaults
+  /// to the action's own call id.
+  pub step_id: Option<String>,
   /// Shift the span's start time into the past (spans recorded after
   /// the fact).
   pub backdate_ms: f64,
   /// Call-site stack frames (the viewer's Source tab; a
   /// `sources: true` recording embeds each referenced file).
   pub stack: Vec<StackFrame>,
+}
+
+/// Record a failure that belongs to the run rather than to one call —
+/// what a test runner writes when a test fails, so the viewer's Errors
+/// tab shows the assertion and not only the call that raised it
+/// (`testTracing.ts::appendForError`).
+///
+/// No-op when `composite` is not being traced.
+pub fn record_error(composite: &str, message: impl Into<String>, stack: Vec<StackFrame>) {
+  let Some(recorder) = recorder_for(composite) else {
+    return;
+  };
+  recorder.push_event(&TraceEvent::Error(TraceErrorEvent {
+    message: message.into(),
+    stack,
+  }));
 }
 
 /// Open a titled action span on the active recorder for `composite`.
@@ -1566,12 +2101,15 @@ pub fn begin_custom_action(composite: &str, action: CustomAction) -> Option<Acti
     params: action.params,
     page_id: None,
     parent_id: action.parent_id,
+    step_id: Some(action.step_id.unwrap_or_else(|| call_id.clone())),
     before_snapshot: None,
     stack: action.stack,
   }));
   Some(ActionSpan {
     recorder: Some(recorder),
+    info: None,
     observed: None,
+    gate: None,
     call_id,
     before_snapshot: None,
     after_snapshot: None,
@@ -1582,6 +2120,14 @@ pub fn begin_custom_action(composite: &str, action: CustomAction) -> Option<Acti
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Stands in for a public action builder: `#[track_caller]` makes
+  /// `call_origin_here` report this function's CALLER, which is what puts a
+  /// user's `.rs` line on the action rather than the builder's body.
+  #[track_caller]
+  fn builder() -> CallOrigin {
+    call_origin_here()
+  }
 
   /// Records which observer saw which action, for the scoping tests.
   #[derive(Debug)]
@@ -1644,10 +2190,23 @@ mod tests {
     );
     drop(guard_b);
 
+    // While something is watching, a Rust host's call site comes from
+    // `#[track_caller]` — and it chains: the location is the caller of
+    // `builder`, not the body that calls `call_origin_here`. That chaining
+    // is the whole reason every `Action`-returning builder carries the
+    // attribute, and it is what lets `pauseAt` name a line in a `.rs` test.
+    let (origin, here) = (builder(), line!());
+    let frame = origin.location.expect("a global observer is still installed");
+    assert!(frame.file.ends_with("trace.rs"), "call site file: {}", frame.file);
+    assert_eq!(frame.line, here, "the caller's line, not the builder's body");
+
+    // …and nothing is captured once nothing is watching, so an ordinary run
+    // pays no stack walk.
     *ACTION_OBSERVER
       .write()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     ACTION_OBSERVER_INSTALLED.store(false, Ordering::Release);
+    assert!(builder().location.is_none(), "unwatched runs capture nothing");
   }
 
   #[test]
@@ -1680,6 +2239,7 @@ mod tests {
       params: serde_json::json!({ "selector": "#a" }),
       page_id: Some("page@1".into()),
       parent_id: None,
+      step_id: None,
       before_snapshot: Some("before@call@1".into()),
       stack: Vec::new(),
     }));
@@ -1744,6 +2304,7 @@ mod tests {
       "chromium".into(),
       serde_json::json!({}),
       0,
+      TraceLocation::temporary(),
     )
     .expect("spool");
     recorder.push_event(&TraceEvent::Before(BeforeActionEvent {
@@ -1755,6 +2316,7 @@ mod tests {
       params: serde_json::json!({ "url": "about:blank" }),
       page_id: None,
       parent_id: None,
+      step_id: None,
       before_snapshot: None,
       stack: Vec::new(),
     }));
@@ -1790,6 +2352,162 @@ mod tests {
       Some(8),
       "first line must be context-options v8"
     );
+    assert_eq!(first["platform"].as_str(), Some(trace_platform()));
+    assert!(
+      first["playwrightVersion"]
+        .as_str()
+        .is_some_and(|v| v.starts_with("ferridriver/")),
+      "the recorder identifies itself: {first}"
+    );
     std::fs::remove_dir_all(&dir).ok();
+  }
+
+  /// A recording under a caller's `tracesDir` is named, left in place,
+  /// and readable as it is written — the three things a viewer following
+  /// a running test depends on.
+  #[test]
+  fn a_named_live_recording_is_readable_while_it_runs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let location = TraceLocation::in_dir(dir.path().to_path_buf(), "abc123-test".to_string());
+    let recorder = TraceRecorder::new(
+      &TracingStartOptions {
+        streaming: TraceStreaming::Live,
+        ..TracingStartOptions::default()
+      },
+      "chromium".into(),
+      serde_json::json!({}),
+      0,
+      location,
+    )
+    .expect("spool");
+
+    recorder.push_event(&TraceEvent::Before(BeforeActionEvent {
+      call_id: "call@1".into(),
+      start_time: 0.0,
+      class: "Page".into(),
+      method: "goto".into(),
+      title: "page.goto".into(),
+      params: serde_json::json!({ "url": "about:blank" }),
+      page_id: Some("page@1".into()),
+      parent_id: None,
+      step_id: Some("call@1".into()),
+      before_snapshot: None,
+      stack: Vec::new(),
+    }));
+
+    // Still recording: no stop, no zip, and the file already has both
+    // lines in it.
+    let path = dir.path().join("abc123-test.trace");
+    let written = std::fs::read_to_string(&path).expect("live trace file");
+    assert_eq!(written.lines().count(), 2, "unflushed live trace: {written:?}");
+    let action: serde_json::Value = serde_json::from_str(written.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(action["stepId"].as_str(), Some("call@1"), "v8 actions carry a stepId");
+
+    drop(recorder);
+    assert!(path.exists(), "a caller's tracesDir must survive the recorder");
+  }
+
+  #[test]
+  fn a_temporary_recording_cleans_up_after_itself() {
+    let recorder = TraceRecorder::new(
+      &TracingStartOptions::default(),
+      "chromium".into(),
+      serde_json::json!({}),
+      0,
+      TraceLocation::temporary(),
+    )
+    .expect("spool");
+    let dir = recorder.location().dir;
+    assert!(dir.exists());
+    drop(recorder);
+    assert!(!dir.exists(), "temp spool left behind");
+  }
+
+  #[test]
+  fn a_chunk_can_be_renamed_and_retitled() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let recorder = TraceRecorder::new(
+      &TracingStartOptions {
+        title: Some("first".into()),
+        streaming: TraceStreaming::Live,
+        ..TracingStartOptions::default()
+      },
+      "chromium".into(),
+      serde_json::json!({}),
+      0,
+      TraceLocation::in_dir(dir.path().to_path_buf(), "one".to_string()),
+    )
+    .expect("spool");
+
+    recorder.start_chunk(0, Some("two".to_string()), Some("second".to_string()));
+    assert_eq!(recorder.location().name, "two");
+    assert_eq!(recorder.title().as_deref(), Some("second"));
+
+    let second = std::fs::read_to_string(dir.path().join("two.trace")).expect("second chunk");
+    let context: serde_json::Value = serde_json::from_str(second.lines().next().unwrap()).unwrap();
+    assert_eq!(context["title"].as_str(), Some("second"));
+    assert!(dir.path().join("one.trace").exists(), "previous chunk was discarded");
+  }
+
+  #[test]
+  fn groups_nest_the_actions_recorded_inside_them() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let recorder = TraceRecorder::new(
+      &TracingStartOptions {
+        streaming: TraceStreaming::Live,
+        ..TracingStartOptions::default()
+      },
+      "chromium".into(),
+      serde_json::json!({}),
+      0,
+      TraceLocation::in_dir(dir.path().to_path_buf(), "grouped".to_string()),
+    )
+    .expect("spool");
+
+    recorder.begin_group(
+      "checkout".to_string(),
+      vec![StackFrame {
+        file: "/spec.ts".into(),
+        line: 3,
+        column: 1,
+      }],
+    );
+    let inner_parent = recorder.current_parent();
+    recorder.end_group();
+    let after_end = recorder.current_parent();
+
+    let written = std::fs::read_to_string(dir.path().join("grouped.trace")).expect("trace");
+    let events: Vec<serde_json::Value> = written.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let group = &events[1];
+    assert_eq!(group["type"].as_str(), Some("before"));
+    assert_eq!(group["class"].as_str(), Some("Tracing"));
+    assert_eq!(group["method"].as_str(), Some("tracingGroup"));
+    assert_eq!(group["title"].as_str(), Some("checkout"));
+    assert_eq!(group["stack"][0]["line"].as_u64(), Some(3));
+
+    assert_eq!(
+      inner_parent.as_deref(),
+      group["callId"].as_str(),
+      "actions inside a group nest under it"
+    );
+    assert!(after_end.is_none(), "groupEnd pops the group");
+    assert_eq!(events[2]["type"].as_str(), Some("after"));
+    assert_eq!(events[2]["callId"], group["callId"]);
+  }
+
+  #[test]
+  fn run_level_errors_serialize_for_the_errors_tab() {
+    let line = serialize_event(&TraceEvent::Error(TraceErrorEvent {
+      message: "expect(received).toBe(expected)".into(),
+      stack: vec![StackFrame {
+        file: "/spec.ts".into(),
+        line: 9,
+        column: 2,
+      }],
+    }));
+    let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid json");
+    assert_eq!(parsed["type"].as_str(), Some("error"));
+    assert_eq!(parsed["message"].as_str(), Some("expect(received).toBe(expected)"));
+    assert_eq!(parsed["stack"][0]["file"].as_str(), Some("/spec.ts"));
   }
 }

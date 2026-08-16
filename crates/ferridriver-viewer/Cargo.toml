@@ -1,0 +1,30 @@
+[package]
+name = "ferridriver-viewer"
+description = "Embedded Playwright-compatible web apps (trace viewer, UI mode, recorder, HTML report) and the routes that feed them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ferridriver = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+rustc-hash = "2"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+mime_guess = "2"
+tower = "0.5"
+tower-http = { version = "0.7", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3"

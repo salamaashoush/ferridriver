@@ -268,6 +268,21 @@ pub struct BrowserState {
   pub user_data_dir: Option<String>,
   /// Default viewport for new pages.
   pub default_viewport: Option<crate::options::ViewportConfig>,
+  /// Where a recording writes its loose trace files (Playwright's
+  /// `browserType.launch({ tracesDir })`). Unset means a temporary
+  /// directory that is discarded once the trace has been exported; a
+  /// runner that wants its live traces readable while a test runs points
+  /// this at a directory it serves.
+  pub traces_dir: Option<std::path::PathBuf>,
+  /// Per-context override of [`Self::traces_dir`], keyed by composite
+  /// session key.
+  ///
+  /// A parallel test runner reuses ONE browser across its workers, so
+  /// "which directory do this recording's files go in" cannot be a
+  /// property of the browser: each worker owns a different artifacts
+  /// directory and its live traces have to land there. Sync mutex for
+  /// the same reason as `record_video` — the setter is not async.
+  pub context_traces_dir: Arc<std::sync::Mutex<HashMap<String, std::path::PathBuf>>>,
   /// Reason passed to the most recent `Browser::close({ reason })` call,
   /// surfaced on `TargetClosed` errors emitted after shutdown.
   close_reason: Option<String>,
@@ -427,6 +442,8 @@ impl BrowserState {
       headless: plan.headless,
       user_data_dir: plan.user_data_dir,
       default_viewport: plan.default_viewport,
+      traces_dir: plan.traces_dir,
+      context_traces_dir: Arc::new(std::sync::Mutex::new(HashMap::default())),
       close_reason: None,
       context_events: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_closed: Arc::new(std::sync::Mutex::new(HashMap::default())),
@@ -573,6 +590,29 @@ impl BrowserState {
   pub fn get_record_video(&self, composite_key: &str) -> Option<crate::options::RecordVideoOptions> {
     let map = self.record_video.lock().ok()?;
     map.get(composite_key).cloned()
+  }
+
+  /// Send `composite_key`'s recordings to `dir` instead of the browser's
+  /// `tracesDir`. See [`Self::context_traces_dir`].
+  pub fn set_context_traces_dir(&self, composite_key: &str, dir: std::path::PathBuf) {
+    let mut map = match self.context_traces_dir.lock() {
+      Ok(guard) => guard,
+      Err(poisoned) => poisoned.into_inner(),
+    };
+    map.insert(composite_key.to_string(), dir);
+  }
+
+  /// Where `composite_key`'s recordings go: its own override, else the
+  /// browser's `tracesDir`, else nowhere in particular (a temporary
+  /// directory the recorder owns).
+  #[must_use]
+  pub fn traces_dir_for(&self, composite_key: &str) -> Option<std::path::PathBuf> {
+    let scoped = self
+      .context_traces_dir
+      .lock()
+      .map(|map| map.get(composite_key).cloned())
+      .unwrap_or_default();
+    scoped.or_else(|| self.traces_dir.clone())
   }
 
   /// Shared handle to the per-context binding registry. Cheap clone of

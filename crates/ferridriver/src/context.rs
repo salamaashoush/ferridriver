@@ -644,6 +644,31 @@ impl ContextRef {
     self.key.to_composite()
   }
 
+  /// Run `op` as a traced context action — the viewer shows it as
+  /// `browserContext.<method>`. No DOM snapshots: a context call belongs
+  /// to no page, which is also why Playwright's viewer shows these
+  /// without before/after frames.
+  ///
+  /// Boxed rather than `async fn` so the wrapped calls do not carry the
+  /// span machinery inside their own state machines.
+  pub(crate) fn traced<'a, T: 'a>(
+    &'a self,
+    method: &'a str,
+    params: serde_json::Value,
+    op: impl std::future::Future<Output = Result<T>> + 'a,
+  ) -> impl std::future::Future<Output = Result<T>> + 'a {
+    Box::pin(async move {
+      let composite = self.composite();
+      let span = crate::trace::begin_action(Some(&composite), "BrowserContext", method, None, params);
+      let span = crate::trace::open_action(span).await;
+      let result = crate::trace::within_action(op).await;
+      if let Some(span) = span {
+        span.finish(result.as_ref().err());
+      }
+      result
+    })
+  }
+
   /// Shared per-state HAR-recorder registry (used by [`crate::tracing::Tracing`]).
   pub(crate) async fn har_recorders(
     &self,
@@ -670,15 +695,19 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or cookie retrieval fails.
   pub async fn cookies(&self) -> Result<Vec<CookieData>> {
-    let page = {
-      let state = self.state.read().await;
-      state.context(&self.name)?.active_page().cloned()
-    };
-    if let Some(page) = page {
-      page.get_cookies().await
-    } else {
-      Ok(Vec::new())
-    }
+    self
+      .traced("cookies", serde_json::json!({}), async {
+        let page = {
+          let state = self.state.read().await;
+          state.context(&self.name)?.active_page().cloned()
+        };
+        if let Some(page) = page {
+          page.get_cookies().await
+        } else {
+          Ok(Vec::new())
+        }
+      })
+      .await
   }
 
   /// Export the current storage state of this context — cookies plus a
@@ -701,6 +730,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist, cookie retrieval fails,
   /// or (when `path` is set) the file cannot be written.
+  #[track_caller]
   pub fn storage_state(
     &self,
   ) -> crate::action::Action<'static, crate::options::StorageStateOptions, crate::options::StorageState> {
@@ -806,16 +836,21 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or setting cookies fails.
   pub async fn add_cookies(&self, cookies: Vec<CookieData>) -> Result<()> {
-    let page = {
-      let state = self.state.read().await;
-      state.context(&self.name)?.active_page().cloned()
-    }
-    .ok_or(crate::error::FerriError::NotConnected)?;
+    let count = cookies.len();
+    self
+      .traced("addCookies", serde_json::json!({ "cookies": count }), async move {
+        let page = {
+          let state = self.state.read().await;
+          state.context(&self.name)?.active_page().cloned()
+        }
+        .ok_or(crate::error::FerriError::NotConnected)?;
 
-    for cookie in cookies {
-      page.set_cookie(cookie).await?;
-    }
-    Ok(())
+        for cookie in cookies {
+          page.set_cookie(cookie).await?;
+        }
+        Ok(())
+      })
+      .await
   }
 
   /// The context-bound HTTP client backing Playwright's
@@ -843,14 +878,18 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or clearing cookies fails.
   pub async fn clear_cookies(&self) -> Result<()> {
-    let page = {
-      let state = self.state.read().await;
-      state.context(&self.name)?.active_page().cloned()
-    };
-    if let Some(page) = page {
-      page.clear_cookies().await?;
-    }
-    Ok(())
+    self
+      .traced("clearCookies", serde_json::json!({}), async {
+        let page = {
+          let state = self.state.read().await;
+          state.context(&self.name)?.active_page().cloned()
+        };
+        if let Some(page) = page {
+          page.clear_cookies().await?;
+        }
+        Ok(())
+      })
+      .await
   }
 
   /// Clear cookies matching the given filters (matches Playwright's `context.clearCookies(options?)`).
@@ -970,7 +1009,13 @@ impl ContextRef {
   /// Returns an error if the re-application fails on any page.
   pub async fn grant_permissions(&self, permissions: &[String], _origin: Option<&str>) -> Result<()> {
     let perms = permissions.to_vec();
-    self.mutate_options(|o| o.permissions = Some(perms)).await
+    self
+      .traced(
+        "grantPermissions",
+        serde_json::json!({ "permissions": permissions }),
+        self.mutate_options(|o| o.permissions = Some(perms)),
+      )
+      .await
   }
 
   /// Clear all granted permissions.
@@ -979,13 +1024,17 @@ impl ContextRef {
   ///
   /// Returns an error if resetting permissions fails.
   pub async fn clear_permissions(&self) -> Result<()> {
-    // Reset via the backend's `Browser.resetPermissions` on every
-    // page, then drop the list from the options bag.
-    let pages = self.pages().await?;
-    for page in &pages {
-      page.inner().reset_permissions().await?;
-    }
-    self.mutate_options(|o| o.permissions = None).await
+    self
+      .traced("clearPermissions", serde_json::json!({}), async {
+        // Reset via the backend's `Browser.resetPermissions` on every
+        // page, then drop the list from the options bag.
+        let pages = self.pages().await?;
+        for page in &pages {
+          page.inner().reset_permissions().await?;
+        }
+        self.mutate_options(|o| o.permissions = None).await
+      })
+      .await
   }
 
   /// Close this context (remove from `BrowserState`). Mirrors
@@ -996,6 +1045,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if state lock acquisition fails.
+  #[track_caller]
   pub fn close(&self) -> crate::action::Action<'static, crate::options::ContextCloseOptions, ()> {
     let ctx = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { ctx.close_impl(Some(opts)).await }))
@@ -1095,6 +1145,17 @@ impl ContextRef {
     Ok(())
   }
 
+  /// Write this context's recordings into `dir` rather than the
+  /// browser's `tracesDir`.
+  ///
+  /// A test runner sets it per test so each worker's live traces land in
+  /// the directory that worker's artifacts are served from, even though
+  /// every worker shares one browser.
+  pub async fn set_traces_dir(&self, dir: std::path::PathBuf) {
+    let composite = self.key.to_composite();
+    self.state.read().await.set_context_traces_dir(&composite, dir);
+  }
+
   // ── Context-level events ────────────────────────────────────────────────
 
   /// Register a context-level event listener. Supported events:
@@ -1148,7 +1209,13 @@ impl ContextRef {
     arg: Option<serde_json::Value>,
   ) -> Result<crate::disposable::Disposable> {
     let source = crate::options::evaluation_script(script, arg.as_ref())?;
-    self.add_init_script_source(source).await
+    self
+      .traced(
+        "addInitScript",
+        serde_json::json!({}),
+        self.add_init_script_source(source),
+      )
+      .await
   }
 
   /// Register a lowered init-script source on this context: applied to
@@ -1219,7 +1286,13 @@ impl ContextRef {
   ///
   /// Returns an error if re-application fails on any page.
   pub async fn set_geolocation(&self, geolocation: Option<crate::options::Geolocation>) -> Result<()> {
-    self.mutate_options(|o| o.geolocation = geolocation).await
+    self
+      .traced(
+        "setGeolocation",
+        serde_json::json!({ "geolocation": geolocation.is_some() }),
+        self.mutate_options(|o| o.geolocation = geolocation),
+      )
+      .await
   }
 
   /// Playwright: `browserContext.setExtraHTTPHeaders(headers)`.
@@ -1228,8 +1301,16 @@ impl ContextRef {
   ///
   /// Returns an error if re-application fails on any page.
   pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<()> {
+    let names: Vec<&String> = headers.keys().collect();
+    let params = serde_json::json!({ "headers": names });
     let headers = headers.clone();
-    self.mutate_options(|o| o.extra_http_headers = Some(headers)).await
+    self
+      .traced(
+        "setExtraHTTPHeaders",
+        params,
+        self.mutate_options(|o| o.extra_http_headers = Some(headers)),
+      )
+      .await
   }
 
   /// Playwright: `browserContext.setOffline(offline)`.
@@ -1238,7 +1319,13 @@ impl ContextRef {
   ///
   /// Returns an error if re-application fails on any page.
   pub async fn set_offline(&self, offline: bool) -> Result<()> {
-    self.mutate_options(|o| o.offline = Some(offline)).await
+    self
+      .traced(
+        "setOffline",
+        serde_json::json!({ "offline": offline }),
+        self.mutate_options(|o| o.offline = Some(offline)),
+      )
+      .await
   }
 
   /// Playwright: `browserContext.setHTTPCredentials(httpCredentials |
@@ -1259,6 +1346,16 @@ impl ContextRef {
   /// Returns an error if any open page's backend rejects the change
   /// (e.g. a backend that does not support auth-challenge interception).
   pub async fn set_http_credentials(&self, credentials: Option<crate::options::HttpCredentials>) -> Result<()> {
+    self
+      .traced(
+        "setHTTPCredentials",
+        serde_json::json!({ "httpCredentials": credentials.is_some() }),
+        self.set_http_credentials_untraced(credentials),
+      )
+      .await
+  }
+
+  async fn set_http_credentials_untraced(&self, credentials: Option<crate::options::HttpCredentials>) -> Result<()> {
     let composite = self.key.to_composite();
     {
       let state = self.state.read().await;
@@ -1294,12 +1391,17 @@ impl ContextRef {
     handler: crate::route::RouteHandler,
     times: Option<u32>,
   ) -> Result<crate::disposable::Disposable> {
-    let registration = crate::route::RegisteredRoute::context_scoped(matcher.clone(), handler, times);
-    self.install_context_route(registration).await?;
-    let ctx = self.clone();
-    Ok(crate::disposable::Disposable::new(move || async move {
-      ctx.unroute(&matcher).await
-    }))
+    let params = serde_json::json!({ "url": matcher.describe() });
+    self
+      .traced("route", params, async {
+        let registration = crate::route::RegisteredRoute::context_scoped(matcher.clone(), handler, times);
+        self.install_context_route(registration).await?;
+        let ctx = self.clone();
+        Ok(crate::disposable::Disposable::new(move || async move {
+          ctx.unroute(&matcher).await
+        }))
+      })
+      .await
   }
 
   /// Register a context-scoped route: push into the per-context registry
@@ -1402,6 +1504,7 @@ impl ContextRef {
   ///
   /// Returns an error if the HAR file cannot be read/parsed or routes fail
   /// to install.
+  #[track_caller]
   pub fn route_from_har(
     &self,
     path: &std::path::Path,
@@ -1471,6 +1574,16 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or route removal fails.
   pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
+    self
+      .traced(
+        "unroute",
+        serde_json::json!({ "url": matcher.describe() }),
+        self.unroute_untraced(matcher),
+      )
+      .await
+  }
+
+  async fn unroute_untraced(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
     {
       let registry = self.state.read().await.context_routes_handle();
       let mut guard = registry.write().await;

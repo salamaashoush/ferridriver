@@ -66,6 +66,20 @@ pub enum UrlMatcher {
   Predicate(UrlPredicate),
 }
 
+impl UrlMatcher {
+  /// How the matcher reads in a trace or an error — the glob or regex
+  /// source the caller wrote, since a predicate has no printable form.
+  #[must_use]
+  pub fn describe(&self) -> String {
+    match self {
+      Self::Any => "**/*".to_string(),
+      Self::Glob { pattern, .. } => pattern.clone(),
+      Self::Regex(regex) => format!("/{}/", regex.as_str()),
+      Self::Predicate(_) => "<predicate>".to_string(),
+    }
+  }
+}
+
 /// Compile a JS `RegExp` source/flags pair into a [`regex::Regex`].
 ///
 /// JS flags are translated to `regex` crate inline flags at the front of

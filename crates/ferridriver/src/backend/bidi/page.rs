@@ -735,7 +735,17 @@ impl BidiPage {
     }
 
     match result {
-      Ok(Ok(_)) => Ok(self.await_nav_response().await),
+      // `navigation` is null for a same-document jump — nothing was
+      // requested, so nothing is coming.
+      Ok(Ok(value)) => {
+        let new_document = value.get("navigation").is_some_and(|id| !id.is_null());
+        let grace = if new_document {
+          crate::network::NAV_REQUEST_GRACE
+        } else {
+          std::time::Duration::ZERO
+        };
+        Ok(self.await_nav_response(grace).await)
+      },
       Ok(Err(e)) => Err(e),
       Err(_) => Err(FerriError::timeout(format!("navigating to {url}"), timeout_ms)),
     }
@@ -745,8 +755,13 @@ impl BidiPage {
   /// listener for the most recent navigation. Returns `None` for
   /// same-document navigations (no new request was issued) or when
   /// the underlying request ended in failure.
-  async fn await_nav_response(&self) -> Option<Response> {
-    let req = self.nav_request_slot.get()?;
+  /// `grace` is how long to wait for the document request to be seen:
+  /// non-zero only when a new document committed, since the request and
+  /// the navigation result reach us on separate consumers and the
+  /// request can be processed second. A same-document navigation issues
+  /// no request, so waiting there would only slow it down.
+  async fn await_nav_response(&self, grace: std::time::Duration) -> Option<Response> {
+    let req = self.nav_request_slot.wait(grace).await?;
     req.response().await.ok().flatten()
   }
 
@@ -813,7 +828,7 @@ impl BidiPage {
     .await;
 
     match result {
-      Ok(Ok(_)) => Ok(self.await_nav_response().await),
+      Ok(Ok(_)) => Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(FerriError::timeout("reloading", timeout_ms)),
     }
@@ -834,7 +849,7 @@ impl BidiPage {
     .await;
 
     match result {
-      Ok(Ok(_)) => Ok(self.await_nav_response().await),
+      Ok(Ok(_)) => Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(FerriError::timeout("go_back", timeout_ms)),
     }
@@ -855,7 +870,7 @@ impl BidiPage {
     .await;
 
     match result {
-      Ok(Ok(_)) => Ok(self.await_nav_response().await),
+      Ok(Ok(_)) => Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(FerriError::timeout("go_forward", timeout_ms)),
     }

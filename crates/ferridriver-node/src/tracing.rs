@@ -60,20 +60,42 @@ impl Tracing {
   }
 
   /// Playwright: `tracing.start(options?: { name?, title?, screenshots?,
-  /// snapshots?, sources? })`. Records a Playwright-format trace; write
-  /// it with `stop({ path })` and open it in `npx playwright show-trace`.
+  /// snapshots?, sources?, live? })`. Records a Playwright-format trace;
+  /// write it with `stop({ path })` and open it with `ferridriver trace
+  /// view` (or `npx playwright show-trace`).
   #[napi(
-    ts_args_type = "options?: { name?: string, title?: string, screenshots?: boolean, snapshots?: boolean, sources?: boolean }"
+    ts_args_type = "options?: { name?: string, title?: string, screenshots?: boolean, snapshots?: boolean, sources?: boolean, live?: boolean }"
   )]
   pub async fn start(&self, options: Option<TracingStartOptionsJs>) -> Result<()> {
     let opts = options.map(Into::into).unwrap_or_default();
     self.inner.tracing().start(opts).await.into_napi()
   }
 
-  /// Playwright: `tracing.startChunk(options?)`.
+  /// Playwright: `tracing.startChunk(options?: { name?, title? })`.
+  #[napi(ts_args_type = "options?: { name?: string, title?: string }")]
+  pub async fn start_chunk(&self, options: Option<TracingChunkOptionsJs>) -> Result<()> {
+    let opts = options.map(Into::into).unwrap_or_default();
+    self.inner.tracing().start_chunk(opts).await.into_napi()
+  }
+
+  /// Playwright: `tracing.group(name, options?: { location? })`. Nests
+  /// everything up to `groupEnd()` under one entry in the viewer.
+  #[napi(ts_args_type = "name: string, options?: { location?: { file: string, line?: number, column?: number } }")]
+  pub fn group(&self, name: String, options: Option<TracingGroupOptionsJs>) -> Result<()> {
+    let location = options
+      .and_then(|o| o.location)
+      .map(|location| ferridriver::trace::StackFrame {
+        file: location.file,
+        line: location.line.unwrap_or(0),
+        column: location.column.unwrap_or(0),
+      });
+    self.inner.tracing().group(name, location).into_napi()
+  }
+
+  /// Playwright: `tracing.groupEnd()`.
   #[napi]
-  pub async fn start_chunk(&self) -> Result<()> {
-    self.inner.tracing().start_chunk().await.into_napi()
+  pub fn group_end(&self) -> Result<()> {
+    self.inner.tracing().group_end().into_napi()
   }
 
   /// Playwright: `tracing.stopChunk(options?: { path? })`.
@@ -99,6 +121,9 @@ pub struct TracingStartOptionsJs {
   pub screenshots: Option<bool>,
   pub snapshots: Option<bool>,
   pub sources: Option<bool>,
+  /// Flush events as they happen so a viewer can follow the recording
+  /// while it is being made.
+  pub live: Option<bool>,
 }
 
 impl From<TracingStartOptionsJs> for ferridriver::trace::TracingStartOptions {
@@ -109,8 +134,39 @@ impl From<TracingStartOptionsJs> for ferridriver::trace::TracingStartOptions {
       screenshots: o.screenshots.unwrap_or(false),
       snapshots: o.snapshots.unwrap_or(false),
       sources: o.sources.unwrap_or(false),
+      streaming: ferridriver::trace::TraceStreaming::from_live(o.live.unwrap_or(false)),
     }
   }
+}
+
+/// Options bag for `tracing.startChunk`.
+#[napi(object)]
+pub struct TracingChunkOptionsJs {
+  pub name: Option<String>,
+  pub title: Option<String>,
+}
+
+impl From<TracingChunkOptionsJs> for ferridriver::trace::TracingChunkOptions {
+  fn from(o: TracingChunkOptionsJs) -> Self {
+    Self {
+      name: o.name,
+      title: o.title,
+    }
+  }
+}
+
+/// `location` of a `tracing.group()` call — where the group was opened.
+#[napi(object)]
+pub struct TracingGroupLocationJs {
+  pub file: String,
+  pub line: Option<u32>,
+  pub column: Option<u32>,
+}
+
+/// Options bag for `tracing.group`.
+#[napi(object)]
+pub struct TracingGroupOptionsJs {
+  pub location: Option<TracingGroupLocationJs>,
 }
 
 /// Options bag for `tracing.stop` / `tracing.stopChunk`.

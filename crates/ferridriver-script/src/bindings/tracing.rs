@@ -54,10 +54,25 @@ impl TracingJs {
     self.ctx.tracing().start(opts).await.into_js_with(&ctx)
   }
 
-  /// Playwright: `tracing.startChunk(options?)`.
+  /// Playwright: `tracing.startChunk(options?: { name?, title? })`.
   #[qjs(rename = "startChunk")]
-  pub async fn start_chunk(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-    self.ctx.tracing().start_chunk().await.into_js_with(&ctx)
+  pub async fn start_chunk<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let opts = parse_tracing_chunk_options(&options)?;
+    self.ctx.tracing().start_chunk(opts).await.into_js_with(&ctx)
+  }
+
+  /// Playwright: `tracing.group(name, options?: { location? })`. Nests
+  /// everything up to `groupEnd()` under one entry in the viewer.
+  #[qjs(rename = "group")]
+  pub fn group<'js>(&self, ctx: Ctx<'js>, name: String, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let location = parse_group_location(&options)?;
+    self.ctx.tracing().group(name, location).into_js_with(&ctx)
+  }
+
+  /// Playwright: `tracing.groupEnd()`.
+  #[qjs(rename = "groupEnd")]
+  pub fn group_end(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    self.ctx.tracing().group_end().into_js_with(&ctx)
   }
 
   /// Playwright: `tracing.stopChunk(options?: { path? })`.
@@ -90,7 +105,45 @@ fn parse_tracing_start_options(options: &Opt<Value<'_>>) -> rquickjs::Result<fer
   out.screenshots = obj.get::<_, Option<bool>>("screenshots")?.unwrap_or(false);
   out.snapshots = obj.get::<_, Option<bool>>("snapshots")?.unwrap_or(false);
   out.sources = obj.get::<_, Option<bool>>("sources")?.unwrap_or(false);
+  out.streaming = ferridriver::trace::TraceStreaming::from_live(obj.get::<_, Option<bool>>("live")?.unwrap_or(false));
   Ok(out)
+}
+
+fn parse_tracing_chunk_options(options: &Opt<Value<'_>>) -> rquickjs::Result<ferridriver::trace::TracingChunkOptions> {
+  let mut out = ferridriver::trace::TracingChunkOptions::default();
+  let Some(obj) = options
+    .0
+    .as_ref()
+    .filter(|v| !v.is_undefined() && !v.is_null())
+    .and_then(rquickjs::Value::as_object)
+  else {
+    return Ok(out);
+  };
+  out.name = obj.get::<_, Option<String>>("name")?;
+  out.title = obj.get::<_, Option<String>>("title")?;
+  Ok(out)
+}
+
+fn parse_group_location(options: &Opt<Value<'_>>) -> rquickjs::Result<Option<ferridriver::trace::StackFrame>> {
+  let Some(obj) = options
+    .0
+    .as_ref()
+    .filter(|v| !v.is_undefined() && !v.is_null())
+    .and_then(rquickjs::Value::as_object)
+  else {
+    return Ok(None);
+  };
+  let Some(location) = obj.get::<_, Option<rquickjs::Object<'_>>>("location")? else {
+    return Ok(None);
+  };
+  let Some(file) = location.get::<_, Option<String>>("file")? else {
+    return Ok(None);
+  };
+  Ok(Some(ferridriver::trace::StackFrame {
+    file,
+    line: location.get::<_, Option<u32>>("line")?.unwrap_or(0),
+    column: location.get::<_, Option<u32>>("column")?.unwrap_or(0),
+  }))
 }
 
 fn parse_tracing_stop_options(options: &Opt<Value<'_>>) -> rquickjs::Result<ferridriver::trace::TracingStopOptions> {

@@ -69,7 +69,7 @@ macro_rules! retry_resolve {
         __trace_params,
       )
     };
-    let __trace_span = __trace_page.snapshot_before(__trace_span).await;
+    let __trace_span = $crate::trace::open_action(__trace_page.snapshot_before(__trace_span).await).await;
     if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
       __s.log(format!("waiting for locator('{}')", $self.selector));
     }
@@ -604,6 +604,7 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found, is not actionable
   /// (unless `force=true`), or the click dispatch fails.
+  #[track_caller]
   pub fn click(&self) -> crate::action::Action<'static, crate::options::ClickOptions, ()> {
     let locator = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { locator.click_impl(Some(opts)).await }))
@@ -634,6 +635,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the double-click fails.
+  #[track_caller]
   pub fn dblclick(&self) -> crate::action::Action<'static, crate::options::DblClickOptions, ()> {
     let locator = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { locator.dblclick_impl(Some(opts)).await }))
@@ -685,6 +687,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not a fillable element.
+  #[track_caller]
   pub fn fill(&self, value: &str) -> crate::action::Action<'static, crate::options::FillOptions, ()> {
     let locator = self.clone();
     let value = value.to_string();
@@ -787,6 +790,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or key dispatch fails.
+  #[track_caller]
   pub fn r#type(&self, text: &str) -> crate::action::Action<'static, crate::options::TypeOptions, ()> {
     let locator = self.clone();
     let text = text.to_string();
@@ -824,6 +828,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the key press fails.
+  #[track_caller]
   pub fn press(&self, key: &str) -> crate::action::Action<'static, crate::options::PressOptions, ()> {
     let locator = self.clone();
     let key = key.to_string();
@@ -865,6 +870,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the hover action fails.
+  #[track_caller]
   pub fn hover(&self) -> crate::action::Action<'static, crate::options::HoverOptions, ()> {
     let locator = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { locator.hover_impl(Some(opts)).await }))
@@ -900,6 +906,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not actionable.
+  #[track_caller]
   pub fn check(&self) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
     let locator = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { locator.check_impl(Some(opts)).await }))
@@ -914,6 +921,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not actionable.
+  #[track_caller]
   pub fn uncheck(&self) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
     let locator = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { locator.uncheck_impl(Some(opts)).await }))
@@ -934,6 +942,7 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found, is not
   /// actionable, or the click dispatch fails.
+  #[track_caller]
   pub fn set_checked(&self, checked: bool) -> crate::action::Action<'static, crate::options::CheckOptions, ()> {
     let locator = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { locator.set_checked_impl(checked, Some(opts)).await }))
@@ -1022,6 +1031,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the tap event dispatch fails.
+  #[track_caller]
   pub fn tap(&self) -> crate::action::Action<'static, crate::options::TapOptions, ()> {
     let locator = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { locator.tap_impl(Some(opts)).await }))
@@ -1057,6 +1067,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not a `<select>`.
+  #[track_caller]
   pub fn select_option(
     &self,
     values: impl Into<crate::options::SelectOptionValues>,
@@ -1112,6 +1123,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element is not a file input or the upload fails.
+  #[track_caller]
   pub fn set_input_files(
     &self,
     files: impl Into<crate::options::InputFiles>,
@@ -1224,6 +1236,7 @@ impl Locator {
   ///
   /// Returns `FerriError::Timeout` if the element does not appear
   /// before the deadline.
+  #[track_caller]
   pub fn dispatch_event(
     &self,
     event_type: &str,
@@ -1351,6 +1364,7 @@ impl Locator {
   ///
   /// [`crate::error::FerriError::Timeout`] if the element cannot be
   /// resolved within the timeout; forwards the page-side render error.
+  #[track_caller]
   pub fn aria_snapshot(&self) -> crate::action::Action<'static, crate::options::AriaSnapshotOptions, String> {
     let locator = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { locator.aria_snapshot_impl(opts).await }))
@@ -1659,6 +1673,7 @@ impl Locator {
   ///
   /// Returns an error if the timeout expires before the element reaches
   /// the desired state, or if an unknown state is specified.
+  #[track_caller]
   pub fn wait_for(&self) -> crate::action::Action<'static, crate::options::WaitOptions, ()> {
     let locator = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { locator.wait_for_impl(opts).await }))
@@ -1740,6 +1755,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or screenshot capture fails.
+  #[track_caller]
   pub fn screenshot(&self) -> crate::action::Action<'static, crate::options::ElementScreenshotOptions, Vec<u8>> {
     let locator = self.clone();
     crate::action::Action::new(move |opts| Box::pin(async move { locator.screenshot_impl(opts).await }))
@@ -1800,6 +1816,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or any key press fails.
+  #[track_caller]
   pub fn press_sequentially(&self, text: &str) -> crate::action::Action<'static, crate::options::TypeOptions, ()> {
     let locator = self.clone();
     let text = text.to_string();
@@ -1840,6 +1857,7 @@ impl Locator {
   ///
   /// Returns an error if either element cannot be found, bounding box
   /// coordinates cannot be read, or the drag operation fails.
+  #[track_caller]
   pub fn drag_to(&self, target: &Locator) -> crate::action::Action<'static, crate::options::DragAndDropOptions, ()> {
     let locator = self.clone();
     let target = target.clone();
@@ -1925,6 +1943,7 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be resolved, a referenced file
   /// path cannot be read, or the target rejects the drop.
+  #[track_caller]
   pub fn drop(
     &self,
     payload: crate::options::DropPayload,
@@ -2108,6 +2127,7 @@ impl Locator {
   /// Returns [`crate::error::FerriError::Timeout`] when the element
   /// cannot be resolved within the configured timeout, or forwards
   /// the page-side evaluate error.
+  #[track_caller]
   pub fn evaluate(
     &self,
     fn_source: &str,
@@ -2248,6 +2268,7 @@ impl Locator {
   /// # Errors
   ///
   /// See [`Self::evaluate`].
+  #[track_caller]
   pub fn evaluate_handle(
     &self,
     fn_source: &str,

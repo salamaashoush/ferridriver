@@ -828,16 +828,24 @@ impl WebKitPage {
     {
       return Err(FerriError::backend(format!("webkit navigate: {err}")));
     }
-    if parsed.loader_id.is_some() {
+    let grace = if parsed.loader_id.is_some() {
       self.wait_for_lifecycle(lifecycle, timeout_ms).await?;
-    }
-    Ok(self.await_nav_response().await)
+      crate::network::NAV_REQUEST_GRACE
+    } else {
+      // No loaderId: a same-document jump, which requested nothing.
+      std::time::Duration::ZERO
+    };
+    Ok(self.await_nav_response(grace).await)
   }
 
   /// Resolve the main-document `Response` captured by the network
   /// listener for the most recent navigation.
-  async fn await_nav_response(&self) -> Option<Response> {
-    let req = self.nav_request_slot.get()?;
+  /// `grace` is how long to wait for the document request to be seen:
+  /// non-zero only when a new document committed, since the request and
+  /// the lifecycle reach us on separate consumers and the request can be
+  /// processed second. A same-document navigation issues none.
+  async fn await_nav_response(&self, grace: std::time::Duration) -> Option<Response> {
+    let req = self.nav_request_slot.wait(grace).await?;
     req.response().await.ok().flatten()
   }
 
@@ -907,7 +915,7 @@ impl WebKitPage {
       .await
       .map_err(conn_err)?;
     self.wait_for_lifecycle(lifecycle, timeout_ms).await?;
-    Ok(self.await_nav_response().await)
+    Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await)
   }
 
   pub async fn go_back(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
@@ -933,7 +941,7 @@ impl WebKitPage {
       return Err(conn_err(e));
     }
     self.wait_for_lifecycle(lifecycle, timeout_ms).await?;
-    Ok(self.await_nav_response().await)
+    Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await)
   }
 
   pub async fn url(&self) -> Result<Option<String>> {

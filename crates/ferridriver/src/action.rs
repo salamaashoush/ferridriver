@@ -24,13 +24,19 @@ pub type ActionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + '
 pub struct Action<'a, O, T> {
   opts: O,
   run: Box<dyn FnOnce(O) -> ActionFuture<'a, T> + Send + 'a>,
+  /// Where the caller wrote this action, for the trace and for
+  /// `test --debug`. Every builder is `#[track_caller]`, so the location
+  /// captured below is the user's line and not the builder's body.
+  origin: crate::trace::CallOrigin,
 }
 
 impl<'a, O: Default, T> Action<'a, O, T> {
+  #[track_caller]
   pub(crate) fn new(run: impl FnOnce(O) -> ActionFuture<'a, T> + Send + 'a) -> Self {
     Self {
       opts: O::default(),
       run: Box::new(run),
+      origin: crate::trace::call_origin_here(),
     }
   }
 }
@@ -51,12 +57,21 @@ impl<O, T> Action<'_, O, T> {
   }
 }
 
-impl<'a, O, T> IntoFuture for Action<'a, O, T> {
+// `T: 'a` because scoping the call origin wraps the boxed future in a new
+// type, which the `+ 'a` object bound then has to hold for.
+impl<'a, O, T: 'a> IntoFuture for Action<'a, O, T> {
   type Output = Result<T>;
   type IntoFuture = ActionFuture<'a, T>;
 
   fn into_future(self) -> Self::IntoFuture {
-    (self.run)(self.opts)
+    let origin = self.origin;
+    let fut = (self.run)(self.opts);
+    // Nothing captured a site (nothing is tracing, observing or gating), so
+    // there is nothing to scope and no reason to box a second time.
+    if origin.location.is_none() {
+      return fut;
+    }
+    Box::pin(crate::trace::with_call_origin(origin, fut))
   }
 }
 

@@ -180,7 +180,7 @@ impl Tracing {
   /// Errors if tracing is already started on this context.
   pub async fn start(&self, options: crate::trace::TracingStartOptions) -> Result<()> {
     let composite = self.ctx.composite();
-    let (browser_name, context_options) = {
+    let (browser_name, context_options, traces_dir) = {
       let state = self.ctx.state().read().await;
       let browser_name = match state.backend_kind() {
         crate::backend::BackendKind::CdpPipe | crate::backend::BackendKind::CdpRaw => "chromium",
@@ -198,14 +198,29 @@ impl Tracing {
           serde_json::json!(viewport.device_scale_factor),
         );
       }
-      (browser_name, serde_json::Value::Object(context_options))
+      (
+        browser_name,
+        serde_json::Value::Object(context_options),
+        state.traces_dir_for(&composite),
+      )
     };
     let network_len = self.network_log_len().await;
+    // `browserType.launch({ tracesDir })` decides where the loose files
+    // live; without one they go to a temp directory this recorder owns
+    // and removes. A named recording under a caller's tracesDir is what
+    // a viewer follows while the test is still running.
+    let location = match traces_dir {
+      Some(dir) => {
+        crate::trace::TraceLocation::in_dir(dir, options.name.clone().unwrap_or_else(|| "trace".to_string()))
+      },
+      None => crate::trace::TraceLocation::temporary(),
+    };
     let recorder = std::sync::Arc::new(crate::trace::TraceRecorder::new(
       &options,
       browser_name.to_string(),
       context_options,
       network_len,
+      location,
     )?);
     crate::trace::install_recorder(&composite, std::sync::Arc::clone(&recorder))?;
     // Pages that predate the recorder still belong to the trace —
@@ -257,16 +272,45 @@ impl Tracing {
       .unwrap_or_default()
   }
 
-  /// Playwright: `tracing.startChunk(options?)`. Resets the chunk-local
-  /// event/resource buffers; the recorder keeps running.
+  /// Playwright: `tracing.startChunk(options?: { name?, title? })`.
+  /// Resets the chunk-local event/resource buffers; the recorder keeps
+  /// running. `name` renames the stream the chunk is written to, `title`
+  /// relabels it in the viewer.
   ///
   /// # Errors
   ///
   /// Errors if tracing was not started.
-  pub async fn start_chunk(&self) -> Result<()> {
+  pub async fn start_chunk(&self, options: crate::trace::TracingChunkOptions) -> Result<()> {
     let recorder = crate::trace::recorder_for(&self.ctx.composite())
       .ok_or_else(|| FerriError::backend("Must start tracing before starting a new chunk".to_string()))?;
-    recorder.start_chunk(self.network_log_len().await);
+    recorder.start_chunk(self.network_log_len().await, options.name, options.title);
+    Ok(())
+  }
+
+  /// Playwright: `tracing.group(name, options?: { location? })`. Nests
+  /// everything recorded until [`Self::group_end`] under one titled
+  /// entry in the viewer's action tree.
+  ///
+  /// # Errors
+  ///
+  /// Errors if tracing was not started.
+  pub fn group(&self, name: String, location: Option<crate::trace::StackFrame>) -> Result<()> {
+    let recorder = crate::trace::recorder_for(&self.ctx.composite())
+      .ok_or_else(|| FerriError::backend("Must start tracing before creating a group".to_string()))?;
+    recorder.begin_group(name, location.into_iter().collect());
+    Ok(())
+  }
+
+  /// Playwright: `tracing.groupEnd()`. Closes the innermost open group;
+  /// closing when none is open is not an error, as in Playwright.
+  ///
+  /// # Errors
+  ///
+  /// Errors if tracing was not started.
+  pub fn group_end(&self) -> Result<()> {
+    let recorder = crate::trace::recorder_for(&self.ctx.composite())
+      .ok_or_else(|| FerriError::backend("Must start tracing before ending a group".to_string()))?;
+    recorder.end_group();
     Ok(())
   }
 
@@ -284,7 +328,7 @@ impl Tracing {
       let network = self.trace_network_entries(&recorder).await;
       export_blocking(std::sync::Arc::clone(&recorder), path, network).await?;
     }
-    recorder.start_chunk(self.network_log_len().await);
+    recorder.start_chunk(self.network_log_len().await, None, None);
     Ok(())
   }
 
@@ -883,7 +927,11 @@ async fn build_content(
   }
 }
 
-pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
+/// Hex sha1, the identity every Playwright artifact is named by:
+/// resource bodies inside a trace, embedded sources, and the ids a test
+/// runner derives for its tests.
+#[must_use]
+pub fn sha1_hex(bytes: &[u8]) -> String {
   use sha1::{Digest, Sha1};
   let digest = Sha1::digest(bytes);
   let mut out = String::with_capacity(40);
@@ -989,7 +1037,8 @@ fn percent_decode(input: &str) -> String {
 /// Format the current wall-clock time as an ISO-8601 UTC string with
 /// millisecond precision (`YYYY-MM-DDTHH:MM:SS.mmmZ`). Uses the civil-
 /// from-days algorithm so no date dependency is needed.
-fn now_iso8601() -> String {
+#[must_use]
+pub fn now_iso8601() -> String {
   let now = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap_or_default();
@@ -998,7 +1047,8 @@ fn now_iso8601() -> String {
 
 /// Format Unix-epoch milliseconds as ISO-8601 with millisecond
 /// precision (`YYYY-MM-DDTHH:MM:SS.mmmZ`).
-fn epoch_ms_to_iso8601(total_ms: i64) -> String {
+#[must_use]
+pub fn epoch_ms_to_iso8601(total_ms: i64) -> String {
   let secs = total_ms.div_euclid(1000);
   let ms = total_ms.rem_euclid(1000);
   let days = secs.div_euclid(86_400);
