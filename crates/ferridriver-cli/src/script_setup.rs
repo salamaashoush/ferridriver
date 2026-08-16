@@ -29,6 +29,22 @@ pub struct ScriptSetup {
   pub artifacts_budget: Option<ferridriver::response::OutputBudget>,
 }
 
+impl ScriptSetup {
+  /// The subset a session host needs. `secrets` and `artifacts_budget` stay
+  /// behind: they describe what the CLI renders around a run, not how the
+  /// host runs it (the engine already carries its own copy of `secrets`).
+  #[must_use]
+  pub fn into_session_script(self) -> ferridriver_script::SessionScriptConfig {
+    ferridriver_script::SessionScriptConfig {
+      sandbox: self.sandbox,
+      artifacts: self.artifacts,
+      caps: self.caps,
+      extensions: self.extensions,
+      engine: self.engine,
+    }
+  }
+}
+
 /// Resolve the scripting environment for `cwd` from `config`, adding any
 /// `--extension` specs the caller typed (which resolve relative to `cwd`,
 /// while config entries keep their declaring layer's directory).

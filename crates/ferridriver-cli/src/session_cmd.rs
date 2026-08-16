@@ -337,10 +337,15 @@ pub async fn run_on_session(
         duration_ms,
         error,
         message,
+        location,
         ..
       } => match phase {
         ferridriver_session::ActionPhase::Begin => {
-          crate::run_console::print_action_begin(&title, params.as_ref().unwrap_or(&serde_json::Value::Null));
+          crate::run_console::print_action_begin(
+            &title,
+            params.as_ref().unwrap_or(&serde_json::Value::Null),
+            location.as_deref(),
+          );
         },
         ferridriver_session::ActionPhase::Log => {
           crate::run_console::print_action_log(message.as_deref().unwrap_or_default());

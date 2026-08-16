@@ -304,6 +304,7 @@ impl ferridriver::trace::ActionObserver for ActionForwarder {
       &action.title,
       ActionDetail {
         params: Some(action.params.clone()),
+        location: action.location.as_ref().map(ToString::to_string),
         ..Default::default()
       },
     );

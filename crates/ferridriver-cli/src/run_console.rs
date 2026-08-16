@@ -13,6 +13,7 @@
 //! `expect.*` call is announced as it starts and closed out with its duration,
 //! so a script parked on a 30s wait shows what it is waiting for.
 
+use std::fmt::Write as _;
 use std::io::Write as _;
 
 use console::Style;
@@ -95,7 +96,11 @@ pub struct RunObserver {
 impl ActionObserver for RunObserver {
   fn action_begin(&self, action: &ActionInfo) {
     if self.trace {
-      print_action_begin(&action.title, &action.params);
+      print_action_begin(
+        &action.title,
+        &action.params,
+        action.location.as_ref().map(ToString::to_string).as_deref(),
+      );
     }
   }
 
@@ -127,14 +132,14 @@ impl ActionObserver for RunObserver {
 /// Shared with `run --session`, where the actions arrive as wire events from
 /// the host rather than from an observer on a local browser — a traced run
 /// must look the same whichever side ran it.
-pub fn print_action_begin(title: &str, params: &serde_json::Value) {
+pub fn print_action_begin(title: &str, params: &serde_json::Value, location: Option<&str>) {
   let dim = Style::new().for_stderr().dim();
   let params = summarize_params(params);
-  let _ = writeln!(
-    std::io::stderr(),
-    "{}",
-    dim.apply_to(format!("› {title} {params}").trim_end().to_string())
-  );
+  let mut line = format!("› {title} {params}").trim_end().to_string();
+  if let Some(location) = location {
+    let _ = write!(line, "  at {location}");
+  }
+  let _ = writeln!(std::io::stderr(), "{}", dim.apply_to(line));
 }
 
 pub fn print_action_end(title: &str, ms: f64, error: Option<&str>) {

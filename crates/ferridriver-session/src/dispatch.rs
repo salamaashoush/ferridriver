@@ -23,6 +23,8 @@ pub struct ActionDetail {
   pub duration_ms: Option<u64>,
   pub error: Option<String>,
   pub message: Option<String>,
+  /// `file:line` the call was written at, on the begin edge.
+  pub location: Option<String>,
 }
 
 /// The tallies half of an [`EventPayload::Page`].
@@ -102,6 +104,7 @@ impl EventSink {
       duration_ms: detail.duration_ms,
       error: detail.error,
       message: detail.message,
+      location: detail.location,
     });
   }
 }

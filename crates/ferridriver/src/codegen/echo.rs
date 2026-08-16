@@ -252,6 +252,8 @@ mod tests {
       method: method.into(),
       title: format!("{}.{method}", class.to_ascii_lowercase()),
       params,
+      location: None,
+      script: None,
     }
   }
 

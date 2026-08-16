@@ -721,7 +721,7 @@ pub async fn invoke_step(
     // Per-step (or registry-default) timeout — JS steps had none before.
     let fut = mp.into_future::<Value<'_>>();
     let awaited = match timeout_ms {
-      Some(t) => match tokio::time::timeout(std::time::Duration::from_millis(t), fut).await {
+      Some(t) => match ferridriver::pause::run_within(std::time::Duration::from_millis(t), fut).await {
         Ok(r) => r,
         Err(_) => return Err(ScriptError::timeout(t, t)),
       },
@@ -810,7 +810,7 @@ pub async fn invoke_hook(
     };
     let fut = mp.into_future::<Value<'_>>();
     let awaited = match timeout_ms {
-      Some(t) => match tokio::time::timeout(std::time::Duration::from_millis(t), fut).await {
+      Some(t) => match ferridriver::pause::run_within(std::time::Duration::from_millis(t), fut).await {
         Ok(r) => r,
         Err(_) => return Err(ScriptError::timeout(t, t)),
       },

@@ -179,6 +179,98 @@ object.
 A local `ferridriver run` (no `--session`) reports everything except the page:
 the script owns the browser it launched, and the CLI holds no handle to it.
 
+## Debugging a test (`test --debug`)
+
+A test normally leaves nothing you can reach: it runs, `afterEach` tears
+the context down, and you are left with a screenshot and a stack.
+`ferridriver test --debug` stops it while everything is still live and
+publishes the browser as a session.
+
+```bash
+ferridriver test --debug
+```
+
+```
+─── starting: tests/login.spec.ts > rejects a stale token ───
+  at tests/login.spec.ts:42
+
+  Attach with:
+    ferridriver run --session tw-tests-login-spec-ts-re --context context-0 --eval "return await page.snapshotForAI()"
+
+  Drive it from a script:
+    await testDebug.stepOver()               run one call, stop again
+    await testDebug.pauseAt('spec.ts:42')    run up to a line
+    await testDebug.resume()                 let the test finish
+
+  stopped before page.goto at tests/login.spec.ts:43
+```
+
+The run stops in front of each API call, before it happens. The context
+holds everything the fixtures set up — the login, the seeded rows, the
+intercepted routes — so the whole scripting surface applies to the exact
+state the test is in:
+
+```bash
+ferridriver run -s tw-… --context context-0 --eval "return await page.locator('#error').count()"
+ferridriver run -s tw-… --context context-0 --code --eval "await page.locator('#retry').click()"
+```
+
+Pass `--context` to reach the test's own context; without it you land on a
+fresh one and see none of the state.
+
+`testDebug` is the stopped run itself, and exists only in a session that a
+stop published — a script can feature-detect it with `typeof testDebug`:
+
+| | |
+|---|---|
+| `await testDebug.info()` | `{ test, location, error, paused, resumed, action }` |
+| `await testDebug.stepOver()` | run the call it is stopped at, stop before the next |
+| `await testDebug.pauseAt('spec.ts:42')` | run on until a call written at that line |
+| `await testDebug.resume()` | let the test run to the end |
+| `await testDebug.paused()` | whether it is stopped right now |
+
+`info().action` is the call it is stopped in front of — `{ title, location }`,
+where `location` is the line in your `.ts`, mapped back through the bundle's
+source map. `pauseAt` takes any suffix of a path, so `'login.spec.ts:42'` and
+the absolute path both work; drop the `:line` to stop at every call in a file.
+
+Stepping is a script call rather than a protocol verb on purpose: the session
+wire carries exactly one verb, and adding `resume` / `step-over` to it would
+start rebuilding the verb table this design replaced. A binding costs nothing
+on the wire and composes with everything else a script can already do.
+
+`--debug=fail` stops at the first failure instead, between the body and the
+teardown, with the page still on it and `info().error` carrying the failure.
+That is the one to reach for when you already know which test breaks and want
+to see the wreckage rather than walk up to it.
+
+### The same flag on BDD and Rust tests
+
+```bash
+ferridriver bdd --debug                          # stops inside the step body
+cargo test --test e2e -- --debug --headless      # stops inside the #[ferritest]
+```
+
+A scenario and a `#[ferritest]` are both tests to the runner, so stopping,
+`stepOver`, `pauseAt` and `resume` work the same on all three. Locations
+follow the language you wrote: a BDD stop reports the line in the step's
+`.ts`, a Rust stop reports the line in the `.rs`.
+
+A Rust harness needs the `debug-session` feature, because publishing a
+session pulls in the scripting engine and a harness that never debugs should
+not pay to build it:
+
+```toml
+ferridriver-test = { version = "…", features = ["debug-session"] }
+```
+
+`--debug` forces a single worker and stops the run after one failure: a
+parked worker beside running ones makes the output unreadable and the browser
+contended. The test's own timeout does not run while it is stopped, so you
+can read a page for as long as you like — but it still applies between stops,
+so a test that hangs on its own still fails. Stopping never changes the
+verdict.
+
 ## Secrets
 
 Declared secrets never reach a caller verbatim. Name them in config — values

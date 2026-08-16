@@ -175,6 +175,9 @@ pub enum EventPayload {
     /// The call-log line, for [`ActionPhase::Log`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    /// `file:line` the call was written at, when the host captured one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    location: Option<String>,
   },
   /// One line of source reproducing an action the script just performed, in
   /// the language the request asked for. Sent only when the request set
