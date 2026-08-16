@@ -34,7 +34,19 @@ source files (.js / .ts / .mjs / .tsx / ...)
   tree-shaken. Cucumber-compatible code can import from
   `@cucumber/cucumber`.
 - **No Node, no Bun in the run path.** Rolldown runs `Platform::Neutral`;
-  QuickJS has no Node builtins.
+  QuickJS has no Node builtins. The runtime serves a small set of them
+  natively instead, importable with or without the `node:` prefix and
+  also reachable through `require()`:
+
+  | Module   | Surface |
+  |----------|---------|
+  | `fs`     | The scoped file I/O of the `fs` global |
+  | `path`   | POSIX `join` / `resolve` / `dirname` / `basename` / `extname` / `normalize` / `relative` / `isAbsolute` / `sep` / `delimiter` |
+  | `buffer` | The documented `Buffer` subset |
+  | `os`     | `platform` / `arch` / `type` / `release` / `version` / `machine` / `endianness` / `EOL` / `devNull` / `homedir` / `tmpdir` / `hostname` / `availableParallelism` / `cpus` / `totalmem` / `freemem` / `uptime` / `loadavg` / `userInfo` / `getPriority` / `setPriority` / `networkInterfaces`. No `os.constants` |
+
+  Anything else Node ships (`child_process`, `net`, `http`, `worker_threads`, …)
+  is absent by design.
 - **Bytecode is cached in-memory and on disk.** An in-process cache
   serves repeat compiles within one process; a cross-process disk cache
   (under the user cache dir, or `FERRIDRIVER_CACHE_DIR`) lets an

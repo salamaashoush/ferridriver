@@ -1,8 +1,8 @@
 # ferridriver-jsstd
 
 Vendored subset of [awslabs/llrt](https://github.com/awslabs/llrt) (Apache
-License 2.0), providing the WHATWG Streams implementation and the pieces it
-depends on for the ferridriver QuickJS runtime.
+License 2.0), providing the WHATWG Streams implementation, the `node:os`
+module, and the pieces they depend on for the ferridriver QuickJS runtime.
 
 Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@46d4215` (2026-08-04).
 
@@ -13,11 +13,14 @@ Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@46d4215` (2026-08-04).
 | `llrt_exceptions`  | `exceptions` |
 | `llrt_events`      | `events`     |
 | `llrt_abort`       | `abort`      |
+| `llrt_os`          | `os`         |
 | `llrt_stream_web`  | `stream_web` |
 | `llrt_test`        | `test` (dev) |
 
 The rest of llrt — its hyper/fetch stack, timers, buffer, url, console — is
-deliberately not vendored: ferridriver has its own, over `reqwest`.
+deliberately not vendored: ferridriver has its own, over `reqwest`. `os` is
+vendored because ferridriver has nothing equivalent and the module is pure
+host introspection with no overlap with the automation stack.
 
 ## Keeping it re-syncable
 
@@ -31,12 +34,13 @@ Re-sync recipe (from a checkout of llrt):
 ```sh
 for m in utils:libs/llrt_utils context:libs/llrt_context \
          exceptions:modules/llrt_exceptions events:modules/llrt_events \
-         abort:modules/llrt_abort stream_web:modules/llrt_stream_web; do
+         abort:modules/llrt_abort os:modules/llrt_os \
+         stream_web:modules/llrt_stream_web; do
   name="${m%%:*}"; path="${m##*:}"
   cp -R "$LLRT/$path/src" "src/$name" && mv "src/$name/lib.rs" "src/$name/mod.rs"
 done
 # per-module first, then the cross-crate rewrite (BSD sed has no \b — use perl)
-for name in utils context exceptions events abort stream_web; do
+for name in utils context exceptions events abort os stream_web; do
   find "src/$name" -name '*.rs' | while read -r f; do
     perl -pi -e "s/\bcrate::/crate::${name}::/g" "$f"
   done
@@ -102,3 +106,40 @@ for ferridriver's convenience. Upstream candidates.
    gated on `sleep-timers`, so it covers the `sleep-tokio` path we build.
    Two regression tests were added to `stream_web/transform/tests.rs` for
    deltas 2 and 3.
+
+8. **`os/mod.rs` — no Windows arm.** `llrt_os`'s `windows.rs` is not
+   vendored: ferridriver targets macOS and Linux, and that arm needs four
+   Windows-only dependencies (`whoami`, `windows-registry`,
+   `windows-result`, `windows-version`).
+
+9. **`os/unix.rs` — `getpwuid_r` instead of the `users` crate.** Upstream
+   reads the login name and shell through `users` 0.11, which has been
+   unmaintained since 2021. The replacement calls `getpwuid_r` directly —
+   the same call that crate makes — including its ERANGE grow-the-buffer
+   protocol.
+
+10. **`os/statistics.rs` — real CPU times.** Upstream returns
+    `times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 }` for every CPU,
+    with the comment "cannot be obtained at this time". sysinfo does not
+    expose them, but the kernel does: `/proc/stat` on Linux and
+    `host_processor_info` on macOS, which is where libuv reads them for
+    Node. Ticks are converted to milliseconds through `_SC_CLK_TCK`.
+    Darwin does not account interrupt time, so `irq` stays 0 there — as
+    it does in libuv.
+
+11. **`os/mod.rs` — `fill()` / `os_object()` split.** Upstream fills the
+    module's default export inline inside `evaluate`. ferridriver serves
+    every native module twice, as an ES module and as a synchronous
+    `require()` namespace, and its loader requires both to read from one
+    place, so the body moved into a function.
+
+12. **`os` feature gates.** Upstream's `system` / `statistics` / `network`
+    features are declared here too (all on by default) so the `#[cfg]`
+    arms stay exactly as upstream wrote them.
+
+## Known gaps against Node
+
+- `os.constants` (signal, errno, priority and dlopen tables) is not
+  implemented upstream and is not added here.
+- `networkInterfaces()` marks link-local and multicast addresses
+  `internal: true`; Node marks only loopback interfaces internal.

@@ -32,6 +32,8 @@ pub const NATIVE_MODULE_NAMES: &[&str] = &[
   "node:path",
   "buffer",
   "node:buffer",
+  "os",
+  "node:os",
 ];
 
 /// Extra specifiers the native loader answers, each mapped onto one of
@@ -169,6 +171,8 @@ pub fn loader() -> NativeModuleLoader {
       ("node:path", NativeModuleLoader::declare_fn::<PathModule>()),
       ("buffer", NativeModuleLoader::declare_fn::<BufferModule>()),
       ("node:buffer", NativeModuleLoader::declare_fn::<BufferModule>()),
+      ("os", NativeModuleLoader::declare_fn::<OsModule>()),
+      ("node:os", NativeModuleLoader::declare_fn::<OsModule>()),
     ],
   }
 }
@@ -229,6 +233,7 @@ pub fn namespace<'js>(ctx: &Ctx<'js>, specifier: &str) -> rquickjs::Result<Optio
     "fs" | "node:fs" => fs_namespace(ctx)?,
     "path" | "node:path" => path_namespace(ctx)?,
     "buffer" | "node:buffer" => buffer_namespace(ctx)?,
+    "os" | "node:os" => os_namespace(ctx)?,
     _ => return Ok(None),
   };
   Ok(Some(ns))
@@ -565,5 +570,57 @@ impl ModuleDef for BufferModule {
 
   fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
     export_from(exports, &buffer_namespace(ctx)?, BUFFER_EXPORTS)
+  }
+}
+
+/// `import os from 'node:os'` — host introspection, served by the
+/// vendored `llrt_os` (see `ferridriver-jsstd`).
+pub struct OsModule;
+
+const OS_MEMBERS: &[&str] = &[
+  "arch",
+  "availableParallelism",
+  "cpus",
+  "devNull",
+  "endianness",
+  "EOL",
+  "freemem",
+  "getPriority",
+  "homedir",
+  "hostname",
+  "loadavg",
+  "machine",
+  "networkInterfaces",
+  "platform",
+  "release",
+  "setPriority",
+  "tmpdir",
+  "totalmem",
+  "type",
+  "uptime",
+  "userInfo",
+  "version",
+];
+
+fn os_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  let obj = ferridriver_jsstd::os::os_object(ctx)?;
+  let ns = Object::new(ctx.clone())?;
+  ns.set("default", obj.clone())?;
+  for name in OS_MEMBERS {
+    ns.set(*name, obj.get::<_, Value<'js>>(*name)?)?;
+  }
+  Ok(ns)
+}
+
+impl ModuleDef for OsModule {
+  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
+    decl.declare("default")?;
+    declare_all(decl, OS_MEMBERS)
+  }
+
+  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
+    let ns = os_namespace(ctx)?;
+    exports.export("default", ns.get::<_, Value<'js>>("default")?)?;
+    export_from(exports, &ns, OS_MEMBERS)
   }
 }
