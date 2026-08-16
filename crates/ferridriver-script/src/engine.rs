@@ -678,16 +678,11 @@ impl Session {
       crate::bindings::install_browser_type(&ctx)
         .map_err(|e| ScriptError::internal(format!("failed to install browser_type: {e}")))?;
 
-      // Node-parity `Buffer` global (same constructor `node:buffer`
-      // exports) — test files and scripts use `Buffer.from` bare, as
-      // they would under Node/Bun.
-      ctx
-        .globals()
-        .set(
-          "Buffer",
-          ferridriver_jsstd::node::buffer::buffer_constructor(&ctx)
-            .map_err(|e| ScriptError::internal(format!("failed to install Buffer: {e}")))?,
-        )
+      // Node-parity `Buffer` global (the same constructor `node:buffer`
+      // exports) — test files and scripts use `Buffer.from` bare, as they
+      // would under Node/Bun. Vendored from llrt, so it really is a
+      // `Uint8Array` subclass rather than a lookalike.
+      ferridriver_jsstd::buffer::init(&ctx)
         .map_err(|e| ScriptError::internal(format!("failed to install Buffer: {e}")))?;
 
       // expect() global (Jest value matchers, Playwright web-first

@@ -9,7 +9,6 @@
 use base64::Engine as _;
 use rquickjs::{ArrayBuffer, Ctx, Value};
 
-use super::buffer::BufferJs;
 use super::throw_named;
 
 /// A `BufferSource`: an `ArrayBuffer`, or a view over one.
@@ -81,9 +80,8 @@ pub fn value_to_bytes<'js>(
     return decode(ctx, &s.to_string()?, encoding.unwrap_or("utf8"));
   }
   if let Some(obj) = value.as_object() {
-    if let Some(buf) = obj.as_class::<BufferJs>() {
-      return Ok(buf.borrow().bytes().to_vec());
-    }
+    // A `Buffer` needs no branch of its own: it is a `Uint8Array`
+    // subclass, so the BufferSource walk below already reads it.
     if let Some(arr) = obj.as_array() {
       let mut out = Vec::with_capacity(arr.len());
       for i in 0..arr.len() {

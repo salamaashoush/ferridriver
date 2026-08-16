@@ -19,7 +19,14 @@ unsafe_code = "allow"
 # and tokio. Only the tokio arm is vendored, so `sleep-timers` is declared as
 # a known cfg rather than as a real feature: as a feature, `--all-features`
 # would switch on an arm calling the `timers` module that is not vendored.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("sleep-timers"))'] }
+# `nightly` is set by upstream's build script (`llrt_build::set_nightly_cfg`),
+# which is not vendored: this repo pins stable, so the nightly arms compile
+# out. Declared so they stay compiling-out silently rather than warning.
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(feature, values("sleep-timers"))',
+  'cfg(nightly)',
+  'cfg(rust_nightly)',
+] }
 
 [lints.clippy]
 correctness = { level = "deny", priority = -1 }
@@ -39,6 +46,11 @@ network = ["sysinfo/network", "system"]
 
 [dependencies]
 base64 = { workspace = true }
+base64-simd = { version = "0.8", features = ["alloc"], default-features = false }
+hex-simd = { version = "0.8", features = ["alloc"], default-features = false }
+itoa = { version = "1", default-features = false }
+phf = { version = "0.14", features = ["macros"], default-features = false }
+ryu = { version = "1", default-features = false }
 half = { version = "2", default-features = false }
 home = { version = "0.5", default-features = false }
 memchr = "2"

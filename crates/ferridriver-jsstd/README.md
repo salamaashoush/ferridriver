@@ -13,6 +13,8 @@ Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@46d4215` (2026-08-04).
 | `llrt_exceptions`  | `exceptions` |
 | `llrt_events`      | `events`     |
 | `llrt_abort`       | `abort`      |
+| `llrt_encoding`    | `encoding`   |
+| `llrt_buffer`      | `buffer`     |
 | `llrt_os`          | `os`         |
 | `llrt_stream_web`  | `stream_web` |
 | `llrt_test`        | `test` (dev) |
@@ -40,7 +42,6 @@ implementation of each surface:
 | `node::process` | The module form of the host's `process` global |
 | `node::timers` | The module form of the host's timers, plus `timers/promises` |
 | `node::path` | The `path` module, moved out of `ferridriver-script`'s `node_compat` |
-| `node::buffer` | The `Buffer` class, moved out of the same place |
 | `node::bytes` | The one JS-value-to-`Vec<u8>` walk: `BufferSource`, `Buffer`, byte arrays, encoded strings. `crypto`, the compression streams, `Buffer.from` and `setInputFiles` all read through it — there were three separate walks before |
 
 `src/node/` carries its own `rustfmt.toml` re-enabling formatting (the crate
@@ -60,14 +61,15 @@ Re-sync recipe (from a checkout of llrt):
 
 ```sh
 for m in utils:libs/llrt_utils context:libs/llrt_context \
-         exceptions:modules/llrt_exceptions events:modules/llrt_events \
-         abort:modules/llrt_abort os:modules/llrt_os \
+         encoding:libs/llrt_encoding exceptions:modules/llrt_exceptions \
+         events:modules/llrt_events abort:modules/llrt_abort \
+         os:modules/llrt_os buffer:modules/llrt_buffer \
          stream_web:modules/llrt_stream_web; do
   name="${m%%:*}"; path="${m##*:}"
   cp -R "$LLRT/$path/src" "src/$name" && mv "src/$name/lib.rs" "src/$name/mod.rs"
 done
 # per-module first, then the cross-crate rewrite (BSD sed has no \b — use perl)
-for name in utils context exceptions events abort os stream_web; do
+for name in utils context encoding exceptions events abort os buffer stream_web; do
   find "src/$name" -name '*.rs' | while read -r f; do
     perl -pi -e "s/\bcrate::/crate::${name}::/g" "$f"
   done
@@ -170,3 +172,33 @@ for ferridriver's convenience. Upstream candidates.
   implemented upstream and is not added here.
 - `networkInterfaces()` marks link-local and multicast addresses
   `internal: true`; Node marks only loopback interfaces internal.
+
+13. **`buffer/` — no `Blob`, no `File`.** `llrt_buffer`'s `blob.rs` and
+    `file.rs` are not vendored and `init` does not define those classes:
+    ferridriver has its own `Blob` and `File` in `ferridriver-script`, and
+    a second implementation of each is what this crate exists to avoid.
+    `llrt_stream_web` is therefore not a dependency of this module either.
+
+14. **`buffer/class.rs`** is upstream's `buffer.rs`, renamed. A `buffer`
+    module inside a `buffer` module trips `clippy::module_inception`,
+    which is on by default and the repo's gate runs `-D warnings`.
+
+15. **`buffer/mod.rs` — `equals` and `toJSON`.** Node defines both on
+    `Buffer.prototype`; upstream defines neither, and the hand-written
+    class this vendoring replaced had both, so not adding them would be a
+    regression. Added after `set_prototype` rather than inside the
+    vendored file, so `class.rs` stays a mechanical diff. Upstream
+    candidates.
+
+16. **`llrt_encoding`'s build script is not vendored.** It only calls
+    `llrt_build::set_nightly_cfg()`; this repo pins stable, so the
+    `rust_nightly` arms compile out. `rust_nightly` and `nightly` are
+    declared as known-but-never-set cfgs in `Cargo.toml`.
+
+## Known gaps against Node — `Buffer`
+
+`Buffer` is a real `Uint8Array` subclass, so every typed-array method
+works and index access reads bytes. Missing against Node: the
+string-aware overrides of `includes` / `indexOf` / `lastIndexOf` / `fill`
+(the `Uint8Array` versions are inherited, so they take byte values, not
+strings), `swap16` / `swap32` / `swap64`, `compare`, and `Buffer.poolSize`.

@@ -12,6 +12,8 @@
 //! | `llrt_events`       | [`events`]    |
 //! | `llrt_abort`        | [`abort`]     |
 //! | `llrt_os`           | [`os`]        |
+//! | `llrt_encoding`     | [`encoding`]  |
+//! | `llrt_buffer`       | [`buffer`]    |
 //! | `llrt_stream_web`   | [`stream_web`]|
 //! | `llrt_test`         | `test` (dev)  |
 //!
@@ -22,6 +24,8 @@
 
 pub mod abort;
 pub mod context;
+pub mod buffer;
+pub mod encoding;
 pub mod events;
 pub mod exceptions;
 /// Node modules ferridriver implements itself, because upstream llrt has

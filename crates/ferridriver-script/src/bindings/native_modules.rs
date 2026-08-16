@@ -596,30 +596,26 @@ impl ModuleDef for PathModule {
   }
 }
 
-/// `import { Buffer } from 'node:buffer'` — the documented [`ferridriver_jsstd::node::buffer::BufferJs`]
-/// subset.
-pub struct BufferModule;
+/// `import { Buffer } from 'node:buffer'` — the vendored llrt `Buffer`,
+/// which subclasses `Uint8Array`.
+pub use ferridriver_jsstd::buffer::BufferModule;
 
-const BUFFER_EXPORTS: &[&str] = &["default", "Buffer"];
-
+/// `require('buffer')`: the same members the ES module exports, read off
+/// the globals the runtime installed.
 fn buffer_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-  let ctor = ferridriver_jsstd::node::buffer::buffer_constructor(ctx)?;
-  let default = Object::new(ctx.clone())?;
-  default.set("Buffer", ctor.clone())?;
   let ns = Object::new(ctx.clone())?;
-  ns.set("default", default)?;
-  ns.set("Buffer", ctor)?;
+  for name in ["Buffer", "atob", "btoa"] {
+    if let Ok(value) = ctx.globals().get::<_, Value<'js>>(name)
+      && !value.is_undefined()
+    {
+      ns.set(name, value)?;
+    }
+  }
+  let constants = Object::new(ctx.clone())?;
+  constants.set("MAX_LENGTH", u32::MAX)?;
+  constants.set("MAX_STRING_LENGTH", (1_u32 << 30) - 1)?;
+  ns.set("constants", constants)?;
   Ok(ns)
-}
-
-impl ModuleDef for BufferModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    declare_all(decl, BUFFER_EXPORTS)
-  }
-
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    export_from(exports, &buffer_namespace(ctx)?, BUFFER_EXPORTS)
-  }
 }
 
 /// `import os from 'node:os'` — host introspection, served by the
