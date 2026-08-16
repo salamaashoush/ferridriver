@@ -708,6 +708,7 @@ pub fn translate_features_js(
         suite: Some(scenario.feature_name.clone()),
         name: scenario.name.clone(),
         line: crate::translate::scenario_line(&scenario),
+        column: None,
       };
       let annotations = crate::translate::scenario_annotations(&scenario);
       let use_options = crate::translate::scenario_use_options(&scenario);

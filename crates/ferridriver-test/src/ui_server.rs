@@ -766,7 +766,7 @@ pub fn reporter_event_to_json(event: &ReporterEvent, artifacts_root: &Path) -> s
       "type": "workerStarted",
       "workerId": worker_id,
     }),
-    ReporterEvent::TestStarted { test_id, attempt } => serde_json::json!({
+    ReporterEvent::TestStarted { test_id, attempt, .. } => serde_json::json!({
       "type": "testStarted",
       "id": test_id.full_name(),
       "attempt": attempt,
@@ -792,9 +792,9 @@ pub fn reporter_event_to_json(event: &ReporterEvent, artifacts_root: &Path) -> s
       "durationMs": step.duration.as_millis() as u64,
       "error": step.error,
     }),
-    ReporterEvent::TestFinished { test_id, outcome } => serde_json::json!({
+    ReporterEvent::TestFinished { outcome } => serde_json::json!({
       "type": "testFinished",
-      "id": test_id.full_name(),
+      "id": outcome.test_id.full_name(),
       "outcome": outcome_json(outcome, artifacts_root),
     }),
     ReporterEvent::WorkerFinished { worker_id } => serde_json::json!({
@@ -808,8 +808,10 @@ pub fn reporter_event_to_json(event: &ReporterEvent, artifacts_root: &Path) -> s
       skipped,
       flaky,
       duration,
+      status,
     } => serde_json::json!({
       "type": "runFinished",
+      "status": status.as_str(),
       "totals": {
         "total": total,
         "passed": passed,
@@ -818,6 +820,17 @@ pub fn reporter_event_to_json(event: &ReporterEvent, artifacts_root: &Path) -> s
         "flaky": flaky,
         "durationMs": duration.as_millis() as u64,
       },
+    }),
+    ReporterEvent::TestOutput(output) => serde_json::json!({
+      "type": "testOutput",
+      "id": output.test_id.full_name(),
+      "stream": if output.stderr { "stderr" } else { "stdout" },
+      "text": output.text,
+    }),
+    ReporterEvent::RunError { error } => serde_json::json!({
+      "type": "runError",
+      "error": error.message,
+      "stack": error.stack,
     }),
   }
 }
@@ -843,6 +856,11 @@ fn outcome_json(outcome: &TestOutcome, artifacts_root: &Path) -> serde_json::Val
     .collect();
   serde_json::json!({
     "status": outcome.status.to_string(),
+    // How the attempt reads once its declared expectation is applied:
+    // a `test.fail()` test carries `status: "failed"` and
+    // `outcome: "expected"`, and a UI colors by the latter.
+    "outcome": crate::model::outcome_kind(&[outcome.status], outcome.expected_status).as_str(),
+    "expectedStatus": crate::reporter::base::expected_status_str(outcome.expected_status),
     "durationMs": outcome.duration.as_millis() as u64,
     "attempt": outcome.attempt,
     "error": outcome.error.as_ref().map(ToString::to_string),
@@ -865,6 +883,7 @@ mod tests {
       suite: Some("UI smoke".into()),
       name: "blank page".into(),
       line: Some(3),
+      column: None,
     }
   }
 
@@ -1000,7 +1019,7 @@ mod tests {
   fn test_finished_maps_outcome_with_artifact_url() {
     let root = tempfile::tempdir().expect("tempdir");
     let trace_path = root.path().join("key with space").join("t-attempt1.trace.zip");
-    let outcome = TestOutcome {
+    let outcome = std::sync::Arc::new(TestOutcome {
       test_id: test_id(),
       status: TestStatus::Passed,
       duration: Duration::from_millis(1234),
@@ -1012,16 +1031,9 @@ mod tests {
         content_type: "application/zip".into(),
         body: AttachmentBody::Path(trace_path),
       }],
-      steps: Vec::new(),
-      stdout: String::new(),
-      stderr: String::new(),
-      annotations: Vec::new(),
-      metadata: serde_json::Value::Null,
-    };
-    let event = ReporterEvent::TestFinished {
-      test_id: test_id(),
-      outcome,
-    };
+      ..Default::default()
+    });
+    let event = ReporterEvent::TestFinished { outcome };
     let json = reporter_event_to_json(&event, root.path());
 
     assert_eq!(json["type"].as_str(), Some("testFinished"));
@@ -1044,6 +1056,7 @@ mod tests {
   #[test]
   fn run_finished_maps_totals() {
     let event = ReporterEvent::RunFinished {
+      status: crate::reporter::RunStatus::Passed,
       total: 5,
       passed: 3,
       failed: 1,
@@ -1062,7 +1075,7 @@ mod tests {
 
   #[test]
   fn step_events_map_ids_and_durations() {
-    let started = ReporterEvent::StepStarted(Box::new(crate::reporter::StepStartedEvent {
+    let started = ReporterEvent::StepStarted(std::sync::Arc::new(crate::reporter::StepStartedEvent {
       test_id: test_id(),
       step_id: "s1".into(),
       parent_step_id: None,
@@ -1075,7 +1088,7 @@ mod tests {
     assert!(json["parentStepId"].is_null());
     assert_eq!(json["category"].as_str(), Some("test.step"));
 
-    let finished = ReporterEvent::StepFinished(Box::new(crate::reporter::StepFinishedEvent {
+    let finished = ReporterEvent::StepFinished(std::sync::Arc::new(crate::reporter::StepFinishedEvent {
       test_id: test_id(),
       step_id: "s1".into(),
       title: "Given a blank page".into(),

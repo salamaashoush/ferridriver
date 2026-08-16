@@ -300,7 +300,9 @@ impl ScenarioExecutor {
     let result = match self.registry.find_match(&interpolated) {
       Ok(step_match) => {
         let handler = &step_match.def.handler;
-        match tokio::time::timeout(self.step_timeout, handler(world, step_match.params, table, docstring)).await {
+        match ferridriver::pause::run_within(self.step_timeout, handler(world, step_match.params, table, docstring))
+          .await
+        {
           Ok(r) => r,
           Err(_) => Err(crate::step::StepError::from(format!(
             "step timed out after {}ms",

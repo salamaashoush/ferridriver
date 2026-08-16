@@ -291,21 +291,16 @@ pub async fn run_bdd_with(
       let extensions = extensions.clone();
       Box::pin(async move {
         match build_bdd_plan(&config, &js_globs, &extensions, changed.as_deref()).await {
-          Ok(plan) => plan,
+          Ok(plan) => ferridriver_test::runner::PlanBuild::ok(plan),
           Err(e) => {
-            eprintln!("{e}");
-            ferridriver_test::model::TestPlan {
-              suites: Vec::new(),
-              total_tests: 0,
-              shard: None,
-            }
+            ferridriver_test::runner::PlanBuild::failed(ferridriver_test::model::TestPlan::default(), e.to_string())
           },
         }
       })
     });
     let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
     return if ui_mode {
-      runner.run_ui(factory, cwd, ui_port).await
+      Box::pin(runner.run_test_server(factory, cwd, None, ui_port)).await
     } else {
       runner.run_watch(factory, cwd).await
     };

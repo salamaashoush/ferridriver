@@ -19,6 +19,82 @@ use ferridriver::Browser;
 use ferridriver::options::LaunchPlan;
 use ferridriver::state::{BrowserState, ConnectMode};
 
+/// One run's event plumbing: the bus tests emit into, plus the reporters
+/// draining it — the session's, and any this run added.
+/// See [`TestRunner::start_run_bus`].
+pub struct RunBus {
+  pub bus: EventBus,
+  reporters: Option<tokio::task::JoinHandle<ReporterSet>>,
+  extra_reporters: Option<tokio::task::JoinHandle<ReporterSet>>,
+}
+
+/// The browser a long-lived session keeps between runs, and the plan it
+/// was launched from. A project configured for another browser (a
+/// different backend, channel, or headedness) must not silently borrow
+/// it — [`same_launch`] is what decides.
+#[derive(Clone)]
+struct SharedBrowser {
+  browser: Arc<Browser>,
+  plan: LaunchPlan,
+}
+
+/// Whether two plans would launch the same browser process.
+///
+/// Only the fields that reach the child matter; context-level options
+/// (viewport, locale) ride on the pages, not the process.
+fn same_launch(a: &LaunchPlan, b: &LaunchPlan) -> bool {
+  a.backend == b.backend
+    && a.kind == b.kind
+    && a.headless == b.headless
+    && a.channel == b.channel
+    && a.executable_path == b.executable_path
+    && a.user_data_dir == b.user_data_dir
+    && a.args == b.args
+    && a.env == b.env
+}
+
+/// One project of a run: the config it executes under, and the name its
+/// test ids are hashed with. A config without `[[test.projects]]` is
+/// itself one project.
+#[derive(Clone)]
+pub struct ProjectRun {
+  pub name: String,
+  pub config: Arc<TestConfig>,
+  project: Option<ProjectConfig>,
+}
+
+impl ProjectRun {
+  /// `plan` narrowed to the tests this project runs.
+  #[must_use]
+  pub fn narrow(&self, plan: &TestPlan) -> TestPlan {
+    let mut narrowed = plan.clone();
+    if let Some(project) = &self.project {
+      filter_plan_for_project(&mut narrowed, &self.config, project);
+    }
+    narrowed
+  }
+}
+
+/// A project's own event bus, plus the tasks draining it. The bus is
+/// closed and those tasks awaited when the project finishes, so nothing
+/// a consumer forwards arrives after the run it belongs to has ended.
+pub struct ProjectStream {
+  pub bus: EventBus,
+  pub drains: Vec<tokio::task::JoinHandle<()>>,
+}
+
+/// How a caller takes part in a multi-project run.
+///
+/// [`TestRunner::run`] needs neither: every project reports onto the one
+/// bus its reporters read. A consumer that must tell projects apart —
+/// the UI computes a test's id from the project that ran it — asks for a
+/// stream per project, and narrows each project's plan itself.
+#[derive(Default)]
+pub struct ProjectHooks<'a> {
+  pub stream: Option<&'a (dyn Fn(&str) -> ProjectStream + Send + Sync)>,
+  pub narrow: Option<&'a (dyn Fn(&str, &mut TestPlan) + Send + Sync)>,
+}
+
 /// Aggregate outcome of one `execute()` pass. The multi-project orchestrator
 /// sums these across concurrently-run projects to emit a single `RunFinished`.
 #[derive(Clone, Copy, Default)]
@@ -37,8 +113,8 @@ pub struct TestRunner {
   hooks: TestHooks,
   reporters: ReporterSet,
   overrides: CliOverrides,
-  /// Shared browser for watch mode (persists across runs).
-  shared_browser: Option<Arc<Browser>>,
+  /// Shared browser for watch and UI modes (persists across runs).
+  shared_browser: Option<SharedBrowser>,
   /// When set, `execute()` does not emit `RunStarted` / `RunFinished`. The
   /// multi-project orchestrator turns this on for every per-project run so a
   /// single aggregate run boundary is emitted once around all projects,
@@ -47,6 +123,12 @@ pub struct TestRunner {
   suppress_run_boundary: bool,
   /// Cooperative cancel for an in-flight `execute` (UI Stop).
   run_stop: RunStop,
+  /// Something is watching this run's traces as they are recorded, so
+  /// events are flushed per line instead of buffered.
+  live_traces: bool,
+  /// Worker numbers for the run in flight, shared with every project of
+  /// it — see the reservation in [`Self::execute_with_summary`].
+  worker_ids: Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Cooperative cancel signal for an in-flight [`TestRunner::execute`].
@@ -75,6 +157,12 @@ impl RunStop {
     self.requested.store(false, std::sync::atomic::Ordering::SeqCst);
   }
 
+  /// Whether a stop was asked for — the difference between a run that
+  /// finished and one that was cut short.
+  fn is_requested(&self) -> bool {
+    self.requested.load(std::sync::atomic::Ordering::SeqCst)
+  }
+
   async fn wait(&self) {
     while !self.requested.load(std::sync::atomic::Ordering::SeqCst) {
       self.notify.notified().await;
@@ -91,13 +179,7 @@ impl TestRunner {
 
   /// Build a runner with programmatic suite hooks supplied at construction.
   pub fn with_hooks(config: TestConfig, hooks: TestHooks, overrides: CliOverrides) -> Self {
-    let reporters = crate::reporter::create_reporters(
-      &config.reporter,
-      &config.output_dir,
-      config.has_bdd,
-      config.quiet,
-      config.report_slow_tests.clone(),
-    );
+    let reporters = crate::reporter::create_reporters(&config.reporter, &config);
     Self {
       config: Arc::new(config),
       hooks,
@@ -106,6 +188,8 @@ impl TestRunner {
       shared_browser: None,
       suppress_run_boundary: false,
       run_stop: RunStop::default(),
+      live_traces: false,
+      worker_ids: Arc::new(std::sync::atomic::AtomicU32::new(0)),
     }
   }
 
@@ -118,6 +202,118 @@ impl TestRunner {
   /// Append an additional reporter after construction (e.g., NAPI ResultCollector).
   pub fn add_reporter(&mut self, reporter: Box<dyn crate::reporter::Reporter>) {
     self.reporters.add(reporter);
+  }
+
+  /// The resolved configuration this runner runs with.
+  #[must_use]
+  pub fn config(&self) -> &TestConfig {
+    &self.config
+  }
+
+  /// The command-line choices this runner was built with.
+  #[must_use]
+  pub fn overrides(&self) -> &CliOverrides {
+    &self.overrides
+  }
+
+  /// A runner for one caller-driven run: this runner's browser, hooks
+  /// and stop signal under a different config and overrides. Reporters
+  /// stay with this runner — the caller owns the run's event bus.
+  #[must_use]
+  pub fn with_run_options(&self, config: Arc<TestConfig>, overrides: CliOverrides) -> Self {
+    Self {
+      config,
+      hooks: self.hooks.clone(),
+      reporters: ReporterSet::default(),
+      overrides,
+      shared_browser: self.shared_browser.clone(),
+      suppress_run_boundary: self.suppress_run_boundary,
+      run_stop: self.run_stop.clone(),
+      live_traces: self.live_traces,
+      worker_ids: Arc::clone(&self.worker_ids),
+    }
+  }
+
+  /// The projects this runner covers: its `[[test.projects]]` merged
+  /// onto the config, or the config itself when it declares none.
+  #[must_use]
+  pub fn project_runs(&self) -> Vec<ProjectRun> {
+    if self.config.projects.is_empty() {
+      return vec![ProjectRun {
+        name: self.config.name.clone().unwrap_or_default(),
+        config: Arc::clone(&self.config),
+        project: None,
+      }];
+    }
+    self
+      .config
+      .projects
+      .iter()
+      .map(|project| ProjectRun {
+        name: project.name.clone(),
+        config: Arc::new(self.config.merge_project(project)),
+        project: Some(project.clone()),
+      })
+      .collect()
+  }
+
+  /// Cancel the run in flight (the UI's Stop). Workers drop what is
+  /// queued and finish what they started, so `execute` still unwinds
+  /// cleanly.
+  pub fn request_stop(&self) {
+    self.run_stop.request();
+  }
+
+  /// Clear a previous cancellation before starting a new run.
+  pub fn reset_stop(&self) {
+    self.run_stop.reset();
+  }
+
+  /// Follow this run's traces as they are recorded (a UI is watching).
+  pub fn set_live_traces(&mut self, live: bool) {
+    self.live_traces = live;
+  }
+
+  /// Build the event bus for one run, wiring the configured reporters
+  /// plus any this run adds (`runTests({ reporters })`).
+  ///
+  /// The configured reporters are taken for the duration and handed back
+  /// by [`Self::finish_run_bus`] — the same take/restore the watch loop
+  /// does, so reporter state survives across runs. `extra` belongs to
+  /// the one run: it is finalized and dropped with it.
+  ///
+  /// A caller that watches the stream itself subscribes per project
+  /// instead (see [`ProjectStream`]), so this takes no subscriber.
+  pub fn start_run_bus(&mut self, extra: ReporterSet) -> RunBus {
+    let mut builder = EventBusBuilder::new();
+    let reporters = (!self.reporters.is_empty()).then(|| {
+      let subscription = builder.subscribe();
+      let reporters = std::mem::take(&mut self.reporters);
+      tokio::spawn(ReporterDriver::new(reporters, subscription).run())
+    });
+    let extra_reporters = (!extra.is_empty()).then(|| {
+      let subscription = builder.subscribe();
+      tokio::spawn(ReporterDriver::new(extra, subscription).run())
+    });
+    RunBus {
+      bus: builder.build(),
+      reporters,
+      extra_reporters,
+    }
+  }
+
+  /// Close a run's bus, wait for its reporters to drain, and take the
+  /// configured ones back.
+  pub async fn finish_run_bus(&mut self, run: RunBus) {
+    run.bus.close();
+    if let Some(reporters) = run.reporters
+      && let Ok(reporters) = reporters.await
+    {
+      self.reporters = reporters;
+    }
+    if let Some(extra) = run.extra_reporters {
+      let _ = extra.await;
+    }
   }
 
   /// Export the configured `baseUrl` as `FERRIDRIVER_BASE_URL` so
@@ -149,6 +345,9 @@ impl TestRunner {
     // visible to every bare `expect()` in this process.
     ferridriver_expect::set_default_expect_timeout(std::time::Duration::from_millis(self.config.expect_timeout));
     self.export_base_url_env();
+    // A fresh run numbers its workers from zero again (watch and UI
+    // sessions run many).
+    self.worker_ids.store(0, std::sync::atomic::Ordering::SeqCst);
     let global_timeout = self.config.global_timeout;
     let inner = async move {
       // ── Multi-project path ──
@@ -201,7 +400,33 @@ impl TestRunner {
     }
   }
 
-  /// Run multiple projects in dependency order.
+  /// Run multiple projects in dependency order, reporting to the
+  /// configured reporters.
+  async fn run_projects(&mut self, plan: TestPlan) -> i32 {
+    let mut builder = EventBusBuilder::new();
+    let driver_handle = if self.reporters.is_empty() {
+      None
+    } else {
+      let sub = builder.subscribe();
+      let reporters = std::mem::take(&mut self.reporters);
+      Some(tokio::spawn(ReporterDriver::new(reporters, sub).run()))
+    };
+    let bus = builder.build();
+
+    let summary = self
+      .execute_projects_with_summary(plan, bus.clone(), ProjectHooks::default())
+      .await;
+
+    bus.close();
+    if let Some(driver_handle) = driver_handle
+      && let Ok(reporters) = driver_handle.await
+    {
+      self.reporters = reporters;
+    }
+    summary.exit_code
+  }
+
+  /// Execute `plan` once per project, in dependency order, onto `bus`.
   ///
   /// Each project creates a merged config and runs the full execute pipeline
   /// with its own browser instance. Results are aggregated — if any project
@@ -212,14 +437,33 @@ impl TestRunner {
   /// - A project only runs after all its dependencies have passed
   /// - `teardown` projects run after the project and all its dependents complete
   /// - If a dependency fails, dependent projects are skipped
-  async fn run_projects(&mut self, plan: TestPlan) -> i32 {
+  ///
+  /// A config that declares no projects is itself the one project.
+  pub async fn execute_projects_with_summary(
+    &self,
+    plan: TestPlan,
+    bus: EventBus,
+    hooks: ProjectHooks<'_>,
+  ) -> ExecuteSummary {
+    self.worker_ids.store(0, std::sync::atomic::Ordering::SeqCst);
+    if self.config.projects.is_empty() {
+      return self.execute_single_project(plan, bus, &hooks).await;
+    }
     let projects = self.config.projects.clone();
+
+    // Projects share one output directory and run concurrently, so the
+    // scratch directories are swept here, around all of them, rather than
+    // by each project's own run.
+    crate::artifacts::sweep(&self.config.output_dir);
 
     let sorted = match topo_sort_projects(&projects) {
       Ok(order) => order,
       Err(e) => {
         tracing::error!(target: "ferridriver::runner", "project dependency error: {e}");
-        return 1;
+        return ExecuteSummary {
+          exit_code: 1,
+          ..Default::default()
+        };
       },
     };
 
@@ -367,7 +611,22 @@ impl TestRunner {
         },
         Err(e) => {
           tracing::error!(target: "ferridriver::runner", "webServer start failed: {e}");
-          return 1;
+          bus.emit(ReporterEvent::RunError {
+            error: Box::new(crate::model::TestFailure::from(format!("webServer start failed: {e}"))),
+          });
+          bus.emit(ReporterEvent::RunFinished {
+            total: 0,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            flaky: 0,
+            duration: std::time::Duration::ZERO,
+            status: crate::reporter::RunStatus::Failed,
+          });
+          return ExecuteSummary {
+            exit_code: 1,
+            ..Default::default()
+          };
         },
       }
     };
@@ -382,21 +641,16 @@ impl TestRunner {
       mc.web_server = Vec::new();
       let mut p = plan.clone();
       filter_plan_for_project(&mut p, &mc, &projects[idx]);
+      self.apply_run_filters(&mut p);
+      if let Some(narrow) = hooks.narrow {
+        narrow(&projects[idx].name, &mut p);
+      }
       total_tests += p.total_tests;
       merged.insert(idx, Arc::new(mc));
       plans.insert(idx, p);
     }
 
-    // ── Shared reporter driver + single aggregate run boundary ──
-    let mut builder = EventBusBuilder::new();
-    let driver_handle = if self.reporters.is_empty() {
-      None
-    } else {
-      let sub = builder.subscribe();
-      let reporters = std::mem::take(&mut self.reporters);
-      Some(tokio::spawn(ReporterDriver::new(reporters, sub).run()))
-    };
-    let bus = builder.build();
+    // ── Single aggregate run boundary ──
     let reporting_enabled = bus.has_subscribers();
 
     // `workers` is the global concurrency budget; never launch more workers
@@ -407,6 +661,7 @@ impl TestRunner {
         total_tests,
         num_workers,
         metadata: self.config.metadata.clone(),
+        start_time: std::time::SystemTime::now(),
       });
     }
     let run_start = Instant::now();
@@ -490,20 +745,29 @@ impl TestRunner {
           "running project",
         );
 
-        let sub_runner = TestRunner {
-          config: merged.get(&idx).cloned().unwrap_or_else(|| Arc::clone(&self.config)),
-          hooks: self.hooks.clone(),
-          reporters: ReporterSet::default(),
-          overrides: self.overrides.clone(),
-          shared_browser: self.shared_browser.clone(),
-          suppress_run_boundary: true,
-          // Sub-runners share the parent's stop signal so one Stop
-          // cancels every concurrently-running project.
-          run_stop: self.run_stop.clone(),
+        let mut sub_runner = self.with_run_options(
+          merged.get(&idx).cloned().unwrap_or_else(|| Arc::clone(&self.config)),
+          self.overrides.clone(),
+        );
+        sub_runner.suppress_run_boundary = true;
+        let (project_bus, drains) = match hooks.stream {
+          Some(stream) => {
+            let stream = stream(&projects[idx].name);
+            (stream.bus, stream.drains)
+          },
+          None => (bus.clone(), Vec::new()),
         };
-        let project_bus = bus.clone();
+        let owns_bus = hooks.stream.is_some();
         join_set.spawn(async move {
-          let summary = sub_runner.execute_with_summary(project_plan, project_bus).await;
+          let summary = sub_runner.execute_with_summary(project_plan, project_bus.clone()).await;
+          // A bus of this project's own is this project's to close: its
+          // drains must finish before the caller calls the run over.
+          if owns_bus {
+            project_bus.close();
+            for drain in drains {
+              let _ = drain.await;
+            }
+          }
           (idx, Some(summary))
         });
         in_flight += 1;
@@ -543,7 +807,7 @@ impl TestRunner {
       }
     }
 
-    // ── Single aggregate RunFinished + reporter teardown ──
+    // ── Single aggregate RunFinished ──
     if reporting_enabled {
       bus.emit(ReporterEvent::RunFinished {
         total: total_tests,
@@ -552,20 +816,50 @@ impl TestRunner {
         skipped: agg.skipped,
         flaky: agg.flaky,
         duration: run_start.elapsed(),
+        status: if agg.failed > 0 {
+          crate::reporter::RunStatus::Failed
+        } else {
+          crate::reporter::RunStatus::Passed
+        },
       });
-    }
-    bus.close();
-    if let Some(driver_handle) = driver_handle
-      && let Ok(reporters) = driver_handle.await
-    {
-      self.reporters = reporters;
     }
 
     if let Some(mgr) = web_server_manager {
       mgr.stop().await;
     }
 
-    exit_code
+    // Every project is finished with its scratch directory now.
+    crate::artifacts::sweep(&self.config.output_dir);
+
+    agg.exit_code = exit_code;
+    agg.total = total_tests;
+    agg
+  }
+
+  /// The one-project case of [`Self::execute_projects_with_summary`]:
+  /// the config is itself the project, so there is nothing to merge or
+  /// schedule — only the caller's hooks to honour.
+  async fn execute_single_project(&self, plan: TestPlan, bus: EventBus, hooks: &ProjectHooks<'_>) -> ExecuteSummary {
+    let name = self.config.name.clone().unwrap_or_default();
+    let mut plan = plan;
+    if let Some(narrow) = hooks.narrow {
+      narrow(&name, &mut plan);
+    }
+    let (project_bus, drains) = match hooks.stream {
+      Some(stream) => {
+        let stream = stream(&name);
+        (stream.bus, stream.drains)
+      },
+      None => (bus, Vec::new()),
+    };
+    let summary = self.execute_with_summary(plan, project_bus.clone()).await;
+    if hooks.stream.is_some() {
+      project_bus.close();
+      for drain in drains {
+        let _ = drain.await;
+      }
+    }
+    summary
   }
 
   /// Core execution engine. Emits events on the provided `EventBus`.
@@ -579,15 +873,14 @@ impl TestRunner {
     self.execute_with_summary(plan, event_bus).await.exit_code
   }
 
-  /// Core execution engine, returning the full per-run tally. `execute()` is
-  /// the thin `i32` wrapper; the multi-project orchestrator uses the summary
-  /// to aggregate counts across concurrently-run projects.
-  #[tracing::instrument(skip_all, fields(workers = self.config.workers, tests = plan.total_tests))]
-  pub async fn execute_with_summary(&self, mut plan: TestPlan, event_bus: EventBus) -> ExecuteSummary {
-    // ── Filtering ──
+  /// Narrow `plan` by what the command line and the config asked for
+  /// (shard, grep, tag). Applied by every `execute`, and by the
+  /// multi-project orchestrator when it counts the run — a total that
+  /// ignored `--grep` reported more tests than ever ran.
+  fn apply_run_filters(&self, plan: &mut TestPlan) {
     if let Some(shard_arg) = &self.overrides.shard {
       shard::filter_by_shard(
-        &mut plan,
+        plan,
         &crate::model::ShardInfo {
           current: shard_arg.current,
           total: shard_arg.total,
@@ -602,14 +895,22 @@ impl TestRunner {
       .as_ref()
       .or(self.config.config_grep_invert.as_ref());
     if let Some(grep) = grep {
-      crate::discovery::filter_by_grep(&mut plan, grep, false);
+      crate::discovery::filter_by_grep(plan, grep, false);
     }
     if let Some(grep_inv) = grep_inv {
-      crate::discovery::filter_by_grep(&mut plan, grep_inv, true);
+      crate::discovery::filter_by_grep(plan, grep_inv, true);
     }
     if let Some(tag) = &self.overrides.tag {
-      crate::discovery::filter_by_tag(&mut plan, tag);
+      crate::discovery::filter_by_tag(plan, tag);
     }
+  }
+
+  /// Core execution engine, returning the full per-run tally. `execute()` is
+  /// the thin `i32` wrapper; the multi-project orchestrator uses the summary
+  /// to aggregate counts across concurrently-run projects.
+  #[tracing::instrument(skip_all, fields(workers = self.config.workers, tests = plan.total_tests))]
+  pub async fn execute_with_summary(&self, mut plan: TestPlan, event_bus: EventBus) -> ExecuteSummary {
+    self.apply_run_filters(&mut plan);
 
     // ── Forbid-only check ──
     if (self.config.forbid_only || self.overrides.forbid_only)
@@ -634,6 +935,15 @@ impl TestRunner {
     // ── preserve_output: "never" — wipe output_dir at run start ──
     if self.config.preserve_output == "never" {
       let _ = std::fs::remove_dir_all(&self.config.output_dir);
+    }
+
+    // Worker scratch directories are per-run: whatever is left is from a
+    // run that was killed before it could zip its traces. Only the
+    // outermost runner may do this — projects run concurrently and share
+    // one output directory, so a project sweeping here would delete the
+    // trace another project is still writing.
+    if !self.suppress_run_boundary {
+      crate::artifacts::sweep(&self.config.output_dir);
     }
 
     let total_tests = plan.total_tests;
@@ -705,6 +1015,11 @@ impl TestRunner {
         },
         Err(e) => {
           tracing::error!(target: "ferridriver::runner", "webServer start failed: {e}");
+          // Before the run boundary: only the error itself is known,
+          // and a report with no tests and this error beats a silent one.
+          event_bus.emit(ReporterEvent::RunError {
+            error: Box::new(crate::model::TestFailure::from(format!("webServer start failed: {e}"))),
+          });
           return ExecuteSummary {
             exit_code: 1,
             total: total_tests,
@@ -744,6 +1059,7 @@ impl TestRunner {
         total_tests,
         num_workers,
         metadata: run_metadata,
+        start_time: std::time::SystemTime::now(),
       });
     }
 
@@ -756,6 +1072,16 @@ impl TestRunner {
         if let Err(e) = setup_fn(global_pool.clone()).await {
           tracing::error!(target: "ferridriver::runner", "global setup failed: {e}");
           if emit_boundary {
+            // A setup failure belongs to no test; without this channel
+            // every report would show a run of zero failures.
+            event_bus.emit(ReporterEvent::RunError {
+              error: Box::new(crate::model::TestFailure {
+                message: format!("global setup failed: {e}"),
+                stack: e.stack.clone(),
+                diff: None,
+                screenshot: None,
+              }),
+            });
             event_bus.emit(ReporterEvent::RunFinished {
               total: total_tests,
               passed: 0,
@@ -763,6 +1089,7 @@ impl TestRunner {
               skipped: 0,
               flaky: 0,
               duration: start.elapsed(),
+              status: crate::reporter::RunStatus::Failed,
             });
           }
           return ExecuteSummary {
@@ -802,7 +1129,7 @@ impl TestRunner {
                   annotations: test.annotations.clone(),
                   timeout: test.timeout,
                   retries: test.retries,
-                  expected_status: test.expected_status.clone(),
+                  expected_status: test.expected_status,
                   use_options: test.use_options.clone(),
                 },
                 attempt: 1,
@@ -825,7 +1152,7 @@ impl TestRunner {
                   annotations: test.annotations.clone(),
                   timeout: test.timeout,
                   retries: test.retries,
-                  expected_status: test.expected_status.clone(),
+                  expected_status: test.expected_status,
                   use_options: test.use_options.clone(),
                 },
                 attempt: 1,
@@ -864,12 +1191,44 @@ impl TestRunner {
     };
     let worker_event_bus = reporting_enabled.then(|| event_bus.clone());
 
-    for worker_id in 0..num_workers {
-      let worker = Worker::new(worker_id, Arc::clone(&self.config), worker_event_bus.clone());
+    // A session's browser is only this run's browser when this run would
+    // have launched the same one: projects differ in backend, channel and
+    // headedness, and borrowing the session's Chromium for a WebKit
+    // project would run the tests on the wrong engine.
+    let shared_browser = self
+      .shared_browser
+      .as_ref()
+      .filter(|shared| same_launch(&shared.plan, &launch_plan))
+      .map(|shared| Arc::clone(&shared.browser));
+    if shared_browser.is_none() && self.shared_browser.is_some() {
+      tracing::debug!(
+        target: "ferridriver::runner",
+        project = self.config.name.as_deref().unwrap_or_default(),
+        "session browser does not match this run's launch plan; launching its own",
+      );
+    }
+
+    // Worker numbers are handed out per RUN, not per runner: projects
+    // execute concurrently, and two workers numbered 0 would share a
+    // scratch directory, a `.playwright-artifacts-0` the UI reads, and —
+    // via the per-worker script session — the "test currently running"
+    // that `test.step()` and `test.info()` resolve against.
+    let worker_base = self
+      .worker_ids
+      .fetch_add(num_workers, std::sync::atomic::Ordering::SeqCst);
+
+    for slot in 0..num_workers {
+      let worker = Worker::new(
+        worker_base + slot,
+        slot,
+        Arc::clone(&self.config),
+        worker_event_bus.clone(),
+        self.live_traces,
+      );
       let rx = dispatcher.receiver();
       let tx = result_tx.clone();
       let custom_pool = FixturePool::new(custom_fixtures.clone(), FixtureScope::Worker);
-      let shared = self.shared_browser.clone();
+      let shared = shared_browser.clone();
       let plan = launch_plan.clone();
       let stop_flag = dispatcher.stop_flag();
 
@@ -886,7 +1245,9 @@ impl TestRunner {
     drop(result_tx);
 
     // ── Collect results with retry re-dispatch ──
-    let mut attempt_history: FxHashMap<String, Vec<TestStatus>> = FxHashMap::default();
+    // Statuses plus what the test was declared to end in: a `test.fail()`
+    // test that fails is a pass, and only the pair says so.
+    let mut attempt_history: FxHashMap<String, (Vec<TestStatus>, crate::model::ExpectedStatus)> = FxHashMap::default();
     let mut final_count = 0usize;
     let mut failure_count = 0usize;
     let max_failures = if self.config.fail_fast {
@@ -911,10 +1272,11 @@ impl TestRunner {
       };
       let Some(result) = result else { break };
       let test_key = result.outcome.test_id.full_name();
-      attempt_history
+      let entry = attempt_history
         .entry(test_key)
-        .or_default()
-        .push(result.outcome.status.clone());
+        .or_insert_with(|| (Vec::new(), result.outcome.expected_status));
+      entry.0.push(result.outcome.status);
+      entry.1 = result.outcome.expected_status;
 
       if result.should_retry {
         tracing::debug!(
@@ -934,7 +1296,9 @@ impl TestRunner {
       } else {
         final_count += 1;
         // Track failures for max_failures / fail_fast.
-        if matches!(result.outcome.status, TestStatus::Failed | TestStatus::TimedOut) {
+        if crate::model::outcome_kind(&[result.outcome.status], result.outcome.expected_status)
+          == crate::model::TestOutcomeKind::Unexpected
+        {
           failure_count += 1;
         }
       }
@@ -979,23 +1343,22 @@ impl TestRunner {
     let mut skipped = 0usize;
     let mut flaky = 0usize;
 
-    for attempts in attempt_history.values() {
-      match crate::retry::RetryPolicy::final_status(attempts) {
-        TestStatus::Passed => passed += 1,
-        TestStatus::Flaky => {
+    for (attempts, expected) in attempt_history.values() {
+      match crate::model::outcome_kind(attempts, *expected) {
+        crate::model::TestOutcomeKind::Expected => passed += 1,
+        crate::model::TestOutcomeKind::Flaky => {
           flaky += 1;
           passed += 1;
         },
-        TestStatus::Skipped => skipped += 1,
-        _ => failed += 1,
+        crate::model::TestOutcomeKind::Skipped => skipped += 1,
+        crate::model::TestOutcomeKind::Unexpected => failed += 1,
       }
     }
 
     // ── preserve_output: "failures-only" — delete output dirs for passing tests ──
     if self.config.preserve_output == "failures-only" {
-      for (test_key, attempts) in &attempt_history {
-        let status = crate::retry::RetryPolicy::final_status(attempts);
-        if matches!(status, TestStatus::Passed | TestStatus::Skipped | TestStatus::Flaky) {
+      for (test_key, (attempts, expected)) in &attempt_history {
+        if crate::model::outcome_kind(attempts, *expected) != crate::model::TestOutcomeKind::Unexpected {
           let test_output_dir = self.config.output_dir.join(test_key);
           if test_output_dir.exists() {
             let _ = std::fs::remove_dir_all(&test_output_dir);
@@ -1009,6 +1372,14 @@ impl TestRunner {
       mgr.stop().await;
     }
 
+    // The loose trace files were only interesting while their tests were
+    // running; the ones worth keeping are zipped into each test's own
+    // output directory by now. Outermost runner only, for the reason
+    // above.
+    if !self.suppress_run_boundary {
+      crate::artifacts::sweep(&self.config.output_dir);
+    }
+
     if emit_boundary {
       event_bus.emit(ReporterEvent::RunFinished {
         total: total_tests,
@@ -1017,6 +1388,13 @@ impl TestRunner {
         skipped,
         flaky,
         duration,
+        status: if failed > 0 {
+          crate::reporter::RunStatus::Failed
+        } else if self.run_stop.is_requested() {
+          crate::reporter::RunStatus::Interrupted
+        } else {
+          crate::reporter::RunStatus::Passed
+        },
       });
     }
 
@@ -1066,14 +1444,17 @@ impl TestRunner {
         return 1;
       },
     };
-    let browser = match launch_with_plan(launch_plan).await {
+    let browser = match launch_with_plan(launch_plan.clone()).await {
       Ok(b) => Arc::new(b),
       Err(e) => {
         eprintln!("Failed to launch browser: {e}");
         return 1;
       },
     };
-    self.shared_browser = Some(Arc::clone(&browser));
+    self.shared_browser = Some(SharedBrowser {
+      browser: Arc::clone(&browser),
+      plan: launch_plan,
+    });
 
     // Start file watcher — uses test_match globs for classification, test_ignore for filtering.
     let watcher = match FileWatcher::new(&watch_root, &self.config.test_match, &self.config.test_ignore) {
@@ -1171,7 +1552,7 @@ impl TestRunner {
     ]);
 
     // Initial run — TUI drains messages in real-time.
-    let plan = plan_factory(None).await;
+    let plan = plan_or_report(plan_factory(None).await);
     if self.run_with_tui_drain(plan, tui).await {
       return; // User cancelled during initial run.
     }
@@ -1206,11 +1587,11 @@ impl TestRunner {
             WatchCommand::RunAll => {
               grep_filter = None;
               tui.active_filter = None;
-              if self.run_with_tui_drain(plan_factory(None).await, tui).await { break; }
+              if self.run_with_tui_drain(plan_or_report(plan_factory(None).await), tui).await { break; }
               tui.set_status(crate::tui::WatchStatus::Idle);
             }
             WatchCommand::RunFailed => {
-              let mut plan = plan_factory(None).await;
+              let mut plan = plan_or_report(plan_factory(None).await);
               let rerun_path = self.config.output_dir.join("@rerun.txt");
               if rerun_path.exists() {
                 crate::discovery::filter_by_rerun(&mut plan, &rerun_path);
@@ -1224,7 +1605,7 @@ impl TestRunner {
               tui.set_status(crate::tui::WatchStatus::Idle);
             }
             WatchCommand::Rerun => {
-              let mut plan = plan_factory(None).await;
+              let mut plan = plan_or_report(plan_factory(None).await);
               if let Some(ref pattern) = grep_filter {
                 crate::discovery::filter_by_grep(&mut plan, pattern, false);
               }
@@ -1234,7 +1615,7 @@ impl TestRunner {
             WatchCommand::FilterByName(pattern) => {
               if !pattern.is_empty() {
                 grep_filter = Some(pattern.clone());
-                let mut plan = plan_factory(None).await;
+                let mut plan = plan_or_report(plan_factory(None).await);
                 crate::discovery::filter_by_grep(&mut plan, &pattern, false);
                 if self.run_with_tui_drain(plan, tui).await { break; }
               }
@@ -1249,7 +1630,7 @@ impl TestRunner {
   /// Non-interactive watch: file changes only, no keyboard, normal terminal output.
   async fn run_watch_headless(&mut self, watcher: &crate::watch::FileWatcher, plan_factory: &WatchPlanFactory) {
     // Initial run.
-    let plan = plan_factory(None).await;
+    let plan = plan_or_report(plan_factory(None).await);
     let _ = Box::pin(self.run(plan)).await;
     eprintln!("\n\x1b[2mWatching for changes (non-interactive)...\x1b[0m\n");
 
@@ -1295,9 +1676,15 @@ impl TestRunner {
 
     self.export_base_url_env();
 
+    // The UI follows each test's trace while it is being recorded, which
+    // only works if events reach the file as they happen.
+    self.live_traces = true;
+
     // Reclaim spool dirs a SIGKILLed previous session left in the temp
-    // dir before this long-lived server starts producing its own.
+    // dir before this long-lived server starts producing its own, and
+    // scratch directories a killed run left in the output dir.
     ferridriver::trace::sweep_stale_spools();
+    crate::artifacts::sweep(&self.config.output_dir);
 
     if self.config.trace == crate::tracing::TraceMode::Off {
       Arc::make_mut(&mut self.config).trace = crate::tracing::TraceMode::On;
@@ -1325,14 +1712,17 @@ impl TestRunner {
         return 1;
       },
     };
-    let browser = match launch_with_plan(launch_plan).await {
+    let browser = match launch_with_plan(launch_plan.clone()).await {
       Ok(b) => Arc::new(b),
       Err(e) => {
         eprintln!("Failed to launch browser: {e}");
         return 1;
       },
     };
-    self.shared_browser = Some(Arc::clone(&browser));
+    self.shared_browser = Some(SharedBrowser {
+      browser: Arc::clone(&browser),
+      plan: launch_plan,
+    });
 
     let watcher = match FileWatcher::new(&watch_root, &self.config.test_match, &self.config.test_ignore) {
       Ok(w) => w,
@@ -1343,7 +1733,7 @@ impl TestRunner {
     };
 
     // Initial plan populates the sidebar; nothing runs until requested.
-    let plan = plan_factory(None).await;
+    let plan = plan_or_report(plan_factory(None).await);
     state.publish_test_list(&plan);
 
     // Commands that arrive mid-run are buffered here and processed in
@@ -1380,7 +1770,7 @@ impl TestRunner {
 
           // Full plan refreshes the sidebar (new/renamed scenarios show
           // up); the run itself is narrowed to the changed files.
-          let mut plan = plan_factory(None).await;
+          let mut plan = plan_or_report(plan_factory(None).await);
           state.publish_test_list(&plan);
           if !run_all {
             retain_tests_in_files(&mut plan, &changed_paths);
@@ -1409,6 +1799,100 @@ impl TestRunner {
     0
   }
 
+  /// Serve the run through Playwright's UI-mode app.
+  ///
+  /// The app is embedded in this binary and speaks the test-server
+  /// protocol ([`crate::test_server`]); this method owns everything on
+  /// our side of it — one shared browser for every run it asks for,
+  /// traces written where its viewer can follow them live, and the loop
+  /// that answers its calls until the window closes.
+  pub async fn run_test_server(
+    &mut self,
+    plan_factory: WatchPlanFactory,
+    root: std::path::PathBuf,
+    host: Option<String>,
+    port: Option<u16>,
+  ) -> i32 {
+    use crate::test_server::{TestServerOptions, driver, start};
+
+    self.export_base_url_env();
+
+    // The UI shows each test's trace, including while it runs.
+    self.live_traces = true;
+    if self.config.trace == crate::tracing::TraceMode::Off {
+      Arc::make_mut(&mut self.config).trace = crate::tracing::TraceMode::On;
+    }
+    ferridriver::trace::sweep_stale_spools();
+    crate::artifacts::sweep(&self.config.output_dir);
+
+    let root = std::path::absolute(&root).unwrap_or(root);
+    let output_dir = std::path::absolute(&self.config.output_dir).unwrap_or_else(|_| self.config.output_dir.clone());
+    let host_given = host.is_some();
+    let server = match start(TestServerOptions {
+      host: host.unwrap_or_else(|| "127.0.0.1".to_string()),
+      port,
+      file_roots: vec![root.clone(), output_dir],
+    })
+    .await
+    {
+      Ok(server) => server,
+      Err(e) => {
+        eprintln!("Failed to start the test server: {e}");
+        return 1;
+      },
+    };
+
+    // One browser for every run the UI asks for: a launch per click is
+    // most of the wait in a UI session.
+    let launch_plan = match build_launch_plan(&self.config.browser) {
+      Ok(plan) => plan,
+      Err(message) => {
+        eprintln!("Error: {message}");
+        return 1;
+      },
+    };
+    let browser = match launch_with_plan(launch_plan.clone()).await {
+      Ok(browser) => Arc::new(browser),
+      Err(e) => {
+        eprintln!("Failed to launch browser: {e}");
+        return 1;
+      },
+    };
+    self.shared_browser = Some(SharedBrowser {
+      browser: Arc::clone(&browser),
+      plan: launch_plan,
+    });
+
+    println!("\n  ferridriver UI mode\n\n  {}\n", server.url);
+    // Asking for a host or a port means "serve it, I will connect" — the
+    // window is for the default, local case (Playwright splits the same
+    // way in `runUIMode`).
+    let open_window = host_given || port.is_none();
+    let url = server.url.clone();
+    let window = tokio::spawn(async move {
+      if !open_window {
+        std::future::pending::<()>().await;
+      }
+      if let Err(e) = ferridriver_viewer::open_app_window(&url).await {
+        eprintln!("could not open a window ({e}); open the URL above yourself");
+        // Nothing to close, so hold the session open until interrupted.
+        std::future::pending::<()>().await;
+      }
+    });
+
+    let runner = std::mem::replace(self, TestRunner::new(TestConfig::default(), CliOverrides::default()));
+    // The window is the session: closing it ends the run loop, exactly as
+    // it does in Playwright.
+    *self = Box::pin(driver::serve(runner, plan_factory, root, server, async move {
+      let _ = window.await;
+    }))
+    .await;
+
+    self.shared_browser = None;
+    let _ = browser.close().await;
+    0
+  }
+
   /// Build the (filtered) plan a UI command asks for. Publishes the
   /// refreshed full test list as a side effect. Returns `None` when
   /// nothing matches or the command needs no run (idle `Stop`).
@@ -1423,7 +1907,7 @@ impl TestRunner {
     if cmd == UiCommand::Stop {
       return None;
     }
-    let mut plan = plan_factory(None).await;
+    let mut plan = plan_or_report(plan_factory(None).await);
     state.publish_test_list(&plan);
     match cmd {
       UiCommand::RunAll | UiCommand::Stop => {},
@@ -1571,12 +2055,53 @@ fn classify_changes(changes: &[crate::watch::ChangeKind]) -> (bool, Vec<std::pat
   (run_all, changed_paths)
 }
 
-/// Async closure producing a fresh [`TestPlan`] for a watch cycle.
+/// What a cycle's factory produced: the plan, and what went wrong
+/// building it.
+///
+/// Discovery and bundling failures are the only explanation a watcher or
+/// a UI can give for an empty tree, so they travel with the plan rather
+/// than reaching a terminal and nothing else.
+#[derive(Default)]
+pub struct PlanBuild {
+  pub plan: TestPlan,
+  pub errors: Vec<String>,
+}
+
+impl PlanBuild {
+  /// A build that went fine.
+  #[must_use]
+  pub fn ok(plan: TestPlan) -> Self {
+    Self {
+      plan,
+      errors: Vec::new(),
+    }
+  }
+
+  /// A build that produced nothing but the reason it produced nothing.
+  #[must_use]
+  pub fn failed(plan: TestPlan, error: impl Into<String>) -> Self {
+    Self {
+      plan,
+      errors: vec![error.into()],
+    }
+  }
+}
+
+/// Async closure producing a fresh [`PlanBuild`] for a watch cycle.
 /// `None` = build the full plan; `Some(paths)` = only re-process those
 /// files (e.g. re-parse only changed `.feature` files). Async so
 /// factories can re-bundle JS/TS step graphs per cycle.
 pub type WatchPlanFactory =
-  Box<dyn Fn(Option<Vec<std::path::PathBuf>>) -> futures::future::BoxFuture<'static, TestPlan> + Send + Sync>;
+  Box<dyn Fn(Option<Vec<std::path::PathBuf>>) -> futures::future::BoxFuture<'static, PlanBuild> + Send + Sync>;
+
+/// Take a cycle's plan, printing whatever went wrong building it — a
+/// terminal watch run has no other surface for a discovery failure.
+fn plan_or_report(build: PlanBuild) -> TestPlan {
+  for error in &build.errors {
+    eprintln!("{error}");
+  }
+  build.plan
+}
 
 /// Build a test plan, optionally filtered to changed files.
 async fn build_plan_for_changes(
@@ -1585,7 +2110,7 @@ async fn build_plan_for_changes(
   changed_paths: &[std::path::PathBuf],
 ) -> TestPlan {
   let changed = if run_all { None } else { Some(changed_paths.to_vec()) };
-  let mut plan = plan_factory(changed).await;
+  let mut plan = plan_or_report(plan_factory(changed).await);
 
   // Filter plan to changed files if applicable.
   if !run_all {
@@ -1671,9 +2196,13 @@ fn topo_sort_projects(projects: &[ProjectConfig]) -> Result<Vec<usize>, ferridri
 ///
 /// Applies project-level test_match, test_dir, grep, grep_invert, and tag filters.
 fn filter_plan_for_project(plan: &mut TestPlan, config: &TestConfig, project: &ProjectConfig) {
-  // Filter by test_dir: only keep suites whose file starts with test_dir.
+  // Filter by test_dir: only keep suites whose file lives under it.
+  // `testDir` is anchored to the config file it was written in, so it
+  // arrives absolute while a plan's files are relative to the run's
+  // working directory — comparing the two as written keeps nothing.
   if let Some(ref test_dir) = config.test_dir {
-    plan.suites.retain(|s| s.file.starts_with(test_dir.as_str()));
+    let dir = absolute_path(test_dir);
+    plan.suites.retain(|suite| absolute_path(&suite.file).starts_with(&dir));
   }
 
   // Apply project-level grep filter (already merged into config.config_grep).
@@ -1694,6 +2223,12 @@ fn filter_plan_for_project(plan: &mut TestPlan, config: &TestConfig, project: &P
   // Recount after filtering.
   plan.suites.retain(|s| !s.tests.is_empty());
   plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
+}
+
+/// `path` against the working directory, without touching the disk.
+fn absolute_path(path: &str) -> std::path::PathBuf {
+  let path = std::path::Path::new(path);
+  std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Build the launch plan for a run.
@@ -1801,6 +2336,15 @@ impl BrowserHandle {
   }
 
   #[tracing::instrument(skip_all, name = "browser_launch")]
+  /// The browser if one has already been launched, without launching one.
+  ///
+  /// For callers that only want to act on a browser that is already driving
+  /// (the `--debug` pause), where launching one would be beside the point.
+  #[must_use]
+  pub fn peek(&self) -> Option<Arc<Browser>> {
+    self.cell.get().cloned()
+  }
+
   pub async fn get(&self) -> ferridriver::error::Result<Arc<Browser>> {
     let plan = self.plan.clone();
     self

@@ -325,6 +325,8 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
     suite: Some(scenario.feature_name.clone()),
     name: scenario.name.clone(),
     line,
+    // Gherkin locations are line-only; a column would be invented.
+    column: None,
   };
   let scenario = Arc::new(scenario);
 
@@ -561,7 +563,7 @@ pub async fn execute_bdd_step(
   let handler = &step_match.def.handler;
   let params = step_match.params;
 
-  let result = tokio::time::timeout(timeout, handler(world, params, table_data, docstring)).await;
+  let result = ferridriver::pause::run_within(timeout, handler(world, params, table_data, docstring)).await;
 
   match result {
     Ok(Ok(())) => Ok(()),

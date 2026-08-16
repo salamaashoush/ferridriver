@@ -1,17 +1,22 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-//! E2E test for `ferridriver bdd --ui`: spawns the built binary in UI
-//! mode on a scratch feature directory, connects over the websocket,
-//! drives a run, and validates the served trace artifact.
+//! `ferridriver bdd --ui` end to end, through the test-server protocol.
+//!
+//! Same app as `ferridriver test --ui` (Playwright's UI mode, embedded),
+//! so this is that app's side of the conversation for a BDD suite:
+//! scenarios are the tests, a run is driven over the websocket, and the
+//! recorded trace is checked for the things the viewer actually reads —
+//! the step span, the protocol call nested inside it, the DOM snapshots
+//! around it, and the embedded sources its Source tab opens.
 //!
 //! Requires a built `ferridriver` binary (`FERRIDRIVER_BIN` or
-//! `target/{debug,release}/ferridriver`) plus Chrome, exactly like the
-//! `backends` suite.
+//! `target/{debug,release}/ferridriver`) plus Chrome.
 
 use std::io::{BufRead, BufReader, Read as _};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -46,26 +51,27 @@ fn write_scratch_project(root: &std::path::Path) {
   )
   .expect("write feature");
   std::fs::write(
+    root.join("features/slow.feature"),
+    "Feature: UI slow\n  Scenario: slow page\n    Given a slow ui step\n",
+  )
+  .expect("write slow feature");
+  std::fs::write(
     root.join("steps/steps.js"),
     concat!(
       "Given(\"a blank ui page\", async (world) => { await world.page.goto(\"about:blank\"); });\n",
-      // Used by the stop test's late-written feature: long enough that a
-      // Stop reliably lands while the step is executing.
-      "Given(\"a slow ui step\", async (world) => { await world.page.waitForTimeout(4000); });\n",
+      // Long enough that a Stop reliably lands while the step is running.
+      "Given(\"a slow ui step\", async (world) => { await world.page.waitForTimeout(6000); });\n",
     ),
   )
   .expect("write steps");
 }
 
-/// Wait for the child to print its `http://127.0.0.1:<port>` URL. The
-/// reader thread keeps draining stdout afterwards so the child never
-/// blocks on a full pipe.
+/// Wait for the child to print its URL, and keep draining stdout after —
+/// a server blocked writing to a full pipe answers nothing.
 fn wait_for_url(stdout: std::process::ChildStdout) -> String {
   let (tx, rx) = std::sync::mpsc::channel::<String>();
   std::thread::spawn(move || {
-    let reader = BufReader::new(stdout);
-    for line in reader.lines() {
-      let Ok(line) = line else { break };
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
       let _ = tx.send(line);
     }
   });
@@ -74,9 +80,8 @@ fn wait_for_url(stdout: std::process::ChildStdout) -> String {
     let Ok(line) = rx.recv_timeout(Duration::from_secs(1)) else {
       continue;
     };
-    if let Some(idx) = line.find("http://127.0.0.1:") {
-      let url = line[idx..].trim().to_string();
-      // Keep draining stdout in the background for the child's lifetime.
+    if let Some(index) = line.find("http://127.0.0.1:") {
+      let url = line[index..].trim().to_string();
       std::thread::spawn(move || while rx.recv().is_ok() {});
       return url;
     }
@@ -86,191 +91,110 @@ fn wait_for_url(stdout: std::process::ChildStdout) -> String {
 
 type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Next JSON text frame from the websocket (2-minute cap per frame).
-async fn next_json(ws: &mut WsStream) -> serde_json::Value {
-  loop {
-    let frame = tokio::time::timeout(Duration::from_mins(2), ws.next())
+/// The UI's side of the protocol: calls with replies, events collected.
+struct Ui {
+  ws: WsStream,
+  next_id: u64,
+  events: Vec<Value>,
+}
+
+impl Ui {
+  async fn connect(url: &str) -> Self {
+    let (base, query) = url.split_once("/trace/").expect("app url");
+    let guid = query
+      .split("ws=")
+      .nth(1)
+      .and_then(|rest| rest.split('&').next())
+      .expect("ws parameter");
+    let ws_url = format!("{}/{guid}", base.replace("http://", "ws://"));
+    let (ws, _) = tokio_tungstenite::connect_async(&ws_url).await.expect("connect");
+    Self {
+      ws,
+      next_id: 0,
+      events: Vec::new(),
+    }
+  }
+
+  async fn call(&mut self, method: &str, params: Value) -> Value {
+    self.next_id += 1;
+    let id = self.next_id;
+    self
+      .ws
+      .send(Message::Text(
+        json!({ "id": id, "method": method, "params": params })
+          .to_string()
+          .into(),
+      ))
       .await
-      .expect("websocket frame timeout")
-      .expect("websocket closed")
-      .expect("websocket error");
-    if let Message::Text(text) = frame {
-      return serde_json::from_str(&text).expect("valid JSON frame");
+      .expect("send");
+    loop {
+      let value = self.next_message().await;
+      if value.get("id").and_then(Value::as_u64) == Some(id) {
+        assert!(value.get("error").is_none(), "{method} failed: {value}");
+        return value.get("result").cloned().unwrap_or(Value::Null);
+      }
     }
   }
-}
 
-/// Minimal HTTP/1.1 GET over a raw socket; returns (headers, body).
-async fn http_get(host: &str, path: &str) -> (String, Vec<u8>) {
-  http_get_with_origin(host, path, None).await
-}
-
-/// [`http_get`] with an optional `Origin` header, for CORS assertions.
-async fn http_get_with_origin(host: &str, path: &str, origin: Option<&str>) -> (String, Vec<u8>) {
-  let mut stream = tokio::net::TcpStream::connect(host).await.expect("connect");
-  let origin_header = origin.map(|o| format!("Origin: {o}\r\n")).unwrap_or_default();
-  let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{origin_header}Connection: close\r\n\r\n");
-  stream.write_all(request.as_bytes()).await.expect("send request");
-  let mut response = Vec::new();
-  stream.read_to_end(&mut response).await.expect("read response");
-  let split = response
-    .windows(4)
-    .position(|w| w == b"\r\n\r\n")
-    .expect("header/body separator");
-  let headers = String::from_utf8_lossy(&response[..split]).to_string();
-  (headers, response[split + 4..].to_vec())
-}
-
-/// Read the initial snapshot frames (test list + watch status) and
-/// return the single scenario's id.
-async fn read_snapshot_test_id(ws: &mut WsStream) -> String {
-  let mut test_id = None;
-  let mut saw_watch_status = false;
-  for _ in 0..4 {
-    let msg = next_json(ws).await;
-    match msg["type"].as_str() {
-      Some("testList") => {
-        let tests = msg["suites"][0]["tests"].as_array().expect("suite tests");
-        assert_eq!(tests.len(), 1, "one scenario discovered: {msg}");
-        let id = tests[0]["id"].as_str().expect("test id").to_string();
-        assert!(id.contains("smoke.feature"), "id carries the feature file: {id}");
-        assert_eq!(tests[0]["status"].as_str(), Some("idle"));
-        test_id = Some(id);
-      },
-      Some("watchStatus") => saw_watch_status = true,
-      _ => {},
-    }
-    if test_id.is_some() && saw_watch_status {
-      break;
-    }
-  }
-  assert!(saw_watch_status, "watchStatus snapshot arrived");
-  test_id.expect("testList snapshot arrived")
-}
-
-/// Fetch the trace artifact and validate CORS + the v8 first line.
-/// CORS is reflected per-origin, never a wildcard: trace.playwright.dev
-/// and loopback origins get a grant, external origins get nothing.
-async fn fetch_and_validate_trace(host: &str, url_path: &str) {
-  let (viewer_headers, _) = http_get_with_origin(host, url_path, Some("https://trace.playwright.dev")).await;
-  assert!(
-    viewer_headers
-      .to_ascii_lowercase()
-      .contains("access-control-allow-origin: https://trace.playwright.dev"),
-    "CORS grant for trace.playwright.dev: {viewer_headers}"
-  );
-  let (external_headers, _) = http_get_with_origin(host, url_path, Some("https://evil.example")).await;
-  assert!(
-    !external_headers
-      .to_ascii_lowercase()
-      .contains("access-control-allow-origin"),
-    "no CORS grant for external origins: {external_headers}"
-  );
-
-  let (trace_headers, trace_body) = http_get(host, url_path).await;
-  assert!(
-    trace_headers.starts_with("HTTP/1.1 200"),
-    "trace fetch status: {trace_headers}"
-  );
-
-  let mut archive = zip::ZipArchive::new(std::io::Cursor::new(trace_body)).expect("trace zip");
-  let mut trace_text = String::new();
-  archive
-    .by_name("trace.trace")
-    .expect("trace.trace entry")
-    .read_to_string(&mut trace_text)
-    .expect("read trace.trace");
-  archive.by_name("trace.network").expect("trace.network entry");
-  let lines: Vec<serde_json::Value> = trace_text
-    .lines()
-    .map(|l| serde_json::from_str(l).expect("json trace line"))
-    .collect();
-  let first = &lines[0];
-  assert_eq!(first["type"].as_str(), Some("context-options"), "first line: {first}");
-  assert_eq!(first["version"].as_u64(), Some(8), "first line: {first}");
-
-  // The trace is recorded live by the library recorder as split
-  // before/after events (tracing.ts): the BDD step boundary and the
-  // protocol-level goto must both appear with a coherent timeline.
-  let befores: Vec<&serde_json::Value> = lines.iter().filter(|l| l["type"] == "before").collect();
-  let step_action = befores
-    .iter()
-    .find(|a| a["title"].as_str() == Some("Given a blank ui page"))
-    .unwrap_or_else(|| panic!("step before event in trace: {befores:?}"));
-  let step_call_id = step_action["callId"].as_str().expect("step callId");
-  let step_after = lines
-    .iter()
-    .find(|l| l["type"] == "after" && l["callId"] == step_call_id)
-    .unwrap_or_else(|| panic!("step after event in trace"));
-  assert!(
-    step_after["endTime"].as_f64().unwrap_or(0.0) >= step_action["startTime"].as_f64().unwrap_or(f64::MAX),
-    "step span times ordered: {step_action} {step_after}"
-  );
-  let goto = befores
-    .iter()
-    .find(|a| a["method"].as_str() == Some("goto"))
-    .unwrap_or_else(|| panic!("protocol goto before event in trace: {befores:?}"));
-
-  // Protocol actions nest under the live BDD step span.
-  assert_eq!(
-    goto["parentId"].as_str(),
-    Some(step_call_id),
-    "goto must nest under its BDD step: {goto}"
-  );
-
-  // Worker traces request DOM snapshots: the goto's before event names
-  // the before snapshot, its after event names the after snapshot,
-  // both resolving to frame-snapshot events.
-  let snapshots: Vec<&serde_json::Value> = lines.iter().filter(|l| l["type"] == "frame-snapshot").collect();
-  assert!(!snapshots.is_empty(), "frame-snapshot events in per-test trace");
-  let goto_call_id = goto["callId"].as_str().expect("goto callId");
-  let goto_after = lines
-    .iter()
-    .find(|l| l["type"] == "after" && l["callId"] == goto_call_id)
-    .unwrap_or_else(|| panic!("goto after event in trace"));
-  for (event, kind) in [(*goto, "beforeSnapshot"), (goto_after, "afterSnapshot")] {
-    let name = event[kind].as_str().unwrap_or_else(|| panic!("goto {kind}: {event}"));
-    assert!(
-      snapshots
-        .iter()
-        .any(|f| f["snapshot"]["snapshotName"].as_str() == Some(name)),
-      "{kind} {name} must resolve to a frame-snapshot"
-    );
+  /// Send a call without waiting for its reply — a run, so events can be
+  /// watched (and a Stop sent) while it is in flight.
+  async fn send(&mut self, method: &str, params: Value) -> u64 {
+    self.next_id += 1;
+    let id = self.next_id;
+    self
+      .ws
+      .send(Message::Text(
+        json!({ "id": id, "method": method, "params": params })
+          .to_string()
+          .into(),
+      ))
+      .await
+      .expect("send");
+    id
   }
 
-  // Sources: the BDD step's stack frame points at its .feature line and
-  // the worker's `sources: true` embeds the file as
-  // `resources/src@<sha1-of-path>.txt` — exactly the name the viewer's
-  // Source tab fetches (`sourceTab.tsx`).
-  let stack = step_action["stack"].as_array().expect("step action stack");
-  let top = stack
-    .first()
-    .unwrap_or_else(|| panic!("step stack frame: {step_action}"));
-  let file = top["file"].as_str().expect("stack frame file");
-  assert!(file.ends_with("smoke.feature"), "stack file: {top}");
-  assert_eq!(top["line"].as_u64(), Some(3), "the Given's feature line: {top}");
-  let sha1_hex = {
-    use sha1::{Digest as _, Sha1};
-    Sha1::digest(file.as_bytes()).iter().fold(String::new(), |mut acc, b| {
-      use std::fmt::Write as _;
-      let _ = write!(acc, "{b:02x}");
-      acc
-    })
-  };
-  let mut source_text = String::new();
-  archive
-    .by_name(&format!("resources/src@{sha1_hex}.txt"))
-    .expect("embedded feature source in trace zip")
-    .read_to_string(&mut source_text)
-    .expect("read embedded source");
-  assert!(
-    source_text.contains("Given a blank ui page"),
-    "embedded source must be the feature file: {source_text}"
-  );
+  async fn next_message(&mut self) -> Value {
+    loop {
+      let frame = tokio::time::timeout(Duration::from_mins(3), self.ws.next())
+        .await
+        .expect("frame timeout")
+        .expect("socket closed")
+        .expect("socket error");
+      if let Message::Text(text) = frame {
+        let value: Value = serde_json::from_str(&text).expect("json");
+        if value.get("method").is_some() {
+          self.events.push(value.clone());
+        }
+        return value;
+      }
+    }
+  }
+
+  /// Wait for a teleReporter event matching `method`, returning it.
+  async fn wait_report(&mut self, method: &str) -> Value {
+    if let Some(found) = self.reports_of(method).first() {
+      return (*found).clone();
+    }
+    loop {
+      let value = self.next_message().await;
+      if value["method"] == "report" && value["params"]["method"] == method {
+        return value["params"].clone();
+      }
+    }
+  }
+
+  fn reports_of(&self, method: &str) -> Vec<&Value> {
+    self
+      .events
+      .iter()
+      .filter(|event| event["method"] == "report" && event["params"]["method"] == method)
+      .map(|event| &event["params"])
+      .collect()
+  }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ui_mode_end_to_end() {
+async fn bdd_ui_lists_runs_and_traces_a_scenario() {
   let dir = tempfile::tempdir().expect("tempdir");
   write_scratch_project(dir.path());
 
@@ -294,187 +218,294 @@ async fn ui_mode_end_to_end() {
   let _guard = KillOnDrop(child);
 
   let url = wait_for_url(stdout);
-  let host = url.strip_prefix("http://").expect("http url").to_string();
+  assert!(url.contains("/trace/uiMode.html?ws="), "UI app url: {url}");
+  let host = url
+    .strip_prefix("http://")
+    .and_then(|rest| rest.split('/').next())
+    .expect("host")
+    .to_string();
 
-  // The index page serves the app shell.
-  let (index_headers, index_body) = http_get(&host, "/").await;
+  // The app and its service worker are served offline by this same
+  // process — no CDN, no npx.
+  let (index_headers, index_body) = http_get(&host, "/trace/uiMode.html").await;
+  assert!(index_headers.starts_with("HTTP/1.1 200"), "app: {index_headers}");
   assert!(
-    index_headers.starts_with("HTTP/1.1 200"),
-    "index status: {index_headers}"
+    String::from_utf8_lossy(&index_body).contains("Playwright"),
+    "the UI-mode shell is served"
   );
-  let index_text = String::from_utf8_lossy(&index_body);
-  assert!(index_text.contains("ferridriver UI"), "index page must be the UI shell");
+  let (sw_headers, _) = http_get(&host, "/trace/sw.bundle.js").await;
   assert!(
-    index_text.contains("id=\"trace-frame\""),
-    "the shell must carry the persistent trace-viewer iframe"
-  );
-  // Live-trace wiring: the shell polls a live snapshot and feeds it to
-  // the viewer via the postMessage `load` hook (Playwright-UI-mode live
-  // view). These markers guard the feature staying wired.
-  assert!(
-    index_text.contains("startLivePoll") && index_text.contains("method: \"load\""),
-    "the shell must carry the live-trace poller + postMessage feed"
+    sw_headers.to_ascii_lowercase().contains("javascript"),
+    "a service worker that does not arrive as JavaScript is refused: {sw_headers}"
   );
 
-  let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{host}/ws"))
-    .await
-    .expect("websocket connect");
+  let mut ui = Ui::connect(&url).await;
+  ui.call("initialize", json!({ "watchTestDirs": true })).await;
 
-  // Snapshot messages arrive first: the test list and the watch status.
-  let test_id = read_snapshot_test_id(&mut ws).await;
-
-  // Nothing runs until requested; runAll drives the suite.
-  ws.send(Message::Text(r#"{"cmd":"runAll"}"#.into()))
-    .await
-    .expect("send runAll");
-
-  let mut outcome = None;
-  let mut live_trace_url = None;
-  let totals = loop {
-    let msg = next_json(&mut ws).await;
-    match msg["type"].as_str() {
-      Some("testStarted") => {
-        // Every started test announces its live-trace snapshot endpoint,
-        // which the viewer polls while the test runs.
-        if msg["id"].as_str() == Some(test_id.as_str()) {
-          live_trace_url = msg["liveTraceUrl"].as_str().map(str::to_string);
-        }
-      },
-      Some("testFinished") => {
-        assert_eq!(msg["id"].as_str(), Some(test_id.as_str()));
-        outcome = Some(msg["outcome"].clone());
-      },
-      Some("runFinished") => break msg["totals"].clone(),
-      _ => {},
-    }
-  };
-  let live_trace_url = live_trace_url.expect("testStarted must announce a liveTraceUrl");
-  assert!(
-    live_trace_url.starts_with("/live-trace?key="),
-    "liveTraceUrl shape: {live_trace_url}"
-  );
-  // After the run the trace has stopped, so the live endpoint reports
-  // 404 (its documented "not recording" response) — proving the route
-  // is wired rather than missing.
-  let (live_headers, _) = http_get(&host, &live_trace_url).await;
-  assert!(
-    live_headers.starts_with("HTTP/1.1 404"),
-    "live-trace after stop must 404: {live_headers}"
-  );
-  assert_eq!(totals["total"].as_u64(), Some(1), "totals: {totals}");
-  assert_eq!(totals["passed"].as_u64(), Some(1), "totals: {totals}");
-  assert_eq!(totals["failed"].as_u64(), Some(0), "totals: {totals}");
-
-  let outcome = outcome.expect("testFinished outcome");
-  assert_eq!(outcome["status"].as_str(), Some("passed"), "outcome: {outcome}");
-  assert!(outcome["durationMs"].as_u64().is_some(), "outcome: {outcome}");
-
-  // UI mode forces traces on: the trace attachment must exist and be
-  // served (with CORS for trace.playwright.dev) as a v8 trace zip.
-  let attachments = outcome["attachments"].as_array().expect("attachments");
-  let trace = attachments
+  // Listing: each feature is a file suite, each scenario a test.
+  let listed = ui.call("listTests", json!({})).await;
+  let project = listed["report"]
+    .as_array()
+    .expect("report")
     .iter()
-    .find(|a| a["name"].as_str() == Some("trace"))
-    .unwrap_or_else(|| panic!("trace attachment present: {attachments:?}"));
-  assert_eq!(trace["contentType"].as_str(), Some("application/zip"));
-  let url_path = trace["urlPath"].as_str().expect("trace urlPath");
-  assert!(url_path.starts_with("/artifact/"), "urlPath: {url_path}");
+    .find(|event| event["method"] == "onProject")
+    .expect("onProject")
+    .clone();
+  let suites = project["params"]["project"]["suites"].as_array().expect("suites");
+  let scenarios: Vec<(String, String)> = suites
+    .iter()
+    .flat_map(|suite| suite["entries"].as_array().cloned().unwrap_or_default())
+    .flat_map(|entry| {
+      // A feature's scenarios sit under the feature suite, either
+      // directly or under its `Feature:` name.
+      entry["entries"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| vec![entry.clone()])
+    })
+    .filter_map(|entry| {
+      Some((
+        entry["title"].as_str()?.to_string(),
+        entry["testId"].as_str()?.to_string(),
+      ))
+    })
+    .collect();
+  let (_, blank_id) = scenarios
+    .iter()
+    .find(|(title, _)| title.contains("blank page"))
+    .unwrap_or_else(|| panic!("blank page scenario in {scenarios:?}"))
+    .clone();
 
-  fetch_and_validate_trace(&host, url_path).await;
-  validate_viewer_and_security(&host).await;
-  stop_is_graceful(&mut ws, dir.path(), &test_id).await;
+  // Run it.
+  let run = ui
+    .call("runTests", json!({ "testIds": [blank_id], "trace": "on" }))
+    .await;
+  assert_eq!(run["status"], "passed", "{run}");
+
+  let ended = ui.wait_report("onTestEnd").await;
+  assert_eq!(ended["params"]["result"]["status"], "passed");
+
+  // The trace the viewer opens is an attachment on the result.
+  let attached = ui.wait_report("onAttach").await;
+  let trace = attached["params"]["attachments"]
+    .as_array()
+    .expect("attachments")
+    .iter()
+    .find(|attachment| attachment["name"] == "trace")
+    .expect("trace attachment")
+    .clone();
+  assert_eq!(trace["contentType"], "application/zip");
+  let trace_path = trace["path"].as_str().expect("trace path").to_string();
+
+  // …and it is fetched through the viewer's own file route.
+  let (headers, body) = http_get(&host, &format!("/trace/file?path={}", encode(&trace_path))).await;
+  assert!(headers.starts_with("HTTP/1.1 200"), "trace fetch: {headers}");
+  validate_trace(body);
+
+  // A path outside the served roots is refused.
+  let (forbidden, _) = http_get(&host, "/trace/file?path=%2Fetc%2Fpasswd").await;
+  assert!(
+    forbidden.starts_with("HTTP/1.1 403"),
+    "the file route must stay inside the run's directories: {forbidden}"
+  );
+
+  stop_is_graceful(&mut ui, &scenarios).await;
 }
 
-/// Stop cancels cooperatively: the in-flight test FINISHES (its
-/// `testFinished` arrives before `runCancelled`) instead of being
-/// dropped into a detached task that keeps driving the shared browser,
-/// and the server accepts and completes a fresh run afterwards.
-///
-/// The slow feature is written mid-session: the watcher refreshes the
-/// sidebar and auto-runs the changed file, giving a 4-second in-flight
-/// step to stop into.
-async fn stop_is_graceful(ws: &mut WsStream, project_root: &std::path::Path, smoke_test_id: &str) {
-  std::fs::write(
-    project_root.join("features/slow.feature"),
-    "Feature: UI slow\n  Scenario: slow page\n    Given a slow ui step\n",
-  )
-  .expect("write slow feature");
+/// Stop cancels cooperatively: the in-flight scenario finishes rather
+/// than being detached, the run reports back, and the server takes
+/// another run afterwards.
+async fn stop_is_graceful(ui: &mut Ui, scenarios: &[(String, String)]) {
+  let (_, slow_id) = scenarios
+    .iter()
+    .find(|(title, _)| title.contains("slow page"))
+    .expect("slow scenario")
+    .clone();
+  let (_, blank_id) = scenarios
+    .iter()
+    .find(|(title, _)| title.contains("blank page"))
+    .expect("blank scenario")
+    .clone();
 
-  // Wait for the auto-run of the new file to actually start executing.
-  let slow_id = loop {
-    let msg = next_json(ws).await;
-    if msg["type"].as_str() == Some("testStarted") {
-      let id = msg["id"].as_str().expect("testStarted id").to_string();
-      if id.contains("slow.feature") {
-        break id;
-      }
-    }
-  };
+  let run_id = ui
+    .send("runTests", json!({ "testIds": [slow_id], "trace": "on" }))
+    .await;
 
-  ws.send(Message::Text(r#"{"cmd":"stop"}"#.into()))
-    .await
-    .expect("send stop");
-
-  let mut finished_before_cancel = false;
-  let mut cancelled = false;
+  // Wait until it is actually executing, then stop.
   loop {
-    let msg = next_json(ws).await;
-    match msg["type"].as_str() {
-      Some("testFinished") if msg["id"].as_str() == Some(slow_id.as_str()) => {
-        assert!(!cancelled, "the in-flight test must finish before runCancelled");
-        finished_before_cancel = true;
-      },
-      Some("runCancelled") => cancelled = true,
-      Some("watchStatus") if msg["status"].as_str() == Some("idle") && cancelled => break,
-      _ => {},
-    }
-  }
-  assert!(
-    finished_before_cancel,
-    "graceful stop lets the executing test complete instead of detaching it"
-  );
-
-  // The runner must be fully idle and reusable: a follow-up run of the
-  // fast scenario completes normally.
-  let run_test = serde_json::json!({ "cmd": "runTest", "id": smoke_test_id });
-  ws.send(Message::Text(run_test.to_string().into()))
-    .await
-    .expect("send runTest after stop");
-  loop {
-    let msg = next_json(ws).await;
-    if msg["type"].as_str() == Some("runFinished") {
-      let totals = &msg["totals"];
-      assert_eq!(totals["total"].as_u64(), Some(1), "post-stop totals: {totals}");
-      assert_eq!(totals["passed"].as_u64(), Some(1), "post-stop totals: {totals}");
+    let value = ui.next_message().await;
+    if value["method"] == "report" && value["params"]["method"] == "onTestBegin" {
       break;
     }
   }
+  ui.send("stopTests", json!({})).await;
+
+  // The run answers, and the scenario it was running reported an end.
+  let mut ended = false;
+  loop {
+    let value = ui.next_message().await;
+    if value["method"] == "report" && value["params"]["method"] == "onTestEnd" {
+      ended = true;
+    }
+    if value.get("id").and_then(Value::as_u64) == Some(run_id) {
+      break;
+    }
+  }
+  assert!(ended, "a stopped run still reports the test it was running");
+
+  // The runner is reusable: another run completes normally.
+  let again = ui
+    .call("runTests", json!({ "testIds": [blank_id], "trace": "on" }))
+    .await;
+  assert_eq!(again["status"], "passed", "post-stop run: {again}");
 }
 
-/// The embedded viewer is served offline by the same server, its service
-/// worker arrives as JavaScript (else the browser rejects registration),
-/// and artifact path traversal is rejected.
-async fn validate_viewer_and_security(host: &str) {
-  let (viewer_headers, viewer_body) = http_get(host, "/trace-viewer/").await;
-  assert!(viewer_headers.starts_with("HTTP/1.1 200"), "viewer: {viewer_headers}");
-  assert!(
-    String::from_utf8_lossy(&viewer_body).contains("Playwright Trace Viewer"),
-    "viewer shell served"
+/// The recorded trace, checked for what the viewer reads: a v8 stream,
+/// the BDD step span, the protocol call nested inside it, DOM snapshots
+/// around that call, and the sources behind both.
+fn validate_trace(body: Vec<u8>) {
+  let mut archive = zip::ZipArchive::new(std::io::Cursor::new(body)).expect("trace zip");
+  let mut trace_text = String::new();
+  archive
+    .by_name("trace.trace")
+    .expect("trace.trace entry")
+    .read_to_string(&mut trace_text)
+    .expect("read trace.trace");
+  archive.by_name("trace.network").expect("trace.network entry");
+
+  let lines: Vec<Value> = trace_text
+    .lines()
+    .map(|line| serde_json::from_str(line).expect("json trace line"))
+    .collect();
+  let first = &lines[0];
+  assert_eq!(first["type"], "context-options", "first line: {first}");
+  assert_eq!(first["version"], 8, "first line: {first}");
+
+  let befores: Vec<&Value> = lines.iter().filter(|line| line["type"] == "before").collect();
+  let step = befores
+    .iter()
+    .find(|action| action["title"] == "Given a blank ui page")
+    .unwrap_or_else(|| panic!("step before event: {befores:?}"));
+  let step_call_id = step["callId"].as_str().expect("step callId");
+  assert_eq!(
+    step["stepId"].as_str(),
+    step["stepId"].as_str().filter(|id| !id.is_empty()),
+    "v8 actions carry a stepId: {step}"
   );
-  let (sw_headers, _) = http_get(host, "/trace-viewer/sw.bundle.js").await;
+  let step_after = lines
+    .iter()
+    .find(|line| line["type"] == "after" && line["callId"] == step_call_id)
+    .expect("step after event");
   assert!(
-    sw_headers
-      .to_ascii_lowercase()
-      .contains("content-type: text/javascript")
-      || sw_headers
-        .to_ascii_lowercase()
-        .contains("content-type: application/javascript"),
-    "service worker MIME: {sw_headers}"
+    step_after["endTime"].as_f64().unwrap_or(0.0) >= step["startTime"].as_f64().unwrap_or(f64::MAX),
+    "step span times ordered: {step} {step_after}"
   );
 
-  let (traversal_headers, _) = http_get(host, "/artifact/../Cargo.toml").await;
-  assert!(
-    traversal_headers.starts_with("HTTP/1.1 404"),
-    "traversal must 404: {traversal_headers}"
+  let goto = befores
+    .iter()
+    .find(|action| action["method"] == "goto")
+    .unwrap_or_else(|| panic!("protocol goto: {befores:?}"));
+  assert_eq!(
+    goto["parentId"].as_str(),
+    Some(step_call_id),
+    "a protocol call nests under the step that made it: {goto}"
   );
+
+  let snapshots: Vec<&Value> = lines.iter().filter(|line| line["type"] == "frame-snapshot").collect();
+  assert!(!snapshots.is_empty(), "DOM snapshots recorded");
+  let goto_call_id = goto["callId"].as_str().expect("goto callId");
+  let goto_after = lines
+    .iter()
+    .find(|line| line["type"] == "after" && line["callId"] == goto_call_id)
+    .expect("goto after event");
+  for (event, kind) in [(*goto, "beforeSnapshot"), (goto_after, "afterSnapshot")] {
+    let name = event[kind].as_str().unwrap_or_else(|| panic!("goto {kind}: {event}"));
+    assert!(
+      snapshots
+        .iter()
+        .any(|snapshot| snapshot["snapshot"]["snapshotName"] == name),
+      "{kind} {name} must resolve to a frame-snapshot"
+    );
+  }
+
+  validate_source_stacks(&mut archive, step, goto);
+}
+
+/// Every action carries where it was written, and `sources: true` embeds
+/// those files into the zip.
+///
+/// The two spans point at different files on purpose: the BDD step span
+/// is located at its `.feature` line, while the protocol `goto` inside it
+/// is located in the step body that issued the call. Both are what the
+/// viewer's Source tab reads.
+fn validate_source_stacks(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>, step: &Value, goto: &Value) {
+  let goto_top = goto["stack"]
+    .as_array()
+    .and_then(|stack| stack.first())
+    .unwrap_or_else(|| panic!("goto stack frame: {goto}"));
+  assert!(
+    goto_top["file"].as_str().is_some_and(|file| file.ends_with("steps.js")),
+    "the goto's stack must name the step body that wrote it: {goto_top}"
+  );
+
+  let top = step["stack"]
+    .as_array()
+    .and_then(|stack| stack.first())
+    .unwrap_or_else(|| panic!("step stack frame: {step}"));
+  let file = top["file"].as_str().expect("stack frame file");
+  assert!(file.ends_with("smoke.feature"), "stack file: {top}");
+  assert_eq!(top["line"].as_u64(), Some(3), "the Given's feature line: {top}");
+
+  // `resources/src@<sha1-of-path>.txt` — exactly the name the viewer
+  // fetches (`sourceTab.tsx`).
+  let sha1_hex = {
+    use sha1::{Digest as _, Sha1};
+    Sha1::digest(file.as_bytes())
+      .iter()
+      .fold(String::new(), |mut acc, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "{byte:02x}");
+        acc
+      })
+  };
+  let mut source_text = String::new();
+  archive
+    .by_name(&format!("resources/src@{sha1_hex}.txt"))
+    .expect("embedded feature source in trace zip")
+    .read_to_string(&mut source_text)
+    .expect("read embedded source");
+  assert!(
+    source_text.contains("Given a blank ui page"),
+    "embedded source must be the feature file: {source_text}"
+  );
+}
+
+fn encode(value: &str) -> String {
+  use std::fmt::Write as _;
+
+  let mut out = String::new();
+  for byte in value.bytes() {
+    match byte {
+      b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(byte as char),
+      _ => {
+        let _ = write!(out, "%{byte:02X}");
+      },
+    }
+  }
+  out
+}
+
+/// Minimal HTTP/1.1 GET over a raw socket; returns (headers, body).
+async fn http_get(host: &str, path: &str) -> (String, Vec<u8>) {
+  let mut stream = tokio::net::TcpStream::connect(host).await.expect("connect");
+  let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+  stream.write_all(request.as_bytes()).await.expect("send request");
+  let mut response = Vec::new();
+  stream.read_to_end(&mut response).await.expect("read response");
+  let split = response
+    .windows(4)
+    .position(|window| window == b"\r\n\r\n")
+    .expect("header/body separator");
+  let headers = String::from_utf8_lossy(&response[..split]).to_string();
+  (headers, response[split + 4..].to_vec())
 }
