@@ -17,7 +17,7 @@ use ferridriver_jsstd::stream_web::ReadableStream;
 use ferridriver_jsstd::utils::bytes::ObjectBytes;
 use rquickjs::{Class, Coerced, Ctx, Value};
 
-use crate::bindings::blob::BlobJs;
+use crate::bindings::blob_bytes::blob_parts;
 use crate::bindings::form_data::FormDataJs;
 use crate::bindings::url_search_params::UrlSearchParams;
 
@@ -84,7 +84,7 @@ pub(crate) fn extract_body<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> rquickjs::Res
       forced: true,
     }));
   }
-  if let Some((bytes, mime)) = BlobJs::from_js_blob(v) {
+  if let Some((bytes, mime)) = blob_parts(v) {
     let mime = (!mime.is_empty()).then_some(mime);
     return Ok(Some(ExtractedBody::bytes(bytes, mime.as_deref())));
   }

@@ -1,6 +1,4 @@
-//! Vendored `llrt_buffer`, minus its `Blob` and `File` — ferridriver has
-//! its own of each in `ferridriver-script`, and a second implementation is
-//! exactly what this crate exists to avoid.
+//! Vendored `llrt_buffer`: `Buffer`, `Blob` and `File`.
 
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
@@ -16,10 +14,14 @@ use rquickjs::{
 };
 
 pub use self::array_buffer_view::*;
+pub use self::blob::*;
 pub use self::class::*;
+pub use self::file::*;
 
 mod array_buffer_view;
+mod blob;
 mod class;
+mod file;
 
 pub struct BufferModule;
 
@@ -93,6 +95,17 @@ pub fn init<'js>(ctx: &Ctx<'js>) -> Result<()> {
     // upstream or from `Uint8Array`.
     add_missing_prototype_methods(ctx)?;
 
+    // Blob
+    rquickjs::Class::<Blob>::define(&ctx.globals())?;
+
+    // File
+    rquickjs::Class::<File>::define(&ctx.globals())?;
+    // `File` extends `Blob` in the spec. rquickjs classes do not inherit,
+    // and upstream leaves the two unrelated, so `file instanceof Blob` is
+    // false and none of Blob's methods are reachable — the chain is wired
+    // here.
+    chain_file_to_blob(ctx)?;
+
     //init primordials
     let _ = BufferPrimordials::get(ctx)?;
 
@@ -131,4 +144,15 @@ fn bytes_of<'js>(object: &Object<'js>) -> Result<Vec<u8>> {
         Some(bytes) => Ok(bytes.as_bytes(object.ctx())?.to_vec()),
         None => Ok(Vec::new()),
     }
+}
+
+/// Point `File.prototype` at `Blob.prototype`, which is what makes a
+/// `File` an instance of `Blob`.
+fn chain_file_to_blob<'js>(ctx: &Ctx<'js>) -> Result<()> {
+    let blob_proto = rquickjs::Class::<Blob<'js>>::prototype(ctx)?;
+    let file_proto = rquickjs::Class::<File<'js>>::prototype(ctx)?;
+    if let (Some(blob_proto), Some(file_proto)) = (blob_proto, file_proto) {
+        file_proto.set_prototype(Some(&blob_proto))?;
+    }
+    Ok(())
 }

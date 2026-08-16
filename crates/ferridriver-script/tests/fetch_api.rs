@@ -1120,7 +1120,10 @@ async fn request_gains_the_full_body_mixin() {
   assert_eq!(v["blobText"], serde_json::json!("hello"));
   assert_eq!(
     v["blobType"],
-    serde_json::json!("text/plain;charset=UTF-8"),
+    // Lowercased by the Blob constructor (WHATWG Blob: "convert every
+    // character to ASCII lowercase"), which the previous hand-written
+    // Blob did not do.
+    serde_json::json!("text/plain;charset=utf-8"),
     "a string body sets the content-type the Blob inherits"
   );
   assert_eq!(v["used"], serde_json::json!(true), "a mixin read marks the body used");

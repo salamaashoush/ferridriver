@@ -135,9 +135,13 @@ const CHECKS: &[(&str, &str, &str)] = &[
     "a",
   ),
   (
+    // `endings: 'native'` rewrites every CRLF to the platform's line
+    // ending, which is LF on both platforms this runtime supports — so
+    // "a\r\nb" loses a byte. The previous Blob ignored the option
+    // entirely and kept all four.
     "Blob endings native",
     "return String(new Blob(['a\\r\\nb'], {endings:'native'}).size);",
-    "4",
+    "3",
   ),
   (
     "Blob type lowercased",

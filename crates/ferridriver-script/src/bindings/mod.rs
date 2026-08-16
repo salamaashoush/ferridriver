@@ -21,7 +21,7 @@
 pub mod abort;
 pub mod artifacts;
 pub mod bdd;
-pub mod blob;
+pub mod blob_bytes;
 pub mod body_init;
 pub mod browser;
 pub mod browser_type;
@@ -39,7 +39,6 @@ pub mod element_handle;
 pub mod expect;
 pub mod extensions;
 pub mod fetch;
-pub mod file;
 pub mod file_chooser;
 pub mod fixture_graph;
 pub mod form_data;
@@ -159,12 +158,11 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   // `AbortSignal` and the whole Streams surface (readable + writable +
   // transform, BYOB, queuing strategies) come from the vendored
   // implementation in `ferridriver-jsstd`.
+  // Also installs `Buffer` (a real `Uint8Array` subclass), `Blob` and
+  // `File`. Exactly once per context: a second `init` re-runs
+  // `define_subclass` and strands the first constructor, which aborts
+  // `JS_FreeRuntime` at teardown.
   ferridriver_jsstd::init(ctx)?;
-  Class::<crate::bindings::blob::BlobJs>::define(&g)?;
-  Class::<crate::bindings::file::FileJs>::define(&g)?;
-  // `File` inherits from `Blob` in the spec; rquickjs classes do not
-  // inherit, so the prototype chain is wired explicitly.
-  crate::bindings::file::install_file_prototype(ctx)?;
   Class::<crate::bindings::form_data::FormDataJs>::define(&g)?;
   Ok(())
 }

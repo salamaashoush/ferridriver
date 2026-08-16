@@ -14,7 +14,7 @@ use rquickjs::atom::PredefinedAtom;
 use rquickjs::function::{Opt, This};
 use rquickjs::{Class, Ctx, Function, Object, Value, class::Trace};
 
-use crate::bindings::blob::BlobJs;
+use crate::bindings::blob_bytes::{blob_parts, file_parts};
 use crate::bindings::js_iterator::live_iterator;
 
 #[derive(Clone)]
@@ -43,7 +43,7 @@ impl FormDataJs {
   fn coerce(value: &Value<'_>, filename: Option<String>) -> FormEntry {
     // A `File` carries its own name, so `fd.append('f', file)` needs no
     // explicit filename; an explicit one still wins, per spec.
-    if let Some((bytes, ct, name)) = crate::bindings::file::FileJs::from_js_file(value) {
+    if let Some((bytes, ct, name)) = file_parts(value) {
       return FormEntry::File {
         bytes,
         filename: filename.unwrap_or(name),
@@ -54,7 +54,7 @@ impl FormDataJs {
         },
       };
     }
-    if let Some((bytes, ct)) = BlobJs::from_js_blob(value) {
+    if let Some((bytes, ct)) = blob_parts(value) {
       return FormEntry::File {
         bytes,
         filename: filename.unwrap_or_else(|| "blob".to_string()),
@@ -86,7 +86,12 @@ impl FormDataJs {
       } => {
         let file = Class::instance(
           ctx.clone(),
-          crate::bindings::file::FileJs::new_parts(bytes.clone(), content_type.clone(), filename.clone()),
+          ferridriver_jsstd::buffer::File::from_bytes(
+            ctx,
+            bytes.clone(),
+            filename.clone(),
+            Some(content_type.clone()),
+          )?,
         )?;
         Ok(file.into_value())
       },

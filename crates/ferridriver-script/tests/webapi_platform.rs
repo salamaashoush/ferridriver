@@ -39,9 +39,9 @@ fn val(o: &Outcome) -> &serde_json::Value {
 async fn file_is_a_blob_with_a_name() {
   let o = run(
     "const f = new File(['hello'], 'note.txt', { type: 'TEXT/Plain', lastModified: 1234 }); \
-     return { name: f.name, size: f.size, type: f.type, text: f.text(), \
+     return { name: f.name, size: f.size, type: f.type, text: await f.text(), \
        lastModified: f.lastModified, isFile: f instanceof File, isBlob: f instanceof Blob, \
-       sliceText: f.slice(0, 2).text(), sliceIsBlob: f.slice(0, 2) instanceof Blob };",
+       sliceText: await f.slice(0, 2).text(), sliceIsBlob: f.slice(0, 2) instanceof Blob };",
   )
   .await;
   let v = val(&o);
@@ -84,7 +84,7 @@ async fn form_data_file_entry_round_trips_as_a_file() {
      fd.append('f', new File(['data'], 'report.csv', { type: 'text/csv' })); \
      fd.append('b', new Blob(['x'])); \
      const f = fd.get('f'); const b = fd.get('b'); \
-     return { isFile: f instanceof File, name: f.name, type: f.type, text: f.text(), \
+     return { isFile: f instanceof File, name: f.name, type: f.type, text: await f.text(), \
        blobName: b.name };",
   )
   .await;

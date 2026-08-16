@@ -47,13 +47,16 @@ mod test;
 
 use rquickjs::{Ctx, Result};
 
-/// Install every vendored global (`DOMException`, `Event`/`EventTarget`,
-/// `AbortController`/`AbortSignal`, and the full Streams surface) on
-/// `ctx`.
+/// Install every vendored global on `ctx`: `DOMException`, `Event` /
+/// `EventTarget`, `AbortController` / `AbortSignal`, the full Streams
+/// surface, and `Buffer` / `Blob` / `File`.
+///
+/// One entry point, so a host cannot install half the crate.
 pub fn init(ctx: &Ctx<'_>) -> Result<()> {
   exceptions::init(ctx)?;
   events::init(ctx)?;
   abort::init(ctx)?;
   stream_web::init(ctx)?;
+  buffer::init(ctx)?;
   Ok(())
 }

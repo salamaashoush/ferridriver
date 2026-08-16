@@ -53,11 +53,11 @@ use rquickjs::{Coerced, Ctx, IntoJs, Object, Value, class::Class, class::Trace};
 
 use crate::bindings::js_iterator::live_iterator;
 
-use crate::bindings::blob::BlobJs;
 use crate::bindings::body_init::{BodySource, ExtractedBody, extract_body};
 use crate::bindings::convert::json_to_js;
 use crate::bindings::form_data::FormDataJs;
 use crate::bindings::http_client::net_check;
+use ferridriver_jsstd::buffer::Blob;
 
 /// Hard cap on a single buffered `fetch` body (`text`/`json`/
 /// `arrayBuffer`). QuickJS's `memory_limit` only bounds the JS heap;
@@ -800,7 +800,7 @@ pub(crate) trait BodyMixin<'js> {
   async fn mixin_blob(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let mime = self.content_type().unwrap_or_default();
     let b = self.consume_body(ctx).await?;
-    Ok(Class::instance(ctx.clone(), BlobJs::new_parts(b, mime))?.into_value())
+    Ok(Class::instance(ctx.clone(), Blob::from_bytes(ctx, b, Some(mime))?)?.into_value())
   }
 
   /// Spec: parses `multipart/form-data` and
