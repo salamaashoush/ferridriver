@@ -25,6 +25,7 @@ pub mod blob;
 pub mod body_init;
 pub mod browser;
 pub mod browser_type;
+pub mod call_site;
 pub mod cdp_session;
 pub mod clock;
 pub mod compression;
@@ -61,6 +62,7 @@ pub mod runtime;
 pub mod sidecars;
 pub mod streams;
 pub mod test;
+pub mod test_debug;
 pub mod timers;
 pub mod tracing;
 pub mod url_search_params;
@@ -77,6 +79,7 @@ pub use bdd::{
 };
 pub use browser::BrowserJs;
 pub use browser_type::{BrowserTypeJs, install_browser_type};
+pub use call_site::CallSite;
 pub use console_message::ConsoleMessageJs;
 pub use context::BrowserContextJs;
 pub use dialog::DialogJs;
@@ -105,6 +108,7 @@ pub use test::{
   TestHostBridge, TestInfoData, TestWorldData, collect_tests, install_test, run_standalone_hook, run_test,
   teardown_worker_fixtures,
 };
+pub use test_debug::{PendingAction, TestDebugControl};
 pub use video::VideoJs;
 pub use web_error::WebErrorJs;
 

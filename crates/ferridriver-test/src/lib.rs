@@ -91,10 +91,14 @@
 pub type Result<T> = std::result::Result<T, model::TestFailure>;
 
 // -- Core modules --
+pub mod artifacts;
 pub mod config;
 pub mod context;
 pub(crate) mod context_pool;
 pub mod ct;
+pub mod debug;
+#[cfg(feature = "debug-session")]
+pub mod debug_session;
 pub mod discovery;
 pub mod dispatcher;
 pub mod expect;
@@ -109,6 +113,7 @@ pub mod runner;
 pub mod server;
 pub mod shard;
 pub mod snapshot;
+pub mod test_server;
 pub mod tracing;
 pub mod tui;
 pub mod tui_reporter;
@@ -168,6 +173,35 @@ macro_rules! main {
   };
 }
 
+/// Publish stopped tests as sessions, when the harness was built with the
+/// `debug-session` feature.
+///
+/// Without it the flag is a clear error rather than a silent no-op: a run
+/// that quietly ignored `--debug` and finished normally would look like the
+/// debugger was broken.
+#[cfg(feature = "debug-session")]
+fn install_harness_debug(mode: debug::DebugMode, overrides: &mut ferridriver_config::test::CliOverrides) {
+  if let Err(e) = debug_session::install_default(mode, overrides) {
+    eprintln!("--debug: {e}");
+    std::process::exit(2);
+  }
+}
+
+#[cfg(not(feature = "debug-session"))]
+#[expect(
+  clippy::needless_pass_by_ref_mut,
+  reason = "signature matches the feature-enabled form"
+)]
+fn install_harness_debug(_mode: debug::DebugMode, _overrides: &mut ferridriver_config::test::CliOverrides) {
+  eprintln!(
+    "--debug needs the `debug-session` feature: publishing a stopped test as a\n\
+     session pulls in the scripting engine, which a harness that never debugs\n\
+     should not pay to build. Add it to the dev-dependency:\n\
+     \n    ferridriver-test = {{ version = \"…\", features = [\"debug-session\"] }}\n"
+  );
+  std::process::exit(2);
+}
+
 /// Entry point called by `main!()`. Parses CLI args, loads config,
 /// discovers tests, and runs them.
 pub fn run_harness() {
@@ -179,7 +213,11 @@ pub fn run_harness() {
     .expect("failed to build tokio runtime");
 
   let exit_code = rt.block_on(async {
-    let overrides = config::parse_common_cli_args();
+    let mut overrides = config::parse_common_cli_args();
+    if let Some(mode) = config::parse_debug_mode() {
+      install_harness_debug(mode, &mut overrides);
+    }
+    let overrides = overrides;
     let config = config::resolve_config(&overrides).unwrap_or_else(|e| {
       eprintln!("config error: {e}");
       std::process::exit(1);

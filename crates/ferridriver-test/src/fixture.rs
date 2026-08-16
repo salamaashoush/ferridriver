@@ -251,7 +251,7 @@ impl FixturePool {
       let timeout = def.timeout;
 
       tracing::debug!(target: "ferridriver::fixture", fixture = name, "setting up fixture");
-      let arc_val = tokio::time::timeout(timeout, setup(pool.clone()))
+      let arc_val = ferridriver::pause::run_within(timeout, setup(pool.clone()))
         .await
         .map_err(|_| FerriError::timeout(format!("fixture '{name}' setup"), timeout.as_millis() as u64))?
         .map_err(|e| FerriError::backend(format!("fixture '{name}' setup failed: {e}")))?;
@@ -379,7 +379,7 @@ fn ensure_resolved(
     let teardown = def.teardown.as_ref().map(Arc::clone);
     let timeout = def.timeout;
 
-    let arc_val = tokio::time::timeout(timeout, setup(pool.clone()))
+    let arc_val = ferridriver::pause::run_within(timeout, setup(pool.clone()))
       .await
       .map_err(|_| FerriError::timeout(format!("fixture '{name}' setup"), timeout.as_millis() as u64))?
       .map_err(|e| FerriError::backend(format!("fixture '{name}' setup failed: {e}")))?;

@@ -159,49 +159,69 @@ impl PageJs {
   #[qjs(rename = "goto")]
   pub async fn goto<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     url: String,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Option<crate::bindings::network::ResponseJs>> {
-    let opts = parse_goto_options(&ctx, options)?;
-    let resp = self.inner.goto(&url).maybe_options(opts).await.into_js_with(&ctx)?;
-    Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
+    call_site
+      .scope(async move {
+        let opts = parse_goto_options(&ctx, options)?;
+        let resp = self.inner.goto(&url).maybe_options(opts).await.into_js_with(&ctx)?;
+        Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
+      })
+      .await
   }
 
   /// Reload the current page. Accepts the same option bag as `goto`.
   #[qjs(rename = "reload")]
   pub async fn reload<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Option<crate::bindings::network::ResponseJs>> {
-    let opts = parse_goto_options(&ctx, options)?;
-    let resp = self.inner.reload().maybe_options(opts).await.into_js_with(&ctx)?;
-    Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
+    call_site
+      .scope(async move {
+        let opts = parse_goto_options(&ctx, options)?;
+        let resp = self.inner.reload().maybe_options(opts).await.into_js_with(&ctx)?;
+        Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
+      })
+      .await
   }
 
   /// Navigate back in history. Accepts the same option bag as `goto`.
   #[qjs(rename = "goBack")]
   pub async fn go_back<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Option<crate::bindings::network::ResponseJs>> {
-    let opts = parse_goto_options(&ctx, options)?;
-    let resp = self.inner.go_back().maybe_options(opts).await.into_js_with(&ctx)?;
-    Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
+    call_site
+      .scope(async move {
+        let opts = parse_goto_options(&ctx, options)?;
+        let resp = self.inner.go_back().maybe_options(opts).await.into_js_with(&ctx)?;
+        Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
+      })
+      .await
   }
 
   /// Navigate forward in history. Accepts the same option bag as `goto`.
   #[qjs(rename = "goForward")]
   pub async fn go_forward<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Option<crate::bindings::network::ResponseJs>> {
-    let opts = parse_goto_options(&ctx, options)?;
-    let resp = self.inner.go_forward().maybe_options(opts).await.into_js_with(&ctx)?;
-    Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
+    call_site
+      .scope(async move {
+        let opts = parse_goto_options(&ctx, options)?;
+        let resp = self.inner.go_forward().maybe_options(opts).await.into_js_with(&ctx)?;
+        Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
+      })
+      .await
   }
 
   /// Current URL of the page.
@@ -213,8 +233,10 @@ impl PageJs {
 
   /// Document title.
   #[qjs(rename = "title")]
-  pub async fn title(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
-    self.inner.title().await.into_js_with(&ctx)
+  pub async fn title(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
+    call_site
+      .scope(async move { self.inner.title().await.into_js_with(&ctx) })
+      .await
   }
 
   /// Playwright: `page.video(): null | Video` —
@@ -236,14 +258,27 @@ impl PageJs {
 
   /// Full HTML content of the page.
   #[qjs(rename = "content")]
-  pub async fn content(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
-    self.inner.content().await.into_js_with(&ctx)
+  pub async fn content(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<String> {
+    call_site
+      .scope(async move { self.inner.content().await.into_js_with(&ctx) })
+      .await
   }
 
   /// Replace the page's HTML with `html`.
   #[qjs(rename = "setContent")]
-  pub async fn set_content(&self, ctx: rquickjs::Ctx<'_>, html: String) -> rquickjs::Result<()> {
-    self.inner.set_content(&html).await.into_js_with(&ctx)
+  pub async fn set_content(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    html: String,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move { self.inner.set_content(&html).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Register a JS snippet to run on every new document before any page
@@ -256,28 +291,46 @@ impl PageJs {
   #[qjs(rename = "addInitScript")]
   pub async fn add_init_script<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     script: rquickjs::Value<'js>,
     arg: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let (init, arg_json) = init_script_from_js(&ctx, script, arg.0)?;
-    let disposable = self.inner.add_init_script(init, arg_json).await.into_js_with(&ctx)?;
-    let instance =
-      rquickjs::class::Class::instance(ctx.clone(), crate::bindings::disposable::DisposableJs::new(disposable))?;
-    rquickjs::IntoJs::into_js(instance, &ctx)
+    call_site
+      .scope(async move {
+        let (init, arg_json) = init_script_from_js(&ctx, script, arg.0)?;
+        let disposable = self.inner.add_init_script(init, arg_json).await.into_js_with(&ctx)?;
+        let instance =
+          rquickjs::class::Class::instance(ctx.clone(), crate::bindings::disposable::DisposableJs::new(disposable))?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      })
+      .await
   }
 
   /// Remove a previously-registered init script by identifier.
   #[qjs(rename = "removeInitScript")]
-  pub async fn remove_init_script(&self, ctx: rquickjs::Ctx<'_>, identifier: String) -> rquickjs::Result<()> {
-    self.inner.remove_init_script(&identifier).await.into_js_with(&ctx)
+  pub async fn remove_init_script(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    identifier: String,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move { self.inner.remove_init_script(&identifier).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Full page rendered as clean Markdown (headings, lists, links, tables
   /// preserved; chrome and boilerplate stripped).
   #[qjs(rename = "markdown")]
-  pub async fn markdown(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
-    self.inner.markdown().await.into_js_with(&ctx)
+  pub async fn markdown(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<String> {
+    call_site
+      .scope(async move { self.inner.markdown().await.into_js_with(&ctx) })
+      .await
   }
 
   /// Wait for an element matching `selector`. Optional `options` object
@@ -286,17 +339,22 @@ impl PageJs {
   #[qjs(rename = "waitForSelector")]
   pub async fn wait_for_selector<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = parse_wait_options(&ctx, options)?;
-    self
-      .inner
-      .wait_for_selector(&selector)
-      .options(opts)
+    call_site
+      .scope(async move {
+        let opts = parse_wait_options(&ctx, options)?;
+        self
+          .inner
+          .wait_for_selector(&selector)
+          .options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   // ── Locators ──────────────────────────────────────────────────────────────
@@ -309,85 +367,119 @@ impl PageJs {
   #[qjs(rename = "querySelector")]
   pub async fn query_selector(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     selector: String,
   ) -> rquickjs::Result<Option<crate::bindings::element_handle::ElementHandleJs>> {
-    let inner = self.inner.query_selector(&selector).await.into_js_with(&ctx)?;
-    Ok(inner.map(crate::bindings::element_handle::ElementHandleJs::new))
+    call_site
+      .scope(async move {
+        let inner = self.inner.query_selector(&selector).await.into_js_with(&ctx)?;
+        Ok(inner.map(crate::bindings::element_handle::ElementHandleJs::new))
+      })
+      .await
   }
 
   /// Playwright `$` shortcut for [`Self::query_selector`].
   #[qjs(rename = "$")]
   pub async fn dollar(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     selector: String,
   ) -> rquickjs::Result<Option<crate::bindings::element_handle::ElementHandleJs>> {
-    self.query_selector(ctx, selector).await
+    call_site
+      .scope(async move {
+        self
+          .query_selector(crate::bindings::CallSite::none(), ctx, selector)
+          .await
+      })
+      .await
   }
 
   /// Playwright: `page.querySelectorAll(selector): Promise<ElementHandle[]>`.
   #[qjs(rename = "querySelectorAll")]
   pub async fn query_selector_all(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     selector: String,
   ) -> rquickjs::Result<Vec<crate::bindings::element_handle::ElementHandleJs>> {
-    let inner_handles = self.inner.query_selector_all(&selector).await.into_js_with(&ctx)?;
-    Ok(
-      inner_handles
-        .into_iter()
-        .map(crate::bindings::element_handle::ElementHandleJs::new)
-        .collect(),
-    )
+    call_site
+      .scope(async move {
+        let inner_handles = self.inner.query_selector_all(&selector).await.into_js_with(&ctx)?;
+        Ok(
+          inner_handles
+            .into_iter()
+            .map(crate::bindings::element_handle::ElementHandleJs::new)
+            .collect(),
+        )
+      })
+      .await
   }
 
   /// Playwright `$$` shortcut for [`Self::query_selector_all`].
   #[qjs(rename = "$$")]
   pub async fn dollar_dollar(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     selector: String,
   ) -> rquickjs::Result<Vec<crate::bindings::element_handle::ElementHandleJs>> {
-    self.query_selector_all(ctx, selector).await
+    call_site
+      .scope(async move {
+        self
+          .query_selector_all(crate::bindings::CallSite::none(), ctx, selector)
+          .await
+      })
+      .await
   }
 
   /// Playwright: `page.$eval(selector, pageFunction, arg?): Promise<R>`.
   #[qjs(rename = "$eval")]
   pub async fn eval_on_selector<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     page_function: rquickjs::Value<'js>,
     arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let result = self
-      .inner
-      .eval_on_selector(&selector, &source, serialized, is_fn)
+    call_site
+      .scope(async move {
+        let (source, is_fn) = extract_page_function(&ctx, page_function)?;
+        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+        let result = self
+          .inner
+          .eval_on_selector(&selector, &source, serialized, is_fn)
+          .await
+          .into_js_with(&ctx)?;
+        serialized_value_to_quickjs(&ctx, &result)
+      })
       .await
-      .into_js_with(&ctx)?;
-    serialized_value_to_quickjs(&ctx, &result)
   }
 
   /// Playwright: `page.$$eval(selector, pageFunction, arg?): Promise<R>`.
   #[qjs(rename = "$$eval")]
   pub async fn eval_on_selector_all<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     page_function: rquickjs::Value<'js>,
     arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let result = self
-      .inner
-      .eval_on_selector_all(&selector, &source, serialized, is_fn)
+    call_site
+      .scope(async move {
+        let (source, is_fn) = extract_page_function(&ctx, page_function)?;
+        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+        let result = self
+          .inner
+          .eval_on_selector_all(&selector, &source, serialized, is_fn)
+          .await
+          .into_js_with(&ctx)?;
+        serialized_value_to_quickjs(&ctx, &result)
+      })
       .await
-      .into_js_with(&ctx)?;
-    serialized_value_to_quickjs(&ctx, &result)
   }
 
   /// Playwright: `page.pause(): Promise<void>`. ferridriver has no
@@ -406,36 +498,46 @@ impl PageJs {
   #[qjs(rename = "evaluate")]
   pub async fn evaluate<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     page_function: rquickjs::Value<'js>,
     arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let result = self
-      .inner
-      .evaluate(&source, serialized, is_fn)
+    call_site
+      .scope(async move {
+        let (source, is_fn) = extract_page_function(&ctx, page_function)?;
+        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+        let result = self
+          .inner
+          .evaluate(&source, serialized, is_fn)
+          .await
+          .into_js_with(&ctx)?;
+        serialized_value_to_quickjs(&ctx, &result)
+      })
       .await
-      .into_js_with(&ctx)?;
-    serialized_value_to_quickjs(&ctx, &result)
   }
 
   /// Playwright: `page.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
   #[qjs(rename = "evaluateHandle")]
   pub async fn evaluate_handle<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     page_function: rquickjs::Value<'js>,
     arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
-    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let handle = self
-      .inner
-      .evaluate_handle(&source, serialized, is_fn)
+    call_site
+      .scope(async move {
+        let (source, is_fn) = extract_page_function(&ctx, page_function)?;
+        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+        let handle = self
+          .inner
+          .evaluate_handle(&source, serialized, is_fn)
+          .await
+          .into_js_with(&ctx)?;
+        Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
+      })
       .await
-      .into_js_with(&ctx)?;
-    Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
   }
 
   /// Playwright: `page.locator(selector, options?: LocatorOptions): Locator`.
@@ -560,12 +662,17 @@ impl PageJs {
   #[qjs(rename = "click")]
   pub async fn click<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = crate::bindings::convert::parse_click_options(&ctx, options)?;
-    self.inner.click(&selector).maybe_options(opts).await.into_js_with(&ctx)
+    call_site
+      .scope(async move {
+        let opts = crate::bindings::convert::parse_click_options(&ctx, options)?;
+        self.inner.click(&selector).maybe_options(opts).await.into_js_with(&ctx)
+      })
+      .await
   }
 
   /// Double-click the first element matching `selector`. Accepts
@@ -573,17 +680,22 @@ impl PageJs {
   #[qjs(rename = "dblclick")]
   pub async fn dblclick<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = crate::bindings::convert::parse_dblclick_options(&ctx, options)?;
-    self
-      .inner
-      .dblclick(&selector)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        let opts = crate::bindings::convert::parse_dblclick_options(&ctx, options)?;
+        self
+          .inner
+          .dblclick(&selector)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// Fill `value` into the input matching `selector`. Accepts
@@ -591,18 +703,23 @@ impl PageJs {
   #[qjs(rename = "fill")]
   pub async fn fill<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     value: String,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = crate::bindings::convert::parse_fill_options(&ctx, options)?;
-    self
-      .inner
-      .fill(&selector, &value)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        let opts = crate::bindings::convert::parse_fill_options(&ctx, options)?;
+        self
+          .inner
+          .fill(&selector, &value)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// Type `text` into the input matching `selector`. Accepts
@@ -613,18 +730,23 @@ impl PageJs {
   #[qjs(rename = "type")]
   pub async fn type_<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     text: String,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
-    self
-      .inner
-      .r#type(&selector, &text)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
+        self
+          .inner
+          .r#type(&selector, &text)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// Press `key` on the element matching `selector`. Accepts Playwright's
@@ -632,29 +754,37 @@ impl PageJs {
   #[qjs(rename = "press")]
   pub async fn press<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     key: String,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = crate::bindings::convert::parse_press_options(&ctx, options)?;
-    self
-      .inner
-      .press(&selector, &key)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        let opts = crate::bindings::convert::parse_press_options(&ctx, options)?;
+        self
+          .inner
+          .press(&selector, &key)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// `page.focus(selector, options?)`.
   #[qjs(rename = "focus")]
   pub async fn focus(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     selector: String,
     _options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<()> {
-    self.inner.focus(&selector).await.into_js_with(&ctx)
+    call_site
+      .scope(async move { self.inner.focus(&selector).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Hover the first element matching `selector`. Accepts Playwright's
@@ -662,12 +792,17 @@ impl PageJs {
   #[qjs(rename = "hover")]
   pub async fn hover<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = crate::bindings::convert::parse_hover_options(&ctx, options)?;
-    self.inner.hover(&selector).maybe_options(opts).await.into_js_with(&ctx)
+    call_site
+      .scope(async move {
+        let opts = crate::bindings::convert::parse_hover_options(&ctx, options)?;
+        self.inner.hover(&selector).maybe_options(opts).await.into_js_with(&ctx)
+      })
+      .await
   }
 
   /// Dispatch a DOM event on the first element matching `selector`.
@@ -675,25 +810,30 @@ impl PageJs {
   #[qjs(rename = "dispatchEvent")]
   pub async fn dispatch_event<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     event_type: String,
     event_init: rquickjs::function::Opt<rquickjs::Value<'js>>,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let init_json = match event_init.0 {
-      Some(v) if !v.is_undefined() && !v.is_null() => {
-        Some(crate::bindings::convert::serde_from_js::<serde_json::Value>(&ctx, v)?)
-      },
-      _ => None,
-    };
-    let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
-    self
-      .inner
-      .dispatch_event(&selector, &event_type, init_json)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        let init_json = match event_init.0 {
+          Some(v) if !v.is_undefined() && !v.is_null() => {
+            Some(crate::bindings::convert::serde_from_js::<serde_json::Value>(&ctx, v)?)
+          },
+          _ => None,
+        };
+        let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
+        self
+          .inner
+          .dispatch_event(&selector, &event_type, init_json)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// Tap (touch) the first element matching `selector`. Accepts
@@ -701,12 +841,17 @@ impl PageJs {
   #[qjs(rename = "tap")]
   pub async fn tap<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = crate::bindings::convert::parse_tap_options(&ctx, options)?;
-    self.inner.tap(&selector).maybe_options(opts).await.into_js_with(&ctx)
+    call_site
+      .scope(async move {
+        let opts = crate::bindings::convert::parse_tap_options(&ctx, options)?;
+        self.inner.tap(&selector).maybe_options(opts).await.into_js_with(&ctx)
+      })
+      .await
   }
 
   /// Check a checkbox matching `selector`. Accepts Playwright's full
@@ -714,12 +859,17 @@ impl PageJs {
   #[qjs(rename = "check")]
   pub async fn check<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self.inner.check(&selector).maybe_options(opts).await.into_js_with(&ctx)
+    call_site
+      .scope(async move {
+        let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
+        self.inner.check(&selector).maybe_options(opts).await.into_js_with(&ctx)
+      })
+      .await
   }
 
   /// Uncheck a checkbox matching `selector`. Accepts Playwright's full
@@ -727,17 +877,22 @@ impl PageJs {
   #[qjs(rename = "uncheck")]
   pub async fn uncheck<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self
-      .inner
-      .uncheck(&selector)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
+        self
+          .inner
+          .uncheck(&selector)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// Set the checked state of a checkbox/radio matching `selector`.
@@ -745,18 +900,23 @@ impl PageJs {
   #[qjs(rename = "setChecked")]
   pub async fn set_checked<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     checked: bool,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-    self
-      .inner
-      .set_checked(&selector, checked)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
+        self
+          .inner
+          .set_checked(&selector, checked)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// Select options on the `<select>` matching `selector`. Returns the
@@ -765,45 +925,78 @@ impl PageJs {
   #[qjs(rename = "selectOption")]
   pub async fn select_option<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     values: rquickjs::Value<'js>,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Vec<String>> {
-    let values = crate::bindings::convert::parse_select_option_values(&ctx, values)?;
-    let opts = crate::bindings::convert::parse_select_option_options(&ctx, options)?;
-    self
-      .inner
-      .select_option(&selector, values)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        let values = crate::bindings::convert::parse_select_option_values(&ctx, values)?;
+        let opts = crate::bindings::convert::parse_select_option_options(&ctx, options)?;
+        self
+          .inner
+          .select_option(&selector, values)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   // ── Info ──────────────────────────────────────────────────────────────────
 
   /// Text content of the first element matching `selector` (or `null`).
   #[qjs(rename = "textContent")]
-  pub async fn text_content(&self, ctx: rquickjs::Ctx<'_>, selector: String) -> rquickjs::Result<Option<String>> {
-    self.inner.text_content(&selector).await.into_js_with(&ctx)
+  pub async fn text_content(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<Option<String>> {
+    call_site
+      .scope(async move { self.inner.text_content(&selector).await.into_js_with(&ctx) })
+      .await
   }
 
   /// `innerText` of the first element matching `selector`.
   #[qjs(rename = "innerText")]
-  pub async fn inner_text(&self, ctx: rquickjs::Ctx<'_>, selector: String) -> rquickjs::Result<String> {
-    self.inner.inner_text(&selector).await.into_js_with(&ctx)
+  pub async fn inner_text(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<String> {
+    call_site
+      .scope(async move { self.inner.inner_text(&selector).await.into_js_with(&ctx) })
+      .await
   }
 
   /// `innerHTML` of the first element matching `selector`.
   #[qjs(rename = "innerHTML")]
-  pub async fn inner_html(&self, ctx: rquickjs::Ctx<'_>, selector: String) -> rquickjs::Result<String> {
-    self.inner.inner_html(&selector).await.into_js_with(&ctx)
+  pub async fn inner_html(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<String> {
+    call_site
+      .scope(async move { self.inner.inner_html(&selector).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Current input value of the first element matching `selector`.
   #[qjs(rename = "inputValue")]
-  pub async fn input_value(&self, ctx: rquickjs::Ctx<'_>, selector: String) -> rquickjs::Result<String> {
-    self.inner.input_value(&selector).await.into_js_with(&ctx)
+  pub async fn input_value(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<String> {
+    call_site
+      .scope(async move { self.inner.input_value(&selector).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Get attribute `name` on the first element matching `selector`
@@ -811,41 +1004,79 @@ impl PageJs {
   #[qjs(rename = "getAttribute")]
   pub async fn get_attribute(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     selector: String,
     name: String,
   ) -> rquickjs::Result<Option<String>> {
-    self.inner.get_attribute(&selector, &name).await.into_js_with(&ctx)
+    call_site
+      .scope(async move { self.inner.get_attribute(&selector, &name).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Whether the first element matching `selector` is visible.
   #[qjs(rename = "isVisible")]
-  pub async fn is_visible(&self, ctx: rquickjs::Ctx<'_>, selector: String) -> rquickjs::Result<bool> {
-    self.inner.is_visible(&selector).await.into_js_with(&ctx)
+  pub async fn is_visible(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<bool> {
+    call_site
+      .scope(async move { self.inner.is_visible(&selector).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Whether the first element matching `selector` is hidden.
   #[qjs(rename = "isHidden")]
-  pub async fn is_hidden(&self, ctx: rquickjs::Ctx<'_>, selector: String) -> rquickjs::Result<bool> {
-    self.inner.is_hidden(&selector).await.into_js_with(&ctx)
+  pub async fn is_hidden(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<bool> {
+    call_site
+      .scope(async move { self.inner.is_hidden(&selector).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Whether the first element matching `selector` is enabled.
   #[qjs(rename = "isEnabled")]
-  pub async fn is_enabled(&self, ctx: rquickjs::Ctx<'_>, selector: String) -> rquickjs::Result<bool> {
-    self.inner.is_enabled(&selector).await.into_js_with(&ctx)
+  pub async fn is_enabled(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<bool> {
+    call_site
+      .scope(async move { self.inner.is_enabled(&selector).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Whether the first element matching `selector` is disabled.
   #[qjs(rename = "isDisabled")]
-  pub async fn is_disabled(&self, ctx: rquickjs::Ctx<'_>, selector: String) -> rquickjs::Result<bool> {
-    self.inner.is_disabled(&selector).await.into_js_with(&ctx)
+  pub async fn is_disabled(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<bool> {
+    call_site
+      .scope(async move { self.inner.is_disabled(&selector).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Whether the first checkbox matching `selector` is checked.
   #[qjs(rename = "isChecked")]
-  pub async fn is_checked(&self, ctx: rquickjs::Ctx<'_>, selector: String) -> rquickjs::Result<bool> {
-    self.inner.is_checked(&selector).await.into_js_with(&ctx)
+  pub async fn is_checked(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<bool> {
+    call_site
+      .scope(async move { self.inner.is_checked(&selector).await.into_js_with(&ctx) })
+      .await
   }
 
   // ── Mouse / keyboard namespaces (Playwright parity) ──────────────────────
@@ -990,17 +1221,23 @@ impl PageJs {
   /// async timer (the QuickJS engine has no `setTimeout`). Playwright
   /// discourages this in production code; prefer web-first waits.
   #[qjs(rename = "waitForTimeout")]
-  pub async fn wait_for_timeout(&self, timeout: f64) {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let ms = if timeout < 0.0 { 0 } else { timeout as u64 };
-    self.inner.wait_for_timeout(ms).await;
+  pub async fn wait_for_timeout(&self, call_site: crate::bindings::CallSite, timeout: f64) {
+    call_site
+      .scope(async move {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let ms = if timeout < 0.0 { 0 } else { timeout as u64 };
+        self.inner.wait_for_timeout(ms).await;
+      })
+      .await;
   }
 
   /// `page.requestGC()`. Forces a garbage-collection pass in the
   /// page's JS engine (Playwright parity).
   #[qjs(rename = "requestGC")]
-  pub async fn request_gc(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-    self.inner.request_gc().await.into_js_with(&ctx)
+  pub async fn request_gc(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move { self.inner.request_gc().await.into_js_with(&ctx) })
+      .await
   }
 
   /// `page.consoleMessages(options?)`. Returns the retained console
@@ -1059,11 +1296,16 @@ impl PageJs {
   #[qjs(rename = "waitForNavigation")]
   pub async fn wait_for_navigation(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<()> {
-    let timeout = opt_timeout_ms(&options)?;
-    self.inner.wait_for_navigation(timeout).await.into_js_with(&ctx)
+    call_site
+      .scope(async move {
+        let timeout = opt_timeout_ms(&options)?;
+        self.inner.wait_for_navigation(timeout).await.into_js_with(&ctx)
+      })
+      .await
   }
 
   /// `page.addScriptTag(options)`. Injects a `<script>` tag. Provide
@@ -1071,17 +1313,22 @@ impl PageJs {
   #[qjs(rename = "addScriptTag")]
   pub async fn add_script_tag(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<()> {
-    let url = opt_str_field(&options, "url")?;
-    let content = opt_str_field(&options, "content")?;
-    let script_type = opt_str_field(&options, "type")?;
-    self
-      .inner
-      .add_script_tag(url.as_deref(), content.as_deref(), script_type.as_deref())
+    call_site
+      .scope(async move {
+        let url = opt_str_field(&options, "url")?;
+        let content = opt_str_field(&options, "content")?;
+        let script_type = opt_str_field(&options, "type")?;
+        self
+          .inner
+          .add_script_tag(url.as_deref(), content.as_deref(), script_type.as_deref())
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// `page.addStyleTag(options)`. Injects a `<style>` / `<link>`. Provide
@@ -1089,16 +1336,21 @@ impl PageJs {
   #[qjs(rename = "addStyleTag")]
   pub async fn add_style_tag(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<()> {
-    let url = opt_str_field(&options, "url")?;
-    let content = opt_str_field(&options, "content")?;
-    self
-      .inner
-      .add_style_tag(url.as_deref(), content.as_deref())
+    call_site
+      .scope(async move {
+        let url = opt_str_field(&options, "url")?;
+        let content = opt_str_field(&options, "content")?;
+        self
+          .inner
+          .add_style_tag(url.as_deref(), content.as_deref())
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// `page.setExtraHTTPHeaders(headers)`. Sends `headers` (a plain
@@ -1106,23 +1358,41 @@ impl PageJs {
   #[qjs(rename = "setExtraHTTPHeaders")]
   pub async fn set_extra_http_headers<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     headers: rquickjs::Value<'js>,
   ) -> rquickjs::Result<()> {
-    let map: rustc_hash::FxHashMap<String, String> = serde_from_js(&ctx, headers)?;
-    self.inner.set_extra_http_headers(&map).await.into_js_with(&ctx)
+    call_site
+      .scope(async move {
+        let map: rustc_hash::FxHashMap<String, String> = serde_from_js(&ctx, headers)?;
+        self.inner.set_extra_http_headers(&map).await.into_js_with(&ctx)
+      })
+      .await
   }
 
   /// `page.bringToFront()`. Activates the page (brings its tab to front).
   #[qjs(rename = "bringToFront")]
-  pub async fn bring_to_front(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-    self.inner.bring_to_front().await.into_js_with(&ctx)
+  pub async fn bring_to_front(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move { self.inner.bring_to_front().await.into_js_with(&ctx) })
+      .await
   }
 
   /// `page.isEditable(selector)`. Whether the element is editable.
   #[qjs(rename = "isEditable")]
-  pub async fn is_editable(&self, ctx: rquickjs::Ctx<'_>, selector: String) -> rquickjs::Result<bool> {
-    self.inner.is_editable(&selector).await.into_js_with(&ctx)
+  pub async fn is_editable(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<bool> {
+    call_site
+      .scope(async move { self.inner.is_editable(&selector).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Playwright: `page.viewportSize(): null | { width, height }` — a
@@ -1201,8 +1471,16 @@ impl PageJs {
   /// ferridriver-specific (NOT Playwright): click at viewport
   /// coordinates without a selector. Playwright equivalent: `mouse.click(x, y)`.
   #[qjs(rename = "clickAt")]
-  pub async fn click_at(&self, ctx: rquickjs::Ctx<'_>, x: f64, y: f64) -> rquickjs::Result<()> {
-    self.inner.click_at(x, y).await.into_js_with(&ctx)
+  pub async fn click_at(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    x: f64,
+    y: f64,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move { self.inner.click_at(x, y).await.into_js_with(&ctx) })
+      .await
   }
 
   /// ferridriver-specific (NOT Playwright): interpolated mouse move
@@ -1211,6 +1489,7 @@ impl PageJs {
   #[qjs(rename = "moveMouseSmooth")]
   pub async fn move_mouse_smooth(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     from_x: f64,
     from_y: f64,
@@ -1218,11 +1497,15 @@ impl PageJs {
     to_y: f64,
     steps: u32,
   ) -> rquickjs::Result<()> {
-    self
-      .inner
-      .move_mouse_smooth(from_x, from_y, to_x, to_y, steps)
+    call_site
+      .scope(async move {
+        self
+          .inner
+          .move_mouse_smooth(from_x, from_y, to_x, to_y, steps)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// Drag from the source selector to the target selector. Accepts
@@ -1231,18 +1514,23 @@ impl PageJs {
   #[qjs(rename = "dragAndDrop")]
   pub async fn drag_and_drop<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     source: String,
     target: String,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = parse_drag_options(&ctx, options)?;
-    self
-      .inner
-      .drag_and_drop(&source, &target)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        let opts = parse_drag_options(&ctx, options)?;
+        self
+          .inner
+          .drag_and_drop(&source, &target)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   // ── File input ────────────────────────────────────────────────────────────
@@ -1253,19 +1541,24 @@ impl PageJs {
   #[qjs(rename = "setInputFiles")]
   pub async fn set_input_files<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     files: rquickjs::Value<'js>,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
-    let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
-    self
-      .inner
-      .set_input_files(&selector, files)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
+        let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
+        self
+          .inner
+          .set_input_files(&selector, files)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   // ── Emulation (page-scoped Playwright API) ───────────────────────────────
@@ -1277,16 +1570,21 @@ impl PageJs {
   #[qjs(rename = "setViewportSize")]
   pub async fn set_viewport_size<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     size: rquickjs::Value<'js>,
   ) -> rquickjs::Result<()> {
-    #[derive(serde::Deserialize)]
-    struct Size {
-      width: i64,
-      height: i64,
-    }
-    let s: Size = crate::bindings::convert::serde_from_js(&ctx, size)?;
-    self.inner.set_viewport_size(s.width, s.height).await.into_js_with(&ctx)
+    call_site
+      .scope(async move {
+        #[derive(serde::Deserialize)]
+        struct Size {
+          width: i64,
+          height: i64,
+        }
+        let s: Size = crate::bindings::convert::serde_from_js(&ctx, size)?;
+        self.inner.set_viewport_size(s.width, s.height).await.into_js_with(&ctx)
+      })
+      .await
   }
 
   /// Emulate media features. Accepts Playwright's
@@ -1296,11 +1594,16 @@ impl PageJs {
   #[qjs(rename = "emulateMedia")]
   pub async fn emulate_media<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = parse_emulate_media_options(&ctx, options)?;
-    self.inner.emulate_media().options(opts).await.into_js_with(&ctx)
+    call_site
+      .scope(async move {
+        let opts = parse_emulate_media_options(&ctx, options)?;
+        self.inner.emulate_media().options(opts).await.into_js_with(&ctx)
+      })
+      .await
   }
 
   // ── Screenshots / PDF (return raw bytes; pair with `artifacts.writeBytes`) ─
@@ -1311,17 +1614,29 @@ impl PageJs {
   #[qjs(rename = "screenshot")]
   pub async fn screenshot<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Vec<u8>> {
-    let opts = parse_screenshot_options(&ctx, options)?;
-    self.inner.screenshot().options(opts).await.into_js_with(&ctx)
+    call_site
+      .scope(async move {
+        let opts = parse_screenshot_options(&ctx, options)?;
+        self.inner.screenshot().options(opts).await.into_js_with(&ctx)
+      })
+      .await
   }
 
   /// Capture a single element as PNG bytes.
   #[qjs(rename = "screenshotElement")]
-  pub async fn screenshot_element(&self, ctx: rquickjs::Ctx<'_>, selector: String) -> rquickjs::Result<Vec<u8>> {
-    self.inner.screenshot_element(&selector).await.into_js_with(&ctx)
+  pub async fn screenshot_element(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<Vec<u8>> {
+    call_site
+      .scope(async move { self.inner.screenshot_element(&selector).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Render the current page as a PDF (raw bytes). Accepts a Playwright-shape
@@ -1330,11 +1645,16 @@ impl PageJs {
   #[qjs(rename = "pdf")]
   pub async fn pdf<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Vec<u8>> {
-    let opts = parse_pdf_options(&ctx, options)?;
-    self.inner.pdf().options(opts).await.into_js_with(&ctx)
+    call_site
+      .scope(async move {
+        let opts = parse_pdf_options(&ctx, options)?;
+        self.inner.pdf().options(opts).await.into_js_with(&ctx)
+      })
+      .await
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -1342,27 +1662,36 @@ impl PageJs {
   /// Close the page. Accepts `{ runBeforeUnload?, reason? }` to mirror
   /// Playwright's `page.close(options?)`.
   #[qjs(rename = "close")]
-  pub async fn close<'js>(&self, ctx: rquickjs::Ctx<'js>, options: Opt<rquickjs::Value<'js>>) -> rquickjs::Result<()> {
-    let opts = parse_page_close_options(&ctx, options)?;
-    self.inner.close().maybe_options(opts).await.into_js_with(&ctx)?;
-    // Let the event pump (same executor) drain the 'close' emission so
-    // close-listeners still find their callbacks in the registry, then
-    // release this page's persisted `page.on` callbacks — the session
-    // VM (and its userdata registry) outlives the page, so without
-    // this the `Persistent`s would sit in the registry for the VM's
-    // remaining life.
-    tokio::task::yield_now().await;
-    let page_key = self.inner.backend_page_id();
-    let ids = with_page_callbacks(&ctx, |r| {
-      r.remove_routes_for_owner(&RouteOwner::Page(page_key));
-      r.remove_ws_callbacks_for_owner(&RouteOwner::Page(page_key));
-      r.remove_exposed_for_page(page_key);
-      r.remove_event_listeners_for_page(page_key)
-    })?;
-    for id in ids {
-      self.inner.off(ferridriver::events::ListenerId(id));
-    }
-    Ok(())
+  pub async fn close<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let opts = parse_page_close_options(&ctx, options)?;
+        self.inner.close().maybe_options(opts).await.into_js_with(&ctx)?;
+        // Let the event pump (same executor) drain the 'close' emission so
+        // close-listeners still find their callbacks in the registry, then
+        // release this page's persisted `page.on` callbacks — the session
+        // VM (and its userdata registry) outlives the page, so without
+        // this the `Persistent`s would sit in the registry for the VM's
+        // remaining life.
+        tokio::task::yield_now().await;
+        let page_key = self.inner.backend_page_id();
+        let ids = with_page_callbacks(&ctx, |r| {
+          r.remove_routes_for_owner(&RouteOwner::Page(page_key));
+          r.remove_ws_callbacks_for_owner(&RouteOwner::Page(page_key));
+          r.remove_exposed_for_page(page_key);
+          r.remove_event_listeners_for_page(page_key)
+        })?;
+        for id in ids {
+          self.inner.off(ferridriver::events::ListenerId(id));
+        }
+        Ok(())
+      })
+      .await
   }
 
   /// Set the default timeout for all non-navigation operations
@@ -1544,17 +1873,22 @@ impl PageJs {
   #[qjs(rename = "routeFromHAR")]
   pub async fn route_from_har<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     har: String,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts = parse_har_options(&ctx, &options)?;
-    self
-      .inner
-      .route_from_har(std::path::Path::new(&har))
-      .options(opts)
+    call_site
+      .scope(async move {
+        let opts = parse_har_options(&ctx, &options)?;
+        self
+          .inner
+          .route_from_har(std::path::Path::new(&har))
+          .options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// `page.unroute(string | RegExp | ((url: URL) => boolean))`. A
@@ -1562,32 +1896,41 @@ impl PageJs {
   /// to `route`, then its always-true core matcher is dropped by `Arc`
   /// identity so sibling predicate routes survive.
   #[qjs(rename = "unroute")]
-  pub async fn unroute<'js>(&self, ctx: rquickjs::Ctx<'js>, url: rquickjs::Value<'js>) -> rquickjs::Result<()> {
-    if let Some(pred) = url.as_function() {
-      // Find every id (registered through THIS page, from any of its
-      // wrappers) whose stored predicate is identical (===) to the
-      // passed function, then drop its core registration + registry
-      // entry. Restoring each saved predicate yields a handle to the
-      // same underlying object, so `Value` `PartialEq` (tag + pointer)
-      // is still strict `===` identity.
-      let saved = with_page_callbacks(&ctx, |r| r.predicate_routes_for_owner(&self.route_owner()))?;
-      let mut victims: Vec<u64> = Vec::new();
-      for (id, sp) in saved {
-        let stored = sp.restore(&ctx)?;
-        if stored.as_value() == pred.as_value() {
-          victims.push(id);
+  pub async fn unroute<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    url: rquickjs::Value<'js>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        if let Some(pred) = url.as_function() {
+          // Find every id (registered through THIS page, from any of its
+          // wrappers) whose stored predicate is identical (===) to the
+          // passed function, then drop its core registration + registry
+          // entry. Restoring each saved predicate yields a handle to the
+          // same underlying object, so `Value` `PartialEq` (tag + pointer)
+          // is still strict `===` identity.
+          let saved = with_page_callbacks(&ctx, |r| r.predicate_routes_for_owner(&self.route_owner()))?;
+          let mut victims: Vec<u64> = Vec::new();
+          for (id, sp) in saved {
+            let stored = sp.restore(&ctx)?;
+            if stored.as_value() == pred.as_value() {
+              victims.push(id);
+            }
+          }
+          for id in victims {
+            let m = with_page_callbacks(&ctx, |r| r.remove_route(id))?;
+            if let Some(m) = m {
+              self.inner.unroute(&m).await.into_js_with(&ctx)?;
+            }
+          }
+          return Ok(());
         }
-      }
-      for id in victims {
-        let m = with_page_callbacks(&ctx, |r| r.remove_route(id))?;
-        if let Some(m) = m {
-          self.inner.unroute(&m).await.into_js_with(&ctx)?;
-        }
-      }
-      return Ok(());
-    }
-    let matcher = url_value_to_matcher(&ctx, url)?;
-    self.inner.unroute(&matcher).await.into_js_with(&ctx)
+        let matcher = url_value_to_matcher(&ctx, url)?;
+        self.inner.unroute(&matcher).await.into_js_with(&ctx)
+      })
+      .await
   }
 
   /// `page.unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' })`.
@@ -1596,19 +1939,24 @@ impl PageJs {
   #[qjs(rename = "unrouteAll")]
   pub async fn unroute_all<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let behavior = match options.0.and_then(rquickjs::Value::into_object) {
-      Some(obj) => match obj.get::<_, Option<String>>("behavior")? {
-        Some(b) => Some(parse_unroute_behavior(&b)?),
-        None => None,
-      },
-      None => None,
-    };
-    self.inner.unroute_all(behavior).await.into_js_with(&ctx)?;
-    with_page_callbacks(&ctx, |r| r.remove_routes_for_owner(&self.route_owner()))?;
-    Ok(())
+    call_site
+      .scope(async move {
+        let behavior = match options.0.and_then(rquickjs::Value::into_object) {
+          Some(obj) => match obj.get::<_, Option<String>>("behavior")? {
+            Some(b) => Some(parse_unroute_behavior(&b)?),
+            None => None,
+          },
+          None => None,
+        };
+        self.inner.unroute_all(behavior).await.into_js_with(&ctx)?;
+        with_page_callbacks(&ctx, |r| r.remove_routes_for_owner(&self.route_owner()))?;
+        Ok(())
+      })
+      .await
   }
 
   /// `page.addLocatorHandler(locator, handler, options?: { times?, noWaitAfter? })`.
@@ -1738,21 +2086,41 @@ impl PageJs {
   /// `page.pickLocator(): Promise<Locator>`. Highlights elements under the
   /// cursor and resolves with a Locator for the element the user clicks.
   #[qjs(rename = "pickLocator")]
-  pub async fn pick_locator(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<LocatorJs> {
-    let loc = self.inner.pick_locator().await.into_js_with(&ctx)?;
-    Ok(LocatorJs::new(loc))
+  pub async fn pick_locator(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<LocatorJs> {
+    call_site
+      .scope(async move {
+        let loc = self.inner.pick_locator().await.into_js_with(&ctx)?;
+        Ok(LocatorJs::new(loc))
+      })
+      .await
   }
 
   /// `page.cancelPickLocator(): Promise<void>`.
   #[qjs(rename = "cancelPickLocator")]
-  pub async fn cancel_pick_locator(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-    self.inner.cancel_pick_locator().await.into_js_with(&ctx)
+  pub async fn cancel_pick_locator(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move { self.inner.cancel_pick_locator().await.into_js_with(&ctx) })
+      .await
   }
 
   /// `page.hideHighlight(): Promise<void>`.
   #[qjs(rename = "hideHighlight")]
-  pub async fn hide_highlight(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-    self.inner.hide_highlight().await.into_js_with(&ctx)
+  pub async fn hide_highlight(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move { self.inner.hide_highlight().await.into_js_with(&ctx) })
+      .await
   }
 
   // ── Network lifecycle waits ──────────────────────────────────────────────
@@ -1767,21 +2135,26 @@ impl PageJs {
   #[qjs(rename = "waitForRequest")]
   pub async fn wait_for_request<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     url: rquickjs::Value<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::network::RequestJs> {
-    let timeout = parse_wait_timeout(&ctx, options)?;
-    if let Some(pred) = url.as_function() {
-      let t = timeout.unwrap_or_else(|| self.inner.default_timeout());
-      return wait_request_predicate(ctx.clone(), self.inner.clone(), pred.clone(), t).await;
-    }
-    let matcher = url_value_to_matcher(&ctx, url)?;
-    let req = self.inner.wait_for_request(matcher, timeout).await.into_js_with(&ctx)?;
-    Ok(crate::bindings::network::RequestJs::new_with_page(
-      req,
-      self.inner.clone(),
-    ))
+    call_site
+      .scope(async move {
+        let timeout = parse_wait_timeout(&ctx, options)?;
+        if let Some(pred) = url.as_function() {
+          let t = timeout.unwrap_or_else(|| self.inner.default_timeout());
+          return wait_request_predicate(ctx.clone(), self.inner.clone(), pred.clone(), t).await;
+        }
+        let matcher = url_value_to_matcher(&ctx, url)?;
+        let req = self.inner.wait_for_request(matcher, timeout).await.into_js_with(&ctx)?;
+        Ok(crate::bindings::network::RequestJs::new_with_page(
+          req,
+          self.inner.clone(),
+        ))
+      })
+      .await
   }
 
   /// `page.waitForResponse(string | RegExp | ((r: Response) => boolean |
@@ -1789,25 +2162,30 @@ impl PageJs {
   #[qjs(rename = "waitForResponse")]
   pub async fn wait_for_response<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     url: rquickjs::Value<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::network::ResponseJs> {
-    let timeout = parse_wait_timeout(&ctx, options)?;
-    if let Some(pred) = url.as_function() {
-      let t = timeout.unwrap_or_else(|| self.inner.default_timeout());
-      return wait_response_predicate(ctx.clone(), self.inner.clone(), pred.clone(), t).await;
-    }
-    let matcher = url_value_to_matcher(&ctx, url)?;
-    let resp = self
-      .inner
-      .wait_for_response(matcher, timeout)
+    call_site
+      .scope(async move {
+        let timeout = parse_wait_timeout(&ctx, options)?;
+        if let Some(pred) = url.as_function() {
+          let t = timeout.unwrap_or_else(|| self.inner.default_timeout());
+          return wait_response_predicate(ctx.clone(), self.inner.clone(), pred.clone(), t).await;
+        }
+        let matcher = url_value_to_matcher(&ctx, url)?;
+        let resp = self
+          .inner
+          .wait_for_response(matcher, timeout)
+          .await
+          .into_js_with(&ctx)?;
+        Ok(crate::bindings::network::ResponseJs::new_with_page(
+          resp,
+          self.inner.clone(),
+        ))
+      })
       .await
-      .into_js_with(&ctx)?;
-    Ok(crate::bindings::network::ResponseJs::new_with_page(
-      resp,
-      self.inner.clone(),
-    ))
   }
 
   /// Mirrors Playwright `page.waitForEvent(event, options?)`. Dispatches
@@ -1822,18 +2200,23 @@ impl PageJs {
   #[qjs(rename = "waitForLoadState")]
   pub async fn wait_for_load_state<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     state: Opt<String>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let opts: Option<ferridriver::options::WaitForLoadStateOptions> =
-      crate::bindings::convert::parse_opt_bag(&ctx, options)?;
-    self
-      .inner
-      .wait_for_load_state(state.0.as_deref())
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        let opts: Option<ferridriver::options::WaitForLoadStateOptions> =
+          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
+        self
+          .inner
+          .wait_for_load_state(state.0.as_deref())
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// Playwright: `page.waitForURL(url: string | RegExp | (url:URL) =>
@@ -1844,18 +2227,24 @@ impl PageJs {
   #[qjs(rename = "waitForURL")]
   pub async fn wait_for_url<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     url: rquickjs::Value<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let matcher = url_value_to_matcher(&ctx, url)?;
-    let opts: Option<ferridriver::options::WaitForUrlOptions> = crate::bindings::convert::parse_opt_bag(&ctx, options)?;
-    self
-      .inner
-      .wait_for_url(matcher)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        let matcher = url_value_to_matcher(&ctx, url)?;
+        let opts: Option<ferridriver::options::WaitForUrlOptions> =
+          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
+        self
+          .inner
+          .wait_for_url(matcher)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// Playwright: `page.waitForFunction(pageFunction: Function|string,
@@ -1866,23 +2255,28 @@ impl PageJs {
   #[qjs(rename = "waitForFunction")]
   pub async fn wait_for_function<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     page_function: rquickjs::Value<'js>,
     arg: Opt<rquickjs::Value<'js>>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
-    let opts: Option<ferridriver::options::WaitForFunctionOptions> = match options.0 {
-      Some(v) if !v.is_undefined() && !v.is_null() => Some(crate::bindings::convert::serde_from_js(&ctx, v)?),
-      _ => None,
-    };
-    let (src, is_fn) = extract_page_function(&ctx, page_function)?;
-    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let handle = self
-      .inner
-      .wait_for_function(&src, serialized, is_fn, opts)
+    call_site
+      .scope(async move {
+        let opts: Option<ferridriver::options::WaitForFunctionOptions> = match options.0 {
+          Some(v) if !v.is_undefined() && !v.is_null() => Some(crate::bindings::convert::serde_from_js(&ctx, v)?),
+          _ => None,
+        };
+        let (src, is_fn) = extract_page_function(&ctx, page_function)?;
+        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+        let handle = self
+          .inner
+          .wait_for_function(&src, serialized, is_fn, opts)
+          .await
+          .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
+        Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
+      })
       .await
-      .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
-    Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
   }
 
   /// `page.waitForEvent(event, optionsOrPredicate?)`. The second
@@ -1894,98 +2288,103 @@ impl PageJs {
   #[qjs(rename = "waitForEvent")]
   pub async fn wait_for_event<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     event: String,
     options_or_predicate: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    use rquickjs::class::Class;
-    let mut timeout_ms: Option<f64> = None;
-    let mut predicate: Option<rquickjs::Function<'js>> = None;
-    if let Some(v) = options_or_predicate.0 {
-      if let Some(n) = v.as_number() {
-        timeout_ms = Some(n);
-      } else if let Some(f) = v.as_function() {
-        predicate = Some(f.clone());
-      } else if let Some(obj) = v.as_object() {
-        let t: rquickjs::Value<'js> = obj.get("timeout")?;
-        timeout_ms = t.as_number();
-        let p: rquickjs::Value<'js> = obj.get("predicate")?;
-        predicate = p.as_function().cloned();
-      }
-    }
-    let timeout = timeout_ms.map_or_else(|| self.inner.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
-    let event_lc = event.to_ascii_lowercase();
-
-    // Predicate waits drain the broadcast for every event type — the
-    // emitter bridge claims dialog / filechooser / download live
-    // handles on behalf of broadcast listeners, so the predicate sees
-    // the same live object a `page.on` listener would.
-    if let Some(pred) = predicate {
-      let mut rx = self.inner.events().subscribe();
-      let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
-      loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-          return Err(crate::bindings::convert::throw_named(
-            &ctx,
-            "TimeoutError",
-            format!("Timeout {timeout}ms exceeded while waiting for event '{event}'"),
-          ));
-        }
-        let recv = tokio::time::timeout(remaining, crate::bindings::page::recv_matching(&mut rx, &event_lc)).await;
-        let Ok(Some(ev)) = recv else {
-          if recv.is_err() {
-            continue; // deadline check at loop top surfaces the timeout
+    call_site
+      .scope(async move {
+        use rquickjs::class::Class;
+        let mut timeout_ms: Option<f64> = None;
+        let mut predicate: Option<rquickjs::Function<'js>> = None;
+        if let Some(v) = options_or_predicate.0 {
+          if let Some(n) = v.as_number() {
+            timeout_ms = Some(n);
+          } else if let Some(f) = v.as_function() {
+            predicate = Some(f.clone());
+          } else if let Some(obj) = v.as_object() {
+            let t: rquickjs::Value<'js> = obj.get("timeout")?;
+            timeout_ms = t.as_number();
+            let p: rquickjs::Value<'js> = obj.get("predicate")?;
+            predicate = p.as_function().cloned();
           }
-          return Err(crate::bindings::convert::throw_named(
-            &ctx,
-            "Error",
-            "page closed while waiting for event",
-          ));
-        };
-        let arg = page_event_to_js(&ctx, &self.inner, ev.clone())?;
-        if call_predicate_truthy(&pred, arg, &ctx).await? {
-          return page_event_to_js(&ctx, &self.inner, ev);
         }
-      }
-    }
+        let timeout = timeout_ms.map_or_else(|| self.inner.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
+        let event_lc = event.to_ascii_lowercase();
 
-    // `dialog` bypasses the broadcast — it registers a one-shot
-    // handler on the per-page `DialogManager` so the claim is
-    // synchronous at `did_open` time (mirrors Playwright's
-    // `addDialogHandler` + `dialogDidOpen` flow exactly).
-    if event_lc == "dialog" {
-      let dialog = self.inner.wait_for_dialog(timeout).await.into_js_with(&ctx)?;
-      let wrapper = crate::bindings::dialog::DialogJs::new(dialog);
-      let instance = Class::instance(ctx.clone(), wrapper)?;
-      return rquickjs::IntoJs::into_js(instance, &ctx);
-    }
-    // Same pattern for `filechooser` — one-shot handler on the
-    // per-page `FileChooserManager` so the claim is synchronous with
-    // the backend event arrival.
-    if event_lc == "filechooser" {
-      let chooser = self.inner.wait_for_file_chooser(timeout).await.into_js_with(&ctx)?;
-      let wrapper = crate::bindings::file_chooser::FileChooserJs::new(chooser);
-      let instance = Class::instance(ctx.clone(), wrapper)?;
-      return rquickjs::IntoJs::into_js(instance, &ctx);
-    }
-    // And for `download` — same one-shot handler pattern via the
-    // per-page `DownloadManager`.
-    if event_lc == "download" {
-      let download = self.inner.wait_for_download(timeout).await.into_js_with(&ctx)?;
-      let wrapper = crate::bindings::download::DownloadJs::new(download);
-      let instance = Class::instance(ctx.clone(), wrapper)?;
-      return rquickjs::IntoJs::into_js(instance, &ctx);
-    }
+        // Predicate waits drain the broadcast for every event type — the
+        // emitter bridge claims dialog / filechooser / download live
+        // handles on behalf of broadcast listeners, so the predicate sees
+        // the same live object a `page.on` listener would.
+        if let Some(pred) = predicate {
+          let mut rx = self.inner.events().subscribe();
+          let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
+          loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+              return Err(crate::bindings::convert::throw_named(
+                &ctx,
+                "TimeoutError",
+                format!("Timeout {timeout}ms exceeded while waiting for event '{event}'"),
+              ));
+            }
+            let recv = tokio::time::timeout(remaining, crate::bindings::page::recv_matching(&mut rx, &event_lc)).await;
+            let Ok(Some(ev)) = recv else {
+              if recv.is_err() {
+                continue; // deadline check at loop top surfaces the timeout
+              }
+              return Err(crate::bindings::convert::throw_named(
+                &ctx,
+                "Error",
+                "page closed while waiting for event",
+              ));
+            };
+            let arg = page_event_to_js(&ctx, &self.inner, ev.clone())?;
+            if call_predicate_truthy(&pred, arg, &ctx).await? {
+              return page_event_to_js(&ctx, &self.inner, ev);
+            }
+          }
+        }
 
-    let name = event_lc.clone();
-    let ev = self
-      .inner
-      .events()
-      .wait_for(move |e| match_event_name(&name, e), timeout)
+        // `dialog` bypasses the broadcast — it registers a one-shot
+        // handler on the per-page `DialogManager` so the claim is
+        // synchronous at `did_open` time (mirrors Playwright's
+        // `addDialogHandler` + `dialogDidOpen` flow exactly).
+        if event_lc == "dialog" {
+          let dialog = self.inner.wait_for_dialog(timeout).await.into_js_with(&ctx)?;
+          let wrapper = crate::bindings::dialog::DialogJs::new(dialog);
+          let instance = Class::instance(ctx.clone(), wrapper)?;
+          return rquickjs::IntoJs::into_js(instance, &ctx);
+        }
+        // Same pattern for `filechooser` — one-shot handler on the
+        // per-page `FileChooserManager` so the claim is synchronous with
+        // the backend event arrival.
+        if event_lc == "filechooser" {
+          let chooser = self.inner.wait_for_file_chooser(timeout).await.into_js_with(&ctx)?;
+          let wrapper = crate::bindings::file_chooser::FileChooserJs::new(chooser);
+          let instance = Class::instance(ctx.clone(), wrapper)?;
+          return rquickjs::IntoJs::into_js(instance, &ctx);
+        }
+        // And for `download` — same one-shot handler pattern via the
+        // per-page `DownloadManager`.
+        if event_lc == "download" {
+          let download = self.inner.wait_for_download(timeout).await.into_js_with(&ctx)?;
+          let wrapper = crate::bindings::download::DownloadJs::new(download);
+          let instance = Class::instance(ctx.clone(), wrapper)?;
+          return rquickjs::IntoJs::into_js(instance, &ctx);
+        }
+
+        let name = event_lc.clone();
+        let ev = self
+          .inner
+          .events()
+          .wait_for(move |e| match_event_name(&name, e), timeout)
+          .await
+          .into_js_with(&ctx)?;
+        page_event_to_js(&ctx, &self.inner, ev)
+      })
       .await
-      .into_js_with(&ctx)?;
-    page_event_to_js(&ctx, &self.inner, ev)
   }
 
   // ── Frames (sync, Playwright parity — task 3.8) ─────────────────────
@@ -2079,69 +2478,79 @@ impl PageJs {
   #[qjs(rename = "snapshotForAI")]
   pub async fn snapshot_for_ai<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let core_opts = match options.0 {
-      None => ferridriver::snapshot::SnapshotOptions::default(),
-      Some(v) if v.is_undefined() || v.is_null() => ferridriver::snapshot::SnapshotOptions::default(),
-      Some(v) => {
-        #[derive(serde::Deserialize, Default)]
-        #[serde(rename_all = "camelCase", default)]
-        struct JsSnap {
-          depth: Option<i32>,
-          track: Option<String>,
+    call_site
+      .scope(async move {
+        let core_opts = match options.0 {
+          None => ferridriver::snapshot::SnapshotOptions::default(),
+          Some(v) if v.is_undefined() || v.is_null() => ferridriver::snapshot::SnapshotOptions::default(),
+          Some(v) => {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(rename_all = "camelCase", default)]
+            struct JsSnap {
+              depth: Option<i32>,
+              track: Option<String>,
+            }
+            let parsed: JsSnap = crate::bindings::convert::serde_from_js(&ctx, v)?;
+            ferridriver::snapshot::SnapshotOptions {
+              depth: parsed.depth,
+              track: parsed.track,
+            }
+          },
+        };
+        let snap = self
+          .inner
+          .snapshot_for_ai()
+          .options(core_opts)
+          .await
+          .into_js_with(&ctx)?;
+        let obj = rquickjs::Object::new(ctx.clone())?;
+        obj.set("full", snap.full)?;
+        if let Some(inc) = snap.incremental {
+          obj.set("incremental", inc)?;
         }
-        let parsed: JsSnap = crate::bindings::convert::serde_from_js(&ctx, v)?;
-        ferridriver::snapshot::SnapshotOptions {
-          depth: parsed.depth,
-          track: parsed.track,
+        let ref_map = rquickjs::Object::new(ctx.clone())?;
+        for (k, v) in snap.ref_map {
+          ref_map.set(k, v as f64)?;
         }
-      },
-    };
-    let snap = self
-      .inner
-      .snapshot_for_ai()
-      .options(core_opts)
+        obj.set("refMap", ref_map)?;
+        rquickjs::IntoJs::into_js(obj, &ctx)
+      })
       .await
-      .into_js_with(&ctx)?;
-    let obj = rquickjs::Object::new(ctx.clone())?;
-    obj.set("full", snap.full)?;
-    if let Some(inc) = snap.incremental {
-      obj.set("incremental", inc)?;
-    }
-    let ref_map = rquickjs::Object::new(ctx.clone())?;
-    for (k, v) in snap.ref_map {
-      ref_map.set(k, v as f64)?;
-    }
-    obj.set("refMap", ref_map)?;
-    rquickjs::IntoJs::into_js(obj, &ctx)
   }
 
   /// Playwright `page.ariaSnapshot(options?): Promise<string>`.
   #[qjs(rename = "ariaSnapshot")]
   pub async fn aria_snapshot<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<String> {
-    let core_opts = match options.0 {
-      Some(v) if !v.is_undefined() && !v.is_null() => {
-        #[derive(serde::Deserialize, Default)]
-        #[serde(rename_all = "camelCase", default)]
-        struct JsSnap {
-          depth: Option<i32>,
-          track: Option<String>,
-        }
-        let p: JsSnap = crate::bindings::convert::serde_from_js(&ctx, v)?;
-        ferridriver::snapshot::SnapshotOptions {
-          depth: p.depth,
-          track: p.track,
-        }
-      },
-      _ => ferridriver::snapshot::SnapshotOptions::default(),
-    };
-    self.inner.aria_snapshot().options(core_opts).await.into_js_with(&ctx)
+    call_site
+      .scope(async move {
+        let core_opts = match options.0 {
+          Some(v) if !v.is_undefined() && !v.is_null() => {
+            #[derive(serde::Deserialize, Default)]
+            #[serde(rename_all = "camelCase", default)]
+            struct JsSnap {
+              depth: Option<i32>,
+              track: Option<String>,
+            }
+            let p: JsSnap = crate::bindings::convert::serde_from_js(&ctx, v)?;
+            ferridriver::snapshot::SnapshotOptions {
+              depth: p.depth,
+              track: p.track,
+            }
+          },
+          _ => ferridriver::snapshot::SnapshotOptions::default(),
+        };
+        self.inner.aria_snapshot().options(core_opts).await.into_js_with(&ctx)
+      })
+      .await
   }
 
   /// Playwright: `page.exposeFunction(name, callback)`. Binds
@@ -2405,10 +2814,18 @@ impl PageJs {
   /// (ending the frame pump) so it doesn't outlive the screencast in
   /// the session VM's registry.
   #[qjs(rename = "stopScreencast")]
-  pub async fn stop_screencast(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-    self.inner.stop_screencast().await.into_js_with(&ctx)?;
-    with_page_callbacks(&ctx, |r| r.screencast = None)?;
-    Ok(())
+  pub async fn stop_screencast(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        self.inner.stop_screencast().await.into_js_with(&ctx)?;
+        with_page_callbacks(&ctx, |r| r.screencast = None)?;
+        Ok(())
+      })
+      .await
   }
 }
 

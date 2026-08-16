@@ -59,6 +59,7 @@ impl MouseJs {
   #[qjs(rename = "click")]
   pub async fn click<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     x: f64,
     y: f64,
@@ -70,13 +71,16 @@ impl MouseJs {
       click_count: o.click_count,
       delay: o.delay,
     };
-    self.page.mouse().click(x, y).options(opts).await.into_js_with(&ctx)
+    call_site
+      .scope(async move { self.page.mouse().click(x, y).options(opts).await.into_js_with(&ctx) })
+      .await
   }
 
   /// `mouse.move(x, y, options?: { steps? })`.
   #[qjs(rename = "move")]
   pub async fn move_<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     x: f64,
     y: f64,
@@ -86,17 +90,22 @@ impl MouseJs {
       Some(val) if !val.is_undefined() && !val.is_null() => serde_from_js::<JsMouseMoveOptions>(&ctx, val)?.steps,
       _ => None,
     };
-    let mut action = self.page.mouse().r#move(x, y);
-    if let Some(steps) = steps {
-      action = action.steps(steps);
-    }
-    action.await.into_js_with(&ctx)
+    call_site
+      .scope(async move {
+        let mut action = self.page.mouse().r#move(x, y);
+        if let Some(steps) = steps {
+          action = action.steps(steps);
+        }
+        action.await.into_js_with(&ctx)
+      })
+      .await
   }
 
   /// `mouse.dblclick(x, y, options?: { button? })`.
   #[qjs(rename = "dblclick")]
   pub async fn dblclick<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     x: f64,
     y: f64,
@@ -108,34 +117,58 @@ impl MouseJs {
       click_count: None,
       delay: o.delay,
     };
-    self.page.mouse().dblclick(x, y).options(opts).await.into_js_with(&ctx)
+    call_site
+      .scope(async move { self.page.mouse().dblclick(x, y).options(opts).await.into_js_with(&ctx) })
+      .await
   }
 
   /// `mouse.down(options?: { button?, clickCount? })`.
   #[qjs(rename = "down")]
-  pub async fn down<'js>(&self, ctx: rquickjs::Ctx<'js>, options: Opt<rquickjs::Value<'js>>) -> rquickjs::Result<()> {
+  pub async fn down<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
     let o = parse_click_options(&ctx, options)?;
     let opts = ferridriver::page::MouseDownOptions {
       button: o.button.as_deref().map(ferridriver::options::MouseButton::from),
       click_count: o.click_count,
     };
-    self.page.mouse().down().options(opts).await.into_js_with(&ctx)
+    call_site
+      .scope(async move { self.page.mouse().down().options(opts).await.into_js_with(&ctx) })
+      .await
   }
 
   /// `mouse.up(options?: { button?, clickCount? })`.
   #[qjs(rename = "up")]
-  pub async fn up<'js>(&self, ctx: rquickjs::Ctx<'js>, options: Opt<rquickjs::Value<'js>>) -> rquickjs::Result<()> {
+  pub async fn up<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
     let o = parse_click_options(&ctx, options)?;
     let opts = ferridriver::page::MouseUpOptions {
       button: o.button.as_deref().map(ferridriver::options::MouseButton::from),
       click_count: o.click_count,
     };
-    self.page.mouse().up().options(opts).await.into_js_with(&ctx)
+    call_site
+      .scope(async move { self.page.mouse().up().options(opts).await.into_js_with(&ctx) })
+      .await
   }
 
   /// `mouse.wheel(deltaX, deltaY)`.
   #[qjs(rename = "wheel")]
-  pub async fn wheel(&self, ctx: rquickjs::Ctx<'_>, delta_x: f64, delta_y: f64) -> rquickjs::Result<()> {
-    self.page.mouse().wheel(delta_x, delta_y).await.into_js_with(&ctx)
+  pub async fn wheel(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    delta_x: f64,
+    delta_y: f64,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move { self.page.mouse().wheel(delta_x, delta_y).await.into_js_with(&ctx) })
+      .await
   }
 }

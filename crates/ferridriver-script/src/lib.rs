@@ -71,8 +71,9 @@ pub use bindings::{
   run_test, set_scenario_world, teardown_worker_fixtures,
 };
 pub use bundle::{
-  BundledSource, CompiledBundle, CompiledExtension, bundle_and_compile, bundle_and_compile_named, bundle_source,
-  compile_and_extract_extensions, compile_bundled_source, eval_bundle, is_typescript_path, source_is_es_module,
+  BundledSource, CompiledBundle, CompiledExtension, SourceMapper, bundle_and_compile, bundle_and_compile_named,
+  bundle_source, compile_and_extract_extensions, compile_bundled_source, eval_bundle, is_typescript_path,
+  resolve_source, source_is_es_module,
 };
 pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
 pub use console::{ConsoleCapture, ConsoleSink};

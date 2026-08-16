@@ -28,6 +28,28 @@ use std::path::PathBuf;
 /// `ferridriver test` uses to reach harness binaries spawned through
 /// cargo/nextest, where extra CLI flags would be rejected by libtest
 /// binaries in the same run); explicit CLI flags win over them.
+/// `--debug`, `--debug start` or `--debug fail` from a harness binary's own
+/// argv.
+///
+/// Parsed apart from [`CliOverrides`] because that type lives in
+/// `ferridriver-config`, below the debug surface — and a config field
+/// naming a runner type would invert the layering for one flag.
+#[must_use]
+pub fn parse_debug_mode() -> Option<crate::debug::DebugMode> {
+  let args: Vec<String> = std::env::args().collect();
+  let at = args.iter().position(|a| a == "--debug")?;
+  match args.get(at + 1).filter(|v| !v.starts_with('-')) {
+    Some(value) => match value.parse() {
+      Ok(mode) => Some(mode),
+      Err(e) => {
+        eprintln!("--debug: {e}");
+        std::process::exit(2);
+      },
+    },
+    None => Some(crate::debug::DebugMode::Start),
+  }
+}
+
 pub fn parse_common_cli_args() -> CliOverrides {
   let args: Vec<String> = std::env::args().collect();
   let mut overrides = CliOverrides::default();
@@ -62,6 +84,13 @@ pub fn parse_common_cli_args() -> CliOverrides {
         overrides.tag = args.get(i).cloned();
       },
       "--list" => overrides.list_only = true,
+      // Consumed by `parse_debug_mode`; skipped here so its optional value
+      // is not mistaken for a positional.
+      "--debug" => {
+        if args.get(i + 1).is_some_and(|v| !v.starts_with('-')) {
+          i += 1;
+        }
+      },
       "--update-snapshots" | "-u" => {
         let mode = match args.get(i + 1).map(String::as_str) {
           Some("all") => {

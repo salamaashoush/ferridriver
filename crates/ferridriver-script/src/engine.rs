@@ -101,6 +101,14 @@ pub struct ScriptEngineConfig {
   /// output directory. Carried here so a session published by
   /// `browser.bind()` inherits the ceiling of the VM that bound it.
   pub artifacts_budget: Option<ferridriver::response::OutputBudget>,
+  /// Set only for a session published by a paused test: scripts get a
+  /// `testDebug` global that inspects the pause and releases it.
+  pub test_debug: Option<Arc<dyn crate::bindings::TestDebugControl>>,
+  /// Identity this VM's actions are attributed with
+  /// ([`ferridriver::trace::CallOrigin::script`]). An action gate reads it
+  /// to tell a paused test's own calls from those of the client inspecting
+  /// it — pausing the inspector would leave nobody to resume.
+  pub script_id: Option<String>,
 }
 
 impl Default for ScriptEngineConfig {
@@ -119,6 +127,8 @@ impl Default for ScriptEngineConfig {
       console_sink: None,
       secrets: ferridriver::response::Secrets::default(),
       artifacts_budget: None,
+      test_debug: None,
+      script_id: None,
     }
   }
 }
@@ -437,6 +447,10 @@ struct TimeoutState {
   epoch: Instant,
   /// Deadline as milliseconds since `epoch`; `DISARMED` between calls.
   deadline_ms: AtomicU64,
+  /// Time the process had spent parked at the debugger when the current
+  /// deadline was armed. Whatever it gains after that is time this call
+  /// was held rather than running, and is added back in [`Self::expired`].
+  parked_at_arm_ms: AtomicU64,
   /// Set by the interrupt handler when it force-halted the interpreter.
   timed_out: AtomicBool,
 }
@@ -448,6 +462,7 @@ impl TimeoutState {
     Self {
       epoch: Instant::now(),
       deadline_ms: AtomicU64::new(Self::DISARMED),
+      parked_at_arm_ms: AtomicU64::new(0),
       timed_out: AtomicBool::new(false),
     }
   }
@@ -458,6 +473,7 @@ impl TimeoutState {
       .as_millis()
       .min(u128::from(Self::DISARMED - 1)) as u64;
     self.timed_out.store(false, Ordering::Relaxed);
+    self.parked_at_arm_ms.store(Self::parked_ms(), Ordering::Relaxed);
     self.deadline_ms.store(ms, Ordering::Relaxed);
   }
 
@@ -465,9 +481,22 @@ impl TimeoutState {
     self.deadline_ms.store(Self::DISARMED, Ordering::Relaxed);
   }
 
+  /// Parked time including a park still open, so the deadline stands still
+  /// for as long as the debugger holds the call rather than only catching
+  /// up once it is released.
+  fn parked_ms() -> u64 {
+    u64::try_from(ferridriver::pause::pause_clock().parked_now().as_millis()).unwrap_or(u64::MAX)
+  }
+
   fn expired(&self) -> bool {
     let deadline = self.deadline_ms.load(Ordering::Relaxed);
-    deadline != Self::DISARMED && self.epoch.elapsed().as_millis() as u64 >= deadline
+    if deadline == Self::DISARMED {
+      return false;
+    }
+    // A call held at the debugger is not a call that is running away: give
+    // back every millisecond spent parked since this deadline was armed.
+    let parked = Self::parked_ms().saturating_sub(self.parked_at_arm_ms.load(Ordering::Relaxed));
+    (self.epoch.elapsed().as_millis() as u64) >= deadline.saturating_add(parked)
   }
 }
 
@@ -549,6 +578,8 @@ impl Session {
     let caps_for_session = caps.clone();
     let session = context.session.clone();
     let sidecars = config.sidecars.clone();
+    let test_debug = config.test_debug.clone();
+    let script_id = config.script_id.clone();
     let ud_vm = vm.clone();
     // Snapshot for the `browser.bind()` script host (see the userdata store
     // below). The engine config goes without its console sink: that sink
@@ -559,12 +590,27 @@ impl Session {
       console_sink: None,
       ..config.clone()
     };
+    let session_console = Arc::new({
+      let capture = ConsoleCapture::new(
+        config.max_console_entries,
+        config.max_console_bytes,
+        config.max_console_entry_bytes,
+      )
+      .with_secrets(config.secrets.clone());
+      match &config.console_sink {
+        Some(sink) => capture.with_sink(sink.clone()),
+        None => capture,
+      }
+    });
     let install: Result<Result<(), ScriptError>, ScriptError> = vm_with!(vm => |ctx| {
       // Stash the session's VM-loop handle so script-minted pages can
       // thread it into PageJs (route/exposeFunction cross-task
       // dispatch). A failure here only degrades those to "no VM
       // handle" — never a correctness break.
       let _ = ctx.store_userdata(SessionVm(ud_vm));
+      if let Some(id) = &script_id {
+        crate::bindings::call_site::set_script_id(&ctx, id);
+      }
       // The active-tool net allow-list cell `fetch` reads (resting state
       // = unrestricted). Stored once per VM so it survives rebuilds and
       // is present even when no tool runs; `extensions::dispatch_tool`
@@ -602,6 +648,14 @@ impl Session {
       // `install_page` also creates it).
       crate::bindings::page::ensure_page_callbacks(&ctx);
       install_runtime_shims(&ctx).map_err(|e| ScriptError::internal(format!("failed to install runtime shims: {e}")))?;
+
+      // `testDebug`, only for a session a paused test published. Absent
+      // otherwise, so a script can feature-detect the pause rather than
+      // calling into a control that would have nothing to release.
+      if let Some(control) = test_debug {
+        crate::bindings::test_debug::install(&ctx, control)
+          .map_err(|e| ScriptError::internal(format!("failed to install testDebug: {e}")))?;
+      }
 
       // Session-stable bindings: install ONCE, not per `execute`. Class
       // prototypes are idempotent; `vars`/`fs`/`artifacts`/`browser_type`
@@ -685,6 +739,13 @@ impl Session {
       for entry in install_console_capture.drain() {
         tracing::info!(target: "ferridriver::extensions", "{}", entry.message);
       }
+      // The console the session runs with from here on. `execute` swaps in
+      // a per-call capture of its own, but code driven straight through the
+      // VM — a test body above all — has only this one, and its output has
+      // to reach the sink the host configured instead of a buffer nobody
+      // drains.
+      install_console(&ctx, session_console)
+        .map_err(|e| ScriptError::internal(format!("failed to install console: {e}")))?;
       installed
     })
     .await;
@@ -900,10 +961,11 @@ impl Session {
     });
 
     let backstop = timeout.saturating_add(TIMEOUT_BACKSTOP_GRACE);
-    let eval_result: Result<serde_json::Value, ScriptError> = match tokio::time::timeout(backstop, eval_fut).await {
-      Ok(r) => r.and_then(|inner| inner),
-      Err(_) => return self.finish_backstop(started, &console, timeout),
-    };
+    let eval_result: Result<serde_json::Value, ScriptError> =
+      match ferridriver::pause::run_within(backstop, eval_fut).await {
+        Ok(r) => r.and_then(|inner| inner),
+        Err(_) => return self.finish_backstop(started, &console, timeout),
+      };
 
     self.finish(eval_result, started, &console, timeout)
   }
@@ -931,9 +993,11 @@ impl Session {
     let install = self.globals_install(context, &console);
     let bytecode = Arc::clone(&bundle.bytecode);
     let label = bundle.module_name.clone();
+    let mapper = bundle.mapper();
     let args = args.to_vec();
 
     let eval_fut = vm_with!(self.vm => |ctx| {
+      crate::bindings::call_site::register_bundle(&ctx, mapper);
       if let Err(e) = install_call_globals(&ctx, &args, install) {
         return Err(ScriptError::internal(format!("failed to install globals: {e}")));
       }
@@ -965,10 +1029,11 @@ impl Session {
     });
 
     let backstop = timeout.saturating_add(TIMEOUT_BACKSTOP_GRACE);
-    let eval_result: Result<serde_json::Value, ScriptError> = match tokio::time::timeout(backstop, eval_fut).await {
-      Ok(r) => r.and_then(|inner| inner),
-      Err(_) => return self.finish_backstop(started, &console, timeout),
-    };
+    let eval_result: Result<serde_json::Value, ScriptError> =
+      match ferridriver::pause::run_within(backstop, eval_fut).await {
+        Ok(r) => r.and_then(|inner| inner),
+        Err(_) => return self.finish_backstop(started, &console, timeout),
+      };
 
     // Remap the failure location back to the original source.
     let eval_result = eval_result.map_err(|mut e| {
@@ -1013,10 +1078,11 @@ impl Session {
     });
 
     let backstop = timeout.saturating_add(TIMEOUT_BACKSTOP_GRACE);
-    let eval_result: Result<serde_json::Value, ScriptError> = match tokio::time::timeout(backstop, eval_fut).await {
-      Ok(r) => r.and_then(|inner| inner),
-      Err(_) => return self.finish_backstop(started, &console, timeout),
-    };
+    let eval_result: Result<serde_json::Value, ScriptError> =
+      match ferridriver::pause::run_within(backstop, eval_fut).await {
+        Ok(r) => r.and_then(|inner| inner),
+        Err(_) => return self.finish_backstop(started, &console, timeout),
+      };
 
     self.finish(eval_result, started, &console, timeout)
   }

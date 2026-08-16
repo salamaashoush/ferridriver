@@ -596,45 +596,54 @@ impl ExpectJs {
   }
 
   #[qjs(rename = "toThrow")]
-  pub async fn to_throw<'js>(&self, ctx: Ctx<'js>, matcher: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let f = self.fn_target()?.clone().restore(&ctx)?;
-    let call_outcome: rquickjs::Result<rquickjs::Value<'js>> = f.call(());
-    // If the function returned a Promise (async fn), await it so a
-    // post-microtask throw is captured.
-    let final_outcome = match call_outcome {
-      Ok(v) => match v.as_promise() {
-        Some(p) => p.clone().into_future::<rquickjs::Value<'js>>().await,
-        None => Ok(v),
-      },
-      Err(e) => Err(e),
-    };
-    let caught = match final_outcome {
-      Ok(_) => None,
-      Err(rquickjs::Error::Exception) => {
-        let exc = ctx.catch();
-        let (msg, name) = extract_error(&exc);
-        Some(ThrownError {
-          message: msg,
-          class_name: name,
-        })
-      },
-      Err(other) => Some(ThrownError {
-        message: other.to_string(),
-        class_name: None,
-      }),
-    };
-    let matcher = match matcher.0 {
-      Some(v) if !v.is_undefined() => Some(parse_throw_matcher(&ctx, v)?),
-      _ => None,
-    };
-    let mut ef = expect_fn(caught);
-    if self.is_not {
-      ef = ef.not();
-    }
-    if let Some(m) = &self.message {
-      ef = ef.with_message(m.clone());
-    }
-    ef.to_throw(matcher.as_ref()).map_err(|e| assertion_to_rq(&ctx, e))
+  pub async fn to_throw<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    matcher: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let f = self.fn_target()?.clone().restore(&ctx)?;
+        let call_outcome: rquickjs::Result<rquickjs::Value<'js>> = f.call(());
+        // If the function returned a Promise (async fn), await it so a
+        // post-microtask throw is captured.
+        let final_outcome = match call_outcome {
+          Ok(v) => match v.as_promise() {
+            Some(p) => p.clone().into_future::<rquickjs::Value<'js>>().await,
+            None => Ok(v),
+          },
+          Err(e) => Err(e),
+        };
+        let caught = match final_outcome {
+          Ok(_) => None,
+          Err(rquickjs::Error::Exception) => {
+            let exc = ctx.catch();
+            let (msg, name) = extract_error(&exc);
+            Some(ThrownError {
+              message: msg,
+              class_name: name,
+            })
+          },
+          Err(other) => Some(ThrownError {
+            message: other.to_string(),
+            class_name: None,
+          }),
+        };
+        let matcher = match matcher.0 {
+          Some(v) if !v.is_undefined() => Some(parse_throw_matcher(&ctx, v)?),
+          _ => None,
+        };
+        let mut ef = expect_fn(caught);
+        if self.is_not {
+          ef = ef.not();
+        }
+        if let Some(m) = &self.message {
+          ef = ef.with_message(m.clone());
+        }
+        ef.to_throw(matcher.as_ref()).map_err(|e| assertion_to_rq(&ctx, e))
+      })
+      .await
   }
 
   // ── Locator web-first matchers (delegated to ferridriver-expect) ──
@@ -646,136 +655,226 @@ impl ExpectJs {
 
   /// Playwright: `toBeVisible(options?: { timeout?, visible? })`.
   #[qjs(rename = "toBeVisible")]
-  pub async fn to_be_visible<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    let me = self.for_call(o.as_ref());
-    let want_visible = bool_field(o.as_ref(), "visible").unwrap_or(true);
-    if want_visible {
-      me.build_locator_expect()?.to_be_visible().await
-    } else {
-      me.build_locator_expect()?.to_be_hidden().await
-    }
-    .map_err(|e| assertion_to_rq(&ctx, e))
+  pub async fn to_be_visible<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        let me = self.for_call(o.as_ref());
+        let want_visible = bool_field(o.as_ref(), "visible").unwrap_or(true);
+        if want_visible {
+          me.build_locator_expect()?.to_be_visible().await
+        } else {
+          me.build_locator_expect()?.to_be_hidden().await
+        }
+        .map_err(|e| assertion_to_rq(&ctx, e))
+      })
+      .await
   }
 
   /// Playwright: `toBeHidden(options?: { timeout? })`.
   #[qjs(rename = "toBeHidden")]
-  pub async fn to_be_hidden<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_be_hidden()
+  pub async fn to_be_hidden<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_be_hidden()
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toBeEnabled(options?: { enabled?, timeout? })`.
   #[qjs(rename = "toBeEnabled")]
-  pub async fn to_be_enabled<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    let me = self.for_call(o.as_ref());
-    let want_enabled = bool_field(o.as_ref(), "enabled").unwrap_or(true);
-    if want_enabled {
-      me.build_locator_expect()?.to_be_enabled().await
-    } else {
-      me.build_locator_expect()?.to_be_disabled().await
-    }
-    .map_err(|e| assertion_to_rq(&ctx, e))
+  pub async fn to_be_enabled<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        let me = self.for_call(o.as_ref());
+        let want_enabled = bool_field(o.as_ref(), "enabled").unwrap_or(true);
+        if want_enabled {
+          me.build_locator_expect()?.to_be_enabled().await
+        } else {
+          me.build_locator_expect()?.to_be_disabled().await
+        }
+        .map_err(|e| assertion_to_rq(&ctx, e))
+      })
+      .await
   }
 
   /// Playwright: `toBeDisabled(options?: { timeout? })`.
   #[qjs(rename = "toBeDisabled")]
-  pub async fn to_be_disabled<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_be_disabled()
+  pub async fn to_be_disabled<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_be_disabled()
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toBeChecked(options?: { checked?, indeterminate?, timeout? })`.
   #[qjs(rename = "toBeChecked")]
-  pub async fn to_be_checked<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    reject_unsupported_option(o.as_ref(), "toBeChecked", "indeterminate")?;
-    let me = self.for_call(o.as_ref());
-    let want_checked = bool_field(o.as_ref(), "checked").unwrap_or(true);
-    let me = if want_checked { me } else { me.negated() };
-    me.build_locator_expect()?
-      .to_be_checked()
+  pub async fn to_be_checked<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        reject_unsupported_option(o.as_ref(), "toBeChecked", "indeterminate")?;
+        let me = self.for_call(o.as_ref());
+        let want_checked = bool_field(o.as_ref(), "checked").unwrap_or(true);
+        let me = if want_checked { me } else { me.negated() };
+        me.build_locator_expect()?
+          .to_be_checked()
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toBeEditable(options?: { editable?, timeout? })`.
   /// `editable: false` maps to the readonly assertion, matching
   /// Playwright's `to.be.readonly` lowering (not a plain negation).
   #[qjs(rename = "toBeEditable")]
-  pub async fn to_be_editable<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    let me = self.for_call(o.as_ref());
-    let want_editable = bool_field(o.as_ref(), "editable").unwrap_or(true);
-    if want_editable {
-      me.build_locator_expect()?.to_be_editable().await
-    } else {
-      me.build_locator_expect()?.to_be_readonly().await
-    }
-    .map_err(|e| assertion_to_rq(&ctx, e))
+  pub async fn to_be_editable<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        let me = self.for_call(o.as_ref());
+        let want_editable = bool_field(o.as_ref(), "editable").unwrap_or(true);
+        if want_editable {
+          me.build_locator_expect()?.to_be_editable().await
+        } else {
+          me.build_locator_expect()?.to_be_readonly().await
+        }
+        .map_err(|e| assertion_to_rq(&ctx, e))
+      })
+      .await
   }
 
   /// Playwright: `toBeAttached(options?: { attached?, timeout? })`.
   #[qjs(rename = "toBeAttached")]
-  pub async fn to_be_attached<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    let me = self.for_call(o.as_ref());
-    let want_attached = bool_field(o.as_ref(), "attached").unwrap_or(true);
-    let me = if want_attached { me } else { me.negated() };
-    me.build_locator_expect()?
-      .to_be_attached()
+  pub async fn to_be_attached<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        let me = self.for_call(o.as_ref());
+        let want_attached = bool_field(o.as_ref(), "attached").unwrap_or(true);
+        let me = if want_attached { me } else { me.negated() };
+        me.build_locator_expect()?
+          .to_be_attached()
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toBeEmpty(options?: { timeout? })`.
   #[qjs(rename = "toBeEmpty")]
-  pub async fn to_be_empty<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_be_empty()
+  pub async fn to_be_empty<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_be_empty()
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toBeFocused(options?: { timeout? })`.
   #[qjs(rename = "toBeFocused")]
-  pub async fn to_be_focused<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_be_focused()
+  pub async fn to_be_focused<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_be_focused()
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toBeInViewport(options?: { ratio?, timeout? })`.
   #[qjs(rename = "toBeInViewport")]
-  pub async fn to_be_in_viewport<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    let opts = ferridriver_expect::InViewportOptions {
-      ratio: f64_field(o.as_ref(), "ratio"),
-    };
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_be_in_viewport_with(opts)
+  pub async fn to_be_in_viewport<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        let opts = ferridriver_expect::InViewportOptions {
+          ratio: f64_field(o.as_ref(), "ratio"),
+        };
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_be_in_viewport_with(opts)
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toHaveText(expected: string | RegExp | (string | RegExp)[],
@@ -784,26 +883,31 @@ impl ExpectJs {
   #[qjs(rename = "toHaveText")]
   pub async fn to_have_text<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    if let Some(list) = parse_string_or_regex_array(&ctx, &expected)? {
-      return self
-        .for_call(o.as_ref())
-        .build_locator_expect()?
-        .to_have_text_array_with(&list, text_match_options(o.as_ref()))
-        .await
-        .map_err(|e| assertion_to_rq(&ctx, e));
-    }
-    let exp = parse_string_or_regex(&ctx, &expected)?;
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_have_text_with(exp, text_match_options(o.as_ref()))
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        if let Some(list) = parse_string_or_regex_array(&ctx, &expected)? {
+          return self
+            .for_call(o.as_ref())
+            .build_locator_expect()?
+            .to_have_text_array_with(&list, text_match_options(o.as_ref()))
+            .await
+            .map_err(|e| assertion_to_rq(&ctx, e));
+        }
+        let exp = parse_string_or_regex(&ctx, &expected)?;
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_have_text_with(exp, text_match_options(o.as_ref()))
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toContainText(expected: string | RegExp | (string | RegExp)[],
@@ -811,44 +915,54 @@ impl ExpectJs {
   #[qjs(rename = "toContainText")]
   pub async fn to_contain_text<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    if let Some(list) = parse_string_or_regex_array(&ctx, &expected)? {
-      return self
-        .for_call(o.as_ref())
-        .build_locator_expect()?
-        .to_contain_text_array_with(&list, text_match_options(o.as_ref()))
-        .await
-        .map_err(|e| assertion_to_rq(&ctx, e));
-    }
-    let exp = parse_string_or_regex(&ctx, &expected)?;
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_contain_text_with(exp, text_match_options(o.as_ref()))
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        if let Some(list) = parse_string_or_regex_array(&ctx, &expected)? {
+          return self
+            .for_call(o.as_ref())
+            .build_locator_expect()?
+            .to_contain_text_array_with(&list, text_match_options(o.as_ref()))
+            .await
+            .map_err(|e| assertion_to_rq(&ctx, e));
+        }
+        let exp = parse_string_or_regex(&ctx, &expected)?;
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_contain_text_with(exp, text_match_options(o.as_ref()))
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toHaveValue(value: string | RegExp, options?: { timeout? })`.
   #[qjs(rename = "toHaveValue")]
   pub async fn to_have_value<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let exp = parse_string_or_regex(&ctx, &expected)?;
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_have_value(exp)
+    call_site
+      .scope(async move {
+        let exp = parse_string_or_regex(&ctx, &expected)?;
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_have_value(exp)
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toHaveValues(values: Array<string | RegExp>,
@@ -857,45 +971,55 @@ impl ExpectJs {
   #[qjs(rename = "toHaveValues")]
   pub async fn to_have_values<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: Vec<Value<'js>>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let mut values = Vec::with_capacity(expected.len());
-    for v in &expected {
-      let Some(s) = v.as_string() else {
-        return Err(rquickjs::Error::new_from_js_message(
-          "expect",
-          "toHaveValues",
-          "RegExp entries are not supported yet — pass strings",
-        ));
-      };
-      values.push(s.to_string()?);
-    }
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_have_values(&values)
+    call_site
+      .scope(async move {
+        let mut values = Vec::with_capacity(expected.len());
+        for v in &expected {
+          let Some(s) = v.as_string() else {
+            return Err(rquickjs::Error::new_from_js_message(
+              "expect",
+              "toHaveValues",
+              "RegExp entries are not supported yet — pass strings",
+            ));
+          };
+          values.push(s.to_string()?);
+        }
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_have_values(&values)
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toHaveCount(count: number, options?: { timeout? })`.
   #[qjs(rename = "toHaveCount")]
   pub async fn to_have_count<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: u32,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_have_count(expected as usize)
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_have_count(expected as usize)
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright overloads: `toHaveAttribute(name, value: string | RegExp,
@@ -906,33 +1030,38 @@ impl ExpectJs {
   #[qjs(rename = "toHaveAttribute")]
   pub async fn to_have_attribute<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     name: String,
     value: Opt<Value<'js>>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let (expected, opts_val) = match value.0 {
-      Some(v) if !v.is_undefined() && !v.is_null() => {
-        if is_string_or_regex(&v) {
-          (Some(v), options.0)
-        } else {
-          (None, Some(v))
+    call_site
+      .scope(async move {
+        let (expected, opts_val) = match value.0 {
+          Some(v) if !v.is_undefined() && !v.is_null() => {
+            if is_string_or_regex(&v) {
+              (Some(v), options.0)
+            } else {
+              (None, Some(v))
+            }
+          },
+          _ => (None, options.0),
+        };
+        let o = opts_val.as_ref().and_then(Value::as_object).cloned();
+        let me = self.for_call(o.as_ref());
+        let ignore_case = bool_field(o.as_ref(), "ignoreCase").unwrap_or(false);
+        let e = me.build_locator_expect()?;
+        match expected {
+          Some(v) => {
+            let exp = parse_string_or_regex(&ctx, &v)?;
+            e.to_have_attribute_with(&name, exp, ignore_case).await
+          },
+          None => e.to_have_attribute_exists(&name).await,
         }
-      },
-      _ => (None, options.0),
-    };
-    let o = opts_val.as_ref().and_then(Value::as_object).cloned();
-    let me = self.for_call(o.as_ref());
-    let ignore_case = bool_field(o.as_ref(), "ignoreCase").unwrap_or(false);
-    let e = me.build_locator_expect()?;
-    match expected {
-      Some(v) => {
-        let exp = parse_string_or_regex(&ctx, &v)?;
-        e.to_have_attribute_with(&name, exp, ignore_case).await
-      },
-      None => e.to_have_attribute_exists(&name).await,
-    }
-    .map_err(|e| assertion_to_rq(&ctx, e))
+        .map_err(|e| assertion_to_rq(&ctx, e))
+      })
+      .await
   }
 
   /// Playwright: `toHaveClass(expected: string | RegExp, options?: { timeout? })`.
@@ -941,42 +1070,52 @@ impl ExpectJs {
   #[qjs(rename = "toHaveClass")]
   pub async fn to_have_class<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    if expected.as_array().is_some() {
-      return Err(rquickjs::Error::new_from_js_message(
-        "expect",
-        "toHaveClass",
-        "the array form is not supported yet — pass a string or RegExp",
-      ));
-    }
-    let exp = parse_string_or_regex(&ctx, &expected)?;
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_have_class(exp)
+    call_site
+      .scope(async move {
+        if expected.as_array().is_some() {
+          return Err(rquickjs::Error::new_from_js_message(
+            "expect",
+            "toHaveClass",
+            "the array form is not supported yet — pass a string or RegExp",
+          ));
+        }
+        let exp = parse_string_or_regex(&ctx, &expected)?;
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_have_class(exp)
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toContainClass(expected: string, options?: { timeout? })`.
   #[qjs(rename = "toContainClass")]
   pub async fn to_contain_class<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_contain_class(&expected)
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_contain_class(&expected)
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toHaveCSS(name: string, value: string | RegExp,
@@ -984,54 +1123,69 @@ impl ExpectJs {
   #[qjs(rename = "toHaveCSS")]
   pub async fn to_have_css<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     name: String,
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let exp = parse_string_or_regex(&ctx, &expected)?;
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_have_css_with(&name, exp, ferridriver_expect::HaveCssOptions::default())
+    call_site
+      .scope(async move {
+        let exp = parse_string_or_regex(&ctx, &expected)?;
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_have_css_with(&name, exp, ferridriver_expect::HaveCssOptions::default())
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toHaveId(id: string | RegExp, options?: { timeout? })`.
   #[qjs(rename = "toHaveId")]
   pub async fn to_have_id<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let exp = parse_string_or_regex(&ctx, &expected)?;
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_have_id(exp)
+    call_site
+      .scope(async move {
+        let exp = parse_string_or_regex(&ctx, &expected)?;
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_have_id(exp)
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toHaveRole(role: string, options?: { timeout? })`.
   #[qjs(rename = "toHaveRole")]
   pub async fn to_have_role<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_have_role(StringOrRegex::String(expected))
+    call_site
+      .scope(async move {
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_have_role(StringOrRegex::String(expected))
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toHaveJSProperty(name: string, value: any,
@@ -1039,19 +1193,24 @@ impl ExpectJs {
   #[qjs(rename = "toHaveJSProperty")]
   pub async fn to_have_js_property<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     name: String,
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let exp: JsonValue = serde_from_js(&ctx, expected)?;
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_have_js_property(&name, exp)
+    call_site
+      .scope(async move {
+        let exp: JsonValue = serde_from_js(&ctx, expected)?;
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_have_js_property(&name, exp)
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toHaveAccessibleName(name: string | RegExp,
@@ -1060,19 +1219,24 @@ impl ExpectJs {
   #[qjs(rename = "toHaveAccessibleName")]
   pub async fn to_have_accessible_name<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let exp = parse_string_or_regex(&ctx, &expected)?;
-    let o = opts_obj(&options);
-    reject_unsupported_option(o.as_ref(), "toHaveAccessibleName", "ignoreCase")?;
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_have_accessible_name(exp)
+    call_site
+      .scope(async move {
+        let exp = parse_string_or_regex(&ctx, &expected)?;
+        let o = opts_obj(&options);
+        reject_unsupported_option(o.as_ref(), "toHaveAccessibleName", "ignoreCase")?;
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_have_accessible_name(exp)
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toHaveAccessibleDescription(description: string | RegExp,
@@ -1081,19 +1245,24 @@ impl ExpectJs {
   #[qjs(rename = "toHaveAccessibleDescription")]
   pub async fn to_have_accessible_description<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let exp = parse_string_or_regex(&ctx, &expected)?;
-    let o = opts_obj(&options);
-    reject_unsupported_option(o.as_ref(), "toHaveAccessibleDescription", "ignoreCase")?;
-    self
-      .for_call(o.as_ref())
-      .build_locator_expect()?
-      .to_have_accessible_description(exp)
+    call_site
+      .scope(async move {
+        let exp = parse_string_or_regex(&ctx, &expected)?;
+        let o = opts_obj(&options);
+        reject_unsupported_option(o.as_ref(), "toHaveAccessibleDescription", "ignoreCase")?;
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect()?
+          .to_have_accessible_description(exp)
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   // ── Page web-first matchers (delegated) ───────────────────────────
@@ -1102,37 +1271,47 @@ impl ExpectJs {
   #[qjs(rename = "toHaveTitle")]
   pub async fn to_have_title<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let exp = parse_string_or_regex(&ctx, &expected)?;
-    let o = opts_obj(&options);
-    self
-      .for_call(o.as_ref())
-      .build_page_expect()?
-      .to_have_title(exp)
+    call_site
+      .scope(async move {
+        let exp = parse_string_or_regex(&ctx, &expected)?;
+        let o = opts_obj(&options);
+        self
+          .for_call(o.as_ref())
+          .build_page_expect()?
+          .to_have_title(exp)
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   /// Playwright: `toHaveURL(url: string | RegExp, options?: { ignoreCase?, timeout? })`.
   #[qjs(rename = "toHaveURL")]
   pub async fn to_have_url<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let exp = parse_string_or_regex(&ctx, &expected)?;
-    let o = opts_obj(&options);
-    let ignore_case = bool_field(o.as_ref(), "ignoreCase").unwrap_or(false);
-    self
-      .for_call(o.as_ref())
-      .build_page_expect()?
-      .to_have_url_with(exp, ignore_case)
+    call_site
+      .scope(async move {
+        let exp = parse_string_or_regex(&ctx, &expected)?;
+        let o = opts_obj(&options);
+        let ignore_case = bool_field(o.as_ref(), "ignoreCase").unwrap_or(false);
+        self
+          .for_call(o.as_ref())
+          .build_page_expect()?
+          .to_have_url_with(exp, ignore_case)
+          .await
+          .map_err(|e| assertion_to_rq(&ctx, e))
+      })
       .await
-      .map_err(|e| assertion_to_rq(&ctx, e))
   }
 
   // ── Retrying function matcher ──────────────────────────────────────
@@ -1143,62 +1322,71 @@ impl ExpectJs {
   /// `[100, 250, 500, 1000]`. With `.not`, passes as soon as the callback
   /// throws.
   #[qjs(rename = "toPass")]
-  pub async fn to_pass<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let func = self.fn_target()?.clone();
-    let o = opts_obj(&options);
-    let timeout_ms = u64_field(o.as_ref(), "timeout").unwrap_or(0);
-    let intervals = u64_array_field(o.as_ref(), "intervals").unwrap_or_else(|| vec![100, 250, 500, 1000]);
-    // Playwright treats timeout 0 as "no deadline"; the retry loop needs
-    // a finite instant, so unbounded is modeled as a year.
-    let timeout = if timeout_ms == 0 {
-      Duration::from_hours(8760)
-    } else {
-      Duration::from_millis(timeout_ms)
-    };
-    let is_not = self.is_not;
-    let body = || {
-      let func = func.clone();
-      let ctx = ctx.clone();
-      async move {
-        let call: rquickjs::Result<()> = async {
-          let f = func.restore(&ctx)?;
-          let v: Value<'_> = f.call(())?;
-          if let Some(p) = v.as_promise() {
-            let _: Value<'_> = p.clone().into_future().await?;
+  pub async fn to_pass<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let func = self.fn_target()?.clone();
+        let o = opts_obj(&options);
+        let timeout_ms = u64_field(o.as_ref(), "timeout").unwrap_or(0);
+        let intervals = u64_array_field(o.as_ref(), "intervals").unwrap_or_else(|| vec![100, 250, 500, 1000]);
+        // Playwright treats timeout 0 as "no deadline"; the retry loop needs
+        // a finite instant, so unbounded is modeled as a year.
+        let timeout = if timeout_ms == 0 {
+          Duration::from_hours(8760)
+        } else {
+          Duration::from_millis(timeout_ms)
+        };
+        let is_not = self.is_not;
+        let body = || {
+          let func = func.clone();
+          let ctx = ctx.clone();
+          async move {
+            let call: rquickjs::Result<()> = async {
+              let f = func.restore(&ctx)?;
+              let v: Value<'_> = f.call(())?;
+              if let Some(p) = v.as_promise() {
+                let _: Value<'_> = p.clone().into_future().await?;
+              }
+              Ok(())
+            }
+            .await;
+            match call {
+              Ok(()) if !is_not => Ok(()),
+              Ok(()) => Err(AssertionFailure::new(
+                "the callback unexpectedly passed".to_string(),
+                None,
+              )),
+              Err(e) if is_not => {
+                // `.not.toPass` succeeds once the callback fails — but the
+                // pending exception must be consumed or it leaks into the
+                // next VM call.
+                let _ = crate::engine::caught_to_script_error(rquickjs::CaughtError::from_error(&ctx, e), "toPass");
+                Ok(())
+              },
+              Err(e) => Err(AssertionFailure::new(
+                crate::engine::caught_to_script_error(rquickjs::CaughtError::from_error(&ctx, e), "toPass").message,
+                None,
+              )),
+            }
           }
-          Ok(())
-        }
-        .await;
-        match call {
-          Ok(()) if !is_not => Ok(()),
-          Ok(()) => Err(AssertionFailure::new(
-            "the callback unexpectedly passed".to_string(),
-            None,
-          )),
-          Err(e) if is_not => {
-            // `.not.toPass` succeeds once the callback fails — but the
-            // pending exception must be consumed or it leaks into the
-            // next VM call.
-            let _ = crate::engine::caught_to_script_error(rquickjs::CaughtError::from_error(&ctx, e), "toPass");
-            Ok(())
+        };
+        ferridriver_expect::to_pass_with_options(
+          body,
+          ferridriver_expect::ToPassOptions {
+            timeout,
+            intervals,
+            message: self.message.clone(),
           },
-          Err(e) => Err(AssertionFailure::new(
-            crate::engine::caught_to_script_error(rquickjs::CaughtError::from_error(&ctx, e), "toPass").message,
-            None,
-          )),
-        }
-      }
-    };
-    ferridriver_expect::to_pass_with_options(
-      body,
-      ferridriver_expect::ToPassOptions {
-        timeout,
-        intervals,
-        message: self.message.clone(),
-      },
-    )
-    .await
-    .map_err(|e| assertion_to_rq(&ctx, e))
+        )
+        .await
+        .map_err(|e| assertion_to_rq(&ctx, e))
+      })
+      .await
   }
 
   // ── Snapshot matchers (test-runner host only) ────────────────────
@@ -1212,20 +1400,29 @@ impl ExpectJs {
   /// Playwright: `toMatchSnapshot(name?: string)` on a string value or
   /// a locator (compares the locator's text content).
   #[qjs(rename = "toMatchSnapshot")]
-  pub async fn to_match_snapshot(&self, ctx: Ctx<'_>, name: Opt<String>) -> rquickjs::Result<()> {
-    let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toMatchSnapshot()")?;
-    if self.is_not {
-      return Err(rquickjs::Error::new_from_js_message(
-        "expect",
-        "toMatchSnapshot",
-        "not.toMatchSnapshot is not supported",
-      ));
-    }
-    let target = self.snapshot_target("toMatchSnapshot")?;
-    bridge
-      .match_text_snapshot(target, name.0)
+  pub async fn to_match_snapshot(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'_>,
+    name: Opt<String>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toMatchSnapshot()")?;
+        if self.is_not {
+          return Err(rquickjs::Error::new_from_js_message(
+            "expect",
+            "toMatchSnapshot",
+            "not.toMatchSnapshot is not supported",
+          ));
+        }
+        let target = self.snapshot_target("toMatchSnapshot")?;
+        bridge
+          .match_text_snapshot(target, name.0)
+          .await
+          .map_err(|m| snapshot_failure(&ctx, "toMatchSnapshot", m))
+      })
       .await
-      .map_err(|m| snapshot_failure(&ctx, "toMatchSnapshot", m))
   }
 
   /// Playwright: `toHaveScreenshot(name?: string, options?)` /
@@ -1233,32 +1430,37 @@ impl ExpectJs {
   #[qjs(rename = "toHaveScreenshot")]
   pub async fn to_have_screenshot<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     name_or_options: Opt<Value<'js>>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toHaveScreenshot()")?;
-    if self.is_not {
-      return Err(rquickjs::Error::new_from_js_message(
-        "expect",
-        "toHaveScreenshot",
-        "not.toHaveScreenshot is not supported",
-      ));
-    }
-    let (name, opts_val) = match name_or_options.0 {
-      Some(v) if v.as_string().is_some() => (v.as_string().and_then(|s| s.to_string().ok()), options.0),
-      Some(v) if v.as_object().is_some() => (None, Some(v)),
-      _ => (None, options.0),
-    };
-    let opts_json: serde_json::Value = match opts_val {
-      Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(&ctx, v)?,
-      _ => serde_json::json!({}),
-    };
-    let target = self.snapshot_target("toHaveScreenshot")?;
-    bridge
-      .match_screenshot(target, name, opts_json)
+    call_site
+      .scope(async move {
+        let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toHaveScreenshot()")?;
+        if self.is_not {
+          return Err(rquickjs::Error::new_from_js_message(
+            "expect",
+            "toHaveScreenshot",
+            "not.toHaveScreenshot is not supported",
+          ));
+        }
+        let (name, opts_val) = match name_or_options.0 {
+          Some(v) if v.as_string().is_some() => (v.as_string().and_then(|s| s.to_string().ok()), options.0),
+          Some(v) if v.as_object().is_some() => (None, Some(v)),
+          _ => (None, options.0),
+        };
+        let opts_json: serde_json::Value = match opts_val {
+          Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(&ctx, v)?,
+          _ => serde_json::json!({}),
+        };
+        let target = self.snapshot_target("toHaveScreenshot")?;
+        bridge
+          .match_screenshot(target, name, opts_json)
+          .await
+          .map_err(|m| snapshot_failure(&ctx, "toHaveScreenshot", m))
+      })
       .await
-      .map_err(|m| snapshot_failure(&ctx, "toHaveScreenshot", m))
   }
 
   /// Playwright: `toMatchAriaSnapshot(expected: string, options?: { timeout? })`
@@ -1266,18 +1468,23 @@ impl ExpectJs {
   #[qjs(rename = "toMatchAriaSnapshot")]
   pub async fn to_match_aria_snapshot<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     expected: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toMatchAriaSnapshot()")?;
-    let o = opts_obj(&options);
-    let timeout_ms = u64_field(o.as_ref(), "timeout");
-    let target = self.snapshot_target("toMatchAriaSnapshot")?;
-    bridge
-      .match_aria_snapshot(target, expected, self.is_not, timeout_ms)
+    call_site
+      .scope(async move {
+        let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toMatchAriaSnapshot()")?;
+        let o = opts_obj(&options);
+        let timeout_ms = u64_field(o.as_ref(), "timeout");
+        let target = self.snapshot_target("toMatchAriaSnapshot")?;
+        bridge
+          .match_aria_snapshot(target, expected, self.is_not, timeout_ms)
+          .await
+          .map_err(|m| snapshot_failure(&ctx, "toMatchAriaSnapshot", m))
+      })
       .await
-      .map_err(|m| snapshot_failure(&ctx, "toMatchAriaSnapshot", m))
   }
 
   // ── APIResponse matcher (delegated) ──────────────────────────────
@@ -1383,62 +1590,89 @@ impl ExpectPollJs {
   }
 
   #[qjs(rename = "toBe")]
-  pub async fn to_be<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
-    let exp: JsonValue = serde_from_js(&ctx, expected)?;
-    self.poll_value(&ctx, "toBe", &exp).await
+  pub async fn to_be<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let exp: JsonValue = serde_from_js(&ctx, expected)?;
+        self.poll_value(&ctx, "toBe", &exp).await
+      })
+      .await
   }
 
   #[qjs(rename = "toEqual")]
-  pub async fn to_equal<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
-    let exp: JsonValue = serde_from_js(&ctx, expected)?;
-    self.poll_value(&ctx, "toEqual", &exp).await
+  pub async fn to_equal<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let exp: JsonValue = serde_from_js(&ctx, expected)?;
+        self.poll_value(&ctx, "toEqual", &exp).await
+      })
+      .await
   }
 
   #[qjs(rename = "toSatisfy")]
-  pub async fn to_satisfy<'js>(&self, ctx: Ctx<'js>, predicate: Function<'js>) -> rquickjs::Result<()> {
-    let saved_pred = Persistent::save(&ctx, predicate);
-    let generator_fn = self.generator.clone();
-    let deadline = tokio::time::Instant::now() + self.timeout;
-    let mut interval_idx = 0;
-    let is_not = self.is_not;
-    let final_dbg: String = loop {
-      let actual: rquickjs::Result<JsonValue> = call_generator(&ctx, &generator_fn).await;
-      let actual = actual?;
-      let dbg = ferridriver_expect::asymmetric::json_short(&actual);
-      let pred = saved_pred.clone().restore(&ctx)?;
-      let actual_js = json_to_js(&ctx, &actual)?;
-      let result: rquickjs::Value<'_> = pred.call((actual_js,))?;
-      let passes = result.as_bool().unwrap_or(false);
-      let passes = if is_not { !passes } else { passes };
-      if passes {
-        return Ok(());
-      }
-      let interval_ms = self
-        .intervals
-        .get(interval_idx)
-        .copied()
-        .unwrap_or_else(|| self.intervals.last().copied().unwrap_or(1000));
-      interval_idx += 1;
-      // Clamp the interval to the remaining budget so the final
-      // attempt lands AT the deadline instead of bailing early.
-      let now = tokio::time::Instant::now();
-      if now >= deadline {
-        break dbg;
-      }
-      let sleep_dur = Duration::from_millis(interval_ms).min(deadline - now);
-      tokio::time::sleep(sleep_dur).await;
-    };
-    let last = final_dbg.as_str();
-    Err(assertion_to_rq(
-      &ctx,
-      AssertionFailure::new(
-        format!(
-          "expect.poll().toSatisfy() timed out after {}ms; last value was {last}",
-          self.timeout.as_millis()
-        ),
-        None,
-      ),
-    ))
+  pub async fn to_satisfy<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    predicate: Function<'js>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let saved_pred = Persistent::save(&ctx, predicate);
+        let generator_fn = self.generator.clone();
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let mut interval_idx = 0;
+        let is_not = self.is_not;
+        let final_dbg: String = loop {
+          let actual: rquickjs::Result<JsonValue> = call_generator(&ctx, &generator_fn).await;
+          let actual = actual?;
+          let dbg = ferridriver_expect::asymmetric::json_short(&actual);
+          let pred = saved_pred.clone().restore(&ctx)?;
+          let actual_js = json_to_js(&ctx, &actual)?;
+          let result: rquickjs::Value<'_> = pred.call((actual_js,))?;
+          let passes = result.as_bool().unwrap_or(false);
+          let passes = if is_not { !passes } else { passes };
+          if passes {
+            return Ok(());
+          }
+          let interval_ms = self
+            .intervals
+            .get(interval_idx)
+            .copied()
+            .unwrap_or_else(|| self.intervals.last().copied().unwrap_or(1000));
+          interval_idx += 1;
+          // Clamp the interval to the remaining budget so the final
+          // attempt lands AT the deadline instead of bailing early.
+          let now = tokio::time::Instant::now();
+          if now >= deadline {
+            break dbg;
+          }
+          let sleep_dur = Duration::from_millis(interval_ms).min(deadline - now);
+          tokio::time::sleep(sleep_dur).await;
+        };
+        let last = final_dbg.as_str();
+        Err(assertion_to_rq(
+          &ctx,
+          AssertionFailure::new(
+            format!(
+              "expect.poll().toSatisfy() timed out after {}ms; last value was {last}",
+              self.timeout.as_millis()
+            ),
+            None,
+          ),
+        ))
+      })
+      .await
   }
 }
 

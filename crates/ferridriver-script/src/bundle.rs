@@ -206,7 +206,57 @@ impl Plugin for FerridriverRuntimePlugin {
 pub struct CompiledBundle {
   pub module_name: String,
   pub bytecode: Arc<[u8]>,
-  source_map: Option<sourcemap::SourceMap>,
+  source_map: Option<Arc<sourcemap::SourceMap>>,
+}
+
+/// A bundle's position mapping on its own.
+///
+/// A VM has to keep translating positions for as long as the module it
+/// loaded can run — long after the [`CompiledBundle`] that produced the
+/// bytecode has been dropped by whoever compiled it.
+#[derive(Clone)]
+pub struct SourceMapper {
+  /// Module name QuickJS knows the bundle by, which is what its stack
+  /// frames are labelled with.
+  pub module_name: String,
+  map: Option<Arc<sourcemap::SourceMap>>,
+}
+
+/// Resolve a source-map `sources` entry to a real file.
+///
+/// The entries are relative to the bundle chunk's virtual location (a
+/// level below the bundling cwd), so a literal join produces paths like
+/// `<cwd>/../tests/a.test.ts` — peel leading `../` segments until the
+/// candidate exists under `cwd`.
+#[must_use]
+pub fn resolve_source(cwd: &Path, src: &str) -> PathBuf {
+  let p = Path::new(src);
+  if p.is_absolute() {
+    return p.to_path_buf();
+  }
+  let mut rest = src;
+  loop {
+    let candidate = cwd.join(rest);
+    if candidate.exists() {
+      return candidate;
+    }
+    match rest.strip_prefix("../") {
+      Some(stripped) => rest = stripped,
+      None => return cwd.join(src),
+    }
+  }
+}
+
+impl SourceMapper {
+  /// Map a bundled-output `line:col` (1-based, as QuickJS reports) back
+  /// to the original `.ts`/`.js` source location.
+  #[must_use]
+  pub fn remap(&self, line: u32, col: u32) -> Option<(String, u32, u32)> {
+    let sm = self.map.as_ref()?;
+    let token = sm.lookup_token(line.saturating_sub(1), col.saturating_sub(1))?;
+    let src = token.get_source().unwrap_or("<unknown>").to_string();
+    Some((src, token.get_src_line() + 1, token.get_src_col() + 1))
+  }
 }
 
 /// The result of one rolldown bundle.
@@ -341,7 +391,8 @@ pub async fn bundle_and_compile_named(
   if let Some(hit) = crate::bytecode_cache::load(cache_key) {
     let source_map = hit
       .source_map_json
-      .and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok());
+      .and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok())
+      .map(Arc::new);
     return Ok(CompiledBundle {
       module_name,
       bytecode: Arc::from(hit.bytecode.into_boxed_slice()),
@@ -424,7 +475,9 @@ pub async fn compile_bundled_source(
   Ok(CompiledBundle {
     module_name: module_name.to_string(),
     bytecode: Arc::from(bytecode.into_boxed_slice()),
-    source_map: source_map_json.and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok()),
+    source_map: source_map_json
+      .and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok())
+      .map(Arc::new),
   })
 }
 
@@ -433,7 +486,9 @@ pub async fn compile_bundled_source(
 pub async fn eval_bundle(vm: &crate::vm::VmHandle, bundle: &CompiledBundle) -> Result<(), ScriptError> {
   let bytecode = Arc::clone(&bundle.bytecode);
   let label = bundle.module_name.clone();
+  let mapper = bundle.mapper();
   crate::vm_with!(vm => |ctx| {
+    crate::bindings::call_site::register_bundle(&ctx, mapper);
     // SAFETY: produced by `Module::write` by this exact rquickjs/QuickJS
     // build with native endianness — either in this process or restored
     // from the bytecode disk cache, whose ABI tag (QuickJS version, arch,
@@ -458,6 +513,15 @@ pub async fn eval_bundle(vm: &crate::vm::VmHandle, bundle: &CompiledBundle) -> R
 }
 
 impl CompiledBundle {
+  /// This bundle's position mapping, detached so a VM can keep it.
+  #[must_use]
+  pub fn mapper(&self) -> SourceMapper {
+    SourceMapper {
+      module_name: self.module_name.clone(),
+      map: self.source_map.clone(),
+    }
+  }
+
   /// Map a bundled-output `line:col` (1-based, as QuickJS reports) back
   /// to the original `.ts`/`.js` source location.
   #[must_use]

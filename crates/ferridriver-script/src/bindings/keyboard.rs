@@ -70,56 +70,87 @@ impl KeyboardJs {
 impl KeyboardJs {
   /// Dispatch a `keydown` event for `key` on the currently focused element.
   #[qjs(rename = "down")]
-  pub async fn down(&self, ctx: rquickjs::Ctx<'_>, key: String) -> rquickjs::Result<()> {
-    self.page.keyboard().down(&key).await.into_js_with(&ctx)
+  pub async fn down(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    key: String,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move { self.page.keyboard().down(&key).await.into_js_with(&ctx) })
+      .await
   }
 
   /// Dispatch a `keyup` event for `key` on the currently focused element.
   #[qjs(rename = "up")]
-  pub async fn up(&self, ctx: rquickjs::Ctx<'_>, key: String) -> rquickjs::Result<()> {
-    self.page.keyboard().up(&key).await.into_js_with(&ctx)
+  pub async fn up(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    key: String,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move { self.page.keyboard().up(&key).await.into_js_with(&ctx) })
+      .await
   }
 
   /// `keyboard.press(key, options?: { delay? })`.
   #[qjs(rename = "press")]
   pub async fn press<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     key: String,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let delay = parse_delay(&ctx, options)?;
     let opts = delay.map(|d| ferridriver::page::KeyboardPressOptions { delay: Some(d) });
-    self
-      .page
-      .keyboard()
-      .press(&key)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        self
+          .page
+          .keyboard()
+          .press(&key)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// `keyboard.type(text, options?: { delay?, namedKeys? })`.
   #[qjs(rename = "type")]
   pub async fn type_<'js>(
     &self,
+    call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     text: String,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = parse_type_options(&ctx, options)?;
-    self
-      .page
-      .keyboard()
-      .r#type(&text)
-      .maybe_options(opts)
+    call_site
+      .scope(async move {
+        self
+          .page
+          .keyboard()
+          .r#type(&text)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
-      .into_js_with(&ctx)
   }
 
   /// `keyboard.insertText(text)` — `input` event only, no key events.
   #[qjs(rename = "insertText")]
-  pub async fn insert_text(&self, ctx: rquickjs::Ctx<'_>, text: String) -> rquickjs::Result<()> {
-    self.page.keyboard().insert_text(&text).await.into_js_with(&ctx)
+  pub async fn insert_text(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    text: String,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move { self.page.keyboard().insert_text(&text).await.into_js_with(&ctx) })
+      .await
   }
 }
