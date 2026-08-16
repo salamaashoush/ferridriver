@@ -11,5 +11,7 @@ harness = false
 
 [dependencies]
 ferridriver = { path = "../../crates/ferridriver" }
-ferridriver-test = { path = "../../crates/ferridriver-test" }
+# `debug-session` so `cargo test --test e2e -- --debug` can stop a test and
+# publish its browser as a session.
+ferridriver-test = { path = "../../crates/ferridriver-test", features = ["debug-session"] }
 tokio = { workspace = true }

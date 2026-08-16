@@ -15,6 +15,7 @@ default-members = [
   "crates/ferridriver-session",
   "crates/ferridriver-node",
   "crates/ferridriver-expect",
+  "crates/ferridriver-viewer",
   "examples/bdd-example",
 ]
 
@@ -59,6 +60,7 @@ ferridriver-config = { path = "crates/ferridriver-config", version = "0.5.0" }
 ferridriver-expect = { path = "crates/ferridriver-expect", version = "0.5.0" }
 ferridriver-jsstd = { path = "crates/ferridriver-jsstd", version = "0.5.0" }
 ferridriver-session = { path = "crates/ferridriver-session", version = "0.5.0" }
+ferridriver-viewer = { path = "crates/ferridriver-viewer", version = "0.5.0" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

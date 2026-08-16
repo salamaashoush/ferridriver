@@ -6,7 +6,11 @@
 msrv = "1.97.0"
 cognitive-complexity-threshold = 30
 too-many-lines-threshold = 100
-too-many-arguments-threshold = 7
+# 8 rather than 7 because every JS-exposed action method carries a
+# `CallSite` parameter that consumes no argument (rquickjs
+# `ParamRequirement::none()`), so it does not count towards what a caller
+# actually juggles — which is what this lint is about.
+too-many-arguments-threshold = 8
 type-complexity-threshold = 250
 large-error-threshold = 256
 allow-expect-in-tests = true

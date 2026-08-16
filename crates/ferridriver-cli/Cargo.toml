@@ -21,14 +21,17 @@ workspace = true
 profiling = ["ferridriver-test/profiling"]
 
 [dependencies]
+async-trait = { workspace = true }
 ferridriver-mcp = { workspace = true }
 ferridriver-script = { workspace = true }
 ferridriver-config = { workspace = true }
-ferridriver-test = { workspace = true }
+ferridriver-test = { workspace = true, features = ["debug-session"] }
 ferridriver-bdd = { workspace = true }
 ferridriver-testjs = { workspace = true }
 ferridriver-session = { workspace = true }
+ferridriver-viewer = { workspace = true }
 ferridriver = { workspace = true }
+axum = { workspace = true }
 clap = { workspace = true }
 console = "0.16"
 tokio = { workspace = true }

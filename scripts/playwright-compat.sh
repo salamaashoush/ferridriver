@@ -8,6 +8,11 @@
 # The corpus is Playwright's own examples/ tree. It is never edited — the
 # checksum manifest (tests/compat/corpus.sha256) is the proof, and the
 # per-example ferridriver configs are generated OUTSIDE the corpus.
+#
+# Every run passes --no-inherit. The layered loader reads the machine, user
+# and repo layers before -c, so without it the repo's own testMatch
+# (`tests/**`) lands on top of the generated one and the corpus discovers
+# zero tests — the harness would be measuring the machine it runs on.
 
 set -euo pipefail
 
@@ -175,7 +180,7 @@ for entry in "${EXAMPLES[@]}"; do
   if [ "$mode" = collect ]; then
     # The suite mutates real remote state (creates/deletes a GitHub repo), so
     # the gate exercises discovery + bundling + registration only.
-    if out="$("$BIN" test -c "$cfg" --list 2>&1)"; then
+    if out="$("$BIN" --no-inherit test -c "$cfg" --list 2>&1)"; then
       n="$(printf '%s\n' "$out" | sed -n 's/^ *\([0-9][0-9]*\) test(s) found$/\1/p' | tail -1)"
       n="${n:-0}"
       echo "$out"
@@ -188,7 +193,7 @@ for entry in "${EXAMPLES[@]}"; do
     continue
   fi
 
-  "$BIN" test -c "$cfg" || true
+  "$BIN" --no-inherit test -c "$cfg" || true
   report="$WORK/$name-out/results.json"
   if [ ! -f "$report" ]; then
     echo "no JSON report at $report" >&2
