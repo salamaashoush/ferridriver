@@ -4,7 +4,7 @@ Vendored subset of [awslabs/llrt](https://github.com/awslabs/llrt) (Apache
 License 2.0), providing the WHATWG Streams implementation, the `node:os`
 module, and the pieces they depend on for the ferridriver QuickJS runtime.
 
-Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@46d4215` (2026-08-04).
+Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@e987d2b` (main, 2026-08-16).
 
 | upstream crate     | module here  |
 | ------------------ | ------------ |
@@ -15,6 +15,8 @@ Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@46d4215` (2026-08-04).
 | `llrt_abort`       | `abort`      |
 | `llrt_encoding`    | `encoding`   |
 | `llrt_buffer`      | `buffer`     |
+| `llrt_json`        | `json`       |
+| `llrt_crypto`      | `crypto`     |
 | `llrt_os`          | `os`         |
 | `llrt_stream_web`  | `stream_web` |
 | `llrt_test`        | `test` (dev) |
@@ -64,12 +66,13 @@ for m in utils:libs/llrt_utils context:libs/llrt_context \
          encoding:libs/llrt_encoding exceptions:modules/llrt_exceptions \
          events:modules/llrt_events abort:modules/llrt_abort \
          os:modules/llrt_os buffer:modules/llrt_buffer \
+         json:libs/llrt_json crypto:modules/llrt_crypto \
          stream_web:modules/llrt_stream_web; do
   name="${m%%:*}"; path="${m##*:}"
   cp -R "$LLRT/$path/src" "src/$name" && mv "src/$name/lib.rs" "src/$name/mod.rs"
 done
 # per-module first, then the cross-crate rewrite (BSD sed has no \b — use perl)
-for name in utils context encoding exceptions events abort os buffer stream_web; do
+for name in utils context encoding exceptions events abort os buffer json crypto stream_web; do
   find "src/$name" -name '*.rs' | while read -r f; do
     perl -pi -e "s/\bcrate::/crate::${name}::/g" "$f"
   done
@@ -86,7 +89,7 @@ Then re-apply the local deltas below.
 Everything here is a fix or a visibility widening, never a behaviour change
 for ferridriver's convenience. Upstream candidates.
 
-0. **Upstream regressions we do NOT take.** As of the 2026-08-04 sync,
+0. **Upstream regressions we do NOT take.** Still true at the 2026-08-16 main sync:
    upstream still ships the two transform-stream bugs listed in deltas 2
    and 3 below — and has since changed
    `transform_stream_error_writable_and_unblock_write` to take `_e` and
@@ -202,3 +205,17 @@ works and index access reads bytes. Missing against Node: the
 string-aware overrides of `includes` / `indexOf` / `lastIndexOf` / `fill`
 (the `Uint8Array` versions are inherited, so they take byte values, not
 strings), `swap16` / `swap32` / `swap64`, `compare`, and `Buffer.poolSize`.
+
+17. **`crypto/provider/{ring,openssl,graviola}.rs` are not vendored.**
+    Only the pure-Rust provider (`crypto-rust`, upstream's own default) is
+    taken; the other three back-ends would each add a system dependency.
+    Their feature names are declared as known-but-unset cfgs.
+
+18. **`crypto` / `json` macro imports.** `iterable_enum` and `str_enum` are
+    `#[macro_export]`ed, so they live at the crate root rather than under
+    `utils` — the import lines are repointed at `crate::`.
+
+19. **Hash crates keep their `oid` feature.** `sha1` / `sha2` / `md-5` are
+    taken with `oid` (and `aes-gcm` with `hazmat`): PKCS#1 v1.5 signing
+    needs `AssociatedOid`, and WebCrypto allows 32- and 64-bit GCM tags,
+    which are gated behind those features in the 0.11 releases.

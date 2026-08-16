@@ -50,6 +50,8 @@ pub const NATIVE_MODULE_NAMES: &[&str] = &[
   "node:timers",
   "timers/promises",
   "node:timers/promises",
+  "crypto",
+  "node:crypto",
 ];
 
 /// Extra specifiers the native loader answers, each mapped onto one of
@@ -283,6 +285,7 @@ pub fn namespace<'js>(ctx: &Ctx<'js>, specifier: &str) -> rquickjs::Result<Optio
     "process" | "node:process" => ferridriver_jsstd::node::process::process_object(ctx)?,
     "timers" | "node:timers" => ferridriver_jsstd::node::timers::timers_object(ctx)?,
     "timers/promises" | "node:timers/promises" => ferridriver_jsstd::node::timers::timers_promises_object(ctx)?,
+    "crypto" | "node:crypto" => crypto_namespace(ctx)?,
     _ => return Ok(None),
   };
   Ok(Some(ns))
@@ -594,6 +597,38 @@ impl ModuleDef for PathModule {
   fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
     export_from(exports, &path_namespace(ctx)?, PATH_EXPORTS)
   }
+}
+
+/// `import { createHash } from 'node:crypto'` — the vendored llrt crypto
+/// module. `require('crypto')` reads the same members off the `crypto`
+/// global the runtime installs.
+pub use ferridriver_jsstd::crypto::CryptoModule;
+
+const CRYPTO_MEMBERS: &[&str] = &[
+  "createHash",
+  "createHmac",
+  "getRandomValues",
+  "randomBytes",
+  "randomFill",
+  "randomFillSync",
+  "randomInt",
+  "randomUUID",
+  "subtle",
+  "webcrypto",
+];
+
+fn crypto_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  let global: Object<'js> = ctx.globals().get("crypto")?;
+  let ns = Object::new(ctx.clone())?;
+  for name in CRYPTO_MEMBERS {
+    if let Ok(value) = global.get::<_, Value<'js>>(*name)
+      && !value.is_undefined()
+    {
+      ns.set(*name, value)?;
+    }
+  }
+  ns.set("webcrypto", global)?;
+  Ok(ns)
 }
 
 /// `import { Buffer } from 'node:buffer'` — the vendored llrt `Buffer`,

@@ -14,6 +14,8 @@
 //! | `llrt_os`           | [`os`]        |
 //! | `llrt_encoding`     | [`encoding`]  |
 //! | `llrt_buffer`       | [`buffer`]    |
+//! | `llrt_json`         | [`json`]      |
+//! | `llrt_crypto`       | [`crypto`]    |
 //! | `llrt_stream_web`   | [`stream_web`]|
 //! | `llrt_test`         | `test` (dev)  |
 //!
@@ -25,9 +27,11 @@
 pub mod abort;
 pub mod context;
 pub mod buffer;
+pub mod crypto;
 pub mod encoding;
 pub mod events;
 pub mod exceptions;
+pub mod json;
 /// Node modules ferridriver implements itself, because upstream llrt has
 /// none or only a stub. Written to the repo's style, but compiled under
 /// this crate's relaxed lints: pedantic's `needless_pass_by_value` is

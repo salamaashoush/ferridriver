@@ -36,3 +36,4 @@ pub(crate) fn writable_stream_error_if_needed<'js>(
     WritableStreamDefaultController::writable_stream_default_controller_error(ctx, objects, error)?;
     Ok(())
 }
+

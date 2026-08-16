@@ -1171,10 +1171,9 @@ pub(crate) fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   // Native TextEncoder/TextDecoder/URL classes + queueMicrotask/btoa/
   // atob — all real #[rquickjs::class]/Func bindings, no JS glue.
   crate::bindings::webapi::install(ctx)?;
-  // Web Crypto subset: randomUUID / getRandomValues / subtle
-  // digest+HMAC — native Rust, see bindings/crypto.rs for the
-  // documented algorithm coverage.
-  crate::bindings::crypto::install(ctx)?;
+  // WebCrypto: randomUUID / getRandomValues / the full `subtle`
+  // surface, vendored from llrt (see `ferridriver-jsstd::crypto`).
+  ferridriver_jsstd::crypto::init(ctx)?;
   // CompressionStream / DecompressionStream, over the vendored
   // TransformStream.
   crate::bindings::compression::install(ctx)?;

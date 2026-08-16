@@ -26,6 +26,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(feature, values("sleep-timers"))',
   'cfg(nightly)',
   'cfg(rust_nightly)',
+  'cfg(feature, values("crypto-openssl", "crypto-ring", "crypto-ring-rust", "crypto-graviola", "crypto-graviola-rust", "llrt_json"))',
 ] }
 
 [lints.clippy]
@@ -34,10 +35,18 @@ perf = { level = "deny", priority = -1 }
 suspicious = { level = "deny", priority = -1 }
 
 [features]
-default = ["fs", "sleep-tokio", "system", "statistics", "network"]
+default = ["fs", "sleep-tokio", "system", "statistics", "network", "crypto-rust"]
 fs = []
 bytearray-buffer = []
 sleep-tokio = []
+# Upstream `llrt_crypto`'s feature names, so its `#[cfg]` arms stay exactly
+# as upstream wrote them. Only the pure-Rust provider is vendored (its
+# `ring` / `openssl` / `graviola` files are not), so those names are absent
+# rather than off.
+_subtle-full = []
+_rustcrypto = ["_subtle-full"]
+crypto-rust = ["_rustcrypto"]
+
 # Upstream `llrt_os`'s own feature split over the `sysinfo` facilities the
 # `os` module reads.
 system = ["sysinfo/system"]
@@ -46,6 +55,37 @@ network = ["sysinfo/network", "system"]
 
 [dependencies]
 base64 = { workspace = true }
+# `llrt_crypto` (crypto-rust provider) and the `llrt_json` it needs for JWK
+# import/export. Versions match upstream's manifest at the vendored commit.
+aes = "0.9"
+# `hazmat` is what implements the 32/64-bit GCM tag sizes WebCrypto allows.
+aes-gcm = { version = "0.11", features = ["alloc", "aes", "hazmat"], default-features = false }
+aes-kw = { version = "0.3", features = ["oid"], default-features = false }
+cbc = { version = "0.2", features = ["alloc"] }
+const-oid = { version = "0.10", features = ["db"], default-features = false }
+crc32c = { version = "0.6", default-features = false }
+crc32fast = { version = "1", default-features = false }
+ctr = { version = "0.10", default-features = false }
+der = { version = "0.8", features = ["derive", "alloc"], default-features = false }
+ecdsa = { version = "0.17", default-features = false }
+ed25519-dalek = { version = "3.0.0-rc.1", features = ["alloc", "pkcs8", "rand_core"], default-features = false }
+elliptic-curve = { version = "0.14", features = ["alloc", "sec1"], default-features = false }
+hkdf = { version = "0.13", default-features = false }
+hmac = { version = "0.13", default-features = false }
+md-5 = { version = "0.11", features = ["alloc", "oid"], default-features = false }
+p256 = { version = "0.14", features = ["ecdh", "ecdsa", "pkcs8"], default-features = false }
+p384 = { version = "0.14.0-rc.15", features = ["ecdh", "ecdsa", "pkcs8"], default-features = false }
+p521 = { version = "0.14.0-rc.15", features = ["ecdh", "ecdsa", "pkcs8"], default-features = false }
+pbkdf2 = { version = "0.13", default-features = false }
+pkcs8 = { version = "0.11", features = ["alloc"], default-features = false }
+rand = { version = "0.10", features = ["std", "std_rng", "thread_rng"], default-features = false }
+rsa = { version = "0.10.0-rc.18", features = ["std", "sha2", "encoding"], default-features = false }
+sha1 = { version = "0.11", features = ["alloc", "oid"], default-features = false }
+sha2 = { version = "0.11", features = ["alloc", "oid"], default-features = false }
+simd-json = { version = "0.17", features = ["big-int-as-float"], default-features = false }
+spki = { version = "0.8", features = ["alloc"], default-features = false }
+x25519-dalek = { version = "3.0.0-rc.1", features = ["static_secrets", "zeroize"], default-features = false }
+
 base64-simd = { version = "0.8", features = ["alloc"], default-features = false }
 hex-simd = { version = "0.8", features = ["alloc"], default-features = false }
 itoa = { version = "1", default-features = false }

@@ -37,6 +37,18 @@ pub(crate) type TransformStreamClass<'js> = Class<'js, TransformStream<'js>>;
 
 #[rquickjs::methods(rename_all = "camelCase")]
 impl<'js> TransformStream<'js> {
+    pub(crate) fn from_transformer(
+        ctx: Ctx<'js>,
+        transformer: Object<'js>,
+    ) -> Result<Class<'js, Self>> {
+        Self::new(
+            ctx,
+            Opt(Some(Undefined(Some(transformer)))),
+            Opt(None),
+            Opt(None),
+        )
+    }
+
     #[qjs(constructor)]
     fn new(
         ctx: Ctx<'js>,
@@ -311,18 +323,7 @@ pub(crate) fn source_pull_algorithm<'js>(
     ctx: Ctx<'js>,
     stream_class: &TransformStreamClass<'js>,
 ) -> Result<Promise<'js>> {
-    let mut stream = stream_class.borrow_mut();
-
-    if let Some(ref old_bp) = stream.backpressure_change_promise {
-        old_bp.resolve_undefined()?;
-    }
-
-    let new_bp = ResolveablePromise::new(&ctx)?;
-    let return_promise = new_bp.promise.clone();
-    stream.backpressure_change_promise = Some(new_bp);
-    stream.backpressure = false;
-
-    Ok(return_promise)
+    controller::transform_stream_set_backpressure(&ctx, stream_class, false)
 }
 
 pub(crate) fn source_cancel_algorithm<'js>(

@@ -32,7 +32,6 @@ pub mod compression;
 pub mod console_message;
 pub mod context;
 pub mod convert;
-pub mod crypto;
 pub mod dialog;
 pub mod disposable;
 pub mod download;

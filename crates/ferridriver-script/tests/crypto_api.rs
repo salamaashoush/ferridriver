@@ -128,28 +128,82 @@ async fn hmac_sign_and_verify_round_trip() {
 }
 
 #[tokio::test]
-async fn unimplemented_subtle_ops_reject_with_not_supported() {
+async fn subtle_generates_encrypts_and_derives() {
+  // Everything this asserts used to reject with NotSupportedError: the
+  // previous crypto binding implemented HMAC sign/verify and digest, and
+  // nothing else.
   let v = run_ok(
     r"
-    const out = {};
-    for (const op of ['encrypt', 'generateKey', 'deriveKey']) {
-      try { await crypto.subtle[op](); out[op] = 'no-throw'; }
-      catch (e) { out[op] = e.name; }
-    }
-    let badAlgo = '';
-    try { await crypto.subtle.digest('MD5', new Uint8Array(1)); }
-    catch (e) { badAlgo = e.name; }
-    return { ...out, badAlgo };
+    const enc = new TextEncoder();
+
+    // AES-GCM: generate, encrypt, decrypt.
+    const aes = await crypto.subtle.generateKey(
+      { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aes, enc.encode('secret'));
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aes, cipher);
+    const roundTrip = new TextDecoder().decode(plain);
+
+    // ECDSA: generate a key pair, sign, verify.
+    const pair = await crypto.subtle.generateKey(
+      { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const message = enc.encode('signed');
+    const signature = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, message);
+    const verified = await crypto.subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, signature, message);
+
+    // PBKDF2 -> raw bits.
+    const material = await crypto.subtle.importKey(
+      'raw', enc.encode('password'), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', salt: enc.encode('salt'), iterations: 10, hash: 'SHA-256' }, material, 128);
+
+    // Export the AES key back out as JWK.
+    const jwk = await crypto.subtle.exportKey('jwk', aes);
+
+    return {
+      roundTrip,
+      cipherDiffers: new TextDecoder('utf-8', { fatal: false }).decode(cipher) !== 'secret',
+      keyType: aes.type,
+      pairTypes: [pair.privateKey.type, pair.publicKey.type],
+      verified,
+      derivedBytes: bits.byteLength,
+      jwkKty: jwk.kty,
+    };
+  ",
+  )
+  .await;
+  assert_eq!(v["roundTrip"], "secret");
+  assert_eq!(v["cipherDiffers"], serde_json::Value::Bool(true));
+  assert_eq!(v["keyType"], "secret");
+  assert_eq!(v["pairTypes"], serde_json::json!(["private", "public"]));
+  assert_eq!(v["verified"], serde_json::Value::Bool(true));
+  assert_eq!(v["derivedBytes"], 16);
+  assert_eq!(v["jwkKty"], "oct");
+}
+
+#[tokio::test]
+async fn node_crypto_module_hashes_and_random() {
+  let v = run_ok(
+    r"
+    const { createHash, createHmac, randomBytes, randomInt, randomUUID } = require('node:crypto');
+    return {
+      sha256: createHash('sha256').update('abc').digest('hex'),
+      hmac: createHmac('sha256', 'key').update('abc').digest('hex').length,
+      randomBytes: randomBytes(8).length,
+      randomIntInRange: (() => { const n = randomInt(1, 3); return n >= 1 && n < 3; })(),
+      uuidShape: /^[0-9a-f]{8}-[0-9a-f]{4}-4/.test(randomUUID()),
+    };
   ",
   )
   .await;
   assert_eq!(
-    v,
-    serde_json::json!({
-      "encrypt": "NotSupportedError",
-      "generateKey": "NotSupportedError",
-      "deriveKey": "NotSupportedError",
-      "badAlgo": "NotSupportedError"
-    })
+    v["sha256"],
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
   );
+  assert_eq!(v["hmac"], 64);
+  assert_eq!(v["randomBytes"], 8);
+  assert_eq!(v["randomIntInRange"], serde_json::Value::Bool(true));
+  assert_eq!(v["uuidShape"], serde_json::Value::Bool(true));
 }
