@@ -506,12 +506,78 @@ impl Default for ViewportConfig {
   }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReporterConfig {
   pub name: String,
   #[serde(default)]
   pub options: BTreeMap<String, serde_json::Value>,
+}
+
+/// Accepts both spellings of a reporter entry:
+///
+/// ```toml
+/// [[test.reporter]]
+/// name = "junit"
+/// outputFile = "junit.xml"        # beside the name
+///
+/// [[test.reporter]]
+/// name = "junit"
+/// [test.reporter.options]         # or in the options table
+/// outputFile = "junit.xml"
+/// ```
+///
+/// The derived form would take only the second and drop the first
+/// without a word, which reads as "the option does nothing".
+impl<'de> Deserialize<'de> for ReporterConfig {
+  fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    use serde::de::Error as _;
+
+    // A bare string is the shorthand for a reporter with no options.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+      Name(String),
+      Table(BTreeMap<String, serde_json::Value>),
+    }
+
+    let mut table = match Repr::deserialize(deserializer)? {
+      Repr::Name(name) => {
+        return Ok(ReporterConfig {
+          name,
+          options: BTreeMap::new(),
+        });
+      },
+      Repr::Table(table) => table,
+    };
+
+    let name = match table.remove("name") {
+      Some(serde_json::Value::String(name)) => name,
+      Some(other) => {
+        return Err(D::Error::custom(format!(
+          "reporter `name` must be a string, got {other}"
+        )));
+      },
+      None => return Err(D::Error::missing_field("name")),
+    };
+
+    let mut options = match table.remove("options") {
+      Some(serde_json::Value::Object(map)) => map.into_iter().collect(),
+      Some(serde_json::Value::Null) | None => BTreeMap::new(),
+      Some(other) => {
+        return Err(D::Error::custom(format!(
+          "reporter `options` must be a table, got {other}"
+        )));
+      },
+    };
+    // Keys written beside `name` are options too; an explicit `options`
+    // table wins on a collision.
+    for (key, value) in table {
+      options.entry(key).or_insert(value);
+    }
+
+    Ok(ReporterConfig { name, options })
+  }
 }
 
 /// Snapshot update mode. Playwright: `updateSnapshots`.
@@ -854,6 +920,10 @@ impl TestConfig {
     let mut merged = self.clone();
 
     if !project.name.is_empty() {
+      // A test's identity is hashed with the name of the project running
+      // it, and that identity names the trace file on disk. Leaving the
+      // base config's name here makes two projects write the same trace.
+      merged.name = Some(project.name.clone());
       if let serde_json::Value::Object(ref mut map) = merged.metadata {
         map.insert("project".into(), serde_json::Value::String(project.name.clone()));
       } else {
@@ -997,5 +1067,65 @@ fn merge_context(base: &mut ContextConfig, overlay: &ContextConfig) {
   }
   if overlay.forced_colors.is_some() {
     base.forced_colors.clone_from(&overlay.forced_colors);
+  }
+}
+
+#[cfg(test)]
+mod reporter_config_tests {
+  use super::ReporterConfig;
+
+  fn parse(toml_src: &str) -> Vec<ReporterConfig> {
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+      reporter: Vec<ReporterConfig>,
+    }
+    toml::from_str::<Wrapper>(toml_src).expect("parse").reporter
+  }
+
+  #[test]
+  fn options_beside_the_name_are_options() {
+    let parsed = parse(
+      r#"
+        [[reporter]]
+        name = "junit"
+        outputFile = "j.xml"
+        includeRetries = true
+      "#,
+    );
+    assert_eq!(parsed[0].name, "junit");
+    assert_eq!(parsed[0].options["outputFile"], serde_json::json!("j.xml"));
+    assert_eq!(parsed[0].options["includeRetries"], serde_json::json!(true));
+  }
+
+  #[test]
+  fn an_explicit_options_table_still_works_and_wins() {
+    let parsed = parse(
+      r#"
+        [[reporter]]
+        name = "junit"
+        outputFile = "beside.xml"
+        [reporter.options]
+        outputFile = "table.xml"
+      "#,
+    );
+    assert_eq!(parsed[0].options["outputFile"], serde_json::json!("table.xml"));
+  }
+
+  #[test]
+  fn a_bare_string_names_a_reporter_without_options() {
+    let parsed = parse(r#"reporter = ["list", "html"]"#);
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].name, "list");
+    assert!(parsed[1].options.is_empty());
+  }
+
+  #[test]
+  fn a_missing_name_is_an_error_rather_than_a_nameless_reporter() {
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+      #[allow(dead_code)]
+      reporter: Vec<ReporterConfig>,
+    }
+    assert!(toml::from_str::<Wrapper>("[[reporter]]\noutputFile = \"x\"\n").is_err());
   }
 }

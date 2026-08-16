@@ -5,7 +5,6 @@
 
 use tokio::sync::mpsc;
 
-use crate::model::TestStatus;
 use crate::reporter::ReporterEvent;
 use crate::tui::{EntryStatus, TestEntry, TuiMessage};
 
@@ -91,14 +90,14 @@ impl crate::reporter::Reporter for TuiReporter {
       },
       ReporterEvent::StepFinished(_) => {},
 
-      ReporterEvent::TestFinished { test_id, outcome } => {
+      ReporterEvent::TestFinished { outcome } => {
+        let test_id = &outcome.test_id;
         let name = self.display_name(test_id);
-        let status = match outcome.status {
-          TestStatus::Passed => EntryStatus::Passed,
-          TestStatus::Failed | TestStatus::TimedOut => EntryStatus::Failed,
-          TestStatus::Skipped => EntryStatus::Skipped,
-          TestStatus::Flaky => EntryStatus::Flaky,
-          TestStatus::Interrupted => EntryStatus::Failed,
+        let status = match crate::model::outcome_kind(&[outcome.status], outcome.expected_status) {
+          crate::model::TestOutcomeKind::Expected => EntryStatus::Passed,
+          crate::model::TestOutcomeKind::Unexpected => EntryStatus::Failed,
+          crate::model::TestOutcomeKind::Skipped => EntryStatus::Skipped,
+          crate::model::TestOutcomeKind::Flaky => EntryStatus::Flaky,
         };
         self.send(TuiMessage::TestFinished {
           name,

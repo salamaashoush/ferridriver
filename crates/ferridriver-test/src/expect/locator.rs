@@ -75,6 +75,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
         suite: None,
         name: name.to_string(),
         line: None,
+        column: None,
       },
       title_path: vec![name.to_string()],
       retry: 0,
@@ -101,6 +102,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       annotations: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
       trace_composite: std::sync::Arc::new(std::sync::Mutex::new(None)),
       trace_step_calls: std::sync::Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+      output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
     };
     crate::snapshot::assert_snapshot(&info, &actual, name, update)
   }

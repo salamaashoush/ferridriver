@@ -2,21 +2,37 @@
 //! `ReporterEvent` as a JSON-lines stream. Mirrors Playwright's
 //! `/tmp/playwright/packages/playwright/src/reporters/blob.ts`.
 //!
-//! The merge subcommand (`ferridriver-test merge-reports <dir>`)
-//! reads every blob in a directory, replays the merged event stream
-//! through the configured reporter, and produces a unified report.
+//! The blob is the input to `ferridriver merge-reports <dir>`, which
+//! replays the merged event stream through whatever reporters the merge
+//! is configured with. That only works if the blob is *lossless*: a
+//! merged HTML or JUnit report is built from these events and nothing
+//! else, so an event shape that drops steps, attachments or stacks
+//! silently degrades every merged report. Everything an outcome carries
+//! round-trips.
+//!
+//! Inline attachment bytes (a failure screenshot) are written straight
+//! into the zip as `resources/<sha1>` entries as they arrive, rather
+//! than base64'd into the JSONL — that keeps them out of the reporter's
+//! memory for the length of the run and out of the text stream.
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use super::{Reporter, ReporterEvent, StepFinishedEvent, StepStartedEvent};
-use crate::model::{StepCategory, TestId, TestOutcome, TestStatus};
+use super::{Reporter, ReporterEvent, RunStatus, StepFinishedEvent, StepStartedEvent, TestOutputEvent};
+use crate::model::{
+  Attachment, AttachmentBody, ExpectedStatus, StepCategory, StepStatus, TestAnnotation, TestFailure, TestId,
+  TestOutcome, TestStatus, TestStep,
+};
 
-const SCHEMA_VERSION: u32 = 1;
+/// Bumped when the wire shape changes in a way an older reader cannot
+/// handle. Readers accept anything up to their own version.
+const SCHEMA_VERSION: u32 = 2;
 
 /// Wire-format mirror of `ReporterEvent`. Distinct from the runtime
 /// enum so adding a new event variant doesn't break stored blobs and
@@ -33,6 +49,8 @@ pub enum WireEvent {
     total_tests: usize,
     num_workers: u32,
     metadata: serde_json::Value,
+    #[serde(default)]
+    start_time_ms: u64,
   },
   WorkerStarted {
     worker_id: u32,
@@ -40,6 +58,8 @@ pub enum WireEvent {
   TestStarted {
     test_id: WireTestId,
     attempt: u32,
+    #[serde(default)]
+    worker_id: u32,
   },
   StepStarted {
     test_id: WireTestId,
@@ -57,12 +77,16 @@ pub enum WireEvent {
     error: Option<String>,
     metadata: Option<serde_json::Value>,
   },
-  TestFinished {
+  TestOutput {
     test_id: WireTestId,
-    status: String,
-    duration_ms: u64,
-    attempt: u32,
-    error: Option<String>,
+    stderr: bool,
+    text: String,
+  },
+  TestFinished {
+    outcome: Box<WireOutcome>,
+  },
+  RunError {
+    error: WireFailure,
   },
   WorkerFinished {
     worker_id: u32,
@@ -74,6 +98,8 @@ pub enum WireEvent {
     skipped: usize,
     flaky: usize,
     duration_ms: u64,
+    #[serde(default)]
+    status: String,
   },
 }
 
@@ -83,6 +109,95 @@ pub struct WireTestId {
   pub suite: Option<String>,
   pub name: String,
   pub line: Option<usize>,
+  #[serde(default)]
+  pub column: Option<usize>,
+}
+
+/// Every field of a [`TestOutcome`]. A merged report is rebuilt from
+/// this and nothing else.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireOutcome {
+  pub test_id: WireTestId,
+  pub status: String,
+  pub duration_ms: u64,
+  pub attempt: u32,
+  #[serde(default = "one")]
+  pub max_attempts: u32,
+  #[serde(default)]
+  pub error: Option<WireFailure>,
+  #[serde(default)]
+  pub errors: Vec<WireFailure>,
+  #[serde(default)]
+  pub attachments: Vec<WireAttachment>,
+  #[serde(default)]
+  pub steps: Vec<WireStep>,
+  #[serde(default, skip_serializing_if = "String::is_empty")]
+  pub stdout: String,
+  #[serde(default, skip_serializing_if = "String::is_empty")]
+  pub stderr: String,
+  #[serde(default)]
+  pub annotations: Vec<TestAnnotation>,
+  #[serde(default)]
+  pub metadata: serde_json::Value,
+  #[serde(default, skip_serializing_if = "String::is_empty")]
+  pub project_name: String,
+  #[serde(default)]
+  pub worker_index: u32,
+  #[serde(default)]
+  pub parallel_index: u32,
+  #[serde(default)]
+  pub start_time_ms: u64,
+  #[serde(default)]
+  pub expected_failure: bool,
+  #[serde(default)]
+  pub timeout_ms: u64,
+}
+
+fn one() -> u32 {
+  1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireFailure {
+  pub message: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub stack: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub diff: Option<String>,
+  /// Resource name of the failure screenshot inside the zip.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub screenshot: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireAttachment {
+  pub name: String,
+  pub content_type: String,
+  /// Exactly one of these is set: a path the artifact already lives at,
+  /// or the zip entry its bytes were stored under.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub path: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub resource: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireStep {
+  pub step_id: String,
+  pub title: String,
+  pub category: String,
+  pub duration_ms: u64,
+  pub status: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub location: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub parent_step_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub metadata: Option<serde_json::Value>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub steps: Vec<WireStep>,
 }
 
 impl From<&TestId> for WireTestId {
@@ -92,6 +207,7 @@ impl From<&TestId> for WireTestId {
       suite: id.suite.clone(),
       name: id.name.clone(),
       line: id.line,
+      column: id.column,
     }
   }
 }
@@ -103,11 +219,12 @@ impl From<WireTestId> for TestId {
       suite: w.suite,
       name: w.name,
       line: w.line,
+      column: w.column,
     }
   }
 }
 
-fn step_category_str(c: StepCategory) -> &'static str {
+fn step_category_str(c: &StepCategory) -> &'static str {
   match c {
     StepCategory::TestStep => "test-step",
     StepCategory::Expect => "expect",
@@ -127,67 +244,236 @@ fn parse_step_category(s: &str) -> StepCategory {
   }
 }
 
-fn status_str(s: TestStatus) -> &'static str {
+fn step_status_str(s: StepStatus) -> &'static str {
   match s {
-    TestStatus::Passed => "passed",
-    TestStatus::Failed => "failed",
-    TestStatus::TimedOut => "timed-out",
-    TestStatus::Skipped => "skipped",
-    TestStatus::Flaky => "flaky",
-    TestStatus::Interrupted => "interrupted",
+    StepStatus::Passed => "passed",
+    StepStatus::Failed => "failed",
+    StepStatus::Skipped => "skipped",
+    StepStatus::Pending => "pending",
   }
 }
 
-fn parse_status(s: &str) -> TestStatus {
+fn parse_step_status(s: &str) -> StepStatus {
   match s {
-    "failed" => TestStatus::Failed,
-    "timed-out" => TestStatus::TimedOut,
-    "skipped" => TestStatus::Skipped,
-    "flaky" => TestStatus::Flaky,
-    "interrupted" => TestStatus::Interrupted,
-    _ => TestStatus::Passed,
+    "failed" => StepStatus::Failed,
+    "skipped" => StepStatus::Skipped,
+    "pending" => StepStatus::Pending,
+    _ => StepStatus::Passed,
+  }
+}
+
+fn epoch_ms(time: SystemTime) -> u64 {
+  time
+    .duration_since(SystemTime::UNIX_EPOCH)
+    .ok()
+    .and_then(|d| u64::try_from(d.as_millis()).ok())
+    .unwrap_or_default()
+}
+
+fn from_epoch_ms(ms: u64) -> SystemTime {
+  SystemTime::UNIX_EPOCH + Duration::from_millis(ms)
+}
+
+fn wire_steps(steps: &[TestStep]) -> Vec<WireStep> {
+  steps
+    .iter()
+    .map(|s| WireStep {
+      step_id: s.step_id.clone(),
+      title: s.title.clone(),
+      category: step_category_str(&s.category).to_string(),
+      duration_ms: u64::try_from(s.duration.as_millis()).unwrap_or(u64::MAX),
+      status: step_status_str(s.status).to_string(),
+      error: s.error.clone(),
+      location: s.location.clone(),
+      parent_step_id: s.parent_step_id.clone(),
+      metadata: s.metadata.clone(),
+      steps: wire_steps(&s.steps),
+    })
+    .collect()
+}
+
+fn runtime_steps(steps: Vec<WireStep>) -> Vec<TestStep> {
+  steps
+    .into_iter()
+    .map(|s| TestStep {
+      step_id: s.step_id,
+      title: s.title,
+      category: parse_step_category(&s.category),
+      duration: Duration::from_millis(s.duration_ms),
+      status: parse_step_status(&s.status),
+      error: s.error,
+      location: s.location,
+      parent_step_id: s.parent_step_id,
+      metadata: s.metadata,
+      steps: runtime_steps(s.steps),
+    })
+    .collect()
+}
+
+/// Storage for inline artifact bytes. Implemented by the writer (stores
+/// into the zip) and by the reader (resolves back out of it).
+trait ResourceSink {
+  fn store(&mut self, name_hint: &str, content_type: &str, bytes: &[u8]) -> Option<String>;
+}
+
+impl WireOutcome {
+  fn from_runtime(outcome: &TestOutcome, sink: &mut dyn ResourceSink) -> Self {
+    Self {
+      test_id: (&outcome.test_id).into(),
+      status: outcome.status.as_str().to_string(),
+      duration_ms: u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX),
+      attempt: outcome.attempt,
+      max_attempts: outcome.max_attempts,
+      error: outcome.error.as_ref().map(|e| wire_failure(e, sink)),
+      errors: outcome.errors.iter().map(|e| wire_failure(e, sink)).collect(),
+      attachments: outcome
+        .attachments
+        .iter()
+        .map(|a| match &a.body {
+          AttachmentBody::Path(path) => WireAttachment {
+            name: a.name.clone(),
+            content_type: a.content_type.clone(),
+            path: Some(path.display().to_string()),
+            resource: None,
+          },
+          AttachmentBody::Bytes(bytes) => WireAttachment {
+            name: a.name.clone(),
+            content_type: a.content_type.clone(),
+            path: None,
+            resource: sink.store(&a.name, &a.content_type, bytes),
+          },
+        })
+        .collect(),
+      steps: wire_steps(&outcome.steps),
+      stdout: outcome.stdout.clone(),
+      stderr: outcome.stderr.clone(),
+      annotations: outcome.annotations.clone(),
+      metadata: outcome.metadata.clone(),
+      project_name: outcome.project_name.clone(),
+      worker_index: outcome.worker_index,
+      parallel_index: outcome.parallel_index,
+      start_time_ms: epoch_ms(outcome.start_time),
+      expected_failure: outcome.expected_status == ExpectedStatus::Fail,
+      timeout_ms: u64::try_from(outcome.timeout.as_millis()).unwrap_or(u64::MAX),
+    }
+  }
+
+  fn into_runtime(self, resources: &FxHashMap<String, Vec<u8>>) -> TestOutcome {
+    let id: TestId = self.test_id.into();
+    TestOutcome {
+      test_id: id,
+      status: TestStatus::parse(&self.status),
+      duration: Duration::from_millis(self.duration_ms),
+      attempt: self.attempt,
+      max_attempts: self.max_attempts,
+      error: self.error.map(|e| runtime_failure(e, resources)),
+      errors: self.errors.into_iter().map(|e| runtime_failure(e, resources)).collect(),
+      attachments: self
+        .attachments
+        .into_iter()
+        .filter_map(|a| {
+          let body = match (a.path, a.resource) {
+            (Some(path), _) => AttachmentBody::Path(PathBuf::from(path)),
+            (None, Some(resource)) => AttachmentBody::Bytes(resources.get(&resource).cloned()?),
+            (None, None) => return None,
+          };
+          Some(Attachment {
+            name: a.name,
+            content_type: a.content_type,
+            body,
+          })
+        })
+        .collect(),
+      steps: runtime_steps(self.steps),
+      stdout: self.stdout,
+      stderr: self.stderr,
+      annotations: self.annotations,
+      metadata: self.metadata,
+      project_name: self.project_name,
+      worker_index: self.worker_index,
+      parallel_index: self.parallel_index,
+      start_time: from_epoch_ms(self.start_time_ms),
+      expected_status: if self.expected_failure {
+        ExpectedStatus::Fail
+      } else {
+        ExpectedStatus::Pass
+      },
+      timeout: Duration::from_millis(self.timeout_ms),
+    }
+  }
+}
+
+fn wire_failure(failure: &TestFailure, sink: &mut dyn ResourceSink) -> WireFailure {
+  WireFailure {
+    message: failure.message.clone(),
+    stack: failure.stack.clone(),
+    diff: failure.diff.clone(),
+    screenshot: failure
+      .screenshot
+      .as_ref()
+      .and_then(|bytes| sink.store("failure", "image/png", bytes)),
+  }
+}
+
+fn runtime_failure(failure: WireFailure, resources: &FxHashMap<String, Vec<u8>>) -> TestFailure {
+  TestFailure {
+    message: failure.message,
+    stack: failure.stack,
+    diff: failure.diff,
+    screenshot: failure.screenshot.and_then(|name| resources.get(&name).cloned()),
   }
 }
 
 impl WireEvent {
-  pub fn from_runtime(event: &ReporterEvent) -> Option<Self> {
+  fn from_runtime(event: &ReporterEvent, sink: &mut dyn ResourceSink) -> Option<Self> {
     Some(match event {
       ReporterEvent::RunStarted {
         total_tests,
         num_workers,
         metadata,
+        start_time,
       } => Self::RunStarted {
         total_tests: *total_tests,
         num_workers: *num_workers,
         metadata: metadata.clone(),
+        start_time_ms: epoch_ms(*start_time),
       },
       ReporterEvent::WorkerStarted { worker_id } => Self::WorkerStarted { worker_id: *worker_id },
-      ReporterEvent::TestStarted { test_id, attempt } => Self::TestStarted {
+      ReporterEvent::TestStarted {
+        test_id,
+        attempt,
+        worker_id,
+      } => Self::TestStarted {
         test_id: test_id.into(),
         attempt: *attempt,
+        worker_id: *worker_id,
       },
       ReporterEvent::StepStarted(s) => Self::StepStarted {
         test_id: (&s.test_id).into(),
         step_id: s.step_id.clone(),
         parent_step_id: s.parent_step_id.clone(),
         title: s.title.clone(),
-        category: step_category_str(s.category.clone()).to_string(),
+        category: step_category_str(&s.category).to_string(),
       },
       ReporterEvent::StepFinished(s) => Self::StepFinished {
         test_id: (&s.test_id).into(),
         step_id: s.step_id.clone(),
         title: s.title.clone(),
-        category: step_category_str(s.category.clone()).to_string(),
-        duration_ms: s.duration.as_millis() as u64,
+        category: step_category_str(&s.category).to_string(),
+        duration_ms: u64::try_from(s.duration.as_millis()).unwrap_or(u64::MAX),
         error: s.error.clone(),
         metadata: s.metadata.clone(),
       },
-      ReporterEvent::TestFinished { test_id, outcome } => Self::TestFinished {
-        test_id: test_id.into(),
-        status: status_str(outcome.status.clone()).to_string(),
-        duration_ms: outcome.duration.as_millis() as u64,
-        attempt: outcome.attempt,
-        error: outcome.error.as_ref().map(|e| e.message.clone()),
+      ReporterEvent::TestOutput(o) => Self::TestOutput {
+        test_id: (&o.test_id).into(),
+        stderr: o.stderr,
+        text: o.text.clone(),
+      },
+      ReporterEvent::TestFinished { outcome } => Self::TestFinished {
+        outcome: Box::new(WireOutcome::from_runtime(outcome, sink)),
+      },
+      ReporterEvent::RunError { error } => Self::RunError {
+        error: wire_failure(error, sink),
       },
       ReporterEvent::WorkerFinished { worker_id } => Self::WorkerFinished { worker_id: *worker_id },
       ReporterEvent::RunFinished {
@@ -197,35 +483,45 @@ impl WireEvent {
         skipped,
         flaky,
         duration,
+        status,
       } => Self::RunFinished {
         total: *total,
         passed: *passed,
         failed: *failed,
         skipped: *skipped,
         flaky: *flaky,
-        duration_ms: duration.as_millis() as u64,
+        duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+        status: status.as_str().to_string(),
       },
     })
   }
 
   /// Lower a wire event back into the runtime variant. Header
   /// frames return `None` since they're metadata, not test events.
-  pub fn into_runtime(self) -> Option<ReporterEvent> {
+  #[must_use]
+  pub fn into_runtime_with(self, resources: &FxHashMap<String, Vec<u8>>) -> Option<ReporterEvent> {
     Some(match self {
       Self::Header { .. } => return None,
       Self::RunStarted {
         total_tests,
         num_workers,
         metadata,
+        start_time_ms,
       } => ReporterEvent::RunStarted {
         total_tests,
         num_workers,
         metadata,
+        start_time: from_epoch_ms(start_time_ms),
       },
       Self::WorkerStarted { worker_id } => ReporterEvent::WorkerStarted { worker_id },
-      Self::TestStarted { test_id, attempt } => ReporterEvent::TestStarted {
+      Self::TestStarted {
+        test_id,
+        attempt,
+        worker_id,
+      } => ReporterEvent::TestStarted {
         test_id: test_id.into(),
         attempt,
+        worker_id,
       },
       Self::StepStarted {
         test_id,
@@ -233,7 +529,7 @@ impl WireEvent {
         parent_step_id,
         title,
         category,
-      } => ReporterEvent::StepStarted(Box::new(StepStartedEvent {
+      } => ReporterEvent::StepStarted(Arc::new(StepStartedEvent {
         test_id: test_id.into(),
         step_id,
         parent_step_id,
@@ -248,7 +544,7 @@ impl WireEvent {
         duration_ms,
         error,
         metadata,
-      } => ReporterEvent::StepFinished(Box::new(StepFinishedEvent {
+      } => ReporterEvent::StepFinished(Arc::new(StepFinishedEvent {
         test_id: test_id.into(),
         step_id,
         title,
@@ -257,37 +553,16 @@ impl WireEvent {
         error,
         metadata,
       })),
-      Self::TestFinished {
-        test_id,
-        status,
-        duration_ms,
-        attempt,
-        error,
-      } => {
-        let status = parse_status(&status);
-        let id: TestId = test_id.into();
-        ReporterEvent::TestFinished {
-          test_id: id.clone(),
-          outcome: TestOutcome {
-            test_id: id,
-            status,
-            duration: Duration::from_millis(duration_ms),
-            attempt,
-            max_attempts: 1,
-            error: error.map(|message| crate::model::TestFailure {
-              message,
-              stack: None,
-              diff: None,
-              screenshot: None,
-            }),
-            attachments: Vec::new(),
-            steps: Vec::new(),
-            stdout: String::new(),
-            stderr: String::new(),
-            annotations: Vec::new(),
-            metadata: serde_json::Value::Null,
-          },
-        }
+      Self::TestOutput { test_id, stderr, text } => ReporterEvent::TestOutput(Arc::new(TestOutputEvent {
+        test_id: test_id.into(),
+        stderr,
+        text,
+      })),
+      Self::TestFinished { outcome } => ReporterEvent::TestFinished {
+        outcome: Arc::new(outcome.into_runtime(resources)),
+      },
+      Self::RunError { error } => ReporterEvent::RunError {
+        error: Box::new(runtime_failure(error, resources)),
       },
       Self::WorkerFinished { worker_id } => ReporterEvent::WorkerFinished { worker_id },
       Self::RunFinished {
@@ -297,6 +572,7 @@ impl WireEvent {
         skipped,
         flaky,
         duration_ms,
+        status,
       } => ReporterEvent::RunFinished {
         total,
         passed,
@@ -304,20 +580,105 @@ impl WireEvent {
         skipped,
         flaky,
         duration: Duration::from_millis(duration_ms),
+        status: match status.as_str() {
+          "failed" => RunStatus::Failed,
+          "timedout" => RunStatus::TimedOut,
+          "interrupted" => RunStatus::Interrupted,
+          _ => RunStatus::Passed,
+        },
       },
     })
   }
 }
 
 /// `--reporter blob` writes one `report-<shard>.zip` per run; each
-/// zip contains a single `events.jsonl` member. The merge subcommand
-/// reads every zip in a directory, concats the streams, and replays
-/// them through the configured reporter.
+/// zip contains an `events.jsonl` member plus a `resources/` entry per
+/// inline artifact. The merge subcommand reads every zip in a
+/// directory, concats the streams, and replays them through the
+/// configured reporter.
 pub struct BlobReporter {
   out_path: PathBuf,
   buffer: Vec<u8>,
   shard_index: Option<u32>,
   shard_total: Option<u32>,
+  /// Opened on the first event so an unused reporter leaves no file.
+  writer: Option<ResourceWriter>,
+}
+
+/// The zip under construction, plus the resource names already in it.
+struct ResourceWriter {
+  zip: zip::ZipWriter<std::fs::File>,
+  seen: std::collections::HashSet<String>,
+  failed: bool,
+}
+
+impl ResourceSink for ResourceWriter {
+  fn store(&mut self, name_hint: &str, content_type: &str, bytes: &[u8]) -> Option<String> {
+    if self.failed {
+      return None;
+    }
+    // Content-addressed, so a screenshot attached twice (once as the
+    // failure image, once as a named attachment) is stored once.
+    let digest = ferridriver::tracing::sha1_hex(bytes);
+    let name = format!(
+      "resources/{}-{}{}",
+      sanitize(name_hint),
+      &digest[..16],
+      extension_for(content_type)
+    );
+    if self.seen.contains(&name) {
+      return Some(name);
+    }
+    let options: zip::write::SimpleFileOptions =
+      zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    if let Err(e) = self.zip.start_file(&name, options) {
+      tracing::warn!("blob: could not store resource {name}: {e}");
+      self.failed = true;
+      return None;
+    }
+    if let Err(e) = self.zip.write_all(bytes) {
+      tracing::warn!("blob: could not write resource {name}: {e}");
+      self.failed = true;
+      return None;
+    }
+    self.seen.insert(name.clone());
+    Some(name)
+  }
+}
+
+/// A sink for callers that have nowhere to put bytes — inline artifacts
+/// are dropped rather than inlined into the text stream.
+struct NoResources;
+
+impl ResourceSink for NoResources {
+  fn store(&mut self, _name_hint: &str, _content_type: &str, _bytes: &[u8]) -> Option<String> {
+    None
+  }
+}
+
+fn sanitize(name: &str) -> String {
+  name
+    .chars()
+    .map(|c| {
+      if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+        c
+      } else {
+        '-'
+      }
+    })
+    .collect()
+}
+
+fn extension_for(content_type: &str) -> &'static str {
+  match content_type {
+    "image/png" => ".png",
+    "image/jpeg" => ".jpg",
+    "video/webm" => ".webm",
+    "application/zip" => ".zip",
+    "text/plain" => ".txt",
+    "application/json" => ".json",
+    _ => "",
+  }
 }
 
 impl BlobReporter {
@@ -326,55 +687,85 @@ impl BlobReporter {
   /// header frame so the merger can preserve the run boundary.
   #[must_use]
   pub fn new(out_path: PathBuf) -> Self {
-    let mut buffer = Vec::new();
-    write_event(
-      &mut buffer,
-      &WireEvent::Header {
-        schema: SCHEMA_VERSION,
-        shard_index: None,
-        shard_total: None,
-      },
-    );
     Self {
       out_path,
-      buffer,
+      buffer: Vec::new(),
       shard_index: None,
       shard_total: None,
+      writer: None,
     }
   }
 
   pub fn with_shard(mut self, current: u32, total: u32) -> Self {
     self.shard_index = Some(current);
     self.shard_total = Some(total);
-    // Rewrite the header now that we know the shard.
-    self.buffer.clear();
-    write_event(
-      &mut self.buffer,
-      &WireEvent::Header {
-        schema: SCHEMA_VERSION,
-        shard_index: self.shard_index,
-        shard_total: self.shard_total,
-      },
-    );
     self
+  }
+
+  fn header(&self) -> WireEvent {
+    WireEvent::Header {
+      schema: SCHEMA_VERSION,
+      shard_index: self.shard_index,
+      shard_total: self.shard_total,
+    }
+  }
+
+  /// The zip, opened on demand. `None` when it could not be created —
+  /// the run keeps going and `finalize` reports the failure.
+  fn writer(&mut self) -> Option<&mut ResourceWriter> {
+    if self.writer.is_none() {
+      if let Some(parent) = self.out_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+      {
+        tracing::warn!("blob: could not create {}: {e}", parent.display());
+        return None;
+      }
+      let file = match std::fs::File::create(&self.out_path) {
+        Ok(file) => file,
+        Err(e) => {
+          tracing::warn!("blob: could not create {}: {e}", self.out_path.display());
+          return None;
+        },
+      };
+      self.writer = Some(ResourceWriter {
+        zip: zip::ZipWriter::new(file),
+        seen: std::collections::HashSet::new(),
+        failed: false,
+      });
+      let header = self.header();
+      write_event(&mut self.buffer, &header);
+    }
+    self.writer.as_mut()
   }
 }
 
 #[async_trait]
 impl Reporter for BlobReporter {
   async fn on_event(&mut self, event: &ReporterEvent) {
-    if let Some(wire) = WireEvent::from_runtime(event) {
+    // Inline artifact bytes go into the zip as they arrive; only the
+    // (small) text line is held until finalize.
+    let wire = match self.writer() {
+      Some(writer) => WireEvent::from_runtime(event, writer),
+      None => WireEvent::from_runtime(event, &mut NoResources),
+    };
+    if let Some(wire) = wire {
       write_event(&mut self.buffer, &wire);
     }
   }
 
   async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     use ferridriver::FerriError;
-    if let Some(parent) = self.out_path.parent() {
-      std::fs::create_dir_all(parent)?;
-    }
-    let file = std::fs::File::create(&self.out_path)?;
-    let mut zip = zip::ZipWriter::new(file);
+    // No event ever arrived; still produce a valid, empty blob so a merge
+    // over a shard that ran nothing does not error. Opening the writer is
+    // what emits the header.
+    self.writer();
+    let Some(writer) = self.writer.take() else {
+      return Err(FerriError::backend(format!(
+        "blob: could not open {}",
+        self.out_path.display()
+      )));
+    };
+    let mut zip = writer.zip;
     let opts: zip::write::SimpleFileOptions =
       zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     zip
@@ -391,9 +782,14 @@ impl Reporter for BlobReporter {
 }
 
 fn write_event(buffer: &mut Vec<u8>, event: &WireEvent) {
-  if let Ok(line) = serde_json::to_string(event) {
-    buffer.extend_from_slice(line.as_bytes());
-    buffer.push(b'\n');
+  match serde_json::to_string(event) {
+    Ok(line) => {
+      buffer.extend_from_slice(line.as_bytes());
+      buffer.push(b'\n');
+    },
+    // Silence here would make a blob quietly incomplete, and the merge
+    // that reads it would report fewer tests than ran.
+    Err(e) => tracing::error!("blob: could not serialize event: {e}"),
   }
 }
 
@@ -416,26 +812,180 @@ pub fn read_blob_dir(dir: &std::path::Path) -> Result<Vec<ReporterEvent>, String
   }
   zips.sort();
   for path in zips {
-    let file = std::fs::File::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("zip read {}: {e}", path.display()))?;
-    let mut events_file = zip
-      .by_name("events.jsonl")
-      .map_err(|e| format!("missing events.jsonl in {}: {e}", path.display()))?;
-    let mut buf = String::new();
-    use std::io::Read;
-    events_file
-      .read_to_string(&mut buf)
-      .map_err(|e| format!("read jsonl: {e}"))?;
-    for (i, line) in buf.lines().enumerate() {
-      if line.trim().is_empty() {
-        continue;
-      }
-      let wire: WireEvent =
-        serde_json::from_str(line).map_err(|e| format!("parse line {i} in {}: {e}", path.display()))?;
-      if let Some(event) = wire.into_runtime() {
-        events.push(event);
-      }
+    events.extend(read_blob(&path)?);
+  }
+  Ok(events)
+}
+
+/// Read one blob zip back into the runtime event stream, restoring the
+/// inline artifacts stored alongside it.
+///
+/// # Errors
+///
+/// Returns an error if the zip is unreadable, is missing its event
+/// stream, or contains a malformed line.
+pub fn read_blob(path: &std::path::Path) -> Result<Vec<ReporterEvent>, String> {
+  use std::io::Read;
+
+  let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+  let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("zip read {}: {e}", path.display()))?;
+
+  let mut resources: FxHashMap<String, Vec<u8>> = FxHashMap::default();
+  let names: Vec<String> = zip.file_names().map(ToString::to_string).collect();
+  for name in names {
+    if !name.starts_with("resources/") {
+      continue;
+    }
+    let mut entry = zip
+      .by_name(&name)
+      .map_err(|e| format!("read {name} in {}: {e}", path.display()))?;
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).map_err(|e| format!("read {name}: {e}"))?;
+    resources.insert(name, bytes);
+  }
+
+  let mut buf = String::new();
+  zip
+    .by_name("events.jsonl")
+    .map_err(|e| format!("missing events.jsonl in {}: {e}", path.display()))?
+    .read_to_string(&mut buf)
+    .map_err(|e| format!("read jsonl: {e}"))?;
+
+  let mut events = Vec::new();
+  for (i, line) in buf.lines().enumerate() {
+    if line.trim().is_empty() {
+      continue;
+    }
+    let wire: WireEvent =
+      serde_json::from_str(line).map_err(|e| format!("parse line {i} in {}: {e}", path.display()))?;
+    if let WireEvent::Header { schema, .. } = &wire
+      && *schema > SCHEMA_VERSION
+    {
+      return Err(format!(
+        "{}: blob schema {schema} is newer than this build understands ({SCHEMA_VERSION})",
+        path.display()
+      ));
+    }
+    if let Some(event) = wire.into_runtime_with(&resources) {
+      events.push(event);
     }
   }
   Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn an_outcome_round_trips_with_its_steps_and_artifacts() {
+    let dir = std::env::temp_dir().join(format!("ferri-blob-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("report.zip");
+
+    let outcome = TestOutcome {
+      test_id: TestId {
+        file: "a.spec.ts".into(),
+        suite: Some("a.spec.ts::group".into()),
+        name: "works".into(),
+        line: Some(9),
+        column: Some(2),
+      },
+      status: TestStatus::TimedOut,
+      duration: Duration::from_millis(1234),
+      attempt: 2,
+      max_attempts: 3,
+      error: Some(TestFailure {
+        message: "boom".into(),
+        stack: Some("at a.spec.ts:9:2".into()),
+        diff: Some("- a\n+ b".into()),
+        screenshot: Some(vec![1, 2, 3, 4]),
+      }),
+      errors: vec![TestFailure {
+        message: "boom".into(),
+        stack: None,
+        diff: None,
+        screenshot: None,
+      }],
+      attachments: vec![Attachment {
+        name: "shot".into(),
+        content_type: "image/png".into(),
+        body: AttachmentBody::Bytes(vec![9, 9, 9]),
+      }],
+      steps: vec![TestStep {
+        step_id: "s1".into(),
+        title: "outer".into(),
+        category: StepCategory::TestStep,
+        duration: Duration::from_millis(5),
+        status: StepStatus::Failed,
+        error: Some("nope".into()),
+        location: Some("a.spec.ts:10".into()),
+        parent_step_id: None,
+        metadata: None,
+        steps: vec![TestStep {
+          step_id: "s2".into(),
+          title: "inner".into(),
+          category: StepCategory::TestStep,
+          duration: Duration::from_millis(2),
+          status: StepStatus::Passed,
+          error: None,
+          location: None,
+          parent_step_id: Some("s1".into()),
+          metadata: None,
+          steps: Vec::new(),
+        }],
+      }],
+      stdout: "hello\n".into(),
+      annotations: vec![TestAnnotation::Tag("@smoke".into())],
+      project_name: "chromium".into(),
+      worker_index: 3,
+      parallel_index: 3,
+      start_time: from_epoch_ms(1_700_000_000_000),
+      expected_status: ExpectedStatus::Fail,
+      timeout: Duration::from_secs(30),
+      ..Default::default()
+    };
+
+    let mut reporter = BlobReporter::new(path.clone());
+    reporter
+      .on_event(&ReporterEvent::TestFinished {
+        outcome: Arc::new(outcome.clone()),
+      })
+      .await;
+    reporter.finalize().await.expect("finalize");
+
+    let events = read_blob(&path).expect("read blob");
+    let ReporterEvent::TestFinished { outcome: back } = &events[0] else {
+      panic!("expected TestFinished, got {:?}", events[0]);
+    };
+
+    assert_eq!(back.status, TestStatus::TimedOut);
+    assert_eq!(back.test_id.column, Some(2));
+    assert_eq!(back.attempt, 2);
+    assert_eq!(back.max_attempts, 3);
+    assert_eq!(back.project_name, "chromium");
+    assert_eq!(back.worker_index, 3);
+    assert_eq!(back.expected_status, ExpectedStatus::Fail);
+    assert_eq!(back.timeout, Duration::from_secs(30));
+    assert_eq!(back.start_time, from_epoch_ms(1_700_000_000_000));
+    assert_eq!(back.stdout, "hello\n");
+    assert_eq!(back.errors.len(), 1);
+    assert_eq!(
+      back.error.as_ref().and_then(|e| e.diff.clone()).as_deref(),
+      Some("- a\n+ b")
+    );
+    assert_eq!(
+      back.error.as_ref().and_then(|e| e.screenshot.clone()),
+      Some(vec![1, 2, 3, 4])
+    );
+    assert_eq!(back.steps.len(), 1);
+    assert_eq!(back.steps[0].steps.len(), 1);
+    assert_eq!(back.steps[0].steps[0].title, "inner");
+    assert_eq!(back.steps[0].status, StepStatus::Failed);
+    assert_eq!(back.attachments.len(), 1);
+    assert!(matches!(&back.attachments[0].body, AttachmentBody::Bytes(b) if b == &[9, 9, 9]));
+    assert_eq!(back.annotations.len(), 1);
+
+    std::fs::remove_dir_all(&dir).ok();
+  }
 }

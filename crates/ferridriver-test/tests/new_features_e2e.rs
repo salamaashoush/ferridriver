@@ -54,6 +54,7 @@ fn noop_test(name: &str) -> TestCase {
       suite: None,
       name,
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|_| Box::pin(async { Ok(()) })),
     fixture_requests: vec![],
@@ -188,6 +189,7 @@ async fn test_after_each_runs_even_on_failure() {
       suite: None,
       name: "failing".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|_| Box::pin(async { Err(fail("intentional failure")) })),
     fixture_requests: vec![],
@@ -268,6 +270,7 @@ async fn test_serial_mode_runs_in_order() {
         suite: Some("serial".into()),
         name,
         line: None,
+        column: None,
       },
       test_fn: Arc::new(move |_| {
         Box::pin(async move {
@@ -320,6 +323,7 @@ async fn test_serial_mode_skips_after_failure() {
       suite: Some("serial_fail".into()),
       name: "fails".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|_| {
       Box::pin(async {
@@ -341,6 +345,7 @@ async fn test_serial_mode_skips_after_failure() {
       suite: Some("serial_fail".into()),
       name: "skipped".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|_| {
       Box::pin(async {
@@ -390,6 +395,7 @@ async fn test_expected_failure_passes_when_test_fails() {
       suite: None,
       name: "expected_fail".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|_| Box::pin(async { Err(fail("this failure is expected")) })),
     fixture_requests: vec![],
@@ -425,6 +431,7 @@ async fn test_expected_failure_fails_when_test_passes() {
       suite: None,
       name: "unexpected_pass".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|_| Box::pin(async { Ok(()) })),
     fixture_requests: vec![],
@@ -469,6 +476,7 @@ async fn test_global_setup_runs_before_tests() {
       suite: None,
       name: "checks_setup".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|_| {
       Box::pin(async {
@@ -559,6 +567,7 @@ async fn test_testinfo_injected_into_pool() {
       suite: None,
       name: "info_check".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
@@ -602,6 +611,7 @@ async fn test_soft_assertions_collected() {
       suite: None,
       name: "soft_test".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
@@ -652,6 +662,7 @@ fn test_snapshot_create_and_match() {
       suite: None,
       name: "my_test".into(),
       line: None,
+      column: None,
     },
     title_path: vec!["snap.rs".into(), "my_test".into()],
     retry: 0,
@@ -678,6 +689,7 @@ fn test_snapshot_create_and_match() {
     annotations: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     trace_composite: Arc::new(std::sync::Mutex::new(None)),
     trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+    output: Arc::new(std::sync::Mutex::new(ferridriver_test::model::TestOutput::default())),
   };
 
   // First call: creates snapshot file.

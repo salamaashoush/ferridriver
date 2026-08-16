@@ -21,9 +21,11 @@ Rust or JavaScript / TypeScript step bodies).
   `#[after_each]`, per-suite per-worker tracking.
 - **Retries with flaky detection.** Failed tests re-dispatched; final
   status is `Flaky` if a later attempt passes.
-- **Reporters.** terminal, progress, dot, JSON, JUnit, HTML, blob,
-  allure, GitHub annotations, rerun, Cucumber Messages, usage,
-  cucumber-json, empty — multiplexed via an event bus.
+- **Reporters.** list, line, dot, progress, JSON (Playwright's shape),
+  JUnit, HTML, blob + `merge-reports`, GitHub annotations, markdown,
+  TAP, TeamCity, CTRF, allure, rerun, Cucumber Messages, cucumber-json,
+  usage, null — multiplexed via an event bus. See
+  [Reporters](/test-runner/reporters).
 - **Snapshots.** Text `.snap` files with unified diff, plus pixel-diff
   PNG snapshots.
 - **Traces.** Playwright-compatible ZIP traces (viewable with

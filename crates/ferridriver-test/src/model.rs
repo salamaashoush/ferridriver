@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::Mutex;
 
@@ -17,13 +17,16 @@ use crate::reporter::EventBus;
 // ── Test Identity ──
 
 /// Globally unique test identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct TestId {
   pub file: String,
   pub suite: Option<String>,
   pub name: String,
   /// Source line number (used by rerun reporter for `file:line` output).
   pub line: Option<usize>,
+  /// Source column, when the discovery layer parsed one. Reporters that
+  /// mirror Playwright's JSON report emit `{file, line, column}` triples.
+  pub column: Option<usize>,
 }
 
 impl TestId {
@@ -51,6 +54,38 @@ impl TestId {
       Some(line) => format!("{}:{}", self.file, line),
       None => self.file.clone(),
     }
+  }
+
+  /// The title path a UI shows: file, then each enclosing suite, then the
+  /// test's own name.
+  #[must_use]
+  pub fn title_path(&self) -> Vec<String> {
+    let mut titles = vec![self.file.clone()];
+    if let Some(suite) = &self.suite
+      && *suite != self.file
+    {
+      let path = suite.strip_prefix(&format!("{}::", self.file)).unwrap_or(suite);
+      titles.extend(path.split("::").map(ToString::to_string));
+    }
+    titles.push(self.name.clone());
+    titles
+  }
+
+  /// Short, stable, filesystem- and URL-safe identity for this test in
+  /// `project`.
+  ///
+  /// Shaped exactly like Playwright's
+  /// (`suiteUtils.ts::bindFileSuiteToProject`): the file's hash, a dash,
+  /// then the hash of the project-qualified title path. Two things
+  /// depend on it being this and not a display name — a live trace is
+  /// found on disk by `<testId>.json`, and a UI asks to run tests by id.
+  #[must_use]
+  pub fn stable_id(&self, project: &str) -> String {
+    let file_id = ferridriver::tracing::sha1_hex(self.file.as_bytes());
+    let titles = self.title_path();
+    let expression = format!("[project={project}]{}\u{1e}{}", self.file, titles[1..].join("\u{1e}"));
+    let test_id = ferridriver::tracing::sha1_hex(expression.as_bytes());
+    format!("{}-{}", &file_id[..20], &test_id[..20])
   }
 }
 
@@ -177,7 +212,7 @@ impl std::fmt::Debug for TestHooks {
 // ── Test Plan ──
 
 /// The full test plan after discovery + filtering + sharding.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct TestPlan {
   pub suites: Vec<TestSuite>,
   /// Total test count (after filtering, before retry expansion).
@@ -428,6 +463,30 @@ pub struct TestInfo {
   /// step_id -> trace call id, so child steps nest under their parent
   /// in the trace viewer's action tree.
   pub trace_step_calls: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, String>>>,
+  /// What the test itself printed. A spec's `console.log` belongs to the
+  /// test that ran it, not to the process — reporters, the HTML report
+  /// and the UI's terminal all read it back off the outcome. A plain
+  /// mutex: the writer is a console sink running on the script VM's
+  /// thread, with no async context to await in.
+  pub output: Arc<std::sync::Mutex<TestOutput>>,
+}
+
+/// Output a test produced while it ran, kept apart by stream.
+#[derive(Debug, Default, Clone)]
+pub struct TestOutput {
+  pub stdout: String,
+  pub stderr: String,
+}
+
+impl TestOutput {
+  /// Append one line, adding the newline the writer left off.
+  pub fn push_line(&mut self, stderr: bool, text: &str) {
+    let target = if stderr { &mut self.stderr } else { &mut self.stdout };
+    target.push_str(text);
+    if !text.ends_with('\n') {
+      target.push('\n');
+    }
+  }
 }
 
 impl TestInfo {
@@ -439,6 +498,7 @@ impl TestInfo {
         suite: None,
         name: "anonymous".into(),
         line: None,
+        column: None,
       },
       title_path: Vec::new(),
       retry: 0,
@@ -465,6 +525,26 @@ impl TestInfo {
       annotations: Arc::new(Mutex::new(Vec::new())),
       trace_composite: Arc::new(std::sync::Mutex::new(None)),
       trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+      output: Arc::new(std::sync::Mutex::new(TestOutput::default())),
+    }
+  }
+
+  /// Record one line the test printed and, when a bus is attached,
+  /// publish it live. A reporter that streams output (`line`, a UI's
+  /// terminal) shows it while the test is still running; the same text
+  /// is replayed in bulk on the outcome for reporters that do not.
+  pub fn emit_output(&self, stderr: bool, text: &str) {
+    if let Ok(mut held) = self.output.lock() {
+      held.push_line(stderr, text);
+    }
+    if let Some(bus) = &self.event_bus {
+      bus.emit(crate::reporter::ReporterEvent::TestOutput(Arc::new(
+        crate::reporter::TestOutputEvent {
+          test_id: self.test_id.clone(),
+          stderr,
+          text: text.to_string(),
+        },
+      )));
     }
   }
 
@@ -543,7 +623,7 @@ impl TestInfo {
     let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
 
     if let Some(bus) = &self.event_bus {
-      bus.emit(crate::reporter::ReporterEvent::StepStarted(Box::new(
+      bus.emit(crate::reporter::ReporterEvent::StepStarted(Arc::new(
         crate::reporter::StepStartedEvent {
           test_id: self.test_id.clone(),
           step_id: step_id.clone(),
@@ -586,7 +666,7 @@ impl TestInfo {
     let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
 
     if let Some(bus) = &self.event_bus {
-      bus.emit(crate::reporter::ReporterEvent::StepStarted(Box::new(
+      bus.emit(crate::reporter::ReporterEvent::StepStarted(Arc::new(
         crate::reporter::StepStartedEvent {
           test_id: self.test_id.clone(),
           step_id: step_id.clone(),
@@ -632,7 +712,7 @@ impl TestInfo {
     let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
 
     if let Some(bus) = &self.event_bus {
-      bus.emit(crate::reporter::ReporterEvent::StepStarted(Box::new(
+      bus.emit(crate::reporter::ReporterEvent::StepStarted(Arc::new(
         crate::reporter::StepStartedEvent {
           test_id: self.test_id.clone(),
           step_id: step_id.clone(),
@@ -641,7 +721,7 @@ impl TestInfo {
           category: category.clone(),
         },
       )));
-      bus.emit(crate::reporter::ReporterEvent::StepFinished(Box::new(
+      bus.emit(crate::reporter::ReporterEvent::StepFinished(Arc::new(
         crate::reporter::StepFinishedEvent {
           test_id: self.test_id.clone(),
           step_id: step_id.clone(),
@@ -716,6 +796,9 @@ impl TestInfo {
         title: title.to_string(),
         params: serde_json::json!({}),
         parent_id: parent_call,
+        // The reporter's step id, so a UI showing both the step tree and
+        // the trace knows they are the same step.
+        step_id: Some(step_id.to_string()),
         backdate_ms: backdate.as_secs_f64() * 1000.0,
         stack,
       },
@@ -827,7 +910,7 @@ impl StepHandle {
 
     // Emit real-time event.
     if let Some(bus) = &self.event_bus {
-      bus.emit(crate::reporter::ReporterEvent::StepFinished(Box::new(
+      bus.emit(crate::reporter::ReporterEvent::StepFinished(Arc::new(
         crate::reporter::StepFinishedEvent {
           test_id: self.test_id.clone(),
           step_id: self.step_id.clone(),
@@ -876,7 +959,7 @@ impl StepHandle {
     }
 
     if let Some(bus) = &self.event_bus {
-      bus.emit(crate::reporter::ReporterEvent::StepFinished(Box::new(
+      bus.emit(crate::reporter::ReporterEvent::StepFinished(Arc::new(
         crate::reporter::StepFinishedEvent {
           test_id: self.test_id.clone(),
           step_id: self.step_id.clone(),
@@ -1012,7 +1095,7 @@ pub enum TestAnnotation {
   },
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ExpectedStatus {
   #[default]
   Pass,
@@ -1065,8 +1148,9 @@ impl std::fmt::Debug for TestModifiers {
 // ── Outcome ──
 
 /// Status of a completed test.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TestStatus {
+  #[default]
   Passed,
   Failed,
   TimedOut,
@@ -1079,15 +1163,104 @@ pub enum TestStatus {
 
 impl fmt::Display for TestStatus {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+impl TestStatus {
+  /// Playwright's `TestStatus` spelling — the one every serialized
+  /// report (JSON, blob, CTRF, TeamCity) and every consumer of them
+  /// uses. `Display` prints the same strings so the two never drift.
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
     match self {
-      Self::Passed => write!(f, "passed"),
-      Self::Failed => write!(f, "failed"),
-      Self::TimedOut => write!(f, "timed out"),
-      Self::Skipped => write!(f, "skipped"),
-      Self::Flaky => write!(f, "flaky"),
-      Self::Interrupted => write!(f, "interrupted"),
+      Self::Passed => "passed",
+      Self::Failed => "failed",
+      Self::TimedOut => "timedOut",
+      Self::Skipped => "skipped",
+      Self::Flaky => "flaky",
+      Self::Interrupted => "interrupted",
     }
   }
+
+  /// Parse back from [`Self::as_str`]. Unknown input reads as `failed`
+  /// rather than silently passing.
+  #[must_use]
+  pub fn parse(s: &str) -> Self {
+    match s {
+      "passed" => Self::Passed,
+      // "timed out" was the pre-parity spelling; blobs written by an
+      // older build still merge.
+      "timedOut" | "timed out" | "timed-out" => Self::TimedOut,
+      "skipped" => Self::Skipped,
+      "flaky" => Self::Flaky,
+      "interrupted" => Self::Interrupted,
+      _ => Self::Failed,
+    }
+  }
+
+  /// Whether this attempt counts as a failure for exit codes and
+  /// `<failure>` elements.
+  #[must_use]
+  pub fn is_failure(self) -> bool {
+    matches!(self, Self::Failed | Self::TimedOut | Self::Interrupted)
+  }
+}
+
+/// Playwright's `TestCase.outcome()`: how a test reads once all its
+/// attempts are in, as opposed to how one attempt ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TestOutcomeKind {
+  #[default]
+  Expected,
+  Unexpected,
+  Flaky,
+  Skipped,
+}
+
+impl TestOutcomeKind {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Expected => "expected",
+      Self::Unexpected => "unexpected",
+      Self::Flaky => "flaky",
+      Self::Skipped => "skipped",
+    }
+  }
+}
+
+impl fmt::Display for TestOutcomeKind {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+/// How a test reads once every attempt is in — Playwright's
+/// `TestCase.outcome()`, and the single place that rule lives.
+///
+/// `expected` is measured against the test's declared status, so a
+/// `test.fail()` test that fails is *expected* and one that passes is
+/// *unexpected*.
+#[must_use]
+pub fn outcome_kind(attempts: &[TestStatus], expected: ExpectedStatus) -> TestOutcomeKind {
+  let Some(last) = attempts.last().copied() else {
+    return TestOutcomeKind::Skipped;
+  };
+  if attempts.iter().all(|s| *s == TestStatus::Skipped) {
+    return TestOutcomeKind::Skipped;
+  }
+  let matches_expectation = |status: TestStatus| match expected {
+    ExpectedStatus::Pass => matches!(status, TestStatus::Passed | TestStatus::Flaky | TestStatus::Skipped),
+    ExpectedStatus::Fail => matches!(status, TestStatus::Failed | TestStatus::TimedOut),
+  };
+  if !matches_expectation(last) {
+    return TestOutcomeKind::Unexpected;
+  }
+  if last == TestStatus::Flaky || attempts.iter().any(|s| !matches_expectation(*s)) {
+    return TestOutcomeKind::Flaky;
+  }
+  TestOutcomeKind::Expected
 }
 
 /// Result of a single test attempt.
@@ -1099,6 +1272,10 @@ pub struct TestOutcome {
   pub attempt: u32,
   pub max_attempts: u32,
   pub error: Option<TestFailure>,
+  /// Every error this attempt produced — the hard failure first, then
+  /// the soft-assertion failures. Mirrors Playwright's
+  /// `TestResult.errors`; `error` is the first entry.
+  pub errors: Vec<TestFailure>,
   pub attachments: Vec<Attachment>,
   pub steps: Vec<TestStep>,
   pub stdout: String,
@@ -1107,6 +1284,79 @@ pub struct TestOutcome {
   pub annotations: Vec<TestAnnotation>,
   /// Project/run metadata (from config). Available to reporters for JSON/HTML output.
   pub metadata: serde_json::Value,
+  /// Project that ran this attempt. Empty for a single-project run.
+  pub project_name: String,
+  /// Worker that ran it (Playwright's `TestResult.workerIndex`).
+  pub worker_index: u32,
+  /// Playwright's `TestResult.parallelIndex` — the worker slot, which a
+  /// restarted worker reuses.
+  pub parallel_index: u32,
+  /// Wall-clock start of this attempt. Reports quote it as ISO-8601.
+  pub start_time: SystemTime,
+  /// Status this test was declared to end in (`test.fail()` flips it).
+  pub expected_status: ExpectedStatus,
+  /// Effective timeout for this attempt, after `test.slow()` and
+  /// `testInfo.setTimeout()`.
+  pub timeout: Duration,
+}
+
+impl Default for TestOutcome {
+  fn default() -> Self {
+    Self {
+      test_id: TestId::default(),
+      status: TestStatus::default(),
+      duration: Duration::ZERO,
+      attempt: 1,
+      max_attempts: 1,
+      error: None,
+      errors: Vec::new(),
+      attachments: Vec::new(),
+      steps: Vec::new(),
+      stdout: String::new(),
+      stderr: String::new(),
+      annotations: Vec::new(),
+      metadata: serde_json::Value::Null,
+      project_name: String::new(),
+      worker_index: 0,
+      parallel_index: 0,
+      start_time: SystemTime::UNIX_EPOCH,
+      expected_status: ExpectedStatus::Pass,
+      timeout: Duration::ZERO,
+    }
+  }
+}
+
+impl TestOutcome {
+  /// Milliseconds since the Unix epoch at which this attempt started.
+  #[must_use]
+  pub fn start_epoch_ms(&self) -> i64 {
+    self
+      .start_time
+      .duration_since(SystemTime::UNIX_EPOCH)
+      .ok()
+      .and_then(|d| i64::try_from(d.as_millis()).ok())
+      .unwrap_or_default()
+  }
+
+  /// ISO-8601 rendering of [`Self::start_time`], the form Playwright's
+  /// JSON report and JUnit's `timestamp` attribute both use.
+  #[must_use]
+  pub fn start_iso8601(&self) -> String {
+    ferridriver::tracing::epoch_ms_to_iso8601(self.start_epoch_ms())
+  }
+
+  /// Tags declared on the test, without the leading `@`.
+  #[must_use]
+  pub fn tags(&self) -> Vec<String> {
+    self
+      .annotations
+      .iter()
+      .filter_map(|a| match a {
+        TestAnnotation::Tag(tag) => Some(tag.trim_start_matches('@').to_string()),
+        _ => None,
+      })
+      .collect()
+  }
 }
 
 /// A test failure with diagnostic information.
@@ -1226,6 +1476,80 @@ pub struct TestFixtures {
 mod tests {
   use super::*;
   use ferridriver::FerriError;
+
+  #[test]
+  fn a_plain_pass_is_expected() {
+    assert_eq!(
+      outcome_kind(&[TestStatus::Passed], ExpectedStatus::Pass),
+      TestOutcomeKind::Expected
+    );
+  }
+
+  #[test]
+  fn a_declared_failure_that_fails_is_expected() {
+    assert_eq!(
+      outcome_kind(&[TestStatus::Failed], ExpectedStatus::Fail),
+      TestOutcomeKind::Expected
+    );
+    assert_eq!(
+      outcome_kind(&[TestStatus::TimedOut], ExpectedStatus::Fail),
+      TestOutcomeKind::Expected
+    );
+  }
+
+  #[test]
+  fn a_declared_failure_that_passes_is_unexpected() {
+    assert_eq!(
+      outcome_kind(&[TestStatus::Passed], ExpectedStatus::Fail),
+      TestOutcomeKind::Unexpected
+    );
+  }
+
+  #[test]
+  fn failing_then_passing_is_flaky() {
+    assert_eq!(
+      outcome_kind(&[TestStatus::Failed, TestStatus::Passed], ExpectedStatus::Pass),
+      TestOutcomeKind::Flaky
+    );
+  }
+
+  #[test]
+  fn failing_every_attempt_stays_unexpected() {
+    assert_eq!(
+      outcome_kind(&[TestStatus::Failed, TestStatus::Failed], ExpectedStatus::Pass),
+      TestOutcomeKind::Unexpected
+    );
+  }
+
+  #[test]
+  fn only_skips_read_as_skipped() {
+    assert_eq!(
+      outcome_kind(&[TestStatus::Skipped], ExpectedStatus::Pass),
+      TestOutcomeKind::Skipped
+    );
+    assert_eq!(outcome_kind(&[], ExpectedStatus::Pass), TestOutcomeKind::Skipped);
+  }
+
+  #[test]
+  fn status_strings_round_trip_and_accept_the_old_spelling() {
+    for status in [
+      TestStatus::Passed,
+      TestStatus::Failed,
+      TestStatus::TimedOut,
+      TestStatus::Skipped,
+      TestStatus::Flaky,
+      TestStatus::Interrupted,
+    ] {
+      assert_eq!(TestStatus::parse(status.as_str()), status);
+    }
+    assert_eq!(TestStatus::parse("timed out"), TestStatus::TimedOut);
+    assert_eq!(TestStatus::parse("timed-out"), TestStatus::TimedOut);
+    assert_eq!(
+      TestStatus::parse("nonsense"),
+      TestStatus::Failed,
+      "unknown never passes"
+    );
+  }
 
   #[test]
   fn testfailure_from_timeout_keeps_class_prefix() {

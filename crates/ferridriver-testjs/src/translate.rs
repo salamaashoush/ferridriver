@@ -39,28 +39,7 @@ fn remap_file(bundle: &CompiledBundle, cwd: &Path, line: u32, col: u32) -> Optio
   Some((rel, src_line))
 }
 
-/// Resolve a source-map `sources` entry to a real file. The entries are
-/// relative to the bundle chunk's virtual location (a level below the
-/// bundling cwd), so a literal join produces paths like
-/// `<cwd>/../tests/a.test.ts` — peel leading `../` segments until the
-/// candidate exists under `cwd`.
-pub(crate) fn resolve_source(cwd: &Path, src: &str) -> std::path::PathBuf {
-  let p = Path::new(src);
-  if p.is_absolute() {
-    return p.to_path_buf();
-  }
-  let mut rest = src;
-  loop {
-    let candidate = cwd.join(rest);
-    if candidate.exists() {
-      return candidate;
-    }
-    match rest.strip_prefix("../") {
-      Some(stripped) => rest = stripped,
-      None => return cwd.join(src),
-    }
-  }
-}
+pub(crate) use ferridriver_script::resolve_source;
 
 fn merge_bag(base: &mut Option<serde_json::Value>, incoming: &serde_json::Value) {
   match base {
@@ -461,9 +440,13 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
         (*p.static_annotations).clone(),
       ));
 
+      // What the body prints is this test's output, from here until the
+      // binding drops.
+      let console = session.capture_console(Arc::clone(&test_info));
       session.session().arm_deadline(base_timeout);
       let result = ferridriver_script::run_test(&session.vm_handle(), spec, world, bridge.clone() as _).await;
       session.session().disarm_deadline();
+      drop(console);
       bridge.flush().await;
 
       match result {
@@ -495,14 +478,42 @@ struct TestMeta {
   expected_status: ExpectedStatus,
   use_bag: Option<serde_json::Value>,
   world_use: serde_json::Value,
-  timeout_ms: u64,
+  /// Only what the spec itself asked for. A test that names no timeout
+  /// leaves this unset so the runner applies the config's — the run's
+  /// config, which is not always the one discovery was done under (a UI
+  /// run sends its own `timeout`).
+  timeout_ms: Option<u64>,
   retries: Option<u32>,
+}
+
+/// `@word` tokens in a title are tags, the way `{ tag: [...] }` is
+/// (Playwright: `testType.ts` reads both), so `--tag @smoke` and the
+/// UI's tag filter see a test titled `logs in @smoke`.
+fn title_tags(titles: &[String]) -> Vec<TestAnnotation> {
+  titles
+    .iter()
+    .flat_map(|title| title.split_whitespace())
+    .filter(|word| word.len() > 1 && word.starts_with('@'))
+    .map(|tag| TestAnnotation::Tag(tag.to_string()))
+    .collect()
 }
 
 fn resolve_meta(cx: &PlanCx<'_>, chain: &SuiteChain, fscope: &FileScope, test_idx: usize) -> TestMeta {
   let test = &cx.source.collected.tests[test_idx];
   let mut annotations: Vec<TestAnnotation> = Vec::new();
   let mut expected_status = ExpectedStatus::Pass;
+  let mut seen_tags: Vec<String> = Vec::new();
+  for tag in title_tags(&chain.path)
+    .into_iter()
+    .chain(title_tags(std::slice::from_ref(&test.title)))
+  {
+    if let TestAnnotation::Tag(name) = &tag
+      && !seen_tags.contains(name)
+    {
+      seen_tags.push(name.clone());
+      annotations.push(tag);
+    }
+  }
   // Suite chain first (skip/fixme/only propagate), then the test's
   // own. Registration-time `fail` flips the expectation.
   for a in chain.annotations.iter().chain(test.annotations.iter()) {
@@ -541,11 +552,7 @@ fn resolve_meta(cx: &PlanCx<'_>, chain: &SuiteChain, fscope: &FileScope, test_id
     expected_status,
     use_bag,
     world_use,
-    timeout_ms: test
-      .timeout_ms
-      .or(chain.timeout_ms)
-      .or(fscope.timeout_ms)
-      .unwrap_or(cx.config.timeout),
+    timeout_ms: test.timeout_ms.or(chain.timeout_ms).or(fscope.timeout_ms),
     retries: test.retries.or(chain.retries).or(fscope.retries),
   }
 }
@@ -600,6 +607,7 @@ fn lower_test(
     suite: Some(suite_id),
     name: test.title.clone(),
     line: Some(line as usize),
+    column: None,
   };
   let title_path: Vec<String> = {
     let mut path = vec![file.clone()];
@@ -629,7 +637,7 @@ fn lower_test(
     title: Arc::new(test.title.clone()),
     browser_config: cx.config.browser.clone(),
     base_url: cx.config.base_url.clone(),
-    expected_status: meta.expected_status.clone(),
+    expected_status: meta.expected_status,
     requests: requests.clone(),
     hooks_before,
     hooks_after,
@@ -640,7 +648,7 @@ fn lower_test(
     test_fn,
     fixture_requests: requests,
     annotations: meta.annotations,
-    timeout: Some(Duration::from_millis(meta.timeout_ms)),
+    timeout: meta.timeout_ms.map(Duration::from_millis),
     retries: meta.retries,
     expected_status: meta.expected_status,
     use_options: meta.use_bag,

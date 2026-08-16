@@ -10,7 +10,7 @@
 //! tests are skipped but afterAll still runs.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use rustc_hash::FxHashMap;
 use tokio::sync::{Mutex, mpsc};
@@ -81,6 +81,13 @@ struct TestBrowserResources {
 /// `TestInfo` step spans and the worker's stop path find the recorder.
 struct TraceSpec {
   title: String,
+  /// Trace stream name — the test's stable id, so a viewer can find the
+  /// recording on disk while it is still being written.
+  name: String,
+  /// This worker's in-progress trace directory.
+  traces_dir: std::path::PathBuf,
+  /// Flush each event as it happens, for a UI following the run.
+  live: bool,
   composite: Arc<std::sync::Mutex<Option<String>>>,
 }
 
@@ -166,14 +173,16 @@ impl TestBrowserResources {
   async fn start_tracing(&self, ctx: &ferridriver::ContextRef) {
     let Some(spec) = &self.trace else { return };
     let options = ferridriver::trace::TracingStartOptions {
-      name: None,
+      name: Some(spec.name.clone()),
       title: Some(spec.title.clone()),
       screenshots: true,
       snapshots: true,
       // Steps carry their .feature / call-site stack frames; embedding
       // the referenced files lights up the viewer's Source tab.
       sources: true,
+      streaming: ferridriver::trace::TraceStreaming::from_live(spec.live),
     };
+    ctx.set_traces_dir(spec.traces_dir.clone()).await;
     match ctx.tracing().start(options).await {
       Ok(()) => {
         let composite = ctx.composite();
@@ -734,7 +743,10 @@ fn build_suite_fixture_defs(resources: Arc<TestBrowserResources>) -> FxHashMap<S
 
 /// Result of a single test execution within a worker.
 pub struct WorkerTestResult {
-  pub outcome: TestOutcome,
+  /// Shared with the reporter event that carried it: an outcome holds
+  /// the attempt's screenshots and step tree, and copying it per
+  /// consumer is the single largest allocation a finished test makes.
+  pub outcome: Arc<TestOutcome>,
   pub should_retry: bool,
   pub test_fn: crate::model::TestFn,
   pub test_id: crate::model::TestId,
@@ -753,9 +765,19 @@ struct SuiteState {
 
 /// A worker that owns a browser and processes tests sequentially.
 pub struct Worker {
+  /// Unique across the whole run, including projects executing at the
+  /// same time: it names this worker's scratch directory and is what a
+  /// UI is told, so two workers sharing a number would share artifacts.
   pub id: u32,
+  /// Which of this runner's worker slots this is (`0..workers`). The
+  /// number a test sees as `parallelIndex`.
+  pub slot: u32,
   config: Arc<TestConfig>,
   event_bus: Option<EventBus>,
+  /// Flush trace events as they happen, because something is watching
+  /// this run (a UI following the live trace). Off for a plain run: the
+  /// trace is only read once it has been zipped, so buffering wins.
+  live_traces: bool,
   /// Contexts pre-created for this worker's upcoming tests. Shared by
   /// every test the worker runs; drained when the worker exits.
   pool: Arc<crate::context_pool::ContextPool>,
@@ -787,13 +809,33 @@ fn absolutize(p: std::path::PathBuf) -> std::path::PathBuf {
 }
 
 impl Worker {
-  pub fn new(id: u32, config: Arc<TestConfig>, event_bus: Option<EventBus>) -> Self {
+  pub fn new(id: u32, slot: u32, config: Arc<TestConfig>, event_bus: Option<EventBus>, live_traces: bool) -> Self {
     let pool = crate::context_pool::ContextPool::new(config.context_prewarm as usize);
     Self {
       id,
+      slot,
       config,
       event_bus,
+      live_traces,
       pool,
+    }
+  }
+
+  /// The run facts every outcome this worker produces carries: which
+  /// worker and slot ran it, under which project, when it started, and
+  /// what it was declared to do. Sites fill the rest.
+  fn outcome_base(&self, test: &crate::model::TestCase, started_at: SystemTime) -> TestOutcome {
+    TestOutcome {
+      project_name: self.config.name.clone().unwrap_or_default(),
+      worker_index: self.id,
+      parallel_index: self.slot,
+      start_time: started_at,
+      expected_status: test.expected_status,
+      timeout: test
+        .timeout
+        .unwrap_or_else(|| Duration::from_millis(self.config.timeout)),
+      metadata: self.config.metadata.clone(),
+      ..Default::default()
     }
   }
 
@@ -804,11 +846,12 @@ impl Worker {
         suite: None,
         name: "suite hooks".to_string(),
         line: None,
+        column: None,
       },
       title_path: vec![suite_key.to_string(), "suite hooks".to_string()],
       retry: 0,
       worker_index: self.id,
-      parallel_index: self.id,
+      parallel_index: self.slot,
       repeat_each_index: 0,
       output_dir: absolutize(
         self
@@ -843,6 +886,7 @@ impl Worker {
       annotations: Arc::new(Mutex::new(Vec::new())),
       trace_composite: Arc::new(std::sync::Mutex::new(None)),
       trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+      output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
     })
   }
 
@@ -919,9 +963,10 @@ impl Worker {
             suite: None,
             name: step_title.clone(),
             line: None,
+            column: None,
           };
           if let Some(event_bus) = &self.event_bus {
-            event_bus.emit(ReporterEvent::StepStarted(Box::new(
+            event_bus.emit(ReporterEvent::StepStarted(Arc::new(
               crate::reporter::StepStartedEvent {
                 test_id: synthetic_id.clone(),
                 step_id: step_id.clone(),
@@ -936,7 +981,7 @@ impl Worker {
           let duration = start.elapsed();
           let error = result.as_ref().err().map(|e| format!("{e}"));
           if let Some(event_bus) = &self.event_bus {
-            event_bus.emit(ReporterEvent::StepFinished(Box::new(
+            event_bus.emit(ReporterEvent::StepFinished(Arc::new(
               crate::reporter::StepFinishedEvent {
                 test_id: synthetic_id,
                 step_id,
@@ -990,7 +1035,7 @@ impl Worker {
       if serial_failed {
         // Skip remaining tests in the serial suite.
         let test = &assignment.test;
-        let outcome = TestOutcome {
+        let outcome = Arc::new(TestOutcome {
           test_id: test.id.clone(),
           status: TestStatus::Skipped,
           duration: Duration::ZERO,
@@ -1002,17 +1047,12 @@ impl Worker {
             diff: None,
             screenshot: None,
           }),
-          attachments: Vec::new(),
-          steps: Vec::new(),
-          stdout: String::new(),
-          stderr: String::new(),
           annotations: test.annotations.clone(),
-          metadata: self.config.metadata.clone(),
-        };
+          ..self.outcome_base(test, SystemTime::now())
+        });
         if let Some(event_bus) = &self.event_bus {
           event_bus.emit(ReporterEvent::TestFinished {
-            test_id: test.id.clone(),
-            outcome: outcome.clone(),
+            outcome: Arc::clone(&outcome),
           });
         }
         results.push(WorkerTestResult {
@@ -1035,6 +1075,29 @@ impl Worker {
     }
 
     results
+  }
+
+  /// Describe the live test for the debug hook.
+  ///
+  /// The context name is what makes a stop useful: a client that attaches
+  /// to the bound browser without it lands on a fresh context and sees none
+  /// of the state the test built. `None` when there is nothing to look at
+  /// (no context yet, no browser launched) — stopping then would block the
+  /// run for an empty page.
+  async fn debug_test(
+    browser: &Arc<crate::runner::BrowserHandle>,
+    resources: &Arc<TestBrowserResources>,
+    test_id: &crate::model::TestId,
+    error: Option<String>,
+  ) -> Option<crate::debug::DebugTest> {
+    let context = resources.current_context().await?;
+    Some(crate::debug::DebugTest {
+      test: test_id.full_name(),
+      location: test_id.line.map(|line| format!("{}:{line}", test_id.file)),
+      error,
+      browser: browser.peek()?,
+      context: context.name().to_string(),
+    })
   }
 
   /// Run a single test with full hook lifecycle.
@@ -1106,7 +1169,7 @@ impl Worker {
           format!("beforeAll [{i}]")
         };
         if let Some(event_bus) = &self.event_bus {
-          event_bus.emit(ReporterEvent::StepStarted(Box::new(
+          event_bus.emit(ReporterEvent::StepStarted(Arc::new(
             crate::reporter::StepStartedEvent {
               test_id: test_id.clone(),
               step_id: format!("hook:beforeAll:{suite_key}:{i}"),
@@ -1121,7 +1184,7 @@ impl Worker {
         let duration = start.elapsed();
         let error = result.as_ref().err().map(|e| e.message.clone());
         if let Some(event_bus) = &self.event_bus {
-          event_bus.emit(ReporterEvent::StepFinished(Box::new(
+          event_bus.emit(ReporterEvent::StepFinished(Arc::new(
             crate::reporter::StepFinishedEvent {
               test_id: test_id.clone(),
               step_id: format!("hook:beforeAll:{suite_key}:{i}"),
@@ -1144,7 +1207,7 @@ impl Worker {
 
     // If beforeAll failed, skip this test.
     if suite_state.before_all_failed {
-      let outcome = TestOutcome {
+      let outcome = Arc::new(TestOutcome {
         test_id: test_id.clone(),
         status: TestStatus::Skipped,
         duration: Duration::ZERO,
@@ -1156,17 +1219,12 @@ impl Worker {
           diff: None,
           screenshot: None,
         }),
-        attachments: Vec::new(),
-        steps: Vec::new(),
-        stdout: String::new(),
-        stderr: String::new(),
         annotations: test.annotations.clone(),
-        metadata: self.config.metadata.clone(),
-      };
+        ..self.outcome_base(test, SystemTime::now())
+      });
       if let Some(event_bus) = &self.event_bus {
         event_bus.emit(ReporterEvent::TestFinished {
-          test_id: test_id.clone(),
-          outcome: outcome.clone(),
+          outcome: Arc::clone(&outcome),
         });
       }
       return WorkerTestResult {
@@ -1194,24 +1252,18 @@ impl Worker {
       _ => false,
     });
     if should_skip {
-      let outcome = TestOutcome {
+      let outcome = Arc::new(TestOutcome {
         test_id: test_id.clone(),
         status: TestStatus::Skipped,
         duration: Duration::ZERO,
         attempt,
         max_attempts,
-        error: None,
-        attachments: Vec::new(),
-        steps: Vec::new(),
-        stdout: String::new(),
-        stderr: String::new(),
         annotations: test.annotations.clone(),
-        metadata: self.config.metadata.clone(),
-      };
+        ..self.outcome_base(test, SystemTime::now())
+      });
       if let Some(event_bus) = &self.event_bus {
         event_bus.emit(ReporterEvent::TestFinished {
-          test_id: test_id.clone(),
-          outcome: outcome.clone(),
+          outcome: Arc::clone(&outcome),
         });
       }
       return WorkerTestResult {
@@ -1229,11 +1281,12 @@ impl Worker {
       event_bus.emit(ReporterEvent::TestStarted {
         test_id: test_id.clone(),
         attempt,
+        worker_id: self.id,
       });
     }
 
     // Evaluate Fail condition: if condition matches, expect failure (invert pass/fail).
-    let mut expected_status = test.expected_status.clone();
+    let mut expected_status = test.expected_status;
     for ann in &test.annotations {
       if let TestAnnotation::Fail { condition, .. } = ann {
         let applies = match condition {
@@ -1260,6 +1313,7 @@ impl Worker {
     }
 
     let start = Instant::now();
+    let started_at = SystemTime::now();
     let effective_config = build_effective_context_config(&self.config, test);
     let trace_composite: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
 
@@ -1277,7 +1331,7 @@ impl Worker {
       },
       retry: attempt.saturating_sub(1),
       worker_index: self.id,
-      parallel_index: self.id,
+      parallel_index: self.slot,
       repeat_each_index: 0,
       output_dir: absolutize(self.config.output_dir.join(artifact_dir_name(&test_id.full_name()))),
       snapshot_dir: absolutize(
@@ -1313,9 +1367,16 @@ impl Worker {
       annotations: Arc::new(Mutex::new(Vec::new())),
       trace_composite: Arc::clone(&trace_composite),
       trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+      output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
     });
     let trace_spec = self.config.trace.should_record(attempt, false).then(|| TraceSpec {
       title: test_id.full_name(),
+      // The stream is named after the test, in this worker's artifacts
+      // directory: that is the whole contract a viewer following a
+      // running test relies on — it asks for `<testId>.json` there.
+      name: test_id.stable_id(self.config.name.as_deref().unwrap_or_default()),
+      traces_dir: crate::artifacts::traces_dir(&self.config.output_dir, self.id as usize),
+      live: self.live_traces,
       composite: Arc::clone(&trace_composite),
     });
     let resources = Arc::new(TestBrowserResources::new(
@@ -1396,24 +1457,21 @@ impl Worker {
           Err(e) => {
             let () = resources.close().await;
             let duration = start.elapsed();
-            let outcome = TestOutcome {
+            let failure = TestFailure::wrap("failed to create page", e);
+            let outcome = Arc::new(TestOutcome {
               test_id: test_id.clone(),
               status: TestStatus::Failed,
               duration,
               attempt,
               max_attempts,
-              error: Some(TestFailure::wrap("failed to create page", e)),
-              attachments: Vec::new(),
-              steps: Vec::new(),
-              stdout: String::new(),
-              stderr: String::new(),
+              errors: vec![failure.clone()],
+              error: Some(failure),
               annotations: test.annotations.clone(),
-              metadata: self.config.metadata.clone(),
-            };
+              ..self.outcome_base(test, started_at)
+            });
             if let Some(event_bus) = &self.event_bus {
               event_bus.emit(ReporterEvent::TestFinished {
-                test_id: test_id.clone(),
-                outcome: outcome.clone(),
+                outcome: Arc::clone(&outcome),
               });
             }
             return WorkerTestResult {
@@ -1447,11 +1505,45 @@ impl Worker {
       }
     }
 
+    let debug_hook = crate::debug::debug_hook();
+    // `--debug`: the body has not started and the context is live, which is
+    // the point Playwright publishes a test from
+    // (`runAfterCreateBrowserContext`). The hook arms rather than blocks —
+    // the first API call is where the run actually stops.
+    //
+    // The context is normally created by the `page` fixture, i.e. inside
+    // the body — too late for a client to attach before the first call.
+    // Debugging is the one mode that pays for creating it up front.
+    if let Some(hook) = &debug_hook {
+      if let Err(e) = resources.context().await {
+        tracing::warn!(target: "ferridriver::worker", "--debug: no context to publish: {e}");
+      }
+      if let Some(live) = Self::debug_test(browser, &resources, &test_id, None).await {
+        hook.test_starting(live).await;
+      }
+    }
+
     let timeout_result = if let Some(err) = before_each_err {
       Ok(Err(err))
     } else {
-      tokio::time::timeout(timeout_dur, run_caught((test.test_fn)(test_pool.clone()))).await
+      ferridriver::pause::run_within(timeout_dur, run_caught((test.test_fn)(test_pool.clone()))).await
     };
+
+    // Hold here, before `afterEach` and before the context closes, so
+    // whoever attaches sees the page the failure left rather than its
+    // wreckage. Only on a failure: a passing test has nothing to look at.
+    if let Some(hook) = &debug_hook {
+      let failure = match &timeout_result {
+        Ok(Err(e)) => Some(e.message.clone()),
+        Err(_) => Some(format!("test timed out after {}ms", timeout_dur.as_millis())),
+        Ok(Ok(())) => None,
+      };
+      if let Some(error) = failure
+        && let Some(live) = Self::debug_test(browser, &resources, &test_id, Some(error)).await
+      {
+        hook.test_failed(live).await;
+      }
+    }
 
     for (i, hook) in hooks.after_each.iter().enumerate() {
       let title = if hooks.after_each.len() == 1 {
@@ -1466,6 +1558,13 @@ impl Worker {
       if let Err(e) = result {
         tracing::warn!(target: "ferridriver::worker", "afterEach error: {e}");
       }
+    }
+
+    // Release the debugger's hold before the artifacts are collected: the
+    // session it published points at this test's context, and the next
+    // test must not inherit either it or the gate it armed.
+    if let Some(hook) = &debug_hook {
+      hook.test_finished().await;
     }
 
     if page_for_artifacts.is_none() {
@@ -1511,6 +1610,33 @@ impl Worker {
       },
       _ => None,
     };
+    // The failure itself goes into the trace, not just the call that
+    // raised it: the viewer's Errors tab is built from these, and an
+    // assertion message is what a reader is looking for first.
+    if test_failed {
+      let message = match &timeout_result {
+        Ok(Err(e)) => Some(e.message.clone()),
+        Err(_) => Some(format!("Test timeout of {}ms exceeded.", timeout_dur.as_millis())),
+        Ok(Ok(())) => None,
+      };
+      let composite = trace_composite
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+      if let (Some(composite), Some(message)) = (composite, message) {
+        let stack = test_id
+          .line
+          .map(|line| ferridriver::trace::StackFrame {
+            file: test_id.file.clone(),
+            line: u32::try_from(line).unwrap_or_default(),
+            column: 0,
+          })
+          .into_iter()
+          .collect();
+        ferridriver::trace::record_error(&composite, message, stack);
+      }
+    }
+
     // Mirror the failure screenshot into the trace as an `attach`
     // action (Playwright's test runner does the same), so the viewer's
     // Attachments tab carries it alongside the timeline.
@@ -1528,6 +1654,7 @@ impl Worker {
             title: "attach \"screenshot-on-failure\"".to_string(),
             params: serde_json::json!({}),
             parent_id: None,
+            step_id: None,
             backdate_ms: 0.0,
             stack: Vec::new(),
           },
@@ -1621,24 +1748,18 @@ impl Worker {
         if failure.message.contains("__FERRIDRIVER_SKIP__:") {
           let reason = failure.message.split("__FERRIDRIVER_SKIP__:").nth(1).unwrap_or("");
           tracing::debug!(target: "ferridriver::worker", "test skipped at runtime: {reason}");
-          let outcome = TestOutcome {
+          let outcome = Arc::new(TestOutcome {
             test_id: test_id.clone(),
             status: TestStatus::Skipped,
             duration: start.elapsed(),
             attempt,
             max_attempts,
-            error: None,
-            attachments: Vec::new(),
-            steps: Vec::new(),
-            stdout: String::new(),
-            stderr: String::new(),
             annotations: test.annotations.clone(),
-            metadata: self.config.metadata.clone(),
-          };
+            ..self.outcome_base(test, started_at)
+          });
           if let Some(event_bus) = &self.event_bus {
             event_bus.emit(ReporterEvent::TestFinished {
-              test_id: test_id.clone(),
-              outcome: outcome.clone(),
+              outcome: Arc::clone(&outcome),
             });
           }
           return WorkerTestResult {
@@ -1689,13 +1810,17 @@ impl Worker {
       }
     }
 
-    // Expected failure inversion (test.fail() annotation OR runtime test.fail()).
+    // `test.fail()` does not rewrite what happened: the attempt keeps the
+    // status it ended with, and `expected_status` says which one counts as
+    // success. Every consumer compares the two through
+    // `model::outcome_kind` — inverting here instead would report a
+    // `test.fail` test as `passed` in the JSON report, where Playwright
+    // reports `failed` with `expectedStatus: "failed"`.
     let (status, error) = match (&raw_status, &expected_status) {
-      (TestStatus::Failed | TestStatus::TimedOut, ExpectedStatus::Fail) => (TestStatus::Passed, None),
       (TestStatus::Passed, ExpectedStatus::Fail) => (
-        TestStatus::Failed,
+        TestStatus::Passed,
         Some(TestFailure {
-          message: "expected test to fail, but it passed".into(),
+          message: "Expected to fail, but passed.".into(),
           stack: None,
           diff: None,
           screenshot: None,
@@ -1705,7 +1830,8 @@ impl Worker {
     };
 
     // Collect soft assertion errors.
-    let soft_errs = test_info.drain_soft_errors().await;
+    let soft_errors = test_info.drain_soft_errors().await;
+    let soft_errs = &soft_errors;
     let (status, error) = if !soft_errs.is_empty() && status == TestStatus::Passed {
       let msg = soft_errs
         .iter()
@@ -1754,30 +1880,47 @@ impl Worker {
     let mut annotations = test.annotations.clone();
     annotations.extend(test_info.get_annotations().await);
 
-    let outcome = TestOutcome {
+    // What the test printed belongs to the test, not to the process:
+    // reporters, the HTML report and the UI's terminal read it here.
+    let output = test_info
+      .output
+      .lock()
+      .map(|mut held| std::mem::take(&mut *held))
+      .unwrap_or_default();
+
+    // `errors` leads with the hard failure and then the soft assertions
+    // the test collected: reporters that show every error read it, and
+    // `error` stays the first for the ones that show one.
+    let mut errors: Vec<TestFailure> = error.iter().cloned().collect();
+    errors.extend(soft_errors);
+    let outcome = Arc::new(TestOutcome {
       test_id: test_id.clone(),
       status,
       duration,
       attempt,
       max_attempts,
       error,
+      errors,
       attachments,
       steps,
-      stdout: String::new(),
-      stderr: String::new(),
+      stdout: output.stdout,
+      stderr: output.stderr,
       annotations,
-      metadata: self.config.metadata.clone(),
-    };
+      // The effective expectation, not the declared one: `test.fail()`
+      // called inside the body arms after the base was built.
+      expected_status,
+      ..self.outcome_base(test, started_at)
+    });
 
     if let Some(event_bus) = &self.event_bus {
       event_bus.emit(ReporterEvent::TestFinished {
-        test_id: test_id.clone(),
-        outcome: outcome.clone(),
+        outcome: Arc::clone(&outcome),
       });
     }
 
-    let should_retry =
-      outcome.status != TestStatus::Passed && outcome.status != TestStatus::Skipped && attempt < max_attempts;
+    let should_retry = crate::model::outcome_kind(&[outcome.status], outcome.expected_status)
+      == crate::model::TestOutcomeKind::Unexpected
+      && attempt < max_attempts;
 
     WorkerTestResult {
       outcome,

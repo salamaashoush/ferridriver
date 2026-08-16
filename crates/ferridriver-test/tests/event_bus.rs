@@ -19,6 +19,7 @@ async fn event_bus_delivers_to_single_subscriber() {
     total_tests: 5,
     num_workers: 2,
     metadata: serde_json::Value::Null,
+    start_time: std::time::SystemTime::now(),
   });
   drop(bus);
 
@@ -47,6 +48,7 @@ async fn event_bus_delivers_to_multiple_subscribers() {
     total_tests: 10,
     num_workers: 4,
     metadata: serde_json::Value::Null,
+    start_time: std::time::SystemTime::now(),
   });
   bus.emit(ReporterEvent::RunFinished {
     total: 10,
@@ -55,6 +57,7 @@ async fn event_bus_delivers_to_multiple_subscribers() {
     skipped: 1,
     flaky: 0,
     duration: Duration::from_secs(5),
+    status: ferridriver_test::reporter::RunStatus::Passed,
   });
   drop(bus);
 
@@ -108,6 +111,7 @@ async fn event_bus_no_subscribers_does_not_panic() {
     total_tests: 1,
     num_workers: 1,
     metadata: serde_json::Value::Null,
+    start_time: std::time::SystemTime::now(),
   });
   drop(bus);
 }
@@ -126,6 +130,7 @@ async fn event_bus_dropped_subscriber_does_not_block() {
     total_tests: 1,
     num_workers: 1,
     metadata: serde_json::Value::Null,
+    start_time: std::time::SystemTime::now(),
   });
   drop(bus);
 
@@ -153,6 +158,8 @@ impl ferridriver_test::reporter::Reporter for CollectorReporter {
       ReporterEvent::WorkerFinished { .. } => "WorkerFinished",
       ReporterEvent::StepStarted(_) => "StepStarted",
       ReporterEvent::StepFinished(_) => "StepFinished",
+      ReporterEvent::TestOutput(_) => "TestOutput",
+      ReporterEvent::RunError { .. } => "RunError",
     };
     self.events.lock().await.push(tag.to_string());
   }
@@ -183,6 +190,7 @@ async fn reporter_driver_forwards_events_and_finalizes() {
     total_tests: 2,
     num_workers: 1,
     metadata: serde_json::Value::Null,
+    start_time: std::time::SystemTime::now(),
   });
   bus.emit(ReporterEvent::RunFinished {
     total: 2,
@@ -191,6 +199,7 @@ async fn reporter_driver_forwards_events_and_finalizes() {
     skipped: 0,
     flaky: 0,
     duration: Duration::from_millis(100),
+    status: ferridriver_test::reporter::RunStatus::Passed,
   });
 
   // Drop bus — closes channel, driver finalizes and exits.
@@ -220,6 +229,7 @@ async fn reporter_driver_returns_reporters_after_run() {
     total_tests: 1,
     num_workers: 1,
     metadata: serde_json::Value::Null,
+    start_time: std::time::SystemTime::now(),
   });
   drop(bus);
 
@@ -247,6 +257,7 @@ async fn real_time_delivery_not_batched() {
     total_tests: 1,
     num_workers: 1,
     metadata: serde_json::Value::Null,
+    start_time: std::time::SystemTime::now(),
   });
 
   // Use try_recv — if the event is delivered in real-time, it's already in the channel.
@@ -284,6 +295,7 @@ async fn concurrent_execution_and_observation() {
       total_tests: 3,
       num_workers: 1,
       metadata: serde_json::Value::Null,
+      start_time: std::time::SystemTime::now(),
     });
     tokio::task::yield_now().await;
     bus.emit(ReporterEvent::WorkerStarted { worker_id: 0 });
@@ -297,6 +309,7 @@ async fn concurrent_execution_and_observation() {
       skipped: 0,
       flaky: 0,
       duration: Duration::from_millis(50),
+      status: ferridriver_test::reporter::RunStatus::Passed,
     });
     drop(bus); // Must explicitly drop — tokio::join! holds MaybeDone alive
   };

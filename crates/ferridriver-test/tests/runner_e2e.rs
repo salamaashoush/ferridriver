@@ -35,6 +35,7 @@ fn make_navigation_test() -> TestCase {
       suite: Some("navigation".into()),
       name: "basic_navigation".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
@@ -80,6 +81,7 @@ fn make_click_test() -> TestCase {
       suite: Some("interaction".into()),
       name: "click_button".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
@@ -136,6 +138,7 @@ fn make_fill_test() -> TestCase {
       suite: Some("interaction".into()),
       name: "fill_input".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
@@ -191,6 +194,7 @@ fn make_expect_test() -> TestCase {
       suite: Some("expect".into()),
       name: "auto_retry_assertions".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
@@ -251,6 +255,7 @@ fn make_skip_test() -> TestCase {
       suite: None,
       name: "skipped_test".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|_pool| {
       Box::pin(async move {

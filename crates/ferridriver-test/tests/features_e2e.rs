@@ -44,6 +44,7 @@ fn make_flaky_test() -> TestCase {
       suite: Some("retry".into()),
       name: "flaky_test_passes_on_retry".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|_pool| {
       Box::pin(async move {
@@ -218,6 +219,7 @@ fn make_matchers_test() -> TestCase {
       suite: Some("matchers".into()),
       name: "all_locator_matchers".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
@@ -268,6 +270,7 @@ fn make_poll_test() -> TestCase {
       suite: Some("expect_poll".into()),
       name: "poll_until_value_matches".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|_pool| {
       Box::pin(async move {
@@ -341,6 +344,7 @@ fn make_to_pass_test() -> TestCase {
       suite: Some("to_pass".into()),
       name: "retries_block_until_success".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
@@ -423,6 +427,7 @@ fn make_page_assertions_test() -> TestCase {
       suite: Some("page".into()),
       name: "page_title_and_url".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {

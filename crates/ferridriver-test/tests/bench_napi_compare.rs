@@ -61,6 +61,7 @@ fn make_nav_test(i: usize) -> TestCase {
       suite: Some("nav".into()),
       name: format!("nav_{i:03}"),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(move |pool| {
       Box::pin(async move {
@@ -91,6 +92,7 @@ fn make_click_test(i: usize) -> TestCase {
       suite: Some("click".into()),
       name: format!("click_{i:03}"),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(move |pool| {
       Box::pin(async move {
@@ -136,6 +138,7 @@ fn make_eval_test(i: usize) -> TestCase {
       suite: Some("eval".into()),
       name: format!("eval_{i:03}"),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(move |pool| {
       Box::pin(async move {

@@ -222,6 +222,7 @@ async fn deep_profile() {
       suite: None,
       name: "noop".into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(|_pool| Box::pin(async { Ok(()) })),
     fixture_requests: vec![],

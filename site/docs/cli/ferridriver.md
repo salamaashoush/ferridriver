@@ -1,8 +1,9 @@
 # `ferridriver`
 
-A single static binary with six subcommands. JavaScript / TypeScript
-BDD step files run natively through the same binary — no separate
-TypeScript CLI exists.
+A single static binary. JavaScript / TypeScript BDD step files run
+natively through it — no separate TypeScript CLI exists — and so do the
+web front-ends: the trace viewer, UI mode and the HTML report are
+compiled in, so they work offline with no npm install.
 
 ## Synopsis
 
@@ -18,6 +19,8 @@ ferridriver [GLOBAL FLAGS] <SUBCOMMAND> [ARGS]
 | `ferridriver run`    | Execute a JavaScript / TypeScript script with Playwright-style bindings |
 | `ferridriver install`| Download browser binaries into the local cache |
 | `ferridriver codegen`| Record interactions in a headed browser; emit a runnable script |
+| `ferridriver trace`  | Read a recorded trace: open it in the viewer, print it, list them |
+| `ferridriver merge-reports` | Fold several shards' `blob` reports into one report |
 
 ## Codegen
 
@@ -101,6 +104,68 @@ source with top-level `import` / `export`, is rolldown-bundled and
 transpiled before running. `args` is the positional list exposed as a
 global. `-` reads source from stdin. `--eval` runs inline source instead
 of a file.
+
+## `ferridriver trace`
+
+```
+ferridriver trace view [TRACE] [--port N] [--host ADDR] [--no-open]
+ferridriver trace show [TRACE] [--errors] [--json] [--limit N]
+                       [--hide logs|console|network]... [--color auto|always|never]
+ferridriver trace ls   [DIR] [--json]
+```
+
+`TRACE` is a `trace.zip`, a directory of trace files (a recording that
+was interrupted), or — for `view` — an `http(s)` URL. Omit it and the
+newest trace under the test output directory is used.
+
+`view` serves the embedded Playwright trace viewer and opens it in an
+application window; `--no-open` prints the URL and keeps serving, which
+is what you want over ssh or in a container.
+
+`show` prints the same trace as text: the call tree with timings, what
+failed and what it was waiting for, then console, network and attachment
+summaries. `--errors` keeps only the failures; `--json` emits the whole
+model for a script to read.
+
+## UI mode
+
+```
+ferridriver test --ui [--ui-port N]
+ferridriver bdd  --ui [--ui-port N] FEATURE_GLOB...
+```
+
+Serves Playwright's UI-mode app — the real one, embedded in this binary —
+and answers the test-server protocol it speaks. The test tree, filters,
+watch mode, per-test trace with DOM snapshots, source, console and
+network all come from it. Traces are forced on for the session and are
+written where the viewer can follow them while a test is still running.
+
+Without `--ui-port` an application window is opened for you; with one,
+the URL is printed and left for you to open (or for another tool to
+drive).
+
+## `ferridriver merge-reports`
+
+```
+ferridriver merge-reports [INPUTS...] [--reporter NAME]... [--output-dir DIR]
+```
+
+Reads every `blob` zip under `INPUTS` (a directory or the zips
+themselves) and replays the merged event stream through the named
+reporters, producing the report an unsharded run would have produced.
+Exits non-zero when any test in the merged run failed.
+
+```bash
+# per shard
+FERRIDRIVER_BLOB_OUTPUT_FILE=blobs/report-$SHARD.zip \
+  ferridriver test --reporter blob --shard $SHARD/$TOTAL
+
+# once, after collecting blobs/
+ferridriver merge-reports blobs --reporter html --reporter junit
+```
+
+See [Reporters](/test-runner/reporters) for the full reporter list and
+their options.
 
 ## `ferridriver install`
 

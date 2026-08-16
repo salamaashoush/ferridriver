@@ -20,6 +20,7 @@ fn sleeping_test(name: &str, sleep: Duration) -> TestCase {
       suite: Some("proj".into()),
       name: name.into(),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(move |_pool| {
       Box::pin(async move {

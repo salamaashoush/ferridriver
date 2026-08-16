@@ -248,10 +248,17 @@ impl Reporter for AllureReporter {
 impl AllureReporter {
   fn collect_result(&mut self, outcome: &TestOutcome) {
     let uuid = make_uuid();
-    let start_ms = self
-      .test_starts
-      .remove(&outcome.test_id.full_name())
-      .unwrap_or(self.run_start);
+    // The attempt's own wall-clock start, which the worker records.
+    // Falling back to a `TestStarted` timestamp keyed by name would
+    // credit a retry with the first attempt's start, and a parallel run
+    // has several attempts of one name in flight at once.
+    let start_ms = match u64::try_from(outcome.start_epoch_ms()) {
+      Ok(ms) if ms > 0 => ms,
+      _ => self
+        .test_starts
+        .remove(&outcome.test_id.full_name())
+        .unwrap_or(self.run_start),
+    };
     let stop_ms = start_ms + outcome.duration.as_millis() as u64;
 
     let status = map_status(&outcome.status);
@@ -524,4 +531,190 @@ fn epoch_ms() -> u64 {
     .duration_since(UNIX_EPOCH)
     .unwrap_or(Duration::ZERO)
     .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+  use std::sync::Arc;
+
+  use super::*;
+  use std::path::Path;
+
+  use crate::model::{StepCategory, StepStatus, TestFailure, TestId, TestOutcome};
+  use crate::reporter::{ReporterEvent, RunStatus};
+
+  struct ScopedDir(PathBuf);
+  impl Drop for ScopedDir {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+
+  fn scoped(name: &str) -> ScopedDir {
+    let path = std::env::temp_dir().join(format!("ferri-allure-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    ScopedDir(path)
+  }
+
+  fn outcome(name: &str, status: TestStatus) -> Arc<TestOutcome> {
+    Arc::new(TestOutcome {
+      test_id: TestId {
+        file: "tests/checkout.spec.ts".into(),
+        suite: Some("Checkout".into()),
+        name: name.into(),
+        line: Some(5),
+        column: Some(1),
+      },
+      status,
+      duration: Duration::from_millis(250),
+      // 2023-11-14T22:13:20Z
+      start_time: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+      annotations: vec![
+        TestAnnotation::Tag("@smoke".into()),
+        TestAnnotation::Info {
+          type_name: "severity".into(),
+          description: "critical".into(),
+        },
+        TestAnnotation::Info {
+          type_name: "issue".into(),
+          description: "JIRA-7".into(),
+        },
+      ],
+      ..Default::default()
+    })
+  }
+
+  /// Drive a run and return the parsed `*-result.json` documents.
+  async fn results(dir: &Path, outcomes: Vec<Arc<TestOutcome>>) -> Vec<serde_json::Value> {
+    let mut reporter = AllureReporter::new(dir.to_path_buf());
+    reporter
+      .on_event(&ReporterEvent::RunStarted {
+        total_tests: outcomes.len(),
+        num_workers: 1,
+        metadata: serde_json::Value::Null,
+        start_time: std::time::SystemTime::UNIX_EPOCH,
+      })
+      .await;
+    for outcome in outcomes {
+      reporter.on_event(&ReporterEvent::TestFinished { outcome }).await;
+    }
+    reporter
+      .on_event(&ReporterEvent::RunFinished {
+        total: 1,
+        passed: 1,
+        failed: 0,
+        skipped: 0,
+        flaky: 0,
+        duration: Duration::from_millis(400),
+        status: RunStatus::Passed,
+      })
+      .await;
+    reporter.finalize().await.expect("finalize");
+
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read dir") {
+      let path = entry.expect("entry").path();
+      if path.to_string_lossy().ends_with("-result.json") {
+        let text = std::fs::read_to_string(&path).expect("read result");
+        out.push(serde_json::from_str(&text).expect("parse result"));
+      }
+    }
+    out
+  }
+
+  #[tokio::test]
+  async fn a_result_carries_the_attempts_own_wall_clock_window() {
+    let dir = scoped("times");
+    let results = results(&dir.0, vec![outcome("pays", TestStatus::Passed)]).await;
+    assert_eq!(results.len(), 1);
+    let r = &results[0];
+    assert_eq!(r["status"], "passed");
+    assert_eq!(r["name"], "pays");
+    // The window comes from the outcome, not from a name-keyed
+    // TestStarted timestamp — that mis-attributed retries and parallel runs.
+    assert_eq!(r["start"], 1_700_000_000_000_u64);
+    assert_eq!(r["stop"], 1_700_000_000_250_u64, "start plus the attempt's duration");
+  }
+
+  #[tokio::test]
+  async fn annotations_become_labels_and_links() {
+    let dir = scoped("labels");
+    let results = results(&dir.0, vec![outcome("pays", TestStatus::Passed)]).await;
+    let labels = &results[0]["labels"];
+    let has = |name: &str, value: &str| {
+      labels
+        .as_array()
+        .expect("labels")
+        .iter()
+        .any(|l| l["name"] == name && l["value"] == value)
+    };
+    assert!(has("suite", "Checkout"), "{labels}");
+    assert!(has("parentSuite", "tests/checkout.spec.ts"), "{labels}");
+    assert!(has("tag", "@smoke"), "{labels}");
+    assert!(has("severity", "critical"), "{labels}");
+    assert_eq!(results[0]["links"][0]["type"], "issue");
+    assert_eq!(results[0]["links"][0]["name"], "JIRA-7");
+  }
+
+  #[tokio::test]
+  async fn a_failure_carries_its_message_trace_and_steps() {
+    let dir = scoped("failure");
+    let mut failed = (*outcome("pays", TestStatus::Failed)).clone();
+    failed.error = Some(TestFailure {
+      message: "card declined".into(),
+      stack: Some("at pay (tests/checkout.spec.ts:9:1)".into()),
+      diff: None,
+      screenshot: Some(vec![1, 2, 3]),
+    });
+    failed.steps = vec![TestStep {
+      step_id: "s1".into(),
+      title: "enter card".into(),
+      category: StepCategory::TestStep,
+      duration: Duration::from_millis(20),
+      status: StepStatus::Failed,
+      error: Some("declined".into()),
+      location: None,
+      parent_step_id: None,
+      metadata: None,
+      steps: Vec::new(),
+    }];
+
+    let results = results(&dir.0, vec![Arc::new(failed)]).await;
+    let r = &results[0];
+    assert_eq!(r["status"], "failed");
+    assert_eq!(r["statusDetails"]["message"], "card declined");
+    assert!(r["statusDetails"]["trace"].as_str().is_some_and(|t| t.contains("pay")));
+    assert_eq!(r["steps"][0]["name"], "enter card");
+    assert_eq!(r["steps"][0]["status"], "failed");
+
+    // The failure screenshot is written beside the result, not just named.
+    let source = r["attachments"][0]["source"].as_str().expect("attachment source");
+    assert!(dir.0.join(source).exists(), "attachment file missing: {source}");
+  }
+
+  #[tokio::test]
+  async fn a_timeout_is_broken_rather_than_failed() {
+    let dir = scoped("timeout");
+    let results = results(&dir.0, vec![outcome("pays", TestStatus::TimedOut)]).await;
+    assert_eq!(
+      results[0]["status"], "broken",
+      "Allure separates a broken run from a failed assertion"
+    );
+  }
+
+  #[tokio::test]
+  async fn every_attempt_of_a_retried_test_is_its_own_result() {
+    let dir = scoped("retries");
+    let mut first = (*outcome("pays", TestStatus::Failed)).clone();
+    first.attempt = 1;
+    let mut second = (*outcome("pays", TestStatus::Passed)).clone();
+    second.attempt = 2;
+    let results = results(&dir.0, vec![Arc::new(first), Arc::new(second)]).await;
+    assert_eq!(results.len(), 2, "Allure history needs both attempts");
+    let history: std::collections::HashSet<&str> = results
+      .iter()
+      .map(|r| r["historyId"].as_str().unwrap_or_default())
+      .collect();
+    assert_eq!(history.len(), 1, "and they share one history id");
+  }
 }

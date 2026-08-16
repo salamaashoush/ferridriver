@@ -103,6 +103,53 @@ pub fn discover_test_files(config: &TestConfig, cwd: &Path) -> Vec<PathBuf> {
 /// test module evaluated (registrations live in the VM's registry).
 pub struct JsTestSession {
   session: ferridriver_script::Session,
+  console: Arc<TestConsole>,
+}
+
+/// Routes a spec's `console.*` to the test that printed it.
+///
+/// One per worker session: the console global is installed per VM, while
+/// the output belongs to whichever test that VM is running. The test
+/// invocation binds its buffer around the body and unbinds after, so a
+/// line printed between tests (module top level, a stray timer) is
+/// dropped rather than charged to the wrong test.
+#[derive(Default)]
+pub struct TestConsole {
+  /// The running test, which owns both the buffer the line lands in and
+  /// the bus it is published on.
+  target: std::sync::Mutex<Option<Arc<ferridriver_test::model::TestInfo>>>,
+}
+
+impl std::fmt::Debug for TestConsole {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("TestConsole").finish_non_exhaustive()
+  }
+}
+
+impl TestConsole {
+  fn bind(&self, test_info: Arc<ferridriver_test::model::TestInfo>) {
+    if let Ok(mut target) = self.target.lock() {
+      *target = Some(test_info);
+    }
+  }
+
+  fn unbind(&self) {
+    if let Ok(mut target) = self.target.lock() {
+      *target = None;
+    }
+  }
+}
+
+impl ferridriver_script::ConsoleSink for TestConsole {
+  fn emit(&self, entry: &ferridriver_script::ConsoleEntry) {
+    use ferridriver_script::ConsoleLevel;
+    let Ok(target) = self.target.lock() else { return };
+    let Some(test_info) = target.as_ref() else { return };
+    // Node's split, which Playwright's reporters assume: warnings and
+    // errors are stderr, everything else stdout.
+    let stderr = matches!(entry.level, ConsoleLevel::Warn | ConsoleLevel::Error);
+    test_info.emit_output(stderr, &entry.message);
+  }
 }
 
 impl JsTestSession {
@@ -134,8 +181,10 @@ impl JsTestSession {
       caps: TEST_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
       session: None,
     };
+    let console = Arc::new(TestConsole::default());
     let engine_config = ferridriver_script::ScriptEngineConfig {
       sidecars: TEST_SIDECARS.get().cloned().unwrap_or_default(),
+      console_sink: Some(Arc::clone(&console) as Arc<dyn ferridriver_script::ConsoleSink>),
       ..Default::default()
     };
     let session = ferridriver_script::Session::create(engine_config, &run_ctx)
@@ -156,12 +205,19 @@ impl JsTestSession {
         collected.tests.len()
       );
     }
-    Ok(Self { session })
+    Ok(Self { session, console })
   }
 
   #[must_use]
   pub fn session(&self) -> &ferridriver_script::Session {
     &self.session
+  }
+
+  /// Send this session's `console.*` to `output` for the duration of one
+  /// test; [`ConsoleBinding`] unbinds when it drops.
+  pub(crate) fn capture_console(&self, test_info: Arc<ferridriver_test::model::TestInfo>) -> ConsoleBinding<'_> {
+    self.console.bind(test_info);
+    ConsoleBinding { console: &self.console }
   }
 
   #[must_use]
@@ -175,6 +231,19 @@ impl JsTestSession {
 /// global) keeps concurrent `TestRunner` runs — parallel projects, the
 /// runner's own tests — from evicting each other's live VMs, and makes
 /// watch-mode invalidation trivial (new plan ⇒ new pool).
+/// Holds a session's console on one test's output. Unbinds on drop, so a
+/// body that panics or times out cannot leave the next test's lines going
+/// to a finished test.
+pub struct ConsoleBinding<'a> {
+  console: &'a TestConsole,
+}
+
+impl Drop for ConsoleBinding<'_> {
+  fn drop(&mut self) {
+    self.console.unbind();
+  }
+}
+
 pub struct SessionPool {
   bundle: Arc<CompiledBundle>,
   cwd: Arc<PathBuf>,
@@ -366,22 +435,19 @@ pub async fn run_ts_tests_with(mut config: TestConfig, overrides: CliOverrides) 
         match build_ts_plan(&config, &cwd).await {
           Ok(Some((plan, pool))) => {
             *live_pool.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pool);
-            plan
+            ferridriver_test::runner::PlanBuild::ok(plan)
           },
           Ok(None) => {
             eprintln!("no test files found (testMatch: {:?})", config.test_match);
-            empty_plan()
+            ferridriver_test::runner::PlanBuild::ok(empty_plan())
           },
-          Err(e) => {
-            eprintln!("{e}");
-            empty_plan()
-          },
+          Err(e) => ferridriver_test::runner::PlanBuild::failed(empty_plan(), e.to_string()),
         }
       })
     });
     let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
     return if ui_mode {
-      runner.run_ui(factory, cwd, ui_port).await
+      Box::pin(runner.run_test_server(factory, cwd, None, ui_port)).await
     } else {
       runner.run_watch(factory, cwd).await
     };
@@ -403,4 +469,40 @@ pub async fn run_ts_tests_with(mut config: TestConfig, overrides: CliOverrides) 
     .await;
   pool.teardown().await;
   code
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use ferridriver_script::{ConsoleEntry, ConsoleLevel, ConsoleSink};
+
+  fn entry(level: ConsoleLevel, message: &str) -> ConsoleEntry {
+    ConsoleEntry {
+      level,
+      message: message.to_string(),
+      ts_ms: 0,
+    }
+  }
+
+  #[test]
+  fn console_output_goes_to_the_test_that_printed_it() {
+    let console = TestConsole::default();
+    let test_info = Arc::new(ferridriver_test::model::TestInfo::new_anonymous());
+    let output = Arc::clone(&test_info.output);
+
+    // Nothing is bound yet: a line printed between tests belongs to no
+    // test rather than to the next one.
+    console.emit(&entry(ConsoleLevel::Log, "module top level"));
+
+    console.bind(Arc::clone(&test_info));
+    console.emit(&entry(ConsoleLevel::Log, "hello"));
+    console.emit(&entry(ConsoleLevel::Warn, "careful"));
+    console.emit(&entry(ConsoleLevel::Error, "boom"));
+    console.unbind();
+    console.emit(&entry(ConsoleLevel::Log, "after the test"));
+
+    let held = output.lock().expect("output");
+    assert_eq!(held.stdout, "hello\n");
+    assert_eq!(held.stderr, "careful\nboom\n", "warnings and errors are stderr");
+  }
 }

@@ -275,39 +275,10 @@ pub(crate) fn with_test_registry<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut TestRegis
 // ── Location capture ─────────────────────────────────────────────────
 
 /// Bundled-output `line:col` of the innermost JS frame in a fresh stack
-/// trace — the user's registration call site. Synthetic frames
-/// (`<eval>`, `native`) are skipped; the glue remaps the position to
-/// the original `.ts`/`.js` via the bundle's source map.
+/// trace — the user's registration call site. The glue remaps the
+/// position to the original `.ts`/`.js` via the bundle's source map.
 fn capture_location(ctx: &Ctx<'_>) -> (u32, u32) {
-  let Ok(stack) = ctx.eval::<String, _>("new Error().stack") else {
-    return (0, 0);
-  };
-  parse_first_js_frame(&stack).unwrap_or((0, 0))
-}
-
-fn parse_first_js_frame(stack: &str) -> Option<(u32, u32)> {
-  use std::sync::OnceLock;
-
-  use regex::Regex;
-  static RE: OnceLock<Option<Regex>> = OnceLock::new();
-  let re = RE.get_or_init(|| Regex::new(r"([^\s()]+):(\d+):(\d+)").ok()).as_ref()?;
-  for line in stack.lines() {
-    let Some(caps) = re.captures(line) else { continue };
-    let file = &caps[1];
-    // Only real module frames — the capture itself runs via `ctx.eval`
-    // (frame `eval_script`), below the native registration frame; the
-    // caller's frame carries the bundle module name (`*.js`).
-    let is_module = std::path::Path::new(file)
-      .extension()
-      .is_some_and(|e| ["js", "mjs", "cjs", "ts"].iter().any(|x| e.eq_ignore_ascii_case(x)));
-    if !is_module {
-      continue;
-    }
-    if let (Ok(l), Ok(c)) = (caps[2].parse::<u32>(), caps[3].parse::<u32>()) {
-      return Some((l, c));
-    }
-  }
-  None
+  super::call_site::capture_frame(ctx).map_or((0, 0), |(_, line, col)| (line, col))
 }
 
 // ── Fixture inference ────────────────────────────────────────────────
@@ -1113,7 +1084,11 @@ fn make_step_fn<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
             Ok(mp) => mp.into_future::<Value<'js>>().await,
             Err(e) => {
               let se = caught_to_script_error(e, "test.step");
-              Err(rq(&se))
+              Err(crate::bindings::convert::throw_named(
+                &ctx,
+                se.name.as_deref().unwrap_or("Error"),
+                se.message.clone(),
+              ))
             },
           };
           let _ = with_test_registry(&ctx, |r| {
@@ -1127,18 +1102,31 @@ fn make_step_fn<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
               Ok(v)
             },
             Err(e) => {
-              let msg = match &e {
-                rquickjs::Error::Exception => ctx
-                  .catch()
-                  .as_exception()
-                  .and_then(rquickjs::Exception::message)
-                  .unwrap_or_else(|| "step failed".to_string()),
-                other => other.to_string(),
+              // Re-throw as a real `Error` carrying the original name and
+              // message. `rquickjs::Error::new_from_js_message` would
+              // render as "Error converting from js 'bdd' into type
+              // 'Error': ...", and that prefix reaches the user through
+              // every report the run writes.
+              let (name, msg) = match &e {
+                rquickjs::Error::Exception => {
+                  let caught = ctx.catch();
+                  let exception = caught.as_exception();
+                  (
+                    exception
+                      .and_then(|ex| ex.as_object().get::<_, String>("name").ok())
+                      .filter(|n| !n.is_empty())
+                      .unwrap_or_else(|| "Error".to_string()),
+                    exception
+                      .and_then(rquickjs::Exception::message)
+                      .unwrap_or_else(|| "step failed".to_string()),
+                  )
+                },
+                other => ("Error".to_string(), other.to_string()),
               };
               // A caught exception was consumed above — re-throw it so
               // the caller still observes the failure.
               bridge.end_step(step_id, Some(msg.clone())).await;
-              Err(rq(&ScriptError::internal(msg)))
+              Err(crate::bindings::convert::throw_named(&ctx, &name, msg))
             },
           }
         })
@@ -2119,7 +2107,7 @@ pub async fn collect_tests(vm: &crate::vm::VmHandle) -> Result<CollectedTests, S
 
 #[cfg(test)]
 mod tests {
-  use super::{interpolate_title, parse_destructured_keys, parse_first_js_frame};
+  use super::{interpolate_title, parse_destructured_keys};
 
   #[test]
   fn destructured_keys_arrow_and_function_forms() {
@@ -2151,12 +2139,6 @@ mod tests {
       parse_destructured_keys("async ({\n  page,\n  context,\n}) => {}"),
       Some(vec!["page".to_string(), "context".to_string()])
     );
-  }
-
-  #[test]
-  fn first_js_frame_skips_synthetic_frames() {
-    let stack = "Error\n    at eval_script:1:4\n    at register (native)\n    at ferridriver-tests.js:42:7\n    at ferridriver-tests.js:1:1";
-    assert_eq!(parse_first_js_frame(stack), Some((42, 7)));
   }
 
   #[test]

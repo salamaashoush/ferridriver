@@ -93,7 +93,8 @@ fn extract_text(step: &TestStep) -> String {
 #[async_trait::async_trait]
 impl Reporter for CucumberJsonReporter {
   async fn on_event(&mut self, event: &ReporterEvent) {
-    if let ReporterEvent::TestFinished { test_id, outcome } = event {
+    if let ReporterEvent::TestFinished { outcome } = event {
+      let test_id = &outcome.test_id;
       let feature = test_id.suite.as_deref().unwrap_or("Unknown Feature");
       self.ensure_feature(feature, &test_id.file);
 
@@ -139,5 +140,148 @@ impl Reporter for CucumberJsonReporter {
     let json = serde_json::to_string_pretty(&self.features)?;
     std::fs::write(&self.output_path, json)?;
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::sync::Arc;
+  use std::time::Duration;
+
+  use super::*;
+  use crate::model::{StepCategory, TestId, TestOutcome, TestStatus};
+
+  struct ScopedDir(std::path::PathBuf);
+  impl Drop for ScopedDir {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+
+  fn scoped(name: &str) -> ScopedDir {
+    let path = std::env::temp_dir().join(format!("ferri-bdd-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).expect("temp dir");
+    ScopedDir(path)
+  }
+
+  fn step(keyword: &str, text: &str, status: StepStatus, error: Option<&str>) -> TestStep {
+    TestStep {
+      step_id: format!("s-{text}"),
+      title: format!("{keyword}{text}"),
+      category: StepCategory::TestStep,
+      duration: Duration::from_millis(12),
+      status,
+      error: error.map(ToString::to_string),
+      location: None,
+      parent_step_id: None,
+      // The translator stores the keyword trimmed (`translate.rs`:
+      // `step.keyword.trim()`); the reporter re-adds the separating space.
+      metadata: Some(serde_json::json!({ "bdd_keyword": keyword.trim(), "bdd_text": text })),
+      steps: Vec::new(),
+    }
+  }
+
+  fn scenario(name: &str, status: TestStatus, steps: Vec<TestStep>) -> Arc<TestOutcome> {
+    Arc::new(TestOutcome {
+      test_id: TestId {
+        file: "features/login.feature".into(),
+        suite: Some("Login".into()),
+        name: name.into(),
+        line: Some(4),
+        column: None,
+      },
+      status,
+      duration: Duration::from_millis(60),
+      max_attempts: 1,
+      steps,
+      ..Default::default()
+    })
+  }
+
+  #[tokio::test]
+  async fn a_scenario_becomes_a_feature_element_with_its_steps() {
+    let dir = scoped("cucumber");
+    let path = dir.0.join("cucumber.json");
+    let mut reporter = CucumberJsonReporter::new(path.clone());
+    reporter
+      .on_event(&ReporterEvent::TestFinished {
+        outcome: scenario(
+          "signs in",
+          TestStatus::Passed,
+          vec![
+            step("Given ", "a registered user", StepStatus::Passed, None),
+            step("When ", "they sign in", StepStatus::Passed, None),
+          ],
+        ),
+      })
+      .await;
+    reporter.finalize().await.expect("finalize");
+
+    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+    let feature = &doc[0];
+    assert_eq!(feature["keyword"], "Feature");
+    assert_eq!(feature["name"], "Login");
+    assert_eq!(feature["uri"], "features/login.feature");
+    let element = &feature["elements"][0];
+    assert_eq!(element["name"], "signs in");
+    assert_eq!(element["type"], "scenario");
+    assert_eq!(element["steps"][0]["keyword"], "Given ");
+    assert_eq!(element["steps"][0]["name"], "a registered user");
+    assert_eq!(element["steps"][0]["result"]["status"], "passed");
+    assert_eq!(
+      element["steps"][0]["result"]["duration"], 12_000_000_u64,
+      "cucumber durations are nanoseconds"
+    );
+  }
+
+  #[tokio::test]
+  async fn a_failing_step_carries_its_message() {
+    let dir = scoped("cucumber-fail");
+    let path = dir.0.join("cucumber.json");
+    let mut reporter = CucumberJsonReporter::new(path.clone());
+    reporter
+      .on_event(&ReporterEvent::TestFinished {
+        outcome: scenario(
+          "signs in",
+          TestStatus::Failed,
+          vec![step(
+            "Then ",
+            "they see the dashboard",
+            StepStatus::Failed,
+            Some("no dashboard"),
+          )],
+        ),
+      })
+      .await;
+    reporter.finalize().await.expect("finalize");
+
+    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+    let result = &doc[0]["elements"][0]["steps"][0]["result"];
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["error_message"], "no dashboard");
+  }
+
+  #[tokio::test]
+  async fn two_scenarios_of_one_feature_share_a_feature_entry() {
+    let dir = scoped("cucumber-group");
+    let path = dir.0.join("cucumber.json");
+    let mut reporter = CucumberJsonReporter::new(path.clone());
+    for name in ["signs in", "signs out"] {
+      reporter
+        .on_event(&ReporterEvent::TestFinished {
+          outcome: scenario(
+            name,
+            TestStatus::Passed,
+            vec![step("Given ", "a user", StepStatus::Passed, None)],
+          ),
+        })
+        .await;
+    }
+    reporter.finalize().await.expect("finalize");
+
+    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+    assert_eq!(doc.as_array().expect("features").len(), 1, "one feature");
+    assert_eq!(doc[0]["elements"].as_array().expect("elements").len(), 2);
   }
 }

@@ -15,6 +15,7 @@ fn make_test(i: usize) -> TestCase {
       suite: Some("no_browser".into()),
       name: format!("case_{i:03}"),
       line: None,
+      column: None,
     },
     test_fn: Arc::new(move |_| Box::pin(async move { Ok(()) })),
     fixture_requests: Vec::new(),
