@@ -119,7 +119,7 @@ The `TestConfig` Rust type is the canonical reference. Notable fields:
 | `updateSnapshots`      | enum      | `missing` | `all` / `changed` / `missing` / `none` |
 | `storageState`         | path?     | none    | Saved auth state JSON |
 | `baseUrl`              | string?   | none    | Base URL for relative `page.goto`s |
-| `strict`               | bool      | false   | (BDD) undefined / pending steps fail |
+| `strict`               | bool      | true    | (BDD) undefined / pending steps fail; `false` (or `--no-strict`) reports them without failing |
 | `order`                | enum      | `defined` | `defined` / `random[:SEED]` (BDD) |
 | `language`             | string?   | none    | Default Gherkin keyword language |
 | `worldParameters`      | JSON      | `{}`    | Passed to JS `this.parameters` (BDD) |

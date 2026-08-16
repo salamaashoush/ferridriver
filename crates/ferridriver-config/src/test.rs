@@ -813,7 +813,8 @@ pub struct CliOverrides {
   pub bypass_csp: Option<bool>,
   pub bdd_tags: Option<String>,
   pub bdd_dry_run: bool,
-  pub bdd_strict: bool,
+  /// `--strict` / `--no-strict`; `None` leaves the resolved config's value.
+  pub bdd_strict: Option<bool>,
   pub bdd_fail_fast: bool,
   pub bdd_step_timeout: Option<u64>,
   pub bdd_order: Option<String>,
@@ -886,7 +887,7 @@ impl Default for TestConfig {
       config_grep: None,
       config_grep_invert: None,
       metadata: serde_json::Value::Null,
-      strict: false,
+      strict: true,
       order: "defined".into(),
       language: None,
       world_parameters: serde_json::Value::Null,

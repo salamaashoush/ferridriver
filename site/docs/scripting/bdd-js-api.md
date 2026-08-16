@@ -112,7 +112,7 @@ construction.
 | Return / throw                | Result |
 |-------------------------------|--------|
 | (nothing) / resolved promise  | **passed** |
-| string `"pending"`            | **pending** (yellow; `--strict` makes it fail) |
+| string `"pending"`            | **failed** — pending and undefined steps fail the run unless `--no-strict` is passed, which reports them yellow |
 | string `"skipped"` or `this.skip()` | **skipped** |
 | throw                         | **failed** — error remapped to original `.ts` / `.js` location via the rolldown source map, including the stack |
 
@@ -142,7 +142,11 @@ Given("I pick {color}", async function (color: { hex: string }) {
 });
 ```
 
-Or shorthand: `defineParameterType("color", "red|green|blue")`.
+`regexp` takes a string or a `RegExp`; its pattern keeps its own regex
+semantics inside the expression, so alternations and character classes
+match as written. Built-in names (`string`, `int`, `float`, `word`, `{}`)
+cannot be redefined, and registering the same name twice is an error —
+both are refused at load with a message naming the type.
 
 Type inference: `Given('I have {int} {string}', (count, item) => {})`
 gives `count: number, item: string` in TS-aware editors.

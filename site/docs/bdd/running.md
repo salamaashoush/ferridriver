@@ -33,7 +33,8 @@ file. Defaults to `steps/**/*.{js,ts}` and
 --tags EXPR               tag filter: @smoke and not @wip, etc.
 --workers N               parallel workers (default: CPU count)
 --reporter NAME           reporter name (repeatable)
---strict                  treat undefined / pending steps as failures
+--strict                  treat undefined / pending steps as failures (default)
+--no-strict               report undefined / pending steps without failing
 --dry-run                 parse + report scenarios without executing
 --fail-fast               stop after first failure
 --step-timeout MS         override per-step timeout

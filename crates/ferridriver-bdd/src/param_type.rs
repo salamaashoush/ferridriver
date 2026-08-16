@@ -28,8 +28,30 @@ impl ParameterTypeRegistry {
     }
   }
 
-  pub fn register(&mut self, param_type: CustomParamType) {
+  /// Register a custom parameter type.
+  ///
+  /// Mirrors cucumber-js' `ParameterTypeRegistry`: neither a built-in name nor
+  /// an already-registered one can be taken over, because the expression
+  /// compiler resolves built-ins itself and would otherwise ignore the
+  /// definition without saying so.
+  pub fn register(&mut self, param_type: CustomParamType) -> ferridriver::error::Result<()> {
+    if crate::expression::BUILTIN_PARAM_TYPES.contains(&param_type.name.as_str()) {
+      return Err(ferridriver::FerriError::invalid_argument(
+        "parameter-type",
+        format!(
+          "{{{}}} is a built-in parameter type and cannot be redefined",
+          param_type.name
+        ),
+      ));
+    }
+    if self.types.contains_key(&param_type.name) {
+      return Err(ferridriver::FerriError::invalid_argument(
+        "parameter-type",
+        format!("there is already a parameter type with name {}", param_type.name),
+      ));
+    }
     self.types.insert(param_type.name.clone(), param_type);
+    Ok(())
   }
 
   pub fn find(&self, name: &str) -> Option<&CustomParamType> {

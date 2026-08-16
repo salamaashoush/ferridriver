@@ -60,7 +60,8 @@ curl -fsSL https://github.com/salamaashoush/ferridriver/releases/latest/download
 
 ```
 ferridriver bdd [--steps GLOB]... [--tags EXPR] [--workers N]
-                [--reporter SPEC]... [--strict] [--dry-run] [--fail-fast]
+                [--reporter SPEC]... [--strict|--no-strict] [--dry-run]
+                [--fail-fast]
                 [--step-timeout MS] [--order defined|random[:SEED]]
                 [--language LANG] [--world-parameters JSON]
                 [BROWSER FLAGS]

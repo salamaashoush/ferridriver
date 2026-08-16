@@ -445,9 +445,13 @@ pub struct BddArgs {
   #[arg(long)]
   pub fail_fast: bool,
 
-  /// Treat undefined or pending steps as failures.
-  #[arg(long)]
+  /// Treat undefined or pending steps as failures (default).
+  #[arg(long, overrides_with = "no_strict")]
   pub strict: bool,
+
+  /// Report undefined or pending steps without failing the run.
+  #[arg(long = "no-strict", overrides_with = "strict")]
+  pub no_strict: bool,
 
   /// Per-step timeout in milliseconds.
   #[arg(long)]

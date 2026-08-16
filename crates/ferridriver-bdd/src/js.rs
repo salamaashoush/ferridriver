@@ -256,11 +256,13 @@ impl JsBddSession {
 
     let mut registry = StepRegistry::build();
     for pt in &snapshot.param_types {
-      registry.register_param_type(CustomParamType {
-        name: pt.name.clone(),
-        regex: pt.regexp.clone(),
-        transformer: None,
-      });
+      registry
+        .register_param_type(CustomParamType {
+          name: pt.name.clone(),
+          regex: pt.regexp.clone(),
+          transformer: None,
+        })
+        .map_err(|e| anyhow::anyhow!("defineParameterType `{}`: {}", pt.name, e))?;
     }
     for (idx, step) in snapshot.steps.iter().enumerate() {
       let kind = match step.kind.as_str() {
@@ -460,6 +462,13 @@ impl JsBddSession {
         }
 
         let status = match self.registry.find_match(&step.text) {
+          // An ambiguous step is a definition bug, not a missing
+          // definition: it fails the scenario even under --no-strict,
+          // exactly as the Rust-step executor treats it.
+          Err(e @ crate::step::MatchError::Ambiguous { .. }) => {
+            failed = true;
+            JsStepStatus::Failed(e.to_string())
+          },
           Err(e) => {
             failed = true;
             // JS step authors need a JS snippet, not a Rust skeleton.

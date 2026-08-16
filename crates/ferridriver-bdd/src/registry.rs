@@ -27,11 +27,13 @@ impl StepRegistry {
     // Collect custom parameter type registrations from inventory.
     for reg in inventory::iter::<ParameterTypeRegistration> {
       let transformer = reg.transformer_factory.map(|f| f());
-      registry.param_types.register(CustomParamType {
+      if let Err(e) = registry.param_types.register(CustomParamType {
         name: reg.name.to_string(),
         regex: reg.regex.to_string(),
         transformer,
-      });
+      }) {
+        tracing::error!("failed to register parameter type \"{}\": {}", reg.name, e);
+      }
     }
 
     // Collect step registrations from #[given], #[when], #[then], #[step] macros.
@@ -47,10 +49,7 @@ impl StepRegistry {
               regex,
               param_types: vec![expression::ParamType::Word; num_groups],
               param_infos: (0..num_groups)
-                .map(|i| expression::ParamInfo {
-                  ty: expression::ParamType::Word,
-                  id: i,
-                })
+                .map(|i| expression::ParamInfo::positional(expression::ParamType::Word, i, i + 1))
                 .collect(),
               handler: (reg.handler_factory)(),
               location: StepLocation {
@@ -174,10 +173,7 @@ impl StepRegistry {
       regex,
       param_types: vec![expression::ParamType::Word; num_groups],
       param_infos: (0..num_groups)
-        .map(|i| expression::ParamInfo {
-          ty: expression::ParamType::Word,
-          id: i,
-        })
+        .map(|i| expression::ParamInfo::positional(expression::ParamType::Word, i, i + 1))
         .collect(),
       handler,
       location,
@@ -186,8 +182,8 @@ impl StepRegistry {
   }
 
   /// Register a custom parameter type for Cucumber expressions.
-  pub fn register_param_type(&mut self, param_type: CustomParamType) {
-    self.param_types.register(param_type);
+  pub fn register_param_type(&mut self, param_type: CustomParamType) -> ferridriver::error::Result<()> {
+    self.param_types.register(param_type)
   }
 
   /// Access the hook registry.

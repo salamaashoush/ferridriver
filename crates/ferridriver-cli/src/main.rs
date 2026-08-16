@@ -451,7 +451,11 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
     ui: args.ui,
     ui_port: args.ui_port,
     bdd_fail_fast: args.fail_fast,
-    bdd_strict: args.strict,
+    bdd_strict: match (args.strict, args.no_strict) {
+      (true, _) => Some(true),
+      (_, true) => Some(false),
+      _ => None,
+    },
     bdd_step_timeout: args.step_timeout,
     bdd_order: args.order,
     bdd_language: args.language,

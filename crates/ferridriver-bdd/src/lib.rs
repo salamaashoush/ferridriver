@@ -224,8 +224,8 @@ pub async fn run_bdd_with(
   if let Some(t) = overrides.bdd_step_timeout {
     config.timeout = t;
   }
-  if overrides.bdd_strict {
-    config.strict = true;
+  if let Some(strict) = overrides.bdd_strict {
+    config.strict = strict;
   }
   if let Some(ref order) = overrides.bdd_order {
     config.order = order.clone();

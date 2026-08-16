@@ -1,10 +1,10 @@
 Feature: Pending Steps
-  Undefined steps are treated as pending in non-strict mode.
+  Undefined steps fail the run by default and are reported as pending under --no-strict.
 
   Scenario: Undefined step becomes pending
-    Given I navigate to "https://example.com"
+    Given a blank page
     When I do something that is not yet implemented
-    Then the page title should contain "Example"
+    Then the page is still blank
 
   Scenario: Multiple undefined steps
     Given I set up the test environment

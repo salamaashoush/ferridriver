@@ -166,7 +166,8 @@ pub fn parse_common_cli_args() -> CliOverrides {
         overrides.bdd_tags = args.get(i).cloned();
       },
       "--dry-run" => overrides.bdd_dry_run = true,
-      "--strict" => overrides.bdd_strict = true,
+      "--strict" => overrides.bdd_strict = Some(true),
+      "--no-strict" => overrides.bdd_strict = Some(false),
       "--fail-fast" => overrides.bdd_fail_fast = true,
       "--step-timeout" => {
         i += 1;
