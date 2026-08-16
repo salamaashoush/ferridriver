@@ -142,7 +142,7 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 /// different aux payload), so they must not share one slot. `salt`
 /// carries extra pipeline state that changes the output without
 /// changing any input file — today the bundler-shims fingerprint
-/// (`BundlerShims::fingerprint`).
+/// (`BundlerEnv::fingerprint`).
 #[must_use]
 pub fn entry_key(kind: &str, entry_paths: &[PathBuf], salt: u64) -> u64 {
   let mut canon: Vec<String> = entry_paths

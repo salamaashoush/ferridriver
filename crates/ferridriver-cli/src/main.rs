@@ -30,20 +30,24 @@ use ferridriver_config::FerridriverConfig;
 use ferridriver_mcp::McpServer;
 use ferridriver_script::ConsoleSink;
 
-/// Install the config's `[bundler]` shims (import aliases + virtual
-/// modules) into the process-global slot every bundle path reads.
-/// Relative alias targets resolve against the config file's directory,
-/// falling back to the cwd for a default/in-memory config.
-fn install_bundler_shims(config: &FerridriverConfig) {
+/// Install the config's `[bundler]` section (import aliases, virtual
+/// modules, resolution controls) plus `[test].tsconfig` into the
+/// process-global slot every bundle path reads. Relative paths resolve
+/// against the config file's directory, falling back to the cwd for a
+/// default/in-memory config.
+///
+/// Runs before the subcommand dispatch because a session or compile
+/// runtime built before the install would bundle against an empty
+/// environment for its whole life.
+fn install_bundler_env(config: &FerridriverConfig) {
   let base = config
     .source_dir
     .clone()
     .or_else(|| std::env::current_dir().ok())
     .unwrap_or_else(|| std::path::PathBuf::from("."));
-  ferridriver_script::bundle::set_bundler_shims(ferridriver_script::bundle::BundlerShims::from_config(
-    &config.bundler,
-    &base,
-  ));
+  let env = ferridriver_script::bundle::BundlerEnv::from_config(&config.bundler, &base)
+    .with_tsconfig(config.test.tsconfig.as_deref(), &base);
+  ferridriver_script::bundle::set_bundler_env(env);
 }
 
 /// Install `[test].moduleAliases` (already merged with `--module-alias`)
@@ -76,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
   // Load the unified config exactly once. Each subcommand reads the
   // section it cares about from this single document.
   let config = FerridriverConfig::load_layered(args.config.as_deref(), !args.no_inherit)?;
-  install_bundler_shims(&config);
+  install_bundler_env(&config);
 
   match args.command {
     cli::Command::Mcp(mcp_args) => Box::pin(run_mcp(config, mcp_args)).await,

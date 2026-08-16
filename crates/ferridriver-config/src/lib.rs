@@ -349,13 +349,18 @@ pub enum ExtensionCommandsCeiling {
 /// Options for the rolldown bundling pipeline.
 ///
 /// ```toml
+/// [bundler]
+/// conditions = ["browser"]
+/// mainFields = ["module", "main"]
+/// aliasFields = [["browser"]]
+///
 /// [bundler.alias]
 /// "@wdio/utils" = "./shims/wdio-utils.ts"
 ///
 /// [bundler.virtualModules]
 /// "acme:env" = "export const env = 'staging';"
 /// ```
-#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BundlerConfig {
   /// Redirect a bare import specifier to a shim file. The target is a
@@ -369,6 +374,35 @@ pub struct BundlerConfig {
   /// The specifier never touches the filesystem. For TypeScript or
   /// multi-file shims use `alias` instead.
   pub virtual_modules: BTreeMap<String, String>,
+  /// Extra `exports` / `imports` condition names, appended to the base
+  /// set the resolver always applies (`default`, plus `import` or
+  /// `require` depending on how the specifier was reached). A package
+  /// whose `exports` map has a `browser` branch only takes it when
+  /// `"browser"` is listed here.
+  pub conditions: Vec<String>,
+  /// `package.json` fields consulted, in order, for a package that has
+  /// no matching `exports` entry. Defaults to `["module", "main"]`;
+  /// an empty list disables main-field resolution entirely, which
+  /// leaves such a package unresolvable.
+  pub main_fields: Vec<String>,
+  /// `package.json` fields whose OBJECT value remaps module paths — the
+  /// legacy `browser` field form (`{"./node.js": "./browser.js"}`),
+  /// which is a different mechanism from a `browser` condition inside
+  /// `exports`. Each entry is a field path, so `[["browser"]]` selects
+  /// the top-level `browser` field. Empty by default.
+  pub alias_fields: Vec<Vec<String>>,
+}
+
+impl Default for BundlerConfig {
+  fn default() -> Self {
+    Self {
+      alias: BTreeMap::new(),
+      virtual_modules: BTreeMap::new(),
+      conditions: Vec::new(),
+      main_fields: vec!["module".to_string(), "main".to_string()],
+      alias_fields: Vec::new(),
+    }
+  }
 }
 
 /// One declared sidecar process. Driven over fd 3/4 with NUL-delimited
@@ -670,6 +704,41 @@ mod tests {
       Some("export const env = 'staging';")
     );
     assert_eq!(root.source_dir.as_deref(), Some(dir.as_path()));
+  }
+
+  #[test]
+  fn bundler_resolution_controls_parse_without_being_anchored() {
+    let dir = std::env::temp_dir().join("ferridriver-config-bundler-resolve");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("ferridriver.toml");
+    std::fs::write(
+      &path,
+      r#"
+[bundler]
+conditions = ["browser", "development"]
+mainFields = ["browser", "module", "main"]
+aliasFields = [["browser"]]
+"#,
+    )
+    .unwrap();
+
+    let root = FerridriverConfig::load_from(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Condition and field names are package.json vocabulary, never
+    // paths: anchoring them would turn "browser" into an absolute path.
+    assert_eq!(root.bundler.conditions, vec!["browser", "development"]);
+    assert_eq!(root.bundler.main_fields, vec!["browser", "module", "main"]);
+    assert_eq!(root.bundler.alias_fields, vec![vec!["browser".to_string()]]);
+  }
+
+  #[test]
+  fn bundler_main_fields_default_is_not_empty() {
+    // rolldown's own default for a neutral platform is EMPTY, which
+    // leaves a package that has only `main` unresolvable.
+    assert_eq!(BundlerConfig::default().main_fields, vec!["module", "main"]);
+    assert!(BundlerConfig::default().conditions.is_empty());
+    assert!(BundlerConfig::default().alias_fields.is_empty());
   }
 
   #[test]

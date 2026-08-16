@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rolldown::{Bundler, BundlerOptions, InputItem, OutputFormat, Platform, SourceMapType};
-use rolldown_common::{ModuleType, Output};
+use rolldown_common::{CodeSplittingMode, ModuleType, Output, ResolveOptions, TsConfig};
 use rolldown_plugin::{
   HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookUsage,
   Plugin, PluginContext, SharedLoadPluginContext,
@@ -26,21 +26,38 @@ use crate::error::ScriptError;
 /// Id prefix for operator-declared virtual modules (`[bundler.virtualModules]`).
 const VIRTUAL_USER_PREFIX: &str = "\0fd-virtual:";
 
-/// Operator-facing bundler options (`[bundler]` in the unified config):
-/// import-specifier aliases to shim files plus inline virtual modules.
-/// Applied by `FerridriverRuntimePlugin` to EVERY bundle ferridriver
-/// produces — BDD step files, extensions, `ferridriver run` scripts.
+/// Operator-facing bundler options: the `[bundler]` section of the
+/// unified config (shim aliases, inline virtual modules, and the module
+/// resolution controls) plus the `[test].tsconfig` selection. Applied to
+/// EVERY bundle ferridriver produces — BDD step files, extensions,
+/// `ferridriver run` scripts.
 #[derive(Debug, Default, Clone)]
-pub struct BundlerShims {
+pub struct BundlerEnv {
   /// `specifier -> absolute shim file path`. The shim is bundled and
   /// transpiled like any other source (so `.ts` works) and lands in the
   /// source map, which keeps the disk-cache freshness check covering it.
   pub alias: Vec<(String, PathBuf)>,
   /// `specifier -> inline ES-module source` (never touches the fs).
   pub virtual_modules: Vec<(String, String)>,
+  /// Extra `exports`/`imports` condition names. The resolver appends
+  /// these to its own base set, so an empty list resolves exactly as it
+  /// did before any were configured.
+  pub conditions: Vec<String>,
+  /// `package.json` fields consulted when no `exports` entry matches.
+  /// rolldown's own default for a neutral platform is EMPTY, which
+  /// leaves a plain `"main": "index.js"` package unresolvable; the
+  /// config's default (`["module", "main"]`) is what ships.
+  pub main_fields: Vec<String>,
+  /// `package.json` field paths holding a legacy path-remapping object.
+  pub alias_fields: Vec<Vec<String>>,
+  /// The tsconfig whose `paths` / `baseUrl` govern resolution. `None`
+  /// leaves rolldown's per-module upward discovery in place; a value
+  /// pins one file for the whole graph, which is the only way to select
+  /// a config discovery would not find (`tsconfig.test.json`).
+  pub tsconfig: Option<PathBuf>,
 }
 
-impl BundlerShims {
+impl BundlerEnv {
   /// Build from the unified config section, resolving relative alias
   /// targets against `base` (the config file's directory, or cwd).
   #[must_use]
@@ -59,14 +76,34 @@ impl BundlerShims {
       .iter()
       .map(|(k, v)| (k.clone(), v.clone()))
       .collect();
-    Self { alias, virtual_modules }
+    Self {
+      alias,
+      virtual_modules,
+      conditions: cfg.conditions.clone(),
+      main_fields: cfg.main_fields.clone(),
+      alias_fields: cfg.alias_fields.clone(),
+      tsconfig: None,
+    }
+  }
+
+  /// Pin the tsconfig governing resolution, resolved against `base` when
+  /// relative.
+  #[must_use]
+  pub fn with_tsconfig(mut self, tsconfig: Option<&str>, base: &Path) -> Self {
+    self.tsconfig = tsconfig.map(|t| {
+      let p = Path::new(t);
+      if p.is_absolute() { p.to_path_buf() } else { base.join(p) }
+    });
+    self
   }
 
   /// Stable content fingerprint, folded into every bundle cache key so
-  /// editing an alias mapping or a virtual module's source invalidates
-  /// cached bytecode. (Alias *target file* content is already covered by
-  /// the transitive source-map input hashes; this covers the mapping
-  /// itself and the inline sources, which never appear as files.)
+  /// editing an alias mapping, a virtual module's source or a resolution
+  /// control invalidates cached bytecode. (Alias *target file* content is
+  /// already covered by the transitive source-map input hashes; this
+  /// covers the mapping itself, the inline sources, and every knob that
+  /// changes output without changing a source byte. The tsconfig's
+  /// CONTENT is covered separately, through the bundle's input set.)
   #[must_use]
   pub fn fingerprint(&self) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -79,24 +116,28 @@ impl BundlerShims {
       spec.hash(&mut h);
       src.hash(&mut h);
     }
+    self.conditions.hash(&mut h);
+    self.main_fields.hash(&mut h);
+    self.alias_fields.hash(&mut h);
+    self.tsconfig.hash(&mut h);
     h.finish()
   }
 }
 
-/// Process-global bundler shims, installed once by the host (CLI / MCP
-/// server) from the loaded config before any bundling happens. A global
-/// (rather than a parameter threaded through every bundle entry point)
-/// because the config is process-wide and the bundle paths are reached
-/// from five call sites across three crates — same pattern as
+/// Process-global bundler environment, installed once by the host (CLI /
+/// MCP server) from the loaded config before any bundling happens. A
+/// global (rather than a parameter threaded through every bundle entry
+/// point) because the config is process-wide and the bundle paths are
+/// reached from five call sites across three crates — same pattern as
 /// `set_bdd_script_caps`.
-static BUNDLER_SHIMS: std::sync::RwLock<Option<Arc<BundlerShims>>> = std::sync::RwLock::new(None);
+static BUNDLER_ENV: std::sync::RwLock<Option<Arc<BundlerEnv>>> = std::sync::RwLock::new(None);
 
-pub fn set_bundler_shims(shims: BundlerShims) {
-  *BUNDLER_SHIMS.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(shims));
+pub fn set_bundler_env(env: BundlerEnv) {
+  *BUNDLER_ENV.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(env));
 }
 
-pub(crate) fn bundler_shims() -> Arc<BundlerShims> {
-  BUNDLER_SHIMS
+pub(crate) fn bundler_env() -> Arc<BundlerEnv> {
+  BUNDLER_ENV
     .read()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .clone()
@@ -104,12 +145,13 @@ pub(crate) fn bundler_shims() -> Arc<BundlerShims> {
 }
 
 /// Everything outside the entry files that can change a bundle's output
-/// for byte-identical sources: the `[bundler]` shims and the native
-/// module aliases. Every cache key folds this in.
+/// for byte-identical sources: the `[bundler]` shims and resolution
+/// controls, the pinned tsconfig, and the native module aliases. Every
+/// cache key folds this in.
 fn bundle_env_fingerprint() -> u64 {
   use std::hash::{Hash, Hasher};
   let mut h = std::collections::hash_map::DefaultHasher::new();
-  bundler_shims().fingerprint().hash(&mut h);
+  bundler_env().fingerprint().hash(&mut h);
   crate::bindings::native_modules::alias_fingerprint().hash(&mut h);
   h.finish()
 }
@@ -124,7 +166,7 @@ const MULTI_ENTRY_ID: &str = "\0ferridriver-multi-entry.js";
 
 #[derive(Debug)]
 struct FerridriverRuntimePlugin {
-  shims: Arc<BundlerShims>,
+  env: Arc<BundlerEnv>,
   /// Source of the synthetic multi-entry module, when the bundle has
   /// more than one entry file.
   multi_entry: Option<String>,
@@ -150,18 +192,13 @@ impl Plugin for FerridriverRuntimePlugin {
         ..Default::default()
       }));
     }
-    if self
-      .shims
-      .virtual_modules
-      .iter()
-      .any(|(spec, _)| spec == args.specifier)
-    {
+    if self.env.virtual_modules.iter().any(|(spec, _)| spec == args.specifier) {
       return Ok(Some(HookResolveIdOutput::from_id(format!(
         "{VIRTUAL_USER_PREFIX}{}",
         args.specifier
       ))));
     }
-    if let Some((_, target)) = self.shims.alias.iter().find(|(spec, _)| spec == args.specifier) {
+    if let Some((_, target)) = self.env.alias.iter().find(|(spec, _)| spec == args.specifier) {
       // Resolved to a concrete file: rolldown's default fs loader reads
       // it and transpiles by extension, so `.ts` shims work.
       return Ok(Some(HookResolveIdOutput::from_id(
@@ -183,7 +220,7 @@ impl Plugin for FerridriverRuntimePlugin {
     }
     let code: Option<Cow<'_, str>> = args.id.strip_prefix(VIRTUAL_USER_PREFIX).and_then(|spec| {
       self
-        .shims
+        .env
         .virtual_modules
         .iter()
         .find(|(s, _)| s == spec)
@@ -274,6 +311,12 @@ pub struct BundledSource {
   /// exactly the small helper modules extensions are made of — and the
   /// bytecode caches then treated an edited helper as unchanged.
   pub modules: Vec<PathBuf>,
+  /// Non-module files the resolver read that can change the output —
+  /// the tsconfigs rolldown discovered or was pointed at. They are not
+  /// in `modules` (nothing imports them) but editing a `paths` mapping
+  /// changes what the same sources resolve to, so they belong in the
+  /// cache's input set.
+  pub config_inputs: Vec<PathBuf>,
 }
 
 /// rolldown-bundle + tree-shake + transpile the step entry files (and
@@ -282,6 +325,16 @@ pub struct BundledSource {
 pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<BundledSource, ScriptError> {
   if entry_paths.is_empty() {
     return Err(ScriptError::internal("no step entry files".to_string()));
+  }
+
+  let env = bundler_env();
+  if let Some(ts) = &env.tsconfig
+    && !ts.is_file()
+  {
+    return Err(ScriptError::internal(format!(
+      "[test].tsconfig points at {}, which is not a file",
+      ts.display()
+    )));
   }
 
   // ONE rolldown input, always. Each input produces its own entry
@@ -319,13 +372,30 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<Bundle
     // Hidden: emit the map but no `//# sourceMappingURL` trailer in the
     // code we feed to QuickJS.
     sourcemap: Some(SourceMapType::Hidden),
+    // One chunk, always. Only the entry chunk is returned and compiled,
+    // so a split chunk would be a reference to code nobody wrote — and
+    // its modules would be missing from the cache's input set, making an
+    // edit to them invalidate nothing. Legal because there is exactly
+    // one input (MULTI_ENTRY fans the rest out).
+    code_splitting: Some(CodeSplittingMode::Bool(false)),
+    resolve: Some(ResolveOptions {
+      // `None` and an empty list are NOT the same to rolldown for main
+      // fields: `None` means "platform default", which is empty for
+      // Platform::Neutral. Always pass ours.
+      main_fields: Some(env.main_fields.clone()),
+      condition_names: (!env.conditions.is_empty()).then(|| env.conditions.clone()),
+      alias_fields: (!env.alias_fields.is_empty()).then(|| env.alias_fields.clone()),
+      ..Default::default()
+    }),
+    // Unset leaves rolldown's per-module upward discovery (its default).
+    tsconfig: env.tsconfig.clone().map(TsConfig::Manual),
     ..Default::default()
   };
 
   let mut bundler = Bundler::with_plugins(
     options,
     vec![Arc::new(FerridriverRuntimePlugin {
-      shims: bundler_shims(),
+      env: Arc::clone(&env),
       multi_entry,
     })],
   )
@@ -335,6 +405,21 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<Bundle
   let out = Box::pin(bundler.generate())
     .await
     .map_err(|e| ScriptError::internal(format!("rolldown bundle: {e:?}")))?;
+
+  // Every tsconfig the resolver consulted, whether pinned or discovered
+  // per module. rolldown reports them alongside the modules it read.
+  let config_inputs: Vec<PathBuf> = bundler
+    .watch_files()
+    .iter()
+    .map(|f| PathBuf::from(f.as_str()))
+    .filter(|p| {
+      let named_tsconfig = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("tsconfig"));
+      named_tsconfig && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"))
+    })
+    .collect();
 
   for asset in &out.assets {
     if let Output::Chunk(chunk) = asset
@@ -357,6 +442,7 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<Bundle
         code: chunk.code.clone(),
         source_map_json,
         modules,
+        config_inputs,
       });
     }
   }
@@ -401,7 +487,8 @@ pub async fn bundle_and_compile_named(
   }
 
   let bundled = Box::pin(bundle_source(entry_paths, cwd)).await?;
-  let (code, map_json, modules) = (bundled.code, bundled.source_map_json, bundled.modules);
+  let (code, map_json, mut modules) = (bundled.code, bundled.source_map_json, bundled.modules);
+  modules.extend(bundled.config_inputs);
 
   let compiled = compile_bundled_source(&code, &module_name, map_json.as_deref()).await?;
 
@@ -828,7 +915,9 @@ pub async fn compile_and_extract_extensions(
       Ok(b) => {
         bundled_code.insert(i, b.code);
         bundled_map.insert(i, b.source_map_json);
-        bundled_modules.insert(i, b.modules);
+        let mut modules = b.modules;
+        modules.extend(b.config_inputs);
+        bundled_modules.insert(i, modules);
       },
       Err(e) => slots[i] = Slot::Failed(e),
     }

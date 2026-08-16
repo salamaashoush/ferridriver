@@ -125,6 +125,38 @@ The `TestConfig` Rust type is the canonical reference. Notable fields:
 | `worldParameters`      | JSON      | `{}`    | Passed to JS `this.parameters` (BDD) |
 | `features`             | `Vec<String>` | `[]` | Feature file globs (BDD) |
 | `steps`                | `Vec<String>` | `[]` | JS / TS step file globs (BDD) |
+| `tsconfig`             | path?     | none    | Pins the tsconfig whose `paths` / `baseUrl` govern bundling for the whole graph. Unset leaves rolldown's per-module upward discovery of `tsconfig.json`, so this is what selects a config discovery would not find (`tsconfig.test.json`). A path naming no file fails the bundle. |
+
+## Bundler
+
+`[bundler]` governs how JS / TS imports are resolved and transformed for
+every bundle ferridriver produces — spec files, BDD step files,
+extensions and `ferridriver run` scripts.
+
+```toml
+[bundler]
+conditions = ["browser"]
+mainFields = ["module", "main"]
+aliasFields = [["browser"]]
+
+[bundler.alias]
+"@wdio/utils" = "./shims/wdio-utils.ts"
+
+[bundler.virtualModules]
+"acme:env" = "export const env = 'staging';"
+```
+
+| Field            | Type          | Default | Notes |
+|------------------|---------------|---------|-------|
+| `alias`          | map           | `{}`    | Bare import specifier -> shim file (`.js`/`.ts`), bundled and transpiled like any other source |
+| `virtualModules` | map           | `{}`    | Import specifier -> inline ES-module source; never touches the filesystem |
+| `conditions`     | `Vec<String>` | `[]`    | Extra `exports` / `imports` condition names, APPENDED to the base set (`default`, plus `import` or `require` per import kind). A package's `browser` branch is taken only when `"browser"` is listed |
+| `mainFields`     | `Vec<String>` | `["module", "main"]` | `package.json` fields consulted when no `exports` entry matches. An empty list disables main-field resolution, which leaves such a package unresolvable |
+| `aliasFields`    | `Vec<Vec<String>>` | `[]` | `package.json` fields holding a legacy path-remapping OBJECT (`{"./node.js": "./browser.js"}`) — a different mechanism from a `browser` condition inside `exports`. `[["browser"]]` selects the top-level `browser` field |
+
+Every one of these participates in the bytecode cache key, and the
+governing tsconfig is tracked as a bundle input, so changing a condition
+or a `paths` mapping rebuilds instead of serving stale bytecode.
 
 Plus per-project `ProjectConfig` and per-context `ContextConfig`
 (viewport, locale, timezone, geolocation, permissions, etc.). See the

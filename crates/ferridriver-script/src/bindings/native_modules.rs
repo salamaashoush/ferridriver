@@ -41,7 +41,7 @@ pub const NATIVE_MODULE_NAMES: &[&str] = &[
 /// surface.
 ///
 /// Process-global for the same reason as
-/// [`crate::bundle::set_bundler_shims`]: the resolver, the throwaway
+/// [`crate::bundle::set_bundler_env`]: the resolver, the throwaway
 /// compile runtimes and the rolldown externals all consult it from call
 /// sites spread across three crates.
 /// Import specifier -> native module name, as configured by

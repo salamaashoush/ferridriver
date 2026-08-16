@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use ferridriver_script::bundle::{BundlerShims, set_bundler_shims};
+use ferridriver_script::bundle::{BundlerEnv, set_bundler_env};
 use ferridriver_script::{
   InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session, bundle_and_compile,
 };
@@ -46,7 +46,7 @@ async fn alias_and_virtual_modules_resolve_in_bundles() {
     "acme:env".to_string(),
     "export const env = 'staging'; export default env;".to_string(),
   );
-  set_bundler_shims(BundlerShims::from_config(&config, dir.path()));
+  set_bundler_env(BundlerEnv::from_config(&config, dir.path()));
 
   let entry = dir.path().join("main.ts");
   std::fs::write(
@@ -87,7 +87,7 @@ async fn alias_and_virtual_modules_resolve_in_bundles() {
   hijack
     .alias
     .insert("ferridriver".to_string(), "wdio-shim.ts".to_string());
-  set_bundler_shims(BundlerShims::from_config(&hijack, dir.path()));
+  set_bundler_env(BundlerEnv::from_config(&hijack, dir.path()));
   let entry2 = dir.path().join("framework.ts");
   std::fs::write(
     &entry2,
@@ -110,7 +110,7 @@ async fn alias_and_virtual_modules_resolve_in_bundles() {
   }
 
   // Different shims => different cache key (the fingerprint salts it).
-  let fp_a = BundlerShims::from_config(&config, dir.path()).fingerprint();
-  let fp_b = BundlerShims::from_config(&hijack, dir.path()).fingerprint();
+  let fp_a = BundlerEnv::from_config(&config, dir.path()).fingerprint();
+  let fp_b = BundlerEnv::from_config(&hijack, dir.path()).fingerprint();
   assert_ne!(fp_a, fp_b, "shim edits must change the bundle cache key");
 }
