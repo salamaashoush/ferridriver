@@ -1,0 +1,7 @@
+# `src/node/` is ferridriver-authored, not vendored from llrt, so it follows
+# the repo's house style rather than upstream's. rustfmt resolves its config
+# per file by walking up from the file's directory, so this overrides the
+# crate-level `disable_all_formatting`.
+edition = "2021"
+tab_spaces = 2
+max_width = 120

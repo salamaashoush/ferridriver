@@ -24,6 +24,12 @@ pub mod abort;
 pub mod context;
 pub mod events;
 pub mod exceptions;
+/// Node modules ferridriver implements itself, because upstream llrt has
+/// none or only a stub. Written to the repo's style, but compiled under
+/// this crate's relaxed lints: pedantic's `needless_pass_by_value` is
+/// unsatisfiable for rquickjs callback signatures, which must take owned
+/// JS values.
+pub mod node;
 pub mod os;
 pub mod stream_web;
 pub mod utils;

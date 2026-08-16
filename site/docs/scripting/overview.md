@@ -44,6 +44,8 @@ source files (.js / .ts / .mjs / .tsx / ...)
   | `path`   | POSIX `join` / `resolve` / `dirname` / `basename` / `extname` / `normalize` / `relative` / `isAbsolute` / `sep` / `delimiter` |
   | `buffer` | The documented `Buffer` subset |
   | `os`     | `platform` / `arch` / `type` / `release` / `version` / `machine` / `endianness` / `EOL` / `devNull` / `homedir` / `tmpdir` / `hostname` / `availableParallelism` / `cpus` / `totalmem` / `freemem` / `uptime` / `loadavg` / `userInfo` / `getPriority` / `setPriority` / `networkInterfaces`. No `os.constants` |
+  | `util`   | `format` / `formatWithOptions` / `inspect` (the same renderer `console` uses) / `promisify` / `callbackify` / `deprecate` / `inherits` / `types.*` / `isDeepStrictEqual`, plus the `TextEncoder` / `TextDecoder` globals |
+  | `events` | `EventEmitter` — the same class `require('events')` returns, so a subclass built either way passes `instanceof` |
 
   Anything else Node ships (`child_process`, `net`, `http`, `worker_threads`, …)
   is absent by design.

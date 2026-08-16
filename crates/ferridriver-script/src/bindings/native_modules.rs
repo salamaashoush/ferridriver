@@ -34,6 +34,10 @@ pub const NATIVE_MODULE_NAMES: &[&str] = &[
   "node:buffer",
   "os",
   "node:os",
+  "util",
+  "node:util",
+  "events",
+  "node:events",
 ];
 
 /// Extra specifiers the native loader answers, each mapped onto one of
@@ -173,6 +177,10 @@ pub fn loader() -> NativeModuleLoader {
       ("node:buffer", NativeModuleLoader::declare_fn::<BufferModule>()),
       ("os", NativeModuleLoader::declare_fn::<OsModule>()),
       ("node:os", NativeModuleLoader::declare_fn::<OsModule>()),
+      ("util", NativeModuleLoader::declare_fn::<UtilModule>()),
+      ("node:util", NativeModuleLoader::declare_fn::<UtilModule>()),
+      ("events", NativeModuleLoader::declare_fn::<EventsModule>()),
+      ("node:events", NativeModuleLoader::declare_fn::<EventsModule>()),
     ],
   }
 }
@@ -234,6 +242,8 @@ pub fn namespace<'js>(ctx: &Ctx<'js>, specifier: &str) -> rquickjs::Result<Optio
     "path" | "node:path" => path_namespace(ctx)?,
     "buffer" | "node:buffer" => buffer_namespace(ctx)?,
     "os" | "node:os" => os_namespace(ctx)?,
+    "util" | "node:util" => util_namespace(ctx)?,
+    "events" | "node:events" => events_namespace(ctx)?,
     _ => return Ok(None),
   };
   Ok(Some(ns))
@@ -602,14 +612,13 @@ const OS_MEMBERS: &[&str] = &[
   "version",
 ];
 
+/// The module object itself, carrying `default` as a self-reference —
+/// `require('os')` hands back what `import os from 'os'` binds, the way
+/// Node's `module.exports` does.
 fn os_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   let obj = ferridriver_jsstd::os::os_object(ctx)?;
-  let ns = Object::new(ctx.clone())?;
-  ns.set("default", obj.clone())?;
-  for name in OS_MEMBERS {
-    ns.set(*name, obj.get::<_, Value<'js>>(*name)?)?;
-  }
-  Ok(ns)
+  obj.set("default", obj.clone())?;
+  Ok(obj)
 }
 
 impl ModuleDef for OsModule {
@@ -622,5 +631,90 @@ impl ModuleDef for OsModule {
     let ns = os_namespace(ctx)?;
     exports.export("default", ns.get::<_, Value<'js>>("default")?)?;
     export_from(exports, &ns, OS_MEMBERS)
+  }
+}
+
+/// `import util from 'node:util'` — formatting, the promise/callback
+/// wrappers and `util.types`.
+pub struct UtilModule;
+
+fn util_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  let obj = ferridriver_jsstd::node::util::util_object(ctx)?;
+  obj.set("default", obj.clone())?;
+  Ok(obj)
+}
+
+impl ModuleDef for UtilModule {
+  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
+    decl.declare("default")?;
+    declare_all(decl, ferridriver_jsstd::node::util::UTIL_MEMBERS)
+  }
+
+  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
+    let ns = util_namespace(ctx)?;
+    exports.export("default", ns.get::<_, Value<'js>>("default")?)?;
+    for name in ferridriver_jsstd::node::util::UTIL_MEMBERS {
+      exports.export(
+        *name,
+        ns.get::<_, Value<'js>>(*name)
+          .unwrap_or_else(|_| Value::new_undefined(ctx.clone())),
+      )?;
+    }
+    Ok(())
+  }
+}
+
+/// `import { EventEmitter } from 'node:events'` — the vendored llrt
+/// emitter, which the `EventTarget` globals already share.
+pub struct EventsModule;
+
+/// Key under which the per-context `EventEmitter` constructor is
+/// remembered. A symbol on `globalThis`, so it stays out of
+/// `Object.keys` and cannot collide with a suite's own globals.
+const EVENT_EMITTER_KEY: &str = "ferridriver.node.events.EventEmitter";
+
+fn events_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  use ferridriver_jsstd::events::{Emitter as _, EventEmitter};
+
+  let symbol: Object<'js> = ctx.globals().get("Symbol")?;
+  let symbol_for: rquickjs::Function<'js> = symbol.get("for")?;
+  let key: Value<'js> = symbol_for.call((EVENT_EMITTER_KEY,))?;
+
+  // One constructor per context, whichever path asks first: a second
+  // `create_constructor` hands back a different function object, and
+  // `require('events') === (await import('events')).EventEmitter` — plus
+  // every `instanceof` across the two — would be false.
+  if let Ok(existing) = ctx.globals().get::<_, Object<'js>>(key.clone()) {
+    return Ok(existing);
+  }
+
+  let ctor = rquickjs::Class::<EventEmitter<'js>>::create_constructor(ctx)?
+    .ok_or_else(|| rquickjs::Error::new_loading("events"))?;
+  EventEmitter::add_event_emitter_prototype(ctx)?;
+  let ctor = ctor
+    .as_object()
+    .cloned()
+    .ok_or_else(|| rquickjs::Error::new_loading("events"))?;
+
+  // Node's `module.exports` for this module IS the class, with the named
+  // export hanging off it — so `require('events')` can be extended.
+  ctor.set("EventEmitter", ctor.clone())?;
+  ctor.set("default", ctor.clone())?;
+  ctx.globals().set(key, ctor.clone())?;
+  Ok(ctor)
+}
+
+impl ModuleDef for EventsModule {
+  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
+    decl.declare("default")?;
+    decl.declare("EventEmitter")?;
+    Ok(())
+  }
+
+  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
+    let ns = events_namespace(ctx)?;
+    exports.export("default", ns.get::<_, Value<'js>>("default")?)?;
+    exports.export("EventEmitter", ns.get::<_, Value<'js>>("EventEmitter")?)?;
+    Ok(())
   }
 }

@@ -22,6 +22,26 @@ deliberately not vendored: ferridriver has its own, over `reqwest`. `os` is
 vendored because ferridriver has nothing equivalent and the module is pure
 host introspection with no overlap with the automation stack.
 
+## `src/node/` — ferridriver-authored
+
+Not everything Node exposes has a usable upstream in llrt. `llrt_util` is
+`TextEncoder`/`TextDecoder` plus `format` and `inherits` (no `promisify`, no
+`inspect`, no `types`), and `llrt_assert` is a single `ok`. Those modules are
+written here instead, under `src/node/`, so the runtime still has exactly one
+implementation of each surface:
+
+| module | why it is ours |
+| ------ | -------------- |
+| `node::inspect` | The `util.inspect` / `util.format` renderer, moved out of `ferridriver-script`'s `console` so `console.log`, `util.format` and `util.inspect` cannot drift apart |
+| `node::deep_equal` | Structural equality for `util.isDeepStrictEqual` (and `assert.deepStrictEqual` when it lands) |
+| `node::util` | The `util` module |
+
+`src/node/` carries its own `rustfmt.toml` re-enabling formatting (the crate
+disables it for the vendored subtree) and follows the repo's house style. It
+is compiled under this crate's relaxed lints because pedantic's
+`needless_pass_by_value` cannot be satisfied by an rquickjs callback, which
+must take owned JS values.
+
 ## Keeping it re-syncable
 
 Sources are kept byte-close to upstream, including upstream's 4-space
