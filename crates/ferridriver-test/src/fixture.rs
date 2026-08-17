@@ -445,6 +445,9 @@ fn slots_of(defs: &FxHashMap<String, FixtureDef>) -> Vec<crate::fixture_graph::F
         deps: def.dependencies.clone(),
         auto: def.auto,
         scope: def.scope,
+        // A Rust `#[fixture]` has no option form: its value comes from
+        // the function, never from a `use` block.
+        option: false,
       }
     })
     .collect()

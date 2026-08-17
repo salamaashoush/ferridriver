@@ -228,7 +228,7 @@ impl JsBddSession {
   /// once + [`JsBddSession::load`] per worker.
   pub async fn from_globs(globs: &[String], cwd: &Path) -> anyhow::Result<Self> {
     let bundle = bundle_steps(globs, cwd).await?;
-    Self::load(bundle, cwd, serde_json::Value::Null).await
+    Self::load(bundle, cwd, serde_json::Value::Null, &[]).await
   }
 
   /// Create a shared-engine session and link the precompiled bundled
@@ -239,6 +239,7 @@ impl JsBddSession {
     bundle: Arc<CompiledBundle>,
     cwd: &Path,
     world_parameters: serde_json::Value,
+    open_use_keys: &[String],
   ) -> anyhow::Result<Self> {
     let sandbox =
       Arc::new(PathSandbox::new(cwd).map_err(|e| anyhow::anyhow!("sandbox {}: {}", cwd.display(), e.message))?);
@@ -276,6 +277,16 @@ impl JsBddSession {
     let snapshot = collect_registry(&vm)
       .await
       .map_err(|e| anyhow::anyhow!("collect registry: {}", e.message))?;
+
+    // The chains exist now, so the config's open `use` keys can be
+    // decided — the same check the spec host runs after collection.
+    if !open_use_keys.is_empty() {
+      let chains: Vec<_> = (0..snapshot.fixture_sets.len())
+        .map(|set| snapshot.fixture_slots(set))
+        .collect();
+      ferridriver_test::fixture_graph::validate_use_keys(open_use_keys.iter().map(String::as_str), &chains)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    }
 
     let mut registry = StepRegistry::build();
     for pt in &snapshot.param_types {
@@ -870,6 +881,7 @@ async fn worker_session(
   bundle: Arc<CompiledBundle>,
   cwd: Arc<PathBuf>,
   world_parameters: serde_json::Value,
+  open_use_keys: Arc<Vec<String>>,
 ) -> Result<Arc<JsBddSession>, String> {
   let map = WORKER_SESSIONS.get_or_init(DashMap::new);
   let cell = map
@@ -878,7 +890,7 @@ async fn worker_session(
     .clone();
   cell
     .get_or_try_init(|| async move {
-      JsBddSession::load(bundle, &cwd, world_parameters)
+      JsBddSession::load(bundle, &cwd, world_parameters, &open_use_keys)
         .await
         .map(Arc::new)
         .map_err(|e| e.to_string())
@@ -901,6 +913,10 @@ pub fn translate_features_js(
   use ferridriver_test::model::{ExpectedStatus, Hooks, SuiteMode, TestCase, TestFailure, TestFn, TestId, TestSuite};
 
   let cwd = Arc::new(cwd);
+  // Open `use` keys travel with the plan: what each one means is only
+  // decidable once a worker VM has evaluated the step bundle and its
+  // `test.extend` chains exist.
+  let open_use_keys = Arc::new(config.open_use_keys().into_iter().cloned().collect::<Vec<String>>());
   let mut suites = Vec::new();
 
   for feature in &feature_set.features {
@@ -934,6 +950,7 @@ pub fn translate_features_js(
       let browser_config = config.browser.clone();
       let world_parameters = config.world_parameters.clone();
       let bdd_strict = config.strict;
+      let open_use_keys = Arc::clone(&open_use_keys);
 
       let test_fn: TestFn = Arc::new(move |pool: FixturePool| {
         let scenario = Arc::clone(&scenario);
@@ -942,6 +959,7 @@ pub fn translate_features_js(
         let browser_config = browser_config.clone();
         let world_parameters = world_parameters.clone();
         let bdd_strict = bdd_strict;
+        let open_use_keys = Arc::clone(&open_use_keys);
         Box::pin(async move {
           let browser = pool
             .get("browser")
@@ -964,7 +982,7 @@ pub fn translate_features_js(
             .await
             .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
 
-          let session = worker_session(test_info.worker_index, bundle, cwd, world_parameters)
+          let session = worker_session(test_info.worker_index, bundle, cwd, world_parameters, open_use_keys)
             .await
             .map_err(|e| TestFailure::from(format!("JS step load failed: {e}")))?;
 

@@ -561,17 +561,46 @@ pub struct CollectedRegistry {
   /// evaluated, so the host snapshots it here instead of asking the VM
   /// per scenario.
   pub fixture_sets: Vec<Vec<usize>>,
+  /// Every fixture registration behind those chains, in registration
+  /// order — what [`CollectedRegistry::fixture_slots`] indexes into.
+  pub fixtures: Vec<crate::bindings::test::CollectedFixture>,
+}
+
+impl CollectedRegistry {
+  /// The `test.extend` chain behind a fixture set, in extend order.
+  #[must_use]
+  pub fn fixture_slots(&self, fixture_set: usize) -> Vec<ferridriver_test::fixture_graph::FixtureSlot> {
+    self
+      .fixture_sets
+      .get(fixture_set)
+      .map(Vec::as_slice)
+      .unwrap_or_default()
+      .iter()
+      .map(|&i| {
+        let f = &self.fixtures[i];
+        ferridriver_test::fixture_graph::FixtureSlot {
+          reg: i,
+          name: f.name.clone(),
+          deps: f.deps.clone(),
+          auto: f.auto,
+          scope: f.scope,
+          option: f.option,
+        }
+      })
+      .collect()
+  }
 }
 
 /// Snapshot the registry after the step `.js` files evaluated.
 pub async fn collect_registry(vm: &crate::vm::VmHandle) -> Result<CollectedRegistry, ScriptError> {
   crate::vm_with!(vm => |ctx| {
-    let fixture_sets = crate::bindings::test::with_test_registry(&ctx, |r| {
-      crate::bindings::test::fixture_set_table(r)
+    let (fixture_sets, fixtures) = crate::bindings::test::with_test_registry(&ctx, |r| {
+      (crate::bindings::test::fixture_set_table(r), crate::bindings::test::fixture_table(r))
     })?;
     with_registry(&ctx, |reg| CollectedRegistry {
       default_timeout_ms: reg.default_timeout_ms,
       fixture_sets,
+      fixtures,
       steps: reg
         .steps
         .iter()

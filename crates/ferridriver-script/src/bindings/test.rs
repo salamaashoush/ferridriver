@@ -100,6 +100,10 @@ pub(crate) struct TestHookReg {
   /// `beforeAll` | `afterAll` | `beforeEach` | `afterEach`
   pub(crate) kind: String,
   pub(crate) suite: Option<usize>,
+  /// The `test.extend` chain of the object the hook was registered on.
+  /// A `beforeAll` runs with no test, so it is the only thing that can
+  /// tell it which chain's fixtures it may ask for.
+  pub(crate) fixture_set: usize,
   pub(crate) func: Persistent<Function<'static>>,
   pub(crate) requested: Option<Vec<String>>,
   pub(crate) line: u32,
@@ -788,6 +792,7 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
           r.hooks.push(TestHookReg {
             kind: kind.to_string(),
             suite: r.describe_stack.last().copied(),
+            fixture_set,
             func: saved,
             requested,
             line,
@@ -1680,6 +1685,7 @@ pub(crate) fn fixture_slots(reg: &TestRegistry, fixture_set: usize) -> Vec<Fixtu
         deps: f.deps.clone(),
         auto: f.auto,
         scope: f.scope,
+        option: f.option,
       }
     })
     .collect()
@@ -1689,6 +1695,22 @@ pub(crate) fn fixture_slots(reg: &TestRegistry, fixture_set: usize) -> Vec<Fixtu
 /// by fixture set — the input [`dominant_fixture_set`] reasons over.
 pub(crate) fn fixture_set_table(reg: &TestRegistry) -> Vec<Vec<usize>> {
   reg.fixture_sets.clone()
+}
+
+/// Every fixture registration in this VM, in registration order — the
+/// table [`fixture_set_table`]'s indices point into.
+pub(crate) fn fixture_table(reg: &TestRegistry) -> Vec<CollectedFixture> {
+  reg
+    .fixtures
+    .iter()
+    .map(|f| CollectedFixture {
+      name: f.name.clone(),
+      scope: f.scope,
+      auto: f.auto,
+      option: f.option,
+      deps: f.deps.clone(),
+    })
+    .collect()
 }
 
 /// Clear the current-test slot (the BDD host ends a scenario without
@@ -1761,26 +1783,32 @@ async fn resolve_one_fixture<'js>(
     (f.name.clone(), f.option, plan)
   })?;
 
-  match plan {
-    Plan::CachedWorker(value) => {
+  // An option fixture named in a `use` bag takes that value whatever
+  // its declaration was: Playwright replaces the registration's `fn`
+  // with the override, and a value that came out of a config file is
+  // never a factory (`common/fixtures.ts:98-101`).
+  let override_v = option.then(|| use_options.get(&name)).flatten();
+
+  match (plan, override_v) {
+    (Plan::CachedWorker(value), _) => {
       let v = value.restore(ctx).map_err(se)?;
       world_obj.set(name.as_str(), v).map_err(se)?;
       Ok(())
     },
-    Plan::Static(value) => {
-      // Option fixtures take the `use` bag override when present.
-      let override_v = option.then(|| use_options.get(&name)).flatten();
-      let v: Value<'_> = match override_v {
-        Some(json) => crate::bindings::convert::json_to_js(ctx, json).map_err(se)?,
-        None => match value {
-          Some(saved) => saved.restore(ctx).map_err(se)?,
-          None => Value::new_undefined(ctx.clone()),
-        },
+    (_, Some(json)) => {
+      let v = crate::bindings::convert::json_to_js(ctx, json).map_err(se)?;
+      world_obj.set(name.as_str(), v).map_err(se)?;
+      Ok(())
+    },
+    (Plan::Static(value), None) => {
+      let v: Value<'_> = match value {
+        Some(saved) => saved.restore(ctx).map_err(se)?,
+        None => Value::new_undefined(ctx.clone()),
       };
       world_obj.set(name.as_str(), v).map_err(se)?;
       Ok(())
     },
-    Plan::Factory { factory, worker_scoped } => {
+    (Plan::Factory { factory, worker_scoped }, None) => {
       run_fixture_factory(ctx, world_obj, reg_idx, &name, factory, worker_scoped, source_label).await
     },
   }
@@ -2132,11 +2160,11 @@ pub async fn run_standalone_hook(
     let info_obj = info_obj.restore(&ctx).map_err(se)?;
 
     let (requested, fixture_set) = with_test_registry(&ctx, |r| {
-      let req = r.hooks.get(hook_idx).and_then(|h| h.requested.clone()).unwrap_or_default();
-      // Standalone hooks resolve against the base set: extend chains are
-      // test-object-scoped and all-hooks register through the base
-      // object today.
-      (req, 0usize)
+      let hook = r.hooks.get(hook_idx);
+      let req = hook.and_then(|h| h.requested.clone()).unwrap_or_default();
+      // The chain the hook was registered on, so a `beforeAll` declared
+      // on an extended object can ask for that chain's fixtures.
+      (req, hook.map_or(0, |h| h.fixture_set))
     })?;
     let result = async {
       resolve_custom_fixtures(&ctx, &world_obj, fixture_set, &requested, &world.use_options, &source_label).await?;
@@ -2254,6 +2282,7 @@ impl CollectedTests {
           deps: f.deps.clone(),
           auto: f.auto,
           scope: f.scope,
+          option: f.option,
         }
       })
       .collect()
@@ -2316,17 +2345,7 @@ pub async fn collect_tests(vm: &crate::vm::VmHandle) -> Result<CollectedTests, S
           col: h.col,
         })
         .collect(),
-      fixtures: r
-        .fixtures
-        .iter()
-        .map(|f| CollectedFixture {
-          name: f.name.clone(),
-          scope: f.scope,
-          auto: f.auto,
-          option: f.option,
-          deps: f.deps.clone(),
-        })
-        .collect(),
+      fixtures: fixture_table(r),
       fixture_sets: r.fixture_sets.clone(),
       file_use: r
         .file_use

@@ -168,7 +168,9 @@ impl BddEngine {
     {
       tracing::warn!(error = %e, "run_bdd: AfterAll on reload failed");
     }
-    let session = Arc::new(JsBddSession::load(Arc::clone(&bundle), cwd, world_params).await?);
+    // The MCP host runs scenarios against a live browser session, not a
+    // `[test]` config layer, so there is no `use` block to decide.
+    let session = Arc::new(JsBddSession::load(Arc::clone(&bundle), cwd, world_params, &[]).await?);
     self.key = key;
     self.content_hash = ch;
     self.record_inputs(&bundle, globs, extensions, cwd);

@@ -53,6 +53,42 @@ backend = "webkit"
 
 Run a single slice with `--project firefox`.
 
+## `use` and option fixtures
+
+`[test.browser.use]` is the Playwright `use` block: context options
+(`locale`, `colorScheme`, `testIdAttribute`, …) plus any key of your
+own. A key no built-in option claims is the value of a fixture
+registered with `{ option: true }`.
+
+```toml
+[test.browser.use]
+locale  = "de-DE"
+profile = "guest"          # -> the `profile` option fixture
+
+[[test.projects]]
+name = "admin"
+[test.projects.browser.use]
+profile = "admin"          # -> only this project's tests
+```
+
+```ts
+const test = base.extend<{ profile: string }>({
+  profile: ['guest', { option: true }],
+});
+
+test('reads it', async ({ profile }) => { /* 'guest' or 'admin' */ });
+```
+
+Precedence, innermost first: a `test.use({ … })` in the spec, then the
+project's block, then the config's, then the fixture's own default. Each
+layer overlays key by key, so a project setting one key keeps the
+config's others.
+
+A key naming a fixture that is NOT an option (including `page`,
+`context`, `request` and `browser`) fails the run — only option fixtures
+can be set from a config. A key naming nothing at all is reported as
+`use.unknownKey` and ignored.
+
 ## Web server
 
 ```toml

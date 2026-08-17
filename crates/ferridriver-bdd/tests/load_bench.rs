@@ -79,13 +79,13 @@ async fn js_plugin_load_bench() {
 
   // Per-session load (unchanged by the disk cache).
   let bundle = bundle_steps(&globs, &dir).await.expect("bundle for session");
-  let _ = JsBddSession::load(bundle.clone(), &dir, serde_json::Value::Null)
+  let _ = JsBddSession::load(bundle.clone(), &dir, serde_json::Value::Null, &[])
     .await
     .expect("warm session");
   let n = 50u32;
   let sess = Instant::now();
   for _ in 0..n {
-    let _ = JsBddSession::load(bundle.clone(), &dir, serde_json::Value::Null)
+    let _ = JsBddSession::load(bundle.clone(), &dir, serde_json::Value::Null, &[])
       .await
       .expect("session load");
   }

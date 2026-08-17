@@ -60,6 +60,22 @@ Also per-call only, as upstream (`NonConfigProperties`): `clip`, `mask`,
 `maskColor`, `fullPage`, `omitBackground`, `signal` — of which
 ferridriver takes `clip`, `mask` and `maskColor`.
 
+### `test.use` cannot register a fixture, only set an option
+
+A `use` bag — from the config, a project, a file's `test.use` or a
+describe's — sets the value of a fixture registered with
+`{ option: true }`, in Playwright's precedence order. Playwright's
+`test.use` is implemented as a fixture LIST appended to a new pool per
+suite level, so it can additionally override a non-option fixture, or
+introduce a name the chain never registered, for the tests under it.
+Ferridriver's chains are decided at collection and identified by index
+(`fixture_sets`), which the collection/worker determinism check and the
+plan digest both read — giving a describe its own chain is a change to
+that identity, not a new branch in the resolver, so it belongs in its
+own phase rather than in the option-fixture work. Setting a non-option
+fixture from a CONFIG `use` block is refused with Playwright's own
+message, which is upstream behaviour and unaffected.
+
 ### `route.fulfill` / `unroute` residuals
 `fulfill` takes `status`, `headers`, `contentType`, `body` (string or any
 byte source), `json`, `path` (read through the session sandbox) and

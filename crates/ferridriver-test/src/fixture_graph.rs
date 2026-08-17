@@ -37,6 +37,11 @@ pub struct FixtureSlot {
   pub deps: Vec<String>,
   pub auto: bool,
   pub scope: FixtureScope,
+  /// Registered as `[value, { option: true }]` — the only kind of
+  /// fixture a `use` block may set a value for. Inherited from the
+  /// registration being overridden, so the topmost slot of a name
+  /// already carries the chain's answer.
+  pub option: bool,
 }
 
 /// Playwright's `FixturePool.resolve(name, forFixture)`. `from` is the
@@ -246,9 +251,117 @@ pub fn dominant_fixture_set(sets: &[Vec<usize>], wanted: &[usize]) -> Result<usi
   Ok(widest)
 }
 
+/// Fixtures the runtime provides without any registration and that
+/// Playwright does NOT declare `{ option: true }` (`page`, `context`,
+/// `request` and `browser` come out of the worker's pool). Naming one
+/// in a `use` block is the error below, not an override.
+pub const BUILTIN_NON_OPTION_FIXTURES: &[&str] = &["page", "context", "request", "browser"];
+
+/// `use` keys the runner itself consumes that are not context options:
+/// `viewport` is applied when the context is created and `baseURL`
+/// feeds both the `baseURL` fixture and the HTTP client.
+pub const RUNTIME_USE_KEYS: &[&str] = &["viewport", "baseURL"];
+
+/// What one key of a `use` block means once the fixture chain is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UseKeyVerdict {
+  /// Sets the value of an `{ option: true }` fixture.
+  Option,
+  /// Names a fixture that exists but was not declared an option —
+  /// Playwright's load error, [`use_override_error`].
+  NotAnOption,
+  /// Names nothing the run knows about. Playwright ignores these
+  /// silently; ferridriver reports them, because before `use` became
+  /// open the config layer warned about every one of them.
+  Unrecognized,
+}
+
+/// Playwright's `FixturePool` constructor rule for a config `use` key
+/// (`packages/playwright/src/common/fixtures.ts:105-111`), against the
+/// topmost registration of that name in one `test.extend` chain.
+#[must_use]
+pub fn classify_use_key(key: &str, slots: &[FixtureSlot]) -> UseKeyVerdict {
+  if let Some(pos) = resolve_dep(slots, key, None) {
+    return if slots[pos].option {
+      UseKeyVerdict::Option
+    } else {
+      UseKeyVerdict::NotAnOption
+    };
+  }
+  if BUILTIN_NON_OPTION_FIXTURES.contains(&key) {
+    return UseKeyVerdict::NotAnOption;
+  }
+  UseKeyVerdict::Unrecognized
+}
+
+/// The verdict for a key across every chain a run collected: an option
+/// anywhere makes it an option, otherwise the strictest verdict wins.
+#[must_use]
+pub fn classify_use_key_across(key: &str, chains: &[Vec<FixtureSlot>]) -> UseKeyVerdict {
+  let mut verdict = UseKeyVerdict::Unrecognized;
+  for slots in chains {
+    match classify_use_key(key, slots) {
+      UseKeyVerdict::Option => return UseKeyVerdict::Option,
+      UseKeyVerdict::NotAnOption => verdict = UseKeyVerdict::NotAnOption,
+      UseKeyVerdict::Unrecognized => {},
+    }
+  }
+  if chains.is_empty() && BUILTIN_NON_OPTION_FIXTURES.contains(&key) {
+    return UseKeyVerdict::NotAnOption;
+  }
+  verdict
+}
+
+/// Decide what every open `use` key means now that the fixture chains
+/// are known, which is the earliest a host can: Playwright runs the
+/// same check in the `FixturePool` constructor, after collection.
+///
+/// A key naming a non-option fixture is a load error. A key naming
+/// nothing is reported and ignored — Playwright ignores it silently,
+/// but before `use` accepted open keys ferridriver's config layer
+/// warned about each one, and losing that signal would make a typo
+/// invisible.
+///
+/// # Errors
+///
+/// [`use_override_error`] for the first key that names a fixture which
+/// is not an option.
+pub fn validate_use_keys<'a>(
+  keys: impl IntoIterator<Item = &'a str>,
+  chains: &[Vec<FixtureSlot>],
+) -> Result<(), String> {
+  for key in keys {
+    if RUNTIME_USE_KEYS.contains(&key) {
+      continue;
+    }
+    match classify_use_key_across(key, chains) {
+      UseKeyVerdict::Option => {},
+      UseKeyVerdict::NotAnOption => return Err(use_override_error(key)),
+      UseKeyVerdict::Unrecognized => tracing::warn!(
+        target: "ferridriver::test",
+        key,
+        "use.unknownKey: no fixture registered with {{ option: true }} claims this `use` key; it is ignored"
+      ),
+    }
+  }
+  Ok(())
+}
+
+/// Playwright's message, verbatim (`fixtures.ts:109`).
+#[must_use]
+pub fn use_override_error(key: &str) -> String {
+  format!(
+    "Fixture \"{key}\" cannot be overridden in the configuration \"use\" section. \
+     Only fixtures registered with {{ option: true }} can be set in the config."
+  )
+}
+
 #[cfg(test)]
 mod tests {
-  use super::{FixtureScope, FixtureSlot, dependency_order, dominant_fixture_set, resolution_order, resolve_dep};
+  use super::{
+    FixtureScope, FixtureSlot, UseKeyVerdict, classify_use_key, classify_use_key_across, dependency_order,
+    dominant_fixture_set, resolution_order, resolve_dep,
+  };
 
   fn slot(reg: usize, name: &str, deps: &[&str]) -> FixtureSlot {
     FixtureSlot {
@@ -257,7 +370,50 @@ mod tests {
       deps: deps.iter().map(|d| (*d).to_string()).collect(),
       auto: false,
       scope: FixtureScope::Test,
+      option: false,
     }
+  }
+
+  fn option_slot(reg: usize, name: &str) -> FixtureSlot {
+    FixtureSlot {
+      option: true,
+      ..slot(reg, name, &[])
+    }
+  }
+
+  #[test]
+  fn a_use_key_is_an_override_only_for_an_option_fixture() {
+    let slots = vec![option_slot(0, "profile"), slot(1, "helper", &[])];
+    assert_eq!(classify_use_key("profile", &slots), UseKeyVerdict::Option);
+    assert_eq!(classify_use_key("helper", &slots), UseKeyVerdict::NotAnOption);
+    assert_eq!(classify_use_key("nope", &slots), UseKeyVerdict::Unrecognized);
+    // A built-in the runtime provides is a registration too, and none
+    // of them is an option.
+    assert_eq!(classify_use_key("page", &slots), UseKeyVerdict::NotAnOption);
+  }
+
+  #[test]
+  fn an_override_of_an_option_reads_as_an_option() {
+    // base.extend({ profile: ['a', {option:true}] }).extend({ profile: 'b' })
+    // — the second registration inherits `option` at registration time,
+    // which is what the topmost slot carries.
+    let slots = vec![option_slot(0, "profile"), option_slot(1, "profile")];
+    assert_eq!(classify_use_key("profile", &slots), UseKeyVerdict::Option);
+  }
+
+  #[test]
+  fn one_chain_declaring_the_option_settles_the_key() {
+    let with_option = vec![option_slot(0, "profile")];
+    let without = vec![slot(0, "helper", &[])];
+    assert_eq!(
+      classify_use_key_across("profile", &[without.clone(), with_option]),
+      UseKeyVerdict::Option
+    );
+    assert_eq!(
+      classify_use_key_across("profile", &[without]),
+      UseKeyVerdict::Unrecognized
+    );
+    assert_eq!(classify_use_key_across("page", &[]), UseKeyVerdict::NotAnOption);
   }
 
   #[test]

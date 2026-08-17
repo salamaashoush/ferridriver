@@ -43,7 +43,7 @@ async fn extension_files_merge_into_the_step_bundle() {
   )
   .await
   .expect("bundle steps + extensions");
-  let session = JsBddSession::load(bundle, &dir, serde_json::Value::Null)
+  let session = JsBddSession::load(bundle, &dir, serde_json::Value::Null, &[])
     .await
     .expect("load bundle into BDD session");
 

@@ -403,6 +403,15 @@ pub struct ContextConfig {
   /// a comma-separated list matches any of the named attributes.
   /// `None` = `data-testid`.
   pub test_id_attribute: Option<String>,
+  /// Every `use` key no field above claims, kept as raw JSON.
+  ///
+  /// Playwright's `use` block is open: a key that matches no built-in
+  /// option is the value of a user `{ option: true }` fixture. Dropping
+  /// it here as "unknown" would make the whole option-fixture feature
+  /// unreachable from a config file, so the decision about what a key
+  /// means moves to where fixtures are known — after collection.
+  #[serde(flatten)]
+  pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -447,6 +456,7 @@ impl Default for ContextConfig {
       storage_state: None,
       reduced_motion: None,
       forced_colors: None,
+      extra: BTreeMap::new(),
     }
   }
 }
@@ -1045,6 +1055,24 @@ impl TestConfig {
   /// `expectTimeout` key, which is ferridriver's older spelling of
   /// `expect.timeout` — the nested key wins when both are present. A
   /// project block never folds it in: the object it replaced is gone.
+  /// Every `use` key no built-in option claims, across the config
+  /// block and every project's — sorted and deduplicated.
+  ///
+  /// One test plan serves every project, so a key only one project
+  /// sets still has to be understood when the plan is built.
+  #[must_use]
+  pub fn open_use_keys(&self) -> Vec<&String> {
+    let mut keys: Vec<&String> = self.browser.use_options.extra.keys().collect();
+    for project in &self.projects {
+      if let Some(browser) = &project.browser {
+        keys.extend(browser.use_options.extra.keys());
+      }
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+  }
+
   #[must_use]
   pub fn resolved_expect(&self, project: Option<&ProjectConfig>) -> ExpectConfig {
     if let Some(from_project) = project.and_then(|p| p.expect.clone()) {
@@ -1220,6 +1248,14 @@ fn merge_context(base: &mut ContextConfig, overlay: &ContextConfig) {
   }
   if overlay.forced_colors.is_some() {
     base.forced_colors.clone_from(&overlay.forced_colors);
+  }
+  if overlay.test_id_attribute.is_some() {
+    base.test_id_attribute.clone_from(&overlay.test_id_attribute);
+  }
+  // Open keys overlay one at a time: a project setting `use.profile`
+  // must not drop the config's `use.theme`.
+  for (key, value) in &overlay.extra {
+    base.extra.insert(key.clone(), value.clone());
   }
 }
 
@@ -1411,5 +1447,99 @@ mod expect_config_tests {
         .map(super::StringOrList::to_vec),
       Some(vec!["a.css".to_string(), "b.css".to_string()])
     );
+  }
+}
+
+#[cfg(test)]
+mod use_options_tests {
+  use super::{ProjectConfig, TestConfig};
+
+  fn config(toml_src: &str) -> TestConfig {
+    toml::from_str::<TestConfig>(toml_src).expect("parse")
+  }
+
+  #[test]
+  fn a_use_key_no_field_claims_survives_parsing() {
+    let cfg = config(
+      r#"
+        [browser.use]
+        locale = "de-DE"
+        profile = "guest"
+        settings = { depth = 2, tags = ["a"] }
+      "#,
+    );
+    assert_eq!(cfg.browser.use_options.locale.as_deref(), Some("de-DE"));
+    assert_eq!(cfg.browser.use_options.extra["profile"], serde_json::json!("guest"));
+    assert_eq!(
+      cfg.browser.use_options.extra["settings"],
+      serde_json::json!({ "depth": 2, "tags": ["a"] })
+    );
+    // A claimed key is NOT duplicated into the open map.
+    assert!(!cfg.browser.use_options.extra.contains_key("locale"));
+  }
+
+  #[test]
+  fn a_project_overlays_open_keys_one_at_a_time() {
+    let cfg = config(
+      r#"
+        [browser.use]
+        profile = "guest"
+        theme = "light"
+
+        [[projects]]
+        name = "admin"
+        [projects.browser.use]
+        profile = "admin"
+      "#,
+    );
+    let merged = cfg.merge_project(&cfg.projects[0]);
+    assert_eq!(merged.browser.use_options.extra["profile"], serde_json::json!("admin"));
+    // The key the project did not name is still the config's.
+    assert_eq!(merged.browser.use_options.extra["theme"], serde_json::json!("light"));
+  }
+
+  #[test]
+  fn a_project_test_id_attribute_reaches_the_merged_config() {
+    let cfg = config(
+      r#"
+        [browser.use]
+        testIdAttribute = "data-testid"
+
+        [[projects]]
+        name = "legacy"
+        [projects.browser.use]
+        testIdAttribute = "data-qa"
+      "#,
+    );
+    let merged = cfg.merge_project(&cfg.projects[0]);
+    assert_eq!(merged.browser.use_options.test_id_attribute.as_deref(), Some("data-qa"));
+  }
+
+  #[test]
+  fn open_use_keys_covers_every_project() {
+    let cfg = config(
+      r#"
+        [browser.use]
+        profile = "guest"
+
+        [[projects]]
+        name = "one"
+        [projects.browser.use]
+        profile = "admin"
+        onlyHere = 1
+
+        [[projects]]
+        name = "two"
+      "#,
+    );
+    let keys: Vec<&str> = cfg.open_use_keys().into_iter().map(String::as_str).collect();
+    assert_eq!(keys, vec!["onlyHere", "profile"]);
+
+    // A project with no browser section contributes nothing.
+    let bare = TestConfig {
+      projects: vec![ProjectConfig::default()],
+      ..TestConfig::default()
+    };
+    assert!(bare.open_use_keys().is_empty());
   }
 }

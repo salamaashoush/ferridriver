@@ -284,7 +284,13 @@ struct TestFnParams {
   sessions: Arc<crate::SessionPool>,
   bundle: Arc<CompiledBundle>,
   cwd: Arc<std::path::PathBuf>,
-  world_use: Arc<serde_json::Value>,
+  /// The root config's `use` block. Only the fallback: a run resolves
+  /// the project's block off the worker's own config snapshot, because
+  /// the plan is translated once and then filtered per project.
+  config_use: Arc<serde_json::Value>,
+  /// This test's own `use` bag — file `test.use` overlaid with its
+  /// describe chain, nothing from any config layer.
+  spec_use: Arc<serde_json::Value>,
   static_annotations: Arc<Vec<(String, Option<String>)>>,
   tags: Arc<Vec<String>>,
   title_path: Arc<Vec<String>>,
@@ -304,6 +310,17 @@ async fn build_world_data(
   test_info: &Arc<TestInfo>,
   p: &TestFnParams,
 ) -> Result<TestWorldData, TestFailure> {
+  // Playwright's `use` precedence, resolved here rather than at
+  // translation time: the worker's config snapshot is the project's
+  // merged config (config ⊕ project), and the spec's own bag is the
+  // innermost layer. Baking it in at translation would freeze every
+  // project onto the root config's block.
+  let config_use = test_info
+    .config_snapshot
+    .as_ref()
+    .and_then(|c| serde_json::to_value(&c.browser.use_options).ok())
+    .unwrap_or_else(|| (*p.config_use).clone());
+  let use_options = ferridriver_test::host::merge_use_options(Some(&config_use), Some(&p.spec_use));
   let mut world = ferridriver_test::host::world_data(ferridriver_test::host::WorldMeta {
     test_info,
     title: p.title.as_str(),
@@ -314,7 +331,7 @@ async fn build_world_data(
     expected_status: p.expected_status,
     browser_config: &p.browser_config,
     base_url: p.base_url.as_deref(),
-    use_options: (*p.world_use).clone(),
+    use_options,
   });
   for name in &p.requests {
     match name.as_str() {
@@ -425,7 +442,7 @@ struct PlanCx<'a> {
   config: &'a TestConfig,
   cwd: &'a Path,
   cwd_arc: Arc<std::path::PathBuf>,
-  config_use: serde_json::Value,
+  config_use: Arc<serde_json::Value>,
   sessions: Arc<crate::SessionPool>,
 }
 
@@ -434,7 +451,6 @@ struct TestMeta {
   annotations: Vec<TestAnnotation>,
   expected_status: ExpectedStatus,
   use_bag: Option<serde_json::Value>,
-  world_use: serde_json::Value,
   /// Only what the spec itself asked for. A test that names no timeout
   /// leaves this unset so the runner applies the config's — the run's
   /// config, which is not always the one discovery was done under (a UI
@@ -483,7 +499,9 @@ fn resolve_meta(cx: &PlanCx<'_>, chain: &SuiteChain, fscope: &FileScope, test_id
     }
   }
 
-  // Effective use bag: config ⊕ file ⊕ suite chain (inner wins).
+  // The spec's own bag: file `test.use` ⊕ describe chain (inner wins).
+  // The config and project layers are overlaid under it at run time,
+  // off the worker's config snapshot.
   let mut use_bag: Option<serde_json::Value> = None;
   if let Some(f) = &fscope.use_options {
     merge_bag(&mut use_bag, f);
@@ -491,24 +509,11 @@ fn resolve_meta(cx: &PlanCx<'_>, chain: &SuiteChain, fscope: &FileScope, test_id
   if let Some(sb) = &chain.use_options {
     merge_bag(&mut use_bag, sb);
   }
-  let mut world_use = if cx.config_use.is_object() {
-    cx.config_use.clone()
-  } else {
-    serde_json::json!({})
-  };
-  if let Some(bag) = &use_bag
-    && let (serde_json::Value::Object(w), serde_json::Value::Object(b)) = (&mut world_use, bag)
-  {
-    for (k, v) in b {
-      w.insert(k.clone(), v.clone());
-    }
-  }
 
   TestMeta {
     annotations,
     expected_status,
     use_bag,
-    world_use,
     timeout_ms: test.timeout_ms.or(chain.timeout_ms).or(fscope.timeout_ms),
     retries: test.retries.or(chain.retries).or(fscope.retries),
   }
@@ -588,7 +593,8 @@ fn lower_test(
     sessions: Arc::clone(&cx.sessions),
     bundle: Arc::clone(bundle),
     cwd: Arc::clone(&cx.cwd_arc),
-    world_use: Arc::new(meta.world_use),
+    config_use: Arc::clone(&cx.config_use),
+    spec_use: Arc::new(meta.use_bag.clone().unwrap_or_else(|| serde_json::json!({}))),
     static_annotations: Arc::new(static_annotation_pairs(&meta.annotations)),
     tags: Arc::new(tags),
     title_path: Arc::new(title_path),
@@ -634,88 +640,33 @@ fn lower_all_hooks(
     let Some((file, _)) = remap_file(bundle, cwd, h.line, h.col) else {
       continue;
     };
+    // The hook's own `use` layers, exactly as a test in the same scope
+    // sees them: the file's `test.use` then its describe chain's. The
+    // config and project layers go under them at run time.
+    let mut spec_use: Option<serde_json::Value> = file_scope(collected, bundle, cwd, &file).use_options;
     let suite_id = match h.suite {
       Some(sidx) => {
         let chain = chain_for(collected, Some(sidx));
+        if let Some(bag) = &chain.use_options {
+          merge_bag(&mut spec_use, bag);
+        }
         format!("{file}::{}", chain.path.join("::"))
       },
       None => file.clone(),
     };
-    let bundle_fn = Arc::clone(bundle);
-    let cwd_fn = Arc::clone(cwd_arc);
-    let sessions_fn = Arc::clone(sessions);
-    let browser_config = config.browser.clone();
-    let hook_base_url = config.base_url.clone();
-    let label = file.clone();
-    let hook_fn: ferridriver_test::model::SuiteHookFn = Arc::new(move |pool| {
-      let bundle = Arc::clone(&bundle_fn);
-      let cwd = Arc::clone(&cwd_fn);
-      let sessions = Arc::clone(&sessions_fn);
-      let browser_config = browser_config.clone();
-      let base_url = hook_base_url.clone();
-      let label = label.clone();
-      Box::pin(async move {
-        let session = sessions
-          .get(0)
-          .await
-          .map_err(|e| TestFailure::from(format!("test session load failed: {e}")))?;
-        let test_info = Arc::new(TestInfo::new_anonymous());
-        let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
-        let browser = pool.get("browser").await.ok();
-        // The suite pool carries the worker's per-project test_info
-        // (config_snapshot = merged project config); the captured
-        // `browser_config` is the root config fallback.
-        let cached_info = pool.try_get_cached::<TestInfo>("test_info");
-        let effective_browser = cached_info
-          .as_ref()
-          .and_then(|ti| ti.config_snapshot.as_ref().map(|cfg| cfg.browser.clone()))
-          .unwrap_or(browser_config);
-        // Same source as the browser config: the worker's per-project
-        // TestInfo, so a hook's assertions default from the project's
-        // own `expect` block.
-        let expect_config = cached_info
-          .as_ref()
-          .map_or_else(Arc::default, |ti| Arc::clone(&ti.expect));
-        let world = TestWorldData {
-          page: None,
-          context: None,
-          request: None,
-          browser,
-          browser_name: effective_browser.browser.clone(),
-          headless: effective_browser.headless,
-          is_mobile: false,
-          has_touch: false,
-          base_url,
-          use_options: serde_json::json!({}),
-          expect: expect_config,
-          info: TestInfoData {
-            title: "beforeAll/afterAll hook".to_string(),
-            timeout_ms: 30_000,
-            expected_status: "passed".to_string(),
-            ..TestInfoData::default()
-          },
-        };
-        let bridge = Arc::new(InfoBridge::new(
-          test_info,
-          modifiers,
-          Arc::new(session.session().deadline()),
-          Arc::new(ferridriver_script::BundleSourceMap::new(
-            Arc::clone(&bundle),
-            cwd.clone(),
-          )),
-          cwd.clone(),
-          Duration::from_secs(30),
-          Vec::new(),
-        ));
-        ferridriver_script::run_standalone_hook(&session.vm_handle(), h_idx, world, bridge as _, label.clone())
-          .await
-          .map_err(|e| TestFailure {
-            message: bundle.format_error(&e),
-            stack: e.stack.clone(),
-            diff: None,
-            screenshot: None,
-          })
-      })
+    let spec_use = Arc::new(spec_use.unwrap_or_else(|| serde_json::json!({})));
+    let config_use =
+      Arc::new(serde_json::to_value(&config.browser.use_options).unwrap_or_else(|_| serde_json::json!({})));
+    let hook_fn = suite_hook_fn(SuiteHookParams {
+      hook_idx: h_idx,
+      bundle: Arc::clone(bundle),
+      cwd: Arc::clone(cwd_arc),
+      sessions: Arc::clone(sessions),
+      browser_config: config.browser.clone(),
+      base_url: config.base_url.clone(),
+      label: file.clone(),
+      spec_use,
+      config_use,
     });
     builder.add_hook(HookDef {
       suite_id,
@@ -727,25 +678,154 @@ fn lower_all_hooks(
   }
 }
 
+/// Everything one suite hook's closure captures.
+struct SuiteHookParams {
+  hook_idx: usize,
+  bundle: Arc<CompiledBundle>,
+  cwd: Arc<std::path::PathBuf>,
+  sessions: Arc<crate::SessionPool>,
+  browser_config: ferridriver_test::config::BrowserConfig,
+  base_url: Option<String>,
+  label: String,
+  /// The hook's file + describe `use` bags.
+  spec_use: Arc<serde_json::Value>,
+  /// Root-config `use`, used only when the pool carries no per-project
+  /// snapshot.
+  config_use: Arc<serde_json::Value>,
+}
+
+/// Build the core hook closure: resolve the worker's session, lower a
+/// standalone world for it, and run the registered hook in it.
+fn suite_hook_fn(p: SuiteHookParams) -> ferridriver_test::model::SuiteHookFn {
+  let p = Arc::new(p);
+  Arc::new(move |pool| {
+    let h_idx = p.hook_idx;
+    let bundle = Arc::clone(&p.bundle);
+    let cwd = Arc::clone(&p.cwd);
+    let sessions = Arc::clone(&p.sessions);
+    let browser_config = p.browser_config.clone();
+    let base_url = p.base_url.clone();
+    let label = p.label.clone();
+    let spec_use = Arc::clone(&p.spec_use);
+    let config_use = Arc::clone(&p.config_use);
+    Box::pin(async move {
+      // The suite pool carries the worker's per-project test_info
+      // (config_snapshot = merged project config); the captured
+      // `browser_config` is the root config fallback.
+      let cached_info = pool.try_get_cached::<TestInfo>("test_info");
+      // A suite hook runs once per WORKER, so it belongs in that
+      // worker's VM — module state a `beforeAll` seeds is invisible to
+      // the tests of any other one.
+      let session = sessions
+        .get(cached_info.as_ref().map_or(0, |ti| ti.worker_index))
+        .await
+        .map_err(|e| TestFailure::from(format!("test session load failed: {e}")))?;
+      let test_info = Arc::new(TestInfo::new_anonymous());
+      let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
+      let browser = pool.get("browser").await.ok();
+      let effective_browser = cached_info
+        .as_ref()
+        .and_then(|ti| ti.config_snapshot.as_ref().map(|cfg| cfg.browser.clone()))
+        .unwrap_or(browser_config);
+      // Same source as the browser config: the worker's per-project
+      // TestInfo, so a hook's assertions default from the project's
+      // own `expect` block.
+      let expect_config = cached_info
+        .as_ref()
+        .map_or_else(Arc::default, |ti| Arc::clone(&ti.expect));
+      let world = TestWorldData {
+        page: None,
+        context: None,
+        request: None,
+        browser,
+        browser_name: effective_browser.browser.clone(),
+        headless: effective_browser.headless,
+        is_mobile: false,
+        has_touch: false,
+        base_url,
+        use_options: ferridriver_test::host::merge_use_options(
+          Some(
+            &cached_info
+              .as_ref()
+              .and_then(|ti| ti.config_snapshot.as_ref())
+              .and_then(|c| serde_json::to_value(&c.browser.use_options).ok())
+              .unwrap_or_else(|| (*config_use).clone()),
+          ),
+          Some(&spec_use),
+        ),
+        expect: expect_config,
+        info: TestInfoData {
+          title: "beforeAll/afterAll hook".to_string(),
+          timeout_ms: 30_000,
+          expected_status: "passed".to_string(),
+          ..TestInfoData::default()
+        },
+      };
+      let bridge = Arc::new(InfoBridge::new(
+        test_info,
+        modifiers,
+        Arc::new(session.session().deadline()),
+        Arc::new(ferridriver_script::BundleSourceMap::new(
+          Arc::clone(&bundle),
+          cwd.clone(),
+        )),
+        cwd.clone(),
+        Duration::from_secs(30),
+        Vec::new(),
+      ));
+      ferridriver_script::run_standalone_hook(&session.vm_handle(), h_idx, world, bridge as _, label.clone())
+        .await
+        .map_err(|e| TestFailure {
+          message: bundle.format_error(&e),
+          stack: e.stack.clone(),
+          diff: None,
+          screenshot: None,
+        })
+    })
+  })
+}
+
+/// Decide what the open `use` keys of every config layer mean, now
+/// that the fixture chains are known — Playwright's `FixturePool`
+/// constructor check, which also runs after collection because the
+/// pool is what answers it (`common/fixtures.ts:105-111`).
+///
+/// The keys of every project are checked together with the config's:
+/// one plan serves every project, so a key only one project sets still
+/// has to be understood here.
+fn validate_use_keys(config: &TestConfig, collected: &CollectedTests) -> anyhow::Result<()> {
+  let keys = config.open_use_keys();
+  if keys.is_empty() {
+    return Ok(());
+  }
+  let chains: Vec<Vec<ferridriver_test::fixture_graph::FixtureSlot>> = (0..collected.fixture_sets.len())
+    .map(|set| collected.fixture_slots(set))
+    .collect();
+  ferridriver_test::fixture_graph::validate_use_keys(keys.into_iter().map(String::as_str), &chains)
+    .map_err(|e| anyhow::anyhow!(e))
+}
+
 /// Build the [`TestPlan`] for a loaded test source.
 ///
 /// # Errors
 ///
 /// Fails when a registration has no source-mapped location (a bundle
-/// without a source map).
+/// without a source map), or when a `use` key names a fixture that was
+/// not registered as an option.
 pub fn translate_tests(
   source: &TsTestSource,
   config: &TestConfig,
   cwd: &Path,
   sessions: &Arc<crate::SessionPool>,
 ) -> anyhow::Result<TestPlan> {
+  validate_use_keys(config, &source.collected)?;
   let cx = PlanCx {
     source,
     config,
     cwd,
     cwd_arc: Arc::new(cwd.to_path_buf()),
     // Effective config `use` bag every test starts from.
-    config_use: serde_json::to_value(&config.browser.use_options).unwrap_or(serde_json::Value::Null),
+    config_use: Arc::new(serde_json::to_value(&config.browser.use_options).unwrap_or_else(|_| serde_json::json!({}))),
     sessions: Arc::clone(sessions),
   };
   let mut builder = TestPlanBuilder::new();
