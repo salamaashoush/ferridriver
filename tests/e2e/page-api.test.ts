@@ -85,16 +85,18 @@ describe('page api', () => {
   });
 
   test('page_off_stops_delivery', async ({ page }) => {
-    // `page.off(id)` removes a listener by the id `on()` returned: the
-    // event after `off` is not delivered, while the one before it was.
+    // `page.off(event, listener)` removes the registration by function
+    // identity: the event after `off` is not delivered, while the one
+    // before it was.
     await page.goto(H1);
     const got: string[] = [];
-    const id = page.on('console', (msg) => got.push((msg as ConsoleMessage).text()));
+    const listener = (msg: unknown) => got.push((msg as ConsoleMessage).text());
+    expect(page.on('console', listener) === page).toBe(true);
     await page.evaluate("console.log('before-off')");
     await pollUntil(page, () => got.length > 0);
     const afterFirst = got.length;
     expect(afterFirst).toBeGreaterThanOrEqual(1);
-    page.off(id);
+    page.off('console', listener);
     await page.evaluate("console.log('after-off')");
     await settle(page);
     expect(got.length).toBe(afterFirst);

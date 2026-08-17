@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ferridriver::Page;
 use rquickjs::JsLifetime;
-use rquickjs::class::Trace;
+use rquickjs::class::{Class, Trace};
+use rquickjs::function::This;
 
 use rquickjs::function::Opt;
 
@@ -91,6 +92,45 @@ impl PageJs {
     &self.inner
   }
 
+  fn off_impl<'js>(
+    &self,
+    ctx: &rquickjs::Ctx<'js>,
+    target: rquickjs::Value<'js>,
+    listener: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let ctx = ctx.clone();
+    let Some(event) = target.as_string() else {
+      return Err(rquickjs::Error::new_from_js_message(
+        "page.off",
+        "TypeError",
+        "off(event, listener) expects an event name".to_string(),
+      ));
+    };
+    let event = event.to_string()?;
+    let listener_fn = listener.0.as_ref().and_then(|v| v.as_function().cloned());
+    let Some(listener_fn) = listener_fn else {
+      // Lenient `off(event)` — drop every listener for that event
+      // (matches `removeAllListeners(event)` semantics).
+      let ids = with_page_callbacks(&ctx, |r| r.remove_event_listeners_named(&event))?;
+      for id in ids {
+        self.inner.off(ferridriver::events::ListenerId(id));
+      }
+      return Ok(());
+    };
+    // Playwright form: match the registration by JS function identity
+    // (`===`). `Value` equality on objects compares the raw JSValue —
+    // exactly strict equality.
+    let target_value: rquickjs::Value<'js> = listener_fn.clone().into_value();
+    for (id, saved) in with_page_callbacks(&ctx, |r| r.event_listeners_named(&event))? {
+      let restored = saved.restore(&ctx)?;
+      if restored.into_value() == target_value {
+        self.inner.off(ferridriver::events::ListenerId(id));
+        with_page_callbacks(&ctx, |r| r.remove_event_listener(id))?;
+      }
+    }
+    Ok(())
+  }
+
   /// Shared core for `page.on` / `page.once`. Saves the JS `listener`
   /// keyed by the core `ListenerId`, then registers a core callback that
   /// forwards `(id, event)` to this context's event pump. The backend
@@ -102,6 +142,19 @@ impl PageJs {
     event: &str,
     listener: rquickjs::Function<'js>,
     once: bool,
+  ) -> rquickjs::Result<f64> {
+    self.register_event_listener_at(ctx, event, listener, once, false)
+  }
+
+  /// [`Self::register_event_listener`] with Node's front-insertion
+  /// (`prependListener` / `prependOnceListener`) as an option.
+  fn register_event_listener_at<'js>(
+    &self,
+    ctx: &rquickjs::Ctx<'js>,
+    event: &str,
+    listener: rquickjs::Function<'js>,
+    once: bool,
+    front: bool,
   ) -> rquickjs::Result<f64> {
     let saved = SavedCallback::save(ctx, listener);
     let tx = ensure_event_pump(ctx);
@@ -115,7 +168,13 @@ impl PageJs {
     let callback: ferridriver::events::EventCallback =
       std::sync::Arc::new(move |ev: ferridriver::events::PageEvent| {
         let id = id_slot_cb.load(Ordering::Relaxed);
-        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send((id, once, page_for_cb.clone(), ev)) {
+        let msg = crate::bindings::page::callbacks::PageEventMsg::Event {
+          id,
+          remove_after: once,
+          page: page_for_cb.clone(),
+          event: ev,
+        };
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(msg) {
           tracing::warn!(
             listener_id = id,
             capacity = PAGE_EVENT_PUMP_CAPACITY,
@@ -123,10 +182,11 @@ impl PageJs {
           );
         }
       });
-    let id = if once {
-      self.inner.once(event, callback)
-    } else {
-      self.inner.on(event, callback)
+    let id = match (once, front) {
+      (false, false) => self.inner.on(event, callback),
+      (true, false) => self.inner.once(event, callback),
+      (false, true) => self.inner.prepend_listener(event, callback),
+      (true, true) => self.inner.prepend_once_listener(event, callback),
     };
     id_slot.store(id.0, Ordering::Relaxed);
     let page_key = self.inner.backend_page_id();
@@ -1116,7 +1176,7 @@ impl PageJs {
   /// `requestfailed`, `websocket`, `dialog`, `filechooser`,
   /// `frameattached`, `framedetached`, `framenavigated`, `load`,
   /// `domcontentloaded`, `close`, `pageerror`, `download`). Returns the
-  /// numeric listener id for `page.off(id)`.
+  /// page, so registrations chain the way Playwright's do.
   ///
   /// Listeners fire cross-task: when core emits, a tokio task
   /// `async_with`s back into the script context and invokes the saved
@@ -1125,94 +1185,206 @@ impl PageJs {
   /// `page.on`, which uses the same core `EventEmitter`.
   #[qjs(rename = "on")]
   pub fn on<'js>(
-    &self,
+    this: This<Class<'js, Self>>,
     ctx: rquickjs::Ctx<'js>,
     event: String,
     listener: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<f64> {
-    self.register_event_listener(&ctx, &event, listener, false)
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    this.0.borrow().register_event_listener(&ctx, &event, listener, false)?;
+    Ok(this.0)
+  }
+
+  /// Node's `addListener`, an alias of [`Self::on`].
+  #[qjs(rename = "addListener")]
+  pub fn add_listener<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: rquickjs::Ctx<'js>,
+    event: String,
+    listener: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    Self::on(this, ctx, event, listener)
+  }
+
+  /// Node's `prependListener`: this listener runs before every listener
+  /// already attached to the same event.
+  #[qjs(rename = "prependListener")]
+  pub fn prepend_listener<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: rquickjs::Ctx<'js>,
+    event: String,
+    listener: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    this
+      .0
+      .borrow()
+      .register_event_listener_at(&ctx, &event, listener, false, true)?;
+    Ok(this.0)
+  }
+
+  /// Node's `prependOnceListener`.
+  #[qjs(rename = "prependOnceListener")]
+  pub fn prepend_once_listener<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: rquickjs::Ctx<'js>,
+    event: String,
+    listener: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    this
+      .0
+      .borrow()
+      .register_event_listener_at(&ctx, &event, listener, true, true)?;
+    Ok(this.0)
+  }
+
+  /// Node's `listeners(type)` — the callbacks attached to `event`, in
+  /// the order they will fire.
+  #[qjs(rename = "listeners")]
+  pub fn listeners<'js>(&self, ctx: rquickjs::Ctx<'js>, event: String) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
+    let saved = with_page_callbacks(&ctx, |r| r.event_listeners_named(&event))?;
+    let mut out = Vec::with_capacity(saved.len());
+    // Dispatch order lives in core; the registry is a map.
+    for id in self.inner.listener_ids_named(&event) {
+      if let Some((_, cb)) = saved.iter().find(|(saved_id, _)| *saved_id == id.0) {
+        out.push(cb.restore(&ctx)?.into_value());
+      }
+    }
+    Ok(out)
+  }
+
+  /// Node's `rawListeners(type)`. ferridriver wraps a `once` listener
+  /// in core rather than in JS, so there is no wrapper to unwrap and
+  /// this is [`Self::listeners`].
+  #[qjs(rename = "rawListeners")]
+  pub fn raw_listeners<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    event: String,
+  ) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
+    self.listeners(ctx, event)
+  }
+
+  /// Node's `listenerCount(type)`.
+  #[qjs(rename = "listenerCount")]
+  pub fn listener_count(&self, event: String) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let count = self.inner.listener_count(&event) as f64;
+    count
+  }
+
+  /// Node's `eventNames()` — every event with a listener attached.
+  #[qjs(rename = "eventNames")]
+  pub fn event_names(&self) -> Vec<String> {
+    self.inner.event_names()
+  }
+
+  /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
+  #[qjs(rename = "setMaxListeners")]
+  pub fn set_max_listeners(this: This<Class<'_, Self>>, max: f64) -> Class<'_, Self> {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let max = max.max(0.0) as usize;
+    this.0.borrow().inner.set_max_listeners(max);
+    this.0
+  }
+
+  /// Node's `getMaxListeners()`.
+  #[qjs(rename = "getMaxListeners")]
+  pub fn get_max_listeners(&self) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let max = self.inner.max_listeners() as f64;
+    max
   }
 
   /// `page.once(event, listener)`. Like [`Self::on`] but the listener
   /// fires at most once (core auto-removes it after the first emit).
   #[qjs(rename = "once")]
   pub fn once<'js>(
-    &self,
+    this: This<Class<'js, Self>>,
     ctx: rquickjs::Ctx<'js>,
     event: String,
     listener: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<f64> {
-    self.register_event_listener(&ctx, &event, listener, true)
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    this.0.borrow().register_event_listener(&ctx, &event, listener, true)?;
+    Ok(this.0)
   }
 
-  /// `page.off(listenerId)`. Removes a listener registered by
-  /// [`Self::on`] / [`Self::once`]. ferridriver mirrors `ferridriver-node`
-  /// here: `off` takes the numeric id returned from `on`, not the
-  /// function reference.
+  /// `page.off(event, listener)` — Playwright's form, matching the
+  /// registration by function identity (`===`). `off(event)` with no
+  /// listener drops every listener for that event.
   #[qjs(rename = "off")]
   pub fn off<'js>(
-    &self,
+    this: This<Class<'js, Self>>,
     ctx: rquickjs::Ctx<'js>,
     target: rquickjs::Value<'js>,
     listener: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    // Ferridriver id form: `off(id)` with the number `on()` returned.
-    if let Some(n) = target.as_number() {
-      #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-      let id = n as u64;
-      self.inner.off(ferridriver::events::ListenerId(id));
-      with_page_callbacks(&ctx, |r| r.remove_event_listener(id))?;
-      return Ok(());
-    }
-    let Some(event) = target.as_string() else {
-      return Err(rquickjs::Error::new_from_js_message(
-        "page.off",
-        "TypeError",
-        "off(event, listener) expects an event name or a listener id".to_string(),
-      ));
-    };
-    let event = event.to_string()?;
-    let listener_fn = listener.0.as_ref().and_then(|v| v.as_function().cloned());
-    let Some(listener_fn) = listener_fn else {
-      // Lenient `off(event)` — drop every listener for that event
-      // (matches `removeAllListeners(event)` semantics).
-      let ids = with_page_callbacks(&ctx, |r| r.remove_event_listeners_named(&event))?;
-      for id in ids {
-        self.inner.off(ferridriver::events::ListenerId(id));
-      }
-      return Ok(());
-    };
-    // Playwright form: match the registration by JS function identity
-    // (`===`). `Value` equality on objects compares the raw JSValue —
-    // exactly strict equality.
-    let target_value: rquickjs::Value<'js> = listener_fn.clone().into_value();
-    for (id, saved) in with_page_callbacks(&ctx, |r| r.event_listeners_named(&event))? {
-      let restored = saved.restore(&ctx)?;
-      if restored.into_value() == target_value {
-        self.inner.off(ferridriver::events::ListenerId(id));
-        with_page_callbacks(&ctx, |r| r.remove_event_listener(id))?;
-      }
-    }
-    Ok(())
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    this.0.borrow().off_impl(&ctx, target, listener)?;
+    Ok(this.0)
   }
 
-  /// `page.removeAllListeners(event?)`. Drops every registered page
-  /// listener (or only those for `event` when given) and releases the
-  /// persisted JS callbacks. Playwright:
-  /// `page.removeAllListeners(type?: string)`.
+  /// Node's `removeListener`, an alias of [`Self::off`].
+  #[qjs(rename = "removeListener")]
+  pub fn remove_listener<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: rquickjs::Ctx<'js>,
+    target: rquickjs::Value<'js>,
+    listener: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    Self::off(this, ctx, target, listener)
+  }
+
+  /// `page.removeAllListeners(type?, options?)`. Drops every registered
+  /// page listener (or only those for `type`) and releases the persisted
+  /// JS callbacks.
+  ///
+  /// Playwright's two shapes: without options it returns the page, so
+  /// the call chains; with options it returns a promise. `behavior:
+  /// 'wait'` resolves once the event pump has dispatched everything
+  /// queued before the call — a listener that is still awaiting inside
+  /// its own body is NOT tracked, because the pump does not await what
+  /// a listener returns. `'ignoreErrors'` and `'default'` resolve the
+  /// same way: a throwing listener is already contained by the pump.
   #[qjs(rename = "removeAllListeners")]
-  pub fn remove_all_listeners(&self, ctx: rquickjs::Ctx<'_>, event: Opt<String>) -> rquickjs::Result<()> {
-    if let Some(ev) = event.0 {
-      let ids = with_page_callbacks(&ctx, |r| r.remove_event_listeners_named(&ev))?;
-      for id in ids {
-        self.inner.off(ferridriver::events::ListenerId(id));
+  pub fn remove_all_listeners<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: rquickjs::Ctx<'js>,
+    event: Opt<String>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    {
+      let page = this.0.borrow();
+      if let Some(ev) = event.0.clone() {
+        let ids = with_page_callbacks(&ctx, |r| r.remove_event_listeners_named(&ev))?;
+        for id in ids {
+          page.inner.off(ferridriver::events::ListenerId(id));
+        }
+        page.inner.remove_listeners_named(&ev);
+      } else {
+        page.inner.remove_all_listeners();
+        with_page_callbacks(&ctx, PageCallbacks::clear_event_listeners)?;
       }
-      self.inner.remove_listeners_named(&ev);
-    } else {
-      self.inner.remove_all_listeners();
-      with_page_callbacks(&ctx, PageCallbacks::clear_event_listeners)?;
     }
-    Ok(())
+    let Some(options) = options.0.filter(|v| !v.is_undefined() && !v.is_null()) else {
+      return Ok(this.0.into_value());
+    };
+    let wait = options
+      .as_object()
+      .and_then(|o| o.get::<_, Option<String>>("behavior").ok().flatten())
+      .is_some_and(|behavior| behavior == "wait");
+    let tx = crate::bindings::page::callbacks::ensure_event_pump(&ctx);
+    let promise = rquickjs::promise::Promise::wrap_future(&ctx, async move {
+      if wait {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        if tx
+          .send(crate::bindings::page::callbacks::PageEventMsg::Drain(done_tx))
+          .await
+          .is_ok()
+        {
+          let _ = done_rx.await;
+        }
+      }
+      Ok::<(), rquickjs::Error>(())
+    })?;
+    Ok(promise.into_value())
   }
 
   // ── Misc page surface (Playwright parity) ────────────────────────────────

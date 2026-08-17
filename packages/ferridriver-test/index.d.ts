@@ -921,14 +921,23 @@ export interface Page {
   setDefaultTimeout(timeout: number): void;
   setDefaultNavigationTimeout(timeout: number): void;
 
-  // on/once return a listener id (a ferridriver extension over
-  // Playwright's chainable emitter); off accepts either that id or the
-  // (event, listener) pair Playwright uses.
-  on(event: PageEvent, handler: (arg: unknown) => void): number;
-  once(event: PageEvent, handler: (arg: unknown) => void): number;
-  off(event: PageEvent, handler: (arg: unknown) => void): void;
-  off(listenerId: number): void;
-  removeAllListeners(event?: PageEvent): void;
+  // The Node emitter surface Playwright exposes: registrations chain,
+  // removal is by function identity.
+  on(event: PageEvent, handler: (arg: unknown) => void): this;
+  addListener(event: PageEvent, handler: (arg: unknown) => void): this;
+  once(event: PageEvent, handler: (arg: unknown) => void): this;
+  prependListener(event: PageEvent, handler: (arg: unknown) => void): this;
+  prependOnceListener(event: PageEvent, handler: (arg: unknown) => void): this;
+  off(event: PageEvent, handler?: (arg: unknown) => void): this;
+  removeListener(event: PageEvent, handler?: (arg: unknown) => void): this;
+  removeAllListeners(event?: PageEvent): this;
+  removeAllListeners(event: PageEvent | undefined, options: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
+  listeners(event: PageEvent): ((arg: unknown) => void)[];
+  rawListeners(event: PageEvent): ((arg: unknown) => void)[];
+  listenerCount(event: PageEvent): number;
+  eventNames(): PageEvent[];
+  setMaxListeners(max: number): this;
+  getMaxListeners(): number;
 
   keyboard: Keyboard;
   mouse: Mouse;
@@ -1006,9 +1015,21 @@ export interface BrowserContext {
   unroute(url: string | RegExp | ((url: URL) => boolean), handler?: (route: Route, request: Request) => void | Promise<void>): Promise<void>;
   unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
   waitForEvent(event: string, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number }): Promise<unknown>;
-  on(event: string, handler: (arg: unknown) => void): void;
-  once(event: string, handler: (arg: unknown) => void): void;
-  off(event: string, handler: (arg: unknown) => void): void;
+  on(event: string, handler: (arg: unknown) => void): this;
+  addListener(event: string, handler: (arg: unknown) => void): this;
+  once(event: string, handler: (arg: unknown) => void): this;
+  prependListener(event: string, handler: (arg: unknown) => void): this;
+  prependOnceListener(event: string, handler: (arg: unknown) => void): this;
+  off(event: string, handler?: (arg: unknown) => void): this;
+  removeListener(event: string, handler?: (arg: unknown) => void): this;
+  removeAllListeners(event?: string): this;
+  removeAllListeners(event: string | undefined, options: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
+  listeners(event: string): ((arg: unknown) => void)[];
+  rawListeners(event: string): ((arg: unknown) => void)[];
+  listenerCount(event: string): number;
+  eventNames(): string[];
+  setMaxListeners(max: number): this;
+  getMaxListeners(): number;
   setDefaultTimeout(timeout: number): void;
   setDefaultNavigationTimeout(timeout: number): void;
   newCDPSession(page: Page): Promise<CDPSession>;
@@ -1088,6 +1109,20 @@ export interface Browser {
   close(): Promise<void>;
   newBrowserCDPSession(): Promise<CDPSession>;
   waitForEvent(event: string, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number }): Promise<unknown>;
+  on(event: string, handler: (arg: unknown) => void): this;
+  addListener(event: string, handler: (arg: unknown) => void): this;
+  once(event: string, handler: (arg: unknown) => void): this;
+  prependListener(event: string, handler: (arg: unknown) => void): this;
+  prependOnceListener(event: string, handler: (arg: unknown) => void): this;
+  off(event: string, handler?: (arg: unknown) => void): this;
+  removeListener(event: string, handler?: (arg: unknown) => void): this;
+  removeAllListeners(event?: string): this;
+  listeners(event: string): ((arg: unknown) => void)[];
+  rawListeners(event: string): ((arg: unknown) => void)[];
+  listenerCount(event: string): number;
+  eventNames(): string[];
+  setMaxListeners(max: number): this;
+  getMaxListeners(): number;
 }
 
 export interface WebStorage {

@@ -18,6 +18,17 @@ pub struct BrowserContext {
   /// keeps each `context.route(predicateFn, handler)` JS function so that
   /// `context.unroute(fn)` can match it by `===`.
   predicate_routes: Arc<Mutex<Vec<PredRoute>>>,
+  /// `context.on` / `context.once` registrations, so `off(event,
+  /// listener)` resolves the core `ListenerId` from JS function
+  /// identity — the same registry `Page` keeps.
+  listener_regs: Arc<Mutex<Vec<ContextListenerReg>>>,
+}
+
+/// One context-level listener registration.
+struct ContextListenerReg {
+  event: String,
+  id: u64,
+  fn_ref: napi::bindgen_prelude::FunctionRef<ContextEventArg, ()>,
 }
 
 impl BrowserContext {
@@ -25,7 +36,38 @@ impl BrowserContext {
     Self {
       inner,
       predicate_routes: Arc::new(Mutex::new(Vec::new())),
+      listener_regs: Arc::new(Mutex::new(Vec::new())),
     }
+  }
+
+  /// Shared body of the registration methods: build the threadsafe
+  /// dispatch, keep a `FunctionRef` for identity removal, and register
+  /// on the core emitter.
+  fn register_listener(
+    &self,
+    event: &str,
+    listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
+    once: bool,
+    front: bool,
+  ) -> Result<()> {
+    let fn_ref = listener.create_ref()?;
+    let callback = build_context_event_callback(listener)?;
+    let id = match (once, front) {
+      (false, false) => self.inner.on(event, callback),
+      (true, false) => self.inner.once(event, callback),
+      (false, true) => self.inner.prepend_listener(event, callback),
+      (true, true) => self.inner.prepend_once_listener(event, callback),
+    };
+    self
+      .listener_regs
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(ContextListenerReg {
+        event: event.to_string(),
+        id: id.0,
+        fn_ref,
+      });
+    Ok(())
   }
 }
 
@@ -506,35 +548,197 @@ impl BrowserContext {
   /// `'frameattached'`, `'framedetached'`, `'framenavigated'`,
   /// `'pageclose'`, `'pageload'`). Playwright:
   /// `browserContext.on(event, listener)` — the callback receives a
-  /// live class instance (WebError / Download / Frame / Page). Returns a
-  /// numeric listener id for removal via [`Self::off`].
+  /// live class instance (WebError / Download / Frame / Page), and the
+  /// context is returned so registrations chain.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void"
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void",
+    ts_return_type = "this"
   )]
-  pub fn on(&self, event: String, listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>) -> Result<f64> {
-    let callback = build_context_event_callback(listener)?;
-    let id = self.inner.on(&event, callback);
-    #[allow(clippy::cast_precision_loss)]
-    Ok(id.0 as f64)
+  pub fn on<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.register_listener(&event, listener, false, false)?;
+    Ok(this.object)
+  }
+
+  /// Node's `addListener`, an alias of [`Self::on`].
+  #[napi(
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void",
+    ts_return_type = "this"
+  )]
+  pub fn add_listener<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.on(this, event, listener)
   }
 
   /// One-shot variant of [`Self::on`]. Auto-removed after first match.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void"
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void",
+    ts_return_type = "this"
   )]
-  pub fn once(&self, event: String, listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>) -> Result<f64> {
-    let callback = build_context_event_callback(listener)?;
-    let id = self.inner.once(&event, callback);
-    #[allow(clippy::cast_precision_loss)]
-    Ok(id.0 as f64)
+  pub fn once<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.register_listener(&event, listener, true, false)?;
+    Ok(this.object)
   }
 
-  /// Remove a context-level listener by id.
+  /// Node's `prependListener`: runs before the listeners already
+  /// attached to the same event.
+  #[napi(
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void",
+    ts_return_type = "this"
+  )]
+  pub fn prepend_listener<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.register_listener(&event, listener, false, true)?;
+    Ok(this.object)
+  }
+
+  /// Node's `prependOnceListener`.
+  #[napi(
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void",
+    ts_return_type = "this"
+  )]
+  pub fn prepend_once_listener<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.register_listener(&event, listener, true, true)?;
+    Ok(this.object)
+  }
+
+  /// Remove a context-level listener by function identity, Playwright's
+  /// `off(event, listener)`. `off(event)` alone drops every listener
+  /// for that event.
+  #[napi(
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener?: (arg: WebError | Download | Frame | Page) => void",
+    ts_return_type = "this"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn off<'env>(
+    &self,
+    env: &napi::Env,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: Option<napi::bindgen_prelude::Function<'_, ContextEventArg, ()>>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    let mut regs = self
+      .listener_regs
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(listener) = listener else {
+      self.inner.remove_listeners_named(&event);
+      regs.retain(|r| r.event != event);
+      return Ok(this.object);
+    };
+    let in_ref = listener.create_ref()?;
+    let mut i = 0;
+    while i < regs.len() {
+      let hit = regs[i].event == event && {
+        let a = in_ref.borrow_back(env)?;
+        let b = regs[i].fn_ref.borrow_back(env)?;
+        env.strict_equals(a, b)?
+      };
+      if hit {
+        let reg = regs.remove(i);
+        self.inner.off(ferridriver::events::ListenerId(reg.id));
+      } else {
+        i += 1;
+      }
+    }
+    Ok(this.object)
+  }
+
+  /// Node's `removeListener`, an alias of [`Self::off`].
+  #[napi(
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener?: (arg: WebError | Download | Frame | Page) => void",
+    ts_return_type = "this"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn remove_listener<'env>(
+    &self,
+    env: &napi::Env,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: Option<napi::bindgen_prelude::Function<'_, ContextEventArg, ()>>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.off(env, this, event, listener)
+  }
+
+  /// Remove every context-level listener, or only those for `event`.
+  #[napi(ts_return_type = "this")]
+  pub fn remove_all_listeners<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    event: Option<String>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    let mut regs = self
+      .listener_regs
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match event {
+      Some(ev) => {
+        self.inner.remove_listeners_named(&ev);
+        regs.retain(|r| r.event != ev);
+      },
+      None => {
+        self.inner.remove_all_listeners();
+        regs.clear();
+      },
+    }
+    Ok(this.object)
+  }
+
+  /// Node's `listenerCount(type)`.
   #[napi]
-  pub fn off(&self, listener_id: f64) {
+  pub fn listener_count(&self, event: String) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let count = self.inner.listener_count(&event) as f64;
+    count
+  }
+
+  /// Node's `eventNames()` — every event with a listener attached.
+  #[napi]
+  pub fn event_names(&self) -> Vec<String> {
+    self.inner.event_names()
+  }
+
+  /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
+  #[napi(ts_return_type = "this")]
+  pub fn set_max_listeners<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    max: f64,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
     self
       .inner
-      .off(ferridriver::events::ListenerId(crate::types::f64_to_u64(listener_id)));
+      .set_max_listeners(crate::types::f64_to_u64(max.max(0.0)) as usize);
+    Ok(this.object)
+  }
+
+  /// Node's `getMaxListeners()`.
+  #[napi]
+  pub fn get_max_listeners(&self) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let max = self.inner.max_listeners() as f64;
+    max
   }
 
   /// Wait for a context-level event. Playwright:

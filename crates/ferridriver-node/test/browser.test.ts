@@ -1415,17 +1415,37 @@ for (const backend of BACKENDS) {
 
     // ── Page.on / off / removeAllListeners ───────────────────────────
 
-    it("on returns listenerId, off removes it", async () => {
+    it("on chains and off removes by identity", async () => {
       const received: any[] = [];
-      const id = page.on("console", (data) => {
+      const listener = (data: any) => {
         received.push(data);
-      });
-      expect(typeof id).toBe("number");
-      expect(id).toBeGreaterThan(0);
+      };
+      expect(page.on("console", listener)).toBe(page);
+      expect(page.listenerCount("console")).toBe(1);
       await page.evaluate("console.log('test_on_off')");
       await page.waitForTimeout(100);
-      page.off(id);
-      // After off, no more events should be received
+      expect(received.length).toBeGreaterThanOrEqual(1);
+      const delivered = received.length;
+      page.off("console", listener);
+      expect(page.listenerCount("console")).toBe(0);
+      await page.evaluate("console.log('after_off')");
+      await page.waitForTimeout(100);
+      expect(received.length).toBe(delivered);
+    });
+
+    it("prependListener runs before the listener already attached", async () => {
+      const order: string[] = [];
+      const second = () => order.push("second");
+      const first = () => order.push("first");
+      page.on("console", second);
+      page.prependListener("console", first);
+      try {
+        await page.evaluate("console.log('ordered')");
+        await page.waitForTimeout(100);
+        expect(order).toEqual(["first", "second"]);
+      } finally {
+        page.removeAllListeners("console");
+      }
     });
 
     it("removeAllListeners clears all listeners", () => {

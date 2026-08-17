@@ -3072,6 +3072,57 @@ impl Page {
     self.inner.events().remove_listeners_named(event_name);
   }
 
+  /// Node's `prependListener`: run before every listener already
+  /// attached to `event_name`.
+  pub fn prepend_listener(
+    &self,
+    event_name: &str,
+    callback: crate::events::EventCallback,
+  ) -> crate::events::ListenerId {
+    self.lazy_enable_for_event(event_name);
+    self.inner.events().prepend(event_name, callback)
+  }
+
+  /// Node's `prependOnceListener`.
+  pub fn prepend_once_listener(
+    &self,
+    event_name: &str,
+    callback: crate::events::EventCallback,
+  ) -> crate::events::ListenerId {
+    self.lazy_enable_for_event(event_name);
+    self.inner.events().prepend_once(event_name, callback)
+  }
+
+  /// Node's `listenerCount(type)`.
+  #[must_use]
+  pub fn listener_count(&self, event_name: &str) -> usize {
+    self.inner.events().listener_count(event_name)
+  }
+
+  /// Node's `eventNames()` — every event with a listener attached.
+  #[must_use]
+  pub fn event_names(&self) -> Vec<String> {
+    self.inner.events().event_names()
+  }
+
+  /// The listener ids registered for `event_name`, in dispatch order.
+  /// A binding layer maps them back to the callbacks it persisted.
+  #[must_use]
+  pub fn listener_ids_named(&self, event_name: &str) -> Vec<crate::events::ListenerId> {
+    self.inner.events().listener_ids_named(event_name)
+  }
+
+  /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
+  pub fn set_max_listeners(&self, max: usize) {
+    self.inner.events().set_max_listeners(max);
+  }
+
+  /// Node's `getMaxListeners()`.
+  #[must_use]
+  pub fn max_listeners(&self) -> usize {
+    self.inner.events().max_listeners()
+  }
+
   /// Live [`Frame`] handle for a backend frame id. Used by the binding
   /// layers to lift `frameattached` / `framenavigated` / `framedetached`
   /// event payloads into the `Frame` object Playwright hands to

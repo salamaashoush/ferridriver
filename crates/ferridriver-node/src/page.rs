@@ -194,6 +194,7 @@ impl Page {
     event: &str,
     listener: &napi::bindgen_prelude::Function<'_, PageWaitForEventResult, ()>,
     once: bool,
+    front: bool,
   ) -> Result<f64> {
     let fn_ref = listener.create_ref()?;
     let tsfn = listener
@@ -209,10 +210,11 @@ impl Page {
         napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
       );
     });
-    let id = if once {
-      self.inner.once(event, callback)
-    } else {
-      self.inner.on(event, callback)
+    let id = match (once, front) {
+      (false, false) => self.inner.on(event, callback),
+      (true, false) => self.inner.once(event, callback),
+      (false, true) => self.inner.prepend_listener(event, callback),
+      (true, true) => self.inner.prepend_once_listener(event, callback),
     };
     self
       .listener_regs
@@ -646,81 +648,173 @@ impl Page {
   /// events, the `Page` itself for `'load'` / `'domcontentloaded'` /
   /// `'close'`, and a native JS `Error` for `'pageerror'`.
   #[napi(
-    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void"
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_return_type = "this"
   )]
-  pub fn on(
+  pub fn on<'env>(
     &self,
+    this: napi::bindgen_prelude::This<'env>,
     event: String,
     listener: napi::bindgen_prelude::Function<'_, PageWaitForEventResult, ()>,
-  ) -> Result<f64> {
-    self.register_listener(&event, &listener, false)
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.register_listener(&event, &listener, false, false)?;
+    Ok(this.object)
+  }
+
+  /// Node's `addListener`, an alias of [`Page::on`].
+  #[napi(
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_return_type = "this"
+  )]
+  pub fn add_listener<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, PageWaitForEventResult, ()>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.on(this, event, listener)
   }
 
   /// Register a one-time event listener. Auto-removed after first match.
   /// Same live listener argument as [`Page::on`].
   #[napi(
-    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void"
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_return_type = "this"
   )]
-  pub fn once(
+  pub fn once<'env>(
     &self,
+    this: napi::bindgen_prelude::This<'env>,
     event: String,
     listener: napi::bindgen_prelude::Function<'_, PageWaitForEventResult, ()>,
-  ) -> Result<f64> {
-    self.register_listener(&event, &listener, true)
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.register_listener(&event, &listener, true, false)?;
+    Ok(this.object)
+  }
+
+  /// Node's `prependListener`: runs before the listeners already
+  /// attached to the same event.
+  #[napi(
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_return_type = "this"
+  )]
+  pub fn prepend_listener<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, PageWaitForEventResult, ()>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.register_listener(&event, &listener, false, true)?;
+    Ok(this.object)
+  }
+
+  /// Node's `prependOnceListener`.
+  #[napi(
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_return_type = "this"
+  )]
+  pub fn prepend_once_listener<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, PageWaitForEventResult, ()>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.register_listener(&event, &listener, true, true)?;
+    Ok(this.object)
   }
 
   /// Remove an event listener — Playwright's `off(event, listener)`
-  /// (function identity, `===`) or the ferridriver id form
-  /// `off(listenerId)` with the number returned from `on()`/`once()`.
+  /// (function identity, `===`). `off(event)` alone drops every
+  /// listener for that event.
   #[napi(
-    ts_args_type = "eventOrId: string | number, listener?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void"
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_return_type = "this"
   )]
   // napi-rs only injects `Env` as `&Env`, hence the pass-by-ref allow
   // (same constraint as `wait_for_event` / `unroute`).
   #[allow(clippy::trivially_copy_pass_by_ref)]
-  pub fn off(
+  pub fn off<'env>(
     &self,
     env: &napi::Env,
-    event_or_id: napi::Either<String, f64>,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
     listener: Option<napi::bindgen_prelude::Function<'_, PageWaitForEventResult, ()>>,
-  ) -> Result<()> {
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
     let mut regs = self
       .listener_regs
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match event_or_id {
-      napi::Either::B(listener_id) => {
-        let id = crate::types::f64_to_u64(listener_id);
-        self.inner.off(ferridriver::events::ListenerId(id));
-        regs.retain(|r| r.id != id);
-      },
-      napi::Either::A(event) => {
-        let Some(listener) = listener else {
-          // Lenient `off(event)` — drop every listener for that event
-          // (Playwright requires the listener; this matches
-          // `removeAllListeners(event)` semantics instead of erroring).
-          self.inner.remove_listeners_named(&event);
-          regs.retain(|r| r.event != event);
-          return Ok(());
-        };
-        let in_ref = listener.create_ref()?;
-        let mut i = 0;
-        while i < regs.len() {
-          let hit = regs[i].event == event && {
-            let a = in_ref.borrow_back(env)?;
-            let b = regs[i].fn_ref.borrow_back(env)?;
-            env.strict_equals(a, b)?
-          };
-          if hit {
-            let reg = regs.remove(i);
-            self.inner.off(ferridriver::events::ListenerId(reg.id));
-          } else {
-            i += 1;
-          }
-        }
-      },
+    let Some(listener) = listener else {
+      self.inner.remove_listeners_named(&event);
+      regs.retain(|r| r.event != event);
+      return Ok(this.object);
+    };
+    let in_ref = listener.create_ref()?;
+    let mut i = 0;
+    while i < regs.len() {
+      let hit = regs[i].event == event && {
+        let a = in_ref.borrow_back(env)?;
+        let b = regs[i].fn_ref.borrow_back(env)?;
+        env.strict_equals(a, b)?
+      };
+      if hit {
+        let reg = regs.remove(i);
+        self.inner.off(ferridriver::events::ListenerId(reg.id));
+      } else {
+        i += 1;
+      }
     }
-    Ok(())
+    Ok(this.object)
+  }
+
+  /// Node's `removeListener`, an alias of [`Page::off`].
+  #[napi(
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_return_type = "this"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn remove_listener<'env>(
+    &self,
+    env: &napi::Env,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: Option<napi::bindgen_prelude::Function<'_, PageWaitForEventResult, ()>>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.off(env, this, event, listener)
+  }
+
+  /// Node's `listenerCount(type)`.
+  #[napi]
+  pub fn listener_count(&self, event: String) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let count = self.inner.listener_count(&event) as f64;
+    count
+  }
+
+  /// Node's `eventNames()` — every event with a listener attached.
+  #[napi]
+  pub fn event_names(&self) -> Vec<String> {
+    self.inner.event_names()
+  }
+
+  /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
+  #[napi(ts_return_type = "this")]
+  pub fn set_max_listeners<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    max: f64,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self
+      .inner
+      .set_max_listeners(crate::types::f64_to_u64(max.max(0.0)) as usize);
+    Ok(this.object)
+  }
+
+  /// Node's `getMaxListeners()`.
+  #[napi]
+  pub fn get_max_listeners(&self) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let max = self.inner.max_listeners() as f64;
+    max
   }
 
   /// Remove event listeners — all of them, or only those for `event`

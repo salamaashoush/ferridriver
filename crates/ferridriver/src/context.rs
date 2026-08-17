@@ -1176,6 +1176,64 @@ impl ContextRef {
     self.events.off(id);
   }
 
+  /// Node's `prependListener`: run before every listener already
+  /// attached to `event_name`.
+  pub fn prepend_listener(
+    &self,
+    event_name: &str,
+    callback: crate::events::ContextEventCallback,
+  ) -> crate::events::ListenerId {
+    self.events.prepend(event_name, callback)
+  }
+
+  /// Node's `prependOnceListener`.
+  pub fn prepend_once_listener(
+    &self,
+    event_name: &str,
+    callback: crate::events::ContextEventCallback,
+  ) -> crate::events::ListenerId {
+    self.events.prepend_once(event_name, callback)
+  }
+
+  /// Remove every context-level listener.
+  pub fn remove_all_listeners(&self) {
+    self.events.remove_all_listeners();
+  }
+
+  /// Remove every context-level listener for `event_name`.
+  pub fn remove_listeners_named(&self, event_name: &str) {
+    self.events.remove_listeners_named(event_name);
+  }
+
+  /// Node's `listenerCount(type)`.
+  #[must_use]
+  pub fn listener_count(&self, event_name: &str) -> usize {
+    self.events.listener_count(event_name)
+  }
+
+  /// Node's `eventNames()`.
+  #[must_use]
+  pub fn event_names(&self) -> Vec<String> {
+    self.events.event_names()
+  }
+
+  /// The listener ids registered for `event_name`, in dispatch order.
+  #[must_use]
+  pub fn listener_ids_named(&self, event_name: &str) -> Vec<crate::events::ListenerId> {
+    self.events.listener_ids_named(event_name)
+  }
+
+  /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
+  pub fn set_max_listeners(&self, max: usize) {
+    self.events.set_max_listeners(max);
+  }
+
+  /// Node's `getMaxListeners()`.
+  #[must_use]
+  pub fn max_listeners(&self) -> usize {
+    self.events.max_listeners()
+  }
+
   /// Wait for the next context-level event matching `event_name`, with
   /// `timeout_ms`. Mirrors Playwright's
   /// `browserContext.waitForEvent(event, options?)`.

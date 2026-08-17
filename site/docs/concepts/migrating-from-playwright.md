@@ -200,15 +200,26 @@ await browser.close();
 | `locator.or(other)`  | `locator.orLocator(other)`  |
 | `locator.and(other)` | `locator.andLocator(other)` |
 
-### Events return a numeric listener id
+### Events are the Node emitter surface
 
-Playwright's `page.on(...)` returns the `Page`; you remove a listener with
-`page.off(event, handler)`. ferridriver returns a numeric id:
+`page`, `context` and `browser` are event emitters with the surface
+Playwright exposes, so registrations chain and removal is by function
+identity:
 
 ```ts
-const id = page.on('response', (data) => console.log(`${data.status} ${data.url}`));
-page.off(id);
+const onResponse = (data) => console.log(`${data.status} ${data.url}`);
+page.on('response', onResponse).once('load', () => console.log('loaded'));
+page.off('response', onResponse);
 ```
+
+`addListener`, `removeListener`, `prependListener`, `prependOnceListener`,
+`listeners`, `rawListeners`, `listenerCount`, `eventNames`,
+`setMaxListeners` and `getMaxListeners` are all present.
+`removeAllListeners(type?)` returns the emitter; with an options bag
+(`{ behavior: 'wait' }`) it returns a promise that settles once the
+already-queued events have been dispatched — a listener still awaiting
+inside its own body is not tracked, because the runtime does not await
+what a listener returns.
 
 ## Auto-waiting
 

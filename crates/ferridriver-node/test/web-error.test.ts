@@ -69,9 +69,10 @@ for (const backend of BACKENDS) {
 
     it("page.on('pageerror', cb) delivers a native JS Error", async () => {
       const received: Error[] = [];
-      const id = page.on("pageerror", (data) => {
-        received.push(data as unknown as Error);
-      });
+      const listener = (data: unknown) => {
+        received.push(data as Error);
+      };
+      page.on("pageerror", listener);
       try {
         await page.goto(
           "data:text/html,<script>throw new Error('callback-path')</script>",
@@ -82,7 +83,7 @@ for (const backend of BACKENDS) {
           await new Promise((r) => setTimeout(r, 50));
         }
       } finally {
-        page.off(id);
+        page.off("pageerror", listener);
       }
       expect(received.length).toBeGreaterThanOrEqual(1);
       const last = received[received.length - 1]!;
@@ -107,9 +108,10 @@ for (const backend of BACKENDS) {
 
     it("context.on('weberror', cb) delivers a live WebError class", async () => {
       const received: WebErrorClass[] = [];
-      const id = context.on("weberror", (webErr) => {
+      const listener = (webErr: unknown) => {
         received.push(webErr as WebErrorClass);
-      });
+      };
+      context.on("weberror", listener);
       try {
         await page.goto(
           "data:text/html,<script>throw new Error('ctx-callback')</script>",
@@ -120,7 +122,7 @@ for (const backend of BACKENDS) {
           await new Promise((r) => setTimeout(r, 50));
         }
       } finally {
-        context.off(id);
+        context.off("weberror", listener);
       }
       expect(received.length).toBeGreaterThanOrEqual(1);
       const last = received[received.length - 1]!;

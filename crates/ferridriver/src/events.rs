@@ -312,7 +312,15 @@ struct EmitterInner<E> {
   /// works from non-async contexts (NAPI).
   runtime_handle: std::sync::Mutex<Option<tokio::runtime::Handle>>,
   next_id: AtomicU64,
+  /// Node's max-listeners threshold for the leak warning (its default
+  /// is 10). `0` disables it.
+  max_listeners: std::sync::atomic::AtomicUsize,
 }
+
+/// Node's default `EventEmitter` max-listeners threshold, which
+/// Playwright inherits: past this many listeners on ONE event, the
+/// emitter warns about a probable leak.
+const DEFAULT_MAX_LISTENERS: usize = 10;
 
 /// Lock a `std::sync::Mutex`, recovering from poisoning. Poisoning only
 /// happens when a panicking thread held the lock; the registries stay
@@ -412,6 +420,7 @@ impl<E: EmitterEvent> Emitter<E> {
       dispatcher_running: AtomicBool::new(false),
       runtime_handle: std::sync::Mutex::new(tokio::runtime::Handle::try_current().ok()),
       next_id: AtomicU64::new(1),
+      max_listeners: std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_LISTENERS),
     });
     let emitter = Self { inner };
     emitter.ensure_dispatcher();
@@ -538,16 +547,115 @@ impl<E: EmitterEvent> Emitter<E> {
     self.register(event_name, callback, true)
   }
 
+  /// Node's `prependListener`: register at the FRONT, so this callback
+  /// runs before every listener already attached to the same event.
+  pub fn prepend(&self, event_name: &str, callback: Arc<dyn Fn(E) + Send + Sync>) -> ListenerId {
+    self.register_at(event_name, callback, false, true)
+  }
+
+  /// Node's `prependOnceListener`.
+  pub fn prepend_once(&self, event_name: &str, callback: Arc<dyn Fn(E) + Send + Sync>) -> ListenerId {
+    self.register_at(event_name, callback, true, true)
+  }
+
   fn register(&self, event_name: &str, callback: Arc<dyn Fn(E) + Send + Sync>, once: bool) -> ListenerId {
+    self.register_at(event_name, callback, once, false)
+  }
+
+  fn register_at(
+    &self,
+    event_name: &str,
+    callback: Arc<dyn Fn(E) + Send + Sync>,
+    once: bool,
+    front: bool,
+  ) -> ListenerId {
     self.ensure_dispatcher();
     let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-    lock_or_recover(&self.inner.shared.listeners).push(ListenerSlot {
+    let slot = ListenerSlot {
       id,
       name: event_name.to_string(),
       once,
       callback,
-    });
+    };
+    let mut listeners = lock_or_recover(&self.inner.shared.listeners);
+    if front {
+      // Only relative to the SAME event: Node's ordering is per event
+      // name, and dispatch walks the whole list filtering by name.
+      let at = listeners
+        .iter()
+        .position(|slot| slot.name == event_name)
+        .unwrap_or(listeners.len());
+      listeners.insert(at, slot);
+    } else {
+      listeners.push(slot);
+    }
+    let count = listeners.iter().filter(|slot| slot.name == event_name).count();
+    drop(listeners);
+    self.warn_if_leaking(event_name, count);
     ListenerId(id)
+  }
+
+  /// Node's max-listeners warning: past the limit, an accumulating
+  /// listener is far more often a leak than a design. Warn once per
+  /// event name so a loop does not print thousands of lines.
+  fn warn_if_leaking(&self, event_name: &str, count: usize) {
+    let max = self.inner.max_listeners.load(Ordering::Relaxed);
+    if max == 0 || count != max + 1 {
+      return;
+    }
+    tracing::warn!(
+      target: "ferridriver::events",
+      event = event_name,
+      count,
+      max,
+      "possible listener leak: more than the maximum listeners attached to one event; \
+       raise it with setMaxListeners(n) if this is intended"
+    );
+  }
+
+  /// Node's `setMaxListeners(n)`; `0` disables the warning entirely.
+  pub fn set_max_listeners(&self, max: usize) {
+    self.inner.max_listeners.store(max, Ordering::Relaxed);
+  }
+
+  /// Node's `getMaxListeners()`.
+  #[must_use]
+  pub fn max_listeners(&self) -> usize {
+    self.inner.max_listeners.load(Ordering::Relaxed)
+  }
+
+  /// Node's `listenerCount(type)`.
+  #[must_use]
+  pub fn listener_count(&self, event_name: &str) -> usize {
+    lock_or_recover(&self.inner.shared.listeners)
+      .iter()
+      .filter(|slot| slot.name == event_name)
+      .count()
+  }
+
+  /// Node's `eventNames()`: every event with at least one listener, in
+  /// registration order, each once.
+  #[must_use]
+  pub fn event_names(&self) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for slot in lock_or_recover(&self.inner.shared.listeners).iter() {
+      if !names.iter().any(|name| name == &slot.name) {
+        names.push(slot.name.clone());
+      }
+    }
+    names
+  }
+
+  /// The ids registered for `event_name`, in dispatch order. A binding
+  /// layer maps them back to the JS functions it persisted, which is
+  /// what `listeners(type)` and identity removal need.
+  #[must_use]
+  pub fn listener_ids_named(&self, event_name: &str) -> Vec<ListenerId> {
+    lock_or_recover(&self.inner.shared.listeners)
+      .iter()
+      .filter(|slot| slot.name == event_name)
+      .map(|slot| ListenerId(slot.id))
+      .collect()
   }
 
   /// Remove an event listener by ID.

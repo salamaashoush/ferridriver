@@ -404,7 +404,20 @@ unsafe impl rquickjs::JsLifetime<'_> for PageCallbacksUd {
 
 /// One `(listener_id, remove_after_dispatch, event)` message from a core
 /// `EventCallback` (backend task) to the context's event pump.
-pub(crate) type PageEventMsg = (u64, bool, Arc<Page>, ferridriver::events::PageEvent);
+pub(crate) enum PageEventMsg {
+  /// One event for one listener id; `remove_after` is a `once`
+  /// registration retiring itself.
+  Event {
+    id: u64,
+    remove_after: bool,
+    page: Arc<Page>,
+    event: ferridriver::events::PageEvent,
+  },
+  /// A marker the pump answers when it reaches it. Everything queued
+  /// BEFORE it has been dispatched by then, which is what
+  /// `removeAllListeners(type, { behavior: 'wait' })` waits for.
+  Drain(tokio::sync::oneshot::Sender<()>),
+}
 
 /// Capacity of the page-event pump channel. The session's VM event loop
 /// drains the pump even between `run_script` calls, but a chatty page
@@ -471,7 +484,19 @@ pub(crate) fn ensure_event_pump(ctx: &rquickjs::Ctx<'_>) -> tokio::sync::mpsc::S
   let (tx, mut rx) = tokio::sync::mpsc::channel::<PageEventMsg>(PAGE_EVENT_PUMP_CAPACITY);
   let pump_ctx = ctx.clone();
   ctx.spawn(async move {
-    while let Some((id, remove_after, page, ev)) = rx.recv().await {
+    while let Some(msg) = rx.recv().await {
+      let PageEventMsg::Event {
+        id,
+        remove_after,
+        page,
+        event: ev,
+      } = msg
+      else {
+        if let PageEventMsg::Drain(done) = msg {
+          let _ = done.send(());
+        }
+        continue;
+      };
       let Ok(Some(f)) = with_page_callbacks(&pump_ctx, |r| {
         let f = r.get_event_listener(id);
         if remove_after {

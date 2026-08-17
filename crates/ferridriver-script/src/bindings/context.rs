@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use ferridriver::context::ContextRef;
-use rquickjs::function::Opt;
-use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
+use rquickjs::function::{Opt, This};
+use rquickjs::{Ctx, JsLifetime, Value, class::Class, class::Trace};
 use rustc_hash::FxHashMap;
 
 use crate::bindings::convert::FerriResultCtxExt;
@@ -838,6 +838,203 @@ impl BrowserContextJs {
     })))
   }
 
+  // ── Event emitter (Playwright parity) ────────────────────────────────
+
+  /// `context.on(event, listener)` — `'page'`, `'weberror'`,
+  /// `'download'`, `'frameattached'`, `'framedetached'`,
+  /// `'framenavigated'`, `'pageclose'`, `'pageload'`. Returns the
+  /// context so registrations chain, as Playwright's do; the listener
+  /// receives the same live class instance `waitForEvent` resolves to.
+  #[qjs(rename = "on")]
+  pub fn on<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: String,
+    listener: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    this
+      .0
+      .borrow()
+      .register_listener(&ctx, &event, listener, false, false)?;
+    Ok(this.0)
+  }
+
+  /// Node's `addListener`, an alias of [`Self::on`].
+  #[qjs(rename = "addListener")]
+  pub fn add_listener<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: String,
+    listener: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    Self::on(this, ctx, event, listener)
+  }
+
+  /// `context.once(event, listener)`.
+  #[qjs(rename = "once")]
+  pub fn once<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: String,
+    listener: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    this.0.borrow().register_listener(&ctx, &event, listener, true, false)?;
+    Ok(this.0)
+  }
+
+  /// Node's `prependListener`.
+  #[qjs(rename = "prependListener")]
+  pub fn prepend_listener<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: String,
+    listener: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    this.0.borrow().register_listener(&ctx, &event, listener, false, true)?;
+    Ok(this.0)
+  }
+
+  /// Node's `prependOnceListener`.
+  #[qjs(rename = "prependOnceListener")]
+  pub fn prepend_once_listener<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: String,
+    listener: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    this.0.borrow().register_listener(&ctx, &event, listener, true, true)?;
+    Ok(this.0)
+  }
+
+  /// `context.off(event, listener)` — removal by function identity.
+  /// `off(event)` alone drops every listener for that event.
+  #[qjs(rename = "off")]
+  pub fn off<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: String,
+    listener: Opt<Value<'js>>,
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    this.0.borrow().off_impl(&ctx, &event, listener)?;
+    Ok(this.0)
+  }
+
+  /// Node's `removeListener`, an alias of [`Self::off`].
+  #[qjs(rename = "removeListener")]
+  pub fn remove_listener<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: String,
+    listener: Opt<Value<'js>>,
+  ) -> rquickjs::Result<Class<'js, Self>> {
+    Self::off(this, ctx, event, listener)
+  }
+
+  /// `context.removeAllListeners(type?, options?)` — see the page form
+  /// for what `behavior` can and cannot observe.
+  #[qjs(rename = "removeAllListeners")]
+  pub fn remove_all_listeners<'js>(
+    this: This<Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: Opt<String>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<Value<'js>> {
+    {
+      let context = this.0.borrow();
+      let name = context.inner.name().to_string();
+      let removed = with_context_callbacks(&ctx, |r| {
+        let ids: Vec<u64> = r
+          .listeners
+          .iter()
+          .filter(|(_, e)| e.context == name && event.0.as_ref().is_none_or(|ev| &e.event == ev))
+          .map(|(id, _)| *id)
+          .collect();
+        for id in &ids {
+          r.listeners.remove(id);
+        }
+        ids
+      })?;
+      for id in removed {
+        context.inner.off(ferridriver::events::ListenerId(id));
+      }
+    }
+    let Some(options) = options.0.filter(|v| !v.is_undefined() && !v.is_null()) else {
+      return Ok(this.0.into_value());
+    };
+    let wait = options
+      .as_object()
+      .and_then(|o| o.get::<_, Option<String>>("behavior").ok().flatten())
+      .is_some_and(|behavior| behavior == "wait");
+    let tx = ensure_context_event_pump(&ctx);
+    let promise = rquickjs::promise::Promise::wrap_future(&ctx, async move {
+      if wait {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        if tx.send(ContextEventMsg::Drain(done_tx)).await.is_ok() {
+          let _ = done_rx.await;
+        }
+      }
+      Ok::<(), rquickjs::Error>(())
+    })?;
+    Ok(promise.into_value())
+  }
+
+  /// Node's `listeners(type)`, in the order they will fire.
+  #[qjs(rename = "listeners")]
+  pub fn listeners<'js>(&self, ctx: Ctx<'js>, event: String) -> rquickjs::Result<Vec<Value<'js>>> {
+    let name = self.inner.name().to_string();
+    let saved = with_context_callbacks(&ctx, |r| {
+      r.listeners
+        .iter()
+        .filter(|(_, e)| e.context == name && e.event == event)
+        .map(|(id, e)| (*id, e.listener.clone()))
+        .collect::<Vec<_>>()
+    })?;
+    let mut out = Vec::with_capacity(saved.len());
+    for id in self.inner.listener_ids_named(&event) {
+      if let Some((_, cb)) = saved.iter().find(|(saved_id, _)| *saved_id == id.0) {
+        out.push(cb.restore(&ctx)?.into_value());
+      }
+    }
+    Ok(out)
+  }
+
+  /// Node's `rawListeners(type)`; see the page form.
+  #[qjs(rename = "rawListeners")]
+  pub fn raw_listeners<'js>(&self, ctx: Ctx<'js>, event: String) -> rquickjs::Result<Vec<Value<'js>>> {
+    self.listeners(ctx, event)
+  }
+
+  /// Node's `listenerCount(type)`.
+  #[qjs(rename = "listenerCount")]
+  pub fn listener_count(&self, event: String) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let count = self.inner.listener_count(&event) as f64;
+    count
+  }
+
+  /// Node's `eventNames()`.
+  #[qjs(rename = "eventNames")]
+  pub fn event_names(&self) -> Vec<String> {
+    self.inner.event_names()
+  }
+
+  /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
+  #[qjs(rename = "setMaxListeners")]
+  pub fn set_max_listeners(this: This<Class<'_, Self>>, max: f64) -> Class<'_, Self> {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let max = max.max(0.0) as usize;
+    this.0.borrow().inner.set_max_listeners(max);
+    this.0
+  }
+
+  /// Node's `getMaxListeners()`.
+  #[qjs(rename = "getMaxListeners")]
+  pub fn get_max_listeners(&self) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let max = self.inner.max_listeners() as f64;
+    max
+  }
+
   // ── Context-level events ───────────────────────────────────────────────
 
   /// Wait for the next context-scoped event. Supports `'page'` (new
@@ -989,5 +1186,219 @@ impl BrowserContextJs {
     )?;
     obj.set("dispose", dispose)?;
     rquickjs::IntoJs::into_js(obj, ctx)
+  }
+}
+
+// ── Context event emitter ────────────────────────────────────────────
+
+/// One `context.on` / `context.once` registration.
+struct ContextListenerEntry {
+  event: String,
+  /// Core context name, so listeners registered through one wrapper are
+  /// removed through another (`page.context()` mints a fresh wrapper
+  /// per call).
+  context: String,
+  listener: crate::bindings::page::SavedCallback,
+}
+
+#[derive(Default)]
+struct ContextCallbacks {
+  listeners: FxHashMap<u64, ContextListenerEntry>,
+}
+
+struct ContextCallbacksUd(std::cell::RefCell<ContextCallbacks>);
+
+// SAFETY: holds only `'static` data (`Persistent` handles and owned
+// values), same rationale as the page-callbacks userdata.
+#[allow(unsafe_code)]
+unsafe impl JsLifetime<'_> for ContextCallbacksUd {
+  type Changed<'to> = ContextCallbacksUd;
+}
+
+fn with_context_callbacks<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut ContextCallbacks) -> R) -> rquickjs::Result<R> {
+  if ctx.userdata::<ContextCallbacksUd>().is_none() {
+    let _ = ctx.store_userdata(ContextCallbacksUd(std::cell::RefCell::new(ContextCallbacks::default())));
+  }
+  let ud = ctx.userdata::<ContextCallbacksUd>().ok_or_else(|| {
+    rquickjs::Error::new_from_js_message("context", "Error", "context callbacks registry missing".to_string())
+  })?;
+  let mut reg = ud.0.borrow_mut();
+  Ok(f(&mut reg))
+}
+
+/// Message the context-event pump consumes. Same shape and the same
+/// rules as the page pump: a core callback fires on a backend thread and
+/// may only `send`; the VM is touched exclusively by the pump future,
+/// which the session's event loop polls on the interpreter thread.
+enum ContextEventMsg {
+  Event {
+    id: u64,
+    remove_after: bool,
+    event: ferridriver::events::ContextEvent,
+  },
+  Drain(tokio::sync::oneshot::Sender<()>),
+}
+
+struct ContextEventPumpUd(tokio::sync::mpsc::Sender<ContextEventMsg>);
+
+#[allow(unsafe_code)]
+unsafe impl JsLifetime<'_> for ContextEventPumpUd {
+  type Changed<'to> = ContextEventPumpUd;
+}
+
+/// Capacity of the context-event pump channel — the page pump's
+/// rationale and bound, applied to the lower-rate context stream.
+const CONTEXT_EVENT_PUMP_CAPACITY: usize = 1024;
+
+fn ensure_context_event_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<ContextEventMsg> {
+  if let Some(ud) = ctx.userdata::<ContextEventPumpUd>() {
+    return ud.0.clone();
+  }
+  let (tx, mut rx) = tokio::sync::mpsc::channel::<ContextEventMsg>(CONTEXT_EVENT_PUMP_CAPACITY);
+  let pump_ctx = ctx.clone();
+  ctx.spawn(async move {
+    while let Some(msg) = rx.recv().await {
+      let ContextEventMsg::Event {
+        id,
+        remove_after,
+        event,
+      } = msg
+      else {
+        if let ContextEventMsg::Drain(done) = msg {
+          let _ = done.send(());
+        }
+        continue;
+      };
+      let Ok(Some(f)) = with_context_callbacks(&pump_ctx, |r| {
+        let entry = r.listeners.get(&id).map(|e| e.listener.clone());
+        if remove_after {
+          r.listeners.remove(&id);
+        }
+        entry
+      }) else {
+        continue;
+      };
+      let Ok(arg) = context_event_to_js(&pump_ctx, event) else {
+        continue;
+      };
+      let _: rquickjs::Result<Value<'_>> = f.call_bracketed(&pump_ctx, (arg,));
+    }
+  });
+  let _ = ctx.store_userdata(ContextEventPumpUd(tx.clone()));
+  tx
+}
+
+/// Lift a context event into the live class instance Playwright hands a
+/// listener — the same mapping `waitForEvent` performs.
+fn context_event_to_js<'js>(ctx: &Ctx<'js>, event: ferridriver::events::ContextEvent) -> rquickjs::Result<Value<'js>> {
+  use ferridriver::events::ContextEvent;
+  use rquickjs::IntoJs;
+  use rquickjs::class::Class;
+  match event {
+    ContextEvent::WebError(err) => {
+      Class::instance(ctx.clone(), crate::bindings::web_error::WebErrorJs::new(err))?.into_js(ctx)
+    },
+    ContextEvent::Download(d) => {
+      Class::instance(ctx.clone(), crate::bindings::download::DownloadJs::new(d))?.into_js(ctx)
+    },
+    ContextEvent::FrameAttached { page, frame_id }
+    | ContextEvent::FrameDetached { page, frame_id }
+    | ContextEvent::FrameNavigated { page, frame_id } => Class::instance(
+      ctx.clone(),
+      crate::bindings::frame::FrameJs::new(page.frame_for_id(&frame_id)),
+    )?
+    .into_js(ctx),
+    ContextEvent::Page(page) | ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => {
+      Class::instance(ctx.clone(), crate::bindings::page::pagejs_for_ctx(ctx, page))?.into_js(ctx)
+    },
+  }
+}
+
+impl BrowserContextJs {
+  /// Shared core for the context emitter: persist the JS listener, then
+  /// register a core callback that only forwards `(id, event)` to this
+  /// context's pump. The backend thread never touches the VM.
+  fn register_listener<'js>(
+    &self,
+    ctx: &Ctx<'js>,
+    event: &str,
+    listener: rquickjs::Function<'js>,
+    once: bool,
+    front: bool,
+  ) -> rquickjs::Result<()> {
+    let saved = crate::bindings::page::SavedCallback::save(ctx, listener);
+    let tx = ensure_context_event_pump(ctx);
+    let id_slot = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let id_slot_cb = id_slot.clone();
+    let callback: ferridriver::events::ContextEventCallback = Arc::new(move |ev: ferridriver::events::ContextEvent| {
+      let id = id_slot_cb.load(std::sync::atomic::Ordering::Relaxed);
+      let msg = ContextEventMsg::Event {
+        id,
+        remove_after: once,
+        event: ev,
+      };
+      if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(msg) {
+        tracing::warn!(
+          listener_id = id,
+          capacity = CONTEXT_EVENT_PUMP_CAPACITY,
+          "context event pump full (VM idle between scripts?); dropping event"
+        );
+      }
+    });
+    let id = match (once, front) {
+      (false, false) => self.inner.on(event, callback),
+      (true, false) => self.inner.once(event, callback),
+      (false, true) => self.inner.prepend_listener(event, callback),
+      (true, true) => self.inner.prepend_once_listener(event, callback),
+    };
+    id_slot.store(id.0, std::sync::atomic::Ordering::Relaxed);
+    with_context_callbacks(ctx, |r| {
+      r.listeners.insert(
+        id.0,
+        ContextListenerEntry {
+          event: event.to_string(),
+          context: self.inner.name().to_string(),
+          listener: saved,
+        },
+      );
+    })?;
+    Ok(())
+  }
+
+  fn off_impl<'js>(&self, ctx: &Ctx<'js>, event: &str, listener: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let name = self.inner.name().to_string();
+    let Some(listener_fn) = listener.0.as_ref().and_then(|v| v.as_function().cloned()) else {
+      let ids = with_context_callbacks(ctx, |r| {
+        let ids: Vec<u64> = r
+          .listeners
+          .iter()
+          .filter(|(_, e)| e.context == name && e.event == event)
+          .map(|(id, _)| *id)
+          .collect();
+        for id in &ids {
+          r.listeners.remove(id);
+        }
+        ids
+      })?;
+      for id in ids {
+        self.inner.off(ferridriver::events::ListenerId(id));
+      }
+      return Ok(());
+    };
+    let target: Value<'js> = listener_fn.into_value();
+    let saved = with_context_callbacks(ctx, |r| {
+      r.listeners
+        .iter()
+        .filter(|(_, e)| e.context == name && e.event == event)
+        .map(|(id, e)| (*id, e.listener.clone()))
+        .collect::<Vec<_>>()
+    })?;
+    for (id, cb) in saved {
+      if cb.restore(ctx)?.into_value() == target {
+        self.inner.off(ferridriver::events::ListenerId(id));
+        with_context_callbacks(ctx, |r| r.listeners.remove(&id))?;
+      }
+    }
+    Ok(())
   }
 }
