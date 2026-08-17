@@ -181,16 +181,19 @@ fn define_own<'js, V: rquickjs::IntoJs<'js>>(obj: &Object<'js>, key: &str, value
 /// `engine.rs`.
 /// An absent value as Playwright spells it in TS: `T | null`.
 ///
-/// rquickjs lowers a bare `None` to `undefined`, which is a different
-/// value in JS — `=== null` and `toBeNull()` both fail on it, and every
-/// Playwright signature that can answer "nothing" says `null`.
-pub(crate) fn nullable<'js, T: rquickjs::IntoJs<'js>>(
-  ctx: &Ctx<'js>,
-  value: Option<T>,
-) -> rquickjs::Result<Value<'js>> {
-  match value {
-    Some(v) => v.into_js(ctx),
-    None => Ok(Value::new_null(ctx.clone())),
+/// rquickjs lowers a bare `Option::None` to `undefined`, which is a
+/// different value in JS — `=== null` and `toBeNull()` both fail on it,
+/// while every Playwright signature that can answer "nothing" says
+/// `null`. A binding whose upstream declaration is `T | null` returns
+/// `Null<T>` instead of `Option<T>`.
+pub struct Null<T>(pub Option<T>);
+
+impl<'js, T: rquickjs::IntoJs<'js>> rquickjs::IntoJs<'js> for Null<T> {
+  fn into_js(self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    match self.0 {
+      Some(v) => v.into_js(ctx),
+      None => Ok(Value::new_null(ctx.clone())),
+    }
   }
 }
 

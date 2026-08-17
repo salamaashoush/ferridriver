@@ -64,8 +64,8 @@ impl FrameJs {
 
   /// Parent frame (null for the main frame). Sync.
   #[qjs(rename = "parentFrame")]
-  pub fn parent_frame(&self) -> Option<FrameJs> {
-    self.inner.parent_frame().map(FrameJs::new)
+  pub fn parent_frame(&self) -> crate::bindings::convert::Null<FrameJs> {
+    crate::bindings::convert::Null(self.inner.parent_frame().map(FrameJs::new))
   }
 
   /// Child frames of this frame. Sync.
@@ -220,7 +220,7 @@ impl FrameJs {
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Option<crate::bindings::element_handle::ElementHandleJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::element_handle::ElementHandleJs>> {
     call_site
       .scope(async move {
         let opts = crate::bindings::page::parse_wait_options(&ctx, options)?;
@@ -233,6 +233,7 @@ impl FrameJs {
         Ok(handle.map(crate::bindings::element_handle::ElementHandleJs::new))
       })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   // ── Locator (frame-scoped) ─────────────────────────────────────────
@@ -643,10 +644,11 @@ impl FrameJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     selector: String,
-  ) -> rquickjs::Result<Option<String>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     call_site
       .scope(async move { self.inner.text_content(&selector).await.into_js_with(&ctx) })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   #[qjs(rename = "innerText")]
@@ -680,10 +682,11 @@ impl FrameJs {
     ctx: rquickjs::Ctx<'_>,
     selector: String,
     name: String,
-  ) -> rquickjs::Result<Option<String>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     call_site
       .scope(async move { self.inner.get_attribute(&selector, &name).await.into_js_with(&ctx) })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   #[qjs(rename = "inputValue")]

@@ -40,12 +40,12 @@ impl DownloadJs {
     self.inner.suggested_filename()
   }
 
-  /// Playwright: `download.page(): Page`. Returns `undefined` only when
-  /// the owning page has already been closed (the Rust weak-backref
-  /// model surfaces that case; Playwright's TS type is non-nullable).
+  /// Playwright: `download.page(): Page`. Answers `null` only when the
+  /// owning page has already been closed (the Rust weak-backref model
+  /// surfaces that case; Playwright's TS type is non-nullable).
   #[qjs(rename = "page")]
-  pub fn page(&self) -> Option<crate::bindings::page::PageJs> {
-    self.inner.page().map(crate::bindings::page::PageJs::new)
+  pub fn page(&self) -> crate::bindings::convert::Null<crate::bindings::page::PageJs> {
+    crate::bindings::convert::Null(self.inner.page().map(crate::bindings::page::PageJs::new))
   }
 
   /// Playwright: `download.path(): Promise<string>`.
@@ -79,7 +79,7 @@ impl DownloadJs {
 
   /// Playwright: `download.failure(): Promise<string | null>`.
   #[qjs(rename = "failure")]
-  pub async fn failure(&self) -> Option<String> {
-    self.inner.failure().await
+  pub async fn failure(&self) -> crate::bindings::convert::Null<String> {
+    crate::bindings::convert::Null(self.inner.failure().await)
   }
 }

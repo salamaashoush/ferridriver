@@ -182,10 +182,11 @@ impl ElementHandleJs {
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<Option<String>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     call_site
       .scope(async move { self.inner.text_content().await.into_js_with(&ctx) })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   #[qjs(rename = "getAttribute")]
@@ -194,10 +195,11 @@ impl ElementHandleJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     name: String,
-  ) -> rquickjs::Result<Option<String>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     call_site
       .scope(async move { self.inner.get_attribute(&name).await.into_js_with(&ctx) })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   #[qjs(rename = "inputValue")]
@@ -479,13 +481,14 @@ impl ElementHandleJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     selector: String,
-  ) -> rquickjs::Result<Option<ElementHandleJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<ElementHandleJs>> {
     call_site
       .scope(async move {
         let maybe = self.inner.query_selector(&selector).await.into_js_with(&ctx)?;
         Ok(maybe.map(ElementHandleJs::new))
       })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   /// Playwright: `elementHandle.$$(selector): Promise<ElementHandle[]>`
@@ -513,13 +516,14 @@ impl ElementHandleJs {
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<Option<crate::bindings::frame::FrameJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::frame::FrameJs>> {
     call_site
       .scope(async move {
         let maybe = self.inner.owner_frame().await.into_js_with(&ctx)?;
         Ok(maybe.map(crate::bindings::frame::FrameJs::new))
       })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   /// Playwright: `elementHandle.contentFrame(): Promise<Frame | null>`.
@@ -528,13 +532,14 @@ impl ElementHandleJs {
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<Option<crate::bindings::frame::FrameJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::frame::FrameJs>> {
     call_site
       .scope(async move {
         let maybe = self.inner.content_frame().await.into_js_with(&ctx)?;
         Ok(maybe.map(crate::bindings::frame::FrameJs::new))
       })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   // ── Wait helpers ─────────────────────────────────────────────────────
@@ -569,7 +574,7 @@ impl ElementHandleJs {
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Option<ElementHandleJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<ElementHandleJs>> {
     call_site
       .scope(async move {
         let timeout_ms = parse_timeout_options(&ctx, options)?;
@@ -581,6 +586,7 @@ impl ElementHandleJs {
         Ok(maybe.map(ElementHandleJs::new))
       })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   // ── Action methods (temp-tag bridge) ─────────────────────────────────

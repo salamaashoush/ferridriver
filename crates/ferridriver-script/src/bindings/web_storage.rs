@@ -43,12 +43,18 @@ impl WebStorageJs {
 
   /// Playwright: `webStorage.getItem(name): Promise<string | null>`.
   #[qjs(rename = "getItem")]
-  pub async fn get_item(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Option<String>> {
-    self
-      .page
-      .web_storage_get_item(self.kind, &name)
-      .await
-      .into_js_with(&ctx)
+  pub async fn get_item(
+    &self,
+    ctx: rquickjs::Ctx<'_>,
+    name: String,
+  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
+    Ok(crate::bindings::convert::Null(
+      self
+        .page
+        .web_storage_get_item(self.kind, &name)
+        .await
+        .into_js_with(&ctx)?,
+    ))
   }
 
   /// Playwright: `webStorage.setItem(name, value): Promise<void>`.

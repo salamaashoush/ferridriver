@@ -223,7 +223,7 @@ impl PageJs {
     ctx: rquickjs::Ctx<'js>,
     url: String,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Option<crate::bindings::network::ResponseJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::network::ResponseJs>> {
     call_site
       .scope(async move {
         let opts = parse_goto_options(&ctx, options)?;
@@ -231,6 +231,7 @@ impl PageJs {
         Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
       })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   /// Reload the current page. Accepts the same option bag as `goto`.
@@ -240,7 +241,7 @@ impl PageJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Option<crate::bindings::network::ResponseJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::network::ResponseJs>> {
     call_site
       .scope(async move {
         let opts = parse_goto_options(&ctx, options)?;
@@ -248,6 +249,7 @@ impl PageJs {
         Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
       })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   /// Navigate back in history. Accepts the same option bag as `goto`.
@@ -257,7 +259,7 @@ impl PageJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Option<crate::bindings::network::ResponseJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::network::ResponseJs>> {
     call_site
       .scope(async move {
         let opts = parse_goto_options(&ctx, options)?;
@@ -265,6 +267,7 @@ impl PageJs {
         Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
       })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   /// Navigate forward in history. Accepts the same option bag as `goto`.
@@ -274,7 +277,7 @@ impl PageJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Option<crate::bindings::network::ResponseJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::network::ResponseJs>> {
     call_site
       .scope(async move {
         let opts = parse_goto_options(&ctx, options)?;
@@ -282,6 +285,7 @@ impl PageJs {
         Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
       })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   /// Current URL of the page.
@@ -430,13 +434,14 @@ impl PageJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     selector: String,
-  ) -> rquickjs::Result<Option<crate::bindings::element_handle::ElementHandleJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::element_handle::ElementHandleJs>> {
     call_site
       .scope(async move {
         let inner = self.inner.query_selector(&selector).await.into_js_with(&ctx)?;
         Ok(inner.map(crate::bindings::element_handle::ElementHandleJs::new))
       })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   /// Playwright `$` shortcut for [`Self::query_selector`].
@@ -446,7 +451,7 @@ impl PageJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     selector: String,
-  ) -> rquickjs::Result<Option<crate::bindings::element_handle::ElementHandleJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::element_handle::ElementHandleJs>> {
     call_site
       .scope(async move {
         self
@@ -1014,10 +1019,11 @@ impl PageJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     selector: String,
-  ) -> rquickjs::Result<Option<String>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     call_site
       .scope(async move { self.inner.text_content(&selector).await.into_js_with(&ctx) })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   /// `innerText` of the first element matching `selector`.
@@ -1068,10 +1074,11 @@ impl PageJs {
     ctx: rquickjs::Ctx<'_>,
     selector: String,
     name: String,
-  ) -> rquickjs::Result<Option<String>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     call_site
       .scope(async move { self.inner.get_attribute(&selector, &name).await.into_js_with(&ctx) })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   /// Whether the first element matching `selector` is visible.
@@ -2637,7 +2644,7 @@ impl PageJs {
     &self,
     ctx: rquickjs::Ctx<'js>,
     selector: rquickjs::Value<'js>,
-  ) -> rquickjs::Result<Option<crate::bindings::frame::FrameJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::frame::FrameJs>> {
     let core_sel = if let Some(s) = selector.as_string() {
       ferridriver::options::FrameSelector::by_name(s.to_string()?)
     } else if let Some(obj) = selector.as_object() {
@@ -2658,13 +2665,15 @@ impl PageJs {
         url: read("url")?,
       }
     } else {
-      return Ok(None);
+      return Ok(crate::bindings::convert::Null(None));
     };
 
     if core_sel.is_empty() {
-      return Ok(None);
+      return Ok(crate::bindings::convert::Null(None));
     }
-    Ok(self.inner.frame(core_sel).map(crate::bindings::frame::FrameJs::new))
+    Ok(crate::bindings::convert::Null(
+      self.inner.frame(core_sel).map(crate::bindings::frame::FrameJs::new),
+    ))
   }
 
   /// Playwright: `page.touchscreen: Touchscreen`.

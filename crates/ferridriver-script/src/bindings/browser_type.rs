@@ -48,8 +48,8 @@ impl BrowserTypeJs {
 
   /// Playwright `BrowserType.executablePath()`.
   #[qjs(rename = "executablePath")]
-  pub fn executable_path(&self) -> Option<String> {
-    self.inner.executable_path().map(|p| p.to_string_lossy().into_owned())
+  pub fn executable_path(&self) -> crate::bindings::convert::Null<String> {
+    crate::bindings::convert::Null(self.inner.executable_path().map(|p| p.to_string_lossy().into_owned()))
   }
 
   /// Playwright `browserType.launch(options?)`.

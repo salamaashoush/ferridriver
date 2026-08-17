@@ -52,8 +52,8 @@ impl DialogJs {
   /// opened before its page was available (early page initialization)
   /// or the owning page has been closed.
   #[qjs(rename = "page")]
-  pub fn page(&self) -> Option<crate::bindings::page::PageJs> {
-    self.inner.page().map(crate::bindings::page::PageJs::new)
+  pub fn page(&self) -> crate::bindings::convert::Null<crate::bindings::page::PageJs> {
+    crate::bindings::convert::Null(self.inner.page().map(crate::bindings::page::PageJs::new))
   }
 
   /// Playwright: `dialog.accept(promptText?): Promise<void>`.

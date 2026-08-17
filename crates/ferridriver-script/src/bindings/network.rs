@@ -12,8 +12,7 @@ use ferridriver::route::{ContinueOverrides, FulfillResponse, Route as CoreRoute}
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use crate::bindings::convert::FerriResultCtxExt;
-use crate::bindings::convert::{serde_from_js, serde_to_js};
+use crate::bindings::convert::{FerriResultCtxExt, Null, serde_from_js, serde_to_js};
 
 // ── RequestJs ────────────────────────────────────────────────────────────────
 
@@ -80,8 +79,8 @@ impl RequestJs {
   }
 
   #[qjs(rename = "postData")]
-  pub fn post_data(&self) -> Option<String> {
-    self.inner.post_data()
+  pub fn post_data(&self) -> Null<String> {
+    Null(self.inner.post_data())
   }
 
   /// Mirrors Playwright `request.postDataBuffer(): Buffer | null` —
@@ -126,8 +125,8 @@ impl RequestJs {
   }
 
   #[qjs(rename = "headerValue")]
-  pub async fn header_value(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Option<String>> {
-    self.inner.header_value(&name).await.into_js_with(&ctx)
+  pub async fn header_value(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Null<String>> {
+    Ok(Null(self.inner.header_value(&name).await.into_js_with(&ctx)?))
   }
 
   #[qjs(rename = "failure")]
@@ -154,45 +153,49 @@ impl RequestJs {
   }
 
   #[qjs(rename = "redirectedFrom")]
-  pub fn redirected_from(&self) -> Option<RequestJs> {
-    self.inner.redirected_from().map(|r| match self.page.as_ref() {
+  pub fn redirected_from(&self) -> Null<RequestJs> {
+    Null(self.inner.redirected_from().map(|r| match self.page.as_ref() {
       Some(page) => RequestJs::new_with_page(r, page.clone()),
       None => RequestJs::new(r),
-    })
+    }))
   }
 
   #[qjs(rename = "redirectedTo")]
-  pub fn redirected_to(&self) -> Option<RequestJs> {
-    self.inner.redirected_to().map(|r| match self.page.as_ref() {
+  pub fn redirected_to(&self) -> Null<RequestJs> {
+    Null(self.inner.redirected_to().map(|r| match self.page.as_ref() {
       Some(page) => RequestJs::new_with_page(r, page.clone()),
       None => RequestJs::new(r),
-    })
+    }))
   }
 
   #[qjs(rename = "response")]
-  pub async fn response(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<Option<ResponseJs>> {
+  pub async fn response(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<Null<ResponseJs>> {
     let resp = self.inner.response().await.into_js_with(&ctx)?;
-    Ok(resp.map(|r| match self.page.as_ref() {
+    Ok(Null(resp.map(|r| match self.page.as_ref() {
       Some(page) => ResponseJs::new_with_page(r, page.clone()),
       None => ResponseJs::new(r),
-    }))
+    })))
   }
 
   /// Mirrors Playwright `request.existingResponse(): Response | null` —
   /// the already-received response without waiting.
   #[qjs(rename = "existingResponse")]
-  pub async fn existing_response(&self) -> Option<ResponseJs> {
-    self.inner.existing_response().await.map(|r| match self.page.as_ref() {
+  pub async fn existing_response(&self) -> Null<ResponseJs> {
+    Null(self.inner.existing_response().await.map(|r| match self.page.as_ref() {
       Some(page) => ResponseJs::new_with_page(r, page.clone()),
       None => ResponseJs::new(r),
-    })
+    }))
   }
 
   /// Mirrors Playwright `request.frame(): Frame`. Resolves the
   /// initiating frame_id via the owning page's frame cache. Returns
   /// `null` when no frame context is attached.
   #[qjs(rename = "frame")]
-  pub fn frame(&self) -> Option<crate::bindings::frame::FrameJs> {
+  pub fn frame(&self) -> Null<crate::bindings::frame::FrameJs> {
+    Null(self.frame_of())
+  }
+
+  fn frame_of(&self) -> Option<crate::bindings::frame::FrameJs> {
     let page = self.page.as_ref()?;
     let frame_id = self.inner.frame_id()?;
     for f in page.frames() {
@@ -289,8 +292,8 @@ impl ResponseJs {
   }
 
   #[qjs(rename = "headerValue")]
-  pub async fn header_value(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Option<String>> {
-    self.inner.header_value(&name).await.into_js_with(&ctx)
+  pub async fn header_value(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Null<String>> {
+    Ok(Null(self.inner.header_value(&name).await.into_js_with(&ctx)?))
   }
 
   #[qjs(rename = "headerValues")]
@@ -375,8 +378,8 @@ impl ResponseJs {
   /// Mirrors Playwright `response.frame(): Frame`. Convenience for
   /// `response.request().frame()`.
   #[qjs(rename = "frame")]
-  pub fn frame(&self) -> Option<crate::bindings::frame::FrameJs> {
-    self.request().frame()
+  pub fn frame(&self) -> Null<crate::bindings::frame::FrameJs> {
+    Null(self.request().frame_of())
   }
 }
 
@@ -565,17 +568,19 @@ impl RouteRequestJs {
   }
   /// Playwright: `request.headerValue(name): Promise<string | null>`.
   #[qjs(rename = "headerValue")]
-  pub fn header_value(&self, name: String) -> Option<String> {
+  pub fn header_value(&self, name: String) -> Null<String> {
     let lower = name.to_ascii_lowercase();
-    self
-      .headers
-      .iter()
-      .find(|(k, _)| k.to_ascii_lowercase() == lower)
-      .map(|(_, v)| v.clone())
+    Null(
+      self
+        .headers
+        .iter()
+        .find(|(k, _)| k.to_ascii_lowercase() == lower)
+        .map(|(_, v)| v.clone()),
+    )
   }
   #[qjs(rename = "postData")]
-  pub fn post_data(&self) -> Option<String> {
-    self.post_data.clone()
+  pub fn post_data(&self) -> Null<String> {
+    Null(self.post_data.clone())
   }
   #[qjs(rename = "resourceType")]
   pub fn resource_type(&self) -> String {
@@ -707,12 +712,14 @@ impl RouteJs {
 
   /// Mirrors Playwright `route.request().postData(): string | null`.
   #[qjs(rename = "postData")]
-  pub fn post_data(&self) -> Option<String> {
-    self
-      .inner
-      .lock()
-      .ok()
-      .and_then(|g| g.as_ref().and_then(|r| r.request().post_data.clone()))
+  pub fn post_data(&self) -> Null<String> {
+    Null(
+      self
+        .inner
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|r| r.request().post_data.clone())),
+    )
   }
 
   /// Headers as a plain JS object (`Record<string, string>`).

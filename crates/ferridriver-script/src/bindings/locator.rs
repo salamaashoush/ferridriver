@@ -533,11 +533,10 @@ impl LocatorJs {
     LocatorJs::new(self.inner.describe(&description))
   }
 
-  /// Playwright: `locator.description(): string | null`. rquickjs maps `None`
-  /// to JS `undefined`; callers should compare with `== null` to catch both.
+  /// Playwright: `locator.description(): string | null`.
   #[qjs(rename = "description")]
-  pub fn description(&self) -> Option<String> {
-    self.inner.description()
+  pub fn description(&self) -> crate::bindings::convert::Null<String> {
+    crate::bindings::convert::Null(self.inner.description())
   }
 
   #[qjs(rename = "first")]
@@ -994,10 +993,11 @@ impl LocatorJs {
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<Option<String>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     call_site
       .scope(async move { self.inner.text_content().await.into_js_with(&ctx) })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   #[qjs(rename = "innerText")]
@@ -1075,10 +1075,11 @@ impl LocatorJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
     name: String,
-  ) -> rquickjs::Result<Option<String>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     call_site
       .scope(async move { self.inner.get_attribute(&name).await.into_js_with(&ctx) })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   #[qjs(rename = "isVisible")]
