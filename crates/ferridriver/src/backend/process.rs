@@ -361,40 +361,134 @@ fn process_is_live(_pid: u32) -> bool {
   true
 }
 
-/// The command line of `pid`, or `None` if it cannot be read. Used to
-/// confirm a recorded pid is still the browser we launched before
-/// signalling it: pids get recycled, and a stale record must never take
-/// down an unrelated process.
-/// One `ps` field for `pid`, or `None` when the process is gone or `ps`
-/// itself could not be run.
-fn process_field(pid: u32, field: &str) -> Option<String> {
-  let out = std::process::Command::new("ps")
-    .args(["-p", &pid.to_string(), "-o", field])
-    .output()
-    .ok()?;
-  out
-    .status
-    .success()
-    .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-    .filter(|s| !s.is_empty())
-}
-
-/// The process's start time as `ps` reports it (second resolution). Paired
-/// with the pid it survives pid recycling, which a command line alone does
-/// not: two automation browsers look identical.
+/// The process's start time, as `<seconds>.<microseconds>` since the
+/// epoch. Paired with the pid it survives pid recycling, which a command
+/// line alone does not: two automation browsers look identical.
+///
+/// Read from the kernel, never by running `ps`. Every browser launch
+/// records a start time, so this used to fork+exec a `ps` per launch on
+/// a tokio worker thread — and `Command::output()` blocks until the
+/// child closes its pipes, which under a full parallel suite could
+/// wedge a worker for the rest of the run.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 fn process_start_time(pid: u32) -> Option<String> {
-  process_field(pid, "lstart=")
+  let info = proc_bsdinfo(pid)?;
+  Some(format!("{}.{:06}", info.pbi_start_tvsec, info.pbi_start_tvusec))
 }
 
+/// `proc_pidinfo(PROC_PIDTBSDINFO)` for `pid`, or `None` when the
+/// process is gone or not ours to inspect.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn proc_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
+  #[allow(clippy::cast_possible_wrap)]
+  let pid = pid as i32;
+  let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+  let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+  // SAFETY: `info` is a live, correctly sized `proc_bsdinfo`; the call
+  // only writes into it and reports how many bytes it wrote.
+  let written = unsafe {
+    libc::proc_pidinfo(
+      pid,
+      libc::PROC_PIDTBSDINFO,
+      0,
+      std::ptr::from_mut(&mut info).cast::<libc::c_void>(),
+      size,
+    )
+  };
+  (written == size).then_some(info)
+}
+
+/// `/proc/<pid>/stat` field 22 — start time in clock ticks since boot.
+/// Unique per (pid, process) exactly like the macOS form; the two are
+/// never compared with each other, only with a value this same function
+/// produced.
+#[cfg(target_os = "linux")]
+fn process_start_time(pid: u32) -> Option<String> {
+  let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+  // The comm field is parenthesised and may contain spaces, so fields
+  // are counted from after the closing parenthesis.
+  let rest = stat.rsplit_once(')')?.1;
+  // After the comm field come state (3), ppid (4), ... so starttime
+  // (22) is the twentieth token here.
+  rest.split_whitespace().nth(19).map(ToString::to_string)
+}
+
+/// The process's full command line (arguments joined by spaces), or
+/// `None` when it cannot be read.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 fn process_command(pid: u32) -> Option<String> {
-  let out = std::process::Command::new("ps")
-    .args(["-p", &pid.to_string(), "-o", "command="])
-    .output()
-    .ok()?;
-  out
-    .status
-    .success()
-    .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+  #[allow(clippy::cast_possible_wrap)]
+  let pid_arg = pid as i32;
+  let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid_arg];
+  let mut len: libc::size_t = 0;
+  // SAFETY: a null buffer with a live length pointer asks for the size.
+  let sized = unsafe {
+    libc::sysctl(
+      mib.as_mut_ptr(),
+      3,
+      std::ptr::null_mut(),
+      std::ptr::addr_of_mut!(len),
+      std::ptr::null_mut(),
+      0,
+    )
+  };
+  if sized != 0 || len == 0 {
+    return None;
+  }
+  let mut buf = vec![0u8; len];
+  // SAFETY: `buf` has exactly `len` bytes and `len` is updated in place.
+  let read = unsafe {
+    libc::sysctl(
+      mib.as_mut_ptr(),
+      3,
+      buf.as_mut_ptr().cast::<libc::c_void>(),
+      std::ptr::addr_of_mut!(len),
+      std::ptr::null_mut(),
+      0,
+    )
+  };
+  if read != 0 {
+    return None;
+  }
+  buf.truncate(len);
+  Some(parse_procargs2(&buf))
+}
+
+/// `KERN_PROCARGS2` payload: `argc` as a 32-bit int, the executable
+/// path, NUL padding, then `argc` NUL-terminated arguments.
+#[cfg(target_os = "macos")]
+fn parse_procargs2(buf: &[u8]) -> String {
+  let Some((count, rest)) = buf.split_at_checked(4) else {
+    return String::new();
+  };
+  let argc = u32::from_ne_bytes([count[0], count[1], count[2], count[3]]) as usize;
+  // Skip the executable path and the NUL padding that follows it.
+  let after_path = rest.iter().position(|b| *b == 0).map_or(rest.len(), |i| i);
+  let mut cursor = &rest[after_path..];
+  while cursor.first() == Some(&0) {
+    cursor = &cursor[1..];
+  }
+  cursor
+    .split(|b| *b == 0)
+    .take(argc)
+    .map(|arg| String::from_utf8_lossy(arg).into_owned())
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+#[cfg(target_os = "linux")]
+fn process_command(pid: u32) -> Option<String> {
+  let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+  let joined = raw
+    .split(|b| *b == 0)
+    .filter(|arg| !arg.is_empty())
+    .map(|arg| String::from_utf8_lossy(arg).into_owned())
+    .collect::<Vec<_>>()
+    .join(" ");
+  (!joined.is_empty()).then_some(joined)
 }
 
 /// What a live pid from a record turned out to be.
@@ -609,9 +703,22 @@ mod tests {
   }
 
   /// `kill(pid, 0)` answers "live" for a killed-but-unreaped child, so tests
-  /// that assert a process survived a sweep have to ask `ps` for its state.
+  /// that assert a process survived a sweep have to ask the kernel for its
+  /// state instead.
+  #[cfg(target_os = "macos")]
   fn is_running(pid: u32) -> bool {
-    process_field(pid, "stat=").is_some_and(|state| !state.starts_with('Z'))
+    super::proc_bsdinfo(pid).is_some_and(|info| info.pbi_status != libc::SZOMB)
+  }
+
+  #[cfg(target_os = "linux")]
+  fn is_running(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+      return false;
+    };
+    stat
+      .rsplit_once(')')
+      .and_then(|(_, rest)| rest.split_whitespace().next().map(ToString::to_string))
+      .is_some_and(|state| state != "Z")
   }
 
   /// Give the group kill a moment to land before asking.
