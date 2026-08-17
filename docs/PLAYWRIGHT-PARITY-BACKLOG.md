@@ -43,21 +43,6 @@ share one:
   Closing this means isolated-world execution across all four backends,
   which is a backend-architecture change, not a selector one.
 
-### Vendored injected script: two files still on the old copy
-
-`crates/ferridriver/src/injected/` was re-synced to Playwright
-1.63.0-next (`07730b7`) except for `injectedScript.ts` and
-`ariaSnapshot.ts`, which stay on the pre-sync copy. Upstream
-restructured aria rendering into tree -> JSON -> YAML
-(`renderAriaTreeAsJSON` + `isomorphic/ariaSnapshotRenderer`), while
-ferridriver's incremental snapshot — `__fd.incrementalAriaSnapshot`,
-which `locator.ariaSnapshot({ track })` and the MCP snapshot tool read
-so a step re-sends only what changed — sits on the single-stage
-renderer. Porting it onto the new pipeline is its own change with its
-own verification, not a side effect of a file copy. `VENDOR.md` carries
-the revision, the copy recipe and the deltas; `local/ariaEquality.ts`
-holds the two equality helpers upstream deleted in that same split.
-
 ### `route.fulfill` / `unroute` residuals
 `fulfill` takes `status`, `headers`, `contentType`, `body` (string or any
 byte source), `json`, `path` (read through the session sandbox) and

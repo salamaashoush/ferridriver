@@ -8,8 +8,8 @@
  */
 
 import { InjectedScript } from './injectedScript';
-import { createTestIdEngine } from './local/testIdEngine';
 import { matchesExpectAriaTemplate } from './ariaSnapshot';
+import { renderAriaSnapshotAsYaml } from '@isomorphic/ariaSnapshotRenderer';
 import { isElementVisible, parentElementOrShadowHost, enclosingShadowRootOrDocument } from './domUtils';
 import { getAriaDisabled, getAriaRole, getCheckedWithoutMixed, getElementAccessibleNameText, getReadonly } from './roleUtils';
 import { escapeForTextSelector, escapeForAttributeSelector } from '@isomorphic/stringUtils';
@@ -37,6 +37,14 @@ const fdOptions: FdOptions = (window as any).__fdOptions ?? {};
 const injected = new InjectedScript(window, {
   isUnderTest: false,
   sdkLanguage: 'javascript',
+  // Playwright builds the injected options per FRAME and puts the
+  // frame's sequence number in every `ai` ref (`f2e7`), so refs are
+  // unique page-wide. ferridriver injects one script per PAGE (an
+  // `addScriptToEvaluateOnNewDocument` source shared by every
+  // document), so there is no per-frame number to put here: the host
+  // renders each frame with its own ref namespace and prefixes the
+  // child frame's refs while stitching (`locator.rs::aria_stitch_frame`).
+  frameSeq: 0,
   // Cosmetic here: a `getByTestId` selector carries its attribute name
   // in the selector body, so this only feeds strict-mode error text and
   // codegen. Registered engines, however, exist only if listed here.
@@ -49,12 +57,6 @@ const injected = new InjectedScript(window, {
   browserName: 'chromium',
   customEngines: fdOptions.customEngines ?? [],
 });
-
-// The vendored `injectedScript.ts` still carries the single-attribute
-// test-id engine; `use: { testIdAttribute: 'a,b' }` needs the
-// multi-attribute one. Replacing the entry in the engine map keeps the
-// vendored file untouched — see `local/testIdEngine.ts` and VENDOR.md.
-(injected as any)._engines.set('internal:testid', createTestIdEngine(injected as any));
 
 // ── Selector Execution (compatibility with ferridriver's parts-based API) ──
 
@@ -644,20 +646,23 @@ if (!window.__fd) {
     },
     ariaSnapshot: (node: Node, options?: { mode?: 'ai' | 'default'; depth?: number }) =>
       injected.ariaSnapshot(node, { mode: options?.mode || 'default', depth: options?.depth }),
-    // Full result incl. `iframeRefs` / `iframeDepths` so the Rust core
-    // can stitch child-iframe subtrees (mirrors server
-    // `ariaSnapshotForFrame`). `refPrefix` namespaces refs per frame so
-    // the parent's `- iframe [ref=...]` line is unique and resolvable.
-    incrementalAriaSnapshot: (
+    // One frame's render plus the `iframeRefs` / `iframeDepths` the Rust
+    // core needs to stitch child-iframe subtrees underneath it (mirrors
+    // server `ariaSnapshotForFrame`). Playwright merges the child JSON
+    // into the parent tree and renders once at the end; ferridriver
+    // renders per frame and splices the text, so the YAML comes back
+    // here rather than the JSON.
+    ariaSnapshotFrame: (
       node: Node,
-      options?: { mode?: 'ai' | 'default'; depth?: number; refPrefix?: string; boxes?: boolean },
-    ) =>
-      injected.incrementalAriaSnapshot(node, {
+      options?: { mode?: 'ai' | 'default'; depth?: number; boxes?: boolean },
+    ) => {
+      const { json, iframeRefs, iframeDepths } = injected.ariaSnapshotJSON(node, {
         mode: options?.mode || 'default',
         depth: options?.depth,
-        refPrefix: options?.refPrefix,
         boxes: options?.boxes,
-      }),
+      });
+      return { full: renderAriaSnapshotAsYaml(json), iframeRefs, iframeDepths };
+    },
     // Tag the iframe/frame element that the renderer assigned `ref` to
     // with `attr=ref`, so the host can re-resolve it through the normal
     // selector + content-frame path (BiDi-safe — passing a utility-eval

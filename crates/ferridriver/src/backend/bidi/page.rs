@@ -3237,7 +3237,7 @@ impl BidiPage {
 
     // A utility eval targeting a child browsing context (e.g. the
     // recursive cross-iframe `ariaSnapshot` stitch running
-    // `window.__fd.incrementalAriaSnapshot(document.body, ...)` inside
+    // `window.__fd.ariaSnapshotFrame(document.body, ...)` inside
     // an iframe) needs the engine present in that context, and the
     // child to be parseable. Same chokepoint as `evaluate_to_element`
     // / `evaluate_in_frame` (Residual 2) — main context is already

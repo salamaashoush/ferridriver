@@ -1345,7 +1345,7 @@ impl Locator {
   /// retry pipeline (strict mode honored — strictness + actionability
   /// stay in Rust core), then renders the accessibility subtree rooted
   /// at that element via the vendored Playwright `InjectedScript`
-  /// (`window.__fd.incrementalAriaSnapshot`). The output is
+  /// (`window.__fd.ariaSnapshotFrame`). The output is
   /// byte-for-byte the Playwright YAML, scoped to the element — siblings
   /// outside the locator are excluded by construction.
   ///
@@ -1376,9 +1376,8 @@ impl Locator {
     let (root_frame, _sel) = self.resolved().await?;
     let mode = options.mode.unwrap_or_default().as_str();
     let depth = options.depth;
-    let opts_json = aria_opts_json(mode, depth, "", options.boxes);
-    let root_js =
-      format!("function() {{ return JSON.stringify(window.__fd.incrementalAriaSnapshot(this, {opts_json})); }}");
+    let opts_json = aria_opts_json(mode, depth, options.boxes);
+    let root_js = format!("function() {{ return JSON.stringify(window.__fd.ariaSnapshotFrame(this, {opts_json})); }}");
     retry_resolve!(self, options.timeout, "ariaSnapshot", |el, _page| async {
       let raw_s = el
         .call_js_fn_value(&root_js)
@@ -1387,7 +1386,7 @@ impl Locator {
         .unwrap_or_default();
       let raw = parse_aria_raw(&raw_s)?;
       let seq = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-      let lines = aria_stitch_frame(root_frame.clone(), raw, mode.to_string(), depth, options.boxes, seq).await?;
+      let lines = aria_stitch_frame(root_frame.clone(), raw, mode.to_string(), depth, options.boxes, "", seq).await?;
       Ok::<String, crate::error::FerriError>(lines.join("\n"))
     })
   }
@@ -3045,12 +3044,12 @@ fn json_quote(s: &str) -> String {
 // Mirrors Playwright's server `ariaSnapshotForFrame` /
 // `ariaSnapshotFrameRef`
 // (`/tmp/playwright/packages/playwright-core/src/server/page.ts:1103`).
-// The injected `incrementalAriaSnapshot` renders one frame and reports
+// The injected `ariaSnapshotFrame` renders one frame and reports
 // the `<iframe>` nodes it gave refs to (`iframeRefs` / `iframeDepths`);
 // the host resolves each into its child browsing context and splices
 // the child render beneath the parent's `- iframe [ref=...]` line.
 
-/// Decoded result of `window.__fd.incrementalAriaSnapshot`.
+/// Decoded result of `window.__fd.ariaSnapshotFrame`.
 #[derive(serde::Deserialize, Default)]
 struct AriaRaw {
   #[serde(default)]
@@ -3064,17 +3063,16 @@ struct AriaRaw {
   iframe_depths: std::collections::HashMap<String, i32>,
 }
 
-/// Build the `AriaTreeOptions` JSON for the injected call. `refPrefix`
-/// is omitted when empty (top frame) — the vendored injected treats
-/// missing and `''` identically (`options.refPrefix ?? ''`).
-fn aria_opts_json(mode: &str, depth: Option<i32>, ref_prefix: &str, boxes: Option<bool>) -> String {
+/// Build the `AriaTreeOptions` JSON for the injected call. The ref
+/// prefix is NOT one of them: the vendored injected derives it from the
+/// per-frame `frameSeq` it was constructed with, and ferridriver injects
+/// one script per page, so the host prefixes a child frame's refs while
+/// stitching instead ([`aria_stitch_frame`]).
+fn aria_opts_json(mode: &str, depth: Option<i32>, boxes: Option<bool>) -> String {
   let mut m = serde_json::Map::new();
   m.insert("mode".into(), serde_json::Value::String(mode.to_string()));
   if let Some(d) = depth {
     m.insert("depth".into(), serde_json::Value::Number(d.into()));
-  }
-  if !ref_prefix.is_empty() {
-    m.insert("refPrefix".into(), serde_json::Value::String(ref_prefix.to_string()));
   }
   if boxes == Some(true) {
     m.insert("boxes".into(), serde_json::Value::Bool(true));
@@ -3105,8 +3103,10 @@ fn aria_stitch_frame(
   mode: String,
   depth: Option<i32>,
   boxes: Option<bool>,
+  ref_prefix: &str,
   seq: Arc<std::sync::atomic::AtomicU32>,
 ) -> futures::future::BoxFuture<'static, Result<Vec<String>>> {
+  let ref_prefix = ref_prefix.to_string();
   Box::pin(async move {
     // Playwright: `iframeRefs.filter(ref => ref in iframeDepths)` —
     // preserves order so `indexOf(ref)` aligns with `childSnapshots`.
@@ -3131,14 +3131,17 @@ fn aria_stitch_frame(
     let mut out: Vec<String> = Vec::new();
     for line in raw.full.split('\n') {
       let Some(caps) = re.captures(line) else {
-        out.push(line.to_string());
+        out.push(prefix_aria_refs(line, &ref_prefix));
         continue;
       };
       let leading = caps.get(1).map_or("", |m| m.as_str());
       let refv = caps.get(2).map_or("", |m| m.as_str());
       let child = rendered.iter().position(|x| x == refv).map(|i| &child_snaps[i]);
       let has = child.is_some_and(|c| !c.is_empty());
-      out.push(if has { format!("{line}:") } else { line.to_string() });
+      // Splicing matches on the frame's OWN ref; the displayed ref is
+      // the prefixed one. Child lines arrive already prefixed.
+      let line = prefix_aria_refs(line, &ref_prefix);
+      out.push(if has { format!("{line}:") } else { line });
       if let Some(child_lines) = child {
         for l in child_lines {
           out.push(format!("{leading}  {l}"));
@@ -3147,6 +3150,18 @@ fn aria_stitch_frame(
     }
     Ok(out)
   })
+}
+
+/// Namespace one frame's rendered refs. Playwright mints `f<seq>e<n>`
+/// inside the renderer because its injected script is built per frame;
+/// ferridriver's is built per page, so the prefix is applied to the
+/// rendered line here. A `- text:` line is left alone — only a node key
+/// carries `[ref=...]`.
+fn prefix_aria_refs(line: &str, prefix: &str) -> String {
+  if prefix.is_empty() || line.trim_start().starts_with("- text:") {
+    return line.to_string();
+  }
+  line.replace("[ref=", &format!("[ref={prefix}"))
 }
 
 /// Resolve one child iframe (`refv`) into its content frame, snapshot
@@ -3203,8 +3218,8 @@ async fn aria_child_snapshot(
   // frames (Playwright uses `frame.seq`; we just need uniqueness).
   let n = seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
   let prefix = format!("f{n}");
-  let copts = aria_opts_json(mode, child_depth, &prefix, boxes);
-  let body_js = format!("() => JSON.stringify(window.__fd.incrementalAriaSnapshot(document.body, {copts}))");
+  let copts = aria_opts_json(mode, child_depth, boxes);
+  let body_js = format!("() => JSON.stringify(window.__fd.ariaSnapshotFrame(document.body, {copts}))");
   let raw_s = child_frame
     .evaluate(&body_js, crate::protocol::SerializedArgument::default(), Some(true))
     .await?
@@ -3221,6 +3236,7 @@ async fn aria_child_snapshot(
     mode.to_string(),
     child_depth,
     boxes,
+    &prefix,
     Arc::clone(seq),
   )
   .await

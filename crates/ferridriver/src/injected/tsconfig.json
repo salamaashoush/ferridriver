@@ -7,7 +7,7 @@
     "skipLibCheck": true,
     "paths": {
       "@isomorphic/*": ["./isomorphic/*"],
-      "@protocol/channels": ["./stubs/channels"]
+      "@protocol/structs": ["./stubs/structs"]
     },
     "types": ["bun-types"]
   },

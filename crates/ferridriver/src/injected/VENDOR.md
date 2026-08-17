@@ -29,11 +29,12 @@ git -C /tmp/playwright fetch --all && git -C /tmp/playwright checkout <rev>
 cd crates/ferridriver/src/injected
 for f in domUtils highlight injectedScript layoutSelectorUtils roleSelectorEngine \
          roleUtils selectorEngine selectorEvaluator selectorGenerator selectorUtils \
-         utilityScript webSocketMock xpathSelectorEngine ariaSnapshot clock consoleApi; do
+         utilityScript webSocketMock xpathSelectorEngine ariaSnapshot \
+         ariaSnapshotDistiller clock consoleApi; do
   cp /tmp/playwright/packages/injected/src/$f.ts $f.ts
 done
-for f in ariaSnapshot cssParser cssTokenizer locatorGenerators locatorParser \
-         locatorUtils selectorParser stringUtils utilityScriptSerializers; do
+for f in ariaSnapshot ariaSnapshotRenderer cssParser cssTokenizer locatorGenerators \
+         locatorParser locatorUtils selectorParser stringUtils utilityScriptSerializers; do
   cp /tmp/playwright/packages/isomorphic/$f.ts isomorphic/$f.ts
 done
 cp /tmp/playwright/packages/injected/src/highlight.css highlight.css
@@ -50,17 +51,18 @@ the Rust side `include_str!`s them.
 
 ## Vendored files
 
-`packages/injected/src/` → here: `ariaSnapshot.ts`, `clock.ts`,
-`consoleApi.ts`, `domUtils.ts`, `highlight.ts`, `highlight.css`,
-`injectedScript.ts`, `layoutSelectorUtils.ts`, `roleSelectorEngine.ts`,
-`roleUtils.ts`, `selectorEngine.ts`, `selectorEvaluator.ts`,
-`selectorGenerator.ts`, `selectorUtils.ts`, `utilityScript.ts`,
-`webSocketMock.ts`, `xpathSelectorEngine.ts`.
+`packages/injected/src/` → here: `ariaSnapshot.ts`,
+`ariaSnapshotDistiller.ts`, `clock.ts`, `consoleApi.ts`, `domUtils.ts`,
+`highlight.ts`, `highlight.css`, `injectedScript.ts`,
+`layoutSelectorUtils.ts`, `roleSelectorEngine.ts`, `roleUtils.ts`,
+`selectorEngine.ts`, `selectorEvaluator.ts`, `selectorGenerator.ts`,
+`selectorUtils.ts`, `utilityScript.ts`, `webSocketMock.ts`,
+`xpathSelectorEngine.ts`.
 
 `packages/isomorphic/` → `isomorphic/`: `ariaSnapshot.ts`,
-`cssParser.ts`, `cssTokenizer.ts`, `locatorGenerators.ts`,
-`locatorParser.ts`, `locatorUtils.ts`, `selectorParser.ts`,
-`stringUtils.ts`, `utilityScriptSerializers.ts`.
+`ariaSnapshotRenderer.ts`, `cssParser.ts`, `cssTokenizer.ts`,
+`locatorGenerators.ts`, `locatorParser.ts`, `locatorUtils.ts`,
+`selectorParser.ts`, `stringUtils.ts`, `utilityScriptSerializers.ts`.
 
 ## ferridriver's own
 
@@ -71,15 +73,20 @@ Entry points and support bundles, all built by `build.ts`: `index.ts`
 `stubs/`.
 
 `local/` holds code that exists only because a vendored file needs
-something upstream does not have:
+something upstream does not have. It is empty right now: the aria
+equality helpers that lived there, and the multi-attribute test-id
+engine, both went away when `injectedScript.ts` / `ariaSnapshot.ts`
+were brought up to 1.63 (upstream's own `_createTestIdEngine` splits
+the comma form, and the tree-diffing snapshot they served was reachable
+from nothing).
 
-| module | why |
-|---|---|
-| `local/ariaEquality.ts` | `ariaNodesEqual` / `ariaPropsEqual`, deleted upstream when snapshot rendering split into `renderAriaTreeAsJSON` + `ariaSnapshotRenderer`. ferridriver's incremental snapshot (`__fd.incrementalAriaSnapshot`) diffs two trees node by node and still needs them. |
+`stubs/structs.ts` stands in for `@protocol/structs`, the only
+`@protocol` module a vendored file still imports (`injectedScript.ts`
+takes `ExpectedTextValue`, `Point` and `Rect` from it).
 
 ## Deltas carried inside vendored files
 
-None. Two API changes landed in ferridriver's own files instead when
+None. Three API changes landed in ferridriver's own files instead when
 upstream made them:
 
 - `getElementAccessibleName` returns a composite `AccessibleName` since
@@ -87,4 +94,11 @@ upstream made them:
   and `getElementAccessibleDescription(...).text` likewise. `index.ts`
   exposes the text form as `__fd.getAccessibleName`, because the Rust
   side reads a string.
-- `InjectedScriptOptions` gained `frameSeq`; `index.ts` passes it.
+- `InjectedScriptOptions` gained `frameSeq`, which the renderer turns
+  into the `f<seq>e<n>` ref prefix. Playwright builds its injected
+  options per frame; ferridriver injects one script per page, so
+  `index.ts` passes `0` and the host prefixes a child frame's refs when
+  it splices the frame's render (`locator.rs::aria_stitch_frame`).
+- Snapshot rendering split into `renderAriaTreeAsJSON` (tree → JSON) and
+  `renderAriaSnapshotAsYaml` (JSON → YAML). `__fd.ariaSnapshotFrame`
+  runs both, because the Rust side stitches iframes as text.
