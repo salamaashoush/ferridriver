@@ -31,7 +31,8 @@ use crate::error::to_napi;
 /// throwing synchronously. Playwright's `register` returns
 /// `Promise<void>`.
 #[napi(
-  js_name = "registerSelectorEngine",
+  namespace = "selectors",
+  js_name = "register",
   ts_args_type = "name: string, script: Function | string | { path?: string, content?: string }, options?: { contentScript?: boolean }",
   ts_return_type = "Promise<void>"
 )]
@@ -63,7 +64,7 @@ pub struct SelectorEngineOptions {
 /// `selectors.setTestIdAttribute(attributeName)` — the process default
 /// every context starts from. A comma-separated list matches any of the
 /// named attributes.
-#[napi(js_name = "setTestIdAttribute")]
+#[napi(namespace = "selectors", js_name = "setTestIdAttribute")]
 pub fn set_test_id_attribute(attribute_name: String) {
   ferridriver::selectors::set_default_test_id_attribute(&attribute_name);
 }
