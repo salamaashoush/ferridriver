@@ -683,6 +683,10 @@ fn test_snapshot_create_and_match() {
     project: None,
     config_snapshot: None,
     expect: Arc::new(ferridriver_test::config::ExpectConfig::default()),
+    config_dir: Default::default(),
+    test_dir: Default::default(),
+    snapshot_names: Default::default(),
+    aria_snapshot_names: Default::default(),
     timeout: Duration::from_secs(5),
     tags: Vec::new(),
     start_time: std::time::Instant::now(),
@@ -695,15 +699,30 @@ fn test_snapshot_create_and_match() {
   };
 
   // First call: creates snapshot file.
-  let result = ferridriver_test::snapshot::assert_snapshot(&info, "hello world\nline 2", "greeting", false);
+  let result = ferridriver_test::snapshot::assert_snapshot(
+    &info,
+    "hello world\nline 2",
+    &ferridriver_test::snapshot_path::SnapshotName::One("greeting".to_string()),
+    false,
+  );
   assert!(result.is_ok(), "first snapshot should pass (creates file)");
 
   // Second call: should match.
-  let result = ferridriver_test::snapshot::assert_snapshot(&info, "hello world\nline 2", "greeting", false);
+  let result = ferridriver_test::snapshot::assert_snapshot(
+    &info,
+    "hello world\nline 2",
+    &ferridriver_test::snapshot_path::SnapshotName::One("greeting".to_string()),
+    false,
+  );
   assert!(result.is_ok(), "matching snapshot should pass");
 
   // Third call: mismatch.
-  let result = ferridriver_test::snapshot::assert_snapshot(&info, "hello world\nline CHANGED", "greeting", false);
+  let result = ferridriver_test::snapshot::assert_snapshot(
+    &info,
+    "hello world\nline CHANGED",
+    &ferridriver_test::snapshot_path::SnapshotName::One("greeting".to_string()),
+    false,
+  );
   assert!(result.is_err(), "mismatched snapshot should fail");
   let err = result.unwrap_err();
   assert!(err.diff.is_some(), "should have diff");
@@ -713,18 +732,33 @@ fn test_snapshot_create_and_match() {
   );
 
   // Update mode: overwrites.
-  let result = ferridriver_test::snapshot::assert_snapshot(&info, "updated content", "greeting", true);
+  let result = ferridriver_test::snapshot::assert_snapshot(
+    &info,
+    "updated content",
+    &ferridriver_test::snapshot_path::SnapshotName::One("greeting".to_string()),
+    true,
+  );
   assert!(result.is_ok(), "update mode should pass");
 
   // Verify updated.
-  let result = ferridriver_test::snapshot::assert_snapshot(&info, "updated content", "greeting", false);
+  let result = ferridriver_test::snapshot::assert_snapshot(
+    &info,
+    "updated content",
+    &ferridriver_test::snapshot_path::SnapshotName::One("greeting".to_string()),
+    false,
+  );
   assert!(result.is_ok(), "should match updated snapshot");
 
   // ignore_snapshots: short-circuits a real mismatch back to a pass so
   // a green run survives stale baselines (`--ignore-snapshots`).
   let mut ignored = info.clone();
   ignored.ignore_snapshots = true;
-  let result = ferridriver_test::snapshot::assert_snapshot(&ignored, "this would normally fail", "greeting", false);
+  let result = ferridriver_test::snapshot::assert_snapshot(
+    &ignored,
+    "this would normally fail",
+    &ferridriver_test::snapshot_path::SnapshotName::One("greeting".to_string()),
+    false,
+  );
   assert!(result.is_ok(), "ignore_snapshots should suppress mismatch");
 
   let _ = std::fs::remove_dir_all(&tmp);

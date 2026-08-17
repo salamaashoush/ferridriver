@@ -113,6 +113,7 @@ pub mod runner;
 pub mod server;
 pub mod shard;
 pub mod snapshot;
+pub mod snapshot_path;
 pub mod step;
 pub mod test_server;
 pub mod tracing;

@@ -116,7 +116,8 @@ The `TestConfig` Rust type is the canonical reference. Notable fields:
 | `video`                | object    | `{ mode = "off" }` | `mode`: `off` / `on` / `retain-on-failure` |
 | `trace`                | enum      | `off`   | `off` / `on` / `retain-on-failure` / `on-first-retry` |
 | `outputDir`            | path      | `test-results` | Test output root |
-| `snapshotDir`          | path?     | none    | Snapshot baseline directory |
+| `snapshotDir`          | path?     | none    | Snapshot baseline directory (`{snapshotDir}` in a template) |
+| `snapshotPathTemplate` | string?   | legacy  | Where snapshots live — see [Snapshot paths](#snapshot-paths) |
 | `updateSnapshots`      | enum      | `missing` | `all` / `changed` / `missing` / `none` |
 | `storageState`         | path?     | none    | Saved auth state JSON |
 | `baseUrl`              | string?   | none    | Base URL for relative `page.goto`s |
@@ -127,6 +128,44 @@ The `TestConfig` Rust type is the canonical reference. Notable fields:
 | `features`             | `Vec<String>` | `[]` | Feature file globs (BDD) |
 | `steps`                | `Vec<String>` | `[]` | JS / TS step file globs (BDD) |
 | `tsconfig`             | path?     | none    | Pins the tsconfig whose `paths` / `baseUrl` govern bundling for the whole graph. Unset leaves rolldown's per-module upward discovery of `tsconfig.json`, so this is what selects a config discovery would not find (`tsconfig.test.json`). A path naming no file fails the bundle. |
+
+## Snapshot paths
+
+`snapshotPathTemplate` decides where a baseline lives; the default is
+Playwright's legacy layout, a `-snapshots` directory beside the spec:
+
+```
+{snapshotDir}/{testFileDir}/{testFileName}-snapshots/{arg}{-projectName}{-snapshotSuffix}{ext}
+```
+
+`expect.toHaveScreenshot.pathTemplate` and
+`expect.toMatchAriaSnapshot.pathTemplate` override it for those two
+matchers. A relative template resolves against the directory of the
+config file that declared it.
+
+| Token | Value |
+|---|---|
+| `{testDir}` | the project's `testDir` |
+| `{snapshotDir}` | the project's `snapshotDir` |
+| `{snapshotSuffix}` | `testInfo.snapshotSuffix` |
+| `{testFileDir}` | the spec's directory, relative to `testDir` |
+| `{testFilePath}` | the spec's path relative to `testDir`, with extension |
+| `{testFileName}` | the spec's file name, with extension |
+| `{testFileBaseName}` | the spec's file name without extension |
+| `{testName}` | the test's title path, sanitized |
+| `{projectName}` | the project name, sanitized |
+| `{platform}` | `darwin` / `linux` / `win32` |
+| `{arg}` | the name passed to the matcher, without extension |
+| `{ext}` | the extension, including the dot |
+
+A token may carry a separator INSIDE its braces — `{-projectName}` emits
+`-chromium` for a named project and nothing at all for an unnamed one.
+That is why `{arg}{-projectName}{ext}` gives `button.png` in a
+single-project run and `button-chromium.png` in a matrix.
+
+`testInfo.snapshotPath(...name, { kind })` answers with the same path
+the matcher of that `kind` (`'snapshot'`, `'screenshot'`, `'aria'`)
+would write, without consuming a snapshot index.
 
 ## Expect block
 

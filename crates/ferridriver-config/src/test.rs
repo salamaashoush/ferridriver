@@ -225,6 +225,12 @@ pub struct TestConfig {
   pub expect_timeout: u64,
   #[serde(default)]
   pub expect: ExpectConfig,
+  /// Directory of the config file this run resolved from — Playwright's
+  /// `configDir`, which a relative `snapshotPathTemplate` resolves
+  /// against. Filled after the layer stack is merged, never read from
+  /// the document itself.
+  #[serde(skip)]
+  pub config_dir: Option<PathBuf>,
   pub workers: u32,
   pub retries: u32,
   pub reporter: Vec<ReporterConfig>,
@@ -959,6 +965,7 @@ impl Default for TestConfig {
       timeout: 30_000,
       expect_timeout: DEFAULT_EXPECT_TIMEOUT_MS,
       expect: ExpectConfig::default(),
+      config_dir: None,
       workers: 0,
       retries: 0,
       reporter: vec![ReporterConfig {
@@ -1301,12 +1308,12 @@ mod expect_config_tests {
     // project's object as-is, so the screenshot budget is NOT inherited
     // (`playwright/src/common/config.ts:201`).
     let cfg = config(
-      r#"
+      r"
         [expect]
         timeout = 1200
         [expect.toHaveScreenshot]
         maxDiffPixelRatio = 0.4
-      "#,
+      ",
     );
     let project = ProjectConfig {
       name: "narrow".to_string(),

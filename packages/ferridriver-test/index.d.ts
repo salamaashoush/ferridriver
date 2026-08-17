@@ -64,7 +64,14 @@ export interface TestInfo {
   slow(condition: boolean, description?: string): void;
   setTimeout(timeout: number): void;
   outputPath(...pathSegments: string[]): string;
-  snapshotPath(name: string): string;
+  /**
+   * Where a snapshot of `kind` lives — the same path the matcher writes,
+   * resolved through `snapshotPathTemplate` / the matcher's own
+   * `pathTemplate`. Several segments are joined as a path; a trailing
+   * `{ kind }` selects the matcher (`'snapshot'` by default).
+   */
+  snapshotPath(...name: string[]): string;
+  snapshotPath(name: string, options: { kind: 'snapshot' | 'screenshot' | 'aria' }): string;
 }
 
 /// Playwright's `Location` — a file plus a 1-based position in it.

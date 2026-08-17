@@ -449,6 +449,18 @@ pub struct TestInfo {
   /// its project (`TestConfig::resolved_expect`). Matchers start from
   /// these and layer their per-call options on top.
   pub expect: Arc<crate::config::ExpectConfig>,
+  /// Directory of the config file the run resolved from — what a
+  /// relative `snapshotPathTemplate` is relative TO (Playwright's
+  /// `configDir`). Empty means the working directory.
+  pub config_dir: PathBuf,
+  /// The project's `testDir`: `{testDir}` in a template, and what a
+  /// spec's path is made relative to for `{testFilePath}`.
+  pub test_dir: PathBuf,
+  /// Snapshot-name indices for this test, so two anonymous snapshots or
+  /// two calls with the same name do not overwrite each other. Aria
+  /// snapshots count separately, exactly as upstream.
+  pub snapshot_names: Arc<std::sync::Mutex<crate::snapshot_path::SnapshotNames>>,
+  pub aria_snapshot_names: Arc<std::sync::Mutex<crate::snapshot_path::SnapshotNames>>,
   /// Test timeout.
   pub timeout: Duration,
   /// Tags from annotations.
@@ -541,6 +553,10 @@ impl TestInfo {
       project: None,
       config_snapshot: None,
       expect: Arc::new(crate::config::ExpectConfig::default()),
+      config_dir: Default::default(),
+      test_dir: Default::default(),
+      snapshot_names: Default::default(),
+      aria_snapshot_names: Default::default(),
       timeout: Duration::from_secs(30),
       tags: Vec::new(),
       start_time: Instant::now(),
@@ -1004,6 +1020,87 @@ impl crate::step::StepDriver for TestInfo {
 }
 
 impl TestInfo {
+  /// The project this test belongs to, by name.
+  ///
+  /// The worker carries the project as its MERGED config (that is what
+  /// `merge_project` renames), so a plan that snapshotted the project
+  /// entry is not the only source — `testInfo.project` and every
+  /// `{projectName}` in a snapshot template read this.
+  #[must_use]
+  pub fn project_name(&self) -> Option<String> {
+    self
+      .project
+      .as_ref()
+      .map(|p| p.name.clone())
+      .or_else(|| self.config_snapshot.as_ref().and_then(|c| c.name.clone()))
+      .filter(|name| !name.is_empty())
+  }
+
+  /// What a template can name for THIS test.
+  #[must_use]
+  pub fn snapshot_context(&self) -> crate::snapshot_path::SnapshotPathContext {
+    let expect = &self.expect;
+    let config_dir = if self.config_dir.as_os_str().is_empty() {
+      std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+      self.config_dir.clone()
+    };
+    crate::snapshot_path::SnapshotPathContext {
+      // An unset `testDir` is the config's own directory, as
+      // Playwright's `project.testDir` defaults — otherwise a spec's
+      // path is relative to nothing and `{testFileDir}` renders the
+      // absolute one.
+      test_dir: if self.test_dir.as_os_str().is_empty() {
+        config_dir.clone()
+      } else {
+        self.test_dir.clone()
+      },
+      config_dir,
+      snapshot_dir: self.snapshot_dir.clone(),
+      project_name: self.project_name().unwrap_or_default(),
+      // Absolute, so `strip_prefix(testDir)` actually strips: a plan
+      // file is relative to the working directory, a `testDir` is
+      // anchored to its config file.
+      test_file: {
+        let file = PathBuf::from(&self.test_id.file);
+        if file.is_absolute() {
+          file
+        } else {
+          std::env::current_dir().unwrap_or_default().join(file)
+        }
+      },
+      title_path: self.title_path.clone(),
+      snapshot_suffix: self.snapshot_suffix.try_lock().map(|s| s.clone()).unwrap_or_default(),
+      screenshot_template: expect.to_have_screenshot.path_template.clone(),
+      aria_template: expect.to_match_aria_snapshot.path_template.clone(),
+      config_template: self.snapshot_path_template.clone(),
+    }
+  }
+
+  /// Where a snapshot of `kind` called `name` lives, and what to call
+  /// the `-actual` / `-diff` files beside it.
+  ///
+  /// The ONE resolver: a matcher and `testInfo.snapshotPath()` must
+  /// answer with the same string, which is the entire point of the
+  /// template. `update_index` is Playwright's
+  /// `'updateSnapshotIndex'` — a matcher consumes an index, a lookup
+  /// only reads one.
+  #[must_use]
+  pub fn resolve_snapshot_paths(
+    &self,
+    kind: crate::snapshot_path::SnapshotKind,
+    name: &crate::snapshot_path::SnapshotName,
+    update_index: bool,
+  ) -> crate::snapshot_path::ResolvedSnapshotPaths {
+    let counters = if kind == crate::snapshot_path::SnapshotKind::Aria {
+      &self.aria_snapshot_names
+    } else {
+      &self.snapshot_names
+    };
+    let mut guard = counters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::snapshot_path::resolve_snapshot_paths(&self.snapshot_context(), kind, name, &mut guard, update_index, None)
+  }
+
   /// Close every step still open, so a body that failed mid-step leaves
   /// no dangling reporter event or trace span behind.
   pub async fn close_open_steps(&self, reason: &str) {

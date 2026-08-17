@@ -324,6 +324,10 @@ pub fn resolve(opts: &LoadOptions) -> anyhow::Result<Resolved> {
   let mut config = deserialize_document(&document, &mut warnings)?;
   config.validate()?;
   config.source_dir = layers.last().and_then(|l| l.path.parent()).map(Path::to_path_buf);
+  // Playwright's `configDir`: what a relative `snapshotPathTemplate`
+  // resolves against, carried on the test config so the runner does not
+  // have to be handed the layer stack.
+  config.test.config_dir.clone_from(&config.source_dir);
   config.extension_bases = extension_bases;
 
   Ok(Resolved {

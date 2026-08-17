@@ -158,8 +158,8 @@ impl TestHostBridge for MockBridge {
     format!("/out/{}", parts.join("/"))
   }
 
-  fn snapshot_path(&self, name: &str) -> String {
-    format!("/snap/{name}")
+  fn snapshot_path(&self, name: &[String], kind: &str) -> Result<String, String> {
+    Ok(format!("/snap/{kind}/{}", name.join("/")))
   }
 
   fn errors(&self) -> Vec<String> {

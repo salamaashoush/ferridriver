@@ -60,7 +60,10 @@ pub trait TestHostBridge: crate::step::StepDriver {
   fn set_slow(&self);
   fn set_timeout_override(&self, ms: u64);
   fn output_path(&self, parts: &[String]) -> String;
-  fn snapshot_path(&self, name: &str) -> String;
+  /// `testInfo.snapshotPath(...name, { kind })`. `kind` is Playwright's
+  /// `'snapshot' | 'screenshot' | 'aria'`; an unknown one is an error
+  /// the host throws.
+  fn snapshot_path(&self, name: &[String], kind: &str) -> Result<String, String>;
   fn errors(&self) -> Vec<String>;
   /// `toMatchSnapshot(name?)` — text snapshot against the run's
   /// snapshot directory/update mode. `Err(message)` = assertion failed.

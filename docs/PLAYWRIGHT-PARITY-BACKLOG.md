@@ -56,12 +56,6 @@ bite on yet, and it is the matcher that is missing, not the config:
   needs a byte subject through the expect seam before an image budget can
   apply. The screenshot equivalents (`expect.toHaveScreenshot.*`) are
   honoured.
-- `expect.toHaveScreenshot.pathTemplate` and
-  `expect.toMatchAriaSnapshot.pathTemplate` are carried and resolved but
-  the snapshot path resolver still reads the config-level
-  `snapshotPathTemplate` only; per-kind templates land with the
-  `_resolveSnapshotPaths` port.
-
 Also per-call only, as upstream (`NonConfigProperties`): `clip`, `mask`,
 `maskColor`, `fullPage`, `omitBackground`, `signal` — of which
 ferridriver takes `clip`, `mask` and `maskColor`.

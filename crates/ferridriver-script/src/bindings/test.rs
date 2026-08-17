@@ -1515,7 +1515,32 @@ fn build_test_info<'js>(
   .map_err(se)?;
   obj.set("outputPath", output_path).map_err(se)?;
   let snap_bridge = Arc::clone(bridge);
-  let snapshot_path = Function::new(ctx.clone(), move |name: String| snap_bridge.snapshot_path(&name)).map_err(se)?;
+  // Playwright: `snapshotPath(...name: string[])` and
+  // `snapshotPath(name, { kind })` (`worker/testInfo.ts:644-662`) — a
+  // trailing object is the options bag, everything before it is a path.
+  let snapshot_path = Function::new(ctx.clone(), move |args: Rest<Value<'js>>| -> rquickjs::Result<String> {
+    let mut parts: Vec<String> = Vec::with_capacity(args.0.len());
+    let mut kind = "snapshot".to_string();
+    let last = args.0.len().saturating_sub(1);
+    for (index, value) in args.0.iter().enumerate() {
+      if index == last
+        && let Some(obj) = value.as_object()
+        && !value.is_string()
+      {
+        if let Some(k) = obj.get::<_, Option<String>>("kind")? {
+          kind = k;
+        }
+        break;
+      }
+      if let Some(s) = value.as_string() {
+        parts.push(s.to_string()?);
+      }
+    }
+    snap_bridge
+      .snapshot_path(&parts, &kind)
+      .map_err(|message| rq(&ScriptError::internal(message)))
+  })
+  .map_err(se)?;
   obj.set("snapshotPath", snapshot_path).map_err(se)?;
 
   Ok(obj)

@@ -97,6 +97,10 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       project: None,
       config_snapshot: None,
       expect: std::sync::Arc::new(crate::config::ExpectConfig::default()),
+      config_dir: Default::default(),
+      test_dir: Default::default(),
+      snapshot_names: Default::default(),
+      aria_snapshot_names: Default::default(),
       timeout: self.timeout,
       tags: Vec::new(),
       start_time: std::time::Instant::now(),
@@ -107,7 +111,12 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       open_steps: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
       output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
     };
-    crate::snapshot::assert_snapshot(&info, &actual, name, update)
+    crate::snapshot::assert_snapshot(
+      &info,
+      &actual,
+      &crate::snapshot_path::SnapshotName::One(name.to_string()),
+      update,
+    )
   }
 
   async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure> {
@@ -125,7 +134,8 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       .map(std::path::PathBuf::from)
       .unwrap_or_else(|_| std::path::PathBuf::from("__snapshots__"));
     let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
-    crate::snapshot::screenshot_until_match(&snap_dir, name, &options, update, timeout, || {
+    let paths = crate::snapshot::ScreenshotFiles::beside(&snap_dir, name);
+    crate::snapshot::screenshot_until_match(&paths, &options, update, timeout, || {
       capture_with_options(locator, &options)
     })
     .await

@@ -90,7 +90,7 @@ const NEVER_VISIBLE: &str = "import { test, expect } from '@ferridriver/test';\n
 
 /// `[test.expect] timeout` decides how long an auto-retrying matcher
 /// waits — the flat `expectTimeout` was the only spelling that reached
-/// the runner before, and neither reached a JS spec at all (the QuickJS
+/// the runner before, and neither reached a JS spec at all (the `QuickJS`
 /// `expect` started from a hardcoded 5s).
 #[test]
 fn the_expect_block_timeout_reaches_a_spec() {

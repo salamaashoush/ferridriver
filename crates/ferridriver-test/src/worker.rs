@@ -892,6 +892,14 @@ impl Worker {
       project: None,
       config_snapshot: Some(Arc::clone(&self.config)),
       expect: Arc::new(self.config.resolved_expect(None)),
+      config_dir: self.config.config_dir.clone().unwrap_or_default(),
+      test_dir: self
+        .config
+        .test_dir
+        .as_ref()
+        .map_or_else(std::path::PathBuf::new, std::path::PathBuf::from),
+      snapshot_names: Arc::new(std::sync::Mutex::new(crate::snapshot_path::SnapshotNames::default())),
+      aria_snapshot_names: Arc::new(std::sync::Mutex::new(crate::snapshot_path::SnapshotNames::default())),
       timeout: Duration::from_millis(self.config.timeout),
       tags: Vec::new(),
       start_time: Instant::now(),
@@ -1371,6 +1379,14 @@ impl Worker {
       project: None,
       config_snapshot: Some(Arc::clone(&self.config)),
       expect: Arc::new(self.config.resolved_expect(None)),
+      config_dir: self.config.config_dir.clone().unwrap_or_default(),
+      test_dir: self
+        .config
+        .test_dir
+        .as_ref()
+        .map_or_else(std::path::PathBuf::new, std::path::PathBuf::from),
+      snapshot_names: Arc::new(std::sync::Mutex::new(crate::snapshot_path::SnapshotNames::default())),
+      aria_snapshot_names: Arc::new(std::sync::Mutex::new(crate::snapshot_path::SnapshotNames::default())),
       timeout: timeout_dur,
       tags: test
         .annotations

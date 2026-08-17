@@ -37,9 +37,6 @@ pub struct InfoBridge {
   /// runtime ones.
   static_annotations: Vec<(String, Option<String>)>,
   attachment_count: AtomicUsize,
-  /// Counter behind Playwright's auto-generated snapshot names
-  /// (`{title}-{n}`).
-  snapshot_counter: AtomicUsize,
 }
 
 impl InfoBridge {
@@ -62,28 +59,7 @@ impl InfoBridge {
       annotations: Mutex::new(Vec::new()),
       static_annotations,
       attachment_count: AtomicUsize::new(0),
-      snapshot_counter: AtomicUsize::new(0),
     }
-  }
-
-  /// `toMatchSnapshot()` / `toHaveScreenshot()` without a name — the
-  /// Playwright convention: sanitized test title + running counter.
-  fn auto_snapshot_name(&self) -> String {
-    let n = self.snapshot_counter.fetch_add(1, Ordering::Relaxed) + 1;
-    let title: String = self
-      .test_info
-      .test_id
-      .name
-      .chars()
-      .map(|c| {
-        if c.is_alphanumeric() || c == '-' || c == '_' {
-          c
-        } else {
-          '-'
-        }
-      })
-      .collect();
-    format!("{title}-{n}")
   }
 
   fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -223,8 +199,18 @@ impl TestHostBridge for InfoBridge {
     p.display().to_string()
   }
 
-  fn snapshot_path(&self, name: &str) -> String {
-    self.test_info.snapshot_dir.join(name).display().to_string()
+  fn snapshot_path(&self, name: &[String], kind: &str) -> Result<String, String> {
+    let kind = crate::snapshot_path::SnapshotKind::parse(kind).ok_or_else(|| {
+      format!(r#"testInfo.snapshotPath: unknown kind "{kind}", must be one of "snapshot", "screenshot" or "aria""#)
+    })?;
+    // The same resolver a matcher uses, and deliberately WITHOUT
+    // consuming an index: asking where a snapshot lives must not change
+    // where the next one goes.
+    let resolved =
+      self
+        .test_info
+        .resolve_snapshot_paths(kind, &crate::snapshot_path::SnapshotName::from_parts(name), false);
+    Ok(resolved.absolute_snapshot_path.display().to_string())
   }
 
   fn errors(&self) -> Vec<String> {
@@ -233,7 +219,12 @@ impl TestHostBridge for InfoBridge {
 
   fn match_text_snapshot(&self, target: SnapshotTarget, name: Option<String>) -> BridgeFuture<Result<(), String>> {
     let info = Arc::clone(&self.test_info);
-    let name = name.unwrap_or_else(|| self.auto_snapshot_name());
+    // An unnamed snapshot is NOT given a name here: the resolver owns
+    // the anonymous form (title path + running index), so a matcher and
+    // `testInfo.snapshotPath()` cannot disagree about it.
+    let name = name.map_or(crate::snapshot_path::SnapshotName::Anonymous, |n| {
+      crate::snapshot_path::SnapshotName::One(n)
+    });
     Box::pin(async move {
       let actual = match target {
         SnapshotTarget::Value(s) => s,
@@ -259,7 +250,9 @@ impl TestHostBridge for InfoBridge {
     options: serde_json::Value,
   ) -> BridgeFuture<Result<(), String>> {
     let info = Arc::clone(&self.test_info);
-    let name = name.unwrap_or_else(|| self.auto_snapshot_name());
+    let name = name.map_or(crate::snapshot_path::SnapshotName::Anonymous, |n| {
+      crate::snapshot_path::SnapshotName::One(n)
+    });
     Box::pin(async move {
       // Playwright layers the call's bag over `expect.toHaveScreenshot`
       // (`matchers/toMatchSnapshot.ts:121-127`), so a suite that sets a
@@ -276,7 +269,12 @@ impl TestHostBridge for InfoBridge {
       let timeout = opts
         .timeout
         .unwrap_or_else(|| Duration::from_millis(info.expect.timeout_ms()));
-      crate::snapshot::screenshot_until_match(&info.snapshot_dir, &name, &opts, update, timeout, || {
+      let resolved = info.resolve_snapshot_paths(crate::snapshot_path::SnapshotKind::Screenshot, &name, true);
+      let paths = crate::snapshot::ScreenshotFiles::new(
+        resolved.absolute_snapshot_path,
+        &info.output_dir.join(&resolved.relative_output_path),
+      );
+      crate::snapshot::screenshot_until_match(&paths, &opts, update, timeout, || {
         let target = target.clone();
         let opts = &opts;
         async move {
@@ -476,7 +474,7 @@ pub fn world_data(meta: WorldMeta<'_>) -> TestWorldData {
       // state the VM never reads through here); the snapshot matchers
       // go through the bridge, which reads the live value.
       snapshot_suffix: String::new(),
-      project_name: info.project.as_ref().map(|p| p.name.clone()),
+      project_name: info.project_name(),
     },
   }
 }
