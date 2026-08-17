@@ -16,9 +16,12 @@ use ferridriver::http_client::HttpResponse;
 use ferridriver::locator::Locator;
 use ferridriver_expect::{
   AssertionFailure, DEFAULT_EXPECT_TIMEOUT, ExpectLive, ExpectValue, JsType, LiveError, LiveValue, POLL_INTERVALS,
-  StringOrRegex, ThrowMatcher, ThrownError, deep_equal, expect_fn, expect_live, expect_value,
+  PromiseMismatch, PromiseMode, StringOrRegex, ThrowMatcher, ThrownError, deep_equal, expect_fn, expect_live,
+  expect_value,
 };
-use rquickjs::{Array, Atom, Class, Ctx, Function, JsLifetime, Object, Persistent, Value, class::Trace, function::Opt};
+use rquickjs::{
+  Array, Atom, Class, Ctx, Function, IntoJs, JsLifetime, Object, Persistent, Value, class::Trace, function::Opt,
+};
 use serde_json::Value as JsonValue;
 
 use crate::bindings::convert::{json_to_js, serde_from_js};
@@ -239,6 +242,19 @@ impl ExpectJs {
     Ok(JsLive(self.subject.live.clone().restore(ctx)?))
   }
 
+  /// The same assertion over a different subject — what a settled
+  /// `.resolves` / `.rejects` chain runs its matcher against. The new
+  /// subject is dispatched afresh, so a promise resolving to a Locator
+  /// gets the Locator matchers.
+  fn with_subject<'js>(&self, ctx: &Ctx<'js>, value: Value<'js>) -> Self {
+    let mut out = build_expect(ctx, value);
+    out.is_not = self.is_not;
+    out.is_soft = self.is_soft;
+    out.timeout = self.timeout;
+    out.message.clone_from(&self.message);
+    out
+  }
+
   /// The subject's structural snapshot, taken now rather than at
   /// `expect(...)` time — a subject that cannot be serialized only
   /// fails the matchers that actually need a snapshot.
@@ -309,6 +325,29 @@ impl ExpectJs {
         ),
       )
     })
+  }
+
+  /// The decision half of `toThrow`, shared with the `.rejects` path —
+  /// there the rejection reason IS the thrown error, so nothing is
+  /// called (Playwright's `createThrowMatcher(name, fromPromise)`).
+  fn check_thrown<'js>(
+    &self,
+    ctx: &Ctx<'js>,
+    caught: Option<ThrownError>,
+    matcher: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let matcher = match matcher.0 {
+      Some(v) if !v.is_undefined() => Some(parse_throw_matcher(ctx, v)?),
+      _ => None,
+    };
+    let mut ef = expect_fn(caught);
+    if self.is_not {
+      ef = ef.not();
+    }
+    if let Some(m) = &self.message {
+      ef = ef.with_message(m.clone());
+    }
+    ef.to_throw(matcher.as_ref()).map_err(|e| assertion_to_rq(ctx, e))
   }
 
   fn build_value_expect(&self, ctx: &Ctx<'_>) -> Result<ExpectValue, rquickjs::Error> {
@@ -835,18 +874,7 @@ impl ExpectJs {
             class_name: None,
           }),
         };
-        let matcher = match matcher.0 {
-          Some(v) if !v.is_undefined() => Some(parse_throw_matcher(&ctx, v)?),
-          _ => None,
-        };
-        let mut ef = expect_fn(caught);
-        if self.is_not {
-          ef = ef.not();
-        }
-        if let Some(m) = &self.message {
-          ef = ef.with_message(m.clone());
-        }
-        ef.to_throw(matcher.as_ref()).map_err(|e| assertion_to_rq(&ctx, e))
+        self.check_thrown(&ctx, caught, matcher)
       })
       .await
   }
@@ -2062,6 +2090,7 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
       {
         let val = class.into_value();
         install_not_getter(&ctx, &val)?;
+        install_settled_getters(&ctx, &val)?;
         Ok(val)
       }
     },
@@ -2088,6 +2117,7 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
       {
         let val = class.into_value();
         install_poll_not_getter(&ctx, &val)?;
+        install_poll_settled_refusal(&ctx, &val)?;
         Ok(val)
       }
     },
@@ -2104,6 +2134,7 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
       {
         let val = class.into_value();
         install_not_getter(&ctx, &val)?;
+        install_settled_getters(&ctx, &val)?;
         Ok(val)
       }
     },
@@ -2268,6 +2299,235 @@ fn install_not_getter<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs::R
   descriptor.set("get", getter)?;
   descriptor.set("configurable", true)?;
   let _: rquickjs::Value<'js> = define_property.call((instance.clone(), "not", descriptor))?;
+  Ok(())
+}
+
+// ── .resolves / .rejects ─────────────────────────────────────────────
+//
+// Playwright builds these the same way (`matchers/expect.ts:311-320`):
+// one object per mode carrying every matcher name, plus a `not` twin.
+// Here each name binds a native function that settles the subject and
+// then delegates to the ordinary matcher on a fresh Expect built over
+// the settled value — so a promise resolving to a Locator gets the
+// Locator matchers, and there is no second copy of the matcher list.
+
+/// A settled matcher's body. Boxed because a closure cannot name an
+/// `impl Future` return type.
+type SettledFuture<'js> = std::pin::Pin<Box<dyn std::future::Future<Output = rquickjs::Result<()>> + 'js>>;
+
+/// Where the settled-matcher object keeps the assertion it came from.
+/// Non-enumerable, and a plain property so QuickJS traces it — a native
+/// closure must never capture a JS value.
+const SETTLED_SOURCE: &str = "_expect";
+const SETTLED_NEGATED: &str = "_not";
+
+fn install_settled_getters<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs::Result<()> {
+  for mode in [PromiseMode::Resolves, PromiseMode::Rejects] {
+    let getter = Function::new(
+      ctx.clone(),
+      move |ctx: Ctx<'js>, this: rquickjs::function::This<Value<'js>>| -> rquickjs::Result<Object<'js>> {
+        build_settled(&ctx, &this.0, mode, true)
+      },
+    )?;
+    define_accessor(ctx, instance, mode.as_str(), getter)?;
+  }
+  Ok(())
+}
+
+/// One matcher-name-keyed object for `mode`. `with_not` adds the `not`
+/// twin — one level deep, as upstream (`resolves.not` exists,
+/// `resolves.not.not` does not).
+fn build_settled<'js>(
+  ctx: &Ctx<'js>,
+  source: &Value<'js>,
+  mode: PromiseMode,
+  with_not: bool,
+) -> rquickjs::Result<Object<'js>> {
+  let obj = Object::new(ctx.clone())?;
+  define_hidden(ctx, &obj, SETTLED_SOURCE, source.clone())?;
+  define_hidden(ctx, &obj, SETTLED_NEGATED, (!with_not).into_js(ctx)?)?;
+  for name in matcher_names(ctx)? {
+    let bound = name.clone();
+    let f = Function::new(
+      ctx.clone(),
+      move |ctx: Ctx<'js>,
+            this: rquickjs::function::This<Value<'js>>,
+            args: rquickjs::function::Rest<Value<'js>>|
+            -> rquickjs::Result<rquickjs::promise::Promised<SettledFuture<'js>>> {
+        let name = bound.clone();
+        let this = this.0;
+        let args = args.0;
+        Ok(rquickjs::promise::Promised::from(
+          Box::pin(async move { settled_call(ctx, this, name, mode, args).await }) as SettledFuture<'js>,
+        ))
+      },
+    )?;
+    f.set_name(&name)?;
+    obj.set(name, f)?;
+  }
+  if with_not {
+    let not = build_settled(ctx, source, mode, false)?;
+    obj.set("not", not)?;
+  }
+  Ok(obj)
+}
+
+/// Every `to*` on the Expect prototype. Reading the prototype rather
+/// than a hardcoded list is what keeps `.resolves` complete: a matcher
+/// added to the class is reachable through it the same day.
+fn matcher_names<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Vec<String>> {
+  let object_global: Object<'js> = ctx.globals().get("Object")?;
+  let own_names: Function<'js> = object_global.get("getOwnPropertyNames")?;
+  let proto = Class::<ExpectJs>::prototype(ctx)?.ok_or_else(|| {
+    rquickjs::Error::new_from_js_message(
+      "expect",
+      "resolves",
+      "the Expect class has no prototype in this context",
+    )
+  })?;
+  let names: Vec<String> = own_names.call((proto,))?;
+  Ok(names.into_iter().filter(|n| n.starts_with("to")).collect())
+}
+
+/// Settle the subject, then run `name` against what it settled to.
+async fn settled_call<'js>(
+  ctx: Ctx<'js>,
+  this: Value<'js>,
+  name: String,
+  mode: PromiseMode,
+  args: Vec<Value<'js>>,
+) -> rquickjs::Result<()> {
+  let holder = this.as_object().ok_or_else(|| {
+    rquickjs::Error::new_from_js_message(
+      "expect",
+      "resolves",
+      "a settled matcher was called without its receiver",
+    )
+  })?;
+  let source: Value<'js> = holder.get(SETTLED_SOURCE)?;
+  let negated: bool = holder.get::<_, Value<'js>>(SETTLED_NEGATED)?.as_bool().unwrap_or(false);
+  let class = Class::<ExpectJs>::from_value(&source)?;
+  // Copy the assertion's state out and drop the borrow: nothing may hold
+  // a class borrow across the await below.
+  let base = {
+    let borrowed = class.borrow();
+    borrowed.clone_with(|e| {
+      if negated {
+        e.is_not = !e.is_not;
+      }
+    })
+  };
+  let fail = |mismatch, received: &str| {
+    assertion_to_rq(
+      &ctx,
+      ferridriver_expect::promise_failure(mode, &name, base.is_not, base.message.as_deref(), mismatch, received),
+    )
+  };
+
+  // Playwright accepts a promise OR a function returning one.
+  let mut actual = base.live(&ctx)?.0;
+  if let Some(f) = actual.as_function().cloned() {
+    actual = f.call(())?;
+  }
+  let Some(promise) = actual.as_promise().cloned() else {
+    return Err(fail(PromiseMismatch::NotAPromise, &JsLive(actual).describe()));
+  };
+
+  let settled = promise.into_future::<Value<'js>>().await;
+  let receiver = match (mode, settled) {
+    (PromiseMode::Resolves, Ok(v)) => v,
+    (PromiseMode::Rejects, Ok(v)) => {
+      return Err(fail(PromiseMismatch::ResolvedNotRejected, &JsLive(v).describe()));
+    },
+    (PromiseMode::Rejects, Err(rquickjs::Error::Exception)) => ctx.catch(),
+    (PromiseMode::Resolves, Err(rquickjs::Error::Exception)) => {
+      let reason = ctx.catch();
+      return Err(fail(PromiseMismatch::RejectedNotResolved, &JsLive(reason).describe()));
+    },
+    // Not a JS rejection at all: a host-side error, which belongs to the
+    // caller unchanged whichever way the chain was pointed.
+    (_, Err(other)) => return Err(other),
+  };
+
+  let settled_expect = base.with_subject(&ctx, receiver.clone());
+  // `toThrow` under a settled chain reads the value as the thrown error
+  // instead of calling it (Playwright's `createThrowMatcher(_, true)`).
+  if name == "toThrow" {
+    let thrown = if receiver.is_error() {
+      let (message, class_name) = extract_error(&receiver);
+      Some(ThrownError { message, class_name })
+    } else if let Some(f) = receiver.as_function().cloned() {
+      match f.call::<_, Value<'js>>(()) {
+        Ok(_) => None,
+        Err(rquickjs::Error::Exception) => {
+          let (message, class_name) = extract_error(&ctx.catch());
+          Some(ThrownError { message, class_name })
+        },
+        Err(other) => Some(ThrownError {
+          message: other.to_string(),
+          class_name: None,
+        }),
+      }
+    } else {
+      None
+    };
+    return settled_expect.check_thrown(&ctx, thrown, Opt(args.into_iter().next()));
+  }
+
+  let instance = Class::instance(ctx.clone(), settled_expect)?.into_value();
+  install_not_getter(&ctx, &instance)?;
+  let matcher: Function<'js> = instance
+    .as_object()
+    .and_then(|o| o.get(name.as_str()).ok())
+    .ok_or_else(|| {
+      rquickjs::Error::new_from_js_message("expect", "resolves", "no such matcher on the settled assertion")
+    })?;
+  let outcome: Value<'js> = matcher.call((
+    rquickjs::function::This(instance.clone()),
+    rquickjs::function::Rest(args),
+  ))?;
+  if let Some(p) = outcome.as_promise() {
+    let _: Value<'js> = p.clone().into_future().await?;
+  }
+  Ok(())
+}
+
+/// `Object.defineProperty(target, key, { value, configurable: true })` —
+/// an own property JS can read but not enumerate.
+fn define_hidden<'js>(ctx: &Ctx<'js>, target: &Object<'js>, key: &str, value: Value<'js>) -> rquickjs::Result<()> {
+  let object_global: Object<'js> = ctx.globals().get("Object")?;
+  let define_property: Function<'js> = object_global.get("defineProperty")?;
+  let descriptor = Object::new(ctx.clone())?;
+  descriptor.set("value", value)?;
+  descriptor.set("configurable", true)?;
+  let _: Value<'js> = define_property.call((target.clone(), key, descriptor))?;
+  Ok(())
+}
+
+/// `Object.defineProperty(target, key, { get, configurable: true })`.
+fn define_accessor<'js>(ctx: &Ctx<'js>, target: &Value<'js>, key: &str, getter: Function<'js>) -> rquickjs::Result<()> {
+  let object_global: Object<'js> = ctx.globals().get("Object")?;
+  let define_property: Function<'js> = object_global.get("defineProperty")?;
+  let descriptor = Object::new(ctx.clone())?;
+  descriptor.set("get", getter)?;
+  descriptor.set("configurable", true)?;
+  let _: Value<'js> = define_property.call((target.clone(), key, descriptor))?;
+  Ok(())
+}
+
+/// Playwright refuses `expect.poll(...).resolves` outright rather than
+/// polling a promise (`matchers/expect.ts:433`), and says so.
+fn install_poll_settled_refusal<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs::Result<()> {
+  for mode in [PromiseMode::Resolves, PromiseMode::Rejects] {
+    let getter = Function::new(ctx.clone(), move |ctx: Ctx<'js>| -> rquickjs::Result<Value<'js>> {
+      Err(crate::bindings::convert::throw_named(
+        &ctx,
+        "Error",
+        format!("`expect.poll()` does not support \"{}\" matcher.", mode.as_str()),
+      ))
+    })?;
+    define_accessor(ctx, instance, mode.as_str(), getter)?;
+  }
   Ok(())
 }
 

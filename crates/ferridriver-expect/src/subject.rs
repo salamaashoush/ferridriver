@@ -156,6 +156,74 @@ pub trait LiveValue: Sized {
   }
 }
 
+/// Which half of a settled promise a matcher chain asserts on.
+///
+/// Playwright: `expect(p).resolves.toBe(x)` / `expect(p).rejects.toThrow()`
+/// (`matchers/expect.ts:311-320`). The mode is part of the matcher's
+/// identity — it appears in the failure title and, once `expect.extend`
+/// lands, in the matcher's `this.promise`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromiseMode {
+  Resolves,
+  Rejects,
+}
+
+impl PromiseMode {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Resolves => "resolves",
+      Self::Rejects => "rejects",
+    }
+  }
+}
+
+/// The three ways a `.resolves` / `.rejects` chain fails before its
+/// matcher ever runs (jest `expectLibrary.ts:1725-1745`).
+#[derive(Debug, Clone, Copy)]
+pub enum PromiseMismatch {
+  /// The subject is neither a promise nor a function returning one.
+  NotAPromise,
+  RejectedNotResolved,
+  ResolvedNotRejected,
+}
+
+/// Build the failure for a `.resolves` / `.rejects` chain whose subject
+/// settled the wrong way. `received` is the offending value, already
+/// rendered.
+#[must_use]
+pub fn promise_failure(
+  mode: PromiseMode,
+  matcher: &str,
+  is_not: bool,
+  prefix: Option<&str>,
+  mismatch: PromiseMismatch,
+  received: &str,
+) -> AssertionFailure {
+  let (expected, received) = match mismatch {
+    PromiseMismatch::NotAPromise => (
+      "a promise, or a function returning a promise".to_string(),
+      received.to_string(),
+    ),
+    PromiseMismatch::RejectedNotResolved => (
+      "promise to resolve".to_string(),
+      format!("promise rejected instead of resolved\nRejected to value: {received}"),
+    ),
+    PromiseMismatch::ResolvedNotRejected => (
+      "promise to reject".to_string(),
+      format!("promise resolved instead of rejected\nResolved to value: {received}"),
+    ),
+  };
+  format_failure(
+    prefix,
+    is_not,
+    &format!("{}.{matcher}", mode.as_str()),
+    expected,
+    received,
+    None,
+  )
+}
+
 /// A live-value assertion. Mirrors [`crate::ExpectValue`]'s builder and
 /// produces byte-identical failure text.
 pub struct ExpectLive<'a, V: LiveValue> {

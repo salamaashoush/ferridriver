@@ -293,7 +293,35 @@ export type LocatorAssertions = WebFirstMatchers &
 export type PageAssertions = PageMatchers & AllowedGenericMatchers & { not: PageMatchers & AllowedGenericMatchers };
 export type APIResponseAssertions = APIResponseMatchers &
   AllowedGenericMatchers & { not: APIResponseMatchers & AllowedGenericMatchers };
-export type ValueAssertions = GenericMatchers & { not: GenericMatchers };
+// `.resolves` / `.rejects` settle the subject first, so every matcher
+// under them returns a Promise and must be awaited. The settled value is
+// dispatched afresh, so a promise resolving to a Locator reaches the
+// Locator matchers — the same rule Playwright's `MakeMatchers` applies to
+// `Awaited<T>`.
+export type Promisified<T> = {
+  [K in keyof T]: T[K] extends (...args: infer A) => unknown ? (...args: A) => Promise<void> : T[K];
+};
+
+// The `[T] extends [X]` form is deliberate: a naked type parameter
+// distributes, and `Awaited<Promise<never>>` is `never`, which would
+// distribute to `never` and leave the chain with no matchers at all.
+export type MatchersFor<T> = [T] extends [Locator]
+  ? WebFirstMatchers & AllowedGenericMatchers
+  : [T] extends [Page]
+    ? PageMatchers & AllowedGenericMatchers
+    : [T] extends [APIResponse]
+      ? APIResponseMatchers & AllowedGenericMatchers
+      : GenericMatchers;
+
+export type SettledAssertions<T = unknown> = Promisified<MatchersFor<T>> & {
+  not: Promisified<MatchersFor<T>>;
+};
+
+export type ValueAssertions<T = unknown> = GenericMatchers & {
+  not: GenericMatchers;
+  resolves: SettledAssertions<Awaited<T>>;
+  rejects: SettledAssertions;
+};
 
 /// Playwright: `expect(actual, messageOrOptions?: string | { message?: string })`.
 export type ExpectMessage = string | { message?: string };
@@ -313,8 +341,8 @@ export interface Expect {
     toPass(options?: { timeout?: number; intervals?: number[] }): Promise<void>;
     not: GenericMatchers & { toPass(options?: { timeout?: number; intervals?: number[] }): Promise<void> };
   };
-  (value: unknown, messageOrOptions?: ExpectMessage): ValueAssertions;
-  soft(value: unknown, messageOrOptions?: ExpectMessage): ValueAssertions;
+  <T>(value: T, messageOrOptions?: ExpectMessage): ValueAssertions<T>;
+  soft<T>(value: T, messageOrOptions?: ExpectMessage): ValueAssertions<T>;
   soft(locator: Locator, messageOrOptions?: ExpectMessage): LocatorAssertions;
   poll(
     fn: () => unknown | Promise<unknown>,

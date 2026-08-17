@@ -105,6 +105,16 @@ for structural equality.
 `expect.stringContaining`, `expect.stringMatching`, `expect.closeTo`,
 plus the `expect.not.*` shorthand.
 
+**Settled:** `.resolves` and `.rejects` settle the subject — a promise,
+or a function returning one — and then run the ordinary matcher against
+what it settled to, so every matcher under them returns a Promise and
+must be awaited. `.resolves.not` / `.rejects.not` compose one level deep,
+as upstream. The settled value is dispatched afresh, so a promise
+resolving to a `Locator` reaches the Locator matchers; under `.rejects`
+the rejection reason IS the subject, and `toThrow` reads it as the thrown
+error rather than calling it. `expect.poll(...).resolves` is refused with
+Playwright's message.
+
 Modifiers: `.not` (a getter returning a negated proxy), `.soft()` (or
 `expect.soft(...)`), `.withTimeout(ms)`, and `.withMessage(msg)`.
 

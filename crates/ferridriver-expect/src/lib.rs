@@ -57,7 +57,10 @@ pub use poll::{
   DEFAULT_EXPECT_TIMEOUT, ExpectContext, MatchError, POLL_INTERVALS, default_expect_timeout, poll_traced, poll_until,
   set_default_expect_timeout,
 };
-pub use subject::{ExpectLive, JsType, LiveError, LiveValue, MatcherInputError, expect_live};
+pub use subject::{
+  ExpectLive, JsType, LiveError, LiveValue, MatcherInputError, PromiseMismatch, PromiseMode, expect_live,
+  promise_failure,
+};
 pub use throw::{ExpectFn, ThrowMatcher, ThrownError, expect_fn};
 pub use value::{ExpectValue, StringOrRegex, expect_value};
 

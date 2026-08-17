@@ -295,6 +295,63 @@ async fn expect_takes_a_custom_message() {
   assert!(err.contains("ids match"), "custom message missing: {err}");
 }
 
+// ── .resolves / .rejects ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn resolves_runs_the_matcher_on_the_resolved_value() {
+  run_ok("await expect(Promise.resolve(1)).resolves.toBe(1); return 'ok'").await;
+  run_ok("await expect(Promise.resolve({a:1})).resolves.toEqual({a:1}); return 'ok'").await;
+  run_ok("await expect(Promise.resolve(1)).resolves.not.toBe(2); return 'ok'").await;
+  // A function returning a promise is accepted, as upstream.
+  run_ok("await expect(async () => 7).resolves.toBe(7); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn rejects_runs_the_matcher_on_the_reason() {
+  run_ok("await expect(Promise.reject(new Error('boom'))).rejects.toThrow('boom'); return 'ok'").await;
+  run_ok("await expect(Promise.reject(new RangeError('r'))).rejects.toThrow(RangeError); return 'ok'").await;
+  run_ok("await expect(Promise.reject('plain')).rejects.toBe('plain'); return 'ok'").await;
+  run_ok("await expect(Promise.reject(new Error('boom'))).rejects.not.toThrow('other'); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn settling_the_wrong_way_names_which_way() {
+  let err = run_err("await expect(Promise.reject(new Error('x'))).resolves.toBe(1); return 'unreached'").await;
+  assert!(
+    err.contains("rejected instead of resolved"),
+    "expected the resolves diagnosis, got: {err}"
+  );
+  let err = run_err("await expect(Promise.resolve(1)).rejects.toBe(1); return 'unreached'").await;
+  assert!(
+    err.contains("resolved instead of rejected"),
+    "expected the rejects diagnosis, got: {err}"
+  );
+}
+
+#[tokio::test]
+async fn a_settled_chain_needs_a_promise() {
+  let err = run_err("await expect(1).resolves.toBe(1); return 'unreached'").await;
+  assert!(
+    err.contains("promise, or a function returning a promise"),
+    "expected the promise requirement, got: {err}"
+  );
+}
+
+#[tokio::test]
+async fn a_settled_matcher_still_fails_normally() {
+  let err = run_err("await expect(Promise.resolve(1)).resolves.toBe(2); return 'unreached'").await;
+  assert!(err.contains("toBe"), "expected a toBe failure, got: {err}");
+}
+
+#[tokio::test]
+async fn poll_refuses_a_settled_chain() {
+  let err = run_err("await expect.poll(() => 1).resolves.toBe(1); return 'unreached'").await;
+  assert!(
+    err.contains("does not support") && err.contains("resolves"),
+    "expected the poll refusal, got: {err}"
+  );
+}
+
 #[tokio::test]
 async fn expect_poll_compares_identity() {
   run_ok(
