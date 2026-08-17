@@ -279,9 +279,24 @@ export interface APIResponseMatchers {
   toBeOK(): void;
 }
 
-export type LocatorAssertions = WebFirstMatchers & { not: WebFirstMatchers };
-export type PageAssertions = PageMatchers & { not: PageMatchers };
+// Every value matcher works on every receiver at runtime, but a
+// Locator / Page / APIResponse subject only TYPES the six Playwright
+// allows (`AllowedGenericMatchers`, types/test.d.ts:8842) — the rest
+// would be a mistake on a handle rather than on its value.
+export type AllowedGenericMatchers = Pick<
+  GenericMatchers,
+  'toBe' | 'toBeDefined' | 'toBeFalsy' | 'toBeNull' | 'toBeTruthy' | 'toBeUndefined'
+>;
+
+export type LocatorAssertions = WebFirstMatchers &
+  AllowedGenericMatchers & { not: WebFirstMatchers & AllowedGenericMatchers };
+export type PageAssertions = PageMatchers & AllowedGenericMatchers & { not: PageMatchers & AllowedGenericMatchers };
+export type APIResponseAssertions = APIResponseMatchers &
+  AllowedGenericMatchers & { not: APIResponseMatchers & AllowedGenericMatchers };
 export type ValueAssertions = GenericMatchers & { not: GenericMatchers };
+
+/// Playwright: `expect(actual, messageOrOptions?: string | { message?: string })`.
+export type ExpectMessage = string | { message?: string };
 
 export interface PollAssertions {
   toBe(expected: unknown): Promise<void>;
@@ -291,17 +306,20 @@ export interface PollAssertions {
 }
 
 export interface Expect {
-  (locator: Locator): LocatorAssertions;
-  (page: Page): PageAssertions;
-  (response: APIResponse): APIResponseMatchers & { not: APIResponseMatchers };
-  (fn: () => unknown | Promise<unknown>): ValueAssertions & {
+  (locator: Locator, messageOrOptions?: ExpectMessage): LocatorAssertions;
+  (page: Page, messageOrOptions?: ExpectMessage): PageAssertions;
+  (response: APIResponse, messageOrOptions?: ExpectMessage): APIResponseAssertions;
+  (fn: () => unknown | Promise<unknown>, messageOrOptions?: ExpectMessage): ValueAssertions & {
     toPass(options?: { timeout?: number; intervals?: number[] }): Promise<void>;
     not: GenericMatchers & { toPass(options?: { timeout?: number; intervals?: number[] }): Promise<void> };
   };
-  (value: unknown): ValueAssertions;
-  soft(value: unknown): ValueAssertions;
-  soft(locator: Locator): LocatorAssertions;
-  poll(fn: () => unknown | Promise<unknown>, options?: { timeout?: number; intervals?: number[] }): PollAssertions;
+  (value: unknown, messageOrOptions?: ExpectMessage): ValueAssertions;
+  soft(value: unknown, messageOrOptions?: ExpectMessage): ValueAssertions;
+  soft(locator: Locator, messageOrOptions?: ExpectMessage): LocatorAssertions;
+  poll(
+    fn: () => unknown | Promise<unknown>,
+    messageOrOptions?: string | { message?: string; timeout?: number; intervals?: number[] },
+  ): PollAssertions;
   any(ctor: Function): unknown;
   anything(): unknown;
   arrayContaining(items: unknown[]): unknown;

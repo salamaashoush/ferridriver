@@ -57,8 +57,10 @@ bodies, and in extensions. It is a thin QuickJS binding
 matcher delegates to the Rust implementation. String matchers also
 accept a native `RegExp`.
 
-`expect(value | locator | page | apiResponse | fn)` dispatches on the
-runtime type:
+`expect(value | locator | page | apiResponse | fn, messageOrOptions?)`
+keeps the value it was handed and dispatches the web-first matchers on
+its runtime type. The value matchers apply to ANY subject — a function,
+a `Locator` and a `Page` all answer `toBe`:
 
 **Value (Jest-style):** `toBe`, `toEqual`, `toStrictEqual`, `toBeNull`,
 `toBeUndefined`, `toBeDefined`, `toBeTruthy`, `toBeFalsy`, `toBeNaN`,
@@ -66,6 +68,21 @@ runtime type:
 `toBeLessThan`, `toBeLessThanOrEqual`, `toContain`, `toContainEqual`,
 `toHaveLength`, `toHaveProperty`, `toMatch`, `toMatchObject`,
 `toBeInstanceOf`, `toThrow`.
+
+The identity- and type-sensitive ones read the live value, so they mean
+what they mean in Playwright: `toBe` is `Object.is` (two structurally
+equal objects are NOT `toBe`-equal — use `toEqual`), `toBeInstanceOf` is
+the `instanceof` operator, `toContain` is a substring test on a string
+and `[...received].indexOf` on any iterable, `toHaveLength` reads the
+receiver's own `.length` (a function's arity included), and `null` and
+`undefined` are distinct. Calling one on a receiver it cannot work on —
+`toContain` on `null`, `toHaveLength` on a value without a numeric
+`.length` — throws a `TypeError` that `.not` does not flip, as upstream.
+
+The structural matchers (`toEqual`, `toStrictEqual`, `toMatchObject`,
+`toContainEqual`, `toHaveProperty`, `toMatch`, and the numeric family)
+still compare a JSON view of the subject; see the parity backlog for
+what that view cannot express.
 
 **Page:** `toHaveTitle`, `toHaveURL`.
 
@@ -78,8 +95,10 @@ runtime type:
 
 **APIResponse:** `toBeOK`.
 
-**Poll:** `expect.poll(fn, { timeout? }).toBe` / `.toEqual` /
-`.toSatisfy`.
+**Poll:** `expect.poll(fn, messageOrOptions?).toBe` / `.toEqual` /
+`.toSatisfy`, where the options are `{ message?, timeout?, intervals? }`.
+`.toBe` polls for `Object.is` against the generated value, `.toEqual`
+for structural equality.
 
 **Asymmetric:** `expect.any`, `expect.anything`,
 `expect.arrayContaining`, `expect.objectContaining`,

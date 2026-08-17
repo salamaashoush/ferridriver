@@ -100,6 +100,35 @@ impl From<Regex> for StringOrRegex {
 
 // ── ExpectValue ──────────────────────────────────────────────────────
 
+/// The one failure renderer, shared with [`crate::subject::ExpectLive`]
+/// so a matcher that reads the live value and one that reads its
+/// snapshot cannot print differently.
+///
+/// Two-field split:
+///   `message` = a single-line title a reporter can highlight on its own
+///               (`expect(value).toEqual() failed`).
+///   `diff`    = the body (Expected/Received, plus an optional unified
+///               diff) printed below the title.
+/// A JS throw concatenates the two; reporters print them in sequence.
+pub(crate) fn format_failure(
+  prefix: Option<&str>,
+  is_not: bool,
+  method: &str,
+  expected: String,
+  received: String,
+  rich_diff: Option<String>,
+) -> AssertionFailure {
+  let not = if is_not { ".not" } else { "" };
+  let prefix = prefix.map(|m| format!("{m}: ")).unwrap_or_default();
+  let message = format!("{prefix}expect(value){not}.{method}() failed");
+  let summary_diff = format!("Expected: {expected}\nReceived: {received}");
+  let body = match rich_diff {
+    Some(d) => format!("{summary_diff}\n\nDiff:\n{d}"),
+    None => summary_diff,
+  };
+  AssertionFailure::new(message, Some(body))
+}
+
 pub struct ExpectValue {
   actual: Value,
   is_not: bool,
@@ -153,23 +182,14 @@ impl ExpectValue {
     rich_diff: Option<String>,
     location: Option<&'static Location<'static>>,
   ) -> AssertionFailure {
-    let expected = expected.into();
-    let received = received.into();
-    let not = if self.is_not { ".not" } else { "" };
-    let prefix = self.message.as_ref().map(|m| format!("{m}: ")).unwrap_or_default();
-    // Two-field split:
-    //   `message` = a single-line title that a reporter can highlight
-    //               on its own (`expect(value).toEqual() failed`).
-    //   `diff`    = the full body (Expected/Received + optional unified
-    //               diff) — printed below the title.
-    // JS-throw concatenates the two; reporters print them in sequence.
-    let message = format!("{prefix}expect(value){not}.{method}() failed");
-    let summary_diff = format!("Expected: {expected}\nReceived: {received}");
-    let body = match rich_diff {
-      Some(d) => format!("{summary_diff}\n\nDiff:\n{d}"),
-      None => summary_diff,
-    };
-    let mut failure = AssertionFailure::new(message, Some(body));
+    let mut failure = format_failure(
+      self.message.as_deref(),
+      self.is_not,
+      method,
+      expected.into(),
+      received.into(),
+      rich_diff,
+    );
     if let Some(loc) = location {
       failure = failure.with_location(CallerLocation::from_std(loc));
     }

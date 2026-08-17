@@ -21,21 +21,30 @@ record.
 
 ## Partial implementations
 
-### `expect` takes a JSON snapshot of its subject
-`expect(value)` serializes the subject with `serde_from_js` and every
-value matcher compares JSON (`bindings/expect.rs`). Two consequences,
-both visible to a suite:
+### `expect`'s structural matchers still compare JSON snapshots
+`expect(value)` now keeps the live JS value (`bindings/expect.rs`,
+`ferridriver-expect::subject`), and the matchers Playwright defines over
+the value itself read it: `toBe` (`Object.is`), `toBeInstanceOf`
+(`instanceof`), `toContain` (`[...received].indexOf`), `toHaveLength`
+(the receiver's own `.length`), `toBeNull` / `toBeUndefined` /
+`toBeDefined` / `toBeTruthy` / `toBeFalsy` / `toBeNaN`. Any subject —
+including a function, a Locator or a Page — answers them.
 
-- A FUNCTION cannot be a value subject at all — `expect(fn).toBe(fn)`
-  throws `this matcher requires a value subject`. Only `toThrow` accepts
-  one (it keeps the function as a `Persistent`).
-- `toBe` is deep JSON equality, where Playwright's is `Object.is`. Two
-  structurally equal objects compare equal here and unequal upstream, and
-  identity (`a === b`) cannot be asserted through `expect` at all — specs
-  that need it compare with `===` and assert the boolean.
+The structural matchers (`toEqual`, `toStrictEqual`, `toMatchObject`,
+`toContainEqual`, `toHaveProperty`, `toMatch` and the numeric family)
+still compare a `serde_json` snapshot taken at matcher time, so jest's
+`equals` distinctions ferridriver does not make are:
 
-The fix is a subject that keeps the live JS value alongside its snapshot,
-which also unlocks `expect.extend` receiving the real receiver.
+- `Map` / `Set` / `Date` / `RegExp` compare as whatever JSON they
+  serialize to, not by their own equality;
+- `toStrictEqual` is an alias of `toEqual` — it does not check the
+  constructor or refuse an `undefined`-valued key;
+- a `bigint` has no snapshot form at all;
+- a misused receiver (`toMatch` on a non-string, `toBeGreaterThan` on a
+  non-number) fails the assertion where Playwright throws a `TypeError`.
+
+Closing those means porting jest's `equals` over `LiveValue` rather than
+over `serde_json::Value`.
 
 ### `route.fulfill` / `unroute` residuals
 `fulfill` takes `status`, `headers`, `contentType`, `body` (string or any

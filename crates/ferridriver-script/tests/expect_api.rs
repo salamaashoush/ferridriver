@@ -201,6 +201,110 @@ async fn to_be_instance_of_builtins() {
   run_ok("expect([1, 2, 3]).toBeInstanceOf(Array); return 'ok'").await;
 }
 
+// ── the live subject ─────────────────────────────────────────────────
+//
+// `expect(...)` keeps the value it was handed, so the matchers Playwright
+// defines over the value itself answer as they do upstream. A JSON
+// snapshot of the subject can express none of the assertions below.
+
+#[tokio::test]
+async fn to_be_is_object_is() {
+  run_ok("const a = {v:1}; expect(a).toBe(a); return 'ok'").await;
+  run_ok("expect({v:1}).not.toBe({v:1}); return 'ok'").await;
+  run_ok("expect({v:1}).toEqual({v:1}); return 'ok'").await;
+  run_ok("expect(NaN).toBe(NaN); expect(0).not.toBe(-0); return 'ok'").await;
+  let err = run_err("expect({v:1}).toBe({v:1}); return 'unreached'").await;
+  assert!(
+    err.contains("replace \\\"toBe\\\" with \\\"toEqual\\\"") || err.contains("replace \"toBe\" with \"toEqual\""),
+    "a failed toBe over equal shapes must name toEqual, got: {err}"
+  );
+}
+
+#[tokio::test]
+async fn a_function_is_a_value_subject() {
+  run_ok("const f = (a,b) => a; expect(f).toBe(f); return 'ok'").await;
+  run_ok("const f = () => 1; expect(f).not.toBe(() => 1); return 'ok'").await;
+  run_ok("expect((a,b) => a).toHaveLength(2); return 'ok'").await;
+  run_ok("expect(() => 1).toBeInstanceOf(Function); return 'ok'").await;
+  run_ok("expect(() => 1).toBeTruthy(); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn undefined_is_not_null() {
+  run_ok("expect(undefined).not.toBeNull(); return 'ok'").await;
+  run_ok("expect(null).not.toBeUndefined(); return 'ok'").await;
+  run_ok("expect(null).toBeDefined(); return 'ok'").await;
+  run_ok("expect(undefined).not.toBeDefined(); return 'ok'").await;
+  run_ok("expect(undefined).not.toBe(null); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn to_be_nan_needs_a_number() {
+  run_ok("expect(NaN).toBeNaN(); return 'ok'").await;
+  run_ok("expect('NaN').not.toBeNaN(); return 'ok'").await;
+  run_ok("expect(null).not.toBeNaN(); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn to_be_instance_of_walks_the_prototype_chain() {
+  run_ok("class A {}; class B extends A {}; expect(new B()).toBeInstanceOf(A); return 'ok'").await;
+  run_ok("class A {}; expect(new A()).toBeInstanceOf(Object); return 'ok'").await;
+  run_ok("class A {}; expect(new A()).not.toBeInstanceOf(Error); return 'ok'").await;
+  let err = run_err("expect(1).toBeInstanceOf(5); return 'unreached'").await;
+  assert!(err.contains("must be a function"), "expected a TypeError, got: {err}");
+}
+
+#[tokio::test]
+async fn to_contain_compares_items_strictly() {
+  run_ok("const o = {}; expect([o]).toContain(o); return 'ok'").await;
+  run_ok("expect([{a:1}]).not.toContain({a:1}); return 'ok'").await;
+  run_ok("expect([{a:1}]).toContainEqual({a:1}); return 'ok'").await;
+  run_ok("expect(new Set(['a'])).toContain('a'); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn to_contain_misuse_is_a_type_error_under_not() {
+  for src in [
+    "expect(null).toContain(1); return 'unreached'",
+    "expect(null).not.toContain(1); return 'unreached'",
+    "expect('hi').toContain(1); return 'unreached'",
+    "expect(7).toContain(1); return 'unreached'",
+  ] {
+    let err = run_err(src).await;
+    assert!(
+      err.contains("TypeError"),
+      "expected a TypeError from `{src}`, got: {err}"
+    );
+  }
+}
+
+#[tokio::test]
+async fn to_have_length_reads_the_live_length() {
+  run_ok("expect(new Uint8Array(4)).toHaveLength(4); return 'ok'").await;
+  // UTF-16 code units, like `.length` in the engine.
+  run_ok("expect('a\\u{1F600}').toHaveLength(3); return 'ok'").await;
+  let err = run_err("expect({a:1}).toHaveLength(1); return 'unreached'").await;
+  assert!(err.contains("length property"), "expected a TypeError, got: {err}");
+}
+
+#[tokio::test]
+async fn expect_takes_a_custom_message() {
+  let err = run_err("expect(1, 'ids match').toBe(2); return 'unreached'").await;
+  assert!(err.contains("ids match"), "custom message missing: {err}");
+  let err = run_err("expect(1, { message: 'ids match' }).toBe(2); return 'unreached'").await;
+  assert!(err.contains("ids match"), "custom message missing: {err}");
+}
+
+#[tokio::test]
+async fn expect_poll_compares_identity() {
+  run_ok(
+    "const wanted = {}; let n = 0;
+     await expect.poll(() => { n += 1; return n >= 2 ? wanted : {}; }, { timeout: 2000, intervals: [5] }).toBe(wanted);
+     return 'ok'",
+  )
+  .await;
+}
+
 #[tokio::test]
 async fn to_throw_sync() {
   run_ok("await expect(() => { throw new Error('boom'); }).toThrow(); return 'ok'").await;
