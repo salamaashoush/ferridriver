@@ -443,7 +443,7 @@ impl Locator {
   /// form. Matches are always exact.
   #[must_use]
   pub fn get_by_test_id(&self, test_id: impl Into<StringOrRegex>) -> Locator {
-    self.chain(&build_testid_selector("data-testid", &test_id.into()))
+    self.chain(&build_testid_selector(&self.frame.test_id_attribute(), &test_id.into()))
   }
 
   fn text_like_builder(
@@ -2672,7 +2672,7 @@ impl FrameLocator {
   /// `getByTestId` inside this iframe.
   #[must_use]
   pub fn get_by_test_id(&self, test_id: impl Into<StringOrRegex>) -> Locator {
-    self.locator(&build_testid_selector("data-testid", &test_id.into()))
+    self.locator(&build_testid_selector(&self.frame.test_id_attribute(), &test_id.into()))
   }
 
   /// `getByLabel` inside this iframe.
@@ -2967,6 +2967,14 @@ pub(crate) fn build_attr_selector(attr: &str, value: &StringOrRegex, opts: &Text
 /// per Playwright.
 pub(crate) fn build_testid_selector(attr_name: &str, testid: &StringOrRegex) -> String {
   let escaped = escape_for_attribute_selector(testid, true);
+  // Playwright's `encodeTestIdAttributeName`
+  // (`packages/isomorphic/locatorUtils.ts`): the comma form names more
+  // than one attribute, and the list has to survive the attribute-
+  // selector parser as ONE name, so it is JSON-quoted.
+  if attr_name.contains(',') {
+    let quoted = serde_json::Value::String(attr_name.to_string()).to_string();
+    return format!("internal:testid=[{quoted}={escaped}]");
+  }
   format!("internal:testid=[{attr_name}={escaped}]")
 }
 
@@ -3216,6 +3224,29 @@ async fn aria_child_snapshot(
     Arc::clone(seq),
   )
   .await
+}
+
+#[cfg(test)]
+mod test_id_selector_tests {
+  use super::build_testid_selector;
+
+  #[test]
+  fn a_test_id_selector_names_its_attribute() {
+    assert_eq!(
+      build_testid_selector("data-testid", &"alpha".into()),
+      r#"internal:testid=[data-testid="alpha"s]"#
+    );
+    assert_eq!(
+      build_testid_selector("data-test-id", &"alpha".into()),
+      r#"internal:testid=[data-test-id="alpha"s]"#
+    );
+    // Playwright's `encodeTestIdAttributeName`: the comma form is ONE
+    // name to the attribute-selector parser, so it is JSON-quoted.
+    assert_eq!(
+      build_testid_selector("data-pw,data-ti", &"alpha".into()),
+      r#"internal:testid=["data-pw,data-ti"="alpha"s]"#
+    );
+  }
 }
 
 #[cfg(test)]

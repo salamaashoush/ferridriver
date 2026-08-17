@@ -305,6 +305,11 @@ pub struct BrowserState {
   /// `ContextRef::close`. Sync mutex so `ContextRef::new` can init the
   /// entry without owning the tokio `RwLock` guard.
   pub context_closed: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+  /// `testIdAttribute` per composite session key, shared by every
+  /// `ContextRef` clone that names the same context — two handles to one
+  /// context must not disagree about what `getByTestId` reads. Absent
+  /// until something overrides the process default.
+  pub context_test_id_attribute: Arc<std::sync::Mutex<HashMap<String, TestIdAttributeSlot>>>,
   /// Per-context `recordVideo` configuration registry. Mirrors
   /// `context_events` above: sync `std::sync::Mutex` so the
   /// non-async setter (`ContextRef::set_record_video`) can write
@@ -400,6 +405,10 @@ pub enum ConnectMode {
   },
 }
 
+/// One context's `testIdAttribute` override, shared by every handle to
+/// that context. `None` = whatever the process default is.
+pub type TestIdAttributeSlot = Arc<std::sync::RwLock<Option<String>>>;
+
 impl BrowserState {
   /// Construct a `BrowserState` from an internal
   /// [`LaunchPlan`](crate::options::LaunchPlan). This is the single
@@ -447,6 +456,7 @@ impl BrowserState {
       close_reason: None,
       context_events: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_closed: Arc::new(std::sync::Mutex::new(HashMap::default())),
+      context_test_id_attribute: Arc::new(std::sync::Mutex::new(HashMap::default())),
       record_video: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_options: Arc::new(std::sync::Mutex::new(HashMap::default())),
       har_recorders: Arc::new(std::sync::Mutex::new(HashMap::default())),
@@ -658,6 +668,20 @@ impl BrowserState {
     map
       .entry(key.to_string())
       .or_insert_with(crate::events::ContextEventEmitter::new)
+      .clone()
+  }
+
+  /// The shared `testIdAttribute` slot for a composite session key.
+  /// See [`Self::context_test_id_attribute`].
+  #[must_use]
+  pub fn get_or_create_context_test_id_attribute(&self, key: &str) -> TestIdAttributeSlot {
+    let mut map = match self.context_test_id_attribute.lock() {
+      Ok(g) => g,
+      Err(poisoned) => poisoned.into_inner(),
+    };
+    map
+      .entry(key.to_string())
+      .or_insert_with(|| Arc::new(std::sync::RwLock::new(None)))
       .clone()
   }
 

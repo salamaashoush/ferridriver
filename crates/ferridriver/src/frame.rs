@@ -446,12 +446,24 @@ impl Frame {
     self.text_like_builder("internal:text", text.into())
   }
 
-  /// `getByTestId` in this frame.
+  /// `getByTestId` in this frame, against the attribute this frame's
+  /// context reads ([`crate::context::ContextRef::test_id_attribute`]).
   #[must_use]
   pub fn get_by_test_id(&self, test_id: impl Into<StringOrRegex>) -> Locator {
     Locator::new(
       self.clone(),
-      crate::locator::build_testid_selector("data-testid", &test_id.into()),
+      crate::locator::build_testid_selector(&self.test_id_attribute(), &test_id.into()),
+    )
+  }
+
+  /// The `testIdAttribute` in force for this frame — its page's context,
+  /// falling back to the process default for a page with no context (a
+  /// standalone MCP session).
+  #[must_use]
+  pub fn test_id_attribute(&self) -> std::borrow::Cow<'static, str> {
+    self.page.context().map_or_else(
+      crate::selectors::default_test_id_attribute,
+      super::context::ContextRef::test_id_attribute,
     )
   }
 

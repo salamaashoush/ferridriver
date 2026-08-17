@@ -289,6 +289,10 @@ pub struct ContextConfig {
   pub storage_state: Option<String>,
   pub reduced_motion: Option<String>,
   pub forced_colors: Option<String>,
+  /// Attribute `getByTestId` reads. Playwright's `use.testIdAttribute`;
+  /// a comma-separated list matches any of the named attributes.
+  /// `None` = `data-testid`.
+  pub test_id_attribute: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -313,6 +317,7 @@ impl Default for ContextConfig {
     Self {
       is_mobile: false,
       has_touch: false,
+      test_id_attribute: None,
       color_scheme: None,
       locale: None,
       device_scale_factor: None,

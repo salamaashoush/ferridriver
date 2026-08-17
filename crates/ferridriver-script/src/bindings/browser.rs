@@ -553,6 +553,10 @@ impl JsBrowserContextOptions {
     });
 
     fo::BrowserContextOptions {
+      // Not a public `newContext` option in Playwright either: the
+      // attribute is set by `selectors.setTestIdAttribute` or the test
+      // runner's `use` bag, which reach the context directly.
+      test_id_attribute: None,
       accept_downloads: self.accept_downloads,
       base_url: self.base_url,
       bypass_csp: self.bypass_csp,

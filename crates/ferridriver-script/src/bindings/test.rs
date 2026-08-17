@@ -31,7 +31,7 @@ use ferridriver_test::model::StepLocation;
 use ferridriver_test::step::{StepBodyError, StepExpectation, StepFrame, StepOptions, StepSpec};
 
 use crate::bindings::call_site;
-use crate::bindings::convert::serde_from_js;
+use crate::bindings::convert::{ferri_throw, serde_from_js};
 use crate::bindings::registry::{as_function, rq};
 use crate::bindings::{install_browser_context_on, install_browser_on, install_page_on, install_request_on};
 use crate::engine::caught_to_script_error;
@@ -1095,7 +1095,78 @@ pub fn install_test(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   fd.set("test", test)?;
   fd.set("describe", describe)?;
   fd.set("mergeTests", Function::new(ctx.clone(), merge_tests)?)?;
+  fd.set("selectors", make_selectors_object(ctx)?)?;
   Ok(())
+}
+
+/// Playwright's `selectors`
+/// (`packages/playwright-core/src/client/selectors.ts`): `register(name,
+/// script, options)` and `setTestIdAttribute(attributeName)`.
+///
+/// Both rules are core's — the registry, the duplicate-name message, the
+/// `Function | string | { path, content }` lowering — so this only
+/// decides which of those shapes the caller passed.
+fn make_selectors_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  let obj = Object::new(ctx.clone())?;
+
+  let register = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, name: String, script: Value<'js>, options: rquickjs::function::Opt<Object<'js>>| {
+      let lowered = if let Some(func) = script.as_function() {
+        let source: String = func
+          .as_object()
+          .ok_or_else(|| {
+            rq(&ScriptError::internal(
+              "selectors.register: script must be a function".to_string(),
+            ))
+          })?
+          .get::<_, Function<'js>>("toString")?
+          .call((rquickjs::function::This(func.clone()),))?;
+        ferridriver::selectors::SelectorScript::Function(source)
+      } else if let Some(source) = script.as_string() {
+        ferridriver::selectors::SelectorScript::Source(source.to_string()?)
+      } else if let Some(bag) = script.as_object() {
+        match (
+          bag.get::<_, Option<String>>("content")?,
+          bag.get::<_, Option<String>>("path")?,
+        ) {
+          (Some(content), _) => ferridriver::selectors::SelectorScript::Source(content),
+          (None, Some(path)) => ferridriver::selectors::SelectorScript::Path(std::path::PathBuf::from(path)),
+          (None, None) => {
+            return Err(rq(&ScriptError::internal(
+              "Either path or content property must be present".to_string(),
+            )));
+          },
+        }
+      } else {
+        return Err(rq(&ScriptError::internal(
+          "selectors.register: script must be a function, a string, or { path } / { content }".to_string(),
+        )));
+      };
+
+      let content_script = options
+        .0
+        .map(|o| o.get::<_, Option<bool>>("contentScript"))
+        .transpose()?
+        .flatten()
+        .unwrap_or(false);
+      let source = ferridriver::selectors::evaluation_script(&lowered).map_err(|e| ferri_throw(&ctx, &e))?;
+      ferridriver::selectors::register_selector_engine(&name, &source, content_script)
+        .map_err(|e| ferri_throw(&ctx, &e))?;
+      // Playwright's `register` is `Promise<void>`; a suite may `.then`
+      // it, so hand back a real promise rather than `undefined`.
+      let (promise, resolve, _reject) = rquickjs::Promise::new(&ctx)?;
+      resolve.call::<_, ()>(())?;
+      Ok::<_, rquickjs::Error>(promise)
+    },
+  )?;
+  obj.set("register", register)?;
+
+  let set_test_id_attribute = Function::new(ctx.clone(), |name: String| {
+    ferridriver::selectors::set_default_test_id_attribute(&name);
+  })?;
+  obj.set("setTestIdAttribute", set_test_id_attribute)?;
+  Ok(obj)
 }
 
 // ── Invocation ───────────────────────────────────────────────────────

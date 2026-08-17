@@ -237,6 +237,10 @@ pub struct ContextRef {
   /// mutate through a shared `&self` handle (the `QuickJS` binding holds
   /// the context behind an `Arc` and cannot offer `&mut self`).
   default_timeout_ms: Arc<std::sync::atomic::AtomicU64>,
+  /// `testIdAttribute` for this context (`None` = the process default
+  /// `selectors.setTestIdAttribute` set). Shared per composite session
+  /// key, so every handle to one context reads the same value.
+  test_id_attribute: crate::state::TestIdAttributeSlot,
   /// Default navigation timeout in this context (ms). 0 = no override.
   /// Shared via `Arc<AtomicU64>` for the same reason as
   /// [`Self::default_timeout_ms`].
@@ -274,19 +278,21 @@ impl ContextRef {
     // only, matching the old behaviour. `get_or_create_context_events`
     // itself uses a `std::sync::Mutex` so it doesn't need the tokio
     // read guard to stay alive beyond the call.
-    let (key, events, closed) = match state.try_read() {
+    let (key, events, closed, test_id_attribute) = match state.try_read() {
       Ok(s) => {
         let key = s.session_key(&name);
         (
           key.clone(),
           s.get_or_create_context_events(&key.to_composite()),
           s.get_or_create_context_closed(&key.to_composite()),
+          s.get_or_create_context_test_id_attribute(&key.to_composite()),
         )
       },
       Err(_) => (
         SessionKey::parse(&name),
         crate::events::ContextEventEmitter::new(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(std::sync::RwLock::new(None)),
       ),
     };
     Self {
@@ -294,6 +300,7 @@ impl ContextRef {
       name: Arc::from(name),
       key,
       default_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+      test_id_attribute,
       default_navigation_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
       events,
       browser: None,
@@ -951,6 +958,31 @@ impl ContextRef {
   #[must_use]
   pub fn default_timeout(&self) -> u64 {
     self.default_timeout_ms.load(std::sync::atomic::Ordering::Relaxed)
+  }
+
+  /// `testIdAttribute` for this context — what `getByTestId` builds its
+  /// selector from. Playwright's `selectors.setTestIdAttribute` sets the
+  /// process default; a context (a project's `use` bag) overrides it,
+  /// which is what lets two projects in one process disagree.
+  ///
+  /// Borrowed when nothing overrides the default, so the common case
+  /// costs no allocation — `getByTestId` asks on every call.
+  #[must_use]
+  pub fn test_id_attribute(&self) -> std::borrow::Cow<'static, str> {
+    self
+      .test_id_attribute
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
+      .map_or_else(crate::selectors::default_test_id_attribute, std::borrow::Cow::Owned)
+  }
+
+  /// Override [`Self::test_id_attribute`] for this context alone.
+  pub fn set_test_id_attribute(&self, name: impl Into<String>) {
+    *self
+      .test_id_attribute
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(name.into());
   }
 
   /// Current default navigation timeout (ms). 0 = no override.

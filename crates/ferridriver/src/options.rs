@@ -2351,6 +2351,11 @@ pub enum ServiceWorkerPolicy {
 #[derive(Debug, Clone, Default)]
 pub struct BrowserContextOptions {
   pub accept_downloads: Option<bool>,
+  /// Attribute `getByTestId` reads in this context. Playwright carries
+  /// it as `testIdAttributeName` on the context options; `None` leaves
+  /// the process default (`selectors.setTestIdAttribute`, else
+  /// `data-testid`).
+  pub test_id_attribute: Option<String>,
   pub base_url: Option<String>,
   pub bypass_csp: Option<bool>,
   /// `null` → disable media emulation; `Some(value)` → apply; absent →

@@ -195,6 +195,30 @@ export interface TestType<TFixtures = TestFixtures> {
   describe: DescribeFunction;
 }
 
+/// Playwright's `selectors`: custom selector engines and the attribute
+/// `getByTestId` reads.
+export interface Selectors {
+  /// Register a selector engine under `name`, usable as
+  /// `page.locator('name=body')`. The script is evaluated in the page —
+  /// a function is stringified and called with no argument, a string is
+  /// an expression producing the engine.
+  ///
+  /// `contentScript` is accepted for source compatibility: ferridriver
+  /// evaluates every engine in the page's own world, so an engine is
+  /// never isolated from page globals.
+  register(
+    name: string,
+    script: Function | string | { path?: string; content?: string },
+    options?: { contentScript?: boolean }
+  ): Promise<void>;
+  /// The process-wide attribute `getByTestId` reads. A comma-separated
+  /// list matches any of the named attributes. A project's
+  /// `use: { testIdAttribute }` overrides it for that project alone.
+  setTestIdAttribute(attributeName: string): void;
+}
+
+export const selectors: Selectors;
+
 export const test: TestType;
 export const describe: DescribeFunction;
 

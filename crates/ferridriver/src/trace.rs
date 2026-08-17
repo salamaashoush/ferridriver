@@ -1000,7 +1000,9 @@ fn context_options_line(
     "title": title.unwrap_or_default(),
     "options": context_options,
     "sdkLanguage": "javascript",
-    "testIdAttributeName": "data-testid",
+    // The viewer resolves a recorded `getByTestId` back to source with
+    // this, so it has to be the attribute the run actually used.
+    "testIdAttributeName": crate::selectors::default_test_id_attribute(),
   })
   .to_string()
 }

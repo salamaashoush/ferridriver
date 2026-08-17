@@ -74,6 +74,7 @@ mod locator;
 mod network;
 mod page;
 mod route;
+mod selectors;
 mod serialize_out;
 mod tracing;
 mod types;

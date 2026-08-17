@@ -404,6 +404,9 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
     if let Some(v) = opts.get("userAgent").and_then(|v| v.as_str()) {
       ctx_config.user_agent = Some(v.to_string());
     }
+    if let Some(v) = opts.get("testIdAttribute").and_then(|v| v.as_str()) {
+      ctx_config.test_id_attribute = Some(v.to_string());
+    }
     if let Some(v) = opts.get("deviceScaleFactor").and_then(|v| v.as_f64()) {
       ctx_config.device_scale_factor = Some(v);
     }
@@ -574,6 +577,7 @@ fn build_context_options(
     );
   }
   opts.user_agent.clone_from(&ctx_config.user_agent);
+  opts.test_id_attribute.clone_from(&ctx_config.test_id_attribute);
   // Plumb the test config's `baseURL` into the BrowserContext bag so
   // `page.goto('/route')` resolves against it. Previously the value
   // was only stored as `request_base_url` for the API-request

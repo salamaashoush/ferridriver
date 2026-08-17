@@ -8,6 +8,7 @@
  */
 
 import { InjectedScript } from './injectedScript';
+import { createTestIdEngine } from './local/testIdEngine';
 import { matchesExpectAriaTemplate } from './ariaSnapshot';
 import { isElementVisible, parentElementOrShadowHost, enclosingShadowRootOrDocument } from './domUtils';
 import { getAriaDisabled, getAriaRole, getCheckedWithoutMixed, getElementAccessibleNameText, getReadonly } from './roleUtils';
@@ -21,18 +22,39 @@ type SelectorPart = { engine: string; body: string; capture?: boolean };
 
 // ── Create InjectedScript instance ──
 
+/**
+ * What the Rust side interpolates ahead of this bundle
+ * (`selectors::build_lazy_inject_js_with`). Absent when the engine is
+ * loaded by something that does not set it (a trace-viewer snapshot),
+ * hence the defaults.
+ */
+type FdOptions = {
+  testIdAttributeName?: string;
+  customEngines?: { name: string, source: string }[];
+};
+const fdOptions: FdOptions = (window as any).__fdOptions ?? {};
+
 const injected = new InjectedScript(window, {
   isUnderTest: false,
   sdkLanguage: 'javascript',
-  testIdAttributeName: 'data-testid',
+  // Cosmetic here: a `getByTestId` selector carries its attribute name
+  // in the selector body, so this only feeds strict-mode error text and
+  // codegen. Registered engines, however, exist only if listed here.
+  testIdAttributeName: fdOptions.testIdAttributeName ?? 'data-testid',
   // Matches Playwright's `rafCountForStablePosition()` — 1 for Chromium,
   // Firefox, and WebKit on Linux/macOS (only WebKit-Windows uses 5, which
   // ferridriver does not target). 2 made the `stable` gate wait an extra
   // animation frame per pointer action vs Playwright.
   stableRafCount: 1,
   browserName: 'chromium',
-  customEngines: [],
+  customEngines: fdOptions.customEngines ?? [],
 });
+
+// The vendored `injectedScript.ts` still carries the single-attribute
+// test-id engine; `use: { testIdAttribute: 'a,b' }` needs the
+// multi-attribute one. Replacing the entry in the engine map keeps the
+// vendored file untouched — see `local/testIdEngine.ts` and VENDOR.md.
+(injected as any)._engines.set('internal:testid', createTestIdEngine(injected as any));
 
 // ── Selector Execution (compatibility with ferridriver's parts-based API) ──
 

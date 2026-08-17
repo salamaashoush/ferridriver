@@ -282,6 +282,9 @@ impl Browser {
     let ctx = ContextRef::new(self.state.clone(), name).with_browser(self.clone());
     if let Some(opts) = options {
       let composite = ctx.key.to_composite();
+      if let Some(ref attr) = opts.test_id_attribute {
+        ctx.set_test_id_attribute(attr.clone());
+      }
       // Mirror `record_video` into the legacy per-video registry too,
       // so the recording runtime (which still reads via
       // `BrowserState::get_record_video`) continues to kick in on

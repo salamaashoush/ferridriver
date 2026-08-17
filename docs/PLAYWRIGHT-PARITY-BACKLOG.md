@@ -3,7 +3,7 @@
 The single tracker for Playwright client-API surface and robustness
 behaviours that ferridriver does not yet fully implement, with the
 concrete blocker for each. Verified against the code (not memory) as of
-2026-07-15. Resolved items are removed, not archived — git history is the
+2026-08-17. Resolved items are removed, not archived — git history is the
 record.
 
 ## API surface not yet mapped
@@ -20,6 +20,43 @@ record.
   per-frame targets yet.
 
 ## Partial implementations
+
+### `selectors.register` scope and `contentScript`
+
+`selectors.register(name, script)` and `selectors.setTestIdAttribute()`
+are implemented and reach every document, but two properties differ from
+Playwright because its workers are separate PROCESSES and ferridriver's
+share one:
+
+- The registry is process-global. A second registration of the same name
+  with an IDENTICAL script is therefore a no-op (every worker evaluates
+  the same spec file); only a conflicting script raises Playwright's
+  "has been already registered". `setTestIdAttribute()` likewise sets a
+  process-wide default, so a spec calling it mid-run affects workers that
+  did not. `use: { testIdAttribute }` is per context and is unaffected —
+  that is the isolated path, and the one a project should use.
+- `contentScript` is accepted and recorded but cannot change anything:
+  ferridriver evaluates every selector engine in the page's own world,
+  having no isolated world at all. `contentScript: true` is therefore
+  honoured exactly; `contentScript: false` (Playwright's default) runs in
+  the page's world too, so an engine is never isolated from page globals.
+  Closing this means isolated-world execution across all four backends,
+  which is a backend-architecture change, not a selector one.
+
+### Vendored injected script: two files still on the old copy
+
+`crates/ferridriver/src/injected/` was re-synced to Playwright
+1.63.0-next (`07730b7`) except for `injectedScript.ts` and
+`ariaSnapshot.ts`, which stay on the pre-sync copy. Upstream
+restructured aria rendering into tree -> JSON -> YAML
+(`renderAriaTreeAsJSON` + `isomorphic/ariaSnapshotRenderer`), while
+ferridriver's incremental snapshot — `__fd.incrementalAriaSnapshot`,
+which `locator.ariaSnapshot({ track })` and the MCP snapshot tool read
+so a step re-sends only what changed — sits on the single-stage
+renderer. Porting it onto the new pipeline is its own change with its
+own verification, not a side effect of a file copy. `VENDOR.md` carries
+the revision, the copy recipe and the deltas; `local/ariaEquality.ts`
+holds the two equality helpers upstream deleted in that same split.
 
 ### `route.fulfill` / `unroute` residuals
 `fulfill` takes `status`, `headers`, `contentType`, `body` (string or any

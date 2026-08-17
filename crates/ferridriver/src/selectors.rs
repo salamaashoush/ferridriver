@@ -109,6 +109,168 @@ pub enum Engine {
 /// Resets the injection promise so we know we need to re-inject after navigation.
 pub const ENGINE_BOOTSTRAP_JS: &str = "window.__fd_promise = null;";
 
+// ─── Selector registry ──────────────────────────────────────────────────────
+
+/// The attribute `getByTestId` reads when nothing overrides it.
+pub const DEFAULT_TEST_ID_ATTRIBUTE: &str = "data-testid";
+
+/// One `selectors.register(name, script)` registration.
+#[derive(Debug, Clone)]
+pub struct SelectorEngineRegistration {
+  pub name: String,
+  /// A JS expression evaluating to a `SelectorEngine` — what the
+  /// injected script's `customEngines` option takes, and what
+  /// Playwright's `evaluationScript` produces from a function.
+  pub source: String,
+  /// Playwright's `{ contentScript: true }`: run the engine in the
+  /// page's own world rather than an isolated one. ferridriver has no
+  /// isolated world, so `true` is honoured exactly and `false` (the
+  /// default) runs in the page's world as well — recorded here so the
+  /// distinction is available if isolated worlds land.
+  pub content_script: bool,
+}
+
+#[derive(Default)]
+struct Registry {
+  engines: Vec<SelectorEngineRegistration>,
+  test_id_attribute: Option<String>,
+}
+
+/// Whether anything has ever been registered / overridden.
+///
+/// Every selector part of every locator call asks whether its engine
+/// name is registered, and every `getByTestId` asks for the attribute.
+/// Both answers are the default in almost every run, so the flags keep
+/// the hot path off the lock entirely — it is taken only once a suite
+/// actually calls `selectors.register` or `setTestIdAttribute`.
+static HAS_ENGINES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static HAS_TEST_ID_OVERRIDE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Process-global, as Playwright's `selectors` object is per client:
+/// engines are registered once (usually from config or a fixture) and
+/// every document injected afterwards gets them.
+fn registry() -> &'static std::sync::RwLock<Registry> {
+  static REGISTRY: std::sync::OnceLock<std::sync::RwLock<Registry>> = std::sync::OnceLock::new();
+  REGISTRY.get_or_init(|| std::sync::RwLock::new(Registry::default()))
+}
+
+fn read_registry<T>(f: impl FnOnce(&Registry) -> T) -> T {
+  f(&registry().read().unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
+/// The second argument of `selectors.register` before a host lowers it:
+/// `Function | string | { path?, content? }`.
+pub enum SelectorScript {
+  /// A function's source (`Function.prototype.toString()`), called with
+  /// no argument to produce the engine.
+  Function(String),
+  /// An expression evaluating to the engine, verbatim.
+  Source(String),
+  /// A file holding that expression.
+  Path(std::path::PathBuf),
+}
+
+/// Playwright's `evaluationScript(script, undefined, false)`
+/// (`client/clientHelper.ts`) — the rule for turning each of those forms
+/// into the one expression the injected script evaluates.
+///
+/// # Errors
+///
+/// [`crate::FerriError::InvalidArgument`] when a path cannot be read.
+pub fn evaluation_script(script: &SelectorScript) -> crate::Result<String> {
+  match script {
+    SelectorScript::Function(source) => Ok(format!("({source})(undefined)")),
+    SelectorScript::Source(source) => Ok(source.clone()),
+    SelectorScript::Path(path) => std::fs::read_to_string(path).map_err(|e| crate::FerriError::InvalidArgument {
+      name: "script".to_string(),
+      reason: format!("selectors.register: reading {}: {e}", path.display()),
+    }),
+  }
+}
+
+/// `selectors.register(name, script, options)`.
+///
+/// Divergence, and the reason for it: Playwright refuses ANY second
+/// registration of a name, which it can afford because each of its
+/// workers is a separate process with its own `selectors`. ferridriver's
+/// workers share one process, so a spec file that registers an engine at
+/// module scope — the ordinary way to do it — registers once per worker.
+/// An IDENTICAL registration is therefore a no-op here; only a
+/// conflicting one (same name, different script) raises, which is the
+/// mistake the upstream error exists to catch.
+///
+/// # Errors
+///
+/// [`crate::FerriError::InvalidArgument`] when the name is registered
+/// with a different script — Playwright's message verbatim.
+pub fn register_selector_engine(name: &str, source: &str, content_script: bool) -> crate::Result<()> {
+  let mut registry = registry().write().unwrap_or_else(std::sync::PoisonError::into_inner);
+  if let Some(existing) = registry.engines.iter().find(|e| e.name == name) {
+    if existing.source == source && existing.content_script == content_script {
+      return Ok(());
+    }
+    return Err(crate::FerriError::InvalidArgument {
+      name: "name".to_string(),
+      reason: format!("selectors.register: \"{name}\" selector engine has been already registered"),
+    });
+  }
+  registry.engines.push(SelectorEngineRegistration {
+    name: name.to_string(),
+    source: source.to_string(),
+    content_script,
+  });
+  HAS_ENGINES.store(true, std::sync::atomic::Ordering::Release);
+  Ok(())
+}
+
+/// Every engine registered so far, in registration order.
+#[must_use]
+pub fn registered_selector_engines() -> Vec<SelectorEngineRegistration> {
+  if !HAS_ENGINES.load(std::sync::atomic::Ordering::Acquire) {
+    return Vec::new();
+  }
+  read_registry(|r| r.engines.clone())
+}
+
+/// `selectors.setTestIdAttribute(name)` — the default every context
+/// starts from. A context can still override it (`testIdAttribute` in
+/// the `use` bag), which is what keeps two projects in one process from
+/// fighting over the value.
+pub fn set_default_test_id_attribute(name: &str) {
+  registry()
+    .write()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .test_id_attribute = Some(name.to_string());
+  HAS_TEST_ID_OVERRIDE.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// The process-wide default test-id attribute.
+#[must_use]
+pub fn default_test_id_attribute() -> std::borrow::Cow<'static, str> {
+  if !HAS_TEST_ID_OVERRIDE.load(std::sync::atomic::Ordering::Acquire) {
+    return std::borrow::Cow::Borrowed(DEFAULT_TEST_ID_ATTRIBUTE);
+  }
+  read_registry(|r| {
+    r.test_id_attribute
+      .clone()
+      .map_or(std::borrow::Cow::Borrowed(DEFAULT_TEST_ID_ATTRIBUTE), |a| {
+        std::borrow::Cow::Owned(a)
+      })
+  })
+}
+
+/// Clear every registration. Tests only: the registry is process-global,
+/// so a test that registers an engine would otherwise leak it into the
+/// next one.
+#[doc(hidden)]
+pub fn reset_selector_registry() {
+  let mut registry = registry().write().unwrap_or_else(std::sync::PoisonError::into_inner);
+  registry.engines.clear();
+  registry.test_id_attribute = None;
+  HAS_ENGINES.store(false, std::sync::atomic::Ordering::Release);
+  HAS_TEST_ID_OVERRIDE.store(false, std::sync::atomic::Ordering::Release);
+}
+
 /// Unified lazy-injection IIFE.
 /// 1. Checks if already ready.
 /// 2. Checks if currently injecting.
@@ -117,15 +279,39 @@ pub const ENGINE_BOOTSTRAP_JS: &str = "window.__fd_promise = null;";
 /// Returns the `InjectedScript` instance.
 #[must_use]
 pub fn build_lazy_inject_js() -> String {
+  build_lazy_inject_js_with(&default_test_id_attribute())
+}
+
+/// [`build_lazy_inject_js`] for a context whose `testIdAttribute` differs
+/// from the process default.
+///
+/// The attribute reaches the page only for the strict-mode error text and
+/// codegen: a `getByTestId` selector already carries the attribute name in
+/// its body (`internal:testid=[<attr>=<value>]`), which is why the
+/// functional path is decided Rust-side and this copy is cosmetic.
+/// Registered selector engines, by contrast, only exist if the injected
+/// script is told about them, so they ride along here — every new
+/// document is injected afresh and picks up whatever is registered by
+/// then.
+#[must_use]
+pub fn build_lazy_inject_js_with(test_id_attribute: &str) -> String {
   let engine_js = build_inject_js();
-  // The engine JS directly creates window.__fd at the end of its IIFE.
-  // We just need to run it once and return the result.
+  let options = serde_json::json!({
+    "testIdAttributeName": test_id_attribute,
+    "customEngines": registered_selector_engines()
+      .into_iter()
+      .map(|e| serde_json::json!({ "name": e.name, "source": e.source }))
+      .collect::<Vec<_>>(),
+  });
+  // The engine JS directly creates window.__fd at the end of its IIFE,
+  // reading `window.__fdOptions` as it goes.
   format!(
     r"(async () => {{
       if (window.__fd) return window.__fd;
       if (window.__fd_promise) return await window.__fd_promise;
       window.__fd_promise = (async () => {{
         try {{
+          window.__fdOptions = {options};
           {engine_js}
           return window.__fd;
         }} catch (e) {{
@@ -345,9 +531,24 @@ fn engine_by_name(name: &str) -> Option<Engine> {
     | "data-test-id:light" | "data-test" | "data-test:light" | "aria-ref" | "internal:control" | "internal:chain" => {
       Engine::Other(name.to_string())
     },
+    // A name `selectors.register` claimed. The parser only has to route
+    // it: the engine itself is JS living in the page, because matching
+    // needs the DOM — Rust owns parsing and authoring, the injected
+    // engine owns matching.
+    other if is_registered_selector_engine(other) => Engine::Other(other.to_string()),
     _ => return None,
   };
   Some(engine)
+}
+
+/// Whether `selectors.register` claimed this engine name.
+#[must_use]
+pub fn is_registered_selector_engine(name: &str) -> bool {
+  if !HAS_ENGINES.load(std::sync::atomic::Ordering::Acquire) {
+    return false;
+  }
+  let bare = name.strip_suffix(":light").unwrap_or(name);
+  read_registry(|r| r.engines.iter().any(|e| e.name == bare))
 }
 
 /// True when the name before `=` is shaped like an engine name —
@@ -761,6 +962,67 @@ pub async fn cleanup_tags(page: &AnyPage) {
     })()",
     )
     .await;
+}
+
+#[cfg(test)]
+mod registry_tests {
+  use super::{
+    DEFAULT_TEST_ID_ATTRIBUTE, SelectorScript, default_test_id_attribute, evaluation_script,
+    is_registered_selector_engine, register_selector_engine, registered_selector_engines, reset_selector_registry,
+    set_default_test_id_attribute,
+  };
+
+  /// One test, not several: the registry is process-global, so separate
+  /// `#[test]` fns would run concurrently and clobber each other.
+  #[test]
+  fn the_registry_is_playwrights_with_one_stated_difference() {
+    reset_selector_registry();
+
+    // Nothing registered: the hot path answers without touching the lock.
+    assert!(!is_registered_selector_engine("tagname"));
+    assert_eq!(default_test_id_attribute(), DEFAULT_TEST_ID_ATTRIBUTE);
+    assert!(registered_selector_engines().is_empty());
+
+    // Playwright's `evaluationScript`: a function is called with no
+    // argument, a string is the expression itself.
+    let engine =
+      evaluation_script(&SelectorScript::Function("() => ({ queryAll: () => [] })".into())).expect("a function lowers");
+    assert_eq!(engine, "(() => ({ queryAll: () => [] }))(undefined)");
+    assert_eq!(
+      evaluation_script(&SelectorScript::Source("({ queryAll: () => [] })".into())).expect("a string lowers"),
+      "({ queryAll: () => [] })"
+    );
+    assert!(evaluation_script(&SelectorScript::Path("/definitely/not/here.js".into())).is_err());
+
+    register_selector_engine("tagname", &engine, false).expect("first registration");
+    assert!(is_registered_selector_engine("tagname"));
+    // Playwright resolves `name:light` against the same engine.
+    assert!(is_registered_selector_engine("tagname:light"));
+    assert!(!is_registered_selector_engine("othername"));
+    assert_eq!(registered_selector_engines().len(), 1);
+
+    // The stated divergence: an IDENTICAL registration is a no-op,
+    // because every worker in this process evaluates the same spec file.
+    register_selector_engine("tagname", &engine, false).expect("an identical registration is a no-op");
+    assert_eq!(registered_selector_engines().len(), 1);
+
+    // A conflicting one still raises, with Playwright's message.
+    let err = register_selector_engine("tagname", "({ queryAll: () => [1] })", false)
+      .expect_err("a different script under the same name");
+    assert!(
+      err
+        .to_string()
+        .contains(r#"selectors.register: "tagname" selector engine has been already registered"#),
+      "{err}"
+    );
+
+    set_default_test_id_attribute("data-pw");
+    assert_eq!(default_test_id_attribute(), "data-pw");
+
+    reset_selector_registry();
+    assert_eq!(default_test_id_attribute(), DEFAULT_TEST_ID_ATTRIBUTE);
+    assert!(!is_registered_selector_engine("tagname"));
+  }
 }
 
 #[cfg(test)]
