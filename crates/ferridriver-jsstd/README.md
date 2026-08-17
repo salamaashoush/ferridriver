@@ -268,6 +268,16 @@ strings), `swap16` / `swap32` / `swap64`, `compare`, and `Buffer.poolSize`.
     is what every browser engine produces. Only `undefined` (the argument
     omitted) means empty.
 
+22. **`url/mod.rs` — `fileURLToPath` decodes and validates.** Upstream
+    strips the `file://` prefix and hands the rest to `PathBuf`: the
+    scheme is never checked, a host is silently swallowed, a query or
+    fragment stays in the path, and percent-escapes are NOT decoded, so
+    `file:///tmp/a%20b.txt` names a file whose name literally contains
+    `%20`. Node checks the scheme, refuses a host it cannot address
+    locally, drops query and fragment, decodes the escapes and refuses
+    an ENCODED separator (which would otherwise change which file is
+    named).
+
 21. **`url/url_class.rs` — `urlToHttpOptions` matches Node's shape.**
     Upstream reports `port` as a STRING, omits `search` / `hash` when
     they are empty, keeps the brackets on an IPv6 `hostname`, and joins

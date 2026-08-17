@@ -51,12 +51,57 @@ pub fn file_url_to_path<'js>(ctx: Ctx<'js>, url: Value<'js>) -> Result<String> {
         url.get::<Coerced<String>>()?.to_string()
     };
 
-    let path = url_string.trim_start_matches("file://");
+    // Node checks the scheme, refuses a host it cannot address locally,
+    // drops the query and fragment, and PERCENT-DECODES the path — an
+    // undecoded `%20` reaches the filesystem as three literal
+    // characters, so a path with a space silently fails to open.
+    let rest = url_string
+        .strip_prefix("file://")
+        .ok_or_else(|| Exception::throw_type(&ctx, "The URL must be of scheme file"))?;
+    let path = match rest.find('/') {
+        Some(0) => rest,
+        _ => return Err(Exception::throw_type(&ctx, "File URL host is not supported")),
+    };
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let decoded = decode_file_url_path(&ctx, path)?;
 
-    Ok(PathBuf::from_str(path)
+    Ok(PathBuf::from_str(&decoded)
         .or_throw(&ctx)?
         .to_string_lossy()
         .to_string())
+}
+
+/// Percent-decode a `file:` URL's path. An ENCODED separator is
+/// refused rather than decoded: `%2F` inside a segment would otherwise
+/// become a path separator and change which file is named.
+fn decode_file_url_path(ctx: &Ctx<'_>, path: &str) -> Result<String> {
+    let bytes = path.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            match u8::from_str_radix(hex, 16) {
+                Ok(byte) => {
+                    if byte == b'/' {
+                        return Err(Exception::throw_type(
+                            ctx,
+                            "File URL path must not include encoded / characters",
+                        ));
+                    }
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                },
+                Err(_) => {
+                    return Err(Exception::throw_type(ctx, "Invalid percent-encoding in file URL"))
+                },
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).map_err(|_| Exception::throw_type(ctx, "File URL path is not valid UTF-8"))
 }
 
 pub fn url_format<'js>(url: Class<'js, URL<'js>>, options: Opt<Value<'js>>) -> Result<String> {
