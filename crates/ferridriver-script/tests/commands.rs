@@ -17,7 +17,8 @@ async fn binding(src: &str) -> (tempfile::TempDir, ExtensionBinding) {
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("ext.ts");
   std::fs::write(&path, src).expect("write");
-  let (compiled, failures) = compile_and_extract_extensions(&[path]).await;
+  let (compiled, failures) =
+    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one");
   (

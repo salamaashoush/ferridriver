@@ -26,7 +26,11 @@ fn write(path: &Path, contents: &str) {
 }
 
 async fn tool_names(entry: &PathBuf) -> Vec<String> {
-  let (compiled, failures) = ferridriver_script::compile_and_extract_extensions(std::slice::from_ref(entry)).await;
+  let (compiled, failures) = ferridriver_script::compile_and_extract_extensions(
+    std::slice::from_ref(entry),
+    &ferridriver_config::ExtensionPolicyConfig::default(),
+  )
+  .await;
   assert!(failures.is_empty(), "{failures:?}");
   assert_eq!(compiled.len(), 1, "one entry in, one compile out");
   let manifests: serde_json::Value = ok(serde_json::from_str(&compiled[0].manifests_json), "parse manifests");

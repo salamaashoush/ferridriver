@@ -265,7 +265,7 @@ async fn build_report(
   let (loaded, load_errors) = if files.is_empty() {
     (Vec::new(), Vec::new())
   } else {
-    ferridriver_mcp::extension::load_all(&files).await
+    ferridriver_mcp::extension::load_all(&files, &config.extensions.policy()).await
   };
 
   // The scratch dir holds the generated tsconfig + the embedded

@@ -428,7 +428,7 @@ async fn check_extensions(config: &FerridriverConfig) -> Vec<Check> {
     return checks;
   }
 
-  let (loaded, errors) = ferridriver_mcp::extension::load_all(&all_files).await;
+  let (loaded, errors) = ferridriver_mcp::extension::load_all(&all_files, &config.extensions.policy()).await;
   for e in &errors {
     checks.push(Check {
       name: "extensions",

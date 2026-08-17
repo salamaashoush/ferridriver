@@ -694,22 +694,45 @@ Playwright-style API) stays; `fetch` is the standard entry point.
    including `node_modules`, transpiles TS, tree-shakes, emits one ESM
    chunk with a hidden source map. Cache-miss bundles run concurrently.
 3. **Compile** the chunk to QuickJS bytecode once, in a single throwaway
-   runtime shared by the whole batch.
+   runtime shared by the whole batch, then **evaluate** it there to read
+   the manifest off the registry it registered into.
 4. **Cache** bytecode + extracted manifests keyed by
-   `hash(canonical path + file bytes)`. Unchanged files skip bundle +
-   compile entirely on reload.
+   `hash(canonical path + file bytes)`, in-process and on disk.
+   Unchanged files skip bundle + compile entirely on reload.
 5. **Load** the bytecode into each session VM with `Module::load` — no
    re-parse, no resolver (imports are already inlined).
+
+The extraction context and a session VM must agree, or a package passes
+`ferridriver ext check` and does nothing at runtime (or the reverse), so:
+
+- **Extraction installs what a session installs** before extensions run:
+  the standard globals, `expect`, the extension registry, and the
+  Playwright `test` surface. Only session-scoped bindings
+  (`fs`, `vars`, `artifacts`, `commands`, `page`, `request`) are absent —
+  they are per-session by definition, and top-level extension code must
+  not depend on them.
+- **The operator ceiling applies at extraction too.** `defineTool` clamps
+  `allow.*` when the tool registers, so `[extensions.policy]` decides the
+  same way in both places.
+- **Files evaluate in batch order into one shared context, cache hits
+  included.** A session evaluates every extension into one VM; extraction
+  reaches each file in the world its predecessors left behind.
+- **A module is named after its file, not its position in the batch.**
+  One QuickJS context holds one module per name, and extensions routinely
+  reach a session having been compiled in different batches.
 
 Consequences worth knowing as an author:
 
 - **Imports work.** `import './helpers.ts'`, `import pkg from 'some-dep'` —
   all bundled and tree-shaken. No Node/Bun in the run path; QuickJS has no
   Node builtins (rolldown `platform: neutral`).
-- **The bytecode cache is in-memory and process-local**, never written to
-  disk — a requirement of the `unsafe Module::load` invariant (bytecode is
-  interpreter-build- and process-specific). Restarting the server
-  rebuilds it.
+- **The bytecode cache has two tiers**: in-process, and on disk under an
+  ABI tag (QuickJS version, arch, endianness, pointer width, crate
+  version). The tag is what keeps the `unsafe Module::load` invariant —
+  bytecode is only ever read back by an ABI-identical toolchain — and
+  every entry also records the content hash of each transitive input, so
+  an edited helper invalidates it. `FERRIDRIVER_NO_BYTECODE_CACHE`
+  disables the disk tier.
 - **One bad file does not abort the batch.** Bundle/compile/manifest
   failures are reported per file and skipped; the server still starts.
 - **Errors are source-mapped.** A thrown error in a bundled step is

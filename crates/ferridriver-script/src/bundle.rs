@@ -857,6 +857,7 @@ fn cache_key(path: &Path, bytes: &[u8], shims_fp: u64) -> u64 {
 /// surviving `CompiledExtension`s carry contiguous `index` values.
 pub async fn compile_and_extract_extensions(
   files: &[PathBuf],
+  policy: &ferridriver_config::ExtensionPolicyConfig,
 ) -> (Vec<CompiledExtension>, Vec<(PathBuf, ScriptError)>) {
   // Per original position: a cache hit (bytecode + manifests), or a
   // cache miss we must bundle, or an early failure. A miss carries both
@@ -953,59 +954,94 @@ pub async fn compile_and_extract_extensions(
   // One throwaway runtime/context compiles + extracts every missed file.
   // Native resolver/loader for the same reason as `bundle_and_compile`:
   // declare-time resolution of the external native specifiers.
-  let runtime_ctx = match AsyncRuntime::new() {
-    Ok(r) => {
-      r.set_loader(
-        crate::bindings::native_modules::resolver(),
-        crate::bindings::native_modules::loader(),
-      )
-      .await;
-      match AsyncContext::full(&r).await {
-        Ok(c) => Some((r, c)),
-        Err(e) => {
-          let err = ScriptError::internal(format!("extension bytecode context: {e}"));
-          for s in &mut slots {
-            if matches!(s, Slot::Miss { .. }) {
-              *s = Slot::Failed(err.clone());
+  //
+  // With nothing missed there is nothing to read back, so no file has to
+  // evaluate at all — the whole batch's manifests came from a cache.
+  let runtime_ctx = if miss_idx.is_empty() {
+    None
+  } else {
+    match AsyncRuntime::new() {
+      Ok(r) => {
+        r.set_loader(
+          crate::bindings::native_modules::resolver(),
+          crate::bindings::native_modules::loader(),
+        )
+        .await;
+        match AsyncContext::full(&r).await {
+          Ok(c) => match install_extraction_env(&c, policy).await {
+            Ok(()) => Some((r, c)),
+            Err(err) => {
+              for s in &mut slots {
+                if matches!(s, Slot::Miss { .. }) {
+                  *s = Slot::Failed(err.clone());
+                }
+              }
+              None
+            },
+          },
+          Err(e) => {
+            let err = ScriptError::internal(format!("extension bytecode context: {e}"));
+            for s in &mut slots {
+              if matches!(s, Slot::Miss { .. }) {
+                *s = Slot::Failed(err.clone());
+              }
             }
-          }
-          None
-        },
-      }
-    },
-    Err(e) => {
-      let err = ScriptError::internal(format!("extension bytecode runtime: {e}"));
-      for s in &mut slots {
-        if matches!(s, Slot::Miss { .. }) {
-          *s = Slot::Failed(err.clone());
+            None
+          },
         }
-      }
-      None
-    },
+      },
+      Err(e) => {
+        let err = ScriptError::internal(format!("extension bytecode runtime: {e}"));
+        for s in &mut slots {
+          if matches!(s, Slot::Miss { .. }) {
+            *s = Slot::Failed(err.clone());
+          }
+        }
+        None
+      },
+    }
   };
 
   if let Some((_runtime, actx)) = runtime_ctx {
-    for i in &miss_idx {
-      let i = *i;
-      let Slot::Miss { inmem_key, disk_key } = slots[i] else {
-        continue;
-      };
-      let Some(code) = bundled_code.get(&i) else { continue };
+    // File order, hits included: a session evaluates every extension it
+    // was given into one VM, so extraction has to reach each file in a
+    // context where the earlier ones have already run — otherwise the
+    // first incremental edit extracts a file in a world its neighbours
+    // never entered. Stopping at the LAST miss costs nothing: a hit
+    // after it has no cold file left to observe what it would leave
+    // behind.
+    let last_miss = miss_idx.last().copied().unwrap_or(0);
+    for i in 0..=last_miss {
       let module_name = format!("ferri_extension_{i}.js");
-      match compile_extract_one(&actx, &module_name, code).await {
-        Ok((bc, mj)) => {
-          let bc: Arc<[u8]> = Arc::from(bc.into_boxed_slice());
-          // Inputs = this extension file plus its transitive imports (from
-          // the source map), so an edited helper invalidates the entry in
-          // BOTH tiers.
-          let map = bundled_map.get(&i).cloned().flatten();
-          let modules = bundled_modules.get(&i).cloned().unwrap_or_default();
-          let inputs = crate::bytecode_cache::input_set(std::slice::from_ref(&files[i]), &modules);
-          crate::bytecode_cache::store(disk_key, &bc, &module_name, map.as_deref(), Some(&mj), &inputs);
-          remember_extension(inmem_key, &bc, &mj, inputs);
-          slots[i] = Slot::Hit(bc, mj);
+      // A hit's manifests come from the cache; the evaluation exists so
+      // the files after it see the world a session would have given them.
+      if let Slot::Hit(bc, _) = &slots[i] {
+        let bc = Arc::clone(bc);
+        if let Err(e) = eval_extracted(&actx, &bc, &module_name).await {
+          slots[i] = Slot::Failed(e);
+        }
+        continue;
+      }
+      match slots[i] {
+        Slot::Miss { inmem_key, disk_key } => {
+          let Some(code) = bundled_code.get(&i) else { continue };
+          match compile_extract_one(&actx, &module_name, code).await {
+            Ok((bc, mj)) => {
+              let bc: Arc<[u8]> = Arc::from(bc.into_boxed_slice());
+              // Inputs = this extension file plus its transitive imports (from
+              // the source map), so an edited helper invalidates the entry in
+              // BOTH tiers.
+              let map = bundled_map.get(&i).cloned().flatten();
+              let modules = bundled_modules.get(&i).cloned().unwrap_or_default();
+              let inputs = crate::bytecode_cache::input_set(std::slice::from_ref(&files[i]), &modules);
+              crate::bytecode_cache::store(disk_key, &bc, &module_name, map.as_deref(), Some(&mj), &inputs);
+              remember_extension(inmem_key, &bc, &mj, inputs);
+              slots[i] = Slot::Hit(bc, mj);
+            },
+            Err(e) => slots[i] = Slot::Failed(e),
+          }
         },
-        Err(e) => slots[i] = Slot::Failed(e),
+        Slot::Hit(..) | Slot::Failed(_) => {},
       }
     }
   }
@@ -1033,6 +1069,83 @@ pub async fn compile_and_extract_extensions(
   (survivors, failures)
 }
 
+/// Install everything the extraction context shares with a session VM,
+/// once for the whole batch.
+///
+/// A session installs all of this before `install_extensions`, so an
+/// extension whose top level uses a standard global (`TextEncoder`,
+/// `setTimeout`, `crypto`, `console`, `expect`) or the Playwright test
+/// surface must find it here too — otherwise the file throws during
+/// extraction and is skipped with a warning, never reaching the session
+/// that would have run it fine. Only session-scoped bindings
+/// (fs/vars/artifacts/commands/page/request) are absent: those are
+/// per-session by definition and top-level extension code must not
+/// depend on them.
+///
+/// The operator ceiling is installed for the same reason: `defineTool`
+/// clamps `allow.*` at REGISTRATION time, so an extraction that carries
+/// no ceiling accepts a package the session then refuses.
+async fn install_extraction_env(
+  actx: &AsyncContext,
+  policy: &ferridriver_config::ExtensionPolicyConfig,
+) -> Result<(), ScriptError> {
+  let policy = policy.clone();
+  actx
+    .async_with(async |ctx| {
+      crate::bindings::install_bdd(&ctx)
+        .map_err(|e| ScriptError::internal(format!("install extension registry: {e}")))?;
+      crate::bindings::define_classes(&ctx).map_err(|e| ScriptError::internal(format!("install classes: {e}")))?;
+      crate::engine::install_runtime_shims(&ctx)
+        .map_err(|e| ScriptError::internal(format!("install runtime shims: {e}")))?;
+      crate::bindings::expect::install_expect(&ctx)
+        .map_err(|e| ScriptError::internal(format!("install expect: {e}")))?;
+      crate::bindings::test::install_test(&ctx)
+        .map_err(|e| ScriptError::internal(format!("install test surface: {e}")))?;
+      // Manifest extraction is the MCP tool path: expose
+      // `ferridriver.host = 'mcp'` so an extension's host-gated
+      // `defineTool` runs and its manifest is captured (mirrors what the
+      // mcp session does).
+      crate::bindings::runtime::install_host(&ctx, "mcp")
+        .map_err(|e| ScriptError::internal(format!("install ferridriver.host: {e}")))?;
+      let _ = ctx.store_userdata(crate::bindings::registry::ExtensionPolicyUd(policy));
+      Ok(())
+    })
+    .await
+}
+
+/// Load + evaluate bytecode that was already compiled and extracted
+/// (a cache hit) in the shared extraction context.
+///
+/// Its manifests come from the cache, so nothing is read back — the
+/// evaluation exists only so the files after it see the same world they
+/// will see in a session, where every extension evaluates into one VM.
+async fn eval_extracted(actx: &AsyncContext, bytecode: &[u8], label: &str) -> Result<(), ScriptError> {
+  let bytecode = bytecode.to_vec();
+  let label = label.to_string();
+  actx
+    .async_with(async |ctx| {
+      // SAFETY: same-interpreter precondition as `install_one_extension`
+      // — the bytes came from `Module::write` in this process or from the
+      // disk cache, whose ABI tag and input hashes guarantee an
+      // ABI-identical toolchain wrote them.
+      #[allow(unsafe_code)]
+      let module = (unsafe { Module::load(ctx.clone(), &bytecode) })
+        .catch(&ctx)
+        .map_err(|e| caught_to_script_error(e, &label))?;
+      let promise = module
+        .eval()
+        .catch(&ctx)
+        .map_err(|e| caught_to_script_error(e, &label))?
+        .1;
+      promise
+        .into_future::<()>()
+        .await
+        .catch(&ctx)
+        .map_err(|e| caught_to_script_error(e, &label))
+    })
+    .await
+}
+
 /// Declare the bundled module, serialise it to bytecode, then load +
 /// evaluate that exact bytecode in the shared context (which has the
 /// extension registry installed) so the manifest is read straight off
@@ -1050,23 +1163,6 @@ async fn compile_extract_one(
   let cfg_default = crate::engine::ScriptEngineConfig::default();
   actx
     .async_with(async |ctx| {
-      // Extraction must evaluate the module in the SAME ambient
-      // environment a session VM provides, or a extension whose top level
-      // uses a standard global (TextEncoder, setTimeout, crypto,
-      // console, expect) is rejected at startup while working fine
-      // in-session. Everything context-free that `Session::create`
-      // installs before `install_extensions` is installed here too; only
-      // session-scoped bindings (fs/vars/artifacts/commands/page/
-      // request) are absent — those are per-session by definition and
-      // top-level extension code must not depend on them. All idempotent —
-      // the shared extraction context installs once for the whole batch.
-      crate::bindings::install_bdd(&ctx)
-        .map_err(|e| ScriptError::internal(format!("install extension registry: {e}")))?;
-      crate::bindings::define_classes(&ctx).map_err(|e| ScriptError::internal(format!("install classes: {e}")))?;
-      crate::engine::install_runtime_shims(&ctx)
-        .map_err(|e| ScriptError::internal(format!("install runtime shims: {e}")))?;
-      crate::bindings::expect::install_expect(&ctx)
-        .map_err(|e| ScriptError::internal(format!("install expect: {e}")))?;
       // Fresh capture per file: whatever the extension's top level logs is
       // forwarded to tracing under the module label after eval.
       let console = std::sync::Arc::new(crate::console::ConsoleCapture::new(
@@ -1076,12 +1172,6 @@ async fn compile_extract_one(
       ));
       crate::console_fmt::install_console(&ctx, console.clone())
         .map_err(|e| ScriptError::internal(format!("install console: {e}")))?;
-      // Manifest extraction is the MCP tool path: expose
-      // `ferridriver.host = 'mcp'` so an extension's host-gated
-      // `defineTool` runs and its manifest is captured (mirrors what the
-      // mcp session does).
-      crate::bindings::runtime::install_host(&ctx, "mcp")
-        .map_err(|e| ScriptError::internal(format!("install ferridriver.host: {e}")))?;
 
       // Bundled module has no remaining imports — `declare` (parse only)
       // needs no resolver; mirrors `bundle_and_compile`.

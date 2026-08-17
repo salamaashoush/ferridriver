@@ -92,7 +92,7 @@ pub async fn resolve(
     spec: spec.clone(),
     base_dir: cwd.to_path_buf(),
   }));
-  let extensions = load_extensions(&roots).await;
+  let extensions = load_extensions(&roots, &config.extensions.policy()).await;
 
   // A misconfigured secrets source fails the run: silently continuing would
   // mean an operator who asked for redaction gets none and is not told.
@@ -121,7 +121,10 @@ pub async fn resolve(
 /// Resolve, compile and extract every configured extension. A spec that fails
 /// to resolve or compile is warned about and skipped: one broken extension
 /// must not take down the run.
-async fn load_extensions(roots: &[ferridriver_script::ExtensionSpec]) -> Vec<ferridriver_script::ExtensionBinding> {
+async fn load_extensions(
+  roots: &[ferridriver_script::ExtensionSpec],
+  policy: &ferridriver_config::ExtensionPolicyConfig,
+) -> Vec<ferridriver_script::ExtensionBinding> {
   if roots.is_empty() {
     return Vec::new();
   }
@@ -145,7 +148,7 @@ async fn load_extensions(roots: &[ferridriver_script::ExtensionSpec]) -> Vec<fer
       },
     })
     .collect();
-  let (compiled, failures) = ferridriver_script::compile_and_extract_extensions(&files).await;
+  let (compiled, failures) = ferridriver_script::compile_and_extract_extensions(&files, policy).await;
   for (path, err) in failures {
     tracing::warn!(path = %path.display(), error = %err.message, "extension compile failed; skipping");
   }

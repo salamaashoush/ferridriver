@@ -93,8 +93,11 @@ impl ExtensionLoadError {
 /// server keeps when building `ExtensionBinding`s — sessions evaluate the
 /// files in the same order the manifests were extracted, so registry
 /// tool order matches the manifest order.
-pub async fn load_all(files: &[PathBuf]) -> (Vec<LoadedExtension>, Vec<ExtensionLoadError>) {
-  let (compiled, bundle_failures) = compile_and_extract_extensions(files).await;
+pub async fn load_all(
+  files: &[PathBuf],
+  policy: &ferridriver_config::ExtensionPolicyConfig,
+) -> (Vec<LoadedExtension>, Vec<ExtensionLoadError>) {
+  let (compiled, bundle_failures) = compile_and_extract_extensions(files, policy).await;
 
   let mut loaded = Vec::with_capacity(compiled.len());
   let mut errors: Vec<ExtensionLoadError> = bundle_failures
@@ -273,7 +276,7 @@ mod tests {
     std::fs::write(dir.join("empty.js"), "export const nothing = 1;").unwrap();
 
     let files = vec![dir.join("good.js"), dir.join("broken.js"), dir.join("empty.js")];
-    let (loaded, errors) = load_all(&files).await;
+    let (loaded, errors) = load_all(&files, &ferridriver_config::ExtensionPolicyConfig::default()).await;
 
     assert_eq!(loaded.len(), 2, "the good file AND the toolless one load: {loaded:?}");
     let toolless = loaded

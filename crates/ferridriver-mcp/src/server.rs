@@ -760,7 +760,7 @@ impl McpServer {
     let (loaded, errors) = if files.is_empty() {
       (Vec::new(), Vec::new())
     } else {
-      crate::extension::load_all(&files).await
+      crate::extension::load_all(&files, &self.script_caps.extension_policy).await
     };
     for e in errors {
       tracing::warn!(error = %e, "extension load failed; skipping");
