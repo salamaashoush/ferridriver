@@ -295,6 +295,181 @@ async fn expect_takes_a_custom_message() {
   assert!(err.contains("ids match"), "custom message missing: {err}");
 }
 
+#[tokio::test]
+async fn the_core_builtin_list_matches_the_shipped_matchers() {
+  // `expect.extend`'s shadowing rule reads a list in ferridriver-expect
+  // while the binding installs the real methods; this is what keeps the
+  // two from drifting.
+  let names = run_ok(
+    "const proto = Object.getPrototypeOf(expect(1));
+     return Object.getOwnPropertyNames(proto).filter(n => n.startsWith('to')).sort();",
+  )
+  .await;
+  let shipped: Vec<String> = serde_json::from_value(names).expect("names");
+  let listed: Vec<String> = ferridriver_expect::BUILTIN_MATCHER_NAMES
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+  assert_eq!(
+    shipped, listed,
+    "ferridriver_expect::BUILTIN_MATCHER_NAMES must list exactly the matchers the class ships"
+  );
+}
+
+// ── expect.extend ────────────────────────────────────────────────────
+
+const WITHIN: &str = "const within = { toBeWithin(received, lo, hi) { \
+   const pass = received >= lo && received <= hi; \
+   return { pass, message: () => `expected ${received} ${this.isNot ? 'not ' : ''}to be within ${lo}..${hi}` }; } };";
+
+#[tokio::test]
+async fn extend_adds_a_matcher_to_the_returned_expect() {
+  run_ok(&format!(
+    "{WITHIN} const e = expect.extend(within); e(5).toBeWithin(0, 10); return 'ok'"
+  ))
+  .await;
+  let err = run_err(&format!(
+    "{WITHIN} const e = expect.extend(within); e(50).toBeWithin(0, 10); return 'unreached'"
+  ))
+  .await;
+  assert!(err.contains("to be within 0..10"), "matcher message missing: {err}");
+}
+
+#[tokio::test]
+async fn a_custom_matcher_inverts_and_reads_its_context() {
+  run_ok(&format!(
+    "{WITHIN} const e = expect.extend(within); e(50).not.toBeWithin(0, 10); return 'ok'"
+  ))
+  .await;
+  let err = run_err(&format!(
+    "{WITHIN} const e = expect.extend(within); e(5).not.toBeWithin(0, 10); return 'unreached'"
+  ))
+  .await;
+  assert!(err.contains("not to be within"), "this.isNot not observed: {err}");
+}
+
+#[tokio::test]
+async fn extend_publishes_a_new_name_on_the_original_expect_too() {
+  // Playwright's legacy behavior: a non-builtin name is usable through
+  // the expect `extend` was called on, without capturing the result.
+  run_ok(&format!(
+    "{WITHIN} expect.extend(within); expect(5).toBeWithin(0, 10); return 'ok'"
+  ))
+  .await;
+}
+
+#[tokio::test]
+async fn extend_never_shadows_a_builtin_on_the_original_expect() {
+  run_ok(
+    "const e = expect.extend({ toBe(received, expected) { return { pass: true, message: () => 'always' }; } });
+     e(1).toBe(2);
+     let threw = false;
+     try { expect(1).toBe(2); } catch { threw = true; }
+     if (!threw) throw new Error('the original expect lost its built-in toBe');
+     return 'ok'",
+  )
+  .await;
+}
+
+#[tokio::test]
+async fn extend_refuses_a_non_function() {
+  let err = run_err("expect.extend({ toBeX: 5 }); return 'unreached'").await;
+  assert!(
+    err.contains("is not a valid matcher") && err.contains("number"),
+    "expected the extend TypeError, got: {err}"
+  );
+}
+
+#[tokio::test]
+async fn a_custom_matcher_may_be_async_and_still_fails() {
+  run_ok(
+    "const e = expect.extend({ async toBeLate(received) { return { pass: received === 1, message: () => 'late' }; } });
+     await e(1).toBeLate();
+     return 'ok'",
+  )
+  .await;
+  let err = run_err(
+    "const e = expect.extend({ async toBeLate(received) { return { pass: false, message: () => 'late' }; } });
+     await e(1).toBeLate();
+     return 'unreached'",
+  )
+  .await;
+  assert!(err.contains("late"), "async matcher message missing: {err}");
+}
+
+#[tokio::test]
+async fn a_custom_matcher_returning_junk_says_so() {
+  let err = run_err("const e = expect.extend({ toBeX() { return 5; } }); e(1).toBeX(); return 'unreached'").await;
+  assert!(
+    err.contains("Unexpected return from a matcher function"),
+    "expected the result validation, got: {err}"
+  );
+}
+
+#[tokio::test]
+async fn configure_returns_a_new_expect() {
+  run_ok(
+    "const quiet = expect.configure({ message: 'ids match' });
+     let msg = '';
+     try { quiet(1).toBe(2); } catch (e) { msg = String(e.message); }
+     if (!msg.includes('ids match')) throw new Error('configured message missing: ' + msg);
+     let plain = '';
+     try { expect(1).toBe(2); } catch (e) { plain = String(e.message); }
+     if (plain.includes('ids match')) throw new Error('the original expect was mutated');
+     return 'ok'",
+  )
+  .await;
+}
+
+#[tokio::test]
+async fn a_custom_matcher_observes_the_configured_timeout() {
+  run_ok(
+    "const e = expect.configure({ timeout: 1234 }).extend({
+       toSeeTimeout(received) { return { pass: this.timeout === 1234, message: () => 'timeout was ' + this.timeout }; },
+     });
+     e(1).toSeeTimeout();
+     return 'ok'",
+  )
+  .await;
+}
+
+#[tokio::test]
+async fn soft_is_a_getter_returning_an_expect() {
+  run_ok("if (typeof expect.soft !== 'function') throw new Error('soft is not callable'); return 'ok'").await;
+  run_ok("expect.soft(1).toBe(1); return 'ok'").await;
+  run_ok("if (expect.soft.soft !== expect.soft.soft.soft) { } return 'ok'").await;
+  run_ok("await expect.soft.poll(() => 1, { timeout: 500, intervals: [5] }).toBe(1); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn get_state_answers_an_object() {
+  run_ok("if (typeof expect.getState() !== 'object') throw new Error('no state'); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn merge_expects_exposes_every_matcher() {
+  run_ok(
+    "const a = expect.extend({ toBeA(received) { return { pass: received === 'a', message: () => 'not a' }; } });
+     const b = expect.extend({ toBeB(received) { return { pass: received === 'b', message: () => 'not b' }; } });
+     const both = mergeExpects(a, b);
+     both('a').toBeA();
+     both('b').toBeB();
+     return 'ok'",
+  )
+  .await;
+}
+
+#[tokio::test]
+async fn a_custom_matcher_reaches_the_settled_chain() {
+  run_ok(
+    "const e = expect.extend({ toBeA(received) { return { pass: received === 'a', message: () => 'not a' }; } });
+     await e(Promise.resolve('a')).resolves.toBeA();
+     await e(Promise.resolve('b')).resolves.not.toBeA();
+     return 'ok'",
+  )
+  .await;
+}
+
 // ── .resolves / .rejects ─────────────────────────────────────────────
 
 #[tokio::test]

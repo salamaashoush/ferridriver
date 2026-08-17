@@ -110,7 +110,7 @@ impl From<Regex> for StringOrRegex {
 ///   `diff`    = the body (Expected/Received, plus an optional unified
 ///               diff) printed below the title.
 /// A JS throw concatenates the two; reporters print them in sequence.
-pub(crate) fn format_failure(
+pub fn format_failure(
   prefix: Option<&str>,
   is_not: bool,
   method: &str,
@@ -227,6 +227,26 @@ impl ExpectValue {
     } else {
       Err(self.fail(method, expected, received, Some(diff), Some(Location::caller())))
     }
+  }
+
+  /// Run a custom matcher against this subject — the Rust-side of
+  /// `expect.extend`. The assertion's `.not`, `.soft` and message flow
+  /// into the matcher's context, and the verdict is inverted and
+  /// rendered by the same code a JS custom matcher goes through.
+  pub fn matches(
+    &self,
+    name: &str,
+    matcher: &crate::extend::ValueMatcher,
+    args: &[Value],
+  ) -> Result<(), AssertionFailure> {
+    let cx = crate::extend::MatcherContext {
+      is_not: self.is_not,
+      is_soft: self.is_soft,
+      promise: None,
+      timeout: crate::poll::default_expect_timeout(),
+      custom_message: self.message.clone(),
+    };
+    crate::extend::run_value_matcher(&cx, name, matcher, &self.actual, args)
   }
 
   // ── primitive equality ──────────────────────────────────────────

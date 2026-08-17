@@ -115,6 +115,23 @@ the rejection reason IS the subject, and `toThrow` reads it as the thrown
 error rather than calling it. `expect.poll(...).resolves` is refused with
 Playwright's message.
 
+**Custom:** `expect.extend({ toBeX(received, ...args) { … } })` returns a
+new expect carrying the matcher; a name that is not a built-in also
+becomes available on the expect `extend` was called on, so the common
+`expect.extend({...})` with the result discarded works. A built-in name
+is only shadowed on the returned expect. The body reads `this.isNot`,
+`this.isSoft`, `this.promise`, `this.timeout` and a `this.utils` subset,
+returns `{ pass, message?, expected?, actual?, log? }`, and may be
+async. `expect.configure({ message?, timeout?, soft? })` returns a
+configured expect, `expect.soft` is a getter answering the soft one,
+`expect.getState()` answers an object, and `mergeExpects(a, b)` builds
+one expect exposing every matcher of both. Custom matchers reach `.`,
+`.not`, `.resolves` and `.rejects` alike.
+
+The same matchers work from Rust: `ferridriver_expect::matcher(f)` plus
+`expect_value(v).matches("toBeX", &m, &args)` runs a plain Rust function
+through the identical context, verdict and message path.
+
 Modifiers: `.not` (a getter returning a negated proxy), `.soft()` (or
 `expect.soft(...)`), `.withTimeout(ms)`, and `.withMessage(msg)`.
 

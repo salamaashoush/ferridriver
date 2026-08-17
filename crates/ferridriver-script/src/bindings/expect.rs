@@ -41,6 +41,13 @@ pub struct ExpectJs {
   #[qjs(skip_trace)]
   timeout: Duration,
   message: Option<String>,
+  /// Index of this assertion's custom-matcher table, and the names in
+  /// it. Both are plain data: the matcher FUNCTIONS live in a JS object
+  /// the engine traces, never in a native closure.
+  #[qjs(skip_trace)]
+  matcher_table: u32,
+  #[qjs(skip_trace)]
+  matcher_names: Vec<String>,
 }
 
 /// What `expect(...)` was handed.
@@ -222,6 +229,8 @@ impl ExpectJs {
       is_soft: false,
       timeout: DEFAULT_EXPECT_TIMEOUT,
       message: None,
+      matcher_table: 0,
+      matcher_names: Vec::new(),
     }
   }
 
@@ -232,6 +241,8 @@ impl ExpectJs {
       is_soft: self.is_soft,
       timeout: self.timeout,
       message: self.message.clone(),
+      matcher_table: self.matcher_table,
+      matcher_names: self.matcher_names.clone(),
     };
     mutate(&mut out);
     out
@@ -252,6 +263,8 @@ impl ExpectJs {
     out.is_soft = self.is_soft;
     out.timeout = self.timeout;
     out.message.clone_from(&self.message);
+    out.matcher_table = self.matcher_table;
+    out.matcher_names.clone_from(&self.matcher_names);
     out
   }
 
@@ -2079,11 +2092,51 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   Class::<ExpectJs>::define(&ctx.globals())?;
   Class::<ExpectPollJs>::define(&ctx.globals())?;
 
+  let root = create_expect(ctx, &ferridriver_expect::ExpectMeta::default(), 0)?;
+  ctx.globals().set("expect", root)?;
+  crate::bindings::runtime::mirror_global(ctx, "expect")?;
+
+  // Playwright exports `mergeExpects` from `@playwright/test`; the
+  // module surface reads it off the globals like `expect` itself.
+  let merge = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, expects: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<Function<'js>> {
+      merge_expects(&ctx, expects.0)
+    },
+  )?;
+  merge.set_name("mergeExpects")?;
+  ctx.globals().set("mergeExpects", merge)?;
+  crate::bindings::runtime::mirror_global(ctx, "mergeExpects")?;
+  Ok(())
+}
+
+/// Build one `expect` — Playwright's `createExpect(info)`.
+///
+/// `meta` is the assertion state this expect applies (message, soft,
+/// timeout, and the NAMES of its custom matchers); `table` indexes the
+/// JS object holding those matchers' functions. Both are plain data, so
+/// the closures below capture no JS value.
+fn create_expect<'js>(
+  ctx: &Ctx<'js>,
+  meta: &ferridriver_expect::ExpectMeta<()>,
+  table: u32,
+) -> rquickjs::Result<Function<'js>> {
+  let call_meta = meta.clone();
   let expect_fn = Function::new(
     ctx.clone(),
-    |ctx: Ctx<'js>, value: Value<'js>, message: Opt<Value<'js>>| -> rquickjs::Result<Value<'js>> {
+    move |ctx: Ctx<'js>, value: Value<'js>, message: Opt<Value<'js>>| -> rquickjs::Result<Value<'js>> {
       let mut inst = build_expect(&ctx, value);
-      inst.message = custom_message(message.0.as_ref())?;
+      inst.message = custom_message(message.0.as_ref())?.or_else(|| call_meta.message.clone());
+      inst.is_soft = call_meta.is_soft;
+      if let Some(timeout) = call_meta.timeout {
+        inst.timeout = timeout;
+      }
+      inst.matcher_table = table;
+      // Read the names off the table, not off the captured meta: an
+      // `expect.extend({...})` whose result was discarded publishes its
+      // new names by mutating the table this expect already points at
+      // (Playwright's legacy behavior).
+      inst.matcher_names = table_names(&ctx, table)?;
       let class = Class::instance(ctx.clone(), inst)?;
       // Wrap in the JS proxy that translates `.not` (a getter) to
       // `_notInner()` (the method-bound clone).
@@ -2091,6 +2144,7 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
         let val = class.into_value();
         install_not_getter(&ctx, &val)?;
         install_settled_getters(&ctx, &val)?;
+        install_user_matchers(&ctx, &val)?;
         Ok(val)
       }
     },
@@ -2099,11 +2153,13 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
 
   // Playwright: `expect.poll(actual, messageOrOptions?: string |
   // { message?, timeout?, intervals? })`.
+  let poll_meta = meta.clone();
   let poll_fn = Function::new(
     ctx.clone(),
-    |ctx: Ctx<'js>, generator: Function<'js>, opts: Opt<Value<'js>>| -> rquickjs::Result<Value<'js>> {
+    move |ctx: Ctx<'js>, generator: Function<'js>, opts: Opt<Value<'js>>| -> rquickjs::Result<Value<'js>> {
       let o = opts_obj(&opts);
-      let timeout_ms = u64_field(o.as_ref(), "timeout").unwrap_or_else(|| DEFAULT_EXPECT_TIMEOUT.as_millis() as u64);
+      let default_timeout = poll_meta.timeout.unwrap_or(DEFAULT_EXPECT_TIMEOUT).as_millis() as u64;
+      let timeout_ms = u64_field(o.as_ref(), "timeout").unwrap_or(default_timeout);
       let intervals = u64_array_field(o.as_ref(), "intervals").unwrap_or_else(|| POLL_INTERVALS.to_vec());
       let saved = Persistent::save(&ctx, generator);
       let inst = ExpectPollJs {
@@ -2111,30 +2167,13 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
         timeout: Duration::from_millis(timeout_ms),
         intervals,
         is_not: false,
-        message: custom_message(opts.0.as_ref())?,
+        message: custom_message(opts.0.as_ref())?.or_else(|| poll_meta.message.clone()),
       };
       let class = Class::instance(ctx.clone(), inst)?;
       {
         let val = class.into_value();
         install_poll_not_getter(&ctx, &val)?;
         install_poll_settled_refusal(&ctx, &val)?;
-        Ok(val)
-      }
-    },
-  )?;
-
-  // expect.soft(target) – marks the resulting Expect as soft.
-  let soft_fn = Function::new(
-    ctx.clone(),
-    |ctx: Ctx<'js>, value: Value<'js>, message: Opt<Value<'js>>| -> rquickjs::Result<Value<'js>> {
-      let mut inst = build_expect(&ctx, value);
-      inst.message = custom_message(message.0.as_ref())?;
-      inst.is_soft = true;
-      let class = Class::instance(ctx.clone(), inst)?;
-      {
-        let val = class.into_value();
-        install_not_getter(&ctx, &val)?;
-        install_settled_getters(&ctx, &val)?;
         Ok(val)
       }
     },
@@ -2236,7 +2275,6 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
     rquickjs::Error::new_from_js_message("expect", "install", "expect Function has no object representation")
   })?;
   expect_obj.set("poll", poll_fn)?;
-  expect_obj.set("soft", soft_fn)?;
   expect_obj.set("any", any_fn)?;
   expect_obj.set("anything", anything_fn)?;
   expect_obj.set("arrayContaining", array_containing_fn)?;
@@ -2245,10 +2283,171 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   expect_obj.set("stringMatching", string_matching_fn)?;
   expect_obj.set("closeTo", close_to_fn)?;
   expect_obj.set("not", not_obj)?;
+  install_expect_meta(ctx, expect_obj, meta, table)?;
+  Ok(expect_fn)
+}
 
-  ctx.globals().set("expect", expect_fn)?;
-  crate::bindings::runtime::mirror_global(ctx, "expect")?;
+/// `extend` / `configure` / `getState` / `soft`, plus the hidden state
+/// `mergeExpects` reads back off another expect.
+fn install_expect_meta<'js>(
+  ctx: &Ctx<'js>,
+  expect_obj: &Object<'js>,
+  meta: &ferridriver_expect::ExpectMeta<()>,
+  table: u32,
+) -> rquickjs::Result<()> {
+  define_hidden(ctx, expect_obj, EXPECT_TABLE, table.into_js(ctx)?)?;
+
+  let extend_meta = meta.clone();
+  let extend = Function::new(
+    ctx.clone(),
+    move |ctx: Ctx<'js>, matchers: Value<'js>| -> rquickjs::Result<Function<'js>> {
+      let Some(additions) = matchers.as_object() else {
+        return Err(crate::bindings::convert::throw_named(
+          &ctx,
+          "TypeError",
+          ferridriver_expect::not_a_matcher_message("matchers", &type_name(&matchers)),
+        ));
+      };
+      extend_expect(&ctx, &extend_meta, table, additions)
+    },
+  )?;
+  expect_obj.set("extend", extend)?;
+
+  let configure_meta = meta.clone();
+  let configure = Function::new(
+    ctx.clone(),
+    move |ctx: Ctx<'js>, config: Opt<Value<'js>>| -> rquickjs::Result<Function<'js>> {
+      let cfg = parse_configure(&ctx, config.0.as_ref())?;
+      create_expect(&ctx, &configure_meta.configure(&cfg), table)
+    },
+  )?;
+  expect_obj.set("configure", configure)?;
+
+  // Jest compatibility: Playwright answers an empty state object.
+  let get_state = Function::new(ctx.clone(), |ctx: Ctx<'js>| -> rquickjs::Result<Object<'js>> {
+    Object::new(ctx.clone())
+  })?;
+  expect_obj.set("getState", get_state)?;
+
+  // `expect.soft` is a getter returning an Expect, so `expect.soft(x)`
+  // and `expect.soft.poll(...)` are both the soft expect. An already
+  // soft expect answers itself.
+  let soft_meta = meta.clone();
+  let soft_getter = Function::new(
+    ctx.clone(),
+    move |ctx: Ctx<'js>, this: rquickjs::function::This<Value<'js>>| -> rquickjs::Result<Value<'js>> {
+      if soft_meta.is_soft {
+        return Ok(this.0);
+      }
+      Ok(create_expect(&ctx, &soft_meta.softened(), table)?.into_value())
+    },
+  )?;
+  define_accessor(ctx, expect_obj.as_value(), "soft", soft_getter)?;
   Ok(())
+}
+
+fn type_name(value: &Value<'_>) -> String {
+  JsLive(value.clone()).js_type().name().to_string()
+}
+
+/// `expect.configure({ message?, timeout?, soft? })` — presence is what
+/// decides, so a key given as `undefined` CLEARS rather than keeps.
+fn parse_configure<'js>(
+  ctx: &Ctx<'js>,
+  config: Option<&Value<'js>>,
+) -> rquickjs::Result<ferridriver_expect::ExpectConfigure> {
+  let mut out = ferridriver_expect::ExpectConfigure::default();
+  let Some(obj) = config.and_then(Value::as_object) else {
+    return Ok(out);
+  };
+  let _ = ctx;
+  if obj.contains_key("message").unwrap_or(false) {
+    let v: Value<'js> = obj.get("message")?;
+    out.message = ferridriver_expect::Setting::from_optional(true, v.as_string().and_then(|s| s.to_string().ok()));
+  }
+  if obj.contains_key("timeout").unwrap_or(false) {
+    let v: Value<'js> = obj.get("timeout")?;
+    out.timeout =
+      ferridriver_expect::Setting::from_optional(true, v.as_number().map(|ms| Duration::from_millis(ms as u64)));
+  }
+  if obj.contains_key("soft").unwrap_or(false) {
+    let v: Value<'js> = obj.get("soft")?;
+    out.soft = Some(v.as_bool().unwrap_or(false));
+  }
+  Ok(out)
+}
+
+/// The body of `expect.extend`, both halves of it.
+fn extend_expect<'js>(
+  ctx: &Ctx<'js>,
+  meta: &ferridriver_expect::ExpectMeta<()>,
+  table: u32,
+  additions: &Object<'js>,
+) -> rquickjs::Result<Function<'js>> {
+  let mut names = Vec::new();
+  for entry in additions.props::<String, Value<'js>>() {
+    let (name, value) = entry?;
+    if !value.is_function() {
+      return Err(crate::bindings::convert::throw_named(
+        ctx,
+        "TypeError",
+        ferridriver_expect::not_a_matcher_message(&name, &type_name(&value)),
+      ));
+    }
+    names.push((name, value));
+  }
+
+  // Playwright's legacy half: a NON-builtin name also lands on the
+  // expect `extend` was called on, so `expect.extend({...})` works
+  // without capturing the return value. A built-in name is only
+  // shadowed on the expect this returns.
+  let current = matcher_table(ctx, table)?;
+  for (name, value) in &names {
+    if !ferridriver_expect::is_builtin_matcher(name) {
+      current.set(name.as_str(), value.clone())?;
+    }
+  }
+
+  // The returned expect gets its own table carrying everything.
+  let next = Object::new(ctx.clone())?;
+  for entry in current.props::<String, Value<'js>>() {
+    let (name, value) = entry?;
+    next.set(name, value)?;
+  }
+  for (name, value) in &names {
+    next.set(name.as_str(), value.clone())?;
+  }
+  let index = push_onto(ctx, &matcher_tables(ctx)?, next.clone().into_value())?;
+  let mut published: Vec<(String, ())> = Vec::new();
+  for entry in next.props::<String, Value<'js>>() {
+    published.push((entry?.0, ()));
+  }
+  create_expect(ctx, &meta.extended(published), index)
+}
+
+/// `mergeExpects(...expects)` — fold every argument's matchers into one
+/// expect, left to right. A foreign expect (no table of ours) is
+/// skipped, as upstream.
+pub fn merge_expects<'js>(ctx: &Ctx<'js>, expects: Vec<Value<'js>>) -> rquickjs::Result<Function<'js>> {
+  let merged = Object::new(ctx.clone())?;
+  for e in expects {
+    let Some(obj) = e.as_object() else { continue };
+    let Some(index) = obj.get::<_, Value<'js>>(EXPECT_TABLE).ok().and_then(|v| v.as_number()) else {
+      continue;
+    };
+    let table = matcher_table(ctx, index as u32)?;
+    for entry in table.props::<String, Value<'js>>() {
+      let (name, value) = entry?;
+      merged.set(name, value)?;
+    }
+  }
+  let index = push_onto(ctx, &matcher_tables(ctx)?, merged.clone().into_value())?;
+  let mut published: Vec<(String, ())> = Vec::new();
+  for entry in merged.props::<String, Value<'js>>() {
+    published.push((entry?.0, ()));
+  }
+  let meta = ferridriver_expect::ExpectMeta::default().extended(published);
+  create_expect(ctx, &meta, index)
 }
 
 // A native closure must NEVER capture a live JS value (`Function`,
@@ -2292,6 +2491,7 @@ fn install_not_getter<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs::R
       let new_class = Class::instance(ctx.clone(), inverted)?;
       let new_val = new_class.into_value();
       install_not_getter(&ctx, &new_val)?;
+      install_user_matchers(&ctx, &new_val)?;
       Ok(new_val)
     },
   )?;
@@ -2300,6 +2500,228 @@ fn install_not_getter<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs::R
   descriptor.set("configurable", true)?;
   let _: rquickjs::Value<'js> = define_property.call((instance.clone(), "not", descriptor))?;
   Ok(())
+}
+
+// ── expect.extend ────────────────────────────────────────────────────
+//
+// Every rule here — what `extend` composes, which names it may publish,
+// how a matcher's result becomes a verdict, what the failure says — is
+// `ferridriver_expect::extend`, so a Rust test registering a matcher and
+// a JS suite calling `expect.extend` behave identically. This module
+// only marshals JS values across that seam.
+//
+// The matcher FUNCTIONS live in JS objects hung off the Expect
+// prototype, indexed by number. A native closure captures the index and
+// the name — plain data — and looks the function up at call time, so no
+// closure ever holds a JS value.
+
+/// Where the per-expect matcher tables hang. Non-enumerable, and the
+/// name does not start with `to`, so it never reads back as a matcher.
+const MATCHER_TABLES: &str = "_matcherTables";
+/// Hidden on each expect function, so `mergeExpects` can read another
+/// expect's matchers without a registry.
+const EXPECT_TABLE: &str = "_matcherTable";
+
+fn matcher_tables<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Array<'js>> {
+  let proto = Class::<ExpectJs>::prototype(ctx)?.ok_or_else(|| {
+    rquickjs::Error::new_from_js_message("expect", "extend", "the Expect class has no prototype in this context")
+  })?;
+  let existing: Value<'js> = proto.get(MATCHER_TABLES)?;
+  if let Some(arr) = existing.as_array() {
+    return Ok(arr.clone());
+  }
+  let arr = Array::new(ctx.clone())?;
+  // Index 0 is the empty table every un-extended expect points at.
+  let empty = Object::new(ctx.clone())?;
+  push_onto(ctx, &arr, empty.into_value())?;
+  define_hidden(ctx, &proto, MATCHER_TABLES, arr.clone().into_value())?;
+  Ok(arr)
+}
+
+fn push_onto<'js>(ctx: &Ctx<'js>, arr: &Array<'js>, value: Value<'js>) -> rquickjs::Result<u32> {
+  let push: Function<'js> = arr.as_object().get("push")?;
+  let len: f64 = push.call((rquickjs::function::This(arr.clone()), value))?;
+  let _ = ctx;
+  Ok(len as u32 - 1)
+}
+
+/// The matcher names currently in `table`.
+fn table_names(ctx: &Ctx<'_>, index: u32) -> rquickjs::Result<Vec<String>> {
+  let table = matcher_table(ctx, index)?;
+  let mut names = Vec::new();
+  for key in table.keys::<String>() {
+    names.push(key?);
+  }
+  Ok(names)
+}
+
+fn matcher_table<'js>(ctx: &Ctx<'js>, index: u32) -> rquickjs::Result<Object<'js>> {
+  let tables = matcher_tables(ctx)?;
+  let entry: Value<'js> = tables.get(index as usize)?;
+  entry
+    .as_object()
+    .cloned()
+    .ok_or_else(|| rquickjs::Error::new_from_js_message("expect", "extend", "this expect's matcher table is missing"))
+}
+
+/// The `this` a matcher body reads — Playwright's `MatcherContext`.
+fn matcher_context<'js>(ctx: &Ctx<'js>, cx: &ferridriver_expect::MatcherContext) -> rquickjs::Result<Object<'js>> {
+  let obj = Object::new(ctx.clone())?;
+  obj.set("isNot", cx.is_not)?;
+  obj.set("isSoft", cx.is_soft)?;
+  obj.set("promise", cx.promise.map_or("", PromiseMode::as_str))?;
+  obj.set("timeout", cx.timeout.as_millis() as f64)?;
+  obj.set("utils", matcher_utils(ctx)?)?;
+  // Playwright hands custom matchers an `equals` that refuses to run:
+  // a jest matcher relying on it is not compatible with this runner.
+  let equals = Function::new(ctx.clone(), |ctx: Ctx<'js>| -> rquickjs::Result<Value<'js>> {
+    Err(crate::bindings::convert::throw_named(
+      &ctx,
+      "Error",
+      "It looks like you are using custom expect matchers that are not compatible with ferridriver".to_string(),
+    ))
+  })?;
+  obj.set("equals", equals)?;
+  Ok(obj)
+}
+
+/// The subset of jest's matcher-utils ferridriver can honestly answer.
+fn matcher_utils<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  let utils = Object::new(ctx.clone())?;
+  for name in ["printReceived", "printExpected", "stringify"] {
+    let render = Function::new(
+      ctx.clone(),
+      |_ctx: Ctx<'js>, value: Value<'js>| -> rquickjs::Result<String> { Ok(JsLive(value).describe()) },
+    )?;
+    utils.set(name, render)?;
+  }
+  let hint = Function::new(
+    ctx.clone(),
+    |_ctx: Ctx<'js>, name: String, args: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<String> {
+      let _ = args;
+      Ok(format!("expect(received).{name}(expected)"))
+    },
+  )?;
+  utils.set("matcherHint", hint)?;
+  Ok(utils)
+}
+
+/// Read a matcher's return value into core's [`ferridriver_expect::MatcherResult`].
+fn parse_matcher_result<'js>(
+  ctx: &Ctx<'js>,
+  matcher: &str,
+  raw: &Value<'js>,
+) -> rquickjs::Result<ferridriver_expect::MatcherResult> {
+  let invalid = || {
+    crate::bindings::convert::throw_named(
+      ctx,
+      "Error",
+      ferridriver_expect::invalid_result_message(&JsLive(raw.clone()).describe()),
+    )
+  };
+  let Some(obj) = raw.as_object() else {
+    return Err(invalid());
+  };
+  let Some(pass) = obj.get::<_, Value<'js>>("pass")?.as_bool() else {
+    return Err(invalid());
+  };
+  let message = obj.get::<_, Value<'js>>("message")?;
+  let message = if let Some(f) = message.as_function() {
+    let produced: Value<'js> = f.call((rquickjs::function::This(raw.clone()),))?;
+    produced.as_string().and_then(|s| s.to_string().ok())
+  } else if message.is_undefined() || message.is_null() {
+    None
+  } else if let Some(s) = message.as_string() {
+    Some(s.to_string()?)
+  } else {
+    return Err(invalid());
+  };
+  let mut out = ferridriver_expect::MatcherResult::new(pass);
+  out.message = message;
+  let expected = obj.get::<_, Value<'js>>("expected")?;
+  let received = obj.get::<_, Value<'js>>("actual")?;
+  if !expected.is_undefined() || !received.is_undefined() {
+    out.expected = Some(JsLive(expected).describe());
+    out.received = Some(JsLive(received).describe());
+  }
+  if let Some(log) = obj.get::<_, Value<'js>>("log")?.as_array() {
+    out.log = log
+      .iter::<Value<'js>>()
+      .filter_map(std::result::Result::ok)
+      .map(|v| JsLive(v).describe())
+      .collect();
+  }
+  let _ = matcher;
+  Ok(out)
+}
+
+/// Give an assertion instance one own method per custom matcher name.
+fn install_user_matchers<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs::Result<()> {
+  let (table, names) = {
+    let class = Class::<ExpectJs>::from_value(instance)?;
+    let borrowed = class.borrow();
+    (borrowed.matcher_table, borrowed.matcher_names.clone())
+  };
+  let Some(obj) = instance.as_object() else {
+    return Ok(());
+  };
+  for name in names {
+    let bound = name.clone();
+    let f = Function::new(
+      ctx.clone(),
+      move |ctx: Ctx<'js>,
+            this: rquickjs::function::This<Value<'js>>,
+            args: rquickjs::function::Rest<Value<'js>>|
+            -> rquickjs::Result<Value<'js>> { call_user_matcher(&ctx, &this.0, &bound, table, args.0) },
+    )?;
+    f.set_name(&name)?;
+    obj.set(name, f)?;
+  }
+  Ok(())
+}
+
+fn call_user_matcher<'js>(
+  ctx: &Ctx<'js>,
+  this: &Value<'js>,
+  name: &str,
+  table: u32,
+  args: Vec<Value<'js>>,
+) -> rquickjs::Result<Value<'js>> {
+  let class = Class::<ExpectJs>::from_value(this)?;
+  let base = {
+    let borrowed = class.borrow();
+    borrowed.clone_with(|_| {})
+  };
+  let cx = ferridriver_expect::MatcherContext {
+    is_not: base.is_not,
+    is_soft: base.is_soft,
+    promise: None,
+    timeout: base.timeout,
+    custom_message: base.message.clone(),
+  };
+  let body: Function<'js> = matcher_table(ctx, table)?.get(name)?;
+  let receiver = base.live(ctx)?.0;
+  let outcome: Value<'js> = body.call((
+    rquickjs::function::This(matcher_context(ctx, &cx)?),
+    receiver,
+    rquickjs::function::Rest(args),
+  ))?;
+
+  // A synchronous matcher must fail synchronously: returning a promise
+  // for it would let an unawaited assertion pass silently.
+  if let Some(promise) = outcome.as_promise().cloned() {
+    let name = name.to_string();
+    let ctx_owned = ctx.clone();
+    let fut: SettledFuture<'js> = Box::pin(async move {
+      let settled: Value<'js> = promise.into_future().await?;
+      let result = parse_matcher_result(&ctx_owned, &name, &settled)?;
+      ferridriver_expect::finalize(&cx, &name, &result).map_err(|e| assertion_to_rq(&ctx_owned, e))
+    });
+    return rquickjs::promise::Promised::from(fut).into_js(ctx);
+  }
+  let result = parse_matcher_result(ctx, name, &outcome)?;
+  ferridriver_expect::finalize(&cx, name, &result).map_err(|e| assertion_to_rq(ctx, e))?;
+  Ok(Value::new_undefined(ctx.clone()))
 }
 
 // ── .resolves / .rejects ─────────────────────────────────────────────
@@ -2346,7 +2768,11 @@ fn build_settled<'js>(
   let obj = Object::new(ctx.clone())?;
   define_hidden(ctx, &obj, SETTLED_SOURCE, source.clone())?;
   define_hidden(ctx, &obj, SETTLED_NEGATED, (!with_not).into_js(ctx)?)?;
-  for name in matcher_names(ctx)? {
+  let mut names = matcher_names(ctx)?;
+  if let Ok(class) = Class::<ExpectJs>::from_value(source) {
+    names.extend(class.borrow().matcher_names.iter().cloned());
+  }
+  for name in names {
     let bound = name.clone();
     let f = Function::new(
       ctx.clone(),
@@ -2476,6 +2902,7 @@ async fn settled_call<'js>(
 
   let instance = Class::instance(ctx.clone(), settled_expect)?.into_value();
   install_not_getter(&ctx, &instance)?;
+  install_user_matchers(&ctx, &instance)?;
   let matcher: Function<'js> = instance
     .as_object()
     .and_then(|o| o.get(name.as_str()).ok())

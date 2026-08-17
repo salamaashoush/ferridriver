@@ -39,6 +39,7 @@ pub mod api_response;
 pub mod asymmetric;
 pub mod builder;
 pub mod diff;
+pub mod extend;
 pub mod locator;
 pub mod page;
 pub mod poll;
@@ -52,6 +53,11 @@ pub use builder::{
   to_pass, to_pass_with_options,
 };
 pub use diff::{json_diff, pretty_json, unified_diff};
+pub use extend::{
+  BUILTIN_MATCHER_NAMES, ExpectConfigure, ExpectMeta, MatcherContext, MatcherResult, MatcherSet, NO_MESSAGE, Setting,
+  ValueMatcher, default_failure, finalize, invalid_result_message, is_builtin_matcher, matcher, not_a_matcher_message,
+  run_value_matcher, shadowed_names,
+};
 pub use locator::TextMatchOptions;
 pub use poll::{
   DEFAULT_EXPECT_TIMEOUT, ExpectContext, MatchError, POLL_INTERVALS, default_expect_timeout, poll_traced, poll_until,

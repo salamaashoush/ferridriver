@@ -8,7 +8,7 @@
 //! reach the report and fail the command, and that an absent compiler is
 //! reported rather than silently passing.
 //!
-//! The compiler itself is stubbed (`FERRIDRIVER_TSGO`) so the suite does
+//! The compiler itself is stubbed (`FERRIDRIVER_TSC`) so the suite does
 //! not depend on a TypeScript install or a network fetch; what the real
 //! compiler makes of the declarations is covered by the type-contract test
 //! in `ferridriver-mcp`.
@@ -63,7 +63,7 @@ fn fixture(root: &Path) -> PathBuf {
 /// the scratch directory (which the command deletes on exit), prints
 /// `stdout_text`, and exits `code`.
 fn stub_checker(root: &Path, stdout_text: &str, code: i32) -> PathBuf {
-  let path = root.join("stub-tsgo");
+  let path = root.join("stub-tsc");
   let out_file = root.join("stub-stdout.txt");
   write(&out_file, stdout_text);
   write(
@@ -115,7 +115,7 @@ fn check_reports_the_declared_entries_and_registered_tools() {
   let run = run_check(
     dir.path(),
     &["check", "./pkg"],
-    &[("FERRIDRIVER_TSGO", &stub.display().to_string())],
+    &[("FERRIDRIVER_TSC", &stub.display().to_string())],
   );
 
   assert!(run.success, "a clean package must pass: {}", run.stdout);
@@ -164,7 +164,7 @@ fn a_type_error_fails_the_check_and_is_reported_verbatim() {
   let run = run_check(
     dir.path(),
     &["check", "./pkg"],
-    &[("FERRIDRIVER_TSGO", &stub.display().to_string())],
+    &[("FERRIDRIVER_TSC", &stub.display().to_string())],
   );
 
   assert!(!run.success, "a type error must fail the command: {}", run.stdout);
@@ -184,7 +184,7 @@ fn no_typecheck_skips_the_pass_and_says_so() {
   let run = run_check(
     dir.path(),
     &["check", "./pkg", "--no-typecheck"],
-    &[("FERRIDRIVER_TSGO", &stub.display().to_string())],
+    &[("FERRIDRIVER_TSC", &stub.display().to_string())],
   );
 
   assert!(run.success, "{}", run.stdout);
@@ -217,11 +217,7 @@ fn an_absent_compiler_is_reported_not_silently_passed() {
     "the report must name the reason: {}",
     run.stdout
   );
-  assert!(
-    skipped.contains("@typescript/native-preview"),
-    "and how to get one: {}",
-    run.stdout
-  );
+  assert!(skipped.contains("typescript"), "and how to get one: {}", run.stdout);
   // A missing compiler is not an extension defect, so the check still
   // passes — it just cannot claim the types were verified.
   assert_eq!(payload["typecheck"]["passed"], true, "{}", run.stdout);
@@ -284,7 +280,7 @@ fn unmet_requirements_block_the_package_and_fail_the_check() {
   let run = run_check(
     dir.path(),
     &["check", "./pkg"],
-    &[("FERRIDRIVER_TSGO", &stub.display().to_string())],
+    &[("FERRIDRIVER_TSC", &stub.display().to_string())],
   );
 
   assert!(!run.success, "{}", run.stdout);

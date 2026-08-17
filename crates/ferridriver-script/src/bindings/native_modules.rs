@@ -416,8 +416,8 @@ pub struct FerridriverTestModule;
 
 /// Mirrors `@playwright/test`'s own export list (`packages/playwright/
 /// test.mjs`), minus what ferridriver has not implemented yet:
-/// `selectors`, `devices`, `defineConfig`, `mergeExpects`, `errors`,
-/// `by` and the `_electron` / `_android` / `_utilityTest` internals.
+/// `selectors`, `devices`, `defineConfig`, `errors`, `by` and the
+/// `_electron` / `_android` / `_utilityTest` internals.
 /// Exporting a name that resolves to `undefined` would be worse than not
 /// exporting it — the import succeeds and the call site fails somewhere
 /// else.
@@ -426,6 +426,7 @@ const TEST_EXPORTS: &[&str] = &[
   "test",
   "describe",
   "expect",
+  "mergeExpects",
   "mergeTests",
   "_baseTest",
   "chromium",
@@ -445,6 +446,7 @@ fn test_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
     ("test", test.clone()),
     ("describe", fd_prop(ctx, "describe")?),
     ("expect", global(ctx, "expect")?),
+    ("mergeExpects", global(ctx, "mergeExpects")?),
     ("mergeTests", fd_prop(ctx, "mergeTests")?),
     ("_baseTest", fd_prop(ctx, "baseTest")?),
     ("chromium", global(ctx, "chromium")?),

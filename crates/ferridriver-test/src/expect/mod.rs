@@ -25,10 +25,12 @@ pub mod page;
 pub mod value;
 
 pub use ferridriver_expect::{
-  ASYM_TAG_KEY, AssertionFailure, Asymmetric, CallerLocation, DEFAULT_EXPECT_TIMEOUT, Expect, ExpectContext, ExpectFn,
-  ExpectPoll, ExpectValue, HaveCssOptions, InViewportOptions, MatchError, POLL_INTERVALS, StringOrRegex, ThrowMatcher,
-  ThrownError, ToPassOptions, TypeTag, deep_equal, expect, expect_configured, expect_fn, expect_poll, expect_value,
-  json_diff, match_object, pretty_json, to_pass, to_pass_with_options, unified_diff,
+  ASYM_TAG_KEY, AssertionFailure, Asymmetric, BUILTIN_MATCHER_NAMES, CallerLocation, DEFAULT_EXPECT_TIMEOUT, Expect,
+  ExpectConfigure, ExpectContext, ExpectFn, ExpectMeta, ExpectPoll, ExpectValue, HaveCssOptions, InViewportOptions,
+  MatchError, MatcherContext, MatcherResult, MatcherSet, POLL_INTERVALS, StringOrRegex, ThrowMatcher, ThrownError,
+  ToPassOptions, TypeTag, ValueMatcher, deep_equal, expect, expect_configured, expect_fn, expect_poll, expect_value,
+  finalize, is_builtin_matcher, json_diff, match_object, matcher, pretty_json, run_value_matcher, to_pass,
+  to_pass_with_options, unified_diff,
 };
 pub use locator::LocatorSnapshotMatchers;
 pub use page::PageSnapshotMatchers;

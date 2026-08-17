@@ -539,12 +539,18 @@ ferridriver ext dev ./plugins/acme        # on every save
 
 The type pass needs no setup. The declarations are embedded in the binary
 (so they always match the runtime that will load the extension) and are
-compiled with `tsgo`, resolved in this order: `FERRIDRIVER_TSGO`, `tsgo`
-or `tsc` on `PATH`, either one in a `node_modules/.bin` above the
-extension, then `npx`/`bunx` fetching `@typescript/native-preview` (cached
-after the first run). `FERRIDRIVER_TS_NO_DOWNLOAD=1` blocks the fetch;
+compiled with the TypeScript compiler, resolved in this order:
+`FERRIDRIVER_TSC`, `tsc` on `PATH`, `tsc` in a
+`node_modules/.bin` above the extension, then `npx`/`bunx` fetching
+`typescript` from `https://registry.npmjs.org/` (cached after the first
+run). The fetch is opt-in: without `FERRIDRIVER_TS_DOWNLOAD=1` a gate
+never pulls and runs a package from the network on its own.
 `--no-typecheck` skips the pass. When no compiler can be found the report
 says so instead of quietly passing.
+
+The registry is pinned rather than inherited from the machine's npm
+config, because a corporate registry commonly proxies a curated subset and
+answers 403 for everything else.
 
 An author `tsconfig.json` next to the package is inherited (`extends`), so
 its options still apply — the runtime-describing options are then applied

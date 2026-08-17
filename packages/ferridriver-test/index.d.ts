@@ -333,17 +333,77 @@ export interface PollAssertions {
   not: PollAssertions;
 }
 
-export interface Expect {
-  (locator: Locator, messageOrOptions?: ExpectMessage): LocatorAssertions;
-  (page: Page, messageOrOptions?: ExpectMessage): PageAssertions;
-  (response: APIResponse, messageOrOptions?: ExpectMessage): APIResponseAssertions;
-  (fn: () => unknown | Promise<unknown>, messageOrOptions?: ExpectMessage): ValueAssertions & {
-    toPass(options?: { timeout?: number; intervals?: number[] }): Promise<void>;
-    not: GenericMatchers & { toPass(options?: { timeout?: number; intervals?: number[] }): Promise<void> };
+/// The `this` a custom matcher body reads.
+export interface MatcherState {
+  readonly isNot: boolean;
+  readonly isSoft: boolean;
+  readonly promise: '' | 'resolves' | 'rejects';
+  readonly timeout: number;
+  readonly utils: {
+    printReceived(value: unknown): string;
+    printExpected(value: unknown): string;
+    stringify(value: unknown): string;
+    matcherHint(name: string, ...rest: unknown[]): string;
   };
-  <T>(value: T, messageOrOptions?: ExpectMessage): ValueAssertions<T>;
-  soft<T>(value: T, messageOrOptions?: ExpectMessage): ValueAssertions<T>;
-  soft(locator: Locator, messageOrOptions?: ExpectMessage): LocatorAssertions;
+  /// Present for jest compatibility; calling it throws, as upstream.
+  equals(...args: unknown[]): boolean;
+}
+
+export interface MatcherReturn {
+  pass: boolean;
+  message?: string | (() => string);
+  expected?: unknown;
+  actual?: unknown;
+  log?: string[];
+}
+
+export type MatcherFunction = (
+  this: MatcherState,
+  received: any,
+  ...args: any[]
+) => MatcherReturn | Promise<MatcherReturn>;
+
+/// A registered matcher as it is called: the receiver is bound, and an
+/// async body makes the call awaitable.
+export type ToUserMatchers<E> = {
+  [K in keyof E]: E[K] extends (this: any, received: any, ...args: infer A) => infer R
+    ? (...args: A) => R extends Promise<unknown> ? Promise<void> : void
+    : never;
+};
+
+type MergedMatchers<List> = List extends [Expect<infer E>, ...infer Rest] ? E & MergedMatchers<Rest> : {};
+
+/// Custom matchers reach `.`, `.not`, `.resolves` and `.rejects`, the
+/// same four places a built-in does.
+type UserChain<E> = ToUserMatchers<E> & { not: ToUserMatchers<E> };
+type SettledUser<E> = Promisified<ToUserMatchers<E>> & { not: Promisified<ToUserMatchers<E>> };
+
+export interface Expect<E = {}> {
+  (locator: Locator, messageOrOptions?: ExpectMessage): LocatorAssertions & UserChain<E>;
+  (page: Page, messageOrOptions?: ExpectMessage): PageAssertions & UserChain<E>;
+  (response: APIResponse, messageOrOptions?: ExpectMessage): APIResponseAssertions & UserChain<E>;
+  (fn: () => unknown | Promise<unknown>, messageOrOptions?: ExpectMessage): ValueAssertions &
+    ToUserMatchers<E> & {
+      toPass(options?: { timeout?: number; intervals?: number[] }): Promise<void>;
+      not: GenericMatchers &
+        ToUserMatchers<E> & { toPass(options?: { timeout?: number; intervals?: number[] }): Promise<void> };
+    };
+  <T>(value: T, messageOrOptions?: ExpectMessage): ValueAssertions<T> &
+    UserChain<E> & {
+      resolves: SettledAssertions<Awaited<T>> & SettledUser<E>;
+      rejects: SettledAssertions & SettledUser<E>;
+    };
+
+  /// Register custom matchers. The result carries them; a name that is
+  /// not a built-in also becomes available on THIS expect, so
+  /// `expect.extend({...})` works without capturing the return value.
+  extend<M extends Record<string, MatcherFunction>>(matchers: M): Expect<E & M>;
+  /// A new expect with these defaults — the receiver is unchanged.
+  configure(configuration: { message?: string; timeout?: number; soft?: boolean }): Expect<E>;
+  /// Jest compatibility; answers an empty object.
+  getState(): Record<string, unknown>;
+  /// The soft expect: failures are recorded rather than thrown.
+  readonly soft: Expect<E>;
   poll(
     fn: () => unknown | Promise<unknown>,
     messageOrOptions?: string | { message?: string; timeout?: number; intervals?: number[] },
@@ -367,6 +427,9 @@ export interface Expect {
 }
 
 export const expect: Expect;
+
+/// One expect exposing every custom matcher of the expects passed in.
+export function mergeExpects<List extends unknown[]>(...expects: List): Expect<MergedMatchers<List>>;
 
 // ── Browser surface (QuickJS bindings over the Rust core) ────────────
 

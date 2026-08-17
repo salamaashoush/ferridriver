@@ -6,8 +6,7 @@
 //! not match the declared `inputSchema` — all of it surfaces only when the
 //! tool is finally invoked, usually against a live browser.
 //!
-//! So the check also type-checks the entry files with `tsgo` (the native
-//! TypeScript compiler; `tsc` is accepted as a fallback), against the
+//! So the check also type-checks the entry files with `tsc`, against the
 //! declarations embedded in this binary. The author needs no
 //! `node_modules`: a generated `tsconfig.json` in a scratch directory
 //! points at the embedded `@ferridriver/extension` / `@ferridriver/test`
@@ -22,7 +21,7 @@ use crate::ext_types;
 
 /// What the TypeScript pass produced.
 pub struct TypecheckOutcome {
-  /// The checker that ran, e.g. `tsgo` — `None` when none was found.
+  /// The checker that ran, e.g. `tsc` — `None` when none was found.
   pub checker: Option<String>,
   /// Diagnostic lines, verbatim from the compiler.
   pub diagnostics: Vec<String>,
@@ -43,8 +42,18 @@ impl TypecheckOutcome {
   }
 }
 
-/// The npm package that ships `tsgo`.
-const TSGO_PACKAGE: &str = "@typescript/native-preview";
+/// The npm package that ships the compiler.
+const TS_PACKAGE: &str = "typescript";
+
+/// The bin `TS_PACKAGE` exposes.
+const TS_PACKAGE_BIN: &str = "tsc";
+
+/// Where a package runner fetches `TS_PACKAGE` from.
+///
+/// Pinned rather than inherited: a corporate registry commonly proxies a
+/// curated subset and answers 403 for the rest, which turns the type pass
+/// into a failing gate on a machine whose npm is configured normally.
+const PUBLIC_REGISTRY: &str = "https://registry.npmjs.org/";
 
 /// Wall-clock ceiling for the compiler run.
 ///
@@ -67,18 +76,19 @@ struct Checker {
   label: String,
   program: PathBuf,
   leading: Vec<String>,
+  /// Environment the runner needs, e.g. the registry to fetch from.
+  env: Vec<(String, String)>,
   /// True when running it may fetch the compiler over the network.
   fetches: bool,
 }
 
 /// Find a checker, cheapest first:
 ///
-/// 1. `FERRIDRIVER_TSGO` — an explicit binary.
-/// 2. `tsgo` on `PATH`.
-/// 3. `tsgo` in a `node_modules/.bin` above any search root.
-/// 4. `tsc` the same two ways — an already-installed compiler beats a
-///    download, even an older one.
-/// 5. `npx`/`bunx`, which FETCHES AND EXECUTES `tsgo` from the registry.
+/// 1. `FERRIDRIVER_TSC` — an explicit binary.
+/// 2. `tsc` on `PATH`.
+/// 3. `tsc` in a `node_modules/.bin` above any search root — an
+///    already-installed compiler beats a download, even an older one.
+/// 4. `npx`/`bunx`, which FETCHES AND EXECUTES `tsc` from the registry.
 ///    Opt-in (`FERRIDRIVER_TS_DOWNLOAD=1`): `ext check` is documented as a
 ///    pre-commit / CI gate, and a gate that silently pulls and runs a
 ///    package from the network is a supply-chain decision the operator
@@ -89,55 +99,63 @@ fn find_checker(search_roots: &[PathBuf]) -> Option<Checker> {
     label,
     program,
     leading: Vec::new(),
+    env: Vec::new(),
     fetches: false,
   };
 
-  if let Some(explicit) = std::env::var_os("FERRIDRIVER_TSGO") {
+  if let Some(explicit) = std::env::var_os("FERRIDRIVER_TSC") {
     let path = PathBuf::from(explicit);
     if path.is_file() {
-      return Some(direct("tsgo (FERRIDRIVER_TSGO)".to_string(), path));
+      return Some(direct(format!("{TS_PACKAGE_BIN} (FERRIDRIVER_TSC)"), path));
     }
   }
 
-  for name in ["tsgo", "tsc"] {
-    if let Ok(path) = which::which(name) {
-      return Some(direct(name.to_string(), path));
-    }
-    for root in search_roots {
-      let mut dir = Some(root.as_path());
-      while let Some(current) = dir {
-        let candidate = current.join("node_modules/.bin").join(name);
-        if candidate.is_file() {
-          return Some(direct(format!("{name} ({})", candidate.display()), candidate));
-        }
-        dir = current.parent();
+  if let Ok(path) = which::which(TS_PACKAGE_BIN) {
+    return Some(direct(TS_PACKAGE_BIN.to_string(), path));
+  }
+  for root in search_roots {
+    let mut dir = Some(root.as_path());
+    while let Some(current) = dir {
+      let candidate = current.join("node_modules/.bin").join(TS_PACKAGE_BIN);
+      if candidate.is_file() {
+        return Some(direct(format!("{TS_PACKAGE_BIN} ({})", candidate.display()), candidate));
       }
+      dir = current.parent();
     }
   }
 
   if !env_flag("FERRIDRIVER_TS_DOWNLOAD") {
     return None;
   }
-  // `npx --package <pkg> tsgo` names the bin explicitly rather than
+  // `npx --package <pkg> tsc` names the bin explicitly rather than
   // relying on "the package has exactly one bin".
   if let Ok(npx) = which::which("npx") {
     return Some(Checker {
-      label: format!("tsgo (npx {TSGO_PACKAGE})"),
+      label: format!("{TS_PACKAGE_BIN} (npx {TS_PACKAGE})"),
       program: npx,
       leading: vec![
         "--yes".to_string(),
+        "--registry".to_string(),
+        PUBLIC_REGISTRY.to_string(),
         "--package".to_string(),
-        TSGO_PACKAGE.to_string(),
-        "tsgo".to_string(),
+        TS_PACKAGE.to_string(),
+        TS_PACKAGE_BIN.to_string(),
       ],
+      env: Vec::new(),
       fetches: true,
     });
   }
   if let Ok(bunx) = which::which("bunx") {
     return Some(Checker {
-      label: format!("tsgo (bunx {TSGO_PACKAGE})"),
+      label: format!("{TS_PACKAGE_BIN} (bunx {TS_PACKAGE})"),
       program: bunx,
-      leading: vec![TSGO_PACKAGE.to_string()],
+      leading: vec![
+        "--package".to_string(),
+        TS_PACKAGE.to_string(),
+        TS_PACKAGE_BIN.to_string(),
+      ],
+      // bun takes the registry from config, not a flag.
+      env: vec![("BUN_CONFIG_REGISTRY".to_string(), PUBLIC_REGISTRY.to_string())],
       fetches: true,
     });
   }
@@ -172,15 +190,15 @@ pub fn run(entries: &[PathBuf], package_dirs: &[PathBuf], scratch: &Path) -> Typ
 
   let Some(checker) = find_checker(&roots) else {
     return TypecheckOutcome::skipped(format!(
-      "no TypeScript compiler available: none of FERRIDRIVER_TSGO, `tsgo`/`tsc` on PATH, or in a \
-       node_modules/.bin above the extension. Install one (`npm i -D {TSGO_PACKAGE}`), or set \
-       FERRIDRIVER_TS_DOWNLOAD=1 to let `npx`/`bunx` fetch and run it from the registry"
+      "no TypeScript compiler available: none of FERRIDRIVER_TSC, `tsc` on PATH, or in a \
+       node_modules/.bin above the extension. Install one (`npm i -D {TS_PACKAGE}`), or set \
+       FERRIDRIVER_TS_DOWNLOAD=1 to let `npx`/`bunx` fetch and run it from {PUBLIC_REGISTRY}"
     ));
   };
   if checker.fetches {
     // The first run downloads the compiler; without a line here it just
     // looks like the check hung.
-    eprintln!("[ext] fetching {TSGO_PACKAGE} to type-check (first run only; cached afterwards)");
+    eprintln!("[ext] fetching {TS_PACKAGE} from {PUBLIC_REGISTRY} to type-check (first run only; cached afterwards)");
   }
 
   let types_root = scratch.join("types");
@@ -205,6 +223,7 @@ pub fn run(entries: &[PathBuf], package_dirs: &[PathBuf], scratch: &Path) -> Typ
 
   let mut cmd = Command::new(&checker.program);
   cmd.args(&checker.leading);
+  cmd.envs(checker.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
   cmd.arg("--noEmit").arg("-p").arg(&config_path);
   // Diagnostics are printed relative to the compiler's cwd; from the
   // scratch directory every path would come out as `../../private/...`.
