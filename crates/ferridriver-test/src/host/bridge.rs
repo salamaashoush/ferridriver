@@ -14,9 +14,7 @@ use std::time::Duration;
 
 use super::{BridgeFuture, DeadlineControl, SnapshotTarget, SourceMap, TestHostBridge, TestInfoData, TestWorldData};
 use crate::config::BrowserConfig;
-use crate::model::{
-  AttachmentBody, ExpectedStatus, StepCategory, StepHandle, StepLocation, TestAnnotation, TestInfo, TestModifiers,
-};
+use crate::model::{AttachmentBody, ExpectedStatus, StepLocation, TestAnnotation, TestInfo, TestModifiers};
 
 pub struct InfoBridge {
   test_info: Arc<TestInfo>,
@@ -32,9 +30,6 @@ pub struct InfoBridge {
   /// three times this (the worker applies the same multiplier to its
   /// own budget).
   base_timeout: Duration,
-  /// Live step handles keyed by step id (`test.step` nesting). `Arc`
-  /// so the async bridge futures own their handle map access.
-  steps: Arc<Mutex<rustc_hash::FxHashMap<String, StepHandle>>>,
   /// Runtime annotations mirror (sync-readable for the `testInfo`
   /// getter; flushed into `TestInfo` after the body settles).
   annotations: Mutex<Vec<(String, Option<String>)>>,
@@ -45,6 +40,10 @@ pub struct InfoBridge {
   /// Counter behind Playwright's auto-generated snapshot names
   /// (`{title}-{n}`).
   snapshot_counter: AtomicUsize,
+  /// The host's `testInfo.titlePath`, which a step's own title path
+  /// continues. Empty means "the test's own", which is what a host with
+  /// no richer path of its own wants.
+  title_path: Vec<String>,
 }
 
 impl InfoBridge {
@@ -64,12 +63,20 @@ impl InfoBridge {
       source_map,
       cwd,
       base_timeout,
-      steps: Arc::new(Mutex::new(rustc_hash::FxHashMap::default())),
       annotations: Mutex::new(Vec::new()),
       static_annotations,
       attachment_count: AtomicUsize::new(0),
       snapshot_counter: AtomicUsize::new(0),
+      title_path: Vec::new(),
     }
+  }
+
+  /// The title path the host's `testInfo.titlePath` shows, so
+  /// `stepInfo.titlePath` continues the same one.
+  #[must_use]
+  pub fn with_title_path(mut self, title_path: Vec<String>) -> Self {
+    self.title_path = title_path;
+    self
   }
 
   /// `toMatchSnapshot()` / `toHaveScreenshot()` without a name — the
@@ -109,40 +116,70 @@ impl InfoBridge {
     }
     // Close any step left open by a mid-step failure so reporters and
     // the trace never see a dangling span.
-    let open: Vec<(String, StepHandle)> = self
-      .steps
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .drain()
-      .collect();
-    for (_, handle) in open {
-      handle
-        .end(Some("step never completed (test aborted)".to_string()))
-        .await;
-    }
+    self
+      .test_info
+      .close_open_steps("step never completed (test aborted)")
+      .await;
   }
 
   fn remap_location(&self, location: Option<(u32, u32)>) -> Option<StepLocation> {
     let (line, col) = location?;
     let (src, src_line, src_col) = self.source_map.remap(line, col)?;
-    let abs = std::path::Path::new(&src);
-    let file = abs
-      .strip_prefix(self.cwd.as_path())
-      .map_or_else(|_| abs.display().to_string(), |r| r.display().to_string());
     Some(StepLocation {
-      file,
+      file: self.relative(&src),
       line: src_line,
       column: src_col,
     })
   }
+
+  /// Reporters show a path relative to where the run was started, so an
+  /// explicit `{ location }` is normalized the same way a captured
+  /// frame is — otherwise one step names an absolute path and the next
+  /// a relative one.
+  fn relative(&self, file: &str) -> String {
+    let path = std::path::Path::new(file);
+    path
+      .strip_prefix(self.cwd.as_path())
+      .map_or_else(|_| path.display().to_string(), |r| r.display().to_string())
+  }
+}
+
+/// The host's step driver: resolve the host's own coordinates back to
+/// authored source, then let the runner apply every rule.
+impl crate::step::StepDriver for InfoBridge {
+  fn begin_step(&self, mut spec: crate::step::StepSpec) -> crate::step::StepFuture<'_, crate::step::StepStarted> {
+    spec.frames = spec
+      .frames
+      .into_iter()
+      .filter_map(|frame| match frame {
+        crate::step::StepFrame::Host { line, column } => self
+          .remap_location(Some((line, column)))
+          .map(crate::step::StepFrame::Source),
+        source => Some(source),
+      })
+      .collect();
+    if let Some(location) = spec.options.location.as_mut() {
+      location.file = self.relative(&location.file);
+    }
+    self.test_info.begin_step_spec(
+      spec,
+      (!self.title_path.is_empty()).then_some(self.title_path.as_slice()),
+    )
+  }
+
+  fn end_step(&self, step_id: String, outcome: crate::step::StepOutcome) -> crate::step::StepFuture<'_, ()> {
+    crate::step::StepDriver::end_step(&*self.test_info, step_id, outcome)
+  }
 }
 
 impl TestHostBridge for InfoBridge {
-  fn attach(&self, name: String, content_type: String, body: Vec<u8>) -> BridgeFuture<()> {
+  fn attach(&self, name: String, content_type: String, body: Vec<u8>, step_id: Option<String>) -> BridgeFuture<()> {
     let info = Arc::clone(&self.test_info);
     self.attachment_count.fetch_add(1, Ordering::Relaxed);
     Box::pin(async move {
-      info.attach(name, content_type, AttachmentBody::Bytes(body)).await;
+      info
+        .attach_to_step(name, content_type, AttachmentBody::Bytes(body), step_id)
+        .await;
     })
   }
 
@@ -158,37 +195,6 @@ impl TestHostBridge for InfoBridge {
     let mut out = self.static_annotations.clone();
     out.extend(Self::lock(&self.annotations).iter().cloned());
     out
-  }
-
-  fn begin_step(&self, title: String, parent: Option<String>, location: Option<(u32, u32)>) -> BridgeFuture<String> {
-    let info = Arc::clone(&self.test_info);
-    let location = self.remap_location(location);
-    let steps = Arc::clone(&self.steps);
-    Box::pin(async move {
-      let handle = match &parent {
-        Some(p) => info.begin_child_step(title, StepCategory::TestStep, p).await,
-        None => info.begin_step_at(title, StepCategory::TestStep, location).await,
-      };
-      let id = handle.step_id.clone();
-      steps
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(id.clone(), handle);
-      id
-    })
-  }
-
-  fn end_step(&self, step_id: String, error: Option<String>) -> BridgeFuture<()> {
-    let steps = Arc::clone(&self.steps);
-    Box::pin(async move {
-      let handle = steps
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(&step_id);
-      if let Some(handle) = handle {
-        handle.end(error).await;
-      }
-    })
   }
 
   fn record_soft_error(&self, message: String, diff: Option<String>) {

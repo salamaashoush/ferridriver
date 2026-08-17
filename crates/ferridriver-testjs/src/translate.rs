@@ -384,18 +384,24 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
       let world = build_world_data(&pool, &test_info, &p).await?;
 
       let base_timeout = test_info.timeout;
-      let bridge = Arc::new(InfoBridge::new(
-        Arc::clone(&test_info),
-        modifiers,
-        Arc::new(session.session().deadline()),
-        Arc::new(ferridriver_script::BundleSourceMap::new(
-          Arc::clone(&p.bundle),
+      let bridge = Arc::new(
+        InfoBridge::new(
+          Arc::clone(&test_info),
+          modifiers,
+          Arc::new(session.session().deadline()),
+          Arc::new(ferridriver_script::BundleSourceMap::new(
+            Arc::clone(&p.bundle),
+            Arc::clone(&p.cwd),
+          )),
           Arc::clone(&p.cwd),
-        )),
-        Arc::clone(&p.cwd),
-        base_timeout,
-        (*p.static_annotations).clone(),
-      ));
+          base_timeout,
+          (*p.static_annotations).clone(),
+        )
+        // A spec names every `describe` separately, so a step's own title
+        // path continues that rather than the coarser one a `TestId` can
+        // rebuild from its joined suite id.
+        .with_title_path((*p.title_path).clone()),
+      );
 
       // What the body prints is this test's output, from here until the
       // binding drops.

@@ -436,6 +436,7 @@ mod tests {
       status: StepStatus::Passed,
       error: None,
       location: None,
+      annotations: Vec::new(),
       parent_step_id: None,
       metadata: Some(serde_json::json!({ "bdd_keyword": "Given" })),
       steps: Vec::new(),

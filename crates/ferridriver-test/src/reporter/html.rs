@@ -112,6 +112,10 @@ struct HtmlStep {
   duration_ms: u64,
   #[serde(skip_serializing_if = "Option::is_none")]
   error: Option<String>,
+  /// The step's own file — a `.feature` line for BDD, the `test.step`
+  /// call site (or its `{ location }`) otherwise.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  location: Option<String>,
   #[serde(skip_serializing_if = "Vec::is_empty")]
   steps: Vec<HtmlStep>,
 }
@@ -442,6 +446,7 @@ fn serialize_html_steps(steps: &[TestStep]) -> Vec<HtmlStep> {
       status: format!("{:?}", step.status).to_ascii_lowercase(),
       duration_ms: step.duration.as_millis() as u64,
       error: step.error.clone(),
+      location: step.location.as_ref().map(ToString::to_string),
       steps: serialize_html_steps(&step.steps),
     })
     .collect()
@@ -680,7 +685,8 @@ function renderSteps(steps) {
     const mark = step.status === 'passed' ? '<span class="pass">v</span>'
       : step.status === 'failed' ? '<span class="fail">x</span>'
       : '<span class="skip">-</span>';
-    let line = `<div>${mark} ${esc(step.title)} <span class="muted">(${dur(step.duration_ms)})</span></div>`;
+    const where = step.location ? ` <span class="muted">${esc(step.location)}</span>` : '';
+    let line = `<div>${mark} ${esc(step.title)} <span class="muted">(${dur(step.duration_ms)})</span>${where}</div>`;
     if (step.error) line += `<div class="fail" style="margin-left:16px">${esc(step.error)}</div>`;
     if (step.steps && step.steps.length) line += `<div class="step">${renderSteps(step.steps)}</div>`;
     return line;

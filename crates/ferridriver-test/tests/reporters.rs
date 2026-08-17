@@ -270,7 +270,8 @@ mod shapes {
         duration: Duration::from_millis(80),
         status: StepStatus::Failed,
         error: Some("no such button".into()),
-        location: Some("tests/login.spec.ts:19".into()),
+        location: Some(ferridriver_test::model::StepLocation::new("tests/login.spec.ts", 19)),
+        annotations: Vec::new(),
         parent_step_id: None,
         metadata: None,
         steps: Vec::new(),
@@ -280,6 +281,7 @@ mod shapes {
         name: "screenshot".into(),
         content_type: "image/png".into(),
         body: AttachmentBody::Bytes(vec![137, 80, 78, 71]),
+        step_id: None,
       }],
       ..(*outcome(name, TestStatus::Failed, attempt)).clone()
     };
@@ -412,6 +414,7 @@ mod shapes {
       name: "trace".into(),
       content_type: "application/zip".into(),
       body: AttachmentBody::Path(trace),
+      step_id: None,
     });
 
     run_reporters(

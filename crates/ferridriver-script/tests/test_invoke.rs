@@ -257,13 +257,17 @@ test('failing step', async () => {
   .await
   .expect("steps pass");
   let events = bridge.state(|s| s.step_events.clone());
+  // Each step also reports where it was opened. The recorder has no
+  // source map, so the position is the bundle's own — what matters is
+  // that a step is located at all, and that the inner one is a
+  // different line from the outer.
   assert_eq!(
     events,
     [
-      "begin s1 `outer` parent=-",
-      "begin s2 `inner` parent=s1",
-      "end s2 err=-",
-      "end s1 err=-",
+      "begin s1 `outer` parent=- at=bundle.js:4:23",
+      "begin s2 `inner` parent=s1 at=bundle.js:5:14",
+      "end s2 err=- status=Passed",
+      "end s1 err=- status=Passed",
     ]
   );
 

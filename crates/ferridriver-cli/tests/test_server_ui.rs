@@ -49,7 +49,7 @@ fn write_project(root: &std::path::Path) {
      test('renders the heading', async ({ page }) => {\n\
      \x20 await test.step('open the page', async () => {\n\
      \x20   await page.setContent('<h1>hello</h1>');\n\
-     \x20 });\n\
+     \x20 }, { location: { file: 'features/hello.feature', line: 12, column: 3 } });\n\
      \x20 await expect(page.locator('h1')).toHaveText('hello');\n\
      });\n",
   )
@@ -293,11 +293,22 @@ async fn the_ui_lists_runs_and_watches_a_suite() {
 
   // Steps of the run are reported too — the UI's step list and the
   // trace's actions are the same thing keyed by the same ids.
-  assert!(
-    !ui.reports_of("onStepBegin").is_empty(),
-    "no steps reported: {:#?}",
-    ui.reports()
+  let steps = ui.reports_of("onStepBegin");
+  assert!(!steps.is_empty(), "no steps reported: {:#?}", ui.reports());
+
+  // A step names its own file, which need not be the spec's: the
+  // explicit `{ location }` this spec's step carries has to survive all
+  // the way onto the live protocol, or the viewer renders a `.feature`
+  // step as if it were written in the spec.
+  let located = steps
+    .iter()
+    .find(|event| event["params"]["step"]["title"] == "open the page")
+    .expect("the user's step");
+  assert_eq!(
+    located["params"]["step"]["location"]["file"], "features/hello.feature",
+    "step location did not reach onStepBegin: {located:#?}"
   );
+  assert_eq!(located["params"]["step"]["location"]["line"], 12);
 }
 
 #[tokio::test]

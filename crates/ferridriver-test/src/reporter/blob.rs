@@ -26,13 +26,19 @@ use serde::{Deserialize, Serialize};
 
 use super::{Reporter, ReporterEvent, RunStatus, StepFinishedEvent, StepStartedEvent, TestOutputEvent};
 use crate::model::{
-  Attachment, AttachmentBody, ExpectedStatus, StepCategory, StepStatus, TestAnnotation, TestFailure, TestId,
-  TestOutcome, TestStatus, TestStep,
+  Attachment, AttachmentBody, ExpectedStatus, StepCategory, StepLocation, StepStatus, TestAnnotation, TestFailure,
+  TestId, TestOutcome, TestStatus, TestStep,
 };
 
 /// Bumped when the wire shape changes in a way an older reader cannot
 /// handle. Readers accept anything up to their own version.
-const SCHEMA_VERSION: u32 = 2;
+///
+/// 3 turned a step's `location` from a `"file:line"` string into
+/// `{file, line, column}` and added it to `step-started`, plus step
+/// annotations and an attachment's owning step. The reader still takes
+/// the string form, so a merge across the boundary keeps every shard's
+/// step locations.
+const SCHEMA_VERSION: u32 = 3;
 
 /// Wire-format mirror of `ReporterEvent`. Distinct from the runtime
 /// enum so adding a new event variant doesn't break stored blobs and
@@ -67,6 +73,8 @@ pub enum WireEvent {
     parent_step_id: Option<String>,
     title: String,
     category: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    location: Option<WireStepLocation>,
   },
   StepFinished {
     test_id: WireTestId,
@@ -76,6 +84,8 @@ pub enum WireEvent {
     duration_ms: u64,
     error: Option<String>,
     metadata: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    annotations: Vec<TestAnnotation>,
   },
   TestOutput {
     test_id: WireTestId,
@@ -179,6 +189,37 @@ pub struct WireAttachment {
   pub path: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub resource: Option<String>,
+  /// The step it was attached from (`stepInfo.attach`).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub step_id: Option<String>,
+}
+
+/// A step's location on the wire.
+///
+/// Schema 2 and older wrote `"file:line"`; schema 3 writes the object
+/// Playwright's `Location` has. Both are read, so `merge-reports` over
+/// shards written by different builds keeps every location it is given.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WireStepLocation {
+  Structured(StepLocation),
+  Legacy(String),
+}
+
+impl From<StepLocation> for WireStepLocation {
+  fn from(location: StepLocation) -> Self {
+    Self::Structured(location)
+  }
+}
+
+impl WireStepLocation {
+  #[must_use]
+  pub fn into_runtime(self) -> Option<StepLocation> {
+    match self {
+      Self::Structured(location) => Some(location),
+      Self::Legacy(text) => StepLocation::parse(&text),
+    }
+  }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,7 +232,9 @@ pub struct WireStep {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub location: Option<String>,
+  pub location: Option<WireStepLocation>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub annotations: Vec<TestAnnotation>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub parent_step_id: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -284,7 +327,8 @@ fn wire_steps(steps: &[TestStep]) -> Vec<WireStep> {
       duration_ms: u64::try_from(s.duration.as_millis()).unwrap_or(u64::MAX),
       status: step_status_str(s.status).to_string(),
       error: s.error.clone(),
-      location: s.location.clone(),
+      location: s.location.clone().map(WireStepLocation::from),
+      annotations: s.annotations.clone(),
       parent_step_id: s.parent_step_id.clone(),
       metadata: s.metadata.clone(),
       steps: wire_steps(&s.steps),
@@ -302,7 +346,8 @@ fn runtime_steps(steps: Vec<WireStep>) -> Vec<TestStep> {
       duration: Duration::from_millis(s.duration_ms),
       status: parse_step_status(&s.status),
       error: s.error,
-      location: s.location,
+      location: s.location.and_then(WireStepLocation::into_runtime),
+      annotations: s.annotations,
       parent_step_id: s.parent_step_id,
       metadata: s.metadata,
       steps: runtime_steps(s.steps),
@@ -335,12 +380,14 @@ impl WireOutcome {
             content_type: a.content_type.clone(),
             path: Some(path.display().to_string()),
             resource: None,
+            step_id: a.step_id.clone(),
           },
           AttachmentBody::Bytes(bytes) => WireAttachment {
             name: a.name.clone(),
             content_type: a.content_type.clone(),
             path: None,
             resource: sink.store(&a.name, &a.content_type, bytes),
+            step_id: a.step_id.clone(),
           },
         })
         .collect(),
@@ -381,6 +428,7 @@ impl WireOutcome {
             name: a.name,
             content_type: a.content_type,
             body,
+            step_id: a.step_id,
           })
         })
         .collect(),
@@ -454,6 +502,7 @@ impl WireEvent {
         parent_step_id: s.parent_step_id.clone(),
         title: s.title.clone(),
         category: step_category_str(&s.category).to_string(),
+        location: s.location.clone().map(WireStepLocation::from),
       },
       ReporterEvent::StepFinished(s) => Self::StepFinished {
         test_id: (&s.test_id).into(),
@@ -463,6 +512,7 @@ impl WireEvent {
         duration_ms: u64::try_from(s.duration.as_millis()).unwrap_or(u64::MAX),
         error: s.error.clone(),
         metadata: s.metadata.clone(),
+        annotations: s.annotations.clone(),
       },
       ReporterEvent::TestOutput(o) => Self::TestOutput {
         test_id: (&o.test_id).into(),
@@ -529,12 +579,14 @@ impl WireEvent {
         parent_step_id,
         title,
         category,
+        location,
       } => ReporterEvent::StepStarted(Arc::new(StepStartedEvent {
         test_id: test_id.into(),
         step_id,
         parent_step_id,
         title,
         category: parse_step_category(&category),
+        location: location.and_then(WireStepLocation::into_runtime),
       })),
       Self::StepFinished {
         test_id,
@@ -544,6 +596,7 @@ impl WireEvent {
         duration_ms,
         error,
         metadata,
+        annotations,
       } => ReporterEvent::StepFinished(Arc::new(StepFinishedEvent {
         test_id: test_id.into(),
         step_id,
@@ -552,6 +605,7 @@ impl WireEvent {
         duration: Duration::from_millis(duration_ms),
         error,
         metadata,
+        annotations,
       })),
       Self::TestOutput { test_id, stderr, text } => ReporterEvent::TestOutput(Arc::new(TestOutputEvent {
         test_id: test_id.into(),
@@ -911,6 +965,7 @@ mod tests {
         name: "shot".into(),
         content_type: "image/png".into(),
         body: AttachmentBody::Bytes(vec![9, 9, 9]),
+        step_id: None,
       }],
       steps: vec![TestStep {
         step_id: "s1".into(),
@@ -919,7 +974,8 @@ mod tests {
         duration: Duration::from_millis(5),
         status: StepStatus::Failed,
         error: Some("nope".into()),
-        location: Some("a.spec.ts:10".into()),
+        location: Some(StepLocation::new("a.spec.ts", 10)),
+        annotations: Vec::new(),
         parent_step_id: None,
         metadata: None,
         steps: vec![TestStep {
@@ -930,6 +986,7 @@ mod tests {
           status: StepStatus::Passed,
           error: None,
           location: None,
+          annotations: Vec::new(),
           parent_step_id: Some("s1".into()),
           metadata: None,
           steps: Vec::new(),

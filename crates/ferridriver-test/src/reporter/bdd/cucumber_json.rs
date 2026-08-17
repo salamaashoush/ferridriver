@@ -174,6 +174,7 @@ mod tests {
       status,
       error: error.map(ToString::to_string),
       location: None,
+      annotations: Vec::new(),
       parent_step_id: None,
       // The translator stores the keyword trimmed (`translate.rs`:
       // `step.keyword.trim()`); the reporter re-adds the separating space.

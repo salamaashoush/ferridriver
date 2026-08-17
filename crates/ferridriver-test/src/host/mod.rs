@@ -38,16 +38,17 @@ pub enum SnapshotTarget {
 /// [`bridge::InfoBridge`] is the implementation every host
 /// uses; the trait exists so a host can be driven in a test with a
 /// recorder in its place.
-pub trait TestHostBridge: Send + Sync {
-  fn attach(&self, name: String, content_type: String, body: Vec<u8>) -> BridgeFuture<()>;
+///
+/// Steps come through [`crate::step::StepDriver`], which the runner
+/// implements too: `test.step`'s options, its location rule and its
+/// timeout are core rules, and a host only hands over a body to run.
+pub trait TestHostBridge: crate::step::StepDriver {
+  /// `testInfo.attach` / `stepInfo.attach` — `step_id` names the step
+  /// the attachment belongs to, when a step made it.
+  fn attach(&self, name: String, content_type: String, body: Vec<u8>, step_id: Option<String>) -> BridgeFuture<()>;
   fn attachment_count(&self) -> usize;
   fn annotate(&self, kind: String, description: Option<String>);
   fn annotations(&self) -> Vec<(String, Option<String>)>;
-  /// Open a live reporter/trace step; returns the step id.
-  /// `location` is the host's own `line:col`, remapped by the bridge
-  /// through the host's [`SourceMap`].
-  fn begin_step(&self, title: String, parent: Option<String>, location: Option<(u32, u32)>) -> BridgeFuture<String>;
-  fn end_step(&self, step_id: String, error: Option<String>) -> BridgeFuture<()>;
   /// Record a soft assertion failure. Synchronous: the value matchers
   /// have no `await` to spend, and the rule that a soft failure is
   /// recorded rather than thrown lives in `ferridriver_expect::soft`.

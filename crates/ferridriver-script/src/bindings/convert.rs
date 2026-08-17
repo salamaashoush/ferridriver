@@ -38,6 +38,29 @@ pub fn ferri_throw(ctx: &Ctx<'_>, e: &FerriError) -> rquickjs::Error {
 /// message and a fixed name.
 pub use ferridriver_jsstd::node::throw_named;
 
+/// [`throw_named`] with the `stack` the thrower decided on, rather than
+/// the one the engine captured at the `Error` construction site.
+///
+/// A boxed `test.step` re-attributes its failure to the line that called
+/// the step (`ferridriver_test::step::boxed_error_stack`), and that
+/// stack is what the user catches and what every report prints.
+pub fn throw_named_with_stack(ctx: &Ctx<'_>, name: &str, message: String, stack: Option<String>) -> rquickjs::Error {
+  let Some(stack) = stack else {
+    return throw_named(ctx, name, message);
+  };
+  let built: rquickjs::Result<Value<'_>> = (|| {
+    let ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("Error")?;
+    let err: Object<'_> = ctor.construct((message.as_str(),))?;
+    err.set("name", name)?;
+    err.set("stack", stack)?;
+    Ok(err.into_value())
+  })();
+  match built {
+    Ok(v) => ctx.throw(v),
+    Err(_) => throw_named(ctx, name, message),
+  }
+}
+
 /// Adapter: `Result<T, FerriError>` into `rquickjs::Result<T>` with a
 /// properly-named thrown `Error` (see [`ferri_throw`]). Preferred over
 /// [`FerriResultExt::into_js`] wherever a `Ctx` is in scope.

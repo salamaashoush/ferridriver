@@ -9,6 +9,7 @@
 use std::sync::Mutex;
 
 use ferridriver_test::host::{BridgeFuture, SnapshotTarget, TestHostBridge};
+use ferridriver_test::step::{StepFrame, StepFuture, StepOutcome, StepSpec, StepStarted};
 
 #[derive(Default)]
 pub struct MockBridgeState {
@@ -23,6 +24,12 @@ pub struct MockBridgeState {
   pub slow: bool,
   pub timeout_override: Option<u64>,
   pub next_step_id: u32,
+  /// Ids of the steps open right now, outermost first.
+  pub open: Vec<String>,
+  pub open_titles: Vec<String>,
+  pub boxed: Vec<Vec<ferridriver_test::model::StepLocation>>,
+  pub step_annotations: Vec<String>,
+  pub step_attachments: Vec<String>,
   pub snapshot_calls: Vec<String>,
 }
 
@@ -35,9 +42,80 @@ impl MockBridge {
   }
 }
 
+/// The recorder's step driver: same rules as the runner's (they are
+/// core's), only the sink is a string log.
+impl ferridriver_test::step::StepDriver for MockBridge {
+  fn begin_step(&self, spec: StepSpec) -> StepFuture<'_, StepStarted> {
+    let frames: Vec<ferridriver_test::model::StepLocation> = spec
+      .frames
+      .iter()
+      .map(|f| match f {
+        StepFrame::Source(loc) => loc.clone(),
+        StepFrame::Host { line, column } => ferridriver_test::model::StepLocation {
+          file: "bundle.js".to_string(),
+          line: *line,
+          column: *column,
+        },
+      })
+      .collect();
+    let started = self.state(|s| {
+      s.next_step_id += 1;
+      let step_id = format!("s{}", s.next_step_id);
+      let parent = s.open.last().cloned();
+      let (location, boxed_stack) = ferridriver_test::step::resolve_location(
+        &spec.options,
+        &frames,
+        s.boxed.last().map_or(&[][..], |b| b.as_slice()),
+      );
+      s.steps.push(spec.title.clone());
+      s.step_events.push(format!(
+        "begin {step_id} `{}` parent={} at={}",
+        spec.title,
+        parent.as_deref().unwrap_or("-"),
+        location.as_ref().map_or_else(|| "-".to_string(), ToString::to_string)
+      ));
+      let mut title_path: Vec<String> = s.open_titles.clone();
+      title_path.push(spec.title.clone());
+      s.open.push(step_id.clone());
+      s.open_titles.push(spec.title);
+      s.boxed.push(boxed_stack.clone());
+      StepStarted {
+        step_id,
+        location,
+        boxed_stack,
+        title_path,
+      }
+    });
+    Box::pin(async move { started })
+  }
+
+  fn end_step(&self, step_id: String, outcome: StepOutcome) -> StepFuture<'_, ()> {
+    self.state(|s| {
+      if let Some(at) = s.open.iter().position(|id| *id == step_id) {
+        s.open.remove(at);
+        s.open_titles.remove(at);
+        s.boxed.remove(at);
+      }
+      s.step_events.push(format!(
+        "end {step_id} err={} status={:?}",
+        outcome.error.as_deref().unwrap_or("-"),
+        outcome.status
+      ));
+      s.step_annotations
+        .extend(outcome.annotations.iter().map(|a| format!("{a:?}")));
+    });
+    Box::pin(async {})
+  }
+}
+
 impl TestHostBridge for MockBridge {
-  fn attach(&self, name: String, content_type: String, body: Vec<u8>) -> BridgeFuture<()> {
-    self.state(|s| s.attachments.push((name, content_type, body)));
+  fn attach(&self, name: String, content_type: String, body: Vec<u8>, step_id: Option<String>) -> BridgeFuture<()> {
+    self.state(|s| {
+      s.attachments.push((name, content_type, body));
+      if let Some(step_id) = step_id {
+        s.step_attachments.push(step_id);
+      }
+    });
     Box::pin(async {})
   }
 
@@ -51,28 +129,6 @@ impl TestHostBridge for MockBridge {
 
   fn annotations(&self) -> Vec<(String, Option<String>)> {
     self.state(|s| s.annotations.clone())
-  }
-
-  fn begin_step(&self, title: String, parent: Option<String>, _location: Option<(u32, u32)>) -> BridgeFuture<String> {
-    let id = self.state(|s| {
-      s.next_step_id += 1;
-      let id = format!("s{}", s.next_step_id);
-      s.steps.push(title.clone());
-      s.step_events.push(format!(
-        "begin {id} `{title}` parent={}",
-        parent.as_deref().unwrap_or("-")
-      ));
-      id
-    });
-    Box::pin(async move { id })
-  }
-
-  fn end_step(&self, step_id: String, error: Option<String>) -> BridgeFuture<()> {
-    self.state(|s| {
-      s.step_events
-        .push(format!("end {step_id} err={}", error.as_deref().unwrap_or("-")));
-    });
-    Box::pin(async {})
   }
 
   fn record_soft_error(&self, message: String, _diff: Option<String>) {

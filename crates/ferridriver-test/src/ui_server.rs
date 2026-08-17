@@ -782,6 +782,9 @@ pub fn reporter_event_to_json(event: &ReporterEvent, artifacts_root: &Path) -> s
       "parentStepId": step.parent_step_id,
       "title": step.title,
       "category": step.category.to_string(),
+      // The step's own file — a `.feature` line for BDD, the call site
+      // for `test.step`.
+      "location": step.location.as_ref().map(ToString::to_string),
     }),
     ReporterEvent::StepFinished(step) => serde_json::json!({
       "type": "stepFinished",
@@ -1030,6 +1033,7 @@ mod tests {
         name: "trace".into(),
         content_type: "application/zip".into(),
         body: AttachmentBody::Path(trace_path),
+        step_id: None,
       }],
       ..Default::default()
     });
@@ -1081,6 +1085,7 @@ mod tests {
       parent_step_id: None,
       title: "Given a blank page".into(),
       category: crate::model::StepCategory::TestStep,
+      location: None,
     }));
     let json = reporter_event_to_json(&started, Path::new("/tmp"));
     assert_eq!(json["type"].as_str(), Some("stepStarted"));
@@ -1096,6 +1101,7 @@ mod tests {
       duration: Duration::from_millis(88),
       error: Some("boom".into()),
       metadata: None,
+      annotations: Vec::new(),
     }));
     let json = reporter_event_to_json(&finished, Path::new("/tmp"));
     assert_eq!(json["type"].as_str(), Some("stepFinished"));

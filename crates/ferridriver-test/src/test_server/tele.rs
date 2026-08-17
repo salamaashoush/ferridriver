@@ -25,7 +25,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::config::TestConfig;
-use crate::model::{TestAnnotation, TestId, TestOutcome, TestPlan, TestStatus};
+use crate::model::{StepLocation, TestAnnotation, TestId, TestOutcome, TestPlan, TestStatus};
 
 /// Result id for one attempt of a test — the receiver keys a result by
 /// it, so retries must not collide.
@@ -311,6 +311,11 @@ fn errors(outcome: &TestOutcome) -> Vec<Value> {
 }
 
 /// `onStepBegin`: a step of the running attempt.
+///
+/// `location` is the step's own file — Playwright's
+/// `JsonTestStepStart.location` (`isomorphic/teleReceiver.ts:107-114`) —
+/// which for a BDD step or an explicit `test.step(…, { location })` is
+/// not the spec's.
 #[must_use]
 pub fn step_begin(
   test_id: &str,
@@ -320,32 +325,57 @@ pub fn step_begin(
   title: &str,
   category: &str,
   start_wall_ms: f64,
+  location: Option<&StepLocation>,
 ) -> Value {
+  let mut step = json!({
+    "id": step_id,
+    "parentStepId": parent_step_id,
+    "title": title,
+    "category": category,
+    "startTime": start_wall_ms,
+  });
+  if let Some(location) = location {
+    step["location"] = step_location(location);
+  }
   json!({
     "method": "onStepBegin",
     "params": {
       "testId": test_id,
       "resultId": result_id(test_id, attempt),
-      "step": {
-        "id": step_id,
-        "parentStepId": parent_step_id,
-        "title": title,
-        "category": category,
-        "startTime": start_wall_ms,
-      },
+      "step": step,
     },
   })
 }
 
-/// `onStepEnd`: how long the step took, and whether it failed.
+/// A `Location` as the viewer reads it.
+fn step_location(location: &StepLocation) -> Value {
+  json!({
+    "file": location.file,
+    "line": location.line,
+    "column": location.column,
+  })
+}
+
+/// `onStepEnd`: how long the step took, whether it failed, and what it
+/// annotated itself with (`stepInfo.skip()`).
 #[must_use]
-pub fn step_end(test_id: &str, attempt: u32, step_id: &str, duration: Duration, error: Option<&str>) -> Value {
+pub fn step_end(
+  test_id: &str,
+  attempt: u32,
+  step_id: &str,
+  duration: Duration,
+  error: Option<&str>,
+  annotations: &[TestAnnotation],
+) -> Value {
   let mut step = json!({
     "id": step_id,
     "duration": duration.as_millis() as u64,
   });
   if let Some(error) = error {
     step["error"] = json!({ "message": error });
+  }
+  if !annotations.is_empty() {
+    step["annotations"] = Value::Array(annotation_values(annotations));
   }
   json!({
     "method": "onStepEnd",
@@ -617,12 +647,37 @@ mod tests {
 
   #[test]
   fn steps_carry_their_result_and_parent() {
-    let begin = step_begin("t1", 1, "s2", Some("s1"), "click", "test.step", 10.0);
+    let begin = step_begin(
+      "t1",
+      1,
+      "s2",
+      Some("s1"),
+      "click",
+      "test.step",
+      10.0,
+      Some(&StepLocation::new("features/checkout.feature", 12)),
+    );
     assert_eq!(begin["params"]["resultId"], "t1-attempt1");
     assert_eq!(begin["params"]["step"]["parentStepId"], "s1");
-    let end = step_end("t1", 1, "s2", Duration::from_millis(88), Some("boom"));
+    // A step may name a file the spec does not, and the viewer reads it
+    // from here.
+    assert_eq!(begin["params"]["step"]["location"]["file"], "features/checkout.feature");
+    assert_eq!(begin["params"]["step"]["location"]["line"], 12);
+    let annotations = [TestAnnotation::Info {
+      type_name: "skip".into(),
+      description: "not on webkit".into(),
+    }];
+    let end = step_end("t1", 1, "s2", Duration::from_millis(88), Some("boom"), &annotations);
     assert_eq!(end["params"]["step"]["duration"], 88);
     assert_eq!(end["params"]["step"]["error"]["message"], "boom");
+    assert_eq!(end["params"]["step"]["annotations"][0]["type"], "skip");
+    assert_eq!(end["params"]["step"]["annotations"][0]["description"], "not on webkit");
+  }
+
+  #[test]
+  fn a_step_without_a_location_omits_the_key() {
+    let begin = step_begin("t1", 1, "s1", None, "click", "test.step", 10.0, None);
+    assert!(begin["params"]["step"].get("location").is_none());
   }
 
   #[test]
@@ -632,11 +687,13 @@ mod tests {
       name: "trace".into(),
       content_type: "application/zip".into(),
       body: crate::model::AttachmentBody::Path(PathBuf::from("/repo/test-results/t/trace.zip")),
+      step_id: None,
     });
     with_trace.attachments.push(crate::model::Attachment {
       name: "note".into(),
       content_type: "text/plain".into(),
       body: crate::model::AttachmentBody::Bytes(b"hi".to_vec()),
+      step_id: None,
     });
     let event = attach("t1", &with_trace);
     let attachments = event["params"]["attachments"].as_array().expect("attachments");

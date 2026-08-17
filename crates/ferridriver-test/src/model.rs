@@ -463,6 +463,10 @@ pub struct TestInfo {
   /// step_id -> trace call id, so child steps nest under their parent
   /// in the trace viewer's action tree.
   pub trace_step_calls: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, String>>>,
+  /// Steps opened through [`crate::step::StepDriver`] and not yet
+  /// ended, outermost first — where a nested `test.step` finds its
+  /// parent, its title path and the box it inherits.
+  pub open_steps: Arc<Mutex<Vec<OpenStep>>>,
   /// What the test itself printed. A spec's `console.log` belongs to the
   /// test that ran it, not to the process — reporters, the HTML report
   /// and the UI's terminal all read it back off the outcome. A plain
@@ -540,6 +544,7 @@ impl TestInfo {
       annotations: Arc::new(Mutex::new(Vec::new())),
       trace_composite: Arc::new(std::sync::Mutex::new(None)),
       trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+      open_steps: Arc::new(Mutex::new(Vec::new())),
       output: Arc::new(std::sync::Mutex::new(TestOutput::default())),
     }
   }
@@ -579,11 +584,24 @@ impl TestInfo {
   }
   /// Add an attachment to this test.
   pub async fn attach(&self, name: String, content_type: String, body: AttachmentBody) {
+    self.attach_to_step(name, content_type, body, None).await;
+  }
+
+  /// [`Self::attach`] from inside a step (`stepInfo.attach`), so a
+  /// report can show the attachment under the step that produced it.
+  pub async fn attach_to_step(
+    &self,
+    name: String,
+    content_type: String,
+    body: AttachmentBody,
+    step_id: Option<String>,
+  ) {
     let mut attachments = self.attachments.lock().await;
     attachments.push(Attachment {
       name,
       content_type,
       body,
+      step_id,
     });
   }
 
@@ -651,40 +669,7 @@ impl TestInfo {
     category: StepCategory,
     location: Option<StepLocation>,
   ) -> StepHandle {
-    let title = title.into();
-    let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
-
-    if let Some(bus) = &self.event_bus {
-      bus.emit(crate::reporter::ReporterEvent::StepStarted(Arc::new(
-        crate::reporter::StepStartedEvent {
-          test_id: self.test_id.clone(),
-          step_id: step_id.clone(),
-          parent_step_id: None,
-          title: title.clone(),
-          category: category.clone(),
-        },
-      )));
-    }
-
-    let trace_span = self.open_step_span(&step_id, &title, &category, None, Duration::ZERO, location.as_ref());
-    let trace_prev_parent = match trace_span.as_ref() {
-      Some(span) => TraceParentGuard::RestoreTo(span.make_current_parent()),
-      None => TraceParentGuard::NotCurrent,
-    };
-    StepHandle {
-      step_id,
-      test_id: self.test_id.clone(),
-      title,
-      category,
-      parent_step_id: None,
-      start: Instant::now(),
-      metadata: None,
-      location,
-      event_bus: self.event_bus.clone(),
-      steps: Arc::clone(&self.steps),
-      trace_span,
-      trace_prev_parent,
-    }
+    self.open_step(title, category, None, location)
   }
 
   /// Begin a nested step (child of a parent step).
@@ -694,6 +679,30 @@ impl TestInfo {
     category: StepCategory,
     parent_step_id: &str,
   ) -> StepHandle {
+    self.open_step(title, category, Some(parent_step_id), None)
+  }
+
+  /// [`Self::begin_child_step`] with the child's own source location.
+  pub async fn begin_child_step_at(
+    &self,
+    title: impl Into<String>,
+    category: StepCategory,
+    parent_step_id: &str,
+    location: Option<StepLocation>,
+  ) -> StepHandle {
+    self.open_step(title, category, Some(parent_step_id), location)
+  }
+
+  /// The one place a live step is opened: allocates the id, streams
+  /// `StepStarted` (with the location, which reporters and the
+  /// test-server protocol carry) and opens the mirrored trace span.
+  fn open_step(
+    &self,
+    title: impl Into<String>,
+    category: StepCategory,
+    parent_step_id: Option<&str>,
+    location: Option<StepLocation>,
+  ) -> StepHandle {
     let title = title.into();
     let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
 
@@ -702,14 +711,22 @@ impl TestInfo {
         crate::reporter::StepStartedEvent {
           test_id: self.test_id.clone(),
           step_id: step_id.clone(),
-          parent_step_id: Some(parent_step_id.to_string()),
+          parent_step_id: parent_step_id.map(ToString::to_string),
           title: title.clone(),
           category: category.clone(),
+          location: location.clone(),
         },
       )));
     }
 
-    let trace_span = self.open_step_span(&step_id, &title, &category, Some(parent_step_id), Duration::ZERO, None);
+    let trace_span = self.open_step_span(
+      &step_id,
+      &title,
+      &category,
+      parent_step_id,
+      Duration::ZERO,
+      location.as_ref(),
+    );
     let trace_prev_parent = match trace_span.as_ref() {
       Some(span) => TraceParentGuard::RestoreTo(span.make_current_parent()),
       None => TraceParentGuard::NotCurrent,
@@ -719,10 +736,11 @@ impl TestInfo {
       test_id: self.test_id.clone(),
       title,
       category,
-      parent_step_id: Some(parent_step_id.to_string()),
+      parent_step_id: parent_step_id.map(ToString::to_string),
       start: Instant::now(),
       metadata: None,
-      location: None,
+      location,
+      annotations: Vec::new(),
       event_bus: self.event_bus.clone(),
       steps: Arc::clone(&self.steps),
       trace_span,
@@ -751,6 +769,7 @@ impl TestInfo {
           parent_step_id: None,
           title: title.clone(),
           category: category.clone(),
+          location: None,
         },
       )));
       bus.emit(crate::reporter::ReporterEvent::StepFinished(Arc::new(
@@ -762,6 +781,7 @@ impl TestInfo {
           duration,
           error: error.clone(),
           metadata: metadata.clone(),
+          annotations: Vec::new(),
         },
       )));
     }
@@ -778,6 +798,7 @@ impl TestInfo {
       status,
       error,
       location: None,
+      annotations: Vec::new(),
       parent_step_id: None,
       metadata,
       steps: Vec::new(),
@@ -846,10 +867,15 @@ impl TestInfo {
 
 /// Source location of a step (`file` + 1-based `line`), e.g. the BDD
 /// step's `.feature` line or a `test.step` call site.
-#[derive(Debug, Clone)]
+///
+/// The file is the step's own, not its test's: an explicit
+/// `test.step(title, body, { location })` and every BDD step name a
+/// file the spec does not.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StepLocation {
   pub file: String,
   pub line: u32,
+  #[serde(default)]
   pub column: u32,
 }
 
@@ -862,6 +888,24 @@ impl StepLocation {
       column: 0,
     }
   }
+
+  /// Read back the `file:line` form older blob reports stored, so a
+  /// merge across a version boundary keeps the location it has.
+  #[must_use]
+  pub fn parse(text: &str) -> Option<Self> {
+    let (file, line) = text.rsplit_once(':')?;
+    Some(Self::new(file, line.parse().ok()?))
+  }
+}
+
+impl fmt::Display for StepLocation {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    if self.column > 0 {
+      write!(f, "{}:{}:{}", self.file, self.line, self.column)
+    } else {
+      write!(f, "{}:{}", self.file, self.line)
+    }
+  }
 }
 
 /// Trace `action.method` for a step category (the viewer's fallback
@@ -872,6 +916,111 @@ fn trace_method_for_category(category: &StepCategory) -> &'static str {
     StepCategory::Expect => "expect",
     StepCategory::Fixture => "fixture",
     StepCategory::Hook => "hook",
+  }
+}
+
+/// A step that is open right now.
+pub struct OpenStep {
+  handle: StepHandle,
+  title: String,
+  /// Frames an error raised inside it is re-attributed to, inherited by
+  /// every step opened while it is open.
+  boxed_stack: Vec<StepLocation>,
+}
+
+/// The runner is the step driver: `#[ferritest]` Rust tests reach it
+/// directly, and both JS hosts reach it through the bridge, so one set
+/// of rules decides every step's id, parent, location and title path.
+impl crate::step::StepDriver for TestInfo {
+  fn begin_step(&self, spec: crate::step::StepSpec) -> crate::step::StepFuture<'_, crate::step::StepStarted> {
+    self.begin_step_spec(spec, None)
+  }
+
+  fn end_step(&self, step_id: String, outcome: crate::step::StepOutcome) -> crate::step::StepFuture<'_, ()> {
+    Box::pin(async move {
+      let open = {
+        let mut open = self.open_steps.lock().await;
+        open
+          .iter()
+          .position(|s| s.handle.step_id == step_id)
+          .map(|at| open.remove(at))
+      };
+      let Some(mut open) = open else { return };
+      open.handle.annotations = outcome.annotations;
+      match outcome.status {
+        StepStatus::Skipped => open.handle.skip(outcome.error).await,
+        StepStatus::Pending => open.handle.pending(outcome.error).await,
+        StepStatus::Passed | StepStatus::Failed => open.handle.end(outcome.error).await,
+      }
+    })
+  }
+}
+
+impl TestInfo {
+  /// Open a step, with the title path its host shows for the test.
+  ///
+  /// `title_base` is the host's `testInfo.titlePath` when the host has
+  /// its own (a JS spec names each `describe` separately, while a
+  /// `TestId`'s suite is one joined string); `None` continues the
+  /// test's own path.
+  pub fn begin_step_spec<'a>(
+    &'a self,
+    spec: crate::step::StepSpec,
+    title_base: Option<&'a [String]>,
+  ) -> crate::step::StepFuture<'a, crate::step::StepStarted> {
+    Box::pin(async move {
+      let frames: Vec<StepLocation> = spec
+        .frames
+        .iter()
+        .filter_map(|f| match f {
+          // Host coordinates only reach here unresolved when the host
+          // has no source map for them; they name nothing on disk.
+          crate::step::StepFrame::Host { .. } => None,
+          crate::step::StepFrame::Source(loc) => Some(loc.clone()),
+        })
+        .collect();
+      let mut open = self.open_steps.lock().await;
+      let parent_boxed = open.last().map(|s| s.boxed_stack.clone()).unwrap_or_default();
+      let (location, boxed_stack) = crate::step::resolve_location(&spec.options, &frames, &parent_boxed);
+
+      let mut title_path = title_base.map_or_else(|| self.title_path.clone(), <[String]>::to_vec);
+      title_path.extend(open.iter().map(|s| s.title.clone()));
+      title_path.push(spec.title.clone());
+
+      let handle = match open.last().map(|s| s.handle.step_id.clone()) {
+        Some(parent) => {
+          self
+            .begin_child_step_at(spec.title.clone(), spec.category, &parent, location.clone())
+            .await
+        },
+        None => {
+          self
+            .begin_step_at(spec.title.clone(), spec.category, location.clone())
+            .await
+        },
+      };
+      let started = crate::step::StepStarted {
+        step_id: handle.step_id.clone(),
+        location,
+        boxed_stack: boxed_stack.clone(),
+        title_path,
+      };
+      open.push(OpenStep {
+        handle,
+        title: spec.title,
+        boxed_stack,
+      });
+      started
+    })
+  }
+
+  /// Close every step still open, so a body that failed mid-step leaves
+  /// no dangling reporter event or trace span behind.
+  pub async fn close_open_steps(&self, reason: &str) {
+    let open: Vec<OpenStep> = self.open_steps.lock().await.drain(..).collect();
+    for step in open.into_iter().rev() {
+      step.handle.end(Some(reason.to_string())).await;
+    }
   }
 }
 
@@ -915,6 +1064,8 @@ pub struct StepHandle {
   pub metadata: Option<serde_json::Value>,
   /// Source location recorded into [`TestStep::location`].
   pub location: Option<StepLocation>,
+  /// Annotations recorded into [`TestStep::annotations`].
+  pub annotations: Vec<TestAnnotation>,
   event_bus: Option<EventBus>,
   steps: Arc<Mutex<Vec<TestStep>>>,
   /// Mirrored trace action, open while the step runs.
@@ -927,48 +1078,12 @@ pub struct StepHandle {
 impl StepHandle {
   /// Complete this step. Pass `None` for success, `Some(msg)` for failure.
   pub async fn end(self, error: Option<String>) {
-    let duration = self.start.elapsed();
     let status = if error.is_some() {
       StepStatus::Failed
     } else {
       StepStatus::Passed
     };
-    if let Some(span) = self.trace_span {
-      match self.trace_prev_parent {
-        TraceParentGuard::RestoreTo(previous) => span.finish_message_restoring(error.clone(), previous),
-        TraceParentGuard::NotCurrent => span.finish_message(error.clone()),
-      }
-    }
-
-    // Emit real-time event.
-    if let Some(bus) = &self.event_bus {
-      bus.emit(crate::reporter::ReporterEvent::StepFinished(Arc::new(
-        crate::reporter::StepFinishedEvent {
-          test_id: self.test_id.clone(),
-          step_id: self.step_id.clone(),
-          title: self.title.clone(),
-          category: self.category.clone(),
-          duration,
-          error: error.clone(),
-          metadata: self.metadata.clone(),
-        },
-      )));
-    }
-
-    // Push to batch step list (for TestOutcome.steps).
-    let step = TestStep {
-      step_id: self.step_id,
-      title: self.title,
-      category: self.category,
-      duration,
-      status,
-      error,
-      location: self.location.map(|l| format!("{}:{}", l.file, l.line)),
-      parent_step_id: self.parent_step_id,
-      metadata: self.metadata.clone(),
-      steps: Vec::new(),
-    };
-    self.steps.lock().await.push(step);
+    self.finish_with_status(status, error).await;
   }
 
   /// Complete this step as skipped.
@@ -1000,6 +1115,7 @@ impl StepHandle {
           duration,
           error: error.clone(),
           metadata: self.metadata.clone(),
+          annotations: self.annotations.clone(),
         },
       )));
     }
@@ -1011,7 +1127,8 @@ impl StepHandle {
       duration,
       status,
       error,
-      location: self.location.map(|l| format!("{}:{}", l.file, l.line)),
+      location: self.location,
+      annotations: self.annotations,
       parent_step_id: self.parent_step_id,
       metadata: self.metadata,
       steps: Vec::new(),
@@ -1033,8 +1150,11 @@ pub struct TestStep {
   /// Step completion status.
   pub status: StepStatus,
   pub error: Option<String>,
-  /// Source location (e.g., "file.rs:42" or "feature.feature:10").
-  pub location: Option<String>,
+  /// Where the step happened — its own file, which need not be the
+  /// test's (`test.step(…, { location })`, a `.feature` line).
+  pub location: Option<StepLocation>,
+  /// Annotations the step recorded while it ran (`step.skip()`).
+  pub annotations: Vec<TestAnnotation>,
   /// Parent step ID for nesting.
   pub parent_step_id: Option<String>,
   /// Arbitrary metadata for domain-specific extensions (e.g., BDD keyword, tags).
@@ -1474,6 +1594,8 @@ pub struct Attachment {
   pub name: String,
   pub content_type: String,
   pub body: AttachmentBody,
+  /// The step that produced it (`stepInfo.attach`), when one did.
+  pub step_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

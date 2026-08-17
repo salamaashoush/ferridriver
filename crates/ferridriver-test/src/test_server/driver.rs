@@ -597,6 +597,7 @@ async fn forward_run(
           &step.title,
           &step.category.to_string(),
           wall_ms(),
+          step.location.as_ref(),
         ));
       },
       ReporterEvent::StepFinished(step) => {
@@ -608,6 +609,7 @@ async fn forward_run(
           &step.step_id,
           step.duration,
           step.error.as_deref(),
+          &step.annotations,
         ));
       },
       ReporterEvent::TestFinished { outcome } => {

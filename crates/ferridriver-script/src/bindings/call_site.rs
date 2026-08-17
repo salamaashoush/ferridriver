@@ -90,6 +90,26 @@ impl<'js> FromParam<'js> for CallSite {
   }
 }
 
+/// The whole calling stack, in bundled coordinates, captured at the
+/// boundary.
+///
+/// A parameter type for the same reason [`CallSite`] is one, and it
+/// matters more here: an `Async` binding body first runs when the VM
+/// executor polls it, by which time the frames a boxed `test.step` has
+/// to name are gone. Taking it as a parameter runs the capture
+/// synchronously, on the calling stack.
+pub struct CallFrames(pub Vec<(String, u32, u32)>);
+
+impl<'js> FromParam<'js> for CallFrames {
+  fn param_requirement() -> ParamRequirement {
+    ParamRequirement::none()
+  }
+
+  fn from_param<'a>(params: &mut ParamsAccessor<'a, 'js>) -> rquickjs::Result<Self> {
+    Ok(Self(capture_frames(params.ctx())))
+  }
+}
+
 /// Capture the calling JS frame, mapped back to the original source.
 #[must_use]
 pub fn capture(ctx: &Ctx<'_>) -> CallOrigin {
@@ -191,16 +211,30 @@ fn absolute(source: &str) -> String {
 /// runs through `ctx.eval`, whose frame sits below the native binding
 /// frame, and the caller's frame is the first that names a module.
 pub(crate) fn capture_frame(ctx: &Ctx<'_>) -> Option<(String, u32, u32)> {
-  let stack = ctx.eval::<String, _>("new Error().stack").ok()?;
-  parse_first_js_frame(&stack)
+  capture_frames(ctx).into_iter().next()
 }
 
-pub(crate) fn parse_first_js_frame(stack: &str) -> Option<(String, u32, u32)> {
+/// Every JS frame of a fresh stack trace, innermost first.
+///
+/// More than the innermost because `test.step(…, { box: true })` names
+/// the frame ABOVE the call site: the line that called the function the
+/// step is written in.
+pub(crate) fn capture_frames(ctx: &Ctx<'_>) -> Vec<(String, u32, u32)> {
+  let Ok(stack) = ctx.eval::<String, _>("new Error().stack") else {
+    return Vec::new();
+  };
+  parse_js_frames(&stack)
+}
+
+pub(crate) fn parse_js_frames(stack: &str) -> Vec<(String, u32, u32)> {
   use std::sync::OnceLock;
 
   use regex::Regex;
   static RE: OnceLock<Option<Regex>> = OnceLock::new();
-  let re = RE.get_or_init(|| Regex::new(r"([^\s()]+):(\d+):(\d+)").ok()).as_ref()?;
+  let Some(re) = RE.get_or_init(|| Regex::new(r"([^\s()]+):(\d+):(\d+)").ok()).as_ref() else {
+    return Vec::new();
+  };
+  let mut frames = Vec::new();
   for line in stack.lines() {
     let Some(caps) = re.captures(line) else { continue };
     let file = &caps[1];
@@ -211,27 +245,37 @@ pub(crate) fn parse_first_js_frame(stack: &str) -> Option<(String, u32, u32)> {
       continue;
     }
     if let (Ok(l), Ok(c)) = (caps[2].parse::<u32>(), caps[3].parse::<u32>()) {
-      return Some((file.to_string(), l, c));
+      frames.push((file.to_string(), l, c));
     }
   }
-  None
+  frames
 }
 
 #[cfg(test)]
 mod tests {
-  use super::parse_first_js_frame;
+  use super::parse_js_frames;
 
   #[test]
   fn skips_the_capture_frame_and_reads_the_caller() {
     // The `eval_script` frame is the capture itself and `native` is the
     // binding it was called from; the caller is the first module frame.
     let stack = "Error\n    at eval_script:1:4\n    at register (native)\n    at ferridriver-tests.js:42:7\n    at ferridriver-tests.js:1:1";
-    let (file, line, col) = parse_first_js_frame(stack).expect("a module frame");
+    let (file, line, col) = parse_js_frames(stack).into_iter().next().expect("a module frame");
     assert_eq!((file.as_str(), line, col), ("ferridriver-tests.js", 42, 7));
   }
 
   #[test]
   fn a_stack_with_no_module_frame_yields_nothing() {
-    assert!(parse_first_js_frame("    at native\n").is_none());
+    assert!(parse_js_frames("    at native\n").is_empty());
+  }
+
+  #[test]
+  fn every_module_frame_is_kept_for_a_boxed_step() {
+    let stack = "Error\n    at eval_script:1:4\n    at step (native)\n    at helpers.ts:9:5\n    at spec.ts:15:3\n    at spec.ts:40:1";
+    let frames = parse_js_frames(stack);
+    assert_eq!(
+      frames.iter().map(|(f, l, _)| (f.as_str(), *l)).collect::<Vec<_>>(),
+      vec![("helpers.ts", 9), ("spec.ts", 15), ("spec.ts", 40)]
+    );
   }
 }

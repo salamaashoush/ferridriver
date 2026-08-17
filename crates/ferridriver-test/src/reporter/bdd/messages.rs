@@ -253,6 +253,7 @@ mod tests {
           duration: Duration::from_millis(1_500),
           error: None,
           metadata: None,
+          annotations: Vec::new(),
         },
       )))
       .await;

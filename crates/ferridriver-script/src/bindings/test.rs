@@ -27,7 +27,10 @@ use rustc_hash::FxHashMap;
 use ferridriver_test::fixture::FixtureScope;
 use ferridriver_test::fixture_graph::{self, FixtureSlot};
 use ferridriver_test::host::{RunTestSpec, TestHostBridge, TestInfoData, TestWorldData};
+use ferridriver_test::model::StepLocation;
+use ferridriver_test::step::{StepBodyError, StepExpectation, StepFrame, StepOptions, StepSpec};
 
+use crate::bindings::call_site;
 use crate::bindings::convert::serde_from_js;
 use crate::bindings::registry::{as_function, rq};
 use crate::bindings::{install_browser_context_on, install_browser_on, install_page_on, install_request_on};
@@ -159,7 +162,6 @@ pub(crate) struct CurrentTest {
   pub(crate) world: Persistent<Object<'static>>,
   pub(crate) test_info: Persistent<Object<'static>>,
   pub(crate) bridge: Arc<dyn TestHostBridge>,
-  pub(crate) step_stack: Vec<String>,
   pub(crate) pending: Vec<PendingFixture>,
 }
 
@@ -1098,85 +1100,227 @@ pub fn install_test(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
 
 // ── Invocation ───────────────────────────────────────────────────────
 
-/// `test.step(title, fn)` — opens a live reporter/trace step around the
+/// Name of the error `stepInfo.skip()` throws to unwind its own body.
+/// Swallowed at the step boundary — the step is reported skipped, the
+/// test carries on. Playwright's `StepSkipError`.
+const STEP_SKIP_ERROR: &str = "StepSkipError";
+
+/// `test.step(title, body, { box, location, timeout })` and
+/// `test.step.skip(...)` — opens a live reporter/trace step around the
 /// body, returns the body's resolved value, re-throws its error after
 /// closing the step.
+///
+/// Every rule (which location the step reports, what `box` re-attributes
+/// to, the timeout message, when the body is skipped) is
+/// `ferridriver_test::step`'s; this only lowers the JS option bag and
+/// mirrors `TestStepInfo` onto a JS object.
 fn make_step_fn<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
+  let step = step_callable(ctx, StepExpectation::Pass)?;
+  let skip = step_callable(ctx, StepExpectation::Skip)?;
+  if let Some(obj) = step.as_object() {
+    obj.set("skip", skip)?;
+  }
+  Ok(step)
+}
+
+fn step_callable<'js>(ctx: &Ctx<'js>, expectation: StepExpectation) -> rquickjs::Result<Function<'js>> {
   Function::new(
     ctx.clone(),
     Async(
       move |ctx: Ctx<'js>,
+            frames: call_site::CallFrames,
             title: String,
-            f: Function<'js>|
+            f: Function<'js>,
+            options: rquickjs::function::Opt<Value<'js>>|
             -> Pin<Box<dyn Future<Output = rquickjs::Result<Value<'js>>> + 'js>> {
+        // The option bag and the stack are read here, on the calling
+        // stack: an `Async` body first runs when the VM executor polls
+        // it, by which time the caller's frames are gone.
+        let options = parse_step_options(&ctx, options.0.as_ref());
         Box::pin(async move {
           let bridge = current_bridge(&ctx, "test.step()")?;
-          let parent = with_test_registry(&ctx, |r| r.current.as_ref().and_then(|c| c.step_stack.last().cloned()))
-            .map_err(|e| rq(&e))?;
-          let location = {
-            let (line, col) = capture_location(&ctx);
-            (line > 0).then_some((line, col))
-          };
-          let step_id = bridge.begin_step(title, parent, location).await;
-          let _ = with_test_registry(&ctx, |r| {
-            if let Some(c) = r.current.as_mut() {
-              c.step_stack.push(step_id.clone());
+          let spec = StepSpec::new(title)
+            .with_options(options?)
+            .with_frames(
+              frames
+                .0
+                .into_iter()
+                .map(|(_, line, column)| StepFrame::Host { line, column })
+                .collect(),
+            )
+            .expecting(expectation);
+
+          let ctx_for_body = ctx.clone();
+          let bridge_for_body = Arc::clone(&bridge);
+          let outcome = ferridriver_test::step::run(&*bridge, spec, move |run| async move {
+            let ctx = ctx_for_body;
+            let step_info = build_step_info(&ctx, &bridge_for_body, &run).map_err(|e| body_error(&ctx, e))?;
+            if !run.should_run_body() {
+              return Ok(Value::new_undefined(ctx.clone()));
             }
-          });
-          let called: rquickjs::Result<MaybePromise<'_>> = f.call(());
-          let outcome: rquickjs::Result<Value<'js>> = match called.catch(&ctx) {
-            Ok(mp) => mp.into_future::<Value<'js>>().await,
-            Err(e) => {
-              let se = caught_to_script_error(e, "test.step");
-              Err(crate::bindings::convert::throw_named(
-                &ctx,
-                se.name.as_deref().unwrap_or("Error"),
-                se.message.clone(),
-              ))
-            },
-          };
-          let _ = with_test_registry(&ctx, |r| {
-            if let Some(c) = r.current.as_mut() {
-              c.step_stack.pop();
+            let called: rquickjs::Result<MaybePromise<'_>> = f.call((step_info.clone(),));
+            let settled = match called {
+              Ok(mp) => mp.into_future::<Value<'js>>().await,
+              Err(e) => Err(e),
+            };
+            collect_step_annotations(&step_info, &run);
+            match settled {
+              Ok(v) => Ok(v),
+              Err(e) => {
+                let failure = body_error(&ctx, e);
+                if failure.name == STEP_SKIP_ERROR {
+                  return Ok(Value::new_undefined(ctx.clone()));
+                }
+                Err(failure)
+              },
             }
-          });
+          })
+          .await;
+
           match outcome {
-            Ok(v) => {
-              bridge.end_step(step_id, None).await;
-              Ok(v)
-            },
-            Err(e) => {
-              // Re-throw as a real `Error` carrying the original name and
-              // message. `rquickjs::Error::new_from_js_message` would
-              // render as "Error converting from js 'bdd' into type
-              // 'Error': ...", and that prefix reaches the user through
-              // every report the run writes.
-              let (name, msg) = match &e {
-                rquickjs::Error::Exception => {
-                  let caught = ctx.catch();
-                  let exception = caught.as_exception();
-                  (
-                    exception
-                      .and_then(|ex| ex.as_object().get::<_, String>("name").ok())
-                      .filter(|n| !n.is_empty())
-                      .unwrap_or_else(|| "Error".to_string()),
-                    exception
-                      .and_then(rquickjs::Exception::message)
-                      .unwrap_or_else(|| "step failed".to_string()),
-                  )
-                },
-                other => ("Error".to_string(), other.to_string()),
-              };
-              // A caught exception was consumed above — re-throw it so
-              // the caller still observes the failure.
-              bridge.end_step(step_id, Some(msg.clone())).await;
-              Err(crate::bindings::convert::throw_named(&ctx, &name, msg))
-            },
+            Ok(v) => Ok(v),
+            // Re-throw as a real `Error` carrying the original name and
+            // message. `rquickjs::Error::new_from_js_message` would
+            // render as "Error converting from js 'bdd' into type
+            // 'Error': ...", and that prefix reaches the user through
+            // every report the run writes.
+            Err(e) => Err(crate::bindings::convert::throw_named_with_stack(
+              &ctx,
+              e.name(),
+              e.message().to_string(),
+              e.stack().map(ToString::to_string),
+            )),
           }
         })
       },
     ),
   )
+}
+
+/// A JS exception, in the host-neutral shape core reports steps with.
+fn body_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> StepBodyError {
+  match error {
+    rquickjs::Error::Exception => {
+      let caught = ctx.catch();
+      let exception = caught.as_exception();
+      StepBodyError {
+        name: exception
+          .and_then(|ex| ex.as_object().get::<_, String>("name").ok())
+          .filter(|n| !n.is_empty())
+          .unwrap_or_else(|| "Error".to_string()),
+        message: exception
+          .and_then(rquickjs::Exception::message)
+          .unwrap_or_else(|| "step failed".to_string()),
+        stack: exception.and_then(rquickjs::Exception::stack),
+      }
+    },
+    other => StepBodyError::new("Error", other.to_string()),
+  }
+}
+
+/// `{ box?, location?, timeout? }` — Playwright's option bag
+/// (`packages/playwright/types/test.d.ts:6728`).
+fn parse_step_options<'js>(ctx: &Ctx<'js>, options: Option<&Value<'js>>) -> rquickjs::Result<StepOptions> {
+  let Some(options) = options.and_then(Value::as_object) else {
+    return Ok(StepOptions::default());
+  };
+  let mut parsed = StepOptions {
+    box_step: options.get::<_, Option<bool>>("box")?.unwrap_or(false),
+    location: None,
+    timeout: options
+      .get::<_, Option<f64>>("timeout")?
+      .filter(|ms| *ms > 0.0)
+      .map(|ms| std::time::Duration::from_millis(ms as u64)),
+  };
+  if let Some(location) = options.get::<_, Option<Object<'js>>>("location")? {
+    let file: String = location
+      .get("file")
+      .map_err(|_| rq(&ScriptError::internal("test.step: location needs a `file`".to_string())))?;
+    parsed.location = Some(StepLocation {
+      file,
+      line: location.get::<_, Option<f64>>("line")?.unwrap_or(0.0) as u32,
+      column: location.get::<_, Option<f64>>("column")?.unwrap_or(0.0) as u32,
+    });
+  }
+  let _ = ctx;
+  Ok(parsed)
+}
+
+/// Playwright's `TestStepInfo` (`types/test.d.ts:10700-10816`):
+/// `attach`, both `skip` forms, and `titlePath`. `annotations` is on
+/// upstream's implementation but not in its public interface; it is
+/// mirrored here as a real array so a push reaches the step's record.
+fn build_step_info<'js>(
+  ctx: &Ctx<'js>,
+  bridge: &Arc<dyn TestHostBridge>,
+  run: &Arc<ferridriver_test::step::StepRun>,
+) -> rquickjs::Result<Object<'js>> {
+  let obj = Object::new(ctx.clone())?;
+  obj.set("titlePath", run.title_path().to_vec())?;
+  obj.set("annotations", rquickjs::Array::new(ctx.clone())?)?;
+
+  let skip_run = Arc::clone(run);
+  let skip = Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
+    // `skip()` unconditional; `skip(condition, description?)`.
+    if let Some(condition) = args.0.first()
+      && !condition
+        .as_bool()
+        .unwrap_or(!condition.is_null() && !condition.is_undefined())
+    {
+      return Ok(());
+    }
+    let description = args
+      .0
+      .get(1)
+      .and_then(Value::as_string)
+      .and_then(|s| s.to_string().ok());
+    skip_run.record_skip(description.clone());
+    Err::<(), _>(crate::bindings::convert::throw_named(
+      &ctx,
+      STEP_SKIP_ERROR,
+      description.unwrap_or_else(|| "step skipped".to_string()),
+    ))
+  })?;
+  obj.set("skip", skip)?;
+
+  let attach_bridge = Arc::clone(bridge);
+  let step_id = run.step_id().to_string();
+  let attach = Function::new(
+    ctx.clone(),
+    Async(
+      move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> Pin<Box<dyn Future<Output = rquickjs::Result<()>> + 'js>> {
+        let bridge = Arc::clone(&attach_bridge);
+        let step_id = step_id.clone();
+        Box::pin(async move {
+          let (name, content_type, source) = parse_attach_args(&ctx, &args.0)?;
+          let bytes = match source {
+            AttachSource::Bytes(b) => b,
+            AttachSource::Path(p) => tokio::fs::read(&p)
+              .await
+              .map_err(|e| rq(&ScriptError::internal(format!("stepInfo.attach: reading {p}: {e}"))))?,
+          };
+          bridge.attach(name, content_type, bytes, Some(step_id)).await;
+          Ok(())
+        })
+      },
+    ),
+  )?;
+  obj.set("attach", attach)?;
+  Ok(obj)
+}
+
+/// Fold whatever the body pushed onto `stepInfo.annotations` into the
+/// step's record, so a reporter sees it.
+fn collect_step_annotations<'js>(step_info: &Object<'js>, run: &Arc<ferridriver_test::step::StepRun>) {
+  let Ok(annotations) = step_info.get::<_, rquickjs::Array<'js>>("annotations") else {
+    return;
+  };
+  for entry in annotations.iter::<Object<'js>>().flatten() {
+    let Ok(type_name) = entry.get::<_, String>("type") else {
+      continue;
+    };
+    run.annotate(type_name, entry.get::<_, Option<String>>("description").ok().flatten());
+  }
 }
 
 fn se(e: impl std::fmt::Display) -> ScriptError {
@@ -1260,7 +1404,7 @@ fn build_test_info<'js>(
               .await
               .map_err(|e| rq(&ScriptError::internal(format!("testInfo.attach: reading {p}: {e}"))))?,
           };
-          bridge.attach(name, content_type, bytes).await;
+          bridge.attach(name, content_type, bytes, None).await;
           Ok(())
         })
       },
@@ -1415,7 +1559,6 @@ pub(crate) fn set_current_test(
       world: world_saved,
       test_info: info_saved,
       bridge,
-      step_stack: Vec::new(),
       pending: Vec::new(),
     });
   })

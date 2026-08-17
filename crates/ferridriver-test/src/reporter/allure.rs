@@ -674,6 +674,7 @@ mod tests {
       status: StepStatus::Failed,
       error: Some("declined".into()),
       location: None,
+      annotations: Vec::new(),
       parent_step_id: None,
       metadata: None,
       steps: Vec::new(),

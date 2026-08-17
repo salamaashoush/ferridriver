@@ -121,6 +121,7 @@ mod tests {
             duration: Duration::from_millis(10),
             error: None,
             metadata: Some(serde_json::json!({ "bdd_text": "a user named {word}" })),
+            annotations: Vec::new(),
           },
         )))
         .await;
@@ -146,6 +147,7 @@ mod tests {
           duration: Duration::from_millis(5),
           error: None,
           metadata: None,
+          annotations: Vec::new(),
         },
       )))
       .await;

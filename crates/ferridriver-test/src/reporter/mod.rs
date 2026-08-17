@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::model::{StepCategory, TestId, TestOutcome};
+use crate::model::{StepCategory, StepLocation, TestAnnotation, TestId, TestOutcome};
 
 // ── Events ──
 
@@ -35,6 +35,10 @@ pub struct StepStartedEvent {
   pub parent_step_id: Option<String>,
   pub title: String,
   pub category: StepCategory,
+  /// Where the step happened — its own file, which need not be the
+  /// test's: an explicit `test.step(…, { location })` and every BDD
+  /// step name one the spec does not.
+  pub location: Option<StepLocation>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +51,8 @@ pub struct StepFinishedEvent {
   pub error: Option<String>,
   /// Arbitrary metadata attached to this step (e.g. BDD keyword/text).
   pub metadata: Option<serde_json::Value>,
+  /// Annotations the step recorded while it ran (`step.skip()`).
+  pub annotations: Vec<TestAnnotation>,
 }
 
 /// One chunk a test wrote while it ran, delivered as it happens.

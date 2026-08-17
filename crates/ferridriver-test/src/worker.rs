@@ -886,6 +886,7 @@ impl Worker {
       annotations: Arc::new(Mutex::new(Vec::new())),
       trace_composite: Arc::new(std::sync::Mutex::new(None)),
       trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+      open_steps: Arc::new(tokio::sync::Mutex::new(Vec::new())),
       output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
     })
   }
@@ -973,6 +974,7 @@ impl Worker {
                 parent_step_id: None,
                 title: step_title.clone(),
                 category: StepCategory::Hook,
+                location: None,
               },
             )));
           }
@@ -990,6 +992,7 @@ impl Worker {
                 duration,
                 error: error.clone(),
                 metadata: None,
+                annotations: Vec::new(),
               },
             )));
           }
@@ -1176,6 +1179,7 @@ impl Worker {
               parent_step_id: None,
               title: step_title.clone(),
               category: StepCategory::Hook,
+              location: None,
             },
           )));
         }
@@ -1193,6 +1197,7 @@ impl Worker {
               duration,
               error: error.clone(),
               metadata: None,
+              annotations: Vec::new(),
             },
           )));
         }
@@ -1367,6 +1372,7 @@ impl Worker {
       annotations: Arc::new(Mutex::new(Vec::new())),
       trace_composite: Arc::clone(&trace_composite),
       trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+      open_steps: Arc::new(tokio::sync::Mutex::new(Vec::new())),
       output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
     });
     let trace_spec = self.config.trace.should_record(attempt, false).then(|| TraceSpec {
@@ -1738,6 +1744,7 @@ impl Worker {
           name: "screenshot-on-failure".into(),
           content_type: "image/png".into(),
           body: AttachmentBody::Path(screenshot_path),
+          step_id: None,
         }),
         Err(e) => {
           tracing::warn!(target: "ferridriver::worker", "screenshot write failed: {e}");
@@ -1745,6 +1752,7 @@ impl Worker {
             name: "screenshot-on-failure".into(),
             content_type: "image/png".into(),
             body: AttachmentBody::Bytes(png.clone()),
+            step_id: None,
           });
         },
       }
@@ -1754,6 +1762,7 @@ impl Worker {
         name: "trace".into(),
         content_type: "application/zip".into(),
         body: AttachmentBody::Path(path),
+        step_id: None,
       });
     }
 
@@ -1888,6 +1897,7 @@ impl Worker {
           name: "video".into(),
           content_type: ferridriver::video::video_content_type().into(),
           body: AttachmentBody::Path(path.clone()),
+          step_id: None,
         });
       } else {
         let _ = std::fs::remove_file(path);

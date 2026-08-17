@@ -67,6 +67,50 @@ export interface TestInfo {
   snapshotPath(name: string): string;
 }
 
+/// Playwright's `Location` — a file plus a 1-based position in it.
+export interface Location {
+  file: string;
+  line: number;
+  column: number;
+}
+
+/// The argument a `test.step` body receives (Playwright's
+/// `TestStepInfo`). `annotations` mirrors upstream's implementation
+/// field: pushing onto it records the annotation on the step.
+export interface TestStepInfo {
+  readonly titlePath: string[];
+  annotations: TestDetailsAnnotation[];
+  attach(
+    name: string,
+    contentType: string,
+    body: string | Uint8Array | ArrayBuffer | Buffer,
+    options?: undefined
+  ): Promise<void>;
+  attach(name: string, options: { body?: string | Uint8Array | ArrayBuffer | Buffer; contentType?: string; path?: string }): Promise<void>;
+  skip(): void;
+  skip(condition: boolean, description?: string): void;
+}
+
+export interface StepOptions {
+  /// Attribute an error raised inside the step to the line that called
+  /// it, rather than to the line that raised it.
+  box?: boolean;
+  /// Where the step happened, when it is not where it was written — the
+  /// `.feature` line a BDD step came from, a generated source.
+  location?: Location;
+  /// Fail the step (not the test) if the body outlives this.
+  ///
+  /// Unlike Playwright's, this deadline stands still while the run is
+  /// parked at `--debug`.
+  timeout?: number;
+}
+
+export interface StepFunction {
+  <T>(title: string, body: (step: TestStepInfo) => T | Promise<T>, options?: StepOptions): Promise<T>;
+  /// Report the step as skipped without running its body.
+  skip(title: string, body: (step: TestStepInfo) => any | Promise<any>, options?: StepOptions): Promise<void>;
+}
+
 export interface TestFixtures {
   page: Page;
   context: BrowserContext;
@@ -143,7 +187,7 @@ export interface TestType<TFixtures = TestFixtures> {
   use(options: Record<string, unknown>): void;
   setTimeout(timeout: number): void;
   info(): TestInfo;
-  step<T>(title: string, body: () => T | Promise<T>): Promise<T>;
+  step: StepFunction;
   extend<T extends object>(fixtures: {
     [K in keyof T]: FixtureValue<T[K], TFixtures & T>;
   }): TestType<TFixtures & T>;
