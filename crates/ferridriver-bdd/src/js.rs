@@ -7,13 +7,17 @@
 //! (`feature`/`scenario`/`filter`/`registry`). No matching, outline
 //! expansion or tag logic lives here.
 //!
-//! The cucumber World is a first-class object; `ferridriver-script`'s
-//! `install_*_on` helpers install `page`/`context`/`request`/`browser`
-//! onto a per-scenario World (the step `this`) — the same bindings
-//! scripting installs onto `globalThis`. The step registry is per-VM
-//! JavaScript state, so one engine session is created per
-//! `ferridriver-test` worker: scenarios run in parallel across workers,
-//! each VM driving its own scenarios.
+//! A scenario runs against one object that is both the cucumber World
+//! and the test's fixture bag: this module decides which `test.extend`
+//! chain it resolves from (the union of what its matched steps and
+//! applicable hooks were bound to, via
+//! `ferridriver_test::fixture_graph::dominant_fixture_set`) and which
+//! names to set up (what those bodies destructured), then hands both to
+//! `begin_scenario`. The step registry is per-VM JavaScript state, so
+//! one engine session is created per `ferridriver-test` worker:
+//! scenarios run in parallel across workers, each VM driving its own
+//! scenarios, and a `{ scope: "worker" }` fixture is shared by every
+//! scenario that worker runs.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,12 +26,16 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use ferridriver_script::{
-  CompiledBundle, HookArg, InMemoryVars, JsArg, PathSandbox, RunContext, ScenarioWorld, ScriptAttachment,
-  ScriptEngineConfig, Session, StepOutcome, VmHandle, bundle_and_compile, collect_registry, drain_attachments,
-  eval_bundle, invoke_hook, invoke_step, is_source_file, reset_world, set_scenario_world, walk_source_files,
+  CompiledBundle, HookArg, InMemoryVars, JsArg, PathSandbox, RunContext, ScenarioSpec, ScriptAttachment,
+  ScriptEngineConfig, Session, StepOutcome, VmHandle, begin_scenario, bundle_and_compile, collect_registry,
+  drain_attachments, end_scenario, eval_bundle, invoke_hook, invoke_step, is_source_file, set_hook_world,
+  walk_source_files,
 };
 use ferridriver_test::FixturePool;
-use ferridriver_test::model::{AttachmentBody, StepCategory, TestInfo};
+use ferridriver_test::fixture_graph::dominant_fixture_set;
+use ferridriver_test::host::TestWorldData;
+use ferridriver_test::host::{InfoBridge, static_annotation_pairs};
+use ferridriver_test::model::{AttachmentBody, StepCategory, TestFixtures, TestInfo};
 use tokio::sync::OnceCell;
 
 use crate::feature::FeatureSet;
@@ -35,7 +43,7 @@ use crate::filter::TagExpression;
 use crate::param_type::CustomParamType;
 use crate::registry::StepRegistry;
 use crate::scenario::ScenarioExecution;
-use crate::step::{StepError, StepHandler, StepKind, StepLocation, StepParam};
+use crate::step::{MatchError, StepError, StepFixtures, StepHandler, StepKind, StepLocation, StepMatch, StepParam};
 use crate::world::BrowserWorld;
 
 const JS_STEP_LOCATION: &str = "<js-step>";
@@ -76,13 +84,28 @@ pub struct JsScenarioResult {
   pub passed: bool,
 }
 
+/// One registered JS hook, with the fixture chain and names its body
+/// resolves from (`bindSteps(test)` registrations; the ambient
+/// `Before`/`After` resolve from the base chain).
+struct HookEntry {
+  idx: usize,
+  kind: String,
+  tags: Option<TagExpression>,
+  fixture_set: usize,
+  requested: Option<Vec<String>>,
+}
+
 /// A loaded JS step suite bound to one shared-engine session (one per
 /// `ferridriver-test` worker).
 pub struct JsBddSession {
   session: Session,
   registry: Arc<StepRegistry>,
-  hooks: Vec<(usize, String, Option<TagExpression>)>,
+  hooks: Vec<HookEntry>,
   bundle: Arc<CompiledBundle>,
+  cwd: Arc<PathBuf>,
+  /// The `test.extend` chains the step bundle registered, indexed by
+  /// fixture set — what a scenario's chain is picked out of.
+  fixture_sets: Vec<Vec<usize>>,
   /// Cucumber `--world-parameters` exposed to every scenario as
   /// `this.parameters`.
   world_parameters: serde_json::Value,
@@ -276,21 +299,34 @@ impl JsBddSession {
         file: JS_STEP_LOCATION,
         line: 0,
       };
-      let res = if step.is_regex {
-        registry.register_regex(kind, &step.pattern, handler, loc)
-      } else {
-        registry.register(kind, &step.pattern, handler, loc)
-      };
-      res.map_err(|e| anyhow::anyhow!("register step `{}`: {}", step.pattern, e))?;
+      registry
+        .register_js(
+          kind,
+          &step.pattern,
+          step.is_regex,
+          handler,
+          loc,
+          StepFixtures {
+            // An ambient `Given`/`When`/`Then` belongs to the base
+            // chain: it is the one an extension's contributed fixtures
+            // land in, so an unmodified suite still receives them.
+            set: step.fixture_set.unwrap_or(0),
+            names: step.requested.clone(),
+          },
+        )
+        .map_err(|e| anyhow::anyhow!("register step `{}`: {}", step.pattern, e))?;
     }
 
     let hooks = snapshot
       .hooks
       .iter()
       .enumerate()
-      .map(|(i, h)| {
-        let te = h.tags.as_deref().and_then(|t| TagExpression::parse(t).ok());
-        (i, h.hook_type.clone(), te)
+      .map(|(i, h)| HookEntry {
+        idx: i,
+        kind: h.hook_type.clone(),
+        tags: h.tags.as_deref().and_then(|t| TagExpression::parse(t).ok()),
+        fixture_set: h.fixture_set.unwrap_or(0),
+        requested: h.requested.clone(),
       })
       .collect();
 
@@ -299,8 +335,15 @@ impl JsBddSession {
       registry: Arc::new(registry),
       hooks,
       bundle,
+      cwd: Arc::new(cwd.to_path_buf()),
+      fixture_sets: snapshot.fixture_sets,
       world_parameters,
     };
+    // `BeforeAll` runs before any scenario exists, so it gets the
+    // world-shaped object rather than a fixture bag.
+    set_hook_world(&vm, &session.world_parameters)
+      .await
+      .map_err(|e| anyhow::anyhow!("world for BeforeAll: {}", e.message))?;
     session
       .run_hooks("BeforeAll", None, None)
       .await
@@ -308,26 +351,29 @@ impl JsBddSession {
     Ok(session)
   }
 
-  async fn run_hooks(&self, kind: &str, tags: Option<&[String]>, arg: Option<&HookArg>) -> Result<(), String> {
-    let vm = self.session.vm_handle();
-    let mut hooks: Vec<(usize, Option<&TagExpression>)> = self
+  /// The hooks of one kind that apply to `tags`, in run order (reverse
+  /// registration for the `After*` family, as cucumber-js does).
+  fn applicable_hooks(&self, kind: &str, tags: Option<&[String]>) -> Vec<&HookEntry> {
+    let mut hooks: Vec<&HookEntry> = self
       .hooks
       .iter()
-      .filter(|(_, k, _)| k == kind)
-      .map(|(i, _, te)| (*i, te.as_ref()))
+      .filter(|h| h.kind == kind)
+      .filter(|h| match (h.tags.as_ref(), tags) {
+        (Some(expr), Some(t)) => expr.matches(t),
+        (Some(_), None) => false,
+        (None, _) => true,
+      })
       .collect();
     if kind == "After" || kind == "AfterAll" || kind == "AfterStep" {
       hooks.reverse();
     }
-    for (idx, te) in hooks {
-      let applies = match (te, tags) {
-        (Some(expr), Some(t)) => expr.matches(t),
-        (Some(_), None) => false,
-        (None, _) => true,
-      };
-      if !applies {
-        continue;
-      }
+    hooks
+  }
+
+  async fn run_hooks(&self, kind: &str, tags: Option<&[String]>, arg: Option<&HookArg>) -> Result<(), String> {
+    let vm = self.session.vm_handle();
+    let indices: Vec<usize> = self.applicable_hooks(kind, tags).iter().map(|h| h.idx).collect();
+    for idx in indices {
       if let Err(e) = invoke_hook(&vm, idx, arg, &self.bundle.module_name).await {
         return Err(self.bundle.format_error(&e));
       }
@@ -337,7 +383,90 @@ impl JsBddSession {
 
   /// Run-level `AfterAll` hooks (once per worker session).
   pub async fn after_all(&self) -> Result<(), String> {
+    let vm = self.session.vm_handle();
+    set_hook_world(&vm, &self.world_parameters)
+      .await
+      .map_err(|e| format!("world for AfterAll: {}", e.message))?;
     self.run_hooks("AfterAll", None, None).await
+  }
+
+  /// Resume every suspended worker-scoped fixture factory of this
+  /// session's VM (the teardown half of each `use()`), after the last
+  /// scenario the worker will run.
+  pub async fn teardown_worker_fixtures(&self) -> Result<(), String> {
+    ferridriver_script::teardown_worker_fixtures(&self.session.vm_handle())
+      .await
+      .map_err(|e| self.bundle.format_error(&e))
+  }
+
+  /// Which fixture chain this scenario resolves against, and every name
+  /// its steps and hooks destructure off it. Auto fixtures of the chain
+  /// are added by the resolver, so they need not be listed here.
+  fn scenario_fixtures(
+    &self,
+    matches: &[Result<StepMatch<'_>, MatchError>],
+    tags: &[String],
+  ) -> Result<(usize, Vec<String>), String> {
+    let mut sets: Vec<usize> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut take = |set: usize, requested: Option<&Vec<String>>| {
+      if !sets.contains(&set) {
+        sets.push(set);
+      }
+      for n in requested.into_iter().flatten() {
+        if !names.contains(n) {
+          names.push(n.clone());
+        }
+      }
+    };
+    for m in matches.iter().flatten() {
+      if let Some(f) = &m.def.fixtures {
+        take(f.set, f.names.as_ref());
+      }
+    }
+    for kind in ["Before", "After", "BeforeStep", "AfterStep"] {
+      for hook in self.applicable_hooks(kind, Some(tags)) {
+        take(hook.fixture_set, hook.requested.as_ref());
+      }
+    }
+    let set = dominant_fixture_set(&self.fixture_sets, &sets)?;
+    Ok((set, names))
+  }
+
+  /// The fixtures + `testInfo` a scenario runs against — lowered by the
+  /// same core helper the Playwright-spec host uses, so a step body
+  /// sees exactly what a test body sees. The `use` bag is the project's
+  /// `use` block overlaid with the scenario's own `@use(...)` tags.
+  fn world_data(scenario: &ScenarioExecution, fixtures: &TestFixtures) -> TestWorldData {
+    let test_info = &fixtures.test_info;
+    let config_use = test_info
+      .config_snapshot
+      .as_ref()
+      .and_then(|c| serde_json::to_value(&c.browser.use_options).ok());
+    let use_options = ferridriver_test::host::merge_use_options(
+      config_use.as_ref(),
+      crate::translate::scenario_use_options(scenario).as_ref(),
+    );
+    let file = scenario.feature_path.display().to_string();
+    let mut world = ferridriver_test::host::world_data(ferridriver_test::host::WorldMeta {
+      test_info,
+      title: &scenario.name,
+      title_path: &test_info.title_path,
+      file: &file,
+      line: u32::try_from(crate::translate::scenario_line(scenario).unwrap_or(0)).unwrap_or(0),
+      tags: &scenario.tags,
+      // A scenario expected to fail is expressed as an annotation the
+      // runner acts on, not as an inverted step outcome.
+      expected_status: ferridriver_test::model::ExpectedStatus::Pass,
+      browser_config: &fixtures.browser_config,
+      base_url: test_info.config_snapshot.as_ref().and_then(|c| c.base_url.as_deref()),
+      use_options,
+    });
+    world.page = Some(Arc::clone(&fixtures.page));
+    world.context = Some(Arc::clone(&fixtures.context));
+    world.request = Some(Arc::clone(&fixtures.request));
+    world.browser = Some(Arc::clone(&fixtures.browser));
+    world
   }
 
   /// Execute one expanded scenario: bind its World from the fixtures,
@@ -355,29 +484,54 @@ impl JsBddSession {
       world.set_feature_dir(dir.to_path_buf());
     }
 
-    let fixtures = world.fixtures();
-    let sw = ScenarioWorld {
-      page: Some(Arc::clone(&fixtures.page)),
-      context: Some(Arc::clone(&fixtures.context)),
-      request: Some(Arc::clone(&fixtures.request)),
-      browser: Some(Arc::clone(&fixtures.browser)),
-      parameters: Some(self.world_parameters.clone()),
-    };
+    // Match every step up front: a scenario's fixture chain is decided
+    // by what its steps destructure, and that has to be known before
+    // the first `Before` hook runs. The matches are then consumed by
+    // the execution loop below, so no step is matched twice.
+    let matches: Vec<Result<StepMatch<'_>, MatchError>> = scenario
+      .steps
+      .iter()
+      .map(|step| self.registry.find_match(&step.text))
+      .collect();
 
-    let _ = reset_world(&vm).await;
-    if let Err(e) = set_scenario_world(&vm, &sw).await {
-      return JsScenarioResult {
-        name: scenario.name.clone(),
-        tags: scenario.tags.clone(),
-        steps: vec![JsStepResult {
-          keyword: "World".into(),
-          text: "bind fixtures".into(),
-          line: 0,
-          duration: Duration::ZERO,
-          status: JsStepStatus::Failed(format!("set_scenario_world: {}", e.message)),
-        }],
-        passed: false,
-      };
+    let fixtures = world.fixtures();
+    let (fixture_set, requested) = match self.scenario_fixtures(&matches, &scenario.tags) {
+      Ok(v) => v,
+      Err(msg) => return Self::world_failure(scenario, msg),
+    };
+    let spec = ScenarioSpec {
+      world: Self::world_data(scenario, fixtures),
+      parameters: self.world_parameters.clone(),
+      fixture_set,
+      requested,
+      source_label: self.bundle.module_name.clone(),
+    };
+    let bridge = Arc::new(InfoBridge::new(
+      Arc::clone(&fixtures.test_info),
+      Arc::clone(&fixtures.modifiers),
+      Arc::new(self.session.deadline()),
+      Arc::new(ferridriver_script::BundleSourceMap::new(
+        Arc::clone(&self.bundle),
+        Arc::clone(&self.cwd),
+      )),
+      Arc::clone(&self.cwd),
+      fixtures.test_info.timeout,
+      static_annotation_pairs(&crate::translate::scenario_annotations(scenario)),
+    ));
+
+    if let Err(e) = begin_scenario(&vm, spec, bridge.clone() as _).await {
+      let message = self.bundle.format_error(&e);
+      // A factory that failed halfway may have parked earlier ones at
+      // their `use()`; resume them, or they leak into the next scenario
+      // with nothing left holding their teardown.
+      if let Err(teardown) = end_scenario(&vm).await {
+        tracing::warn!(
+          target: "ferridriver::bdd",
+          error = %self.bundle.format_error(&teardown),
+          "fixture teardown after a failed scenario setup"
+        );
+      }
+      return Self::world_failure(scenario, message);
     }
 
     let mut steps = Vec::with_capacity(scenario.steps.len());
@@ -403,7 +557,7 @@ impl JsBddSession {
     if !failed {
       let test_info = std::sync::Arc::clone(&world.fixtures().test_info);
       let feature_path = scenario.feature_path.display().to_string();
-      for step in &scenario.steps {
+      for (step, matched) in scenario.steps.iter().zip(matches) {
         let step_meta = serde_json::json!({
           "bdd_keyword": step.keyword.trim(),
           "bdd_text": step.text,
@@ -461,7 +615,7 @@ impl JsBddSession {
           tracing::warn!(step = %step.text, "BeforeStep hook failed: {msg}");
         }
 
-        let status = match self.registry.find_match(&step.text) {
+        let status = match matched {
           // An ambiguous step is a definition bug, not a missing
           // definition: it fails the scenario even under --no-strict,
           // exactly as the Rust-step executor treats it.
@@ -572,11 +726,44 @@ impl JsBddSession {
       failed = true;
     }
 
+    // Teardown last: the fixture factories resume (LIFO) only once the
+    // last step and every `After` hook are done with what they set up.
+    if let Err(e) = end_scenario(&vm).await {
+      steps.push(JsStepResult {
+        keyword: "Fixture".into(),
+        text: "teardown".into(),
+        line: 0,
+        duration: Duration::ZERO,
+        status: JsStepStatus::Failed(self.bundle.format_error(&e)),
+      });
+      failed = true;
+    }
+    // Runtime annotations into the test result, and any step a mid-step
+    // failure left open closed, exactly as the spec host does.
+    bridge.flush().await;
+
     JsScenarioResult {
       name: scenario.name.clone(),
       tags: scenario.tags.clone(),
       passed: !failed,
       steps,
+    }
+  }
+
+  /// A scenario that never got as far as its first step: the fixture
+  /// chain could not be chosen, or building the world failed.
+  fn world_failure(scenario: &ScenarioExecution, message: String) -> JsScenarioResult {
+    JsScenarioResult {
+      name: scenario.name.clone(),
+      tags: scenario.tags.clone(),
+      steps: vec![JsStepResult {
+        keyword: "World".into(),
+        text: "bind fixtures".into(),
+        line: 0,
+        duration: Duration::ZERO,
+        status: JsStepStatus::Failed(message),
+      }],
+      passed: false,
     }
   }
 }
@@ -657,6 +844,25 @@ static BDD_SIDECARS: OnceLock<Vec<ferridriver_script::sidecar::SidecarSpec>> = O
 /// run; idempotent (first set wins).
 pub fn set_bdd_sidecars(sidecars: Vec<ferridriver_script::sidecar::SidecarSpec>) {
   let _ = BDD_SIDECARS.set(sidecars);
+}
+
+/// End every worker session this run created: `AfterAll` hooks, then
+/// the teardown half of every worker-scoped fixture, then the sessions
+/// themselves. Call once after `TestRunner::run` returns — a worker VM
+/// outlives the individual scenarios, so nothing earlier can do it.
+pub async fn teardown_worker_sessions() {
+  let Some(map) = WORKER_SESSIONS.get() else { return };
+  let cells: Vec<(u32, Arc<WorkerSessionCell>)> = map.iter().map(|r| (*r.key(), Arc::clone(r.value()))).collect();
+  map.clear();
+  for (worker, cell) in cells {
+    let Some(session) = cell.get() else { continue };
+    if let Err(e) = session.after_all().await {
+      tracing::warn!(target: "ferridriver::bdd", worker, error = %e, "AfterAll hook failed");
+    }
+    if let Err(e) = session.teardown_worker_fixtures().await {
+      tracing::warn!(target: "ferridriver::bdd", worker, error = %e, "worker fixture teardown failed");
+    }
+  }
 }
 
 async fn worker_session(

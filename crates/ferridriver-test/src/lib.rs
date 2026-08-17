@@ -97,13 +97,13 @@ pub mod context;
 pub(crate) mod context_pool;
 pub mod ct;
 pub mod debug;
-#[cfg(feature = "debug-session")]
-pub mod debug_session;
 pub mod discovery;
 pub mod dispatcher;
 pub mod expect;
 pub mod fixture;
+pub mod fixture_graph;
 pub mod git_info;
+pub mod host;
 pub mod interactive;
 pub mod logging;
 pub mod model;
@@ -173,33 +173,27 @@ macro_rules! main {
   };
 }
 
-/// Publish stopped tests as sessions, when the harness was built with the
-/// `debug-session` feature.
+/// Publish stopped tests as sessions, when this binary links a host that
+/// can (`ferridriver-script` registers one).
 ///
-/// Without it the flag is a clear error rather than a silent no-op: a run
-/// that quietly ignored `--debug` and finished normally would look like the
-/// debugger was broken.
-#[cfg(feature = "debug-session")]
+/// Without a publisher the flag is a clear error rather than a silent
+/// no-op: a run that quietly ignored `--debug` and finished normally
+/// would look like the debugger was broken.
 fn install_harness_debug(mode: debug::DebugMode, overrides: &mut ferridriver_config::test::CliOverrides) {
-  if let Err(e) = debug_session::install_default(mode, overrides) {
+  let Some(publisher) = debug::debug_publisher() else {
+    eprintln!(
+      "--debug needs a session publisher: stopping a test and handing it to a\n\
+       debugger means publishing it as a scriptable session, which pulls in the\n\
+       scripting engine a harness that never debugs should not pay to build.\n\
+       Add it to the dev-dependency:\n\
+       \n    ferridriver-script = \"…\"\n"
+    );
+    std::process::exit(2);
+  };
+  if let Err(e) = (publisher.install_default)(mode, overrides) {
     eprintln!("--debug: {e}");
     std::process::exit(2);
   }
-}
-
-#[cfg(not(feature = "debug-session"))]
-#[expect(
-  clippy::needless_pass_by_ref_mut,
-  reason = "signature matches the feature-enabled form"
-)]
-fn install_harness_debug(_mode: debug::DebugMode, _overrides: &mut ferridriver_config::test::CliOverrides) {
-  eprintln!(
-    "--debug needs the `debug-session` feature: publishing a stopped test as a\n\
-     session pulls in the scripting engine, which a harness that never debugs\n\
-     should not pay to build. Add it to the dev-dependency:\n\
-     \n    ferridriver-test = {{ version = \"…\", features = [\"debug-session\"] }}\n"
-  );
-  std::process::exit(2);
 }
 
 /// Entry point called by `main!()`. Parses CLI args, loads config,

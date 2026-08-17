@@ -500,6 +500,22 @@ impl TimeoutState {
   }
 }
 
+/// Cloneable handle to a session's interrupt deadline. Held by hosts
+/// that re-arm it from outside the session (the test-runner bridge, for
+/// `test.slow()` / `testInfo.setTimeout()`).
+#[derive(Clone)]
+pub struct Deadline(Arc<TimeoutState>);
+
+impl ferridriver_test::host::DeadlineControl for Deadline {
+  fn arm(&self, timeout: Duration) {
+    self.0.arm(Instant::now() + timeout);
+  }
+
+  fn disarm(&self) {
+    self.0.disarm();
+  }
+}
+
 impl Session {
   /// Build the persistent VM: runtime, resource limits, sandbox-rooted
   /// module loader, context, and one-time extension install. The module
@@ -776,6 +792,15 @@ impl Session {
   /// Clear a deadline armed with [`Self::arm_deadline`].
   pub fn disarm_deadline(&self) {
     self.timeout.disarm();
+  }
+
+  /// A cloneable handle to the same deadline [`Self::arm_deadline`]
+  /// drives, for a host that re-arms from somewhere the session itself
+  /// cannot be held (`testInfo.setTimeout()` reaching in from a bridge
+  /// the runner owns).
+  #[must_use]
+  pub fn deadline(&self) -> Deadline {
+    Deadline(Arc::clone(&self.timeout))
   }
 
   /// The session's VM-loop handle. The BDD core clones this to drive

@@ -556,8 +556,8 @@ impl ExpectJs {
     &self,
     ctx: &Ctx<'_>,
     matcher: &'static str,
-  ) -> Result<crate::bindings::test::SnapshotTarget, rquickjs::Error> {
-    use crate::bindings::test::SnapshotTarget;
+  ) -> Result<ferridriver_test::host::SnapshotTarget, rquickjs::Error> {
+    use ferridriver_test::host::SnapshotTarget;
     match &self.subject.kind {
       SubjectKind::Locator(l) => Ok(SnapshotTarget::Locator(l.clone())),
       SubjectKind::Page(p) => Ok(SnapshotTarget::Page(std::sync::Arc::clone(p))),

@@ -38,7 +38,6 @@ pub mod expect;
 pub mod extensions;
 pub mod fetch;
 pub mod file_chooser;
-pub mod fixture_graph;
 pub mod frame;
 pub mod frame_locator;
 pub mod http_client;
@@ -65,8 +64,8 @@ pub mod web_storage;
 
 pub use artifacts::ArtifactsJs;
 pub use bdd::{
-  CollectedRegistry, HookArg, JsArg, ScenarioWorld, StepOutcome, collect_registry, drain_attachments, install_bdd,
-  invoke_hook, invoke_step, reset_world, set_scenario_world,
+  CollectedHook, CollectedRegistry, CollectedStep, HookArg, JsArg, ScenarioSpec, StepOutcome, begin_scenario,
+  collect_registry, drain_attachments, end_scenario, install_bdd, invoke_hook, invoke_step, set_hook_world,
 };
 pub use browser::BrowserJs;
 pub use browser_type::{BrowserTypeJs, install_browser_type};
@@ -94,9 +93,8 @@ pub use page::PageJs;
 pub use registry::{CollectedAllow, CollectedTool, ScriptAttachment, tools_len, tools_snapshot};
 pub use sidecars::{SidecarJs, SidecarsJs, install_sidecars};
 pub use test::{
-  BridgeFuture, CollectedAnnotation, CollectedFileConfigure, CollectedFileUse, CollectedFixture, CollectedSuite,
-  CollectedTest, CollectedTestHook, CollectedTests, JsFixtureScope, RunTestSpec, SnapshotTarget, TEST_SKIP_SENTINEL,
-  TestHostBridge, TestInfoData, TestWorldData, collect_tests, install_test, run_standalone_hook, run_test,
+  CollectedAnnotation, CollectedFileConfigure, CollectedFileUse, CollectedFixture, CollectedSuite, CollectedTest,
+  CollectedTestHook, CollectedTests, TEST_SKIP_SENTINEL, collect_tests, install_test, run_standalone_hook, run_test,
   teardown_worker_fixtures,
 };
 pub use test_debug::{PendingAction, TestDebugControl};

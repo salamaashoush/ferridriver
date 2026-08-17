@@ -11,7 +11,9 @@ harness = false
 
 [dependencies]
 ferridriver = { path = "../../crates/ferridriver" }
-# `debug-session` so `cargo test --test e2e -- --debug` can stop a test and
-# publish its browser as a session.
-ferridriver-test = { path = "../../crates/ferridriver-test", features = ["debug-session"] }
+ferridriver-test = { path = "../../crates/ferridriver-test" }
+# Linking the scripting engine is what makes `cargo test --test e2e --
+# --debug` able to stop a test and publish its browser as a session: it
+# registers the runner's session publisher.
+ferridriver-script = { path = "../../crates/ferridriver-script" }
 tokio = { workspace = true }

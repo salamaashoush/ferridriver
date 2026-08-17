@@ -7,13 +7,21 @@
 //! held as context userdata (the QuickJS context is single-threaded, so
 //! a `RefCell` is the right interior mutability — no `Arc`/`Mutex`).
 //! Step bodies are kept as `Persistent` functions and called back by
-//! the Rust `ferridriver-bdd` core. Every body receives the
-//! per-scenario World as its FIRST positional argument — arrow,
-//! classic `function`, async, all the same shape — followed by the
+//! the Rust `ferridriver-bdd` core. Every body receives the scenario's
+//! object as its FIRST positional argument — arrow, classic
+//! `function`, async, all the same shape — followed by the
 //! cucumber-extracted parameters, an optional `DataTableJs`, and an
-//! optional doc-string. The World is also bound as `this` so
+//! optional doc-string. That object is also bound as `this`, so
 //! `function (world) { this === world }` holds for callers who prefer
 //! that style.
+//!
+//! It is one object per scenario and it is the test's fixture bag:
+//! `set_current_test` builds it (browser bindings, config scalars,
+//! `testInfo`), this module adds the cucumber World surface and the
+//! `setWorldConstructor` instance as its prototype, and
+//! `resolve_custom_fixtures` sets up whatever the scenario's steps and
+//! hooks destructured — the same graph, `use()` handshake and LIFO
+//! teardown a `test()` body gets.
 //!
 //! No business logic here: matching, outline expansion, tag filtering
 //! and hook ordering all stay in the `ferridriver-bdd` core.
@@ -26,9 +34,9 @@ use rquickjs::{ArrayBuffer, CatchResultExt, Ctx, Function, JsLifetime, Object, P
 
 use crate::bindings::convert::{serde_from_js, serde_to_js};
 use crate::bindings::registry::{HookReg, ParamTypeReg, ScriptAttachment, StepReg, as_function, rq, with_registry};
-use crate::bindings::{install_browser_context_on, install_browser_on, install_page_on, install_request_on};
 use crate::engine::caught_to_script_error;
 use crate::error::ScriptError;
+use ferridriver_test::host::TestWorldData;
 
 /// Thrown by `this.skip()`; recognised in [`invoke_step`] and mapped to
 /// `StepOutcome::Skipped` (cucumber aborts the step on throw).
@@ -194,6 +202,8 @@ fn register_step_in(kind: StepKind, args: &[Value<'_>], fixture_set: Option<usiz
     .find_map(as_function)
     .ok_or_else(|| rq(&ScriptError::internal(format!("step `{pat}` has no function body"))))?;
   let timeout_ms = timeout_from_opts(&args[1..]);
+  let requested = crate::bindings::test::destructured_keys(&ctx, &func);
+  note_unnamed_fixtures(fixture_set, requested.as_ref(), "step", &pat);
   let saved = Persistent::save(&ctx, func);
   with_registry(&ctx, |reg| {
     reg.steps.push(StepReg {
@@ -203,9 +213,34 @@ fn register_step_in(kind: StepKind, args: &[Value<'_>], fixture_set: Option<usiz
       func: saved,
       timeout_ms,
       fixture_set,
+      requested,
     });
   })
   .map_err(|e| rq(&e))
+}
+
+/// A body bound to a fixture chain takes its fixtures from the object
+/// pattern of its first parameter. A plain identifier there — the
+/// classic cucumber `function (world)` style — names nothing, so the
+/// chain's fixtures are not set up for it; it still receives the same
+/// object, with the scenario's browser bindings, the World surface and
+/// every `auto` fixture on it.
+///
+/// That is supported, not a mistake, so it is a named diagnostic rather
+/// than a warning: `RUST_LOG=ferridriver::script=debug` (or `--verbose`)
+/// answers "why is my fixture undefined in this step" in one line.
+fn note_unnamed_fixtures(fixture_set: Option<usize>, requested: Option<&Vec<String>>, kind: &str, what: &str) {
+  if fixture_set.is_none() || requested.is_some() {
+    return;
+  }
+  tracing::debug!(
+    target: "ferridriver::script",
+    %kind,
+    definition = %what,
+    "bdd.fixtures.not_destructured: `{what}` takes a plain identifier as its first parameter, so no fixture of \
+     the chain it was bound to is set up for it. Write ({{ myFixture }}, …) to name what it needs — page, \
+     context, request, browser and the World surface are on that same object either way"
+  );
 }
 
 fn register_hook(kind: &str, args: &[Value<'_>]) -> rquickjs::Result<()> {
@@ -235,6 +270,13 @@ fn register_hook_in(kind: &str, args: &[Value<'_>], fixture_set: Option<usize>) 
     (tags, f)
   };
   let timeout_ms = timeout_from_opts(args);
+  // `BeforeAll` / `AfterAll` run without a scenario, so they get the
+  // world-shaped object rather than a fixture bag — naming fixtures
+  // there resolves nothing, and warning about it would be noise.
+  let requested = crate::bindings::test::destructured_keys(&ctx, &func);
+  if !matches!(kind, "BeforeAll" | "AfterAll") {
+    note_unnamed_fixtures(fixture_set, requested.as_ref(), "hook", kind);
+  }
   let saved = Persistent::save(&ctx, func);
   with_registry(&ctx, |reg| {
     reg.hooks.push(HookReg {
@@ -243,6 +285,7 @@ fn register_hook_in(kind: &str, args: &[Value<'_>], fixture_set: Option<usize>) 
       func: saved,
       timeout_ms,
       fixture_set,
+      requested,
     });
   })
   .map_err(|e| rq(&e))
@@ -487,6 +530,8 @@ pub struct CollectedStep {
   /// The fixture set a `bindSteps(test)` registration belongs to; the
   /// BDD host resolves this step's first parameter from it.
   pub fixture_set: Option<usize>,
+  /// Fixture names the body destructured from its first parameter.
+  pub requested: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -494,6 +539,7 @@ pub struct CollectedHook {
   pub hook_type: String,
   pub tags: Option<String>,
   pub fixture_set: Option<usize>,
+  pub requested: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -508,13 +554,24 @@ pub struct CollectedRegistry {
   pub steps: Vec<CollectedStep>,
   pub hooks: Vec<CollectedHook>,
   pub param_types: Vec<CollectedParamType>,
+  /// The `test.extend` chains this VM registered, indexed by fixture
+  /// set — the table
+  /// [`dominant_fixture_set`](crate::bindings::test::dominant_fixture_set)
+  /// picks a scenario's chain from. Fixed once the step bundle has
+  /// evaluated, so the host snapshots it here instead of asking the VM
+  /// per scenario.
+  pub fixture_sets: Vec<Vec<usize>>,
 }
 
 /// Snapshot the registry after the step `.js` files evaluated.
 pub async fn collect_registry(vm: &crate::vm::VmHandle) -> Result<CollectedRegistry, ScriptError> {
   crate::vm_with!(vm => |ctx| {
+    let fixture_sets = crate::bindings::test::with_test_registry(&ctx, |r| {
+      crate::bindings::test::fixture_set_table(r)
+    })?;
     with_registry(&ctx, |reg| CollectedRegistry {
       default_timeout_ms: reg.default_timeout_ms,
+      fixture_sets,
       steps: reg
         .steps
         .iter()
@@ -523,6 +580,7 @@ pub async fn collect_registry(vm: &crate::vm::VmHandle) -> Result<CollectedRegis
           pattern: s.pattern.clone(),
           is_regex: s.is_regex,
           fixture_set: s.fixture_set,
+          requested: s.requested.clone(),
         })
         .collect(),
       hooks: reg
@@ -532,6 +590,7 @@ pub async fn collect_registry(vm: &crate::vm::VmHandle) -> Result<CollectedRegis
           hook_type: h.kind.clone(),
           tags: h.tags.clone(),
           fixture_set: h.fixture_set,
+          requested: h.requested.clone(),
         })
         .collect(),
       param_types: reg
@@ -547,99 +606,156 @@ pub async fn collect_registry(vm: &crate::vm::VmHandle) -> Result<CollectedRegis
   .await?
 }
 
-/// Per-scenario fixtures the BDD core threads onto the JS World — the
-/// same handles `RunContext` carries for scripting, installed onto a
-/// per-scenario World object rather than `globalThis`.
-#[derive(Clone, Default)]
-pub struct ScenarioWorld {
-  pub page: Option<Arc<ferridriver::Page>>,
-  pub context: Option<Arc<ferridriver::context::ContextRef>>,
-  pub request: Option<Arc<ferridriver::http_client::HttpClient>>,
-  pub browser: Option<Arc<ferridriver::Browser>>,
+/// What the BDD host hands the VM to open a scenario: the runner's
+/// fixtures and `testInfo` (the same [`TestWorldData`] the Playwright
+/// test host builds), the cucumber world parameters, and which
+/// `test.extend` chain — plus which names off it — this scenario's
+/// steps and hooks resolve from.
+pub struct ScenarioSpec {
+  pub world: TestWorldData,
   /// Cucumber `--world-parameters` (top-level config / CLI). Exposed as
   /// `this.parameters` and passed to a `setWorldConstructor` ctor as
-  /// `{ parameters }`. `None`/`Null` ⇒ `{}`.
-  pub parameters: Option<serde_json::Value>,
+  /// `{ parameters }`. `Null` ⇒ `{}`.
+  pub parameters: serde_json::Value,
+  pub fixture_set: usize,
+  /// Union of every matched step's and applicable hook's destructured
+  /// first-parameter names. Auto fixtures of the chain are added by the
+  /// resolver itself.
+  pub requested: Vec<String>,
+  /// Label errors from JS bodies are attributed to (the bundle name).
+  pub source_label: String,
 }
 
-/// Build the per-scenario World and make it the `this` steps run
-/// against. If `setWorldConstructor` was used, that class is
-/// constructed and the fixtures are augmented onto the instance.
-pub async fn set_scenario_world(vm: &crate::vm::VmHandle, world: &ScenarioWorld) -> Result<(), ScriptError> {
-  let world = world.clone();
+/// The cucumber World surface every step object carries, whatever else
+/// is on it: `parameters`, `attach`, `log`, `skip`, and — when the suite
+/// called `setWorldConstructor` — that instance as the object's
+/// PROTOTYPE, so instance methods resolve through it while a step's own
+/// `this.foo = …` lands on the per-scenario object and survives to the
+/// next step.
+fn install_world_surface<'js>(
+  ctx: &Ctx<'js>,
+  obj: &Object<'js>,
+  parameters: &serde_json::Value,
+) -> Result<(), ScriptError> {
+  let ctor = with_registry(ctx, |reg| reg.world_ctor.clone())?;
+  let params_val: Value<'js> = if parameters.is_null() {
+    Object::new(ctx.clone())
+      .map_err(|e| ScriptError::internal(e.to_string()))?
+      .into_value()
+  } else {
+    serde_to_js(ctx, parameters).map_err(|e| ScriptError::internal(e.to_string()))?
+  };
+
+  if let Some(ctor) = ctor {
+    let ctor = ctor.restore(ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
+    let opts = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
+    opts
+      .set("parameters", params_val.clone())
+      .map_err(|e| ScriptError::internal(e.to_string()))?;
+    let instance = ctor
+      .construct::<_, Object<'js>>((opts,))
+      .map_err(|e| ScriptError::internal(format!("World constructor: {e}")))?;
+    obj
+      .set_prototype(Some(&instance))
+      .map_err(|e| ScriptError::internal(e.to_string()))?;
+  }
+
+  obj
+    .set("parameters", params_val)
+    .map_err(|e| ScriptError::internal(e.to_string()))?;
+  // Native Cucumber `this.attach` / `this.log` — queue into the
+  // registry; the BDD layer drains them into the test result.
+  let attach = Function::new(ctx.clone(), |args: Rest<Value<'_>>| register_attachment(&args.0, false))
+    .map_err(|e| ScriptError::internal(e.to_string()))?;
+  let log = Function::new(ctx.clone(), |args: Rest<Value<'_>>| register_attachment(&args.0, true))
+    .map_err(|e| ScriptError::internal(e.to_string()))?;
+  obj
+    .set("attach", attach)
+    .map_err(|e| ScriptError::internal(e.to_string()))?;
+  obj.set("log", log).map_err(|e| ScriptError::internal(e.to_string()))?;
+  // Cucumber `this.skip()` — throws a sentinel the step bridge maps
+  // to `Skipped` (cucumber aborts the step as skipped on throw).
+  let skip = Function::new(ctx.clone(), || -> rquickjs::Result<()> {
+    Err(rquickjs::Error::new_from_js_message(
+      "World",
+      "Error",
+      SKIP_SENTINEL.to_string(),
+    ))
+  })
+  .map_err(|e| ScriptError::internal(e.to_string()))?;
+  obj
+    .set("skip", skip)
+    .map_err(|e| ScriptError::internal(e.to_string()))?;
+  Ok(())
+}
+
+/// Open a scenario: build the fixtures object the Playwright test host
+/// builds (`page`/`context`/`request`/`browser`/`testInfo`/the config
+/// scalars), give it the cucumber World surface, then resolve the
+/// scenario's custom fixtures onto it through the same `use()`
+/// handshake, worker-scoped cache and LIFO teardown a `test()` gets.
+///
+/// That one object is both `this` and the first argument of every step
+/// and hook in the scenario, so `({ signingRequest, page }, table) => …`
+/// destructures and `function (world) { world.page }` still reads.
+pub async fn begin_scenario(
+  vm: &crate::vm::VmHandle,
+  spec: ScenarioSpec,
+  bridge: Arc<dyn ferridriver_test::host::TestHostBridge>,
+) -> Result<(), ScriptError> {
   let route_vm = vm.clone();
   crate::vm_with!(vm => |ctx| {
-    let ctor = with_registry(&ctx, |reg| reg.world_ctor.clone())?;
-
-    // `this.parameters` (cucumber `--world-parameters`). Built once;
-    // passed to a custom World ctor as `{ parameters }` and set on the
-    // instance regardless (cucumber-js always populates it).
-    let params_val: Value<'_> = match &world.parameters {
-      Some(v) if !v.is_null() => serde_to_js(&ctx, v).map_err(|e| ScriptError::internal(e.to_string()))?,
-      _ => Object::new(ctx.clone())
-        .map_err(|e| ScriptError::internal(e.to_string()))?
-        .into_value(),
-    };
-
-    let obj: Object<'_> = if let Some(ctor) = ctor {
-      let ctor = ctor.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
-      let opts = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
-      opts
-        .set("parameters", params_val.clone())
-        .map_err(|e| ScriptError::internal(e.to_string()))?;
-      ctor
-        .construct::<_, Object<'_>>((opts,))
-        .map_err(|e| ScriptError::internal(format!("World constructor: {e}")))?
-    } else {
-      Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?
-    };
-
-    obj
-      .set("parameters", params_val)
-      .map_err(|e| ScriptError::internal(e.to_string()))?;
-    // Native Cucumber `this.attach` / `this.log` — queue into the
-    // registry; the BDD layer drains them into the test result.
-    let attach = Function::new(ctx.clone(), |args: Rest<Value<'_>>| register_attachment(&args.0, false))
-      .map_err(|e| ScriptError::internal(e.to_string()))?;
-    let log = Function::new(ctx.clone(), |args: Rest<Value<'_>>| register_attachment(&args.0, true))
-      .map_err(|e| ScriptError::internal(e.to_string()))?;
-    obj.set("attach", attach).map_err(|e| ScriptError::internal(e.to_string()))?;
-    obj.set("log", log).map_err(|e| ScriptError::internal(e.to_string()))?;
-    // Cucumber `this.skip()` — throws a sentinel the step bridge maps
-    // to `Skipped` (cucumber aborts the step as skipped on throw).
-    let skip = Function::new(ctx.clone(), || -> rquickjs::Result<()> {
-      Err(rquickjs::Error::new_from_js_message("World", "Error", SKIP_SENTINEL.to_string()))
-    })
-    .map_err(|e| ScriptError::internal(e.to_string()))?;
-    obj.set("skip", skip).map_err(|e| ScriptError::internal(e.to_string()))?;
-
-    if let Some(page) = world.page {
-      install_page_on(&ctx, &obj, page, route_vm.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
-    }
-    if let Some(c) = world.context {
-      install_browser_context_on(&ctx, &obj, c).map_err(|e| ScriptError::internal(e.to_string()))?;
-    }
-    if let Some(r) = world.request {
-      install_request_on(&ctx, &obj, r).map_err(|e| ScriptError::internal(e.to_string()))?;
-    }
-    if let Some(b) = world.browser {
-      install_browser_on(&ctx, &obj, b).map_err(|e| ScriptError::internal(e.to_string()))?;
-    }
-
+    with_registry(&ctx, |reg| {
+      reg.current_world = None;
+      reg.attachments.clear();
+    })?;
+    crate::bindings::test::set_current_test(&ctx, &route_vm, &spec.world, bridge)?;
+    let obj = crate::bindings::test::current_world_object(&ctx)?;
+    install_world_surface(&ctx, &obj, &spec.parameters)?;
+    crate::bindings::test::resolve_custom_fixtures(
+      &ctx,
+      &obj,
+      spec.fixture_set,
+      &spec.requested,
+      &spec.world.use_options,
+      &spec.source_label,
+    )
+    .await?;
+    // The scenario object and the current test's fixtures object are
+    // ONE object: `invoke_step` reaches it through the cucumber
+    // registry, `test.info()` and `expect.soft` through the test
+    // registry, and neither can drift from the other.
     let saved = Persistent::save(&ctx, obj);
     with_registry(&ctx, |reg| reg.current_world = Some(saved))
   })
   .await?
 }
 
-/// Drop the per-scenario World (cucumber builds a fresh one per
-/// scenario). The next [`set_scenario_world`] installs a new one.
-pub async fn reset_world(vm: &crate::vm::VmHandle) -> Result<(), ScriptError> {
+/// Close a scenario: resume its test-scoped fixture factories in LIFO
+/// order (the teardown half of every `use()`) and drop the per-scenario
+/// object. Attachments stay queued for the host to drain into the test
+/// result; the next [`begin_scenario`] clears them.
+pub async fn end_scenario(vm: &crate::vm::VmHandle) -> Result<(), ScriptError> {
   crate::vm_with!(vm => |ctx| {
-    with_registry(&ctx, |reg| {
-      reg.current_world = None;
-      reg.attachments.clear();
-    })
+    let teardown = crate::bindings::test::teardown_test_fixtures(&ctx).await;
+    crate::bindings::test::clear_current_test(&ctx)?;
+    with_registry(&ctx, |reg| reg.current_world = None)?;
+    teardown
+  })
+  .await?
+}
+
+/// Install the world-shaped object `BeforeAll` / `AfterAll` run against.
+/// Those hooks run with no scenario — no page, no fixture bag — so they
+/// get the World surface alone (`parameters`, `attach`, `log`, `skip`,
+/// and the `setWorldConstructor` instance as prototype).
+pub async fn set_hook_world(vm: &crate::vm::VmHandle, parameters: &serde_json::Value) -> Result<(), ScriptError> {
+  let parameters = parameters.clone();
+  crate::vm_with!(vm => |ctx| {
+    let obj = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
+    install_world_surface(&ctx, &obj, &parameters)?;
+    let saved = Persistent::save(&ctx, obj);
+    with_registry(&ctx, |reg| reg.current_world = Some(saved))
   })
   .await?
 }

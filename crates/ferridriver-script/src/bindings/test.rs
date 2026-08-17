@@ -24,8 +24,11 @@ use rquickjs::promise::MaybePromise;
 use rquickjs::{CatchResultExt, Ctx, Function, JsLifetime, Object, Persistent, Promise, Value};
 use rustc_hash::FxHashMap;
 
+use ferridriver_test::fixture::FixtureScope;
+use ferridriver_test::fixture_graph::{self, FixtureSlot};
+use ferridriver_test::host::{RunTestSpec, TestHostBridge, TestInfoData, TestWorldData};
+
 use crate::bindings::convert::serde_from_js;
-use crate::bindings::fixture_graph::{self, FixtureSlot};
 use crate::bindings::registry::{as_function, rq};
 use crate::bindings::{install_browser_context_on, install_browser_on, install_page_on, install_request_on};
 use crate::engine::caught_to_script_error;
@@ -35,64 +38,6 @@ use crate::error::ScriptError;
 /// the body; the `ferridriver-test` worker recognizes it and marks the
 /// test Skipped instead of Failed.
 pub const TEST_SKIP_SENTINEL: &str = "__FERRIDRIVER_SKIP__:";
-
-/// Future type of the async [`TestHostBridge`] methods (kept local so
-/// the bridge needs no extra dependency crate-side).
-pub type BridgeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
-
-/// Subject of a snapshot matcher, handed across the bridge as owned
-/// core handles (no JS types leave the VM).
-pub enum SnapshotTarget {
-  Locator(ferridriver::Locator),
-  Page(Arc<ferridriver::Page>),
-  /// `expect(string).toMatchSnapshot(...)` — the serialized value.
-  Value(String),
-}
-
-/// Runner-side services a running test reaches from JS (`testInfo`,
-/// `test.step`, runtime modifiers). Implemented by the test-runner glue
-/// over the core `TestInfo`/`TestModifiers`; `ferridriver-script` never
-/// depends on `ferridriver-test`, so the seam is this trait.
-pub trait TestHostBridge: Send + Sync {
-  fn attach(&self, name: String, content_type: String, body: Vec<u8>) -> BridgeFuture<()>;
-  fn attachment_count(&self) -> usize;
-  fn annotate(&self, kind: String, description: Option<String>);
-  fn annotations(&self) -> Vec<(String, Option<String>)>;
-  /// Open a live reporter/trace step; returns the step id.
-  /// `location` is the BUNDLED `line:col` — the glue remaps it.
-  fn begin_step(&self, title: String, parent: Option<String>, location: Option<(u32, u32)>) -> BridgeFuture<String>;
-  fn end_step(&self, step_id: String, error: Option<String>) -> BridgeFuture<()>;
-  /// Record a soft assertion failure. Synchronous: the value matchers
-  /// have no `await` to spend, and the rule that a soft failure is
-  /// recorded rather than thrown lives in `ferridriver_expect::soft`.
-  fn record_soft_error(&self, message: String, diff: Option<String>);
-  fn set_skip(&self, reason: Option<String>);
-  fn set_expected_failure(&self);
-  fn set_slow(&self);
-  fn set_timeout_override(&self, ms: u64);
-  fn output_path(&self, parts: &[String]) -> String;
-  fn snapshot_path(&self, name: &str) -> String;
-  fn errors(&self) -> Vec<String>;
-  /// `toMatchSnapshot(name?)` — text snapshot against the run's
-  /// snapshot directory/update mode. `Err(message)` = assertion failed.
-  fn match_text_snapshot(&self, target: SnapshotTarget, name: Option<String>) -> BridgeFuture<Result<(), String>>;
-  /// `toHaveScreenshot(name?, options?)` — PNG baseline compare.
-  /// `options` is the raw Playwright option bag as JSON.
-  fn match_screenshot(
-    &self,
-    target: SnapshotTarget,
-    name: Option<String>,
-    options: serde_json::Value,
-  ) -> BridgeFuture<Result<(), String>>;
-  /// `toMatchAriaSnapshot(yaml, { timeout? })`.
-  fn match_aria_snapshot(
-    &self,
-    target: SnapshotTarget,
-    expected_yaml: String,
-    is_not: bool,
-    timeout_ms: Option<u64>,
-  ) -> BridgeFuture<Result<(), String>>;
-}
 
 /// Suite execution mode requested via `describe.serial` /
 /// `describe.parallel` / `describe.configure({ mode })`.
@@ -158,17 +103,9 @@ pub(crate) struct TestHookReg {
   pub(crate) col: u32,
 }
 
-/// Fixture scope for `test.extend` entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum JsFixtureScope {
-  #[default]
-  Test,
-  Worker,
-}
-
 pub(crate) struct FixtureReg {
   pub(crate) name: String,
-  pub(crate) scope: JsFixtureScope,
+  pub(crate) scope: FixtureScope,
   pub(crate) auto: bool,
   pub(crate) option: bool,
   pub(crate) factory: Option<Persistent<Function<'static>>>,
@@ -292,7 +229,7 @@ fn capture_location(ctx: &Ctx<'_>) -> (u32, u32) {
 /// Destructured keys of a function's first parameter, from its source
 /// (`Function.prototype.toString`). `None` when the first parameter is
 /// not an object pattern (or a rest element makes the set unknowable).
-fn destructured_keys<'js>(ctx: &Ctx<'js>, func: &Function<'js>) -> Option<Vec<String>> {
+pub(crate) fn destructured_keys<'js>(ctx: &Ctx<'js>, func: &Function<'js>) -> Option<Vec<String>> {
   let src = function_source(ctx, func)?;
   parse_destructured_keys(&src)
 }
@@ -627,7 +564,7 @@ struct ParsedFixture {
 }
 
 fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result<ParsedFixture, rquickjs::Error> {
-  let mut scope = JsFixtureScope::Test;
+  let mut scope = FixtureScope::Test;
   let mut auto = false;
   let mut option = false;
   let mut option_specified = false;
@@ -640,12 +577,13 @@ fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result
   };
   if let Some(o) = &opts {
     if let Ok(s) = o.get::<_, String>("scope") {
-      scope = match s.as_str() {
-        "worker" => JsFixtureScope::Worker,
-        "test" => JsFixtureScope::Test,
-        other => {
+      // `global` is a runner scope with no `test.extend` spelling in
+      // Playwright, so a host may only ask for the two it has.
+      scope = match FixtureScope::from_label(&s) {
+        Some(s @ (FixtureScope::Worker | FixtureScope::Test)) => s,
+        _ => {
           return Err(rq(&ScriptError::internal(format!(
-            "fixture `{name}`: unknown scope `{other}` (expected \"test\" or \"worker\")"
+            "fixture `{name}`: unknown scope `{s}` (expected \"test\" or \"worker\")"
           ))));
         },
       };
@@ -678,13 +616,6 @@ fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result
   })
 }
 
-fn scope_label(scope: JsFixtureScope) -> &'static str {
-  match scope {
-    JsFixtureScope::Worker => "worker",
-    JsFixtureScope::Test => "test",
-  }
-}
-
 /// Append one `test.extend` entry to a fixture set, applying
 /// Playwright's override rules against the registration it shadows.
 fn append_fixture(r: &mut TestRegistry, visible: &mut Vec<usize>, parsed: ParsedFixture) -> Result<(), ScriptError> {
@@ -700,7 +631,7 @@ fn append_fixture(r: &mut TestRegistry, visible: &mut Vec<usize>, parsed: Parsed
         return Err(ScriptError::internal(format!(
           "Fixture \"{}\" has already been registered as a {{ scope: '{}' }} fixture.",
           reg.name,
-          scope_label(prev.scope)
+          prev.scope.label()
         )));
       }
       if prev.auto != reg.auto {
@@ -1248,63 +1179,6 @@ fn make_step_fn<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
   )
 }
 
-/// Static test metadata the glue passes for one invocation — mirrored
-/// onto the JS `testInfo` object.
-#[derive(Debug, Clone, Default)]
-pub struct TestInfoData {
-  pub title: String,
-  pub title_path: Vec<String>,
-  pub file: String,
-  pub line: u32,
-  pub column: u32,
-  pub retry: u32,
-  pub worker_index: u32,
-  pub parallel_index: u32,
-  pub repeat_each_index: u32,
-  pub timeout_ms: u64,
-  /// `passed` | `failed` | `timedOut` | `skipped`
-  pub expected_status: String,
-  pub tags: Vec<String>,
-  pub output_dir: String,
-  pub snapshot_dir: String,
-  pub snapshot_suffix: String,
-  pub project_name: Option<String>,
-}
-
-/// Per-test fixtures + config scalars the glue resolves from the core
-/// `FixturePool` before dispatching into the VM.
-#[derive(Clone, Default)]
-pub struct TestWorldData {
-  pub page: Option<Arc<ferridriver::Page>>,
-  pub context: Option<Arc<ferridriver::context::ContextRef>>,
-  pub request: Option<Arc<ferridriver::http_client::HttpClient>>,
-  pub browser: Option<Arc<ferridriver::Browser>>,
-  pub browser_name: String,
-  pub headless: bool,
-  pub is_mobile: bool,
-  pub has_touch: bool,
-  /// Effective `baseURL` (test-level `use` override, else config) —
-  /// exposed as the `baseURL` fixture, Playwright-style.
-  pub base_url: Option<String>,
-  /// Effective merged `use` options (config ⊕ suite/file bags ⊕
-  /// project) — option fixtures read their overrides from here.
-  pub use_options: serde_json::Value,
-  pub info: TestInfoData,
-}
-
-/// One test invocation: the registry index plus the each-hook indices
-/// the body runs between (outer-first for before, inner-first for
-/// after). Hooks run inside the test so custom fixtures are shared
-/// between hooks and body, and a hook failure fails the test —
-/// Playwright semantics.
-#[derive(Debug, Clone, Default)]
-pub struct RunTestSpec {
-  pub test_idx: usize,
-  pub hooks_before: Vec<usize>,
-  pub hooks_after: Vec<usize>,
-  pub source_label: String,
-}
-
 fn se(e: impl std::fmt::Display) -> ScriptError {
   ScriptError::internal(e.to_string())
 }
@@ -1507,7 +1381,7 @@ fn parse_attach_args<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> rquickjs::Resu
 /// Build the per-test fixtures object (`{ page, context, request,
 /// browser, browserName, headless, isMobile, hasTouch, testInfo, ...
 /// custom }`) and register it as the VM's current test.
-fn set_current_test(
+pub(crate) fn set_current_test(
   ctx: &Ctx<'_>,
   vm: &crate::vm::VmHandle,
   world: &TestWorldData,
@@ -1563,17 +1437,37 @@ pub(crate) fn fixture_slots(reg: &TestRegistry, fixture_set: usize) -> Vec<Fixtu
         name: f.name.clone(),
         deps: f.deps.clone(),
         auto: f.auto,
-        worker_scoped: f.scope == JsFixtureScope::Worker,
+        scope: f.scope,
       }
     })
     .collect()
+}
+
+/// Snapshot of the `test.extend` chains registered in this VM, indexed
+/// by fixture set — the input [`dominant_fixture_set`] reasons over.
+pub(crate) fn fixture_set_table(reg: &TestRegistry) -> Vec<Vec<usize>> {
+  reg.fixture_sets.clone()
+}
+
+/// Clear the current-test slot (the BDD host ends a scenario without
+/// going through [`run_test`]).
+pub(crate) fn clear_current_test(ctx: &Ctx<'_>) -> Result<(), ScriptError> {
+  with_test_registry(ctx, |r| r.current = None)
+}
+
+/// The fixtures object of the running test / scenario, once
+/// [`set_current_test`] built it.
+pub(crate) fn current_world_object<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>, ScriptError> {
+  let saved = with_test_registry(ctx, |r| r.current.as_ref().map(|c| c.world.clone()))?
+    .ok_or_else(|| ScriptError::internal("no current test".to_string()))?;
+  saved.restore(ctx).map_err(se)
 }
 
 /// Resolve the custom fixtures a test (plus its each-hooks) needs, in
 /// dependency order, running `use()`-handshake factories to their
 /// suspension point. Worker-scoped fixtures are set up once per VM and
 /// reused.
-async fn resolve_custom_fixtures<'js>(
+pub(crate) async fn resolve_custom_fixtures<'js>(
   ctx: &Ctx<'js>,
   world_obj: &Object<'js>,
   fixture_set: usize,
@@ -1617,7 +1511,7 @@ async fn resolve_one_fixture<'js>(
     } else if let Some(factory) = &f.factory {
       Plan::Factory {
         factory: factory.clone(),
-        worker_scoped: f.scope == JsFixtureScope::Worker,
+        worker_scoped: f.scope == FixtureScope::Worker,
       }
     } else {
       Plan::Static(f.static_value.clone())
@@ -1767,7 +1661,7 @@ async fn run_fixture_factory<'js>(
 
 /// Resume suspended test-scoped fixture factories (LIFO) and await
 /// their teardown halves. Returns the first teardown error.
-async fn teardown_test_fixtures(ctx: &Ctx<'_>) -> Result<(), ScriptError> {
+pub(crate) async fn teardown_test_fixtures(ctx: &Ctx<'_>) -> Result<(), ScriptError> {
   let mut first_err: Option<ScriptError> = None;
   loop {
     let entry = with_test_registry(ctx, |r| r.current.as_mut().and_then(|c| c.pending.pop()))?;
@@ -2061,7 +1955,7 @@ pub struct CollectedTestHook {
 #[derive(Debug, Clone)]
 pub struct CollectedFixture {
   pub name: String,
-  pub scope: JsFixtureScope,
+  pub scope: FixtureScope,
   pub auto: bool,
   /// `[value, { option: true }]` form — overridable via `use` bags.
   pub option: bool,
@@ -2117,7 +2011,7 @@ impl CollectedTests {
           name: f.name.clone(),
           deps: f.deps.clone(),
           auto: f.auto,
-          worker_scoped: f.scope == JsFixtureScope::Worker,
+          scope: f.scope,
         }
       })
       .collect()

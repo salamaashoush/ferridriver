@@ -71,7 +71,7 @@ pub(crate) struct ExtensionRegistry {
   pub(crate) param_types: Vec<ParamTypeReg>,
   pub(crate) tools: Vec<ToolReg>,
   /// Attachments queued by the running scenario's `this.attach`/`log`.
-  /// Drained per scenario by the BDD layer; cleared by `reset_world`.
+  /// Drained per scenario by the BDD layer; cleared by `begin_scenario`.
   pub(crate) attachments: Vec<ScriptAttachment>,
   pub(crate) default_timeout_ms: u64,
   /// `setDefinitionFunctionWrapper(fn)` — wraps every step body
@@ -91,8 +91,12 @@ pub(crate) struct StepReg {
   pub(crate) timeout_ms: Option<u64>,
   /// The fixture set this step resolves its first parameter from, when
   /// it was registered through `bindSteps(test)`. `None` ⇒ the ambient
-  /// `Given`/`When`/`Then`, which have no fixture chain of their own.
+  /// `Given`/`When`/`Then`, which resolve from the base chain.
   pub(crate) fixture_set: Option<usize>,
+  /// Fixture names destructured from the body's first parameter.
+  /// `None` when that parameter is a plain identifier (the cucumber
+  /// World style) or a rest pattern, which names nothing resolvable.
+  pub(crate) requested: Option<Vec<String>>,
 }
 
 pub(crate) struct HookReg {
@@ -103,6 +107,9 @@ pub(crate) struct HookReg {
   pub(crate) timeout_ms: Option<u64>,
   /// The fixture set a `bindSteps(test)` hook resolves from.
   pub(crate) fixture_set: Option<usize>,
+  /// Fixture names destructured from the body's first parameter (see
+  /// [`StepReg::requested`]).
+  pub(crate) requested: Option<Vec<String>>,
 }
 
 pub(crate) struct ParamTypeReg {

@@ -2010,10 +2010,12 @@ dependencies = [
  "ferridriver-expect",
  "ferridriver-jsstd",
  "ferridriver-session",
+ "ferridriver-test",
  "flate2",
  "futures",
  "getrandom 0.4.3",
  "hmac",
+ "inventory",
  "libc",
  "regex",
  "rolldown",
@@ -2070,8 +2072,6 @@ dependencies = [
  "ferridriver",
  "ferridriver-config",
  "ferridriver-expect",
- "ferridriver-script",
- "ferridriver-session",
  "ferridriver-test-macros",
  "ferridriver-viewer",
  "futures",
@@ -5805,6 +5805,7 @@ name = "rust-e2e-example"
 version = "0.1.0"
 dependencies = [
  "ferridriver",
+ "ferridriver-script",
  "ferridriver-test",
  "tokio",
 ]

@@ -8,9 +8,26 @@
 use std::sync::Arc;
 
 use ferridriver_script::{
-  ExtensionHost, HookArg, InMemoryVars, PathSandbox, RunContext, ScenarioWorld, ScriptEngineConfig, Session,
-  bundle_and_compile, collect_registry, drain_attachments, eval_bundle, invoke_hook, invoke_step, set_scenario_world,
+  ExtensionHost, HookArg, InMemoryVars, PathSandbox, RunContext, ScenarioSpec, ScriptEngineConfig, Session,
+  begin_scenario, bundle_and_compile, collect_registry, drain_attachments, eval_bundle, invoke_hook, invoke_step,
 };
+use ferridriver_test::host::TestWorldData;
+
+mod support;
+
+use support::MockBridge;
+
+/// A scenario with no fixtures of its own, on the base chain — what a
+/// plain `Given(...)` step gets.
+fn scenario(parameters: serde_json::Value) -> ScenarioSpec {
+  ScenarioSpec {
+    world: TestWorldData::default(),
+    parameters,
+    fixture_set: 0,
+    requested: Vec::new(),
+    source_label: "steps.js".to_string(),
+  }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn this_attach_and_log_reach_drain_attachments() {
@@ -52,9 +69,13 @@ async fn this_attach_and_log_reach_drain_attachments() {
   let reg = collect_registry(&actx).await.expect("collect");
   assert_eq!(reg.steps.len(), 1, "one step registered");
 
-  set_scenario_world(&actx, &ScenarioWorld::default())
-    .await
-    .expect("world");
+  begin_scenario(
+    &actx,
+    scenario(serde_json::Value::Null),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect("world");
   invoke_step(&actx, 0, &[], None, None, &bundle.module_name)
     .await
     .expect("step ran");
@@ -121,9 +142,13 @@ async fn after_hook_receives_cucumber_result_arg() {
   let reg = collect_registry(&actx).await.expect("collect");
   assert_eq!(reg.hooks.len(), 1, "one After hook");
 
-  set_scenario_world(&actx, &ScenarioWorld::default())
-    .await
-    .expect("world");
+  begin_scenario(
+    &actx,
+    scenario(serde_json::Value::Null),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect("world");
   let arg = HookArg {
     name: "My scenario".to_string(),
     tags: vec!["@x".to_string()],
@@ -179,9 +204,13 @@ async fn define_parameter_type_transformer_yields_typed_arg() {
   assert_eq!(reg.steps.len(), 1);
   assert_eq!(reg.param_types.len(), 1, "param type registered");
 
-  set_scenario_world(&actx, &ScenarioWorld::default())
-    .await
-    .expect("world");
+  begin_scenario(
+    &actx,
+    scenario(serde_json::Value::Null),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect("world");
   invoke_step(
     &actx,
     0,
@@ -238,9 +267,13 @@ async fn set_definition_function_wrapper_wraps_steps() {
     .expect("session");
   let actx = session.vm_handle();
   eval_bundle(&actx, &bundle).await.expect("eval");
-  set_scenario_world(&actx, &ScenarioWorld::default())
-    .await
-    .expect("world");
+  begin_scenario(
+    &actx,
+    scenario(serde_json::Value::Null),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect("world");
   invoke_step(&actx, 0, &[], None, None, &bundle.module_name)
     .await
     .expect("step");
@@ -286,9 +319,13 @@ async fn per_step_timeout_option_is_enforced() {
     .expect("session");
   let actx = session.vm_handle();
   eval_bundle(&actx, &bundle).await.expect("eval");
-  set_scenario_world(&actx, &ScenarioWorld::default())
-    .await
-    .expect("world");
+  begin_scenario(
+    &actx,
+    scenario(serde_json::Value::Null),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect("world");
   let err = invoke_step(&actx, 0, &[], None, None, &bundle.module_name)
     .await
     .expect_err("step must time out");
@@ -325,11 +362,13 @@ async fn world_parameters_are_exposed_as_this_parameters() {
     .expect("session");
   let actx = session.vm_handle();
   eval_bundle(&actx, &bundle).await.expect("eval");
-  let sw = ScenarioWorld {
-    parameters: Some(serde_json::json!({ "env": "staging", "n": 3 })),
-    ..Default::default()
-  };
-  set_scenario_world(&actx, &sw).await.expect("world");
+  begin_scenario(
+    &actx,
+    scenario(serde_json::json!({ "env": "staging", "n": 3 })),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect("world");
   invoke_step(&actx, 0, &[], None, None, &bundle.module_name)
     .await
     .expect("step");
@@ -374,9 +413,13 @@ async fn this_skip_marks_step_skipped() {
     .expect("session");
   let actx = session.vm_handle();
   eval_bundle(&actx, &bundle).await.expect("eval");
-  set_scenario_world(&actx, &ScenarioWorld::default())
-    .await
-    .expect("world");
+  begin_scenario(
+    &actx,
+    scenario(serde_json::Value::Null),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect("world");
   let out = invoke_step(&actx, 0, &[], None, None, &bundle.module_name)
     .await
     .expect("this.skip() must NOT be an error");

@@ -4,162 +4,18 @@
 //! custom-fixture use()-handshake lifecycle, each-hooks, runtime
 //! modifiers, `test.step`, and the `testInfo` object.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ferridriver_script::{
-  BridgeFuture, CollectedTests, CompiledBundle, ExtensionHost, InMemoryVars, PathSandbox, RunContext, RunTestSpec,
-  ScriptCaps, ScriptEngineConfig, Session, SnapshotTarget, TEST_SKIP_SENTINEL, TestHostBridge, TestInfoData,
-  TestWorldData, bundle_and_compile_named, collect_tests, eval_bundle, run_test, teardown_worker_fixtures,
+  CollectedTests, CompiledBundle, ExtensionHost, InMemoryVars, PathSandbox, RunContext, ScriptCaps, ScriptEngineConfig,
+  Session, TEST_SKIP_SENTINEL, bundle_and_compile_named, collect_tests, eval_bundle, run_test,
+  teardown_worker_fixtures,
 };
+use ferridriver_test::host::{RunTestSpec, TestInfoData, TestWorldData};
 
-#[derive(Default)]
-struct MockBridgeState {
-  attachments: Vec<(String, String, Vec<u8>)>,
-  annotations: Vec<(String, Option<String>)>,
-  steps: Vec<String>,
-  step_events: Vec<String>,
-  soft_errors: Vec<String>,
-  skipped: bool,
-  skip_reason: Option<String>,
-  expected_failure: bool,
-  slow: bool,
-  timeout_override: Option<u64>,
-  next_step_id: u32,
-  snapshot_calls: Vec<String>,
-}
+mod support;
 
-#[derive(Default)]
-struct MockBridge(Mutex<MockBridgeState>);
-
-impl MockBridge {
-  fn state<R>(&self, f: impl FnOnce(&mut MockBridgeState) -> R) -> R {
-    f(&mut self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
-  }
-}
-
-impl TestHostBridge for MockBridge {
-  fn attach(&self, name: String, content_type: String, body: Vec<u8>) -> BridgeFuture<()> {
-    self.state(|s| s.attachments.push((name, content_type, body)));
-    Box::pin(async {})
-  }
-
-  fn attachment_count(&self) -> usize {
-    self.state(|s| s.attachments.len())
-  }
-
-  fn annotate(&self, kind: String, description: Option<String>) {
-    self.state(|s| s.annotations.push((kind, description)));
-  }
-
-  fn annotations(&self) -> Vec<(String, Option<String>)> {
-    self.state(|s| s.annotations.clone())
-  }
-
-  fn begin_step(&self, title: String, parent: Option<String>, _location: Option<(u32, u32)>) -> BridgeFuture<String> {
-    let id = self.state(|s| {
-      s.next_step_id += 1;
-      let id = format!("s{}", s.next_step_id);
-      s.steps.push(title.clone());
-      s.step_events.push(format!(
-        "begin {id} `{title}` parent={}",
-        parent.as_deref().unwrap_or("-")
-      ));
-      id
-    });
-    Box::pin(async move { id })
-  }
-
-  fn end_step(&self, step_id: String, error: Option<String>) -> BridgeFuture<()> {
-    self.state(|s| {
-      s.step_events
-        .push(format!("end {step_id} err={}", error.as_deref().unwrap_or("-")));
-    });
-    Box::pin(async {})
-  }
-
-  fn record_soft_error(&self, message: String, _diff: Option<String>) {
-    self.state(|s| s.soft_errors.push(message));
-  }
-
-  fn set_skip(&self, reason: Option<String>) {
-    self.state(|s| {
-      s.skipped = true;
-      s.skip_reason = reason;
-    });
-  }
-
-  fn set_expected_failure(&self) {
-    self.state(|s| s.expected_failure = true);
-  }
-
-  fn set_slow(&self) {
-    self.state(|s| s.slow = true);
-  }
-
-  fn set_timeout_override(&self, ms: u64) {
-    self.state(|s| s.timeout_override = Some(ms));
-  }
-
-  fn output_path(&self, parts: &[String]) -> String {
-    format!("/out/{}", parts.join("/"))
-  }
-
-  fn snapshot_path(&self, name: &str) -> String {
-    format!("/snap/{name}")
-  }
-
-  fn errors(&self) -> Vec<String> {
-    self.state(|s| s.soft_errors.clone())
-  }
-
-  fn match_text_snapshot(&self, target: SnapshotTarget, name: Option<String>) -> BridgeFuture<Result<(), String>> {
-    let kind = snapshot_target_kind(&target);
-    self.state(|s| {
-      s.snapshot_calls
-        .push(format!("text {kind} name={}", name.as_deref().unwrap_or("<auto>")));
-    });
-    Box::pin(async { Ok(()) })
-  }
-
-  fn match_screenshot(
-    &self,
-    target: SnapshotTarget,
-    name: Option<String>,
-    options: serde_json::Value,
-  ) -> BridgeFuture<Result<(), String>> {
-    let kind = snapshot_target_kind(&target);
-    self.state(|s| {
-      s.snapshot_calls.push(format!(
-        "screenshot {kind} name={} opts={options}",
-        name.as_deref().unwrap_or("<auto>")
-      ));
-    });
-    Box::pin(async { Ok(()) })
-  }
-
-  fn match_aria_snapshot(
-    &self,
-    target: SnapshotTarget,
-    expected_yaml: String,
-    is_not: bool,
-    _timeout_ms: Option<u64>,
-  ) -> BridgeFuture<Result<(), String>> {
-    let kind = snapshot_target_kind(&target);
-    self.state(|s| {
-      s.snapshot_calls
-        .push(format!("aria {kind} not={is_not} yaml={expected_yaml}"));
-    });
-    Box::pin(async { Ok(()) })
-  }
-}
-
-fn snapshot_target_kind(target: &SnapshotTarget) -> &'static str {
-  match target {
-    SnapshotTarget::Locator(_) => "locator",
-    SnapshotTarget::Page(_) => "page",
-    SnapshotTarget::Value(_) => "value",
-  }
-}
+use support::MockBridge;
 
 struct Harness {
   session: Session,

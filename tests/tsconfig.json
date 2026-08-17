@@ -20,9 +20,7 @@
     }
   },
   "include": [
-    "**/*.ts"
-  ],
-  "exclude": [
-    "steps"
+    "**/*.ts",
+    "../packages/ferridriver-test/bdd.d.ts"
   ]
 }

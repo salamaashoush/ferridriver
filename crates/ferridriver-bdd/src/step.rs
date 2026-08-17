@@ -195,6 +195,21 @@ impl fmt::Display for StepLocation {
 
 // ── Step definition ──
 
+/// What a JS step definition asks of the fixture graph: the
+/// `test.extend` chain its first parameter resolves from (0 is the base
+/// `test`, which is what an ambient `Given`/`When`/`Then` gets), and the
+/// names it destructured off that parameter.
+///
+/// `names: None` means the body took a plain identifier — the cucumber
+/// World style — so it names nothing resolvable; the object it receives
+/// still carries `page` / `context` / `request` / `browser` and every
+/// `auto` fixture of the chain.
+#[derive(Debug, Clone)]
+pub struct StepFixtures {
+  pub set: usize,
+  pub names: Option<Vec<String>>,
+}
+
 /// A compiled step definition: expression + handler + metadata.
 pub struct StepDef {
   /// The kind of step (Given/When/Then/Step).
@@ -211,6 +226,9 @@ pub struct StepDef {
   pub handler: StepHandler,
   /// Source location for diagnostics.
   pub location: StepLocation,
+  /// Fixture request of a JS step. `None` for a Rust step, whose
+  /// fixtures come from the runner's pool rather than a JS chain.
+  pub fixtures: Option<StepFixtures>,
 }
 
 // ── Step match result ──

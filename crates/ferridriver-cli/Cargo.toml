@@ -25,7 +25,7 @@ async-trait = { workspace = true }
 ferridriver-mcp = { workspace = true }
 ferridriver-script = { workspace = true }
 ferridriver-config = { workspace = true }
-ferridriver-test = { workspace = true, features = ["debug-session"] }
+ferridriver-test = { workspace = true }
 ferridriver-bdd = { workspace = true }
 ferridriver-testjs = { workspace = true }
 ferridriver-session = { workspace = true }

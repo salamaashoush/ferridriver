@@ -296,6 +296,29 @@ impl SourceMapper {
   }
 }
 
+/// A compiled bundle as the runner's [`ferridriver_test::host::SourceMap`]:
+/// a position in the code QuickJS executed, answered as the file the
+/// author wrote, resolved against the directory the bundle was built
+/// from.
+pub struct BundleSourceMap {
+  bundle: std::sync::Arc<CompiledBundle>,
+  cwd: std::sync::Arc<std::path::PathBuf>,
+}
+
+impl BundleSourceMap {
+  #[must_use]
+  pub fn new(bundle: std::sync::Arc<CompiledBundle>, cwd: std::sync::Arc<std::path::PathBuf>) -> Self {
+    Self { bundle, cwd }
+  }
+}
+
+impl ferridriver_test::host::SourceMap for BundleSourceMap {
+  fn remap(&self, line: u32, column: u32) -> Option<(String, u32, u32)> {
+    let (src, src_line, src_col) = self.bundle.remap(line, column)?;
+    Some((resolve_source(&self.cwd, &src).display().to_string(), src_line, src_col))
+  }
+}
+
 /// The result of one rolldown bundle.
 pub struct BundledSource {
   pub code: String,

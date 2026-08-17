@@ -56,6 +56,7 @@ impl StepRegistry {
                 file: reg.file,
                 line: reg.line,
               },
+              fixtures: None,
             });
           },
           Err(e) => {
@@ -83,6 +84,7 @@ impl StepRegistry {
                 file: reg.file,
                 line: reg.line,
               },
+              fixtures: None,
             });
           },
           Err(e) => {
@@ -142,17 +144,7 @@ impl StepRegistry {
     handler: StepHandler,
     location: StepLocation,
   ) -> ferridriver::error::Result<()> {
-    let compiled = expression::compile_with_custom(expr, &self.param_types)?;
-    self.steps.push(StepDef {
-      kind,
-      expression: expr.to_string(),
-      regex: compiled.regex,
-      param_types: compiled.param_types,
-      param_infos: compiled.param_infos,
-      handler,
-      location,
-    });
-    Ok(())
+    self.push_step(kind, expr, false, handler, location, None)
   }
 
   /// Register a step from a raw regex pattern (not a Cucumber expression).
@@ -164,19 +156,54 @@ impl StepRegistry {
     handler: StepHandler,
     location: StepLocation,
   ) -> ferridriver::error::Result<()> {
-    let regex = regex::Regex::new(pattern)
-      .map_err(|e| ferridriver::FerriError::invalid_argument("regex", format!("invalid regex \"{pattern}\": {e}")))?;
-    let num_groups = regex.captures_len().saturating_sub(1);
+    self.push_step(kind, pattern, true, handler, location, None)
+  }
+
+  /// Register a JS step together with the fixture chain its first
+  /// parameter resolves from, so a scenario using it sets up exactly
+  /// the fixtures its steps name.
+  pub fn register_js(
+    &mut self,
+    kind: crate::step::StepKind,
+    pattern: &str,
+    is_regex: bool,
+    handler: StepHandler,
+    location: StepLocation,
+    fixtures: crate::step::StepFixtures,
+  ) -> ferridriver::error::Result<()> {
+    self.push_step(kind, pattern, is_regex, handler, location, Some(fixtures))
+  }
+
+  fn push_step(
+    &mut self,
+    kind: crate::step::StepKind,
+    pattern: &str,
+    is_regex: bool,
+    handler: StepHandler,
+    location: StepLocation,
+    fixtures: Option<crate::step::StepFixtures>,
+  ) -> ferridriver::error::Result<()> {
+    let (regex, param_types, param_infos) = if is_regex {
+      let regex = regex::Regex::new(pattern)
+        .map_err(|e| ferridriver::FerriError::invalid_argument("regex", format!("invalid regex \"{pattern}\": {e}")))?;
+      let num_groups = regex.captures_len().saturating_sub(1);
+      let infos = (0..num_groups)
+        .map(|i| expression::ParamInfo::positional(expression::ParamType::Word, i, i + 1))
+        .collect();
+      (regex, vec![expression::ParamType::Word; num_groups], infos)
+    } else {
+      let compiled = expression::compile_with_custom(pattern, &self.param_types)?;
+      (compiled.regex, compiled.param_types, compiled.param_infos)
+    };
     self.steps.push(StepDef {
       kind,
       expression: pattern.to_string(),
       regex,
-      param_types: vec![expression::ParamType::Word; num_groups],
-      param_infos: (0..num_groups)
-        .map(|i| expression::ParamInfo::positional(expression::ParamType::Word, i, i + 1))
-        .collect(),
+      param_types,
+      param_infos,
       handler,
       location,
+      fixtures,
     });
     Ok(())
   }

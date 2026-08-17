@@ -475,8 +475,8 @@ impl HttpResponseJs {
 
   /// Combined value of a single header, or `null` if absent.
   #[qjs(rename = "header")]
-  pub fn header(&self, name: String) -> Option<String> {
-    self.inner.header(&name)
+  pub fn header<'js>(&self, ctx: Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
+    crate::bindings::convert::nullable(&ctx, self.inner.header(&name))
   }
 
   /// Playwright: `apiResponse.dispose()` — release the buffered body.

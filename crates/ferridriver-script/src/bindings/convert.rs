@@ -179,6 +179,21 @@ fn define_own<'js, V: rquickjs::IntoJs<'js>>(obj: &Object<'js>, key: &str, value
 /// Build an `rquickjs::Value` from a `serde_json::Value`. Thin wrapper
 /// over [`serde_to_js`], kept for the script-args call site in
 /// `engine.rs`.
+/// An absent value as Playwright spells it in TS: `T | null`.
+///
+/// rquickjs lowers a bare `None` to `undefined`, which is a different
+/// value in JS — `=== null` and `toBeNull()` both fail on it, and every
+/// Playwright signature that can answer "nothing" says `null`.
+pub(crate) fn nullable<'js, T: rquickjs::IntoJs<'js>>(
+  ctx: &Ctx<'js>,
+  value: Option<T>,
+) -> rquickjs::Result<Value<'js>> {
+  match value {
+    Some(v) => v.into_js(ctx),
+    None => Ok(Value::new_null(ctx.clone())),
+  }
+}
+
 pub(crate) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs::Result<Value<'js>> {
   // A transitive dep force-enables `serde_json/arbitrary_precision`
   // workspace-wide. Under that feature `serde_json::Value::Number`'s

@@ -22,11 +22,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::config::CliOverrides;
-use crate::debug::{DebugHook, DebugMode, DebugTest};
+use crate::bindings::{PendingAction, TestDebugControl};
 use async_trait::async_trait;
 use ferridriver::trace::{ActionGate, ActionInfo};
-use ferridriver_script::bindings::{PendingAction, TestDebugControl};
+use ferridriver_test::config::CliOverrides;
+use ferridriver_test::debug::{DebugHook, DebugMode, DebugPublisher, DebugTest};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::watch;
 
@@ -132,7 +132,7 @@ pub struct SessionDebugHook {
   /// Resolved scripting environment — the published session gets the same
   /// sandboxes, caps and extensions a `session open` would, so a script
   /// written against one runs against the other.
-  script: Arc<ferridriver_script::SessionScriptConfig>,
+  script: Arc<crate::SessionScriptConfig>,
   mode: DebugMode,
   /// The test currently published. `AsyncMutex` because it is taken across
   /// the bind, which awaits.
@@ -145,7 +145,7 @@ pub struct SessionDebugHook {
 /// Shared by `ferridriver test`, `ferridriver bdd` and a Rust harness
 /// binary — a scenario and a `#[ferritest]` are both tests to the runner, so
 /// the gate, the session and the stepping are the same on all three.
-pub fn install(mode: DebugMode, script: ferridriver_script::SessionScriptConfig, overrides: &mut CliOverrides) {
+pub fn install(mode: DebugMode, script: crate::SessionScriptConfig, overrides: &mut CliOverrides) {
   // The same three Playwright forces (`common/config.ts`). One worker
   // because a second one driving its own browser while the first is parked
   // makes the terminal unreadable and the stopped test harder to reach; one
@@ -155,7 +155,7 @@ pub fn install(mode: DebugMode, script: ferridriver_script::SessionScriptConfig,
   overrides.workers = Some(1);
   overrides.max_failures = Some(1);
   overrides.global_timeout = Some(0);
-  crate::debug::set_debug_hook(Arc::new(SessionDebugHook::new(script, mode)));
+  ferridriver_test::debug::set_debug_hook(Arc::new(SessionDebugHook::new(script, mode)));
 }
 
 /// [`install`] for a host with no configuration to resolve: a Rust harness
@@ -169,18 +169,17 @@ pub fn install(mode: DebugMode, script: ferridriver_script::SessionScriptConfig,
 ///
 /// Returns an error if the current directory cannot be used as a sandbox
 /// root.
-pub fn install_default(mode: DebugMode, overrides: &mut CliOverrides) -> Result<(), ferridriver_script::ScriptError> {
-  let cwd = std::env::current_dir()
-    .map_err(|e| ferridriver_script::ScriptError::internal(format!("current directory: {e}")))?;
-  let sandbox = Arc::new(ferridriver_script::PathSandbox::new(&cwd)?);
+pub fn install_default(mode: DebugMode, overrides: &mut CliOverrides) -> Result<(), crate::ScriptError> {
+  let cwd = std::env::current_dir().map_err(|e| crate::ScriptError::internal(format!("current directory: {e}")))?;
+  let sandbox = Arc::new(crate::PathSandbox::new(&cwd)?);
   install(
     mode,
-    ferridriver_script::SessionScriptConfig {
+    crate::SessionScriptConfig {
       sandbox: Arc::clone(&sandbox),
       artifacts: Some(sandbox),
-      caps: ferridriver_script::ScriptCaps::default(),
+      caps: crate::ScriptCaps::default(),
       extensions: Vec::new(),
-      engine: ferridriver_script::ScriptEngineConfig::default(),
+      engine: crate::ScriptEngineConfig::default(),
     },
     overrides,
   );
@@ -188,7 +187,7 @@ pub fn install_default(mode: DebugMode, overrides: &mut CliOverrides) -> Result<
 }
 
 impl SessionDebugHook {
-  pub fn new(script: ferridriver_script::SessionScriptConfig, mode: DebugMode) -> Self {
+  pub fn new(script: crate::SessionScriptConfig, mode: DebugMode) -> Self {
     Self {
       script: Arc::new(script),
       mode,
@@ -213,10 +212,10 @@ impl SessionDebugHook {
     // inspecting a stopped test drives the same context it is stopped in,
     // and stopping the inspector would leave nobody to resume it.
     engine.script_id = Some(id.clone());
-    let host = Arc::new(ferridriver_script::SessionScriptHost::new(
+    let host = Arc::new(crate::SessionScriptHost::new(
       Arc::clone(test.browser.state()),
       &id,
-      ferridriver_script::SessionScriptConfig {
+      crate::SessionScriptConfig {
         sandbox: self.script.sandbox.clone(),
         artifacts: self.script.artifacts.clone(),
         caps: self.script.caps.clone(),
@@ -297,7 +296,7 @@ impl DebugHook for SessionDebugHook {
     // Block the worker. The context stays open, the page stays on the
     // failure, and the bound session serves scripts against both.
     let mut rx = stopped.release.subscribe();
-    let _parked = crate::debug::pause_clock().park();
+    let _parked = ferridriver_test::debug::pause_clock().park();
     while !stopped.done.load(Ordering::SeqCst) {
       if rx.changed().await.is_err() {
         break;
@@ -361,7 +360,7 @@ impl ActionGate for StoppedTest {
     print_stop(&pending);
     *self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
     {
-      let _parked = crate::debug::pause_clock().park();
+      let _parked = ferridriver_test::debug::pause_clock().park();
       if rx.changed().await.is_err() {
         // The sender is gone, which only happens once the test is over.
         self.done.store(true, Ordering::SeqCst);
@@ -457,8 +456,8 @@ mod tests {
   use std::sync::Arc;
   use std::sync::atomic::AtomicBool;
 
+  use crate::bindings::TestDebugControl;
   use ferridriver::trace::{ActionGate, ActionInfo, StackFrame};
-  use ferridriver_script::bindings::TestDebugControl;
 
   use super::{StopAt, StoppedTest, matches_location, watch};
 
@@ -543,5 +542,15 @@ mod tests {
     assert!(!matches_location(at, "out.spec.ts:42"));
     // No line: every call in the file.
     assert!(matches_location(at, "checkout.spec.ts"));
+  }
+}
+
+// Registers this crate as the runner's session publisher: linking
+// `ferridriver-script` is what makes `--debug` work in any binary, so
+// the core runner owns the flag's semantics without ever depending on a
+// scripting engine.
+inventory::submit! {
+  DebugPublisher {
+    install_default: |mode, overrides| install_default(mode, overrides).map_err(|e| e.message),
   }
 }

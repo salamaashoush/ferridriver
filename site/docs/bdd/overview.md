@@ -89,6 +89,34 @@ carrying `page` / `context` / `request` / `browser` / `parameters` /
 Returning `'pending'` or `'skipped'` (or calling `this.skip()`) marks the
 step as such.
 
+### Fixtures in a scenario
+
+`bindSteps(test)` binds the registrars to a `test.extend` chain, and a
+step destructures what it needs from its first parameter:
+
+```ts
+import { mergeTests, test } from '@ferridriver/test';
+
+const shop = test.extend<{ cart: Cart }>({
+  cart: async ({ page }, use) => { await use(await Cart.open(page)); },
+});
+
+const { Given, Then } = bindSteps(shop);
+
+Given('a cart with {int} items', async function ({ cart }, n: number) {
+  await cart.fill(n);
+});
+```
+
+The object a step receives is the scenario's World AND its fixture bag:
+`page` / `context` / `request` / `browser` / `parameters` / `attach` /
+`log` / `skip` are on it either way, and a `setWorldConstructor`
+instance becomes its prototype. Fixtures resolve through the same graph
+a Playwright spec resolves through — dependency order, `auto`,
+`{ scope: 'worker' }` shared across the scenarios one worker runs, and
+LIFO teardown after the last step. Steps bound to unrelated `test`
+objects fail the scenario up front, pointing at `mergeTests(...)`.
+
 Files are bundled with rolldown (TypeScript, imports, tree-shake),
 compiled to QuickJS bytecode once, and `Module::load`ed per worker. The
 bytecode cache is content-hashed, in-memory within a run and persisted

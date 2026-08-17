@@ -419,7 +419,7 @@ async fn run_test_native(config: FerridriverConfig, args: cli::TestRunArgs) -> a
   // Resolved before `config.test` is moved below.
   if let Some(mode) = args.debug {
     let setup = script_setup::resolve(&config, &std::env::current_dir()?, &[]).await?;
-    ferridriver_test::debug_session::install(mode, setup.into_session_script(), &mut overrides);
+    ferridriver_script::debug_session::install(mode, setup.into_session_script(), &mut overrides);
   }
 
   let test_config = ferridriver_test::config::resolve_config_from(config.test, &overrides)
@@ -485,7 +485,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   // Resolved before `config.test` is moved below.
   if let Some(mode) = args.debug {
     let setup = script_setup::resolve(&config, &std::env::current_dir()?, &[]).await?;
-    ferridriver_test::debug_session::install(mode, setup.into_session_script(), &mut overrides);
+    ferridriver_script::debug_session::install(mode, setup.into_session_script(), &mut overrides);
   }
 
   let mut test_config = ferridriver_test::config::resolve_config_from(config.test, &overrides)

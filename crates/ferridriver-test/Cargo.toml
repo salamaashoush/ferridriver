@@ -17,17 +17,11 @@ workspace = true
 default = []
 profiling = ["dep:tracing-chrome"]
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
-# `--debug`: publish a stopped test as a scriptable session. Off by default
-# because it pulls the whole scripting engine in, which a harness binary
-# that never debugs should not pay to build.
-debug-session = ["dep:ferridriver-script", "dep:ferridriver-session"]
 
 [dependencies]
 ferridriver = { workspace = true }
 ferridriver-config = { workspace = true }
 ferridriver-expect = { workspace = true }
-ferridriver-script = { workspace = true, optional = true }
-ferridriver-session = { workspace = true, optional = true }
 ferridriver-test-macros = { workspace = true }
 ferridriver-viewer = { workspace = true }
 tokio = { workspace = true }

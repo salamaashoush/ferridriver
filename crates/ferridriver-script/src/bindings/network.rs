@@ -100,7 +100,11 @@ impl RequestJs {
   pub fn post_data_json<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let v = self.inner.post_data_json().into_js_with(&ctx)?;
     let v = v.unwrap_or(serde_json::Value::Null);
-    serde_to_js(&ctx, &v)
+    // A raw `serde_json::Value` must go through `json_to_js`: a
+    // transitive dep force-enables `serde_json/arbitrary_precision`, and
+    // under it `serde_to_js` would hand JS a number as
+    // `{"$serde_json::private::Number": "7"}`.
+    crate::bindings::convert::json_to_js(&ctx, &v)
   }
 
   #[qjs(rename = "headers")]

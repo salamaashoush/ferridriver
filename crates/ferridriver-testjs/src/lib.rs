@@ -15,7 +15,6 @@
 //! exports (`collect_tests`, `run_test`, `run_standalone_hook`,
 //! [`ferridriver_script::TestHostBridge`]).
 
-mod bridge;
 mod translate;
 
 use std::path::{Path, PathBuf};
@@ -27,7 +26,7 @@ use ferridriver_test::config::{CliOverrides, TestConfig};
 use ferridriver_test::model::TestPlan;
 use tokio::sync::OnceCell;
 
-pub use bridge::InfoBridge;
+pub use ferridriver_test::host::InfoBridge;
 pub use translate::translate_tests;
 
 /// Bundle module label — appears in stack frames before source-map

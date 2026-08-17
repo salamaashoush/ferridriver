@@ -1,0 +1,359 @@
+//! Custom-fixture dependency resolution, mirroring Playwright's
+//! `FixturePool` (`packages/playwright/src/common/fixtures.ts`).
+//!
+//! The one rule everything else follows from: a dependency named the
+//! same as the fixture declaring it resolves to that fixture's SUPER —
+//! the previous registration of the name in the `test.extend` chain —
+//! never to itself. That is what makes
+//!
+//! ```js
+//! base.extend({ page: async ({ page }, use) => { …; await use(page); } })
+//! ```
+//!
+//! a shadowing override rather than a cycle. When no earlier
+//! registration exists the dependency falls through to the runtime's
+//! built-in of that name.
+//!
+//! Core-owned, host-neutral: the QuickJS binding resolves a spec's
+//! fixtures through it, the BDD host picks a scenario's chain with
+//! [`dominant_fixture_set`], and the runner's own pool-request
+//! computation reads the same order, so no two of them can disagree
+//! about which registration a name means.
+
+use crate::fixture::FixtureScope;
+
+/// One fixture registration, in the order it was registered. `reg` is
+/// the caller's own registration id (an index into the Rust pool's
+/// definitions, or into the JS registry); this module only cares about
+/// positions within the slice it is given.
+///
+/// A Rust `#[fixture]`, a `test.extend` entry and a BDD chain
+/// registration all lower to this — which is what lets one set of rules
+/// serve all three.
+#[derive(Debug, Clone)]
+pub struct FixtureSlot {
+  pub reg: usize,
+  pub name: String,
+  pub deps: Vec<String>,
+  pub auto: bool,
+  pub scope: FixtureScope,
+}
+
+/// Playwright's `FixturePool.resolve(name, forFixture)`. `from` is the
+/// position of the fixture whose dependency list `dep` came from;
+/// `None` for a test/hook body, which always sees the topmost
+/// registration.
+#[must_use]
+pub fn resolve_dep(slots: &[FixtureSlot], dep: &str, from: Option<usize>) -> Option<usize> {
+  if let Some(pos) = from
+    && slots.get(pos).is_some_and(|s| s.name == dep)
+  {
+    return slots[..pos].iter().rposition(|s| s.name == dep);
+  }
+  slots.iter().rposition(|s| s.name == dep)
+}
+
+/// Positions of every `auto` fixture at or below `scope`, topmost
+/// registration of each name (Playwright's name-keyed `autoFixtures()`).
+///
+/// A worker entering its scope resolves the worker-scoped autos; a test
+/// resolves those plus its own — hence "at or below".
+#[must_use]
+pub fn auto_slots(slots: &[FixtureSlot], scope: FixtureScope) -> Vec<usize> {
+  slots
+    .iter()
+    .enumerate()
+    .filter(|(pos, slot)| {
+      slot.auto && slot.scope.rank() <= scope.rank() && resolve_dep(slots, &slot.name, None) == Some(*pos)
+    })
+    .map(|(pos, _)| pos)
+    .collect()
+}
+
+/// Positions to set up for a test: everything [`dependency_order`]
+/// needs for `requested`, plus every auto fixture of the chain.
+///
+/// # Errors
+///
+/// See [`dependency_order`].
+pub fn resolution_order(
+  slots: &[FixtureSlot],
+  requested: &[String],
+  is_builtin: &dyn Fn(&str) -> bool,
+) -> Result<Vec<usize>, String> {
+  order_from(slots, requested, &auto_slots(slots, FixtureScope::Test), is_builtin)
+}
+
+/// Positions to set up for `requested` alone, in dependency order —
+/// dependencies before dependents, with no auto fixtures pulled in.
+///
+/// This is the lazy single-request form the runner's pool resolves
+/// through; a test entering its scope wants [`resolution_order`].
+///
+/// `is_builtin` answers whether the runtime provides a fixture of that
+/// name without any registration; it is what distinguishes a legitimate
+/// override of a built-in from Playwright's "references itself, but
+/// does not have a base implementation".
+///
+/// # Errors
+///
+/// Dependency cycle, a self-reference with no base implementation, or a
+/// fixture depending on one that does not outlive it (a worker fixture
+/// on a test fixture).
+pub fn dependency_order(
+  slots: &[FixtureSlot],
+  requested: &[String],
+  is_builtin: &dyn Fn(&str) -> bool,
+) -> Result<Vec<usize>, String> {
+  order_from(slots, requested, &[], is_builtin)
+}
+
+fn order_from(
+  slots: &[FixtureSlot],
+  requested: &[String],
+  seeds: &[usize],
+  is_builtin: &dyn Fn(&str) -> bool,
+) -> Result<Vec<usize>, String> {
+  let mut queue: Vec<usize> = requested
+    .iter()
+    .filter_map(|name| resolve_dep(slots, name, None))
+    .collect();
+  queue.extend_from_slice(seeds);
+
+  let mut needed: Vec<usize> = Vec::new();
+  while let Some(pos) = queue.pop() {
+    if needed.contains(&pos) {
+      continue;
+    }
+    needed.push(pos);
+    for dep in &slots[pos].deps {
+      if let Some(dep_pos) = resolve_dep(slots, dep, Some(pos)) {
+        queue.push(dep_pos);
+      }
+    }
+  }
+  // Registration order, so the setup sequence does not depend on the
+  // order names happened to come off the queue.
+  needed.sort_unstable();
+
+  let mut ordered: Vec<usize> = Vec::with_capacity(needed.len());
+  let mut visiting: Vec<usize> = Vec::new();
+  for &pos in &needed {
+    visit(pos, slots, is_builtin, &mut ordered, &mut visiting)?;
+  }
+  Ok(ordered)
+}
+
+/// A dependency name that resolves to no registration: either the
+/// runtime provides it (a built-in, an injected value), or it is one of
+/// Playwright's two dependency errors, verbatim
+/// (`common/fixtures.ts:196-200`) — a self-reference with nothing under
+/// it, or an unknown parameter.
+fn unresolved_dep(slot: &FixtureSlot, dep: &str, is_builtin: &dyn Fn(&str) -> bool) -> Result<(), String> {
+  if is_builtin(dep) {
+    return Ok(());
+  }
+  if dep == slot.name {
+    return Err(format!(
+      "Fixture \"{dep}\" references itself, but does not have a base implementation."
+    ));
+  }
+  Err(format!("Fixture \"{}\" has unknown parameter \"{dep}\".", slot.name))
+}
+
+fn visit(
+  pos: usize,
+  slots: &[FixtureSlot],
+  is_builtin: &dyn Fn(&str) -> bool,
+  ordered: &mut Vec<usize>,
+  visiting: &mut Vec<usize>,
+) -> Result<(), String> {
+  if ordered.contains(&pos) {
+    return Ok(());
+  }
+  if let Some(start) = visiting.iter().position(|&p| p == pos) {
+    let chain: Vec<String> = visiting[start..]
+      .iter()
+      .map(|&p| format!("\"{}\"", slots[p].name))
+      .collect();
+    return Err(format!(
+      "Fixtures {} -> \"{}\" form a dependency cycle",
+      chain.join(" -> "),
+      slots[pos].name
+    ));
+  }
+  visiting.push(pos);
+  for dep in &slots[pos].deps {
+    let Some(dep_pos) = resolve_dep(slots, dep, Some(pos)) else {
+      unresolved_dep(&slots[pos], dep, is_builtin)?;
+      continue;
+    };
+    // A fixture may only depend on one that outlives it: a worker
+    // fixture reused across tests cannot hold a value torn down after
+    // each one.
+    if slots[pos].scope.rank() > slots[dep_pos].scope.rank() {
+      return Err(format!(
+        "{} fixture \"{}\" cannot depend on a {} fixture \"{dep}\"",
+        slots[pos].scope.label(),
+        slots[pos].name,
+        slots[dep_pos].scope.label()
+      ));
+    }
+    visit(dep_pos, slots, is_builtin, ordered, visiting)?;
+  }
+  visiting.pop();
+  ordered.push(pos);
+  Ok(())
+}
+
+/// The one fixture set that covers `wanted`, or the reason none does.
+///
+/// A `test.extend` chain's set is its parent's set plus the new
+/// registrations, and `mergeTests` unions the sets of its arguments, so
+/// "one chain covers them all" is exactly "one set contains every other
+/// set's registrations". Steps bound to unrelated chains have no such
+/// set: nothing could give a scenario both bags at once, and silently
+/// picking one would leave the other chain's fixtures undefined.
+///
+/// The empty request answers the base set (0), which is the chain the
+/// ambient `Given`/`When`/`Then` and every unbound hook resolve from.
+///
+/// # Errors
+///
+/// The wanted sets are not totally ordered by containment.
+pub fn dominant_fixture_set(sets: &[Vec<usize>], wanted: &[usize]) -> Result<usize, String> {
+  let mut uniq: Vec<usize> = Vec::new();
+  for &s in wanted {
+    if !uniq.contains(&s) {
+      uniq.push(s);
+    }
+  }
+  let Some(&first) = uniq.first() else { return Ok(0) };
+  if uniq.len() == 1 {
+    return Ok(first);
+  }
+  let slots = |set: usize| sets.get(set).map(Vec::as_slice).unwrap_or_default();
+  let widest = uniq.iter().copied().max_by_key(|&s| slots(s).len()).unwrap_or(first);
+  for &other in &uniq {
+    if !slots(other).iter().all(|reg| slots(widest).contains(reg)) {
+      return Err(format!(
+        "this scenario's steps are bound to unrelated `test` objects (fixture sets {other} and {widest}), \
+         so no single fixture chain resolves them all.\n\
+         Build one object with mergeTests(...) and pass it to bindSteps()."
+      ));
+    }
+  }
+  Ok(widest)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{FixtureScope, FixtureSlot, dependency_order, dominant_fixture_set, resolution_order, resolve_dep};
+
+  fn slot(reg: usize, name: &str, deps: &[&str]) -> FixtureSlot {
+    FixtureSlot {
+      reg,
+      name: name.to_string(),
+      deps: deps.iter().map(|d| (*d).to_string()).collect(),
+      auto: false,
+      scope: FixtureScope::Test,
+    }
+  }
+
+  #[test]
+  fn same_name_dependency_resolves_to_the_super() {
+    // base.extend({ page }).extend({ page })
+    let slots = vec![slot(0, "page", &["page"]), slot(1, "page", &["page"])];
+    assert_eq!(resolve_dep(&slots, "page", Some(1)), Some(0));
+    // The first override's `page` falls through to the built-in.
+    assert_eq!(resolve_dep(&slots, "page", Some(0)), None);
+    // A test body always sees the topmost.
+    assert_eq!(resolve_dep(&slots, "page", None), Some(1));
+
+    let order = resolution_order(&slots, &["page".to_string()], &|n| n == "page").expect("resolves");
+    assert_eq!(order, vec![0, 1], "super runs before the override");
+  }
+
+  #[test]
+  fn self_reference_without_a_base_is_named_as_such() {
+    let slots = vec![slot(0, "todoPage", &["todoPage"])];
+    let err = resolution_order(&slots, &["todoPage".to_string()], &|_| false).expect_err("no base");
+    assert_eq!(
+      err,
+      "Fixture \"todoPage\" references itself, but does not have a base implementation."
+    );
+  }
+
+  #[test]
+  fn an_unregistered_dependency_is_named_as_an_unknown_parameter() {
+    let slots = vec![slot(0, "todoPage", &["db"])];
+    let err = dependency_order(&slots, &["todoPage".to_string()], &|_| false).expect_err("unknown dep");
+    assert_eq!(err, "Fixture \"todoPage\" has unknown parameter \"db\".");
+    // …unless the runtime provides it without a registration.
+    assert!(dependency_order(&slots, &["todoPage".to_string()], &|n| n == "db").is_ok());
+  }
+
+  #[test]
+  fn genuine_cycles_are_still_rejected() {
+    let slots = vec![slot(0, "a", &["b"]), slot(1, "b", &["a"])];
+    let err = resolution_order(&slots, &["a".to_string()], &|_| false).expect_err("cycle");
+    assert!(err.contains("form a dependency cycle"), "{err}");
+  }
+
+  #[test]
+  fn worker_fixture_cannot_depend_on_a_test_fixture() {
+    let mut slots = vec![slot(0, "seed", &[]), slot(1, "pool", &["seed"])];
+    slots[1].scope = FixtureScope::Worker;
+    let err = resolution_order(&slots, &["pool".to_string()], &|_| false).expect_err("scope order");
+    assert_eq!(err, "worker fixture \"pool\" cannot depend on a test fixture \"seed\"");
+  }
+
+  #[test]
+  fn auto_fixtures_seed_only_their_topmost_registration() {
+    let mut slots = vec![slot(0, "seeded", &[]), slot(1, "seeded", &["seeded"])];
+    slots[0].auto = true;
+    slots[1].auto = true;
+    let order = resolution_order(&slots, &[], &|_| false).expect("resolves");
+    assert_eq!(order, vec![0, 1]);
+  }
+
+  #[test]
+  fn three_deep_override_chain_runs_bottom_up() {
+    let slots = vec![
+      slot(0, "page", &["page"]),
+      slot(1, "page", &["page"]),
+      slot(2, "page", &["page"]),
+    ];
+    let order = resolution_order(&slots, &["page".to_string()], &|n| n == "page").expect("resolves");
+    assert_eq!(order, vec![0, 1, 2]);
+  }
+
+  #[test]
+  fn the_base_set_answers_an_empty_request() {
+    let sets = vec![Vec::new(), vec![0, 1]];
+    assert_eq!(dominant_fixture_set(&sets, &[]), Ok(0));
+  }
+
+  #[test]
+  fn an_extend_chain_covers_the_base_it_grew_from() {
+    // base, base.extend({a}), that.extend({b})
+    let sets = vec![Vec::new(), vec![0], vec![0, 1]];
+    assert_eq!(dominant_fixture_set(&sets, &[0, 2]), Ok(2));
+    assert_eq!(dominant_fixture_set(&sets, &[2, 1, 0]), Ok(2));
+  }
+
+  #[test]
+  fn unrelated_chains_are_refused_by_name() {
+    // base.extend({a}) and base.extend({b}) — neither covers the other.
+    let sets = vec![Vec::new(), vec![0], vec![1]];
+    let err = dominant_fixture_set(&sets, &[1, 2]).expect_err("unrelated");
+    assert!(err.contains("unrelated `test` objects"), "{err}");
+    assert!(err.contains("mergeTests"), "{err}");
+  }
+
+  #[test]
+  fn a_merged_chain_covers_both_arguments() {
+    let sets = vec![Vec::new(), vec![0], vec![1], vec![0, 1]];
+    assert_eq!(dominant_fixture_set(&sets, &[1, 2, 3]), Ok(3));
+  }
+}

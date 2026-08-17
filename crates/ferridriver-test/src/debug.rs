@@ -105,6 +105,29 @@ pub fn debug_hook() -> Option<Arc<dyn DebugHook>> {
   HOOK.get().cloned()
 }
 
+/// A host that can publish a stopped test as a live, scriptable session.
+///
+/// The runner owns what `--debug` MEANS — one worker, one failure, no
+/// global timeout, a gate every action passes through — but publishing
+/// needs a scripting engine, which the core runner deliberately does not
+/// depend on. A host registers its publisher through inventory, so any
+/// binary that links one supports `--debug` with no wiring, and one that
+/// does not gets a clear error instead of a silently ignored flag.
+pub struct DebugPublisher {
+  /// Install the hook for a host with nothing to resolve — a Rust
+  /// harness binary run straight from `cargo test`. `Err` carries the
+  /// reason the session environment could not be built.
+  pub install_default: fn(DebugMode, &mut ferridriver_config::test::CliOverrides) -> Result<(), String>,
+}
+
+inventory::collect!(DebugPublisher);
+
+/// The registered publisher, if this binary links a host that has one.
+#[must_use]
+pub fn debug_publisher() -> Option<&'static DebugPublisher> {
+  inventory::iter::<DebugPublisher>.into_iter().next()
+}
+
 // ── The parked clock ───────────────────────────────────────────────────
 
 /// Re-exported from core, where it has to live: the script engine's own

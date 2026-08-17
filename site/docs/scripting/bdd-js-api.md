@@ -65,6 +65,61 @@ Given("I open my dashboard", async function ({ page, session }) {
 `bindSteps(mergeTests(a, b))` binds to both chains at once. Passing
 anything that is not a `test` object throws, naming what was expected.
 
+### What a step receives
+
+One object per scenario is both `this` and the first argument of every
+step and hook in it:
+
+- the scenario's browser bindings — `page`, `context`, `request`,
+  `browser` — plus `browserName`, `headless`, `isMobile`, `hasTouch`,
+  `baseURL` and `testInfo`;
+- the cucumber World surface: `parameters`, `attach`, `log`, `skip`;
+- every fixture the scenario's steps and hooks named, resolved from the
+  chain they were bound to, plus every `auto` fixture of that chain;
+- when the suite called `setWorldConstructor`, that instance as the
+  object's **prototype**, so its methods resolve through `this` while a
+  step's own `this.foo = …` lands on the scenario object and is still
+  there in the next step.
+
+```ts
+const { Given, Then } = bindSteps(test.extend<{ cart: Cart }>({
+  cart: async ({ page }, use) => { await use(await Cart.open(page)); },
+}));
+
+Given("a cart with {int} items", async function ({ cart }, n: number) {
+  await cart.fill(n);
+  this.startedAt = Date.now();          // survives to the next step
+});
+
+Then("checkout succeeds", async function ({ cart, page }) {
+  await cart.checkout();
+  this.log(`took ${Date.now() - this.startedAt}ms`);
+});
+```
+
+Fixtures are set up in dependency order before the first `Before` hook
+and torn down in LIFO order after the last step and every `After` hook —
+the same graph, the same `use()` handshake and the same rules a
+Playwright spec gets, including `{ scope: 'worker' }` fixtures shared by
+every scenario one worker runs, and `option: true` fixtures overridden
+from the `use` block or an `@use(...)` tag.
+
+A body whose first parameter is a plain identifier (the classic
+`function (world)` style) keeps working and still receives that same
+object — it simply names no fixtures, so none of the chain's are set up
+for it. That answer is the named diagnostic
+`bdd.fixtures.not_destructured`, visible under `--verbose` or
+`RUST_LOG=ferridriver::script=debug`.
+
+Steps in one scenario must resolve from one chain. Bound to unrelated
+`test` objects, the scenario fails before its first step, naming both
+fixture sets and pointing at `mergeTests(...)` — nothing could hand a
+scenario two disjoint bags at once.
+
+`BeforeAll` / `AfterAll` run with no scenario, so they receive the
+world-shaped object (`parameters`, `attach`, `log`, `skip`, and the
+`setWorldConstructor` instance as prototype) rather than a fixture bag.
+
 ## Hooks
 
 ```ts

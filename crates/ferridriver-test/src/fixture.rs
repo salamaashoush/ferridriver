@@ -33,6 +33,41 @@ pub enum FixtureScope {
   Global,
 }
 
+impl FixtureScope {
+  /// The name this scope is written as in a `{ scope: … }` option bag
+  /// and printed as in a diagnostic.
+  #[must_use]
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::Test => "test",
+      Self::Worker => "worker",
+      Self::Global => "global",
+    }
+  }
+
+  /// Parse the name a host wrote, or `None` when it is not a scope.
+  #[must_use]
+  pub fn from_label(name: &str) -> Option<Self> {
+    match name {
+      "test" => Some(Self::Test),
+      "worker" => Some(Self::Worker),
+      "global" => Some(Self::Global),
+      _ => None,
+    }
+  }
+
+  /// Widening rank: a fixture may depend only on one that lives at
+  /// least as long as it does (`Test` < `Worker` < `Global`).
+  #[must_use]
+  pub fn rank(self) -> u8 {
+    match self {
+      Self::Test => 0,
+      Self::Worker => 1,
+      Self::Global => 2,
+    }
+  }
+}
+
 /// Type-erased fixture value stored in the pool.
 type ArcValue = Arc<dyn Any + Send + Sync>;
 
@@ -137,6 +172,11 @@ struct FixturePoolInner {
   values: DashMap<String, ArcValue>,
   /// Fixture definitions (shared reference).
   defs: Arc<FxHashMap<String, FixtureDef>>,
+  /// The same definitions as the workspace's one fixture graph sees
+  /// them, so ordering, cycles, auto fixtures and the scope rule are
+  /// decided by `fixture_graph` here exactly as they are for a JS
+  /// `test.extend` chain or a BDD scenario.
+  slots: Arc<Vec<crate::fixture_graph::FixtureSlot>>,
   /// Teardown stack: LIFO order for cleanup. std::sync::Mutex — only locked briefly.
   teardown_stack: std::sync::Mutex<Vec<(String, TeardownFn)>>,
   /// Parent pool (for cross-scope access).
@@ -148,10 +188,12 @@ struct FixturePoolInner {
 impl FixturePool {
   /// Create a new root fixture pool.
   pub fn new(defs: FxHashMap<String, FixtureDef>, scope: FixtureScope) -> Self {
+    let slots = Arc::new(slots_of(&defs));
     Self {
       inner: Arc::new(FixturePoolInner {
         values: DashMap::new(),
         defs: Arc::new(defs),
+        slots,
         teardown_stack: std::sync::Mutex::new(Vec::new()),
         parent: None,
         scope,
@@ -165,6 +207,7 @@ impl FixturePool {
       inner: Arc::new(FixturePoolInner {
         values: DashMap::new(),
         defs: Arc::clone(&self.inner.defs),
+        slots: Arc::clone(&self.inner.slots),
         teardown_stack: std::sync::Mutex::new(Vec::new()),
         parent: Some(self.clone()),
         scope,
@@ -189,10 +232,12 @@ impl FixturePool {
   pub fn child_with_defs(&self, defs: FxHashMap<String, FixtureDef>, scope: FixtureScope) -> Self {
     let mut merged = (*self.inner.defs).clone();
     merged.extend(defs);
+    let slots = Arc::new(slots_of(&merged));
     Self {
       inner: Arc::new(FixturePoolInner {
         values: DashMap::new(),
         defs: Arc::new(merged),
+        slots,
         teardown_stack: std::sync::Mutex::new(Vec::new()),
         parent: Some(self.clone()),
         scope,
@@ -203,7 +248,7 @@ impl FixturePool {
   /// Get or lazily create a fixture by name.
   ///
   /// Returns `Arc<T>` since fixture values are shared and not cloneable.
-  /// Resolves dependencies recursively (DAG walk).
+  /// Dependencies are set up first, in the order `fixture_graph` gives.
   pub fn get<T: Any + Send + Sync>(
     &self,
     name: &str,
@@ -212,63 +257,34 @@ impl FixturePool {
     let name = name.to_string();
     Box::pin(async move {
       use ferridriver::FerriError;
-      // Check local cache first (lock-free read).
-      if let Some(val) = pool.inner.values.get(name.as_str()) {
-        return val
-          .value()
-          .clone()
-          .downcast::<T>()
-          .map_err(|_| FerriError::backend(format!("fixture '{name}' type mismatch")));
-      }
-
-      // Check if this fixture belongs to a parent scope.
-      if let Some(def) = pool.inner.defs.get(name.as_str()) {
-        if scope_rank(def.scope) > scope_rank(pool.inner.scope)
-          && let Some(parent) = &pool.inner.parent
-        {
-          return parent.get::<T>(&name).await;
-        }
-      } else if let Some(parent) = &pool.inner.parent {
-        return parent.get::<T>(&name).await;
-      }
-
-      // Resolve dependencies first.
-      if let Some(def) = pool.inner.defs.get(name.as_str()) {
-        for dep in &def.dependencies {
-          ensure_resolved(&pool, dep).await?;
-        }
-      }
-
-      // Set up the fixture.
-      let def = pool
-        .inner
-        .defs
-        .get(name.as_str())
-        .ok_or_else(|| FerriError::backend(format!("fixture '{name}' not defined")))?;
-
-      let setup = Arc::clone(&def.setup);
-      let teardown = def.teardown.as_ref().map(Arc::clone);
-      let timeout = def.timeout;
-
-      tracing::debug!(target: "ferridriver::fixture", fixture = name, "setting up fixture");
-      let arc_val = ferridriver::pause::run_within(timeout, setup(pool.clone()))
-        .await
-        .map_err(|_| FerriError::timeout(format!("fixture '{name}' setup"), timeout.as_millis() as u64))?
-        .map_err(|e| FerriError::backend(format!("fixture '{name}' setup failed: {e}")))?;
-
-      // Cache (lock-free insert).
-      pool.inner.values.insert(name.to_string(), Arc::clone(&arc_val));
-
-      // Register teardown.
-      if let Some(td) = teardown {
-        let mut stack = pool.inner.teardown_stack.lock().expect("teardown_stack lock poisoned");
-        stack.push((name.to_string(), td));
-      }
-
-      arc_val
+      ensure_resolved(&pool, &name).await?;
+      pool
+        .cached_value(&name)
+        .ok_or_else(|| FerriError::backend(format!("fixture '{name}' not defined")))?
         .downcast::<T>()
         .map_err(|_| FerriError::backend(format!("fixture '{name}' type mismatch")))
     })
+  }
+
+  /// The value of `name` if this pool or any parent has resolved it.
+  fn cached_value(&self, name: &str) -> Option<ArcValue> {
+    if let Some(val) = self.inner.values.get(name) {
+      return Some(val.value().clone());
+    }
+    self.inner.parent.as_ref().and_then(|p| p.cached_value(name))
+  }
+
+  /// Whether `name` exists without a registration of its own here — an
+  /// injected value, or a definition a parent pool owns. It is what
+  /// separates a legitimate override from a self-reference with nothing
+  /// underneath it.
+  fn is_provided(&self, name: &str) -> bool {
+    self.inner.values.contains_key(name)
+      || self
+        .inner
+        .parent
+        .as_ref()
+        .is_some_and(|p| p.inner.defs.contains_key(name) || p.is_provided(name))
   }
 
   /// Synchronously get an already-resolved fixture from the cache.
@@ -303,13 +319,10 @@ impl FixturePool {
   /// from a test-scope child pool.
   #[must_use]
   pub fn auto_fixture_names_for(&self, scope: FixtureScope) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    let want_rank = scope_rank(scope);
-    for (name, def) in self.inner.defs.iter() {
-      if def.auto && scope_rank(def.scope) <= want_rank {
-        names.push(name.clone());
-      }
-    }
+    let mut names: Vec<String> = crate::fixture_graph::auto_slots(&self.inner.slots, scope)
+      .into_iter()
+      .map(|pos| self.inner.slots[pos].name.clone())
+      .collect();
     if let Some(parent) = &self.inner.parent {
       for n in parent.auto_fixture_names_for(scope) {
         if !names.contains(&n) {
@@ -337,7 +350,12 @@ impl FixturePool {
   }
 }
 
-/// Ensure a fixture is resolved (trigger creation without needing a concrete type).
+/// Ensure a fixture is resolved (trigger creation without needing a
+/// concrete type), together with everything it depends on.
+///
+/// Ordering, cycles, the self-reference rule and the scope rule all come
+/// from [`crate::fixture_graph`] — the same code a JS `test.extend`
+/// chain and a BDD scenario resolve through.
 fn ensure_resolved(
   pool: &FixturePool,
   name: &str,
@@ -345,98 +363,106 @@ fn ensure_resolved(
   let pool = pool.clone();
   let name = name.to_string();
   Box::pin(async move {
-    // Check if already cached (lock-free read).
-    if pool.inner.values.contains_key(name.as_str()) {
+    use ferridriver::FerriError;
+    if pool.cached_value(&name).is_some() {
       return Ok(());
     }
-
-    // Check parent scope.
-    if let Some(def) = pool.inner.defs.get(name.as_str()) {
-      if scope_rank(def.scope) > scope_rank(pool.inner.scope)
-        && let Some(parent) = &pool.inner.parent
-      {
-        return ensure_resolved(parent, &name).await;
-      }
-    } else if let Some(parent) = &pool.inner.parent {
+    // Not ours: a parent scope owns it (or nobody does).
+    let Some(def) = pool.inner.defs.get(name.as_str()) else {
+      return match &pool.inner.parent {
+        Some(parent) => ensure_resolved(parent, &name).await,
+        None => Err(FerriError::backend(format!("fixture '{name}' not defined"))),
+      };
+    };
+    if def.scope.rank() > pool.inner.scope.rank()
+      && let Some(parent) = &pool.inner.parent
+    {
       return ensure_resolved(parent, &name).await;
     }
 
-    // Resolve dependencies.
-    if let Some(def) = pool.inner.defs.get(name.as_str()) {
-      for dep in &def.dependencies {
-        ensure_resolved(&pool, dep).await?;
+    let order =
+      crate::fixture_graph::dependency_order(&pool.inner.slots, std::slice::from_ref(&name), &|n| pool.is_provided(n))
+        .map_err(|e| FerriError::invalid_argument("fixture", e))?;
+    for pos in order {
+      let slot = &pool.inner.slots[pos];
+      if pool.cached_value(&slot.name).is_some() {
+        continue;
       }
-    }
-
-    // Set up.
-    use ferridriver::FerriError;
-    let def = pool
-      .inner
-      .defs
-      .get(name.as_str())
-      .ok_or_else(|| FerriError::backend(format!("fixture '{name}' not defined")))?;
-    let setup = Arc::clone(&def.setup);
-    let teardown = def.teardown.as_ref().map(Arc::clone);
-    let timeout = def.timeout;
-
-    let arc_val = ferridriver::pause::run_within(timeout, setup(pool.clone()))
-      .await
-      .map_err(|_| FerriError::timeout(format!("fixture '{name}' setup"), timeout.as_millis() as u64))?
-      .map_err(|e| FerriError::backend(format!("fixture '{name}' setup failed: {e}")))?;
-
-    pool.inner.values.insert(name.to_string(), arc_val);
-    if let Some(td) = teardown {
-      let mut stack = pool.inner.teardown_stack.lock().expect("teardown_stack lock poisoned");
-      stack.push((name.to_string(), td));
+      if slot.scope.rank() > pool.inner.scope.rank()
+        && let Some(parent) = &pool.inner.parent
+      {
+        ensure_resolved(parent, &slot.name).await?;
+        continue;
+      }
+      set_up(&pool, &slot.name).await?;
     }
     Ok(())
   })
 }
 
-fn scope_rank(scope: FixtureScope) -> u8 {
-  match scope {
-    FixtureScope::Test => 0,
-    FixtureScope::Worker => 1,
-    FixtureScope::Global => 2,
-  }
-}
-
-/// Validate that fixture definitions form a DAG (no cycles).
-pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> ferridriver::error::Result<()> {
+/// Run one fixture's setup in this pool, cache the value and park its
+/// teardown. Every path into a fixture goes through here.
+async fn set_up(pool: &FixturePool, name: &str) -> ferridriver::error::Result<()> {
   use ferridriver::FerriError;
-  use std::collections::HashSet;
+  let def = pool
+    .inner
+    .defs
+    .get(name)
+    .ok_or_else(|| FerriError::backend(format!("fixture '{name}' not defined")))?;
+  let setup = Arc::clone(&def.setup);
+  let teardown = def.teardown.as_ref().map(Arc::clone);
+  let timeout = def.timeout;
 
-  fn visit(
-    name: &str,
-    defs: &FxHashMap<String, FixtureDef>,
-    visiting: &mut HashSet<String>,
-    visited: &mut HashSet<String>,
-  ) -> ferridriver::error::Result<()> {
-    if visited.contains(name) {
-      return Ok(());
-    }
-    if !visiting.insert(name.to_string()) {
-      return Err(FerriError::invalid_argument(
-        "fixture",
-        format!("circular fixture dependency involving '{name}'"),
-      ));
-    }
-    if let Some(def) = defs.get(name) {
-      for dep in &def.dependencies {
-        visit(dep, defs, visiting, visited)?;
-      }
-    }
-    visiting.remove(name);
-    visited.insert(name.to_string());
-    Ok(())
-  }
+  tracing::debug!(target: "ferridriver::fixture", fixture = name, "setting up fixture");
+  let arc_val = ferridriver::pause::run_within(timeout, setup(pool.clone()))
+    .await
+    .map_err(|_| FerriError::timeout(format!("fixture '{name}' setup"), timeout.as_millis() as u64))?
+    .map_err(|e| FerriError::backend(format!("fixture '{name}' setup failed: {e}")))?;
 
-  let mut visiting = HashSet::new();
-  let mut visited = HashSet::new();
-  for name in defs.keys() {
-    visit(name, defs, &mut visiting, &mut visited)?;
+  pool.inner.values.insert(name.to_string(), arc_val);
+  if let Some(td) = teardown {
+    let mut stack = pool.inner.teardown_stack.lock().expect("teardown_stack lock poisoned");
+    stack.push((name.to_string(), td));
   }
   Ok(())
+}
+
+/// Lower fixture definitions into the graph's slots. Name order, since a
+/// Rust registration table is keyed by name and holds exactly one entry
+/// per name — the shadowing chains a `test.extend` builds have no Rust
+/// equivalent, and a stable order keeps setup sequences reproducible.
+fn slots_of(defs: &FxHashMap<String, FixtureDef>) -> Vec<crate::fixture_graph::FixtureSlot> {
+  let mut names: Vec<&String> = defs.keys().collect();
+  names.sort_unstable();
+  names
+    .into_iter()
+    .enumerate()
+    .map(|(reg, name)| {
+      let def = &defs[name];
+      crate::fixture_graph::FixtureSlot {
+        reg,
+        name: name.clone(),
+        deps: def.dependencies.clone(),
+        auto: def.auto,
+        scope: def.scope,
+      }
+    })
+    .collect()
+}
+
+/// Validate that fixture definitions form a DAG (no cycles) and that no
+/// fixture depends on one that does not outlive it.
+///
+/// # Errors
+///
+/// The reason from [`crate::fixture_graph`], which is the same text a JS
+/// chain or a BDD scenario would report for the same shape.
+pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> ferridriver::error::Result<()> {
+  let slots = slots_of(defs);
+  let names: Vec<String> = slots.iter().map(|s| s.name.clone()).collect();
+  crate::fixture_graph::dependency_order(&slots, &names, &|_| false)
+    .map(|_| ())
+    .map_err(|e| ferridriver::FerriError::invalid_argument("fixture", e))
 }
 
 /// Built-in fixture definitions for the ferridriver test runner.

@@ -46,6 +46,7 @@ pub mod bytecode_cache;
 pub mod command_spec;
 pub mod console;
 pub mod console_fmt;
+pub mod debug_session;
 pub mod discover;
 pub mod engine;
 pub mod error;
@@ -62,24 +63,24 @@ pub mod vm;
 pub use bindings::native_modules::{module_aliases, native_module_names, set_module_aliases};
 pub use bindings::registry::net_entry_subsumed;
 pub use bindings::{
-  ArtifactsJs, BridgeFuture, BrowserContextJs, CollectedAnnotation, CollectedFileConfigure, CollectedFileUse,
-  CollectedFixture, CollectedRegistry, CollectedSuite, CollectedTest, CollectedTestHook, CollectedTests,
+  ArtifactsJs, BrowserContextJs, CollectedAnnotation, CollectedFileConfigure, CollectedFileUse, CollectedFixture,
+  CollectedHook, CollectedRegistry, CollectedStep, CollectedSuite, CollectedTest, CollectedTestHook, CollectedTests,
   ExtensionBinding, ExtensionCommandsJs, FORWARDED_CONTEXT_KEYS, HookArg, HttpClientJs, HttpResponseJs, JsArg,
-  JsFixtureScope, KeyboardJs, LocatorJs, MouseJs, PageJs, RunTestSpec, ScenarioWorld, ScriptAttachment, SnapshotTarget,
-  StepOutcome, TEST_SKIP_SENTINEL, TOOL_CONTEXT_KEYS, TestHostBridge, TestInfoData, TestWorldData, collect_registry,
-  collect_tests, drain_attachments, install_extensions, invoke_hook, invoke_step, reset_world, run_standalone_hook,
-  run_test, set_scenario_world, teardown_worker_fixtures,
+  KeyboardJs, LocatorJs, MouseJs, PageJs, ScenarioSpec, ScriptAttachment, StepOutcome, TEST_SKIP_SENTINEL,
+  TOOL_CONTEXT_KEYS, begin_scenario, collect_registry, collect_tests, drain_attachments, end_scenario,
+  install_extensions, invoke_hook, invoke_step, run_standalone_hook, run_test, set_hook_world,
+  teardown_worker_fixtures,
 };
 pub use bundle::{
-  BundledSource, CompiledBundle, CompiledExtension, SourceMapper, bundle_and_compile, bundle_and_compile_named,
-  bundle_source, compile_and_extract_extensions, compile_bundled_source, eval_bundle, is_typescript_path,
-  resolve_source, source_is_es_module,
+  BundleSourceMap, BundledSource, CompiledBundle, CompiledExtension, SourceMapper, bundle_and_compile,
+  bundle_and_compile_named, bundle_source, compile_and_extract_extensions, compile_bundled_source, eval_bundle,
+  is_typescript_path, resolve_source, source_is_es_module,
 };
 pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
 pub use console::{ConsoleCapture, ConsoleSink};
 pub use discover::{ResolvedExtension, SOURCE_EXTENSIONS, is_source_file, walk_source_files};
 pub use engine::{
-  ExtensionHost, RunContext, RunOptions, ScriptCaps, ScriptEngine, ScriptEngineConfig, Session, SessionRun,
+  Deadline, ExtensionHost, RunContext, RunOptions, ScriptCaps, ScriptEngine, ScriptEngineConfig, Session, SessionRun,
 };
 pub use error::{ScriptError, ScriptErrorKind};
 pub use ferridriver_config::ExtensionSpec;

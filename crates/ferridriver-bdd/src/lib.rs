@@ -299,11 +299,15 @@ pub async fn run_bdd_with(
       })
     });
     let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
-    return if ui_mode {
+    let code = if ui_mode {
       Box::pin(runner.run_test_server(factory, cwd, None, ui_port)).await
     } else {
       runner.run_watch(factory, cwd).await
     };
+    // Worker VMs outlive the individual cycles, so their `AfterAll`
+    // hooks and worker-scoped fixtures are torn down once, here.
+    js::teardown_worker_sessions().await;
+    return code;
   }
 
   let plan = match build_bdd_plan(&config, &js_globs, &extensions, None).await {
@@ -319,7 +323,9 @@ pub async fn run_bdd_with(
   }
 
   let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
-  runner.run(plan).await
+  let code = runner.run(plan).await;
+  js::teardown_worker_sessions().await;
+  code
 }
 
 /// Build a BDD test plan from disk: discover + parse features (narrowed

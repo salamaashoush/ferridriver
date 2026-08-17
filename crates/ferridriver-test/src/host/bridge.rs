@@ -1,24 +1,32 @@
 //! [`TestHostBridge`] implementation over the core `TestInfo` /
 //! `TestModifiers` — the seam a running JS test reaches the runner
 //! through (`testInfo.*`, `test.step`, runtime modifiers).
+//!
+//! One implementation, both JS hosts: a `ferridriver test` spec and a
+//! `ferridriver bdd` scenario reach the runner through the same object,
+//! so `testInfo.attach`, `test.step`, soft assertions and the snapshot
+//! matchers cannot behave differently depending on which one is running.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ferridriver_script::{BridgeFuture, CompiledBundle, SnapshotTarget, TestHostBridge};
-use ferridriver_test::model::{
-  AttachmentBody, StepCategory, StepHandle, StepLocation, TestAnnotation, TestInfo, TestModifiers,
+use super::{BridgeFuture, DeadlineControl, SnapshotTarget, SourceMap, TestHostBridge, TestInfoData, TestWorldData};
+use crate::config::BrowserConfig;
+use crate::model::{
+  AttachmentBody, ExpectedStatus, StepCategory, StepHandle, StepLocation, TestAnnotation, TestInfo, TestModifiers,
 };
-
-use crate::JsTestSession;
 
 pub struct InfoBridge {
   test_info: Arc<TestInfo>,
   modifiers: Arc<TestModifiers>,
-  session: Arc<JsTestSession>,
-  bundle: Arc<CompiledBundle>,
+  /// The host's interrupt deadline: `test.slow()` and
+  /// `testInfo.setTimeout()` re-arm it so a runaway body is still
+  /// force-halted at the budget the test just asked for.
+  deadline: Arc<dyn DeadlineControl>,
+  /// The host's map back to authored source, for step locations.
+  source_map: Arc<dyn SourceMap>,
   cwd: Arc<PathBuf>,
   /// Base per-test timeout — `test.slow()` re-arms the VM deadline to
   /// three times this (the worker applies the same multiplier to its
@@ -43,8 +51,8 @@ impl InfoBridge {
   pub fn new(
     test_info: Arc<TestInfo>,
     modifiers: Arc<TestModifiers>,
-    session: Arc<JsTestSession>,
-    bundle: Arc<CompiledBundle>,
+    deadline: Arc<dyn DeadlineControl>,
+    source_map: Arc<dyn SourceMap>,
     cwd: Arc<PathBuf>,
     base_timeout: Duration,
     static_annotations: Vec<(String, Option<String>)>,
@@ -52,8 +60,8 @@ impl InfoBridge {
     Self {
       test_info,
       modifiers,
-      session,
-      bundle,
+      deadline,
+      source_map,
       cwd,
       base_timeout,
       steps: Arc::new(Mutex::new(rustc_hash::FxHashMap::default())),
@@ -116,8 +124,8 @@ impl InfoBridge {
 
   fn remap_location(&self, location: Option<(u32, u32)>) -> Option<StepLocation> {
     let (line, col) = location?;
-    let (src, src_line, src_col) = self.bundle.remap(line, col)?;
-    let abs = crate::translate::resolve_source(&self.cwd, &src);
+    let (src, src_line, src_col) = self.source_map.remap(line, col)?;
+    let abs = std::path::Path::new(&src);
     let file = abs
       .strip_prefix(self.cwd.as_path())
       .map_or_else(|_| abs.display().to_string(), |r| r.display().to_string());
@@ -187,7 +195,7 @@ impl TestHostBridge for InfoBridge {
     // One store: the test's own collector, which decides the outcome and
     // backs `testInfo.errors`. Recording is synchronous because a value
     // matcher has no `await` to spend.
-    self.test_info.add_soft_error(ferridriver_test::model::TestFailure {
+    self.test_info.add_soft_error(crate::model::TestFailure {
       message,
       stack: None,
       diff,
@@ -208,12 +216,12 @@ impl TestHostBridge for InfoBridge {
     self.modifiers.slow.store(true, Ordering::Relaxed);
     // Playwright triples the budget; keep the VM interrupt deadline in
     // step with the worker's extended timeout.
-    self.session.session().arm_deadline(self.base_timeout * 3);
+    self.deadline.arm(self.base_timeout * 3);
   }
 
   fn set_timeout_override(&self, ms: u64) {
     *Self::lock(&self.modifiers.timeout_override) = Some(ms);
-    self.session.session().arm_deadline(Duration::from_millis(ms));
+    self.deadline.arm(Duration::from_millis(ms));
   }
 
   fn output_path(&self, parts: &[String]) -> String {
@@ -250,7 +258,7 @@ impl TestHostBridge for InfoBridge {
           );
         },
       };
-      ferridriver_test::snapshot::assert_snapshot(&info, &actual, &name, false).map_err(|f| f.message)
+      crate::snapshot::assert_snapshot(&info, &actual, &name, false).map_err(|f| f.message)
     })
   }
 
@@ -265,7 +273,7 @@ impl TestHostBridge for InfoBridge {
     Box::pin(async move {
       let opts = screenshot_options_from_json(&options, info.ignore_snapshots);
       let png = match target {
-        SnapshotTarget::Locator(locator) => ferridriver_test::expect::locator::capture_with_options(&locator, &opts)
+        SnapshotTarget::Locator(locator) => crate::expect::locator::capture_with_options(&locator, &opts)
           .await
           .map_err(|f| f.message)?,
         SnapshotTarget::Page(page) => page
@@ -278,10 +286,9 @@ impl TestHostBridge for InfoBridge {
       };
       let update = matches!(
         info.update_snapshots,
-        ferridriver_test::config::UpdateSnapshotsMode::All | ferridriver_test::config::UpdateSnapshotsMode::Changed
+        crate::config::UpdateSnapshotsMode::All | crate::config::UpdateSnapshotsMode::Changed
       );
-      ferridriver_test::snapshot::compare_screenshot_png_in(&info.snapshot_dir, &png, &name, &opts, update)
-        .map_err(|f| f.message)
+      crate::snapshot::compare_screenshot_png_in(&info.snapshot_dir, &png, &name, &opts, update).map_err(|f| f.message)
     })
   }
 
@@ -303,7 +310,7 @@ impl TestHostBridge for InfoBridge {
           if is_not {
             e = e.not();
           }
-          ferridriver_test::expect::LocatorSnapshotMatchers::to_match_aria_snapshot(&e, &expected_yaml)
+          crate::expect::LocatorSnapshotMatchers::to_match_aria_snapshot(&e, &expected_yaml)
             .await
             .map_err(|f| f.message)
         },
@@ -312,7 +319,7 @@ impl TestHostBridge for InfoBridge {
           if is_not {
             e = e.not();
           }
-          ferridriver_test::expect::PageSnapshotMatchers::to_match_aria_snapshot(&e, &expected_yaml)
+          crate::expect::PageSnapshotMatchers::to_match_aria_snapshot(&e, &expected_yaml)
             .await
             .map_err(|f| f.message)
         },
@@ -323,14 +330,14 @@ impl TestHostBridge for InfoBridge {
 }
 
 /// Lower the raw Playwright option bag into the runner's
-/// [`ferridriver_test::expect::ScreenshotMatcherOptions`].
+/// [`crate::expect::ScreenshotMatcherOptions`].
 fn screenshot_options_from_json(
   v: &serde_json::Value,
   ignore_snapshots: bool,
-) -> ferridriver_test::expect::ScreenshotMatcherOptions {
+) -> crate::expect::ScreenshotMatcherOptions {
   let f = |k: &str| v.get(k).and_then(serde_json::Value::as_f64);
   let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_string);
-  ferridriver_test::expect::ScreenshotMatcherOptions {
+  crate::expect::ScreenshotMatcherOptions {
     threshold: f("threshold"),
     max_diff_pixels: v.get("maxDiffPixels").and_then(serde_json::Value::as_u64),
     max_diff_pixel_ratio: f("maxDiffPixelRatio"),
@@ -339,7 +346,7 @@ fn screenshot_options_from_json(
     caret: s("caret"),
     scale: s("scale"),
     style_path: s("stylePath").map(std::path::PathBuf::from),
-    clip: v.get("clip").map(|c| ferridriver_test::expect::ScreenshotClip {
+    clip: v.get("clip").map(|c| crate::expect::ScreenshotClip {
       x: c.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
       y: c.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
       width: c.get("width").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
@@ -351,6 +358,103 @@ fn screenshot_options_from_json(
       .map(|a| a.iter().filter_map(|m| m.as_str().map(str::to_string)).collect())
       .unwrap_or_default(),
     ignore: ignore_snapshots,
+  }
+}
+
+/// Overlay one `use` bag onto another, key by key — Playwright's rule
+/// for `use` precedence, which is a shallow take-the-inner-value, never
+/// a deep merge. A non-object base starts from `{}`.
+#[must_use]
+pub fn merge_use_options(base: Option<&serde_json::Value>, overlay: Option<&serde_json::Value>) -> serde_json::Value {
+  let mut out = match base {
+    Some(serde_json::Value::Object(map)) => map.clone(),
+    _ => serde_json::Map::new(),
+  };
+  if let Some(serde_json::Value::Object(inc)) = overlay {
+    for (k, v) in inc {
+      out.insert(k.clone(), v.clone());
+    }
+  }
+  serde_json::Value::Object(out)
+}
+
+/// Everything a JS host knows about one test or scenario that is not a
+/// live browser handle. [`world_data`] lowers it into the
+/// [`TestWorldData`] the VM builds its fixtures object from; the host
+/// fills in `page` / `context` / `request` / `browser` afterwards from
+/// whatever pool it resolved them out of.
+pub struct WorldMeta<'a> {
+  pub test_info: &'a TestInfo,
+  pub title: &'a str,
+  pub title_path: &'a [String],
+  pub file: &'a str,
+  pub line: u32,
+  pub tags: &'a [String],
+  pub expected_status: ExpectedStatus,
+  /// Fallback browser config for a run with no per-project snapshot.
+  /// The worker's own `TestInfo.config_snapshot` wins when present: a
+  /// multi-project run gives each test its project's browser, and the
+  /// translate-time config would report the root one.
+  pub browser_config: &'a BrowserConfig,
+  /// Config-level `baseURL`, below the `use` bag and above the
+  /// environment.
+  pub base_url: Option<&'a str>,
+  /// Effective `use` bag (config ⊕ file ⊕ suite ⊕ test, or ⊕ the
+  /// scenario's `@use(...)` tags). Option fixtures read their overrides
+  /// from it, and three Playwright options are lifted out of it here.
+  pub use_options: serde_json::Value,
+}
+
+/// Lower one test's metadata for the VM. The single place `TestInfo`
+/// becomes `TestInfoData`, so the spec host and the BDD host cannot
+/// disagree about what `testInfo` says.
+#[must_use]
+pub fn world_data(meta: WorldMeta<'_>) -> TestWorldData {
+  let info = meta.test_info;
+  let browser = info
+    .config_snapshot
+    .as_ref()
+    .map_or(meta.browser_config, |cfg| &cfg.browser);
+  let bag = |key: &str| meta.use_options.get(key);
+  TestWorldData {
+    page: None,
+    context: None,
+    request: None,
+    browser: None,
+    browser_name: browser.browser.clone(),
+    headless: browser.headless,
+    is_mobile: bag("isMobile").and_then(serde_json::Value::as_bool).unwrap_or(false),
+    has_touch: bag("hasTouch").and_then(serde_json::Value::as_bool).unwrap_or(false),
+    base_url: bag("baseURL")
+      .and_then(serde_json::Value::as_str)
+      .map(String::from)
+      .or_else(|| meta.base_url.map(String::from))
+      .or_else(crate::config::base_url_from_env),
+    use_options: meta.use_options,
+    info: TestInfoData {
+      title: meta.title.to_string(),
+      title_path: meta.title_path.to_vec(),
+      file: meta.file.to_string(),
+      line: meta.line,
+      column: info.column.unwrap_or(0),
+      retry: info.retry,
+      worker_index: info.worker_index,
+      parallel_index: info.parallel_index,
+      repeat_each_index: info.repeat_each_index,
+      timeout_ms: u64::try_from(info.timeout.as_millis()).unwrap_or(u64::MAX),
+      expected_status: match meta.expected_status {
+        ExpectedStatus::Pass => "passed".to_string(),
+        ExpectedStatus::Fail => "failed".to_string(),
+      },
+      tags: meta.tags.to_vec(),
+      output_dir: info.output_dir.display().to_string(),
+      snapshot_dir: info.snapshot_dir.display().to_string(),
+      // The runner owns the suffix (`TestInfo.snapshot_suffix` is async
+      // state the VM never reads through here); the snapshot matchers
+      // go through the bridge, which reads the live value.
+      snapshot_suffix: String::new(),
+      project_name: info.project.as_ref().map(|p| p.name.clone()),
+    },
   }
 }
 

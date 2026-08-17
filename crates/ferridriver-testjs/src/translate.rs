@@ -7,9 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferridriver_script::{
-  CollectedAnnotation, CollectedTests, CompiledBundle, RunTestSpec, TestInfoData, TestWorldData,
-};
+use ferridriver_script::{CollectedAnnotation, CollectedTests, CompiledBundle};
 use ferridriver_test::config::TestConfig;
 use ferridriver_test::model::{
   ExpectedStatus, HookDef, HookKind, SuiteDef, SuiteMode, TestAnnotation, TestCase, TestFailure, TestFn, TestId,
@@ -17,7 +15,8 @@ use ferridriver_test::model::{
 };
 
 use crate::TsTestSource;
-use crate::bridge::{InfoBridge, static_annotation_pairs};
+use ferridriver_test::host::{InfoBridge, static_annotation_pairs};
+use ferridriver_test::host::{RunTestSpec, TestInfoData, TestWorldData};
 
 /// Resolved-per-suite chain data (ancestors included).
 struct SuiteChain {
@@ -126,16 +125,14 @@ fn fixture_requests(collected: &CollectedTests, test_idx: usize, hook_idxs: &[us
   // `page` override depending on `{ page }` asks the pool for the
   // built-in page rather than looping.
   let slots = collected.fixture_slots(test.fixture_set);
-  let Ok(needed) = ferridriver_script::bindings::fixture_graph::resolution_order(&slots, &names, &|_| true) else {
+  let Ok(needed) = ferridriver_test::fixture_graph::resolution_order(&slots, &names, &|_| true) else {
     // Malformed graph (cycle / self-reference with no base). Request
     // everything so the VM-side resolver is the one that reports it.
     return DEFAULT_REQUESTS.iter().map(|s| (*s).to_string()).collect();
   };
   for pos in needed {
     for dep in &slots[pos].deps {
-      if ferridriver_script::bindings::fixture_graph::resolve_dep(&slots, dep, Some(pos)).is_none()
-        && !names.contains(dep)
-      {
+      if ferridriver_test::fixture_graph::resolve_dep(&slots, dep, Some(pos)).is_none() && !names.contains(dep) {
         names.push(dep.clone());
       }
     }
@@ -307,61 +304,18 @@ async fn build_world_data(
   test_info: &Arc<TestInfo>,
   p: &TestFnParams,
 ) -> Result<TestWorldData, TestFailure> {
-  // The worker runs each project with its own merged config
-  // (`TestInfo.config_snapshot`); the translate-time `p.browser_config`
-  // is the root config and would report the wrong browserName/headless
-  // under `--project`/multi-project runs.
-  let effective_browser = test_info
-    .config_snapshot
-    .as_ref()
-    .map_or(&p.browser_config, |cfg| &cfg.browser);
-  let mut world = TestWorldData {
-    page: None,
-    context: None,
-    request: None,
-    browser: None,
-    browser_name: effective_browser.browser.clone(),
-    headless: effective_browser.headless,
-    is_mobile: p
-      .world_use
-      .get("isMobile")
-      .and_then(serde_json::Value::as_bool)
-      .unwrap_or(false),
-    has_touch: p
-      .world_use
-      .get("hasTouch")
-      .and_then(serde_json::Value::as_bool)
-      .unwrap_or(false),
-    base_url: p
-      .world_use
-      .get("baseURL")
-      .and_then(serde_json::Value::as_str)
-      .map(String::from)
-      .or_else(|| p.base_url.clone())
-      .or_else(ferridriver_test::config::base_url_from_env),
+  let mut world = ferridriver_test::host::world_data(ferridriver_test::host::WorldMeta {
+    test_info,
+    title: p.title.as_str(),
+    title_path: &p.title_path,
+    file: p.file.as_str(),
+    line: u32::try_from(test_info.test_id.line.unwrap_or(0)).unwrap_or(0),
+    tags: &p.tags,
+    expected_status: p.expected_status,
+    browser_config: &p.browser_config,
+    base_url: p.base_url.as_deref(),
     use_options: (*p.world_use).clone(),
-    info: TestInfoData {
-      title: p.title.as_str().to_string(),
-      title_path: (*p.title_path).clone(),
-      file: p.file.as_str().to_string(),
-      line: u32::try_from(test_info.test_id.line.unwrap_or(0)).unwrap_or(0),
-      column: 0,
-      retry: test_info.retry,
-      worker_index: test_info.worker_index,
-      parallel_index: test_info.parallel_index,
-      repeat_each_index: test_info.repeat_each_index,
-      timeout_ms: u64::try_from(test_info.timeout.as_millis()).unwrap_or(u64::MAX),
-      expected_status: match p.expected_status {
-        ExpectedStatus::Pass => "passed".to_string(),
-        ExpectedStatus::Fail => "failed".to_string(),
-      },
-      tags: (*p.tags).clone(),
-      output_dir: test_info.output_dir.display().to_string(),
-      snapshot_dir: test_info.snapshot_dir.display().to_string(),
-      snapshot_suffix: String::new(),
-      project_name: test_info.project.as_ref().map(|pr| pr.name.clone()),
-    },
-  };
+  });
   for name in &p.requests {
     match name.as_str() {
       "page" => {
@@ -433,8 +387,11 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
       let bridge = Arc::new(InfoBridge::new(
         Arc::clone(&test_info),
         modifiers,
-        Arc::clone(&session),
-        Arc::clone(&p.bundle),
+        Arc::new(session.session().deadline()),
+        Arc::new(ferridriver_script::BundleSourceMap::new(
+          Arc::clone(&p.bundle),
+          Arc::clone(&p.cwd),
+        )),
         Arc::clone(&p.cwd),
         base_timeout,
         (*p.static_annotations).clone(),
@@ -731,8 +688,11 @@ fn lower_all_hooks(
         let bridge = Arc::new(InfoBridge::new(
           test_info,
           modifiers,
-          Arc::clone(&session),
-          Arc::clone(&bundle),
+          Arc::new(session.session().deadline()),
+          Arc::new(ferridriver_script::BundleSourceMap::new(
+            Arc::clone(&bundle),
+            cwd.clone(),
+          )),
           cwd.clone(),
           Duration::from_secs(30),
           Vec::new(),
