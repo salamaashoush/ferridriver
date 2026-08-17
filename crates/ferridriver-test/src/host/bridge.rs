@@ -40,10 +40,6 @@ pub struct InfoBridge {
   /// Counter behind Playwright's auto-generated snapshot names
   /// (`{title}-{n}`).
   snapshot_counter: AtomicUsize,
-  /// The host's `testInfo.titlePath`, which a step's own title path
-  /// continues. Empty means "the test's own", which is what a host with
-  /// no richer path of its own wants.
-  title_path: Vec<String>,
 }
 
 impl InfoBridge {
@@ -67,16 +63,7 @@ impl InfoBridge {
       static_annotations,
       attachment_count: AtomicUsize::new(0),
       snapshot_counter: AtomicUsize::new(0),
-      title_path: Vec::new(),
     }
-  }
-
-  /// The title path the host's `testInfo.titlePath` shows, so
-  /// `stepInfo.titlePath` continues the same one.
-  #[must_use]
-  pub fn with_title_path(mut self, title_path: Vec<String>) -> Self {
-    self.title_path = title_path;
-    self
   }
 
   /// `toMatchSnapshot()` / `toHaveScreenshot()` without a name — the
@@ -161,10 +148,7 @@ impl crate::step::StepDriver for InfoBridge {
     if let Some(location) = spec.options.location.as_mut() {
       location.file = self.relative(&location.file);
     }
-    self.test_info.begin_step_spec(
-      spec,
-      (!self.title_path.is_empty()).then_some(self.title_path.as_slice()),
-    )
+    crate::step::StepDriver::begin_step(&*self.test_info, spec)
   }
 
   fn end_step(&self, step_id: String, outcome: crate::step::StepOutcome) -> crate::step::StepFuture<'_, ()> {

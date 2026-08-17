@@ -150,10 +150,27 @@ describe('test.step options', () => {
     expect(paths[0][paths[0].length - 1]).toBe('outer');
     expect(paths[1][paths[1].length - 1]).toBe('inner');
     expect(paths[1][paths[1].length - 2]).toBe('outer');
-    // The step path continues the test's own, so a step knows the test
-    // it belongs to.
-    expect(paths[1].length).toBe(paths[0].length + 1);
+    // A step's path continues the test's own, exactly — one derivation
+    // behind both, so a nested `describe` is one segment for the step
+    // and for `testInfo` alike.
     expect(paths[0].slice(0, -1)).toEqual(test.info().titlePath);
+    expect(paths[1].length).toBe(paths[0].length + 1);
+  });
+
+  describe('inside a nested describe', () => {
+    test('the test and its steps agree on where they are', async () => {
+      const testPath = test.info().titlePath;
+      // Each `describe` is its own segment, never one joined string.
+      expect(testPath[testPath.length - 1]).toBe('the test and its steps agree on where they are');
+      expect(testPath[testPath.length - 2]).toBe('inside a nested describe');
+      expect(testPath[testPath.length - 3]).toBe('test.step options');
+
+      let stepPath: string[] = [];
+      await test.step('somewhere', async (step: TestStepInfo) => {
+        stepPath = step.titlePath;
+      });
+      expect(stepPath).toEqual([...testPath, 'somewhere']);
+    });
   });
 
   test('stepInfo.attach records an attachment', async ({ testInfo }) => {

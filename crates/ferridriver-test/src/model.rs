@@ -31,20 +31,13 @@ pub struct TestId {
 
 impl TestId {
   /// Stable full name for display and hashing.
+  ///
+  /// Rendered from [`Self::title_path`], so what a reporter prints and
+  /// what a step's title path continues can never disagree: one nested
+  /// `describe` per segment, joined for display with ` > `.
   #[must_use]
   pub fn full_name(&self) -> String {
-    match &self.suite {
-      // A file-level suite carries the file as its id — printing it
-      // twice ("a.test.ts > a.test.ts > title") is pure noise; a
-      // describe suite's id is namespaced as "file::path" — display
-      // just the path.
-      Some(s) if *s == self.file => format!("{} > {}", self.file, self.name),
-      Some(s) => match s.strip_prefix(&format!("{}::", self.file)) {
-        Some(path) => format!("{} > {} > {}", self.file, path, self.name),
-        None => format!("{} > {} > {}", self.file, s, self.name),
-      },
-      None => format!("{} > {}", self.file, self.name),
-    }
+    self.title_path().join(" > ")
   }
 
   /// File path with optional line number (e.g., `features/login.feature:15`).
@@ -58,6 +51,12 @@ impl TestId {
 
   /// The title path a UI shows: file, then each enclosing suite, then the
   /// test's own name.
+  ///
+  /// The ONE derivation. `testInfo.titlePath`, `stepInfo.titlePath`,
+  /// [`Self::full_name`] and [`Self::stable_id`] all read it, so a
+  /// nested `describe` is one segment for every consumer. A suite id is
+  /// `file::outer::inner`; a file-level suite carries the file itself,
+  /// which would otherwise print twice.
   #[must_use]
   pub fn title_path(&self) -> Vec<String> {
     let mut titles = vec![self.file.clone()];
@@ -933,41 +932,6 @@ pub struct OpenStep {
 /// of rules decides every step's id, parent, location and title path.
 impl crate::step::StepDriver for TestInfo {
   fn begin_step(&self, spec: crate::step::StepSpec) -> crate::step::StepFuture<'_, crate::step::StepStarted> {
-    self.begin_step_spec(spec, None)
-  }
-
-  fn end_step(&self, step_id: String, outcome: crate::step::StepOutcome) -> crate::step::StepFuture<'_, ()> {
-    Box::pin(async move {
-      let open = {
-        let mut open = self.open_steps.lock().await;
-        open
-          .iter()
-          .position(|s| s.handle.step_id == step_id)
-          .map(|at| open.remove(at))
-      };
-      let Some(mut open) = open else { return };
-      open.handle.annotations = outcome.annotations;
-      match outcome.status {
-        StepStatus::Skipped => open.handle.skip(outcome.error).await,
-        StepStatus::Pending => open.handle.pending(outcome.error).await,
-        StepStatus::Passed | StepStatus::Failed => open.handle.end(outcome.error).await,
-      }
-    })
-  }
-}
-
-impl TestInfo {
-  /// Open a step, with the title path its host shows for the test.
-  ///
-  /// `title_base` is the host's `testInfo.titlePath` when the host has
-  /// its own (a JS spec names each `describe` separately, while a
-  /// `TestId`'s suite is one joined string); `None` continues the
-  /// test's own path.
-  pub fn begin_step_spec<'a>(
-    &'a self,
-    spec: crate::step::StepSpec,
-    title_base: Option<&'a [String]>,
-  ) -> crate::step::StepFuture<'a, crate::step::StepStarted> {
     Box::pin(async move {
       let frames: Vec<StepLocation> = spec
         .frames
@@ -983,7 +947,7 @@ impl TestInfo {
       let parent_boxed = open.last().map(|s| s.boxed_stack.clone()).unwrap_or_default();
       let (location, boxed_stack) = crate::step::resolve_location(&spec.options, &frames, &parent_boxed);
 
-      let mut title_path = title_base.map_or_else(|| self.title_path.clone(), <[String]>::to_vec);
+      let mut title_path = self.title_path.clone();
       title_path.extend(open.iter().map(|s| s.title.clone()));
       title_path.push(spec.title.clone());
 
@@ -1014,6 +978,27 @@ impl TestInfo {
     })
   }
 
+  fn end_step(&self, step_id: String, outcome: crate::step::StepOutcome) -> crate::step::StepFuture<'_, ()> {
+    Box::pin(async move {
+      let open = {
+        let mut open = self.open_steps.lock().await;
+        open
+          .iter()
+          .position(|s| s.handle.step_id == step_id)
+          .map(|at| open.remove(at))
+      };
+      let Some(mut open) = open else { return };
+      open.handle.annotations = outcome.annotations;
+      match outcome.status {
+        StepStatus::Skipped => open.handle.skip(outcome.error).await,
+        StepStatus::Pending => open.handle.pending(outcome.error).await,
+        StepStatus::Passed | StepStatus::Failed => open.handle.end(outcome.error).await,
+      }
+    })
+  }
+}
+
+impl TestInfo {
   /// Close every step still open, so a body that failed mid-step leaves
   /// no dangling reporter event or trace span behind.
   pub async fn close_open_steps(&self, reason: &str) {

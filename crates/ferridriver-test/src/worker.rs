@@ -1325,15 +1325,7 @@ impl Worker {
     // Create TestInfo for this test execution.
     let test_info = Arc::new(TestInfo {
       test_id: test_id.clone(),
-      title_path: {
-        let mut path = Vec::new();
-        path.push(test_id.file.clone());
-        if let Some(ref s) = test_id.suite {
-          path.push(s.clone());
-        }
-        path.push(test_id.name.clone());
-        path
-      },
+      title_path: test_id.title_path(),
       retry: attempt.saturating_sub(1),
       worker_index: self.id,
       parallel_index: self.slot,

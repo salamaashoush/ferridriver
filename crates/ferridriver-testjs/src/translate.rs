@@ -384,24 +384,18 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
       let world = build_world_data(&pool, &test_info, &p).await?;
 
       let base_timeout = test_info.timeout;
-      let bridge = Arc::new(
-        InfoBridge::new(
-          Arc::clone(&test_info),
-          modifiers,
-          Arc::new(session.session().deadline()),
-          Arc::new(ferridriver_script::BundleSourceMap::new(
-            Arc::clone(&p.bundle),
-            Arc::clone(&p.cwd),
-          )),
+      let bridge = Arc::new(InfoBridge::new(
+        Arc::clone(&test_info),
+        modifiers,
+        Arc::new(session.session().deadline()),
+        Arc::new(ferridriver_script::BundleSourceMap::new(
+          Arc::clone(&p.bundle),
           Arc::clone(&p.cwd),
-          base_timeout,
-          (*p.static_annotations).clone(),
-        )
-        // A spec names every `describe` separately, so a step's own title
-        // path continues that rather than the coarser one a `TestId` can
-        // rebuild from its joined suite id.
-        .with_title_path((*p.title_path).clone()),
-      );
+        )),
+        Arc::clone(&p.cwd),
+        base_timeout,
+        (*p.static_annotations).clone(),
+      ));
 
       // What the body prints is this test's output, from here until the
       // binding drops.
@@ -536,13 +530,18 @@ fn lower_test(
   let fscope = file_scope(collected, bundle, cx.cwd, &file);
   let chain = chain_for(collected, test.suite);
 
-  // Suite identity: one core suite per (file, describe path).
+  // Suite identity: one core suite per (file, describe path). The id
+  // joins the describe titles with `::`, the separator
+  // `TestId::title_path` splits on, so a nested `describe` stays its own
+  // segment for every consumer of the path — `testInfo.titlePath`, the
+  // title path a step continues, the reporter's name, the stable id.
+  // The display name keeps ` > `.
   let (suite_id, suite_name, suite_mode) = if chain.path.is_empty() {
     (file.clone(), file.clone(), fscope.mode.unwrap_or_default())
   } else {
     let name = chain.path.join(" > ");
     (
-      format!("{file}::{name}"),
+      format!("{file}::{}", chain.path.join("::")),
       name,
       chain.mode.or(fscope.mode).unwrap_or_default(),
     )
@@ -572,12 +571,9 @@ fn lower_test(
     line: Some(line as usize),
     column: None,
   };
-  let title_path: Vec<String> = {
-    let mut path = vec![file.clone()];
-    path.extend(chain.path.iter().cloned());
-    path.push(test.title.clone());
-    path
-  };
+  // One derivation, core's — the same vector the runner's `TestInfo`
+  // carries and a step's title path continues.
+  let title_path: Vec<String> = id.title_path();
   let tags: Vec<String> = meta
     .annotations
     .iter()
@@ -641,7 +637,7 @@ fn lower_all_hooks(
     let suite_id = match h.suite {
       Some(sidx) => {
         let chain = chain_for(collected, Some(sidx));
-        format!("{file}::{}", chain.path.join(" > "))
+        format!("{file}::{}", chain.path.join("::"))
       },
       None => file.clone(),
     };
