@@ -3028,9 +3028,16 @@ impl BidiPage {
     self.track_listener(route_listener.abort_handle());
   }
 
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher, scope: crate::route::RouteScope) -> Result<()> {
+  pub async fn unroute(
+    &self,
+    matcher: &crate::url_matcher::UrlMatcher,
+    scope: crate::route::RouteScope,
+    handler_id: Option<usize>,
+  ) -> Result<()> {
     let mut routes = self.routes.write().await;
-    routes.retain(|r| r.scope != scope || !r.matcher.equivalent(matcher));
+    routes.retain(|r| {
+      r.scope != scope || !r.matcher.equivalent(matcher) || handler_id.is_some_and(|id| r.handler_id() != id)
+    });
 
     // If no routes left, remove the intercept entirely
     if routes.is_empty() {

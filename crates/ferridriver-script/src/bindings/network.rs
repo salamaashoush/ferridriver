@@ -601,13 +601,21 @@ impl RouteJs {
 /// the documented form (see `client/network.ts`).
 type JsHeadersMap = std::collections::BTreeMap<String, String>;
 
-#[derive(serde::Deserialize, Debug, Default)]
-#[serde(rename_all = "camelCase", default)]
-struct JsFulfillOptions {
-  status: Option<i32>,
-  body: Option<String>,
-  content_type: Option<String>,
-  headers: Option<JsHeadersMap>,
+/// Bytes for `route.fulfill({ body })`: a string is UTF-8, anything
+/// else goes through the one byte extractor the rest of the runtime
+/// uses, so a `Buffer` or typed array reaches the wire intact instead of
+/// being JSON-stringified.
+fn fulfill_body_bytes<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Vec<u8>> {
+  if let Some(text) = value.as_string() {
+    return Ok(text.to_string()?.into_bytes());
+  }
+  ferridriver_jsstd::node::bytes::buffer_source_bytes(ctx, &value).map_err(|e| {
+    rquickjs::Error::new_from_js_message(
+      "route.fulfill",
+      "TypeError",
+      format!("`body` must be a string or a byte source: {e}"),
+    )
+  })
 }
 
 #[derive(serde::Deserialize, Debug, Default)]
@@ -715,41 +723,153 @@ impl RouteJs {
     serde_to_js(&ctx, &map)
   }
 
-  /// Mirrors Playwright `route.fulfill(options?)`.
+  /// Mirrors Playwright `route.fulfill(options?)`:
+  /// `{ status?, headers?, contentType?, body?, json?, path?, response? }`.
+  ///
+  /// `body` takes a string or any byte source (`Buffer`, typed array,
+  /// `ArrayBuffer`); `json` serializes and implies
+  /// `application/json`; `path` reads through the session sandbox and
+  /// implies the MIME type its extension names; `response` takes the
+  /// status, headers and body of an `APIResponse`, each only where the
+  /// option bag did not say otherwise.
   #[qjs(rename = "fulfill")]
   pub fn fulfill<'js>(&self, ctx: Ctx<'js>, options: rquickjs::function::Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let opts: JsFulfillOptions = match options.0 {
-      Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(&ctx, v)?,
-      _ => JsFulfillOptions::default(),
-    };
+    let opts = options.0.filter(|v| !v.is_undefined() && !v.is_null());
+    let bag = opts.as_ref().and_then(rquickjs::Value::as_object);
     let route = self
       .inner
       .lock()
       .ok()
       .and_then(|mut g| g.take())
       .ok_or_else(|| rquickjs::Error::new_from_js_message("Route", "Error", "Route already handled".to_string()))?;
-    let mut headers: Vec<(String, String)> = headers_to_pairs(opts.headers);
-    if let Some(ct) = opts.content_type.clone()
+
+    let mut status: Option<i32> = None;
+    let mut headers: Vec<(String, String)> = Vec::new();
+    let mut body: Option<Vec<u8>> = None;
+    let mut content_type: Option<String> = None;
+
+    // `response` first: it only supplies what the bag does not.
+    if let Some(response) = bag
+      .and_then(|o| o.get::<_, Option<Value<'js>>>("response").ok().flatten())
+      .filter(|v| !v.is_undefined() && !v.is_null())
+    {
+      let api = rquickjs::class::Class::<crate::bindings::http_client::HttpResponseJs>::from_value(&response).map_err(
+        |_| {
+          rquickjs::Error::new_from_js_message(
+            "route.fulfill",
+            "TypeError",
+            "`response` must be an HttpResponse (Playwright's APIResponse)".to_string(),
+          )
+        },
+      )?;
+      let inner = api.borrow().inner_clone();
+      status = Some(i32::from(inner.status()));
+      headers = inner
+        .headers_object()
+        .into_iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value))
+        .collect();
+      body = Some(
+        inner
+          .body_shared()
+          .map_err(|e| rquickjs::Error::new_from_js_message("route.fulfill", "Error", e.to_string()))?
+          .to_vec(),
+      );
+    }
+
+    if let Some(o) = bag {
+      if let Ok(Some(s)) = o.get::<_, Option<i32>>("status") {
+        status = Some(s);
+      }
+      if let Ok(Some(map)) = o.get::<_, Option<JsHeadersMap>>("headers") {
+        headers = headers_to_pairs(Some(map));
+      }
+      content_type = o.get::<_, Option<String>>("contentType").ok().flatten();
+
+      let json = o.get::<_, Option<Value<'js>>>("json").ok().flatten();
+      let json = json.filter(|v| !v.is_undefined());
+      let raw_body = o.get::<_, Option<Value<'js>>>("body").ok().flatten();
+      let raw_body = raw_body.filter(|v| !v.is_undefined() && !v.is_null());
+      if json.is_some() && raw_body.is_some() {
+        return Err(rquickjs::Error::new_from_js_message(
+          "route.fulfill",
+          "Error",
+          "Can specify either body or json parameters".to_string(),
+        ));
+      }
+      if let Some(json) = json {
+        let value: serde_json::Value = serde_from_js(&ctx, json)?;
+        body = Some(value.to_string().into_bytes());
+        if content_type.is_none() {
+          content_type = Some("application/json".to_string());
+        }
+      } else if let Some(raw) = raw_body {
+        body = Some(fulfill_body_bytes(&ctx, raw)?);
+      }
+
+      if let Some(path) = o.get::<_, Option<String>>("path").ok().flatten() {
+        let sandbox = ctx
+          .userdata::<crate::engine::SandboxUd>()
+          .ok_or_else(|| {
+            rquickjs::Error::new_from_js_message(
+              "route.fulfill",
+              "Error",
+              "`path` needs a session filesystem sandbox".to_string(),
+            )
+          })?
+          .0
+          .clone();
+        let resolved = sandbox
+          .resolve_read(&path)
+          .map_err(|e| rquickjs::Error::new_from_js_message("route.fulfill", "Error", e.message))?;
+        let bytes = std::fs::read(&resolved).map_err(|e| {
+          rquickjs::Error::new_from_js_message("route.fulfill", "Error", format!("read {}: {e}", resolved.display()))
+        })?;
+        body = Some(bytes);
+        if content_type.is_none() {
+          content_type = Some(ferridriver::locator::guess_mime_type(&path).to_string());
+        }
+      }
+    }
+
+    let body = body.unwrap_or_default();
+    if let Some(ct) = content_type.clone()
       && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
     {
       headers.push(("content-type".to_string(), ct));
     }
-    let body_bytes = opts.body.unwrap_or_default().into_bytes();
+    // Playwright sets `content-length` from the body it is about to
+    // send unless the caller pinned one; a mock whose length disagrees
+    // with its body hangs the page instead of failing.
+    if !body.is_empty() && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-length")) {
+      headers.push(("content-length".to_string(), body.len().to_string()));
+    }
     route.fulfill(FulfillResponse {
-      status: opts.status.unwrap_or(200),
+      status: status.unwrap_or(200),
       headers,
-      body: body_bytes,
-      content_type: opts.content_type,
+      body,
+      content_type,
     });
     Ok(())
   }
 
-  /// Mirrors Playwright `route.continue(options?)`.
+  /// Mirrors Playwright `route.continue(options?)`. `postData` takes a
+  /// string or any byte source, like `fulfill`'s `body`.
   #[qjs(rename = "continue")]
   pub fn continue_<'js>(&self, ctx: Ctx<'js>, options: rquickjs::function::Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let opts: JsContinueOptions = match options.0 {
-      Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(&ctx, v)?,
-      _ => JsContinueOptions::default(),
+    let bag = options.0.filter(|v| !v.is_undefined() && !v.is_null());
+    let post_data = bag
+      .as_ref()
+      .and_then(rquickjs::Value::as_object)
+      .and_then(|o| o.get::<_, Option<Value<'js>>>("postData").ok().flatten())
+      .filter(|v| !v.is_undefined() && !v.is_null());
+    let post_data = match post_data {
+      Some(v) => Some(fulfill_body_bytes(&ctx, v)?),
+      None => None,
+    };
+    let opts: JsContinueOptions = match bag {
+      Some(v) => serde_from_js(&ctx, v).unwrap_or_default(),
+      None => JsContinueOptions::default(),
     };
     let route = self
       .inner
@@ -761,7 +881,7 @@ impl RouteJs {
       url: opts.url,
       method: opts.method,
       headers: opts.headers.map(|m| m.into_iter().collect()),
-      post_data: opts.post_data.map(String::into_bytes),
+      post_data,
     });
     Ok(())
   }

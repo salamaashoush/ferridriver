@@ -256,6 +256,15 @@ pub struct RegisteredRoute {
   pub scope: RouteScope,
 }
 
+/// Stable identity of a route handler closure. `route`'s caller keeps
+/// the `RouteHandler` it passed, so it can name that exact registration
+/// later — which is what `unroute(url, handler)` needs and what a
+/// matcher alone cannot express.
+#[must_use]
+pub fn route_handler_id(handler: &RouteHandler) -> usize {
+  std::sync::Arc::as_ptr(handler).cast::<()>() as usize
+}
+
 impl RegisteredRoute {
   /// Build a page-scoped registration, optionally limited to `times`
   /// invocations.
@@ -295,9 +304,12 @@ impl RegisteredRoute {
   }
 
   /// Stable identity of the underlying handler closure — used by the
-  /// chain driver to skip handlers that already ran for this request.
-  fn handler_id(&self) -> usize {
-    std::sync::Arc::as_ptr(&self.handler).cast::<()>() as usize
+  /// chain driver to skip handlers that already ran for this request,
+  /// and by `unroute(url, handler)` to remove exactly the registration
+  /// a caller names rather than every route sharing its matcher.
+  #[must_use]
+  pub fn handler_id(&self) -> usize {
+    route_handler_id(&self.handler)
   }
 }
 

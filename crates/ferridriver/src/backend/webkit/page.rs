@@ -1929,12 +1929,15 @@ impl WebKitPage {
     Ok(())
   }
 
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher, scope: crate::route::RouteScope) -> Result<()> {
-    self
-      .routes
-      .write()
-      .await
-      .retain(|r| r.scope != scope || !r.matcher.equivalent(matcher));
+  pub async fn unroute(
+    &self,
+    matcher: &crate::url_matcher::UrlMatcher,
+    scope: crate::route::RouteScope,
+    handler_id: Option<usize>,
+  ) -> Result<()> {
+    self.routes.write().await.retain(|r| {
+      r.scope != scope || !r.matcher.equivalent(matcher) || handler_id.is_some_and(|id| r.handler_id() != id)
+    });
     Ok(())
   }
 

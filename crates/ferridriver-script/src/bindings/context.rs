@@ -442,9 +442,6 @@ impl BrowserContextJs {
     } else {
       (url_value_to_matcher(&ctx, url)?, None, None)
     };
-    with_page_callbacks(&ctx, |r| {
-      r.insert_route(id, self.route_owner(), saved_handler, saved_pred, registry_matcher);
-    })?;
 
     let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
       let vm = vm.clone();
@@ -480,6 +477,21 @@ impl BrowserContextJs {
         .await;
       });
     });
+
+    // AFTER the core handler exists: its `Arc` identity is what
+    // `unroute(url, handler)` names, so the registry has to remember it
+    // alongside the JS function the caller passed.
+    let handler_id = ferridriver::route::route_handler_id(&rust_handler);
+    with_page_callbacks(&ctx, |r| {
+      r.insert_route(
+        id,
+        self.route_owner(),
+        saved_handler,
+        handler_id,
+        saved_pred,
+        registry_matcher,
+      );
+    })?;
 
     let inner = self.inner.clone();
     Ok(rquickjs::promise::Promised::from(call_site.scope(async move {
@@ -550,9 +562,27 @@ impl BrowserContextJs {
     call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
     url: Value<'js>,
+    handler: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
+        // Playwright's second argument: remove only the registration
+        // made with THIS handler, leaving another handler on the same
+        // pattern serving.
+        let handler_fn = handler.0.as_ref().and_then(|v| v.as_function().cloned());
+        let mut handler_id: Option<usize> = None;
+        if let Some(handler_fn) = handler_fn {
+          let target = handler_fn.into_value();
+          for (_, saved, core_id) in with_page_callbacks(&ctx, |r| r.routes_for_owner(&self.route_owner()))? {
+            if saved.restore(&ctx)?.into_value() == target {
+              handler_id = Some(core_id);
+              break;
+            }
+          }
+          if handler_id.is_none() {
+            return Ok(());
+          }
+        }
         if let Some(pred) = url.as_function() {
           let saved = with_page_callbacks(&ctx, |r| r.predicate_routes_for_owner(&self.route_owner()))?;
           let mut victims: Vec<u64> = Vec::new();
@@ -565,13 +595,13 @@ impl BrowserContextJs {
           for id in victims {
             let m = with_page_callbacks(&ctx, |r| r.remove_route(id))?;
             if let Some(m) = m {
-              self.inner.unroute(&m).await.into_js_with(&ctx)?;
+              self.inner.unroute(&m, handler_id).await.into_js_with(&ctx)?;
             }
           }
           return Ok(());
         }
         let matcher = url_value_to_matcher(&ctx, url)?;
-        self.inner.unroute(&matcher).await.into_js_with(&ctx)
+        self.inner.unroute(&matcher, handler_id).await.into_js_with(&ctx)
       })
       .await
   }

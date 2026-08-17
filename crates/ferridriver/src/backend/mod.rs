@@ -1728,8 +1728,13 @@ impl AnyPage {
     page_dispatch!(self, route(route))
   }
 
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher, scope: crate::route::RouteScope) -> Result<()> {
-    page_dispatch!(self, unroute(matcher, scope))
+  pub async fn unroute(
+    &self,
+    matcher: &crate::url_matcher::UrlMatcher,
+    scope: crate::route::RouteScope,
+    handler_id: Option<usize>,
+  ) -> Result<()> {
+    page_dispatch!(self, unroute(matcher, scope, handler_id))
   }
 
   pub async fn unroute_all(

@@ -1157,7 +1157,7 @@ async fn network_interception_tests() {
 
   // 4. Unroute
   page
-    .unroute(&ferridriver::UrlMatcher::glob("**/api/data").unwrap())
+    .unroute(&ferridriver::UrlMatcher::glob("**/api/data").unwrap(), None)
     .await
     .unwrap();
 

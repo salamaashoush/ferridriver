@@ -611,6 +611,7 @@ export interface Route {
     body?: string | Uint8Array | Buffer;
     json?: unknown;
     path?: string;
+    response?: APIResponse;
   }): Promise<void>;
   continue(options?: {
     url?: string;

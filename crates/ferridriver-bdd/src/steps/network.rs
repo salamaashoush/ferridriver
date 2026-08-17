@@ -202,7 +202,7 @@ async fn remove_route(world: &mut BrowserWorld, pattern: String) {
     UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
   world
     .page()
-    .unroute(&matcher)
+    .unroute(&matcher, None)
     .await
     .map_err(|e| StepError::wrap(format!("remove route for \"{pattern}\""), e))?;
 }

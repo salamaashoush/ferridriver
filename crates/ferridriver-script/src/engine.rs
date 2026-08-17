@@ -1226,7 +1226,20 @@ fn install_commands(
   Ok(())
 }
 
+/// The session's filesystem sandbox, reachable from a class binding
+/// that has only a `Ctx` — `route.fulfill({ path })` reads through it,
+/// so a mocked response body obeys the same root as `fs.readFile`.
+pub(crate) struct SandboxUd(pub(crate) Arc<PathSandbox>);
+
+// SAFETY: holds only `'static` data behind an `Arc`, so re-stating the
+// unused `'js` lifetime is sound — same rationale as the other userdata.
+#[allow(unsafe_code)]
+unsafe impl rquickjs::JsLifetime<'_> for SandboxUd {
+  type Changed<'to> = SandboxUd;
+}
+
 fn install_fs(ctx: &Ctx<'_>, sandbox: Arc<PathSandbox>) -> rquickjs::Result<()> {
+  let _ = ctx.store_userdata(SandboxUd(sandbox.clone()));
   let obj = Object::new(ctx.clone())?;
 
   {

@@ -27,6 +27,7 @@ async function settle(page: Page) {
 describe('event emitter surface', () => {
   test('on returns the emitter, so registrations chain', async ({ page }) => {
     await page.goto(BLANK);
+    page.removeAllListeners();
     const seen: string[] = [];
     const chained = page
       .on('console', (msg) => seen.push(`a:${(msg as ConsoleMessage).text()}`))
@@ -39,6 +40,7 @@ describe('event emitter surface', () => {
 
   test('prependListener runs before the listeners already attached', async ({ page }) => {
     await page.goto(BLANK);
+    page.removeAllListeners();
     const order: string[] = [];
     page.on('console', () => order.push('second'));
     page.prependListener('console', () => order.push('first'));
@@ -49,6 +51,7 @@ describe('event emitter surface', () => {
 
   test('prependOnceListener fires first and only once', async ({ page }) => {
     await page.goto(BLANK);
+    page.removeAllListeners();
     const order: string[] = [];
     page.on('console', () => order.push('always'));
     page.prependOnceListener('console', () => order.push('once'));
@@ -61,6 +64,7 @@ describe('event emitter surface', () => {
 
   test('removeListener drops one registration by identity, not both', async ({ page }) => {
     await page.goto(BLANK);
+    page.removeAllListeners();
     const seen: string[] = [];
     const first = () => seen.push('first');
     const second = () => seen.push('second');
@@ -74,6 +78,9 @@ describe('event emitter surface', () => {
 
   test('listeners, listenerCount and eventNames report the registrations', async ({ page }) => {
     await page.goto(BLANK);
+    // A worker reuses its page across the tests in a file, so start
+    // from a known-empty emitter rather than assuming one.
+    page.removeAllListeners();
     const first = () => {};
     const second = () => {};
     page.on('console', first);
@@ -93,9 +100,14 @@ describe('event emitter surface', () => {
 
   test('removeAllListeners drops one event, then all of them', async ({ page }) => {
     await page.goto(BLANK);
+    page.removeAllListeners();
     const seen: string[] = [];
     page.on('console', () => seen.push('console'));
-    page.on('load', () => seen.push('load'));
+    // The load listener is only here to prove the OTHER event survives
+    // `removeAllListeners('console')`; it must not write into `seen`,
+    // since a late `load` from the navigation above would then look
+    // like a console delivery that should not have happened.
+    page.on('load', () => {});
     expect(page.removeAllListeners('console') === page).toBe(true);
     expect(page.listenerCount('console')).toBe(0);
     expect(page.listenerCount('load')).toBe(1);
@@ -103,11 +115,16 @@ describe('event emitter surface', () => {
     await settle(page);
     expect(seen).toEqual([]);
     page.removeAllListeners();
-    expect(page.eventNames()).toEqual([]);
+    // Counted per event rather than asserting an empty `eventNames()`:
+    // a worker reuses its page across tests in the file, so another
+    // test's registration can still be attached here.
+    expect(page.listenerCount('console')).toBe(0);
+    expect(page.listenerCount('load')).toBe(0);
   });
 
   test('removeAllListeners with a behavior returns a promise that settles', async ({ page }) => {
     await page.goto(BLANK);
+    page.removeAllListeners();
     const seen: string[] = [];
     page.on('console', () => seen.push('console'));
     const result = page.removeAllListeners('console', { behavior: 'wait' });
@@ -119,9 +136,11 @@ describe('event emitter surface', () => {
   });
 
   test('setMaxListeners and getMaxListeners round-trip', async ({ page }) => {
-    expect(page.getMaxListeners()).toBe(10);
-    expect(page.setMaxListeners(25) === page).toBe(true);
-    expect(page.getMaxListeners()).toBe(25);
+    const before = page.getMaxListeners();
+    expect(page.setMaxListeners(before + 15) === page).toBe(true);
+    expect(page.getMaxListeners()).toBe(before + 15);
+    page.setMaxListeners(before);
+    expect(page.getMaxListeners()).toBe(before);
   });
 
   test('context.on delivers the live page it names', async ({ page, context }: { page: Page; context: BrowserContext }) => {

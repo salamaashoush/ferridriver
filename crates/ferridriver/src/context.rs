@@ -1456,7 +1456,7 @@ impl ContextRef {
         self.install_context_route(registration).await?;
         let ctx = self.clone();
         Ok(crate::disposable::Disposable::new(move || async move {
-          ctx.unroute(&matcher).await
+          ctx.unroute(&matcher, None).await
         }))
       })
       .await
@@ -1631,22 +1631,25 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or route removal fails.
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
+  /// With a `handler_id` — [`crate::route::RegisteredRoute::handler_id`]
+  /// of the registration to drop — only that one goes, which is what
+  /// Playwright's `browserContext.unroute(url, handler)` means.
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher, handler_id: Option<usize>) -> Result<()> {
     self
       .traced(
         "unroute",
         serde_json::json!({ "url": matcher.describe() }),
-        self.unroute_untraced(matcher),
+        self.unroute_untraced(matcher, handler_id),
       )
       .await
   }
 
-  async fn unroute_untraced(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
+  async fn unroute_untraced(&self, matcher: &crate::url_matcher::UrlMatcher, handler_id: Option<usize>) -> Result<()> {
     {
       let registry = self.state.read().await.context_routes_handle();
       let mut guard = registry.write().await;
       if let Some(entries) = guard.get_mut(&self.key.to_composite()) {
-        entries.retain(|r| !r.matcher.equivalent(matcher));
+        entries.retain(|r| !r.matcher.equivalent(matcher) || handler_id.is_some_and(|id| r.handler_id() != id));
       }
     }
     let inner_pages = {
@@ -1654,7 +1657,9 @@ impl ContextRef {
       state.context(&self.name).map(|c| c.pages.clone()).unwrap_or_default()
     };
     for page in inner_pages {
-      page.unroute(matcher, crate::route::RouteScope::Context).await?;
+      page
+        .unroute(matcher, crate::route::RouteScope::Context, handler_id)
+        .await?;
     }
     Ok(())
   }

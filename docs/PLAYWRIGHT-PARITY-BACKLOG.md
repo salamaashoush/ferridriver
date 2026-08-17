@@ -37,6 +37,17 @@ both visible to a suite:
 The fix is a subject that keeps the live JS value alongside its snapshot,
 which also unlocks `expect.extend` receiving the real receiver.
 
+### `route.fulfill` / `unroute` residuals
+`fulfill` takes `status`, `headers`, `contentType`, `body` (string or any
+byte source), `json`, `path` (read through the session sandbox) and
+`response`; `continue` takes a byte `postData`; `unroute(url, handler)`
+removes exactly the registration a handler installed. What Playwright
+still does and ferridriver does not: replaying an `APIResponse` that came
+from the SAME connection by reference (`fetchResponseUid`) — the body is
+copied instead, which costs a buffer for a large response — and
+`page.route` does not intercept traffic the HTTP client (`request`
+fixture) makes, only page traffic.
+
 ### `@ferridriver/test` module surface
 `mergeTests`, `_baseTest`, `chromium` / `firefox` / `webkit`, `request`
 and the module-object-is-the-test-function shape are served (also under

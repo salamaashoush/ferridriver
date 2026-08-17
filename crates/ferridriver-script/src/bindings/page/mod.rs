@@ -1942,9 +1942,6 @@ impl PageJs {
     } else {
       (url_value_to_matcher(&ctx, url)?, None, None)
     };
-    with_page_callbacks(&ctx, |r| {
-      r.insert_route(id, self.route_owner(), saved_handler, saved_pred, registry_matcher);
-    })?;
 
     // LIMITATION (persistent-session VMs): this closure captures a clone
     // of the session's `AsyncContext`. Core route registrations live on
@@ -1997,6 +1994,21 @@ impl PageJs {
         .await;
       });
     });
+
+    // AFTER the core handler exists: its `Arc` identity is what
+    // `unroute(url, handler)` names, so the registry has to remember it
+    // alongside the JS function the caller passed.
+    let handler_id = ferridriver::route::route_handler_id(&rust_handler);
+    with_page_callbacks(&ctx, |r| {
+      r.insert_route(
+        id,
+        self.route_owner(),
+        saved_handler,
+        handler_id,
+        saved_pred,
+        registry_matcher,
+      );
+    })?;
 
     let inner = self.inner.clone();
     Ok(rquickjs::promise::Promised::from(async move {
@@ -2073,9 +2085,29 @@ impl PageJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     url: rquickjs::Value<'js>,
+    handler: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
+        // Playwright's second argument: remove only the registration
+        // made with THIS handler, leaving another handler on the same
+        // pattern serving. Without it, every route for the pattern goes.
+        let handler_fn = handler.0.as_ref().and_then(|v| v.as_function().cloned());
+        let mut handler_id: Option<usize> = None;
+        if let Some(handler_fn) = handler_fn {
+          let target = handler_fn.into_value();
+          for (_, saved, core_id) in with_page_callbacks(&ctx, |r| r.routes_for_owner(&self.route_owner()))? {
+            if saved.restore(&ctx)?.into_value() == target {
+              handler_id = Some(core_id);
+              break;
+            }
+          }
+          if handler_id.is_none() {
+            // Nothing was registered with that function: Playwright
+            // treats this as a no-op rather than an error.
+            return Ok(());
+          }
+        }
         if let Some(pred) = url.as_function() {
           // Find every id (registered through THIS page, from any of its
           // wrappers) whose stored predicate is identical (===) to the
@@ -2094,13 +2126,13 @@ impl PageJs {
           for id in victims {
             let m = with_page_callbacks(&ctx, |r| r.remove_route(id))?;
             if let Some(m) = m {
-              self.inner.unroute(&m).await.into_js_with(&ctx)?;
+              self.inner.unroute(&m, handler_id).await.into_js_with(&ctx)?;
             }
           }
           return Ok(());
         }
         let matcher = url_value_to_matcher(&ctx, url)?;
-        self.inner.unroute(&matcher).await.into_js_with(&ctx)
+        self.inner.unroute(&matcher, handler_id).await.into_js_with(&ctx)
       })
       .await
   }

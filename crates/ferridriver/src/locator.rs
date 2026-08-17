@@ -2873,10 +2873,11 @@ fn lower_drop_files(files: Option<crate::options::InputFiles>) -> Result<Vec<ser
 }
 
 /// Best-effort MIME type for a filename based on its extension. Used by
-/// [`Locator::drop`] when reading `DropPayload` file paths from disk, where
-/// the caller did not supply an explicit MIME type. Falls back to
-/// `application/octet-stream` for unknown extensions.
-fn guess_mime_type(name: &str) -> &'static str {
+/// [`Locator::drop`] when reading `DropPayload` file paths from disk and by
+/// `route.fulfill({ path })`, neither of which is given an explicit MIME
+/// type. Falls back to `application/octet-stream` for unknown extensions.
+#[must_use]
+pub fn guess_mime_type(name: &str) -> &'static str {
   let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
   match ext.as_str() {
     "txt" | "text" => "text/plain",

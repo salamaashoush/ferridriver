@@ -170,6 +170,16 @@ pub struct Page {
   /// `page.on`/`page.once` registrations, kept so `off(event, listener)`
   /// can resolve the core `ListenerId` from the JS function identity.
   listener_regs: Arc<Mutex<Vec<ListenerReg>>>,
+  /// `page.route` registrations, kept so `unroute(url, handler)` can
+  /// resolve the core handler identity from the JS function identity.
+  route_regs: Arc<Mutex<Vec<RouteReg>>>,
+}
+
+/// One `page.route` registration: the identity of the core handler
+/// closure, plus a `FunctionRef` to the JS handler that installed it.
+struct RouteReg {
+  handler_id: usize,
+  handler_ref: napi::bindgen_prelude::FunctionRef<crate::route::Route, ()>,
 }
 
 impl Page {
@@ -179,6 +189,7 @@ impl Page {
       mouse_position: Arc::new(Mutex::new((0.0, 0.0))),
       predicate_routes: Arc::new(Mutex::new(Vec::new())),
       listener_regs: Arc::new(Mutex::new(Vec::new())),
+      route_regs: Arc::new(Mutex::new(Vec::new())),
     }
   }
 
@@ -2233,23 +2244,26 @@ impl Page {
       crate::types::JsRegExpLike,
       napi::bindgen_prelude::Function<'_, JsUrl, PredReturn>,
     >,
-    handler: napi::threadsafe_function::ThreadsafeFunction<
-      crate::route::Route,
-      (),
-      crate::route::Route,
-      napi::Status,
-      false,
-      true,
-      0,
-    >,
+    handler: napi::bindgen_prelude::Function<'_, crate::route::Route, ()>,
     options: Option<crate::types::RouteOptions>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::disposable::Disposable>> {
     use napi::bindgen_prelude::Either3;
     let times = options.and_then(|o| o.times_u32());
     let nb = napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking;
+    // Keep a `FunctionRef` to the handler as well as the dispatch TSFN:
+    // `unroute(url, handler)` names the registration by the identity of
+    // the function the caller passed.
+    let handler_ref = handler.create_ref()?;
     // The route-handler TSFN is `weak` (not `Clone`); share it via `Arc`
     // so the predicate path can move it into a per-request task.
-    let handler = std::sync::Arc::new(handler);
+    let handler = std::sync::Arc::new(
+      handler
+        .build_threadsafe_function()
+        .callee_handled::<false>()
+        .weak::<true>()
+        .max_queue_size::<0>()
+        .build()?,
+    );
     let (spec, rust_handler): (MatcherSpec, ferridriver::route::RouteHandler) = match url {
       Either3::A(glob) => (
         MatcherSpec::Glob(glob),
@@ -2306,6 +2320,15 @@ impl Page {
       },
     };
 
+    self
+      .route_regs
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(RouteReg {
+        handler_id: ferridriver::route::route_handler_id(&rust_handler),
+        handler_ref,
+      });
+
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       let matcher = spec.build()?;
@@ -2355,7 +2378,7 @@ impl Page {
   /// predicate is matched by `===` against the function passed to
   /// `route`, dropping its always-true core matcher by `Arc` identity.
   #[napi(
-    ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean)",
+    ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler?: (route: Route) => void",
     ts_return_type = "Promise<void>"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -2367,8 +2390,32 @@ impl Page {
       crate::types::JsRegExpLike,
       napi::bindgen_prelude::Function<'_, JsUrl, PredReturn>,
     >,
+    handler: Option<napi::bindgen_prelude::Function<'_, crate::route::Route, ()>>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
     use napi::bindgen_prelude::Either3;
+    // Playwright's second argument: remove only the registration made
+    // with THIS handler, leaving another handler on the same pattern
+    // serving. A handler that never registered anything is a no-op.
+    let mut handler_id: Option<usize> = None;
+    if let Some(handler) = handler {
+      let in_ref = handler.create_ref()?;
+      let regs = self
+        .route_regs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      for reg in regs.iter() {
+        let a = in_ref.borrow_back(env)?;
+        let b = reg.handler_ref.borrow_back(env)?;
+        if env.strict_equals(a, b)? {
+          handler_id = Some(reg.handler_id);
+          break;
+        }
+      }
+      drop(regs);
+      if handler_id.is_none() {
+        return napi::bindgen_prelude::AsyncBlockBuilder::new(async move { Ok(()) }).build(env);
+      }
+    }
     let specs: Vec<MatcherSpec> = match url {
       Either3::A(glob) => vec![MatcherSpec::Glob(glob)],
       Either3::B(re) => vec![MatcherSpec::Regex {
@@ -2405,7 +2452,7 @@ impl Page {
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       for spec in specs {
         let m = spec.build()?;
-        inner.unroute(&m).await.map_err(crate::error::to_napi)?;
+        inner.unroute(&m, handler_id).await.map_err(crate::error::to_napi)?;
       }
       Ok(())
     })

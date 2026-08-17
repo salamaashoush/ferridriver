@@ -169,6 +169,10 @@ pub(crate) enum RouteOwner {
 pub(crate) struct RouteEntry {
   owner: RouteOwner,
   handler: SavedCallback,
+  /// Identity of the CORE handler closure this registration installed,
+  /// so `unroute(url, handler)` can name exactly this route rather than
+  /// every route sharing its matcher.
+  handler_id: usize,
   /// JS URL predicate, when the route was registered with a function
   /// instead of a string/RegExp matcher.
   pred: Option<SavedCallback>,
@@ -192,6 +196,7 @@ impl PageCallbacks {
     id: u64,
     owner: RouteOwner,
     handler: SavedCallback,
+    handler_id: usize,
     pred: Option<SavedCallback>,
     matcher: Option<ferridriver::url_matcher::UrlMatcher>,
   ) {
@@ -200,6 +205,7 @@ impl PageCallbacks {
       RouteEntry {
         owner,
         handler,
+        handler_id,
         pred,
         matcher,
       },
@@ -282,6 +288,17 @@ impl PageCallbacks {
 
   /// `(id, predicate)` pairs registered through `owner`, for
   /// `unroute(fn)` identity matching.
+  /// Every registration this owner made, with the JS handler it was
+  /// registered with and the core handler identity behind it.
+  pub(crate) fn routes_for_owner(&self, owner: &RouteOwner) -> Vec<(u64, SavedCallback, usize)> {
+    self
+      .routes
+      .iter()
+      .filter(|(_, e)| &e.owner == owner)
+      .map(|(id, e)| (*id, e.handler.clone(), e.handler_id))
+      .collect()
+  }
+
   pub(crate) fn predicate_routes_for_owner(&self, owner: &RouteOwner) -> Vec<(u64, SavedCallback)> {
     self
       .routes

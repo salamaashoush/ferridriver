@@ -3449,7 +3449,7 @@ impl Page {
       .await?;
     let inner = self.inner.clone();
     Ok(crate::disposable::Disposable::new(move || async move {
-      inner.unroute(&matcher, crate::route::RouteScope::Page).await
+      inner.unroute(&matcher, crate::route::RouteScope::Page, None).await
     }))
   }
 
@@ -3507,8 +3507,16 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the route handlers cannot be removed.
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
-    self.inner.unroute(matcher, crate::route::RouteScope::Page).await
+  /// Remove page-scoped routes registered for `matcher`. With a
+  /// `handler_id` — [`crate::route::RegisteredRoute::handler_id`] of the
+  /// registration to drop — only that one goes, which is what
+  /// Playwright's `page.unroute(url, handler)` means; without one, every
+  /// route sharing the matcher is removed.
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher, handler_id: Option<usize>) -> Result<()> {
+    self
+      .inner
+      .unroute(matcher, crate::route::RouteScope::Page, handler_id)
+      .await
   }
 
   /// Remove all route handlers registered via [`Page::route`].
