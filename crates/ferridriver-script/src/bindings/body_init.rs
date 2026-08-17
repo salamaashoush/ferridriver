@@ -17,9 +17,9 @@ use ferridriver_jsstd::stream_web::ReadableStream;
 use ferridriver_jsstd::utils::bytes::ObjectBytes;
 use rquickjs::{Class, Coerced, Ctx, Value};
 
-use crate::bindings::blob_bytes::blob_parts;
-use crate::bindings::form_data::FormDataJs;
 use ferridriver_jsstd::url::url_search_params::URLSearchParams;
+use ferridriver_jsstd::web::blob_bytes::blob_parts;
+use ferridriver_jsstd::web::form_data::FormDataJs;
 
 /// Where the extracted body's bytes live. A `ReadableStream` body is
 /// NOT drained at extraction time — the spec keeps it as the body
@@ -77,7 +77,7 @@ pub(crate) fn extract_body<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> rquickjs::Res
     }));
   }
   if let Ok(fd) = Class::<FormDataJs>::from_value(v) {
-    let (bytes, content_type) = fd.borrow().to_multipart();
+    let (bytes, content_type) = crate::bindings::multipart::form_data_to_multipart(&fd.borrow());
     return Ok(Some(ExtractedBody {
       source: BodySource::Bytes(bytes),
       content_type: Some(content_type),

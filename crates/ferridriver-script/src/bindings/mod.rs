@@ -21,14 +21,12 @@
 pub mod abort;
 pub mod artifacts;
 pub mod bdd;
-pub mod blob_bytes;
 pub mod body_init;
 pub mod browser;
 pub mod browser_type;
 pub mod call_site;
 pub mod cdp_session;
 pub mod clock;
-pub mod compression;
 pub mod console_message;
 pub mod context;
 pub mod convert;
@@ -41,19 +39,17 @@ pub mod extensions;
 pub mod fetch;
 pub mod file_chooser;
 pub mod fixture_graph;
-pub mod form_data;
 pub mod frame;
 pub mod frame_locator;
 pub mod http_client;
 pub mod js_handle;
-pub mod js_iterator;
 pub mod keyboard;
 pub mod locator;
 pub mod mouse;
+pub mod multipart;
 pub mod native_modules;
 pub mod network;
 pub mod page;
-pub mod process;
 pub mod registry;
 pub mod runtime;
 pub mod sidecars;
@@ -161,7 +157,6 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   // `define_subclass` and strands the first constructor, which aborts
   // `JS_FreeRuntime` at teardown.
   ferridriver_jsstd::init(ctx)?;
-  Class::<crate::bindings::form_data::FormDataJs>::define(&g)?;
   Ok(())
 }
 

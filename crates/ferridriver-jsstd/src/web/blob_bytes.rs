@@ -1,10 +1,10 @@
 //! Reading bytes back out of a `Blob` or `File`.
 //!
-//! The classes are the vendored ones (`ferridriver_jsstd::buffer`); this is
+//! The classes are the vendored ones (`crate::buffer`); this is
 //! the synchronous accessor the request-body and form-data paths need,
 //! which the JS surface only exposes as promises.
 
-use ferridriver_jsstd::buffer::{Blob, File};
+use crate::buffer::{Blob, File};
 use rquickjs::{Class, Value};
 
 /// Bytes + MIME type of a value that is a `Blob` — or a `File`, which is

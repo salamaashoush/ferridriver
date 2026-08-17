@@ -51,13 +51,13 @@ use rquickjs::atom::PredefinedAtom;
 use rquickjs::function::{Opt, This};
 use rquickjs::{Coerced, Ctx, IntoJs, Object, Value, class::Class, class::Trace};
 
-use crate::bindings::js_iterator::live_iterator;
+use ferridriver_jsstd::web::js_iterator::live_iterator;
 
 use crate::bindings::body_init::{BodySource, ExtractedBody, extract_body};
 use crate::bindings::convert::json_to_js;
-use crate::bindings::form_data::FormDataJs;
 use crate::bindings::http_client::net_check;
 use ferridriver_jsstd::buffer::Blob;
+use ferridriver_jsstd::web::form_data::FormDataJs;
 
 /// Hard cap on a single buffered `fetch` body (`text`/`json`/
 /// `arrayBuffer`). QuickJS's `memory_limit` only bounds the JS heap;
@@ -823,7 +823,7 @@ pub(crate) trait BodyMixin<'js> {
     let bytes = self.consume_body(ctx).await?;
     let form = match boundary {
       Some(boundary) => {
-        FormDataJs::from_multipart_fields(&ferridriver::http_client::parse_multipart(&bytes, &boundary))
+        crate::bindings::multipart::form_data_from_fields(&ferridriver::http_client::parse_multipart(&bytes, &boundary))
       },
       None => FormDataJs::from_urlencoded(&String::from_utf8_lossy(&bytes)),
     };

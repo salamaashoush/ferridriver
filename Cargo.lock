@@ -1915,6 +1915,7 @@ dependencies = [
  "ecdsa",
  "ed25519-dalek",
  "elliptic-curve",
+ "flate2",
  "half",
  "hex-simd",
  "hkdf",

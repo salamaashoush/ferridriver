@@ -3,7 +3,7 @@
 //! Both are "generic transform streams": not `TransformStream`
 //! subclasses, but objects exposing the `readable` / `writable` pair of
 //! one. This builds a real `TransformStream` (the vendored class in
-//! [`ferridriver_jsstd::stream_web`]) whose `transform` and `flush` are
+//! [`crate::stream_web`]) whose `transform` and `flush` are
 //! native functions, so backpressure, cancellation and `pipeThrough`
 //! all come from the spec-exact stream machinery rather than being
 //! reimplemented here.
@@ -109,7 +109,7 @@ fn lock(coder: &SharedCoder) -> std::sync::MutexGuard<'_, Option<Coder>> {
 /// would silently get UTF-8 where they may have meant something else.
 fn buffer_source_bytes<'js>(ctx: &Ctx<'js>, chunk: &Value<'js>) -> rquickjs::Result<Vec<u8>> {
   // The shared extractor, with this call site's spec wording on failure.
-  ferridriver_jsstd::node::bytes::buffer_source_bytes(ctx, chunk).map_err(|_| {
+  crate::node::bytes::buffer_source_bytes(ctx, chunk).map_err(|_| {
     rquickjs::Exception::throw_type(
       ctx,
       "Failed to execute 'write': chunk could not be converted to a BufferSource",

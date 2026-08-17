@@ -5,20 +5,23 @@
 //! return real live iterators (see [`super::js_iterator`]). A file entry
 //! reads back as a `File` carrying the filename it was stored under, and
 //! appending a `File` supplies that filename without repeating it.
-//! A `FormData` used as a `fetch` body lowers to the core
-//! [`MultipartField`](ferridriver::http_client::MultipartField) list and
-//! is written by the core serializer — the same one the Playwright
-//! `multipart` option bag uses, so both produce identical bodies.
+//! The class holds entries and nothing else: a host that puts a
+//! `FormData` on the wire reads [`FormDataJs::entries_slice`] and
+//! serializes with its own multipart writer, and hands parsed bodies back
+//! through [`FormDataJs::from_entries`].
 
 use rquickjs::atom::PredefinedAtom;
 use rquickjs::function::{Opt, This};
 use rquickjs::{Class, Ctx, Function, Object, Value, class::Trace};
 
-use crate::bindings::blob_bytes::{blob_parts, file_parts};
-use crate::bindings::js_iterator::live_iterator;
+use crate::web::blob_bytes::{blob_parts, file_parts};
+use crate::web::js_iterator::live_iterator;
 
+/// One entry's value: a string, or a file with the name and type it was
+/// stored under. Public because the multipart bridge in the host crate
+/// converts between this and its own wire types.
 #[derive(Clone)]
-enum FormEntry {
+pub enum FormEntry {
   Text(String),
   File {
     bytes: Vec<u8>,
@@ -32,6 +35,21 @@ enum FormEntry {
 pub struct FormDataJs {
   #[qjs(skip_trace)]
   entries: Vec<(String, FormEntry)>,
+}
+
+impl FormDataJs {
+  /// Build from entries a host produced (a parsed multipart or
+  /// urlencoded body).
+  #[must_use]
+  pub fn from_entries(entries: Vec<(String, FormEntry)>) -> Self {
+    Self { entries }
+  }
+
+  /// The entries, in insertion order.
+  #[must_use]
+  pub fn entries_slice(&self) -> &[(String, FormEntry)] {
+    &self.entries
+  }
 }
 
 #[allow(unsafe_code)]
@@ -86,7 +104,7 @@ impl FormDataJs {
       } => {
         let file = Class::instance(
           ctx.clone(),
-          ferridriver_jsstd::buffer::File::from_bytes(
+          crate::buffer::File::from_bytes(
             ctx,
             bytes.clone(),
             filename.clone(),
@@ -130,33 +148,6 @@ impl FormDataJs {
     Self::entry_value(ctx, &entry).map(Some)
   }
 
-  /// Build from parsed `multipart/form-data` fields — the read side of
-  /// the `formData()` body mixin. A part with a filename reads back as a
-  /// `File`, matching how `append(name, file)` stored it.
-  pub fn from_multipart_fields(fields: &[ferridriver::http_client::MultipartField]) -> Self {
-    use ferridriver::http_client::MultipartValue;
-    Self {
-      entries: fields
-        .iter()
-        .map(|f| {
-          let entry = match &f.value {
-            MultipartValue::Text(text) => FormEntry::Text(text.clone()),
-            MultipartValue::File {
-              filename,
-              content_type,
-              bytes,
-            } => FormEntry::File {
-              bytes: bytes.clone(),
-              filename: filename.clone(),
-              content_type: content_type.clone(),
-            },
-          };
-          (f.name.clone(), entry)
-        })
-        .collect(),
-    }
-  }
-
   /// Build from an `application/x-www-form-urlencoded` body: `+` decodes
   /// to a space and every entry is text (the format cannot carry files).
   pub fn from_urlencoded(body: &str) -> Self {
@@ -165,37 +156,6 @@ impl FormDataJs {
         .map(|(k, v)| (k.into_owned(), FormEntry::Text(v.into_owned())))
         .collect(),
     }
-  }
-
-  /// The entries as core multipart fields — the same representation the
-  /// Playwright `multipart` option bag lowers into, so both reach the
-  /// wire through one serializer.
-  pub fn to_fields(&self) -> Vec<ferridriver::http_client::MultipartField> {
-    use ferridriver::http_client::{MultipartField, MultipartValue};
-    self
-      .entries
-      .iter()
-      .map(|(name, entry)| MultipartField {
-        name: name.clone(),
-        value: match entry {
-          FormEntry::Text(text) => MultipartValue::Text(text.clone()),
-          FormEntry::File {
-            bytes,
-            filename,
-            content_type,
-          } => MultipartValue::File {
-            filename: filename.clone(),
-            content_type: content_type.clone(),
-            bytes: bytes.clone(),
-          },
-        },
-      })
-      .collect()
-  }
-
-  /// `(multipart-body, content-type)` for a `fetch` `FormData` body.
-  pub fn to_multipart(&self) -> (Vec<u8>, String) {
-    ferridriver::http_client::serialize_multipart(&self.to_fields(), &ferridriver::http_client::multipart_boundary())
   }
 }
 

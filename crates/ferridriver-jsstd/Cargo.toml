@@ -102,6 +102,8 @@ sysinfo = { version = "0.39", default-features = false, optional = true }
 rquickjs = { version = "0.12", features = ["full-async", "parallel", "macro", "loader", "array-buffer", "half"] }
 simdutf8 = { version = "0.1", features = ["std", "aarch64_neon"] }
 url = { version = "2", features = ["std"], default-features = false }
+# gzip / deflate for `CompressionStream` / `DecompressionStream`.
+flate2 = "1"
 # `urlToHttpOptions` decodes the credentials the way `decodeURIComponent`
 # does; `url` keeps this crate private rather than re-exporting it.
 percent-encoding = { version = "2", default-features = false, features = ["std"] }

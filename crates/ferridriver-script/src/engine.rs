@@ -667,7 +667,12 @@ impl Session {
         .map_err(|e| ScriptError::internal(format!("failed to define classes: {e}")))?;
       install_vars(&ctx, vars).map_err(|e| ScriptError::internal(format!("failed to install vars: {e}")))?;
       install_fs(&ctx, sandbox).map_err(|e| ScriptError::internal(format!("failed to install fs: {e}")))?;
-      crate::bindings::process::install(&ctx, &caps, &sandbox_root)
+      // `process.env` is the operator's allow-list already intersected
+      // with the real environment, and `cwd()` answers the sandbox root
+      // rather than the real process cwd — the two host-supplied values
+      // the standard-library `process` takes.
+      ferridriver_jsstd::node::process::install(&ctx, &caps.env, &sandbox_root)
+        .and_then(|()| crate::bindings::runtime::mirror_global(&ctx, "process"))
         .map_err(|e| ScriptError::internal(format!("failed to install process: {e}")))?;
       install_commands(&ctx, &caps, None)
         .map_err(|e| ScriptError::internal(format!("failed to install commands: {e}")))?;
@@ -1160,9 +1165,6 @@ pub(crate) fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   // Native timers (setTimeout/Interval, ctx.spawn-backed) plus
   // queueMicrotask, which shares their net-policy carry-over.
   crate::bindings::timers::install(ctx)?;
-  // CompressionStream / DecompressionStream, over the vendored
-  // TransformStream.
-  crate::bindings::compression::install(ctx)?;
   // `require` for the native specifiers only — what a CommonJS source
   // bundles down to for an external module.
   crate::bindings::native_modules::install_require(ctx)?;

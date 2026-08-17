@@ -1,5 +1,16 @@
 //! Web-platform globals with no upstream in llrt: `atob` / `btoa`,
-//! `structuredClone` and `performance`.
+//! `structuredClone`, `performance`, `FormData`, the compression streams
+//! and the timers.
+//!
+//! The timers are not installed by [`init`]: they carry host state across
+//! a scheduled callback, so the host installs them with its own
+//! [`timers::CallbackPolicy`].
+
+pub mod blob_bytes;
+pub mod compression;
+pub mod form_data;
+pub mod js_iterator;
+pub mod timers;
 
 use base64::Engine as _;
 use base64::engine::GeneralPurpose;
@@ -19,7 +30,8 @@ static TIME_ORIGIN: std::sync::LazyLock<f64> = std::sync::LazyLock::new(|| {
     .map_or(0.0, |d| d.as_secs_f64() * 1000.0)
 });
 
-/// Install `atob`, `btoa`, `structuredClone` and `performance`.
+/// Install `atob`, `btoa`, `structuredClone`, `performance`, `FormData`
+/// and `CompressionStream` / `DecompressionStream`.
 ///
 /// # Errors
 ///
@@ -65,6 +77,9 @@ pub fn init(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   performance.set("now", Func::from(|| PROCESS_START.elapsed().as_secs_f64() * 1000.0))?;
   performance.set("timeOrigin", *TIME_ORIGIN)?;
   globals.set("performance", performance)?;
+
+  rquickjs::Class::<form_data::FormDataJs>::define(&globals)?;
+  compression::install(ctx)?;
 
   Ok(())
 }

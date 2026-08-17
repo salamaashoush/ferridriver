@@ -62,8 +62,8 @@ implementation of each surface:
 | `node::deep_equal` | Structural equality for `util.isDeepStrictEqual` (and `assert.deepStrictEqual` when it lands) |
 | `node::util` | The `util` module |
 | `node::assert` | The `assert` module (upstream `llrt_assert` is a single `ok`) |
-| `node::process` | The module form of the host's `process` global |
-| `node::timers` | The module form of the host's timers, plus `timers/promises` |
+| `node::process` | A sandbox-safe `process` — inert identity and timing, with `env` and `cwd()` supplied by the host — and its module form |
+| `node::timers` | The module form of `web::timers`, plus `timers/promises` |
 | `node::path` | The `path` module, moved out of `ferridriver-script`'s `node_compat` |
 | `node::bytes` | The one JS-value-to-`Vec<u8>` walk: `BufferSource`, `Buffer`, byte arrays, encoded strings. `crypto`, the compression streams, `Buffer.from` and `setInputFiles` all read through it — there were three separate walks before |
 
@@ -75,12 +75,17 @@ must take owned JS values.
 
 ## `src/web/` — ferridriver-authored
 
-Web-platform globals llrt has no upstream for: `atob` / `btoa` (the WHATWG
-forgiving-base64 algorithm, which `base64::STANDARD` does not implement),
-`structuredClone`, and `performance.now()` / `performance.timeOrigin` over a
-monotonic base. `llrt_buffer`'s module form reads `atob` / `btoa` off the
-globals, so installing them here is what makes `require('buffer').atob`
-resolve. Same formatting rules as `src/node/`.
+Web-platform globals llrt has no upstream for. Same formatting rules as
+`src/node/`.
+
+| module | what it is |
+| ------ | ---------- |
+| `web` (`mod.rs`) | `atob` / `btoa` (the WHATWG forgiving-base64 algorithm, which `base64::STANDARD` does not implement), `structuredClone`, and `performance.now()` / `timeOrigin` over a monotonic base. `llrt_buffer`'s module form reads `atob` / `btoa` off the globals, so installing them here is what makes `require('buffer').atob` resolve |
+| `web::form_data` | `FormData`. It holds entries and nothing else: a host serializes them with its own multipart writer and hands parsed bodies back through `from_entries` |
+| `web::compression` | `CompressionStream` / `DecompressionStream` (gzip, deflate, deflate-raw) over the vendored `TransformStream` |
+| `web::timers` | `setTimeout` / `setInterval` / `clearTimeout` / `clearInterval` / `setImmediate` / `queueMicrotask`. NOT installed by `init`: a host supplies a `CallbackPolicy` so ambient state (ferridriver carries an `allow.net` grant) survives from arming the timer to running the callback |
+| `web::blob_bytes` | The bytes-and-type read of a `Blob` / `File` value |
+| `web::js_iterator` | The live-iterator protocol object `FormData`'s `entries` / `keys` / `values` return |
 
 ## Keeping it re-syncable
 
