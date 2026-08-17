@@ -10,6 +10,12 @@
     "paths": {
       "@ferridriver/test": [
         "../packages/ferridriver-test/index.d.ts"
+      ],
+      "@playwright/test": [
+        "../packages/ferridriver-test/index.d.ts"
+      ],
+      "playwright/test": [
+        "../packages/ferridriver-test/index.d.ts"
       ]
     }
   },

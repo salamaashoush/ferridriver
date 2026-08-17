@@ -21,6 +21,39 @@ record.
 
 ## Partial implementations
 
+### `expect` takes a JSON snapshot of its subject
+`expect(value)` serializes the subject with `serde_from_js` and every
+value matcher compares JSON (`bindings/expect.rs`). Two consequences,
+both visible to a suite:
+
+- A FUNCTION cannot be a value subject at all — `expect(fn).toBe(fn)`
+  throws `this matcher requires a value subject`. Only `toThrow` accepts
+  one (it keeps the function as a `Persistent`).
+- `toBe` is deep JSON equality, where Playwright's is `Object.is`. Two
+  structurally equal objects compare equal here and unequal upstream, and
+  identity (`a === b`) cannot be asserted through `expect` at all — specs
+  that need it compare with `===` and assert the boolean.
+
+The fix is a subject that keeps the live JS value alongside its snapshot,
+which also unlocks `expect.extend` receiving the real receiver.
+
+### `@ferridriver/test` module surface
+`mergeTests`, `_baseTest`, `chromium` / `firefox` / `webkit`, `request`
+and the module-object-is-the-test-function shape are served (also under
+`@playwright/test` and `playwright/test`). Still absent, and therefore
+NOT exported rather than exported as `undefined`: `selectors`, `devices`,
+`defineConfig`, `mergeExpects`, `errors` (Playwright's `{ TimeoutError }`),
+`by`, and the `_electron` / `_android` / `_utilityTest` internals.
+
+### `test.extend` type inference needs explicit type arguments
+`test.extend<{ myFixture: string }>({ … })` infers correctly;
+`test.extend({ … })` without the type argument falls back to the
+constraint and the new fixture names are lost from the body's parameter
+type. Playwright's own declarations have the same shape and its docs also
+pass the type argument, so this is a papercut rather than a divergence —
+but the inference site (`FixtureValue<T[K], TFixtures & T>` in
+`packages/ferridriver-test/index.d.ts`) is where a fix would go.
+
 ### Context-bound `request` (`page.request` / `context.request`)
 Cookie bridging (both directions, per redirect hop), live `baseURL` /
 `extraHTTPHeaders` / `userAgent` / `ignoreHTTPSErrors` defaults, and the

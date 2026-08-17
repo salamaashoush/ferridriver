@@ -698,13 +698,15 @@ impl Session {
       crate::bindings::install_bdd(&ctx)
         .map_err(|e| ScriptError::internal(format!("failed to install extension registry: {e}")))?;
 
-      // Playwright-shaped `test`/`describe` registration surface —
-      // host-gated: only `ferridriver test` sessions consume these, and
-      // the registry userdata is what the runner glue snapshots.
-      if host == ExtensionHost::Test {
-        crate::bindings::test::install_test(&ctx)
-          .map_err(|e| ScriptError::internal(format!("failed to install test surface: {e}")))?;
-      }
+      // Playwright-shaped `test`/`describe` registration surface. Every
+      // host gets it: an extension or a step file that builds a fixture
+      // chain with `test.extend` / `mergeTests` must be able to do so
+      // wherever it is loaded. Only `ferridriver test` CONSUMES what
+      // registering leaves behind — the runner glue snapshots the
+      // registry userdata — and a `test()` call under any other host is
+      // reported as a diagnostic rather than silently collected.
+      crate::bindings::test::install_test(&ctx)
+        .map_err(|e| ScriptError::internal(format!("failed to install test surface: {e}")))?;
 
       // `sidecars.connect(name)` — declared external processes driven over
       // fd 3/4. Connect is by declared name only; no arbitrary spawn.

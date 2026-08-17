@@ -29,10 +29,39 @@ use rquickjs::{Ctx, Module, Object, Value};
 const FERRIDRIVER_MODULE_NAMES: &[&str] = &[
   "ferridriver",
   "@ferridriver/test",
+  // The canonical Playwright import specifiers, served by the same
+  // module: a suite that imports `@playwright/test` links against the
+  // native test surface with no config, no alias entry and no edit to
+  // its own source. Parity belongs to the binary, not to a setting.
+  "@playwright/test",
+  "playwright/test",
   "@cucumber/cucumber",
   "fs",
   "node:fs",
 ];
+
+/// Specifiers ferridriver serves that are ONE module under several
+/// names. jsstd's own table carries the same information for the Node
+/// modules (`url` / `node:url`, ...).
+const FERRIDRIVER_SPECIFIER_GROUPS: &[&[&str]] = &[
+  &["@ferridriver/test", "@playwright/test", "playwright/test"],
+  &["fs", "node:fs"],
+];
+
+/// The canonical name of the module a specifier resolves to, so two
+/// spellings of one module compare equal.
+fn namespace_group(specifier: &str) -> String {
+  if let Some(group) = FERRIDRIVER_SPECIFIER_GROUPS
+    .iter()
+    .find(|group| group.contains(&specifier))
+  {
+    return group[0].to_string();
+  }
+  ferridriver_jsstd::modules::modules()
+    .into_iter()
+    .find(|module| module.specifiers.contains(&specifier))
+    .map_or_else(|| specifier.to_string(), |module| module.specifiers[0].to_string())
+}
 
 /// Every specifier served natively, ferridriver's own plus jsstd's.
 pub fn native_module_names() -> Vec<&'static str> {
@@ -70,6 +99,13 @@ pub fn set_module_aliases(aliases: impl IntoIterator<Item = (String, String)>) -
   let list: Vec<(String, String)> = aliases.into_iter().collect();
   for (from, to) in &list {
     if native_module_names().contains(&from.as_str()) {
+      // Redundant rather than wrong: `@playwright/test` was an alias
+      // target before the runtime served it natively, and a config that
+      // still spells it out must keep working. Only an alias that would
+      // REDIRECT a native specifier somewhere else is an error.
+      if canonical_native_name(from).as_deref() == Some(from.as_str()) && namespace_group(from) == namespace_group(to) {
+        continue;
+      }
       return Err(format!(
         "module alias `{from}`: cannot alias a specifier the runtime already serves natively"
       ));
@@ -170,6 +206,14 @@ pub fn loader() -> NativeModuleLoader {
       "@ferridriver/test",
       NativeModuleLoader::declare_fn::<FerridriverTestModule>(),
     ),
+    (
+      "@playwright/test",
+      NativeModuleLoader::declare_fn::<FerridriverTestModule>(),
+    ),
+    (
+      "playwright/test",
+      NativeModuleLoader::declare_fn::<FerridriverTestModule>(),
+    ),
     ("@cucumber/cucumber", NativeModuleLoader::declare_fn::<CucumberModule>()),
     ("fs", NativeModuleLoader::declare_fn::<FsModule>()),
     ("node:fs", NativeModuleLoader::declare_fn::<FsModule>()),
@@ -233,7 +277,7 @@ pub fn namespace<'js>(ctx: &Ctx<'js>, specifier: &str) -> rquickjs::Result<Optio
   };
   let ns = match canonical.as_str() {
     "ferridriver" => ferridriver_namespace(ctx)?,
-    "@ferridriver/test" => test_namespace(ctx)?,
+    "@ferridriver/test" | "@playwright/test" | "playwright/test" => test_namespace(ctx)?,
     "@cucumber/cucumber" => cucumber_namespace(ctx)?,
     "fs" | "node:fs" => fs_namespace(ctx)?,
     // Everything else native is jsstd's, and its own table says how each
@@ -364,28 +408,55 @@ impl ModuleDef for FerridriverModule {
 }
 
 /// `import { test, describe, expect } from '@ferridriver/test'` — the
-/// Playwright-shaped test-runner surface. `test`/`describe` live on the
-/// `ferridriver` global object (installed only for
-/// `ExtensionHost::Test` sessions); under any other host they evaluate
-/// to `undefined`, so importing is harmless and calling gives a plain
-/// TypeError.
+/// Playwright-shaped test-runner surface, served under `@playwright/test`
+/// and `playwright/test` too so an unmodified suite links against it.
+/// The surface exists under every host; only `ferridriver test` collects
+/// what registering leaves behind.
 pub struct FerridriverTestModule;
 
-const TEST_EXPORTS: &[&str] = &["default", "test", "describe", "expect"];
+/// Mirrors `@playwright/test`'s own export list (`packages/playwright/
+/// test.mjs`), minus what ferridriver has not implemented yet:
+/// `selectors`, `devices`, `defineConfig`, `mergeExpects`, `errors`,
+/// `by` and the `_electron` / `_android` / `_utilityTest` internals.
+/// Exporting a name that resolves to `undefined` would be worse than not
+/// exporting it — the import succeeds and the call site fails somewhere
+/// else.
+const TEST_EXPORTS: &[&str] = &[
+  "default",
+  "test",
+  "describe",
+  "expect",
+  "mergeTests",
+  "_baseTest",
+  "chromium",
+  "firefox",
+  "webkit",
+  "request",
+];
 
+/// The module object IS the `test` function, carrying every named export
+/// as a property — Playwright's `module.exports = Object.assign(test,
+/// exports)` — so `import test, { expect } from …`,
+/// `import { test } from …` and `const { test } = require(…)` all work,
+/// as does `require('@playwright/test')(…)`.
 fn test_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   let test = fd_prop(ctx, "test")?;
-  let describe = fd_prop(ctx, "describe")?;
-  let expect = global(ctx, "expect")?;
-  let default = Object::new(ctx.clone())?;
-  default.set("test", test.clone())?;
-  default.set("describe", describe.clone())?;
-  default.set("expect", expect.clone())?;
-  let ns = Object::new(ctx.clone())?;
-  ns.set("default", default)?;
-  ns.set("test", test)?;
-  ns.set("describe", describe)?;
-  ns.set("expect", expect)?;
+  let members: Vec<(&str, Value<'js>)> = vec![
+    ("test", test.clone()),
+    ("describe", fd_prop(ctx, "describe")?),
+    ("expect", global(ctx, "expect")?),
+    ("mergeTests", fd_prop(ctx, "mergeTests")?),
+    ("_baseTest", fd_prop(ctx, "baseTest")?),
+    ("chromium", global(ctx, "chromium")?),
+    ("firefox", global(ctx, "firefox")?),
+    ("webkit", global(ctx, "webkit")?),
+    ("request", global(ctx, "request")?),
+  ];
+  let ns = test.as_object().cloned().unwrap_or(Object::new(ctx.clone())?);
+  for (name, value) in members {
+    ns.set(name, value)?;
+  }
+  ns.set("default", test)?;
   Ok(ns)
 }
 

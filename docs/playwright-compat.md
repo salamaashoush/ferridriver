@@ -65,20 +65,27 @@ Baseline at the start of this work: **30 tests ran, 30 failed.**
 
 ## Module aliasing
 
-Upstream specs `import { test, expect } from '@playwright/test'`. Serving
-that specifier from ferridriver's native module is what lets them run
-unedited:
+Upstream specs `import { test, expect } from '@playwright/test'`.
+`@playwright/test` and `playwright/test` are now served NATIVELY — the
+same module `@ferridriver/test` serves — so a suite needs no config at
+all to link against the runtime's test surface. Parity belongs to the
+binary, not to a setting.
+
+Aliasing remains for everything else a suite might import under its own
+name:
 
 ```toml
 [test.moduleAliases]
-"@playwright/test" = "@ferridriver/test"
 "playwright" = "ferridriver"
 ```
 
 Aliases reach both the runtime module loader
 (`bindings/native_modules.rs`) and the rolldown externals (`bundle.rs`),
 which read the same list, and are folded into the bytecode cache key. An
-alias target must be a native module, and an alias may not shadow one.
+alias target must be a native module, and an alias may not REDIRECT a
+native specifier — though spelling out one that already resolves there
+(`"@playwright/test" = "@ferridriver/test"`) stays accepted as the no-op
+it is, so configs written before this kept working.
 
 ## Divergence ledger
 

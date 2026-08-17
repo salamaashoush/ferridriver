@@ -144,7 +144,7 @@ export interface TestType<TFixtures = TestFixtures> {
   setTimeout(timeout: number): void;
   info(): TestInfo;
   step<T>(title: string, body: () => T | Promise<T>): Promise<T>;
-  extend<T extends Record<string, unknown>>(fixtures: {
+  extend<T extends object>(fixtures: {
     [K in keyof T]: FixtureValue<T[K], TFixtures & T>;
   }): TestType<TFixtures & T>;
 
@@ -153,6 +153,32 @@ export interface TestType<TFixtures = TestFixtures> {
 
 export const test: TestType;
 export const describe: DescribeFunction;
+
+/// The unextended root `test`, before any `extend` — Playwright's
+/// `_baseTest`. It is the same object as `test`, exported under the name
+/// a suite that composes fixture chains expects.
+export const _baseTest: TestType;
+
+/** The fixtures of every `test` in the list, intersected. */
+type MergedFixtures<List> = List extends [TestType<infer T>, ...infer Rest] ? T & MergedFixtures<Rest> : TestFixtures;
+
+/**
+ * Compose independent `test.extend` chains into one `test`. Fixtures the
+ * chains share are registered once, so a shared registration never
+ * becomes an override of itself.
+ */
+export function mergeTests<List extends unknown[]>(...tests: List): TestType<MergedFixtures<List>>;
+
+/** Secondary browser factories, independent of the project's backend. */
+export const chromium: (options?: { transport?: 'pipe' | 'ws' }) => BrowserType;
+export const firefox: () => BrowserType;
+export const webkit: () => BrowserType;
+/** The session's HTTP client, the same object the `request` fixture holds. */
+export const request: APIRequestContext;
+
+/** The module object is the `test` function itself, as in Playwright. */
+declare const frameworkModule: TestType;
+export default frameworkModule;
 
 // ── Expect ───────────────────────────────────────────────────────────
 

@@ -113,13 +113,24 @@ async fn aliased_specifiers_resolve_in_bundles_and_dynamic_imports() {
   );
 
   // Validation: the target must be a native module, and an alias must
-  // never shadow one.
-  let bad_target = set_module_aliases([("@playwright/test".to_string(), "playwright-core".to_string())])
+  // never REDIRECT a native specifier somewhere else.
+  let bad_target = set_module_aliases([("playwright".to_string(), "playwright-core".to_string())])
     .expect_err("non-native target rejected");
   assert!(bad_target.contains("is not a native module"), "{bad_target}");
   let shadow =
     set_module_aliases([("ferridriver".to_string(), "@ferridriver/test".to_string())]).expect_err("shadow rejected");
   assert!(shadow.contains("already serves natively"), "{shadow}");
+  // `@playwright/test` is served natively now, so the alias every
+  // pre-existing config carries is a no-op rather than an error — but
+  // only onto the module it already resolves to.
+  set_module_aliases([
+    ("@playwright/test".to_string(), "@ferridriver/test".to_string()),
+    ("playwright".to_string(), "ferridriver".to_string()),
+  ])
+  .expect("a redundant alias of a native specifier is accepted");
+  let redirected = set_module_aliases([("@playwright/test".to_string(), "ferridriver".to_string())])
+    .expect_err("redirecting a native specifier is rejected");
+  assert!(redirected.contains("already serves natively"), "{redirected}");
 
   // A rejected call leaves the previously installed map in place.
   let names: Vec<String> = ferridriver_script::module_aliases()

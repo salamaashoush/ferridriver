@@ -95,6 +95,7 @@ subtle = "2"
 
 [dev-dependencies]
 tempfile = "3"
+tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 # Convert round-trip test drives rquickjs directly; it is a runtime dep
 # but integration tests are separate crates and cannot name a lib-only

@@ -203,11 +203,14 @@ for entry in "${EXAMPLES[@]}"; do
   # `retries = 1` means a retried test appears twice; only its final
   # attempt is the outcome.
   jq -c --arg e "$name" '
-    [ .tests[] | {example:$e, mode:"run",
-                  id: ((.file | sub(".*/examples/";"examples/")) + " > " + .name),
-                  attempt: .attempt,
-                  status: .status,
-                  error: (.error // null)} ]
+    [ .. | objects | select(has("specs")) | .specs[]
+      | . as $spec
+      | .tests[].results[]
+      | {example:$e, mode:"run",
+         id: (($spec.file | sub(".*/examples/";"examples/")) + " > " + $spec.title),
+         attempt: (.retry // 0),
+         status: .status,
+         error: (.errors[0].message // null)} ]
     | group_by(.id) | map(max_by(.attempt))[]' "$report" >>"$WORK/results.ndjson"
 done
 

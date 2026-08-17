@@ -11,6 +11,47 @@ use ferridriver_script::{
   bundle_and_compile_named, collect_tests, eval_bundle,
 };
 
+/// Collects formatted tracing output so a test can assert on a named
+/// diagnostic the way an operator would read it.
+#[derive(Clone)]
+struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+  fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    self.0.lock().expect("logs").extend_from_slice(buf);
+    Ok(buf.len())
+  }
+
+  fn flush(&mut self) -> std::io::Result<()> {
+    Ok(())
+  }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+  type Writer = Self;
+
+  fn make_writer(&'a self) -> Self::Writer {
+    self.clone()
+  }
+}
+
+/// The subscriber has to be the GLOBAL one: the diagnostic is emitted on
+/// the session's VM thread, which a thread-local `set_default` in the
+/// test's own thread would never see.
+fn captured_logs() -> &'static CapturedLogs {
+  static LOGS: std::sync::OnceLock<CapturedLogs> = std::sync::OnceLock::new();
+  LOGS.get_or_init(|| {
+    let logs = CapturedLogs(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+      .with_writer(logs.clone())
+      .with_ansi(false)
+      .with_max_level(tracing::Level::WARN)
+      .finish();
+    let _ = tracing::subscriber::set_global_default(subscriber);
+    logs
+  })
+}
+
 fn ctx(dir: &std::path::Path) -> RunContext {
   RunContext {
     vars: Arc::new(InMemoryVars::new()),
@@ -300,14 +341,47 @@ async fn runtime_modifiers_outside_a_test_are_hard_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn non_test_hosts_do_not_expose_the_surface() {
+async fn non_test_hosts_expose_the_whole_surface() {
   let dir = tempfile::tempdir().expect("tempdir");
   let entry = dir.path().join("probe.test.ts");
   std::fs::write(
     &entry,
-    "import { test, describe } from '@ferridriver/test';\n\
-     if (typeof test !== 'undefined') throw new Error('test leaked into script host');\n\
-     if (typeof describe !== 'undefined') throw new Error('describe leaked into script host');\n",
+    "import { test, describe, expect, mergeTests } from '@ferridriver/test';\n\
+     for (const [name, value] of Object.entries({ test, describe, expect, mergeTests })) {\n\
+       if (typeof value !== 'function') throw new Error(`${name} missing under the script host`);\n\
+     }\n\
+     const a = test.extend({ a: async ({}, use) => { await use(1); } });\n\
+     const b = test.extend({ b: async ({}, use) => { await use(2); } });\n\
+     if (typeof mergeTests(a, b).extend !== 'function') throw new Error('mergeTests chain is not a test');\n",
+  )
+  .expect("write entry");
+
+  let bundle = bundle_and_compile_named(&[entry], dir.path(), "ferridriver-tests.js")
+    .await
+    .expect("bundle");
+  for host in [ExtensionHost::Script, ExtensionHost::Bdd, ExtensionHost::Mcp] {
+    let mut context = ctx(dir.path());
+    context.host = host;
+    let session = Session::create(ScriptEngineConfig::default(), &context)
+      .await
+      .expect("session");
+    eval_bundle(&session.vm_handle(), &bundle)
+      .await
+      .unwrap_or_else(|e| panic!("the test surface must exist under {host:?}: {e:?}"));
+  }
+}
+
+/// Registering a test where nothing collects it is inert, so it is named
+/// rather than silently kept: the surface stays usable (an extension
+/// builds fixture chains with it) but the call is reported.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_test_registered_off_the_test_host_is_reported() {
+  let dir = tempfile::tempdir().expect("tempdir");
+  let entry = dir.path().join("probe.test.ts");
+  std::fs::write(
+    &entry,
+    "import { test } from '@ferridriver/test';\n\
+     test('inert', async () => {});\n",
   )
   .expect("write entry");
 
@@ -319,7 +393,17 @@ async fn non_test_hosts_do_not_expose_the_surface() {
   let session = Session::create(ScriptEngineConfig::default(), &context)
     .await
     .expect("session");
+
+  let logs = captured_logs().clone();
+
   eval_bundle(&session.vm_handle(), &bundle)
     .await
-    .expect("imports resolve to undefined under non-test hosts");
+    .expect("registration under a non-test host is not an error");
+
+  let written = logs.0.lock().expect("logs").clone();
+  let written = String::from_utf8_lossy(&written);
+  assert!(
+    written.contains("test.registration.ignored"),
+    "expected the named diagnostic, got: {written}"
+  );
 }

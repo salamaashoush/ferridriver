@@ -237,6 +237,9 @@ pub(crate) struct TestRegistry {
   pub(crate) file_use: Vec<FileUseReg>,
   pub(crate) file_configure: Vec<FileConfigureReg>,
   pub(crate) has_only: bool,
+  /// Set once the "registered under a non-test host" diagnostic has been
+  /// emitted, so a step file registering fifty tests says it once.
+  pub(crate) warned_off_host: bool,
   /// Suite nesting during registration (indices into `suites`).
   pub(crate) describe_stack: Vec<usize>,
   pub(crate) current: Option<CurrentTest>,
@@ -434,6 +437,31 @@ fn parse_registration<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> Result<Regist
   Ok(Registration { title, details, body })
 }
 
+/// A `test()` registered under a host that never runs tests is a
+/// mistake worth naming: the surface exists everywhere (an extension
+/// builds fixture chains with it), but only `ferridriver test` collects
+/// the registry, so under `mcp` / `bdd` / `script` the registration is
+/// inert. Say so once per session rather than silently keeping it.
+fn warn_off_test_host(ctx: &Ctx<'_>, title: &str) {
+  let host = crate::bindings::runtime::ensure_ferridriver(ctx)
+    .ok()
+    .and_then(|fd| fd.get::<_, String>("host").ok());
+  let Some(host) = host else { return };
+  if host == "test" {
+    return;
+  }
+  let already = with_test_registry(ctx, |r| std::mem::replace(&mut r.warned_off_host, true)).unwrap_or(true);
+  if !already {
+    tracing::warn!(
+      target: "ferridriver::script",
+      host = host.as_str(),
+      test = title,
+      "test.registration.ignored: test() registered under a host that does not run tests; \
+       the registration is kept but nothing will collect it"
+    );
+  }
+}
+
 fn push_test<'js>(
   ctx: &Ctx<'js>,
   fixture_set: usize,
@@ -442,6 +470,7 @@ fn push_test<'js>(
   each_arg: Option<serde_json::Value>,
   title_override: Option<String>,
 ) -> rquickjs::Result<()> {
+  warn_off_test_host(ctx, &reg.title);
   let (line, col) = capture_location(ctx);
   let requested = destructured_keys(ctx, &reg.body);
   let saved = Persistent::save(ctx, reg.body);
@@ -686,6 +715,63 @@ fn append_fixture(r: &mut TestRegistry, visible: &mut Vec<usize>, parsed: Parsed
   Ok(())
 }
 
+// ── The fixture-set marker ───────────────────────────────────────────
+
+/// Global-symbol key under which every `test` object records the fixture
+/// set it is bound to. Playwright marks its test objects the same way
+/// (`testTypeSymbol`, `common/testType.ts`), and for the same reasons:
+/// `mergeTests` needs the chains behind its arguments, `test.extend`
+/// needs to recognise a test object passed where fixtures belong, and a
+/// symbol cannot collide with a suite's own properties.
+const TEST_TYPE_SYMBOL: &str = "ferridriver.testType";
+
+fn test_type_key<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<rquickjs::Atom<'js>> {
+  Ok(rquickjs::Symbol::new_global(ctx.clone(), TEST_TYPE_SYMBOL)?.as_atom())
+}
+
+/// The fixture set `value`'s `test` object is bound to, or `None` when
+/// the value is not one of ours.
+pub(crate) fn fixture_set_of<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Option<usize> {
+  let obj = value.as_object()?;
+  let marked: Value<'js> = obj.get(test_type_key(ctx).ok()?).ok()?;
+  let index = marked.as_number()?;
+  (index >= 0.0).then_some(index as usize)
+}
+
+/// `mergeTests(...tests)` — one `test` whose fixtures are the union of
+/// every argument's chain, with the fixtures they share registered once.
+///
+/// Playwright filters by the identity of the fixtures object each
+/// `extend` was called with (`common/testType.ts:338`); a fixture set
+/// here is a list of registration indices, so the same filter is index
+/// identity. Dedup by NAME would be wrong in the same way it is
+/// upstream: a base fixture appearing in both chains would become an
+/// override of itself and resolve its own `super`.
+fn merge_tests<'js>(ctx: Ctx<'js>, tests: Rest<Value<'js>>) -> rquickjs::Result<Function<'js>> {
+  let mut merged: Vec<usize> = Vec::new();
+  for test in &tests.0 {
+    let Some(set) = fixture_set_of(&ctx, test) else {
+      return Err(rq(&ScriptError::internal(
+        "mergeTests() accepts \"test\" functions as parameters.\nDid you mean to call test.extend() with fixtures instead?"
+          .to_string(),
+      )));
+    };
+    let visible =
+      with_test_registry(&ctx, |r| r.fixture_sets.get(set).cloned().unwrap_or_default()).map_err(|e| rq(&e))?;
+    for index in visible {
+      if !merged.contains(&index) {
+        merged.push(index);
+      }
+    }
+  }
+  let new_set = with_test_registry(&ctx, |r| {
+    r.fixture_sets.push(merged);
+    r.fixture_sets.len() - 1
+  })
+  .map_err(|e| rq(&e))?;
+  make_test_object(&ctx, new_set)
+}
+
 // ── The test / describe object builders ──────────────────────────────
 
 /// Build a `test` function object bound to one fixture set. `test.extend`
@@ -814,6 +900,11 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
   let extend = Function::new(
     ctx.clone(),
     move |ctx: Ctx<'js>, fixtures: Object<'js>| -> rquickjs::Result<Function<'js>> {
+      if fixture_set_of(&ctx, fixtures.as_value()).is_some() {
+        return Err(rq(&ScriptError::internal(
+          "test.extend() accepts fixtures object, not a test object.\nDid you mean to call mergeTests()?".to_string(),
+        )));
+      }
       let mut new_regs = Vec::new();
       for key in fixtures.keys::<String>() {
         let key = key?;
@@ -837,6 +928,10 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
 
   let describe = make_describe_object(ctx)?;
   obj.set("describe", describe)?;
+
+  // Non-enumerable, non-writable: a spread of `test` must not copy it,
+  // and a suite must not be able to forge a chain by assigning it.
+  obj.prop(test_type_key(ctx)?, rquickjs::object::Property::from(set as f64))?;
 
   Ok(test_fn)
 }
@@ -1034,10 +1129,12 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
 }
 
 /// Install the Playwright-shaped test surface: the `TestRegistry`
-/// userdata plus the base `test` / `describe` objects on the
-/// `ferridriver` global (consumed by the `@ferridriver/test` native
-/// module — they are NOT bare globals). Idempotent; called once at
-/// `Session::create` for `ExtensionHost::Test` sessions.
+/// userdata plus the base `test` / `describe` objects and `mergeTests`
+/// on the `ferridriver` global (consumed by the `@ferridriver/test`
+/// native module — they are NOT bare globals). Idempotent; called once
+/// at `Session::create`, for EVERY host: a fixture chain an extension
+/// or a step file builds must exist wherever it is imported, and only
+/// the Test host consumes what registering leaves behind.
 pub fn install_test(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   if ctx.userdata::<TestRegistryUserData>().is_some() {
     return Ok(());
@@ -1047,8 +1144,13 @@ pub fn install_test(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let test = make_test_object(ctx, 0)?;
   let describe = make_describe_object(ctx)?;
   let fd = crate::bindings::runtime::ensure_ferridriver(ctx)?;
+  // Playwright exports the unextended root as `_baseTest`; it is this
+  // very object, not a copy, so `mergeTests(_baseTest, x)` sees the
+  // shared ancestor it has to dedup against.
+  fd.set("baseTest", test.clone())?;
   fd.set("test", test)?;
   fd.set("describe", describe)?;
+  fd.set("mergeTests", Function::new(ctx.clone(), merge_tests)?)?;
   Ok(())
 }
 

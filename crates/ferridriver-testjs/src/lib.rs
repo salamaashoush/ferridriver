@@ -152,6 +152,25 @@ impl ferridriver_script::ConsoleSink for TestConsole {
   }
 }
 
+/// What a module registered, compared between the collection pass and
+/// every worker. The fixture-set count matters as much as the test
+/// count: a body resolves its fixtures by set INDEX, so a chain built
+/// under a condition would silently point at another chain's fixtures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Registrations {
+  tests: usize,
+  fixture_sets: usize,
+}
+
+impl Registrations {
+  fn of(collected: &ferridriver_script::CollectedTests) -> Self {
+    Self {
+      tests: collected.tests.len(),
+      fixture_sets: collected.fixture_sets.len(),
+    }
+  }
+}
+
 impl JsTestSession {
   /// Create the worker session and evaluate the precompiled bundle.
   /// The registration count is checked against the collection pass —
@@ -163,7 +182,7 @@ impl JsTestSession {
   ///
   /// Fails when the session cannot be created, the bundle fails to
   /// evaluate, or the registration count diverges from the plan's.
-  pub async fn load(bundle: Arc<CompiledBundle>, cwd: &Path, expected_tests: usize) -> anyhow::Result<Self> {
+  pub async fn load(bundle: Arc<CompiledBundle>, cwd: &Path, expected: Registrations) -> anyhow::Result<Self> {
     let sandbox = Arc::new(
       ferridriver_script::PathSandbox::new(cwd)
         .map_err(|e| anyhow::anyhow!("sandbox {}: {}", cwd.display(), e.message))?,
@@ -197,12 +216,16 @@ impl JsTestSession {
     let collected = collect_tests(&vm)
       .await
       .map_err(|e| anyhow::anyhow!("collect tests: {}", e.message))?;
-    if collected.tests.len() != expected_tests {
+    let registered = Registrations::of(&collected);
+    if registered != expected {
       anyhow::bail!(
-        "test registration is nondeterministic: collection saw {} tests, this worker registered {} — \
-         register tests unconditionally at module top level",
-        expected_tests,
-        collected.tests.len()
+        "test registration is nondeterministic: collection saw {} tests and {} fixture sets, this worker \
+         registered {} and {} — register tests and build `test.extend` / `mergeTests` chains unconditionally \
+         at module top level",
+        expected.tests,
+        expected.fixture_sets,
+        registered.tests,
+        registered.fixture_sets
       );
     }
     Ok(Self { session, console })
@@ -247,16 +270,16 @@ impl Drop for ConsoleBinding<'_> {
 pub struct SessionPool {
   bundle: Arc<CompiledBundle>,
   cwd: Arc<PathBuf>,
-  expected_tests: usize,
+  expected: Registrations,
   slots: DashMap<u32, Arc<OnceCell<Arc<JsTestSession>>>>,
 }
 
 impl SessionPool {
-  fn new(bundle: Arc<CompiledBundle>, cwd: PathBuf, expected_tests: usize) -> Self {
+  fn new(bundle: Arc<CompiledBundle>, cwd: PathBuf, expected: Registrations) -> Self {
     Self {
       bundle,
       cwd: Arc::new(cwd),
-      expected_tests,
+      expected,
       slots: DashMap::new(),
     }
   }
@@ -270,7 +293,7 @@ impl SessionPool {
     );
     let bundle = Arc::clone(&self.bundle);
     let cwd = Arc::clone(&self.cwd);
-    let expected = self.expected_tests;
+    let expected = self.expected;
     cell
       .get_or_try_init(|| async move {
         JsTestSession::load(bundle, &cwd, expected)
@@ -379,7 +402,7 @@ pub async fn build_ts_plan(config: &TestConfig, cwd: &Path) -> anyhow::Result<Op
   let pool = Arc::new(SessionPool::new(
     Arc::clone(&source.bundle),
     cwd.to_path_buf(),
-    source.collected.tests.len(),
+    Registrations::of(&source.collected),
   ));
   let plan = translate_tests(&source, config, cwd, &pool)?;
   Ok(Some((plan, pool)))
