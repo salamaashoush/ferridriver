@@ -17,6 +17,7 @@
 import * as aria from '@isomorphic/ariaSnapshot';
 import { escapeRegExp, longestCommonSubstring, normalizeWhiteSpace } from '@isomorphic/stringUtils';
 import { yamlEscapeKeyIfNeeded, yamlEscapeValueIfNeeded } from '@isomorphic/yaml';
+import { ariaNodesEqual } from './local/ariaEquality';
 
 import { computeBox, getElementComputedStyle, isElementVisible } from './domUtils';
 import * as roleUtils from './roleUtils';
@@ -242,7 +243,7 @@ function toAriaNode(element: Element, options: InternalOptions): aria.AriaNode |
   if (!role || role === 'presentation' || role === 'none')
     return null;
 
-  const name = normalizeWhiteSpace(roleUtils.getElementAccessibleName(element, false) || '');
+  const name = normalizeWhiteSpace(roleUtils.getElementAccessibleNameText(element, false) || '');
   const receivesPointerEvents = roleUtils.receivesPointerEvents(element);
 
   const box = computeBox(element);
@@ -509,7 +510,7 @@ function compareSnapshots(ariaSnapshot: AriaSnapshot, previousSnapshot: AriaSnap
 
   // Returns whether ariaNode is the same as previousNode.
   const visit = (ariaNode: aria.AriaNode, previousNode: aria.AriaNode | undefined): boolean => {
-    let same: boolean = ariaNode.children.length === previousNode?.children.length && aria.ariaNodesEqual(ariaNode, previousNode);
+    let same: boolean = ariaNode.children.length === previousNode?.children.length && ariaNodesEqual(ariaNode, previousNode);
     let canBeSkipped = same;
 
     for (let childIndex = 0 ; childIndex < ariaNode.children.length; childIndex++) {

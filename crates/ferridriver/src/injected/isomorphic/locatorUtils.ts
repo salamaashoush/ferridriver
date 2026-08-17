@@ -18,6 +18,7 @@ import { escapeForAttributeSelector, escapeForTextSelector } from './stringUtils
 
 export type ByRoleOptions = {
   checked?: boolean;
+  description?: string | RegExp;
   disabled?: boolean;
   exact?: boolean;
   expanded?: boolean;
@@ -32,8 +33,17 @@ function getByAttributeTextSelector(attrName: string, text: string | RegExp, opt
   return `internal:attr=[${attrName}=${escapeForAttributeSelector(text, options?.exact || false)}]`;
 }
 
+// Multiple test id attribute names can be joined with a comma. Attribute names cannot contain commas.
+export function splitTestIdAttributeNames(testIdAttributeName: string): string[] {
+  return testIdAttributeName.split(',');
+}
+
+export function encodeTestIdAttributeName(testIdAttributeName: string): string {
+  return testIdAttributeName.includes(',') ? JSON.stringify(testIdAttributeName) : testIdAttributeName;
+}
+
 export function getByTestIdSelector(testIdAttributeName: string, testId: string | RegExp): string {
-  return `internal:testid=[${testIdAttributeName}=${escapeForAttributeSelector(testId, true)}]`;
+  return `internal:testid=[${encodeTestIdAttributeName(testIdAttributeName)}=${escapeForAttributeSelector(testId, true)}]`;
 }
 
 export function getByLabelSelector(text: string | RegExp, options?: { exact?: boolean }): string {
@@ -72,6 +82,8 @@ export function getByRoleSelector(role: string, options: ByRoleOptions = {}): st
     props.push(['level', String(options.level)]);
   if (options.name !== undefined)
     props.push(['name', escapeForAttributeSelector(options.name, !!options.exact)]);
+  if (options.description !== undefined)
+    props.push(['description', escapeForAttributeSelector(options.description, !!options.exact)]);
   if (options.pressed !== undefined)
     props.push(['pressed', String(options.pressed)]);
   return `internal:role=${role}${props.map(([n, v]) => `[${n}=${v}]`).join('')}`;

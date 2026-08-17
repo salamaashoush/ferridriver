@@ -38,9 +38,14 @@ async function build(entrypoint: string, outfile: string, wrap: (source: string)
   const result = await Bun.build({
     entrypoints: [entrypoint],
     target: 'browser',
-    minify: true,
+    // Everything bun has: `minify: true` is this triple today, spelled
+    // out so a future default change cannot quietly cost us bundle size.
+    // The engine bundle is injected into every document, so its size is
+    // per-document wire cost, not just binary size.
+    minify: { whitespace: true, identifiers: true, syntax: true },
     format: 'iife',
     sourcemap: 'none',
+    drop: ['debugger'],
     plugins: [inlineCssPlugin],
   });
 

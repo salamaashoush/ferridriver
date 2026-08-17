@@ -1,4 +1,4 @@
-import { getAriaDisabled, getAriaRole, getCheckedWithoutMixed, getElementAccessibleName, getReadonly } from './roleUtils';
+import { getAriaDisabled, getAriaRole, getCheckedWithoutMixed, getElementAccessibleNameText, getReadonly } from './roleUtils';
 
 declare global {
   interface Window { __fd: any; }
@@ -72,7 +72,7 @@ function accessibilityTree(maxDepth: number): AXNode[] {
     }
 
     let name = '';
-    try { name = getElementAccessibleName(el, false) || ''; } catch { /* noop */ }
+    try { name = getElementAccessibleNameText(el, false) || ''; } catch { /* noop */ }
     if (!name) {
       name = el.getAttribute?.('aria-label')
         || el.getAttribute?.('alt')

@@ -10,7 +10,7 @@
 import { InjectedScript } from './injectedScript';
 import { matchesExpectAriaTemplate } from './ariaSnapshot';
 import { isElementVisible, parentElementOrShadowHost, enclosingShadowRootOrDocument } from './domUtils';
-import { getAriaDisabled, getAriaRole, getCheckedWithoutMixed, getElementAccessibleName, getReadonly } from './roleUtils';
+import { getAriaDisabled, getAriaRole, getCheckedWithoutMixed, getElementAccessibleNameText, getReadonly } from './roleUtils';
 import { escapeForTextSelector, escapeForAttributeSelector } from '@isomorphic/stringUtils';
 import { UtilityScript } from './utilityScript';
 import { parseEvaluationResultValue, serializeAsCallArgument } from '@isomorphic/utilityScriptSerializers';
@@ -592,7 +592,7 @@ if (!window.__fd) {
 
     // ARIA
     getAriaRole,
-    getAccessibleName: getElementAccessibleName,
+    getAccessibleName: getElementAccessibleNameText,
     getAriaDisabled,
     // Playwright reads the checked state AFTER retargeting through
     // `follow-label` (`injectedScript.ts::elementState`), so a locator

@@ -24,7 +24,7 @@ import { beginDOMCaches, enclosingShadowRootOrDocument, endDOMCaches, isElementV
 import { Highlight } from './highlight';
 import { kLayoutSelectorNames, layoutSelectorScore } from './layoutSelectorUtils';
 import { createRoleEngine } from './roleSelectorEngine';
-import { beginAriaCaches, endAriaCaches, getAriaDisabled, getAriaRole, getCheckedAllowMixed, getCheckedWithoutMixed, getElementAccessibleDescription, getElementAccessibleErrorMessage, getElementAccessibleName, getReadonly } from './roleUtils';
+import { beginAriaCaches, endAriaCaches, getAriaDisabled, getAriaRole, getCheckedAllowMixed, getCheckedWithoutMixed, getElementAccessibleDescription, getElementAccessibleErrorMessage, getElementAccessibleNameText, getReadonly } from './roleUtils';
 import { SelectorEvaluatorImpl, sortInDOMOrder } from './selectorEvaluator';
 import { generateSelector } from './selectorGenerator';
 import { elementMatchesText, elementText, getElementLabels } from './selectorUtils';
@@ -104,7 +104,7 @@ export class InjectedScript {
     elementText,
     getAriaRole,
     getElementAccessibleDescription,
-    getElementAccessibleName,
+    getElementAccessibleNameText,
     isElementVisible,
     isInsideScope,
     normalizeWhiteSpace,
@@ -1529,9 +1529,9 @@ export class InjectedScript {
       } else if (expression === 'to.have.text') {
         received = options.useInnerText ? (element as HTMLElement).innerText : elementText(new Map(), element).full;
       } else if (expression === 'to.have.accessible.name') {
-        received = getElementAccessibleName(element, false /* includeHidden */);
+        received = getElementAccessibleNameText(element, false /* includeHidden */);
       } else if (expression === 'to.have.accessible.description') {
-        received = getElementAccessibleDescription(element, false /* includeHidden */);
+        received = getElementAccessibleDescription(element, false /* includeHidden */).text;
       } else if (expression === 'to.have.accessible.error.message') {
         received = getElementAccessibleErrorMessage(element);
       } else if (expression === 'to.have.role') {

@@ -15,6 +15,7 @@
  */
 
 import { asLocators } from './locatorGenerators';
+import { encodeTestIdAttributeName } from './locatorUtils';
 import { parseSelector } from './selectorParser';
 import { escapeForAttributeSelector, escapeForTextSelector } from './stringUtils';
 
@@ -77,6 +78,7 @@ function parseLocator(locator: string, testIdAttributeName: string): { selector:
       .replace(/has_not/g, 'hasnot')
       .replace(/frame_locator/g, 'framelocator')
       .replace(/content_frame/g, 'contentframe')
+      .replace(/pierce_frames/g, 'pierceframes')
       .replace(/[{}\s]/g, '')
       .replace(/new\(\)/g, '')
       .replace(/new[\w]+\.[\w]+options\(\)/g, '')
@@ -158,6 +160,7 @@ function transform(template: string, params: TemplateParams, testIdAttributeName
       .replace(/\,set([\w]+)\(([^)]+)\)/g, (_, group1, group2) => ',' + group1.toLowerCase() + '=' + group2.toLowerCase())
       .replace(/framelocator\(([^)]+)\)/g, '$1.internal:control=enter-frame')
       .replace(/contentframe(\(\))?/g, 'internal:control=enter-frame')
+      .replace(/pierceframes(\(\))?/g, 'internal:control=pierce-frames')
       .replace(/locator\(([^)]+),hastext=([^),]+)\)/g, 'locator($1).internal:has-text=$2')
       .replace(/locator\(([^)]+),hasnottext=([^),]+)\)/g, 'locator($1).internal:has-not-text=$2')
       .replace(/locator\(([^)]+),hastext=([^),]+)\)/g, 'locator($1).internal:has-text=$2')
@@ -165,7 +168,7 @@ function transform(template: string, params: TemplateParams, testIdAttributeName
       .replace(/getbyrole\(([^)]+)\)/g, 'internal:role=$1')
       .replace(/getbytext\(([^)]+)\)/g, 'internal:text=$1')
       .replace(/getbylabel\(([^)]+)\)/g, 'internal:label=$1')
-      .replace(/getbytestid\(([^)]+)\)/g, `internal:testid=[${testIdAttributeName}=$1]`)
+      .replace(/getbytestid\(([^)]+)\)/g, `internal:testid=[${encodeTestIdAttributeName(testIdAttributeName)}=$1]`)
       .replace(/getby(placeholder|alt|title)(?:text)?\(([^)]+)\)/g, 'internal:attr=[$1=$2]')
       .replace(/first(\(\))?/g, 'nth=0')
       .replace(/last(\(\))?/g, 'nth=-1')
@@ -177,6 +180,7 @@ function transform(template: string, params: TemplateParams, testIdAttributeName
       .replace(/filter\(,?has2=([^)]+)\)/g, 'internal:has=$1')
       .replace(/filter\(,?hasnot2=([^)]+)\)/g, 'internal:has-not=$1')
       .replace(/,exact=false/g, '')
+      .replace(/(,name=\$\d+)(,description=\$\d+),exact=true/g, '$1s$2s') // exact=true is shared between name and description, so we need a special case for applying it to both.
       .replace(/,exact=true/g, 's')
       .replace(/,includehidden=/g, ',include-hidden=')
       .replace(/\,/g, '][');
@@ -218,7 +222,7 @@ function transform(template: string, params: TemplateParams, testIdAttributeName
   }).join(' >> ');
 }
 
-export function locatorOrSelectorAsSelector(language: Language, locator: string, testIdAttributeName: string): string {
+export function locatorOrSelectorAsSelector(language: Language, locator: string, testIdAttributeName: string = 'data-testid'): string {
   try {
     return unsafeLocatorOrSelectorAsSelector(language, locator, testIdAttributeName);
   } catch (e) {
@@ -226,7 +230,7 @@ export function locatorOrSelectorAsSelector(language: Language, locator: string,
   }
 }
 
-export function unsafeLocatorOrSelectorAsSelector(language: Language, locator: string, testIdAttributeName: string): string {
+export function unsafeLocatorOrSelectorAsSelector(language: Language, locator: string, testIdAttributeName: string = 'data-testid'): string {
   try {
     parseSelector(locator);
     return locator;

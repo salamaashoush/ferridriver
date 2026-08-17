@@ -21,7 +21,7 @@ import type { NestedSelectorBody } from './selectorParser';
 import type { ParsedSelector } from './selectorParser';
 
 export type Language = 'javascript' | 'python' | 'java' | 'csharp' | 'jsonl';
-export type LocatorType = 'default' | 'role' | 'text' | 'label' | 'placeholder' | 'alt' | 'title' | 'test-id' | 'nth' | 'first' | 'last' | 'visible' | 'has-text' | 'has-not-text' | 'has' | 'hasNot' | 'frame' | 'frame-locator' | 'and' | 'or' | 'chain';
+export type LocatorType = 'default' | 'role' | 'text' | 'label' | 'placeholder' | 'alt' | 'title' | 'test-id' | 'nth' | 'first' | 'last' | 'visible' | 'has-text' | 'has-not-text' | 'has' | 'hasNot' | 'frame' | 'frame-locator' | 'pierce-frames' | 'no-pierce-frames' | 'and' | 'or' | 'chain';
 export type LocatorBase = 'page' | 'locator' | 'frame-locator';
 export type Quote = '\'' | '"' | '`';
 
@@ -29,6 +29,7 @@ type LocatorOptions = {
   attrs?: { name: string, value: string | boolean | number }[],
   exact?: boolean,
   name?: string | RegExp,
+  description?: string | RegExp,
   hasText?: string | RegExp,
   hasNotText?: string | RegExp,
 };
@@ -162,8 +163,15 @@ function innerAsLocators(factory: LocatorFactory, parsed: ParsedSelector, isFram
       const options: LocatorOptions = { attrs: [] };
       for (const attr of attrSelector.attributes) {
         if (attr.name === 'name') {
+          if (options.exact !== undefined && options.exact !== attr.caseSensitive)
+            throw new Error(`Conflicting exactness in internal:role selector: ${stringifySelector({ parts: [part] })}`);
           options.exact = attr.caseSensitive;
           options.name = attr.value;
+        } else if (attr.name === 'description') {
+          if (options.exact !== undefined && options.exact !== attr.caseSensitive)
+            throw new Error(`Conflicting exactness in internal:role selector: ${stringifySelector({ parts: [part] })}`);
+          options.exact = attr.caseSensitive;
+          options.description = attr.value;
         } else {
           if (attr.name === 'level' && typeof attr.value === 'string')
             attr.value = +attr.value;
@@ -196,6 +204,11 @@ function innerAsLocators(factory: LocatorFactory, parsed: ParsedSelector, isFram
         tokens.push([factory.generateLocator(base, 'title', text, { exact })]);
         continue;
       }
+    }
+    if (part.name === 'internal:control' && ((part.body as string) === 'pierce-frames' || (part.body as string) === 'no-pierce-frames')) {
+      tokens.push([factory.generateLocator(base, part.body as LocatorType, '')]);
+      nextBase = 'frame-locator';
+      continue;
     }
     if (part.name === 'internal:control' && (part.body as string) === 'enter-frame') {
       // transform last tokens from `${selector}` into `${selector}.contentFrame()` and `frameLocator(${selector})`
@@ -307,6 +320,10 @@ export class JavaScriptLocatorFactory implements LocatorFactory {
         return `frameLocator(${this.quote(body as string)})`;
       case 'frame':
         return `contentFrame()`;
+      case 'pierce-frames':
+        return `pierceFrames()`;
+      case 'no-pierce-frames':
+        return `pierceFrames({ pierce: false })`;
       case 'nth':
         return `nth(${body})`;
       case 'first':
@@ -317,13 +334,16 @@ export class JavaScriptLocatorFactory implements LocatorFactory {
         return `filter({ visible: ${body === 'true' ? 'true' : 'false'} })`;
       case 'role':
         const attrs: string[] = [];
-        if (isRegExp(options.name)) {
+        if (isRegExp(options.name))
           attrs.push(`name: ${this.regexToSourceString(options.name)}`);
-        } else if (typeof options.name === 'string') {
+        else if (typeof options.name === 'string')
           attrs.push(`name: ${this.quote(options.name)}`);
-          if (options.exact)
-            attrs.push(`exact: true`);
-        }
+        if (isRegExp(options.description))
+          attrs.push(`description: ${this.regexToSourceString(options.description)}`);
+        else if (typeof options.description === 'string')
+          attrs.push(`description: ${this.quote(options.description)}`);
+        if (options.exact && (typeof options.name === 'string' || typeof options.description === 'string'))
+          attrs.push(`exact: true`);
         for (const { name, value } of options.attrs!)
           attrs.push(`${name}: ${typeof value === 'string' ? this.quote(value) : value}`);
         const attrString = attrs.length ? `, { ${attrs.join(', ')} }` : '';
@@ -403,6 +423,10 @@ export class PythonLocatorFactory implements LocatorFactory {
         return `frame_locator(${this.quote(body as string)})`;
       case 'frame':
         return `content_frame`;
+      case 'pierce-frames':
+        return `pierce_frames`;
+      case 'no-pierce-frames':
+        return `pierce_frames(pierce=False)`;
       case 'nth':
         return `nth(${body})`;
       case 'first':
@@ -413,13 +437,16 @@ export class PythonLocatorFactory implements LocatorFactory {
         return `filter(visible=${body === 'true' ? 'True' : 'False'})`;
       case 'role':
         const attrs: string[] = [];
-        if (isRegExp(options.name)) {
+        if (isRegExp(options.name))
           attrs.push(`name=${this.regexToString(options.name)}`);
-        } else if (typeof options.name === 'string') {
+        else if (typeof options.name === 'string')
           attrs.push(`name=${this.quote(options.name)}`);
-          if (options.exact)
-            attrs.push(`exact=True`);
-        }
+        if (isRegExp(options.description))
+          attrs.push(`description=${this.regexToString(options.description)}`);
+        else if (typeof options.description === 'string')
+          attrs.push(`description=${this.quote(options.description)}`);
+        if (options.exact && (typeof options.name === 'string' || typeof options.description === 'string'))
+          attrs.push(`exact=True`);
         for (const { name, value } of options.attrs!) {
           let valueString = typeof value === 'string' ? this.quote(value) : value;
           if (typeof value === 'boolean')
@@ -512,6 +539,10 @@ export class JavaLocatorFactory implements LocatorFactory {
         return `frameLocator(${this.quote(body as string)})`;
       case 'frame':
         return `contentFrame()`;
+      case 'pierce-frames':
+        return `pierceFrames()`;
+      case 'no-pierce-frames':
+        return `pierceFrames(new ${clazz}.PierceFramesOptions().setPierce(false))`;
       case 'nth':
         return `nth(${body})`;
       case 'first':
@@ -522,13 +553,16 @@ export class JavaLocatorFactory implements LocatorFactory {
         return `filter(new ${clazz}.FilterOptions().setVisible(${body === 'true' ? 'true' : 'false'}))`;
       case 'role':
         const attrs: string[] = [];
-        if (isRegExp(options.name)) {
+        if (isRegExp(options.name))
           attrs.push(`.setName(${this.regexToString(options.name)})`);
-        } else if (typeof options.name === 'string') {
+        else if (typeof options.name === 'string')
           attrs.push(`.setName(${this.quote(options.name)})`);
-          if (options.exact)
-            attrs.push(`.setExact(true)`);
-        }
+        if (isRegExp(options.description))
+          attrs.push(`.setDescription(${this.regexToString(options.description)})`);
+        else if (typeof options.description === 'string')
+          attrs.push(`.setDescription(${this.quote(options.description)})`);
+        if (options.exact && (typeof options.name === 'string' || typeof options.description === 'string'))
+          attrs.push(`.setExact(true)`);
         for (const { name, value } of options.attrs!)
           attrs.push(`.set${toTitleCase(name)}(${typeof value === 'string' ? this.quote(value) : value})`);
         const attrString = attrs.length ? `, new ${clazz}.GetByRoleOptions()${attrs.join('')}` : '';
@@ -611,6 +645,10 @@ export class CSharpLocatorFactory implements LocatorFactory {
         return `FrameLocator(${this.quote(body as string)})`;
       case 'frame':
         return `ContentFrame`;
+      case 'pierce-frames':
+        return `PierceFrames`;
+      case 'no-pierce-frames':
+        return `PierceFrames(new() { Pierce = false })`;
       case 'nth':
         return `Nth(${body})`;
       case 'first':
@@ -621,13 +659,16 @@ export class CSharpLocatorFactory implements LocatorFactory {
         return `Filter(new() { Visible = ${body === 'true' ? 'true' : 'false'} })`;
       case 'role':
         const attrs: string[] = [];
-        if (isRegExp(options.name)) {
+        if (isRegExp(options.name))
           attrs.push(`NameRegex = ${this.regexToString(options.name)}`);
-        } else if (typeof options.name === 'string') {
+        else if (typeof options.name === 'string')
           attrs.push(`Name = ${this.quote(options.name)}`);
-          if (options.exact)
-            attrs.push(`Exact = true`);
-        }
+        if (isRegExp(options.description))
+          attrs.push(`DescriptionRegex = ${this.regexToString(options.description)}`);
+        else if (typeof options.description === 'string')
+          attrs.push(`Description = ${this.quote(options.description)}`);
+        if (options.exact && (typeof options.name === 'string' || typeof options.description === 'string'))
+          attrs.push(`Exact = true`);
         for (const { name, value } of options.attrs!)
           attrs.push(`${toTitleCase(name)} = ${typeof value === 'string' ? this.quote(value) : value}`);
         const attrString = attrs.length ? `, new() { ${attrs.join(', ')} }` : '';
@@ -714,8 +755,13 @@ export class JsonlLocatorFactory implements LocatorFactory {
 
   chainLocators(locators: string[]): string {
     const objects = locators.map(l => JSON.parse(l));
-    for (let i = 0; i < objects.length - 1; ++i)
-      objects[i].next = objects[i + 1];
+    for (let i = 0; i < objects.length - 1; ++i) {
+      // A locator may already be a chain, e.g. `contentFrame()` produces one. Append to its tail.
+      let tail = objects[i];
+      while (tail.next)
+        tail = tail.next;
+      tail.next = objects[i + 1];
+    }
     return JSON.stringify(objects[0]);
   }
 }

@@ -91,19 +91,37 @@ export function parseSelector(selector: string): ParsedSelector {
   };
 }
 
-export function splitSelectorByFrame(selectorText: string): ParsedSelector[] {
+// Splits a selector into per-frame chunks separated by "enter-frame" boundaries in non-piercing mode.
+// In piercing mode, "enter-frame" tokens are preserved, so `chunks` holds a single chunk.
+export function splitSelectorByFrame(selectorText: string, pierceByDefault?: boolean): { pierce: boolean, chunks: ParsedSelector[] } {
   const selector = parseSelector(selectorText);
-  const result: ParsedSelector[] = [];
+  const chunks: ParsedSelector[] = [];
   let chunk: ParsedSelector = {
     parts: [],
   };
+  let pierce = !!pierceByDefault;
+  let pierceToken = false;
   let chunkStartIndex = 0;
   for (let i = 0; i < selector.parts.length; ++i) {
     const part = selector.parts[i];
+    if (part.name === 'internal:control' && (part.body === 'pierce-frames' || part.body === 'no-pierce-frames')) {
+      // Piercing applies to the whole selector, so the token only makes sense as the very first one.
+      if (i !== 0)
+        throw new InvalidSelectorError(`"${part.body}" is only allowed as the first selector token, while parsing selector ${selectorText}`);
+      pierce = part.body === 'pierce-frames';
+      pierceToken = true;
+      chunkStartIndex = i + 1;
+      continue;
+    }
     if (part.name === 'internal:control' && part.body === 'enter-frame') {
-      if (!chunk.parts.length)
+      const lastPart = chunk.parts[chunk.parts.length - 1];
+      if (!lastPart || (lastPart.name === 'internal:control' && lastPart.body === 'enter-frame'))
         throw new InvalidSelectorError('Selector cannot start with entering frame, select the iframe first');
-      result.push(chunk);
+      if (pierce) {
+        chunk.parts.push(part);
+        continue;
+      }
+      chunks.push(chunk);
       chunk = { parts: [] };
       chunkStartIndex = i + 1;
       continue;
@@ -112,12 +130,20 @@ export function splitSelectorByFrame(selectorText: string): ParsedSelector[] {
       chunk.capture = i - chunkStartIndex;
     chunk.parts.push(part);
   }
-  if (!chunk.parts.length)
+  if (!chunk.parts.length) {
+    if (pierceToken)
+      throw new InvalidSelectorError(`Selector cannot be empty when piercing frames, while parsing selector ${selectorText}`);
     throw new InvalidSelectorError(`Selector cannot end with entering frame, while parsing selector ${selectorText}`);
-  result.push(chunk);
-  if (typeof selector.capture === 'number' && typeof result[result.length - 1].capture !== 'number')
+  }
+  const lastPart = chunk.parts[chunk.parts.length - 1];
+  if (lastPart.name === 'internal:control' && lastPart.body === 'enter-frame')
+    throw new InvalidSelectorError(`Selector cannot end with entering frame, while parsing selector ${selectorText}`);
+  chunks.push(chunk);
+  if (typeof selector.capture === 'number' && typeof chunks[chunks.length - 1].capture !== 'number')
     throw new InvalidSelectorError(`Can not capture the selector before diving into the frame. Only use * after the last frame has been selected`);
-  return result;
+  if (typeof selector.capture === 'number' && pierce)
+    throw new InvalidSelectorError(`Can not *-capture inside a frame-piercing selector, while parsing selector ${selectorText}`);
+  return { pierce, chunks };
 }
 
 function selectorPartsEqual(list1: ParsedSelectorPart[], list2: ParsedSelectorPart[]) {
@@ -132,7 +158,7 @@ export function stringifySelector(selector: string | ParsedSelector, forceEngine
     if (!forceEngineName && i !== selector.capture) {
       if (p.name === 'css')
         includeEngine = false;
-      else if (p.name === 'xpath' && p.source.startsWith('//') || p.source.startsWith('..'))
+      else if (p.name === 'xpath' && (p.source.startsWith('//') || p.source.startsWith('..')))
         includeEngine = false;
     }
     const prefix = includeEngine ? p.name + '=' : '';
@@ -324,7 +350,7 @@ export function parseAttributeSelector(selector: string, allowUnquotedStrings: b
       syntaxError('parsing regular expression');
     let flags = '';
     // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Regular_Expressions
-    while (!EOL && next().match(/[dgimsuy]/))
+    while (!EOL && next().match(/[dgimsuvy]/))
       flags += eat1();
     try {
       return new RegExp(source, flags);
