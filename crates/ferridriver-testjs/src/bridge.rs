@@ -34,7 +34,6 @@ pub struct InfoBridge {
   /// runtime ones.
   static_annotations: Vec<(String, Option<String>)>,
   attachment_count: AtomicUsize,
-  soft_errors: Mutex<Vec<String>>,
   /// Counter behind Playwright's auto-generated snapshot names
   /// (`{title}-{n}`).
   snapshot_counter: AtomicUsize,
@@ -61,7 +60,6 @@ impl InfoBridge {
       annotations: Mutex::new(Vec::new()),
       static_annotations,
       attachment_count: AtomicUsize::new(0),
-      soft_errors: Mutex::new(Vec::new()),
       snapshot_counter: AtomicUsize::new(0),
     }
   }
@@ -185,19 +183,16 @@ impl TestHostBridge for InfoBridge {
     })
   }
 
-  fn soft_error(&self, message: String) -> BridgeFuture<()> {
-    Self::lock(&self.soft_errors).push(message.clone());
-    let info = Arc::clone(&self.test_info);
-    Box::pin(async move {
-      info
-        .add_soft_error(ferridriver_test::model::TestFailure {
-          message,
-          stack: None,
-          diff: None,
-          screenshot: None,
-        })
-        .await;
-    })
+  fn record_soft_error(&self, message: String, diff: Option<String>) {
+    // One store: the test's own collector, which decides the outcome and
+    // backs `testInfo.errors`. Recording is synchronous because a value
+    // matcher has no `await` to spend.
+    self.test_info.add_soft_error(ferridriver_test::model::TestFailure {
+      message,
+      stack: None,
+      diff,
+      screenshot: None,
+    });
   }
 
   fn set_skip(&self, reason: Option<String>) {
@@ -235,7 +230,7 @@ impl TestHostBridge for InfoBridge {
   }
 
   fn errors(&self) -> Vec<String> {
-    Self::lock(&self.soft_errors).clone()
+    self.test_info.soft_error_messages()
   }
 
   fn match_text_snapshot(&self, target: SnapshotTarget, name: Option<String>) -> BridgeFuture<Result<(), String>> {

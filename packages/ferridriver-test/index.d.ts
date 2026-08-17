@@ -371,14 +371,20 @@ export type ToUserMatchers<E> = {
     : never;
 };
 
-type MergedMatchers<List> = List extends [Expect<infer E>, ...infer Rest] ? E & MergedMatchers<Rest> : {};
+type MergedMatchers<List> = List extends [ExpectBase<infer E>, ...infer Rest] ? E & MergedMatchers<Rest> : {};
+
+/// Every registered matcher is published as an asymmetric one too, so it
+/// can stand in for a value inside `toEqual` / `toMatchObject`.
+export type ToUserAsymmetric<E> = {
+  [K in keyof E]: E[K] extends (this: any, received: any, ...args: infer A) => unknown ? (...args: A) => unknown : never;
+};
 
 /// Custom matchers reach `.`, `.not`, `.resolves` and `.rejects`, the
 /// same four places a built-in does.
 type UserChain<E> = ToUserMatchers<E> & { not: ToUserMatchers<E> };
 type SettledUser<E> = Promisified<ToUserMatchers<E>> & { not: Promisified<ToUserMatchers<E>> };
 
-export interface Expect<E = {}> {
+export interface ExpectBase<E = {}> {
   (locator: Locator, messageOrOptions?: ExpectMessage): LocatorAssertions & UserChain<E>;
   (page: Page, messageOrOptions?: ExpectMessage): PageAssertions & UserChain<E>;
   (response: APIResponse, messageOrOptions?: ExpectMessage): APIResponseAssertions & UserChain<E>;
@@ -415,6 +421,7 @@ export interface Expect<E = {}> {
   stringContaining(substring: string): unknown;
   stringMatching(pattern: string | RegExp): unknown;
   closeTo(value: number, numDigits?: number): unknown;
+  arrayOf(sample: unknown): unknown;
   not: {
     any(ctor: Function): unknown;
     anything(): unknown;
@@ -423,8 +430,13 @@ export interface Expect<E = {}> {
     stringContaining(substring: string): unknown;
     stringMatching(pattern: string | RegExp): unknown;
     closeTo(value: number, numDigits?: number): unknown;
-  };
+    arrayOf(sample: unknown): unknown;
+  } & ToUserAsymmetric<E>;
 }
+
+/// `expect` itself: the assertion factory plus every asymmetric matcher,
+/// including the ones `extend` registered.
+export type Expect<E = {}> = ExpectBase<E> & ToUserAsymmetric<E>;
 
 export const expect: Expect;
 

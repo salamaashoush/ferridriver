@@ -873,7 +873,7 @@ impl Worker {
       ignore_snapshots: self.config.ignore_snapshots,
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
-      soft_errors: Arc::new(Mutex::new(Vec::new())),
+      soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
       errors: Arc::new(Mutex::new(Vec::new())),
       snapshot_suffix: Arc::new(Mutex::new(String::new())),
       column: None,
@@ -1347,7 +1347,7 @@ impl Worker {
       ignore_snapshots: self.config.ignore_snapshots,
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
-      soft_errors: Arc::new(Mutex::new(Vec::new())),
+      soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
       errors: Arc::new(Mutex::new(Vec::new())),
       snapshot_suffix: Arc::new(Mutex::new(String::new())),
       column: None,
@@ -1496,7 +1496,11 @@ impl Worker {
         format!("beforeEach [{i}]")
       };
       let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
-      let result = run_caught(hook(test_pool.clone(), Arc::clone(&test_info))).await;
+      let result = ferridriver_expect::with_sink(
+        Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
+        run_caught(hook(test_pool.clone(), Arc::clone(&test_info))),
+      )
+      .await;
       let err_msg = result.as_ref().err().map(|e| e.message.clone());
       step_handle.end(err_msg).await;
       if let Err(e) = result {
@@ -1526,7 +1530,16 @@ impl Worker {
     let timeout_result = if let Some(err) = before_each_err {
       Ok(Err(err))
     } else {
-      ferridriver::pause::run_within(timeout_dur, run_caught((test.test_fn)(test_pool.clone()))).await
+      // Soft assertions raised anywhere in the body land on this test's
+      // own collector and fail it at the end, instead of stopping here.
+      ferridriver::pause::run_within(
+        timeout_dur,
+        ferridriver_expect::with_sink(
+          Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
+          run_caught((test.test_fn)(test_pool.clone())),
+        ),
+      )
+      .await
     };
 
     // Hold here, before `afterEach` and before the context closes, so
@@ -1552,7 +1565,11 @@ impl Worker {
         format!("afterEach [{i}]")
       };
       let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
-      let result = run_caught(hook(test_pool.clone(), Arc::clone(&test_info))).await;
+      let result = ferridriver_expect::with_sink(
+        Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
+        run_caught(hook(test_pool.clone(), Arc::clone(&test_info))),
+      )
+      .await;
       let err_msg = result.as_ref().err().map(|e| e.message.clone());
       step_handle.end(err_msg).await;
       if let Err(e) = result {
@@ -1810,6 +1827,29 @@ impl Worker {
       }
     }
 
+    // Soft assertions are part of WHAT HAPPENED, so they settle before
+    // `test.fail()` is consulted: a test that only failed softly did
+    // fail, and `test.fail()` must be able to expect that.
+    let soft_errors = test_info.drain_soft_errors();
+    let (raw_status, raw_error) = if !soft_errors.is_empty() && raw_status == TestStatus::Passed {
+      let msg = soft_errors
+        .iter()
+        .map(|e| format!("  - {}", e.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+      (
+        TestStatus::Failed,
+        Some(TestFailure {
+          message: format!("{} soft assertion(s) failed:\n{msg}", soft_errors.len()),
+          stack: None,
+          diff: None,
+          screenshot: None,
+        }),
+      )
+    } else {
+      (raw_status, raw_error)
+    };
+
     // `test.fail()` does not rewrite what happened: the attempt keeps the
     // status it ended with, and `expected_status` says which one counts as
     // success. Every consumer compares the two through
@@ -1827,28 +1867,6 @@ impl Worker {
         }),
       ),
       _ => (raw_status, raw_error),
-    };
-
-    // Collect soft assertion errors.
-    let soft_errors = test_info.drain_soft_errors().await;
-    let soft_errs = &soft_errors;
-    let (status, error) = if !soft_errs.is_empty() && status == TestStatus::Passed {
-      let msg = soft_errs
-        .iter()
-        .map(|e| format!("  - {}", e.message))
-        .collect::<Vec<_>>()
-        .join("\n");
-      (
-        TestStatus::Failed,
-        Some(TestFailure {
-          message: format!("{} soft assertion(s) failed:\n{msg}", soft_errs.len()),
-          stack: None,
-          diff: None,
-          screenshot: None,
-        }),
-      )
-    } else {
-      (status, error)
     };
 
     // Collect tracked test steps and attachments.

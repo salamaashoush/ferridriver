@@ -77,9 +77,8 @@ impl TestHostBridge for MockBridge {
     Box::pin(async {})
   }
 
-  fn soft_error(&self, message: String) -> BridgeFuture<()> {
+  fn record_soft_error(&self, message: String, _diff: Option<String>) {
     self.state(|s| s.soft_errors.push(message));
-    Box::pin(async {})
   }
 
   fn set_skip(&self, reason: Option<String>) {

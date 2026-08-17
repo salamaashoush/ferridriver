@@ -14,11 +14,12 @@ use crate::builder::Expect;
 use crate::poll::{ExpectContext, MatchError, poll_traced};
 use crate::value::StringOrRegex;
 
-fn page_ctx(method: &'static str, is_not: bool) -> ExpectContext {
+fn page_ctx(method: &'static str, is_not: bool, is_soft: bool) -> ExpectContext {
   ExpectContext {
     method,
     subject: "page".into(),
     is_not,
+    is_soft,
   }
 }
 
@@ -29,6 +30,7 @@ async fn poll_page<F, Fut>(
   timeout: Duration,
   method: &'static str,
   is_not: bool,
+  is_soft: bool,
   check: F,
 ) -> Result<(), AssertionFailure>
 where
@@ -39,7 +41,7 @@ where
     "isNot": is_not,
     "timeout": u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
   });
-  poll_traced(Some(page), params, timeout, page_ctx(method, is_not), check).await
+  poll_traced(Some(page), params, timeout, page_ctx(method, is_not, is_soft), check).await
 }
 
 impl<P: Borrow<Page>> Expect<'_, P> {
@@ -47,7 +49,7 @@ impl<P: Borrow<Page>> Expect<'_, P> {
     let expected = expected.into();
     let page: &Page = self.subject.borrow();
     let is_not = self.is_not;
-    poll_page(page, self.timeout, "toHaveTitle", is_not, || {
+    poll_page(page, self.timeout, "toHaveTitle", is_not, self.is_soft, || {
       let expected = expected.clone();
       async move {
         let actual = page
@@ -72,7 +74,7 @@ impl<P: Borrow<Page>> Expect<'_, P> {
     let expected = expected.to_string();
     let page: &Page = self.subject.borrow();
     let is_not = self.is_not;
-    poll_page(page, self.timeout, "toContainTitle", is_not, || {
+    poll_page(page, self.timeout, "toContainTitle", is_not, self.is_soft, || {
       let expected = expected.clone();
       async move {
         let actual = page
@@ -105,7 +107,7 @@ impl<P: Borrow<Page>> Expect<'_, P> {
     let expected = expected.into();
     let page: &Page = self.subject.borrow();
     let is_not = self.is_not;
-    poll_page(page, self.timeout, "toHaveURL", is_not, || {
+    poll_page(page, self.timeout, "toHaveURL", is_not, self.is_soft, || {
       let expected = expected.clone();
       async move {
         let actual = page.url();
@@ -127,7 +129,7 @@ impl<P: Borrow<Page>> Expect<'_, P> {
     let expected = expected.to_string();
     let page: &Page = self.subject.borrow();
     let is_not = self.is_not;
-    poll_page(page, self.timeout, "toContainURL", is_not, || {
+    poll_page(page, self.timeout, "toContainURL", is_not, self.is_soft, || {
       let expected = expected.clone();
       async move {
         let actual = page.url();

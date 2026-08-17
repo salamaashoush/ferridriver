@@ -43,11 +43,15 @@ pub mod extend;
 pub mod locator;
 pub mod page;
 pub mod poll;
+pub mod soft;
 pub mod subject;
 pub mod throw;
 pub mod value;
 
-pub use asymmetric::{ASYM_TAG_KEY, Asymmetric, TypeTag, deep_equal, match_object};
+pub use asymmetric::{
+  ASYM_TAG_KEY, Asymmetric, CustomAsymmetric, Evaluator, TypeTag, deep_equal, deep_equal_with, match_object,
+  match_object_with,
+};
 pub use builder::{
   Expect, ExpectPoll, HaveCssOptions, InViewportOptions, ToPassOptions, expect, expect_configured, expect_poll,
   to_pass, to_pass_with_options,
@@ -63,6 +67,7 @@ pub use poll::{
   DEFAULT_EXPECT_TIMEOUT, ExpectContext, MatchError, POLL_INTERVALS, default_expect_timeout, poll_traced, poll_until,
   set_default_expect_timeout,
 };
+pub use soft::{SoftSink, absorb, absorb_result, with_sink};
 pub use subject::{
   ExpectLive, JsType, LiveError, LiveValue, MatcherInputError, PromiseMismatch, PromiseMode, expect_live,
   promise_failure,
@@ -83,6 +88,9 @@ pub struct AssertionFailure {
   pub message: String,
   pub diff: Option<String>,
   pub location: Option<CallerLocation>,
+  /// Raised by a `.soft()` assertion: the current test records it and
+  /// carries on instead of stopping here. See [`crate::soft`].
+  pub soft: bool,
 }
 
 /// Source location captured at the matcher call site. `'static` strings
@@ -118,7 +126,22 @@ impl AssertionFailure {
       message: message.into(),
       diff,
       location: None,
+      soft: false,
     }
+  }
+
+  /// Mark this failure as belonging to a soft assertion.
+  #[must_use]
+  pub fn as_soft(mut self) -> Self {
+    self.soft = true;
+    self
+  }
+
+  /// Mark it soft only when the assertion was.
+  #[must_use]
+  pub fn with_soft(mut self, soft: bool) -> Self {
+    self.soft = soft;
+    self
   }
 
   #[must_use]

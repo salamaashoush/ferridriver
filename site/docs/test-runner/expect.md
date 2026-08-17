@@ -101,9 +101,13 @@ what that view cannot express.
 for structural equality.
 
 **Asymmetric:** `expect.any`, `expect.anything`,
-`expect.arrayContaining`, `expect.objectContaining`,
+`expect.arrayContaining`, `expect.arrayOf`, `expect.objectContaining`,
 `expect.stringContaining`, `expect.stringMatching`, `expect.closeTo`,
-plus the `expect.not.*` shorthand.
+plus the `expect.not.*` shorthand. Every matcher registered through
+`expect.extend` is published as an asymmetric one too, so
+`expect.toBeX()` can stand in for a value inside `toEqual` /
+`toMatchObject`; an async matcher cannot (the comparison is synchronous,
+as it is upstream).
 
 **Settled:** `.resolves` and `.rejects` settle the subject — a promise,
 or a function returning one — and then run the ordinary matcher against
@@ -131,6 +135,15 @@ one expect exposing every matcher of both. Custom matchers reach `.`,
 The same matchers work from Rust: `ferridriver_expect::matcher(f)` plus
 `expect_value(v).matches("toBeX", &m, &args)` runs a plain Rust function
 through the identical context, verdict and message path.
+
+**Soft:** `expect.soft(...)` (and `expect.configure({ soft: true })`)
+records a failure against the running test and carries on; the test
+fails at the end with every soft failure listed, and `testInfo.errors`
+holds them meanwhile. Value, web-first and custom matchers all obey it.
+Outside a test there is nothing to record into, so a soft failure is
+raised normally rather than vanishing — the same rule on both sides:
+Rust tests get it from `ferridriver_expect::soft`, which the runner
+scopes around each test body.
 
 Modifiers: `.not` (a getter returning a negated proxy), `.soft()` (or
 `expect.soft(...)`), `.withTimeout(ms)`, and `.withMessage(msg)`.

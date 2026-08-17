@@ -10,11 +10,12 @@ use ferridriver_expect::{Expect, ExpectContext, MatchError, poll_traced};
 
 use crate::model::TestFailure;
 
-fn page_ctx(method: &'static str, is_not: bool) -> ExpectContext {
+fn page_ctx(method: &'static str, is_not: bool, is_soft: bool) -> ExpectContext {
   ExpectContext {
     method,
     subject: "page".into(),
     is_not,
+    is_soft,
   }
 }
 
@@ -63,28 +64,33 @@ impl PageSnapshotMatchers for Expect<'_, Arc<Page>> {
     let is_not = self.is_not;
     let expected = expected.to_string();
 
-    poll_until_test(page, self.timeout, page_ctx("toMatchAriaSnapshot", is_not), || {
-      let expected = expected.clone();
-      async move {
-        // Page-scoped `to.match.aria` matches against `document.body`
-        // (`injectedScript.ts::expect`), through the same template
-        // matcher the locator form uses — a plain substring test on the
-        // rendered YAML accepted and rejected the wrong things.
-        let result = page
-          .locator("body")
-          .match_aria_snapshot(&expected)
-          .await
-          .map_err(|e| MatchError::new("(aria snapshot)", format!("error: {e}")))?;
-        if result.matches == is_not {
-          Err(MatchError::new(
-            format!("{}\n{expected}", if is_not { "not matching" } else { "matching" }),
-            result.received,
-          ))
-        } else {
-          Ok(())
+    poll_until_test(
+      page,
+      self.timeout,
+      page_ctx("toMatchAriaSnapshot", is_not, self.is_soft),
+      || {
+        let expected = expected.clone();
+        async move {
+          // Page-scoped `to.match.aria` matches against `document.body`
+          // (`injectedScript.ts::expect`), through the same template
+          // matcher the locator form uses — a plain substring test on the
+          // rendered YAML accepted and rejected the wrong things.
+          let result = page
+            .locator("body")
+            .match_aria_snapshot(&expected)
+            .await
+            .map_err(|e| MatchError::new("(aria snapshot)", format!("error: {e}")))?;
+          if result.matches == is_not {
+            Err(MatchError::new(
+              format!("{}\n{expected}", if is_not { "not matching" } else { "matching" }),
+              result.received,
+            ))
+          } else {
+            Ok(())
+          }
         }
-      }
-    })
+      },
+    )
     .await
   }
 }

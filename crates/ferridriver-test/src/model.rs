@@ -425,7 +425,7 @@ pub struct TestInfo {
   /// Collected test steps.
   pub steps: Arc<Mutex<Vec<TestStep>>>,
   /// Soft assertion errors (collected, not thrown).
-  pub soft_errors: Arc<Mutex<Vec<TestFailure>>>,
+  pub soft_errors: Arc<std::sync::Mutex<Vec<TestFailure>>>,
   /// Hard errors collected during test execution. The worker pushes
   /// the primary failure here after the test body returns; afterEach
   /// hooks observe the full list. Mirrors Playwright's
@@ -489,6 +489,21 @@ impl TestOutput {
   }
 }
 
+/// A soft assertion records into the test it was raised in.
+///
+/// The rule that a soft failure is recorded rather than raised lives in
+/// `ferridriver_expect::soft`; this is only where the failures land.
+impl ferridriver_expect::SoftSink for TestInfo {
+  fn record(&self, failure: &ferridriver_expect::AssertionFailure) {
+    self.add_soft_error(TestFailure {
+      message: failure.message.clone(),
+      stack: failure.location.map(|l| l.to_string()),
+      diff: failure.diff.clone(),
+      screenshot: None,
+    });
+  }
+}
+
 impl TestInfo {
   /// Create a minimal TestInfo for non-test-runner contexts (MCP, standalone).
   pub fn new_anonymous() -> Self {
@@ -512,7 +527,7 @@ impl TestInfo {
       ignore_snapshots: false,
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
-      soft_errors: Arc::new(Mutex::new(Vec::new())),
+      soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
       errors: Arc::new(Mutex::new(Vec::new())),
       snapshot_suffix: Arc::new(Mutex::new(String::new())),
       column: None,
@@ -573,21 +588,38 @@ impl TestInfo {
   }
 
   /// Record a soft assertion error (test continues, fails at end).
-  pub async fn add_soft_error(&self, error: TestFailure) {
-    let mut errors = self.soft_errors.lock().await;
-    errors.push(error);
+  ///
+  /// Synchronous on purpose: a soft failure is recorded from inside a
+  /// matcher, and the value matchers have no `await` to spend.
+  pub fn add_soft_error(&self, error: TestFailure) {
+    self.soft_errors.lock().unwrap_or_else(|e| e.into_inner()).push(error);
   }
 
   /// Check if any soft errors have been collected.
-  pub async fn has_soft_errors(&self) -> bool {
-    let errors = self.soft_errors.lock().await;
-    !errors.is_empty()
+  pub fn has_soft_errors(&self) -> bool {
+    !self.soft_errors.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
   }
 
   /// Drain all soft errors for final reporting.
-  pub async fn drain_soft_errors(&self) -> Vec<TestFailure> {
-    let mut errors = self.soft_errors.lock().await;
-    errors.drain(..).collect()
+  pub fn drain_soft_errors(&self) -> Vec<TestFailure> {
+    self
+      .soft_errors
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .drain(..)
+      .collect()
+  }
+
+  /// The failures a soft assertion has recorded so far, without
+  /// draining them — what `testInfo.errors` reads.
+  pub fn soft_error_messages(&self) -> Vec<String> {
+    self
+      .soft_errors
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .iter()
+      .map(|e| e.message.clone())
+      .collect()
   }
 
   /// Record a test step.

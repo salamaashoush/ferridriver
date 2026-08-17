@@ -130,6 +130,27 @@ describe('expect.extend', () => {
     expect(thrown(() => junk(1).toBeJunk())).toContain('Unexpected return from a matcher function');
   });
 
+  test('a custom matcher is also an asymmetric matcher', async () => {
+    const even = expect.extend({
+      toBeEven(received: number) {
+        return { pass: received % 2 === 0, message: () => `${received} is odd` };
+      },
+    });
+    even({ n: 4 }).toEqual({ n: even.toBeEven() });
+    even([2, 4]).toEqual([even.toBeEven(), even.toBeEven()]);
+    even({ n: 3 }).toEqual({ n: even.not.toBeEven() });
+    even({ a: { n: 8 } }).toMatchObject({ a: { n: even.toBeEven() } });
+    expect(thrown(() => even({ n: 3 }).toEqual({ n: even.toBeEven() }))).toContain('toEqual');
+  });
+
+  test('expect.arrayOf matches every item', async () => {
+    expect([1, 2, 3]).toEqual(expect.arrayOf(expect.any(Number)));
+    expect([]).toEqual(expect.arrayOf(expect.any(Number)));
+    expect([1, 'two']).toEqual(expect.not.arrayOf(expect.any(Number)));
+    expect({ items: [1, 2] }).toMatchObject({ items: expect.arrayOf(expect.any(Number)) });
+    expect(thrown(() => expect([1, 'two']).toEqual(expect.arrayOf(expect.any(Number))))).toContain('toEqual');
+  });
+
   test('soft is a getter that answers an expect', async () => {
     expect(typeof expect.soft).toBe('function');
     expect.soft(1).toBe(1);

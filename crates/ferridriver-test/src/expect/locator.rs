@@ -13,11 +13,12 @@ use ferridriver_expect::{Expect, ExpectContext, MatchError, poll_traced};
 use super::ScreenshotMatcherOptions;
 use crate::model::TestFailure;
 
-fn locator_ctx(locator: &Locator, method: &'static str, is_not: bool) -> ExpectContext {
+fn locator_ctx(locator: &Locator, method: &'static str, is_not: bool, is_soft: bool) -> ExpectContext {
   ExpectContext {
     method,
     subject: format!("locator('{}')", locator.selector()),
     is_not,
+    is_soft,
   }
 }
 
@@ -89,7 +90,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       ignore_snapshots: false,
       attachments: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
       steps: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-      soft_errors: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+      soft_errors: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
       errors: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
       snapshot_suffix: std::sync::Arc::new(tokio::sync::Mutex::new(String::new())),
       column: None,
@@ -125,7 +126,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
     poll_until_test(
       locator,
       self.timeout,
-      locator_ctx(locator, "toMatchAriaSnapshot", is_not),
+      locator_ctx(locator, "toMatchAriaSnapshot", is_not, self.is_soft),
       || {
         let expected_yaml = expected_yaml.to_string();
         async move {

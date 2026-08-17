@@ -470,6 +470,50 @@ async fn a_custom_matcher_reaches_the_settled_chain() {
   .await;
 }
 
+#[tokio::test]
+async fn a_custom_matcher_is_also_an_asymmetric_matcher() {
+  // Playwright publishes every registered matcher as an asymmetric one,
+  // so it can stand in for a value inside a structural comparison.
+  run_ok(
+    "const e = expect.extend({ toBeEven(received) { return { pass: received % 2 === 0, message: () => 'odd' }; } });
+     e({ n: 4 }).toEqual({ n: e.toBeEven() });
+     e([2, 4]).toEqual([e.toBeEven(), e.toBeEven()]);
+     e({ n: 3 }).toEqual({ n: e.not.toBeEven() });
+     e({ a: { n: 8 } }).toMatchObject({ a: { n: e.toBeEven() } });
+     return 'ok'",
+  )
+  .await;
+  let err = run_err(
+    "const e = expect.extend({ toBeEven(received) { return { pass: received % 2 === 0, message: () => 'odd' }; } });
+     e({ n: 3 }).toEqual({ n: e.toBeEven() });
+     return 'unreached'",
+  )
+  .await;
+  assert!(err.contains("toEqual"), "expected a toEqual failure, got: {err}");
+}
+
+#[tokio::test]
+async fn an_async_custom_matcher_cannot_be_asymmetric() {
+  let err = run_err(
+    "const e = expect.extend({ async toBeEven(received) { return { pass: true, message: () => '' }; } });
+     e({ n: 4 }).toEqual({ n: e.toBeEven() });
+     return 'unreached'",
+  )
+  .await;
+  // It fails the comparison rather than silently passing.
+  assert!(err.contains("toEqual"), "expected a toEqual failure, got: {err}");
+}
+
+#[tokio::test]
+async fn array_of_matches_every_item() {
+  run_ok("expect([1, 2, 3]).toEqual(expect.arrayOf(expect.any(Number))); return 'ok'").await;
+  run_ok("expect([]).toEqual(expect.arrayOf(expect.any(Number))); return 'ok'").await;
+  run_ok("expect([1, 'two']).toEqual(expect.not.arrayOf(expect.any(Number))); return 'ok'").await;
+  run_ok("expect({items: [1, 2]}).toMatchObject({items: expect.arrayOf(expect.any(Number))}); return 'ok'").await;
+  let err = run_err("expect([1, 'two']).toEqual(expect.arrayOf(expect.any(Number))); return 'unreached'").await;
+  assert!(err.contains("toEqual"), "expected a toEqual failure, got: {err}");
+}
+
 // ── .resolves / .rejects ─────────────────────────────────────────────
 
 #[tokio::test]

@@ -62,7 +62,10 @@ pub trait TestHostBridge: Send + Sync {
   /// `location` is the BUNDLED `line:col` — the glue remaps it.
   fn begin_step(&self, title: String, parent: Option<String>, location: Option<(u32, u32)>) -> BridgeFuture<String>;
   fn end_step(&self, step_id: String, error: Option<String>) -> BridgeFuture<()>;
-  fn soft_error(&self, message: String) -> BridgeFuture<()>;
+  /// Record a soft assertion failure. Synchronous: the value matchers
+  /// have no `await` to spend, and the rule that a soft failure is
+  /// recorded rather than thrown lives in `ferridriver_expect::soft`.
+  fn record_soft_error(&self, message: String, diff: Option<String>);
   fn set_skip(&self, reason: Option<String>);
   fn set_expected_failure(&self);
   fn set_slow(&self);
@@ -530,6 +533,14 @@ fn modifier_call<'js>(
 
 /// The running test's bridge, or the Playwright-parity hard error when
 /// no test is executing in this VM.
+/// The current test's bridge, or `None` outside a test — for callers
+/// that have a fallback rather than a requirement.
+pub(crate) fn optional_bridge(ctx: &Ctx<'_>) -> Option<Arc<dyn TestHostBridge>> {
+  with_test_registry(ctx, |r| r.current.as_ref().map(|c| Arc::clone(&c.bridge)))
+    .ok()
+    .flatten()
+}
+
 pub(crate) fn current_bridge(ctx: &Ctx<'_>, what: &str) -> rquickjs::Result<Arc<dyn TestHostBridge>> {
   with_test_registry(ctx, |r| r.current.as_ref().map(|c| Arc::clone(&c.bridge)))
     .map_err(|e| rq(&e))?

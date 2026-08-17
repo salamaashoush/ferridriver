@@ -139,7 +139,7 @@ pub fn finalize(cx: &MatcherContext, matcher: &str, result: &MatcherResult) -> R
     None => message,
   };
   let _ = matcher;
-  Err(AssertionFailure::new(message, body))
+  crate::soft::absorb(AssertionFailure::new(message, body).with_soft(cx.is_soft))
 }
 
 /// Fall back to the built-in failure shape when a custom matcher gives

@@ -189,7 +189,8 @@ impl ExpectValue {
       expected.into(),
       received.into(),
       rich_diff,
-    );
+    )
+    .with_soft(self.is_soft);
     if let Some(loc) = location {
       failure = failure.with_location(CallerLocation::from_std(loc));
     }
@@ -208,7 +209,7 @@ impl ExpectValue {
     if pass {
       Ok(())
     } else {
-      Err(self.fail(method, expected, received, None, Some(Location::caller())))
+      crate::soft::absorb(self.fail(method, expected, received, None, Some(Location::caller())))
     }
   }
 
@@ -225,8 +226,109 @@ impl ExpectValue {
     if pass {
       Ok(())
     } else {
-      Err(self.fail(method, expected, received, Some(diff), Some(Location::caller())))
+      crate::soft::absorb(self.fail(method, expected, received, Some(diff), Some(Location::caller())))
     }
+  }
+
+  /// The structural matchers, with a host that can run custom
+  /// asymmetric matchers (`expect.toBeX()` standing in for a value).
+  /// The plain forms delegate here with no evaluator.
+  #[track_caller]
+  pub fn to_equal_with(&self, expected: &Value, ev: crate::Evaluator<'_>) -> Result<(), AssertionFailure> {
+    let pass = crate::asymmetric::deep_equal_with(&self.actual, expected, ev);
+    let diff = if pass {
+      None
+    } else {
+      Some(json_diff(expected, &self.actual))
+    };
+    match diff {
+      Some(d) => self.check_with_diff(pass, "toEqual", json_short(expected), json_short(&self.actual), d),
+      None => self.check(pass, "toEqual", json_short(expected), json_short(&self.actual)),
+    }
+  }
+
+  #[track_caller]
+  pub fn to_strict_equal_with(&self, expected: &Value, ev: crate::Evaluator<'_>) -> Result<(), AssertionFailure> {
+    let pass = crate::asymmetric::deep_equal_with(&self.actual, expected, ev);
+    let diff = if pass {
+      None
+    } else {
+      Some(json_diff(expected, &self.actual))
+    };
+    match diff {
+      Some(d) => self.check_with_diff(pass, "toStrictEqual", json_short(expected), json_short(&self.actual), d),
+      None => self.check(pass, "toStrictEqual", json_short(expected), json_short(&self.actual)),
+    }
+  }
+
+  #[track_caller]
+  pub fn to_match_object_with(&self, subset: &Value, ev: crate::Evaluator<'_>) -> Result<(), AssertionFailure> {
+    let pass = crate::asymmetric::match_object_with(&self.actual, subset, ev);
+    if pass {
+      self.check(pass, "toMatchObject", json_short(subset), json_short(&self.actual))
+    } else {
+      let diff = json_diff(subset, &self.actual);
+      self.check_with_diff(
+        pass,
+        "toMatchObject",
+        json_short(subset),
+        json_short(&self.actual),
+        diff,
+      )
+    }
+  }
+
+  #[track_caller]
+  pub fn to_contain_equal_with(&self, expected: &Value, ev: crate::Evaluator<'_>) -> Result<(), AssertionFailure> {
+    let pass = match &self.actual {
+      Value::Array(arr) => arr.iter().any(|v| crate::asymmetric::deep_equal_with(v, expected, ev)),
+      _ => false,
+    };
+    if pass {
+      self.check(
+        pass,
+        "toContainEqual",
+        format!("containing equal {}", json_short(expected)),
+        json_short(&self.actual),
+      )
+    } else {
+      let diff = json_diff(expected, &self.actual);
+      self.check_with_diff(
+        pass,
+        "toContainEqual",
+        format!("containing equal {}", json_short(expected)),
+        json_short(&self.actual),
+        diff,
+      )
+    }
+  }
+
+  #[track_caller]
+  pub fn to_have_property_with(
+    &self,
+    path: &Value,
+    expected: Option<&Value>,
+    ev: crate::Evaluator<'_>,
+  ) -> Result<(), AssertionFailure> {
+    let loc = Location::caller();
+    let segments =
+      parse_property_path(path).map_err(|e| self.fail("toHaveProperty", e, json_short(path), None, Some(loc)))?;
+    let descended = descend(&self.actual, &segments);
+    let pass = match (descended, expected) {
+      (Some(_), None) => true,
+      (Some(val), Some(exp)) => crate::asymmetric::deep_equal_with(val, exp, ev),
+      (None, _) => false,
+    };
+    let desc = format!(
+      "property {} {}",
+      path_describe(&segments),
+      expected.map(|v| format!("= {}", json_short(v))).unwrap_or_default()
+    );
+    let received = match descend(&self.actual, &segments) {
+      Some(v) => format!("= {}", json_short(v)),
+      None => "(missing)".to_string(),
+    };
+    self.check(pass, "toHaveProperty", desc, received)
   }
 
   /// Run a custom matcher against this subject — the Rust-side of

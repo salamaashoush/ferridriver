@@ -59,6 +59,9 @@ pub struct ExpectContext {
   pub subject: String,
   /// Whether this is a negated assertion (`.not`).
   pub is_not: bool,
+  /// Whether the assertion was made soft — a failure is recorded and
+  /// the test carries on (see [`crate::soft`]).
+  pub is_soft: bool,
 }
 
 /// Poll a condition until it passes or timeout. Produces a
@@ -137,7 +140,7 @@ where
 
   let diff = format!("Expected: {}\nReceived: {}", err.expected, err.received);
 
-  Err(AssertionFailure::new(message, Some(diff)))
+  crate::soft::absorb(AssertionFailure::new(message, Some(diff)).with_soft(ctx.is_soft))
 }
 
 /// [`poll_until`] wrapped in a traced `expect.<method>` action span on

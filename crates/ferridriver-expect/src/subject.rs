@@ -285,7 +285,8 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
       expected.into(),
       received.into(),
       rich_diff,
-    );
+    )
+    .with_soft(self.is_soft);
     if let Some(loc) = location {
       failure = failure.with_location(CallerLocation::from_std(loc));
     }
@@ -314,15 +315,12 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
   ) -> Result<(), LiveError<V::Error>> {
     let pass = if self.is_not { !pass } else { pass };
     if pass {
-      Ok(())
-    } else {
-      Err(LiveError::Failed(self.fail(
-        method,
-        expected,
-        received,
-        diff,
-        Some(Location::caller()),
-      )))
+      return Ok(());
+    }
+    let failure = self.fail(method, expected, received, diff, Some(Location::caller()));
+    match crate::soft::absorb(failure) {
+      Ok(()) => Ok(()),
+      Err(failure) => Err(LiveError::Failed(failure)),
     }
   }
 

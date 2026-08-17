@@ -488,10 +488,36 @@ fn unsupported_snapshot_subject(matcher: &'static str) -> rquickjs::Error {
   )
 }
 
-/// A snapshot-matcher failure thrown as an `AssertionError`-shaped JS
-/// error (message produced runner-side, already fully formatted).
-fn snapshot_failure(ctx: &Ctx<'_>, _matcher: &str, message: String) -> rquickjs::Error {
-  crate::bindings::convert::throw_named(ctx, "AssertionError", message)
+/// A snapshot-matcher failure (message produced runner-side, already
+/// fully formatted), resolved by the same soft rule as every other
+/// assertion.
+fn snapshot_failure(ctx: &Ctx<'_>, is_soft: bool, message: String) -> rquickjs::Result<()> {
+  report(ctx, AssertionFailure::new(message, None).with_soft(is_soft))
+}
+
+/// A failed assertion, resolved the way its softness says: a soft
+/// failure is recorded against the running test and the caller carries
+/// on; anything else is thrown.
+///
+/// Outside a test there is nothing to record into, so a soft failure
+/// throws — the same rule `ferridriver_expect::soft` applies on the Rust
+/// side, where an absent sink means the failure surfaces.
+fn report(ctx: &Ctx<'_>, err: AssertionFailure) -> rquickjs::Result<()> {
+  if err.soft
+    && let Some(bridge) = crate::bindings::test::optional_bridge(ctx)
+  {
+    bridge.record_soft_error(assertion_text(&err), err.diff);
+    return Ok(());
+  }
+  Err(assertion_to_rq(ctx, err))
+}
+
+/// The same one-string rendering the thrown error carries.
+fn assertion_text(err: &AssertionFailure) -> String {
+  match err.diff.as_deref() {
+    Some(body) if !body.is_empty() => format!("{}\n\n{body}", err.message),
+    _ => err.message.clone(),
+  }
 }
 
 fn assertion_to_rq(ctx: &Ctx<'_>, err: AssertionFailure) -> rquickjs::Error {
@@ -665,31 +691,39 @@ impl ExpectJs {
     self
       .live_expect(&actual)
       .to_be(&expected)
-      .map_err(|e| live_to_rq(&ctx, e))
+      .or_else(|e| live_report(&ctx, e))
   }
 
   #[qjs(rename = "toEqual")]
   pub fn to_equal<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
     let exp: JsonValue = serde_from_js(&ctx, expected)?;
+    let ev = self.evaluator(&ctx);
     self
       .build_value_expect(&ctx)?
-      .to_equal(&exp)
-      .map_err(|e| assertion_to_rq(&ctx, e))
+      .to_equal_with(
+        &exp,
+        ev.as_ref().map(|e| e as &dyn ferridriver_expect::CustomAsymmetric),
+      )
+      .or_else(|e| report(&ctx, e))
   }
 
   #[qjs(rename = "toStrictEqual")]
   pub fn to_strict_equal<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
     let exp: JsonValue = serde_from_js(&ctx, expected)?;
+    let ev = self.evaluator(&ctx);
     self
       .build_value_expect(&ctx)?
-      .to_strict_equal(&exp)
-      .map_err(|e| assertion_to_rq(&ctx, e))
+      .to_strict_equal_with(
+        &exp,
+        ev.as_ref().map(|e| e as &dyn ferridriver_expect::CustomAsymmetric),
+      )
+      .or_else(|e| report(&ctx, e))
   }
 
   #[qjs(rename = "toBeNull")]
   pub fn to_be_null(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
-    self.live_expect(&actual).to_be_null().map_err(|e| live_to_rq(&ctx, e))
+    self.live_expect(&actual).to_be_null().or_else(|e| live_report(&ctx, e))
   }
 
   #[qjs(rename = "toBeUndefined")]
@@ -698,7 +732,7 @@ impl ExpectJs {
     self
       .live_expect(&actual)
       .to_be_undefined()
-      .map_err(|e| live_to_rq(&ctx, e))
+      .or_else(|e| live_report(&ctx, e))
   }
 
   #[qjs(rename = "toBeDefined")]
@@ -707,7 +741,7 @@ impl ExpectJs {
     self
       .live_expect(&actual)
       .to_be_defined()
-      .map_err(|e| live_to_rq(&ctx, e))
+      .or_else(|e| live_report(&ctx, e))
   }
 
   #[qjs(rename = "toBeTruthy")]
@@ -716,19 +750,22 @@ impl ExpectJs {
     self
       .live_expect(&actual)
       .to_be_truthy()
-      .map_err(|e| live_to_rq(&ctx, e))
+      .or_else(|e| live_report(&ctx, e))
   }
 
   #[qjs(rename = "toBeFalsy")]
   pub fn to_be_falsy(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
-    self.live_expect(&actual).to_be_falsy().map_err(|e| live_to_rq(&ctx, e))
+    self
+      .live_expect(&actual)
+      .to_be_falsy()
+      .or_else(|e| live_report(&ctx, e))
   }
 
   #[qjs(rename = "toBeNaN")]
   pub fn to_be_nan(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
-    self.live_expect(&actual).to_be_nan().map_err(|e| live_to_rq(&ctx, e))
+    self.live_expect(&actual).to_be_nan().or_else(|e| live_report(&ctx, e))
   }
 
   #[qjs(rename = "toBeCloseTo")]
@@ -736,7 +773,7 @@ impl ExpectJs {
     self
       .build_value_expect(&ctx)?
       .to_be_close_to(expected, digits.0)
-      .map_err(|e| assertion_to_rq(&ctx, e))
+      .or_else(|e| report(&ctx, e))
   }
 
   #[qjs(rename = "toBeGreaterThan")]
@@ -744,7 +781,7 @@ impl ExpectJs {
     self
       .build_value_expect(&ctx)?
       .to_be_greater_than(expected)
-      .map_err(|e| assertion_to_rq(&ctx, e))
+      .or_else(|e| report(&ctx, e))
   }
 
   #[qjs(rename = "toBeGreaterThanOrEqual")]
@@ -752,7 +789,7 @@ impl ExpectJs {
     self
       .build_value_expect(&ctx)?
       .to_be_greater_than_or_equal(expected)
-      .map_err(|e| assertion_to_rq(&ctx, e))
+      .or_else(|e| report(&ctx, e))
   }
 
   #[qjs(rename = "toBeLessThan")]
@@ -760,7 +797,7 @@ impl ExpectJs {
     self
       .build_value_expect(&ctx)?
       .to_be_less_than(expected)
-      .map_err(|e| assertion_to_rq(&ctx, e))
+      .or_else(|e| report(&ctx, e))
   }
 
   #[qjs(rename = "toBeLessThanOrEqual")]
@@ -768,7 +805,7 @@ impl ExpectJs {
     self
       .build_value_expect(&ctx)?
       .to_be_less_than_or_equal(expected)
-      .map_err(|e| assertion_to_rq(&ctx, e))
+      .or_else(|e| report(&ctx, e))
   }
 
   /// Playwright: substring for a string receiver, otherwise
@@ -781,15 +818,20 @@ impl ExpectJs {
     self
       .live_expect(&actual)
       .to_contain(&expected)
-      .map_err(|e| live_to_rq(&ctx, e))
+      .or_else(|e| live_report(&ctx, e))
   }
 
   #[qjs(rename = "toContainEqual")]
   pub fn to_contain_equal<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
+    let exp: JsonValue = serde_from_js(&ctx, expected)?;
+    let ev = self.evaluator(&ctx);
     self
       .build_value_expect(&ctx)?
-      .to_contain_equal(&serde_from_js(&ctx, expected)?)
-      .map_err(|e| assertion_to_rq(&ctx, e))
+      .to_contain_equal_with(
+        &exp,
+        ev.as_ref().map(|e| e as &dyn ferridriver_expect::CustomAsymmetric),
+      )
+      .or_else(|e| report(&ctx, e))
   }
 
   /// Playwright reads the receiver's own `.length`, so a function's
@@ -800,7 +842,7 @@ impl ExpectJs {
     self
       .live_expect(&actual)
       .to_have_length(expected)
-      .map_err(|e| live_to_rq(&ctx, e))
+      .or_else(|e| live_report(&ctx, e))
   }
 
   #[qjs(rename = "toHaveProperty")]
@@ -815,10 +857,15 @@ impl ExpectJs {
       Some(v) if !v.is_undefined() => Some(serde_from_js::<JsonValue>(&ctx, v)?),
       _ => None,
     };
+    let ev = self.evaluator(&ctx);
     self
       .build_value_expect(&ctx)?
-      .to_have_property(&path_v, exp.as_ref())
-      .map_err(|e| assertion_to_rq(&ctx, e))
+      .to_have_property_with(
+        &path_v,
+        exp.as_ref(),
+        ev.as_ref().map(|e| e as &dyn ferridriver_expect::CustomAsymmetric),
+      )
+      .or_else(|e| report(&ctx, e))
   }
 
   #[qjs(rename = "toMatch")]
@@ -827,16 +874,20 @@ impl ExpectJs {
     self
       .build_value_expect(&ctx)?
       .to_match(&pat)
-      .map_err(|e| assertion_to_rq(&ctx, e))
+      .or_else(|e| report(&ctx, e))
   }
 
   #[qjs(rename = "toMatchObject")]
   pub fn to_match_object<'js>(&self, ctx: Ctx<'js>, subset: Value<'js>) -> rquickjs::Result<()> {
     let sub: JsonValue = serde_from_js(&ctx, subset)?;
+    let ev = self.evaluator(&ctx);
     self
       .build_value_expect(&ctx)?
-      .to_match_object(&sub)
-      .map_err(|e| assertion_to_rq(&ctx, e))
+      .to_match_object_with(
+        &sub,
+        ev.as_ref().map(|e| e as &dyn ferridriver_expect::CustomAsymmetric),
+      )
+      .or_else(|e| report(&ctx, e))
   }
 
   /// Playwright: the real `instanceof` operator (jest
@@ -849,7 +900,7 @@ impl ExpectJs {
     self
       .live_expect(&actual)
       .to_be_instance_of(&ctor)
-      .map_err(|e| live_to_rq(&ctx, e))
+      .or_else(|e| live_report(&ctx, e))
   }
 
   #[qjs(rename = "toThrow")]
@@ -917,7 +968,7 @@ impl ExpectJs {
         } else {
           me.build_locator_expect(&ctx, "toBeVisible")?.to_be_hidden().await
         }
-        .map_err(|e| assertion_to_rq(&ctx, e))
+        .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -938,7 +989,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toBeHidden")?
           .to_be_hidden()
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -961,7 +1012,7 @@ impl ExpectJs {
         } else {
           me.build_locator_expect(&ctx, "toBeEnabled")?.to_be_disabled().await
         }
-        .map_err(|e| assertion_to_rq(&ctx, e))
+        .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -982,7 +1033,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toBeDisabled")?
           .to_be_disabled()
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1005,7 +1056,7 @@ impl ExpectJs {
         me.build_locator_expect(&ctx, "toBeChecked")?
           .to_be_checked()
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1030,7 +1081,7 @@ impl ExpectJs {
         } else {
           me.build_locator_expect(&ctx, "toBeEditable")?.to_be_readonly().await
         }
-        .map_err(|e| assertion_to_rq(&ctx, e))
+        .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1052,7 +1103,7 @@ impl ExpectJs {
         me.build_locator_expect(&ctx, "toBeAttached")?
           .to_be_attached()
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1073,7 +1124,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toBeEmpty")?
           .to_be_empty()
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1094,7 +1145,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toBeFocused")?
           .to_be_focused()
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1118,7 +1169,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toBeInViewport")?
           .to_be_in_viewport_with(opts)
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1143,7 +1194,7 @@ impl ExpectJs {
             .build_locator_expect(&ctx, "toHaveText")?
             .to_have_text_array_with(&list, text_match_options(o.as_ref()))
             .await
-            .map_err(|e| assertion_to_rq(&ctx, e));
+            .or_else(|e| report(&ctx, e));
         }
         let exp = parse_string_or_regex(&ctx, &expected)?;
         self
@@ -1151,7 +1202,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toHaveText")?
           .to_have_text_with(exp, text_match_options(o.as_ref()))
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1175,7 +1226,7 @@ impl ExpectJs {
             .build_locator_expect(&ctx, "toContainText")?
             .to_contain_text_array_with(&list, text_match_options(o.as_ref()))
             .await
-            .map_err(|e| assertion_to_rq(&ctx, e));
+            .or_else(|e| report(&ctx, e));
         }
         let exp = parse_string_or_regex(&ctx, &expected)?;
         self
@@ -1183,7 +1234,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toContainText")?
           .to_contain_text_with(exp, text_match_options(o.as_ref()))
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1206,7 +1257,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toHaveValue")?
           .to_have_value(exp)
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1241,7 +1292,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toHaveValues")?
           .to_have_values(&values)
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1263,7 +1314,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toHaveCount")?
           .to_have_count(expected as usize)
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1305,7 +1356,7 @@ impl ExpectJs {
           },
           None => e.to_have_attribute_exists(&name).await,
         }
-        .map_err(|e| assertion_to_rq(&ctx, e))
+        .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1337,7 +1388,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toHaveClass")?
           .to_have_class(exp)
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1359,7 +1410,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toContainClass")?
           .to_contain_class(&expected)
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1384,7 +1435,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toHaveCSS")?
           .to_have_css_with(&name, exp, ferridriver_expect::HaveCssOptions::default())
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1407,7 +1458,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toHaveId")?
           .to_have_id(exp)
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1429,7 +1480,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toHaveRole")?
           .to_have_role(StringOrRegex::String(expected))
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1454,7 +1505,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toHaveJSProperty")?
           .to_have_js_property(&name, exp)
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1480,7 +1531,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toHaveAccessibleName")?
           .to_have_accessible_name(exp)
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1506,7 +1557,7 @@ impl ExpectJs {
           .build_locator_expect(&ctx, "toHaveAccessibleDescription")?
           .to_have_accessible_description(exp)
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1531,7 +1582,7 @@ impl ExpectJs {
           .build_page_expect(&ctx, "toHaveTitle")?
           .to_have_title(exp)
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1555,7 +1606,7 @@ impl ExpectJs {
           .build_page_expect(&ctx, "toHaveURL")?
           .to_have_url_with(exp, ignore_case)
           .await
-          .map_err(|e| assertion_to_rq(&ctx, e))
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1630,7 +1681,7 @@ impl ExpectJs {
           },
         )
         .await
-        .map_err(|e| assertion_to_rq(&ctx, e))
+        .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1666,7 +1717,7 @@ impl ExpectJs {
         bridge
           .match_text_snapshot(target, name.0)
           .await
-          .map_err(|m| snapshot_failure(&ctx, "toMatchSnapshot", m))
+          .or_else(|m| snapshot_failure(&ctx, self.is_soft, m))
       })
       .await
   }
@@ -1704,7 +1755,7 @@ impl ExpectJs {
         bridge
           .match_screenshot(target, name, opts_json)
           .await
-          .map_err(|m| snapshot_failure(&ctx, "toHaveScreenshot", m))
+          .or_else(|m| snapshot_failure(&ctx, self.is_soft, m))
       })
       .await
   }
@@ -1728,7 +1779,7 @@ impl ExpectJs {
         bridge
           .match_aria_snapshot(target, expected, self.is_not, timeout_ms)
           .await
-          .map_err(|m| snapshot_failure(&ctx, "toMatchAriaSnapshot", m))
+          .or_else(|m| snapshot_failure(&ctx, self.is_soft, m))
       })
       .await
   }
@@ -1740,7 +1791,7 @@ impl ExpectJs {
     self
       .build_api_response_expect(&ctx, "toBeOK")?
       .to_be_ok()
-      .map_err(|e| assertion_to_rq(&ctx, e))
+      .or_else(|e| report(&ctx, e))
   }
 }
 
@@ -2065,11 +2116,11 @@ fn custom_message<'js>(value: Option<&Value<'js>>) -> rquickjs::Result<Option<St
 /// failure becomes an `AssertionError`, a misuse becomes a real
 /// `TypeError` (Playwright throws those and `.not` does not flip them),
 /// and a JS exception raised while reading the value propagates as-is.
-fn live_to_rq(ctx: &Ctx<'_>, err: LiveError<rquickjs::Error>) -> rquickjs::Error {
+fn live_report(ctx: &Ctx<'_>, err: LiveError<rquickjs::Error>) -> rquickjs::Result<()> {
   match err {
-    LiveError::Failed(f) => assertion_to_rq(ctx, f),
-    LiveError::BadInput(b) => crate::bindings::convert::throw_named(ctx, "TypeError", b.to_string()),
-    LiveError::Host(e) => e,
+    LiveError::Failed(f) => report(ctx, f),
+    LiveError::BadInput(b) => Err(crate::bindings::convert::throw_named(ctx, "TypeError", b.to_string())),
+    LiveError::Host(e) => Err(e),
   }
 }
 
@@ -2247,6 +2298,16 @@ fn create_expect<'js>(
       make_asymmetric(&ctx, "stringMatching", obj)
     },
   )?;
+  // Playwright: `expect.arrayOf(sample)` — an array whose EVERY item
+  // matches (`expectLibrary.ts:335`).
+  let array_of_fn = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, sample: Value<'js>| -> rquickjs::Result<Object<'js>> {
+      let obj = Object::new(ctx.clone())?;
+      obj.set("sample", sample)?;
+      make_asymmetric(&ctx, "arrayOf", obj)
+    },
+  )?;
   let close_to_fn = Function::new(
     ctx.clone(),
     |ctx: Ctx<'js>, value: f64, digits: Opt<u8>| -> rquickjs::Result<Object<'js>> {
@@ -2269,6 +2330,7 @@ fn create_expect<'js>(
   install_not_asym(ctx, &not_obj, "stringContaining")?;
   install_not_asym(ctx, &not_obj, "stringMatching")?;
   install_not_asym(ctx, &not_obj, "closeTo")?;
+  install_not_asym(ctx, &not_obj, "arrayOf")?;
 
   // Attach the helpers to expect()'s own properties.
   let expect_obj = expect_fn.as_object().ok_or_else(|| {
@@ -2282,7 +2344,14 @@ fn create_expect<'js>(
   expect_obj.set("stringContaining", string_containing_fn)?;
   expect_obj.set("stringMatching", string_matching_fn)?;
   expect_obj.set("closeTo", close_to_fn)?;
-  expect_obj.set("not", not_obj)?;
+  expect_obj.set("arrayOf", array_of_fn)?;
+  expect_obj.set("not", not_obj.clone())?;
+  // Playwright publishes every custom matcher as an asymmetric one too
+  // (`buildCustomAsymmetricMatcher`), so `expect.toBeX()` can stand in
+  // for a value inside `toEqual`.
+  for name in table_names(ctx, table)? {
+    install_custom_asym(ctx, expect_obj, &not_obj, &name)?;
+  }
   install_expect_meta(ctx, expect_obj, meta, table)?;
   Ok(expect_fn)
 }
@@ -2458,6 +2527,109 @@ pub fn merge_expects<'js>(ctx: &Ctx<'js>, expects: Vec<Value<'js>>) -> rquickjs:
 // `gc_obj_list` assertion when the session VM is dropped. Closures here
 // re-resolve what they need at call time instead (globals lookup /
 // `This`).
+
+/// `expect.<name>(...args)` and `expect.not.<name>(...args)` for a
+/// matcher registered through `expect.extend`. The tag carries the name
+/// and the arguments; the body runs later, through the evaluator the
+/// structural matchers install.
+fn install_custom_asym<'js>(
+  ctx: &Ctx<'js>,
+  expect_obj: &Object<'js>,
+  not_obj: &Object<'js>,
+  name: &str,
+) -> rquickjs::Result<()> {
+  let owned = name.to_string();
+  let positive = Function::new(
+    ctx.clone(),
+    move |ctx: Ctx<'js>, args: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<Object<'js>> {
+      custom_asym_tag(&ctx, &owned, args.0)
+    },
+  )?;
+  expect_obj.set(name, positive)?;
+  let owned = name.to_string();
+  let inverse = Function::new(
+    ctx.clone(),
+    move |ctx: Ctx<'js>, args: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<Object<'js>> {
+      let inner = custom_asym_tag(&ctx, &owned, args.0)?;
+      let wrapper = Object::new(ctx.clone())?;
+      wrapper.set("inner", inner)?;
+      make_asymmetric(&ctx, "not", wrapper)
+    },
+  )?;
+  not_obj.set(name, inverse)?;
+  Ok(())
+}
+
+fn custom_asym_tag<'js>(ctx: &Ctx<'js>, name: &str, args: Vec<Value<'js>>) -> rquickjs::Result<Object<'js>> {
+  let obj = Object::new(ctx.clone())?;
+  obj.set("name", name)?;
+  let arr = Array::new(ctx.clone())?;
+  for (i, arg) in args.into_iter().enumerate() {
+    arr.set(i, arg)?;
+  }
+  obj.set("args", arr)?;
+  make_asymmetric(ctx, "custom", obj)
+}
+
+/// Runs a custom matcher as an asymmetric one, mid-comparison. The
+/// values reaching it are the structural view (JSON), which is what the
+/// comparison itself is working with.
+struct TableEvaluator<'js> {
+  ctx: Ctx<'js>,
+  table: u32,
+  timeout: Duration,
+}
+
+impl ferridriver_expect::CustomAsymmetric for TableEvaluator<'_> {
+  fn matches(&self, name: &str, args: &[JsonValue], actual: &JsonValue) -> bool {
+    let run = || -> rquickjs::Result<bool> {
+      let body: Function<'_> = matcher_table(&self.ctx, self.table)?.get(name)?;
+      let cx = ferridriver_expect::MatcherContext {
+        is_not: false,
+        is_soft: false,
+        promise: None,
+        timeout: self.timeout,
+        custom_message: None,
+      };
+      let mut call_args = vec![json_to_js(&self.ctx, actual)?];
+      for arg in args {
+        call_args.push(json_to_js(&self.ctx, arg)?);
+      }
+      let outcome: Value<'_> = body.call((
+        rquickjs::function::This(matcher_context(&self.ctx, &cx)?),
+        rquickjs::function::Rest(call_args),
+      ))?;
+      if outcome.as_promise().is_some() {
+        // An asymmetric matcher is used mid-comparison, where there is
+        // nothing to await into — jest's `asymmetricMatch` is sync too.
+        return Err(crate::bindings::convert::throw_named(
+          &self.ctx,
+          "TypeError",
+          format!("expect.{name}() is asynchronous and cannot be used as an asymmetric matcher"),
+        ));
+      }
+      Ok(parse_matcher_result(&self.ctx, name, &outcome)?.pass)
+    };
+    run().unwrap_or_else(|_| {
+      // The comparison has no way to carry an error; the pending
+      // exception must still be cleared or it leaks into the next call.
+      let _ = self.ctx.catch();
+      false
+    })
+  }
+}
+
+impl<'js> ExpectJs {
+  /// This assertion's custom matchers, ready to answer as asymmetric
+  /// ones inside a structural comparison.
+  fn evaluator(&self, ctx: &Ctx<'js>) -> Option<TableEvaluator<'js>> {
+    (!self.matcher_names.is_empty()).then(|| TableEvaluator {
+      ctx: ctx.clone(),
+      table: self.matcher_table,
+      timeout: self.timeout,
+    })
+  }
+}
 
 fn install_not_asym<'js>(ctx: &Ctx<'js>, not_obj: &Object<'js>, name: &'static str) -> rquickjs::Result<()> {
   let wrapped = Function::new(
@@ -2715,12 +2887,12 @@ fn call_user_matcher<'js>(
     let fut: SettledFuture<'js> = Box::pin(async move {
       let settled: Value<'js> = promise.into_future().await?;
       let result = parse_matcher_result(&ctx_owned, &name, &settled)?;
-      ferridriver_expect::finalize(&cx, &name, &result).map_err(|e| assertion_to_rq(&ctx_owned, e))
+      ferridriver_expect::finalize(&cx, &name, &result).or_else(|e| report(&ctx_owned, e))
     });
     return rquickjs::promise::Promised::from(fut).into_js(ctx);
   }
   let result = parse_matcher_result(ctx, name, &outcome)?;
-  ferridriver_expect::finalize(&cx, name, &result).map_err(|e| assertion_to_rq(ctx, e))?;
+  ferridriver_expect::finalize(&cx, name, &result).or_else(|e| report(ctx, e))?;
   Ok(Value::new_undefined(ctx.clone()))
 }
 

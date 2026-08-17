@@ -18,9 +18,32 @@ pub enum Asymmetric {
   ObjectContaining(Map<String, Value>),
   StringContaining(String),
   StringMatching(StringOrRegex),
-  CloseTo { value: f64, digits: u8 },
+  CloseTo {
+    value: f64,
+    digits: u8,
+  },
+  /// `expect.arrayOf(sample)` — an array whose EVERY item matches.
+  ArrayOf(Box<Value>),
+  /// A matcher registered through `expect.extend`, used as an expected
+  /// value. Core cannot run it: the body belongs to the host, which
+  /// installs an evaluator for the duration of the comparison.
+  Custom {
+    name: String,
+    args: Vec<Value>,
+  },
   Not(Box<Asymmetric>),
 }
+
+/// Runs a host-registered matcher during a structural comparison.
+pub trait CustomAsymmetric {
+  /// `expect.<name>(...args)` as an expected value: does `actual` match?
+  fn matches(&self, name: &str, args: &[Value], actual: &Value) -> bool;
+}
+
+/// The evaluator a comparison carries, if the caller has one. Passed
+/// explicitly rather than kept ambient: it borrows the host's context,
+/// and a comparison must never outlive it.
+pub type Evaluator<'a> = Option<&'a dyn CustomAsymmetric>;
 
 #[derive(Debug, Clone)]
 pub enum TypeTag {
@@ -117,6 +140,11 @@ impl Asymmetric {
           digits: digits as u8,
         })
       },
+      "arrayOf" => Some(Self::ArrayOf(Box::new(obj.get("sample")?.clone()))),
+      "custom" => Some(Self::Custom {
+        name: obj.get("name")?.as_str()?.to_string(),
+        args: obj.get("args").and_then(Value::as_array).cloned().unwrap_or_default(),
+      }),
       "not" => {
         let inner = obj.get("inner")?;
         let inner = Self::from_value(inner)?;
@@ -126,7 +154,13 @@ impl Asymmetric {
     }
   }
 
+  /// Match without a host: a custom matcher cannot run, so it never
+  /// matches (the host that registered it is not the one comparing).
   pub fn matches(&self, actual: &Value) -> bool {
+    self.matches_with(actual, None)
+  }
+
+  pub fn matches_with(&self, actual: &Value, ev: Evaluator<'_>) -> bool {
     match self {
       Self::Anything => !actual.is_null(),
       Self::Any(tag) => tag.matches_value(actual),
@@ -134,19 +168,23 @@ impl Asymmetric {
         let Some(arr) = actual.as_array() else { return false };
         items
           .iter()
-          .all(|expected| arr.iter().any(|act| deep_equal(act, expected)))
+          .all(|expected| arr.iter().any(|act| deep_equal_with(act, expected, ev)))
       },
       Self::ObjectContaining(subset) => {
         let Some(obj) = actual.as_object() else { return false };
         subset.iter().all(|(k, expected)| match obj.get(k) {
-          Some(act) => deep_equal(act, expected),
+          Some(act) => deep_equal_with(act, expected, ev),
           None => false,
         })
       },
       Self::StringContaining(needle) => actual.as_str().is_some_and(|s| s.contains(needle.as_str())),
       Self::StringMatching(pat) => actual.as_str().is_some_and(|s| pat.matches(s)),
       Self::CloseTo { value, digits } => actual.as_f64().is_some_and(|a| close_enough(a, *value, *digits)),
-      Self::Not(inner) => !inner.matches(actual),
+      Self::ArrayOf(sample) => actual
+        .as_array()
+        .is_some_and(|arr| arr.iter().all(|item| deep_equal_with(item, sample, ev))),
+      Self::Custom { name, args } => ev.is_some_and(|e| e.matches(name, args, actual)),
+      Self::Not(inner) => !inner.matches_with(actual, ev),
     }
   }
 
@@ -159,6 +197,8 @@ impl Asymmetric {
       Self::StringContaining(s) => format!("StringContaining({s:?})"),
       Self::StringMatching(p) => format!("StringMatching({})", p.description()),
       Self::CloseTo { value, digits } => format!("CloseTo({value}, {digits})"),
+      Self::ArrayOf(sample) => format!("ArrayOf({})", json_short(sample)),
+      Self::Custom { name, args } => format!("{name}({})", json_short(&Value::Array(args.clone()))),
       Self::Not(inner) => format!("Not({})", inner.description()),
     }
   }
@@ -210,8 +250,13 @@ pub fn json_short(v: &Value) -> String {
 /// Deep equality treating any [`Asymmetric`] embedded in `expected` as
 /// a matcher rather than a literal.
 pub fn deep_equal(actual: &Value, expected: &Value) -> bool {
+  deep_equal_with(actual, expected, None)
+}
+
+/// [`deep_equal`] with a host that can run custom asymmetric matchers.
+pub fn deep_equal_with(actual: &Value, expected: &Value, ev: Evaluator<'_>) -> bool {
   if let Some(asym) = Asymmetric::from_value(expected) {
-    return asym.matches(actual);
+    return asym.matches_with(actual, ev);
   }
   match (actual, expected) {
     (Value::Null, Value::Null) => true,
@@ -221,12 +266,14 @@ pub fn deep_equal(actual: &Value, expected: &Value) -> bool {
       _ => false,
     },
     (Value::String(a), Value::String(b)) => a == b,
-    (Value::Array(a), Value::Array(b)) => a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| deep_equal(x, y)),
+    (Value::Array(a), Value::Array(b)) => {
+      a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| deep_equal_with(x, y, ev))
+    },
     (Value::Object(a), Value::Object(b)) => {
       a.len() == b.len()
         && a
           .iter()
-          .all(|(k, v)| b.get(k).is_some_and(|other| deep_equal(v, other)))
+          .all(|(k, v)| b.get(k).is_some_and(|other| deep_equal_with(v, other, ev)))
     },
     _ => false,
   }
@@ -234,16 +281,23 @@ pub fn deep_equal(actual: &Value, expected: &Value) -> bool {
 
 /// Subset equality (Jest's `toMatchObject`).
 pub fn match_object(actual: &Value, subset: &Value) -> bool {
+  match_object_with(actual, subset, None)
+}
+
+/// [`match_object`] with a host that can run custom asymmetric matchers.
+pub fn match_object_with(actual: &Value, subset: &Value, ev: Evaluator<'_>) -> bool {
   if let Some(asym) = Asymmetric::from_value(subset) {
-    return asym.matches(actual);
+    return asym.matches_with(actual, ev);
   }
   match (actual, subset) {
     (Value::Object(a), Value::Object(b)) => b.iter().all(|(k, expected)| match a.get(k) {
-      Some(act) => match_object(act, expected),
+      Some(act) => match_object_with(act, expected, ev),
       None => false,
     }),
-    (Value::Array(a), Value::Array(b)) => b.len() == a.len() && a.iter().zip(b.iter()).all(|(x, y)| match_object(x, y)),
-    _ => deep_equal(actual, subset),
+    (Value::Array(a), Value::Array(b)) => {
+      b.len() == a.len() && a.iter().zip(b.iter()).all(|(x, y)| match_object_with(x, y, ev))
+    },
+    _ => deep_equal_with(actual, subset, ev),
   }
 }
 
@@ -290,6 +344,40 @@ mod tests {
     let exp = json!([{ASYM_TAG_KEY: "objectContaining", "subset": {"id": 1}}]);
     assert!(deep_equal(&json!([{"id": 1, "name": "n"}]), &exp));
     assert!(!deep_equal(&json!([{"id": 2}]), &exp));
+  }
+
+  #[test]
+  fn asymmetric_array_of() {
+    let exp = json!({ASYM_TAG_KEY: "arrayOf", "sample": {ASYM_TAG_KEY: "any", "name": "Number"}});
+    let asym = Asymmetric::from_value(&exp).unwrap();
+    assert!(asym.matches(&json!([1, 2, 3])));
+    assert!(!asym.matches(&json!([1, "two"])));
+    assert!(!asym.matches(&json!("not an array")));
+    // An empty array vacuously satisfies it, as upstream.
+    assert!(asym.matches(&json!([])));
+  }
+
+  #[test]
+  fn a_custom_asymmetric_needs_its_host() {
+    struct EvenOnly;
+    impl CustomAsymmetric for EvenOnly {
+      fn matches(&self, name: &str, args: &[Value], actual: &Value) -> bool {
+        assert_eq!(name, "toBeEven");
+        assert!(args.is_empty());
+        actual.as_i64().is_some_and(|n| n % 2 == 0)
+      }
+    }
+    let exp = json!({ASYM_TAG_KEY: "custom", "name": "toBeEven", "args": []});
+    // With no evaluator the matcher cannot run — and must not panic.
+    assert!(!deep_equal(&json!(2), &exp));
+    let ev = EvenOnly;
+    let ev: Evaluator<'_> = Some(&ev);
+    assert!(deep_equal_with(&json!(2), &exp, ev));
+    assert!(!deep_equal_with(&json!(3), &exp, ev));
+    // And it composes inside a structure, and under `not`.
+    assert!(deep_equal_with(&json!({"n": 2}), &json!({"n": exp.clone()}), ev));
+    let inverted = json!({ASYM_TAG_KEY: "not", "inner": exp.clone()});
+    assert!(deep_equal_with(&json!(3), &inverted, ev));
   }
 
   #[test]

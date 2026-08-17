@@ -617,8 +617,8 @@ async fn test_soft_assertions_collected() {
       Box::pin(async move {
         let info: Arc<TestInfo> = pool.get("test_info").await.map_err(fail)?;
         // Add soft errors but don't return Err — test body "passes".
-        info.add_soft_error(fail("soft error 1")).await;
-        info.add_soft_error(fail("soft error 2")).await;
+        info.add_soft_error(fail("soft error 1"));
+        info.add_soft_error(fail("soft error 2"));
         Ok(()) // Test body returns Ok, but soft errors should make it fail.
       })
     }),
@@ -676,7 +676,7 @@ fn test_snapshot_create_and_match() {
     ignore_snapshots: false,
     attachments: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     steps: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-    soft_errors: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
     errors: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     snapshot_suffix: Arc::new(tokio::sync::Mutex::new(String::new())),
     column: None,

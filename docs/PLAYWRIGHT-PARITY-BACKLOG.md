@@ -46,27 +46,6 @@ still compare a `serde_json` snapshot taken at matcher time, so jest's
 Closing those means porting jest's `equals` over `LiveValue` rather than
 over `serde_json::Value`.
 
-### `expect.soft` still throws instead of recording
-A soft assertion is built (`expect.soft(x)`, `expect.configure({soft:true})`)
-and its `is_soft` flag reaches core, but a failure is thrown like a hard
-one — nothing calls `TestHostBridge::soft_error`, so `testInfo.errors`
-stays empty and the test fails at the first soft failure instead of
-collecting them. The blocker is shape, not intent: `soft_error` returns a
-`BridgeFuture` while the synchronous value matchers cannot await, and the
-bridge keeps soft errors in two places (a sync `Vec` behind
-`testInfo.errors` and an async `TestInfo` half that decides the outcome).
-Closing it means giving the bridge one synchronous recorder that the
-testjs host drains into `TestInfo` at a known point.
-
-### Custom asymmetric matchers
-`expect.extend` gives a matcher on the assertion (`expect(x).toBeX()`) but
-NOT the asymmetric form Playwright also publishes (`expect.toBeX()` inside
-`toEqual`, and `expect.not.toBeX()`). ferridriver's asymmetric matchers
-are JSON tags walked by `ferridriver-expect::asymmetric` in Rust, which
-has no way to call a JS function mid-walk. `expect.arrayOf` /
-`expect.not.arrayOf` are absent for the same reason they are cheap to add
-— they are pure tags, unlike a user matcher.
-
 ### `route.fulfill` / `unroute` residuals
 `fulfill` takes `status`, `headers`, `contentType`, `body` (string or any
 byte source), `json`, `path` (read through the session sandbox) and
