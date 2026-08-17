@@ -35,6 +35,28 @@ pub use ferridriver_expect::{
 pub use locator::LocatorSnapshotMatchers;
 pub use page::PageSnapshotMatchers;
 
+/// The `expect` block in force, or Playwright's defaults outside a test.
+/// The scope itself is [`ferridriver_expect::with_expect_config`], so
+/// the timeout the poll loop reads and the screenshot budget a matcher
+/// reads cannot come from different places.
+#[must_use]
+pub fn current_expect_config() -> std::sync::Arc<crate::config::ExpectConfig> {
+  ferridriver_expect::current_expect_config().unwrap_or_default()
+}
+
+/// Playwright's `expect.toMatchAriaSnapshot.children`: prepend the
+/// configured `/children` mode unless the template already declares one
+/// (`matchers/toMatchAriaSnapshot.ts:90-92`).
+#[must_use]
+pub fn aria_template_with_children(expected_yaml: &str, children: Option<&str>) -> String {
+  match children {
+    Some(mode) if !expected_yaml.lines().any(|l| l.starts_with("- /children:")) => {
+      format!("- /children: {mode}\n{expected_yaml}")
+    },
+    _ => expected_yaml.to_string(),
+  }
+}
+
 /// Options for `expect(locator|page).toHaveScreenshot()`.
 ///
 /// Mirrors Playwright's `LocatorAssertions.toHaveScreenshot` /
@@ -50,10 +72,55 @@ pub struct ScreenshotMatcherOptions {
   pub animations: Option<String>,
   pub caret: Option<String>,
   pub scale: Option<String>,
-  pub style_path: Option<std::path::PathBuf>,
+  /// Playwright spells it `string | string[]`; empty means unset.
+  pub style_path: Vec<std::path::PathBuf>,
   pub clip: Option<ScreenshotClip>,
   pub mask: Vec<String>,
   pub ignore: bool,
+  /// `expect.toHaveScreenshot.timeout`, or the per-call `timeout`, or
+  /// neither — in which case the assertion's own timeout applies.
+  pub timeout: Option<std::time::Duration>,
+}
+
+impl ScreenshotMatcherOptions {
+  /// Fill in what the CALL did not set from the `expect.toHaveScreenshot`
+  /// block — Playwright's `{ ...configOptions, ...callOptions }`
+  /// (`matchers/toMatchSnapshot.ts:121-127`).
+  ///
+  /// `clip`, `mask`, `maskColor` (and `fullPage` / `omitBackground` /
+  /// `signal`, which ferridriver does not take yet) are per-call only:
+  /// upstream strips them from the config bag first
+  /// (`NonConfigProperties`, `:62`).
+  #[must_use]
+  pub fn with_config_defaults(mut self, cfg: &crate::config::ToHaveScreenshotConfig) -> Self {
+    if self.threshold.is_none() {
+      self.threshold = cfg.threshold;
+    }
+    if self.max_diff_pixels.is_none() {
+      self.max_diff_pixels = cfg.max_diff_pixels.map(u64::from);
+    }
+    if self.max_diff_pixel_ratio.is_none() {
+      self.max_diff_pixel_ratio = cfg.max_diff_pixel_ratio;
+    }
+    if self.animations.is_none() {
+      self.animations.clone_from(&cfg.animations);
+    }
+    if self.caret.is_none() {
+      self.caret.clone_from(&cfg.caret);
+    }
+    if self.scale.is_none() {
+      self.scale.clone_from(&cfg.scale);
+    }
+    if self.style_path.is_empty()
+      && let Some(style) = &cfg.style_path
+    {
+      self.style_path = style.to_vec().into_iter().map(std::path::PathBuf::from).collect();
+    }
+    if self.timeout.is_none() {
+      self.timeout = cfg.timeout.map(std::time::Duration::from_millis);
+    }
+    self
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

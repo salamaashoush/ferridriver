@@ -271,15 +271,19 @@ pub fn resolve_source(cwd: &Path, src: &str) -> PathBuf {
   if p.is_absolute() {
     return p.to_path_buf();
   }
+  // Normalized, because the joined form keeps every `../` verbatim: a
+  // spec outside the working directory would then be reported as
+  // `<cwd>/../../../tmp/specs/a.ts`, which names the right file but is
+  // not under `cwd` and is not under `testDir` either.
   let mut rest = src;
   loop {
-    let candidate = cwd.join(rest);
+    let candidate = ferridriver_config::layer::normalize_path(&cwd.join(rest));
     if candidate.exists() {
       return candidate;
     }
     match rest.strip_prefix("../") {
       Some(stripped) => rest = stripped,
-      None => return cwd.join(src),
+      None => return ferridriver_config::layer::normalize_path(&cwd.join(src)),
     }
   }
 }

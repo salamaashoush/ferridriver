@@ -445,6 +445,10 @@ pub struct TestInfo {
   /// Snapshot of the active `TestConfig`. Cloned at test-info
   /// construction time so the `testInfo.config` accessor is cheap.
   pub config_snapshot: Option<Arc<crate::config::TestConfig>>,
+  /// The `expect` block this test runs under, already resolved against
+  /// its project (`TestConfig::resolved_expect`). Matchers start from
+  /// these and layer their per-call options on top.
+  pub expect: Arc<crate::config::ExpectConfig>,
   /// Test timeout.
   pub timeout: Duration,
   /// Tags from annotations.
@@ -536,6 +540,7 @@ impl TestInfo {
       column: None,
       project: None,
       config_snapshot: None,
+      expect: Arc::new(crate::config::ExpectConfig::default()),
       timeout: Duration::from_secs(30),
       tags: Vec::new(),
       start_time: Instant::now(),

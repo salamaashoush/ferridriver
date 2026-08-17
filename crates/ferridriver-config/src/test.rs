@@ -107,6 +107,105 @@ impl Default for VideoConfig {
   }
 }
 
+// ── Expect config ───────────────────────────────────────────────────────────
+
+/// Playwright's default `expect()` timeout when nothing sets one.
+pub const DEFAULT_EXPECT_TIMEOUT_MS: u64 = 5_000;
+
+/// The `expect` block, on both `TestConfig` and `ProjectConfig`
+/// (`playwright/types/test.d.ts:184` and `:1131`).
+///
+/// A project's block REPLACES the config's whole object rather than
+/// merging into it — `takeFirst(projectConfig.expect, config.expect,
+/// {})` (`playwright/src/common/config.ts:201`) — so a project that
+/// sets only `timeout` starts from Playwright's defaults for
+/// everything else, not from the config's screenshot thresholds. See
+/// [`TestConfig::resolved_expect`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ExpectConfig {
+  /// Default timeout for auto-retrying matchers, in ms.
+  pub timeout: Option<u64>,
+  pub to_have_screenshot: ToHaveScreenshotConfig,
+  pub to_match_snapshot: ToMatchSnapshotConfig,
+  pub to_match_aria_snapshot: ToMatchAriaSnapshotConfig,
+  pub to_pass: ToPassConfig,
+}
+
+impl ExpectConfig {
+  /// The timeout matchers start from, defaulted the way Playwright does.
+  #[must_use]
+  pub fn timeout_ms(&self) -> u64 {
+    self.timeout.unwrap_or(DEFAULT_EXPECT_TIMEOUT_MS)
+  }
+}
+
+/// `expect.toHaveScreenshot` defaults. Every key is Playwright's; the
+/// per-call option bag layers on top of whatever is set here.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ToHaveScreenshotConfig {
+  pub threshold: Option<f64>,
+  pub max_diff_pixels: Option<u32>,
+  pub max_diff_pixel_ratio: Option<f64>,
+  pub animations: Option<String>,
+  pub caret: Option<String>,
+  pub scale: Option<String>,
+  /// Stylesheet(s) applied before the screenshot. Relative entries are
+  /// anchored to the directory of the config file that declared them
+  /// (Playwright resolves against `configDir`).
+  pub style_path: Option<StringOrList>,
+  /// Consumed by the snapshot path resolver.
+  pub path_template: Option<String>,
+  /// Overrides `expect.timeout` for this matcher only.
+  pub timeout: Option<u64>,
+}
+
+/// `expect.toMatchSnapshot` defaults (`types/test.d.ts:279`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ToMatchSnapshotConfig {
+  pub threshold: Option<f64>,
+  pub max_diff_pixels: Option<u32>,
+  pub max_diff_pixel_ratio: Option<f64>,
+}
+
+/// `expect.toMatchAriaSnapshot` defaults (`types/test.d.ts:258`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ToMatchAriaSnapshotConfig {
+  pub path_template: Option<String>,
+  /// `contain` | `equal` | `deep-equal` — the `/children` property
+  /// every template gets unless it declares its own.
+  pub children: Option<String>,
+}
+
+/// `expect.toPass` defaults (`types/test.d.ts:302`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ToPassConfig {
+  pub timeout: Option<u64>,
+  pub intervals: Option<Vec<u64>>,
+}
+
+/// A config value Playwright spells `string | string[]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StringOrList {
+  One(String),
+  Many(Vec<String>),
+}
+
+impl StringOrList {
+  #[must_use]
+  pub fn to_vec(&self) -> Vec<String> {
+    match self {
+      Self::One(s) => vec![s.clone()],
+      Self::Many(v) => v.clone(),
+    }
+  }
+}
+
 // ── Test config ─────────────────────────────────────────────────────────────
 
 /// Test runner configuration.
@@ -120,7 +219,12 @@ pub struct TestConfig {
   pub test_dir: Option<String>,
   pub test_ignore: Vec<String>,
   pub timeout: u64,
+  /// ferridriver's flat spelling of `expect.timeout`, kept because it
+  /// shipped first. `[test.expect] timeout` wins where both are set;
+  /// [`TestConfig::resolved_expect`] folds this one in.
   pub expect_timeout: u64,
+  #[serde(default)]
+  pub expect: ExpectConfig,
   pub workers: u32,
   pub retries: u32,
   pub reporter: Vec<ReporterConfig>,
@@ -635,6 +739,10 @@ pub struct ProjectConfig {
   #[serde(default)]
   pub metadata: serde_json::Value,
   pub tag: Option<Vec<String>>,
+  /// Playwright's project-level `expect`. Present or absent — never
+  /// deep-merged with the config-level block.
+  #[serde(default)]
+  pub expect: Option<ExpectConfig>,
 }
 
 impl Default for ProjectConfig {
@@ -657,6 +765,7 @@ impl Default for ProjectConfig {
       teardown: None,
       metadata: serde_json::Value::Null,
       tag: None,
+      expect: None,
     }
   }
 }
@@ -848,7 +957,8 @@ impl Default for TestConfig {
       test_dir: None,
       test_ignore: vec!["**/node_modules/**".into(), "**/target/**".into()],
       timeout: 30_000,
-      expect_timeout: 5_000,
+      expect_timeout: DEFAULT_EXPECT_TIMEOUT_MS,
+      expect: ExpectConfig::default(),
       workers: 0,
       retries: 0,
       reporter: vec![ReporterConfig {
@@ -916,6 +1026,30 @@ impl std::fmt::Debug for TestConfig {
 }
 
 impl TestConfig {
+  /// The `expect` block a project actually runs with.
+  ///
+  /// Playwright: `takeFirst(projectConfig.expect, config.expect, {})`
+  /// (`playwright/src/common/config.ts:201`) — a WHOLE-OBJECT take, not
+  /// a merge. A project declaring `expect = { timeout = 900 }` therefore
+  /// does NOT inherit the config's `toHaveScreenshot` thresholds; it
+  /// starts from the defaults, exactly as upstream.
+  ///
+  /// The config-level block additionally folds in the flat
+  /// `expectTimeout` key, which is ferridriver's older spelling of
+  /// `expect.timeout` — the nested key wins when both are present. A
+  /// project block never folds it in: the object it replaced is gone.
+  #[must_use]
+  pub fn resolved_expect(&self, project: Option<&ProjectConfig>) -> ExpectConfig {
+    if let Some(from_project) = project.and_then(|p| p.expect.clone()) {
+      return from_project;
+    }
+    let mut expect = self.expect.clone();
+    if expect.timeout.is_none() {
+      expect.timeout = Some(self.expect_timeout);
+    }
+    expect
+  }
+
   /// Create a new config with project overrides merged on top.
   ///
   /// Follows Playwright's merge semantics: project fields override base config
@@ -924,6 +1058,12 @@ impl TestConfig {
   #[must_use]
   pub fn merge_project(&self, project: &ProjectConfig) -> Self {
     let mut merged = self.clone();
+
+    // Whole-object take-first, never a merge — see `resolved_expect`.
+    // Both spellings are settled here so everything downstream reads one
+    // resolved block.
+    merged.expect = self.resolved_expect(Some(project));
+    merged.expect_timeout = merged.expect.timeout_ms();
 
     if !project.name.is_empty() {
       // A test's identity is hashed with the name of the project running
@@ -1133,5 +1273,136 @@ mod reporter_config_tests {
       reporter: Vec<ReporterConfig>,
     }
     assert!(toml::from_str::<Wrapper>("[[reporter]]\noutputFile = \"x\"\n").is_err());
+  }
+}
+
+#[cfg(test)]
+mod expect_config_tests {
+  use super::{ExpectConfig, ProjectConfig, TestConfig};
+
+  fn config(toml_src: &str) -> TestConfig {
+    toml::from_str::<TestConfig>(toml_src).expect("parse")
+  }
+
+  #[test]
+  fn the_flat_expect_timeout_is_the_nested_ones_older_spelling() {
+    let cfg = config("expectTimeout = 900\n");
+    assert_eq!(cfg.resolved_expect(None).timeout_ms(), 900);
+
+    // The nested key wins where both are set.
+    let cfg = config("expectTimeout = 900\n[expect]\ntimeout = 1200\n");
+    assert_eq!(cfg.resolved_expect(None).timeout_ms(), 1200);
+  }
+
+  #[test]
+  fn a_project_expect_block_replaces_the_config_one_whole() {
+    // The config sets a screenshot budget AND a timeout; the project
+    // sets ONLY a timeout. Playwright's `takeFirst` hands back the
+    // project's object as-is, so the screenshot budget is NOT inherited
+    // (`playwright/src/common/config.ts:201`).
+    let cfg = config(
+      r#"
+        [expect]
+        timeout = 1200
+        [expect.toHaveScreenshot]
+        maxDiffPixelRatio = 0.4
+      "#,
+    );
+    let project = ProjectConfig {
+      name: "narrow".to_string(),
+      expect: Some(ExpectConfig {
+        timeout: Some(900),
+        ..ExpectConfig::default()
+      }),
+      ..ProjectConfig::default()
+    };
+
+    let resolved = cfg.resolved_expect(Some(&project));
+    assert_eq!(resolved.timeout_ms(), 900);
+    assert_eq!(
+      resolved.to_have_screenshot.max_diff_pixel_ratio, None,
+      "a project's expect block replaces the config's whole object, never merges into it"
+    );
+    // A project with no block of its own does inherit everything.
+    let plain = ProjectConfig {
+      name: "plain".to_string(),
+      ..ProjectConfig::default()
+    };
+    let inherited = cfg.resolved_expect(Some(&plain));
+    assert_eq!(inherited.timeout_ms(), 1200);
+    assert_eq!(inherited.to_have_screenshot.max_diff_pixel_ratio, Some(0.4));
+  }
+
+  #[test]
+  fn a_project_block_without_a_timeout_falls_back_to_the_default_not_the_config() {
+    let cfg = config("expectTimeout = 900\n[expect]\ntimeout = 1200\n");
+    let project = ProjectConfig {
+      name: "p".to_string(),
+      expect: Some(ExpectConfig {
+        to_pass: super::ToPassConfig {
+          timeout: Some(50),
+          intervals: None,
+        },
+        ..ExpectConfig::default()
+      }),
+      ..ProjectConfig::default()
+    };
+    let resolved = cfg.resolved_expect(Some(&project));
+    assert_eq!(resolved.to_pass.timeout, Some(50));
+    assert_eq!(
+      resolved.timeout_ms(),
+      super::DEFAULT_EXPECT_TIMEOUT_MS,
+      "the replaced object is gone, so an unset timeout is Playwright's default"
+    );
+  }
+
+  #[test]
+  fn merge_project_settles_both_spellings() {
+    let cfg = config("expectTimeout = 900\n");
+    let project = ProjectConfig {
+      name: "p".to_string(),
+      expect: Some(ExpectConfig {
+        timeout: Some(300),
+        ..ExpectConfig::default()
+      }),
+      ..ProjectConfig::default()
+    };
+    let merged = cfg.merge_project(&project);
+    assert_eq!(merged.expect.timeout, Some(300));
+    assert_eq!(merged.expect_timeout, 300, "the flat key follows the resolved block");
+  }
+
+  #[test]
+  fn the_style_path_takes_a_string_or_a_list() {
+    let cfg = config(
+      r#"
+        [expect.toHaveScreenshot]
+        stylePath = "a.css"
+      "#,
+    );
+    assert_eq!(
+      cfg
+        .expect
+        .to_have_screenshot
+        .style_path
+        .as_ref()
+        .map(super::StringOrList::to_vec),
+      Some(vec!["a.css".to_string()])
+    );
+    let cfg = config(
+      r#"
+        [expect.toHaveScreenshot]
+        stylePath = ["a.css", "b.css"]
+      "#,
+    );
+    assert_eq!(
+      cfg
+        .expect
+        .to_have_screenshot
+        .style_path
+        .as_ref()
+        .map(super::StringOrList::to_vec),
+      Some(vec!["a.css".to_string(), "b.css".to_string()])
+    );
   }
 }

@@ -104,6 +104,9 @@ const PATH_KEYS: &[&str] = &[
 /// Leaf key names holding an ARRAY of filesystem paths.
 const PATH_ARRAY_KEYS: &[&str] = &["globalSetup", "globalTeardown"];
 
+/// Keys Playwright spells `string | string[]`, both forms holding paths.
+const PATH_STRING_OR_ARRAY_KEYS: &[&str] = &["stylePath"];
+
 /// Keys whose object value is keyed by the OPERATOR, not by the schema.
 /// Their contents are data, so no key inside them may be read as a path
 /// name.
@@ -658,6 +661,13 @@ fn anchor_paths(value: &mut Value, dir: &Path) {
           k if OPAQUE_MAP_KEYS.contains(&k) => {},
           k if PATH_KEYS.contains(&k) => anchor_in_place(child, dir),
           k if PATH_ARRAY_KEYS.contains(&k) => anchor_array(child, dir),
+          k if PATH_STRING_OR_ARRAY_KEYS.contains(&k) => {
+            if child.is_array() {
+              anchor_array(child, dir);
+            } else {
+              anchor_in_place(child, dir);
+            }
+          },
           _ => anchor_paths(child, dir),
         }
       }
@@ -755,17 +765,26 @@ fn resolve_against(dir: &Path, entry: &str) -> PathBuf {
 /// Lexically remove `.` and `..` components. Unlike `canonicalize`
 /// this does not require the path to exist, which matters for output
 /// directories a run has yet to create.
-fn normalize_path(path: &Path) -> PathBuf {
+///
+/// A `..` that would climb past the root is DROPPED, as the OS drops it
+/// (`/..` is `/`). Keeping it produced paths like `/../private/tmp/x`,
+/// which name the same file but compare as a prefix of nothing.
+#[must_use]
+pub fn normalize_path(path: &Path) -> PathBuf {
   let mut out = PathBuf::new();
+  let mut rooted = false;
   for component in path.components() {
     match component {
       std::path::Component::CurDir => {},
       std::path::Component::ParentDir => {
-        if !out.pop() {
+        if !out.pop() && !rooted {
           out.push("..");
         }
       },
-      other => out.push(other.as_os_str()),
+      other => {
+        rooted |= matches!(other, std::path::Component::RootDir | std::path::Component::Prefix(_));
+        out.push(other.as_os_str());
+      },
     }
   }
   out
@@ -1004,6 +1023,21 @@ mod tests {
   #[test]
   fn normalize_path_removes_dot_segments() {
     assert_eq!(normalize_path(Path::new("/a/./b/../c")), PathBuf::from("/a/c"));
+  }
+
+  #[test]
+  fn normalize_path_cannot_climb_past_the_root() {
+    // A source map's `../`-heavy entry joined onto a shallow cwd
+    // produces more `..` than there are components. The OS reads `/..`
+    // as `/`; keeping the `..` made the result compare as a prefix of
+    // nothing, which is how a multi-project run came to report "no
+    // tests matched" for a testDir outside the working directory.
+    assert_eq!(
+      normalize_path(Path::new("/one/two/../../../../tmp/specs/a.ts")),
+      PathBuf::from("/tmp/specs/a.ts")
+    );
+    // A relative path still keeps the `..` it needs.
+    assert_eq!(normalize_path(Path::new("a/../../b")), PathBuf::from("../b"));
   }
 
   #[test]

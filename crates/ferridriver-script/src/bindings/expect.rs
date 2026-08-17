@@ -15,9 +15,8 @@ use ferridriver::Page;
 use ferridriver::http_client::HttpResponse;
 use ferridriver::locator::Locator;
 use ferridriver_expect::{
-  AssertionFailure, DEFAULT_EXPECT_TIMEOUT, ExpectLive, ExpectValue, JsType, LiveError, LiveValue, POLL_INTERVALS,
-  PromiseMismatch, PromiseMode, StringOrRegex, ThrowMatcher, ThrownError, deep_equal, expect_fn, expect_live,
-  expect_value,
+  AssertionFailure, ExpectLive, ExpectValue, JsType, LiveError, LiveValue, POLL_INTERVALS, PromiseMismatch,
+  PromiseMode, StringOrRegex, ThrowMatcher, ThrownError, deep_equal, expect_fn, expect_live, expect_value,
 };
 use rquickjs::{
   Array, Atom, Class, Ctx, Function, IntoJs, JsLifetime, Object, Persistent, Value, class::Trace, function::Opt,
@@ -390,13 +389,55 @@ impl<'js> JsLive<'js> {
   }
 }
 
+/// The `expect` block the test currently running in this VM resolved to.
+/// The runner mirrors it in through `set_current_test`, so a bare
+/// `expect(x)` in a spec starts from `[test.expect]` — or from the
+/// project's own `expect` block, which REPLACES the config's whole
+/// object rather than merging into it.
+pub(crate) struct ExpectDefaultsUd(pub std::cell::RefCell<Arc<ferridriver_test::config::ExpectConfig>>);
+
+// SAFETY: holds only `'static` data, same rationale as the other
+// per-session registries in this crate.
+#[allow(unsafe_code)]
+unsafe impl JsLifetime<'_> for ExpectDefaultsUd {
+  type Changed<'to> = ExpectDefaultsUd;
+}
+
+/// Publish the running test's resolved `expect` block to this VM.
+pub(crate) fn set_expect_defaults(ctx: &Ctx<'_>, expect: Arc<ferridriver_test::config::ExpectConfig>) {
+  if let Some(ud) = ctx.userdata::<ExpectDefaultsUd>() {
+    *ud.0.borrow_mut() = expect;
+    return;
+  }
+  let _ = ctx.store_userdata(ExpectDefaultsUd(std::cell::RefCell::new(expect)));
+}
+
+/// The running test's `expect` block, or the defaults when there is no
+/// test (a `run_script` session).
+fn expect_defaults(ctx: &Ctx<'_>) -> Arc<ferridriver_test::config::ExpectConfig> {
+  ctx
+    .userdata::<ExpectDefaultsUd>()
+    .map_or_else(Arc::default, |ud| Arc::clone(&ud.0.borrow()))
+}
+
+/// What an assertion built right now starts from: the running test's
+/// resolved `expect.timeout`, else the process-wide default the runner
+/// set from the config.
+fn default_timeout(ctx: &Ctx<'_>) -> Duration {
+  ctx
+    .userdata::<ExpectDefaultsUd>()
+    .map_or_else(ferridriver_expect::default_expect_timeout, |ud| {
+      Duration::from_millis(ud.0.borrow().timeout_ms())
+    })
+}
+
 impl ExpectJs {
-  fn new(subject: ExpectSubject) -> Self {
+  fn new(subject: ExpectSubject, timeout: Duration) -> Self {
     Self {
       subject,
       is_not: false,
       is_soft: false,
-      timeout: DEFAULT_EXPECT_TIMEOUT,
+      timeout,
       message: None,
       matcher_table: 0,
       matcher_names: Vec::new(),
@@ -1799,8 +1840,13 @@ impl ExpectJs {
       .scope(async move {
         let func = Persistent::save(&ctx, self.function_target(&ctx, "toPass")?);
         let o = opts_obj(&options);
-        let timeout_ms = u64_field(o.as_ref(), "timeout").unwrap_or(0);
-        let intervals = u64_array_field(o.as_ref(), "intervals").unwrap_or_else(|| vec![100, 250, 500, 1000]);
+        // Playwright: the call's bag, then `expect.toPass` from config,
+        // then its own defaults (`matchers/matchers.ts:504-505`).
+        let cfg = expect_defaults(&ctx);
+        let timeout_ms = u64_field(o.as_ref(), "timeout").or(cfg.to_pass.timeout).unwrap_or(0);
+        let intervals = u64_array_field(o.as_ref(), "intervals")
+          .or_else(|| cfg.to_pass.intervals.clone())
+          .unwrap_or_else(|| POLL_INTERVALS.to_vec());
         // Playwright treats timeout 0 as "no deadline"; the retry loop needs
         // a finite instant, so unbounded is modeled as a year.
         let timeout = if timeout_ms == 0 {
@@ -2263,10 +2309,13 @@ fn build_expect<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> ExpectJs {
   } else {
     SubjectKind::Value
   };
-  ExpectJs::new(ExpectSubject {
-    live: Persistent::save(ctx, value),
-    kind,
-  })
+  ExpectJs::new(
+    ExpectSubject {
+      live: Persistent::save(ctx, value),
+      kind,
+    },
+    default_timeout(ctx),
+  )
 }
 
 /// Playwright: `expect(actual, messageOrOptions?: string | { message?: string })`
@@ -2379,7 +2428,7 @@ fn create_expect<'js>(
     ctx.clone(),
     move |ctx: Ctx<'js>, generator: Function<'js>, opts: Opt<Value<'js>>| -> rquickjs::Result<Value<'js>> {
       let o = opts_obj(&opts);
-      let default_timeout = poll_meta.timeout.unwrap_or(DEFAULT_EXPECT_TIMEOUT).as_millis() as u64;
+      let default_timeout = poll_meta.timeout.unwrap_or_else(|| default_timeout(&ctx)).as_millis() as u64;
       let timeout_ms = u64_field(o.as_ref(), "timeout").unwrap_or(default_timeout);
       let intervals = u64_array_field(o.as_ref(), "intervals").unwrap_or_else(|| POLL_INTERVALS.to_vec());
       let saved = Persistent::save(&ctx, generator);

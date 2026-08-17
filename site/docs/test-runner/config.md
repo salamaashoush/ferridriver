@@ -102,7 +102,8 @@ The `TestConfig` Rust type is the canonical reference. Notable fields:
 |------------------------|-----------|---------|-------|
 | `testMatch`            | `Vec<String>` | `[]` | Glob patterns for test files (JS / TS path) |
 | `timeout`              | `u64`     | 30000   | Per-test timeout (ms) |
-| `expectTimeout`        | `u64`     | 5000    | Assertion polling timeout (ms) |
+| `expectTimeout`        | `u64`     | 5000    | Assertion polling timeout (ms). Older spelling of `expect.timeout`; the nested key wins when both are set |
+| `expect`               | object    | `{}`    | Matcher defaults — see [Expect block](#expect-block) |
 | `workers`              | `u32`     | 0       | 0 = number of logical CPUs |
 | `retries`              | `u32`     | 0       | Per-test retries on failure |
 | `fullyParallel`        | `bool`    | false   | Treat all tests as parallel even within suites |
@@ -126,6 +127,60 @@ The `TestConfig` Rust type is the canonical reference. Notable fields:
 | `features`             | `Vec<String>` | `[]` | Feature file globs (BDD) |
 | `steps`                | `Vec<String>` | `[]` | JS / TS step file globs (BDD) |
 | `tsconfig`             | path?     | none    | Pins the tsconfig whose `paths` / `baseUrl` govern bundling for the whole graph. Unset leaves rolldown's per-module upward discovery of `tsconfig.json`, so this is what selects a config discovery would not find (`tsconfig.test.json`). A path naming no file fails the bundle. |
+
+## Expect block
+
+`[test.expect]` carries the defaults every assertion starts from, and
+each matcher's own sub-table carries its options. A per-call option bag
+layers on top: a key the call names wins, a key it leaves out comes from
+here.
+
+```toml
+[test.expect]
+timeout = 5000
+
+[test.expect.toHaveScreenshot]
+threshold         = 0.2
+maxDiffPixels     = 100
+maxDiffPixelRatio = 0.01
+animations        = "disabled"
+caret             = "hide"
+scale             = "css"
+stylePath         = ["screenshot.css"]   # relative to this config file
+pathTemplate      = "{testDir}/__screenshots__/{testFilePath}/{arg}{ext}"
+timeout           = 10000
+
+[test.expect.toMatchSnapshot]
+threshold         = 0.2
+maxDiffPixels     = 100
+maxDiffPixelRatio = 0.01
+
+[test.expect.toMatchAriaSnapshot]
+pathTemplate = "{testDir}/__aria__/{testFilePath}/{arg}{ext}"
+children     = "equal"          # contain | equal | deep-equal
+
+[test.expect.toPass]
+timeout   = 10000
+intervals = [100, 250, 500, 1000]
+```
+
+A project may carry its own `expect` block, and it **replaces** the
+config's whole object rather than merging into it — Playwright's
+`takeFirst(projectConfig.expect, config.expect, {})`. A project setting
+only `expect.timeout` therefore starts from the defaults for everything
+else, including the screenshot budget:
+
+```toml
+[test.expect]
+timeout = 2500
+[test.expect.toHaveScreenshot]
+maxDiffPixelRatio = 0.4
+
+[[test.projects]]
+name = "fast"
+[test.projects.expect]
+timeout = 600                    # and NO inherited maxDiffPixelRatio
+```
 
 ## Bundler
 

@@ -66,8 +66,8 @@ pub use extend::{
 };
 pub use locator::TextMatchOptions;
 pub use poll::{
-  DEFAULT_EXPECT_TIMEOUT, ExpectContext, MatchError, POLL_INTERVALS, default_expect_timeout, poll_traced, poll_until,
-  set_default_expect_timeout,
+  DEFAULT_EXPECT_TIMEOUT, ExpectContext, MatchError, POLL_INTERVALS, current_expect_config, default_expect_timeout,
+  poll_traced, poll_until, set_default_expect_timeout, with_expect_config,
 };
 pub use soft::{SoftSink, absorb, absorb_result, with_sink};
 pub use subject::{

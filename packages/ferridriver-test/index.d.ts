@@ -722,7 +722,9 @@ export interface Locator {
   all(): Promise<Locator[]>;
   boundingBox(options?: TimeoutOption): Promise<{ x: number; y: number; width: number; height: number } | null>;
   screenshot(options?: ScreenshotOptions): Promise<Uint8Array>;
-  ariaSnapshot(options?: TimeoutOption & { boxes?: boolean }): Promise<string>;
+  ariaSnapshot(
+    options?: TimeoutOption & { mode?: 'ai' | 'default'; depth?: number; boxes?: boolean },
+  ): Promise<string>;
 
   isVisible(options?: TimeoutOption): Promise<boolean>;
   isHidden(options?: TimeoutOption): Promise<boolean>;

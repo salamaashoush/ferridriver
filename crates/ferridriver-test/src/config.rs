@@ -7,9 +7,10 @@
 //! and failure types defined in this crate.
 
 pub use ferridriver_config::test::{
-  BrowserConfig, CliOverrides, ContextConfig, GeolocationConfig, GracefulShutdown, HttpCredentialsConfig,
-  ProjectConfig, ProxyConfig, ReportSlowTestsConfig, ReporterConfig, ShardArg, TestConfig, TraceMode,
-  UpdateSnapshotsMode, VideoConfig, VideoMode, ViewportConfig, WebServerConfig,
+  BrowserConfig, CliOverrides, ContextConfig, DEFAULT_EXPECT_TIMEOUT_MS, ExpectConfig, GeolocationConfig,
+  GracefulShutdown, HttpCredentialsConfig, ProjectConfig, ProxyConfig, ReportSlowTestsConfig, ReporterConfig, ShardArg,
+  StringOrList, TestConfig, ToHaveScreenshotConfig, ToMatchAriaSnapshotConfig, ToMatchSnapshotConfig, ToPassConfig,
+  TraceMode, UpdateSnapshotsMode, VideoConfig, VideoMode, ViewportConfig, WebServerConfig,
 };
 
 use std::path::Path;

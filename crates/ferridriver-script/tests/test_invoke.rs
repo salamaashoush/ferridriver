@@ -70,6 +70,7 @@ fn world(title: &str) -> TestWorldData {
     has_touch: false,
     base_url: None,
     use_options: serde_json::json!({}),
+    expect: std::sync::Arc::default(),
     info: TestInfoData {
       title: title.to_string(),
       title_path: vec![title.to_string()],

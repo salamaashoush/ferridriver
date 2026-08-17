@@ -15,6 +15,17 @@ pub const DEFAULT_EXPECT_TIMEOUT: Duration = Duration::from_secs(5);
 static DEFAULT_EXPECT_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
   std::sync::atomic::AtomicU64::new(DEFAULT_EXPECT_TIMEOUT.as_millis() as u64);
 
+tokio::task_local! {
+  /// The resolved `expect` block of the test currently running on this
+  /// task.
+  ///
+  /// Projects in one run can each carry their own block and
+  /// ferridriver's workers are tasks in ONE process, so a process-wide
+  /// value cannot answer for all of them. Whatever runs inside
+  /// [`with_expect_config`] reads that scope instead.
+  static SCOPED_EXPECT_CONFIG: std::sync::Arc<ferridriver_config::test::ExpectConfig>;
+}
+
 /// Override the process-wide default `expect()` timeout.
 pub fn set_default_expect_timeout(timeout: Duration) {
   DEFAULT_EXPECT_TIMEOUT_MS.store(
@@ -23,9 +34,32 @@ pub fn set_default_expect_timeout(timeout: Duration) {
   );
 }
 
-/// The current process-wide default `expect()` timeout.
+/// Run `fut` with `config` as the `expect` block its assertions default
+/// from. Nested scopes shadow, so a per-project block beats the
+/// process-wide timeout.
+pub async fn with_expect_config<F: Future>(
+  config: std::sync::Arc<ferridriver_config::test::ExpectConfig>,
+  fut: F,
+) -> F::Output {
+  SCOPED_EXPECT_CONFIG.scope(config, fut).await
+}
+
+/// The `expect` block in force on this task, if any. Outside a test
+/// (a `run_script` session, a bare `#[tokio::test]`) there is none, and
+/// callers fall back to the process-wide default.
+#[must_use]
+pub fn current_expect_config() -> Option<std::sync::Arc<ferridriver_config::test::ExpectConfig>> {
+  SCOPED_EXPECT_CONFIG.try_with(std::sync::Arc::clone).ok()
+}
+
+/// The default `expect()` timeout in force: the running test's, if this
+/// task is inside [`with_expect_config`], else the process-wide one the
+/// runner set from the config.
 #[must_use]
 pub fn default_expect_timeout() -> Duration {
+  if let Some(cfg) = current_expect_config() {
+    return Duration::from_millis(cfg.timeout_ms());
+  }
   Duration::from_millis(DEFAULT_EXPECT_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed))
 }
 

@@ -665,10 +665,17 @@ fn lower_all_hooks(
         // The suite pool carries the worker's per-project test_info
         // (config_snapshot = merged project config); the captured
         // `browser_config` is the root config fallback.
-        let effective_browser = pool
-          .try_get_cached::<TestInfo>("test_info")
+        let cached_info = pool.try_get_cached::<TestInfo>("test_info");
+        let effective_browser = cached_info
+          .as_ref()
           .and_then(|ti| ti.config_snapshot.as_ref().map(|cfg| cfg.browser.clone()))
           .unwrap_or(browser_config);
+        // Same source as the browser config: the worker's per-project
+        // TestInfo, so a hook's assertions default from the project's
+        // own `expect` block.
+        let expect_config = cached_info
+          .as_ref()
+          .map_or_else(Arc::default, |ti| Arc::clone(&ti.expect));
         let world = TestWorldData {
           page: None,
           context: None,
@@ -680,6 +687,7 @@ fn lower_all_hooks(
           has_touch: false,
           base_url,
           use_options: serde_json::json!({}),
+          expect: expect_config,
           info: TestInfoData {
             title: "beforeAll/afterAll hook".to_string(),
             timeout_ms: 30_000,

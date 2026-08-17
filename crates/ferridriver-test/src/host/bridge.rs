@@ -261,24 +261,44 @@ impl TestHostBridge for InfoBridge {
     let info = Arc::clone(&self.test_info);
     let name = name.unwrap_or_else(|| self.auto_snapshot_name());
     Box::pin(async move {
-      let opts = screenshot_options_from_json(&options, info.ignore_snapshots);
-      let png = match target {
-        SnapshotTarget::Locator(locator) => crate::expect::locator::capture_with_options(&locator, &opts)
-          .await
-          .map_err(|f| f.message)?,
-        SnapshotTarget::Page(page) => page
-          .screenshot()
-          .await
-          .map_err(|e| format!("toHaveScreenshot: page screenshot failed: {e}"))?,
-        SnapshotTarget::Value(_) => {
-          return Err("toHaveScreenshot applies to a locator or a page".to_string());
-        },
-      };
+      // Playwright layers the call's bag over `expect.toHaveScreenshot`
+      // (`matchers/toMatchSnapshot.ts:121-127`), so a suite that sets a
+      // threshold once in config gets it on every call that did not
+      // name its own.
+      let opts = screenshot_options_from_json(&options, info.ignore_snapshots)
+        .with_config_defaults(&info.expect.to_have_screenshot);
       let update = matches!(
         info.update_snapshots,
         crate::config::UpdateSnapshotsMode::All | crate::config::UpdateSnapshotsMode::Changed
       );
-      crate::snapshot::compare_screenshot_png_in(&info.snapshot_dir, &png, &name, &opts, update).map_err(|f| f.message)
+      // `timeout` on the call, else `expect.toHaveScreenshot.timeout`,
+      // else the expect default — the window the capture retries in.
+      let timeout = opts
+        .timeout
+        .unwrap_or_else(|| Duration::from_millis(info.expect.timeout_ms()));
+      crate::snapshot::screenshot_until_match(&info.snapshot_dir, &name, &opts, update, timeout, || {
+        let target = target.clone();
+        let opts = &opts;
+        async move {
+          match target {
+            SnapshotTarget::Locator(locator) => crate::expect::locator::capture_with_options(&locator, opts).await,
+            SnapshotTarget::Page(page) => page.screenshot().await.map_err(|e| crate::model::TestFailure {
+              message: format!("toHaveScreenshot: page screenshot failed: {e}"),
+              stack: None,
+              diff: None,
+              screenshot: None,
+            }),
+            SnapshotTarget::Value(_) => Err(crate::model::TestFailure {
+              message: "toHaveScreenshot applies to a locator or a page".to_string(),
+              stack: None,
+              diff: None,
+              screenshot: None,
+            }),
+          }
+        }
+      })
+      .await
+      .map_err(|f| f.message)
     })
   }
 
@@ -289,9 +309,10 @@ impl TestHostBridge for InfoBridge {
     is_not: bool,
     timeout_ms: Option<u64>,
   ) -> BridgeFuture<Result<(), String>> {
-    let timeout = Duration::from_millis(
-      timeout_ms
-        .unwrap_or_else(|| u64::try_from(ferridriver_expect::default_expect_timeout().as_millis()).unwrap_or(5000)),
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or_else(|| self.test_info.expect.timeout_ms()));
+    let expected_yaml = crate::expect::aria_template_with_children(
+      &expected_yaml,
+      self.test_info.expect.to_match_aria_snapshot.children.as_deref(),
     );
     Box::pin(async move {
       match target {
@@ -335,7 +356,18 @@ fn screenshot_options_from_json(
     animations: s("animations"),
     caret: s("caret"),
     scale: s("scale"),
-    style_path: s("stylePath").map(std::path::PathBuf::from),
+    style_path: match v.get("stylePath") {
+      Some(serde_json::Value::String(one)) => vec![std::path::PathBuf::from(one)],
+      Some(serde_json::Value::Array(many)) => many
+        .iter()
+        .filter_map(|e| e.as_str().map(std::path::PathBuf::from))
+        .collect(),
+      _ => Vec::new(),
+    },
+    timeout: v
+      .get("timeout")
+      .and_then(serde_json::Value::as_u64)
+      .map(Duration::from_millis),
     clip: v.get("clip").map(|c| crate::expect::ScreenshotClip {
       x: c.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
       y: c.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
@@ -421,6 +453,7 @@ pub fn world_data(meta: WorldMeta<'_>) -> TestWorldData {
       .or_else(|| meta.base_url.map(String::from))
       .or_else(crate::config::base_url_from_env),
     use_options: meta.use_options,
+    expect: Arc::clone(&info.expect),
     info: TestInfoData {
       title: meta.title.to_string(),
       title_path: meta.title_path.to_vec(),

@@ -342,8 +342,11 @@ impl TestRunner {
   /// use `execute()` directly with a custom bus.
   pub async fn run(&mut self, plan: TestPlan) -> i32 {
     // Playwright's `config.expect.timeout`: make the configured default
-    // visible to every bare `expect()` in this process.
-    ferridriver_expect::set_default_expect_timeout(std::time::Duration::from_millis(self.config.expect_timeout));
+    // visible to every bare `expect()` in this process. A project with
+    // its own `expect` block narrows it again per test, in the worker.
+    ferridriver_expect::set_default_expect_timeout(std::time::Duration::from_millis(
+      self.config.resolved_expect(None).timeout_ms(),
+    ));
     self.export_base_url_env();
     // A fresh run numbers its workers from zero again (watch and UI
     // sessions run many).
@@ -2202,7 +2205,20 @@ fn filter_plan_for_project(plan: &mut TestPlan, config: &TestConfig, project: &P
   // working directory — comparing the two as written keeps nothing.
   if let Some(ref test_dir) = config.test_dir {
     let dir = absolute_path(test_dir);
-    plan.suites.retain(|suite| absolute_path(&suite.file).starts_with(&dir));
+    plan.suites.retain(|suite| {
+      let file = absolute_path(&suite.file);
+      let kept = file.starts_with(&dir);
+      if !kept {
+        tracing::debug!(
+          target: "ferridriver::runner",
+          project = project.name,
+          suite = %file.display(),
+          test_dir = %dir.display(),
+          "project filter dropped a suite: outside testDir",
+        );
+      }
+      kept
+    });
   }
 
   // Apply project-level grep filter (already merged into config.config_grep).
@@ -2225,10 +2241,27 @@ fn filter_plan_for_project(plan: &mut TestPlan, config: &TestConfig, project: &P
   plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
 }
 
-/// `path` against the working directory, without touching the disk.
+/// `path` in the form a prefix comparison can trust.
+///
+/// Two things break the naive `std::path::absolute`. It keeps `..`
+/// verbatim, so a plan file discovered OUTSIDE the working directory
+/// arrives as `<cwd>/../../tmp/specs/a.spec.ts` and is under no
+/// `testDir`; and a bundler reports a spec through its REAL path
+/// (`/private/var/...`) while `testDir` keeps the symlink the user
+/// wrote (`/var/...`). Either one makes every project report "no tests
+/// matched" for a config a single-project run happily executes.
+///
+/// So: canonicalize when the path exists (resolving symlinks the same
+/// way for both sides), and fall back to a lexical absolute+normalize
+/// when it does not — a `testDir` may name a directory nothing created
+/// yet.
 fn absolute_path(path: &str) -> std::path::PathBuf {
   let path = std::path::Path::new(path);
-  std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+  if let Ok(real) = std::fs::canonicalize(path) {
+    return real;
+  }
+  let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+  ferridriver_config::layer::normalize_path(&absolute)
 }
 
 /// Build the launch plan for a run.
@@ -2365,5 +2398,56 @@ impl BrowserHandle {
     if let Some(b) = self.cell.get() {
       let _ = b.close().await;
     }
+  }
+}
+
+#[cfg(test)]
+mod project_filter_tests {
+  use super::absolute_path;
+
+  /// A spec discovered outside the working directory reaches
+  /// `filter_plan_for_project` as a `../..`-prefixed relative path.
+  /// Making it absolute is not enough — the `..` components have to go,
+  /// or the `testDir` prefix match fails and every project reports "no
+  /// tests matched".
+  #[test]
+  fn an_out_of_tree_path_normalizes_before_it_is_compared() {
+    let cwd = std::env::current_dir().expect("cwd");
+    let resolved = absolute_path("../sibling-that-does-not-exist/specs/a.spec.ts");
+    assert!(
+      !resolved.components().any(|c| c.as_os_str() == ".."),
+      "{} still carries `..`",
+      resolved.display()
+    );
+    let expected = cwd
+      .parent()
+      .expect("cwd has a parent")
+      .join("sibling-that-does-not-exist/specs/a.spec.ts");
+    assert_eq!(resolved, expected);
+    assert!(resolved.starts_with(absolute_path("../sibling-that-does-not-exist/specs")));
+  }
+
+  /// The other half: a bundler names a spec through its real path while
+  /// `testDir` keeps the symlink the user wrote (`/var` -> `/private/var`
+  /// on macOS). Both sides have to resolve the link or the prefix match
+  /// fails on a path that exists.
+  #[test]
+  fn a_symlinked_test_dir_compares_equal_to_the_real_path() {
+    let base = std::env::temp_dir().join(format!("ferri-abs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let real = base.join("real/specs");
+    std::fs::create_dir_all(&real).expect("create dirs");
+    let file = real.join("a.spec.ts");
+    std::fs::write(&file, "").expect("write spec");
+
+    let link = base.join("linked");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(base.join("real"), &link).expect("symlink");
+
+    let via_link = absolute_path(&link.join("specs/a.spec.ts").to_string_lossy());
+    let via_real = absolute_path(&file.to_string_lossy());
+    assert_eq!(via_link, via_real);
+    assert!(via_real.starts_with(absolute_path(&link.join("specs").to_string_lossy())));
+    let _ = std::fs::remove_dir_all(&base);
   }
 }

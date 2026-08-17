@@ -192,10 +192,19 @@ pub struct ToPassOptions {
 }
 
 impl Default for ToPassOptions {
+  /// `expect.toPass` from the running test's config, else Playwright's
+  /// own defaults (`matchers/matchers.ts:504-505`). A caller that names
+  /// a field still wins — this only fills in what nothing set.
   fn default() -> Self {
+    let cfg = crate::poll::current_expect_config();
+    let to_pass = cfg.as_ref().map(|c| &c.to_pass);
     Self {
-      timeout: DEFAULT_EXPECT_TIMEOUT,
-      intervals: POLL_INTERVALS.to_vec(),
+      timeout: to_pass
+        .and_then(|t| t.timeout)
+        .map_or(DEFAULT_EXPECT_TIMEOUT, Duration::from_millis),
+      intervals: to_pass
+        .and_then(|t| t.intervals.clone())
+        .unwrap_or_else(|| POLL_INTERVALS.to_vec()),
       message: None,
     }
   }

@@ -1868,6 +1868,7 @@ name = "ferridriver-expect"
 version = "0.5.0"
 dependencies = [
  "ferridriver",
+ "ferridriver-config",
  "pretty_assertions",
  "regex",
  "serde",

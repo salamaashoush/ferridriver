@@ -96,6 +96,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       column: None,
       project: None,
       config_snapshot: None,
+      expect: std::sync::Arc::new(crate::config::ExpectConfig::default()),
       timeout: self.timeout,
       tags: Vec::new(),
       start_time: std::time::Instant::now(),
@@ -117,13 +118,28 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
 
   async fn to_have_screenshot_with(&self, name: &str, options: ScreenshotMatcherOptions) -> Result<(), TestFailure> {
     let locator = self.subject;
-    let actual_png = capture_with_options(locator, &options).await?;
-    crate::snapshot::compare_screenshot_png_with(&actual_png, name, &options)
+    // What the call did not set comes from `expect.toHaveScreenshot`.
+    let options = options.with_config_defaults(&crate::expect::current_expect_config().to_have_screenshot);
+    let timeout = options.timeout.unwrap_or(self.timeout);
+    let snap_dir = std::env::var("SNAPSHOT_DIR")
+      .map(std::path::PathBuf::from)
+      .unwrap_or_else(|_| std::path::PathBuf::from("__snapshots__"));
+    let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
+    crate::snapshot::screenshot_until_match(&snap_dir, name, &options, update, timeout, || {
+      capture_with_options(locator, &options)
+    })
+    .await
   }
 
   async fn to_match_aria_snapshot(&self, expected_yaml: &str) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
+    // `expect.toMatchAriaSnapshot.children` applies to every template
+    // that does not declare its own `/children`.
+    let cfg = crate::expect::current_expect_config();
+    let expected_yaml =
+      crate::expect::aria_template_with_children(expected_yaml, cfg.to_match_aria_snapshot.children.as_deref());
+    let expected_yaml = expected_yaml.as_str();
     poll_until_test(
       locator,
       self.timeout,
@@ -184,7 +200,7 @@ pub async fn capture_with_options(
     style_blocks.push("html, body, * { caret-color: transparent !important; }".to_string());
   }
 
-  if let Some(ref style_path) = options.style_path {
+  for style_path in &options.style_path {
     match std::fs::read_to_string(style_path) {
       Ok(content) => style_blocks.push(content),
       Err(e) => {

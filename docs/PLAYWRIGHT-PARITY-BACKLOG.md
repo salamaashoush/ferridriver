@@ -43,6 +43,29 @@ share one:
   Closing this means isolated-world execution across all four backends,
   which is a backend-architecture change, not a selector one.
 
+### `expect` block: what the keys reach
+
+`[test.expect]` and a project's own `expect` block carry every key
+Playwright has, resolved the way it resolves them (a project's block
+REPLACES the config's whole object). Two of those keys have nothing to
+bite on yet, and it is the matcher that is missing, not the config:
+
+- `expect.toMatchSnapshot.{threshold,maxDiffPixels,maxDiffPixelRatio}`
+  are image-comparison budgets, and `toMatchSnapshot` only takes a string
+  or a locator's text today — `expect(buffer).toMatchSnapshot('x.png')`
+  needs a byte subject through the expect seam before an image budget can
+  apply. The screenshot equivalents (`expect.toHaveScreenshot.*`) are
+  honoured.
+- `expect.toHaveScreenshot.pathTemplate` and
+  `expect.toMatchAriaSnapshot.pathTemplate` are carried and resolved but
+  the snapshot path resolver still reads the config-level
+  `snapshotPathTemplate` only; per-kind templates land with the
+  `_resolveSnapshotPaths` port.
+
+Also per-call only, as upstream (`NonConfigProperties`): `clip`, `mask`,
+`maskColor`, `fullPage`, `omitBackground`, `signal` — of which
+ferridriver takes `clip`, `mask` and `maskColor`.
+
 ### `route.fulfill` / `unroute` residuals
 `fulfill` takes `status`, `headers`, `contentType`, `body` (string or any
 byte source), `json`, `path` (read through the session sandbox) and

@@ -843,6 +843,14 @@ impl Worker {
     }
   }
 
+  /// The `expect` block this worker's project resolved to. Every
+  /// assertion a test makes — in a hook, in the body, in a fixture —
+  /// defaults from it, which is why the whole test runs inside the
+  /// scope rather than just the body.
+  fn expect_config(&self) -> Arc<crate::config::ExpectConfig> {
+    Arc::new(self.config.resolved_expect(None))
+  }
+
   fn create_suite_test_info(&self, suite_key: &str) -> Arc<TestInfo> {
     Arc::new(TestInfo {
       test_id: crate::model::TestId {
@@ -883,6 +891,7 @@ impl Worker {
       column: None,
       project: None,
       config_snapshot: Some(Arc::clone(&self.config)),
+      expect: Arc::new(self.config.resolved_expect(None)),
       timeout: Duration::from_millis(self.config.timeout),
       tags: Vec::new(),
       start_time: Instant::now(),
@@ -929,8 +938,11 @@ impl Worker {
       }
       match item {
         WorkItem::Single(assignment) => {
-          let result =
-            Box::pin(self.run_single(&browser_handle, &custom_fixture_pool, &mut active_suites, assignment)).await;
+          let result = ferridriver_expect::with_expect_config(
+            self.expect_config(),
+            Box::pin(self.run_single(&browser_handle, &custom_fixture_pool, &mut active_suites, assignment)),
+          )
+          .await;
           if result_tx.send(result).await.is_err() {
             break;
           }
@@ -1074,7 +1086,11 @@ impl Worker {
         continue;
       }
 
-      let result = Box::pin(self.run_single(browser, custom_pool, active_suites, assignment)).await;
+      let result = ferridriver_expect::with_expect_config(
+        self.expect_config(),
+        Box::pin(self.run_single(browser, custom_pool, active_suites, assignment)),
+      )
+      .await;
       if result.outcome.status == TestStatus::Failed || result.outcome.status == TestStatus::TimedOut {
         serial_failed = true;
       }
@@ -1354,6 +1370,7 @@ impl Worker {
       column: None,
       project: None,
       config_snapshot: Some(Arc::clone(&self.config)),
+      expect: Arc::new(self.config.resolved_expect(None)),
       timeout: timeout_dur,
       tags: test
         .annotations

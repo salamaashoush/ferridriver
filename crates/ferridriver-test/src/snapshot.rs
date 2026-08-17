@@ -155,6 +155,50 @@ pub fn compare_screenshot_png_with(
   compare_screenshot_png_in(&snap_dir, actual_png, name, options, update)
 }
 
+/// Capture and compare until the baseline matches or the budget runs
+/// out — Playwright's `toHaveScreenshot` retries rather than judging one
+/// frame (`matchers/toMatchSnapshot.ts:352`, which races the capture
+/// against `helper.options.timeout ?? this.timeout`).
+///
+/// `timeout` is the per-call `timeout`, else `expect.toHaveScreenshot`'s,
+/// else the assertion's own — resolved by the caller. A missing baseline
+/// is written on the first capture, so nothing retries there.
+///
+/// # Errors
+///
+/// The last comparison failure, once the deadline passes.
+pub async fn screenshot_until_match<F, Fut>(
+  snap_dir: &std::path::Path,
+  name: &str,
+  options: &crate::expect::ScreenshotMatcherOptions,
+  update: bool,
+  timeout: std::time::Duration,
+  mut capture: F,
+) -> Result<(), TestFailure>
+where
+  F: FnMut() -> Fut,
+  Fut: std::future::Future<Output = Result<Vec<u8>, TestFailure>>,
+{
+  let deadline = std::time::Instant::now() + timeout;
+  let mut attempt = 0usize;
+  loop {
+    let png = capture().await?;
+    let result = compare_screenshot_png_in(snap_dir, &png, name, options, update);
+    let Err(failure) = result else { return Ok(()) };
+    let wait = ferridriver_expect::POLL_INTERVALS
+      .get(attempt)
+      .or_else(|| ferridriver_expect::POLL_INTERVALS.last())
+      .copied()
+      .unwrap_or(1000);
+    let next = std::time::Instant::now() + std::time::Duration::from_millis(wait);
+    if next >= deadline {
+      return Err(failure);
+    }
+    attempt += 1;
+    tokio::time::sleep_until(tokio::time::Instant::from_std(next)).await;
+  }
+}
+
 /// [`compare_screenshot_png_with`] with an explicit snapshot directory
 /// and update flag — the test-runner path, where both come from the
 /// live `TestInfo` instead of environment variables.

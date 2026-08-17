@@ -24,7 +24,9 @@ use std::time::Duration;
 pub type BridgeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 /// Subject of a snapshot matcher, handed across the bridge as owned
-/// core handles (no host-side values leave the host).
+/// core handles (no host-side values leave the host). Cloneable because
+/// a screenshot matcher re-captures its subject while it retries.
+#[derive(Clone)]
 pub enum SnapshotTarget {
   Locator(ferridriver::Locator),
   Page(Arc<ferridriver::Page>),
@@ -100,7 +102,7 @@ pub trait DeadlineControl: Send + Sync {
 
 /// Static test metadata for one invocation — what a host mirrors onto
 /// its `testInfo`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TestInfoData {
   pub title: String,
   pub title_path: Vec<String>,
@@ -121,6 +123,29 @@ pub struct TestInfoData {
   pub project_name: Option<String>,
 }
 
+impl Default for TestInfoData {
+  fn default() -> Self {
+    Self {
+      title: String::new(),
+      title_path: Vec::new(),
+      file: String::new(),
+      line: 0,
+      column: 0,
+      retry: 0,
+      worker_index: 0,
+      parallel_index: 0,
+      repeat_each_index: 0,
+      timeout_ms: 0,
+      expected_status: String::new(),
+      tags: Vec::new(),
+      output_dir: String::new(),
+      snapshot_dir: String::new(),
+      snapshot_suffix: String::new(),
+      project_name: None,
+    }
+  }
+}
+
 /// Per-test fixtures + config scalars the runner resolved before
 /// dispatching into a host.
 #[derive(Clone, Default)]
@@ -139,6 +164,11 @@ pub struct TestWorldData {
   /// Effective merged `use` options (config ⊕ suite/file bags ⊕
   /// project) — option fixtures read their overrides from here.
   pub use_options: serde_json::Value,
+  /// The `expect` block this test's project resolved to
+  /// (`TestConfig::resolved_expect`). A host mirrors it into its VM so a
+  /// bare `expect(...)` there starts from the same defaults the Rust
+  /// matchers use.
+  pub expect: Arc<crate::config::ExpectConfig>,
   pub info: TestInfoData,
 }
 

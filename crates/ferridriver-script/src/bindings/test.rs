@@ -1622,6 +1622,9 @@ pub(crate) fn set_current_test(
   }
   let info_obj = build_test_info(ctx, &world.info, &bridge)?;
   obj.set("testInfo", info_obj.clone()).map_err(se)?;
+  // The `expect` block this test's project resolved to — every bare
+  // `expect(...)` the body makes starts from its timeout.
+  crate::bindings::expect::set_expect_defaults(ctx, Arc::clone(&world.expect));
 
   let world_saved = Persistent::save(ctx, obj);
   let info_saved = Persistent::save(ctx, info_obj);

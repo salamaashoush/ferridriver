@@ -56,13 +56,18 @@ impl PageSnapshotMatchers for Expect<'_, Arc<Page>> {
       screenshot: None,
     })?;
 
-    crate::snapshot::compare_screenshot_png(&actual_png, name)
+    // The comparison budget comes from `expect.toHaveScreenshot` when
+    // the call named nothing of its own.
+    let options = crate::expect::ScreenshotMatcherOptions::default()
+      .with_config_defaults(&crate::expect::current_expect_config().to_have_screenshot);
+    crate::snapshot::compare_screenshot_png_with(&actual_png, name, &options)
   }
 
   async fn to_match_aria_snapshot(&self, expected: &str) -> Result<(), TestFailure> {
     let page = self.subject;
     let is_not = self.is_not;
-    let expected = expected.to_string();
+    let cfg = crate::expect::current_expect_config();
+    let expected = crate::expect::aria_template_with_children(expected, cfg.to_match_aria_snapshot.children.as_deref());
 
     poll_until_test(
       page,

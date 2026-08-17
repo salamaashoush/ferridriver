@@ -682,6 +682,7 @@ fn test_snapshot_create_and_match() {
     column: None,
     project: None,
     config_snapshot: None,
+    expect: Arc::new(ferridriver_test::config::ExpectConfig::default()),
     timeout: Duration::from_secs(5),
     tags: Vec::new(),
     start_time: std::time::Instant::now(),
