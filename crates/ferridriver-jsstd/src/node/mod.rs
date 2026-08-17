@@ -10,7 +10,6 @@ pub mod inspect;
 pub mod path;
 pub mod process;
 pub mod timers;
-pub mod url;
 pub mod util;
 
 /// Throw an `Error` carrying a specific `name` (`TypeError`,

@@ -19,7 +19,7 @@ use rquickjs::{Class, Coerced, Ctx, Value};
 
 use crate::bindings::blob_bytes::blob_parts;
 use crate::bindings::form_data::FormDataJs;
-use crate::bindings::url_search_params::UrlSearchParams;
+use ferridriver_jsstd::url::url_search_params::URLSearchParams;
 
 /// Where the extracted body's bytes live. A `ReadableStream` body is
 /// NOT drained at extraction time — the spec keeps it as the body
@@ -88,9 +88,9 @@ pub(crate) fn extract_body<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> rquickjs::Res
     let mime = (!mime.is_empty()).then_some(mime);
     return Ok(Some(ExtractedBody::bytes(bytes, mime.as_deref())));
   }
-  if let Ok(params) = Class::<UrlSearchParams>::from_value(v) {
+  if let Ok(params) = Class::<URLSearchParams>::from_value(v) {
     return Ok(Some(ExtractedBody::bytes(
-      params.borrow().to_js_string().into_bytes(),
+      params.borrow().to_string().into_bytes(),
       Some("application/x-www-form-urlencoded;charset=UTF-8"),
     )));
   }

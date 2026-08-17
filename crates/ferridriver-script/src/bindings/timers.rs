@@ -159,6 +159,25 @@ pub(crate) fn deferred_call_with_net(net: Option<&Arc<[String]>>, args: &[Value<
   crate::bindings::fetch::call_with_net(&ctx, net, || inner.call_arg(call_args))
 }
 
+/// WHATWG `queueMicrotask(cb)`. A named generic fn so `Ctx`, the
+/// callback, and the wrapper share one `'js` (an inline closure would
+/// give each its own lifetime).
+fn queue_microtask<'js>(ctx: Ctx<'js>, cb: Function<'js>) -> rquickjs::Result<()> {
+  match crate::bindings::fetch::active_net(&ctx) {
+    None => cb.defer::<()>(()),
+    Some(list) => {
+      // The wrapper captures only plain data (`net`); the real callback
+      // rides the deferred args (a native closure must never capture a
+      // JS value — untraceable GC cycle at teardown).
+      let net = Some(list);
+      let wrapper = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| {
+        deferred_call_with_net(net.as_ref(), &args.0)
+      })?;
+      wrapper.defer((cb,))
+    },
+  }
+}
+
 pub fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let globals = ctx.globals();
   globals.set("setTimeout", Func::from(set_timeout))?;
@@ -166,5 +185,10 @@ pub fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   globals.set("setInterval", Func::from(set_interval))?;
   globals.set("clearInterval", Func::from(clear_timeout))?;
   globals.set("setImmediate", Func::from(set_immediate))?;
+  // Capability follows the registrar: the job queue drains outside a
+  // tool handler's net-policy bracket, so a microtask queued by a
+  // net-restricted handler must carry that grant with it (same rule as
+  // `setTimeout` / `setImmediate`).
+  globals.set("queueMicrotask", Func::from(queue_microtask))?;
   Ok(())
 }

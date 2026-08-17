@@ -62,12 +62,10 @@ pub mod test;
 pub mod test_debug;
 pub mod timers;
 pub mod tracing;
-pub mod url_search_params;
 pub mod video;
 pub mod web_error;
 pub mod web_socket_route;
 pub mod web_storage;
-pub mod webapi;
 
 pub use artifacts::ArtifactsJs;
 pub use bdd::{

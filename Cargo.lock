@@ -1930,6 +1930,7 @@ dependencies = [
  "p384",
  "p521",
  "pbkdf2",
+ "percent-encoding",
  "phf",
  "pkcs8",
  "rand 0.10.2",
@@ -1944,6 +1945,7 @@ dependencies = [
  "sysinfo",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "x25519-dalek",
 ]

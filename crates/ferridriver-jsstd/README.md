@@ -19,12 +19,17 @@ Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@e987d2b` (main, 2026-08-
 | `llrt_crypto`      | `crypto`     |
 | `llrt_os`          | `os`         |
 | `llrt_stream_web`  | `stream_web` |
+| `llrt_url`         | `url`        |
+| `llrt_util`        | `text`       |
 | `llrt_test`        | `test` (dev) |
 
-The rest of llrt — its hyper/fetch stack, timers, buffer, url, console — is
-deliberately not vendored: ferridriver has its own, over `reqwest`. `os` is
-vendored because ferridriver has nothing equivalent and the module is pure
-host introspection with no overlap with the automation stack.
+The rest of llrt — its hyper/fetch stack, timers, console — is deliberately
+not vendored: ferridriver has its own, over `reqwest`. `os` is vendored
+because ferridriver has nothing equivalent and the module is pure host
+introspection with no overlap with the automation stack. From `llrt_util`
+only the four text codecs are taken (`TextEncoder`, `TextDecoder` and their
+stream forms); its `format` / `inherits` / `inspect` are `node::util`'s,
+which are richer.
 
 ## What a host installs
 
@@ -32,7 +37,9 @@ Two entry points, and nothing else to remember:
 
 - `jsstd::init(ctx)` — every global this crate provides: `DOMException`,
   `Event` / `EventTarget`, `AbortController` / `AbortSignal`, the Streams
-  surface, `Buffer` / `Blob` / `File`.
+  surface, `Buffer` / `Blob` / `File`, `crypto`, `TextEncoder` /
+  `TextDecoder` (+ their stream forms), `URL` / `URLSearchParams`, `atob` /
+  `btoa`, `structuredClone` and `performance`.
 - `jsstd::modules::modules()` — every Node / web MODULE it serves, each
   entry carrying its specifiers, the `ModuleDef` the ES loader declares,
   and the object `require()` returns: `path`, `buffer`, `os`, `util`,
@@ -55,7 +62,6 @@ implementation of each surface:
 | `node::deep_equal` | Structural equality for `util.isDeepStrictEqual` (and `assert.deepStrictEqual` when it lands) |
 | `node::util` | The `util` module |
 | `node::assert` | The `assert` module (upstream `llrt_assert` is a single `ok`) |
-| `node::url` | `fileURLToPath` / `pathToFileURL` / `format` over the runtime's own `URL` |
 | `node::process` | The module form of the host's `process` global |
 | `node::timers` | The module form of the host's timers, plus `timers/promises` |
 | `node::path` | The `path` module, moved out of `ferridriver-script`'s `node_compat` |
@@ -66,6 +72,15 @@ disables it for the vendored subtree) and follows the repo's house style. It
 is compiled under this crate's relaxed lints because pedantic's
 `needless_pass_by_value` cannot be satisfied by an rquickjs callback, which
 must take owned JS values.
+
+## `src/web/` — ferridriver-authored
+
+Web-platform globals llrt has no upstream for: `atob` / `btoa` (the WHATWG
+forgiving-base64 algorithm, which `base64::STANDARD` does not implement),
+`structuredClone`, and `performance.now()` / `performance.timeOrigin` over a
+monotonic base. `llrt_buffer`'s module form reads `atob` / `btoa` off the
+globals, so installing them here is what makes `require('buffer').atob`
+resolve. Same formatting rules as `src/node/`.
 
 ## Keeping it re-syncable
 
@@ -82,12 +97,17 @@ for m in utils:libs/llrt_utils context:libs/llrt_context \
          events:modules/llrt_events abort:modules/llrt_abort \
          os:modules/llrt_os buffer:modules/llrt_buffer \
          json:libs/llrt_json crypto:modules/llrt_crypto \
+         url:modules/llrt_url \
          stream_web:modules/llrt_stream_web; do
   name="${m%%:*}"; path="${m##*:}"
   cp -R "$LLRT/$path/src" "src/$name" && mv "src/$name/lib.rs" "src/$name/mod.rs"
 done
+# `text` takes only llrt_util's four codec files; its own mod.rs stays.
+for f in text_encoder text_decoder text_encoder_stream text_decoder_stream; do
+  cp "$LLRT/modules/llrt_util/src/$f.rs" "src/text/$f.rs"
+done
 # per-module first, then the cross-crate rewrite (BSD sed has no \b — use perl)
-for name in utils context encoding exceptions events abort os buffer json crypto stream_web; do
+for name in utils context encoding exceptions events abort os buffer json crypto url text stream_web; do
   find "src/$name" -name '*.rs' | while read -r f; do
     perl -pi -e "s/\bcrate::/crate::${name}::/g" "$f"
   done
@@ -234,3 +254,21 @@ strings), `swap16` / `swap32` / `swap64`, `compare`, and `Buffer.poolSize`.
     taken with `oid` (and `aes-gcm` with `hazmat`): PKCS#1 v1.5 signing
     needs `AssociatedOid`, and WebCrypto allows 32- and 64-bit GCM tags,
     which are gated behind those features in the 0.11 releases.
+
+20. **`url/url_search_params.rs` — a non-string, non-object init.**
+    Upstream ignores it, so `new URLSearchParams(null)` and
+    `new URLSearchParams(42)` both build an EMPTY query. WebIDL's init
+    union is not nullable, so anything that is neither a sequence nor a
+    record converts to USVString: the queries are `null` and `42`, which
+    is what every browser engine produces. Only `undefined` (the argument
+    omitted) means empty.
+
+21. **`url/url_class.rs` — `urlToHttpOptions` matches Node's shape.**
+    Upstream reports `port` as a STRING, omits `search` / `hash` when
+    they are empty, keeps the brackets on an IPv6 `hostname`, and joins
+    the raw percent-encoded credentials into `auth`. Node reports a
+    numeric port, always sets `search` and `hash`, hands over a bare IPv6
+    host (what a socket connect takes) and `decodeURIComponent`s the
+    credentials. `URL::inner_url` was upstream's only reader for the
+    omitted-hash branch and goes with it; the `percent-encoding` dep is
+    for the credential decode (`url` keeps that crate private).

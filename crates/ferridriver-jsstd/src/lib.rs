@@ -17,6 +17,8 @@
 //! | `llrt_json`         | [`json`]      |
 //! | `llrt_crypto`       | [`crypto`]    |
 //! | `llrt_stream_web`   | [`stream_web`]|
+//! | `llrt_url`          | [`url`]       |
+//! | `llrt_util` (codecs)| [`text`]      |
 //! | `llrt_test`         | `test` (dev)  |
 //!
 //! Sources are kept byte-close to upstream — only `crate::` / `llrt_*`
@@ -41,7 +43,12 @@ pub mod modules;
 pub mod node;
 pub mod os;
 pub mod stream_web;
+pub mod text;
+pub mod url;
 pub mod utils;
+/// Web-platform globals with no upstream in llrt, written here so the
+/// runtime has exactly one implementation of each.
+pub mod web;
 
 #[cfg(test)]
 mod test;
@@ -50,7 +57,8 @@ use rquickjs::{Ctx, Result};
 
 /// Install every vendored global on `ctx`: `DOMException`, `Event` /
 /// `EventTarget`, `AbortController` / `AbortSignal`, the full Streams
-/// surface, and `Buffer` / `Blob` / `File`.
+/// surface, `Buffer` / `Blob` / `File`, `crypto`, the text codecs and
+/// `URL` / `URLSearchParams`.
 ///
 /// One entry point, so a host cannot install half the crate.
 pub fn init(ctx: &Ctx<'_>) -> Result<()> {
@@ -59,5 +67,9 @@ pub fn init(ctx: &Ctx<'_>) -> Result<()> {
   abort::init(ctx)?;
   stream_web::init(ctx)?;
   buffer::init(ctx)?;
+  crypto::init(ctx)?;
+  text::init(ctx)?;
+  url::init(ctx)?;
+  web::init(ctx)?;
   Ok(())
 }

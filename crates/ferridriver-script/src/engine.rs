@@ -1157,16 +1157,9 @@ fn install_call_globals(ctx: &Ctx<'_>, args: &[serde_json::Value], inst: Globals
 /// needed. Sandbox-safe surface only — `os` / `sqlite` are deliberately
 /// excluded so scripts cannot escape the filesystem/db sandbox.
 pub(crate) fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-  // Native timers (setTimeout/Interval, ctx.spawn-backed) and the
-  // URLSearchParams class.
+  // Native timers (setTimeout/Interval, ctx.spawn-backed) plus
+  // queueMicrotask, which shares their net-policy carry-over.
   crate::bindings::timers::install(ctx)?;
-  crate::bindings::url_search_params::install(ctx)?;
-  // Native TextEncoder/TextDecoder/URL classes + queueMicrotask/btoa/
-  // atob — all real #[rquickjs::class]/Func bindings, no JS glue.
-  crate::bindings::webapi::install(ctx)?;
-  // WebCrypto: randomUUID / getRandomValues / the full `subtle`
-  // surface, vendored from llrt (see `ferridriver-jsstd::crypto`).
-  ferridriver_jsstd::crypto::init(ctx)?;
   // CompressionStream / DecompressionStream, over the vendored
   // TransformStream.
   crate::bindings::compression::install(ctx)?;

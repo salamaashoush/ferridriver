@@ -239,19 +239,36 @@ impl ModuleDef for AssertStrictModule {
   }
 }
 
-/// `import { fileURLToPath } from 'node:url'`.
-pub struct UrlModule;
+/// `import { fileURLToPath } from 'node:url'` — the vendored `llrt_url`,
+/// whose `URL` and `URLSearchParams` are the runtime's globals.
+pub use crate::url::UrlModule;
 
-impl ModuleDef for UrlModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    decl.declare("default")?;
-    declare_all(decl, crate::node::url::URL_MEMBERS)
-  }
+/// `require('url')`: the module's members over the same functions the ES
+/// module exports, with the classes read off the globals so both forms
+/// hand back one constructor.
+fn url_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  use rquickjs::function::Func;
 
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    let object = crate::node::url::url_object(ctx)?;
-    export_node_module(ctx, exports, &object, crate::node::url::URL_MEMBERS)
+  let ns = Object::new(ctx.clone())?;
+  for name in ["URL", "URLSearchParams"] {
+    ns.set(name, ctx.globals().get::<_, Value<'js>>(name)?)?;
   }
+  ns.set(
+    "domainToASCII",
+    Func::from(|domain: String| crate::url::domain_to_ascii(&domain)),
+  )?;
+  ns.set(
+    "domainToUnicode",
+    Func::from(|domain: String| crate::url::domain_to_unicode(&domain)),
+  )?;
+  ns.set("fileURLToPath", Func::from(crate::url::file_url_to_path))?;
+  ns.set("pathToFileURL", Func::from(crate::url::path_to_file_url))?;
+  ns.set("format", Func::from(crate::url::url_format))?;
+  ns.set(
+    "urlToHttpOptions",
+    Func::from(crate::url::url_class::url_to_http_options),
+  )?;
+  Ok(ns)
 }
 
 /// `import process from 'node:process'` — the module form of the global.
@@ -416,7 +433,7 @@ pub fn modules() -> Vec<NodeModule> {
     NodeModule {
       specifiers: &["url", "node:url"],
       declare: declare_fn::<UrlModule>(),
-      namespace: |ctx| crate::node::url::url_object(ctx),
+      namespace: url_namespace,
     },
     NodeModule {
       specifiers: &["process", "node:process"],

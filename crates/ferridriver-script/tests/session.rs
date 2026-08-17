@@ -1159,6 +1159,124 @@ async fn set_timeout_passes_extra_args_and_clear_tolerates_garbage() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn url_search_params_binding_is_live_in_both_directions() {
+  let (_tmp, ctx) = make_ctx();
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+  let r = session
+    .execute(
+      "const u = new URL('https://ex.com/p?a=1');\n\
+       const sp = u.searchParams;\n\
+       sp.append('b', '2');\n\
+       const afterAppend = [u.href, u.search];\n\
+       u.search = '?c=3';\n\
+       const afterSearchSet = [sp.get('c'), sp.has('a'), sp.size];\n\
+       u.href = 'https://ex.com/q?d=4';\n\
+       return { afterAppend, afterSearchSet, sameObject: u.searchParams === sp, afterHref: sp.get('d') };",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => {
+      let v = &success.value;
+      assert_eq!(
+        v["afterAppend"],
+        serde_json::json!(["https://ex.com/p?a=1&b=2", "?a=1&b=2"]),
+        "params mutation must rewrite the URL: {v}"
+      );
+      assert_eq!(
+        v["afterSearchSet"],
+        serde_json::json!(["3", false, 1]),
+        "setting search must be visible through the same params object: {v}"
+      );
+      assert_eq!(v["sameObject"], serde_json::json!(true));
+      assert_eq!(
+        v["afterHref"],
+        serde_json::json!("4"),
+        "href set must reach params: {v}"
+      );
+    },
+    Outcome::Error { error } => panic!("live searchParams failed: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn text_codecs_cover_utf16_and_the_stream_forms() {
+  let (_tmp, ctx) = make_ctx();
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+  let r = session
+    .execute(
+      "const utf16 = new TextDecoder('utf-16le').decode(new Uint8Array([0x68, 0x00, 0x69, 0x00]));\n\
+       const es = new TextEncoderStream();\n\
+       const ds = new TextDecoderStream();\n\
+       const out = es.readable.pipeThrough(ds).getReader();\n\
+       const w = es.writable.getWriter();\n\
+       await w.write('hi\\u20ac');\n\
+       await w.close();\n\
+       let text = '';\n\
+       for (;;) { const { value, done } = await out.read(); if (done) break; text += value; }\n\
+       return { utf16, text, encoding: ds.encoding };",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => {
+      let v = &success.value;
+      assert_eq!(v["utf16"], serde_json::json!("hi"), "utf-16le decode: {v}");
+      assert_eq!(v["text"], serde_json::json!("hi\u{20ac}"), "stream round-trip: {v}");
+      assert_eq!(v["encoding"], serde_json::json!("utf-8"));
+    },
+    Outcome::Error { error } => panic!("text codec streams failed: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn node_url_module_serves_the_path_and_host_helpers() {
+  let (_tmp, ctx) = make_ctx();
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+  let r = session
+    .execute(
+      "const url = require('node:url');\n\
+       const opts = url.urlToHttpOptions(new URL('https://ex.com:8443/a?b=1'));\n\
+       return {\n\
+         path: url.fileURLToPath('file:///tmp/a b.txt'),\n\
+         href: url.pathToFileURL('/tmp/a b.txt').href,\n\
+         ascii: url.domainToASCII('bücher.de'),\n\
+         unicode: url.domainToUnicode('xn--bcher-kva.de'),\n\
+         sameClass: url.URL === URL,\n\
+         port: opts.port,\n\
+         search: opts.search,\n\
+       };",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => {
+      let v = &success.value;
+      assert_eq!(v["path"], serde_json::json!("/tmp/a b.txt"), "{v}");
+      assert_eq!(v["href"], serde_json::json!("file:///tmp/a%20b.txt"), "{v}");
+      assert_eq!(v["ascii"], serde_json::json!("xn--bcher-kva.de"), "{v}");
+      assert_eq!(v["unicode"], serde_json::json!("bücher.de"), "{v}");
+      assert_eq!(v["sameClass"], serde_json::json!(true), "one URL class per VM: {v}");
+      assert_eq!(v["port"], serde_json::json!(8443), "{v}");
+      assert_eq!(v["search"], serde_json::json!("?b=1"), "{v}");
+    },
+    Outcome::Error { error } => panic!("node:url module failed: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn url_search_params_node_semantics() {
   let (_tmp, ctx) = make_ctx();
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
