@@ -79,10 +79,19 @@ receiver's own `.length` (a function's arity included), and `null` and
 `toContain` on `null`, `toHaveLength` on a value without a numeric
 `.length` — throws a `TypeError` that `.not` does not flip, as upstream.
 
-The structural matchers (`toEqual`, `toStrictEqual`, `toMatchObject`,
-`toContainEqual`, `toHaveProperty`, `toMatch`, and the numeric family)
-still compare a JSON view of the subject; see the parity backlog for
-what that view cannot express.
+The structural matchers run jest's own equality over the live values:
+`toEqual` ignores `undefined`-valued keys on both sides, `toStrictEqual`
+adds the constructor check and array sparseness, `toMatchObject` is a
+recursive subset, and `Map` / `Set` / `Date` / `RegExp` / `Error` /
+typed arrays / `bigint` each compare as themselves rather than as
+whatever they serialize to. Cyclic structures terminate.
+`toHaveProperty` READS the property, so a getter or an inherited field
+answers.
+
+The same engine is available to Rust: `expect_value(json)` runs it over
+`serde_json::Value`, which implements the same `LiveValue` trait and
+degrades exactly where JSON has nothing to say (no `undefined`, no
+`Map`, no identity).
 
 **Page:** `toHaveTitle`, `toHaveURL`.
 

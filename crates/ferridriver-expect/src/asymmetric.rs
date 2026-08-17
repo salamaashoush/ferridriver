@@ -188,6 +188,66 @@ impl Asymmetric {
     }
   }
 
+  /// Match against a LIVE value rather than its JSON view — the same
+  /// rules, over whatever the host can describe.
+  pub fn matches_live<V: crate::subject::LiveValue>(&self, actual: &V, ev: Evaluator<'_>) -> Result<bool, V::Error> {
+    use crate::subject::{JsType, Shape};
+    Ok(match self {
+      Self::Anything => !matches!(actual.js_type(), JsType::Null | JsType::Undefined),
+      Self::Any(tag) => match actual.as_json() {
+        Some(json) => tag.matches_value(&json),
+        None => false,
+      },
+      Self::ArrayContaining(items) => {
+        let Shape::Array(arr) = actual.shape()? else {
+          return Ok(false);
+        };
+        let present: Vec<&V> = arr.iter().flatten().collect();
+        items.iter().all(|expected| {
+          present
+            .iter()
+            .any(|act| act.as_json().is_some_and(|j| deep_equal_with(&j, expected, ev)))
+        })
+      },
+      Self::ObjectContaining(subset) => {
+        let Shape::Object(entries) = actual.shape()? else {
+          return Ok(false);
+        };
+        subset.iter().all(|(k, expected)| {
+          entries
+            .iter()
+            .find(|(key, _)| key == k)
+            .and_then(|(_, v)| v.as_json())
+            .is_some_and(|j| deep_equal_with(&j, expected, ev))
+        })
+      },
+      Self::StringContaining(needle) => actual.text().is_some_and(|s| s.contains(needle.as_str())),
+      Self::StringMatching(pat) => actual.text().is_some_and(|s| pat.matches(&s)),
+      Self::CloseTo { value, digits } => actual.number().is_some_and(|a| close_enough(a, *value, *digits)),
+      Self::ArrayOf(sample) => {
+        let Shape::Array(arr) = actual.shape()? else {
+          return Ok(false);
+        };
+        let mut all = true;
+        for item in arr.iter().flatten() {
+          // Compared through the item's structural view: the sample
+          // itself came off the wire as JSON.
+          let matched = item.as_json().is_some_and(|j| deep_equal_with(&j, sample, ev));
+          if !matched {
+            all = false;
+            break;
+          }
+        }
+        all
+      },
+      Self::Custom { name, args } => match actual.as_json() {
+        Some(json) => ev.is_some_and(|e| e.matches(name, args, &json)),
+        None => false,
+      },
+      Self::Not(inner) => !inner.matches_live(actual, ev)?,
+    })
+  }
+
   pub fn description(&self) -> String {
     match self {
       Self::Anything => "Anything".into(),

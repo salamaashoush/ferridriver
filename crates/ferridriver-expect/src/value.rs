@@ -5,7 +5,7 @@ use std::panic::Location;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::asymmetric::{deep_equal, float_bit_eq, json_short, match_object};
+use crate::asymmetric::{deep_equal, float_bit_eq, json_short};
 use crate::diff::json_diff;
 use crate::{AssertionFailure, CallerLocation};
 
@@ -129,6 +129,12 @@ pub fn format_failure(
   AssertionFailure::new(message, Some(body))
 }
 
+/// The shared engine, over JSON's own `LiveValue` view. JSON cannot
+/// fail to describe itself, so the result is infallible.
+fn engine(actual: &Value, expected: &Value, mode: crate::equality::Mode, ev: crate::Evaluator<'_>) -> bool {
+  crate::equality::equals(actual, expected, mode, ev).unwrap_or(false)
+}
+
 pub struct ExpectValue {
   actual: Value,
   is_not: bool,
@@ -235,7 +241,7 @@ impl ExpectValue {
   /// The plain forms delegate here with no evaluator.
   #[track_caller]
   pub fn to_equal_with(&self, expected: &Value, ev: crate::Evaluator<'_>) -> Result<(), AssertionFailure> {
-    let pass = crate::asymmetric::deep_equal_with(&self.actual, expected, ev);
+    let pass = engine(&self.actual, expected, crate::equality::Mode::Loose, ev);
     let diff = if pass {
       None
     } else {
@@ -249,7 +255,7 @@ impl ExpectValue {
 
   #[track_caller]
   pub fn to_strict_equal_with(&self, expected: &Value, ev: crate::Evaluator<'_>) -> Result<(), AssertionFailure> {
-    let pass = crate::asymmetric::deep_equal_with(&self.actual, expected, ev);
+    let pass = engine(&self.actual, expected, crate::equality::Mode::Strict, ev);
     let diff = if pass {
       None
     } else {
@@ -263,7 +269,7 @@ impl ExpectValue {
 
   #[track_caller]
   pub fn to_match_object_with(&self, subset: &Value, ev: crate::Evaluator<'_>) -> Result<(), AssertionFailure> {
-    let pass = crate::asymmetric::match_object_with(&self.actual, subset, ev);
+    let pass = engine(&self.actual, subset, crate::equality::Mode::Subset, ev);
     if pass {
       self.check(pass, "toMatchObject", json_short(subset), json_short(&self.actual))
     } else {
@@ -281,7 +287,9 @@ impl ExpectValue {
   #[track_caller]
   pub fn to_contain_equal_with(&self, expected: &Value, ev: crate::Evaluator<'_>) -> Result<(), AssertionFailure> {
     let pass = match &self.actual {
-      Value::Array(arr) => arr.iter().any(|v| crate::asymmetric::deep_equal_with(v, expected, ev)),
+      Value::Array(arr) => arr
+        .iter()
+        .any(|v| engine(v, expected, crate::equality::Mode::Loose, ev)),
       _ => false,
     };
     if pass {
@@ -316,7 +324,7 @@ impl ExpectValue {
     let descended = descend(&self.actual, &segments);
     let pass = match (descended, expected) {
       (Some(_), None) => true,
-      (Some(val), Some(exp)) => crate::asymmetric::deep_equal_with(val, exp, ev),
+      (Some(val), Some(exp)) => engine(val, exp, crate::equality::Mode::Loose, ev),
       (None, _) => false,
     };
     let desc = format!(
@@ -374,32 +382,15 @@ impl ExpectValue {
   /// matchers embedded in `expected`.
   #[track_caller]
   pub fn to_equal(&self, expected: &Value) -> Result<(), AssertionFailure> {
-    let pass = deep_equal(&self.actual, expected);
-    let diff = if pass {
-      None
-    } else {
-      Some(json_diff(expected, &self.actual))
-    };
-    match diff {
-      Some(d) => self.check_with_diff(pass, "toEqual", json_short(expected), json_short(&self.actual), d),
-      None => self.check(pass, "toEqual", json_short(expected), json_short(&self.actual)),
-    }
+    self.to_equal_with(expected, None)
   }
 
-  /// `toStrictEqual(expected)` — alias of [`Self::to_equal`] for
-  /// `serde_json::Value` (no `undefined` to differentiate).
+  /// `toStrictEqual(expected)` — the constructor check and array
+  /// sparseness it adds have no JSON meaning, but the engine is the
+  /// same one the live values use.
   #[track_caller]
   pub fn to_strict_equal(&self, expected: &Value) -> Result<(), AssertionFailure> {
-    let pass = deep_equal(&self.actual, expected);
-    let diff = if pass {
-      None
-    } else {
-      Some(json_diff(expected, &self.actual))
-    };
-    match diff {
-      Some(d) => self.check_with_diff(pass, "toStrictEqual", json_short(expected), json_short(&self.actual), d),
-      None => self.check(pass, "toStrictEqual", json_short(expected), json_short(&self.actual)),
-    }
+    self.to_strict_equal_with(expected, None)
   }
 
   // ── nullishness ──────────────────────────────────────────────────
@@ -556,7 +547,9 @@ impl ExpectValue {
   #[track_caller]
   pub fn to_contain_equal(&self, expected: &Value) -> Result<(), AssertionFailure> {
     let pass = match &self.actual {
-      Value::Array(arr) => arr.iter().any(|v| deep_equal(v, expected)),
+      Value::Array(arr) => arr
+        .iter()
+        .any(|v| engine(v, expected, crate::equality::Mode::Loose, None)),
       _ => false,
     };
     if pass {
@@ -612,7 +605,7 @@ impl ExpectValue {
     let descended = descend(&self.actual, &segments);
     let pass = match (descended, expected) {
       (Some(_), None) => true,
-      (Some(val), Some(exp)) => deep_equal(val, exp),
+      (Some(val), Some(exp)) => engine(val, exp, crate::equality::Mode::Loose, None),
       (None, _) => false,
     };
     let desc = format!(
@@ -653,7 +646,7 @@ impl ExpectValue {
 
   #[track_caller]
   pub fn to_match_object(&self, subset: &Value) -> Result<(), AssertionFailure> {
-    let pass = match_object(&self.actual, subset);
+    let pass = engine(&self.actual, subset, crate::equality::Mode::Subset, None);
     if pass {
       self.check(pass, "toMatchObject", json_short(subset), json_short(&self.actual))
     } else {

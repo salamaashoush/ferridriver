@@ -316,6 +316,104 @@ async fn the_core_builtin_list_matches_the_shipped_matchers() {
   );
 }
 
+// ── structural equality over live values ─────────────────────────────
+
+#[tokio::test]
+async fn to_equal_compares_maps_and_sets() {
+  run_ok("expect(new Map([['a', 1]])).toEqual(new Map([['a', 1]])); return 'ok'").await;
+  run_ok("expect(new Map([['a', 1]])).not.toEqual(new Map([['a', 2]])); return 'ok'").await;
+  run_ok("expect(new Map([['a', 1]])).not.toEqual(new Map()); return 'ok'").await;
+  run_ok("expect(new Set([1, 2])).toEqual(new Set([2, 1])); return 'ok'").await;
+  run_ok("expect(new Set([1, 2])).not.toEqual(new Set([1, 3])); return 'ok'").await;
+  // A Map is not the plain object with the same entries.
+  run_ok("expect(new Map([['a', 1]])).not.toEqual({ a: 1 }); return 'ok'").await;
+  // Nested, and with an asymmetric matcher inside.
+  run_ok("expect({m: new Map([['a', {b: 1}]])}).toEqual({m: new Map([['a', {b: expect.any(Number)}]])}); return 'ok'")
+    .await;
+}
+
+#[tokio::test]
+async fn to_equal_compares_dates_regexps_and_errors() {
+  run_ok("expect(new Date(5)).toEqual(new Date(5)); return 'ok'").await;
+  run_ok("expect(new Date(5)).not.toEqual(new Date(6)); return 'ok'").await;
+  run_ok("expect(new Date(NaN)).toEqual(new Date(NaN)); return 'ok'").await;
+  run_ok("expect(/ab+/gi).toEqual(/ab+/gi); return 'ok'").await;
+  run_ok("expect(/ab+/g).not.toEqual(/ab+/i); return 'ok'").await;
+  run_ok("expect(new Error('boom')).toEqual(new Error('boom')); return 'ok'").await;
+  run_ok("expect(new Error('boom')).not.toEqual(new Error('other')); return 'ok'").await;
+  run_ok("expect(new RangeError('x')).not.toEqual(new Error('x')); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn to_equal_ignores_undefined_keys_and_to_strict_equal_does_not() {
+  run_ok("expect({ a: 1, b: undefined }).toEqual({ a: 1 }); return 'ok'").await;
+  run_ok("expect({ a: 1 }).toEqual({ a: 1, b: undefined }); return 'ok'").await;
+  run_ok("expect({ a: 1, b: undefined }).not.toStrictEqual({ a: 1 }); return 'ok'").await;
+  run_ok("expect({ a: 1, b: undefined }).toStrictEqual({ a: 1, b: undefined }); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn to_strict_equal_compares_the_class() {
+  run_ok(
+    "class Point { constructor() { this.x = 1; } }
+     expect(new Point()).toEqual({ x: 1 });
+     expect(new Point()).not.toStrictEqual({ x: 1 });
+     expect(new Point()).toStrictEqual(new Point());
+     return 'ok'",
+  )
+  .await;
+}
+
+#[tokio::test]
+async fn to_strict_equal_sees_array_holes() {
+  run_ok("expect([, 1]).toEqual([undefined, 1]); return 'ok'").await;
+  run_ok("expect([, 1]).not.toStrictEqual([undefined, 1]); return 'ok'").await;
+  run_ok("expect([, 1]).toStrictEqual([, 1]); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn to_equal_compares_bigints_and_typed_arrays() {
+  run_ok("expect(1n).toEqual(1n); return 'ok'").await;
+  run_ok("expect(1n).not.toEqual(2n); return 'ok'").await;
+  run_ok("expect(new Uint8Array([1, 2])).toEqual(new Uint8Array([1, 2])); return 'ok'").await;
+  run_ok("expect(new Uint8Array([1, 2])).not.toEqual(new Uint8Array([1, 3])); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn a_cyclic_structure_terminates() {
+  run_ok(
+    "const a = { name: 'a' }; a.self = a;
+     const b = { name: 'a' }; b.self = b;
+     expect(a).toEqual(b);
+     const c = { name: 'c' }; c.self = c;
+     expect(a).not.toEqual(c);
+     return 'ok'",
+  )
+  .await;
+}
+
+#[tokio::test]
+async fn to_have_property_walks_the_live_value() {
+  run_ok("expect({ a: { b: 42 } }).toHaveProperty('a.b', 42); return 'ok'").await;
+  run_ok("expect({ arr: [10, 20] }).toHaveProperty(['arr', 1], 20); return 'ok'").await;
+  run_ok("expect({ m: new Date(3) }).toHaveProperty('m', new Date(3)); return 'ok'").await;
+  run_ok(
+    "class Holder { get computed() { return 7; } }
+     expect(new Holder()).toHaveProperty('computed', 7);
+     return 'ok'",
+  )
+  .await;
+  run_ok("expect({ a: 1 }).not.toHaveProperty('b'); return 'ok'").await;
+}
+
+#[tokio::test]
+async fn to_contain_equal_uses_deep_equality_over_live_items() {
+  run_ok("expect([{ a: 1 }]).toContainEqual({ a: 1 }); return 'ok'").await;
+  run_ok("expect([new Date(1)]).toContainEqual(new Date(1)); return 'ok'").await;
+  run_ok("expect(new Set([{ a: 1 }])).toContainEqual({ a: 1 }); return 'ok'").await;
+  run_ok("expect([{ a: 1 }]).not.toContainEqual({ a: 2 }); return 'ok'").await;
+}
+
 // ── expect.extend ────────────────────────────────────────────────────
 
 const WITHIN: &str = "const within = { toBeWithin(received, lo, hi) { \

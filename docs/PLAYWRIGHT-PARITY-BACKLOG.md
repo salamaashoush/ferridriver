@@ -21,31 +21,6 @@ record.
 
 ## Partial implementations
 
-### `expect`'s structural matchers still compare JSON snapshots
-`expect(value)` now keeps the live JS value (`bindings/expect.rs`,
-`ferridriver-expect::subject`), and the matchers Playwright defines over
-the value itself read it: `toBe` (`Object.is`), `toBeInstanceOf`
-(`instanceof`), `toContain` (`[...received].indexOf`), `toHaveLength`
-(the receiver's own `.length`), `toBeNull` / `toBeUndefined` /
-`toBeDefined` / `toBeTruthy` / `toBeFalsy` / `toBeNaN`. Any subject —
-including a function, a Locator or a Page — answers them.
-
-The structural matchers (`toEqual`, `toStrictEqual`, `toMatchObject`,
-`toContainEqual`, `toHaveProperty`, `toMatch` and the numeric family)
-still compare a `serde_json` snapshot taken at matcher time, so jest's
-`equals` distinctions ferridriver does not make are:
-
-- `Map` / `Set` / `Date` / `RegExp` compare as whatever JSON they
-  serialize to, not by their own equality;
-- `toStrictEqual` is an alias of `toEqual` — it does not check the
-  constructor or refuse an `undefined`-valued key;
-- a `bigint` has no snapshot form at all;
-- a misused receiver (`toMatch` on a non-string, `toBeGreaterThan` on a
-  non-number) fails the assertion where Playwright throws a `TypeError`.
-
-Closing those means porting jest's `equals` over `LiveValue` rather than
-over `serde_json::Value`.
-
 ### `route.fulfill` / `unroute` residuals
 `fulfill` takes `status`, `headers`, `contentType`, `body` (string or any
 byte source), `json`, `path` (read through the session sandbox) and

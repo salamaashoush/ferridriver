@@ -222,7 +222,7 @@ export interface GenericMatchers {
   toContain(expected: unknown): void;
   toContainEqual(expected: unknown): void;
   toHaveLength(length: number): void;
-  toHaveProperty(path: string, value?: unknown): void;
+  toHaveProperty(path: string | Array<string | number>, value?: unknown): void;
   toMatch(pattern: string | RegExp): void;
   toMatchObject(subset: object): void;
   toBeInstanceOf(ctor: Function): void;

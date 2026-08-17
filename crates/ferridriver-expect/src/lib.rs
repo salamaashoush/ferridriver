@@ -39,6 +39,7 @@ pub mod api_response;
 pub mod asymmetric;
 pub mod builder;
 pub mod diff;
+pub mod equality;
 pub mod extend;
 pub mod locator;
 pub mod page;
@@ -57,6 +58,7 @@ pub use builder::{
   to_pass, to_pass_with_options,
 };
 pub use diff::{json_diff, pretty_json, unified_diff};
+pub use equality::{Mode as EqualityMode, equals};
 pub use extend::{
   BUILTIN_MATCHER_NAMES, ExpectConfigure, ExpectMeta, MatcherContext, MatcherResult, MatcherSet, NO_MESSAGE, Setting,
   ValueMatcher, default_failure, finalize, invalid_result_message, is_builtin_matcher, matcher, not_a_matcher_message,
@@ -69,8 +71,8 @@ pub use poll::{
 };
 pub use soft::{SoftSink, absorb, absorb_result, with_sink};
 pub use subject::{
-  ExpectLive, JsType, LiveError, LiveValue, MatcherInputError, PromiseMismatch, PromiseMode, expect_live,
-  promise_failure,
+  ExpectLive, JsType, LiveError, LiveValue, MatcherInputError, PromiseMismatch, PromiseMode, PropSegment, Shape,
+  expect_live, promise_failure,
 };
 pub use throw::{ExpectFn, ThrowMatcher, ThrownError, expect_fn};
 pub use value::{ExpectValue, StringOrRegex, expect_value};

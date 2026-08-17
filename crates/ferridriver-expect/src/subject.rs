@@ -144,6 +144,50 @@ pub trait LiveValue: Sized {
   /// How the value prints in a failure message.
   fn describe(&self) -> String;
 
+  /// The value's structure, for a deep comparison. One call so a host
+  /// walks the value once rather than answering six questions about it.
+  fn shape(&self) -> Result<Shape<Self>, Self::Error>;
+
+  /// The constructor's name, for `toStrictEqual`'s type check — `None`
+  /// for a value with no constructor (a null-prototype object).
+  fn class_name(&self) -> Option<String>;
+
+  /// A stable identity for a reference value, used to stop a cyclic
+  /// comparison. `None` for primitives and for hosts with no notion of
+  /// identity.
+  fn ref_id(&self) -> Option<u64>;
+
+  /// The structural view, for the matchers that still compare JSON and
+  /// for rendering. `None` when the value has no such form.
+  fn as_json(&self) -> Option<serde_json::Value>;
+
+  /// Read a property the way JS does — through the prototype chain, so
+  /// a getter or an inherited field answers. `None` when the value has
+  /// no such property at all, which is what `toHaveProperty` reports as
+  /// missing.
+  ///
+  /// The default derives from [`Self::shape`], which is enough for a
+  /// host whose values are plain data.
+  fn get_prop(&self, key: &str) -> Result<Option<Self>, Self::Error> {
+    Ok(match self.shape()? {
+      Shape::Object(entries) => entries.into_iter().find(|(k, _)| k == key).map(|(_, v)| v),
+      Shape::Array(items) => match key.parse::<usize>() {
+        Ok(i) => items.into_iter().nth(i).flatten(),
+        Err(_) => None,
+      },
+      _ => None,
+    })
+  }
+
+  /// The asymmetric matcher this value IS, if any — `expect.any(...)`
+  /// and friends are ordinary objects carrying a tag.
+  fn asymmetric(&self) -> Option<crate::asymmetric::Asymmetric> {
+    self
+      .as_json()
+      .as_ref()
+      .and_then(crate::asymmetric::Asymmetric::from_value)
+  }
+
   /// `self === other`. Derived: strict equality differs from
   /// `Object.is` in exactly two places — `NaN` is never equal to itself,
   /// and `-0` equals `+0` (adding `+0.0` normalizes the sign bit, so one
@@ -222,6 +266,72 @@ pub fn promise_failure(
     received,
     None,
   )
+}
+
+/// What a value looks like to a deep comparison.
+///
+/// The variants are the ones jest's equality distinguishes: a `Date` is
+/// its instant, a `RegExp` its pattern, a `Map` its entries, and an
+/// array's holes are not the same as `undefined` values.
+#[derive(Debug)]
+pub enum Shape<V> {
+  /// Compared with `Object.is` / type rules rather than by walking.
+  Primitive,
+  /// `None` is a hole — an index the array does not have at all.
+  Array(Vec<Option<V>>),
+  /// Own enumerable string-keyed properties, in the host's order.
+  Object(Vec<(String, V)>),
+  Map(Vec<(V, V)>),
+  Set(Vec<V>),
+  /// Epoch milliseconds; `NaN` for an invalid date.
+  Date(f64),
+  RegExp {
+    source: String,
+    flags: String,
+  },
+  Error {
+    name: String,
+    message: String,
+  },
+  /// `ArrayBuffer` / typed array contents.
+  Bytes(Vec<u8>),
+  /// Compared by identity: two functions are equal only if they are the
+  /// same function.
+  Function,
+}
+
+/// One step of a `toHaveProperty` path.
+#[derive(Debug, Clone)]
+pub enum PropSegment {
+  Key(String),
+  Index(usize),
+}
+
+impl PropSegment {
+  #[must_use]
+  pub fn describe(&self) -> String {
+    match self {
+      Self::Key(k) => k.clone(),
+      Self::Index(i) => format!("[{i}]"),
+    }
+  }
+}
+
+/// Walk `path` through a live value.
+fn descend_live<V: LiveValue>(root: &V, path: &[PropSegment]) -> Result<Option<V>, V::Error> {
+  let mut current: Option<V> = None;
+  for segment in path {
+    let here = current.as_ref().unwrap_or(root);
+    let key = match segment {
+      PropSegment::Key(k) => k.clone(),
+      PropSegment::Index(i) => i.to_string(),
+    };
+    match here.get_prop(&key)? {
+      Some(v) => current = Some(v),
+      None => return Ok(None),
+    }
+  }
+  Ok(current)
 }
 
 /// A live-value assertion. Mirrors [`crate::ExpectValue`]'s builder and
@@ -454,6 +564,105 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
     )
   }
 
+  // ── structure ────────────────────────────────────────────────────
+  //
+  // The same engine `ExpectValue` uses, over the live values, so a Map,
+  // a Date, a class instance and an `undefined`-valued key mean here
+  // what they mean in Playwright.
+
+  /// `toEqual(expected)` — jest's non-strict deep equality.
+  #[track_caller]
+  pub fn to_equal(&self, expected: &V, ev: crate::asymmetric::Evaluator<'_>) -> Result<(), LiveError<V::Error>> {
+    self.structural(expected, "toEqual", crate::equality::Mode::Loose, ev)
+  }
+
+  /// `toStrictEqual(expected)` — adds the constructor check, array
+  /// sparseness, and `undefined`-valued keys.
+  #[track_caller]
+  pub fn to_strict_equal(&self, expected: &V, ev: crate::asymmetric::Evaluator<'_>) -> Result<(), LiveError<V::Error>> {
+    self.structural(expected, "toStrictEqual", crate::equality::Mode::Strict, ev)
+  }
+
+  /// `toMatchObject(subset)`.
+  #[track_caller]
+  pub fn to_match_object(&self, subset: &V, ev: crate::asymmetric::Evaluator<'_>) -> Result<(), LiveError<V::Error>> {
+    self.structural(subset, "toMatchObject", crate::equality::Mode::Subset, ev)
+  }
+
+  #[track_caller]
+  fn structural(
+    &self,
+    expected: &V,
+    method: &'static str,
+    mode: crate::equality::Mode,
+    ev: crate::asymmetric::Evaluator<'_>,
+  ) -> Result<(), LiveError<V::Error>> {
+    let pass = crate::equality::equals(self.actual, expected, mode, ev).map_err(LiveError::Host)?;
+    let diff = (!pass)
+      .then(|| match (expected.as_json(), self.actual.as_json()) {
+        (Some(e), Some(a)) => Some(crate::diff::json_diff(&e, &a)),
+        _ => None,
+      })
+      .flatten();
+    self.check_with_diff(pass, method, expected.describe(), self.actual.describe(), diff)
+  }
+
+  /// `toContainEqual(expected)` — deep equality against each item.
+  #[track_caller]
+  pub fn to_contain_equal(
+    &self,
+    expected: &V,
+    ev: crate::asymmetric::Evaluator<'_>,
+  ) -> Result<(), LiveError<V::Error>> {
+    let items = match self.actual.shape().map_err(LiveError::Host)? {
+      Shape::Array(items) => items,
+      Shape::Set(values) => values.into_iter().map(Some).collect(),
+      _ => Vec::new(),
+    };
+    let mut pass = false;
+    for item in items.iter().flatten() {
+      if crate::equality::equals(item, expected, crate::equality::Mode::Loose, ev).map_err(LiveError::Host)? {
+        pass = true;
+        break;
+      }
+    }
+    self.check(
+      pass,
+      "toContainEqual",
+      format!("containing equal {}", expected.describe()),
+      self.actual.describe(),
+    )
+  }
+
+  /// `toHaveProperty(path, value?)` — walks the live value, so a getter
+  /// or a class field answers as it would in the page.
+  #[track_caller]
+  pub fn to_have_property(
+    &self,
+    path: &[PropSegment],
+    expected: Option<&V>,
+    ev: crate::asymmetric::Evaluator<'_>,
+  ) -> Result<(), LiveError<V::Error>> {
+    let found = descend_live(self.actual, path).map_err(LiveError::Host)?;
+    let pass = match (&found, expected) {
+      (Some(_), None) => true,
+      (Some(got), Some(want)) => {
+        crate::equality::equals(got, want, crate::equality::Mode::Loose, ev).map_err(LiveError::Host)?
+      },
+      (None, _) => false,
+    };
+    let described = path.iter().map(PropSegment::describe).collect::<Vec<_>>().join(".");
+    let expectation = match expected {
+      Some(v) => format!("property {described} = {}", v.describe()),
+      None => format!("property {described}"),
+    };
+    let received = match &found {
+      Some(v) => format!("= {}", v.describe()),
+      None => "(missing)".to_string(),
+    };
+    self.check(pass, "toHaveProperty", expectation, received)
+  }
+
   // ── type and truthiness ──────────────────────────────────────────
 
   /// `toBeNull()` — `received === null`, which a snapshot cannot tell
@@ -604,6 +813,53 @@ mod tests {
         (Self::Arr(_), Self::Fun { name: "Array", .. }) => Ok(true),
         (_, Self::Fun { name: "Object", .. }) => Ok(!matches!(self, Self::Undefined | Self::Null)),
         _ => Ok(false),
+      }
+    }
+
+    fn shape(&self) -> Result<Shape<Self>, Self::Error> {
+      Ok(match self {
+        Self::Arr(items) => Shape::Array(items.iter().cloned().map(Some).collect()),
+        Self::Obj { shape, .. } => {
+          Shape::Object(shape.iter().map(|(k, v)| (k.clone(), Self::Str(v.clone()))).collect())
+        },
+        Self::Fun { .. } => Shape::Function,
+        _ => Shape::Primitive,
+      })
+    }
+
+    fn class_name(&self) -> Option<String> {
+      Some(
+        match self {
+          Self::Arr(_) => "Array",
+          Self::Obj { .. } => "Object",
+          Self::Fun { .. } => "Function",
+          _ => return None,
+        }
+        .to_string(),
+      )
+    }
+
+    fn ref_id(&self) -> Option<u64> {
+      match self {
+        Self::Obj { id, .. } => Some(u64::from(*id)),
+        _ => None,
+      }
+    }
+
+    fn as_json(&self) -> Option<serde_json::Value> {
+      match self {
+        Self::Undefined => None,
+        Self::Null => Some(serde_json::Value::Null),
+        Self::Bool(b) => Some(serde_json::json!(b)),
+        Self::Num(n) => Some(serde_json::json!(n)),
+        Self::Str(s) => Some(serde_json::json!(s)),
+        Self::Arr(items) => Some(serde_json::Value::Array(
+          items.iter().filter_map(Self::as_json).collect(),
+        )),
+        Self::Obj { shape, .. } => Some(serde_json::Value::Object(
+          shape.iter().map(|(k, v)| (k.clone(), serde_json::json!(v))).collect(),
+        )),
+        Self::Fun { .. } => None,
       }
     }
 
