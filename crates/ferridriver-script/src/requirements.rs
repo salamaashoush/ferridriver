@@ -20,8 +20,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::ResolvedExtension;
 use ferridriver_config::{ExtensionCommandsCeiling, ExtensionPolicyConfig};
-use ferridriver_script::ResolvedExtension;
 
 /// What the host provides, for a package's `requires` to be checked
 /// against.
@@ -34,6 +34,21 @@ pub struct RequirementEnv<'a> {
   pub sidecars: &'a [String],
   /// The operator's `[extensions.settings]` blocks.
   pub settings: &'a BTreeMap<String, serde_json::Value>,
+}
+
+impl<'a> RequirementEnv<'a> {
+  /// The env a host built from its resolved `[scripting]` caps and its
+  /// declared sidecars — the four things every host already has, so no
+  /// host has to assemble the gate's inputs itself.
+  #[must_use]
+  pub fn from_caps(caps: &'a crate::ScriptCaps, sidecars: &'a [String]) -> Self {
+    Self {
+      policy: &caps.extension_policy,
+      allow_env: &caps.allow_env,
+      sidecars,
+      settings: &caps.extension_settings,
+    }
+  }
 }
 
 /// One unmet or questionable requirement.
@@ -155,7 +170,7 @@ fn check_net(required: &[String], env: &RequirementEnv<'_>, push: &mut impl FnMu
   let outside: Vec<&str> = required
     .iter()
     .map(String::as_str)
-    .filter(|host| !ferridriver_script::net_entry_subsumed(host, ceiling))
+    .filter(|host| !crate::net_entry_subsumed(host, ceiling))
     .collect();
   if !outside.is_empty() {
     push(

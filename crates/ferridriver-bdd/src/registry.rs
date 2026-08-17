@@ -16,6 +16,24 @@ pub struct StepRegistry {
 }
 
 impl StepRegistry {
+  /// A registry with nothing in it — no built-in steps, no
+  /// inventory-collected Rust registrations, no parameter types beyond
+  /// cucumber's own.
+  ///
+  /// The choice belongs to the host, not to this crate: a suite that
+  /// brings its whole step library (a third-party BDD package) wants
+  /// only what it registered, because a built-in step whose expression
+  /// also matches one of its lines is an Ambiguous failure it cannot
+  /// fix from its own source.
+  #[must_use]
+  pub fn empty() -> Self {
+    Self {
+      steps: Vec::new(),
+      hooks: HookRegistry::new(),
+      param_types: ParameterTypeRegistry::new(),
+    }
+  }
+
   /// Build the registry from inventory-collected registrations.
   pub fn build() -> Self {
     let mut registry = Self {

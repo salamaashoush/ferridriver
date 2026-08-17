@@ -18,7 +18,7 @@
 
 use std::time::Instant;
 
-use ferridriver_bdd::js::{JsBddSession, bundle_steps};
+use ferridriver_bdd::js::{BddSessionSetup, JsBddSession, bundle_steps};
 
 fn step_source(marker: u128) -> String {
   format!(
@@ -79,13 +79,13 @@ async fn js_plugin_load_bench() {
 
   // Per-session load (unchanged by the disk cache).
   let bundle = bundle_steps(&globs, &dir).await.expect("bundle for session");
-  let _ = JsBddSession::load(bundle.clone(), &dir, serde_json::Value::Null, &[])
+  let _ = JsBddSession::load(bundle.clone(), &dir, &BddSessionSetup::default())
     .await
     .expect("warm session");
   let n = 50u32;
   let sess = Instant::now();
   for _ in 0..n {
-    let _ = JsBddSession::load(bundle.clone(), &dir, serde_json::Value::Null, &[])
+    let _ = JsBddSession::load(bundle.clone(), &dir, &BddSessionSetup::default())
       .await
       .expect("session load");
   }

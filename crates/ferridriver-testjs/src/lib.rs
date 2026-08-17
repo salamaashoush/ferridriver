@@ -53,6 +53,35 @@ pub fn set_test_sidecars(sidecars: Vec<ferridriver_script::sidecar::SidecarSpec>
   let _ = TEST_SIDECARS.set(sidecars);
 }
 
+/// Extensions the test VMs load, compiled once for the run. Same
+/// threading as [`set_test_script_caps`]; unset ⇒ none, which is what a
+/// harness binary with no config gets.
+static TEST_EXTENSIONS: OnceLock<Vec<ferridriver_script::ExtensionBinding>> = OnceLock::new();
+
+pub fn set_test_extensions(extensions: Vec<ferridriver_script::ExtensionBinding>) {
+  let _ = TEST_EXTENSIONS.set(extensions);
+}
+
+/// The bindings every test VM installs — the collection session and each
+/// worker alike, because a fixture or matcher an extension contributes
+/// has to exist where tests are COLLECTED as well as where they run.
+fn test_extensions() -> Vec<ferridriver_script::ExtensionBinding> {
+  TEST_EXTENSIONS.get().cloned().unwrap_or_default()
+}
+
+/// The engine config a test VM runs with. One function, because the
+/// collection session and a worker diverging is how a registration
+/// index shifts between the two.
+fn test_engine_config(
+  console: Option<Arc<dyn ferridriver_script::ConsoleSink>>,
+) -> ferridriver_script::ScriptEngineConfig {
+  ferridriver_script::ScriptEngineConfig {
+    sidecars: TEST_SIDECARS.get().cloned().unwrap_or_default(),
+    console_sink: console,
+    ..Default::default()
+  }
+}
+
 /// Discover test entry files for the config's `testMatch` globs,
 /// resolved against `cwd` (and `testDir` when set). `.feature` globs
 /// belong to the BDD path and are skipped here; `testIgnore` prunes.
@@ -194,17 +223,13 @@ impl JsTestSession {
       browser_context: None,
       request: None,
       browser: None,
-      extensions: Vec::new(),
+      extensions: test_extensions(),
       host: ferridriver_script::ExtensionHost::Test,
       caps: TEST_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
       session: None,
     };
     let console = Arc::new(TestConsole::default());
-    let engine_config = ferridriver_script::ScriptEngineConfig {
-      sidecars: TEST_SIDECARS.get().cloned().unwrap_or_default(),
-      console_sink: Some(Arc::clone(&console) as Arc<dyn ferridriver_script::ConsoleSink>),
-      ..Default::default()
-    };
+    let engine_config = test_engine_config(Some(Arc::clone(&console) as Arc<dyn ferridriver_script::ConsoleSink>));
     let session = ferridriver_script::Session::create(engine_config, &run_ctx)
       .await
       .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
@@ -365,12 +390,16 @@ pub async fn load_ts_tests(config: &TestConfig, cwd: &Path) -> anyhow::Result<Op
     browser_context: None,
     request: None,
     browser: None,
-    extensions: Vec::new(),
+    extensions: test_extensions(),
     host: ferridriver_script::ExtensionHost::Test,
     caps: TEST_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
     session: None,
   };
-  let session = ferridriver_script::Session::create(ferridriver_script::ScriptEngineConfig::default(), &run_ctx)
+  // Built from the SAME engine config a worker uses: sidecars and the
+  // console sink change what an extension's top level can do, and a
+  // collection VM that differs from a worker's is how the two come to
+  // disagree about what was registered.
+  let session = ferridriver_script::Session::create(test_engine_config(None), &run_ctx)
     .await
     .map_err(|e| anyhow::anyhow!("collection session: {}", e.message))?;
   let vm = session.vm_handle();
@@ -425,6 +454,20 @@ fn empty_plan() -> TestPlan {
 /// session pool, tearing down the previous cycle's).
 pub async fn run_ts_tests_with(mut config: TestConfig, overrides: CliOverrides) -> i32 {
   let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+  // Extensions load ONCE for the run, through the gate every host uses,
+  // and the bindings serve the collection session and every worker. The
+  // CLI has populated `overrides.extensions` since extensions existed;
+  // until now nothing on this host read it.
+  if !overrides.extensions.is_empty() && TEST_EXTENSIONS.get().is_none() {
+    let caps = TEST_SCRIPT_CAPS.get().cloned().unwrap_or_default();
+    let sidecar_names: Vec<String> = TEST_SIDECARS
+      .get()
+      .map(|s| s.iter().map(|s| s.name.clone()).collect())
+      .unwrap_or_default();
+    let env = ferridriver_script::RequirementEnv::from_caps(&caps, &sidecar_names);
+    set_test_extensions(ferridriver_script::load_bindings(&overrides.extensions, &env, &caps.extension_policy).await);
+  }
 
   // Positional files/globs on the CLI replace the config's testMatch.
   if !overrides.test_files.is_empty() {

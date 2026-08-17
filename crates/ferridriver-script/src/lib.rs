@@ -50,8 +50,10 @@ pub mod debug_session;
 pub mod discover;
 pub mod engine;
 pub mod error;
+pub mod extension_load;
 pub mod fs;
 pub mod modules;
+pub mod requirements;
 pub mod result;
 pub mod session_host;
 pub mod session_procs;
@@ -83,8 +85,10 @@ pub use engine::{
   Deadline, ExtensionHost, RunContext, RunOptions, ScriptCaps, ScriptEngine, ScriptEngineConfig, Session, SessionRun,
 };
 pub use error::{ScriptError, ScriptErrorKind};
+pub use extension_load::{GatedExtensions, gate, load_bindings};
 pub use ferridriver_config::ExtensionSpec;
 pub use fs::PathSandbox;
+pub use requirements::{RequirementEnv, RequirementIssue};
 pub use result::{ConsoleEntry, ConsoleLevel, Outcome, ScriptResult, ScriptSuccess};
 pub use session_host::{SessionScriptConfig, SessionScriptHost};
 pub use session_procs::SessionProcs;

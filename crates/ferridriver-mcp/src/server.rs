@@ -698,26 +698,16 @@ impl McpServer {
   /// never resolve, gate or promote differently.
   async fn load_extension_specs(&self) {
     let specs = self.extension_specs.clone();
-
-    // Discover every file across all configured roots, then bundle +
-    // compile + extract the whole set in ONE batch runtime (rolldown ->
-    // QuickJS bytecode; TypeScript and extension-local imports resolved).
-    // Failures are logged AND recorded on the registry so the
-    // `ferridriver_extensions` tool can report them without a restart.
-    let (resolved, discovery_errors) = crate::extension::resolve_specs(&specs);
     let mut failures: Vec<(String, String)> = Vec::new();
     let mut policy_warnings: Vec<(String, String)> = Vec::new();
-    for e in discovery_errors {
-      tracing::warn!(error = %e, "extension discovery failed; skipping path");
-      failures.push((e.source_label(), e.to_string()));
-    }
 
-    // A package states its host preconditions in `package.json`
-    // (`ferridriver.requires` / `ferridriver.settings`). Checking them
-    // here is what turns a missing binary, an unlisted `allowEnv` name,
-    // a host outside the operator ceiling, an undeclared sidecar or a
-    // mistyped settings key into one message naming the package and the
-    // config key that fixes it — instead of a failure on the first call.
+    // One resolve + gate for every host (`ferridriver_script::extension_load`):
+    // a package states its preconditions in `package.json`
+    // (`ferridriver.requires` / `ferridriver.settings`), and the gate is
+    // what turns a missing binary, an unlisted `allowEnv` name, a host
+    // outside the operator ceiling, an undeclared sidecar or a mistyped
+    // settings key into one message naming the package and the config
+    // key that fixes it — instead of a failure on the first call.
     let sidecar_names: Vec<String> = self
       .script_engine
       .config()
@@ -725,37 +715,22 @@ impl McpServer {
       .iter()
       .map(|s| s.name.clone())
       .collect();
-    let issues = crate::extension::requirements::check(
-      &resolved,
-      &crate::extension::RequirementEnv {
-        policy: &self.script_caps.extension_policy,
-        allow_env: &self.script_caps.allow_env,
-        sidecars: &sidecar_names,
-        settings: &self.script_caps.extension_settings,
-      },
-    );
-    let blocked = crate::extension::requirements::blocked_specs(&resolved, &issues);
-    for issue in issues {
+    let env = ferridriver_script::RequirementEnv::from_caps(&self.script_caps, &sidecar_names);
+    let gated = ferridriver_script::gate(&specs, &env);
+    for (spec, e) in &gated.resolve_errors {
+      tracing::warn!(extension = %spec, error = %e.message, "extension discovery failed; skipping path");
+      failures.push((spec.clone(), e.message.clone()));
+    }
+    for issue in &gated.issues {
       if issue.blocking {
         tracing::error!(source = %issue.source, "extension package requirement unmet: {}", issue.message);
-        failures.push((issue.source, issue.message));
+        failures.push((issue.source.clone(), issue.message.clone()));
       } else {
         tracing::warn!(source = %issue.source, "{}", issue.message);
-        policy_warnings.push((issue.source, issue.message));
+        policy_warnings.push((issue.source.clone(), issue.message.clone()));
       }
     }
-
-    let mut files: Vec<std::path::PathBuf> = Vec::new();
-    for r in &resolved {
-      if blocked.contains(&r.spec) {
-        continue;
-      }
-      for f in &r.files {
-        if !files.contains(f) {
-          files.push(f.clone());
-        }
-      }
-    }
+    let files = gated.files.clone();
 
     let (loaded, errors) = if files.is_empty() {
       (Vec::new(), Vec::new())

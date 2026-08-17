@@ -261,7 +261,7 @@ export interface ToolDefinition<
 }
 
 /** Which host is running this module. */
-export type ExtensionHost = 'mcp' | 'bdd' | 'script';
+export type ExtensionHost = 'mcp' | 'bdd' | 'test' | 'script';
 
 // ── package.json `ferridriver` manifest ──────────────────────────────
 

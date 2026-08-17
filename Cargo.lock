@@ -2017,6 +2017,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "inventory",
+ "jsonschema",
  "libc",
  "regex",
  "rolldown",
@@ -2038,6 +2039,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "which",
 ]
 
 [[package]]

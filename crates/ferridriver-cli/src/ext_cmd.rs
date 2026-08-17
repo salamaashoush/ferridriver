@@ -184,26 +184,31 @@ struct Resolution {
 }
 
 fn resolve_and_gate(config: &FerridriverConfig, specs: &[ferridriver_config::ExtensionSpec]) -> Resolution {
-  let (resolved, resolve_errors) = ferridriver_script::discover::resolve_extensions(specs);
-
+  // The gate every host runs (`ferridriver_script::extension_load`), so
+  // what `ext check` reports is what a run would actually load.
   let policy = config.extensions.policy();
   let settings = config.extensions.settings();
   let sidecars: Vec<String> = config.sidecars.iter().map(|s| s.name.clone()).collect();
-  let issues = ferridriver_mcp::extension::requirements::check(
-    &resolved,
-    &ferridriver_mcp::extension::RequirementEnv {
+  let gated = ferridriver_script::gate(
+    specs,
+    &ferridriver_script::RequirementEnv {
       policy: &policy,
       allow_env: &config.scripting.allow_env,
       sidecars: &sidecars,
       settings: &settings,
     },
   );
-  let blocked = ferridriver_mcp::extension::requirements::blocked_specs(&resolved, &issues);
+  let ferridriver_script::GatedExtensions {
+    resolved,
+    resolve_errors,
+    issues,
+    blocked,
+    files,
+    all_files: type_files,
+  } = gated;
 
   let mut roots: Vec<PathBuf> = Vec::new();
   let mut package_dirs: Vec<PathBuf> = Vec::new();
-  let mut files: Vec<PathBuf> = Vec::new();
-  let mut type_files: Vec<PathBuf> = Vec::new();
   for r in &resolved {
     let root = r
       .package_dir
@@ -218,19 +223,6 @@ fn resolve_and_gate(config: &FerridriverConfig, specs: &[ferridriver_config::Ext
       && !package_dirs.contains(dir)
     {
       package_dirs.push(dir.clone());
-    }
-    for f in &r.files {
-      if !type_files.contains(f) {
-        type_files.push(f.clone());
-      }
-    }
-    if blocked.contains(&r.spec) {
-      continue;
-    }
-    for f in &r.files {
-      if !files.contains(f) {
-        files.push(f.clone());
-      }
     }
   }
 

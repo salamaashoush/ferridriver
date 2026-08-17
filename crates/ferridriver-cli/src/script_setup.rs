@@ -92,7 +92,8 @@ pub async fn resolve(
     spec: spec.clone(),
     base_dir: cwd.to_path_buf(),
   }));
-  let extensions = load_extensions(&roots, &config.extensions.policy()).await;
+  let sidecar_names: Vec<String> = config.sidecars.iter().map(|s| s.name.clone()).collect();
+  let extensions = load_extensions(&roots, &caps, &sidecar_names).await;
 
   // A misconfigured secrets source fails the run: silently continuing would
   // mean an operator who asked for redaction gets none and is not told.
@@ -118,47 +119,18 @@ pub async fn resolve(
   })
 }
 
-/// Resolve, compile and extract every configured extension. A spec that fails
-/// to resolve or compile is warned about and skipped: one broken extension
-/// must not take down the run.
+/// Resolve, gate, compile and extract every configured extension through
+/// the one loader every host uses. A spec that fails to resolve, a
+/// package the gate blocks and a file that will not compile are each
+/// warned about and skipped: one broken extension must not take the run
+/// down.
 async fn load_extensions(
   roots: &[ferridriver_script::ExtensionSpec],
-  policy: &ferridriver_config::ExtensionPolicyConfig,
+  caps: &ferridriver_script::ScriptCaps,
+  sidecars: &[String],
 ) -> Vec<ferridriver_script::ExtensionBinding> {
-  if roots.is_empty() {
-    return Vec::new();
-  }
-  let (mut files, errors) = ferridriver_script::discover::resolve_extension_specs_with_bases(roots);
-  for (spec, e) in errors {
-    tracing::warn!(extension = %spec, error = %e.message, "extension discovery failed; skipping");
-  }
-  if files.is_empty() {
-    return Vec::new();
-  }
-  // rolldown resolves the bundle entry from an absolute id; a relative
-  // path (e.g. `extensions = ["gateway.ts"]` in ferridriver.toml) would
-  // fail with UnresolvedEntry. Canonicalize, dropping any that vanished.
-  files = files
-    .into_iter()
-    .filter_map(|f| match std::fs::canonicalize(&f) {
-      Ok(abs) => Some(abs),
-      Err(e) => {
-        tracing::warn!(path = %f.display(), error = %e, "extension path not found; skipping");
-        None
-      },
-    })
-    .collect();
-  let (compiled, failures) = ferridriver_script::compile_and_extract_extensions(&files, policy).await;
-  for (path, err) in failures {
-    tracing::warn!(path = %path.display(), error = %err.message, "extension compile failed; skipping");
-  }
-  compiled
-    .into_iter()
-    .map(|cp| ferridriver_script::ExtensionBinding {
-      bytecode: cp.bytecode,
-      name: cp.path.display().to_string(),
-    })
-    .collect()
+  let env = ferridriver_script::RequirementEnv::from_caps(caps, sidecars);
+  ferridriver_script::load_bindings(roots, &env, &caps.extension_policy).await
 }
 
 /// Lower the declared `[[sidecars]]` config entries into the scripting

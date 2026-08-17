@@ -111,6 +111,37 @@ pub struct JsBddSession {
   world_parameters: serde_json::Value,
 }
 
+/// Everything a worker's step VM is built from, beyond the compiled
+/// step bundle itself. Carried as one value because it is decided once
+/// per run and every worker must be built identically — a session that
+/// differs from its siblings is a scenario that passes on one worker
+/// and fails on another.
+#[derive(Clone)]
+pub struct BddSessionSetup {
+  /// Cucumber `--world-parameters`, exposed as `this.parameters`.
+  pub world_parameters: serde_json::Value,
+  /// Config `use` keys no built-in option claims. Decided against the
+  /// chains this VM registered, once it has evaluated.
+  pub open_use_keys: Arc<Vec<String>>,
+  /// Extensions, compiled and gated by the loader every host shares.
+  /// Installed as bytecode, exactly as the MCP and script hosts install
+  /// them — never bundled into the step module.
+  pub extensions: Arc<Vec<ferridriver_script::ExtensionBinding>>,
+  /// Include ferridriver's built-in Rust step library.
+  pub builtin_steps: bool,
+}
+
+impl Default for BddSessionSetup {
+  fn default() -> Self {
+    Self {
+      world_parameters: serde_json::Value::Null,
+      open_use_keys: Arc::new(Vec::new()),
+      extensions: Arc::new(Vec::new()),
+      builtin_steps: true,
+    }
+  }
+}
+
 /// Discover step entry files for the given globs (relative globs are
 /// resolved against `cwd`). Empty globs fall back to the cucumber-js
 /// defaults. `.ts`/`.tsx` are included — rolldown transpiles them.
@@ -160,19 +191,36 @@ pub async fn bundle_steps(globs: &[String], cwd: &Path) -> anyhow::Result<Arc<Co
   bundle_steps_with(globs, &[], cwd).await
 }
 
-/// Like [`bundle_steps`] but also bundles the configured `extensions`
-/// (top-level config) into the same module, so an extension's BDD steps
-/// are available to the test runner exactly like a step file's.
+/// Like [`bundle_steps`] but with the configured `extensions` taken into
+/// account.
+///
+/// Extensions are NOT bundled in any more: they are compiled and gated
+/// like every other host's (`ferridriver_script::extension_load`) and
+/// installed into the session as bytecode. What survives here is the
+/// overlap rule — a file reachable from BOTH the step globs and an
+/// extension entry must be bundled ONCE, or its steps register twice
+/// and every scenario using them fails Ambiguous. The extension entry
+/// wins, because that is the copy the session installs.
 pub async fn bundle_steps_with(
   globs: &[String],
   extensions: &[ferridriver_script::ExtensionSpec],
   cwd: &Path,
 ) -> anyhow::Result<Arc<CompiledBundle>> {
   let mut files = discover_step_files(globs, cwd);
-  files.extend(discover_extension_files(extensions));
+  let extension_files = discover_extension_files(extensions);
+  let before = files.len();
+  files.retain(|f| !extension_files.contains(f));
+  if files.len() < before {
+    tracing::warn!(
+      target: "ferridriver::bdd",
+      dropped = before - files.len(),
+      "bdd.steps.claimed_by_extension: a step file is also an extension entry; \
+       it is loaded once, as the extension, so its steps register once"
+    );
+  }
   files.sort();
   files.dedup();
-  if files.is_empty() {
+  if files.is_empty() && extension_files.is_empty() {
     let pats: Vec<&str> = if globs.is_empty() {
       DEFAULT_STEP_GLOBS.to_vec()
     } else {
@@ -185,9 +233,18 @@ pub async fn bundle_steps_with(
       cwd.display()
     );
   }
+  if files.is_empty() {
+    // Every step file was claimed by an extension entry. The session
+    // still evaluates a step module, so give it an empty one rather than
+    // teaching every caller that the bundle is optional.
+    let bundle = ferridriver_script::compile_bundled_source("export {};\n", "ferridriver-bdd-steps.js", None)
+      .await
+      .map_err(|e| anyhow::anyhow!("empty step bundle: {}", e.message))?;
+    return Ok(Arc::new(bundle));
+  }
   let bundle = bundle_and_compile(&files, cwd)
     .await
-    .map_err(|e| anyhow::anyhow!("bundle step/extension files: {}", e.message))?;
+    .map_err(|e| anyhow::anyhow!("bundle step files: {}", e.message))?;
   Ok(Arc::new(bundle))
 }
 
@@ -228,19 +285,16 @@ impl JsBddSession {
   /// once + [`JsBddSession::load`] per worker.
   pub async fn from_globs(globs: &[String], cwd: &Path) -> anyhow::Result<Self> {
     let bundle = bundle_steps(globs, cwd).await?;
-    Self::load(bundle, cwd, serde_json::Value::Null, &[]).await
+    Self::load(bundle, cwd, &BddSessionSetup::default()).await
   }
 
   /// Create a shared-engine session and link the precompiled bundled
   /// step module (one `Module::load`, no parse, no resolver — imports
   /// are inlined by rolldown). Builds the Rust step registry from what
   /// the module registered.
-  pub async fn load(
-    bundle: Arc<CompiledBundle>,
-    cwd: &Path,
-    world_parameters: serde_json::Value,
-    open_use_keys: &[String],
-  ) -> anyhow::Result<Self> {
+  pub async fn load(bundle: Arc<CompiledBundle>, cwd: &Path, setup: &BddSessionSetup) -> anyhow::Result<Self> {
+    let world_parameters = setup.world_parameters.clone();
+    let open_use_keys: &[String] = &setup.open_use_keys;
     let sandbox =
       Arc::new(PathSandbox::new(cwd).map_err(|e| anyhow::anyhow!("sandbox {}: {}", cwd.display(), e.message))?);
     let run_ctx = RunContext {
@@ -251,7 +305,7 @@ impl JsBddSession {
       browser_context: None,
       request: None,
       browser: None,
-      extensions: Vec::new(),
+      extensions: (*setup.extensions).clone(),
       host: ferridriver_script::ExtensionHost::Bdd,
       // `[scripting]` caps threaded from resolved config by the
       // `ferridriver bdd` entry (`set_bdd_script_caps`), exactly like
@@ -288,7 +342,11 @@ impl JsBddSession {
         .map_err(|e| anyhow::anyhow!(e))?;
     }
 
-    let mut registry = StepRegistry::build();
+    let mut registry = if setup.builtin_steps {
+      StepRegistry::build()
+    } else {
+      StepRegistry::empty()
+    };
     for pt in &snapshot.param_types {
       registry
         .register_param_type(CustomParamType {
@@ -857,6 +915,19 @@ pub fn set_bdd_sidecars(sidecars: Vec<ferridriver_script::sidecar::SidecarSpec>)
   let _ = BDD_SIDECARS.set(sidecars);
 }
 
+/// The caps a BDD step VM runs with — also what the extension gate is
+/// checked against, so a package's `requires` is answered by the same
+/// environment its tools will run in.
+#[must_use]
+pub fn bdd_script_caps() -> ferridriver_script::ScriptCaps {
+  BDD_SCRIPT_CAPS.get().cloned().unwrap_or_default()
+}
+
+#[must_use]
+pub fn bdd_sidecars() -> Vec<ferridriver_script::sidecar::SidecarSpec> {
+  BDD_SIDECARS.get().cloned().unwrap_or_default()
+}
+
 /// End every worker session this run created: `AfterAll` hooks, then
 /// the teardown half of every worker-scoped fixture, then the sessions
 /// themselves. Call once after `TestRunner::run` returns — a worker VM
@@ -880,8 +951,7 @@ async fn worker_session(
   worker_index: u32,
   bundle: Arc<CompiledBundle>,
   cwd: Arc<PathBuf>,
-  world_parameters: serde_json::Value,
-  open_use_keys: Arc<Vec<String>>,
+  setup: BddSessionSetup,
 ) -> Result<Arc<JsBddSession>, String> {
   let map = WORKER_SESSIONS.get_or_init(DashMap::new);
   let cell = map
@@ -890,7 +960,7 @@ async fn worker_session(
     .clone();
   cell
     .get_or_try_init(|| async move {
-      JsBddSession::load(bundle, &cwd, world_parameters, &open_use_keys)
+      JsBddSession::load(bundle, &cwd, &setup)
         .await
         .map(Arc::new)
         .map_err(|e| e.to_string())
@@ -909,6 +979,7 @@ pub fn translate_features_js(
   config: &ferridriver_test::config::TestConfig,
   bundle: Arc<CompiledBundle>,
   cwd: PathBuf,
+  extensions: Arc<Vec<ferridriver_script::ExtensionBinding>>,
 ) -> ferridriver_test::model::TestPlan {
   use ferridriver_test::model::{ExpectedStatus, Hooks, SuiteMode, TestCase, TestFailure, TestFn, TestId, TestSuite};
 
@@ -916,7 +987,12 @@ pub fn translate_features_js(
   // Open `use` keys travel with the plan: what each one means is only
   // decidable once a worker VM has evaluated the step bundle and its
   // `test.extend` chains exist.
-  let open_use_keys = Arc::new(config.open_use_keys().into_iter().cloned().collect::<Vec<String>>());
+  let setup = BddSessionSetup {
+    world_parameters: config.world_parameters.clone(),
+    open_use_keys: Arc::new(config.open_use_keys().into_iter().cloned().collect::<Vec<String>>()),
+    extensions,
+    builtin_steps: config.builtin_steps,
+  };
   let mut suites = Vec::new();
 
   for feature in &feature_set.features {
@@ -948,18 +1024,16 @@ pub fn translate_features_js(
       let bundle = Arc::clone(&bundle);
       let cwd = Arc::clone(&cwd);
       let browser_config = config.browser.clone();
-      let world_parameters = config.world_parameters.clone();
       let bdd_strict = config.strict;
-      let open_use_keys = Arc::clone(&open_use_keys);
+      let setup = setup.clone();
 
       let test_fn: TestFn = Arc::new(move |pool: FixturePool| {
         let scenario = Arc::clone(&scenario);
         let bundle = Arc::clone(&bundle);
         let cwd = Arc::clone(&cwd);
         let browser_config = browser_config.clone();
-        let world_parameters = world_parameters.clone();
         let bdd_strict = bdd_strict;
-        let open_use_keys = Arc::clone(&open_use_keys);
+        let setup = setup.clone();
         Box::pin(async move {
           let browser = pool
             .get("browser")
@@ -982,7 +1056,7 @@ pub fn translate_features_js(
             .await
             .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
 
-          let session = worker_session(test_info.worker_index, bundle, cwd, world_parameters, open_use_keys)
+          let session = worker_session(test_info.worker_index, bundle, cwd, setup)
             .await
             .map_err(|e| TestFailure::from(format!("JS step load failed: {e}")))?;
 

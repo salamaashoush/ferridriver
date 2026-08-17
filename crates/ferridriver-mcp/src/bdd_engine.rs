@@ -168,9 +168,28 @@ impl BddEngine {
     {
       tracing::warn!(error = %e, "run_bdd: AfterAll on reload failed");
     }
+    // Extensions are installed as compiled bytecode, gated by the loader
+    // every host shares — never bundled into the step module. The caps
+    // are the ones the tool call just threaded in, so a package's
+    // `requires` is answered by the environment its tools will run in.
+    let caps = js::bdd_script_caps();
+    let sidecar_names: Vec<String> = js::bdd_sidecars().iter().map(|s| s.name.clone()).collect();
+    let env = ferridriver_script::RequirementEnv::from_caps(&caps, &sidecar_names);
+    let bindings = ferridriver_script::load_bindings(extensions, &env, &caps.extension_policy).await;
     // The MCP host runs scenarios against a live browser session, not a
     // `[test]` config layer, so there is no `use` block to decide.
-    let session = Arc::new(JsBddSession::load(Arc::clone(&bundle), cwd, world_params, &[]).await?);
+    let session = Arc::new(
+      JsBddSession::load(
+        Arc::clone(&bundle),
+        cwd,
+        &ferridriver_bdd::js::BddSessionSetup {
+          world_parameters: world_params,
+          extensions: Arc::new(bindings),
+          ..Default::default()
+        },
+      )
+      .await?,
+    );
     self.key = key;
     self.content_hash = ch;
     self.record_inputs(&bundle, globs, extensions, cwd);

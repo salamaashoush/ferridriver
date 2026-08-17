@@ -25,6 +25,8 @@ js-dump-leaks = ["rquickjs/dump-leaks"]
 [dependencies]
 ferridriver = { workspace = true }
 ferridriver-config = { workspace = true }
+jsonschema = { workspace = true }
+which = { workspace = true }
 ferridriver-expect = { workspace = true }
 ferridriver-test = { workspace = true }
 ferridriver-jsstd = { workspace = true }

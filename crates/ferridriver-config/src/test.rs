@@ -286,6 +286,15 @@ pub struct TestConfig {
   #[serde(default)]
   pub metadata: serde_json::Value,
   pub strict: bool,
+  /// Whether ferridriver's own Rust step library (and any
+  /// inventory-registered step in the running binary) is part of the
+  /// registry a JS/TS step suite runs against.
+  ///
+  /// On by default, which is what a suite written for ferridriver
+  /// expects. A suite that brings its whole step library turns it off:
+  /// a built-in expression that also matches one of its lines is an
+  /// Ambiguous failure it cannot fix from its own source.
+  pub builtin_steps: bool,
   pub order: String,
   pub language: Option<String>,
   /// Cucumber `--world-parameters`: JSON exposed to every scenario as
@@ -1020,6 +1029,7 @@ impl Default for TestConfig {
       config_grep_invert: None,
       metadata: serde_json::Value::Null,
       strict: true,
+      builtin_steps: true,
       order: "defined".into(),
       language: None,
       world_parameters: serde_json::Value::Null,

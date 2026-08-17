@@ -13,7 +13,10 @@
 pub mod loader;
 pub mod manifest;
 pub mod registry;
-pub mod requirements;
+
+/// The requirements gate now lives in `ferridriver-script`, so the test
+/// and BDD hosts can gate without depending on this crate.
+pub use ferridriver_script::requirements;
 
 pub use loader::{ExtensionLoadError, LoadedExtension, discover, discover_specs, load_all, resolve_specs};
 pub use manifest::{ToolAllow, ToolManifest};

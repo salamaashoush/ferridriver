@@ -143,7 +143,7 @@ pub struct RunOptions {
 }
 
 /// Which host is running the extension/registry. Exposed to JS as the
-/// native global `ferridriver.host` ("mcp" | "bdd" | "script") so one
+/// native global `ferridriver.host` ("mcp" | "bdd" | "test" | "script") so one
 /// extension file can branch its contributions — e.g. only `tool`
 /// under MCP, only `Given/When/Then` under the test runner — without any
 /// runtime cost (a single string set once per session).

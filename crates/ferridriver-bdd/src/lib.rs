@@ -367,6 +367,21 @@ async fn build_bdd_plan(
     let bundle = js::bundle_steps_with(js_globs, extensions, &cwd)
       .await
       .map_err(|e| format!("step bundle error: {e}"))?;
-    Ok(js::translate_features_js(&feature_set, config, bundle, cwd))
+    // Extensions load once per plan build, through the gate every host
+    // shares, and every worker VM installs the same bytecode. Before
+    // this they were bundled into the step module as SOURCE: never
+    // gated, never manifest-extracted, and out of reach of the
+    // `[extensions.policy]` ceiling.
+    let caps = js::bdd_script_caps();
+    let sidecar_names: Vec<String> = js::bdd_sidecars().iter().map(|s| s.name.clone()).collect();
+    let env = ferridriver_script::RequirementEnv::from_caps(&caps, &sidecar_names);
+    let bindings = ferridriver_script::load_bindings(extensions, &env, &caps.extension_policy).await;
+    Ok(js::translate_features_js(
+      &feature_set,
+      config,
+      bundle,
+      cwd,
+      Arc::new(bindings),
+    ))
   }
 }
