@@ -268,6 +268,18 @@ strings), `swap16` / `swap32` / `swap64`, `compare`, and `Buffer.poolSize`.
     is what every browser engine produces. Only `undefined` (the argument
     omitted) means empty.
 
+23. **`encoding/mod.rs` — `windows-1252` / `latin1` / `ascii` are real.**
+    Upstream folds `Windows1252` into the UTF-8 arm in every direction,
+    so `new TextDecoder('windows-1252').decode([0xE9])` answered U+FFFD
+    and `Buffer.from('é', 'latin1')` produced the two UTF-8 bytes rather
+    than one. Worse, one label map served both consumers, which cannot
+    be right: Node's `latin1` is ISO-8859-1 and its `ascii` masks the
+    high bit, while the WHATWG Encoding Standard maps BOTH labels to
+    `windows-1252`. There are now two maps — `Encoder::from_str` for
+    Buffer, `Encoder::from_web_label` for `TextDecoder` — and three
+    single-byte variants (`Windows1252` with the real 0x80-0x9F index,
+    `Latin1`, `Ascii`) implemented in both directions.
+
 22. **`url/mod.rs` — `fileURLToPath` decodes and validates.** Upstream
     strips the `file://` prefix and hands the rest to `PathBuf`: the
     scheme is never checked, a host is silently swallowed, a query or

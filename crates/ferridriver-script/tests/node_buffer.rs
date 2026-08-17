@@ -116,3 +116,54 @@ async fn buffer_is_a_uint8array_subclass_with_node_surface() {
   assert_eq!(value["maxLength"], serde_json::Value::Bool(true));
   assert_eq!(value["atobIsGlobal"], serde_json::Value::Bool(true));
 }
+
+/// Node's `latin1` / `binary` is ISO-8859-1 and its `ascii` masks the
+/// high bit — neither is UTF-8, and neither is the WHATWG
+/// `windows-1252` a `TextDecoder` means by the same label.
+#[tokio::test(flavor = "multi_thread")]
+async fn buffer_latin1_and_ascii_are_node_encodings() {
+  let dir = tempfile::tempdir().expect("tempdir");
+  let context = ctx(dir.path());
+  let session = Session::create(ScriptEngineConfig::default(), &context)
+    .await
+    .expect("session");
+  let value = run(
+    "export default {
+       latin1Bytes: Array.from(Buffer.from('\\u00e9A', 'latin1')),
+       latin1RoundTrip: Buffer.from([0xe9, 0x41]).toString('latin1'),
+       binaryIsLatin1: Buffer.from([0x80]).toString('binary'),
+       truncated: Array.from(Buffer.from('\\u20ac', 'latin1')),
+       asciiMasked: Array.from(Buffer.from('\\u00e9', 'ascii')),
+       asciiDecode: Buffer.from([0xe9]).toString('ascii'),
+       utf8Stays: Array.from(Buffer.from('\\u00e9', 'utf8')),
+       webLabel: new TextDecoder('windows-1252').decode(new Uint8Array([0x80])),
+     };",
+    dir.path(),
+    &session,
+    &context,
+  )
+  .await;
+  assert_eq!(value["latin1Bytes"], serde_json::json!([0xe9, 0x41]), "{value}");
+  assert_eq!(value["latin1RoundTrip"], "\u{e9}A");
+  assert_eq!(value["binaryIsLatin1"], "\u{80}", "binary is latin1, not windows-1252");
+  assert_eq!(
+    value["truncated"],
+    serde_json::json!([0xac]),
+    "Node truncates a code point above U+00FF to its low byte"
+  );
+  assert_eq!(
+    value["asciiMasked"],
+    serde_json::json!([0x69]),
+    "ascii masks the high bit"
+  );
+  assert_eq!(value["asciiDecode"], "i");
+  assert_eq!(
+    value["utf8Stays"],
+    serde_json::json!([0xc3, 0xa9]),
+    "utf8 is unaffected by the split"
+  );
+  assert_eq!(
+    value["webLabel"], "\u{20ac}",
+    "the same label means windows-1252 to a TextDecoder"
+  );
+}

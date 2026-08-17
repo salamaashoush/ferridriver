@@ -284,8 +284,10 @@ async fn text_decoder_honours_fatal_stream_bom_and_labels() {
   let o = run(
     "const out = {}; \
      out.label = new TextDecoder('UTF-8').encoding; \
-     try { new TextDecoder('windows-1252'); out.badLabel = 'no throw'; } \
+     try { new TextDecoder('shift_jis'); out.badLabel = 'no throw'; } \
      catch (e) { out.badLabel = e.name; } \
+     out.latin1 = new TextDecoder('windows-1252').decode(new Uint8Array([0xe9, 0x41])); \
+     out.utf16 = new TextDecoder('utf-16le').decode(new Uint8Array([0x68, 0x00, 0x69, 0x00])); \
      out.lossy = new TextDecoder().decode(new Uint8Array([0xff, 0x41])); \
      try { new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array([0xff])); \
        out.fatal = 'no throw'; } catch (e) { out.fatal = e.name; } \
@@ -307,6 +309,12 @@ async fn text_decoder_honours_fatal_stream_bom_and_labels() {
     serde_json::json!("RangeError"),
     "an unimplemented encoding is refused, not silently misdecoded"
   );
+  assert_eq!(
+    v["latin1"],
+    serde_json::json!("\u{e9}A"),
+    "windows-1252 is implemented, not merely accepted"
+  );
+  assert_eq!(v["utf16"], serde_json::json!("hi"), "utf-16le is implemented");
   assert_eq!(v["lossy"], serde_json::json!("\u{fffd}A"), "default is lossy");
   assert_eq!(
     v["fatal"],

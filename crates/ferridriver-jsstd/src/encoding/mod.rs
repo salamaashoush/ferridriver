@@ -9,13 +9,78 @@ use hex_simd::AsciiCase;
 pub enum Encoder {
     Hex,
     Base64,
+    /// WHATWG `windows-1252`: bytes 0x80-0x9F carry the punctuation
+    /// block, everything else is Latin-1. What `TextDecoder` uses for
+    /// this label family.
     Windows1252,
+    /// Node's `latin1` / `binary` Buffer encoding: byte value IS the
+    /// code point, and encoding truncates anything above U+00FF.
+    Latin1,
+    /// Node's `ascii` Buffer encoding, which MASKS the high bit rather
+    /// than treating the byte as Latin-1.
+    Ascii,
     Utf8,
     Utf16le,
     Utf16be,
 }
 
+/// Code points for bytes 0x80-0x9F under `windows-1252`. The five
+/// unassigned slots map to the C1 control of the same value, per the
+/// WHATWG index.
+const WINDOWS_1252_HIGH: [char; 32] = [
+    '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}', '\u{017D}', '\u{008F}',
+    '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+];
+
+fn windows_1252_to_string(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| match b {
+            0x80..=0x9F => WINDOWS_1252_HIGH[usize::from(b - 0x80)],
+            other => char::from(*other),
+        })
+        .collect()
+}
+
+fn string_to_windows_1252(string: &str) -> Vec<u8> {
+    string
+        .chars()
+        .map(|c| {
+            if let Some(index) = WINDOWS_1252_HIGH.iter().position(|high| *high == c) {
+                #[allow(clippy::cast_possible_truncation)]
+                return 0x80 + index as u8;
+            }
+            u8::try_from(u32::from(c)).unwrap_or(b'?')
+        })
+        .collect()
+}
+
+/// Node's Buffer encodings. Node and the WHATWG Encoding Standard
+/// disagree on what several labels MEAN — `latin1` is ISO-8859-1 for a
+/// Buffer but `windows-1252` for a `TextDecoder`, and `ascii` masks the
+/// high bit for a Buffer while decoding as `windows-1252` for a
+/// `TextDecoder` — so each consumer looks its label up in its own map.
+const NODE_ENCODING_MAP: phf::Map<&'static str, Encoder> = phf::phf_map! {
+    "buffer" => Encoder::Utf8,
+    "hex" => Encoder::Hex,
+    "base64" => Encoder::Base64,
+    "utf-8" => Encoder::Utf8,
+    "utf8" => Encoder::Utf8,
+    "ucs-2" => Encoder::Utf16le,
+    "ucs2" => Encoder::Utf16le,
+    "utf-16le" => Encoder::Utf16le,
+    "utf16le" => Encoder::Utf16le,
+    "latin1" => Encoder::Latin1,
+    "binary" => Encoder::Latin1,
+    "ascii" => Encoder::Ascii,
+};
+
+/// The WHATWG Encoding Standard's label index, for `TextDecoder`.
 const ENCODING_MAP: phf::Map<&'static str, Encoder> = phf::phf_map! {
+    "ascii" => Encoder::Windows1252,
+    "latin1" => Encoder::Windows1252,
     "buffer" => Encoder::Utf8,
     "hex" => Encoder::Hex,
     "base64" => Encoder::Base64,
@@ -37,7 +102,6 @@ const ENCODING_MAP: phf::Map<&'static str, Encoder> = phf::phf_map! {
     "unicodefffe" => Encoder::Utf16be,
     "utf-16be" => Encoder::Utf16be,
     "ansi_x3.4-1968" => Encoder::Windows1252,
-    "ascii" => Encoder::Windows1252,
     "cp1252" => Encoder::Windows1252,
     "cp819" => Encoder::Windows1252,
     "csisolatin1" => Encoder::Windows1252,
@@ -49,7 +113,6 @@ const ENCODING_MAP: phf::Map<&'static str, Encoder> = phf::phf_map! {
     "iso_8859-1" => Encoder::Windows1252,
     "iso_8859-1:1987" => Encoder::Windows1252,
     "l1" => Encoder::Windows1252,
-    "latin1" => Encoder::Windows1252,
     "us-ascii" => Encoder::Windows1252,
     "windows-1252" => Encoder::Windows1252,
     "x-cp1252" => Encoder::Windows1252,
@@ -63,19 +126,39 @@ impl Encoder {
         }
     }
 
+    /// A Node Buffer encoding name.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(encoding: &str) -> Result<Self, String> {
-        ENCODING_MAP
+        NODE_ENCODING_MAP
             .get(encoding.trim_ascii().to_ascii_lowercase().as_str())
             .cloned()
             .ok_or_else(|| ["The \"", encoding, "\" encoding is not supported"].concat())
+    }
+
+    /// A WHATWG Encoding Standard label, as `TextDecoder` takes.
+    pub fn from_web_label(label: &str) -> Result<Self, String> {
+        ENCODING_MAP
+            .get(label.trim_ascii().to_ascii_lowercase().as_str())
+            .cloned()
+            .ok_or_else(|| ["The \"", label, "\" encoding is not supported"].concat())
+    }
+
+    /// A WHATWG label, defaulting to UTF-8 when absent or empty.
+    pub fn from_optional_web_label(label: Option<&str>) -> Result<Self, String> {
+        match label {
+            Some(label) if !label.is_empty() => Self::from_web_label(label),
+            _ => Ok(Self::Utf8),
+        }
     }
 
     pub fn encode_to_string(&self, bytes: &[u8], lossy: bool) -> Result<String, String> {
         match self {
             Self::Hex => Ok(bytes_to_hex_string(bytes)),
             Self::Base64 => Ok(bytes_to_b64_string(bytes)),
-            Self::Utf8 | Self::Windows1252 => bytes_to_utf8_string(bytes, lossy),
+            Self::Utf8 => bytes_to_utf8_string(bytes, lossy),
+            Self::Windows1252 => Ok(windows_1252_to_string(bytes)),
+            Self::Latin1 => Ok(bytes.iter().map(|b| char::from(*b)).collect()),
+            Self::Ascii => Ok(bytes.iter().map(|b| char::from(b & 0x7F)).collect()),
             Self::Utf16le => bytes_to_utf16_string(bytes, Endian::Little, lossy),
             Self::Utf16be => bytes_to_utf16_string(bytes, Endian::Big, lossy),
         }
@@ -86,7 +169,9 @@ impl Encoder {
         match self {
             Self::Hex => Ok(bytes_to_hex(bytes)),
             Self::Base64 => Ok(bytes_to_b64(bytes)),
-            Self::Utf8 | Self::Windows1252 | Self::Utf16le | Self::Utf16be => Ok(bytes.to_vec()),
+            Self::Utf8 | Self::Windows1252 | Self::Latin1 | Self::Ascii | Self::Utf16le | Self::Utf16be => {
+                Ok(bytes.to_vec())
+            },
         }
     }
 
@@ -94,7 +179,7 @@ impl Encoder {
         match self {
             Self::Hex => bytes_from_hex(bytes),
             Self::Base64 => bytes_from_b64(bytes),
-            Self::Utf8 | Self::Windows1252 | Self::Utf16le | Self::Utf16be => {
+            Self::Utf8 | Self::Windows1252 | Self::Latin1 | Self::Ascii | Self::Utf16le | Self::Utf16be => {
                 Ok(bytes.into().into())
             },
         }
@@ -104,7 +189,14 @@ impl Encoder {
         match self {
             Self::Hex => bytes_from_hex(string.into_bytes()),
             Self::Base64 => bytes_from_b64(string.into_bytes()),
-            Self::Utf8 | Self::Windows1252 => Ok(string.into_bytes()),
+            Self::Utf8 => Ok(string.into_bytes()),
+            Self::Windows1252 => Ok(string_to_windows_1252(&string)),
+            // Node truncates rather than refusing: `Buffer.from('€',
+            // 'latin1')` is one byte, the low byte of the code point.
+            #[allow(clippy::cast_possible_truncation)]
+            Self::Latin1 => Ok(string.chars().map(|c| u32::from(c) as u8).collect()),
+            #[allow(clippy::cast_possible_truncation)]
+            Self::Ascii => Ok(string.chars().map(|c| (u32::from(c) as u8) & 0x7F).collect()),
             Self::Utf16le => Ok(string
                 .encode_utf16()
                 .flat_map(|utf16| utf16.to_le_bytes())
@@ -121,6 +213,8 @@ impl Encoder {
             Self::Hex => "hex",
             Self::Base64 => "base64",
             Self::Windows1252 => "windows-1252",
+            Self::Latin1 => "latin1",
+            Self::Ascii => "ascii",
             Self::Utf8 => "utf-8",
             Self::Utf16le => "utf-16le",
             Self::Utf16be => "utf-16be",
