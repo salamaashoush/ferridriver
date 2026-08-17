@@ -176,6 +176,10 @@ fn ctx_of<'js>(args: &[Value<'js>]) -> Result<Ctx<'js>, rquickjs::Error> {
 }
 
 fn register_step(kind: StepKind, args: &[Value<'_>]) -> rquickjs::Result<()> {
+  register_step_in(kind, args, None)
+}
+
+fn register_step_in(kind: StepKind, args: &[Value<'_>], fixture_set: Option<usize>) -> rquickjs::Result<()> {
   let ctx = ctx_of(args)?;
   let pattern = args
     .first()
@@ -198,12 +202,17 @@ fn register_step(kind: StepKind, args: &[Value<'_>]) -> rquickjs::Result<()> {
       is_regex,
       func: saved,
       timeout_ms,
+      fixture_set,
     });
   })
   .map_err(|e| rq(&e))
 }
 
 fn register_hook(kind: &str, args: &[Value<'_>]) -> rquickjs::Result<()> {
+  register_hook_in(kind, args, None)
+}
+
+fn register_hook_in(kind: &str, args: &[Value<'_>], fixture_set: Option<usize>) -> rquickjs::Result<()> {
   let ctx = ctx_of(args)?;
   let first = args
     .first()
@@ -233,6 +242,7 @@ fn register_hook(kind: &str, args: &[Value<'_>]) -> rquickjs::Result<()> {
       tags,
       func: saved,
       timeout_ms,
+      fixture_set,
     });
   })
   .map_err(|e| rq(&e))
@@ -318,7 +328,7 @@ pub async fn drain_attachments(vm: &crate::vm::VmHandle) -> Result<Vec<ScriptAtt
 /// Install the native cucumber + MCP-tool surface and the shared
 /// extension registry as context userdata. Idempotent; called once at
 /// `Session::create`.
-pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   // Shared extension registry + native `defineTool`/`tool` contribution
   // point. `None` back means it was already installed — the cucumber
   // surface below is idempotent to re-set, but keep the early return so
@@ -343,6 +353,50 @@ pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     g.set(name, f.clone())?;
     bdd.set(name, f)?;
   }
+
+  // `bindSteps(test)` — the native primitive behind playwright-bdd's
+  // `createBdd(test)`: the returned registrars record which fixture
+  // chain a step resolves its first parameter from, so
+  // `Given('...', async ({ myFixture }) => …)` works for a suite that
+  // built that fixture with `test.extend` / `mergeTests`.
+  let bind_steps = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, test: Value<'js>| -> rquickjs::Result<Object<'js>> {
+      let Some(set) = crate::bindings::test::fixture_set_of(&ctx, &test) else {
+        return Err(rq(&ScriptError::internal(
+          "bindSteps() accepts a \"test\" function as its parameter.\nDid you mean to pass the object `test.extend()`            returned?"
+            .to_string(),
+        )));
+      };
+      let bound = Object::new(ctx.clone())?;
+      for (name, kind) in [
+        ("Given", StepKind::Given),
+        ("When", StepKind::When),
+        ("Then", StepKind::Then),
+        ("Step", StepKind::Step),
+        ("defineStep", StepKind::Step),
+        ("And", StepKind::Step),
+        ("But", StepKind::Step),
+      ] {
+        // Captures the set index and the keyword — plain data, never a
+        // JS value.
+        let f = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| {
+          register_step_in(kind, &args.0, Some(set))
+        })?;
+        bound.set(name, f)?;
+      }
+      for hook in ["Before", "After", "BeforeAll", "AfterAll", "BeforeStep", "AfterStep"] {
+        let f = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| {
+          register_hook_in(hook, &args.0, Some(set))
+        })?;
+        bound.set(hook, f)?;
+      }
+      Ok(bound)
+    },
+  )?;
+  bind_steps.set_name("bindSteps")?;
+  g.set("bindSteps", bind_steps.clone())?;
+  bdd.set("bindSteps", bind_steps)?;
 
   for hook in ["Before", "After", "BeforeAll", "AfterAll", "BeforeStep", "AfterStep"] {
     let f = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| register_hook(hook, &args.0))?;
@@ -430,12 +484,16 @@ pub struct CollectedStep {
   pub kind: String,
   pub pattern: String,
   pub is_regex: bool,
+  /// The fixture set a `bindSteps(test)` registration belongs to; the
+  /// BDD host resolves this step's first parameter from it.
+  pub fixture_set: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CollectedHook {
   pub hook_type: String,
   pub tags: Option<String>,
+  pub fixture_set: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -464,6 +522,7 @@ pub async fn collect_registry(vm: &crate::vm::VmHandle) -> Result<CollectedRegis
           kind: s.kind.as_str().to_string(),
           pattern: s.pattern.clone(),
           is_regex: s.is_regex,
+          fixture_set: s.fixture_set,
         })
         .collect(),
       hooks: reg
@@ -472,6 +531,7 @@ pub async fn collect_registry(vm: &crate::vm::VmHandle) -> Result<CollectedRegis
         .map(|h| CollectedHook {
           hook_type: h.kind.clone(),
           tags: h.tags.clone(),
+          fixture_set: h.fixture_set,
         })
         .collect(),
       param_types: reg

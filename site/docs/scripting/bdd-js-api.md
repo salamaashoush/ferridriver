@@ -41,6 +41,30 @@ Per-step options object goes between pattern and handler:
 Given("slow thing", { timeout: 30000 }, async function () { /* ... */ });
 ```
 
+### Binding steps to a fixture chain
+
+`bindSteps(test)` returns the same registrars bound to a `test` object's
+fixture chain — the native primitive behind playwright-bdd's
+`createBdd(test)`. A step registered through it resolves its first
+parameter from that chain rather than from the ambient world:
+
+```ts
+import { test } from '@ferridriver/test';
+
+const authed = test.extend<{ session: string }>({
+  session: async ({}, use) => { await use(await signIn()); },
+});
+
+const { Given, Before } = bindSteps(authed);
+
+Given("I open my dashboard", async function ({ page, session }) {
+  await page.goto(`/dashboard?s=${session}`);
+});
+```
+
+`bindSteps(mergeTests(a, b))` binds to both chains at once. Passing
+anything that is not a `test` object throws, naming what was expected.
+
 ## Hooks
 
 ```ts

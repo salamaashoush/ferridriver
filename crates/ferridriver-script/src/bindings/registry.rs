@@ -89,6 +89,10 @@ pub(crate) struct StepReg {
   /// Per-step `{ timeout }` (ms) from `Given(pat, { timeout }, fn)`.
   /// `None` ⇒ the registry default. Enforced in [`invoke_step`].
   pub(crate) timeout_ms: Option<u64>,
+  /// The fixture set this step resolves its first parameter from, when
+  /// it was registered through `bindSteps(test)`. `None` ⇒ the ambient
+  /// `Given`/`When`/`Then`, which have no fixture chain of their own.
+  pub(crate) fixture_set: Option<usize>,
 }
 
 pub(crate) struct HookReg {
@@ -97,6 +101,8 @@ pub(crate) struct HookReg {
   pub(crate) func: Persistent<Function<'static>>,
   /// Per-hook `{ timeout }` (ms). `None` ⇒ registry default.
   pub(crate) timeout_ms: Option<u64>,
+  /// The fixture set a `bindSteps(test)` hook resolves from.
+  pub(crate) fixture_set: Option<usize>,
 }
 
 pub(crate) struct ParamTypeReg {
