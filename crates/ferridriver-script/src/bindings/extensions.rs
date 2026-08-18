@@ -412,8 +412,18 @@ async fn install_one_extension(ctx: &Ctx<'_>, file: &ExtensionBinding) -> rquick
   // Evaluating the module runs its top-level `tool(...)` /
   // `Given(...)` calls, registering directly into the extension
   // registry. No `globalThis.exports`, no post-eval ingest.
-  let (_evaluated, promise) = module.eval()?;
-  promise.into_future::<()>().await
+  let (evaluated, promise) = module.eval()?;
+  promise.into_future::<()>().await?;
+  // A provider's namespace is what `require('<specifier>')` hands back:
+  // `require` is synchronous and cannot await a dynamic import, so the
+  // object is remembered here, where the module has just finished
+  // evaluating.
+  if let Some(specifier) = &file.provides
+    && let Ok(namespace) = evaluated.namespace()
+  {
+    crate::bindings::native_modules::remember_provided_namespace(ctx, specifier, &namespace);
+  }
+  Ok(())
 }
 
 fn install_tool_namespace<'js>(

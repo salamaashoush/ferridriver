@@ -687,6 +687,43 @@ Playwright-style API) stays; `fetch` is the standard entry point.
 
 ---
 
+## Providing an import specifier
+
+A package can answer for an import specifier, so a suite written against
+some other package runs unmodified:
+
+```json
+{
+  "name": "vendor-shim",
+  "ferridriver": {
+    "apiVersion": 2,
+    "entries": ["src/steps.ts"],
+    "provides": {
+      "modules": { "fake-vendor": "src/vendor.ts" },
+      "aliases": { "fake-vendor/testing": "fake-vendor" }
+    }
+  }
+}
+```
+
+Anything in the run — a spec, a step file, another extension, a
+`ferridriver run` script — can then `import { thing } from 'fake-vendor'`
+or `require('fake-vendor')`, and every one of them receives the SAME
+module instance. State the provider holds is shared, which is usually
+the point.
+
+The rules, each of which is a load-time error naming the package and the
+specifier: one specifier has one owner; a specifier the runtime already
+serves cannot be claimed (`@playwright/test`, `node:*`, `@cucumber/*`,
+`@ferridriver/*`, `playwright`, `playwright-core`); an alias may only
+target a specifier its own package provides; providers may not form a
+cycle. The operator's `[test].moduleAliases` outrank a package's claim,
+with a warning, and `[extensions.policy] modules` / `allowModules` is
+the ceiling over claiming at all.
+
+A provider that throws while evaluating aborts the run rather than being
+skipped — every module importing its specifier depends on it.
+
 ## The compile pipeline
 
 1. **Discover** files (config + globs).

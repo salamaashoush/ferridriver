@@ -168,7 +168,7 @@ async fn a_claimed_specifier_is_importable_from_a_plain_script() {
     "import { marker, note } from 'fake-vendor';\nnote('script');\nexport default marker.seen.join(',');\n",
   )
   .expect("write consumer");
-  let bundle = ferridriver_script::bundle_and_compile(std::slice::from_ref(&entry), &dir)
+  let bundle = ferridriver_script::bundle_and_compile(std::slice::from_ref(&entry), dir)
     .await
     .expect("bundle consumer");
   let run = session.execute_module(&bundle, &[], RunOptions::default(), &ctx).await;
@@ -178,6 +178,43 @@ async fn a_claimed_specifier_is_importable_from_a_plain_script() {
     Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("one,script")),
     Outcome::Error { error } => panic!("consumer module failed: {error:?}"),
   }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn require_answers_a_claimed_specifier_with_the_same_module() {
+  // `require` is synchronous and cannot await a dynamic import, so it
+  // reads the namespace remembered when the provider evaluated. If it
+  // built its own object instead, a CommonJS consumer would mutate a
+  // copy nobody else sees.
+  let dir = shared_package();
+  let specs = shared_specs();
+  let (session, ctx, _diagnostics) = session_for(dir, &specs).await;
+
+  let facts = eval(
+    &session,
+    &ctx,
+    "const v = require('fake-vendor');\n\
+     const a = require('fake-vendor/alias');\n\
+     v.note('require');\n\
+     return { same: v.marker === a.marker, live: v.marker === globalThis.__one, seen: v.marker.seen };",
+  )
+  .await;
+  assert_eq!(
+    facts["same"],
+    serde_json::json!(true),
+    "an alias requires the same module: {facts}"
+  );
+  assert_eq!(
+    facts["live"],
+    serde_json::json!(true),
+    "require and import must answer with ONE object: {facts}"
+  );
+  assert!(
+    facts["seen"]
+      .as_array()
+      .is_some_and(|s| s.contains(&serde_json::json!("require"))),
+    "the mutation must land on the shared module: {facts}"
+  );
 }
 
 #[tokio::test(flavor = "multi_thread")]

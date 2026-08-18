@@ -124,6 +124,118 @@ fn without_the_extension_the_same_spec_fails() {
   );
 }
 
+/// The four backend projects, so a provided specifier is proven to
+/// resolve on every engine the runner drives rather than on whichever
+/// one happens to run first.
+const BACKEND_PROJECTS: &str = r#"
+[[test.projects]]
+name = "cdp-pipe"
+[test.projects.browser]
+browser = "chromium"
+backend = "cdp-pipe"
+headless = true
+
+[[test.projects]]
+name = "cdp-raw"
+[test.projects.browser]
+browser = "chromium"
+backend = "cdp-raw"
+headless = true
+
+[[test.projects]]
+name = "bidi"
+[test.projects.browser]
+browser = "firefox"
+backend = "bidi"
+headless = true
+
+[[test.projects]]
+name = "webkit"
+[test.projects.browser]
+browser = "webkit"
+backend = "webkit"
+headless = true
+"#;
+
+/// A spec importing a specifier only a package serves. The import is
+/// the whole point: a suite written against another package runs with
+/// no edit to its own source.
+const PROVIDED_SPEC: &str = "
+import { test, expect } from '@ferridriver/test';
+import { greet, calls } from 'fake-vendor';
+
+test('imports a specifier an extension provides', async ({}) => {
+  expect(greet('world')).toBe('hello world');
+  // The module the extension's own entry already used: one instance,
+  // so the entry's call is visible here.
+  expect(calls).toEqual(['from-entry', 'hello world']);
+});
+";
+
+#[test]
+fn a_spec_imports_a_specifier_only_an_extension_provides() {
+  let dir = std::env::temp_dir().join(format!("ferri-ext-provided-{}", std::process::id()));
+  let _ = std::fs::remove_dir_all(&dir);
+  std::fs::create_dir_all(dir.join("specs")).expect("create workspace");
+  std::fs::create_dir_all(dir.join("pkg")).expect("create package");
+  std::fs::write(dir.join("specs/provided.spec.ts"), PROVIDED_SPEC).expect("write spec");
+  std::fs::write(
+    dir.join("pkg/package.json"),
+    r#"{"name":"vendor","ferridriver":{"apiVersion":2,"name":"vendor","entries":["entry.ts"],
+        "provides":{"modules":{"fake-vendor":"vendor.ts"}}}}"#,
+  )
+  .expect("write package.json");
+  std::fs::write(
+    dir.join("pkg/vendor.ts"),
+    "export const calls: string[] = [];\n\
+     export function greet(who: string) { const out = `hello ${who}`; calls.push(out); return out; }\n",
+  )
+  .expect("write provider");
+  std::fs::write(
+    dir.join("pkg/entry.ts"),
+    "import { calls } from 'fake-vendor';\ncalls.push('from-entry');\n",
+  )
+  .expect("write entry");
+  std::fs::write(
+    dir.join("ferridriver.toml"),
+    format!(
+      "extensions = [\"./pkg\"]\n\
+       [test]\n\
+       testDir = {:?}\n\
+       testMatch = [\"**/*.spec.ts\"]\n\
+       workers = 1\n\
+       retries = 0\n\
+       timeout = 30000\n\
+       maxParallelProjects = 1\n\
+       outputDir = {:?}\n\
+       reporter = [{{ name = \"list\" }}]\n\
+       {BACKEND_PROJECTS}\n",
+      dir.join("specs").to_string_lossy(),
+      dir.join("out").to_string_lossy(),
+    ),
+  )
+  .expect("write config");
+
+  let out = Command::new(bin())
+    .arg("test")
+    .arg("--no-inherit")
+    .arg("-c")
+    .arg(dir.join("ferridriver.toml"))
+    .output()
+    .expect("spawn ferridriver test");
+  let output = format!(
+    "{}{}",
+    String::from_utf8_lossy(&out.stdout),
+    String::from_utf8_lossy(&out.stderr)
+  );
+  let _ = std::fs::remove_dir_all(&dir);
+  assert!(out.status.success(), "expected a green run, got:\n{output}");
+  assert!(
+    output.contains("4 passed"),
+    "the spec must pass on all four backend projects:\n{output}"
+  );
+}
+
 #[test]
 fn the_test_host_gates_a_package_whose_requirements_are_unmet() {
   // The gate the test host never had: a package declaring a binary that

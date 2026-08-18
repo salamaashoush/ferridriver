@@ -410,7 +410,51 @@ fn fd_prop<'js>(ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<Value<'js>> {
 ///
 /// Propagates the underlying property reads; `None` for a specifier no
 /// native module serves.
+/// Namespaces of the package-provided modules this VM has evaluated,
+/// keyed by specifier. What `require('<specifier>')` answers, since it
+/// is synchronous and cannot await a dynamic import.
+struct ProvidedNamespaces(
+  std::cell::RefCell<std::collections::BTreeMap<String, rquickjs::Persistent<Object<'static>>>>,
+);
+
+// SAFETY: holds only `Persistent` values, which are lifetime-erased by
+// construction — the same rationale as the registry userdata.
+#[allow(unsafe_code)]
+unsafe impl rquickjs::JsLifetime<'_> for ProvidedNamespaces {
+  type Changed<'to> = ProvidedNamespaces;
+}
+
+/// Record a provider's namespace after its module evaluated.
+pub fn remember_provided_namespace<'js>(ctx: &Ctx<'js>, specifier: &str, namespace: &Object<'js>) {
+  if ctx.userdata::<ProvidedNamespaces>().is_none() {
+    let _ = ctx.store_userdata(ProvidedNamespaces(std::cell::RefCell::new(
+      std::collections::BTreeMap::new(),
+    )));
+  }
+  if let Some(ud) = ctx.userdata::<ProvidedNamespaces>() {
+    ud.0.borrow_mut().insert(
+      specifier.to_string(),
+      rquickjs::Persistent::save(ctx, namespace.clone()),
+    );
+  }
+}
+
+/// The namespace of an evaluated package-provided module, if this VM has
+/// one. Aliases normalise to their target first, so `x` and `x/sub`
+/// answer with the same object `import` would give.
+fn provided_namespace<'js>(ctx: &Ctx<'js>, specifier: &str) -> Option<Object<'js>> {
+  let canonical = crate::provided_modules::canonical_provided_name(specifier)?;
+  let ud = ctx.userdata::<ProvidedNamespaces>()?;
+  let saved = ud.0.borrow().get(&canonical).cloned()?;
+  saved.restore(ctx).ok()
+}
+
 pub fn namespace<'js>(ctx: &Ctx<'js>, specifier: &str) -> rquickjs::Result<Option<Object<'js>>> {
+  // A package-provided specifier answers with the very module `import`
+  // links to, so `require` and `import` cannot see different objects.
+  if let Some(ns) = provided_namespace(ctx, specifier) {
+    return Ok(Some(ns));
+  }
   let Some(canonical) = canonical_native_name(specifier) else {
     return Ok(None);
   };
