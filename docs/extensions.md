@@ -330,6 +330,9 @@ commands = "argvOnly"
 # Whether packages may contribute fixtures onto the base `test` chain
 # with defineFixtures. Default true.
 fixtures = false
+# Whether packages may contribute configuration defaults with
+# defineDefaults. Default true.
+configDefaults = false
 ```
 
 - `net` absent: manifests keep the back-compat semantics documented
@@ -483,8 +486,78 @@ const { Given } = bindSteps(ferridriver.test);
 Given("the deployment is known", async ({ deployment }) => { /* ... */ });
 ```
 
-Both `defineFixtures` and `bindSteps` are globals, and are also exported
-from the `ferridriver` module.
+`defineFixtures`, `defineDefaults` and `bindSteps` are globals, and are
+also exported from the `ferridriver` module.
+
+## Contributing config defaults: `defineDefaults`
+
+A package can supply defaults for the run's configuration, so a suite
+that adopts it does not have to copy its settings into every
+`ferridriver.toml`:
+
+```ts
+defineDefaults({
+  test: {
+    timeout: 60_000,
+    retries: 1,
+    // Nested exactly as the config file nests it.
+    browser: { use: { testIdAttribute: "data-qa" } },
+  },
+});
+```
+
+The contribution is the **lowest layer**. Everything else still wins,
+in the usual order:
+
+```
+extension defineDefaults   <- lowest
+machine / user / repo / cwd / local config files
+--config file
+FERRIDRIVER_* environment overrides
+CLI flags                  <- highest
+```
+
+Two packages that set the same key compose in load order, the later one
+winning — the same rule the config files follow. `ferridriver config`
+names the package a value came from, exactly as it names the file:
+
+```
+test.timeout   60000   extension ./ext/acme.ts
+```
+
+### Why the run reads the config twice
+
+The set of extensions is itself configuration, so it cannot come from an
+extension. Startup therefore has two passes:
+
+1. resolve the layer stack with no contributions — this is what says
+   which packages to load, which bundler options to compile them with,
+   and what the `[extensions.policy]` ceiling is;
+2. load the packages, then re-resolve with whatever they contributed
+   underneath every file.
+
+That is also why a contribution may not set the sections that decide how
+the contributing package itself was found, compiled or trusted. Each is
+refused by name, and the refusal fails the run:
+
+| Refused | Because |
+|---|---|
+| `extensions` | the set of extensions is resolved before any of them runs |
+| `bundler` | the bundler compiled this package before it could ask for a different one |
+| `scripting` | the sandbox an extension runs under is the operator's to set |
+| `test.moduleAliases` | the alias table is sealed by the first bundle, which is the one that read this package |
+
+A key the schema does not have is refused too, naming the key — strict
+where a config FILE is only warned about, because a typo in a
+dependency's defaults is one nobody would ever see.
+
+`defineDefaults` is read once, before the first session exists. Calling
+it from a spec, a step file or a script throws: configuration has
+already been resolved by then.
+
+Refused wholesale by `[extensions.policy] configDefaults = false`.
+
+---
 
 ---
 
@@ -947,7 +1020,7 @@ cross-extension channel by design.
 
 ### Registration surface (JS globals)
 
-`defineTool` · `defineFixtures` · `bindSteps` · `Given` · `When` · `Then` ·
+`defineTool` · `defineFixtures` · `defineDefaults` · `bindSteps` · `Given` · `When` · `Then` ·
 `defineStep` · `And` · `But` · `Before` · `After` · `BeforeAll` · `AfterAll` ·
 `BeforeStep` · `AfterStep` · `defineParameterType` · `setDefaultTimeout` ·
 `setDefinitionFunctionWrapper` · `setWorldConstructor` ·

@@ -108,6 +108,13 @@ impl ScriptError {
   /// something a package's manifest or contribution asked for. Carries
   /// [`EXTENSION_POLICY_ERROR`] as its `name` so the extension loader
   /// can refuse to skip past it.
+  /// Whether this is an `[extensions.policy]` refusal — the one error
+  /// an extension loader may never skip past.
+  #[must_use]
+  pub fn is_policy_refusal(&self) -> bool {
+    self.name.as_deref() == Some(EXTENSION_POLICY_ERROR)
+  }
+
   #[must_use]
   pub fn policy(message: impl Into<String>) -> Self {
     Self {

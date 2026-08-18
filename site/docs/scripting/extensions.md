@@ -166,6 +166,40 @@ naming the key. It covers `defineFixtures` only: a package's own
 `test.extend` / `mergeTests` chains and its `expect.extend` matchers are
 never clamped.
 
+## Contributing config defaults
+
+`defineDefaults` supplies defaults for the run's configuration, so a
+suite that adopts a package does not have to copy its settings into
+every `ferridriver.toml`:
+
+```ts
+defineDefaults({
+  test: {
+    timeout: 60_000,
+    browser: { use: { testIdAttribute: "data-qa" } },
+  },
+});
+```
+
+It is the **lowest** layer: every config file, every `FERRIDRIVER_*`
+override and every CLI flag still wins, and two packages setting the
+same key compose in load order. `ferridriver config` names the package a
+value came from just as it names a file.
+
+The set of extensions is itself configuration, so the run resolves the
+layer stack twice: once to learn which packages to load, then again with
+what they contributed underneath. That is why a contribution may not set
+`extensions`, `bundler`, `scripting` or `[test].moduleAliases` — each
+decides how the contributing package was found, compiled or trusted, and
+each is refused by name. A key the schema does not have is refused too,
+naming the key: a typo in a dependency's defaults is one nobody would
+otherwise see.
+
+Contributions are read before the first session exists; calling
+`defineDefaults` from a spec, a step file or a script throws. An
+operator closes the door with `[extensions.policy] configDefaults =
+false`.
+
 ## Discovery and configuration
 
 Extensions are configured in `ferridriver.toml`:

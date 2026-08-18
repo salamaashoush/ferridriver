@@ -215,6 +215,61 @@ pub async fn load(
 
 /// [`load`], reduced to what a session VM needs, with every diagnostic
 /// logged. The shape three of the four hosts want.
+/// What the named packages contribute through `defineDefaults` under
+/// `host`, in load order, as `(package, payload)`.
+///
+/// This is the CLI's second startup pass. Extraction is memoised in
+/// process and on disk, so asking here and loading the same packages
+/// again later costs one lookup rather than a second compile.
+///
+/// A package that fails to resolve or compile contributes nothing and
+/// is not reported here: the load that follows reports it, with the
+/// diagnostics it already has.
+pub async fn extension_defaults(
+  specs: &[ExtensionSpec],
+  env: &RequirementEnv<'_>,
+  policy: &ExtensionPolicyConfig,
+  host: crate::ExtensionHost,
+) -> Result<Vec<(String, serde_json::Value)>, ScriptError> {
+  if specs.is_empty() {
+    return Ok(Vec::new());
+  }
+  let (_gated, compiled, failures) = load(specs, env, policy).await;
+
+  // An `[extensions.policy]` refusal is never skippable — the same rule
+  // `install_extensions` applies when a session loads a package, moved
+  // to the pass that runs FIRST. Without it a refusal raised while
+  // extracting was a warning and a dropped package: the operator said
+  // no and the run carried on as if the package had simply been absent.
+  for (path, e) in &failures {
+    if e.is_policy_refusal() {
+      return Err(ScriptError::policy(format!("{}: {}", path.display(), e.message)));
+    }
+  }
+  for cp in &compiled {
+    if let Some((host_name, message)) = cp.snapshot.policy_refusal() {
+      return Err(ScriptError::policy(format!(
+        "{} (host {host_name}): {message}",
+        cp.path.display()
+      )));
+    }
+  }
+
+  Ok(
+    compiled
+      .into_iter()
+      .flat_map(|cp| {
+        let name = cp.path.display().to_string();
+        cp.snapshot
+          .defaults_for(host.as_str())
+          .to_vec()
+          .into_iter()
+          .map(move |payload| (name.clone(), payload))
+      })
+      .collect(),
+  )
+}
+
 pub async fn load_bindings(
   specs: &[ExtensionSpec],
   env: &RequirementEnv<'_>,

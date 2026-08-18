@@ -79,6 +79,10 @@ pub(crate) struct ExtensionRegistry {
   pub(crate) def_fn_wrapper: Option<Persistent<Function<'static>>>,
   pub(crate) world_ctor: Option<Persistent<Constructor<'static>>>,
   pub(crate) current_world: Option<Persistent<Object<'static>>>,
+  /// `defineDefaults(defaults)` payloads, in the order the packages
+  /// were loaded. Read by the extraction pass and folded UNDER every
+  /// config layer; never consumed by a live session.
+  pub(crate) defaults: Vec<serde_json::Value>,
 }
 
 pub(crate) struct StepReg {
@@ -440,12 +444,19 @@ pub struct RegistryMarks {
   param_types: usize,
   tests: usize,
   fixtures: usize,
+  defaults: usize,
 }
 
 /// Snapshot the position of every registry.
 pub fn registry_marks(ctx: &Ctx<'_>) -> Result<RegistryMarks, ScriptError> {
-  let (tools, steps, hooks, param_types) = with_registry(ctx, |reg| {
-    (reg.tools.len(), reg.steps.len(), reg.hooks.len(), reg.param_types.len())
+  let (tools, steps, hooks, param_types, defaults) = with_registry(ctx, |reg| {
+    (
+      reg.tools.len(),
+      reg.steps.len(),
+      reg.hooks.len(),
+      reg.param_types.len(),
+      reg.defaults.len(),
+    )
   })?;
   let (tests, fixtures) = crate::bindings::test::registry_marks(ctx)?;
   Ok(RegistryMarks {
@@ -455,6 +466,7 @@ pub fn registry_marks(ctx: &Ctx<'_>) -> Result<RegistryMarks, ScriptError> {
     param_types,
     tests,
     fixtures,
+    defaults,
   })
 }
 
@@ -474,7 +486,7 @@ pub fn registrations_since(
     .iter()
     .map(|t| serde_json::to_value(t).unwrap_or(serde_json::Value::Null))
     .collect();
-  let (steps, hooks, param_types) = with_registry(ctx, |reg| {
+  let (steps, hooks, param_types, defaults) = with_registry(ctx, |reg| {
     (
       reg
         .steps
@@ -497,6 +509,7 @@ pub fn registrations_since(
         .iter()
         .map(|p| p.name.clone())
         .collect::<Vec<_>>(),
+      reg.defaults.get(marks.defaults..).unwrap_or_default().to_vec(),
     )
   })?;
   let (tests, fixtures) = crate::bindings::test::registrations_since(ctx, marks.tests, marks.fixtures)?;
@@ -507,7 +520,9 @@ pub fn registrations_since(
     param_types,
     tests,
     fixtures,
+    defaults,
     error: None,
+    error_name: None,
   })
 }
 
@@ -579,6 +594,65 @@ pub(crate) fn tool_dispatch<'js>(ctx: &Ctx<'js>, idx: usize) -> Result<ToolDispa
   })
 }
 
+/// `defineDefaults(defaults)` — an extension package contributing
+/// config defaults.
+///
+/// The payload lands UNDER every config layer: a config file, an
+/// environment override and a CLI flag all still win. It is read by the
+/// extraction pass — a session never consumes it, which is why calling
+/// it once the extensions are installed is a mistake worth naming
+/// rather than a silent no-op.
+///
+/// Nothing is validated here. The shape belongs to
+/// `ferridriver-config`, which checks the payload against the one
+/// schema every layer is checked against and refuses a key an extension
+/// may not set.
+fn define_defaults<'js>(ctx: Ctx<'js>, defaults: Value<'js>) -> rquickjs::Result<()> {
+  let permitted = ctx.userdata::<ExtensionPolicyUd>().is_none_or(|p| p.0.config_defaults);
+  if !permitted {
+    return Err(throw_script_error(
+      &ctx,
+      &ScriptError::policy(
+        "defineDefaults() is refused by the operator policy (`[extensions.policy] configDefaults = \
+         false`), which forbids packages from contributing configuration defaults",
+      ),
+    ));
+  }
+  if crate::bindings::test::base_is_sealed(&ctx).unwrap_or(false) {
+    return Err(throw_script_error(
+      &ctx,
+      &ScriptError::internal(
+        "defineDefaults() can only be called while an extension is loading. Configuration is \
+         resolved before the first session exists, so a contribution made now would change \
+         nothing that has already been read.",
+      ),
+    ));
+  }
+  let payload: serde_json::Value = serde_from_js(&ctx, defaults)?;
+  if !payload.is_object() {
+    return Err(throw_script_error(
+      &ctx,
+      &ScriptError::internal(format!(
+        "defineDefaults() takes a configuration object, like the one `ferridriver.toml` holds \
+         (`{{ test: {{ testIdAttribute: 'data-qa' }} }}`), not {}",
+        type_word(&payload)
+      )),
+    ));
+  }
+  with_registry(&ctx, |reg| reg.defaults.push(payload)).map_err(|e| rq(&e))
+}
+
+fn type_word(value: &serde_json::Value) -> &'static str {
+  match value {
+    serde_json::Value::Null => "null",
+    serde_json::Value::Bool(_) => "a boolean",
+    serde_json::Value::Number(_) => "a number",
+    serde_json::Value::String(_) => "a string",
+    serde_json::Value::Array(_) => "an array",
+    serde_json::Value::Object(_) => "an object",
+  }
+}
+
 /// Install the registry userdata (idempotent) and the native `tool` /
 /// `defineTool` contribution point, returning the contribution
 /// function so the caller can mirror it (`ferridriver.tool`).
@@ -594,6 +668,9 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, default_timeout_ms: u64) -> rquickjs:
   let g = ctx.globals();
   g.set("defineTool", tool.clone())?;
   g.set("tool", tool.clone())?;
+  let defaults = Function::new(ctx.clone(), define_defaults)?;
+  defaults.set_name("defineDefaults")?;
+  g.set("defineDefaults", defaults)?;
   Ok(Some(tool))
 }
 

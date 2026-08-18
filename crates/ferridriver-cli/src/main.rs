@@ -30,6 +30,72 @@ use ferridriver_config::FerridriverConfig;
 use ferridriver_mcp::McpServer;
 use ferridriver_script::ConsoleSink;
 
+/// Re-resolve the layer stack with what the configured extension
+/// packages contribute through `defineDefaults` underneath it.
+///
+/// A no-op when nothing is configured, which is every run that names no
+/// extensions. The contributions are read under the host the subcommand
+/// will run as: a package branches on `ferridriver.host`, so what it
+/// asks for under `mcp` need not be what it asks for under `test`.
+type ContributedDefaults = Vec<(String, serde_json::Value)>;
+
+async fn apply_extension_defaults(
+  config: FerridriverConfig,
+  args: &cli::Cli,
+) -> anyhow::Result<(FerridriverConfig, ContributedDefaults)> {
+  let specs = config.extension_specs();
+  let Some(host) = extension_host_of(&args.command) else {
+    return Ok((config, Vec::new()));
+  };
+  if specs.is_empty() {
+    return Ok((config, Vec::new()));
+  }
+  let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
+    &config.scripting.allow_env,
+    config.scripting.allow.commands.clone(),
+  )
+  .with_extension_policy(config.extensions.policy());
+  let sidecars: Vec<String> = config.sidecars.iter().map(|s| s.name.clone()).collect();
+  let env = ferridriver_script::RequirementEnv::from_caps(&caps, &sidecars);
+  // A refusal by `[extensions.policy]` is never skippable, so it fails
+  // the command here rather than being logged while the run carries on
+  // as if the package had simply been absent.
+  let defaults = ferridriver_script::extension_defaults(&specs, &env, &caps.extension_policy, host)
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+  if defaults.is_empty() {
+    return Ok((config, Vec::new()));
+  }
+  for (package, _) in &defaults {
+    tracing::debug!(target: "ferridriver::extensions", package, host = host.as_str(), "extension.defaults.applied");
+  }
+  let config =
+    FerridriverConfig::load_layered_with_defaults(args.config.as_deref(), !args.no_inherit, defaults.clone())?;
+  Ok((config, defaults))
+}
+
+/// The extension host a subcommand runs as, or `None` for one that
+/// loads no extensions at all.
+fn extension_host_of(command: &cli::Command) -> Option<ferridriver_script::ExtensionHost> {
+  use ferridriver_script::ExtensionHost;
+  match command {
+    cli::Command::Mcp(_) => Some(ExtensionHost::Mcp),
+    cli::Command::Bdd(_) => Some(ExtensionHost::Bdd),
+    cli::Command::Test(_) | cli::Command::RustTest(_) => Some(ExtensionHost::Test),
+    // `config` and `doctor` run nothing, but they exist to explain what
+    // a run would see — so they read the contributions too, under the
+    // neutral script host.
+    cli::Command::Run(_) | cli::Command::Session(_) | cli::Command::Config(_) | cli::Command::Doctor(_) => {
+      Some(ExtensionHost::Script)
+    },
+    cli::Command::Install(_)
+    | cli::Command::Codegen(_)
+    | cli::Command::Ext(_)
+    | cli::Command::Trace(_)
+    | cli::Command::MergeReports(_) => None,
+  }
+}
+
 /// Compile every JS reporter the config names and install the factory
 /// `create_reporters` consults for a name outside its built-in table.
 /// Runs before the runner is built, because a reporter that cannot load
@@ -116,11 +182,17 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(count = reclaimed, "reclaimed browsers leaked by earlier runs");
   }
 
-  // Load the unified config exactly once. Each subcommand reads the
-  // section it cares about from this single document.
+  // Two passes over the layer stack. The first learns which extension
+  // packages to load — that list is itself config, so it cannot come
+  // from a package — then the packages are read and whatever they
+  // contributed through `defineDefaults` is applied BENEATH every file
+  // for the second. The operator tables go in between: extraction IS a
+  // bundle, so the bundler environment and the alias table have to be
+  // installed before it runs.
   let config = FerridriverConfig::load_layered(args.config.as_deref(), !args.no_inherit)?;
   install_bundler_env(&config);
   install_module_aliases(&config.test, module_alias_flags(&args.command))?;
+  let (config, contributed) = apply_extension_defaults(config, &args).await?;
 
   match args.command {
     cli::Command::Mcp(mcp_args) => Box::pin(run_mcp(config, mcp_args)).await,
@@ -145,11 +217,14 @@ async fn main() -> anyhow::Result<()> {
       };
       Box::pin(session_cmd::run(config, origin, session_args)).await
     },
-    cli::Command::Config(config_args) => config_cmd::run_config(args.config.as_deref(), !args.no_inherit, &config_args),
+    cli::Command::Config(config_args) => {
+      config_cmd::run_config(args.config.as_deref(), !args.no_inherit, contributed, &config_args)
+    },
     cli::Command::Doctor(doctor_args) => {
       Box::pin(config_cmd::run_doctor(
         args.config.as_deref(),
         !args.no_inherit,
+        contributed,
         doctor_args,
       ))
       .await

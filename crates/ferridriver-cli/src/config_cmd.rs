@@ -29,8 +29,20 @@ fn load_options(explicit: Option<&Path>, inherit: bool) -> LoadOptions {
 
 /// `ferridriver config`: show the layer stack and what each key
 /// resolved to.
-pub fn run_config(explicit: Option<&Path>, inherit: bool, args: &cli::ConfigArgs) -> anyhow::Result<()> {
-  let resolved = layer::resolve(&load_options(explicit, inherit))?;
+///
+/// `defaults` is what the configured extension packages contributed
+/// through `defineDefaults`, already read by startup's second pass.
+/// Without them this command would answer "where did this value come
+/// from" while omitting a whole layer.
+pub fn run_config(
+  explicit: Option<&Path>,
+  inherit: bool,
+  defaults: Vec<(String, serde_json::Value)>,
+  args: &cli::ConfigArgs,
+) -> anyhow::Result<()> {
+  let mut options = load_options(explicit, inherit);
+  options.extension_defaults = defaults;
+  let resolved = layer::resolve(&options)?;
   let effective = effective_browser(&args.browser, &resolved.config.mcp);
 
   if args.resolved {
@@ -288,10 +300,17 @@ impl Status {
 
 /// `ferridriver doctor`: verify the setup end to end and exit non-zero
 /// when something will not work.
-pub async fn run_doctor(explicit: Option<&Path>, inherit: bool, args: cli::DoctorArgs) -> anyhow::Result<()> {
+pub async fn run_doctor(
+  explicit: Option<&Path>,
+  inherit: bool,
+  defaults: Vec<(String, serde_json::Value)>,
+  args: cli::DoctorArgs,
+) -> anyhow::Result<()> {
   let mut checks = Vec::new();
 
-  let resolved = match layer::resolve(&load_options(explicit, inherit)) {
+  let mut options = load_options(explicit, inherit);
+  options.extension_defaults = defaults;
+  let resolved = match layer::resolve(&options) {
     Ok(r) => r,
     Err(e) => {
       // A config that does not parse is the whole answer; nothing

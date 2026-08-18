@@ -57,6 +57,7 @@ impl Tree {
       machine_config_dir: None,
       env: BTreeMap::new(),
       inherit: true,
+      extension_defaults: Vec::new(),
     }
   }
 }
@@ -524,4 +525,160 @@ fn no_files_anywhere_yields_defaults() {
   let r = resolve(&t.opts(t.root().to_path_buf())).expect("resolve");
   assert!(r.layers.is_empty());
   assert_eq!(r.config.mcp.server_name(), "ferridriver");
+}
+
+/// `defineDefaults` is the LOWEST config layer, and the authoring
+/// contract that describes it cannot drift from the schema it feeds.
+mod extension_defaults {
+  use std::collections::BTreeMap;
+  use std::path::{Path, PathBuf};
+
+  use ferridriver_config::layer::{self, LoadOptions};
+
+  fn opts(cwd: PathBuf, defaults: Vec<(String, serde_json::Value)>) -> LoadOptions {
+    LoadOptions {
+      explicit: None,
+      cwd,
+      user_config_dir: None,
+      machine_config_dir: None,
+      env: BTreeMap::new(),
+      inherit: true,
+      extension_defaults: defaults,
+    }
+  }
+
+  fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("ferri-defaults-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    dir.canonicalize().expect("canonical")
+  }
+
+  #[test]
+  fn a_contribution_applies_when_the_config_is_silent_and_loses_when_it_speaks() {
+    let dir = scratch("precedence");
+    let defaults = vec![(
+      "pkg".to_string(),
+      serde_json::json!({ "test": { "testDir": "from-extension", "timeout": 12345 } }),
+    )];
+
+    // Nothing on disk: the contribution is what the run sees.
+    let resolved = layer::resolve(&opts(dir.clone(), defaults.clone())).expect("resolve");
+    assert_eq!(resolved.config.test.test_dir.as_deref(), Some("from-extension"));
+    assert_eq!(resolved.config.test.timeout, 12345);
+    assert_eq!(
+      resolved.provenance.get("test.timeout").map(|o| o.describe()),
+      Some("extension pkg".to_string()),
+      "`ferridriver config` can say where it came from",
+    );
+
+    // A config file speaks: it wins, key by key.
+    std::fs::write(dir.join("ferridriver.toml"), "[test]\ntimeout = 999\n").expect("write config");
+    let resolved = layer::resolve(&opts(dir.clone(), defaults)).expect("resolve");
+    assert_eq!(resolved.config.test.timeout, 999, "the file overrides the contribution");
+    assert_eq!(
+      resolved.config.test.test_dir.as_deref(),
+      Some("from-extension"),
+      "and a key the file is silent about keeps the contributed value",
+    );
+  }
+
+  #[test]
+  fn later_packages_win_over_earlier_ones() {
+    let dir = scratch("order");
+    let resolved = layer::resolve(&opts(
+      dir,
+      vec![
+        ("first".to_string(), serde_json::json!({ "test": { "timeout": 1 } })),
+        ("second".to_string(), serde_json::json!({ "test": { "timeout": 2 } })),
+      ],
+    ))
+    .expect("resolve");
+    assert_eq!(resolved.config.test.timeout, 2);
+    assert_eq!(
+      resolved.provenance.get("test.timeout").map(|o| o.describe()),
+      Some("extension second".to_string()),
+    );
+  }
+
+  #[test]
+  fn a_typo_names_the_key() {
+    let dir = scratch("typo");
+    let error = layer::resolve(&opts(
+      dir,
+      vec![(
+        "pkg".to_string(),
+        serde_json::json!({ "test": { "testIdAttribut": "data-qa" } }),
+      )],
+    ))
+    .expect_err("a contributed typo is a hard failure, not a warning");
+    let message = format!("{error}");
+    assert!(message.contains("testIdAttribut"), "{message}");
+    assert!(message.contains("pkg"), "{message}");
+  }
+
+  #[test]
+  fn the_loader_configuring_sections_are_refused() {
+    let dir = scratch("refused");
+    for (payload, needle) in [
+      (serde_json::json!({ "extensions": { "policy": {} } }), "extensions"),
+      (serde_json::json!({ "bundler": { "conditions": ["node"] } }), "bundler"),
+      (
+        serde_json::json!({ "scripting": { "allowEnv": ["HOME"] } }),
+        "scripting",
+      ),
+      (
+        serde_json::json!({ "test": { "moduleAliases": { "a": "b" } } }),
+        "test.moduleAliases",
+      ),
+    ] {
+      let error = layer::resolve(&opts(dir.clone(), vec![("pkg".to_string(), payload)]))
+        .expect_err("a package may not configure the loader that read it");
+      let message = format!("{error}");
+      assert!(message.contains(needle), "expected `{needle}` in: {message}");
+    }
+  }
+
+  /// The `.d.ts` an extension author type-checks against enumerates the
+  /// keys — no index signature — so it can only stay right if something
+  /// pins it against the schema it feeds.
+  #[test]
+  fn the_authoring_contract_lists_exactly_the_schema_s_keys() {
+    let contract = std::fs::read_to_string(
+      Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/ferridriver-extension/index.d.ts"),
+    )
+    .expect("authoring contract");
+
+    let declared = |interface: &str| -> Vec<String> {
+      let start = contract
+        .find(&format!("interface {interface} {{"))
+        .unwrap_or_else(|| panic!("{interface} is declared"));
+      let body = &contract[start..];
+      let end = body.find("\n  }").expect("interface closes");
+      body[..end]
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.trim().split('?').next().map(str::to_string))
+        .filter(|key| !key.is_empty())
+        .collect()
+    };
+
+    let document = serde_json::to_value(ferridriver_config::FerridriverConfig::default()).expect("serialize");
+    let schema_keys = |section: &str, refused: &[&str]| -> Vec<String> {
+      document[section]
+        .as_object()
+        .expect("section")
+        .keys()
+        .filter(|key| !refused.contains(&key.as_str()))
+        .cloned()
+        .collect()
+    };
+
+    assert_eq!(
+      declared("TestConfigDefaults"),
+      schema_keys("test", &["moduleAliases"]),
+      "TestConfigDefaults must list every `[test]` key an extension may set, and only those",
+    );
+    assert_eq!(declared("McpConfigDefaults"), schema_keys("mcp", &[]));
+  }
 }

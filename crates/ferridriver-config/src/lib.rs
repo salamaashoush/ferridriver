@@ -345,6 +345,18 @@ pub struct ExtensionPolicyConfig {
   /// package's own `test.extend` / `mergeTests` chains are untouched:
   /// they change nothing a suite did not ask for by importing them.
   pub fixtures: bool,
+  /// Whether packages may contribute config defaults with
+  /// `defineDefaults`. `false` refuses the contribution and fails the
+  /// run: a package that quietly changed `testIdAttribute` under an
+  /// operator who forbade it is exactly the surprise the ceiling
+  /// exists to prevent.
+  ///
+  /// A contributed default is the LOWEST layer — every config file and
+  /// every CLI flag still wins — and the sections that configure the
+  /// loader itself (`bundler`, `extensions`, `scripting`, and
+  /// `[test].moduleAliases`) are refused outright, because they decide
+  /// how the contributing package was compiled.
+  pub config_defaults: bool,
 }
 
 impl Default for ExtensionPolicyConfig {
@@ -355,6 +367,7 @@ impl Default for ExtensionPolicyConfig {
       modules: ExtensionModulesCeiling::default(),
       allow_modules: Vec::new(),
       fixtures: true,
+      config_defaults: true,
     }
   }
 }
@@ -526,10 +539,32 @@ impl FerridriverConfig {
   ///
   /// Same as [`Self::load`].
   pub fn load_layered(explicit: Option<&Path>, inherit: bool) -> anyhow::Result<Self> {
+    Self::load_layered_with_defaults(explicit, inherit, Vec::new())
+  }
+
+  /// [`Self::load_layered`], with what the loaded extension packages
+  /// contributed through `defineDefaults` applied BENEATH every file.
+  ///
+  /// This is the second pass of the CLI's startup: the first resolves
+  /// the stack with no contributions in order to learn which packages
+  /// to load, and this one re-resolves once they have been read. A
+  /// contribution can therefore never decide which packages load, which
+  /// is what keeps the two passes from chasing each other.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::load_layered`], plus a contribution that sets a section
+  /// an extension may not set or a key the schema does not have.
+  pub fn load_layered_with_defaults(
+    explicit: Option<&Path>,
+    inherit: bool,
+    defaults: Vec<(String, serde_json::Value)>,
+  ) -> anyhow::Result<Self> {
     let mut opts = layer::LoadOptions::from_process(explicit);
     // A false argument must not re-enable inheritance that the
     // environment already switched off.
     opts.inherit = opts.inherit && inherit;
+    opts.extension_defaults = defaults;
     let resolved = layer::resolve(&opts)?;
     for w in &resolved.warnings {
       tracing::warn!(source = %w.source, "{}", w.message);
@@ -559,6 +594,7 @@ impl FerridriverConfig {
       machine_config_dir: None,
       env: BTreeMap::new(),
       inherit: false,
+      extension_defaults: Vec::new(),
     })?;
     for w in &resolved.warnings {
       tracing::warn!(source = %w.source, "{}", w.message);

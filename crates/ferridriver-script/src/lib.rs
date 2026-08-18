@@ -87,7 +87,7 @@ pub use engine::{
   Deadline, ExtensionHost, RunContext, RunOptions, ScriptCaps, ScriptEngine, ScriptEngineConfig, Session, SessionRun,
 };
 pub use error::{ScriptError, ScriptErrorKind};
-pub use extension_load::{GatedExtensions, gate, load_bindings};
+pub use extension_load::{GatedExtensions, extension_defaults, gate, load_bindings};
 pub use ferridriver_config::ExtensionSpec;
 pub use fs::PathSandbox;
 pub use provided_modules::{PackageClaims, ProvidedModule, ProvidedModuleTable};

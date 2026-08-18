@@ -379,6 +379,109 @@ declare global {
     [K in keyof T]: FixtureValue<T[K], TestFixtures & T>;
   }): TestType<TestFixtures & T>;
 
+
+  /**
+   * The configuration an extension package may contribute defaults for.
+   *
+   * Every key is enumerated on purpose: there is no index signature, so
+   * a misspelled key is a type error here and a hard failure at load,
+   * naming the key. VALUES are typed as `unknown` — the shapes belong to
+   * `ferridriver.toml`'s own schema, which checks them when the run
+   * resolves and reports a mismatch with the key that caused it.
+   *
+   * The sections that decide how this package itself was found,
+   * compiled or trusted — `extensions`, `bundler`, `scripting`, and
+   * `[test].moduleAliases` — are absent by design: a default that
+   * changed them would have had to take effect before the package that
+   * set it was read.
+   */
+  interface ConfigDefaults {
+    test?: TestConfigDefaults;
+    mcp?: McpConfigDefaults;
+  }
+
+  interface TestConfigDefaults {
+    baseUrl?: unknown;
+    browser?: unknown;
+    builtinSteps?: unknown;
+    captureGitInfo?: unknown;
+    configGrep?: unknown;
+    configGrepInvert?: unknown;
+    contextPrewarm?: unknown;
+    dryRun?: unknown;
+    examplesTitleFormat?: unknown;
+    expect?: unknown;
+    expectTimeout?: unknown;
+    failFast?: unknown;
+    failOnFlakyTests?: unknown;
+    features?: unknown;
+    forbidOnly?: unknown;
+    fullyParallel?: unknown;
+    globalSetup?: unknown;
+    globalTeardown?: unknown;
+    globalTimeout?: unknown;
+    hasBdd?: unknown;
+    ignoreSnapshots?: unknown;
+    language?: unknown;
+    maxFailures?: unknown;
+    maxParallelProjects?: unknown;
+    metadata?: unknown;
+    name?: unknown;
+    order?: unknown;
+    outputDir?: unknown;
+    passWithNoTests?: unknown;
+    preserveOutput?: unknown;
+    profiles?: unknown;
+    projects?: unknown;
+    quiet?: unknown;
+    repeatEach?: unknown;
+    reportSlowTests?: unknown;
+    reporter?: unknown;
+    retries?: unknown;
+    screenshotOnFailure?: unknown;
+    snapshotDir?: unknown;
+    snapshotPathTemplate?: unknown;
+    steps?: unknown;
+    storageState?: unknown;
+    strict?: unknown;
+    tags?: unknown;
+    testDir?: unknown;
+    testIgnore?: unknown;
+    testMatch?: unknown;
+    timeout?: unknown;
+    trace?: unknown;
+    tsconfig?: unknown;
+    updateSnapshots?: unknown;
+    video?: unknown;
+    webServer?: unknown;
+    workers?: unknown;
+    worldParameters?: unknown;
+  }
+
+  interface McpConfigDefaults {
+    browser?: unknown;
+    server?: unknown;
+  }
+
+  /**
+   * Contribute configuration defaults. Call at the module's top level.
+   *
+   * The payload is the LOWEST layer: a machine, user, repository or
+   * `--config` file, a `FERRIDRIVER_*` environment override and a CLI
+   * flag all still win. Two packages that set the same key compose in
+   * load order, the later one winning — the same rule the config layers
+   * follow.
+   *
+   * It is read once, before the first session exists, by the pass that
+   * loads the packages. Calling it later throws: configuration has
+   * already been resolved, so a contribution then would change nothing
+   * that had been read.
+   *
+   * Refused when the operator sets `[extensions.policy] configDefaults =
+   * false`, which fails the run rather than dropping the package.
+   */
+  function defineDefaults(defaults: ConfigDefaults): void;
+
   /** Call another registered tool, including from a different extension. */
   const tools: Record<string, (args?: Record<string, unknown>) => Promise<unknown>>;
 

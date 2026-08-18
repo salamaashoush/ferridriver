@@ -159,6 +159,8 @@ pub enum Origin {
   File(PathBuf),
   /// An environment variable of this name.
   Env(String),
+  /// `defineDefaults` in the named extension package.
+  Extension(String),
 }
 
 impl Origin {
@@ -168,6 +170,7 @@ impl Origin {
     match self {
       Self::File(p) => p.display().to_string(),
       Self::Env(name) => format!("${name}"),
+      Self::Extension(name) => format!("extension {name}"),
     }
   }
 }
@@ -222,6 +225,15 @@ pub struct LoadOptions {
   /// When false, only `explicit` (or, without it, the single
   /// highest-precedence discovered file) is loaded.
   pub inherit: bool,
+  /// `defineDefaults` contributions, `(package, payload)` in load
+  /// order. They are applied BENEATH every discovered file, so a config
+  /// file, an environment override and a CLI flag all still win.
+  ///
+  /// Empty on the first pass: the list of extensions is itself read
+  /// from the config, so the defaults can only be learnt after one
+  /// resolution has happened. See [`Resolved`] and the CLI's two-pass
+  /// startup.
+  pub extension_defaults: Vec<(String, Value)>,
 }
 
 impl LoadOptions {
@@ -242,6 +254,7 @@ impl LoadOptions {
       machine_config_dir: Some(PathBuf::from("/etc")),
       env,
       inherit,
+      extension_defaults: Vec::new(),
     }
   }
 
@@ -257,6 +270,7 @@ impl LoadOptions {
       machine_config_dir: None,
       env: BTreeMap::new(),
       inherit: true,
+      extension_defaults: Vec::new(),
     }
   }
 }
@@ -305,6 +319,21 @@ pub fn resolve(opts: &LoadOptions) -> anyhow::Result<Resolved> {
   let mut layers = Vec::new();
   let mut seen = BTreeSet::new();
   let mut extension_bases = BTreeMap::new();
+
+  // Beneath everything: what the loaded packages contribute. A file, an
+  // environment override and a CLI flag all overwrite these.
+  for (package, defaults) in &opts.extension_defaults {
+    let mut value = defaults.clone();
+    check_contributed_defaults(package, &value)?;
+    normalize(&mut value);
+    merge(
+      &mut document,
+      &value,
+      "",
+      &Origin::Extension(package.clone()),
+      &mut provenance,
+    );
+  }
 
   for layer in discovered {
     apply_layer(
@@ -969,6 +998,87 @@ fn nest(dotted: &str, value: Value) -> Value {
 ///
 /// Returns an error when the document does not match the schema (a
 /// wrong type, or an invalid enum variant such as an unknown backend).
+/// Sections an extension may not contribute defaults for, and why.
+///
+/// Every one of them decides how the contributing package itself was
+/// found, compiled or trusted — a default that changed them would have
+/// had to take effect before the package that set it was read.
+const REFUSED_DEFAULT_SECTIONS: &[(&str, &str)] = &[
+  (
+    "extensions",
+    "the set of extensions is resolved before any of them runs",
+  ),
+  (
+    "bundler",
+    "the bundler compiled this package before it could ask for a different one",
+  ),
+  (
+    "scripting",
+    "the sandbox an extension runs under is the operator's to set, never the package's",
+  ),
+];
+
+/// The one key inside a permitted section that is refused for the same
+/// reason: the module-alias table is read by the first bundle, which is
+/// the extraction that produced this contribution.
+const REFUSED_DEFAULT_KEYS: &[(&str, &str)] = &[(
+  "test.moduleAliases",
+  "the alias table is sealed by the first bundle, which is the one that read this package",
+)];
+
+/// Check one `defineDefaults` payload before it is merged.
+///
+/// Strict where a config FILE is lenient: an unknown key in a file is a
+/// warning the author can see, while a contributed one comes from a
+/// dependency and would silently do nothing. It is checked against the
+/// same schema every layer is checked against rather than against a
+/// hand-written mirror, which is the only way the two cannot drift.
+fn check_contributed_defaults(package: &str, value: &Value) -> anyhow::Result<()> {
+  let Some(map) = value.as_object() else {
+    anyhow::bail!("extension {package}: defineDefaults() takes a configuration object");
+  };
+  for (section, why) in REFUSED_DEFAULT_SECTIONS {
+    if map.contains_key(*section) {
+      anyhow::bail!(
+        "extension {package}: defineDefaults() may not set `{section}` — {why}. Ask the operator to \
+         put it in the config file instead."
+      );
+    }
+  }
+  for (key, why) in REFUSED_DEFAULT_KEYS {
+    let mut node = value;
+    let mut present = true;
+    for segment in key.split('.') {
+      match node.get(segment) {
+        Some(next) => node = next,
+        None => {
+          present = false;
+          break;
+        },
+      }
+    }
+    if present {
+      anyhow::bail!(
+        "extension {package}: defineDefaults() may not set `{key}` — {why}. Ask the operator to put \
+         it in the config file instead."
+      );
+    }
+  }
+
+  let mut normalized = value.clone();
+  normalize(&mut normalized);
+  let mut ignored = Vec::new();
+  let _: FerridriverConfig = serde_ignored::deserialize(&normalized, |path| ignored.push(path.to_string()))
+    .map_err(|e| anyhow::anyhow!("extension {package}: defineDefaults() payload is invalid: {e}"))?;
+  if let Some(key) = ignored.first() {
+    anyhow::bail!(
+      "extension {package}: defineDefaults() sets unknown key `{key}`{}",
+      suggestion_for(key)
+    );
+  }
+  Ok(())
+}
+
 fn deserialize_document(document: &Value, warnings: &mut Vec<ConfigWarning>) -> anyhow::Result<FerridriverConfig> {
   let mut ignored = Vec::new();
   let config: FerridriverConfig = serde_ignored::deserialize(document, |path| ignored.push(path.to_string()))

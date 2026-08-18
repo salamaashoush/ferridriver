@@ -919,6 +919,17 @@ pub fn seal_base_fixtures(ctx: &Ctx<'_>) -> Result<(), ScriptError> {
   with_test_registry(ctx, |r| r.base_sealed = true)
 }
 
+/// Whether the extension-loading window has closed. `false` when the
+/// test surface is not installed at all, which is the state the
+/// extraction pass runs a non-Test host in.
+///
+/// # Errors
+///
+/// Never; the absent-surface case answers `false`.
+pub fn base_is_sealed(ctx: &Ctx<'_>) -> Result<bool, ScriptError> {
+  Ok(with_test_registry(ctx, |r| r.base_sealed).unwrap_or(false))
+}
+
 // ── The test / describe object builders ──────────────────────────────
 
 /// Build a `test` function object bound to one fixture set. `test.extend`

@@ -515,6 +515,11 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   let fd = crate::bindings::runtime::ensure_ferridriver(ctx)?;
   fd.set("bdd", bdd)?;
   fd.set("tool", tool)?;
+  // `defineDefaults` is installed on the globals by the registry; the
+  // `ferridriver` object mirrors it so `import { defineDefaults } from
+  // 'ferridriver'` resolves like every other contribution point.
+  let define_defaults: Value<'js> = ctx.globals().get("defineDefaults")?;
+  fd.set("defineDefaults", define_defaults)?;
 
   Ok(())
 }

@@ -830,11 +830,20 @@ pub struct HostRegistrations {
   pub tests: Vec<String>,
   /// `test.extend` fixture names.
   pub fixtures: Vec<String>,
+  /// `defineDefaults(defaults)` payloads, in call order. Folded under
+  /// every config layer by the two-pass startup.
+  pub defaults: Vec<serde_json::Value>,
   /// Why this host's evaluation failed, when it did. A file is entitled
   /// to throw under one host and work under another — a session
   /// isolates per file per host, so extraction records the throw where
   /// it happened instead of condemning the file everywhere.
   pub error: Option<String>,
+  /// The thrown error's `name`, kept beside the message because one
+  /// name decides whether the failure may be skipped:
+  /// `ExtensionPolicyError` never can. A cache HIT replays the recorded
+  /// throw rather than re-evaluating, so the marker has to survive in
+  /// the snapshot.
+  pub error_name: Option<String>,
 }
 
 impl HostRegistrations {
@@ -846,6 +855,7 @@ impl HostRegistrations {
       && self.param_types.is_empty()
       && self.tests.is_empty()
       && self.fixtures.is_empty()
+      && self.defaults.is_empty()
   }
 }
 
@@ -874,6 +884,25 @@ impl ExtensionSnapshot {
     serde_json::to_string(tools).unwrap_or_else(|_| "[]".to_string())
   }
 
+  /// The first `[extensions.policy]` refusal any host recorded, as
+  /// `(host, message)`. Never skippable, so its consumer fails rather
+  /// than dropping the package.
+  #[must_use]
+  pub fn policy_refusal(&self) -> Option<(&str, &str)> {
+    self.hosts.iter().find_map(|(host, registrations)| {
+      let message = registrations.error.as_deref()?;
+      (registrations.error_name.as_deref() == Some(crate::error::EXTENSION_POLICY_ERROR))
+        .then_some((host.as_str(), message))
+    })
+  }
+
+  /// The config defaults this file contributes under `host`, in call
+  /// order.
+  #[must_use]
+  pub fn defaults_for(&self, host: &str) -> &[serde_json::Value] {
+    self.hosts.get(host).map(|h| h.defaults.as_slice()).unwrap_or_default()
+  }
+
   /// Whether the file registered anything at all, under any host.
   #[must_use]
   pub fn is_empty(&self) -> bool {
@@ -898,7 +927,7 @@ struct AuxEnvelope {
 
 /// Bump on any change to [`ExtensionSnapshot`] that a reader cannot
 /// absorb; an entry at another version is a miss.
-const AUX_VERSION: u32 = 1;
+const AUX_VERSION: u32 = 2;
 
 fn encode_aux(snapshot: &ExtensionSnapshot) -> String {
   serde_json::to_string(&AuxEnvelope {
@@ -1322,6 +1351,7 @@ pub async fn compile_and_extract_extensions(
                     host.as_str().to_string(),
                     HostRegistrations {
                       error: Some(e.message.clone()),
+                      error_name: e.name.clone(),
                       ..HostRegistrations::default()
                     },
                   );
@@ -1343,12 +1373,20 @@ pub async fn compile_and_extract_extensions(
           // registration the operator ceiling refuses, say — and that is
           // a failure, not a snapshot full of errors.
           if !snapshot.hosts.is_empty() && snapshot.hosts.values().all(|h| h.error.is_some()) {
-            let first = snapshot
+            let (first, name) = snapshot
               .hosts
               .values()
-              .find_map(|h| h.error.clone())
-              .unwrap_or_else(|| "extension failed under every host".to_string());
-            slots[i] = Slot::Failed(ScriptError::internal(first));
+              .find_map(|h| h.error.clone().map(|message| (message, h.error_name.clone())))
+              .unwrap_or_else(|| ("extension failed under every host".to_string(), None));
+            // The thrown error's NAME decides whether the failure may be
+            // skipped, so rebuilding it as a plain internal error is how
+            // an `[extensions.policy]` refusal used to reach the loader
+            // as a skippable compile failure.
+            slots[i] = Slot::Failed(if name.as_deref() == Some(crate::error::EXTENSION_POLICY_ERROR) {
+              ScriptError::policy(first)
+            } else {
+              ScriptError::internal(first)
+            });
             continue;
           }
           let module_name = extension_module_name(&groups[i]);
