@@ -430,6 +430,87 @@ pub fn tools_len(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
   with_registry(ctx, |reg| reg.tools.len())
 }
 
+/// Where every registry stood before a file evaluated, so what the file
+/// added can be sliced off afterwards.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RegistryMarks {
+  tools: usize,
+  steps: usize,
+  hooks: usize,
+  param_types: usize,
+  tests: usize,
+  fixtures: usize,
+}
+
+/// Snapshot the position of every registry.
+pub fn registry_marks(ctx: &Ctx<'_>) -> Result<RegistryMarks, ScriptError> {
+  let (tools, steps, hooks, param_types) = with_registry(ctx, |reg| {
+    (reg.tools.len(), reg.steps.len(), reg.hooks.len(), reg.param_types.len())
+  })?;
+  let (tests, fixtures) = crate::bindings::test::registry_marks(ctx)?;
+  Ok(RegistryMarks {
+    tools,
+    steps,
+    hooks,
+    param_types,
+    tests,
+    fixtures,
+  })
+}
+
+/// Everything registered since `marks`, which for one file evaluated in
+/// a shared context is exactly that file's contribution.
+///
+/// Tools used to be the only registry sliced, so an extension that
+/// contributes steps, hooks, parameter types or fixtures reported an
+/// empty manifest — the same answer as a `defineTool` that never ran.
+pub fn registrations_since(
+  ctx: &Ctx<'_>,
+  marks: RegistryMarks,
+) -> Result<crate::bundle::HostRegistrations, ScriptError> {
+  let tools = tools_snapshot(ctx)?
+    .get(marks.tools..)
+    .unwrap_or_default()
+    .iter()
+    .map(|t| serde_json::to_value(t).unwrap_or(serde_json::Value::Null))
+    .collect();
+  let (steps, hooks, param_types) = with_registry(ctx, |reg| {
+    (
+      reg
+        .steps
+        .get(marks.steps..)
+        .unwrap_or_default()
+        .iter()
+        .map(|s| format!("{} {}", s.kind.as_str(), s.pattern))
+        .collect::<Vec<_>>(),
+      reg
+        .hooks
+        .get(marks.hooks..)
+        .unwrap_or_default()
+        .iter()
+        .map(|h| h.kind.clone())
+        .collect::<Vec<_>>(),
+      reg
+        .param_types
+        .get(marks.param_types..)
+        .unwrap_or_default()
+        .iter()
+        .map(|p| p.name.clone())
+        .collect::<Vec<_>>(),
+    )
+  })?;
+  let (tests, fixtures) = crate::bindings::test::registrations_since(ctx, marks.tests, marks.fixtures)?;
+  Ok(crate::bundle::HostRegistrations {
+    tools,
+    steps,
+    hooks,
+    param_types,
+    tests,
+    fixtures,
+    error: None,
+  })
+}
+
 /// How many POSITIONAL registrations this VM holds: tools, steps, hooks
 /// and parameter types, plus the test-surface fixtures and tests.
 ///

@@ -1073,9 +1073,11 @@ async fn plugin_top_level_await_registers_tools_in_session() {
 #[tokio::test(flavor = "multi_thread")]
 async fn broken_plugin_is_skipped_without_killing_the_session() {
   // Session-time install must isolate per file like startup does: one
-  // plugin whose top-level throws (here: only under the script host, so
-  // it passes manifest extraction, which runs as host 'mcp') must not
+  // plugin whose top-level throws under the SCRIPT host only must not
   // take down the whole VM — the healthy plugin's tool stays callable.
+  // Extraction evaluates under every host, so the throw is recorded
+  // against the script host's snapshot; a file that threw under every
+  // host would be a compile failure instead.
   let tmp = tempfile::tempdir().expect("tempdir");
   let bad = tmp.path().join("bad.js");
   std::fs::write(
@@ -1575,9 +1577,9 @@ async fn extraction_environment_matches_session_for_top_level_globals() {
   );
   let cp = compiled.into_iter().next().expect("one compiled plugin");
   assert!(
-    cp.manifests_json.contains("\"ambient\""),
+    cp.manifests_json().contains("\"ambient\""),
     "manifest extracted: {}",
-    cp.manifests_json
+    cp.manifests_json()
   );
 
   let sb_tmp = tempfile::tempdir().expect("tempdir");

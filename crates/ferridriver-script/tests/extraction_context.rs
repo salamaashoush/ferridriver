@@ -121,9 +121,9 @@ async fn an_extension_may_use_the_test_surface_at_its_top_level() {
   let (ok, err) = compile(std::slice::from_ref(&path)).await;
   assert!(err.is_empty(), "extraction failed: {err:?}");
   assert!(
-    ok[0].manifests_json.contains("shapes"),
+    ok[0].manifests_json().contains("shapes"),
     "manifest missing the tool: {}",
-    ok[0].manifests_json
+    ok[0].manifests_json()
   );
 
   let (_tmp, session, ctx) = session_with(vec![binding(&ok[0])]).await;

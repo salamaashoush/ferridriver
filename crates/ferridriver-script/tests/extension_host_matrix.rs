@@ -91,6 +91,11 @@ async fn one_extension_registers_the_same_under_every_host() {
     base_dir: dir.clone(),
   }];
 
+  let caps = ScriptCaps::default();
+  let sidecars: Vec<String> = Vec::new();
+  let env = RequirementEnv::from_caps(&caps, &sidecars);
+  let (_g, _c, failures) = ferridriver_script::extension_load::load(&specs, &env, &caps.extension_policy).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
   let (blocked, bindings) = gate_and_load(&specs).await;
   assert!(blocked.is_empty(), "nothing to block");
   assert_eq!(bindings.len(), 1, "the file must compile");
@@ -149,6 +154,59 @@ async fn an_unmet_requirement_blocks_identically_under_every_host() {
       "{host:?} must expose nothing from a blocked package"
     );
   }
+
+  let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extraction_reports_what_each_host_would_see() {
+  // A file branches on `ferridriver.host`, so its contribution IS a
+  // function of the host. Extraction used to evaluate under `mcp` alone
+  // and report only the tools it found there: the BDD steps, the test
+  // fixtures and the script-host contributions of the very same file
+  // were reported as "declares nothing".
+  let dir = scratch("snapshot");
+  std::fs::write(
+    dir.join("branching.ts"),
+    "import { test } from '@ferridriver/test';\n\
+     if (ferridriver.host === 'mcp') { defineTool({ name: 'only.mcp', handler: async () => 1 }); }\n\
+     if (ferridriver.host === 'bdd') { Given('a step only bdd sees', function () {}); Before(function () {}); }\n\
+     if (ferridriver.host === 'test') { test.extend({ onlyTest: ['x', { option: true }] }); }\n\
+     if (ferridriver.host === 'script') { defineTool({ name: 'only.script', handler: async () => 2 }); }\n",
+  )
+  .expect("write extension");
+  let specs = vec![ExtensionSpec {
+    spec: "./branching.ts".to_string(),
+    base_dir: dir.clone(),
+  }];
+
+  let caps = ScriptCaps::default();
+  let sidecars: Vec<String> = Vec::new();
+  let env = RequirementEnv::from_caps(&caps, &sidecars);
+  let (_gated, compiled, failures) =
+    ferridriver_script::extension_load::load(&specs, &env, &caps.extension_policy).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let snapshot = &compiled[0].snapshot;
+
+  let mcp = snapshot.for_host("mcp").expect("mcp host snapshot");
+  assert_eq!(mcp.tools.len(), 1, "mcp registers one tool");
+  assert!(mcp.steps.is_empty(), "mcp branch registers no steps");
+
+  let bdd = snapshot.for_host("bdd").expect("bdd host snapshot");
+  assert_eq!(bdd.steps, vec!["Given a step only bdd sees".to_string()]);
+  assert_eq!(bdd.hooks, vec!["Before".to_string()]);
+  assert!(bdd.tools.is_empty(), "bdd branch registers no tools");
+
+  let test_host = snapshot.for_host("test").expect("test host snapshot");
+  assert_eq!(test_host.fixtures, vec!["onlyTest".to_string()]);
+
+  let script = snapshot.for_host("script").expect("script host snapshot");
+  assert_eq!(script.tools.len(), 1, "script registers its own tool");
+
+  // The MCP consumer still reads exactly its own host's manifests.
+  let mcp_json = compiled[0].manifests_json();
+  assert!(mcp_json.contains("only.mcp"), "{mcp_json}");
+  assert!(!mcp_json.contains("only.script"), "{mcp_json}");
 
   let _ = std::fs::remove_dir_all(&dir);
 }

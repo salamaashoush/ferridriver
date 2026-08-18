@@ -1697,6 +1697,35 @@ pub(crate) fn fixture_set_table(reg: &TestRegistry) -> Vec<Vec<usize>> {
   reg.fixture_sets.clone()
 }
 
+/// Where the test surface's registries stand — `(tests, fixtures)`.
+pub(crate) fn registry_marks(ctx: &Ctx<'_>) -> Result<(usize, usize), ScriptError> {
+  with_test_registry(ctx, |r| (r.tests.len(), r.fixtures.len()))
+}
+
+/// Test titles and fixture names registered since those marks.
+pub(crate) fn registrations_since(
+  ctx: &Ctx<'_>,
+  tests: usize,
+  fixtures: usize,
+) -> Result<(Vec<String>, Vec<String>), ScriptError> {
+  with_test_registry(ctx, |r| {
+    (
+      r.tests
+        .get(tests..)
+        .unwrap_or_default()
+        .iter()
+        .map(|t| t.title.clone())
+        .collect(),
+      r.fixtures
+        .get(fixtures..)
+        .unwrap_or_default()
+        .iter()
+        .map(|f| f.name.clone())
+        .collect(),
+    )
+  })
+}
+
 /// Positional registrations on the test surface: tests, suites, hooks
 /// and fixtures. Consumers address all of them by index, so a partial
 /// registration is not something a host can skip past.

@@ -315,7 +315,7 @@ async fn manifest_extraction_carries_title_output_schema_annotations() {
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled extension");
 
-  let manifests: serde_json::Value = serde_json::from_str(&cp.manifests_json).expect("manifest JSON");
+  let manifests: serde_json::Value = serde_json::from_str(&cp.manifests_json()).expect("manifest JSON");
   let tool = &manifests[0];
   assert_eq!(tool["name"], "meta");
   assert_eq!(tool["title"], "Meta Tool");

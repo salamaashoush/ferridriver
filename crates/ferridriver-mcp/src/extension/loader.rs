@@ -112,7 +112,7 @@ pub async fn load_all(
     .collect();
 
   for cp in compiled {
-    let tools: Vec<ToolManifest> = match serde_json::from_str(&cp.manifests_json) {
+    let tools: Vec<ToolManifest> = match serde_json::from_str(&cp.manifests_json()) {
       Ok(t) => t,
       Err(error) => {
         errors.push(ExtensionLoadError::ManifestInvalid { path: cp.path, error });

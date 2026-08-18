@@ -780,6 +780,111 @@ pub fn source_is_es_module(source: &str) -> bool {
 /// `ExtensionRegistry`. `manifests_json` is read straight off that
 /// registry — no JS extraction expression. `index` is the file's
 /// position in the returned (file-order, contiguous over successes) vec.
+/// What one extension file registered under one host, sliced out of the
+/// shared registries by the difference its evaluation made.
+///
+/// Tools were the only thing extraction ever reported, so a file whose
+/// contribution is steps, hooks, parameter types or fixtures showed up
+/// as "declares no tools" — indistinguishable from a `defineTool` that
+/// never ran.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct HostRegistrations {
+  /// Tool manifests, verbatim as the registry serialises them (the
+  /// manifest type belongs to the MCP crate, so this stays raw JSON).
+  pub tools: Vec<serde_json::Value>,
+  /// `"Given a cart with 2 items"` — keyword and expression.
+  pub steps: Vec<String>,
+  /// `"Before"`, `"AfterAll"`, …
+  pub hooks: Vec<String>,
+  pub param_types: Vec<String>,
+  /// `test(...)` titles.
+  pub tests: Vec<String>,
+  /// `test.extend` fixture names.
+  pub fixtures: Vec<String>,
+  /// Why this host's evaluation failed, when it did. A file is entitled
+  /// to throw under one host and work under another — a session
+  /// isolates per file per host, so extraction records the throw where
+  /// it happened instead of condemning the file everywhere.
+  pub error: Option<String>,
+}
+
+impl HostRegistrations {
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self.tools.is_empty()
+      && self.steps.is_empty()
+      && self.hooks.is_empty()
+      && self.param_types.is_empty()
+      && self.tests.is_empty()
+      && self.fixtures.is_empty()
+  }
+}
+
+/// One extension file's contribution, per host.
+///
+/// A file branches on `ferridriver.host`, so what it registers is a
+/// function of the host — extracting under one host and reporting that
+/// as "the manifest" hid every contribution the other three make.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ExtensionSnapshot {
+  pub hosts: std::collections::BTreeMap<String, HostRegistrations>,
+}
+
+impl ExtensionSnapshot {
+  #[must_use]
+  pub fn for_host(&self, host: &str) -> Option<&HostRegistrations> {
+    self.hosts.get(host)
+  }
+
+  /// The tool manifests this file declares under `host`, as the JSON
+  /// array its consumer deserialises.
+  #[must_use]
+  pub fn tools_json(&self, host: &str) -> String {
+    let tools = self.hosts.get(host).map(|h| h.tools.as_slice()).unwrap_or_default();
+    serde_json::to_string(tools).unwrap_or_else(|_| "[]".to_string())
+  }
+
+  /// Whether the file registered anything at all, under any host.
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self.hosts.values().all(HostRegistrations::is_empty)
+  }
+
+  /// Why the file failed to evaluate under `host`, if it did.
+  #[must_use]
+  pub fn host_error(&self, host: &str) -> Option<&str> {
+    self.hosts.get(host).and_then(|h| h.error.as_deref())
+  }
+}
+
+/// Cache payload envelope. The snapshot's shape is going to grow, and a
+/// reader that met an older one used to deserialise it as an empty
+/// manifest list rather than as the miss it is.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AuxEnvelope {
+  v: u32,
+  snapshot: ExtensionSnapshot,
+}
+
+/// Bump on any change to [`ExtensionSnapshot`] that a reader cannot
+/// absorb; an entry at another version is a miss.
+const AUX_VERSION: u32 = 1;
+
+fn encode_aux(snapshot: &ExtensionSnapshot) -> String {
+  serde_json::to_string(&AuxEnvelope {
+    v: AUX_VERSION,
+    snapshot: snapshot.clone(),
+  })
+  .unwrap_or_else(|_| String::new())
+}
+
+fn decode_aux(aux: Option<&str>) -> Option<ExtensionSnapshot> {
+  let envelope: AuxEnvelope = serde_json::from_str(aux?).ok()?;
+  (envelope.v == AUX_VERSION).then_some(envelope.snapshot)
+}
+
 pub struct CompiledExtension {
   pub path: PathBuf,
   pub index: usize,
@@ -792,10 +897,18 @@ pub struct CompiledExtension {
   /// reports the author's `.ts` line rather than a bundled offset.
   /// `None` when the bundle produced no map.
   pub source_map_json: Option<String>,
-  /// JSON array (one object per tool, source order, `handler` stripped).
-  /// Deserialises into `Vec<ToolManifest>` on the MCP side without
-  /// ever re-running the extension.
-  pub manifests_json: String,
+  /// Everything the file registered, per host — read straight off the
+  /// registries its evaluation changed, never by re-running it.
+  pub snapshot: ExtensionSnapshot,
+}
+
+impl CompiledExtension {
+  /// The tool manifests this file declares under the MCP host, as the
+  /// JSON array `ferridriver-mcp` deserialises.
+  #[must_use]
+  pub fn manifests_json(&self) -> String {
+    self.snapshot.tools_json(crate::ExtensionHost::Mcp.as_str())
+  }
 }
 
 impl CompiledExtension {
@@ -826,7 +939,7 @@ impl CompiledExtension {
 /// handing out code compiled from the old helper.
 struct CachedExtension {
   bytecode: Arc<[u8]>,
-  manifests_json: String,
+  snapshot: ExtensionSnapshot,
   module_name: String,
   source_map_json: Option<String>,
   inputs: Vec<PathBuf>,
@@ -859,7 +972,7 @@ fn extension_cache() -> &'static ExtensionCache {
 fn remember_extension(
   key: u64,
   bytecode: &Arc<[u8]>,
-  manifests_json: &str,
+  snapshot: &ExtensionSnapshot,
   module_name: &str,
   source_map_json: Option<&str>,
   inputs: Vec<PathBuf>,
@@ -872,7 +985,7 @@ fn remember_extension(
       key,
       CachedExtension {
         bytecode: bytecode.clone(),
-        manifests_json: manifests_json.to_string(),
+        snapshot: snapshot.clone(),
         module_name: module_name.to_string(),
         source_map_json: source_map_json.map(str::to_string),
         inputs,
@@ -941,7 +1054,7 @@ pub async fn compile_and_extract_extensions(
   /// a freshly compiled one's.
   struct Loaded {
     bytecode: Arc<[u8]>,
-    manifests_json: String,
+    snapshot: ExtensionSnapshot,
     module_name: String,
     source_map_json: Option<String>,
   }
@@ -966,7 +1079,7 @@ pub async fn compile_and_extract_extensions(
           }
           Some(Loaded {
             bytecode: hit.bytecode.clone(),
-            manifests_json: hit.manifests_json.clone(),
+            snapshot: hit.snapshot.clone(),
             module_name: hit.module_name.clone(),
             source_map_json: hit.source_map_json.clone(),
           })
@@ -979,30 +1092,33 @@ pub async fn compile_and_extract_extensions(
           Some(hit) => slots.push(Slot::Hit(hit)),
           // 2. Disk (cross-process), transitively validated. Promote into
           //    the in-memory tier so later same-process loads stay hot.
-          None => match crate::bytecode_cache::load(disk_key) {
-            Some(entry) => {
-              let bc: Arc<[u8]> = Arc::from(entry.bytecode.into_boxed_slice());
-              let mj = entry.aux.unwrap_or_else(|| "[]".to_string());
+          // An entry whose payload this build cannot read is a MISS,
+          // not an empty snapshot.
+          None => match crate::bytecode_cache::load(disk_key).and_then(|e| {
+            let snapshot = decode_aux(e.aux.as_deref())?;
+            Some((e.bytecode, e.module_name, e.source_map_json, e.inputs, snapshot))
+          }) {
+            Some((bytecode, module_name, source_map_json, inputs, snapshot)) => {
+              let bc: Arc<[u8]> = Arc::from(bytecode.into_boxed_slice());
               // The map and the module name come back with the entry:
               // dropping them here is what made a cache hit report
               // bundled offsets where a cold compile reported the
               // author's `.ts` line.
-              let module_name = entry.module_name;
-              let source_map_json = entry.source_map_json;
+              //
               // Reuse the input set the disk manifest recorded rather
               // than re-deriving it; it is what that bytecode's freshness
               // was just validated against.
               remember_extension(
                 inmem_key,
                 &bc,
-                &mj,
+                &snapshot,
                 &module_name,
                 source_map_json.as_deref(),
-                entry.inputs,
+                inputs,
               );
               slots.push(Slot::Hit(Loaded {
                 bytecode: bc,
-                manifests_json: mj,
+                snapshot,
                 module_name,
                 source_map_json,
               }));
@@ -1064,97 +1180,131 @@ pub async fn compile_and_extract_extensions(
   //
   // With nothing missed there is nothing to read back, so no file has to
   // evaluate at all — the whole batch's manifests came from a cache.
-  let runtime_ctx = if miss_idx.is_empty() {
-    None
-  } else {
-    match AsyncRuntime::new() {
-      Ok(r) => {
-        r.set_loader(
-          crate::bindings::native_modules::resolver(),
-          crate::bindings::native_modules::loader(),
-        )
-        .await;
-        match AsyncContext::full(&r).await {
-          Ok(c) => match install_extraction_env(&c, policy).await {
-            Ok(()) => Some((r, c)),
-            Err(err) => {
-              for s in &mut slots {
-                if matches!(s, Slot::Miss { .. }) {
-                  *s = Slot::Failed(err.clone());
-                }
-              }
-              None
+  // Nothing to extract: every file's manifests came from a cache, and no
+  // file needs a context to be read back in.
+  if !miss_idx.is_empty() {
+    match extraction_hosts(policy).await {
+      Ok(contexts) => {
+        // Compile every missed file ONCE. `Module::declare` parses; it
+        // does not evaluate, so this leaves every registry untouched and
+        // the per-host passes below all start from the same bytes.
+        let compile_ctx = &contexts[0].2;
+        let mut compiled: rustc_hash::FxHashMap<usize, Arc<[u8]>> = rustc_hash::FxHashMap::default();
+        for &i in &miss_idx {
+          let Some(code) = bundled_code.get(&i) else { continue };
+          let module_name = extension_module_name(&files[i]);
+          match compile_one(compile_ctx, &module_name, code).await {
+            Ok(bc) => {
+              compiled.insert(i, Arc::from(bc.into_boxed_slice()));
             },
-          },
-          Err(e) => {
-            let err = ScriptError::internal(format!("extension bytecode context: {e}"));
-            for s in &mut slots {
-              if matches!(s, Slot::Miss { .. }) {
-                *s = Slot::Failed(err.clone());
-              }
+            Err(e) => slots[i] = Slot::Failed(e),
+          }
+        }
+
+        // One pass per host. What a file registers is a function of
+        // `ferridriver.host` — an extension that only calls `defineTool`
+        // under `mcp` and `Given` under `bdd` reported, under a
+        // single-host extraction, exactly half of itself.
+        //
+        // Within a pass: file order, hits included. A session evaluates
+        // every extension it was given into one VM, so extraction has to
+        // reach each file in a context where the earlier ones have
+        // already run. Stopping at the LAST miss costs nothing — a hit
+        // after it has no cold file left to observe what it would leave
+        // behind.
+        let last_miss = miss_idx.last().copied().unwrap_or(0);
+        let mut snapshots: rustc_hash::FxHashMap<usize, ExtensionSnapshot> = rustc_hash::FxHashMap::default();
+        for (host, _runtime, actx) in &contexts {
+          for i in 0..=last_miss {
+            let (bytecode, label, is_miss) = match &slots[i] {
+              Slot::Hit(hit) => (Arc::clone(&hit.bytecode), hit.module_name.clone(), false),
+              Slot::Miss { .. } => match compiled.get(&i) {
+                Some(bc) => (Arc::clone(bc), extension_module_name(&files[i]), true),
+                None => continue,
+              },
+              Slot::Failed(_) => continue,
+            };
+            match eval_and_slice(actx, &bytecode, &label).await {
+              Ok(registrations) => {
+                if is_miss {
+                  snapshots
+                    .entry(i)
+                    .or_default()
+                    .hosts
+                    .insert(host.as_str().to_string(), registrations);
+                }
+              },
+              // Recorded against THIS host, not against the file: a
+              // session installs per file per host and skips the pairing
+              // that throws, so condemning the file everywhere would
+              // report a package as broken that three hosts run fine.
+              Err(e) => {
+                tracing::warn!(
+                  target: "ferridriver::extensions",
+                  path = %files[i].display(),
+                  host = host.as_str(),
+                  error = %e.message,
+                  "extension.extract.host_failed: the file threw under this host"
+                );
+                if is_miss {
+                  snapshots.entry(i).or_default().hosts.insert(
+                    host.as_str().to_string(),
+                    HostRegistrations {
+                      error: Some(e.message.clone()),
+                      ..HostRegistrations::default()
+                    },
+                  );
+                }
+              },
             }
-            None
-          },
+          }
+        }
+
+        // Persist what the passes found, in both cache tiers.
+        for &i in &miss_idx {
+          let Slot::Miss { inmem_key, disk_key } = slots[i] else {
+            continue;
+          };
+          let Some(bytecode) = compiled.get(&i) else { continue };
+          let snapshot = snapshots.remove(&i).unwrap_or_default();
+          // Throwing under one host is the file's business; throwing
+          // under EVERY host is a file that cannot work anywhere — a
+          // registration the operator ceiling refuses, say — and that is
+          // a failure, not a snapshot full of errors.
+          if !snapshot.hosts.is_empty() && snapshot.hosts.values().all(|h| h.error.is_some()) {
+            let first = snapshot
+              .hosts
+              .values()
+              .find_map(|h| h.error.clone())
+              .unwrap_or_else(|| "extension failed under every host".to_string());
+            slots[i] = Slot::Failed(ScriptError::internal(first));
+            continue;
+          }
+          let module_name = extension_module_name(&files[i]);
+          // Inputs = this extension file plus its transitive imports (from
+          // the source map), so an edited helper invalidates the entry in
+          // BOTH tiers.
+          let map = bundled_map.get(&i).cloned().flatten();
+          let modules = bundled_modules.get(&i).cloned().unwrap_or_default();
+          let inputs = crate::bytecode_cache::input_set(std::slice::from_ref(&files[i]), &modules);
+          let aux = encode_aux(&snapshot);
+          crate::bytecode_cache::store(disk_key, bytecode, &module_name, map.as_deref(), Some(&aux), &inputs);
+          remember_extension(inmem_key, bytecode, &snapshot, &module_name, map.as_deref(), inputs);
+          slots[i] = Slot::Hit(Loaded {
+            bytecode: Arc::clone(bytecode),
+            snapshot,
+            module_name,
+            source_map_json: map,
+          });
         }
       },
-      Err(e) => {
-        let err = ScriptError::internal(format!("extension bytecode runtime: {e}"));
+      Err(err) => {
         for s in &mut slots {
           if matches!(s, Slot::Miss { .. }) {
             *s = Slot::Failed(err.clone());
           }
         }
-        None
       },
-    }
-  };
-
-  if let Some((_runtime, actx)) = runtime_ctx {
-    // File order, hits included: a session evaluates every extension it
-    // was given into one VM, so extraction has to reach each file in a
-    // context where the earlier ones have already run — otherwise the
-    // first incremental edit extracts a file in a world its neighbours
-    // never entered. Stopping at the LAST miss costs nothing: a hit
-    // after it has no cold file left to observe what it would leave
-    // behind.
-    let last_miss = miss_idx.last().copied().unwrap_or(0);
-    for i in 0..=last_miss {
-      // A hit's manifests come from the cache; the evaluation exists so
-      // the files after it see the world a session would have given them.
-      if let Slot::Hit(hit) = &slots[i] {
-        let (bc, name) = (Arc::clone(&hit.bytecode), hit.module_name.clone());
-        if let Err(e) = eval_extracted(&actx, &bc, &name).await {
-          slots[i] = Slot::Failed(e);
-        }
-        continue;
-      }
-      let module_name = extension_module_name(&files[i]);
-      match slots[i] {
-        Slot::Miss { inmem_key, disk_key } => {
-          let Some(code) = bundled_code.get(&i) else { continue };
-          match compile_extract_one(&actx, &module_name, code).await {
-            Ok((bc, mj)) => {
-              let bc: Arc<[u8]> = Arc::from(bc.into_boxed_slice());
-              // Inputs = this extension file plus its transitive imports (from
-              // the source map), so an edited helper invalidates the entry in
-              // BOTH tiers.
-              let map = bundled_map.get(&i).cloned().flatten();
-              let modules = bundled_modules.get(&i).cloned().unwrap_or_default();
-              let inputs = crate::bytecode_cache::input_set(std::slice::from_ref(&files[i]), &modules);
-              crate::bytecode_cache::store(disk_key, &bc, &module_name, map.as_deref(), Some(&mj), &inputs);
-              remember_extension(inmem_key, &bc, &mj, &module_name, map.as_deref(), inputs);
-              slots[i] = Slot::Hit(Loaded {
-                bytecode: bc,
-                manifests_json: mj,
-                module_name,
-                source_map_json: map,
-              });
-            },
-            Err(e) => slots[i] = Slot::Failed(e),
-          }
-        },
-        Slot::Hit(..) | Slot::Failed(_) => {},
-      }
     }
   }
 
@@ -1168,7 +1318,7 @@ pub async fn compile_and_extract_extensions(
         bytecode: hit.bytecode,
         module_name: hit.module_name,
         source_map_json: hit.source_map_json,
-        manifests_json: hit.manifests_json,
+        snapshot: hit.snapshot,
       }),
       Slot::Failed(e) => failures.push((files[i].clone(), e)),
       // A Miss with no compiled output never reached Hit/Failed only if
@@ -1202,6 +1352,7 @@ pub async fn compile_and_extract_extensions(
 async fn install_extraction_env(
   actx: &AsyncContext,
   policy: &ferridriver_config::ExtensionPolicyConfig,
+  host: crate::ExtensionHost,
 ) -> Result<(), ScriptError> {
   let policy = policy.clone();
   actx
@@ -1215,11 +1366,10 @@ async fn install_extraction_env(
         .map_err(|e| ScriptError::internal(format!("install expect: {e}")))?;
       crate::bindings::test::install_test(&ctx)
         .map_err(|e| ScriptError::internal(format!("install test surface: {e}")))?;
-      // Manifest extraction is the MCP tool path: expose
-      // `ferridriver.host = 'mcp'` so an extension's host-gated
-      // `defineTool` runs and its manifest is captured (mirrors what the
-      // mcp session does).
-      crate::bindings::runtime::install_host(&ctx, "mcp")
+      // The host this context extracts for: an extension branches on
+      // `ferridriver.host`, so each host needs its own context to
+      // register what that host would have seen.
+      crate::bindings::runtime::install_host(&ctx, host.as_str())
         .map_err(|e| ScriptError::internal(format!("install ferridriver.host: {e}")))?;
       let _ = ctx.store_userdata(crate::bindings::registry::ExtensionPolicyUd(policy));
       Ok(())
@@ -1227,17 +1377,86 @@ async fn install_extraction_env(
     .await
 }
 
-/// Load + evaluate bytecode that was already compiled and extracted
-/// (a cache hit) in the shared extraction context.
+/// One extraction runtime + context per host.
 ///
-/// Its manifests come from the cache, so nothing is read back — the
-/// evaluation exists only so the files after it see the same world they
-/// will see in a session, where every extension evaluates into one VM.
-async fn eval_extracted(actx: &AsyncContext, bytecode: &[u8], label: &str) -> Result<(), ScriptError> {
-  let bytecode = bytecode.to_vec();
-  let label = label.to_string();
+/// A runtime, not just a context: `store_userdata` is keyed on the
+/// RUNTIME (`Ctx::get_opaque` reads `JS_GetRuntime`), and the registries
+/// every contribution point writes into are userdata. Four contexts on
+/// one runtime would share one registry — the second context would not
+/// even get its `defineTool` global, because `registry::install` returns
+/// early when the userdata is already there — so the per-host slices
+/// would be each other's.
+async fn extraction_hosts(
+  policy: &ferridriver_config::ExtensionPolicyConfig,
+) -> Result<Vec<(crate::ExtensionHost, AsyncRuntime, AsyncContext)>, ScriptError> {
+  use crate::ExtensionHost as H;
+  let mut out = Vec::new();
+  for host in [H::Mcp, H::Bdd, H::Test, H::Script] {
+    let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("extension bytecode runtime: {e}")))?;
+    runtime
+      .set_loader(
+        crate::bindings::native_modules::resolver(),
+        crate::bindings::native_modules::loader(),
+      )
+      .await;
+    let ctx = AsyncContext::full(&runtime)
+      .await
+      .map_err(|e| ScriptError::internal(format!("extension bytecode context: {e}")))?;
+    install_extraction_env(&ctx, policy, host).await?;
+    out.push((host, runtime, ctx));
+  }
+  Ok(out)
+}
+
+/// Parse the bundled module and serialise it to bytecode. Parsing only
+/// — nothing evaluates, so every per-host pass starts from the same
+/// bytes and from registries this call did not touch.
+async fn compile_one(actx: &AsyncContext, module_name: &str, code: &str) -> Result<Vec<u8>, ScriptError> {
+  let name = module_name.to_string();
+  let code = code.to_string();
+  let label = module_name.to_string();
   actx
     .async_with(async |ctx| {
+      // Bundled module has no remaining imports — `declare` (parse only)
+      // needs no resolver; mirrors `bundle_and_compile`.
+      let module = Module::declare(ctx.clone(), name.into_bytes(), code.into_bytes())
+        .catch(&ctx)
+        .map_err(|e| caught_to_script_error(e, &label))?;
+      module
+        .write(WriteOptions {
+          // Same process + interpreter that will `load` it.
+          endianness: WriteOptionsEndianness::Native,
+          ..Default::default()
+        })
+        .map_err(|e| ScriptError::internal(format!("extension module write: {e}")))
+    })
+    .await
+}
+
+/// Load + evaluate one extension's bytecode in a host context and slice
+/// off everything it registered.
+///
+/// The evaluation matters even for a file whose registrations are
+/// already cached: the files after it must see the world a session
+/// would have given them.
+async fn eval_and_slice(actx: &AsyncContext, bytecode: &[u8], label: &str) -> Result<HostRegistrations, ScriptError> {
+  let bytecode = bytecode.to_vec();
+  let label = label.to_string();
+  let cfg_default = crate::engine::ScriptEngineConfig::default();
+  actx
+    .async_with(async |ctx| {
+      // Fresh capture per file: whatever the extension's top level logs
+      // is forwarded to tracing under the module label after eval.
+      let console = std::sync::Arc::new(crate::console::ConsoleCapture::new(
+        cfg_default.max_console_entries,
+        cfg_default.max_console_bytes,
+        cfg_default.max_console_entry_bytes,
+      ));
+      crate::console_fmt::install_console(&ctx, console.clone())
+        .map_err(|e| ScriptError::internal(format!("install console: {e}")))?;
+
+      let marks = crate::bindings::registry::registry_marks(&ctx)?;
+
       // SAFETY: same-interpreter precondition as `install_one_extension`
       // — the bytes came from `Module::write` in this process or from the
       // disk cache, whose ABI tag and input hashes guarantee an
@@ -1251,84 +1470,13 @@ async fn eval_extracted(actx: &AsyncContext, bytecode: &[u8], label: &str) -> Re
         .catch(&ctx)
         .map_err(|e| caught_to_script_error(e, &label))?
         .1;
-      promise
-        .into_future::<()>()
-        .await
-        .catch(&ctx)
-        .map_err(|e| caught_to_script_error(e, &label))
-    })
-    .await
-}
-
-/// Declare the bundled module, serialise it to bytecode, then load +
-/// evaluate that exact bytecode in the shared context (which has the
-/// extension registry installed) so the manifest is read straight off
-/// the Rust registry — the very bytes, and the very registration path,
-/// a session will run. Returns the file's bytecode and the JSON of just
-/// the tools THIS file registered (registry slice `[before, after)`).
-async fn compile_extract_one(
-  actx: &AsyncContext,
-  module_name: &str,
-  code: &str,
-) -> Result<(Vec<u8>, String), ScriptError> {
-  let name = module_name.to_string();
-  let code = code.to_string();
-  let label = module_name.to_string();
-  let cfg_default = crate::engine::ScriptEngineConfig::default();
-  actx
-    .async_with(async |ctx| {
-      // Fresh capture per file: whatever the extension's top level logs is
-      // forwarded to tracing under the module label after eval.
-      let console = std::sync::Arc::new(crate::console::ConsoleCapture::new(
-        cfg_default.max_console_entries,
-        cfg_default.max_console_bytes,
-        cfg_default.max_console_entry_bytes,
-      ));
-      crate::console_fmt::install_console(&ctx, console.clone())
-        .map_err(|e| ScriptError::internal(format!("install console: {e}")))?;
-
-      // Bundled module has no remaining imports — `declare` (parse only)
-      // needs no resolver; mirrors `bundle_and_compile`.
-      let module = Module::declare(ctx.clone(), name.clone().into_bytes(), code.into_bytes())
-        .catch(&ctx)
-        .map_err(|e| caught_to_script_error(e, &label))?;
-      let bytecode = module
-        .write(WriteOptions {
-          // Same process + interpreter that will `load` it.
-          endianness: WriteOptionsEndianness::Native,
-          ..Default::default()
-        })
-        .map_err(|e| ScriptError::internal(format!("extension module write: {e}")))?;
-
-      let before = crate::bindings::tools_len(&ctx)?;
-
-      // SAFETY: `bytecode` was just produced by `Module::write` in THIS
-      // process and rquickjs/QuickJS build with native endianness — the
-      // precondition `Module::load` documents. (When it is later stored in
-      // the disk cache, the cache's ABI tag + input hashes preserve that
-      // precondition for the process that loads it back.)
-      #[allow(unsafe_code)]
-      let loaded = (unsafe { Module::load(ctx.clone(), &bytecode) })
-        .catch(&ctx)
-        .map_err(|e| caught_to_script_error(e, &label))?;
-      let promise = loaded
-        .eval()
-        .catch(&ctx)
-        .map_err(|e| caught_to_script_error(e, &label))?
-        .1;
       let evaled = promise.into_future::<()>().await.catch(&ctx);
       for entry in console.drain() {
         tracing::info!(target: "ferridriver::extensions", extension = %label, "{}", entry.message);
       }
       evaled.map_err(|e| caught_to_script_error(e, &label))?;
 
-      // Tools registered via the file's top-level `defineTool(...)` calls
-      // during eval — slice off the ones THIS file added.
-      let all = crate::bindings::tools_snapshot(&ctx)?;
-      let slice = all.get(before..).unwrap_or(&[]);
-      let manifests_json =
-        serde_json::to_string(slice).map_err(|e| ScriptError::internal(format!("serialise manifests: {e}")))?;
-      Ok((bytecode, manifests_json))
+      crate::bindings::registry::registrations_since(&ctx, marks)
     })
     .await
 }
