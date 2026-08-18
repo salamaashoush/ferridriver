@@ -64,6 +64,18 @@ pub struct ProvidedModuleTable {
 }
 
 impl ProvidedModuleTable {
+  /// A plain copy of an installed table, for a caller that wants to
+  /// report what the process resolved against.
+  #[must_use]
+  pub fn clone_of(table: &Self) -> Self {
+    Self {
+      modules: table.modules.clone(),
+      order: table.order.clone(),
+      errors: table.errors.clone(),
+      warnings: table.warnings.clone(),
+    }
+  }
+
   #[must_use]
   pub fn get(&self, specifier: &str) -> Option<&ProvidedModule> {
     self.modules.get(specifier)
@@ -298,6 +310,102 @@ fn provider_order(
     );
   }
   order
+}
+
+/// The claim table this process resolves against, installed once by the
+/// host from the gate's verdict.
+///
+/// Process-global for the same reason the alias table is: a bundle is
+/// built and a session is created from several call sites across three
+/// crates, and all of them must answer "who serves this specifier?" the
+/// same way.
+static PROVIDED: std::sync::RwLock<Option<std::sync::Arc<ProvidedModuleTable>>> = std::sync::RwLock::new(None);
+static PROVIDED_SEALED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Install the merged table. Rejected once anything has resolved
+/// against it: a session built earlier would keep a resolver that never
+/// heard of the new specifier, and a bundle keyed earlier would have
+/// inlined what should have stayed external.
+///
+/// # Errors
+///
+/// When the table is already sealed and `table` is not what it holds.
+pub fn set_provided_modules(table: ProvidedModuleTable) -> Result<(), String> {
+  let mut guard = PROVIDED.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+  if PROVIDED_SEALED.load(std::sync::atomic::Ordering::Acquire) {
+    let same = guard.as_ref().is_some_and(|current| current.modules == table.modules);
+    return if same {
+      Ok(())
+    } else {
+      Err(format!(
+        "provided modules are sealed: `{}` arrived after the first module resolved against the table",
+        table.specifiers().join("`, `")
+      ))
+    };
+  }
+  *guard = Some(std::sync::Arc::new(table));
+  Ok(())
+}
+
+/// The installed table, sealing it: whatever reads it is about to make a
+/// decision that cannot be revisited.
+#[must_use]
+pub fn provided_modules() -> std::sync::Arc<ProvidedModuleTable> {
+  PROVIDED_SEALED.store(true, std::sync::atomic::Ordering::Release);
+  PROVIDED
+    .read()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone()
+    .unwrap_or_default()
+}
+
+/// The specifier a claimed one resolves to: itself for a provided
+/// module, the alias target for an alias, `None` when nothing claims it.
+///
+/// One module instance per specifier group falls out of this: the
+/// provider's bytecode is loaded under the target's name, and every
+/// alias normalises to that name before QuickJS looks the module up.
+#[must_use]
+pub fn canonical_provided_name(specifier: &str) -> Option<String> {
+  let table = provided_modules();
+  let provided = table.get(specifier)?;
+  Some(provided.alias_of.clone().unwrap_or_else(|| specifier.to_string()))
+}
+
+/// Whether any package serves this specifier.
+#[must_use]
+pub fn is_provided_specifier(specifier: &str) -> bool {
+  canonical_provided_name(specifier).is_some()
+}
+
+/// The module name a provider file is compiled under: the first
+/// specifier it serves, so the loaded module IS the specifier and
+/// nothing has to re-export it.
+#[must_use]
+pub fn provider_module_name(file: &Path) -> Option<String> {
+  let table = provided_modules();
+  table
+    .modules
+    .iter()
+    .filter(|(_, provided)| provided.alias_of.is_none() && provided.file == file)
+    .map(|(specifier, _)| specifier.clone())
+    .next()
+}
+
+/// Fingerprint of the claim table, folded into every bundle cache key:
+/// a claim flips a specifier between "external bare import" and
+/// "inlined into the chunk", which changes output for identical inputs.
+#[must_use]
+pub fn provided_fingerprint() -> u64 {
+  use std::hash::{Hash, Hasher};
+  let table = provided_modules();
+  let mut h = std::collections::hash_map::DefaultHasher::new();
+  for (specifier, provided) in &table.modules {
+    specifier.hash(&mut h);
+    provided.file.hash(&mut h);
+    provided.alias_of.hash(&mut h);
+  }
+  h.finish()
 }
 
 /// A package's name for diagnostics: the manifest's own, else the

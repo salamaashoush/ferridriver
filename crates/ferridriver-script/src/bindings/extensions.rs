@@ -45,6 +45,10 @@ pub struct ExtensionBinding {
   pub bytecode: Arc<[u8]>,
   /// Source identity (file path) used only in install-failure logs.
   pub name: String,
+  /// The import specifier this file SERVES, when it is a package's
+  /// provider. Its module is loaded under that name, and anything that
+  /// imports the specifier links to it.
+  pub provides: Option<String>,
   /// Maps this extension's bundled frames back to the author's source.
   /// Registered into the VM before the module evaluates, so a throw in
   /// its top level already reports the original `.ts` line. `None`
@@ -329,6 +333,17 @@ pub async fn install_extensions(ctx: &Ctx<'_>, files: &[ExtensionBinding]) -> rq
         ),
         other => other.to_string(),
       };
+      // A PROVIDER that does not evaluate cannot be skipped: every
+      // consumer's `import` of its specifier resolves to a module that
+      // is not there, so the session would come up with a specifier
+      // that silently answers nothing.
+      if let Some(specifier) = &file.provides {
+        return Err(rq(&ScriptError::internal(format!(
+          "extension.provider.failed: `{}` serves `{specifier}` and failed to evaluate: {detail}. \
+           Every module importing `{specifier}` depends on it, so the session cannot start",
+          file.name
+        ))));
+      }
       let after = crate::bindings::registry::registration_counts(ctx).map_err(|e| rq(&e))?;
       if after > before {
         // Skipping is only safe while the file left nothing behind.

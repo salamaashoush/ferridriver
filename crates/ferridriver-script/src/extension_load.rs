@@ -69,6 +69,10 @@ pub fn gate(specs: &[ExtensionSpec], env: &RequirementEnv<'_>) -> GatedExtension
 
   let mut files: Vec<PathBuf> = Vec::new();
   let mut all_files: Vec<PathBuf> = Vec::new();
+  // Providers first, in dependency order: every entry that imports a
+  // claimed specifier links against a module that must already be
+  // there, and a provider importing another package's specifier has to
+  // follow it.
   for r in &resolved {
     for f in &r.files {
       if !all_files.contains(f) {
@@ -111,12 +115,24 @@ pub fn gate(specs: &[ExtensionSpec], env: &RequirementEnv<'_>) -> GatedExtension
     });
   }
 
+  let mut ordered: Vec<PathBuf> = provided.provider_order().to_vec();
+  for f in files {
+    if !ordered.contains(&f) {
+      ordered.push(f);
+    }
+  }
+  for f in provided.provider_order() {
+    if !all_files.contains(f) {
+      all_files.push(f.clone());
+    }
+  }
+
   GatedExtensions {
     resolved,
     resolve_errors,
     issues,
     blocked,
-    files,
+    files: ordered,
     all_files,
     provided,
   }
@@ -161,7 +177,20 @@ pub async fn load(
   env: &RequirementEnv<'_>,
   policy: &ExtensionPolicyConfig,
 ) -> (GatedExtensions, Vec<CompiledExtension>, Vec<(PathBuf, ScriptError)>) {
-  let gated = gate(specs, env);
+  let mut gated = gate(specs, env);
+  // The claim table has to be installed BEFORE anything bundles: it
+  // decides which specifiers stay external, which module name a
+  // provider compiles under, and what every later resolver accepts.
+  if let Err(e) = crate::provided_modules::set_provided_modules(std::mem::take(&mut gated.provided)) {
+    gated.issues.push(RequirementIssue {
+      source: "extensions".to_string(),
+      message: e,
+      blocking: false,
+    });
+  }
+  // Re-read what is installed, so the caller sees the table the process
+  // actually resolves against rather than the one it just offered.
+  gated.provided = ProvidedModuleTable::clone_of(&crate::provided_modules::provided_modules());
   if gated.files.is_empty() {
     return (gated, Vec::new(), Vec::new());
   }
@@ -212,6 +241,7 @@ pub async fn load_bindings(
     .into_iter()
     .map(|cp| ExtensionBinding {
       source_map: Some(cp.mapper()),
+      provides: crate::provided_modules::provider_module_name(&cp.path),
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     })

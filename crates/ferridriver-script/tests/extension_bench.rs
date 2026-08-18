@@ -68,6 +68,7 @@ fn bindings(compiled: &[Compiled]) -> Vec<ExtensionBinding> {
       bytecode: c.bytecode.clone(),
       name: c.name.clone(),
       source_map: None,
+      provides: None,
     })
     .collect()
 }

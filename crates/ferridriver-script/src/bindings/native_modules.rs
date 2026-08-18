@@ -15,7 +15,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use rquickjs::loader::{BuiltinResolver, Loader};
+use rquickjs::loader::{BuiltinResolver, ImportAttributes, Loader, Resolver};
 use rquickjs::module::{Declarations, Exports, ModuleDef};
 use rquickjs::{Ctx, Module, Object, Value};
 
@@ -264,7 +264,7 @@ pub fn alias_fingerprint() -> u64 {
 /// Resolver accepting exactly the native specifiers plus the configured
 /// aliases (non-consuming).
 #[must_use]
-pub fn resolver() -> BuiltinResolver {
+pub fn resolver() -> NativeResolver {
   // A resolver is a SNAPSHOT: the session it serves keeps it for life,
   // so an alias added after this point could never reach that session.
   seal_aliases();
@@ -275,7 +275,40 @@ pub fn resolver() -> BuiltinResolver {
   for (from, _) in module_aliases().iter() {
     r.add_module(from.as_str());
   }
-  r
+  // Specifiers packages serve. The provider's own bytecode is loaded
+  // under the specifier's name, so accepting it here is all that stands
+  // between an importer and the one module instance QuickJS already
+  // holds — no facade, no re-export.
+  for specifier in crate::provided_modules::provided_modules().specifiers() {
+    r.add_module(specifier);
+  }
+  NativeResolver { builtin: r }
+}
+
+/// The specifiers this runtime accepts, plus the normalisation a
+/// package-provided ALIAS needs.
+///
+/// QuickJS looks a module up by the name the resolver returns, so an
+/// alias answering with its target's name lands on the module instance
+/// the target already is — which is what keeps `x` and `x/sub` one
+/// module rather than two copies of the provider's state.
+pub struct NativeResolver {
+  builtin: BuiltinResolver,
+}
+
+impl Resolver for NativeResolver {
+  fn resolve<'js>(
+    &mut self,
+    ctx: &Ctx<'js>,
+    base: &str,
+    name: &str,
+    attributes: Option<ImportAttributes<'js>>,
+  ) -> rquickjs::Result<String> {
+    if let Some(target) = crate::provided_modules::canonical_provided_name(name) {
+      return Ok(target);
+    }
+    self.builtin.resolve(ctx, base, name, attributes)
+  }
 }
 
 type DeclareFn = for<'js> fn(Ctx<'js>, Vec<u8>) -> rquickjs::Result<Module<'js>>;
@@ -333,6 +366,15 @@ impl Loader for NativeModuleLoader {
     // An aliased specifier declares the SAME `ModuleDef` under its own
     // name, so `import ... from '@playwright/test'` links to exactly the
     // module `import ... from '@ferridriver/test'` would.
+    // A specifier a package serves: in a session the provider's own
+    // bytecode is already loaded under this name, so the loader is never
+    // reached. It IS reached in the throwaway compile runtimes, which
+    // only ever `declare` — linking happens at eval — so an empty module
+    // is enough to let a consumer's import resolve while it is being
+    // compiled.
+    if crate::provided_modules::is_provided_specifier(path) {
+      return Module::declare(ctx.clone(), path, "export {};\n");
+    }
     let canonical = canonical_native_name(path).ok_or_else(|| rquickjs::Error::new_loading(path))?;
     let declare = self
       .modules

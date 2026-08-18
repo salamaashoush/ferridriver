@@ -153,6 +153,7 @@ fn bundle_env_fingerprint() -> u64 {
   let mut h = std::collections::hash_map::DefaultHasher::new();
   bundler_env().fingerprint().hash(&mut h);
   crate::bindings::native_modules::alias_fingerprint().hash(&mut h);
+  crate::provided_modules::provided_fingerprint().hash(&mut h);
   h.finish()
 }
 
@@ -185,7 +186,13 @@ impl Plugin for FerridriverRuntimePlugin {
     // import and the bytecode re-links by name against the loading
     // runtime's ModuleDefs (`bindings::native_modules`). Checked first
     // so an operator alias can never hijack the framework surface.
-    if crate::bindings::native_modules::is_native_specifier(args.specifier) {
+    // A specifier a package serves stays external too: the emitted
+    // chunk keeps the bare import and links, at load, against the one
+    // module the provider's bytecode already is. Inlining it would give
+    // every consumer its own copy of the provider's state.
+    if crate::bindings::native_modules::is_native_specifier(args.specifier)
+      || crate::provided_modules::is_provided_specifier(args.specifier)
+    {
       return Ok(Some(HookResolveIdOutput {
         id: args.specifier.into(),
         external: Some(rolldown_common::ResolvedExternal::Bool(true)),
@@ -1028,10 +1035,25 @@ fn cache_key(path: &Path, bytes: &[u8], shims_fp: u64) -> u64 {
 /// second one's frames are mapped through the first one's map.
 fn extension_module_name(path: &Path) -> String {
   use std::hash::{Hash, Hasher};
+  // A provider is loaded under the SPECIFIER it serves, so an importer
+  // links straight to it: QuickJS looks a module up by the name the
+  // resolver returned, and that name is already in `loaded_modules`.
+  // No facade, no re-export list, and exactly one instance per run.
+  if let Some(specifier) = crate::provided_modules::provider_module_name(path) {
+    return specifier;
+  }
   let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
   let mut h = std::collections::hash_map::DefaultHasher::new();
   canon.hash(&mut h);
   format!("ferri_extension_{:016x}.js", h.finish())
+}
+
+/// Cache namespace for one extension file. A provider's bytecode is
+/// compiled under a different module name from a plain entry's, and the
+/// name is baked into the bytecode, so the two must not share a slot.
+fn extension_cache_kind(path: &Path) -> String {
+  crate::provided_modules::provider_module_name(path)
+    .map_or_else(|| "extension".to_string(), |s| format!("extension:provide:{s}"))
 }
 
 /// the process content-hash cache with no bundle and no compile.
@@ -1047,22 +1069,6 @@ pub async fn compile_and_extract_extensions(
   // cache miss we must bundle, or an early failure. A miss carries both
   // the in-memory content key and the disk-cache key so the compile step
   // can populate both tiers.
-  /// What a position ended up with. `Hit` carries everything a caller
-  /// needs to install the file AND map its frames — the module name and
-  /// source map travel with the bytecode through both cache tiers,
-  /// because a cached extension's stack traces have to read the same as
-  /// a freshly compiled one's.
-  struct Loaded {
-    bytecode: Arc<[u8]>,
-    snapshot: ExtensionSnapshot,
-    module_name: String,
-    source_map_json: Option<String>,
-  }
-  enum Slot {
-    Hit(Loaded),
-    Miss { inmem_key: u64, disk_key: u64 },
-    Failed(ScriptError),
-  }
 
   let shims_fp = bundle_env_fingerprint();
   let mut bytes: Vec<Vec<u8>> = Vec::with_capacity(files.len());
@@ -1086,7 +1092,12 @@ pub async fn compile_and_extract_extensions(
         });
         // Each extension bundles from its own parent directory.
         let ext_cwd = path.parent().unwrap_or_else(|| Path::new("."));
-        let disk_key = crate::bytecode_cache::entry_key("extension", std::slice::from_ref(path), ext_cwd, shims_fp);
+        let disk_key = crate::bytecode_cache::entry_key(
+          &extension_cache_kind(path),
+          std::slice::from_ref(path),
+          ext_cwd,
+          shims_fp,
+        );
         match cached {
           // 1. In-memory (same process).
           Some(hit) => slots.push(Slot::Hit(hit)),
@@ -1185,10 +1196,23 @@ pub async fn compile_and_extract_extensions(
   if !miss_idx.is_empty() {
     match extraction_hosts(policy).await {
       Ok(contexts) => {
-        // Compile every missed file ONCE. `Module::declare` parses; it
-        // does not evaluate, so this leaves every registry untouched and
-        // the per-host passes below all start from the same bytes.
-        let compile_ctx = &contexts[0].2;
+        // Compile every missed file ONCE, in a context of its own.
+        //
+        // `Module::declare` parses and resolves — so a consumer of a
+        // package-provided specifier resolves it HERE, against the
+        // loader's stub, before any provider has evaluated. Doing that
+        // in a host context would leave the stub registered under the
+        // specifier's name, and the entries would link to it instead of
+        // to the provider that evaluates in the pass below.
+        let Ok(compile) = compile_context(policy).await else {
+          for s in &mut slots {
+            if matches!(s, Slot::Miss { .. }) {
+              *s = Slot::Failed(ScriptError::internal("extension compile context".to_string()));
+            }
+          }
+          return finish(slots, files);
+        };
+        let compile_ctx = &compile.1;
         let mut compiled: rustc_hash::FxHashMap<usize, Arc<[u8]>> = rustc_hash::FxHashMap::default();
         for &i in &miss_idx {
           let Some(code) = bundled_code.get(&i) else { continue };
@@ -1308,6 +1332,28 @@ pub async fn compile_and_extract_extensions(
     }
   }
 
+  finish(slots, files)
+}
+
+/// What a position ended up with. `Hit` carries everything a caller
+/// needs to install the file AND map its frames — the module name and
+/// source map travel with the bytecode through both cache tiers,
+/// because a cached extension's stack traces have to read the same as
+/// a freshly compiled one's.
+struct Loaded {
+  bytecode: Arc<[u8]>,
+  snapshot: ExtensionSnapshot,
+  module_name: String,
+  source_map_json: Option<String>,
+}
+enum Slot {
+  Hit(Loaded),
+  Miss { inmem_key: u64, disk_key: u64 },
+  Failed(ScriptError),
+}
+
+/// Turn the per-position outcomes into the batch's result.
+fn finish(slots: Vec<Slot>, files: &[PathBuf]) -> (Vec<CompiledExtension>, Vec<(PathBuf, ScriptError)>) {
   let mut survivors: Vec<CompiledExtension> = Vec::new();
   let mut failures: Vec<(PathBuf, ScriptError)> = Vec::new();
   for (i, slot) in slots.into_iter().enumerate() {
@@ -1406,6 +1452,26 @@ async fn extraction_hosts(
     out.push((host, runtime, ctx));
   }
   Ok(out)
+}
+
+/// A runtime + context used ONLY to parse and serialise, never to
+/// evaluate — kept apart from the host passes so what `Module::declare`
+/// resolves here cannot become what an entry links to there.
+async fn compile_context(
+  policy: &ferridriver_config::ExtensionPolicyConfig,
+) -> Result<(AsyncRuntime, AsyncContext), ScriptError> {
+  let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("extension bytecode runtime: {e}")))?;
+  runtime
+    .set_loader(
+      crate::bindings::native_modules::resolver(),
+      crate::bindings::native_modules::loader(),
+    )
+    .await;
+  let ctx = AsyncContext::full(&runtime)
+    .await
+    .map_err(|e| ScriptError::internal(format!("extension bytecode context: {e}")))?;
+  install_extraction_env(&ctx, policy, crate::ExtensionHost::Script).await?;
+  Ok((runtime, ctx))
 }
 
 /// Parse the bundled module and serialise it to bytecode. Parsing only

@@ -27,6 +27,7 @@ async fn binding(src: &str) -> (tempfile::TempDir, ExtensionBinding) {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
       source_map: None,
+      provides: None,
     },
   )
 }

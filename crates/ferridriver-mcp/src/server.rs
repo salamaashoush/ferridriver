@@ -1057,6 +1057,7 @@ impl McpServer {
         bytecode: f.bytecode.clone(),
         name: f.path.display().to_string(),
         source_map: f.source_map.clone(),
+        provides: ferridriver_script::provided_modules::provider_module_name(&f.path),
       })
       .collect()
   }
