@@ -149,9 +149,21 @@ pub fn webkit_set_cookie_param(cookie: &CookieData) -> Value {
 /// Called from [`super::page::WebKitPage::attach`] — no separate
 /// "wire it up later" step. [`super::page::WebKitPage::attach_listeners`]
 /// only swaps in the caller's log sinks via the `ArcSwap` fields.
-pub fn attach_listeners(page: &WebKitPage) {
-  let mut target_rx = page.target_session().events();
-  let mut proxy_rx = page.proxy_session().events();
+/// Drive one page's target + page-proxy event loops.
+///
+/// The receivers are passed IN rather than subscribed here: `attach`
+/// spends half a dozen awaited protocol calls before it can build the
+/// page, and a popup's own navigation creates its provisional target
+/// inside that window. Subscribing at the end lost that
+/// `Target.targetCreated`, so the paused provisional was never resumed
+/// and the popup sat on `about:blank` forever. The channels are
+/// unbounded, so subscribing first and draining later replays
+/// everything in wire order.
+pub fn attach_listeners(
+  page: &WebKitPage,
+  mut target_rx: tokio::sync::mpsc::UnboundedReceiver<super::protocol::Envelope>,
+  mut proxy_rx: tokio::sync::mpsc::UnboundedReceiver<super::protocol::Envelope>,
+) {
   let proxy = page.proxy_session().clone();
   let dialog_manager = page.dialog_manager.clone();
   let file_chooser_manager = page.file_chooser_manager.clone();

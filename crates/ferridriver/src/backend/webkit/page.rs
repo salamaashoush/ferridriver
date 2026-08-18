@@ -307,6 +307,12 @@ impl WebKitPage {
     let proxy_id = proxy.page_proxy_id().unwrap_or_default().to_string();
     let (target_id, is_paused) = wait_for_first_page_target(&proxy).await?;
     let target = conn.target_session(&proxy_id, &target_id);
+    // Subscribe BEFORE the enables below. Everything between here and
+    // `attach_listeners` is awaited protocol work, and a popup that is
+    // already navigating creates its provisional target inside that
+    // window; the events are buffered until the loop starts.
+    let target_rx = target.events();
+    let proxy_rx = proxy.events();
 
     // Page agent before Runtime so executionContextCreated ordering holds.
     target.send("Page.enable", json!({})).await?;
@@ -412,7 +418,7 @@ impl WebKitPage {
     // API (no `attach_listeners` from `BrowserState`) would see
     // `wait_for_lifecycle` wedge for the full timeout because no one
     // ever marks the lifecycle latches.
-    super::events::attach_listeners(&page);
+    super::events::attach_listeners(&page, target_rx, proxy_rx);
     // Browser-created popup targets arrive paused (`isPaused`, like the
     // provisional-target swap path) — resume only after the full
     // session init above so the popup's first document already sees
