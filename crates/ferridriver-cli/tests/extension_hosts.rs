@@ -256,3 +256,99 @@ fn the_test_host_gates_a_package_whose_requirements_are_unmet() {
     run.output
   );
 }
+
+/// A spec that names a fixture nothing in its own file registers. The
+/// extension put it on the base chain with `defineFixtures`, so the
+/// suite receives it through the `test` it already imports — no edit to
+/// the suite, no import of the package.
+const FIXTURE_SPEC: &str = "
+import { test, expect } from '@ferridriver/test';
+
+test('receives a contributed fixture', async ({ page, deployment }) => {
+  expect(deployment).toBe('staging');
+  await page.goto('about:blank');
+  expect(await page.evaluate(() => 1 + 1)).toBe(2);
+});
+";
+
+const FIXTURE_EXTENSION: &str = "
+defineFixtures({
+  deployment: async ({}, use) => { await use('staging'); },
+});
+";
+
+fn run_fixture_suite(case: &str, extensions: &str) -> Run {
+  let dir = std::env::temp_dir().join(format!("ferri-ext-fixtures-{}-{case}", std::process::id()));
+  let _ = std::fs::remove_dir_all(&dir);
+  std::fs::create_dir_all(dir.join("specs")).expect("create workspace");
+  std::fs::create_dir_all(dir.join("ext")).expect("create ext dir");
+  std::fs::write(dir.join("specs/fixtures.spec.ts"), FIXTURE_SPEC).expect("write spec");
+  std::fs::write(dir.join("ext/fixtures.ts"), FIXTURE_EXTENSION).expect("write extension");
+  std::fs::write(
+    dir.join("ferridriver.toml"),
+    format!(
+      "{extensions}\n\
+       [test]\n\
+       testDir = {:?}\n\
+       testMatch = [\"**/*.spec.ts\"]\n\
+       workers = 1\n\
+       retries = 0\n\
+       timeout = 30000\n\
+       maxParallelProjects = 1\n\
+       outputDir = {:?}\n\
+       reporter = [{{ name = \"list\" }}]\n\
+       {BACKEND_PROJECTS}\n",
+      dir.join("specs").to_string_lossy(),
+      dir.join("out").to_string_lossy(),
+    ),
+  )
+  .expect("write config");
+
+  let out = Command::new(bin())
+    .arg("test")
+    .arg("--no-inherit")
+    .arg("-c")
+    .arg(dir.join("ferridriver.toml"))
+    .output()
+    .expect("spawn ferridriver test");
+  let output = format!(
+    "{}{}",
+    String::from_utf8_lossy(&out.stdout),
+    String::from_utf8_lossy(&out.stderr)
+  );
+  let _ = std::fs::remove_dir_all(&dir);
+  Run {
+    output,
+    passed: out.status.success(),
+  }
+}
+
+#[test]
+fn a_spec_receives_a_fixture_an_extension_contributed() {
+  let run = run_fixture_suite("loaded", "extensions = [\"./ext/fixtures.ts\"]");
+  assert!(run.passed, "expected a green run, got:\n{}", run.output);
+  assert!(
+    run.output.contains("4 passed"),
+    "the contributed fixture must resolve on all four backend projects:\n{}",
+    run.output
+  );
+}
+
+#[test]
+fn without_the_extension_the_contributed_fixture_is_absent() {
+  // The inversion: `deployment` is not a built-in and the spec declares
+  // nothing, so the only thing that can supply it is the extension.
+  //
+  // Today an unresolvable first-parameter name arrives as `undefined`
+  // rather than as Playwright's `Test has unknown parameter` load error
+  // (`common/fixtures.ts:250-256`, raised per test/hook from
+  // `common/poolBuilder.ts:66-71`), so the assertion is what the spec
+  // itself observes.
+  let run = run_fixture_suite("absent", "");
+  assert!(!run.passed, "expected a red run, got:\n{}", run.output);
+  assert!(
+    run.output.contains("4 failed") && run.output.contains("Received: undefined"),
+    "every project must fail, with the fixture absent rather than wrong:\n{}",
+    run.output
+  );
+}

@@ -129,6 +129,43 @@ validated against it (full JSON Schema, via the `jsonschema` crate)
 **before** the handler runs; a non-conforming call is rejected as a
 tool error and the handler is never entered.
 
+## Contributing fixtures
+
+`defineFixtures` adds fixtures to the base `test` chain, so a suite that
+never imports the package still receives them through the `test` it
+already imports:
+
+```ts
+// the package
+defineFixtures<{ deployment: string }>({
+  deployment: async ({}, use) => { await use("staging"); },
+});
+```
+
+```ts
+// the suite, unchanged
+import { test, expect } from "@ferridriver/test";
+
+test("knows where it is pointed", async ({ deployment }) => {
+  expect(deployment).toBe("staging");
+});
+```
+
+Entries and override rules are `test.extend`'s: packages compose in load
+order, a later same-name entry shadows the earlier one, and that entry's
+own same-name dependency resolves to the registration it shadows.
+
+The base chain seals once every extension has installed — each
+`test.extend()` copies it from then on, so a later contribution would
+reach some suites and not others. A `defineFixtures` from a spec bundle,
+a step file or a script throws and points at `test.extend()`.
+
+An operator can close the door entirely with `[extensions.policy]
+fixtures = false`, which refuses the contribution and fails the run
+naming the key. It covers `defineFixtures` only: a package's own
+`test.extend` / `mergeTests` chains and its `expect.extend` matchers are
+never clamped.
+
 ## Discovery and configuration
 
 Extensions are configured in `ferridriver.toml`:

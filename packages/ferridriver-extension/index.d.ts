@@ -19,7 +19,10 @@ import type {
   Browser,
   BrowserContext,
   BrowserType,
+  FixtureValue,
   Page,
+  TestFixtures,
+  TestType,
 } from '@ferridriver/test';
 
 export type {
@@ -322,6 +325,28 @@ declare global {
     Settings = Record<string, unknown>,
   >(definition: ToolDefinition<Args, Result, Settings>): void;
 
+  /**
+   * Contribute fixtures onto the BASE `test` chain, so a suite that
+   * never imports this package still receives them through the `test` it
+   * already imports. Call at the module's top level.
+   *
+   * Packages compose in load order under `test.extend`'s override rules:
+   * a later same-name entry shadows the earlier one and resolves it as
+   * its own `super`.
+   *
+   * The base chain seals once every extension has installed — from then
+   * on each `test.extend()` copies it, so a later contribution would
+   * reach some suites and not others. A `defineFixtures` from a spec
+   * bundle, a step file or a script therefore throws; use
+   * `test.extend()` for a chain of your own.
+   *
+   * Refused when the operator sets `[extensions.policy] fixtures =
+   * false`, which fails the run rather than dropping the package.
+   */
+  function defineFixtures<T extends object>(fixtures: {
+    [K in keyof T]: FixtureValue<T[K], TestFixtures & T>;
+  }): TestType<TestFixtures & T>;
+
   /** Call another registered tool, including from a different extension. */
   const tools: Record<string, (args?: Record<string, unknown>) => Promise<unknown>>;
 
@@ -329,6 +354,14 @@ declare global {
     /** Branch on this so one module can serve the MCP, BDD and script hosts. */
     readonly host: ExtensionHost;
     readonly commands: Commands;
+    /**
+     * The base `test` object — the one `@ferridriver/test` exports and
+     * every suite imports. Read-only, and deliberately so: an importer
+     * keeps the object it linked against, so reassigning this would look
+     * like it replaced the base chain while reaching nobody. Contribute
+     * with `defineFixtures` instead.
+     */
+    readonly test: TestType;
   };
 
   /**

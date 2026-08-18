@@ -318,7 +318,7 @@ pub struct ExtensionsDetailed {
 /// what the operator GRANTS. The effective authority a tool runs with
 /// is the intersection of the two — a manifest can never widen past the
 /// ceiling.
-#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ExtensionPolicyConfig {
   /// Host ceiling for extension HTTP (`allow.net`). Absent ⇒ manifests
@@ -336,6 +336,27 @@ pub struct ExtensionPolicyConfig {
   /// `allowListed`. Empty ⇒ nothing is allowed, which is what makes an
   /// empty list mean "deny" rather than "unset".
   pub allow_modules: Vec<String>,
+  /// Whether packages may contribute fixtures onto the base `test`
+  /// chain with `defineFixtures`. `false` refuses the contribution and
+  /// fails the run — a suite that silently lost a fixture it never
+  /// declared is a mystery, not a policy.
+  ///
+  /// The ceiling covers the `defineFixtures` entry point only. A
+  /// package's own `test.extend` / `mergeTests` chains are untouched:
+  /// they change nothing a suite did not ask for by importing them.
+  pub fixtures: bool,
+}
+
+impl Default for ExtensionPolicyConfig {
+  fn default() -> Self {
+    Self {
+      net: None,
+      commands: ExtensionCommandsCeiling::default(),
+      modules: ExtensionModulesCeiling::default(),
+      allow_modules: Vec::new(),
+      fixtures: true,
+    }
+  }
 }
 
 /// Whether an extension package may serve import specifiers of its own.
@@ -977,6 +998,10 @@ command = []
     assert_eq!(root.extensions.policy(), ExtensionPolicyConfig::default());
     assert_eq!(root.extensions.policy().net, None);
     assert_eq!(root.extensions.policy().commands, ExtensionCommandsCeiling::Any);
+    assert!(
+      root.extensions.policy().fixtures,
+      "a config that never mentions `fixtures` must leave the ceiling open"
+    );
   }
 
   #[test]
@@ -1034,6 +1059,37 @@ commands = "none"
     let policy = root.extensions.policy();
     assert_eq!(policy.net.as_deref(), Some([].as_slice()), "empty list must stay Some");
     assert_eq!(policy.commands, ExtensionCommandsCeiling::None);
+  }
+
+  #[test]
+  fn extensions_policy_can_close_the_fixtures_ceiling() {
+    // `fixtures` is the one boolean in the block, so it is the one key
+    // whose derived `Default` would read as "deny" — the ceiling has to
+    // stay open for every config that predates it.
+    let dir = std::env::temp_dir().join("ferridriver-config-ext-fixtures");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("ferridriver.toml");
+    std::fs::write(
+      &path,
+      r#"
+[extensions]
+paths = ["./ext"]
+[extensions.policy]
+fixtures = false
+"#,
+    )
+    .unwrap();
+
+    let root = FerridriverConfig::load_from(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let policy = root.extensions.policy();
+    assert!(!policy.fixtures, "the operator closed the ceiling");
+    assert_eq!(
+      policy.commands,
+      ExtensionCommandsCeiling::Any,
+      "closing one key must not move the others"
+    );
   }
 
   #[test]

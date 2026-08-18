@@ -1016,7 +1016,7 @@ fn cache_key(group: &[PathBuf], bytes: &[u8], shims_fp: u64) -> u64 {
   let mut h = std::collections::hash_map::DefaultHasher::new();
   for path in group {
     std::fs::canonicalize(path)
-      .unwrap_or_else(|_| path.to_path_buf())
+      .unwrap_or_else(|_| path.clone())
       .hash(&mut h);
   }
   bytes.hash(&mut h);
@@ -1073,7 +1073,7 @@ fn extension_module_name(group: &[PathBuf]) -> String {
   let mut h = std::collections::hash_map::DefaultHasher::new();
   for path in group {
     std::fs::canonicalize(path)
-      .unwrap_or_else(|_| path.to_path_buf())
+      .unwrap_or_else(|_| path.clone())
       .hash(&mut h);
   }
   format!("ferri_extension_{:016x}.js", h.finish())

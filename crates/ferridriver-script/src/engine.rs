@@ -747,6 +747,11 @@ impl Session {
       let installed = crate::bindings::install_extensions(&ctx, &extensions)
         .await
         .map_err(|e| ScriptError::internal(format!("failed to install extensions: {e}")));
+      // Every extension has now contributed. `defineFixtures` appends to
+      // the base fixture chain in place, and every `test.extend` from
+      // here on COPIES that chain — so the base has to stop moving
+      // before the first bundle links against it.
+      crate::bindings::test::seal_base_fixtures(&ctx)?;
       for entry in install_console_capture.drain() {
         tracing::info!(target: "ferridriver::extensions", "{}", entry.message);
       }

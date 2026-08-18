@@ -101,6 +101,28 @@ remembered when the provider evaluates.
 over claiming at all: a deployment can refuse the mechanism outright, or
 name the specifiers it will accept.
 
+## Contributing onto the base fixture chain
+
+`defineFixtures` appends to fixture set 0 — the chain `ferridriver.test`,
+`_baseTest` and the ambient cucumber registrars all resolve from —
+rather than building a new chain and rebinding `ferridriver.test`. The
+rebind is not merely worse, it does not work: a native module is
+instantiated once per VM and its export slots hold the values copied at
+evaluation, so every importer keeps the `test` object it linked against.
+`ferridriver.test` is therefore read-only, and the mutation is in place.
+
+The chain seals when the last extension has installed. After that every
+`test.extend()` copies it, so a later append would be visible to the
+suites that had not derived a chain yet and invisible to those that had —
+the divergence the seal converts into a refusal.
+
+| Rule | Why |
+|---|---|
+| The one `test` object per VM is mutated, never replaced | Export slots hold copied values; a replacement reaches nobody. |
+| The base chain seals after the last extension installs | `test.extend()` copies the chain, so a late append splits the suite in two. |
+| `[extensions.policy] fixtures` covers `defineFixtures` only | `test.extend` / `mergeTests` / `expect.extend` change nothing a suite did not ask for by importing the package. |
+| A ceiling refusal fails the run, never skips the package | Skipping leaves the deployment running without authority the operator withheld, behind one warning line. |
+
 ## What was considered and not built
 
 - **A plugin manifest with its own module format** (VS Code's shape).

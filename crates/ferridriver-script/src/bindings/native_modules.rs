@@ -536,6 +536,8 @@ const FERRIDRIVER_EXPORTS: &[&str] = &[
   "host",
   "tool",
   "defineTool",
+  "defineFixtures",
+  "bindSteps",
   "bdd",
   "commands",
   "tools",
@@ -561,6 +563,7 @@ fn ferridriver_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   for name in [
     "host",
     "tool",
+    "defineFixtures",
     "bdd",
     "commands",
     "tools",
@@ -571,6 +574,15 @@ fn ferridriver_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   ] {
     ns.set(name, fd_prop(ctx, name)?)?;
   }
+  // `bindSteps` hangs off `ferridriver.bdd` beside the cucumber
+  // registrars; the module exports it flat because that is how a
+  // package writes `import { bindSteps } from 'ferridriver'`.
+  ns.set(
+    "bindSteps",
+    fd_prop(ctx, "bdd")?
+      .into_object()
+      .map_or_else(|| Ok(Value::new_undefined(ctx.clone())), |o| o.get("bindSteps"))?,
+  )?;
   ns.set("defineTool", fd_prop(ctx, "tool")?)?;
   for name in [
     "page", "context", "browser", "request", "expect", "chromium", "firefox", "webkit",

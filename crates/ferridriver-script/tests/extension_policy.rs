@@ -195,62 +195,93 @@ async fn empty_net_ceiling_denies_all_hosts() {
   );
 }
 
-/// `commands = "argvOnly"` fails registration of a shell-form tool (its
-/// file is skipped) while an argv-form tool in another file registers
-/// and runs.
+/// `commands = "argvOnly"` refuses a shell-form tool, and the refusal
+/// takes the SESSION down rather than skipping the file.
+///
+/// Skipping is what the loader does for an extension whose own top
+/// level threw and left nothing behind. A ceiling refusal is not that:
+/// the operator withheld authority the package asked for, and a run
+/// that continues without the package — silently, minus one warning
+/// line — is a deployment nobody agreed to.
 #[tokio::test(flavor = "multi_thread")]
-async fn argv_only_ceiling_rejects_shell_form_tools() {
+async fn argv_only_ceiling_refuses_shell_form_tools() {
   const SHELL: &str = "defineTool({ name: 'sh', allow: { commands: { echo: 'echo hi' } }, \
     handler: async ({ commands }) => commands.run('echo') });";
+  let (_t1, shell_binding) = binding_from("sh.js", SHELL).await;
+  let policy = ExtensionPolicyConfig {
+    net: None,
+    commands: ExtensionCommandsCeiling::ArgvOnly,
+    ..ExtensionPolicyConfig::default()
+  };
+  let (_tmp, ctx) = run_context(vec![shell_binding], policy);
+  let err = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .err()
+    .expect("the ceiling must refuse the session");
+  assert!(
+    err.message.contains("extension.policy.refused") && err.message.contains("argvOnly"),
+    "the refusal must name itself and the key, got: {}",
+    err.message
+  );
+}
+
+/// The same ceiling leaves an argv-form tool alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn argv_only_ceiling_admits_argv_form_tools() {
   const ARGV: &str = "defineTool({ name: 'argv', allow: { commands: { echo: { run: ['echo', 'hi'] } } }, \
     handler: async ({ commands }) => commands.run('echo') });";
-  let (_t1, shell_binding) = binding_from("sh.js", SHELL).await;
   let (_t2, argv_binding) = binding_from("argv.js", ARGV).await;
   let policy = ExtensionPolicyConfig {
     net: None,
     commands: ExtensionCommandsCeiling::ArgvOnly,
     ..ExtensionPolicyConfig::default()
   };
-  let (_tmp, ctx) = run_context(vec![shell_binding, argv_binding], policy);
+  let (_tmp, ctx) = run_context(vec![argv_binding], policy);
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
     .expect("session create");
-
-  let missing = error_message(run(&session, &ctx, "return await tools['sh']();").await);
-  assert!(
-    missing.contains("not a function") || missing.contains("undefined"),
-    "shell-form tool must not register under argvOnly, got: {missing}"
-  );
-
   let argv_ok = ok_value(run(&session, &ctx, "return await tools['argv']();").await);
   assert_eq!(argv_ok, serde_json::json!("hi"), "argv-form tool must run normally");
 }
 
-/// `commands = "none"` fails registration of any command-declaring tool
-/// but leaves command-free tools untouched.
+/// `commands = "none"` refuses any command-declaring tool, again as a
+/// hard failure.
 #[tokio::test(flavor = "multi_thread")]
-async fn none_ceiling_rejects_command_declaring_tools() {
+async fn none_ceiling_refuses_command_declaring_tools() {
   const WITH_CMD: &str = "defineTool({ name: 'cmd', allow: { commands: { echo: { run: ['echo', 'hi'] } } }, \
     handler: async ({ commands }) => commands.run('echo') });";
-  const PLAIN: &str = "defineTool({ name: 'plain', handler: async () => 'fine' });";
   let (_t1, cmd_binding) = binding_from("cmd.js", WITH_CMD).await;
+  let policy = ExtensionPolicyConfig {
+    net: None,
+    commands: ExtensionCommandsCeiling::None,
+    ..ExtensionPolicyConfig::default()
+  };
+  let (_tmp, ctx) = run_context(vec![cmd_binding], policy);
+  let err = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .err()
+    .expect("the ceiling must refuse the session");
+  assert!(
+    err.message.contains("extension.policy.refused"),
+    "expected the policy refusal, got: {}",
+    err.message
+  );
+}
+
+/// A command-free tool is untouched by `commands = "none"`.
+#[tokio::test(flavor = "multi_thread")]
+async fn none_ceiling_leaves_command_free_tools_alone() {
+  const PLAIN: &str = "defineTool({ name: 'plain', handler: async () => 'fine' });";
   let (_t2, plain_binding) = binding_from("plain.js", PLAIN).await;
   let policy = ExtensionPolicyConfig {
     net: None,
     commands: ExtensionCommandsCeiling::None,
     ..ExtensionPolicyConfig::default()
   };
-  let (_tmp, ctx) = run_context(vec![cmd_binding, plain_binding], policy);
+  let (_tmp, ctx) = run_context(vec![plain_binding], policy);
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
     .expect("session create");
-
-  let missing = error_message(run(&session, &ctx, "return await tools['cmd']();").await);
-  assert!(
-    missing.contains("not a function") || missing.contains("undefined"),
-    "command-declaring tool must not register under `none`, got: {missing}"
-  );
-
   let plain_ok = ok_value(run(&session, &ctx, "return await tools['plain']();").await);
   assert_eq!(plain_ok, serde_json::json!("fine"));
 }

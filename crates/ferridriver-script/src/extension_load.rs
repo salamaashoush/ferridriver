@@ -276,12 +276,13 @@ fn compile_groups(gated: &GatedExtensions, files: &[PathBuf]) -> Vec<Vec<PathBuf
       .find(|r| r.files.iter().any(|f| canonical_eq(f, file)))
       .and_then(|r| r.package_dir.clone());
     match package {
-      Some(dir) => match package_group.get(&dir) {
-        Some(&index) => groups[index].push(file.clone()),
-        None => {
+      Some(dir) => {
+        if let Some(&index) = package_group.get(&dir) {
+          groups[index].push(file.clone());
+        } else {
           package_group.insert(dir, groups.len());
           groups.push(vec![file.clone()]);
-        },
+        }
       },
       None => groups.push(vec![file.clone()]),
     }

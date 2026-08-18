@@ -32,7 +32,7 @@ use ferridriver_test::step::{StepBodyError, StepExpectation, StepFrame, StepOpti
 
 use crate::bindings::call_site;
 use crate::bindings::convert::{ferri_throw, serde_from_js};
-use crate::bindings::registry::{as_function, rq};
+use crate::bindings::registry::{as_function, rq, throw_script_error};
 use crate::bindings::{install_browser_context_on, install_browser_on, install_page_on, install_request_on};
 use crate::engine::caught_to_script_error;
 use crate::error::ScriptError;
@@ -186,6 +186,12 @@ pub(crate) struct TestRegistry {
   /// Set once the "registered under a non-test host" diagnostic has been
   /// emitted, so a step file registering fifty tests says it once.
   pub(crate) warned_off_host: bool,
+  /// Set once every extension has been installed. `defineFixtures`
+  /// appends to the base set in place, and a `test.extend` chain COPIES
+  /// the base set at the moment it is built — so a contribution made
+  /// after a suite has started deriving chains would reach some of them
+  /// and not others. Sealing turns that into a refusal.
+  pub(crate) base_sealed: bool,
   /// Suite nesting during registration (indices into `suites`).
   pub(crate) describe_stack: Vec<usize>,
   pub(crate) current: Option<CurrentTest>,
@@ -720,6 +726,92 @@ fn merge_tests<'js>(ctx: Ctx<'js>, tests: Rest<Value<'js>>) -> rquickjs::Result<
   make_test_object(&ctx, new_set)
 }
 
+/// The base fixture chain: the set `ferridriver.test`, `_baseTest` and
+/// every ambient `Given`/`When`/`Then` resolve from.
+const BASE_FIXTURE_SET: usize = 0;
+
+/// `defineFixtures(fixtures)` — an extension package contributing onto
+/// the BASE chain, so a suite that never imports the package still
+/// receives the fixtures through its own `test`.
+///
+/// It appends to set 0 IN PLACE instead of building a new chain and
+/// rebinding `ferridriver.test`. Rebinding cannot work: `@ferridriver/
+/// test` is one module instance per VM and its export slots hold the
+/// values copied when it evaluated, so an importer keeps the object it
+/// linked against however the source property is reassigned afterwards
+/// (pinned by `tests/extraction_context.rs`).
+///
+/// Packages compose in load order under `test.extend`'s own override
+/// rules: a later same-name entry shadows the earlier one and resolves
+/// it as its `super`. A chain a package already derived with
+/// `test.extend` keeps the base it copied — which is why the base seals
+/// once the last extension has been installed.
+fn define_fixtures<'js>(ctx: Ctx<'js>, fixtures: Object<'js>) -> rquickjs::Result<Value<'js>> {
+  let permitted = ctx
+    .userdata::<crate::bindings::registry::ExtensionPolicyUd>()
+    .is_none_or(|p| p.0.fixtures);
+  if !permitted {
+    return Err(throw_script_error(
+      &ctx,
+      &ScriptError::policy(
+        "defineFixtures() is refused by the operator policy (`[extensions.policy] fixtures = false`), \
+         which forbids packages from contributing fixtures onto the base `test` chain",
+      ),
+    ));
+  }
+  if with_test_registry(&ctx, |r| r.base_sealed).map_err(|e| rq(&e))? {
+    return Err(throw_script_error(
+      &ctx,
+      &ScriptError::internal(
+        "defineFixtures() can only be called while an extension is loading. The base `test` chain \
+         is sealed once every extension has been installed, because a `test.extend()` chain copies \
+         the base chain at the moment it is built — a contribution made now would reach some \
+         suites and not others. Use `test.extend()` to build a chain of your own instead.",
+      ),
+    ));
+  }
+  if fixture_set_of(&ctx, fixtures.as_value()).is_some() {
+    return Err(throw_script_error(
+      &ctx,
+      &ScriptError::internal(
+        "defineFixtures() accepts a fixtures object, not a test object.\nDid you mean to call \
+         test.extend() with fixtures instead?",
+      ),
+    ));
+  }
+
+  let mut parsed = Vec::new();
+  for key in fixtures.keys::<String>() {
+    let key = key?;
+    let v: Value<'js> = fixtures.get(key.as_str())?;
+    parsed.push(parse_fixture_entry(&ctx, &key, v)?);
+  }
+  with_test_registry(&ctx, |r| {
+    let mut visible = r.fixture_sets.get(BASE_FIXTURE_SET).cloned().unwrap_or_default();
+    for entry in parsed {
+      append_fixture(r, &mut visible, entry)?;
+    }
+    if let Some(base) = r.fixture_sets.get_mut(BASE_FIXTURE_SET) {
+      *base = visible;
+    }
+    Ok(())
+  })
+  .map_err(|e| rq(&e))?
+  .map_err(|e: ScriptError| throw_script_error(&ctx, &e))?;
+
+  crate::bindings::runtime::ensure_ferridriver(&ctx)?.get::<_, Value<'js>>("test")
+}
+
+/// Seal the base fixture chain — every extension has been installed, so
+/// nothing may append to set 0 again.
+///
+/// # Errors
+///
+/// When the test surface is not installed in this context.
+pub fn seal_base_fixtures(ctx: &Ctx<'_>) -> Result<(), ScriptError> {
+  with_test_registry(ctx, |r| r.base_sealed = true)
+}
+
 // ── The test / describe object builders ──────────────────────────────
 
 /// Build a `test` function object bound to one fixture set. `test.extend`
@@ -1090,17 +1182,27 @@ pub fn install_test(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   }
   let _ = ctx.store_userdata(TestRegistryUserData(RefCell::new(TestRegistry::new())));
 
-  let test = make_test_object(ctx, 0)?;
+  let test = make_test_object(ctx, BASE_FIXTURE_SET)?;
   let describe = make_describe_object(ctx)?;
   let fd = crate::bindings::runtime::ensure_ferridriver(ctx)?;
   // Playwright exports the unextended root as `_baseTest`; it is this
   // very object, not a copy, so `mergeTests(_baseTest, x)` sees the
   // shared ancestor it has to dedup against.
-  fd.set("baseTest", test.clone())?;
-  fd.set("test", test)?;
+  //
+  // Both are read-only: they ARE the base chain's identity, and an
+  // importer links to the object it found here. Letting a package
+  // reassign either would give it a way to look like it had replaced
+  // the base chain while every module that already imported kept the
+  // original — the failure `defineFixtures` exists to avoid.
+  fd.prop("baseTest", rquickjs::object::Property::from(test.clone()).enumerable())?;
+  fd.prop("test", rquickjs::object::Property::from(test).enumerable())?;
   fd.set("describe", describe)?;
   fd.set("mergeTests", Function::new(ctx.clone(), merge_tests)?)?;
   fd.set("selectors", make_selectors_object(ctx)?)?;
+  let define_fixtures_fn = Function::new(ctx.clone(), define_fixtures)?;
+  define_fixtures_fn.set_name("defineFixtures")?;
+  ctx.globals().set("defineFixtures", define_fixtures_fn.clone())?;
+  fd.set("defineFixtures", define_fixtures_fn)?;
   Ok(())
 }
 

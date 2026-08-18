@@ -57,6 +57,16 @@ pub struct ScriptError {
   pub source_snippet: Option<String>,
 }
 
+/// `name` every operator-ceiling refusal carries, on the Rust error and
+/// on the JS `Error` it is thrown as.
+///
+/// `install_extensions` reads it to tell a refusal by
+/// `[extensions.policy]` — which can never be skipped, because skipping
+/// would silently run the deployment with authority the operator denied
+/// — apart from an extension whose own top level threw, which is
+/// skippable while it left no registrations behind.
+pub const EXTENSION_POLICY_ERROR: &str = "ExtensionPolicyError";
+
 impl ScriptError {
   /// Replace declared secret values everywhere this error carries text.
   ///
@@ -91,6 +101,18 @@ impl ScriptError {
       line: None,
       column: None,
       source_snippet: None,
+    }
+  }
+
+  /// An operator-ceiling refusal: an `[extensions.policy]` key denied
+  /// something a package's manifest or contribution asked for. Carries
+  /// [`EXTENSION_POLICY_ERROR`] as its `name` so the extension loader
+  /// can refuse to skip past it.
+  #[must_use]
+  pub fn policy(message: impl Into<String>) -> Self {
+    Self {
+      name: Some(EXTENSION_POLICY_ERROR.to_string()),
+      ..Self::internal(message)
     }
   }
 

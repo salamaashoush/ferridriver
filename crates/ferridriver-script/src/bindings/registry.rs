@@ -191,7 +191,7 @@ fn check_commands_ceiling(
     Ceiling::ArgvOnly => {
       for (name, spec) in commands {
         if matches!(spec.run, crate::command_spec::CommandRun::Shell(_)) {
-          return Err(ScriptError::internal(format!(
+          return Err(ScriptError::policy(format!(
             "tool `{tool}`: command `{name}` is a shell-string spec, but the operator policy \
              (`[extensions.policy] commands = \"argvOnly\"`) permits only argv-array specs"
           )));
@@ -203,7 +203,7 @@ fn check_commands_ceiling(
       if commands.is_empty() {
         Ok(())
       } else {
-        Err(ScriptError::internal(format!(
+        Err(ScriptError::policy(format!(
           "tool `{tool}` declares `allow.commands`, but the operator policy \
            (`[extensions.policy] commands = \"none\"`) forbids command declarations"
         )))
@@ -363,7 +363,7 @@ fn register_tool_args(args: &[Value<'_>]) -> rquickjs::Result<()> {
         "tool: no handler — pass tool(manifest) with a `handler` method or tool(manifest, fn)".to_string(),
       ))
     })?;
-  register_tool(&ctx, manifest, handler).map_err(|e| rq(&e))
+  register_tool(&ctx, manifest, handler).map_err(|e| throw_script_error(&ctx, &e))
 }
 
 /// Capability allow-list snapshot. Serialises to the exact JSON the MCP
@@ -599,6 +599,26 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, default_timeout_ms: u64) -> rquickjs:
 
 pub(crate) fn rq(e: &ScriptError) -> rquickjs::Error {
   rquickjs::Error::new_from_js_message("bdd", "Error", e.message.clone())
+}
+
+/// Throw `e` as a real JS `Error` carrying its own `name`.
+///
+/// [`rq`] cannot: it has no `Ctx`, so rquickjs materialises it as a
+/// conversion failure whose message is prefixed and whose name is fixed.
+/// A refusal by `[extensions.policy]` has to stay recognisable all the
+/// way out to `install_extensions`, which decides whether a failing
+/// extension may be skipped — so every path that can raise one throws
+/// through here.
+pub(crate) fn throw_script_error(ctx: &Ctx<'_>, e: &ScriptError) -> rquickjs::Error {
+  crate::bindings::convert::throw_named(ctx, e.name.as_deref().unwrap_or("Error"), e.message.clone())
+}
+
+/// Whether a caught JS value is an operator-ceiling refusal.
+pub(crate) fn is_policy_refusal(value: &Value<'_>) -> bool {
+  value
+    .as_object()
+    .and_then(|o| o.get::<_, Option<String>>("name").ok().flatten())
+    .is_some_and(|name| name == crate::error::EXTENSION_POLICY_ERROR)
 }
 
 pub(crate) fn as_function<'js>(v: &Value<'js>) -> Option<Function<'js>> {

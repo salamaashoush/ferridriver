@@ -326,13 +326,30 @@ pub async fn install_extensions(ctx: &Ctx<'_>, files: &[ExtensionBinding]) -> rq
   for file in files {
     let before = crate::bindings::registry::registration_counts(ctx).map_err(|e| rq(&e))?;
     if let Err(e) = install_one_extension(ctx, file).await {
-      let detail = match e {
-        rquickjs::Error::Exception => ctx.catch().try_into_exception().map_or_else(
-          |v| format!("{v:?}"),
-          |ex| ex.message().unwrap_or_else(|| "exception".into()),
-        ),
-        other => other.to_string(),
+      let (detail, refused_by_policy) = match e {
+        rquickjs::Error::Exception => {
+          // `ctx.catch()` takes the pending exception, so read both
+          // facts off the one value.
+          let thrown = ctx.catch();
+          let refused = crate::bindings::registry::is_policy_refusal(&thrown);
+          let detail = thrown.try_into_exception().map_or_else(
+            |v| format!("{v:?}"),
+            |ex| ex.message().unwrap_or_else(|| "exception".into()),
+          );
+          (detail, refused)
+        },
+        other => (other.to_string(), false),
       };
+      // An `[extensions.policy]` refusal is never skippable. Skipping
+      // would leave the deployment running a package the operator's
+      // ceiling denied a part of — quietly, with only a warning line
+      // between the operator and authority they withheld.
+      if refused_by_policy {
+        return Err(rq(&ScriptError::internal(format!(
+          "extension.policy.refused: `{}` was refused by the operator policy: {detail}",
+          file.name
+        ))));
+      }
       // A PROVIDER that does not evaluate cannot be skipped: every
       // consumer's `import` of its specifier resolves to a module that
       // is not there, so the session would come up with a specifier

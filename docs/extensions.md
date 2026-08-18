@@ -327,6 +327,9 @@ net = ["*.acme.com", "localhost"]
 # What allow.commands declarations are permitted:
 #   "any" (default) | "argvOnly" | "none"
 commands = "argvOnly"
+# Whether packages may contribute fixtures onto the base `test` chain
+# with defineFixtures. Default true.
+fixtures = false
 ```
 
 - `net` absent: manifests keep the back-compat semantics documented
@@ -341,6 +344,18 @@ commands = "argvOnly"
   live) — argv-array specs still work. `commands = "none"` fails
   registration of any command-declaring tool. Both conflicts are also
   reported as startup warnings.
+
+- `fixtures = false` refuses any `defineFixtures` call and FAILS the run,
+  naming the key. It is deliberately not a skip: a suite that silently
+  lost a fixture it never declared is a mystery, not a policy. The
+  ceiling covers the `defineFixtures` entry point only — a package's own
+  `test.extend` / `mergeTests` chains and its `expect.extend` matchers are
+  never clamped, because those change nothing a suite did not ask for by
+  importing them.
+
+Every ceiling refusal is a hard failure for the same reason. The loader
+skips an extension whose own top level threw and left no registrations
+behind; it never skips past authority the operator withheld.
 
 The `commands` ceiling exists because arbitrary exec subsumes every
 other capability: a tool granted a shell line can trivially reach any
@@ -406,6 +421,70 @@ per-pickle scheduler.
 > steps/*`, registered via `#[given]`/`#[when]`/inventory). That is the
 > shipped step vocabulary, not the user extension surface — it is not
 > loaded from your `.ts` files and is out of scope for this document.
+
+---
+
+## Contributing fixtures: `defineFixtures`
+
+A package can add fixtures to the BASE `test` chain, so a suite that
+never imports the package still receives them through the `test` it
+already imports:
+
+```ts
+// the package
+defineFixtures<{ deployment: string; signedIn: void }>({
+  deployment: async ({}, use) => { await use(process.env.DEPLOYMENT ?? "staging"); },
+  signedIn: [async ({ page, deployment }, use) => {
+    await page.goto(`https://${deployment}.example.com/login`);
+    await use();
+  }, { auto: true }],
+});
+```
+
+```ts
+// the suite, unchanged and importing nothing of the package's
+import { test, expect } from "@ferridriver/test";
+
+test("knows where it is pointed", async ({ deployment }) => {
+  expect(deployment).toBe("staging");
+});
+```
+
+The entries are exactly `test.extend`'s: a bare factory, a static value,
+or the `[value, { scope, auto, option }]` tuple. The override rules are
+`test.extend`'s too — packages compose in **load order**, a later
+same-name entry shadows the earlier one, and that entry's own `{ label }`
+dependency resolves to the registration it shadows (its `super`), never
+to itself.
+
+`defineFixtures` returns the base `test`, so a package can keep using it
+directly. It does not — and cannot — replace `ferridriver.test`:
+`@ferridriver/test` is one module instance per VM whose export slots hold
+the values copied when it evaluated, so an importer keeps the object it
+linked against no matter what is assigned afterwards. `ferridriver.test`
+is read-only for the same reason; an assignment that looked like it had
+replaced the base chain while reaching nobody is the worst outcome
+available.
+
+**The base chain seals** once every extension has installed. From that
+point each `test.extend()` COPIES the chain, so a later contribution
+would reach the suites that had not derived one yet and miss those that
+had. A `defineFixtures` from a spec bundle, a step file or a
+`run_script` therefore throws and points at `test.extend()`. A chain a
+package itself derived with `test.extend` before a later package's
+`defineFixtures` likewise keeps the base it copied.
+
+A step registered through `bindSteps(test)` resolves from the chain that
+`test` carries, so a contributed fixture is destructurable in a step body
+the same way:
+
+```ts
+const { Given } = bindSteps(ferridriver.test);
+Given("the deployment is known", async ({ deployment }) => { /* ... */ });
+```
+
+Both `defineFixtures` and `bindSteps` are globals, and are also exported
+from the `ferridriver` module.
 
 ---
 
@@ -868,10 +947,12 @@ cross-extension channel by design.
 
 ### Registration surface (JS globals)
 
-`defineTool` · `Given` · `When` · `Then` · `defineStep` · `And` · `But` ·
-`Before` · `After` · `BeforeAll` · `AfterAll` · `BeforeStep` · `AfterStep` ·
-`defineParameterType` · `setDefaultTimeout` · `setDefinitionFunctionWrapper`
-· `setWorldConstructor` · `setParallelCanAssign` (inert) · `ferridriver.host`
+`defineTool` · `defineFixtures` · `bindSteps` · `Given` · `When` · `Then` ·
+`defineStep` · `And` · `But` · `Before` · `After` · `BeforeAll` · `AfterAll` ·
+`BeforeStep` · `AfterStep` · `defineParameterType` · `setDefaultTimeout` ·
+`setDefinitionFunctionWrapper` · `setWorldConstructor` ·
+`setParallelCanAssign` (inert) · `ferridriver.host` · `ferridriver.test`
+(read-only)
 
 ---
 

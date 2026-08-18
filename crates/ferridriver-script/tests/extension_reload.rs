@@ -8,7 +8,7 @@
 //! `compile_and_extract_extensions` call in one process, which is exactly
 //! where that bites.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Panic with context instead of `unwrap`/`expect`.
 fn ok<T, E: std::fmt::Display>(result: Result<T, E>, what: &str) -> T {
@@ -25,9 +25,9 @@ fn write(path: &Path, contents: &str) {
   ok(std::fs::write(path, contents), "write file");
 }
 
-async fn tool_names(entry: &PathBuf) -> Vec<String> {
+async fn tool_names(entry: &Path) -> Vec<String> {
   let (compiled, failures) = ferridriver_script::compile_and_extract_extensions(
-    &[vec![entry.clone()]],
+    &[vec![entry.to_path_buf()]],
     &ferridriver_config::ExtensionPolicyConfig::default(),
   )
   .await;

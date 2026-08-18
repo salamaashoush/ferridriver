@@ -206,28 +206,37 @@ async fn extraction_enforces_the_operator_command_ceiling() {
 async fn one_native_module_instance_serves_every_file_in_a_vm() {
   // The mechanism package-owned import specifiers rest on: a specifier
   // marked external resolves to ONE module instance per VM, and its
-  // export slots hold VALUES copied when the module evaluated. Rebinding
-  // the object the module read from therefore cannot reach an importer —
-  // which is why a fixture-set change has to mutate the one `test`
-  // object in place rather than replace it.
+  // export slots hold VALUES copied when the module evaluated. Reassigning
+  // the property the module read from therefore cannot reach an importer.
+  //
+  // That is why a fixture-set change has to mutate the one `test` object
+  // in place (`defineFixtures`) rather than replace it, and why
+  // `ferridriver.test` is read-only: an assignment that looks like it
+  // replaced the base chain while reaching nobody is the worst of the
+  // three outcomes. `mergeTests` is the writable neighbour that shows
+  // what such an assignment actually achieves.
   let tmp = tempfile::tempdir().expect("tempdir");
   let first = tmp.path().join("first.ts");
   let second = tmp.path().join("second.ts");
   std::fs::write(
     &first,
-    "import { test } from '@ferridriver/test';\n\
+    "import { test, mergeTests } from '@ferridriver/test';\n\
      globalThis.__firstTest = test;\n\
+     globalThis.__firstMerge = mergeTests;\n\
      globalThis.__rebindThrew = false;\n\
-     try { ferridriver.test = function fake() {}; } catch (e) { globalThis.__rebindThrew = true; }\n",
+     try { ferridriver.test = function fake() {}; } catch (e) { globalThis.__rebindThrew = true; }\n\
+     ferridriver.mergeTests = function fakeMerge() {};\n",
   )
   .expect("write");
   std::fs::write(
     &second,
-    "import { test } from '@ferridriver/test';\n\
+    "import { test, mergeTests } from '@ferridriver/test';\n\
      defineTool({ name: 'identity', handler: async () => ({\n\
      \x20 sameInstance: globalThis.__firstTest === test,\n\
-     \x20 rebindReachedTheImport: ferridriver.test === test,\n\
-     \x20 rebindThrew: globalThis.__rebindThrew }) });\n",
+     \x20 rebindThrew: globalThis.__rebindThrew,\n\
+     \x20 testStillTheBase: ferridriver.test === test,\n\
+     \x20 reassignReachedTheImport: ferridriver.mergeTests === mergeTests,\n\
+     \x20 importStillTheOriginal: globalThis.__firstMerge === mergeTests }) });\n",
   )
   .expect("write");
 
@@ -243,12 +252,22 @@ async fn one_native_module_instance_serves_every_file_in_a_vm() {
   );
   assert_eq!(
     facts["rebindThrew"],
-    serde_json::json!(false),
-    "the rebind itself must be what fails, not the assignment: {facts}"
+    serde_json::json!(true),
+    "assigning to the read-only `ferridriver.test` must be refused outright: {facts}"
   );
   assert_eq!(
-    facts["rebindReachedTheImport"],
+    facts["testStillTheBase"],
+    serde_json::json!(true),
+    "the refused assignment must leave the base test object in place: {facts}"
+  );
+  assert_eq!(
+    facts["reassignReachedTheImport"],
     serde_json::json!(false),
-    "an export slot holds a copied value, so rebinding the source cannot reach an importer: {facts}"
+    "an export slot holds a copied value, so reassigning the source cannot reach an importer: {facts}"
+  );
+  assert_eq!(
+    facts["importStillTheOriginal"],
+    serde_json::json!(true),
+    "every importer keeps the value the module exported: {facts}"
   );
 }

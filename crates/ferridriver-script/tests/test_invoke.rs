@@ -301,7 +301,11 @@ test('attaches', async ({ testInfo }) => {
   if (!Array.isArray(anns) || anns.length !== 1) throw new Error('annotations');
   if (anns[0].type !== 'issue' || anns[0].description !== 'JIRA-9') throw new Error('annotation shape');
   if (testInfo.outputPath('a', 'b.txt') !== '/out/a/b.txt') throw new Error('outputPath');
-  if (testInfo.snapshotPath('x.png') !== '/snap/x.png') throw new Error('snapshotPath');
+  // The bridge answers `/snap/<kind>/<name>`, so this also pins the
+  // default kind Playwright applies when the bag omits it
+  // (`worker/testInfo.ts:644`).
+  if (testInfo.snapshotPath('x.png') !== '/snap/snapshot/x.png') throw new Error('snapshotPath: ' + testInfo.snapshotPath('x.png'));
+  if (testInfo.snapshotPath('x.png', { kind: 'screenshot' }) !== '/snap/screenshot/x.png') throw new Error('snapshotPath kind: ' + testInfo.snapshotPath('x.png', { kind: 'screenshot' }));
 });
 ",
   )
