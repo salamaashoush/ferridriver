@@ -100,7 +100,8 @@ pub async fn load_all(
   files: &[PathBuf],
   policy: &ferridriver_config::ExtensionPolicyConfig,
 ) -> (Vec<LoadedExtension>, Vec<ExtensionLoadError>) {
-  let (compiled, bundle_failures) = compile_and_extract_extensions(files, policy).await;
+  let (compiled, bundle_failures) =
+    compile_and_extract_extensions(&files.iter().map(|f| vec![f.clone()]).collect::<Vec<_>>(), policy).await;
 
   let mut loaded = Vec::with_capacity(compiled.len());
   let mut errors: Vec<ExtensionLoadError> = bundle_failures

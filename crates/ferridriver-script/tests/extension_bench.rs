@@ -89,8 +89,11 @@ async fn plugin_path_bench() {
     })
     .collect();
   let cold = Instant::now();
-  let (cp, failures) =
-    compile_and_extract_extensions(&paths, &ferridriver_config::ExtensionPolicyConfig::default()).await;
+  let (cp, failures) = compile_and_extract_extensions(
+    &paths.iter().map(|p| vec![p.clone()]).collect::<Vec<_>>(),
+    &ferridriver_config::ExtensionPolicyConfig::default(),
+  )
+  .await;
   let cold_ms = cold.elapsed().as_secs_f64() * 1e3;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   assert_eq!(cp.len(), FILES.len(), "all files must compile");
@@ -98,7 +101,11 @@ async fn plugin_path_bench() {
   // Second call: every file is unchanged -> served from the content-hash
   // cache, no rolldown, no compile.
   let warm_cache = Instant::now();
-  let (cp2, _) = compile_and_extract_extensions(&paths, &ferridriver_config::ExtensionPolicyConfig::default()).await;
+  let (cp2, _) = compile_and_extract_extensions(
+    &paths.iter().map(|p| vec![p.clone()]).collect::<Vec<_>>(),
+    &ferridriver_config::ExtensionPolicyConfig::default(),
+  )
+  .await;
   let warm_cache_ms = warm_cache.elapsed().as_secs_f64() * 1e3;
   assert_eq!(cp2.len(), FILES.len(), "cache hit must return all files");
   let compiled: Vec<Compiled> = cp

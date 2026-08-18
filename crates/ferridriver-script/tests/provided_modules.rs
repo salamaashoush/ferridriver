@@ -59,7 +59,7 @@ fn write_package(dir: &Path) {
     r#"{"name":"vendor-pkg","ferridriver":{
         "apiVersion":2,
         "name":"vendor-pkg",
-        "entries":["one.ts","two.ts"],
+        "entries":["one.ts","two.ts","a.ts","b.ts"],
         "provides":{"modules":{"fake-vendor":"vendor.ts"},"aliases":{"fake-vendor/alias":"fake-vendor"}}
       }}"#,
   )
@@ -76,6 +76,21 @@ fn write_package(dir: &Path) {
      (globalThis as Record<string, unknown>).__one = marker;\n",
   )
   .expect("write entry one");
+  std::fs::write(
+    dir.join("pkg/state.ts"),
+    "export const state = { entries: [] as string[] };\n",
+  )
+  .expect("write helper");
+  std::fs::write(
+    dir.join("pkg/a.ts"),
+    "import { state } from './state.ts';\nstate.entries.push('a');\n(globalThis as Record<string, unknown>).__stateA = state;\n",
+  )
+  .expect("write entry a");
+  std::fs::write(
+    dir.join("pkg/b.ts"),
+    "import { state } from './state.ts';\nstate.entries.push('b');\n(globalThis as Record<string, unknown>).__stateB = state;\n",
+  )
+  .expect("write entry b");
   std::fs::write(
     dir.join("pkg/two.ts"),
     "import { marker } from 'fake-vendor/alias';\n\
@@ -260,4 +275,31 @@ async fn a_claim_arriving_after_the_table_is_sealed_is_refused() {
   );
 
   let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_entries_of_one_package_share_their_helper() {
+  // A package's entries are ONE bundle. Bundling them apart inlines a
+  // shared helper into each, so the array the package keeps in that
+  // helper holds one name in each copy instead of both in one — the
+  // module is "shared" in the source and duplicated in the run.
+  let dir = shared_package();
+  let specs = shared_specs();
+  let (session, ctx, _diagnostics) = session_for(dir, &specs).await;
+  let facts = eval(
+    &session,
+    &ctx,
+    "return { same: globalThis.__stateA === globalThis.__stateB, entries: globalThis.__stateA.entries };",
+  )
+  .await;
+  assert_eq!(
+    facts["same"],
+    serde_json::json!(true),
+    "both entries must import ONE helper module: {facts}"
+  );
+  assert_eq!(
+    facts["entries"],
+    serde_json::json!(["a", "b"]),
+    "each entry appends to the same array: {facts}"
+  );
 }

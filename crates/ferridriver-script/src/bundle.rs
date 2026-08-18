@@ -893,7 +893,11 @@ fn decode_aux(aux: Option<&str>) -> Option<ExtensionSnapshot> {
 }
 
 pub struct CompiledExtension {
+  /// The group's first file — what a report names.
   pub path: PathBuf,
+  /// Every file bundled into this module. A package's entries share one
+  /// bundle, so a helper both of them import is evaluated once.
+  pub files: Vec<PathBuf>,
   pub index: usize,
   pub bytecode: Arc<[u8]>,
   /// The module name baked into `bytecode`, which is what QuickJS
@@ -1007,15 +1011,37 @@ fn remember_extension(
 /// [`bundle_env_fingerprint`] (a shim/alias edit changes the output for
 /// the same input bytes). SipHash via the std default hasher — adequate
 /// for an in-process content cache, no dep.
-fn cache_key(path: &Path, bytes: &[u8], shims_fp: u64) -> u64 {
+fn cache_key(group: &[PathBuf], bytes: &[u8], shims_fp: u64) -> u64 {
   use std::hash::{Hash, Hasher};
   let mut h = std::collections::hash_map::DefaultHasher::new();
-  std::fs::canonicalize(path)
-    .unwrap_or_else(|_| path.to_path_buf())
-    .hash(&mut h);
+  for path in group {
+    std::fs::canonicalize(path)
+      .unwrap_or_else(|_| path.to_path_buf())
+      .hash(&mut h);
+  }
   bytes.hash(&mut h);
   shims_fp.hash(&mut h);
   h.finish()
+}
+
+/// Every file of a group, concatenated, as the content half of its
+/// cache key.
+fn group_bytes(group: &[PathBuf]) -> Result<Vec<u8>, ScriptError> {
+  let mut out = Vec::new();
+  for path in group {
+    let bytes = std::fs::read(path).map_err(|e| ScriptError::internal(format!("read {}: {e}", path.display())))?;
+    out.extend_from_slice(&bytes);
+  }
+  Ok(out)
+}
+
+/// The directory a group bundles from: its first entry's.
+fn group_cwd(group: &[PathBuf]) -> PathBuf {
+  group
+    .first()
+    .and_then(|p| p.parent())
+    .unwrap_or_else(|| Path::new("."))
+    .to_path_buf()
 }
 
 /// Bundle + compile + extract every extension file. The expensive
@@ -1033,27 +1059,35 @@ fn cache_key(path: &Path, bytes: &[u8], shims_fp: u64) -> u64 {
 /// batch, so two extensions routinely reach one VM having been compiled
 /// apart. Under a position-derived name they collide there, and the
 /// second one's frames are mapped through the first one's map.
-fn extension_module_name(path: &Path) -> String {
+fn extension_module_name(group: &[PathBuf]) -> String {
   use std::hash::{Hash, Hasher};
   // A provider is loaded under the SPECIFIER it serves, so an importer
   // links straight to it: QuickJS looks a module up by the name the
   // resolver returned, and that name is already in `loaded_modules`.
   // No facade, no re-export list, and exactly one instance per run.
-  if let Some(specifier) = crate::provided_modules::provider_module_name(path) {
+  if let [only] = group
+    && let Some(specifier) = crate::provided_modules::provider_module_name(only)
+  {
     return specifier;
   }
-  let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
   let mut h = std::collections::hash_map::DefaultHasher::new();
-  canon.hash(&mut h);
+  for path in group {
+    std::fs::canonicalize(path)
+      .unwrap_or_else(|_| path.to_path_buf())
+      .hash(&mut h);
+  }
   format!("ferri_extension_{:016x}.js", h.finish())
 }
 
 /// Cache namespace for one extension file. A provider's bytecode is
 /// compiled under a different module name from a plain entry's, and the
 /// name is baked into the bytecode, so the two must not share a slot.
-fn extension_cache_kind(path: &Path) -> String {
-  crate::provided_modules::provider_module_name(path)
-    .map_or_else(|| "extension".to_string(), |s| format!("extension:provide:{s}"))
+fn extension_cache_kind(group: &[PathBuf]) -> String {
+  match group {
+    [only] => crate::provided_modules::provider_module_name(only)
+      .map_or_else(|| "extension".to_string(), |s| format!("extension:provide:{s}")),
+    _ => "extension".to_string(),
+  }
 }
 
 /// the process content-hash cache with no bundle and no compile.
@@ -1062,7 +1096,7 @@ fn extension_cache_kind(path: &Path) -> String {
 /// rather than aborting the batch. Output preserves input file order;
 /// surviving `CompiledExtension`s carry contiguous `index` values.
 pub async fn compile_and_extract_extensions(
-  files: &[PathBuf],
+  groups: &[Vec<PathBuf>],
   policy: &ferridriver_config::ExtensionPolicyConfig,
 ) -> (Vec<CompiledExtension>, Vec<(PathBuf, ScriptError)>) {
   // Per original position: a cache hit (bytecode + manifests), or a
@@ -1071,12 +1105,11 @@ pub async fn compile_and_extract_extensions(
   // can populate both tiers.
 
   let shims_fp = bundle_env_fingerprint();
-  let mut bytes: Vec<Vec<u8>> = Vec::with_capacity(files.len());
-  let mut slots: Vec<Slot> = Vec::with_capacity(files.len());
-  for path in files {
-    match std::fs::read(path) {
+  let mut slots: Vec<Slot> = Vec::with_capacity(groups.len());
+  for group in groups {
+    match group_bytes(group) {
       Ok(b) => {
-        let inmem_key = cache_key(path, &b, shims_fp);
+        let inmem_key = cache_key(group, &b, shims_fp);
         let cached = extension_cache().lock().ok().and_then(|c| {
           let hit = c.get(&inmem_key)?;
           // Same question the disk tier asks: did ANY input change?
@@ -1090,14 +1123,11 @@ pub async fn compile_and_extract_extensions(
             source_map_json: hit.source_map_json.clone(),
           })
         });
-        // Each extension bundles from its own parent directory.
-        let ext_cwd = path.parent().unwrap_or_else(|| Path::new("."));
-        let disk_key = crate::bytecode_cache::entry_key(
-          &extension_cache_kind(path),
-          std::slice::from_ref(path),
-          ext_cwd,
-          shims_fp,
-        );
+        // A group bundles from its first entry's directory: a
+        // package's entries live together, and a loose file is its own
+        // group.
+        let ext_cwd = group_cwd(group);
+        let disk_key = crate::bytecode_cache::entry_key(&extension_cache_kind(group), group, &ext_cwd, shims_fp);
         match cached {
           // 1. In-memory (same process).
           Some(hit) => slots.push(Slot::Hit(hit)),
@@ -1138,15 +1168,8 @@ pub async fn compile_and_extract_extensions(
             None => slots.push(Slot::Miss { inmem_key, disk_key }),
           },
         }
-        bytes.push(b);
       },
-      Err(e) => {
-        slots.push(Slot::Failed(ScriptError::internal(format!(
-          "read {}: {e}",
-          path.display()
-        ))));
-        bytes.push(Vec::new());
-      },
+      Err(e) => slots.push(Slot::Failed(e)),
     }
   }
 
@@ -1158,10 +1181,13 @@ pub async fn compile_and_extract_extensions(
     .filter_map(|(i, s)| matches!(s, Slot::Miss { .. }).then_some(i))
     .collect();
   let bundles = futures::future::join_all(miss_idx.iter().map(|&i| {
-    let path = files[i].clone();
+    let group = groups[i].clone();
     async move {
-      let cwd = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-      (i, Box::pin(bundle_source(std::slice::from_ref(&path), &cwd)).await)
+      let cwd = group_cwd(&group);
+      // One graph per GROUP: a package's entries share their helpers,
+      // and bundling them apart would inline a shared helper into each
+      // and give one module two states.
+      (i, Box::pin(bundle_source(&group, &cwd)).await)
     }
   }))
   .await;
@@ -1210,13 +1236,13 @@ pub async fn compile_and_extract_extensions(
               *s = Slot::Failed(ScriptError::internal("extension compile context".to_string()));
             }
           }
-          return finish(slots, files);
+          return finish(slots, groups);
         };
         let compile_ctx = &compile.1;
         let mut compiled: rustc_hash::FxHashMap<usize, Arc<[u8]>> = rustc_hash::FxHashMap::default();
         for &i in &miss_idx {
           let Some(code) = bundled_code.get(&i) else { continue };
-          let module_name = extension_module_name(&files[i]);
+          let module_name = extension_module_name(&groups[i]);
           match compile_one(compile_ctx, &module_name, code).await {
             Ok(bc) => {
               compiled.insert(i, Arc::from(bc.into_boxed_slice()));
@@ -1243,7 +1269,7 @@ pub async fn compile_and_extract_extensions(
             let (bytecode, label, is_miss) = match &slots[i] {
               Slot::Hit(hit) => (Arc::clone(&hit.bytecode), hit.module_name.clone(), false),
               Slot::Miss { .. } => match compiled.get(&i) {
-                Some(bc) => (Arc::clone(bc), extension_module_name(&files[i]), true),
+                Some(bc) => (Arc::clone(bc), extension_module_name(&groups[i]), true),
                 None => continue,
               },
               Slot::Failed(_) => continue,
@@ -1265,7 +1291,7 @@ pub async fn compile_and_extract_extensions(
               Err(e) => {
                 tracing::warn!(
                   target: "ferridriver::extensions",
-                  path = %files[i].display(),
+                  path = %group_label(&groups[i]),
                   host = host.as_str(),
                   error = %e.message,
                   "extension.extract.host_failed: the file threw under this host"
@@ -1304,13 +1330,13 @@ pub async fn compile_and_extract_extensions(
             slots[i] = Slot::Failed(ScriptError::internal(first));
             continue;
           }
-          let module_name = extension_module_name(&files[i]);
-          // Inputs = this extension file plus its transitive imports (from
-          // the source map), so an edited helper invalidates the entry in
-          // BOTH tiers.
+          let module_name = extension_module_name(&groups[i]);
+          // Inputs = this group's files plus their transitive imports
+          // (from the module graph), so an edited helper invalidates the
+          // entry in BOTH tiers.
           let map = bundled_map.get(&i).cloned().flatten();
           let modules = bundled_modules.get(&i).cloned().unwrap_or_default();
-          let inputs = crate::bytecode_cache::input_set(std::slice::from_ref(&files[i]), &modules);
+          let inputs = crate::bytecode_cache::input_set(&groups[i], &modules);
           let aux = encode_aux(&snapshot);
           crate::bytecode_cache::store(disk_key, bytecode, &module_name, map.as_deref(), Some(&aux), &inputs);
           remember_extension(inmem_key, bytecode, &snapshot, &module_name, map.as_deref(), inputs);
@@ -1332,7 +1358,7 @@ pub async fn compile_and_extract_extensions(
     }
   }
 
-  finish(slots, files)
+  finish(slots, groups)
 }
 
 /// What a position ended up with. `Hit` carries everything a caller
@@ -1352,26 +1378,40 @@ enum Slot {
   Failed(ScriptError),
 }
 
+/// A group's files as one label, for a diagnostic that must name what
+/// failed without printing a paragraph.
+fn group_label(group: &[PathBuf]) -> String {
+  match group {
+    [only] => only.display().to_string(),
+    many => many
+      .iter()
+      .map(|p| p.display().to_string())
+      .collect::<Vec<_>>()
+      .join(", "),
+  }
+}
+
 /// Turn the per-position outcomes into the batch's result.
-fn finish(slots: Vec<Slot>, files: &[PathBuf]) -> (Vec<CompiledExtension>, Vec<(PathBuf, ScriptError)>) {
+fn finish(slots: Vec<Slot>, groups: &[Vec<PathBuf>]) -> (Vec<CompiledExtension>, Vec<(PathBuf, ScriptError)>) {
   let mut survivors: Vec<CompiledExtension> = Vec::new();
   let mut failures: Vec<(PathBuf, ScriptError)> = Vec::new();
   for (i, slot) in slots.into_iter().enumerate() {
     match slot {
       Slot::Hit(hit) => survivors.push(CompiledExtension {
-        path: files[i].clone(),
+        path: groups[i].first().cloned().unwrap_or_default(),
+        files: groups[i].clone(),
         index: survivors.len(),
         bytecode: hit.bytecode,
         module_name: hit.module_name,
         source_map_json: hit.source_map_json,
         snapshot: hit.snapshot,
       }),
-      Slot::Failed(e) => failures.push((files[i].clone(), e)),
+      Slot::Failed(e) => failures.push((groups[i].first().cloned().unwrap_or_default(), e)),
       // A Miss with no compiled output never reached Hit/Failed only if
       // its bundle was dropped — already recorded as Failed above; this
       // arm is unreachable but keeps the match total without a panic.
       Slot::Miss { .. } => failures.push((
-        files[i].clone(),
+        groups[i].first().cloned().unwrap_or_default(),
         ScriptError::internal("extension compile produced no output".to_string()),
       )),
     }

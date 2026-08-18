@@ -18,7 +18,7 @@ async fn binding_from(name: &str, src: &str) -> (tempfile::TempDir, ExtensionBin
   let path = tmp.path().join(name);
   std::fs::write(&path, src).expect("write extension");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled extension");
   (
@@ -317,7 +317,7 @@ async fn manifest_extraction_carries_title_output_schema_annotations() {
   let path = tmp.path().join("meta.js");
   std::fs::write(&path, SRC).expect("write extension");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled extension");
 

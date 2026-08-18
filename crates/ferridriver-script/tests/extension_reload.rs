@@ -27,7 +27,7 @@ fn write(path: &Path, contents: &str) {
 
 async fn tool_names(entry: &PathBuf) -> Vec<String> {
   let (compiled, failures) = ferridriver_script::compile_and_extract_extensions(
-    std::slice::from_ref(entry),
+    &[vec![entry.clone()]],
     &ferridriver_config::ExtensionPolicyConfig::default(),
   )
   .await;

@@ -22,7 +22,8 @@ fn policy() -> ferridriver_config::ExtensionPolicyConfig {
 }
 
 async fn compile(files: &[PathBuf]) -> (Vec<ferridriver_script::CompiledExtension>, Vec<(PathBuf, String)>) {
-  let (ok, err) = compile_and_extract_extensions(files, &policy()).await;
+  let (ok, err) =
+    compile_and_extract_extensions(&files.iter().map(|f| vec![f.clone()]).collect::<Vec<_>>(), &policy()).await;
   (ok, err.into_iter().map(|(p, e)| (p, e.message)).collect())
 }
 
@@ -192,7 +193,7 @@ async fn extraction_enforces_the_operator_command_ceiling() {
     commands: ferridriver_config::ExtensionCommandsCeiling::None,
     ..ferridriver_config::ExtensionPolicyConfig::default()
   };
-  let (ok, err) = compile_and_extract_extensions(std::slice::from_ref(&path), &strict).await;
+  let (ok, err) = compile_and_extract_extensions(&[vec![path.clone()]], &strict).await;
   assert!(ok.is_empty(), "the ceiling must refuse the file");
   assert!(
     err.iter().any(|(_, e)| e.message.contains("allow.commands")),

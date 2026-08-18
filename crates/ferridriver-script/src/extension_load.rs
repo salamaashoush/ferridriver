@@ -12,7 +12,7 @@
 //! under the others, which it cannot do while each host decides for
 //! itself what loading means.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ferridriver_config::{ExtensionPolicyConfig, ExtensionSpec};
 
@@ -208,7 +208,7 @@ pub async fn load(
       },
     })
     .collect();
-  let (compiled, failures) = crate::compile_and_extract_extensions(&files, policy).await;
+  let (compiled, failures) = crate::compile_and_extract_extensions(&compile_groups(&gated, &files), policy).await;
   compile_failures.extend(failures);
   (gated, compiled, compile_failures)
 }
@@ -246,4 +246,50 @@ pub async fn load_bindings(
       name: cp.path.display().to_string(),
     })
     .collect()
+}
+
+/// How the files are split into bundles.
+///
+/// One bundle per PACKAGE for its entries: a helper two entries of the
+/// same package import must be evaluated once, and bundling each entry
+/// as its own graph inlines a copy into each — one module with two
+/// states, which is exactly what a shared helper must not be.
+///
+/// A provider is always its own bundle: its module is loaded under the
+/// specifier it serves, and a module has one name. Anything that is not
+/// part of a package (a loose file named directly) is its own bundle
+/// too.
+fn compile_groups(gated: &GatedExtensions, files: &[PathBuf]) -> Vec<Vec<PathBuf>> {
+  let providers: Vec<&PathBuf> = gated.provided.provider_order().iter().collect();
+  let mut groups: Vec<Vec<PathBuf>> = Vec::new();
+  let mut package_group: std::collections::BTreeMap<PathBuf, usize> = std::collections::BTreeMap::new();
+
+  for file in files {
+    // Providers keep their own identity.
+    if providers.iter().any(|p| canonical_eq(p, file)) {
+      groups.push(vec![file.clone()]);
+      continue;
+    }
+    let package = gated
+      .resolved
+      .iter()
+      .find(|r| r.files.iter().any(|f| canonical_eq(f, file)))
+      .and_then(|r| r.package_dir.clone());
+    match package {
+      Some(dir) => match package_group.get(&dir) {
+        Some(&index) => groups[index].push(file.clone()),
+        None => {
+          package_group.insert(dir, groups.len());
+          groups.push(vec![file.clone()]);
+        },
+      },
+      None => groups.push(vec![file.clone()]),
+    }
+  }
+  groups
+}
+
+/// Two paths naming the same file, however they were spelled.
+fn canonical_eq(a: &Path, b: &Path) -> bool {
+  a == b || std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok()
 }

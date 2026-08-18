@@ -26,7 +26,7 @@ async fn demo_binding() -> (tempfile::TempDir, ExtensionBinding) {
   let path = tmp.path().join("demo.js");
   std::fs::write(&path, DEMO_PLUGIN).expect("write plugin");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
   assert!(!cp.bytecode.is_empty(), "compiled bytecode must be non-empty");
@@ -97,7 +97,7 @@ async fn dotted_tool_names_are_projected_as_namespaces() {
   let path = tmp.path().join("acme.js");
   std::fs::write(&path, NAMESPACED_PLUGIN).expect("write plugin");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -173,7 +173,7 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
   .expect("write plugin");
 
   let (compiled, failures) = compile_and_extract_extensions(
-    &[tmp.path().join("plug.ts")],
+    &[vec![tmp.path().join("plug.ts")]],
     &ferridriver_config::ExtensionPolicyConfig::default(),
   )
   .await;
@@ -224,7 +224,7 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
   let path = tmp.path().join("net.js");
   std::fs::write(&path, NET_PLUGIN).expect("write plugin");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -309,7 +309,7 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
   let path = tmp.path().join("netf.js");
   std::fs::write(&path, NET_PLUGIN).expect("write plugin");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -396,7 +396,7 @@ async fn fetch_net_policy_does_not_leak_between_concurrent_tools() {
   let path = tmp.path().join("leak.js");
   std::fs::write(&path, PLUGIN).expect("write plugin");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -467,7 +467,7 @@ async fn extension_branches_on_ferridriver_host_flag() {
   let path = tmp.path().join("ext.js");
   std::fs::write(&path, EXT).expect("write ext");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled");
 
@@ -933,7 +933,7 @@ async fn binding_from(src: &str) -> (tempfile::TempDir, Result<ExtensionBinding,
   let path = tmp.path().join("ext.ts");
   std::fs::write(&path, src).expect("write plugin");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   if let Some((_, e)) = failures.into_iter().next() {
     return (tmp, Err(e.message));
   }
@@ -1044,7 +1044,7 @@ async fn plugin_top_level_await_registers_tools_in_session() {
   )
   .expect("write plugin");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -1097,8 +1097,11 @@ async fn broken_plugin_is_skipped_without_killing_the_session() {
   .expect("write bad plugin");
   let good = tmp.path().join("good.js");
   std::fs::write(&good, "defineTool({ name: 'good', handler: async () => 'fine' });\n").expect("write good plugin");
-  let (compiled, failures) =
-    compile_and_extract_extensions(&[bad, good], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+  let (compiled, failures) = compile_and_extract_extensions(
+    &[vec![bad], vec![good]],
+    &ferridriver_config::ExtensionPolicyConfig::default(),
+  )
+  .await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let extensions: Vec<ExtensionBinding> = compiled
     .into_iter()
@@ -1390,7 +1393,7 @@ async fn allow_net_capability_binds_the_global_request_binding() {
   let path = tmp.path().join("netg.js");
   std::fs::write(&path, NET_PLUGIN).expect("write plugin");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -1493,7 +1496,7 @@ async fn allow_net_follows_timer_callbacks_registered_by_a_restricted_tool() {
   let path = tmp.path().join("nett.js");
   std::fs::write(&path, NET_PLUGIN).expect("write plugin");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
@@ -1582,7 +1585,7 @@ async fn extraction_environment_matches_session_for_top_level_globals() {
   let path = tmp.path().join("ambient.js");
   std::fs::write(&path, EXT).expect("write plugin");
   let (compiled, failures) =
-    compile_and_extract_extensions(&[path], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
   assert!(
     failures.is_empty(),
     "top-level standard globals must not fail extraction: {failures:?}"
