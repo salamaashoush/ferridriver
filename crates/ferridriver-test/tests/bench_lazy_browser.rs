@@ -10,6 +10,7 @@ use ferridriver_test::runner::TestRunner;
 
 fn make_test(i: usize) -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "bench_lazy_browser.rs".into(),
       suite: Some("no_browser".into()),

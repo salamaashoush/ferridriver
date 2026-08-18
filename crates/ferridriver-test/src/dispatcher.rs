@@ -75,9 +75,11 @@ impl Dispatcher {
     attempt: u32,
     suite_key: String,
     hooks: Arc<Hooks>,
+    metadata: Option<serde_json::Value>,
   ) {
     let assignment = TestAssignment {
       test: TestCase {
+        metadata,
         id: id.clone(),
         test_fn: Arc::clone(test_fn),
         fixture_requests,

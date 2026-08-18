@@ -990,6 +990,7 @@ mod tests {
 
   fn case(name: &str) -> crate::model::TestCase {
     crate::model::TestCase {
+      metadata: None,
       id: crate::model::TestId {
         file: "a.spec.ts".into(),
         suite: None,

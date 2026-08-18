@@ -113,6 +113,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
 
     let test_fn_ptr = reg.test_fn;
     let test_case: TestCase = TestCase {
+      metadata: None,
       id: TestId {
         file: file.clone(),
         suite: Some(suite_name.to_string()),
@@ -385,6 +386,7 @@ mod tests {
 
   fn dummy_test(name: &str, annotations: Vec<TestAnnotation>) -> TestCase {
     TestCase {
+      metadata: None,
       id: TestId {
         file: "test.rs".into(),
         suite: Some("suite".into()),

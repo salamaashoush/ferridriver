@@ -49,6 +49,7 @@ fn fail<T: std::fmt::Display>(msg: T) -> TestFailure {
 fn noop_test(name: &str) -> TestCase {
   let name = name.to_string();
   TestCase {
+    metadata: None,
     id: TestId {
       file: "new_features.rs".into(),
       suite: None,
@@ -184,6 +185,7 @@ async fn test_after_each_runs_even_on_failure() {
   };
 
   let failing_test = TestCase {
+    metadata: None,
     id: TestId {
       file: "new_features.rs".into(),
       suite: None,
@@ -265,6 +267,7 @@ async fn test_serial_mode_runs_in_order() {
   fn ordered_test(name: &str, expected_order: u32) -> TestCase {
     let name = name.to_string();
     TestCase {
+      metadata: None,
       id: TestId {
         file: "new_features.rs".into(),
         suite: Some("serial".into()),
@@ -318,6 +321,7 @@ async fn test_serial_mode_skips_after_failure() {
   RUN_COUNT.store(0, Ordering::SeqCst);
 
   let failing = TestCase {
+    metadata: None,
     id: TestId {
       file: "new_features.rs".into(),
       suite: Some("serial_fail".into()),
@@ -340,6 +344,7 @@ async fn test_serial_mode_skips_after_failure() {
   };
 
   let should_skip = TestCase {
+    metadata: None,
     id: TestId {
       file: "new_features.rs".into(),
       suite: Some("serial_fail".into()),
@@ -390,6 +395,7 @@ async fn test_serial_mode_skips_after_failure() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_expected_failure_passes_when_test_fails() {
   let test = TestCase {
+    metadata: None,
     id: TestId {
       file: "new_features.rs".into(),
       suite: None,
@@ -426,6 +432,7 @@ async fn test_expected_failure_passes_when_test_fails() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_expected_failure_fails_when_test_passes() {
   let test = TestCase {
+    metadata: None,
     id: TestId {
       file: "new_features.rs".into(),
       suite: None,
@@ -471,6 +478,7 @@ async fn test_global_setup_runs_before_tests() {
   TEST_SAW_SETUP.store(0, Ordering::SeqCst);
 
   let test = TestCase {
+    metadata: None,
     id: TestId {
       file: "new_features.rs".into(),
       suite: None,
@@ -562,6 +570,7 @@ async fn test_global_setup_failure_aborts_run() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_testinfo_injected_into_pool() {
   let test = TestCase {
+    metadata: None,
     id: TestId {
       file: "new_features.rs".into(),
       suite: None,
@@ -606,6 +615,7 @@ async fn test_testinfo_injected_into_pool() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_soft_assertions_collected() {
   let test = TestCase {
+    metadata: None,
     id: TestId {
       file: "new_features.rs".into(),
       suite: None,

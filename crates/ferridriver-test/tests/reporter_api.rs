@@ -10,6 +10,7 @@ use ferridriver_test::reporter::{ReporterMode, api, create_reporters_mode, creat
 
 fn case(file: &str, describe: Option<&str>, name: &str) -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: file.to_string(),
       suite: describe.map(|d| format!("{file}::{d}")),

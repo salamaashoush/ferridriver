@@ -27,7 +27,12 @@ pub fn translate_features(feature_set: &FeatureSet, registry: Arc<StepRegistry>,
   let mut suites = Vec::new();
 
   for feature in &feature_set.features {
-    let scenarios = scenario::expand_feature(feature);
+    let scenarios = scenario::expand_feature_with(
+      feature,
+      &scenario::ExpandOptions {
+        examples_title_format: config.examples_title_format.clone(),
+      },
+    );
     if scenarios.is_empty() {
       continue;
     }
@@ -320,9 +325,20 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
   let annotations = scenario_annotations(&scenario);
   let use_options = scenario_use_options(&scenario);
   let line = scenario_line(&scenario);
+  // The Gherkin facts a cucumber-json document quotes and the run never
+  // reads. Carried as opaque metadata, so the core stays domain-free.
+  let metadata = serde_json::to_value(&scenario.source).ok();
   let id = TestId {
     file: scenario.feature_path.display().to_string(),
-    suite: Some(scenario.feature_name.clone()),
+    // A `Rule` and a Scenario Outline are each a describe around what
+    // they hold, the way `playwright-bdd` renders them — so a row's
+    // title path is feature > [rule >] outline > row.
+    suite: Some(
+      std::iter::once(scenario.feature_name.clone())
+        .chain(scenario.describe_path.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("::"),
+    ),
     name: scenario.name.clone(),
     line,
     // Gherkin locations are line-only; a column would be invented.
@@ -426,6 +442,7 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
     retries: None,
     expected_status: ExpectedStatus::Pass,
     use_options,
+    metadata,
   }
 }
 
@@ -451,6 +468,7 @@ impl TestInfoObserver {
       "bdd_keyword": step.keyword.trim(),
       "bdd_text": text,
       "bdd_line": step.line,
+      "bdd_arguments": step.cucumber_arguments(),
     })
   }
 
@@ -602,6 +620,8 @@ mod use_options_tests {
 
   fn scenario_with_tags(tags: &[&str]) -> ScenarioExecution {
     ScenarioExecution {
+      describe_path: Vec::new(),
+      source: crate::scenario::ScenarioSource::default(),
       feature_name: "f".to_string(),
       feature_path: std::path::PathBuf::from("f.feature"),
       name: "s".to_string(),

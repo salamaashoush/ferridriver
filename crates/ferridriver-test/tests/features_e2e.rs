@@ -39,6 +39,7 @@ fn make_flaky_test() -> TestCase {
   ATTEMPT_COUNTER.store(0, Ordering::SeqCst);
 
   TestCase {
+    metadata: None,
     id: TestId {
       file: "features_e2e.rs".into(),
       suite: Some("retry".into()),
@@ -214,6 +215,7 @@ async fn assert_all_matchers(page: &Arc<ferridriver::Page>) -> Result<(), TestFa
 
 fn make_matchers_test() -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "features_e2e.rs".into(),
       suite: Some("matchers".into()),
@@ -265,6 +267,7 @@ async fn test_all_locator_matchers() {
 
 fn make_poll_test() -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "features_e2e.rs".into(),
       suite: Some("expect_poll".into()),
@@ -339,6 +342,7 @@ async fn test_expect_poll() {
 
 fn make_to_pass_test() -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "features_e2e.rs".into(),
       suite: Some("to_pass".into()),
@@ -422,6 +426,7 @@ async fn test_to_pass() {
 
 fn make_page_assertions_test() -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "features_e2e.rs".into(),
       suite: Some("page".into()),

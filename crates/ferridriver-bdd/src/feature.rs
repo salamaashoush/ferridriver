@@ -11,6 +11,115 @@ pub struct ParsedFeature {
   pub path: PathBuf,
   /// Parsed Gherkin feature AST.
   pub feature: gherkin::Feature,
+  /// The file's own lines, 1-indexed by [`ParsedFeature::line`].
+  ///
+  /// The `gherkin` crate's AST carries neither comments nor tag
+  /// positions, and a table knows only where it starts — so a
+  /// `# title-format:` comment, a `tags[].line` in a cucumber-json
+  /// document and an Examples ROW's line all have to be read back off
+  /// the source.
+  lines: Vec<String>,
+}
+
+/// Where a tag was written.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SourceTag {
+  pub name: String,
+  pub line: usize,
+}
+
+impl ParsedFeature {
+  fn with_source(path: PathBuf, feature: gherkin::Feature, source: &str) -> Self {
+    Self {
+      path,
+      feature,
+      lines: source.lines().map(ToString::to_string).collect(),
+    }
+  }
+
+  /// The file's `line`th line (1-indexed), if it has one.
+  #[must_use]
+  pub fn line(&self, line: usize) -> Option<&str> {
+    line
+      .checked_sub(1)
+      .and_then(|index| self.lines.get(index))
+      .map(String::as_str)
+  }
+
+  /// The comment on `line`, without its leading `#`-run trimmed — the
+  /// text as `playwright-bdd` reads it, `# title-format: ...` included.
+  #[must_use]
+  pub fn comment_at(&self, line: usize) -> Option<&str> {
+    let text = self.line(line)?.trim();
+    text.starts_with('#').then_some(text)
+  }
+
+  /// The line each of `tags` was written on, searching upward from the
+  /// keyword at `keyword_line` over the contiguous run of tag and
+  /// comment lines above it. A tag the run does not mention is left
+  /// without a line, which is what Cucumber itself emits for one it
+  /// cannot place.
+  #[must_use]
+  pub fn tag_lines(&self, keyword_line: usize, tags: &[String]) -> Vec<SourceTag> {
+    let mut found: rustc_hash::FxHashMap<&str, usize> = rustc_hash::FxHashMap::default();
+    let mut line = keyword_line.saturating_sub(1);
+    while line >= 1 {
+      let Some(text) = self.line(line).map(str::trim) else {
+        break;
+      };
+      if text.is_empty() || text.starts_with('#') {
+        line -= 1;
+        continue;
+      }
+      if !text.starts_with('@') {
+        break;
+      }
+      for word in text.split_whitespace() {
+        found.entry(word.trim_start_matches('@')).or_insert(line);
+      }
+      line -= 1;
+    }
+    tags
+      .iter()
+      .map(|tag| {
+        let bare = tag.trim_start_matches('@');
+        SourceTag {
+          name: if tag.starts_with('@') {
+            tag.clone()
+          } else {
+            format!("@{tag}")
+          },
+          line: found.get(bare).copied().unwrap_or_default(),
+        }
+      })
+      .collect()
+  }
+
+  /// The line of each row of the table starting at `table_line`. Read
+  /// off the source rather than counted, because Gherkin allows a
+  /// comment or a blank line between two rows.
+  #[must_use]
+  pub fn table_row_lines(&self, table_line: usize, rows: usize) -> Vec<usize> {
+    let mut lines = Vec::with_capacity(rows);
+    let mut line = table_line;
+    while lines.len() < rows {
+      let Some(text) = self.line(line).map(str::trim) else {
+        break;
+      };
+      if text.starts_with('|') {
+        lines.push(line);
+      } else if !text.is_empty() && !text.starts_with('#') {
+        break;
+      }
+      line += 1;
+    }
+    // A table the source cannot account for (an inline feature built by
+    // a test) still needs one line per row.
+    while lines.len() < rows {
+      lines.push(table_line + lines.len());
+    }
+    lines
+  }
 }
 
 /// A collection of parsed features.
@@ -90,7 +199,8 @@ impl FeatureSet {
         feature.path = Some(path.clone());
       }
 
-      features.push(ParsedFeature { path, feature });
+      let source = std::fs::read_to_string(&path).unwrap_or_default();
+      features.push(ParsedFeature::with_source(path, feature, &source));
     }
 
     Ok(Self { features })
@@ -102,10 +212,7 @@ impl FeatureSet {
     let feature = gherkin::Feature::parse(text, env)
       .map_err(|e| FerriError::backend(format!("failed to parse Gherkin text: {e}")))?;
     Ok(Self {
-      features: vec![ParsedFeature {
-        path: PathBuf::from("<inline>"),
-        feature,
-      }],
+      features: vec![ParsedFeature::with_source(PathBuf::from("<inline>"), feature, text)],
     })
   }
 

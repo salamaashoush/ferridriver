@@ -188,15 +188,23 @@ impl Reporter for TerminalReporter {
         let mut out = String::new();
         let bdd = is_bdd_test(&outcome.steps);
 
-        // BDD: print Feature header when suite changes.
-        if bdd && self.current_suite.as_ref() != test_id.suite.as_ref() {
+        // BDD: print a Feature header when the feature changes. A
+        // scenario's suite id nests its `Rule` and its Scenario Outline
+        // (`Feature::Rule::Outline`); the feature is the first segment,
+        // and the rest is already on the test's own line.
+        let feature = test_id
+          .suite
+          .as_deref()
+          .and_then(|suite| suite.split("::").next())
+          .map(ToString::to_string);
+        if bdd && self.current_suite != feature {
           if self.current_suite.is_some() {
             out.push('\n');
           }
-          if let Some(suite) = &test_id.suite {
-            let _ = writeln!(out, "  {} {}", screen.bold("Feature:"), screen.bold(suite));
+          if let Some(feature) = &feature {
+            let _ = writeln!(out, "  {} {}", screen.bold("Feature:"), screen.bold(feature));
           }
-          self.current_suite.clone_from(&test_id.suite);
+          self.current_suite = feature;
         }
 
         // The mark describes the test, not the raw status: a `test.fail()`

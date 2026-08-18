@@ -56,6 +56,7 @@ fn fail<T: std::fmt::Display>(msg: T) -> TestFailure {
 
 fn make_nav_test(i: usize) -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "bench_napi_compare.rs".into(),
       suite: Some("nav".into()),
@@ -87,6 +88,7 @@ fn make_nav_test(i: usize) -> TestCase {
 
 fn make_click_test(i: usize) -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "bench_napi_compare.rs".into(),
       suite: Some("click".into()),
@@ -133,6 +135,7 @@ fn make_click_test(i: usize) -> TestCase {
 
 fn make_eval_test(i: usize) -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "bench_napi_compare.rs".into(),
       suite: Some("eval".into()),

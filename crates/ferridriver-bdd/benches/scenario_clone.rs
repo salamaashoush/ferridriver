@@ -29,6 +29,7 @@ fn make_scenario(n: usize) -> ScenarioExecution {
     });
     let docstring = (i == 5).then(|| "a multi-line\npayload body\nfor the step".to_string());
     steps.push(ScenarioStep {
+      docstring_line: 0,
       keyword: "When ".to_string(),
       text: format!("I click the \"submit-button-number-{i}\" control"),
       table,
@@ -41,6 +42,8 @@ fn make_scenario(n: usize) -> ScenarioExecution {
   example_values.insert("count".to_string(), "42".to_string());
 
   ScenarioExecution {
+    describe_path: Vec::new(),
+    source: ferridriver_bdd::scenario::ScenarioSource::default(),
     feature_name: "Checkout flow with a fairly long descriptive name".to_string(),
     feature_path: PathBuf::from("tests/features/checkout.feature"),
     name: "Buy items as a returning customer (Examples: row 3)".to_string(),

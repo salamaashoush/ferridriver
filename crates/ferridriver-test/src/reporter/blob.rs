@@ -145,6 +145,8 @@ pub struct WireTestId {
 /// this and nothing else.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireOutcome {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub case_metadata: Option<serde_json::Value>,
   pub test_id: WireTestId,
   pub status: String,
   pub duration_ms: u64,
@@ -382,6 +384,7 @@ trait ResourceSink {
 impl WireOutcome {
   fn from_runtime(outcome: &TestOutcome, sink: &mut dyn ResourceSink) -> Self {
     Self {
+      case_metadata: outcome.case_metadata.clone(),
       test_id: (&outcome.test_id).into(),
       status: outcome.status.as_str().to_string(),
       duration_ms: u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX),
@@ -426,6 +429,7 @@ impl WireOutcome {
   fn into_runtime(self, resources: &FxHashMap<String, Vec<u8>>) -> TestOutcome {
     let id: TestId = self.test_id.into();
     TestOutcome {
+      case_metadata: self.case_metadata,
       test_id: id,
       status: TestStatus::parse(&self.status),
       duration: Duration::from_millis(self.duration_ms),

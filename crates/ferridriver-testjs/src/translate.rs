@@ -676,6 +676,7 @@ fn lower_test(
   });
 
   Ok(TestCase {
+    metadata: None,
     id,
     test_fn,
     fixture_requests: requests,

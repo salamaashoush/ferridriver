@@ -527,6 +527,7 @@ pub const REPORTER_NAMES: &[&str] = &[
   "progress",
   "rerun",
   "cucumber-json",
+  "cucumber-html",
   "messages",
   "usage",
 ];
@@ -682,9 +683,19 @@ fn build_reporters(
 
       // ── BDD-specific reporters (usable in any mode) ──
       "cucumber-json" | "cucumber" => {
-        reporters.push(Box::new(bdd::cucumber_json::CucumberJsonReporter::new(out(
-          "cucumber.json",
-        ))));
+        reporters.push(Box::new(
+          bdd::cucumber_json::CucumberJsonReporter::new(out("cucumber.json")).with_options(opts, config),
+        ));
+      },
+      // Named rather than swallowed by the unknown-reporter warning:
+      // the document is the same one, and the HTML is produced from it
+      // by the tool that owns the format.
+      "cucumber-html" => {
+        tracing::warn!(
+          "the `cucumber-html` reporter is not built in — write the document with `cucumber-json` and render it \
+           with the cucumber HTML formatter (`cucumber-html-reporter`, `multiple-cucumber-html-reporter`), which \
+           reads exactly that file"
+        );
       },
       "messages" | "ndjson" => {
         reporters.push(Box::new(bdd::messages::CucumberMessagesReporter::new(out(

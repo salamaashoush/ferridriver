@@ -1267,6 +1267,7 @@ impl TestRunner {
             for test in &suite.tests {
               let assignment = crate::dispatcher::TestAssignment {
                 test: crate::model::TestCase {
+                  metadata: test.metadata.clone(),
                   id: test.id.clone(),
                   test_fn: Arc::clone(&test.test_fn),
                   fixture_requests: test.fixture_requests.clone(),
@@ -1290,6 +1291,7 @@ impl TestRunner {
               .iter()
               .map(|test| crate::dispatcher::TestAssignment {
                 test: crate::model::TestCase {
+                  metadata: test.metadata.clone(),
                   id: test.id.clone(),
                   test_fn: Arc::clone(&test.test_fn),
                   fixture_requests: test.fixture_requests.clone(),
@@ -1436,6 +1438,7 @@ impl TestRunner {
           result.outcome.attempt + 1,
           result.suite_key.clone(),
           Arc::clone(&result.hooks),
+          result.outcome.case_metadata.clone(),
         );
       } else {
         final_count += 1;

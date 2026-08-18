@@ -18,3 +18,13 @@ Feature: Rule Keyword
 
     Scenario: Has correct URL
       Then the URL should contain "example.com"
+
+  Rule: Page elements
+    @outline
+    Scenario Outline: The <selector> element is visible
+      Then "<selector>" should be visible
+
+      Examples:
+        | selector |
+        | h1       |
+        | p        |

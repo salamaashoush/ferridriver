@@ -286,6 +286,12 @@ pub struct TestConfig {
   #[serde(default)]
   pub metadata: serde_json::Value,
   pub strict: bool,
+  /// How a Scenario Outline row is titled when neither a
+  /// `# title-format:` comment, the Examples' name nor the scenario's
+  /// name names a column. `playwright-bdd`'s `examplesTitleFormat`;
+  /// unset falls through to `Example #<_index_>`.
+  #[serde(default)]
+  pub examples_title_format: Option<String>,
   /// Whether ferridriver's own Rust step library (and any
   /// inventory-registered step in the running binary) is part of the
   /// registry a JS/TS step suite runs against.
@@ -1029,6 +1035,7 @@ impl Default for TestConfig {
       config_grep_invert: None,
       metadata: serde_json::Value::Null,
       strict: true,
+      examples_title_format: None,
       builtin_steps: true,
       order: "defined".into(),
       language: None,

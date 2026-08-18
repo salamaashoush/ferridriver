@@ -839,6 +839,7 @@ impl Worker {
         .timeout
         .unwrap_or_else(|| Duration::from_millis(self.config.timeout)),
       metadata: self.config.metadata.clone(),
+      case_metadata: test.metadata.clone(),
       ..Default::default()
     }
   }

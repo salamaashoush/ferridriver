@@ -35,6 +35,7 @@ fn data_url(html: &str) -> String {
 
 fn make_nav_test(i: usize) -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "bench.rs".into(),
       suite: Some("nav".into()),
@@ -73,6 +74,7 @@ fn make_nav_test(i: usize) -> TestCase {
 
 fn make_interaction_test(i: usize) -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "bench.rs".into(),
       suite: Some("click".into()),

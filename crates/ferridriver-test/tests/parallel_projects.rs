@@ -15,6 +15,7 @@ use ferridriver_test::runner::TestRunner;
 /// wall-clock assertions deterministic without a Chrome dependency.
 fn sleeping_test(name: &str, sleep: Duration) -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "parallel_projects.rs".into(),
       suite: Some("proj".into()),

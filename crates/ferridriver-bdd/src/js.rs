@@ -631,6 +631,7 @@ impl JsBddSession {
           "bdd_keyword": step.keyword.trim(),
           "bdd_text": step.text,
           "bdd_line": step.line,
+          "bdd_arguments": step.cucumber_arguments(),
         });
         let step_location =
           ferridriver_test::model::StepLocation::new(feature_path.clone(), u32::try_from(step.line).unwrap_or(0));
@@ -996,7 +997,12 @@ pub fn translate_features_js(
   let mut suites = Vec::new();
 
   for feature in &feature_set.features {
-    let scenarios = crate::scenario::expand_feature(feature);
+    let scenarios = crate::scenario::expand_feature_with(
+      feature,
+      &crate::scenario::ExpandOptions {
+        examples_title_format: config.examples_title_format.clone(),
+      },
+    );
     if scenarios.is_empty() {
       continue;
     }
@@ -1012,13 +1018,19 @@ pub fn translate_features_js(
       // the Rust-step path in `translate::translate_scenario`).
       let id = TestId {
         file: scenario.feature_path.display().to_string(),
-        suite: Some(scenario.feature_name.clone()),
+        suite: Some(
+          std::iter::once(scenario.feature_name.clone())
+            .chain(scenario.describe_path.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("::"),
+        ),
         name: scenario.name.clone(),
         line: crate::translate::scenario_line(&scenario),
         column: None,
       };
       let annotations = crate::translate::scenario_annotations(&scenario);
       let use_options = crate::translate::scenario_use_options(&scenario);
+      let metadata = serde_json::to_value(&scenario.source).ok();
       let scenario = Arc::new(scenario);
 
       let bundle = Arc::clone(&bundle);
@@ -1108,6 +1120,7 @@ pub fn translate_features_js(
       });
 
       tests.push(TestCase {
+        metadata,
         id,
         test_fn,
         fixture_requests: vec![

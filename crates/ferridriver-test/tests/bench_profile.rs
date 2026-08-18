@@ -217,6 +217,7 @@ async fn deep_profile() {
   // ── 8. Runner overhead measurement ──
   println!("  [8] Runner framework overhead (1 no-op test, 1 worker)");
   let noop_test = TestCase {
+    metadata: None,
     id: TestId {
       file: "bench".into(),
       suite: None,

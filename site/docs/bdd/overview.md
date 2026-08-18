@@ -138,6 +138,37 @@ Outlines (with named Examples blocks), tags (boolean expressions: `and`,
 like `"""json`), the asterisk (`*`) keyword, and i18n keywords via
 `--language` or `# language: xx` (70+ languages).
 
+## How a scenario is named
+
+A `Rule` and a Scenario Outline are each a suite around what they hold,
+so a scenario's title path is
+`<feature> > [rule >] [outline >] <scenario>` — the same nesting
+`playwright-bdd` generates, and what `--grep`, the rerun list and a
+report's own grouping key read.
+
+One Examples ROW is titled by the first of these that applies:
+
+1. a `# title-format:` comment directly above the `Examples:` keyword,
+   or above its first tag;
+2. the Examples block's own name, if it names a column in `<>`;
+3. the scenario's name, if it names a column in `<>`;
+4. `[test].examplesTitleFormat` from the config file;
+5. `Example #<_index_>`.
+
+`<column>` is substituted from the row and `<_index_>` is the row's
+number, counting across every Examples block of that outline. A
+placeholder no column supplies is left exactly as written.
+
+```gherkin
+Scenario Outline: user <name> is <age>
+  Given nothing
+
+  # title-format: <name>, aged <age> (#<_index_>)
+  Examples:
+    | name | age |
+    | Ada  | 36  |
+```
+
 ## Learn more
 
 - [Built-in steps](/bdd/steps) — all 145 steps grouped by category

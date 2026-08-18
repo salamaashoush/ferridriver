@@ -564,6 +564,7 @@ mod tests {
       mode: crate::model::SuiteMode::Parallel,
     };
     suite.tests.push(crate::model::TestCase {
+      metadata: None,
       id: test_id(),
       test_fn: std::sync::Arc::new(|_| Box::pin(async { Ok(()) })),
       fixture_requests: Vec::new(),

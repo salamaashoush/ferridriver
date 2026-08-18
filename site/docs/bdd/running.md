@@ -96,6 +96,34 @@ terminal --reporter junit`. Each name is matched exactly (no `name:path`
 syntax). File-writing reporters emit into the run's output directory —
 `junit` writes `junit.xml`, `json` writes `results.json`. Set the path or
 per-reporter options with a `[[test.reporter]]` table in the config file.
+A name that is neither built in nor a path to a reporter module is
+refused with the list above; see
+[custom reporters](/test-runner/reporters#custom-reporters).
+
+### The cucumber-json document
+
+`cucumber-json` writes the document cucumber's own ecosystem reads,
+field for field: a feature's `id`, `line`, `description` and `tags[]`
+(each with the line it was written on), an element's `id`
+(`feature;rule;scenario`), `keyword`, `line` and `description`, and a
+step's `line`, `arguments` (a data table as `{rows:[{cells}]}`, a doc
+string as `{content, line}`) and `result.duration` in nanoseconds.
+Hooks appear as `hidden` steps keyworded `Before` or `After`.
+
+Feature entries are keyed on the file AND the project, so a run over
+several projects produces one entry per project rather than merging
+them; the entry's `id` carries the project name.
+
+| Option | Default | Effect |
+|---|---|---|
+| `skipAttachments` | `true` | Attachment bodies are large; set `false` to emit them as base64 `embeddings` |
+| `addProjectToFeatureName` | `false` | Put the project in the feature's `name`, not only its `id` |
+| `addMetadata` | unset | `"object"` or `"list"` — add `{Project, Browser}` to each feature |
+
+There is no `cucumber-html` reporter. The HTML report is produced from
+this document by the tool that owns the format
+(`cucumber-html-reporter`, `multiple-cucumber-html-reporter`), which
+reads exactly the file `cucumber-json` writes.
 
 ## Environment variables
 

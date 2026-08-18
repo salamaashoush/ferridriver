@@ -154,6 +154,7 @@ fn preamble(names: &[&str]) -> Arc<api::RunPreamble> {
 
 fn outcome(name: &str, status: TestStatus) -> Arc<TestOutcome> {
   Arc::new(TestOutcome {
+    case_metadata: None,
     test_id: test_id(name),
     status,
     duration: Duration::from_millis(120),

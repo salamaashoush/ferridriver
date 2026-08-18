@@ -120,6 +120,12 @@ pub struct TestCase {
   pub expected_status: ExpectedStatus,
   /// Per-test fixture overrides from `test.use()`. Merged with global config by the worker.
   pub use_options: Option<serde_json::Value>,
+  /// Arbitrary metadata for a domain the core does not model — the same
+  /// role [`TestStep::metadata`] plays for a step. A BDD scenario
+  /// carries its Gherkin source here (keywords, descriptions, tag
+  /// lines) so the cucumber-json reporter can quote them without the
+  /// runner learning what Gherkin is.
+  pub metadata: Option<serde_json::Value>,
 }
 
 // ── Test Suite ──
@@ -1545,6 +1551,10 @@ pub struct TestOutcome {
   /// Effective timeout for this attempt, after `test.slow()` and
   /// `testInfo.setTimeout()`.
   pub timeout: Duration,
+  /// [`TestCase::metadata`], carried onto the attempt so a reporter
+  /// reads it from the outcome it is handed. Distinct from
+  /// [`Self::metadata`], which is the RUN's (from config).
+  pub case_metadata: Option<serde_json::Value>,
 }
 
 impl Default for TestOutcome {
@@ -1569,6 +1579,7 @@ impl Default for TestOutcome {
       start_time: SystemTime::UNIX_EPOCH,
       expected_status: ExpectedStatus::Pass,
       timeout: Duration::ZERO,
+      case_metadata: None,
     }
   }
 }

@@ -30,6 +30,7 @@ fn data_url(html: &str) -> String {
 /// Test: basic page navigation and title check using fixtures.
 fn make_navigation_test() -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "runner_e2e.rs".into(),
       suite: Some("navigation".into()),
@@ -76,6 +77,7 @@ fn make_navigation_test() -> TestCase {
 /// Test: locator click and text assertion.
 fn make_click_test() -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "runner_e2e.rs".into(),
       suite: Some("interaction".into()),
@@ -133,6 +135,7 @@ fn make_click_test() -> TestCase {
 /// Test: fill input and read value.
 fn make_fill_test() -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "runner_e2e.rs".into(),
       suite: Some("interaction".into()),
@@ -189,6 +192,7 @@ fn make_fill_test() -> TestCase {
 /// Test: expect assertions (auto-retrying).
 fn make_expect_test() -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "runner_e2e.rs".into(),
       suite: Some("expect".into()),
@@ -250,6 +254,7 @@ fn make_expect_test() -> TestCase {
 /// Test that should be skipped.
 fn make_skip_test() -> TestCase {
   TestCase {
+    metadata: None,
     id: TestId {
       file: "runner_e2e.rs".into(),
       suite: None,
