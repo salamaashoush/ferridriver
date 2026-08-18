@@ -266,6 +266,50 @@ pub struct ContextRef {
 }
 
 impl ContextRef {
+  /// [`Self::new`] for a caller that can await.
+  ///
+  /// The sync constructor falls back to a TRANSIENT emitter when it
+  /// cannot take the state lock, and an event emitted on that emitter
+  /// reaches nobody — a `waitForEvent('page')` on the real context just
+  /// hangs. tokio's `RwLock` is write-preferring, so a merely QUEUED
+  /// writer is enough to make `try_read` fail; the popup pump hit this
+  /// deterministically. Anywhere there is an `.await` to spend, spend it
+  /// here instead of degrading.
+  pub(crate) async fn new_async(state: Arc<RwLock<BrowserState>>, name: String) -> Self {
+    let (key, events, closed, test_id_attribute) = {
+      let s = state.read().await;
+      let key = s.session_key(&name);
+      (
+        key.clone(),
+        s.get_or_create_context_events(&key.to_composite()),
+        s.get_or_create_context_closed(&key.to_composite()),
+        s.get_or_create_context_test_id_attribute(&key.to_composite()),
+      )
+    };
+    Self::from_parts(state, name, key, events, closed, test_id_attribute)
+  }
+
+  fn from_parts(
+    state: Arc<RwLock<BrowserState>>,
+    name: String,
+    key: SessionKey,
+    events: crate::events::ContextEventEmitter,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    test_id_attribute: Arc<std::sync::RwLock<Option<String>>>,
+  ) -> Self {
+    Self {
+      state,
+      name: Arc::from(name),
+      key,
+      default_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+      test_id_attribute,
+      default_navigation_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+      events,
+      browser: None,
+      closed,
+    }
+  }
+
   pub fn new(state: Arc<RwLock<BrowserState>>, name: String) -> Self {
     // Look up (or initialise) the shared emitter for this composite
     // key, and resolve the key against the state's own instance names.
@@ -295,17 +339,7 @@ impl ContextRef {
         Arc::new(std::sync::RwLock::new(None)),
       ),
     };
-    Self {
-      state,
-      name: Arc::from(name),
-      key,
-      default_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-      test_id_attribute,
-      default_navigation_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-      events,
-      browser: None,
-      closed,
-    }
+    Self::from_parts(state, name, key, events, closed, test_id_attribute)
   }
 
   /// Attach the parent [`crate::Browser`] handle so [`Self::browser`]
@@ -1922,8 +1956,13 @@ async fn register_popup(
   }
   // The browser handle keeps `popup.context().browser()` non-null,
   // matching Playwright where a popup shares the opener's context.
-  let ctx_ref =
-    ContextRef::new(state.clone(), composite.clone()).with_browser(crate::Browser::from_shared_state(state.clone()));
+  // `new_async`, not `new`: the sync constructor degrades to a
+  // transient emitter when the state lock is contended, and a popup
+  // announced on one is a popup the suite's `waitForEvent('page')`
+  // never sees.
+  let ctx_ref = ContextRef::new_async(state.clone(), composite.clone())
+    .await
+    .with_browser(crate::Browser::from_shared_state(state.clone()));
   let page = Page::with_context(popup.page.clone(), ctx_ref.clone());
 
   // While a CDP/WebKit popup is still paused only protocol-level
