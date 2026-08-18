@@ -281,13 +281,45 @@ export interface ExtensionRequires {
 }
 
 /**
+ * Import specifiers a package serves, and how. A specifier one package
+ * claims is that package's for the whole run: two claims on one name,
+ * or a claim on a specifier the runtime owns (`@playwright/*`,
+ * `@cucumber/*`, `node:*`, `@ferridriver/*`), is a startup error.
+ */
+export interface ExtensionProvides {
+  /**
+   * `specifier -> module file`, relative to the package directory. The
+   * file IS the specifier — it is compiled under that module name and
+   * evaluated before anything that imports it, so there is one instance
+   * per run and no facade in between.
+   */
+  modules?: Record<string, string>;
+  /**
+   * `specifier -> another specifier this package also provides`. An
+   * alias may not target a name the package does not own.
+   */
+  aliases?: Record<string, string>;
+}
+
+/**
  * The `ferridriver` field of an extension package's `package.json`.
  *
  * ```json
- * { "ferridriver": { "entries": ["./src/login.ts"] } }
+ * { "ferridriver": { "apiVersion": 2, "entries": ["./src/login.ts"] } }
  * ```
  */
 export interface ExtensionPackageManifest {
+  /**
+   * Manifest version the package was written against. Absent means 1,
+   * the shape that shipped before a package could claim a specifier.
+   */
+  apiVersion?: number;
+  /**
+   * The package's own name, so a diagnostic can say WHICH package
+   * claimed a specifier. Falls back to the directory name.
+   */
+  name?: string;
+  provides?: ExtensionProvides;
   /**
    * Modules to load as extensions, in declaration order; paths relative
    * to the package directory (a file, extension optional, or a directory

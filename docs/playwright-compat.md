@@ -115,6 +115,7 @@ recorded here with the reason. No silent skips.
 | `mock-filesystem` › *should display directory tree* fails | **Corpus defect, not a gap.** `expect(page.locator('#dir')).toContainText([...7 strings])` asserts an array against a locator matching ONE element; `to.contain.text.array` matches expectations against elements pairwise, so 7 expectations can never be satisfied by 1 element. Verified by running the identical spec under `@playwright/test`: it fails with a byte-identical expected/received diff. Our behaviour matches Playwright exactly. |
 | `github-api` is collected, not executed | The suite creates and deletes a real repository under `$GITHUB_USER` with `$API_TOKEN`. The gate exercises discovery, bundling and registration; running it would mutate someone's GitHub account. |
 | a `test.step` timeout stands still while the run is parked at `--debug` | Playwright races the step body against a wall-clock deadline (`raceAgainstDeadline`, `common/testType.ts:286-298`) taken OUTSIDE its `TimeoutManager`, so a paused debugger does not suspend a step timeout upstream — a step with `{ timeout: 200 }` fails 200ms after the pause starts. ferridriver runs it through `ferridriver::pause::run_within`, the same parked clock the test timeout and the script engine's per-call deadline read, so parked time does not count. The message and the failure shape are identical; only the clock differs. Suspending, not disabling: a body that hangs on its own after the debugger releases still times out. |
+| an unknown fixture parameter fails the function, not the file | Playwright's `FixturePool.validateFunction` (`common/fixtures.ts:250-256`) is called from `common/poolBuilder.ts:66-71` while pools are built, so `Test has unknown parameter "x".` is a LOAD error and every test in the file goes red. ferridriver raises the identical message from `fixture_graph::validate_requested`, per test and per hook, at the moment that function's fixtures are resolved — so only the function that asks for the name fails. The wording, the prefix (`Test`, `beforeEach hook`) and the outcome-is-red are the same; the blast radius is smaller. Scope is deliberately not consulted here: a built-in the world in hand does not carry (`page` in a `beforeAll`) is a known name, because answering "unknown parameter" for it would be a worse lie than the `undefined` this replaced. |
 | the compat configs set `retries = 1` | The `mock-battery` demo app loads `src/index.js` with `async`, so its `getBattery()` microtask races `styles.css`; when the script wins, the app throws on `document.styleSheets[0].insertRule` and renders nothing. That is the app's race — the page error and the correctly-installed mock are both observable — but it is real, and one retry is what Playwright's own example configs use. A genuine regression fails both attempts. |
 
 ### Not yet measured
@@ -123,9 +124,5 @@ recorded here with the reason. No silent skips.
   `ferridriver.toml`; the harness generates one per example rather than
   reading the upstream config. Nothing in the corpus depends on it at
   runtime.
-- Playwright's load-time fixture validation (`has unknown parameter
-  "x"`). ferridriver validates the self-reference case, which is what
-  distinguishes an override from a typo, but an unknown non-self
-  dependency still resolves to `undefined` rather than failing the load.
 - `test.extend` overriding an option fixture with `undefined` to restore
   the original default (`_appendFixtureList`'s `optionOverride` walk).

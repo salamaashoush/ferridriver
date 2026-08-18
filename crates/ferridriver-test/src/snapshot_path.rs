@@ -248,14 +248,48 @@ pub fn resolve_snapshot_paths(
   }
 }
 
+/// Node's `path.relative(base, path)`, which is what Playwright uses to
+/// place a spec under `{testFileDir}`.
+///
+/// It never answers with an absolute path — the reason this is not a
+/// bare `strip_prefix`. A failed strip used to fall back to the absolute
+/// path, which the template then joined under `{snapshotDir}`, so every
+/// baseline landed in a mirror of the whole filesystem. macOS reaches
+/// that on its own: `/var/folders/...` is a symlink to
+/// `/private/var/folders/...`, so a `testDir` and a spec path that name
+/// the same directory through different sides of the link do not strip.
+/// Hence the canonicalised second attempt before the `..`-walk.
+fn relative_to(base: &Path, path: &Path) -> PathBuf {
+  if let Ok(rel) = path.strip_prefix(base) {
+    return rel.to_path_buf();
+  }
+  let (base, path) = match (base.canonicalize(), path.canonicalize()) {
+    (Ok(b), Ok(p)) => {
+      if let Ok(rel) = p.strip_prefix(&b) {
+        return rel.to_path_buf();
+      }
+      (b, p)
+    },
+    _ => (base.to_path_buf(), path.to_path_buf()),
+  };
+  let mut b = base.components().peekable();
+  let mut p = path.components().peekable();
+  while b.peek().is_some() && b.peek() == p.peek() {
+    b.next();
+    p.next();
+  }
+  let mut out = PathBuf::new();
+  for _ in b {
+    out.push("..");
+  }
+  out.extend(p);
+  out
+}
+
 /// Playwright's `_applyPathTemplate`.
 #[must_use]
 pub fn apply_path_template(cx: &SnapshotPathContext, template: &str, name_argument: &str, ext: &str) -> PathBuf {
-  let relative_test_file = cx
-    .test_file
-    .strip_prefix(&cx.test_dir)
-    .unwrap_or(&cx.test_file)
-    .to_path_buf();
+  let relative_test_file = relative_to(&cx.test_dir, &cx.test_file);
   let file_dir = relative_test_file
     .parent()
     .map(|p| p.to_string_lossy().into_owned())
@@ -702,5 +736,39 @@ mod tests {
     assert_eq!(trimmed.chars().count(), 100);
     assert!(trimmed.contains('-'), "the hash separator is missing: {trimmed}");
     assert_eq!(trim_long_string("short", 100), "short");
+  }
+
+  #[test]
+  fn a_spec_outside_test_dir_relativizes_instead_of_going_absolute() {
+    // The bug this replaced: `strip_prefix` fails, the fallback is the
+    // ABSOLUTE path, and `{snapshotDir}/{testFileDir}` becomes a mirror
+    // of the whole filesystem under the snapshot dir.
+    let rel = super::relative_to(Path::new("/repo/tests"), Path::new("/repo/other/login.spec.ts"));
+    assert_eq!(rel, PathBuf::from("../other/login.spec.ts"));
+    assert!(!rel.is_absolute(), "a relative path is the whole point");
+  }
+
+  #[test]
+  fn a_spec_under_test_dir_strips_to_its_own_tail() {
+    assert_eq!(
+      super::relative_to(Path::new("/repo/tests"), Path::new("/repo/tests/e2e/login.spec.ts")),
+      PathBuf::from("e2e/login.spec.ts")
+    );
+  }
+
+  #[test]
+  fn the_two_sides_of_a_symlinked_temp_dir_still_strip() {
+    // macOS: `std::env::temp_dir()` answers `/var/folders/...` while a
+    // canonicalised spec path is `/private/var/folders/...`. Both name
+    // the same directory, so the spec must relativize to its own name
+    // and not drag `private/var/folders/...` into the template.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spec = dir.path().join("snap.test.ts");
+    std::fs::write(&spec, "").expect("write spec");
+    let canonical = spec.canonicalize().expect("canonicalize");
+    assert_eq!(
+      super::relative_to(dir.path(), &canonical),
+      PathBuf::from("snap.test.ts")
+    );
   }
 }

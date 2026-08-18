@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import { type Browser, type Page } from "../index.js";
 import { launchForBackend } from "./_helpers.js";
 import { createServer, type Server } from "node:http";
@@ -366,6 +366,15 @@ for (const backend of BACKENDS) {
       });
     }
 
+    // Every emulateMedia test also calls this at the end of its body,
+    // which is useless precisely when it matters: a failing assertion
+    // throws past it and carries the override into the next test. One
+    // wrong print+dark expectation used to fail three tests for that
+    // reason. afterEach runs either way.
+    afterEach(async () => {
+      await resetEmulation();
+    });
+
     it("emulates dark color scheme", async () => {
       await page.emulateMedia({ colorScheme: "dark" });
       await page.goto(testUrl);
@@ -434,16 +443,7 @@ for (const backend of BACKENDS) {
       // CDP / WebKit accept the full bag in one call; assert every field
       // lands in matchMedia. BiDi only supports colorScheme reliably.
       if (backend === "bidi") return;
-      // WebKit reads the host's real appearance as the prefers-color-scheme
-      // baseline (dark macOS => dark baseline). Capture it before overriding
-      // so the print-suppression assertion below is baseline-aware instead of
-      // assuming a light host.
       await page.goto(testUrl);
-      const baselineDark = JSON.parse(
-        (await page.evaluate(
-          `JSON.stringify(matchMedia('(prefers-color-scheme: dark)').matches)`
-        )) as string
-      ) as boolean;
       await page.emulateMedia({
         media: "print",
         colorScheme: "dark",
@@ -464,12 +464,16 @@ for (const backend of BACKENDS) {
       );
       expect(result.print).toBe(true);
       expect(result.screen).toBe(false);
-      // WebKit's print rendering suppresses the prefers-color-scheme
-      // OVERRIDE while a print media override is active, so `dark` falls back
-      // to the host baseline (the preference returns once media is cleared);
-      // Chromium honours the override outright. Engine semantics, not a driver
-      // gap — Playwright's own page-emulate-media spec never asserts print+dark.
-      expect(result.dark).toBe(backend === "webkit" ? baselineDark : true);
+      // WebKit's print rendering FORCES `prefers-color-scheme: light`
+      // while a print media override is active — it does not fall back
+      // to the host appearance, which is what an earlier version of this
+      // assertion claimed and why it only ever passed on a light host.
+      // Measured on a dark host: `{colorScheme:'dark'}` alone reports
+      // dark, `{media:'print', colorScheme:'dark'}` reports light, and
+      // switching back to `screen` reports dark again. Chromium honours
+      // the override outright. Engine semantics, not a driver gap —
+      // Playwright's own page-emulate-media spec never asserts print+dark.
+      expect(result.dark).toBe(backend !== "webkit");
       expect(result.reduced).toBe(true);
       expect(result.forced).toBe(true);
       expect(result.contrast).toBe(true);

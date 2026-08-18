@@ -612,3 +612,111 @@ test('value snapshot', async () => {
   let calls = bridge.state(|s| s.snapshot_calls.clone());
   assert_eq!(calls, ["text value name=greeting", "text value name=<auto>"]);
 }
+
+/// A first parameter naming nothing is Playwright's load error, not an
+/// `undefined` the body then fails on somewhere unrelated
+/// (`common/fixtures.ts:250-256` via `common/poolBuilder.ts:66-71`).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_first_parameter_name_is_reported_by_name() {
+  let h = harness(
+    r"import { test } from '@ferridriver/test';
+
+test('asks for nothing anyone registered', async ({ deployment }) => {
+  if (deployment !== undefined) throw new Error('unreachable');
+});
+",
+  )
+  .await;
+  let err = run_test(
+    &h.session.vm_handle(),
+    spec(title_index(&h.collected, "asks for nothing anyone registered")),
+    world("asks for nothing anyone registered"),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect_err("an unknown parameter must fail the test");
+  assert_eq!(err.message, "Test has unknown parameter \"deployment\".");
+}
+
+/// A hook is checked too, and the message names the hook the way
+/// Playwright does.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_hook_parameter_names_the_hook() {
+  let h = harness(
+    r"import { test } from '@ferridriver/test';
+
+test.beforeEach(async ({ notAFixture }) => { void notAFixture; });
+
+test('body is fine', async ({ browserName }) => { void browserName; });
+",
+  )
+  .await;
+  let mut s = spec(title_index(&h.collected, "body is fine"));
+  s.hooks_before = h
+    .collected
+    .hooks
+    .iter()
+    .enumerate()
+    .filter(|(_, hook)| hook.kind == "beforeEach")
+    .map(|(i, _)| i)
+    .collect();
+  assert!(!s.hooks_before.is_empty(), "the beforeEach must be collected");
+  let err = run_test(
+    &h.session.vm_handle(),
+    s,
+    world("body is fine"),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect_err("an unknown hook parameter must fail the test");
+  assert_eq!(err.message, "beforeEach hook has unknown parameter \"notAFixture\".");
+}
+
+/// A built-in the world in hand does not carry is still a known name.
+/// A `beforeAll` world has no `page`; answering "unknown parameter" for
+/// it would be a worse lie than the `undefined` this check replaces.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_builtin_absent_from_this_world_is_not_an_unknown_parameter() {
+  let h = harness(
+    r"import { test } from '@ferridriver/test';
+
+test('names a built-in this world lacks', async ({ page }) => {
+  if (page !== undefined) throw new Error('this world carries no page');
+});
+",
+  )
+  .await;
+  run_test(
+    &h.session.vm_handle(),
+    spec(title_index(&h.collected, "names a built-in this world lacks")),
+    world("names a built-in this world lacks"),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect("a built-in name must pass the check whatever this world carries");
+}
+
+/// And a registered custom fixture passes, so the check cannot be
+/// passing everything or failing everything.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registered_fixture_passes_the_check() {
+  let h = harness(
+    r"import { test } from '@ferridriver/test';
+
+const t = test.extend({ deployment: async ({}, use) => { await use('staging'); } });
+
+t('asks for what it registered', async ({ deployment }) => {
+  if (deployment !== 'staging') throw new Error('deployment: ' + String(deployment));
+});
+",
+  )
+  .await;
+  run_test(
+    &h.session.vm_handle(),
+    spec(title_index(&h.collected, "asks for what it registered")),
+    world("asks for what it registered"),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect("a registered fixture resolves");
+}

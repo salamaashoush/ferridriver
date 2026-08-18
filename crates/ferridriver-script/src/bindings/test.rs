@@ -1871,6 +1871,34 @@ pub(crate) fn current_world_object<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>, S
 /// dependency order, running `use()`-handshake factories to their
 /// suspension point. Worker-scoped fixtures are set up once per VM and
 /// reused.
+/// Playwright's per-function unknown-parameter check
+/// (`common/fixtures.ts:250-256`), applied before anything is resolved.
+///
+/// The built-in set is core's, not this world's key set: a `beforeAll`
+/// world carries no `page`, and answering `beforeAll hook has unknown
+/// parameter "page"` for a name the runtime plainly knows would be a
+/// worse lie than the `undefined` this replaces. A name of the wrong
+/// SCOPE is a different failure and is deliberately not decided here.
+///
+/// Playwright raises these as load errors, failing every test in the
+/// file; ferridriver raises them per function, so only the test that
+/// asks for the name fails. Recorded in `docs/playwright-compat.md`.
+pub(crate) fn validate_requested_names<'js>(
+  ctx: &Ctx<'js>,
+  world_obj: &Object<'js>,
+  fixture_set: usize,
+  functions: &[(String, Vec<String>)],
+) -> Result<(), ScriptError> {
+  let slots = with_test_registry(ctx, |r| fixture_slots(r, fixture_set))?;
+  let is_builtin = |name: &str| {
+    ferridriver_test::fixture_graph::BUILTIN_FIXTURES.contains(&name) || world_obj.contains_key(name).unwrap_or(false)
+  };
+  for (prefix, requested) in functions {
+    fixture_graph::validate_requested(&slots, requested, &is_builtin, prefix).map_err(ScriptError::internal)?;
+  }
+  Ok(())
+}
+
 pub(crate) async fn resolve_custom_fixtures<'js>(
   ctx: &Ctx<'js>,
   world_obj: &Object<'js>,
@@ -2140,6 +2168,25 @@ pub async fn teardown_worker_fixtures(vm: &crate::vm::VmHandle) -> Result<(), Sc
 /// Names of custom fixtures a test + its each-hooks request (their
 /// requested lists intersected with the fixture set happens in
 /// [`resolve_custom_fixtures`]).
+/// What each function of this test asks for, labelled the way
+/// Playwright labels it in the unknown-parameter message
+/// (`common/poolBuilder.ts:66-71`: `'Test'` for the body,
+/// `hook.type + ' hook'` for each hook).
+fn requested_per_function(reg: &TestRegistry, spec: &RunTestSpec) -> Vec<(String, Vec<String>)> {
+  let mut out = vec![(
+    "Test".to_string(),
+    reg.tests[spec.test_idx].requested.clone().unwrap_or_default(),
+  )];
+  for &h in spec.hooks_before.iter().chain(spec.hooks_after.iter()) {
+    let hook = &reg.hooks[h];
+    out.push((
+      format!("{} hook", hook.kind),
+      hook.requested.clone().unwrap_or_default(),
+    ));
+  }
+  out
+}
+
 fn requested_names(reg: &TestRegistry, spec: &RunTestSpec) -> Vec<String> {
   let mut names: Vec<String> = Vec::new();
   let mut add = |req: &Option<Vec<String>>| {
@@ -2205,6 +2252,8 @@ async fn drive_current_test(ctx: &Ctx<'_>, spec: &RunTestSpec, world: &TestWorld
     let t = &r.tests[spec.test_idx];
     (t.fixture_set, t.each_arg.clone(), t.func.clone())
   })?;
+  let per_function = with_test_registry(ctx, |r| requested_per_function(r, spec))?;
+  validate_requested_names(ctx, &world_obj, fixture_set, &per_function)?;
   let custom = with_test_registry(ctx, |r| requested_names(r, spec))?;
   resolve_custom_fixtures(
     ctx,
@@ -2299,13 +2348,23 @@ pub async fn run_standalone_hook(
     let world_obj = world_obj.restore(&ctx).map_err(se)?;
     let info_obj = info_obj.restore(&ctx).map_err(se)?;
 
-    let (requested, fixture_set) = with_test_registry(&ctx, |r| {
+    let (requested, fixture_set, kind) = with_test_registry(&ctx, |r| {
       let hook = r.hooks.get(hook_idx);
       let req = hook.and_then(|h| h.requested.clone()).unwrap_or_default();
       // The chain the hook was registered on, so a `beforeAll` declared
       // on an extended object can ask for that chain's fixtures.
-      (req, hook.map_or(0, |h| h.fixture_set))
+      (
+        req,
+        hook.map_or(0, |h| h.fixture_set),
+        hook.map_or_else(String::new, |h| h.kind.clone()),
+      )
     })?;
+    validate_requested_names(
+      &ctx,
+      &world_obj,
+      fixture_set,
+      &[(format!("{kind} hook"), requested.clone())],
+    )?;
     let result = async {
       resolve_custom_fixtures(&ctx, &world_obj, fixture_set, &requested, &world.use_options, &source_label).await?;
       invoke_hook_fn(&ctx, hook_idx, &world_obj, &info_obj, &source_label).await

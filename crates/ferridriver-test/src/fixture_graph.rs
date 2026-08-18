@@ -257,6 +257,60 @@ pub fn dominant_fixture_set(sets: &[Vec<usize>], wanted: &[usize]) -> Result<usi
 /// in a `use` block is the error below, not an override.
 pub const BUILTIN_NON_OPTION_FIXTURES: &[&str] = &["page", "context", "request", "browser"];
 
+/// Every fixture name a host provides without a registration.
+///
+/// Playwright keeps its built-ins in the base pool's `_registrations`,
+/// so `validateFunction` accepts them like any other name. ferridriver's
+/// are properties the host puts on the fixtures object, and a given
+/// world legitimately carries only some of them — a `beforeAll` world
+/// has no `page` — so the set a requested name is CHECKED against has to
+/// be stated rather than read off whichever world is in hand.
+/// [`BUILTIN_NON_OPTION_FIXTURES`] is the subset a `use` block may not
+/// override.
+pub const BUILTIN_FIXTURES: &[&str] = &[
+  "baseURL",
+  "browser",
+  "browserName",
+  "context",
+  "hasTouch",
+  "headless",
+  "isMobile",
+  "page",
+  "request",
+  "testInfo",
+];
+
+/// Playwright's `FixturePool.validateFunction`
+/// (`common/fixtures.ts:250-256`), run per test, hook and modifier from
+/// `common/poolBuilder.ts:66-71`: a first-parameter name that resolves
+/// to no registration and no built-in is an error, not an `undefined`
+/// the body then compares against and fails on somewhere else.
+///
+/// `prefix` is what the message names the function: `"Test"`,
+/// `"beforeEach hook"`, `"skip modifier"` — Playwright's own wording.
+///
+/// Scope is deliberately not consulted. Playwright's scope rule is
+/// fixture-to-fixture ([`dependency_order`] carries it); a function
+/// asking for a name of the wrong scope is a different failure from a
+/// function asking for a name nobody registered.
+///
+/// # Errors
+///
+/// The verbatim load error for the first parameter naming nothing.
+pub fn validate_requested(
+  slots: &[FixtureSlot],
+  requested: &[String],
+  is_builtin: &dyn Fn(&str) -> bool,
+  prefix: &str,
+) -> Result<(), String> {
+  for name in requested {
+    if resolve_dep(slots, name, None).is_none() && !is_builtin(name) {
+      return Err(format!("{prefix} has unknown parameter \"{name}\"."));
+    }
+  }
+  Ok(())
+}
+
 /// `use` keys the runner itself consumes that are not context options:
 /// `viewport` is applied when the context is created and `baseURL`
 /// feeds both the `baseURL` fixture and the HTTP client.
@@ -359,8 +413,8 @@ pub fn use_override_error(key: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::{
-    FixtureScope, FixtureSlot, UseKeyVerdict, classify_use_key, classify_use_key_across, dependency_order,
-    dominant_fixture_set, resolution_order, resolve_dep,
+    BUILTIN_FIXTURES, BUILTIN_NON_OPTION_FIXTURES, FixtureScope, FixtureSlot, UseKeyVerdict, classify_use_key,
+    classify_use_key_across, dependency_order, dominant_fixture_set, resolution_order, resolve_dep, validate_requested,
   };
 
   fn slot(reg: usize, name: &str, deps: &[&str]) -> FixtureSlot {
@@ -511,5 +565,46 @@ mod tests {
   fn a_merged_chain_covers_both_arguments() {
     let sets = vec![Vec::new(), vec![0], vec![1], vec![0, 1]];
     assert_eq!(dominant_fixture_set(&sets, &[1, 2, 3]), Ok(3));
+  }
+
+  #[test]
+  fn an_unregistered_parameter_name_is_playwrights_load_error() {
+    let slots = [slot(0, "todoPage", &[])];
+    let err = validate_requested(&slots, &["deployment".to_string()], &|_| false, "Test")
+      .expect_err("nothing registers `deployment`");
+    assert_eq!(err, "Test has unknown parameter \"deployment\".");
+  }
+
+  #[test]
+  fn the_prefix_names_the_function_the_way_playwright_does() {
+    let err = validate_requested(&[], &["nope".to_string()], &|_| false, "beforeEach hook").expect_err("unknown");
+    assert_eq!(err, "beforeEach hook has unknown parameter \"nope\".");
+  }
+
+  #[test]
+  fn a_registered_or_builtin_name_passes() {
+    let slots = [slot(0, "todoPage", &[])];
+    let is_builtin = |n: &str| BUILTIN_FIXTURES.contains(&n);
+    validate_requested(&slots, &["todoPage".to_string()], &is_builtin, "Test").expect("registered");
+    // `page` is a built-in even though no world in hand carries it —
+    // a `beforeAll` world has none, and that is a scope question, not
+    // an unknown-name one.
+    validate_requested(&slots, &["page".to_string()], &is_builtin, "beforeAll hook").expect("built-in");
+  }
+
+  #[test]
+  fn a_shadowed_registration_still_counts_as_registered() {
+    let slots = [slot(0, "page", &[]), slot(1, "page", &["page"])];
+    validate_requested(&slots, &["page".to_string()], &|_| false, "Test").expect("override chain resolves");
+  }
+
+  #[test]
+  fn every_non_option_builtin_is_a_builtin() {
+    for name in BUILTIN_NON_OPTION_FIXTURES {
+      assert!(
+        BUILTIN_FIXTURES.contains(name),
+        "`{name}` may not be overridden in `use`, so it must also be a name a test may request"
+      );
+    }
   }
 }

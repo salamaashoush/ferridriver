@@ -338,17 +338,14 @@ fn a_spec_receives_a_fixture_an_extension_contributed() {
 fn without_the_extension_the_contributed_fixture_is_absent() {
   // The inversion: `deployment` is not a built-in and the spec declares
   // nothing, so the only thing that can supply it is the extension.
-  //
-  // Today an unresolvable first-parameter name arrives as `undefined`
-  // rather than as Playwright's `Test has unknown parameter` load error
-  // (`common/fixtures.ts:250-256`, raised per test/hook from
-  // `common/poolBuilder.ts:66-71`), so the assertion is what the spec
-  // itself observes.
+  // Without it the name resolves to no registration, which is
+  // Playwright's unknown-parameter error rather than a silent
+  // `undefined` the assertion then trips over.
   let run = run_fixture_suite("absent", "");
   assert!(!run.passed, "expected a red run, got:\n{}", run.output);
   assert!(
-    run.output.contains("4 failed") && run.output.contains("Received: undefined"),
-    "every project must fail, with the fixture absent rather than wrong:\n{}",
+    run.output.contains("4 failed") && run.output.contains(r#"Test has unknown parameter "deployment"."#),
+    "every project must fail, naming the parameter nothing registers:\n{}",
     run.output
   );
 }

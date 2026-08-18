@@ -152,16 +152,41 @@ test('snapshots', async ({ page }) => {
   assert_eq!(first, 0, "baseline-writing run must be green");
   let snap_dir = dir.path().join("__snapshots__");
   assert!(snap_dir.exists(), "snapshot dir created");
-  let entries: Vec<String> = std::fs::read_dir(&snap_dir)
+  // Playwright's default template is
+  // `{snapshotDir}/{testFileDir}/{testFileName}-snapshots/{arg}…`, so
+  // the baselines sit one level down, under the spec's own directory.
+  let per_spec = snap_dir.join("snap.test.ts-snapshots");
+  let entries: Vec<String> = std::fs::read_dir(&per_spec)
+    .unwrap_or_else(|e| panic!("read {}: {e}", per_spec.display()))
+    .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+    .collect();
+  // A NAMED snapshot takes its extension from the name and nothing
+  // else — `ext = path.extname(name)` in Playwright's
+  // `_resolveSnapshotPaths` (`worker/testInfo.ts:591-593`); the
+  // per-kind defaults (`.png` / `.txt` / `.aria.yml`) apply only to the
+  // anonymous branch. `toHaveScreenshot('main-shot')` therefore writes
+  // `main-shot`, extensionless, upstream as here.
+  for name in ["main-shot", "page-shot", "header-text", "literal"] {
+    assert!(
+      entries.iter().any(|e| e == name),
+      "`{name}` baseline written: {entries:?}"
+    );
+    assert!(
+      per_spec.join(name).is_file(),
+      "`{name}` must be the baseline file itself, not a directory"
+    );
+  }
+  // The spec is the only thing under `testDir`, so nothing may sit
+  // beside the per-spec directory — an absolute path leaking into
+  // `{testFileDir}` shows up here as a mirror of the filesystem.
+  let top: Vec<String> = std::fs::read_dir(&snap_dir)
     .expect("read snapshots")
     .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
     .collect();
-  assert!(
-    entries.iter().any(|e| e.contains("main-shot")
-      && std::path::Path::new(e)
-        .extension()
-        .is_some_and(|x| x.eq_ignore_ascii_case("png"))),
-    "locator screenshot baseline written: {entries:?}"
+  assert_eq!(
+    top,
+    vec!["snap.test.ts-snapshots".to_string()],
+    "unexpected snapshot tree"
   );
   let second = Box::pin(run_plan(dir.path())).await;
   assert_eq!(second, 0, "comparison run must match the baselines");

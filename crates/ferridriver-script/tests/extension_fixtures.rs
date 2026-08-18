@@ -435,8 +435,11 @@ async fn extraction_enforces_the_fixtures_ceiling() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_module_exports_both_entry_points() {
   const IMPORTED: &str = "
-import { defineFixtures, bindSteps } from 'ferridriver';
-import { test } from '@ferridriver/test';
+import { defineFixtures, bindSteps, test, mergeTests } from 'ferridriver';
+import { test as fromTestModule } from '@ferridriver/test';
+
+if (test !== fromTestModule) { throw new Error('the two surfaces must hand back one test object'); }
+if (typeof mergeTests !== 'function') { throw new Error('mergeTests'); }
 
 defineFixtures({ viaImport: async ({}, use) => { await use('imported'); } });
 const { Given } = bindSteps(test);
