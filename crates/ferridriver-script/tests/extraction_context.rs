@@ -188,8 +188,8 @@ async fn extraction_enforces_the_operator_command_ceiling() {
   .expect("write");
 
   let strict = ferridriver_config::ExtensionPolicyConfig {
-    net: None,
     commands: ferridriver_config::ExtensionCommandsCeiling::None,
+    ..ferridriver_config::ExtensionPolicyConfig::default()
   };
   let (ok, err) = compile_and_extract_extensions(std::slice::from_ref(&path), &strict).await;
   assert!(ok.is_empty(), "the ceiling must refuse the file");

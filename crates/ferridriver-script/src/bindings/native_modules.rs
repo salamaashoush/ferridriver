@@ -48,6 +48,32 @@ const FERRIDRIVER_SPECIFIER_GROUPS: &[&[&str]] = &[
   &["fs", "node:fs"],
 ];
 
+/// Specifier namespaces no package may claim, beyond the ones the
+/// runtime already serves.
+///
+/// A claim on any of these would let whichever extension happened to be
+/// loaded — and in whatever order — decide what `@playwright/test` or
+/// `node:fs` means. The bare twin of every reserved `node:` name is
+/// reserved with it, because a package claiming `fs` while the runtime
+/// serves `node:fs` is the same hijack spelled differently.
+const RESERVED_PREFIXES: &[&str] = &["node:", "@ferridriver/", "@playwright/", "@cucumber/"];
+const RESERVED_NAMES: &[&str] = &["playwright", "playwright-core", "ferridriver"];
+
+/// Whether `specifier` is off-limits to a package's `provides` claims.
+#[must_use]
+pub fn is_reserved_specifier(specifier: &str) -> bool {
+  if native_module_names().contains(&specifier) {
+    return true;
+  }
+  if RESERVED_NAMES.contains(&specifier) || RESERVED_PREFIXES.iter().any(|p| specifier.starts_with(p)) {
+    return true;
+  }
+  // `fs` when the runtime serves `node:fs`.
+  native_module_names()
+    .iter()
+    .any(|name| name.strip_prefix("node:") == Some(specifier))
+}
+
 /// The canonical name of the module a specifier resolves to, so two
 /// spellings of one module compare equal.
 fn namespace_group(specifier: &str) -> String {

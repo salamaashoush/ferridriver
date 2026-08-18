@@ -205,6 +205,9 @@ fn resolve_and_gate(config: &FerridriverConfig, specs: &[ferridriver_config::Ext
     blocked,
     files,
     all_files: type_files,
+    // The claim table's own diagnostics are already folded into
+    // `issues`; `ext check` reports them there.
+    provided: _,
   } = gated;
 
   let mut roots: Vec<PathBuf> = Vec::new();

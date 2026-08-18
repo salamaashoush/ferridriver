@@ -84,6 +84,7 @@ async fn net_ceiling_applies_default_deny_to_undeclared_tools() {
   let policy = ExtensionPolicyConfig {
     net: Some(vec!["127.0.0.1".into()]),
     commands: ExtensionCommandsCeiling::Any,
+    ..ExtensionPolicyConfig::default()
   };
   let (_tmp, ctx) = run_context(vec![binding], policy);
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
@@ -128,6 +129,7 @@ async fn net_ceiling_clamps_declared_entries() {
   let policy = ExtensionPolicyConfig {
     net: Some(vec!["127.0.0.1".into()]),
     commands: ExtensionCommandsCeiling::Any,
+    ..ExtensionPolicyConfig::default()
   };
   let (_tmp, ctx) = run_context(vec![binding], policy);
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
@@ -171,6 +173,7 @@ async fn empty_net_ceiling_denies_all_hosts() {
   let policy = ExtensionPolicyConfig {
     net: Some(Vec::new()),
     commands: ExtensionCommandsCeiling::Any,
+    ..ExtensionPolicyConfig::default()
   };
   let (_tmp, ctx) = run_context(vec![binding], policy);
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
@@ -205,6 +208,7 @@ async fn argv_only_ceiling_rejects_shell_form_tools() {
   let policy = ExtensionPolicyConfig {
     net: None,
     commands: ExtensionCommandsCeiling::ArgvOnly,
+    ..ExtensionPolicyConfig::default()
   };
   let (_tmp, ctx) = run_context(vec![shell_binding, argv_binding], policy);
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
@@ -233,6 +237,7 @@ async fn none_ceiling_rejects_command_declaring_tools() {
   let policy = ExtensionPolicyConfig {
     net: None,
     commands: ExtensionCommandsCeiling::None,
+    ..ExtensionPolicyConfig::default()
   };
   let (_tmp, ctx) = run_context(vec![cmd_binding, plain_binding], policy);
   let session = Session::create(ScriptEngineConfig::default(), &ctx)

@@ -2314,6 +2314,7 @@ mod tests {
       ferridriver_config::ExtensionPolicyConfig {
         net: Some(vec!["*.acme.com".into()]),
         commands: ferridriver_config::ExtensionCommandsCeiling::ArgvOnly,
+        ..ferridriver_config::ExtensionPolicyConfig::default()
       },
     ));
     let loaded = vec![loaded_extension(serde_json::json!({

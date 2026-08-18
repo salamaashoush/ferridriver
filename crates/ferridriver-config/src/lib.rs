@@ -329,6 +329,26 @@ pub struct ExtensionPolicyConfig {
   pub net: Option<Vec<String>>,
   /// Ceiling on `allow.commands` declarations.
   pub commands: ExtensionCommandsCeiling,
+  /// Whether packages may claim import specifiers at all
+  /// (`provides.modules` / `provides.aliases`).
+  pub modules: ExtensionModulesCeiling,
+  /// Specifiers packages may claim when [`Self::modules`] is
+  /// `allowListed`. Empty ⇒ nothing is allowed, which is what makes an
+  /// empty list mean "deny" rather than "unset".
+  pub allow_modules: Vec<String>,
+}
+
+/// Whether an extension package may serve import specifiers of its own.
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ExtensionModulesCeiling {
+  /// Any specifier the conflict rules accept (default).
+  #[default]
+  Any,
+  /// Only the specifiers named in `allowModules`.
+  AllowListed,
+  /// No package may claim a specifier.
+  None,
 }
 
 /// What kinds of `allow.commands` declarations the operator permits.
@@ -454,7 +474,7 @@ pub struct ScriptingAllow {
 }
 
 pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
-pub use extension_manifest::{ExtensionManifest, ExtensionRequires};
+pub use extension_manifest::{ExtensionManifest, ExtensionProvides, ExtensionRequires};
 
 impl FerridriverConfig {
   /// Load the unified configuration by resolving the whole layer
@@ -1029,6 +1049,7 @@ commands = "none"
       policy: ExtensionPolicyConfig {
         net: Some(vec!["*.acme.com".into()]),
         commands: ExtensionCommandsCeiling::ArgvOnly,
+        ..ExtensionPolicyConfig::default()
       },
     });
     let json = serde_json::to_value(&detailed).unwrap();

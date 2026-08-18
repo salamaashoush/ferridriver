@@ -53,6 +53,7 @@ pub mod error;
 pub mod extension_load;
 pub mod fs;
 pub mod modules;
+pub mod provided_modules;
 pub mod requirements;
 pub mod result;
 pub mod session_host;
@@ -62,7 +63,7 @@ pub mod sidecar;
 pub mod vars;
 pub mod vm;
 
-pub use bindings::native_modules::{module_aliases, native_module_names, set_module_aliases};
+pub use bindings::native_modules::{is_reserved_specifier, module_aliases, native_module_names, set_module_aliases};
 pub use bindings::registry::net_entry_subsumed;
 pub use bindings::{
   ArtifactsJs, BrowserContextJs, CollectedAnnotation, CollectedFileConfigure, CollectedFileUse, CollectedFixture,
@@ -88,6 +89,7 @@ pub use error::{ScriptError, ScriptErrorKind};
 pub use extension_load::{GatedExtensions, gate, load_bindings};
 pub use ferridriver_config::ExtensionSpec;
 pub use fs::PathSandbox;
+pub use provided_modules::{PackageClaims, ProvidedModule, ProvidedModuleTable};
 pub use requirements::{RequirementEnv, RequirementIssue};
 pub use result::{ConsoleEntry, ConsoleLevel, Outcome, ScriptResult, ScriptSuccess};
 pub use session_host::{SessionScriptConfig, SessionScriptHost};

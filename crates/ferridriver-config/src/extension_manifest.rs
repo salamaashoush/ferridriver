@@ -45,12 +45,21 @@ pub const MANIFEST_KEY: &str = "ferridriver";
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionManifest {
+  /// Manifest version the package was written against. Absent ⇒ 1, the
+  /// shape that shipped before packages could claim a specifier.
+  pub api_version: Option<u32>,
+  /// The package's own name, for diagnostics that must say WHICH package
+  /// claimed a specifier. Falls back to the directory name when absent
+  /// (`package.json`'s own `name` is not part of this manifest).
+  pub name: Option<String>,
   /// Entry modules to load as extensions, in declaration order. Each is
   /// a path relative to the package directory (a file, with the
   /// extension optional, or a directory scanned recursively). Anything
   /// not named here is reachable only as an import of an entry, which is
   /// what keeps a `lib/` tree out of the extension list.
   pub entries: Vec<String>,
+  /// Import specifiers this package serves, and how.
+  pub provides: ExtensionProvides,
   /// Host preconditions. See the module docs: declarations, not grants.
   pub requires: ExtensionRequires,
   /// JSON Schema per `[extensions.settings.<key>]` block the package
@@ -59,6 +68,34 @@ pub struct ExtensionManifest {
   /// at load, so a mistyped key is an error instead of an `undefined`
   /// the handler reads at 3am.
   pub settings: BTreeMap<String, serde_json::Value>,
+}
+
+/// What a package SERVES: import specifiers other modules — a spec, a
+/// step file, another extension — may import and have resolved to this
+/// package's own code.
+///
+/// This is the mechanism that lets a suite written against some other
+/// package run unmodified: the specifier it imports is claimed here and
+/// answered by one module instance per VM, rather than being a file the
+/// suite had to be edited to point at.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtensionProvides {
+  /// `specifier -> module file`, relative to the package directory. The
+  /// file is bundled with the package and evaluated before anything that
+  /// imports it.
+  pub modules: BTreeMap<String, String>,
+  /// `specifier -> another specifier this package also provides`. An
+  /// alias may not target a specifier the package does not own — a
+  /// package cannot re-point someone else's name, nor a native one.
+  pub aliases: BTreeMap<String, String>,
+}
+
+impl ExtensionProvides {
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self.modules.is_empty() && self.aliases.is_empty()
+  }
 }
 
 /// What a package needs from its host.
@@ -108,7 +145,7 @@ impl ExtensionManifest {
   /// True when the manifest declares nothing at all (`"ferridriver": {}`).
   #[must_use]
   pub fn is_empty(&self) -> bool {
-    self.entries.is_empty() && self.requires.is_empty() && self.settings.is_empty()
+    self.entries.is_empty() && self.requires.is_empty() && self.settings.is_empty() && self.provides.is_empty()
   }
 }
 
@@ -200,6 +237,7 @@ mod tests {
         ..Default::default()
       },
       settings: BTreeMap::from([("acme".to_string(), serde_json::json!({"type":"object"}))]),
+      ..Default::default()
     };
     let json = serde_json::to_value(&manifest).expect("serialize");
     assert_eq!(json["requires"]["commands"][0], "acme");

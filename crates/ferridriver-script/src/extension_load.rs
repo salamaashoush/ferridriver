@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use ferridriver_config::{ExtensionPolicyConfig, ExtensionSpec};
 
 use crate::error::ScriptError;
+use crate::provided_modules::{PackageClaims, ProvidedModuleTable, package_label};
 use crate::requirements::{RequirementEnv, RequirementIssue};
 use crate::{CompiledExtension, ExtensionBinding, ResolvedExtension};
 
@@ -40,6 +41,11 @@ pub struct GatedExtensions {
   /// Every resolved entry file, gate ignored. What a report shows as
   /// "declared", against which `files` is what actually loads.
   pub all_files: Vec<PathBuf>,
+  /// Import specifiers the surviving packages serve, merged and
+  /// conflict-checked. Its own errors and warnings are folded into
+  /// [`Self::issues`], because a package whose claim is refused is a
+  /// package the operator has to hear about.
+  pub provided: ProvidedModuleTable,
 }
 
 impl GatedExtensions {
@@ -74,6 +80,37 @@ pub fn gate(specs: &[ExtensionSpec], env: &RequirementEnv<'_>) -> GatedExtension
     }
   }
 
+  // Specifier claims are decided over the packages that SURVIVED the
+  // gate: a package held back for an unmet requirement must not also
+  // take a specifier with it.
+  let claims: Vec<PackageClaims> = resolved
+    .iter()
+    .enumerate()
+    .filter(|(_, r)| !blocked.contains(&r.spec))
+    .filter_map(|(index, r)| package_claims(index, r))
+    .collect();
+  let provided = ProvidedModuleTable::build(
+    &claims,
+    &crate::module_aliases(),
+    env.policy,
+    &crate::is_reserved_specifier,
+  );
+  let mut issues = issues;
+  for message in &provided.errors {
+    issues.push(RequirementIssue {
+      source: "extensions".to_string(),
+      message: message.clone(),
+      blocking: false,
+    });
+  }
+  for message in &provided.warnings {
+    issues.push(RequirementIssue {
+      source: "extensions".to_string(),
+      message: message.clone(),
+      blocking: false,
+    });
+  }
+
   GatedExtensions {
     resolved,
     resolve_errors,
@@ -81,7 +118,34 @@ pub fn gate(specs: &[ExtensionSpec], env: &RequirementEnv<'_>) -> GatedExtension
     blocked,
     files,
     all_files,
+    provided,
   }
+}
+
+/// One package's specifier claims, with every path made absolute
+/// against the package directory and the directory canonicalized — two
+/// specs that reach the same directory are one package, however they
+/// were spelled.
+fn package_claims(index: usize, resolved: &ResolvedExtension) -> Option<PackageClaims> {
+  let manifest = resolved.manifest.as_ref()?;
+  if manifest.provides.is_empty() {
+    return None;
+  }
+  let package_dir = resolved.package_dir.clone()?;
+  let package_dir = std::fs::canonicalize(&package_dir).unwrap_or(package_dir);
+  Some(PackageClaims {
+    package: package_label(manifest.name.as_deref(), &package_dir),
+    modules: manifest
+      .provides
+      .modules
+      .iter()
+      .map(|(specifier, file)| (specifier.clone(), package_dir.join(file)))
+      .collect(),
+    aliases: manifest.provides.aliases.clone(),
+    imports: std::collections::BTreeSet::new(),
+    package_dir,
+    index,
+  })
 }
 
 /// Resolve, gate, compile and extract. The compiled output carries both

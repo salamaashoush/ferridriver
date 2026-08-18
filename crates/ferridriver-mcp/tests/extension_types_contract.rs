@@ -122,6 +122,7 @@ fn package_manifest_types_match_the_config_schema() {
       sidecars: vec!["s".into()],
     },
     settings: BTreeMap::from([("ns".to_string(), serde_json::json!({ "type": "object" }))]),
+    ..Default::default()
   };
 
   let source = types_source();
