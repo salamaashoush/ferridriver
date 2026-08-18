@@ -147,6 +147,7 @@ pub async fn load_bindings(
   compiled
     .into_iter()
     .map(|cp| ExtensionBinding {
+      source_map: Some(cp.mapper()),
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
     })

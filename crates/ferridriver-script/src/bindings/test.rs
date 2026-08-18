@@ -1697,6 +1697,15 @@ pub(crate) fn fixture_set_table(reg: &TestRegistry) -> Vec<Vec<usize>> {
   reg.fixture_sets.clone()
 }
 
+/// Positional registrations on the test surface: tests, suites, hooks
+/// and fixtures. Consumers address all of them by index, so a partial
+/// registration is not something a host can skip past.
+pub(crate) fn registration_count(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
+  with_test_registry(ctx, |r| {
+    r.tests.len() + r.suites.len() + r.hooks.len() + r.fixtures.len()
+  })
+}
+
 /// Every fixture registration in this VM, in registration order — the
 /// table [`fixture_set_table`]'s indices point into.
 pub(crate) fn fixture_table(reg: &TestRegistry) -> Vec<CollectedFixture> {

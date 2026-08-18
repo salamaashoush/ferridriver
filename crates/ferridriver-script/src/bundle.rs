@@ -20,7 +20,7 @@ use rolldown_plugin::{
 };
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Module, WriteOptions, WriteOptionsEndianness};
 
-use crate::engine::caught_to_script_error;
+use crate::engine::{caught_to_script_error, caught_to_script_error_in};
 use crate::error::ScriptError;
 
 /// Id prefix for operator-declared virtual modules (`[bundler.virtualModules]`).
@@ -257,6 +257,15 @@ pub struct SourceMapper {
   /// frames are labelled with.
   pub module_name: String,
   map: Option<Arc<sourcemap::SourceMap>>,
+}
+
+impl std::fmt::Debug for SourceMapper {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("SourceMapper")
+      .field("module_name", &self.module_name)
+      .field("mapped", &self.map.is_some())
+      .finish()
+  }
 }
 
 /// Resolve a source-map `sources` entry to a real file.
@@ -499,8 +508,12 @@ pub async fn bundle_and_compile_named(
   // written bytecode (QuickJS stores the module name), so two hosts
   // bundling the same files under different labels must not share an
   // entry.
-  let cache_key =
-    crate::bytecode_cache::entry_key(&format!("bundle:{module_name}"), entry_paths, bundle_env_fingerprint());
+  let cache_key = crate::bytecode_cache::entry_key(
+    &format!("bundle:{module_name}"),
+    entry_paths,
+    cwd,
+    bundle_env_fingerprint(),
+  );
   if let Some(hit) = crate::bytecode_cache::load(cache_key) {
     let source_map = hit
       .source_map_json
@@ -619,8 +632,12 @@ pub async fn eval_bundle(vm: &crate::vm::VmHandle, bundle: &CompiledBundle) -> R
       Err(e) => return Err(caught_to_script_error(e, &label)),
     };
     match promise.into_future::<()>().await.catch(&ctx) {
-      Ok(()) => Ok(()),
-      Err(e) => Err(caught_to_script_error(e, &label)),
+      // A bundle's top level may register tools of its own; the
+      // callables are built from the registry, so they only exist after
+      // a rebuild.
+      Ok(()) => crate::bindings::rebuild_tool_bindings(&ctx)
+        .map_err(|e| ScriptError::internal(format!("rebuild tool bindings: {e}"))),
+      Err(e) => Err(caught_to_script_error_in(&ctx, e, &label)),
     }
   })
   .await?
@@ -767,10 +784,35 @@ pub struct CompiledExtension {
   pub path: PathBuf,
   pub index: usize,
   pub bytecode: Arc<[u8]>,
+  /// The module name baked into `bytecode`, which is what QuickJS
+  /// labels this extension's stack frames with — the key a session's
+  /// source-map registry is looked up by.
+  pub module_name: String,
+  /// Source-map JSON for that bundle, so a frame from this extension
+  /// reports the author's `.ts` line rather than a bundled offset.
+  /// `None` when the bundle produced no map.
+  pub source_map_json: Option<String>,
   /// JSON array (one object per tool, source order, `handler` stripped).
   /// Deserialises into `Vec<ToolManifest>` on the MCP side without
   /// ever re-running the extension.
   pub manifests_json: String,
+}
+
+impl CompiledExtension {
+  /// The mapper a session registers so this extension's frames report
+  /// the author's source. Parsed here rather than carried as a live map,
+  /// because the JSON is what both cache tiers store.
+  #[must_use]
+  pub fn mapper(&self) -> SourceMapper {
+    SourceMapper {
+      module_name: self.module_name.clone(),
+      map: self
+        .source_map_json
+        .as_deref()
+        .and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok())
+        .map(Arc::new),
+    }
+  }
 }
 
 /// One in-process cache entry: the compiled bytecode, its manifests, and
@@ -785,6 +827,8 @@ pub struct CompiledExtension {
 struct CachedExtension {
   bytecode: Arc<[u8]>,
   manifests_json: String,
+  module_name: String,
+  source_map_json: Option<String>,
   inputs: Vec<PathBuf>,
   inputs_fingerprint: u64,
 }
@@ -812,7 +856,14 @@ fn extension_cache() -> &'static ExtensionCache {
 /// Record a compile in the in-process tier together with the input set
 /// its freshness depends on. An unreadable input means "cannot vouch for
 /// this" — the entry is simply not cached rather than cached as stale.
-fn remember_extension(key: u64, bytecode: &Arc<[u8]>, manifests_json: &str, inputs: Vec<PathBuf>) {
+fn remember_extension(
+  key: u64,
+  bytecode: &Arc<[u8]>,
+  manifests_json: &str,
+  module_name: &str,
+  source_map_json: Option<&str>,
+  inputs: Vec<PathBuf>,
+) {
   let Some(fingerprint) = crate::bytecode_cache::inputs_fingerprint(&inputs) else {
     return;
   };
@@ -822,6 +873,8 @@ fn remember_extension(key: u64, bytecode: &Arc<[u8]>, manifests_json: &str, inpu
       CachedExtension {
         bytecode: bytecode.clone(),
         manifests_json: manifests_json.to_string(),
+        module_name: module_name.to_string(),
+        source_map_json: source_map_json.map(str::to_string),
         inputs,
         inputs_fingerprint: fingerprint,
       },
@@ -850,6 +903,24 @@ fn cache_key(path: &Path, bytes: &[u8], shims_fp: u64) -> u64 {
 /// extraction share ONE throwaway runtime for the whole batch (the
 /// pre-migration path spun one full engine per file for extraction
 /// *and* one per file for bytecode). Unchanged files are served from
+/// A module name derived from the file's own identity rather than its
+/// position in the batch.
+///
+/// Two bytecode modules can share a name — QuickJS creates a module at
+/// `Module::load` and never looks one up by name — but the SOURCE MAP
+/// registry keys on it (`call_site::register_bundle` keeps one mapper
+/// per name), and every load path compiles whatever is cold in ITS
+/// batch, so two extensions routinely reach one VM having been compiled
+/// apart. Under a position-derived name they collide there, and the
+/// second one's frames are mapped through the first one's map.
+fn extension_module_name(path: &Path) -> String {
+  use std::hash::{Hash, Hasher};
+  let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+  let mut h = std::collections::hash_map::DefaultHasher::new();
+  canon.hash(&mut h);
+  format!("ferri_extension_{:016x}.js", h.finish())
+}
+
 /// the process content-hash cache with no bundle and no compile.
 ///
 /// Per-file failures (bundle, compile, or extraction) are returned
@@ -863,8 +934,19 @@ pub async fn compile_and_extract_extensions(
   // cache miss we must bundle, or an early failure. A miss carries both
   // the in-memory content key and the disk-cache key so the compile step
   // can populate both tiers.
+  /// What a position ended up with. `Hit` carries everything a caller
+  /// needs to install the file AND map its frames — the module name and
+  /// source map travel with the bytecode through both cache tiers,
+  /// because a cached extension's stack traces have to read the same as
+  /// a freshly compiled one's.
+  struct Loaded {
+    bytecode: Arc<[u8]>,
+    manifests_json: String,
+    module_name: String,
+    source_map_json: Option<String>,
+  }
   enum Slot {
-    Hit(Arc<[u8]>, String),
+    Hit(Loaded),
     Miss { inmem_key: u64, disk_key: u64 },
     Failed(ScriptError),
   }
@@ -882,23 +964,48 @@ pub async fn compile_and_extract_extensions(
           if crate::bytecode_cache::inputs_fingerprint(&hit.inputs) != Some(hit.inputs_fingerprint) {
             return None;
           }
-          Some((hit.bytecode.clone(), hit.manifests_json.clone()))
+          Some(Loaded {
+            bytecode: hit.bytecode.clone(),
+            manifests_json: hit.manifests_json.clone(),
+            module_name: hit.module_name.clone(),
+            source_map_json: hit.source_map_json.clone(),
+          })
         });
-        let disk_key = crate::bytecode_cache::entry_key("extension", std::slice::from_ref(path), shims_fp);
+        // Each extension bundles from its own parent directory.
+        let ext_cwd = path.parent().unwrap_or_else(|| Path::new("."));
+        let disk_key = crate::bytecode_cache::entry_key("extension", std::slice::from_ref(path), ext_cwd, shims_fp);
         match cached {
           // 1. In-memory (same process).
-          Some((bc, mj)) => slots.push(Slot::Hit(bc, mj)),
+          Some(hit) => slots.push(Slot::Hit(hit)),
           // 2. Disk (cross-process), transitively validated. Promote into
           //    the in-memory tier so later same-process loads stay hot.
           None => match crate::bytecode_cache::load(disk_key) {
             Some(entry) => {
               let bc: Arc<[u8]> = Arc::from(entry.bytecode.into_boxed_slice());
               let mj = entry.aux.unwrap_or_else(|| "[]".to_string());
+              // The map and the module name come back with the entry:
+              // dropping them here is what made a cache hit report
+              // bundled offsets where a cold compile reported the
+              // author's `.ts` line.
+              let module_name = entry.module_name;
+              let source_map_json = entry.source_map_json;
               // Reuse the input set the disk manifest recorded rather
               // than re-deriving it; it is what that bytecode's freshness
               // was just validated against.
-              remember_extension(inmem_key, &bc, &mj, entry.inputs);
-              slots.push(Slot::Hit(bc, mj));
+              remember_extension(
+                inmem_key,
+                &bc,
+                &mj,
+                &module_name,
+                source_map_json.as_deref(),
+                entry.inputs,
+              );
+              slots.push(Slot::Hit(Loaded {
+                bytecode: bc,
+                manifests_json: mj,
+                module_name,
+                source_map_json,
+              }));
             },
             // 3. Cold: bundle + compile below.
             None => slots.push(Slot::Miss { inmem_key, disk_key }),
@@ -1012,16 +1119,16 @@ pub async fn compile_and_extract_extensions(
     // behind.
     let last_miss = miss_idx.last().copied().unwrap_or(0);
     for i in 0..=last_miss {
-      let module_name = format!("ferri_extension_{i}.js");
       // A hit's manifests come from the cache; the evaluation exists so
       // the files after it see the world a session would have given them.
-      if let Slot::Hit(bc, _) = &slots[i] {
-        let bc = Arc::clone(bc);
-        if let Err(e) = eval_extracted(&actx, &bc, &module_name).await {
+      if let Slot::Hit(hit) = &slots[i] {
+        let (bc, name) = (Arc::clone(&hit.bytecode), hit.module_name.clone());
+        if let Err(e) = eval_extracted(&actx, &bc, &name).await {
           slots[i] = Slot::Failed(e);
         }
         continue;
       }
+      let module_name = extension_module_name(&files[i]);
       match slots[i] {
         Slot::Miss { inmem_key, disk_key } => {
           let Some(code) = bundled_code.get(&i) else { continue };
@@ -1035,8 +1142,13 @@ pub async fn compile_and_extract_extensions(
               let modules = bundled_modules.get(&i).cloned().unwrap_or_default();
               let inputs = crate::bytecode_cache::input_set(std::slice::from_ref(&files[i]), &modules);
               crate::bytecode_cache::store(disk_key, &bc, &module_name, map.as_deref(), Some(&mj), &inputs);
-              remember_extension(inmem_key, &bc, &mj, inputs);
-              slots[i] = Slot::Hit(bc, mj);
+              remember_extension(inmem_key, &bc, &mj, &module_name, map.as_deref(), inputs);
+              slots[i] = Slot::Hit(Loaded {
+                bytecode: bc,
+                manifests_json: mj,
+                module_name,
+                source_map_json: map,
+              });
             },
             Err(e) => slots[i] = Slot::Failed(e),
           }
@@ -1050,11 +1162,13 @@ pub async fn compile_and_extract_extensions(
   let mut failures: Vec<(PathBuf, ScriptError)> = Vec::new();
   for (i, slot) in slots.into_iter().enumerate() {
     match slot {
-      Slot::Hit(bytecode, manifests_json) => survivors.push(CompiledExtension {
+      Slot::Hit(hit) => survivors.push(CompiledExtension {
         path: files[i].clone(),
         index: survivors.len(),
-        bytecode,
-        manifests_json,
+        bytecode: hit.bytecode,
+        module_name: hit.module_name,
+        source_map_json: hit.source_map_json,
+        manifests_json: hit.manifests_json,
       }),
       Slot::Failed(e) => failures.push((files[i].clone(), e)),
       // A Miss with no compiled output never reached Hit/Failed only if

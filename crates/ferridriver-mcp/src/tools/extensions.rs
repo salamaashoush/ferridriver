@@ -199,6 +199,7 @@ mod tests {
       tools: vec![manifest],
       bytecode: std::sync::Arc::from(Vec::new().into_boxed_slice()),
       path: std::path::PathBuf::from("acme-login.ts"),
+      source_map: None,
     }];
     let errors = vec![("broken.js".to_string(), "bundle: syntax error".to_string())];
     let warnings = vec![("acme-login.ts".to_string(), "tool `acme.login`: shell-form".to_string())];

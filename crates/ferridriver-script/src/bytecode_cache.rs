@@ -37,6 +37,10 @@ use serde::{Deserialize, Serialize};
 /// needs to reconstruct its result without re-running rolldown.
 pub struct CacheEntry {
   pub bytecode: Vec<u8>,
+  /// The module name baked into `bytecode`. A caller that registers a
+  /// source map has to key it by the same name QuickJS labels the
+  /// module's frames with, and only the writer knew it.
+  pub module_name: String,
   /// Source-map JSON (BDD bundle) — `None` when the bundle had no map.
   pub source_map_json: Option<String>,
   /// Caller-specific sidecar (extension manifests JSON) — `None` for BDD.
@@ -69,7 +73,11 @@ fn disabled() -> bool {
 
 /// Toolchain fingerprint. Bytecode under one tag is safe to
 /// `Module::load` only by an identical toolchain. `fdbc<N>` is our own
-/// format version — bump it on any change to the manifest shape.
+/// format version — bump it on any change to the manifest shape, or to
+/// anything baked into the bytecode that a reader now depends on.
+/// `fdbc4` retired extension bytecode named after the file's position in
+/// its batch: the source-map registry keys on the module name, so two
+/// extensions compiled in different batches used to collide there.
 ///
 /// Beyond the raw bytecode ABI (QuickJS version, arch, endianness,
 /// pointer width) the tag folds in the crate version, as a proxy for
@@ -88,7 +96,7 @@ fn abi_tag() -> &'static str {
       .unwrap_or("unknown");
     let endian = if cfg!(target_endian = "big") { "be" } else { "le" };
     format!(
-      "fdbc3-v{}-qjs{qjs}-{}-{endian}-p{}",
+      "fdbc4-v{}-qjs{qjs}-{}-{endian}-p{}",
       env!("CARGO_PKG_VERSION"),
       std::env::consts::ARCH,
       std::mem::size_of::<usize>() * 8,
@@ -142,9 +150,10 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 /// different aux payload), so they must not share one slot. `salt`
 /// carries extra pipeline state that changes the output without
 /// changing any input file — today the bundler-shims fingerprint
-/// (`BundlerEnv::fingerprint`).
+/// (`BundlerEnv::fingerprint`). `cwd` is the directory the bundle is
+/// built from, which decides how every bare specifier resolves.
 #[must_use]
-pub fn entry_key(kind: &str, entry_paths: &[PathBuf], salt: u64) -> u64 {
+pub fn entry_key(kind: &str, entry_paths: &[PathBuf], cwd: &Path, salt: u64) -> u64 {
   let mut canon: Vec<String> = entry_paths
     .iter()
     .map(|p| {
@@ -159,6 +168,12 @@ pub fn entry_key(kind: &str, entry_paths: &[PathBuf], salt: u64) -> u64 {
   abi_tag().hash(&mut h);
   kind.hash(&mut h);
   salt.hash(&mut h);
+  // The bundling cwd decides how bare specifiers and `node_modules`
+  // resolve, so the same entry files bundled from two directories are
+  // two different outputs — and used to share one cache slot.
+  std::fs::canonicalize(cwd)
+    .unwrap_or_else(|_| cwd.to_path_buf())
+    .hash(&mut h);
   canon.hash(&mut h);
   h.finish()
 }
@@ -236,6 +251,7 @@ pub fn load(key: u64) -> Option<CacheEntry> {
   }
   Some(CacheEntry {
     bytecode,
+    module_name: manifest.module_name,
     source_map_json: manifest.source_map_json,
     aux: manifest.aux,
     inputs: manifest.inputs.iter().map(|(p, _)| PathBuf::from(p)).collect(),

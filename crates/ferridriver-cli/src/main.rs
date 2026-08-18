@@ -50,13 +50,38 @@ fn install_bundler_env(config: &FerridriverConfig) {
   ferridriver_script::bundle::set_bundler_env(env);
 }
 
-/// Install `[test].moduleAliases` (already merged with `--module-alias`)
-/// into the process-global slot the native module resolver, the
-/// throwaway compile runtimes, and the rolldown externals all read.
-/// Must run before anything bundles.
-fn install_module_aliases(test: &ferridriver_test::config::TestConfig) -> anyhow::Result<()> {
-  ferridriver_script::set_module_aliases(test.module_aliases.iter().map(|(k, v)| (k.clone(), v.clone())))
-    .map_err(|e| anyhow::anyhow!("{e}"))
+/// Install `[test].moduleAliases` plus any `--module-alias` flags into
+/// the process-global slot the native module resolver, the throwaway
+/// compile runtimes and the rolldown externals all read.
+///
+/// Runs at startup for EVERY subcommand, before anything bundles: the
+/// table is read by the first resolver built, and a session created
+/// before an alias arrives would keep resolving without it. The
+/// resolved-config path re-states the same table later, which the
+/// merge treats as the no-op it is.
+fn install_module_aliases(test: &ferridriver_test::config::TestConfig, flags: &[String]) -> anyhow::Result<()> {
+  let mut table: Vec<(String, String)> = test
+    .module_aliases
+    .iter()
+    .map(|(k, v)| (k.clone(), v.clone()))
+    .collect();
+  for spec in flags {
+    let (from, to) = spec
+      .split_once('=')
+      .ok_or_else(|| anyhow::anyhow!("invalid --module-alias {spec:?} (expected <specifier>=<native module>)"))?;
+    table.push((from.trim().to_string(), to.trim().to_string()));
+  }
+  ferridriver_script::set_module_aliases(table).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// `--module-alias` flags of whichever subcommand carries them, so the
+/// merge can happen at startup rather than inside one subcommand's
+/// config resolution.
+fn module_alias_flags(command: &cli::Command) -> &[String] {
+  match command {
+    cli::Command::Test(args) => &args.module_alias,
+    _ => &[],
+  }
 }
 
 #[tokio::main]
@@ -81,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
   // section it cares about from this single document.
   let config = FerridriverConfig::load_layered(args.config.as_deref(), !args.no_inherit)?;
   install_bundler_env(&config);
+  install_module_aliases(&config.test, module_alias_flags(&args.command))?;
 
   match args.command {
     cli::Command::Mcp(mcp_args) => Box::pin(run_mcp(config, mcp_args)).await,
@@ -424,7 +450,7 @@ async fn run_test_native(config: FerridriverConfig, args: cli::TestRunArgs) -> a
 
   let test_config = ferridriver_test::config::resolve_config_from(config.test, &overrides)
     .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
-  install_module_aliases(&test_config)?;
+  install_module_aliases(&test_config, &[])?;
 
   let exit_code = Box::pin(ferridriver_testjs::run_ts_tests_with(test_config, overrides)).await;
   if exit_code == 0 {
@@ -495,7 +521,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   if !args.features.is_empty() {
     test_config.features = args.features;
   }
-  install_module_aliases(&test_config)?;
+  install_module_aliases(&test_config, &[])?;
 
   let exit_code = Box::pin(ferridriver_bdd::run_bdd_with(test_config, overrides)).await;
   if exit_code == 0 {

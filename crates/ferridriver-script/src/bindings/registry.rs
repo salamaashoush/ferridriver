@@ -430,6 +430,21 @@ pub fn tools_len(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
   with_registry(ctx, |reg| reg.tools.len())
 }
 
+/// How many POSITIONAL registrations this VM holds: tools, steps, hooks
+/// and parameter types, plus the test-surface fixtures and tests.
+///
+/// Every consumer indexes into these by position — a tool callable is
+/// an index, a step handler is an index, a fixture set is a list of
+/// indices. A file that registered some of them and then threw leaves
+/// the VM holding entries nobody can address, so the count before and
+/// after an install is what says whether skipping it is safe.
+pub fn registration_counts(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
+  let own = with_registry(ctx, |reg| {
+    reg.tools.len() + reg.steps.len() + reg.hooks.len() + reg.param_types.len()
+  })?;
+  Ok(own + crate::bindings::test::registration_count(ctx)?)
+}
+
 /// The ordered tool names — drives building the native `tools.<name>`
 /// surface.
 pub fn tool_names(ctx: &Ctx<'_>) -> Result<Vec<String>, ScriptError> {

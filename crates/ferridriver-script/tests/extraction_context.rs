@@ -30,6 +30,7 @@ fn binding(cp: &ferridriver_script::CompiledExtension) -> ExtensionBinding {
   ExtensionBinding {
     bytecode: cp.bytecode.clone(),
     name: cp.path.display().to_string(),
+    source_map: None,
   }
 }
 

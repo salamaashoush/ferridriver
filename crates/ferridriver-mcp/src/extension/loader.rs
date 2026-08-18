@@ -36,6 +36,9 @@ pub struct LoadedExtension {
   /// shared (`Arc`) so handing it to a session VM is a refcount bump.
   pub bytecode: Arc<[u8]>,
   pub path: PathBuf,
+  /// Maps this file's bundled frames back to the author's source, keyed
+  /// by the module name its bytecode carries.
+  pub source_map: Option<ferridriver_script::SourceMapper>,
 }
 
 /// Failure modes the loader can surface (per file; one bad file never
@@ -121,10 +124,12 @@ pub async fn load_all(
     // meant those contributions never ran at all. The host warns about the
     // toolless file instead, so a `defineTool` that silently failed to
     // register is still visible.
+    let source_map = Some(cp.mapper());
     loaded.push(LoadedExtension {
       tools,
       bytecode: cp.bytecode,
       path: cp.path,
+      source_map,
     });
   }
 

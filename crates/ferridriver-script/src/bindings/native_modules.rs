@@ -117,10 +117,70 @@ pub fn set_module_aliases(aliases: impl IntoIterator<Item = (String, String)>) -
       ));
     }
   }
-  *MODULE_ALIASES
+  if ALIASES_SEALED.load(std::sync::atomic::Ordering::Acquire) {
+    // Re-stating what the table already says is a no-op, and the hosts
+    // do it (startup installs the operator's table, a subcommand later
+    // re-installs the same one after resolving its own config). Only a
+    // genuine addition is refused.
+    let table = module_aliases();
+    let late: Vec<&str> = list
+      .iter()
+      .filter(|(from, to)| !table.iter().any(|(f, t)| f == from && t == to))
+      .map(|(from, _)| from.as_str())
+      .collect();
+    if late.is_empty() {
+      return Ok(());
+    }
+    return Err(format!(
+      "module aliases are sealed: `{}` arrived after the first resolver was built, \
+       so a session created earlier would keep resolving without it",
+      late.join("`, `")
+    ));
+  }
+
+  // MERGE, never replace: the table is fed from more than one place —
+  // the operator's `[test].moduleAliases`, the `--module-alias` flag,
+  // and (later) the specifiers a package provides. A whole-table write
+  // silently dropped whichever arrived first.
+  let mut guard = MODULE_ALIASES
     .write()
-    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(list));
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
+  let mut merged: Vec<(String, String)> = guard.as_ref().map(|a| (**a).clone()).unwrap_or_default();
+  for (from, to) in list {
+    match merged.iter_mut().find(|(existing, _)| *existing == from) {
+      Some(entry) if entry.1 == to => {},
+      Some(entry) => {
+        tracing::warn!(
+          target: "ferridriver::script",
+          specifier = %from,
+          previous = %entry.1,
+          replacement = %to,
+          "module.alias.replaced: two sources claim the same specifier; the later one wins"
+        );
+        entry.1 = to;
+      },
+      None => merged.push((from, to)),
+    }
+  }
+  *guard = Some(Arc::new(merged));
   Ok(())
+}
+
+/// One-way latch: set the first time anything reads the table to build a
+/// resolver or a cache key. After that a new alias cannot be honoured —
+/// a session created before it would keep resolving without it, and a
+/// bundle keyed before it would be served from the wrong slot — so the
+/// attempt is an error rather than a table that means two things.
+static ALIASES_SEALED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn seal_aliases() {
+  ALIASES_SEALED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Whether the alias table has been read by a resolver / cache key yet.
+#[must_use]
+pub fn aliases_sealed() -> bool {
+  ALIASES_SEALED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 #[must_use]
@@ -159,8 +219,16 @@ pub fn is_native_specifier(specifier: &str) -> bool {
 #[must_use]
 pub fn alias_fingerprint() -> u64 {
   use std::hash::{Hash, Hasher};
+  // Sorted: the table is merged from several sources, so declaration
+  // order varies between runs that mean exactly the same thing — and an
+  // order-sensitive fingerprint would invalidate every cached bundle.
+  // Reading it seals the table (a bundle keyed now must not be served
+  // under a table that changes afterwards).
+  seal_aliases();
+  let mut entries: Vec<(String, String)> = (*module_aliases()).clone();
+  entries.sort();
   let mut h = std::collections::hash_map::DefaultHasher::new();
-  for (from, to) in module_aliases().iter() {
+  for (from, to) in &entries {
     from.hash(&mut h);
     to.hash(&mut h);
   }
@@ -171,6 +239,9 @@ pub fn alias_fingerprint() -> u64 {
 /// aliases (non-consuming).
 #[must_use]
 pub fn resolver() -> BuiltinResolver {
+  // A resolver is a SNAPSHOT: the session it serves keeps it for life,
+  // so an alias added after this point could never reach that session.
+  seal_aliases();
   let mut r = BuiltinResolver::default();
   for name in native_module_names() {
     r.add_module(name);

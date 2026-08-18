@@ -1056,6 +1056,7 @@ impl McpServer {
       .map(|f| ferridriver_script::ExtensionBinding {
         bytecode: f.bytecode.clone(),
         name: f.path.display().to_string(),
+        source_map: f.source_map.clone(),
       })
       .collect()
   }
@@ -2280,6 +2281,7 @@ mod tests {
         ],
         bytecode: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         path: std::path::PathBuf::from("bad.js"),
+        source_map: None,
       }],
       Vec::new(),
     );
@@ -2293,6 +2295,7 @@ mod tests {
       tools: vec![serde_json::from_value(manifest).expect("manifest")],
       bytecode: std::sync::Arc::from(Vec::new().into_boxed_slice()),
       path: std::path::PathBuf::from("ext.js"),
+      source_map: None,
     }
   }
 

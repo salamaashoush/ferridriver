@@ -168,6 +168,42 @@ pub fn set_script_id(ctx: &Ctx<'_>, id: &str) {
   let _ = ctx.store_userdata(ScriptIdUd(Arc::from(id)));
 }
 
+/// Rewrite every `<module>:LINE:COL` frame in a JS stack through the map
+/// registered for THAT module.
+///
+/// `CompiledBundle::remap_stack` answers for one bundle; a session VM
+/// holds several — the spec or step bundle plus every extension
+/// installed beside it — and a frame belongs to whichever module it
+/// names. Frames whose module has no registered map are left exactly as
+/// QuickJS wrote them.
+#[must_use]
+pub fn remap_stack(ctx: &Ctx<'_>, stack: &str) -> String {
+  use std::sync::OnceLock;
+
+  use regex::Regex;
+  static RE: OnceLock<Option<Regex>> = OnceLock::new();
+  let Some(re) = RE.get_or_init(|| Regex::new(r"([^\s()]+):(\d+):(\d+)").ok()) else {
+    return stack.to_string();
+  };
+  let Some(maps) = ctx.userdata::<SourceMapsUd>() else {
+    return stack.to_string();
+  };
+  let maps = maps.0.borrow();
+  re.replace_all(stack, |caps: &regex::Captures<'_>| {
+    let (Ok(line), Ok(col)) = (caps[2].parse::<u32>(), caps[3].parse::<u32>()) else {
+      return caps[0].to_string();
+    };
+    let Some(mapper) = maps.iter().find(|m| m.module_name == caps[1]) else {
+      return caps[0].to_string();
+    };
+    match mapper.remap(line, col) {
+      Some((src, sl, sc)) => format!("{}:{sl}:{sc}", absolute(&src)),
+      None => caps[0].to_string(),
+    }
+  })
+  .into_owned()
+}
+
 /// Translate a bundled `line:col` back to the original source through the
 /// map of the bundle the frame names.
 fn remap(ctx: &Ctx<'_>, file: &str, line: u32, column: u32) -> Option<StackFrame> {
@@ -177,8 +213,14 @@ fn remap(ctx: &Ctx<'_>, file: &str, line: u32, column: u32) -> Option<StackFrame
   // module name. A VM with exactly one bundle skips the match: a `run`
   // labels its module after the entry file, and matching the label
   // against itself buys nothing.
+  // With one bundle in the VM the frame's label is that bundle's by
+  // construction, and a `run` labels its module after the entry file —
+  // matching the label against itself buys nothing. With more than one
+  // (a spec bundle plus the extensions installed beside it) the label
+  // is the only thing that says which map a frame belongs to, and
+  // guessing maps one bundle's line numbers through another's.
   let mapper = match maps.as_slice() {
-    [only] => Some(only),
+    [only] if only.module_name == file || file.is_empty() => Some(only),
     many => many.iter().find(|m| m.module_name == file),
   }?;
   let (src, src_line, src_col) = mapper.remap(line, column)?;

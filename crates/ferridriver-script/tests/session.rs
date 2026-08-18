@@ -35,6 +35,7 @@ async fn demo_binding() -> (tempfile::TempDir, ExtensionBinding) {
     ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
+      source_map: None,
     },
   )
 }
@@ -111,6 +112,7 @@ async fn dotted_tool_names_are_projected_as_namespaces() {
     extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
+      source_map: None,
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
@@ -188,6 +190,7 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
     extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
+      source_map: None,
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
@@ -237,6 +240,7 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
     extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
+      source_map: None,
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
@@ -320,6 +324,7 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
     extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
+      source_map: None,
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
@@ -404,6 +409,7 @@ async fn fetch_net_policy_does_not_leak_between_concurrent_tools() {
     extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
+      source_map: None,
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
@@ -472,6 +478,7 @@ async fn extension_branches_on_ferridriver_host_flag() {
       extensions: vec![ExtensionBinding {
         bytecode: cp.bytecode.clone(),
         name: cp.path.display().to_string(),
+        source_map: None,
       }],
       host,
       caps: ferridriver_script::ScriptCaps::default(),
@@ -929,6 +936,7 @@ async fn binding_from(src: &str) -> (tempfile::TempDir, Result<ExtensionBinding,
     Ok(ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
+      source_map: None,
     }),
   )
 }
@@ -1044,6 +1052,7 @@ async fn plugin_top_level_await_registers_tools_in_session() {
     extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
+      source_map: None,
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
@@ -1085,6 +1094,7 @@ async fn broken_plugin_is_skipped_without_killing_the_session() {
     .map(|cp| ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
+      source_map: None,
     })
     .collect();
   assert_eq!(extensions.len(), 2);
@@ -1386,6 +1396,7 @@ async fn allow_net_capability_binds_the_global_request_binding() {
     extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
+      source_map: None,
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
@@ -1487,6 +1498,7 @@ async fn allow_net_follows_timer_callbacks_registered_by_a_restricted_tool() {
     extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
+      source_map: None,
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),
@@ -1580,6 +1592,7 @@ async fn extraction_environment_matches_session_for_top_level_globals() {
     extensions: vec![ExtensionBinding {
       bytecode: cp.bytecode,
       name: cp.path.display().to_string(),
+      source_map: None,
     }],
     host: ferridriver_script::ExtensionHost::Script,
     caps: ferridriver_script::ScriptCaps::default(),

@@ -45,6 +45,12 @@ pub struct ExtensionBinding {
   pub bytecode: Arc<[u8]>,
   /// Source identity (file path) used only in install-failure logs.
   pub name: String,
+  /// Maps this extension's bundled frames back to the author's source.
+  /// Registered into the VM before the module evaluates, so a throw in
+  /// its top level already reports the original `.ts` line. `None`
+  /// leaves the frames unmapped rather than mapped through some other
+  /// bundle's map.
+  pub source_map: Option<crate::bundle::SourceMapper>,
 }
 
 /// The `commands` object a extension handler receives. Holds this tool's
@@ -314,6 +320,7 @@ fn extension_logger<'js>(ctx: &Ctx<'js>, tool: &str) -> rquickjs::Result<Value<'
 /// whole session VM (and with it every `run_script` for the session).
 pub async fn install_extensions(ctx: &Ctx<'_>, files: &[ExtensionBinding]) -> rquickjs::Result<()> {
   for file in files {
+    let before = crate::bindings::registry::registration_counts(ctx).map_err(|e| rq(&e))?;
     if let Err(e) = install_one_extension(ctx, file).await {
       let detail = match e {
         rquickjs::Error::Exception => ctx.catch().try_into_exception().map_or_else(
@@ -322,10 +329,36 @@ pub async fn install_extensions(ctx: &Ctx<'_>, files: &[ExtensionBinding]) -> rq
         ),
         other => other.to_string(),
       };
+      let after = crate::bindings::registry::registration_counts(ctx).map_err(|e| rq(&e))?;
+      if after > before {
+        // Skipping is only safe while the file left nothing behind.
+        // Having registered and THEN thrown, it owns entries every
+        // consumer addresses by index — a manifest extracted from a
+        // clean run, a plan built from a collection VM — so continuing
+        // means running against registrations that no longer line up.
+        return Err(rq(&ScriptError::internal(format!(
+          "extension.install.partial: `{}` registered {} item(s) and then failed: {detail}. \
+           Its registrations are addressed by position, so the session cannot continue without them",
+          file.name,
+          after - before
+        ))));
+      }
       tracing::warn!(extension = %file.name, error = %detail, "extension install failed; skipping file");
     }
   }
 
+  rebuild_tool_bindings(ctx)
+}
+
+/// Rebuild the `tools` global from the registry as it stands now.
+///
+/// The callables are indices into the registry, so anything registered
+/// AFTER the extensions were installed — a `defineTool` at the top level
+/// of a step bundle or a spec bundle, which evaluate later in the same
+/// VM — has a registry entry but no callable until this runs again.
+/// Cheap (one closure per tool) and idempotent, so every bundle
+/// evaluation ends with it.
+pub fn rebuild_tool_bindings(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let names = tool_names(ctx).map_err(|e| rq(&e))?;
   let tools_obj = Object::new(ctx.clone())?;
   let mut created_global_roots = BTreeSet::new();
@@ -347,6 +380,11 @@ pub async fn install_extensions(ctx: &Ctx<'_>, files: &[ExtensionBinding]) -> rq
 /// `compile_extract_one` — so a tool registered after an async setup
 /// step is visible here too, not only in the manifest).
 async fn install_one_extension(ctx: &Ctx<'_>, file: &ExtensionBinding) -> rquickjs::Result<()> {
+  // Before the load: a top-level throw is reported through the same
+  // registry, and the module evaluates as part of `eval()` below.
+  if let Some(mapper) = file.source_map.clone() {
+    crate::bindings::call_site::register_bundle(ctx, mapper);
+  }
   // SAFETY: `file.bytecode` was produced by `Module::write` by this
   // exact rquickjs/QuickJS build with native endianness — either in
   // this process (`compile_and_extract_extensions`) or restored from the

@@ -969,12 +969,12 @@ impl Session {
 
       let promise: rquickjs::Promise<'_> = match ctx.eval(wrapped.as_bytes()) {
         Ok(v) => v,
-        Err(e) => return Err(caught_to_script_error(rquickjs::CaughtError::from_error(&ctx, e), &source_owned)),
+        Err(e) => return Err(caught_to_script_error_in(&ctx, rquickjs::CaughtError::from_error(&ctx, e), &source_owned)),
       };
 
       let result: Value<'_> = match promise.into_future::<Value<'_>>().await {
         Ok(v) => v,
-        Err(e) => return Err(caught_to_script_error(rquickjs::CaughtError::from_error(&ctx, e), &source_owned)),
+        Err(e) => return Err(caught_to_script_error_in(&ctx, rquickjs::CaughtError::from_error(&ctx, e), &source_owned)),
       };
 
       Ok(value_to_json(&ctx, result).unwrap_or(serde_json::Value::Null))
@@ -1030,14 +1030,19 @@ impl Session {
       #[allow(unsafe_code)]
       let module = match (unsafe { Module::load(ctx.clone(), &bytecode) }).catch(&ctx) {
         Ok(m) => m,
-        Err(e) => return Err(caught_to_script_error(e, &label)),
+        Err(e) => return Err(caught_to_script_error_in(&ctx, e, &label)),
       };
       let (evaluated, promise) = match module.eval().catch(&ctx) {
         Ok(v) => v,
-        Err(e) => return Err(caught_to_script_error(e, &label)),
+        Err(e) => return Err(caught_to_script_error_in(&ctx, e, &label)),
       };
       if let Err(e) = promise.into_future::<()>().await.catch(&ctx) {
-        return Err(caught_to_script_error(e, &label));
+        return Err(caught_to_script_error_in(&ctx, e, &label));
+      }
+      // Same reason as `eval_bundle`: a module that registered a tool at
+      // its top level has no callable until the bindings are rebuilt.
+      if let Err(e) = crate::bindings::rebuild_tool_bindings(&ctx) {
+        return Err(ScriptError::internal(format!("rebuild tool bindings: {e}")));
       }
 
       // Result = the module's `default` export, if any.
@@ -1503,6 +1508,25 @@ impl<'de> serde::Deserialize<'de> for JsonInter {
     }
     d.deserialize_any(V)
   }
+}
+
+/// [`caught_to_script_error`], with every frame of the stack mapped
+/// through whichever bundle registered it in THIS VM.
+///
+/// A session holds more than one: the module the caller executed plus
+/// every extension installed beside it. Without this a throw from an
+/// extension's handler reports `ferri_extension_<id>.js:12:5`, which
+/// names nothing the author wrote.
+pub(crate) fn caught_to_script_error_in(
+  ctx: &rquickjs::Ctx<'_>,
+  caught: rquickjs::CaughtError<'_>,
+  source: &str,
+) -> ScriptError {
+  let mut err = caught_to_script_error(caught, source);
+  if let Some(stack) = err.stack.take() {
+    err.stack = Some(crate::bindings::call_site::remap_stack(ctx, &stack));
+  }
+  err
 }
 
 pub(crate) fn caught_to_script_error(caught: rquickjs::CaughtError<'_>, source: &str) -> ScriptError {

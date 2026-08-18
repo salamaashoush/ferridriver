@@ -22,7 +22,7 @@ fn disk_cache_roundtrip_invalidation_and_disable() {
   std::fs::write(&entry, "import './helper.js'; const v = 1;").expect("write entry");
   std::fs::write(&helper, "export const h = 1;").expect("write helper");
 
-  let key = entry_key("bundle", std::slice::from_ref(&entry), 0);
+  let key = entry_key("bundle", std::slice::from_ref(&entry), src.path(), 0);
   // In production these come from rolldown's module graph
   // (`input_set(entries, modules)`); here we pass both directly.
   let inputs = vec![entry.clone(), helper.clone()];
@@ -31,7 +31,7 @@ fn disk_cache_roundtrip_invalidation_and_disable() {
   // plugin must not share the bundle's slot.
   assert_ne!(
     key,
-    entry_key("plugin", std::slice::from_ref(&entry), 0),
+    entry_key("plugin", std::slice::from_ref(&entry), src.path(), 0),
     "plugin and bundle keys must not collide for the same file"
   );
 
