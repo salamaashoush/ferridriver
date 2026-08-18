@@ -45,6 +45,7 @@ use ferridriver::state::ConnectMode;
 
 use crate::command_spec::{CommandOutput, CommandSpec, ResolvedCommand, ResolvedExec};
 use crate::mcp::BackendChoice;
+use ferridriver::backend::BackendKind;
 
 /// Default TTL for cached command outputs (5 minutes).
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_mins(5);
@@ -136,6 +137,14 @@ pub struct InstanceConfig {
   /// Extra browser arguments for this instance.
   #[serde(alias = "chrome_args", alias = "chromeArgs")]
   pub args: Vec<String>,
+  /// Command producing this instance's browser args, replacing the
+  /// section-level `instanceArgsCommand`.
+  ///
+  /// A section command is one template for every instance, which cannot serve
+  /// instances that need different commands — a Chromium instance asking for
+  /// DNS rules and a WebKit one asking for proxy flags, say.
+  #[serde(alias = "args_command")]
+  pub args_command: Option<CommandSpec>,
   /// Explicit WebSocket URL to connect to (skips launch entirely).
   #[serde(alias = "connect_url")]
   pub connect_url: Option<String>,
@@ -168,14 +177,23 @@ pub struct InstanceConfig {
 /// Lower one [`InstanceConfig`] to the engine's launch-override type,
 /// expanding `${INSTANCE}` in its paths.
 ///
+/// `section_backend` is the backend the instance runs on when it names none of
+/// its own; the proxy flags differ per backend, so lowering without it picks
+/// the wrong switch.
+///
 /// # Errors
 ///
 /// Returns an error when the proxy declares credentials (not a launch
 /// flag) — surfaced rather than silently dropped.
-pub fn instance_overrides_from(cfg: &InstanceConfig, instance: &str) -> Result<InstanceOverrides, String> {
+pub fn instance_overrides_from(
+  cfg: &InstanceConfig,
+  instance: &str,
+  section_backend: BackendKind,
+) -> Result<InstanceOverrides, String> {
+  let backend = cfg.backend.map_or(section_backend, BackendChoice::kind);
   let mut args = cfg.args.clone();
   if let Some(proxy) = &cfg.proxy {
-    args.extend(proxy_args(proxy)?);
+    args.extend(proxy_args(proxy, backend)?);
   }
   Ok(InstanceOverrides {
     args,
@@ -200,6 +218,8 @@ pub struct RoutingView<'a> {
   pub discover_command: Option<&'a CommandSpec>,
   pub cache: &'a CommandCache,
   pub cache_ttl: Duration,
+  /// Backend an instance runs on unless it names its own.
+  pub backend: BackendKind,
 }
 
 impl RoutingView<'_> {
@@ -220,11 +240,18 @@ impl RoutingView<'_> {
     validate_instance_name(instance)?;
 
     let mut out = match self.config_for(instance) {
-      Some(cfg) => instance_overrides_from(cfg, instance)?,
+      Some(cfg) => instance_overrides_from(cfg, instance, self.backend)?,
       None => InstanceOverrides::default(),
     };
 
-    if let Some(spec) = self.args_command {
+    // The instance's own command replaces the section's rather than adding to
+    // it: two commands would each contribute a full set of launch args.
+    let command = self
+      .config_for(instance)
+      .and_then(|cfg| cfg.args_command.as_ref())
+      .or(self.args_command);
+
+    if let Some(spec) = command {
       let resolved = resolve_for_instance(spec, instance)?;
       let value = self.cache.get_or_exec(&resolved, self.cache_ttl)?;
       out.args.extend(value_to_args(&value));
@@ -283,10 +310,26 @@ impl RoutingView<'_> {
       return None;
     }
 
-    if let Some(cfg) = self.config_for(instance) {
+    let cfg = self.config_for(instance);
+
+    if let Some(cfg) = cfg {
       if let Some(url) = &cfg.connect_url {
         return Some(ConnectMode::ConnectUrl(url.clone()));
       }
+    }
+
+    // Discovery answers "is there a browser already running I can attach to",
+    // and both answers it knows -- a `DevToolsActivePort` file and a `ws://`
+    // endpoint -- are CDP. A WebKit browser is driven over an inspector pipe
+    // its launcher owns, with no endpoint for anyone else to attach to, so
+    // running the section's discover command for a WebKit instance can only
+    // waste its timeout before every launch.
+    let backend = cfg.and_then(|c| c.backend).map_or(self.backend, BackendChoice::kind);
+    if backend == BackendKind::WebKit {
+      return None;
+    }
+
+    if let Some(cfg) = cfg {
       // A stale profile means "the browser this profile described is
       // gone", NOT "stop looking" — the previous code returned early
       // here and never tried the discover command.
@@ -335,8 +378,28 @@ fn expand_instance_path(template: Option<&str>, instance: &str) -> Option<String
   Some(shellexpand::tilde(&substituted).into_owned())
 }
 
-/// Lower proxy settings into launch flags.
-fn proxy_args(proxy: &ProxyConfig) -> Result<Vec<String>, String> {
+/// Spell the proxy launch flags the way `backend`'s binary takes them.
+///
+/// Thin wrapper over the engine's own lowering so a config-declared proxy and
+/// a `launch({ proxy })` proxy can never disagree about the switch name.
+#[must_use]
+pub fn proxy_launch_flags(server: &str, bypass: Option<&str>, backend: BackendKind) -> Vec<String> {
+  ferridriver::options::ProxyConfig {
+    server: server.to_string(),
+    bypass: bypass.map(ToString::to_string),
+    username: None,
+    password: None,
+  }
+  .launch_flags(backend)
+}
+
+/// Lower instance proxy settings into launch flags for `backend`.
+///
+/// # Errors
+///
+/// Returns an error when the proxy declares credentials, which are not a
+/// launch flag.
+pub fn proxy_args(proxy: &ProxyConfig, backend: BackendKind) -> Result<Vec<String>, String> {
   if proxy.username.is_some() || proxy.password.is_some() {
     return Err(
       "instance proxy credentials are not launch flags; set them on the context proxy \
@@ -344,11 +407,8 @@ fn proxy_args(proxy: &ProxyConfig) -> Result<Vec<String>, String> {
         .to_string(),
     );
   }
-  let mut args = vec![format!("--proxy-server={}", proxy.server)];
-  if let Some(bypass) = &proxy.bypass {
-    args.push(format!("--proxy-bypass-list={bypass}"));
-  }
-  Ok(args)
+
+  Ok(proxy_launch_flags(&proxy.server, proxy.bypass.as_deref(), backend))
 }
 
 /// Shape a command's output into browser arguments.
@@ -667,6 +727,7 @@ mod tests {
       discover_command: discover,
       cache,
       cache_ttl: DEFAULT_CACHE_TTL,
+      backend: BackendKind::CdpPipe,
     }
   }
 
@@ -791,6 +852,111 @@ mod tests {
       ])),
       "ignoreDefaultArgs must reach the launch path"
     );
+  }
+
+  #[test]
+  fn an_instance_args_command_replaces_the_section_one() {
+    let cache = CommandCache::default();
+    let mut instances = std::collections::HashMap::new();
+    instances.insert(
+      "webkit".to_string(),
+      InstanceConfig {
+        args_command: Some(spec(r#""echo --from-instance""#)),
+        ..Default::default()
+      },
+    );
+
+    let section = spec(r#""echo --from-section""#);
+    let view = view(&instances, Some(&section), None, &cache);
+    let out = view.overrides_for("webkit").expect("overrides");
+
+    assert_eq!(
+      out.args,
+      vec!["--from-instance".to_string()],
+      "instance command must win outright"
+    );
+
+    // An instance without its own command still gets the section's.
+    let other = view.overrides_for("chrome").expect("overrides");
+    assert_eq!(other.args, vec!["--from-section".to_string()]);
+  }
+
+  #[test]
+  fn a_webkit_instance_is_never_discovered() {
+    let cache = CommandCache::default();
+    let mut instances = std::collections::HashMap::new();
+    instances.insert(
+      "webkit".to_string(),
+      InstanceConfig {
+        backend: Some(BackendChoice::WebKit),
+        ..Default::default()
+      },
+    );
+
+    // The command leaves a trace, so the test observes whether it RAN rather
+    // than whether its endpoint was accepted (a dead one is rejected either way).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let marker = tmp.path().join("${INSTANCE}.ran");
+    let discover = spec(&format!(
+      r#""touch {} && echo ws://127.0.0.1:9222/devtools/browser/x""#,
+      marker.display()
+    ));
+    let view = view(&instances, None, Some(&discover), &cache);
+
+    let _ = view.resolve_connect("webkit");
+    assert!(
+      !tmp.path().join("webkit.ran").exists(),
+      "a WebKit browser exposes no endpoint to attach to, so discovery must not run"
+    );
+
+    let _ = view.resolve_connect("chrome");
+    assert!(
+      tmp.path().join("chrome.ran").exists(),
+      "the section's discover command still serves CDP instances"
+    );
+  }
+
+  #[test]
+  fn webkit_takes_its_own_proxy_switch() {
+    let proxy = ProxyConfig {
+      server: "http://127.0.0.1:3052".into(),
+      bypass: Some("127.0.0.1,localhost".into()),
+      username: None,
+      password: None,
+    };
+
+    let chromium = proxy_args(&proxy, BackendKind::CdpPipe).expect("chromium flags");
+    assert!(chromium.contains(&"--proxy-server=http://127.0.0.1:3052".to_string()));
+
+    // `--proxy-server` is not a WebKit switch: it is accepted and ignored, so
+    // lowering it the Chromium way left WebKit talking to the network direct.
+    let webkit = proxy_args(&proxy, BackendKind::WebKit).expect("webkit flags");
+    assert!(webkit.contains(&"--proxy=http://127.0.0.1:3052".to_string()));
+    assert!(!webkit.iter().any(|arg| arg.starts_with("--proxy-server=")));
+
+    if cfg!(target_os = "linux") {
+      assert!(webkit.contains(&"--ignore-host=127.0.0.1".to_string()));
+      assert!(webkit.contains(&"--ignore-host=localhost".to_string()));
+    } else {
+      assert!(webkit.contains(&"--proxy-bypass-list=127.0.0.1,localhost".to_string()));
+    }
+  }
+
+  #[test]
+  fn an_instance_backend_overrides_the_sections_for_proxy_flags() {
+    let cfg = InstanceConfig {
+      backend: Some(BackendChoice::WebKit),
+      proxy: Some(ProxyConfig {
+        server: "http://127.0.0.1:3052".into(),
+        bypass: None,
+        username: None,
+        password: None,
+      }),
+      ..Default::default()
+    };
+
+    let overrides = instance_overrides_from(&cfg, "staging", BackendKind::CdpPipe).expect("overrides");
+    assert!(overrides.args.contains(&"--proxy=http://127.0.0.1:3052".to_string()));
   }
 
   #[test]

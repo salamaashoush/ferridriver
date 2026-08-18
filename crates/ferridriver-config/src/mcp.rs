@@ -242,6 +242,7 @@ impl McpConfig {
         ..Default::default()
       },
       instance,
+      self.backend_kind(),
     )
   }
 
@@ -262,6 +263,7 @@ impl McpConfig {
       discover_command: self.browser.instance_discover_command.as_ref(),
       cache: &self.command_cache,
       cache_ttl: self.cache_ttl(),
+      backend: self.backend_kind(),
     }
   }
 

@@ -158,6 +158,17 @@ struct JsLaunchOptions {
   timeout: Option<u64>,
   downloads_path: Option<String>,
   traces_dir: Option<String>,
+  proxy: Option<JsProxyConfig>,
+}
+
+/// `{ server, bypass?, username?, password? }` -- Playwright's proxy shape.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsProxyConfig {
+  server: String,
+  bypass: Option<String>,
+  username: Option<String>,
+  password: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -194,7 +205,12 @@ fn parse_launch_options<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Res
     handle_sigterm: None,
     chromium_sandbox: None,
     firefox_user_prefs: None,
-    proxy: None,
+    proxy: parsed.proxy.map(|p| ferridriver::options::ProxyConfig {
+      server: p.server,
+      bypass: p.bypass,
+      username: p.username,
+      password: p.password,
+    }),
     traces_dir: parsed.traces_dir.map(std::path::PathBuf::from),
   })
 }

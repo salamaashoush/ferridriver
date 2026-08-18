@@ -1289,6 +1289,12 @@ pub struct LaunchOptions {
   pub downloads_path: Option<String>,
   /// Tracing artifact directory.
   pub traces_dir: Option<String>,
+  /// Proxy every context of this browser uses unless it names its own.
+  ///
+  /// Lowered per engine: Chromium takes `--proxy-server`, WebKit takes
+  /// `--proxy`, and Firefox takes the WebDriver `proxy` capability -- it has no
+  /// proxy switch at all.
+  pub proxy: Option<crate::context::NapiProxyConfig>,
 }
 
 /// Options for `chromium()` / `firefox()` / `webkit()` factory.

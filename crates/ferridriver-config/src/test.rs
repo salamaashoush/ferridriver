@@ -549,6 +549,7 @@ impl BrowserConfig {
       cache_ttl: self
         .command_cache_ttl
         .map_or(crate::browser::DEFAULT_CACHE_TTL, std::time::Duration::from_secs),
+      backend: self.resolve_kinds().0,
     }
   }
 

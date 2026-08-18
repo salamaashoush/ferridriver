@@ -93,11 +93,19 @@ impl BidiBrowser {
     flags: &[String],
     env: &rustc_hash::FxHashMap<String, String>,
     user_data_dir: Option<&std::path::Path>,
+    proxy: Option<&crate::options::ProxyConfig>,
   ) -> Result<Self> {
     // Determine if headless from flags
     let headless = flags.iter().any(|f| f == "--headless");
-    let (session, child, profile) =
-      Box::pin(BidiSession::launch(browser_path, flags, headless, env, user_data_dir)).await?;
+    let (session, child, profile) = Box::pin(BidiSession::launch(
+      browser_path,
+      flags,
+      headless,
+      env,
+      user_data_dir,
+      proxy,
+    ))
+    .await?;
     let session = Arc::new(session);
     let downloads_dir = new_downloads_dir()?;
     let popup_taps = Self::spawn_popup_listener(&session, &downloads_dir);
@@ -119,7 +127,7 @@ impl BidiBrowser {
 
   /// Connect to an existing `BiDi` endpoint via WebSocket.
   pub async fn connect(ws_url: &str) -> Result<Self> {
-    let session = Arc::new(BidiSession::connect(ws_url).await?);
+    let session = Arc::new(Box::pin(BidiSession::connect(ws_url)).await?);
     let downloads_dir = new_downloads_dir()?;
     let popup_taps = Self::spawn_popup_listener(&session, &downloads_dir);
     Ok(Self {
@@ -209,24 +217,7 @@ impl BidiBrowser {
   pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
     let mut params = json!({});
     if let Some(p) = proxy {
-      // Parse the server URL into BiDi's proxy capability fields.
-      let (proxy_type, host_port, is_socks, socks_version) = parse_bidi_proxy(&p.server);
-      let mut bidi_proxy = json!({ "proxyType": proxy_type });
-      if is_socks {
-        bidi_proxy["socksProxy"] = json!(host_port);
-        if let Some(v) = socks_version {
-          bidi_proxy["socksVersion"] = json!(v);
-        }
-      } else {
-        bidi_proxy["httpProxy"] = json!(host_port);
-        bidi_proxy["sslProxy"] = json!(host_port);
-      }
-      if let Some(ref bypass) = p.bypass {
-        // WebDriver noProxy is an array of host strings.
-        let list: Vec<&str> = bypass.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-        bidi_proxy["noProxy"] = json!(list);
-      }
-      params["proxy"] = bidi_proxy;
+      params["proxy"] = bidi_proxy_capability(p);
     }
     let result = self
       .session
@@ -381,6 +372,33 @@ impl BidiBrowser {
   }
 }
 
+/// A Playwright-shaped proxy as the `BiDi`/`WebDriver` `proxy` capability.
+///
+/// The same shape serves `session.new` (browser-wide, from
+/// `launch({ proxy })`) and `browser.createUserContext` (per context).
+pub(crate) fn bidi_proxy_capability(proxy: &crate::options::ProxyConfig) -> serde_json::Value {
+  let (proxy_type, host_port, is_socks, socks_version) = parse_bidi_proxy(&proxy.server);
+  let mut capability = json!({ "proxyType": proxy_type });
+
+  if is_socks {
+    capability["socksProxy"] = json!(host_port);
+    if let Some(version) = socks_version {
+      capability["socksVersion"] = json!(version);
+    }
+  } else {
+    capability["httpProxy"] = json!(host_port);
+    capability["sslProxy"] = json!(host_port);
+  }
+
+  if let Some(ref bypass) = proxy.bypass {
+    // WebDriver noProxy is an array of host strings.
+    let list: Vec<&str> = bypass.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    capability["noProxy"] = json!(list);
+  }
+
+  capability
+}
+
 /// Decompose a Playwright-shaped proxy `server` string into the
 /// BiDi/WebDriver capability fields. Returns `(proxyType, host_port,
 /// is_socks, socks_version)`.
@@ -403,4 +421,43 @@ fn new_downloads_dir() -> Result<Arc<tempfile::TempDir>> {
       .tempdir()
       .map_err(|e| FerriError::backend(format!("downloads tempdir: {e}")))?,
   ))
+}
+
+#[cfg(test)]
+mod proxy_capability_tests {
+  use super::bidi_proxy_capability;
+  use crate::options::ProxyConfig;
+
+  #[test]
+  fn an_http_proxy_becomes_a_manual_webdriver_capability() {
+    let capability = bidi_proxy_capability(&ProxyConfig {
+      server: "http://127.0.0.1:3052".to_string(),
+      bypass: Some("127.0.0.1, localhost".to_string()),
+      username: None,
+      password: None,
+    });
+
+    assert_eq!(capability["proxyType"], "manual");
+    // WebDriver wants host:port, not a URL, and the same value for both schemes.
+    assert_eq!(capability["httpProxy"], "127.0.0.1:3052");
+    assert_eq!(capability["sslProxy"], "127.0.0.1:3052");
+    assert_eq!(capability["noProxy"], serde_json::json!(["127.0.0.1", "localhost"]));
+  }
+
+  #[test]
+  fn a_socks_proxy_carries_its_version() {
+    let capability = bidi_proxy_capability(&ProxyConfig {
+      server: "socks5://127.0.0.1:1080".to_string(),
+      bypass: None,
+      username: None,
+      password: None,
+    });
+
+    assert_eq!(capability["socksProxy"], "127.0.0.1:1080");
+    assert_eq!(capability["socksVersion"], 5);
+    assert!(
+      capability.get("httpProxy").is_none(),
+      "a socks proxy is not an http one"
+    );
+  }
 }

@@ -1053,6 +1053,7 @@ impl From<NapiHttpCredentials> for ferridriver::options::HttpCredentials {
 }
 
 #[napi(object)]
+#[derive(Debug, Clone)]
 pub struct NapiProxyConfig {
   pub server: String,
   pub bypass: Option<String>,

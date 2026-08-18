@@ -48,6 +48,15 @@ impl BidiSession {
   /// 2. Send `session.new` to create a session
   /// 3. Subscribe to all events
   pub async fn connect(ws_url: &str) -> Result<Self> {
+    Box::pin(Self::connect_with_proxy(ws_url, None)).await
+  }
+
+  /// Connect and open a session whose default context uses `proxy`.
+  ///
+  /// Firefox has no proxy command-line switch, so `launch({ proxy })` lands
+  /// here: the `WebDriver` `proxy` capability is the browser-wide equivalent, and
+  /// a user context created later with its own proxy still overrides it.
+  pub async fn connect_with_proxy(ws_url: &str, proxy: Option<&crate::options::ProxyConfig>) -> Result<Self> {
     info!("Connecting BiDi session to {ws_url}");
 
     let transport = Arc::new(BidiTransport::connect(ws_url).await?);
@@ -55,20 +64,21 @@ impl BidiSession {
     // Create a new session with proper capabilities.
     // webSocketUrl: true tells Firefox to maintain the BiDi WebSocket across navigations.
     // unhandledPromptBehavior: ignore prevents dialogs from blocking automation.
+    let mut always_match = json!({
+      "acceptInsecureCerts": true,
+      "webSocketUrl": true,
+      "unhandledPromptBehavior": {
+        "default": "ignore"
+      }
+    });
+    if let Some(proxy) = proxy {
+      always_match["proxy"] = super::browser::bidi_proxy_capability(proxy);
+    }
+
     let result = transport
       .send_command(
         "session.new",
-        json!({
-          "capabilities": {
-            "alwaysMatch": {
-              "acceptInsecureCerts": true,
-              "webSocketUrl": true,
-              "unhandledPromptBehavior": {
-                "default": "ignore"
-              }
-            }
-          }
-        }),
+        json!({ "capabilities": { "alwaysMatch": always_match } }),
       )
       .await?;
 
@@ -133,7 +143,7 @@ impl BidiSession {
   /// Constructs `ws://127.0.0.1:{port}/session` and connects.
   #[allow(dead_code, reason = "public library API for external consumers")]
   pub async fn connect_to_port(port: u16) -> Result<Self> {
-    Self::connect(&format!("ws://127.0.0.1:{port}/session")).await
+    Box::pin(Self::connect(&format!("ws://127.0.0.1:{port}/session"))).await
   }
 
   /// Launch Firefox and create a `BiDi` session.
@@ -155,6 +165,7 @@ impl BidiSession {
     headless: bool,
     env: &rustc_hash::FxHashMap<String, String>,
     user_data_dir: Option<&std::path::Path>,
+    proxy: Option<&crate::options::ProxyConfig>,
   ) -> Result<(Self, tokio::process::Child, LaunchedProfile)> {
     // Prefix the throwaway profile dir so test-harness cleanup can
     // `pkill -f` any leaked Firefox processes by their `--profile` arg —
@@ -256,7 +267,7 @@ impl BidiSession {
     let ws_url = discover_bidi_ws_url(&mut child).await?;
     debug!("Firefox BiDi endpoint: {ws_url}");
 
-    let session = Self::connect(&ws_url).await?;
+    let session = Box::pin(Self::connect_with_proxy(&ws_url, proxy)).await?;
 
     Ok((session, child, profile_dir))
   }
@@ -270,10 +281,19 @@ impl BidiSession {
     headless: bool,
     env: &rustc_hash::FxHashMap<String, String>,
     user_data_dir: Option<&std::path::Path>,
+    proxy: Option<&crate::options::ProxyConfig>,
   ) -> Result<(Self, tokio::process::Child, LaunchedProfile)> {
     let path_lower = browser_path.to_lowercase();
     if path_lower.contains("firefox") {
-      Box::pin(Self::launch_firefox(browser_path, flags, headless, env, user_data_dir)).await
+      Box::pin(Self::launch_firefox(
+        browser_path,
+        flags,
+        headless,
+        env,
+        user_data_dir,
+        proxy,
+      ))
+      .await
     } else {
       Err(FerriError::unsupported(format!(
         "BiDi backend requires Firefox (found: {browser_path}). \

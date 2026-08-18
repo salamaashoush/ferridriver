@@ -96,6 +96,7 @@ impl BrowserType {
     timeout?: number;
     downloadsPath?: string;
     tracesDir?: string;
+    proxy?: { server: string; bypass?: string; username?: string; password?: string };
     acceptDownloads?: boolean;
     baseURL?: string;
     bypassCSP?: boolean;
@@ -184,7 +185,12 @@ fn lower_launch_options(opts: LaunchOptions) -> core_opts::LaunchOptions {
     handle_sigterm: None,
     chromium_sandbox: None,
     firefox_user_prefs: None,
-    proxy: None,
+    proxy: opts.proxy.map(|p| core_opts::ProxyConfig {
+      server: p.server,
+      bypass: p.bypass,
+      username: p.username,
+      password: p.password,
+    }),
     traces_dir: opts.traces_dir.map(std::path::PathBuf::from),
   }
 }

@@ -42,6 +42,62 @@ pub const UTILITY_WORLD_NAME: &str = "__playwright_utility_world__";
 const CONTEXT_MENU_SUPPRESSOR: &str =
   "window.addEventListener('contextmenu', function(e){ e.preventDefault(); }, true)";
 
+/// Document-start shim for the API surface the Playwright `WebKit` build is
+/// missing next to Safari, mirroring `wkPage.ts::_calculateBootstrapScript`.
+///
+/// `window.safari` and `window.GestureEvent` do not exist in this build, so
+/// Safari feature detection (`!!window.GestureEvent`, `window.safari.push...`)
+/// takes the non-Safari path and the page under test behaves unlike the browser
+/// it is emulating. `PublicKeyCredential` is absent for the same reason. These
+/// are the exact fragments Playwright injects, so a page sees the same surface
+/// under ferridriver as under Playwright's own `WebKit`.
+const SAFARI_SURFACE_SHIM: &str = concat!(
+  "if (!window.safari) window.safari = { pushNotification: { toString() { return \"[object SafariRemoteNotification]\"; } } };\n",
+  "if (!window.GestureEvent) window.GestureEvent = function GestureEvent() {};\n",
+  "window.PublicKeyCredential ??= {",
+  "  async getClientCapabilities() { return {}; },",
+  "  async isConditionalMediationAvailable() { return false; },",
+  "  async isUserVerifyingPlatformAuthenticatorAvailable() { return false; },",
+  "};",
+);
+
+/// Document-start shim removing the orientation surface a desktop browser does
+/// not have. Injected only when the page is NOT emulating a mobile device --
+/// this build exposes `window.orientation` unconditionally, which makes a
+/// desktop page look like a phone to any script sniffing for it.
+const DESKTOP_ORIENTATION_SHIM: &str =
+  "delete window.orientation;\ndelete window.ondevicemotion;\ndelete window.ondeviceorientation";
+
+/// `navigator.platform` implied by an emulated user agent, mirroring
+/// Playwright's `calculateUserAgentEmulation`.
+///
+/// Returns `None` when the UA names no platform this maps -- better to leave
+/// the real value than to invent one.
+fn navigator_platform_for(user_agent: &str) -> Option<&'static str> {
+  let arm = user_agent.contains("ARM") || user_agent.contains("aarch64");
+
+  if user_agent.contains("Android") {
+    // Android is arm regardless of what else the UA says, per Playwright.
+    return Some("Linux armv8l");
+  }
+  if user_agent.contains("iPhone OS") {
+    return Some("iPhone");
+  }
+  if user_agent.contains("iPad; CPU OS") {
+    return Some("iPad");
+  }
+  if user_agent.contains("Mac OS X") {
+    return Some("MacIntel");
+  }
+  if user_agent.contains("Windows") {
+    return Some("Win32");
+  }
+  if user_agent.to_lowercase().contains("linux") {
+    return Some(if arm { "Linux aarch64" } else { "Linux x86_64" });
+  }
+  None
+}
+
 /// Playwright `WebKit` page. Cheaply cloneable; clones share the
 /// underlying sessions + managers.
 #[derive(Clone)]
@@ -101,6 +157,10 @@ pub struct WebKitPage {
   /// on every cross-document navigation and drops active overrides, so
   /// the provisional-target handler replays them.
   pub(crate) emulated_media: Arc<std::sync::Mutex<Option<crate::options::EmulateMediaOptions>>>,
+  /// Viewport emulation currently in force, stashed for the same reason as
+  /// [`Self::emulated_media`] (the target session is swapped on cross-document
+  /// navigation) and because the bootstrap shim depends on `is_mobile`.
+  pub(crate) emulated_viewport: Arc<std::sync::Mutex<Option<crate::options::ViewportConfig>>>,
   /// Live request table, keyed by PW `WebKit` `requestId`. The network
   /// listener inserts on `Network.requestWillBeSent`, links responses
   /// on `Network.responseReceived`, and removes on terminal
@@ -391,6 +451,7 @@ impl WebKitPage {
       init_script_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
       extra_http_headers: Arc::new(std::sync::Mutex::new(None)),
       emulated_media: Arc::new(std::sync::Mutex::new(None)),
+      emulated_viewport: Arc::new(std::sync::Mutex::new(None)),
       requests: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       nav_request_slot: crate::network::NavRequestSlot::new(),
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -1567,6 +1628,14 @@ impl WebKitPage {
         .target_session()
         .send("Page.overrideUserAgent", json!({ "value": ua }))
         .await;
+      // A UA claiming an iPhone with `navigator.platform` still reading
+      // "MacIntel" is a contradiction every device-sniffing script sees.
+      if let Some(platform) = navigator_platform_for(ua) {
+        let _ = self
+          .target_session()
+          .send("Page.overridePlatform", json!({ "value": platform }))
+          .await;
+      }
     }
     if let Some(tz) = opts.timezone_id.as_deref() {
       let _ = self
@@ -1668,7 +1737,10 @@ impl WebKitPage {
         json!({
           "width": config.width,
           "height": config.height,
-          "fixedLayout": false,
+          // `fixedLayout` is what makes the page lay out against the emulated
+          // viewport instead of the window: without it a 390px mobile viewport
+          // still laid out at the desktop fallback width of 980px.
+          "fixedLayout": config.is_mobile,
           "deviceScaleFactor": if config.device_scale_factor > 0.0 { config.device_scale_factor } else { 1.0 },
         }),
       )
@@ -1681,7 +1753,66 @@ impl WebKitPage {
         json!({ "width": config.width, "height": config.height }),
       )
       .await;
+
+    if config.is_mobile {
+      let angle = if config.is_landscape || config.width > config.height {
+        90
+      } else {
+        0
+      };
+      let _ = self
+        .proxy
+        .send("Emulation.setOrientationOverride", json!({ "angle": angle }))
+        .await;
+    }
+
+    let _ = self
+      .target_session()
+      .send("Page.setTouchEmulationEnabled", json!({ "enabled": config.has_touch }))
+      .await;
+
+    for (setting, value) in Self::mobile_settings(config.is_mobile) {
+      let _ = self
+        .target_session()
+        .send("Page.overrideSetting", json!({ "setting": setting, "value": value }))
+        .await;
+    }
+
+    {
+      *self
+        .emulated_viewport
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config.clone());
+    }
+    // The bootstrap shim differs between mobile and desktop, so the script
+    // already installed for the previous mode has to be replaced.
+    self.flush_bootstrap_script().await?;
+
     Ok(())
+  }
+
+  /// Settings `WebKit` gates on "is this a mobile device", in Playwright's
+  /// `wkPage.ts::_initializeSession` order.
+  fn mobile_settings(is_mobile: bool) -> [(&'static str, bool); 7] {
+    [
+      ("DeviceOrientationEventEnabled", is_mobile),
+      ("FullScreenEnabled", !is_mobile),
+      ("NotificationsEnabled", !is_mobile),
+      ("PointerLockEnabled", !is_mobile),
+      ("InputTypeMonthEnabled", is_mobile),
+      ("InputTypeWeekEnabled", is_mobile),
+      ("FixedBackgroundsPaintRelativeToDocument", is_mobile),
+    ]
+  }
+
+  /// Whether the page is currently emulating a mobile device.
+  fn is_mobile_emulation(&self) -> bool {
+    self
+      .emulated_viewport
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .as_ref()
+      .is_some_and(|vp| vp.is_mobile)
   }
 
   /// Lower the merged emulation state into the protocol command list —
@@ -2085,16 +2216,26 @@ impl WebKitPage {
   /// load without any registered init script (the WebSocket mock, user
   /// `addInitScript`s, etc.).
   pub(crate) async fn replay_bootstrap_script(&self, target: &super::connection::Session) {
-    let joined = {
-      let scripts = self.init_scripts.lock().await;
-      std::iter::once(CONTEXT_MENU_SUPPRESSOR)
-        .chain(scripts.iter().map(|(_, src)| src.as_str()))
-        .collect::<Vec<_>>()
-        .join(";\n")
-    };
+    let joined = self.bootstrap_source().await;
     let _ = target
       .send("Page.setBootstrapScript", json!({ "source": joined }))
       .await;
+  }
+
+  /// The single bootstrap source: the built-in shims followed by every
+  /// registered init script, in registration order.
+  async fn bootstrap_source(&self) -> String {
+    let mut fragments = vec![CONTEXT_MENU_SUPPRESSOR, SAFARI_SURFACE_SHIM];
+    if !self.is_mobile_emulation() {
+      fragments.push(DESKTOP_ORIENTATION_SHIM);
+    }
+
+    let scripts = self.init_scripts.lock().await;
+    fragments
+      .into_iter()
+      .chain(scripts.iter().map(|(_, src)| src.as_str()))
+      .collect::<Vec<_>>()
+      .join(";\n")
   }
 
   pub async fn add_init_script(&self, source: &str) -> Result<String> {
@@ -2122,13 +2263,7 @@ impl WebKitPage {
   /// to keep N scripts live across navigations is to concatenate them
   /// (mirrors `wkPage.ts::_calculateBootstrapScript`).
   async fn flush_bootstrap_script(&self) -> Result<()> {
-    let joined = {
-      let scripts = self.init_scripts.lock().await;
-      std::iter::once(CONTEXT_MENU_SUPPRESSOR)
-        .chain(scripts.iter().map(|(_, src)| src.as_str()))
-        .collect::<Vec<_>>()
-        .join(";\n")
-    };
+    let joined = self.bootstrap_source().await;
     self
       .target_session()
       .send("Page.setBootstrapScript", json!({ "source": joined }))
@@ -2469,4 +2604,47 @@ fn parse_eval_response(resp: &Value, return_by_value: bool) -> Result<crate::js_
     SerializedValue::from_json(&value, &mut SerializationContext::default())
   };
   Ok(EvaluateResult::Handle(JSHandleBacking::Value(serialized), false))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{DESKTOP_ORIENTATION_SHIM, SAFARI_SURFACE_SHIM, WebKitPage, navigator_platform_for};
+
+  #[test]
+  fn platform_follows_the_emulated_user_agent() {
+    let iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+    let ipad = "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+    let android =
+      "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36";
+    let mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+
+    // An iPad UA also carries "Mac OS X", so order decides the answer.
+    assert_eq!(navigator_platform_for(iphone), Some("iPhone"));
+    assert_eq!(navigator_platform_for(ipad), Some("iPad"));
+    assert_eq!(navigator_platform_for(android), Some("Linux armv8l"));
+    assert_eq!(navigator_platform_for(mac), Some("MacIntel"));
+    assert_eq!(navigator_platform_for("some custom agent"), None);
+  }
+
+  #[test]
+  fn mobile_settings_invert_between_desktop_and_mobile() {
+    let mobile = WebKitPage::mobile_settings(true);
+    let desktop = WebKitPage::mobile_settings(false);
+
+    for ((name, mobile_value), (_, desktop_value)) in mobile.iter().zip(desktop.iter()) {
+      assert_ne!(mobile_value, desktop_value, "{name} should differ between modes");
+    }
+    assert!(
+      mobile.contains(&("DeviceOrientationEventEnabled", true)),
+      "a mobile page must fire orientation events"
+    );
+  }
+
+  #[test]
+  fn the_shim_supplies_the_surface_this_build_lacks() {
+    assert!(SAFARI_SURFACE_SHIM.contains("window.GestureEvent"));
+    assert!(SAFARI_SURFACE_SHIM.contains("window.safari"));
+    assert!(SAFARI_SURFACE_SHIM.contains("PublicKeyCredential"));
+    assert!(DESKTOP_ORIENTATION_SHIM.contains("delete window.orientation"));
+  }
 }

@@ -254,6 +254,10 @@ pub struct BrowserState {
   backend_kind: BackendKind,
   /// Base Chrome flags applied to ALL instances.
   pub extra_args: Vec<String>,
+  /// Proxy every instance this state launches is pointed at
+  /// (`browserType.launch({ proxy })`). A context's own `proxy` overrides it,
+  /// exactly as it does in Playwright.
+  pub proxy: Option<crate::options::ProxyConfig>,
   /// Per-instance additional chrome args. Called with instance name when launching.
   instance_overrides_fn: Option<InstanceOverridesFn>,
   /// Per-instance connect mode resolver. Called before launching to check if
@@ -445,6 +449,7 @@ impl BrowserState {
       connect_mode,
       backend_kind: plan.backend,
       extra_args: plan.args,
+      proxy: plan.proxy,
       instance_overrides_fn: None,
       instance_resolver_fn: None,
       known_instances: Arc::from(Vec::new()),
@@ -759,6 +764,7 @@ impl BrowserState {
       user_data_dir: self.user_data_dir.clone(),
       connect_mode: self.connect_mode.clone(),
       base_args: self.extra_args.clone(),
+      proxy: self.proxy.clone(),
       default_viewport: self.default_viewport.clone(),
       overrides_fn: self.instance_overrides_fn.clone(),
       resolver_fn: self.instance_resolver_fn.clone(),
@@ -884,6 +890,7 @@ struct LaunchSpec {
   user_data_dir: Option<String>,
   connect_mode: ConnectMode,
   base_args: Vec<String>,
+  proxy: Option<crate::options::ProxyConfig>,
   default_viewport: Option<crate::options::ViewportConfig>,
   overrides_fn: Option<InstanceOverridesFn>,
   resolver_fn: Option<InstanceResolverFn>,
@@ -900,6 +907,7 @@ struct EffectiveLaunch {
   args: Vec<String>,
   env: rustc_hash::FxHashMap<String, String>,
   ignore_default_args: Option<crate::options::IgnoreDefaultArgs>,
+  proxy: Option<crate::options::ProxyConfig>,
 }
 
 impl EffectiveLaunch {
@@ -988,15 +996,27 @@ impl LaunchSpec {
       args,
       env: overrides.env,
       ignore_default_args: overrides.ignore_default_args,
+      proxy: self.proxy.clone(),
     };
     Ok((mode.unwrap_or_else(|| self.connect_mode.clone()), effective))
   }
 
   async fn launch_browser(&self, eff: &EffectiveLaunch) -> Result<AnyBrowser> {
+    // `launch({ proxy })` is a per-process setting on every engine that has
+    // one, so it is lowered here rather than at context creation: a context
+    // that names no proxy of its own inherits it.
+    let proxy_flags = eff
+      .proxy
+      .as_ref()
+      .map(|proxy| proxy.launch_flags(eff.backend_kind))
+      .unwrap_or_default();
+
     Ok(match eff.backend_kind {
       BackendKind::CdpPipe => {
         use crate::backend::cdp::{CdpBrowser, pipe::PipeTransport};
-        let flags = chrome_flags_with(eff.headless, &eff.args, eff.ignore_default_args.as_ref());
+        let mut args = eff.args.clone();
+        args.extend(proxy_flags);
+        let flags = chrome_flags_with(eff.headless, &args, eff.ignore_default_args.as_ref());
         let browser = match &eff.user_data_dir {
           Some(dir) => {
             CdpBrowser::<PipeTransport>::launch_with_flags_in_dir(
@@ -1013,7 +1033,9 @@ impl LaunchSpec {
       },
       BackendKind::CdpRaw => {
         use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
-        let flags = chrome_flags_with(eff.headless, &eff.args, eff.ignore_default_args.as_ref());
+        let mut args = eff.args.clone();
+        args.extend(proxy_flags);
+        let flags = chrome_flags_with(eff.headless, &args, eff.ignore_default_args.as_ref());
         let browser = match &eff.user_data_dir {
           Some(dir) => {
             Box::pin(CdpBrowser::<WsTransport>::launch_with_flags_in_dir(
@@ -1036,7 +1058,8 @@ impl LaunchSpec {
           env: eff.env.clone(),
           user_data_dir: eff.user_data_dir.as_ref().map(std::path::PathBuf::from),
           extra_args: eff.args.clone(),
-          ..LaunchConfig::default()
+          proxy_server: eff.proxy.as_ref().map(|p| p.server.clone()),
+          proxy_bypass_list: eff.proxy.as_ref().and_then(|p| p.bypass.clone()),
         };
         AnyBrowser::WebKit(Box::pin(WebKitBrowser::launch(&config)).await?)
       },
@@ -1047,12 +1070,15 @@ impl LaunchSpec {
         if eff.headless {
           flags.push("--headless".into());
         }
+        // Firefox takes no proxy switch: the proxy is a session capability,
+        // so it goes into `session.new` rather than onto the command line.
         AnyBrowser::Bidi(
           Box::pin(BidiBrowser::launch_with_flags(
             &eff.chromium_path,
             &flags,
             &eff.env,
             eff.user_data_dir.as_deref().map(std::path::Path::new),
+            eff.proxy.as_ref(),
           ))
           .await?,
         )

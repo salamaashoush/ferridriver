@@ -2421,12 +2421,13 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> Result<La
   let (backend, kind) = browser_config.resolve_kinds();
 
   let mut args = browser_config.args.clone();
-  // Proxy launch args.
+  // Proxy launch args, spelled the way this backend's binary takes them.
   if let Some(ref proxy) = browser_config.use_options.proxy {
-    args.push(format!("--proxy-server={}", proxy.server));
-    if let Some(ref bypass) = proxy.bypass {
-      args.push(format!("--proxy-bypass-list={bypass}"));
-    }
+    args.extend(ferridriver_config::browser::proxy_launch_flags(
+      &proxy.server,
+      proxy.bypass.as_deref(),
+      backend,
+    ));
   }
   // Ignore HTTPS errors launch arg.
   if browser_config.use_options.ignore_https_errors {

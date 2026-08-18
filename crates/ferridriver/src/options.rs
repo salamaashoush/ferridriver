@@ -2211,6 +2211,41 @@ pub struct ProxyConfig {
   pub password: Option<String>,
 }
 
+impl ProxyConfig {
+  /// Command-line flags pointing `backend`'s binary at this proxy.
+  ///
+  /// The spelling is per engine, exactly as Playwright spells it for the same
+  /// binaries: Chromium and the GTK/WPE `MiniBrowser` disagree on the switch
+  /// name, and a switch a browser does not know is accepted and ignored — a
+  /// proxy that silently does nothing rather than an error.
+  ///
+  /// Credentials are not a launch flag in any engine; they are answered on the
+  /// authentication challenge, so they are not lowered here.
+  #[must_use]
+  pub fn launch_flags(&self, backend: crate::backend::BackendKind) -> Vec<String> {
+    let bypass = self.bypass.as_deref();
+
+    if backend != crate::backend::BackendKind::WebKit {
+      let mut flags = vec![format!("--proxy-server={}", self.server)];
+      if let Some(bypass) = bypass {
+        flags.push(format!("--proxy-bypass-list={bypass}"));
+      }
+      return flags;
+    }
+
+    let mut flags = vec![format!("--proxy={}", self.server)];
+    if let Some(bypass) = bypass {
+      if cfg!(target_os = "linux") {
+        // The GTK/WPE build takes one host per flag, not a list.
+        flags.extend(bypass.split(',').map(|host| format!("--ignore-host={}", host.trim())));
+      } else {
+        flags.push(format!("--proxy-bypass-list={bypass}"));
+      }
+    }
+    flags
+  }
+}
+
 /// `recordHar` options bag. `recordHar` shape —
 /// types.d.ts:22441.
 #[derive(Debug, Clone)]
@@ -3111,5 +3146,84 @@ mod storage_state_tests {
     assert_eq!(parsed.origins[0].local_storage[0].name, "k");
     // The same value is accepted as inline hydration input.
     assert!(matches!(StorageStateInput::Inline(json), StorageStateInput::Inline(_)));
+  }
+}
+
+#[cfg(test)]
+mod proxy_lowering_tests {
+  use super::ProxyConfig;
+  use crate::backend::BackendKind;
+
+  fn proxy() -> ProxyConfig {
+    ProxyConfig {
+      server: "http://127.0.0.1:3052".to_string(),
+      bypass: Some("127.0.0.1,localhost".to_string()),
+      username: None,
+      password: None,
+    }
+  }
+
+  #[test]
+  fn chromium_takes_proxy_server() {
+    for backend in [BackendKind::CdpPipe, BackendKind::CdpRaw] {
+      let flags = proxy().launch_flags(backend);
+      assert!(
+        flags.contains(&"--proxy-server=http://127.0.0.1:3052".to_string()),
+        "{backend:?}"
+      );
+      assert!(
+        flags.contains(&"--proxy-bypass-list=127.0.0.1,localhost".to_string()),
+        "{backend:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn webkit_takes_a_different_switch_entirely() {
+    let flags = proxy().launch_flags(BackendKind::WebKit);
+
+    // WebKit accepts `--proxy-server` and ignores it, so the wrong spelling is
+    // a proxy that silently does nothing rather than a launch failure.
+    assert!(flags.contains(&"--proxy=http://127.0.0.1:3052".to_string()));
+    assert!(!flags.iter().any(|flag| flag.starts_with("--proxy-server=")));
+  }
+
+  #[test]
+  fn webkit_bypass_is_spelled_per_platform() {
+    let flags = proxy().launch_flags(BackendKind::WebKit);
+
+    if cfg!(target_os = "linux") {
+      assert!(flags.contains(&"--ignore-host=127.0.0.1".to_string()));
+      assert!(flags.contains(&"--ignore-host=localhost".to_string()));
+    } else {
+      assert!(flags.contains(&"--proxy-bypass-list=127.0.0.1,localhost".to_string()));
+    }
+  }
+
+  #[test]
+  fn credentials_are_never_a_launch_flag() {
+    let with_credentials = ProxyConfig {
+      username: Some("user".to_string()),
+      password: Some("secret".to_string()),
+      ..proxy()
+    };
+
+    // They are answered on the auth challenge; a password on a command line
+    // would be readable in every process listing on the machine.
+    for flag in with_credentials.launch_flags(BackendKind::CdpPipe) {
+      assert!(!flag.contains("secret"), "credential leaked into {flag}");
+      assert!(!flag.contains("user"), "credential leaked into {flag}");
+    }
+  }
+
+  #[test]
+  fn a_proxy_without_bypass_lowers_to_one_flag() {
+    let no_bypass = ProxyConfig {
+      bypass: None,
+      ..proxy()
+    };
+
+    assert_eq!(no_bypass.launch_flags(BackendKind::WebKit).len(), 1);
+    assert_eq!(no_bypass.launch_flags(BackendKind::CdpRaw).len(), 1);
   }
 }
