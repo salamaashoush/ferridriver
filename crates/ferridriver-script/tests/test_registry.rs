@@ -317,11 +317,23 @@ describe.each([{ backend: 'cdp' }, { backend: 'webkit' }])('on $backend', (row) 
   assert_eq!(c.tests[3].suite, Some(2));
 }
 
+/// A modifier at FILE scope is a static annotation on the file, not an
+/// error: Playwright's `_modifier` takes the collecting branch whenever
+/// a file suite is loading and pushes onto `_staticAnnotations`
+/// (`common/testType.ts:236`). A bare `test.skip()` there skips every
+/// test in the file, and a falsy condition registers nothing.
 #[tokio::test(flavor = "multi_thread")]
-async fn runtime_modifiers_outside_a_test_are_hard_errors() {
+async fn file_scope_modifiers_annotate_the_file() {
   let dir = tempfile::tempdir().expect("tempdir");
-  let entry = dir.path().join("bad.test.ts");
-  std::fs::write(&entry, "import { test } from '@ferridriver/test';\ntest.skip();\n").expect("write entry");
+  let entry = dir.path().join("annotated.test.ts");
+  std::fs::write(
+    &entry,
+    "import { test } from '@ferridriver/test';\n\
+     test.skip();\n\
+     test.slow(false, 'not this one');\n\
+     test('a', async () => {});\n",
+  )
+  .expect("write entry");
 
   let bundle = bundle_and_compile_named(&[entry], dir.path(), "ferridriver-tests.js")
     .await
@@ -330,14 +342,12 @@ async fn runtime_modifiers_outside_a_test_are_hard_errors() {
   let session = Session::create(ScriptEngineConfig::default(), &context)
     .await
     .expect("session");
-  let err = eval_bundle(&session.vm_handle(), &bundle)
+  eval_bundle(&session.vm_handle(), &bundle)
     .await
-    .expect_err("top-level runtime skip must fail");
-  assert!(
-    err.message.contains("can only be called while a test is running"),
-    "unexpected error: {}",
-    err.message
-  );
+    .expect("a file-scope modifier is not an error");
+  let c = collect_tests(&session.vm_handle()).await.expect("collect");
+  let kinds: Vec<&str> = c.file_annotations.iter().map(|a| a.annotation.kind.as_str()).collect();
+  assert_eq!(kinds, ["skip"], "only the truthy modifier annotates: {kinds:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -153,6 +153,16 @@ export type FixtureValue<T, TFixtures> =
       { scope?: FixtureScope; auto?: boolean; option?: boolean },
     ];
 
+/// The callback form of `test.skip` / `fixme` / `fail` / `slow`, which
+/// only has a meaning at file or describe scope: it is kept and
+/// evaluated per test with THAT test's fixtures, so one call can decide
+/// a whole group.
+///
+/// Declared returning `boolean` because that is Playwright's own
+/// declaration (`ConditionBody`, `types/test.d.ts:2729`); both runtimes
+/// await the result, so an async callback works and simply is not typed.
+export type ConditionBody<TFixtures> = (fixtures: TFixtures) => boolean;
+
 export interface TestType<TFixtures = TestFixtures> {
   (title: string, body: TestBody<TFixtures>): void;
   (title: string, details: TestDetails, body: TestBody<TFixtures>): void;
@@ -161,21 +171,25 @@ export interface TestType<TFixtures = TestFixtures> {
   skip(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
   skip(): void;
   skip(condition: boolean, description?: string): void;
+  skip(callback: ConditionBody<TFixtures>, description?: string): void;
 
   fixme(title: string, body: TestBody<TFixtures>): void;
   fixme(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
   fixme(): void;
   fixme(condition: boolean, description?: string): void;
+  fixme(callback: ConditionBody<TFixtures>, description?: string): void;
 
   fail(title: string, body: TestBody<TFixtures>): void;
   fail(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
   fail(): void;
   fail(condition: boolean, description?: string): void;
+  fail(callback: ConditionBody<TFixtures>, description?: string): void;
 
   slow(title: string, body: TestBody<TFixtures>): void;
   slow(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
   slow(): void;
   slow(condition: boolean, description?: string): void;
+  slow(callback: ConditionBody<TFixtures>, description?: string): void;
 
   only(title: string, body: TestBody<TFixtures>): void;
   only(title: string, details: TestDetails, body: TestBody<TFixtures>): void;

@@ -430,7 +430,12 @@ impl BrowserInstaller {
     let entries = std::fs::read_dir(&self.cache_dir).ok()?;
     let mut candidates: Vec<_> = entries
       .filter_map(std::result::Result::ok)
-      .filter(|e| e.file_name().to_string_lossy().starts_with("chromium-"))
+      // `chromium-headless-shell-*` also starts with `chromium-`, and it is a
+      // different binary with a different layout.
+      .filter(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        name.starts_with("chromium-") && !name.starts_with("chromium-headless-shell-")
+      })
       .collect();
     // Sort by name descending (newest version first)
     candidates.sort_by_key(|b| std::cmp::Reverse(b.file_name()));

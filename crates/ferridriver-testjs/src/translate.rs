@@ -97,7 +97,12 @@ const DEFAULT_REQUESTS: &[&str] = &["browser", "context", "page", "test_info", "
 /// body's and each-hooks' destructured names plus the transitive deps
 /// of every custom fixture involved. `None` anywhere ⇒ the
 /// conservative default (everything).
-fn fixture_requests(collected: &CollectedTests, test_idx: usize, hook_idxs: &[usize]) -> Vec<String> {
+fn fixture_requests(
+  collected: &CollectedTests,
+  test_idx: usize,
+  hook_idxs: &[usize],
+  modifier_idxs: &[usize],
+) -> Vec<String> {
   let test = &collected.tests[test_idx];
   let mut names: Vec<String> = Vec::new();
   let mut conservative = false;
@@ -114,6 +119,9 @@ fn fixture_requests(collected: &CollectedTests, test_idx: usize, hook_idxs: &[us
   add_requested(&test.requested, &mut conservative);
   for &h in hook_idxs {
     add_requested(&collected.hooks[h].requested, &mut conservative);
+  }
+  for &m in modifier_idxs {
+    add_requested(&collected.modifiers[m].requested, &mut conservative);
   }
   if conservative {
     return DEFAULT_REQUESTS.iter().map(|s| (*s).to_string()).collect();
@@ -239,12 +247,55 @@ fn hooks_for(
   (before, after)
 }
 
+/// Suite modifiers that apply to one test, outer scope first — the
+/// same ancestor walk [`hooks_for`] does, and with the same per-FILE
+/// rule for the root scope: a top-level `test.skip(cb)` in `a.test.ts`
+/// must not modify `b.test.ts`'s tests bundled alongside it.
+fn modifiers_for(
+  collected: &CollectedTests,
+  bundle: &CompiledBundle,
+  cwd: &Path,
+  test_file: &str,
+  suite: Option<usize>,
+) -> Vec<usize> {
+  let mut scopes: Vec<Option<usize>> = vec![None];
+  let mut idxs: Vec<usize> = Vec::new();
+  let mut cur = suite;
+  while let Some(i) = cur {
+    idxs.push(i);
+    cur = collected.suites[i].parent;
+  }
+  idxs.reverse();
+  scopes.extend(idxs.into_iter().map(Some));
+
+  let mut out: Vec<usize> = Vec::new();
+  for scope in &scopes {
+    for (m_idx, m) in collected.modifiers.iter().enumerate() {
+      if m.suite != *scope {
+        continue;
+      }
+      if scope.is_none() {
+        let declared_in = remap_file(bundle, cwd, m.line, m.col).map(|(f, _)| f);
+        if declared_in.as_deref() != Some(test_file) {
+          continue;
+        }
+      }
+      out.push(m_idx);
+    }
+  }
+  out
+}
+
 /// File-scope `test.use` bags + `describe.configure` for one file.
 struct FileScope {
   use_options: Option<serde_json::Value>,
   mode: Option<SuiteMode>,
   retries: Option<u32>,
   timeout_ms: Option<u64>,
+  /// `test.skip(true, 'reason')` written at file scope. Applies to
+  /// every test in the file, whatever the declaration order — the same
+  /// rule Playwright's file-suite `_staticAnnotations` has.
+  annotations: Vec<ferridriver_script::CollectedAnnotation>,
 }
 
 fn file_scope(collected: &CollectedTests, bundle: &CompiledBundle, cwd: &Path, file: &str) -> FileScope {
@@ -253,7 +304,13 @@ fn file_scope(collected: &CollectedTests, bundle: &CompiledBundle, cwd: &Path, f
     mode: None,
     retries: None,
     timeout_ms: None,
+    annotations: Vec::new(),
   };
+  for a in &collected.file_annotations {
+    if remap_file(bundle, cwd, a.line, a.col).map(|(f, _)| f).as_deref() == Some(file) {
+      out.annotations.push(a.annotation.clone());
+    }
+  }
   for u in &collected.file_use {
     if remap_file(bundle, cwd, u.line, u.col).map(|(f, _)| f).as_deref() == Some(file) {
       merge_bag(&mut out.use_options, &u.options);
@@ -300,6 +357,7 @@ struct TestFnParams {
   base_url: Option<String>,
   expected_status: ExpectedStatus,
   requests: Vec<String>,
+  modifiers: Vec<usize>,
   hooks_before: Vec<usize>,
   hooks_after: Vec<usize>,
 }
@@ -379,6 +437,7 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
     let p = Arc::clone(&p);
     let spec = RunTestSpec {
       test_idx: p.test_idx,
+      modifiers: p.modifiers.clone(),
       hooks_before: p.hooks_before.clone(),
       hooks_after: p.hooks_after.clone(),
       source_label: p.file.as_str().to_string(),
@@ -489,7 +548,12 @@ fn resolve_meta(cx: &PlanCx<'_>, chain: &SuiteChain, fscope: &FileScope, test_id
   }
   // Suite chain first (skip/fixme/only propagate), then the test's
   // own. Registration-time `fail` flips the expectation.
-  for a in chain.annotations.iter().chain(test.annotations.iter()) {
+  for a in fscope
+    .annotations
+    .iter()
+    .chain(chain.annotations.iter())
+    .chain(test.annotations.iter())
+  {
     if a.kind == "fail" {
       expected_status = ExpectedStatus::Fail;
       continue;
@@ -563,10 +627,12 @@ fn lower_test(
 
   let meta = resolve_meta(cx, &chain, &fscope, test_idx);
   let (hooks_before, hooks_after) = hooks_for(collected, bundle, cx.cwd, &file, test.suite);
+  let modifiers = modifiers_for(collected, bundle, cx.cwd, &file, test.suite);
   let requests = fixture_requests(
     collected,
     test_idx,
     &[hooks_before.as_slice(), hooks_after.as_slice()].concat(),
+    &modifiers,
   );
 
   let id = TestId {
@@ -604,6 +670,7 @@ fn lower_test(
     base_url: cx.config.base_url.clone(),
     expected_status: meta.expected_status,
     requests: requests.clone(),
+    modifiers,
     hooks_before,
     hooks_after,
   });

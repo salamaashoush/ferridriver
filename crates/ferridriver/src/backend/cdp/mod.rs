@@ -1086,6 +1086,7 @@ impl CdpBrowser<pipe::PipeTransport> {
     user_data_dir: &std::path::Path,
     env: &rustc_hash::FxHashMap<String, String>,
   ) -> Result<Self> {
+    crate::backend::ensure_user_data_dir(Some(&user_data_dir.to_string_lossy()))?;
     let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir, flags, false, env)?;
     let group = super::process::ChildGroup::recorded(child, Some(user_data_dir), false);
     Self::init(Arc::new(transport), Some(group), None).await
@@ -1140,6 +1141,7 @@ impl CdpBrowser<ws::WsTransport> {
     user_data_dir: &std::path::Path,
     env: &rustc_hash::FxHashMap<String, String>,
   ) -> Result<Self> {
+    crate::backend::ensure_user_data_dir(Some(&user_data_dir.to_string_lossy()))?;
     let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir, flags, false, env)).await?;
     let group = super::process::ChildGroup::recorded(child, Some(user_data_dir), false);
     Self::init(Arc::new(transport), Some(group), None).await

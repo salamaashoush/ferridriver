@@ -86,10 +86,13 @@ pub struct WebKitBrowser {
   /// PW `WebKit` protocol has no page-list RPC.
   pages: Arc<Mutex<Vec<WebKitPage>>>,
   /// Context every page lands in when the caller passes no explicit
-  /// `browserContextId`. PW `WebKit` non-persistent launches have no
-  /// implicit default context — `Playwright.createPage` without a
-  /// `browserContextId` fails with "Browser started with no default
-  /// context", so we mint one at launch.
+  /// `browserContextId`.
+  ///
+  /// This build has no implicit default context — it opens no startup
+  /// window (the launcher always passes `--no-startup-window`) and
+  /// `Playwright.createPage` without a `browserContextId` is refused
+  /// with "Browser started with no default context" — so one is minted
+  /// at launch, for a persistent profile as much as a throwaway one.
   default_context: Arc<str>,
   /// PW `WebKit` build revision (e.g. `"webkit-playwright/2272"`),
   /// derived from the binary path — a real build identifier, not a
@@ -145,8 +148,11 @@ impl WebKitBrowser {
     let root = conn.browser_session();
     root.send(protocol::PLAYWRIGHT_ENABLE, json!({})).await?;
 
-    // Mint the default context — PW WebKit non-persistent launches
-    // have no implicit one.
+    // Mint the default context. This build starts with none whether or
+    // not a profile was configured — it never opens a startup window
+    // (see the launcher) and `Playwright.createPage` without a
+    // `browserContextId` is refused with "Browser started with no
+    // default context".
     let ctx_resp = root
       .send(
         protocol::PLAYWRIGHT_CREATE_CONTEXT,

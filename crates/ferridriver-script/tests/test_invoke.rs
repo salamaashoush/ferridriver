@@ -95,10 +95,40 @@ fn world(title: &str) -> TestWorldData {
 fn spec(idx: usize) -> RunTestSpec {
   RunTestSpec {
     test_idx: idx,
+    modifiers: Vec::new(),
     hooks_before: Vec::new(),
     hooks_after: Vec::new(),
     source_label: "invoke.test.ts".to_string(),
   }
+}
+
+/// The spec for `title` with every suite modifier that applies to it,
+/// outer scope first — the ancestor walk `ferridriver-testjs`'
+/// `modifiers_for` does for a real run, minus the per-file filter (one
+/// file per harness).
+fn spec_with_modifiers(h: &Harness, title: &str) -> RunTestSpec {
+  let idx = title_index(&h.collected, title);
+  let mut scopes: Vec<Option<usize>> = vec![None];
+  let mut chain: Vec<usize> = Vec::new();
+  let mut cur = h.collected.tests[idx].suite;
+  while let Some(i) = cur {
+    chain.push(i);
+    cur = h.collected.suites[i].parent;
+  }
+  chain.reverse();
+  scopes.extend(chain.into_iter().map(Some));
+  let modifiers = scopes
+    .iter()
+    .flat_map(|scope| {
+      h.collected
+        .modifiers
+        .iter()
+        .enumerate()
+        .filter(move |(_, m)| m.suite == *scope)
+        .map(|(i, _)| i)
+    })
+    .collect();
+  RunTestSpec { modifiers, ..spec(idx) }
 }
 
 fn title_index(c: &CollectedTests, title: &str) -> usize {
@@ -719,4 +749,174 @@ t('asks for what it registered', async ({ deployment }) => {
   )
   .await
   .expect("a registered fixture resolves");
+}
+
+/// `test.skip(callback)` at describe scope: the callback is kept, then
+/// evaluated per test with THAT test's fixtures, and its truthy return
+/// skips the test. Playwright's `suite._modifiers`
+/// (`common/testType.ts:232`, evaluated at `worker/workerMain.ts:545`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_describe_scope_callback_modifier_skips_with_its_fixtures() {
+  let h = harness(
+    r"import { test } from '@ferridriver/test';
+
+test.describe('group', () => {
+  test.skip(({ browserName }) => browserName === 'chromium', 'chromium only');
+  test('is skipped', async () => { throw new Error('body must not run'); });
+});
+",
+  )
+  .await;
+  let bridge = Arc::new(MockBridge::default());
+  let err = run_test(
+    &h.session.vm_handle(),
+    spec_with_modifiers(&h, "is skipped"),
+    world("is skipped"),
+    bridge.clone(),
+  )
+  .await
+  .expect_err("the modifier must abort the test");
+  assert!(
+    err.message.contains(TEST_SKIP_SENTINEL),
+    "expected the skip sentinel, got: {}",
+    err.message
+  );
+  assert!(bridge.state(|s| s.skipped), "the bridge must be told it is a skip");
+}
+
+/// The same modifier whose callback answers false leaves the test alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_falsy_callback_modifier_runs_the_test() {
+  let h = harness(
+    r"import { test } from '@ferridriver/test';
+
+test.describe('group', () => {
+  test.skip(({ browserName }) => browserName === 'firefox', 'firefox only');
+  test('runs', async ({ browserName }) => {
+    if (browserName !== 'chromium') throw new Error('browserName: ' + browserName);
+  });
+});
+",
+  )
+  .await;
+  run_test(
+    &h.session.vm_handle(),
+    spec_with_modifiers(&h, "runs"),
+    world("runs"),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect("a false condition must not skip");
+}
+
+/// A modifier reaches the bridge for the non-aborting kinds too.
+#[tokio::test(flavor = "multi_thread")]
+async fn callback_modifiers_cover_fail_and_slow() {
+  let h = harness(
+    r"import { test } from '@ferridriver/test';
+
+test.describe('failing', () => {
+  test.fail(() => true, 'known bad');
+  test('expected to fail', async () => {});
+});
+
+test.describe('slow', () => {
+  test.slow(() => true);
+  test('is slow', async () => {});
+});
+",
+  )
+  .await;
+  let failing = Arc::new(MockBridge::default());
+  run_test(
+    &h.session.vm_handle(),
+    spec_with_modifiers(&h, "expected to fail"),
+    world("expected to fail"),
+    failing.clone(),
+  )
+  .await
+  .expect("fail does not abort the body");
+  assert!(failing.state(|s| s.expected_failure), "fail must flip the expectation");
+
+  let slow = Arc::new(MockBridge::default());
+  run_test(
+    &h.session.vm_handle(),
+    spec_with_modifiers(&h, "is slow"),
+    world("is slow"),
+    slow.clone(),
+  )
+  .await
+  .expect("slow does not abort the body");
+  assert!(slow.state(|s| s.slow), "slow must reach the bridge");
+}
+
+/// A callback inside a running test is refused with Playwright's own
+/// message: the fixtures it would read are already resolved by then, so
+/// accepting it would silently do nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_callback_modifier_inside_a_test_body_is_refused() {
+  let h = harness(
+    r"import { test } from '@ferridriver/test';
+
+test('uses a callback at the wrong scope', async () => {
+  test.skip(() => true, 'nope');
+});
+",
+  )
+  .await;
+  let err = run_test(
+    &h.session.vm_handle(),
+    spec(title_index(&h.collected, "uses a callback at the wrong scope")),
+    world("uses a callback at the wrong scope"),
+    Arc::new(MockBridge::default()),
+  )
+  .await
+  .expect_err("a callback is not valid inside a test body");
+  assert!(
+    err
+      .message
+      .contains("test.skip() with a function can only be called inside describe block"),
+    "expected Playwright's message, got: {}",
+    err.message
+  );
+}
+
+/// The static form at describe scope annotates the suite instead of
+/// throwing "can only be called while a test is running", and a falsy
+/// condition registers nothing at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_static_form_at_describe_scope_annotates_the_suite() {
+  let h = harness(
+    r"import { test } from '@ferridriver/test';
+
+test.describe('annotated', () => {
+  test.skip(true, 'not yet');
+  test('a', async () => {});
+});
+
+test.describe('untouched', () => {
+  test.skip(false, 'never');
+  test('b', async () => {});
+});
+",
+  )
+  .await;
+  let suite_of = |title: &str| {
+    let t = &h.collected.tests[title_index(&h.collected, title)];
+    t.suite
+      .map(|i| h.collected.suites[i].annotations.clone())
+      .unwrap_or_default()
+  };
+  let annotated = suite_of("a");
+  assert!(
+    annotated
+      .iter()
+      .any(|a| a.kind == "skip" && a.value.as_deref() == Some("not yet")),
+    "expected a skip annotation carrying its reason, got: {annotated:?}"
+  );
+  assert!(
+    suite_of("b").is_empty(),
+    "a falsy condition must leave no annotation: {:?}",
+    suite_of("b")
+  );
 }

@@ -183,6 +183,12 @@ pub struct TestWorldData {
 #[derive(Debug, Clone, Default)]
 pub struct RunTestSpec {
   pub test_idx: usize,
+  /// Suite modifiers (`test.skip(callback)` and friends) that apply to
+  /// this test, outer scope first. Evaluated BEFORE `hooks_before` —
+  /// Playwright orders them the same way ("Modifiers first, then
+  /// hooks", `worker/workerMain.ts:556`), because a modifier decides
+  /// whether the hooks should run at all.
+  pub modifiers: Vec<usize>,
   pub hooks_before: Vec<usize>,
   pub hooks_after: Vec<usize>,
   pub source_label: String,

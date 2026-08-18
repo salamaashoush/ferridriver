@@ -162,6 +162,7 @@ fn spec_for(collected: &CollectedTests, title: &str) -> RunTestSpec {
       .iter()
       .position(|t| t.title == title)
       .unwrap_or_else(|| panic!("no test titled `{title}`")),
+    modifiers: Vec::new(),
     hooks_before: Vec::new(),
     hooks_after: Vec::new(),
     source_label: "contributed.test.ts".to_string(),

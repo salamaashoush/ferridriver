@@ -58,17 +58,68 @@ pub fn setsid_pre_exec() -> impl FnMut() -> std::io::Result<()> + Send + Sync + 
 /// stream unconditionally for the same reason
 /// (`packages/utils/processLauncher.ts` — stderr piped into the
 /// `pw:browser` debug channel).
-pub fn drain_child_stderr(child: &mut tokio::process::Child) {
+pub fn drain_child_stderr(child: &mut tokio::process::Child) -> StderrTail {
+  let tail = StderrTail::default();
   let Some(stderr) = child.stderr.take() else {
-    return;
+    return tail;
   };
+  let sink = tail.clone();
   tokio::spawn(async move {
     use tokio::io::AsyncBufReadExt;
     let mut lines = tokio::io::BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
       tracing::debug!(target: "ferridriver::browser::stderr", "{line}");
+      sink.record(line);
     }
   });
+  tail
+}
+
+/// How many of the browser's most recent stderr lines to keep for error
+/// messages. Enough to carry a policy refusal or a crash banner, small
+/// enough that a chatty renderer cannot grow it without bound.
+const STDERR_TAIL_LINES: usize = 20;
+
+/// The tail of a browser child's stderr, captured while it is drained.
+///
+/// Draining is mandatory (see [`drain_child_stderr`]); keeping the tail is
+/// what lets a launch failure quote the browser's own explanation instead of
+/// reporting a bare timeout. Chrome refuses remote debugging under an
+/// enterprise `RemoteDebuggingAllowed=false` policy by printing one line and
+/// otherwise starting normally, which is invisible without this.
+#[derive(Clone, Default)]
+pub struct StderrTail(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+
+impl StderrTail {
+  /// Append one line, evicting the oldest once the window is full. A
+  /// poisoned lock drops the line rather than propagating: losing a
+  /// diagnostic must never take down a browser launch.
+  pub(crate) fn record(&self, line: String) {
+    if let Ok(mut buf) = self.0.lock() {
+      if buf.len() == STDERR_TAIL_LINES {
+        buf.pop_front();
+      }
+      buf.push_back(line);
+    }
+  }
+
+  /// The captured lines, oldest first. Empty when the child had no piped
+  /// stderr or has printed nothing yet.
+  #[must_use]
+  pub fn lines(&self) -> Vec<String> {
+    self.0.lock().map(|b| b.iter().cloned().collect()).unwrap_or_default()
+  }
+
+  /// The tail rendered for an error message, or `None` when nothing was
+  /// captured — so a caller never appends an empty "stderr:" section.
+  #[must_use]
+  pub fn as_error_context(&self) -> Option<String> {
+    let lines = self.lines();
+    if lines.is_empty() {
+      return None;
+    }
+    Some(format!("browser stderr:\n  {}", lines.join("\n  ")))
+  }
 }
 
 /// Send `SIGKILL` to every process in the given pid's process group.
@@ -614,6 +665,33 @@ pub fn sweep_stale_browsers() -> usize {
 
 #[cfg(test)]
 mod tests {
+  use super::{STDERR_TAIL_LINES, StderrTail};
+
+  /// The tail exists so a launch failure can quote the browser. An empty
+  /// tail must stay silent rather than render an empty section.
+  #[test]
+  fn empty_stderr_tail_contributes_no_error_context() {
+    assert!(StderrTail::default().as_error_context().is_none());
+  }
+
+  /// A chatty renderer must not grow the buffer without bound, and the
+  /// lines that survive must be the MOST RECENT ones — a policy refusal is
+  /// printed at startup but a crash banner is printed last.
+  #[test]
+  fn stderr_tail_keeps_the_last_lines_only() {
+    let tail = StderrTail::default();
+    for n in 0..(STDERR_TAIL_LINES * 3) {
+      tail.record(format!("line {n}"));
+    }
+    let lines = tail.lines();
+    assert_eq!(lines.len(), STDERR_TAIL_LINES);
+    assert_eq!(lines.last().map(String::as_str), Some("line 59"));
+    assert_eq!(lines.first().map(String::as_str), Some("line 40"));
+    let context = tail.as_error_context().expect("context");
+    assert!(context.starts_with("browser stderr:"));
+    assert!(context.contains("line 59"));
+  }
+
   use super::*;
 
   /// A pid that has exited and been reaped, so `process_is_live` is

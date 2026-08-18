@@ -2034,3 +2034,38 @@ impl AnyElement {
     element_dispatch!(self, screenshot(format))
   }
 }
+
+/// Create a configured profile directory before the browser is told to
+/// use it.
+///
+/// Chromium creates a missing `--user-data-dir` itself; the others do
+/// not. Playwright levels this and says why: "Firefox bails if the
+/// profile directory does not exist, Chrome creates it. We ensure
+/// consistent behavior here." (`server/browserType.ts:165-169`, with
+/// `mode: 0o700`).
+pub(crate) fn ensure_user_data_dir(dir: Option<&str>) -> crate::error::Result<()> {
+  let Some(dir) = dir else {
+    return Ok(());
+  };
+  let path = std::path::Path::new(dir);
+  if path.is_dir() {
+    return Ok(());
+  }
+  std::fs::create_dir_all(path).map_err(|e| {
+    crate::error::FerriError::backend(format!(
+      "could not create the configured user data directory `{dir}`: {e}"
+    ))
+  })?;
+  // The profile holds cookies and credentials, so it is the owner's
+  // alone — the mode Playwright sets for the same reason.
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+      crate::error::FerriError::backend(format!(
+        "could not restrict the user data directory `{dir}` to its owner: {e}"
+      ))
+    })?;
+  }
+  Ok(())
+}

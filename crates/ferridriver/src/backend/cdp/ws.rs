@@ -117,10 +117,10 @@ impl WsTransport {
       .map_err(|e| FerriError::Backend(format!("Chrome launch: {e}")))?;
     // Track before the port-file wait + websocket connect below.
     crate::backend::process::track_spawned(child.id().unwrap_or(0), Some(user_data_dir), owns_user_data_dir);
-    crate::backend::process::drain_child_stderr(&mut child);
+    let stderr_tail = crate::backend::process::drain_child_stderr(&mut child);
 
     let port_file = user_data_dir.join("DevToolsActivePort");
-    let ws_url = discover_ws_url(&port_file, &mut child).await?;
+    let ws_url = discover_ws_url(&port_file, &mut child, chromium_path, &stderr_tail).await?;
 
     let transport = Box::pin(Self::connect(&ws_url)).await?;
     Ok((transport, child))
@@ -220,11 +220,23 @@ impl super::transport::CdpTransport for WsTransport {
   }
 }
 
-async fn discover_ws_url(port_file: &Path, child: &mut tokio::process::Child) -> Result<String> {
+async fn discover_ws_url(
+  port_file: &Path,
+  child: &mut tokio::process::Child,
+  chromium_path: &str,
+  stderr_tail: &crate::backend::process::StderrTail,
+) -> Result<String> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
   loop {
     if tokio::time::Instant::now() >= deadline {
-      return Err(FerriError::timeout("waiting for DevToolsActivePort", 10_000));
+      return Err(FerriError::Backend(launch_failure_detail(
+        &format!(
+          "timed out after 10000ms waiting for {} to write {}",
+          chromium_path,
+          port_file.display()
+        ),
+        stderr_tail,
+      )));
     }
     if let Ok(contents) = tokio::fs::read_to_string(port_file).await {
       let lines: Vec<&str> = contents.lines().collect();
@@ -235,10 +247,73 @@ async fn discover_ws_url(port_file: &Path, child: &mut tokio::process::Child) ->
       }
     }
     if let Ok(Some(status)) = child.try_wait() {
-      return Err(FerriError::Backend(format!(
-        "Chrome exited with status {status} before providing DevToolsActivePort"
+      return Err(FerriError::Backend(launch_failure_detail(
+        &format!(
+          "{chromium_path} exited with status {status} before writing {}",
+          port_file.display()
+        ),
+        stderr_tail,
       )));
     }
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  }
+}
+
+/// A launch failure with everything needed to act on it: what we were
+/// waiting for, whatever the browser said, and — when the message is the
+/// signature of an enterprise policy — the way out.
+fn launch_failure_detail(what: &str, stderr_tail: &crate::backend::process::StderrTail) -> String {
+  let mut msg = format!("Chrome launch: {what}");
+  let lines = stderr_tail.lines();
+  if let Some(context) = stderr_tail.as_error_context() {
+    msg.push('\n');
+    msg.push_str(&context);
+  }
+  if lines.iter().any(|l| l.contains("remote debugging is disallowed")) {
+    msg.push_str(
+      "\nThis browser is enrolled in cloud management and its policy forbids remote debugging, \
+       so it will never open the port. Point at an unenrolled build instead: run \
+       `ferridriver install chromium`, or set `executablePath` (per instance under \
+       `[mcp.browser.instances.<name>]`) or the CHROMIUM_PATH environment variable.",
+    );
+  }
+  msg
+}
+
+#[cfg(test)]
+mod tests {
+  use super::launch_failure_detail;
+  use crate::backend::process::StderrTail;
+
+  /// The whole point of capturing stderr: an enrolled Chrome refuses
+  /// remote debugging with one line and otherwise starts normally, so the
+  /// timeout alone tells the operator nothing about what to do next.
+  #[test]
+  fn a_policy_refusal_is_quoted_and_answered() {
+    let tail = StderrTail::default();
+    tail.record("DevTools remote debugging is disallowed by the system admin.".to_string());
+
+    let msg = launch_failure_detail("timed out after 10000ms", &tail);
+    assert!(
+      msg.contains("disallowed by the system admin"),
+      "must quote the browser: {msg}"
+    );
+    assert!(
+      msg.contains("ferridriver install chromium"),
+      "must name the way out: {msg}"
+    );
+    assert!(msg.contains("executablePath"), "must name the config key: {msg}");
+  }
+
+  /// An ordinary failure must not be dressed up as a policy problem.
+  #[test]
+  fn an_unexplained_failure_gets_no_policy_advice() {
+    let msg = launch_failure_detail("exited with status 1", &StderrTail::default());
+    assert!(msg.contains("exited with status 1"));
+    assert!(
+      !msg.contains("install chromium"),
+      "no policy hint without the signature: {msg}"
+    );
+    assert!(!msg.contains("browser stderr:"), "no empty stderr section: {msg}");
   }
 }

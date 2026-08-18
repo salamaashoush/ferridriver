@@ -2213,7 +2213,62 @@ pub fn detect_chromium_headless_shell() -> Option<String> {
   None
 }
 
+/// Chrome for Testing / Chromium builds under a browser cache directory,
+/// newest first. Covers every layout Chrome for Testing has shipped: the
+/// per-arch `chrome-mac-arm64` / `chrome-mac-x64` bundles it uses now, and
+/// the older `chrome-mac/Chromium.app` that Playwright caches still carry.
+fn cached_chromium_in(cache: &std::path::Path) -> Option<String> {
+  const LAYOUTS: [&str; 6] = [
+    "chrome-linux64/chrome",
+    "chrome-linux/chrome",
+    "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+    "chrome-win64/chrome.exe",
+  ];
+
+  let entries = std::fs::read_dir(cache).ok()?;
+  let mut candidates: Vec<_> = entries
+    .filter_map(std::result::Result::ok)
+    .filter(|e| {
+      let name = e.file_name().to_string_lossy().into_owned();
+      name.starts_with("chromium-") && !name.starts_with("chromium-headless-shell-")
+    })
+    .collect();
+  candidates.sort_by_key(|b| std::cmp::Reverse(b.file_name())); // newest first
+
+  for entry in candidates {
+    for layout in LAYOUTS {
+      let exe = entry.path().join(layout);
+      if exe.exists() {
+        return Some(exe.to_string_lossy().to_string());
+      }
+    }
+  }
+  None
+}
+
+/// Playwright's browser cache, following Playwright's own registry logic:
+/// `PLAYWRIGHT_BROWSERS_PATH`, then `XDG_CACHE_HOME`, then `~/.cache`.
+fn playwright_cache_dir() -> Option<std::path::PathBuf> {
+  if let Ok(p) = std::env::var("PLAYWRIGHT_BROWSERS_PATH") {
+    return Some(std::path::PathBuf::from(p));
+  }
+  std::env::var("XDG_CACHE_HOME")
+    .ok()
+    .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.cache")))
+    .map(|c| std::path::PathBuf::from(c).join("ms-playwright"))
+}
+
 /// Detect Chrome/Chromium binary on the system.
+///
+/// Automation-capable builds win over the platform's installed browser, and
+/// not merely because they are better tested: a Chrome enrolled in cloud
+/// management can carry a `RemoteDebuggingAllowed=false` policy, under which
+/// it starts normally, refuses to open the debugging port, and never writes
+/// `DevToolsActivePort` — indistinguishable from a hang. Chrome for Testing
+/// and Chromium builds are never enrolled. Both launchers here always pass
+/// their own `--user-data-dir`, so preferring one costs no profile.
 #[must_use]
 pub fn detect_chromium() -> String {
   if let Ok(p) = std::env::var("CHROMIUM_PATH")
@@ -2222,34 +2277,35 @@ pub fn detect_chromium() -> String {
     return p;
   }
 
-  // Check for Playwright's bundled Chrome first (most up-to-date, best tested).
-  // Follows Playwright's registry logic: PLAYWRIGHT_BROWSERS_PATH, then XDG_CACHE_HOME, then ~/.cache.
-  let pw_cache = if let Ok(p) = std::env::var("PLAYWRIGHT_BROWSERS_PATH") {
-    Some(std::path::PathBuf::from(p))
-  } else {
-    std::env::var("XDG_CACHE_HOME")
-      .ok()
-      .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.cache")))
-      .map(|c| std::path::PathBuf::from(c).join("ms-playwright"))
-  };
-  if let Some(pw_cache) = pw_cache
+  // ferridriver's own `install chromium` download.
+  if let Some(p) = crate::install::BrowserInstaller::new().find_installed_chromium() {
+    return p;
+  }
+
+  if let Some(pw_cache) = playwright_cache_dir()
     && pw_cache.is_dir()
+    && let Some(p) = cached_chromium_in(&pw_cache)
   {
-    // Find the latest chromium-* directory
-    if let Ok(entries) = std::fs::read_dir(&pw_cache) {
-      let mut candidates: Vec<_> = entries
-        .filter_map(std::result::Result::ok)
-        .filter(|e| e.file_name().to_string_lossy().starts_with("chromium-"))
-        .collect();
-      candidates.sort_by_key(|b| std::cmp::Reverse(b.file_name())); // newest first
-      for entry in candidates {
-        let chrome = entry.path().join("chrome-linux64/chrome");
-        if chrome.exists() {
-          return chrome.to_string_lossy().to_string();
-        }
-        let chrome_mac = entry.path().join("chrome-mac/Chromium.app/Contents/MacOS/Chromium");
-        if chrome_mac.exists() {
-          return chrome_mac.to_string_lossy().to_string();
+    return p;
+  }
+
+  // Chrome for Testing installed as a normal app, and plain Chromium — both
+  // unenrolled, so they outrank the managed bundles further down.
+  #[cfg(target_os = "macos")]
+  {
+    let unmanaged = [
+      "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+      "Chromium.app/Contents/MacOS/Chromium",
+    ];
+    for bundle in &unmanaged {
+      let sys = std::path::PathBuf::from("/Applications").join(bundle);
+      if sys.exists() {
+        return sys.to_string_lossy().to_string();
+      }
+      if let Ok(home) = std::env::var("HOME") {
+        let user = std::path::PathBuf::from(&home).join("Applications").join(bundle);
+        if user.exists() {
+          return user.to_string_lossy().to_string();
         }
       }
     }
@@ -2257,10 +2313,10 @@ pub fn detect_chromium() -> String {
 
   if let Ok(path_var) = std::env::var("PATH") {
     let names = [
-      "google-chrome-stable",
-      "google-chrome",
       "chromium-browser",
       "chromium",
+      "google-chrome-stable",
+      "google-chrome",
       "microsoft-edge",
       "chrome",
     ];
@@ -2276,10 +2332,11 @@ pub fn detect_chromium() -> String {
 
   #[cfg(target_os = "macos")]
   {
+    // Chromium and Chrome for Testing were already tried above; what is left
+    // is the platform's own browser, which may be enrolled.
     let bundles = [
       "Google Chrome.app/Contents/MacOS/Google Chrome",
       "Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-      "Chromium.app/Contents/MacOS/Chromium",
       "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
     ];
     for bundle in &bundles {
@@ -2299,11 +2356,11 @@ pub fn detect_chromium() -> String {
   #[cfg(target_os = "linux")]
   {
     let paths = [
-      "/usr/bin/google-chrome-stable",
-      "/usr/bin/google-chrome",
       "/usr/bin/chromium-browser",
       "/usr/bin/chromium",
       "/snap/bin/chromium",
+      "/usr/bin/google-chrome-stable",
+      "/usr/bin/google-chrome",
       "/usr/bin/microsoft-edge",
     ];
     for path in &paths {
@@ -2611,6 +2668,63 @@ fn find_playwright_chrome() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+  use super::cached_chromium_in;
+
+  /// Chrome for Testing has shipped several directory layouts and a cache
+  /// commonly holds more than one build; picking the wrong entry is how a
+  /// machine silently falls through to its enrolled system Chrome.
+  #[test]
+  fn cached_chromium_prefers_the_newest_build_and_knows_every_layout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    let old = root
+      .join("chromium-100")
+      .join("chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS");
+    std::fs::create_dir_all(&old).expect("mkdir");
+    std::fs::write(old.join("Google Chrome for Testing"), b"x").expect("write");
+
+    let new = root
+      .join("chromium-150")
+      .join("chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS");
+    std::fs::create_dir_all(&new).expect("mkdir");
+    std::fs::write(new.join("Google Chrome for Testing"), b"x").expect("write");
+
+    let found = cached_chromium_in(root).expect("a build");
+    assert!(found.contains("chromium-150"), "newest build must win, got {found}");
+  }
+
+  /// `chromium-headless-shell-*` also starts with `chromium-` but is a
+  /// different binary; treating it as a headed build yields a browser that
+  /// can never open a window.
+  #[test]
+  fn cached_chromium_ignores_the_headless_shell() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    // Sorts AFTER "chromium-150" descending, so a naive filter picks it first.
+    let shell = root
+      .join("chromium-headless-shell-999")
+      .join("chrome-headless-shell-mac-arm64");
+    std::fs::create_dir_all(&shell).expect("mkdir");
+    std::fs::write(shell.join("chrome-headless-shell"), b"x").expect("write");
+
+    assert!(
+      cached_chromium_in(root).is_none(),
+      "headless shell is not a headed build"
+    );
+
+    let headed = root.join("chromium-150").join("chrome-linux64");
+    std::fs::create_dir_all(&headed).expect("mkdir");
+    std::fs::write(headed.join("chrome"), b"x").expect("write");
+
+    let found = cached_chromium_in(root).expect("a build");
+    assert!(
+      found.contains("chromium-150"),
+      "must skip the shell and take the headed build, got {found}"
+    );
+  }
+
   use std::sync::Arc;
 
   use super::*;

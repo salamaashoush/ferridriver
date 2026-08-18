@@ -169,6 +169,30 @@ pub(crate) struct CurrentTest {
   pub(crate) pending: Vec<PendingFixture>,
 }
 
+/// A `test.skip(callback[, description])` registered at file or
+/// describe scope — Playwright's `suite._modifiers`
+/// (`common/testType.ts:232`). The callback is evaluated with the
+/// test's fixtures and its truthy return applies the modifier.
+pub(crate) struct ModifierReg {
+  /// `skip` | `fixme` | `fail` | `slow`
+  pub(crate) kind: String,
+  /// The suite it was declared in; `None` = file scope.
+  pub(crate) suite: Option<usize>,
+  pub(crate) func: Persistent<Function<'static>>,
+  pub(crate) description: Option<String>,
+  /// Fixture names destructured from the callback's parameter.
+  pub(crate) requested: Option<Vec<String>>,
+  pub(crate) line: u32,
+  pub(crate) col: u32,
+}
+
+/// A file-scope static annotation and where it was written.
+pub(crate) struct FileAnnotationReg {
+  pub(crate) annotation: CollectedAnnotation,
+  pub(crate) line: u32,
+  pub(crate) col: u32,
+}
+
 #[derive(Default)]
 pub(crate) struct TestRegistry {
   pub(crate) tests: Vec<TestReg>,
@@ -180,6 +204,14 @@ pub(crate) struct TestRegistry {
   /// set = parent set + the new registrations (later same-name entries
   /// shadow earlier ones).
   pub(crate) fixture_sets: Vec<Vec<usize>>,
+  pub(crate) modifiers: Vec<ModifierReg>,
+  /// `test.skip(true, 'reason')` at FILE scope — Playwright's
+  /// `suite._staticAnnotations` on the file suite, which applies to
+  /// every test in the file regardless of declaration order. The
+  /// describe-scope form lands on [`SuiteReg::annotations`] instead.
+  /// Carries its call site because one bundle holds many files, so the
+  /// glue has to remap it the way it remaps a root hook.
+  pub(crate) file_annotations: Vec<FileAnnotationReg>,
   pub(crate) file_use: Vec<FileUseReg>,
   pub(crate) file_configure: Vec<FileConfigureReg>,
   pub(crate) has_only: bool,
@@ -458,13 +490,21 @@ fn modifier_annotation(kind: &str, reason: Option<String>) -> CollectedAnnotatio
   }
 }
 
-/// Dual-mode `test.skip`/`test.fixme`/`test.fail`/`test.slow`.
+/// `test.skip`/`test.fixme`/`test.fail`/`test.slow`, in every form
+/// Playwright accepts (`common/testType.ts:217-248`). Which one applies
+/// is decided the way upstream decides it — by whether a file is still
+/// being collected, not by the argument shape alone:
 ///
-/// - `(title, [details,] body)` — registration form: annotate + register.
-/// - `()` / `(condition[, reason])` — runtime form: only valid while a
-///   test is running (wired by the invocation surface; without a
-///   current test this is a hard error, same as Playwright outside a
-///   test).
+/// - `(title, [details,] body)` — registers an annotated test.
+/// - collecting, `(callback[, description])` — a SUITE MODIFIER: the
+///   callback is kept and evaluated per test with that test's fixtures.
+/// - collecting, `([condition[, reason]])` — a static annotation on the
+///   enclosing describe, or on the file when there is none. A falsy
+///   condition registers nothing at all.
+/// - running, `([condition[, reason]])` — the runtime form.
+/// - running, `(callback, …)` — refused, with Playwright's message: the
+///   fixtures a callback would read are already resolved by then, so
+///   accepting it would silently do nothing.
 fn modifier_call<'js>(
   kind: &'static str,
   fixture_set: usize,
@@ -477,7 +517,72 @@ fn modifier_call<'js>(
     let reg = parse_registration(ctx, args)?;
     return push_test(ctx, fixture_set, &[modifier_annotation(kind, None)], reg, None, None);
   }
-  runtime_modifier(ctx, kind, args)
+
+  let collecting = with_test_registry(ctx, |r| r.current.is_none()).map_err(|e| rq(&e))?;
+  let callback = args.first().and_then(as_function);
+
+  if !collecting {
+    if callback.is_some() {
+      return Err(rq(&ScriptError::internal(format!(
+        "test.{kind}() with a function can only be called inside describe block"
+      ))));
+    }
+    return runtime_modifier(ctx, kind, args);
+  }
+
+  let reason = args
+    .iter()
+    .skip(1)
+    .find_map(|v| v.as_string().and_then(|s| s.to_string().ok()));
+
+  if let Some(func) = callback {
+    let (line, col) = capture_location(ctx);
+    let requested = destructured_keys(ctx, &func);
+    let saved = Persistent::save(ctx, func);
+    return with_test_registry(ctx, |r| {
+      r.modifiers.push(ModifierReg {
+        kind: kind.to_string(),
+        suite: r.describe_stack.last().copied(),
+        func: saved,
+        description: reason,
+        requested,
+        line,
+        col,
+      });
+    })
+    .map_err(|e| rq(&e));
+  }
+
+  // Static form. Playwright returns early on an explicitly falsy
+  // condition (`testType.ts:234-235`), so `test.skip(false)` leaves no
+  // annotation rather than an inert one a reporter would render.
+  if args.first().is_some_and(|v| !truthy(v)) {
+    return Ok(());
+  }
+  let annotation = modifier_annotation(kind, reason);
+  let (line, col) = capture_location(ctx);
+  with_test_registry(ctx, |r| match r.describe_stack.last().copied() {
+    Some(idx) => r.suites[idx].annotations.push(annotation),
+    None => r.file_annotations.push(FileAnnotationReg { annotation, line, col }),
+  })
+  .map_err(|e| rq(&e))
+}
+
+/// JS truthiness for a modifier condition. `test.skip(0)` and
+/// `test.skip('')` are falsy upstream, so a bare `as_bool` (which
+/// answers `None` for anything but a boolean) would turn them into
+/// unconditional skips.
+fn truthy(v: &Value<'_>) -> bool {
+  if let Some(b) = v.as_bool() {
+    return b;
+  }
+  if let Some(n) = v.as_number() {
+    return n != 0.0 && !n.is_nan();
+  }
+  if let Some(s) = v.as_string() {
+    return s.to_string().map_or(true, |s| !s.is_empty());
+  }
+  !(v.is_null() || v.is_undefined())
 }
 
 /// The running test's bridge, or the Playwright-parity hard error when
@@ -506,7 +611,9 @@ pub(crate) fn current_bridge(ctx: &Ctx<'_>, what: &str) -> rquickjs::Result<Arc<
 /// `fail` flips the expected outcome; `slow` triples the timeout.
 fn runtime_modifier(ctx: &Ctx<'_>, kind: &str, args: &[Value<'_>]) -> rquickjs::Result<()> {
   let bridge = current_bridge(ctx, &format!("test.{kind}()"))?;
-  let condition = args.first().and_then(Value::as_bool).unwrap_or(true);
+  // No argument at all is unconditional; otherwise JS falsiness decides,
+  // so `test.skip(0)` is a no-op rather than an unconditional skip.
+  let condition = args.first().is_none_or(truthy);
   let reason = args.iter().find_map(|v| v.as_string().and_then(|s| s.to_string().ok()));
   if !condition {
     return Ok(());
@@ -1833,7 +1940,7 @@ pub(crate) fn registrations_since(
 /// registration is not something a host can skip past.
 pub(crate) fn registration_count(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
   with_test_registry(ctx, |r| {
-    r.tests.len() + r.suites.len() + r.hooks.len() + r.fixtures.len()
+    r.tests.len() + r.suites.len() + r.hooks.len() + r.fixtures.len() + r.modifiers.len()
   })
 }
 
@@ -2184,6 +2291,13 @@ fn requested_per_function(reg: &TestRegistry, spec: &RunTestSpec) -> Vec<(String
       hook.requested.clone().unwrap_or_default(),
     ));
   }
+  for &m in &spec.modifiers {
+    let modifier = &reg.modifiers[m];
+    out.push((
+      format!("{} modifier", modifier.kind),
+      modifier.requested.clone().unwrap_or_default(),
+    ));
+  }
   out
 }
 
@@ -2201,6 +2315,9 @@ fn requested_names(reg: &TestRegistry, spec: &RunTestSpec) -> Vec<String> {
   add(&reg.tests[spec.test_idx].requested);
   for &h in spec.hooks_before.iter().chain(spec.hooks_after.iter()) {
     add(&reg.hooks[h].requested);
+  }
+  for &m in &spec.modifiers {
+    add(&reg.modifiers[m].requested);
   }
   names
 }
@@ -2267,6 +2384,20 @@ async fn drive_current_test(ctx: &Ctx<'_>, spec: &RunTestSpec, world: &TestWorld
 
   let mut first_err: Option<ScriptError> = None;
 
+  // Modifiers first, then hooks — Playwright's order
+  // (`worker/workerMain.ts:556`). A `skip` here must stop the test
+  // before its beforeEach hooks run, but afterEach still runs, so the
+  // failure travels the same road a hook failure does.
+  for &m in &spec.modifiers {
+    match apply_suite_modifier(ctx, m, &world_obj, &info_obj, &spec.source_label).await {
+      Ok(()) => {},
+      Err(e) => {
+        first_err = Some(e);
+        break;
+      },
+    }
+  }
+
   for &h in &spec.hooks_before {
     if let Err(e) = invoke_hook_fn(ctx, h, &world_obj, &info_obj, &spec.source_label).await {
       first_err = Some(e);
@@ -2301,6 +2432,60 @@ async fn drive_current_test(ctx: &Ctx<'_>, spec: &RunTestSpec, world: &TestWorld
   match first_err {
     Some(e) => Err(e),
     None => Ok(()),
+  }
+}
+
+/// Evaluate one suite modifier with the test's fixtures and apply it.
+///
+/// Playwright wraps the callback so its result becomes
+/// `testInfo._modifier(type, location, [!!result, description])`
+/// (`worker/workerMain.ts:545-548`) — the truthy return is the
+/// condition, and the description came from the registration. A
+/// `skip`/`fixme` therefore aborts the test exactly as the runtime form
+/// does, through the sentinel the worker recognises.
+async fn apply_suite_modifier<'js>(
+  ctx: &Ctx<'js>,
+  modifier_idx: usize,
+  world_obj: &Object<'js>,
+  info_obj: &Object<'js>,
+  source_label: &str,
+) -> Result<(), ScriptError> {
+  let (kind, description, func) = with_test_registry(ctx, |r| {
+    r.modifiers
+      .get(modifier_idx)
+      .map(|m| (m.kind.clone(), m.description.clone(), m.func.clone()))
+      .ok_or_else(|| ScriptError::internal(format!("modifier index {modifier_idx} out of range")))
+  })??;
+  let func = func.restore(ctx).map_err(se)?;
+  let called: rquickjs::Result<MaybePromise<'js>> = func.call((world_obj.clone(), info_obj.clone()));
+  let mp = called.catch(ctx).map_err(|e| caught_to_script_error(e, source_label))?;
+  let result: Value<'js> = mp
+    .into_future()
+    .await
+    .catch(ctx)
+    .map_err(|e| caught_to_script_error(e, source_label))?;
+  if !truthy(&result) {
+    return Ok(());
+  }
+  let bridge = with_test_registry(ctx, |r| r.current.as_ref().map(|c| Arc::clone(&c.bridge)))?
+    .ok_or_else(|| ScriptError::internal("no current test for a suite modifier".to_string()))?;
+  match kind.as_str() {
+    "skip" | "fixme" => {
+      bridge.set_skip(description.clone());
+      Err(ScriptError::internal(format!(
+        "{TEST_SKIP_SENTINEL}{}",
+        description.unwrap_or_default()
+      )))
+    },
+    "fail" => {
+      bridge.set_expected_failure();
+      Ok(())
+    },
+    "slow" => {
+      bridge.set_slow();
+      Ok(())
+    },
+    other => Err(ScriptError::internal(format!("unknown suite modifier `{other}`"))),
   }
 }
 
@@ -2412,6 +2597,22 @@ pub struct CollectedSuite {
   pub col: u32,
 }
 
+/// One `test.skip(callback)`-style suite modifier, as the glue sees it.
+/// The callback stays in the VM; this carries the index's metadata so
+/// the glue can decide which tests it applies to.
+#[derive(Debug, Clone)]
+pub struct CollectedModifier {
+  /// `skip` | `fixme` | `fail` | `slow`
+  pub kind: String,
+  /// Declaring suite; `None` = file scope, which is per-FILE and needs
+  /// the same source remap a root hook does.
+  pub suite: Option<usize>,
+  pub description: Option<String>,
+  pub requested: Option<Vec<String>>,
+  pub line: u32,
+  pub col: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct CollectedTestHook {
   pub kind: String,
@@ -2429,6 +2630,13 @@ pub struct CollectedFixture {
   /// `[value, { option: true }]` form — overridable via `use` bags.
   pub option: bool,
   pub deps: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CollectedFileAnnotation {
+  pub annotation: CollectedAnnotation,
+  pub line: u32,
+  pub col: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -2453,6 +2661,10 @@ pub struct CollectedTests {
   pub tests: Vec<CollectedTest>,
   pub suites: Vec<CollectedSuite>,
   pub hooks: Vec<CollectedTestHook>,
+  pub modifiers: Vec<CollectedModifier>,
+  /// Static annotations declared at FILE scope (`test.skip(true)` with
+  /// no enclosing describe). They apply to every test in that file.
+  pub file_annotations: Vec<CollectedFileAnnotation>,
   pub fixtures: Vec<CollectedFixture>,
   pub fixture_sets: Vec<Vec<usize>>,
   pub file_use: Vec<CollectedFileUse>,
@@ -2542,6 +2754,27 @@ pub async fn collect_tests(vm: &crate::vm::VmHandle) -> Result<CollectedTests, S
           requested: h.requested.clone(),
           line: h.line,
           col: h.col,
+        })
+        .collect(),
+      modifiers: r
+        .modifiers
+        .iter()
+        .map(|m| CollectedModifier {
+          kind: m.kind.clone(),
+          suite: m.suite,
+          description: m.description.clone(),
+          requested: m.requested.clone(),
+          line: m.line,
+          col: m.col,
+        })
+        .collect(),
+      file_annotations: r
+        .file_annotations
+        .iter()
+        .map(|a| CollectedFileAnnotation {
+          annotation: a.annotation.clone(),
+          line: a.line,
+          col: a.col,
         })
         .collect(),
       fixtures: fixture_table(r),
