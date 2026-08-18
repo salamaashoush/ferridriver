@@ -155,6 +155,10 @@ fn yaml_scalar(text: &str) -> String {
 
 #[async_trait::async_trait]
 impl Reporter for TapReporter {
+  fn prints_to_stdio(&self) -> bool {
+    true
+  }
+
   async fn on_event(&mut self, event: &ReporterEvent) {
     self.collector.observe(event);
     // A bail-out has to reach the consumer immediately: a run that dies

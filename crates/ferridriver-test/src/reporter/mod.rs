@@ -1,6 +1,7 @@
 //! Reporter system: event-driven, multiplexed, trait-based.
 
 pub mod allure;
+pub mod api;
 pub mod base;
 pub mod bdd;
 pub mod blob;
@@ -31,6 +32,10 @@ use crate::model::{StepCategory, StepLocation, TestAnnotation, TestId, TestOutco
 #[derive(Debug, Clone)]
 pub struct StepStartedEvent {
   pub test_id: TestId,
+  /// Project the attempt belongs to. Two projects run the same
+  /// `test_id` concurrently off one bus, so a consumer that keys live
+  /// state by test needs it to tell them apart.
+  pub project: String,
   pub step_id: String,
   pub parent_step_id: Option<String>,
   pub title: String,
@@ -44,6 +49,8 @@ pub struct StepStartedEvent {
 #[derive(Debug, Clone)]
 pub struct StepFinishedEvent {
   pub test_id: TestId,
+  /// See [`StepStartedEvent::project`].
+  pub project: String,
   pub step_id: String,
   pub title: String,
   pub category: StepCategory,
@@ -59,6 +66,8 @@ pub struct StepFinishedEvent {
 #[derive(Debug, Clone)]
 pub struct TestOutputEvent {
   pub test_id: TestId,
+  /// See [`StepStartedEvent::project`].
+  pub project: String,
   /// `true` for stderr, `false` for stdout.
   pub stderr: bool,
   pub text: String,
@@ -84,6 +93,19 @@ impl RunStatus {
       Self::Interrupted => "interrupted",
     }
   }
+
+  /// Parse back from [`Self::as_str`]. Anything unrecognised reads as
+  /// `passed` — the only statuses a producer emits are these four, and
+  /// inventing a failure from a typo would fail a green run.
+  #[must_use]
+  pub fn parse(s: &str) -> Self {
+    match s {
+      "failed" => Self::Failed,
+      "timedout" | "timedOut" => Self::TimedOut,
+      "interrupted" => Self::Interrupted,
+      _ => Self::Passed,
+    }
+  }
 }
 
 /// Events emitted during a test run.
@@ -98,12 +120,18 @@ pub enum ReporterEvent {
     /// Wall-clock start of the run — the `stats.startTime` every
     /// serialized report carries.
     start_time: std::time::SystemTime,
+    /// The run's `FullConfig` and its whole `Suite` tree — Playwright's
+    /// `onConfigure(config)` and `onBegin(suite)` arguments, resolved
+    /// once by the runner so every reporter reads the same tree.
+    preamble: Arc<api::RunPreamble>,
   },
   /// A worker has been spawned.
   WorkerStarted { worker_id: u32 },
   /// A test is about to execute.
   TestStarted {
     test_id: TestId,
+    /// See [`StepStartedEvent::project`].
+    project: String,
     attempt: u32,
     /// Worker running it. A UI that follows a live trace needs it: the
     /// in-progress trace files live in that worker's artifacts directory.
@@ -141,6 +169,22 @@ pub enum ReporterEvent {
   },
 }
 
+/// A reporter's edits to the corpus, from Playwright's
+/// `Reporter.preprocess({ config, suite, testRun })`. The reporter is
+/// handed the whole tree before the run and may drop cases from it or
+/// annotate them; `TestRun.skipSharding()` says the reporter has taken
+/// sharding over itself.
+#[derive(Debug, Default, Clone)]
+pub struct TestRunEdits {
+  /// Stable case ids to drop from the run (`TestRun.exclude`).
+  pub excluded: Vec<String>,
+  /// Annotations to apply before a case runs — `TestRun.skip`,
+  /// `fixme` and `fail`, keyed by stable case id.
+  pub annotations: Vec<(String, TestAnnotation)>,
+  /// `TestRun.skipSharding()`: the run's `--shard` is not applied.
+  pub skip_sharding: bool,
+}
+
 // ── Reporter Trait ──
 
 /// Trait that all reporters implement.
@@ -152,6 +196,35 @@ pub trait Reporter: Send + Sync {
   /// Called after the run to finalize output (write files, close streams).
   async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     Ok(())
+  }
+
+  /// Playwright's `Reporter.preprocess`: the reporter sees the corpus
+  /// before the run and may edit it. Unlike every other callback, an
+  /// error here is NOT swallowed — a half-applied edit must not reach
+  /// the workers.
+  ///
+  /// # Errors
+  ///
+  /// Whatever the reporter raised, which aborts the run.
+  async fn preprocess(&mut self, _preamble: &api::RunPreamble, _edits: &mut TestRunEdits) -> Result<(), String> {
+    Ok(())
+  }
+
+  /// How this reporter says the run ended, when it says so at all.
+  /// Playwright's `onEnd` may return `{ status }`, and its multiplexer
+  /// lets that overwrite the run's own verdict — the last reporter to
+  /// answer wins. Read once, after [`Self::finalize`].
+  fn status_override(&self) -> Option<RunStatus> {
+    None
+  }
+
+  /// Whether this reporter writes to the terminal. Playwright's
+  /// `printsToStdio()`: when nothing in a set does, a line (or dot,
+  /// under CI) reporter goes in FRONT of the set so the run is not
+  /// silent — first, so a reporter that stalls in its finalize cannot
+  /// swallow the output.
+  fn prints_to_stdio(&self) -> bool {
+    false
   }
 }
 
@@ -199,6 +272,35 @@ impl ReporterSet {
         tracing::error!("reporter finalize error: {e}");
       }
     }
+  }
+
+  /// Whether anything in the set writes to the terminal. Playwright's
+  /// multiplexer answers the same way — `some`, not `all`.
+  #[must_use]
+  pub fn prints_to_stdio(&self) -> bool {
+    self.reporters.iter().any(|r| r.prints_to_stdio())
+  }
+
+  /// Let every reporter edit the corpus before the run. Errors
+  /// propagate: Playwright's multiplexer deliberately does not swallow
+  /// a `preprocess` throw.
+  ///
+  /// # Errors
+  ///
+  /// The first reporter error, verbatim.
+  pub async fn preprocess(&mut self, preamble: &api::RunPreamble, edits: &mut TestRunEdits) -> Result<(), String> {
+    for reporter in &mut self.reporters {
+      reporter.preprocess(preamble, edits).await?;
+    }
+    Ok(())
+  }
+
+  /// The run status the reporters between them decided on, if any.
+  /// Playwright's multiplexer overwrites `result.status` with each
+  /// reporter's returned one in turn, so the last answer wins.
+  #[must_use]
+  pub fn status_override(&self) -> Option<RunStatus> {
+    self.reporters.iter().filter_map(|r| r.status_override()).next_back()
   }
 }
 
@@ -331,6 +433,53 @@ impl ReporterDriver {
   }
 }
 
+// ── Host-provided reporters ──
+
+/// Builds a reporter for a name the built-in factory does not answer
+/// to. Playwright's `loadReporter`: a reporter description that is not
+/// a built-in name is a module path, and the module's default export is
+/// the reporter class.
+///
+/// Registered before the run, so loading — resolving, bundling,
+/// compiling, instantiating — happens where it can fail loudly, and
+/// [`ReporterFactory::create`] itself is the synchronous hand-off
+/// [`create_reporters`] needs.
+pub trait ReporterFactory: Send + Sync {
+  /// The reporter `entry` names, or `None` when this factory does not
+  /// own the name.
+  fn create(
+    &self,
+    entry: &crate::config::ReporterConfig,
+    config: &crate::config::TestConfig,
+  ) -> Option<Box<dyn Reporter>>;
+}
+
+static REPORTER_FACTORY: std::sync::RwLock<Option<Arc<dyn ReporterFactory>>> = std::sync::RwLock::new(None);
+
+/// Install the factory consulted for every reporter name outside
+/// [`REPORTER_NAMES`]. Replaces any previous one.
+pub fn set_reporter_factory(factory: Arc<dyn ReporterFactory>) {
+  if let Ok(mut slot) = REPORTER_FACTORY.write() {
+    *slot = Some(factory);
+  }
+}
+
+/// The installed factory, if a host registered one.
+#[must_use]
+pub fn reporter_factory() -> Option<Arc<dyn ReporterFactory>> {
+  REPORTER_FACTORY.read().ok().and_then(|slot| slot.clone())
+}
+
+/// What a set of reporters is being built for. Playwright's `mode`:
+/// only a real run gets a fallback terminal reporter put in front —
+/// merging shards prints its own summary and must not gain one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReporterMode {
+  #[default]
+  Test,
+  Merge,
+}
+
 // ── Factory ──
 
 /// Unified reporter factory. Creates reporters from `names`, resolving
@@ -344,6 +493,15 @@ pub fn create_reporters_pub(
   config: &crate::config::TestConfig,
 ) -> ReporterSet {
   create_reporters(names, config)
+}
+
+/// [`create_reporters_pub`] for a caller that is not running tests.
+pub fn create_reporters_mode(
+  names: &[crate::config::ReporterConfig],
+  config: &crate::config::TestConfig,
+  mode: ReporterMode,
+) -> ReporterSet {
+  build_reporters(names, config, mode)
 }
 
 /// Every reporter name the factory answers to, with the aliases that
@@ -377,6 +535,14 @@ pub(crate) fn create_reporters(
   names: &[crate::config::ReporterConfig],
   config: &crate::config::TestConfig,
 ) -> ReporterSet {
+  build_reporters(names, config, ReporterMode::Test)
+}
+
+fn build_reporters(
+  names: &[crate::config::ReporterConfig],
+  config: &crate::config::TestConfig,
+  mode: ReporterMode,
+) -> ReporterSet {
   let output_dir = config.output_dir.as_path();
   let quiet = config.quiet;
   let report_slow_tests = config.report_slow_tests.clone();
@@ -384,6 +550,7 @@ pub(crate) fn create_reporters(
     return ReporterSet::default();
   }
 
+  let factory = reporter_factory();
   let mut reporters: Vec<Box<dyn Reporter>> = Vec::new();
   let mut has_terminal = false;
 
@@ -529,16 +696,31 @@ pub(crate) fn create_reporters(
       },
 
       other => {
-        tracing::warn!(
-          "unknown reporter '{other}' — known reporters: {}",
-          REPORTER_NAMES.join(", ")
-        );
+        if let Some(reporter) = factory.as_ref().and_then(|f| f.create(entry, config)) {
+          reporters.push(reporter);
+        } else {
+          tracing::warn!(
+            "unknown reporter '{other}' — known reporters: {}",
+            REPORTER_NAMES.join(", ")
+          );
+        }
       },
     }
   }
 
   if reporters.is_empty() {
     reporters.push(Box::new(terminal::TerminalReporter::new()));
+  } else if mode == ReporterMode::Test && !quiet && !reporters.iter().any(|r| r.prints_to_stdio()) {
+    // Playwright `runner/reporters.ts::createReporters`: nothing in the
+    // set writes to the terminal, so a run would be silent. Line off
+    // CI, dot on it, and FIRST — a reporter that stalls in `onEnd`
+    // must not be able to swallow the output.
+    let fallback: Box<dyn Reporter> = if std::env::var_os("CI").is_some() {
+      Box::new(dot::DotReporter::new().with_slow_tests_config(report_slow_tests.clone()))
+    } else {
+      Box::new(line::LineReporter::new().with_slow_tests_config(report_slow_tests.clone()))
+    };
+    reporters.insert(0, fallback);
   }
 
   // Two reporters drawing on the same terminal produce unreadable output,

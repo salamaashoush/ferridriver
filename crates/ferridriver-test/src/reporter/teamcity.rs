@@ -102,6 +102,10 @@ fn step_lines(steps: &[TestStep], depth: usize, out: &mut String) {
 
 #[async_trait::async_trait]
 impl Reporter for TeamCityReporter {
+  fn prints_to_stdio(&self) -> bool {
+    true
+  }
+
   async fn on_event(&mut self, event: &ReporterEvent) {
     self.collector.observe(event);
     match event {

@@ -111,6 +111,10 @@ impl Default for LineReporter {
 
 #[async_trait::async_trait]
 impl Reporter for LineReporter {
+  fn prints_to_stdio(&self) -> bool {
+    true
+  }
+
   async fn on_event(&mut self, event: &ReporterEvent) {
     self.collector.observe(event);
     let screen = self.screen;
@@ -246,6 +250,7 @@ mod tests {
         num_workers: 1,
         metadata: serde_json::Value::Null,
         start_time: std::time::SystemTime::UNIX_EPOCH,
+        preamble: std::sync::Arc::new(crate::reporter::api::RunPreamble::empty()),
       })
       .await;
     for event in &events {
@@ -269,6 +274,7 @@ mod tests {
   async fn the_status_line_counts_through_the_run() {
     let text = run(vec![
       ReporterEvent::TestStarted {
+        project: String::new(),
         test_id: id("charges"),
         attempt: 1,
         worker_id: 0,
@@ -277,6 +283,7 @@ mod tests {
         outcome: passing("charges"),
       },
       ReporterEvent::TestStarted {
+        project: String::new(),
         test_id: id("refunds"),
         attempt: 1,
         worker_id: 0,
@@ -296,6 +303,7 @@ mod tests {
   #[tokio::test]
   async fn a_retry_is_labelled_on_the_status_line() {
     let text = run(vec![ReporterEvent::TestStarted {
+      project: String::new(),
       test_id: id("charges"),
       attempt: 2,
       worker_id: 0,
@@ -338,11 +346,13 @@ mod tests {
   async fn streamed_output_is_printed_under_its_test() {
     let text = run(vec![
       ReporterEvent::TestOutput(Arc::new(TestOutputEvent {
+        project: String::new(),
         test_id: id("charges"),
         stderr: false,
         text: "talking to the gateway\n".into(),
       })),
       ReporterEvent::TestOutput(Arc::new(TestOutputEvent {
+        project: String::new(),
         test_id: id("charges"),
         stderr: false,
         text: "still going\n".into(),

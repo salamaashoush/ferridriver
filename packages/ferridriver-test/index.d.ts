@@ -1393,6 +1393,186 @@ export interface APIRequestContext {
 
 // The QuickJS environment provides Node-parity `Buffer` and the
 // web-platform text codecs (UTF-8 only) as globals.
+// ── Reporters ────────────────────────────────────────────────────────
+//
+// `reporter = [{ name = "./reporters/my-reporter.ts" }]` in
+// `ferridriver.toml` names a module whose DEFAULT EXPORT is a reporter
+// class; it is constructed with `new` and handed the entry's options
+// plus `configDir` and `outputDir`.
+//
+// There are two interfaces, and which one a class implements is decided
+// by `version()`: a class whose `version()` returns `'v2'` is a
+// `ReporterV2` and its `onBegin` takes the suite alone; anything else
+// is a `Reporter` and its `onBegin` takes the config first. A `Reporter`
+// never receives `onConfigure`.
+
+export interface ReporterTestError {
+  message?: string;
+  stack?: string;
+  location?: Location;
+  snippet?: string;
+}
+
+export interface ReporterAttachment {
+  name: string;
+  contentType: string;
+  path?: string;
+  body?: Buffer;
+}
+
+export interface ReporterFullProject {
+  id: string;
+  name: string;
+  testDir: string;
+  testMatch: string[];
+  testIgnore: string[];
+  outputDir: string;
+  timeout: number;
+  retries: number;
+  repeatEach: number;
+  metadata: Record<string, unknown>;
+}
+
+export interface ReporterFullConfig {
+  rootDir: string;
+  version: string;
+  workers: number;
+  projects: ReporterFullProject[];
+  forbidOnly: boolean;
+  fullyParallel: boolean;
+  globalSetup: string[];
+  globalTeardown: string[];
+  globalTimeout: number;
+  grep: string | null;
+  grepInvert: string | null;
+  maxFailures: number;
+  metadata: Record<string, unknown>;
+  preserveOutput: string;
+  quiet: boolean;
+  reporter: [string, Record<string, unknown>][];
+  shard: { current: number; total: number } | null;
+  updateSnapshots: string;
+}
+
+export interface ReporterTestStep {
+  title: string;
+  category: string;
+  duration: number;
+  startTime: Date;
+  error?: ReporterTestError;
+  location?: Location;
+  annotations: TestDetailsAnnotation[];
+  attachments: ReporterAttachment[];
+  steps: ReporterTestStep[];
+  parent?: ReporterTestStep;
+  titlePath(): string[];
+}
+
+export interface ReporterTestResult {
+  retry: number;
+  workerIndex: number;
+  parallelIndex: number;
+  duration: number;
+  startTime: Date;
+  status?: 'passed' | 'failed' | 'timedOut' | 'skipped' | 'flaky' | 'interrupted';
+  error?: ReporterTestError;
+  errors: ReporterTestError[];
+  stdout: string[];
+  stderr: string[];
+  attachments: ReporterAttachment[];
+  annotations: TestDetailsAnnotation[];
+  steps: ReporterTestStep[];
+}
+
+export interface ReporterTestCase {
+  id: string;
+  title: string;
+  type: 'test';
+  location: Location;
+  expectedStatus: 'passed' | 'failed';
+  timeout: number;
+  retries: number;
+  repeatEachIndex: number;
+  tags: string[];
+  annotations: TestDetailsAnnotation[];
+  results: ReporterTestResult[];
+  parent: ReporterSuite;
+  titlePath(): string[];
+  outcome(): 'skipped' | 'expected' | 'unexpected' | 'flaky';
+  ok(): boolean;
+}
+
+export interface ReporterSuite {
+  title: string;
+  type: 'root' | 'project' | 'file' | 'describe';
+  location?: Location;
+  suites: ReporterSuite[];
+  tests: ReporterTestCase[];
+  parent?: ReporterSuite;
+  titlePath(): string[];
+  entries(): (ReporterSuite | ReporterTestCase)[];
+  allTests(): ReporterTestCase[];
+  project(): ReporterFullProject | undefined;
+}
+
+export interface ReporterFullResult {
+  status: 'passed' | 'failed' | 'timedout' | 'interrupted';
+  startTime: Date;
+  duration: number;
+}
+
+/// The handle `preprocess` may edit the corpus through. Every method
+/// throws once `preprocess` has returned.
+export interface ReporterTestRun {
+  exclude(target: ReporterTestCase | ReporterSuite): void;
+  skip(target: ReporterTestCase | ReporterSuite, reason?: string): void;
+  fixme(target: ReporterTestCase | ReporterSuite, reason?: string): void;
+  fail(target: ReporterTestCase | ReporterSuite, reason?: string): void;
+  skipSharding(): void;
+}
+
+export interface ReporterPreprocessParams {
+  config: ReporterFullConfig;
+  suite: ReporterSuite;
+  testRun: ReporterTestRun;
+}
+
+/// The original reporter interface: `onBegin` takes the config, and
+/// `onConfigure` is never called.
+export interface Reporter {
+  preprocess?(params: ReporterPreprocessParams): void | Promise<void>;
+  onBegin?(config: ReporterFullConfig, suite: ReporterSuite): void;
+  onTestBegin?(test: ReporterTestCase, result: ReporterTestResult): void;
+  onStdOut?(chunk: string, test?: ReporterTestCase, result?: ReporterTestResult): void;
+  onStdErr?(chunk: string, test?: ReporterTestCase, result?: ReporterTestResult): void;
+  onTestEnd?(test: ReporterTestCase, result: ReporterTestResult): void;
+  onStepBegin?(test: ReporterTestCase, result: ReporterTestResult, step: ReporterTestStep): void;
+  onStepEnd?(test: ReporterTestCase, result: ReporterTestResult, step: ReporterTestStep): void;
+  onError?(error: ReporterTestError): void;
+  onEnd?(result: ReporterFullResult): void | Promise<{ status?: ReporterFullResult['status'] } | undefined | void>;
+  onExit?(): void | Promise<void>;
+  printsToStdio?(): boolean;
+}
+
+/// The current reporter interface. A class implementing it MUST declare
+/// `version(): 'v2'` — that is how the two are told apart.
+export interface ReporterV2 {
+  version(): 'v2';
+  onConfigure?(config: ReporterFullConfig): void;
+  preprocess?(params: ReporterPreprocessParams): void | Promise<void>;
+  onBegin?(suite: ReporterSuite): void;
+  onTestBegin?(test: ReporterTestCase, result: ReporterTestResult): void;
+  onStdOut?(chunk: string, test?: ReporterTestCase, result?: ReporterTestResult): void;
+  onStdErr?(chunk: string, test?: ReporterTestCase, result?: ReporterTestResult): void;
+  onTestEnd?(test: ReporterTestCase, result: ReporterTestResult): void;
+  onStepBegin?(test: ReporterTestCase, result: ReporterTestResult, step: ReporterTestStep): void;
+  onStepEnd?(test: ReporterTestCase, result: ReporterTestResult, step: ReporterTestStep): void;
+  onError?(error: ReporterTestError): void;
+  onEnd?(result: ReporterFullResult): void | Promise<{ status?: ReporterFullResult['status'] } | undefined | void>;
+  onExit?(): void | Promise<void>;
+  printsToStdio?(): boolean;
+}
+
 declare global {
   // BrowserType factories: secondary browsers independent of the
   // project's own backend. chromium accepts a transport override

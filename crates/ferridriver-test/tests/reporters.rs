@@ -74,6 +74,7 @@ async fn dot_reporter_emits_one_glyph_per_test() {
     num_workers: 1,
     metadata: serde_json::Value::Null,
     start_time: std::time::SystemTime::now(),
+    preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
   })
   .await;
   let id1 = make_id("t1");
@@ -112,6 +113,7 @@ async fn empty_reporter_swallows_every_event() {
     num_workers: 0,
     metadata: serde_json::Value::Null,
     start_time: std::time::SystemTime::now(),
+    preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
   })
   .await;
   r.finalize().await.unwrap();
@@ -154,9 +156,11 @@ async fn blob_reporter_writes_zip_and_merge_reads_back_events() {
     num_workers: 1,
     metadata: serde_json::json!({ "key": "value" }),
     start_time: std::time::SystemTime::now(),
+    preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
   })
   .await;
   r.on_event(&ReporterEvent::TestStarted {
+    project: String::new(),
     test_id: id.clone(),
     attempt: 1,
     worker_id: 0,
@@ -319,6 +323,7 @@ mod shapes {
       num_workers: 2,
       metadata: serde_json::json!({ "ci": "local" }),
       start_time: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+      preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
     }];
     all.extend(events);
     all.push(ReporterEvent::RunFinished {

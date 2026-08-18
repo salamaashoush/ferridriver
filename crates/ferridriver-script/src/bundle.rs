@@ -618,6 +618,20 @@ pub async fn compile_bundled_source(
 /// Link + evaluate the bundled step module from precompiled bytecode in
 /// the given session. Top-level `Given`/`When`/`Then` run here.
 pub async fn eval_bundle(vm: &crate::vm::VmHandle, bundle: &CompiledBundle) -> Result<(), ScriptError> {
+  eval_bundle_with(vm, bundle, |_, _| Ok(())).await
+}
+
+/// [`eval_bundle`], plus a look at the evaluated module's namespace.
+///
+/// A host that consumes a module's EXPORTS rather than its
+/// registrations — a reporter module, whose default export is the
+/// class to instantiate — needs the namespace, which `eval_bundle`
+/// drops. `after` runs on the VM loop with the namespace object, right
+/// after the module's top level has settled.
+pub async fn eval_bundle_with<F>(vm: &crate::vm::VmHandle, bundle: &CompiledBundle, after: F) -> Result<(), ScriptError>
+where
+  F: for<'js> FnOnce(&rquickjs::Ctx<'js>, rquickjs::Object<'js>) -> Result<(), ScriptError> + Send + 'static,
+{
   let bytecode = Arc::clone(&bundle.bytecode);
   let label = bundle.module_name.clone();
   let mapper = bundle.mapper();
@@ -634,16 +648,23 @@ pub async fn eval_bundle(vm: &crate::vm::VmHandle, bundle: &CompiledBundle) -> R
       Ok(m) => m,
       Err(e) => return Err(caught_to_script_error(e, &label)),
     };
-    let promise = match module.eval().catch(&ctx) {
-      Ok((_evaluated, p)) => p,
+    let (evaluated, promise) = match module.eval().catch(&ctx) {
+      Ok(pair) => pair,
       Err(e) => return Err(caught_to_script_error(e, &label)),
     };
     match promise.into_future::<()>().await.catch(&ctx) {
       // A bundle's top level may register tools of its own; the
       // callables are built from the registry, so they only exist after
       // a rebuild.
-      Ok(()) => crate::bindings::rebuild_tool_bindings(&ctx)
-        .map_err(|e| ScriptError::internal(format!("rebuild tool bindings: {e}"))),
+      Ok(()) => {
+        crate::bindings::rebuild_tool_bindings(&ctx)
+          .map_err(|e| ScriptError::internal(format!("rebuild tool bindings: {e}")))?;
+        let namespace = match evaluated.namespace().catch(&ctx) {
+          Ok(ns) => ns,
+          Err(e) => return Err(caught_to_script_error(e, &label)),
+        };
+        after(&ctx, namespace)
+      },
       Err(e) => Err(caught_to_script_error_in(&ctx, e, &label)),
     }
   })

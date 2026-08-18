@@ -181,6 +181,10 @@ impl GithubReporter {
 
 #[async_trait]
 impl Reporter for GithubReporter {
+  fn prints_to_stdio(&self) -> bool {
+    true
+  }
+
   async fn on_event(&mut self, event: &ReporterEvent) {
     if self.enabled {
       self.collector.observe(event);

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use ferridriver_config::FerridriverConfig;
 use ferridriver_test::config::ReporterConfig;
-use ferridriver_test::reporter::{ReporterEvent, RunStatus, blob, create_reporters_pub};
+use ferridriver_test::reporter::{ReporterEvent, RunStatus, blob};
 
 use crate::cli::MergeReportsArgs;
 
@@ -66,7 +66,11 @@ pub async fn run(config: FerridriverConfig, args: MergeReportsArgs) -> anyhow::R
     .iter()
     .any(|event| matches!(event, ReporterEvent::RunFinished { failed, .. } if *failed > 0));
 
-  let mut reporters = create_reporters_pub(&names, &test_config);
+  let mut reporters = ferridriver_test::reporter::create_reporters_mode(
+    &names,
+    &test_config,
+    ferridriver_test::reporter::ReporterMode::Merge,
+  );
   for event in &merged {
     reporters.emit(event).await;
   }
@@ -128,6 +132,7 @@ fn merge_boundaries(events: Vec<ReporterEvent>) -> Vec<ReporterEvent> {
   let mut status = RunStatus::Passed;
   let mut start_time: Option<std::time::SystemTime> = None;
   let mut metadata = serde_json::Value::Null;
+  let mut preamble = ferridriver_test::reporter::api::RunPreamble::empty();
 
   let mut body: Vec<ReporterEvent> = Vec::new();
   for event in events {
@@ -137,7 +142,11 @@ fn merge_boundaries(events: Vec<ReporterEvent>) -> Vec<ReporterEvent> {
         num_workers,
         metadata: meta,
         start_time: started,
+        preamble: shard,
       } => {
+        // Each shard's tree covers only the tests it ran; the merged
+        // report has to describe the whole suite.
+        preamble.merge_from((*shard).clone());
         total += total_tests;
         workers += num_workers;
         if metadata.is_null() {
@@ -183,6 +192,7 @@ fn merge_boundaries(events: Vec<ReporterEvent>) -> Vec<ReporterEvent> {
     num_workers: workers,
     metadata,
     start_time: start_time.unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+    preamble: std::sync::Arc::new(preamble),
   });
   out.extend(body);
   out.push(ReporterEvent::RunFinished {
@@ -207,6 +217,7 @@ mod tests {
       num_workers: workers,
       metadata: serde_json::Value::Null,
       start_time: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10),
+      preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
     }
   }
 

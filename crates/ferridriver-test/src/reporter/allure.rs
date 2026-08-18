@@ -593,6 +593,7 @@ mod tests {
         num_workers: 1,
         metadata: serde_json::Value::Null,
         start_time: std::time::SystemTime::UNIX_EPOCH,
+        preamble: std::sync::Arc::new(crate::reporter::api::RunPreamble::empty()),
       })
       .await;
     for outcome in outcomes {

@@ -1080,6 +1080,7 @@ mod tests {
   #[test]
   fn step_events_map_ids_and_durations() {
     let started = ReporterEvent::StepStarted(std::sync::Arc::new(crate::reporter::StepStartedEvent {
+      project: String::new(),
       test_id: test_id(),
       step_id: "s1".into(),
       parent_step_id: None,
@@ -1094,6 +1095,7 @@ mod tests {
     assert_eq!(json["category"].as_str(), Some("test.step"));
 
     let finished = ReporterEvent::StepFinished(std::sync::Arc::new(crate::reporter::StepFinishedEvent {
+      project: String::new(),
       test_id: test_id(),
       step_id: "s1".into(),
       title: "Given a blank page".into(),

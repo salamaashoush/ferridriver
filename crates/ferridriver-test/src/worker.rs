@@ -993,6 +993,7 @@ impl Worker {
           if let Some(event_bus) = &self.event_bus {
             event_bus.emit(ReporterEvent::StepStarted(Arc::new(
               crate::reporter::StepStartedEvent {
+                project: self.config.name.clone().unwrap_or_default(),
                 test_id: synthetic_id.clone(),
                 step_id: step_id.clone(),
                 parent_step_id: None,
@@ -1009,6 +1010,7 @@ impl Worker {
           if let Some(event_bus) = &self.event_bus {
             event_bus.emit(ReporterEvent::StepFinished(Arc::new(
               crate::reporter::StepFinishedEvent {
+                project: self.config.name.clone().unwrap_or_default(),
                 test_id: synthetic_id,
                 step_id,
                 title: step_title,
@@ -1202,6 +1204,7 @@ impl Worker {
         if let Some(event_bus) = &self.event_bus {
           event_bus.emit(ReporterEvent::StepStarted(Arc::new(
             crate::reporter::StepStartedEvent {
+              project: self.config.name.clone().unwrap_or_default(),
               test_id: test_id.clone(),
               step_id: format!("hook:beforeAll:{suite_key}:{i}"),
               parent_step_id: None,
@@ -1218,6 +1221,7 @@ impl Worker {
         if let Some(event_bus) = &self.event_bus {
           event_bus.emit(ReporterEvent::StepFinished(Arc::new(
             crate::reporter::StepFinishedEvent {
+              project: self.config.name.clone().unwrap_or_default(),
               test_id: test_id.clone(),
               step_id: format!("hook:beforeAll:{suite_key}:{i}"),
               title: step_title,
@@ -1313,6 +1317,7 @@ impl Worker {
     if let Some(event_bus) = &self.event_bus {
       event_bus.emit(ReporterEvent::TestStarted {
         test_id: test_id.clone(),
+        project: self.config.name.clone().unwrap_or_default(),
         attempt,
         worker_id: self.id,
       });

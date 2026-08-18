@@ -114,6 +114,7 @@ mod tests {
       reporter
         .on_event(&ReporterEvent::StepFinished(Arc::new(
           crate::reporter::StepFinishedEvent {
+            project: String::new(),
             test_id: TestId::default(),
             step_id: "s".into(),
             title: "Given a user named Bob".into(),
@@ -140,6 +141,7 @@ mod tests {
     reporter
       .on_event(&ReporterEvent::StepFinished(Arc::new(
         crate::reporter::StepFinishedEvent {
+          project: String::new(),
           test_id: TestId::default(),
           step_id: "s".into(),
           title: "plain step".into(),

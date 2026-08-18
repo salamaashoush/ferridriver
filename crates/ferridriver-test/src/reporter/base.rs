@@ -402,6 +402,7 @@ impl ResultCollector {
         num_workers,
         metadata,
         start_time,
+        ..
       } => {
         self.run.total_tests = *total_tests;
         self.run.num_workers = *num_workers;

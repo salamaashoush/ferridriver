@@ -38,7 +38,13 @@ use crate::model::{
 /// annotations and an attachment's owning step. The reader still takes
 /// the string form, so a merge across the boundary keeps every shard's
 /// step locations.
-const SCHEMA_VERSION: u32 = 3;
+///
+/// 4 names the project on every per-test event and carries the run's
+/// `FullConfig` + `Suite` tree on `run-started`. Both are `#[serde
+/// (default)]`, so a schema-3 blob still replays — with an empty
+/// preamble, which is what a reporter that needs the tree would see
+/// for a shard written by an older build.
+const SCHEMA_VERSION: u32 = 4;
 
 /// Wire-format mirror of `ReporterEvent`. Distinct from the runtime
 /// enum so adding a new event variant doesn't break stored blobs and
@@ -57,18 +63,26 @@ pub enum WireEvent {
     metadata: serde_json::Value,
     #[serde(default)]
     start_time_ms: u64,
+    /// The run's `FullConfig` + `Suite` tree. Absent in a blob written
+    /// before schema 4, which replays as an empty preamble.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preamble: Option<crate::reporter::api::RunPreamble>,
   },
   WorkerStarted {
     worker_id: u32,
   },
   TestStarted {
     test_id: WireTestId,
+    #[serde(default)]
+    project: String,
     attempt: u32,
     #[serde(default)]
     worker_id: u32,
   },
   StepStarted {
     test_id: WireTestId,
+    #[serde(default)]
+    project: String,
     step_id: String,
     parent_step_id: Option<String>,
     title: String,
@@ -78,6 +92,8 @@ pub enum WireEvent {
   },
   StepFinished {
     test_id: WireTestId,
+    #[serde(default)]
+    project: String,
     step_id: String,
     title: String,
     category: String,
@@ -89,6 +105,8 @@ pub enum WireEvent {
   },
   TestOutput {
     test_id: WireTestId,
+    #[serde(default)]
+    project: String,
     stderr: bool,
     text: String,
   },
@@ -480,24 +498,29 @@ impl WireEvent {
         num_workers,
         metadata,
         start_time,
+        preamble,
       } => Self::RunStarted {
         total_tests: *total_tests,
         num_workers: *num_workers,
         metadata: metadata.clone(),
         start_time_ms: epoch_ms(*start_time),
+        preamble: Some((**preamble).clone()),
       },
       ReporterEvent::WorkerStarted { worker_id } => Self::WorkerStarted { worker_id: *worker_id },
       ReporterEvent::TestStarted {
         test_id,
+        project,
         attempt,
         worker_id,
       } => Self::TestStarted {
         test_id: test_id.into(),
+        project: project.clone(),
         attempt: *attempt,
         worker_id: *worker_id,
       },
       ReporterEvent::StepStarted(s) => Self::StepStarted {
         test_id: (&s.test_id).into(),
+        project: s.project.clone(),
         step_id: s.step_id.clone(),
         parent_step_id: s.parent_step_id.clone(),
         title: s.title.clone(),
@@ -506,6 +529,7 @@ impl WireEvent {
       },
       ReporterEvent::StepFinished(s) => Self::StepFinished {
         test_id: (&s.test_id).into(),
+        project: s.project.clone(),
         step_id: s.step_id.clone(),
         title: s.title.clone(),
         category: step_category_str(&s.category).to_string(),
@@ -516,6 +540,7 @@ impl WireEvent {
       },
       ReporterEvent::TestOutput(o) => Self::TestOutput {
         test_id: (&o.test_id).into(),
+        project: o.project.clone(),
         stderr: o.stderr,
         text: o.text.clone(),
       },
@@ -557,24 +582,29 @@ impl WireEvent {
         num_workers,
         metadata,
         start_time_ms,
+        preamble,
       } => ReporterEvent::RunStarted {
         total_tests,
         num_workers,
         metadata,
         start_time: from_epoch_ms(start_time_ms),
+        preamble: Arc::new(preamble.unwrap_or_else(crate::reporter::api::RunPreamble::empty)),
       },
       Self::WorkerStarted { worker_id } => ReporterEvent::WorkerStarted { worker_id },
       Self::TestStarted {
         test_id,
+        project,
         attempt,
         worker_id,
       } => ReporterEvent::TestStarted {
         test_id: test_id.into(),
+        project,
         attempt,
         worker_id,
       },
       Self::StepStarted {
         test_id,
+        project,
         step_id,
         parent_step_id,
         title,
@@ -582,6 +612,7 @@ impl WireEvent {
         location,
       } => ReporterEvent::StepStarted(Arc::new(StepStartedEvent {
         test_id: test_id.into(),
+        project,
         step_id,
         parent_step_id,
         title,
@@ -590,6 +621,7 @@ impl WireEvent {
       })),
       Self::StepFinished {
         test_id,
+        project,
         step_id,
         title,
         category,
@@ -599,6 +631,7 @@ impl WireEvent {
         annotations,
       } => ReporterEvent::StepFinished(Arc::new(StepFinishedEvent {
         test_id: test_id.into(),
+        project,
         step_id,
         title,
         category: parse_step_category(&category),
@@ -607,8 +640,14 @@ impl WireEvent {
         metadata,
         annotations,
       })),
-      Self::TestOutput { test_id, stderr, text } => ReporterEvent::TestOutput(Arc::new(TestOutputEvent {
+      Self::TestOutput {
+        test_id,
+        project,
+        stderr,
+        text,
+      } => ReporterEvent::TestOutput(Arc::new(TestOutputEvent {
         test_id: test_id.into(),
+        project,
         stderr,
         text,
       })),
@@ -634,12 +673,7 @@ impl WireEvent {
         skipped,
         flaky,
         duration: Duration::from_millis(duration_ms),
-        status: match status.as_str() {
-          "failed" => RunStatus::Failed,
-          "timedout" => RunStatus::TimedOut,
-          "interrupted" => RunStatus::Interrupted,
-          _ => RunStatus::Passed,
-        },
+        status: RunStatus::parse(&status),
       },
     })
   }

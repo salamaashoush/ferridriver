@@ -155,6 +155,10 @@ fn write_steps(out: &mut String, screen: Screen, steps: &[&TestStep], indent: us
 
 #[async_trait::async_trait]
 impl Reporter for TerminalReporter {
+  fn prints_to_stdio(&self) -> bool {
+    true
+  }
+
   async fn on_event(&mut self, event: &ReporterEvent) {
     self.collector.observe(event);
     let screen = self.screen;
@@ -329,6 +333,7 @@ mod tests {
         num_workers: 2,
         metadata: serde_json::Value::Null,
         start_time: std::time::SystemTime::UNIX_EPOCH,
+        preamble: std::sync::Arc::new(crate::reporter::api::RunPreamble::empty()),
       })
       .await;
     for event in &events {
@@ -473,6 +478,7 @@ mod tests {
     // the live event must not produce a second copy.
     let text = run(vec![
       ReporterEvent::TestOutput(Arc::new(TestOutputEvent {
+        project: String::new(),
         test_id: id("adds an item"),
         stderr: false,
         text: "chatter\n".into(),

@@ -581,6 +581,7 @@ async fn forward_run(
         test_id,
         attempt,
         worker_id,
+        ..
       } => {
         let id = test_id.stable_id(&project);
         attempts.insert(id.clone(), attempt);

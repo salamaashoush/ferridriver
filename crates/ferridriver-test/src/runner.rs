@@ -64,6 +64,12 @@ pub struct ProjectRun {
 }
 
 impl ProjectRun {
+  /// The `[[test.projects]]` entry this run came from, if any.
+  #[must_use]
+  pub fn project_config(&self) -> Option<&ProjectConfig> {
+    self.project.as_ref()
+  }
+
   /// `plan` narrowed to the tests this project runs.
   #[must_use]
   pub fn narrow(&self, plan: &TestPlan) -> TestPlan {
@@ -131,6 +137,46 @@ pub struct TestRunner {
   worker_ids: Arc<std::sync::atomic::AtomicU32>,
 }
 
+/// Drop and annotate what a reporter's `preprocess` asked for, under
+/// `project_name`. A case is named by its stable id under that project,
+/// so excluding a test in one project leaves the same test running in
+/// another.
+///
+/// Applied after the run's own filters, which means an exclusion does
+/// not rebalance `--shard`. Playwright's answer to that is
+/// `TestRun.skipSharding()`, which a reporter that reshapes the corpus
+/// is expected to call and which the runner honours.
+fn apply_run_edits(plan: &mut TestPlan, project_name: &str, edits: &crate::reporter::TestRunEdits) {
+  if edits.excluded.is_empty() && edits.annotations.is_empty() {
+    return;
+  }
+  for suite in &mut plan.suites {
+    suite
+      .tests
+      .retain(|test| !edits.excluded.contains(&test.id.stable_id(project_name)));
+    for test in &mut suite.tests {
+      let id = test.id.stable_id(project_name);
+      for (target, annotation) in &edits.annotations {
+        if *target == id {
+          test.annotations.push(annotation.clone());
+        }
+      }
+    }
+  }
+  plan.total_tests = plan.suites.iter().map(|suite| suite.tests.len()).sum();
+}
+
+/// Playwright's `onEnd` returning `{ status }`: a reporter may decide
+/// how the run ended, and the exit code follows it. Read once, after
+/// the reporters have drained and finalized.
+fn apply_status_override(reporters: &ReporterSet, exit_code: i32) -> i32 {
+  match reporters.status_override() {
+    Some(crate::reporter::RunStatus::Passed) => 0,
+    Some(_) => 1,
+    None => exit_code,
+  }
+}
+
 /// Cooperative cancel signal for an in-flight [`TestRunner::execute`].
 /// Requesting a stop trips the dispatcher's hard-stop: workers drop
 /// queued items and exit after their current test, and `execute`
@@ -191,6 +237,54 @@ impl TestRunner {
       live_traces: false,
       worker_ids: Arc::new(std::sync::atomic::AtomicU32::new(0)),
     }
+  }
+
+  /// Playwright's `Reporter.preprocess`: hand every reporter the corpus
+  /// before the run and apply what they ask for.
+  ///
+  /// The view is the projects this run will EXECUTE. Playwright also
+  /// prepends the unfiltered dependency projects and marks them
+  /// read-only so a reporter cannot edit a setup project; here they are
+  /// simply not in the tree, which enforces the same rule by absence.
+  ///
+  /// Returns the edits, so each project can drop what was excluded
+  /// under ITS name — the plan is shared across projects, and the same
+  /// test excluded in one project still runs in another.
+  async fn preprocess_corpus(&mut self, plan: &TestPlan) -> Result<crate::reporter::TestRunEdits, String> {
+    let mut edits = crate::reporter::TestRunEdits::default();
+    if self.reporters.is_empty() {
+      return Ok(edits);
+    }
+    let runs: Vec<ProjectRun> = self
+      .project_runs()
+      .into_iter()
+      .filter(|run| self.overrides.project_filter.is_empty() || self.overrides.project_filter.contains(&run.name))
+      .collect();
+    let narrowed: Vec<TestPlan> = runs
+      .iter()
+      .map(|run| {
+        let mut narrowed = run.narrow(plan);
+        self.apply_run_filters(&mut narrowed);
+        narrowed
+      })
+      .collect();
+    let project_plans: Vec<crate::reporter::api::ProjectPlan<'_>> = runs
+      .iter()
+      .zip(narrowed.iter())
+      .map(|(run, plan)| crate::reporter::api::ProjectPlan {
+        name: run.name.as_str(),
+        config: run.config.as_ref(),
+        project: run.project_config(),
+        plan,
+      })
+      .collect();
+    let preamble = crate::reporter::api::RunPreamble::build(&self.config, &project_plans);
+    self.reporters.preprocess(&preamble, &mut edits).await?;
+    if edits.skip_sharding {
+      // The reporter has taken sharding over itself.
+      self.overrides.shard = None;
+    }
+    Ok(edits)
   }
 
   /// Handle for cancelling an in-flight `execute` cooperatively (see
@@ -359,6 +453,18 @@ impl TestRunner {
       }
 
       // ── Single-project path ──
+      let mut plan = plan;
+      match self.preprocess_corpus(&plan).await {
+        Ok(edits) => {
+          let project = self.config.name.clone().unwrap_or_default();
+          apply_run_edits(&mut plan, &project, &edits);
+        },
+        Err(message) => {
+          eprintln!("Error: reporter preprocess failed: {message}");
+          return 1;
+        },
+      }
+
       let mut builder = EventBusBuilder::new();
       let driver_handle = if self.reporters.is_empty() {
         None
@@ -383,7 +489,7 @@ impl TestRunner {
         self.reporters = reporters;
       }
 
-      exit_code
+      apply_status_override(&self.reporters, exit_code)
     };
 
     if global_timeout > 0 {
@@ -406,6 +512,14 @@ impl TestRunner {
   /// Run multiple projects in dependency order, reporting to the
   /// configured reporters.
   async fn run_projects(&mut self, plan: TestPlan) -> i32 {
+    let edits = match self.preprocess_corpus(&plan).await {
+      Ok(edits) => edits,
+      Err(message) => {
+        eprintln!("Error: reporter preprocess failed: {message}");
+        return 1;
+      },
+    };
+
     let mut builder = EventBusBuilder::new();
     let driver_handle = if self.reporters.is_empty() {
       None
@@ -416,8 +530,16 @@ impl TestRunner {
     };
     let bus = builder.build();
 
+    let narrow = move |name: &str, plan: &mut TestPlan| apply_run_edits(plan, name, &edits);
     let summary = self
-      .execute_projects_with_summary(plan, bus.clone(), ProjectHooks::default())
+      .execute_projects_with_summary(
+        plan,
+        bus.clone(),
+        ProjectHooks {
+          narrow: Some(&narrow),
+          ..ProjectHooks::default()
+        },
+      )
       .await;
 
     bus.close();
@@ -426,7 +548,7 @@ impl TestRunner {
     {
       self.reporters = reporters;
     }
-    summary.exit_code
+    apply_status_override(&self.reporters, summary.exit_code)
   }
 
   /// Execute `plan` once per project, in dependency order, onto `bus`.
@@ -660,11 +782,23 @@ impl TestRunner {
     // than tests across all projects in flight.
     let num_workers = (self.config.workers as usize).min(total_tests.max(1)).max(1) as u32;
     if reporting_enabled {
+      let project_plans: Vec<crate::reporter::api::ProjectPlan<'_>> = scheduled
+        .iter()
+        .filter_map(|idx| {
+          Some(crate::reporter::api::ProjectPlan {
+            name: projects[*idx].name.as_str(),
+            config: merged.get(idx)?.as_ref(),
+            project: Some(&projects[*idx]),
+            plan: plans.get(idx)?,
+          })
+        })
+        .collect();
       bus.emit(ReporterEvent::RunStarted {
         total_tests,
         num_workers,
         metadata: self.config.metadata.clone(),
         start_time: std::time::SystemTime::now(),
+        preamble: Arc::new(crate::reporter::api::RunPreamble::build(&self.config, &project_plans)),
       });
     }
     let run_start = Instant::now();
@@ -1058,11 +1192,18 @@ impl TestRunner {
     // shared bus — it emits a single aggregate boundary itself.
     let emit_boundary = reporting_enabled && !self.suppress_run_boundary;
     if emit_boundary {
+      let project_plans = [crate::reporter::api::ProjectPlan {
+        name: self.config.name.as_deref().unwrap_or_default(),
+        config: &self.config,
+        project: None,
+        plan: &plan,
+      }];
       event_bus.emit(ReporterEvent::RunStarted {
         total_tests,
         num_workers,
         metadata: run_metadata,
         start_time: std::time::SystemTime::now(),
+        preamble: Arc::new(crate::reporter::api::RunPreamble::build(&self.config, &project_plans)),
       });
     }
 

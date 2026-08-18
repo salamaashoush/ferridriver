@@ -150,3 +150,96 @@ ferridriver test --reporter github
 `markdown` writes `report.md` and, when `GITHUB_STEP_SUMMARY` is set,
 appends the same text there — the summary renders on the job page with
 no extra workflow step.
+
+## Custom reporters
+
+A reporter name that is not one of the built-ins is a path to a module,
+resolved against the working directory and then against `testDir`. The
+module's default export is the reporter class; it is bundled and
+compiled through the same TypeScript pipeline the specs take, and
+constructed once per run with the entry's own options plus `configDir`
+and `outputDir`:
+
+```toml
+[[test.reporter]]
+name = "./reporters/failure-reporter.ts"
+outputFile = "reports/failures.json"
+```
+
+```ts
+import type { Reporter, ReporterFullConfig, ReporterSuite, ReporterTestCase } from '@ferridriver/test';
+
+export default class FailureReporter implements Reporter {
+  private readonly failed: string[] = [];
+
+  constructor(private readonly options: { outputFile?: string } = {}) {}
+
+  onBegin(config: ReporterFullConfig, suite: ReporterSuite): void {
+    console.log(`${suite.allTests().length} tests on ${config.workers} workers`);
+  }
+
+  onTestEnd(test: ReporterTestCase): void {
+    if (test.outcome() === 'unexpected') this.failed.push(test.titlePath().join(' > '));
+  }
+
+  async onEnd(): Promise<void> {
+    await fs.writeFile(this.options.outputFile ?? 'failures.json', JSON.stringify(this.failed));
+  }
+}
+```
+
+A reporter runs in the same sandbox every other script does: `fs` is
+rooted at the project directory and `fetch` obeys the `[scripting]`
+network policy, so a reporter that posts to a webhook needs that host
+allowed like any other outbound call.
+
+The module is compiled before the first test runs, so a reporter that
+does not resolve, does not parse, or throws while constructing fails
+the command rather than the run. Once the run has started, a reporter is
+isolated: a hook that throws is reported and the run carries on, exactly
+as it does upstream.
+
+### The two interfaces
+
+There are two, and which one a class implements is decided by
+`version()`:
+
+| | `Reporter` | `ReporterV2` |
+|---|---|---|
+| `version()` | absent | returns `'v2'` |
+| `onConfigure(config)` | never called | called first |
+| `onBegin(...)` | `(config, suite)` | `(suite)` |
+
+Everything else is the same. `Reporter` is the interface third-party
+Playwright reporters implement, so an existing one works unchanged.
+
+### What a hook is handed
+
+The objects are Playwright's: a `Suite` tree of root → project → file →
+describe with `titlePath()`, `entries()`, `allTests()` and `project()`;
+a `TestCase` with `outcome()` and `ok()` computed from the results it
+has so far; a `TestResult` whose `status` is `undefined` until the
+attempt ends, and whose `steps` fill in as `onStepBegin` fires; and
+`attachments` whose `body` is a `Buffer`.
+
+### Deciding whether the run printed anything
+
+`printsToStdio()` says whether the reporter writes to the terminal. If
+nothing in the whole set does — a run configured with only `json` and a
+custom file reporter, say — a `line` reporter (or `dot` under CI) is put
+in FRONT of the set, so the run is never silent. A reporter that does
+not declare `printsToStdio` counts as one that prints.
+
+### Editing the run, and deciding how it ended
+
+`preprocess({ config, suite, testRun })` runs once before the first
+test with the whole corpus in hand. `testRun.exclude(target)` drops a
+case or a whole suite, `testRun.skip` / `fixme` / `fail` annotate one,
+and `testRun.skipSharding()` says the reporter has taken sharding over.
+Unlike every other hook, an error here is not swallowed — it aborts the
+run rather than letting a half-applied edit reach the workers. The
+handle is dead the moment `preprocess` returns.
+
+`onEnd(result)` may return `{ status }` to change how the run is
+reported to have ended, and the process exit code follows it. The last
+reporter to answer wins.

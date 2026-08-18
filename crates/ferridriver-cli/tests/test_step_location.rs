@@ -148,7 +148,7 @@ fn a_steps_own_file_survives_the_blob_and_the_merge() {
   // The schema says 3 — an older reader refuses rather than silently
   // dropping what it cannot understand.
   let header = lines.iter().find(|line| line["kind"] == "header").expect("a header");
-  assert_eq!(header["schema"], 3);
+  assert_eq!(header["schema"], 4);
 
   // merge-reports replays the stream into a fresh HTML report, and the
   // location has to be there too: that is the only file a shard's

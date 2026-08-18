@@ -20,6 +20,7 @@ async fn event_bus_delivers_to_single_subscriber() {
     num_workers: 2,
     metadata: serde_json::Value::Null,
     start_time: std::time::SystemTime::now(),
+    preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
   });
   drop(bus);
 
@@ -49,6 +50,7 @@ async fn event_bus_delivers_to_multiple_subscribers() {
     num_workers: 4,
     metadata: serde_json::Value::Null,
     start_time: std::time::SystemTime::now(),
+    preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
   });
   bus.emit(ReporterEvent::RunFinished {
     total: 10,
@@ -112,6 +114,7 @@ async fn event_bus_no_subscribers_does_not_panic() {
     num_workers: 1,
     metadata: serde_json::Value::Null,
     start_time: std::time::SystemTime::now(),
+    preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
   });
   drop(bus);
 }
@@ -131,6 +134,7 @@ async fn event_bus_dropped_subscriber_does_not_block() {
     num_workers: 1,
     metadata: serde_json::Value::Null,
     start_time: std::time::SystemTime::now(),
+    preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
   });
   drop(bus);
 
@@ -191,6 +195,7 @@ async fn reporter_driver_forwards_events_and_finalizes() {
     num_workers: 1,
     metadata: serde_json::Value::Null,
     start_time: std::time::SystemTime::now(),
+    preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
   });
   bus.emit(ReporterEvent::RunFinished {
     total: 2,
@@ -230,6 +235,7 @@ async fn reporter_driver_returns_reporters_after_run() {
     num_workers: 1,
     metadata: serde_json::Value::Null,
     start_time: std::time::SystemTime::now(),
+    preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
   });
   drop(bus);
 
@@ -258,6 +264,7 @@ async fn real_time_delivery_not_batched() {
     num_workers: 1,
     metadata: serde_json::Value::Null,
     start_time: std::time::SystemTime::now(),
+    preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
   });
 
   // Use try_recv — if the event is delivered in real-time, it's already in the channel.
@@ -296,6 +303,7 @@ async fn concurrent_execution_and_observation() {
       num_workers: 1,
       metadata: serde_json::Value::Null,
       start_time: std::time::SystemTime::now(),
+      preamble: std::sync::Arc::new(ferridriver_test::reporter::api::RunPreamble::empty()),
     });
     tokio::task::yield_now().await;
     bus.emit(ReporterEvent::WorkerStarted { worker_id: 0 });

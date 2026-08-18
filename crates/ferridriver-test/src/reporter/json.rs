@@ -187,7 +187,7 @@ impl JsonReporter {
       config: self
         .config
         .as_deref()
-        .map_or_else(|| serde_json::json!({}), config_block),
+        .map_or_else(|| serde_json::json!({}), crate::reporter::api::full_config),
       suites: self.suites(),
       errors: self.collector.errors.iter().map(|e| json_error(e, None)).collect(),
       stats: JsonStats {
@@ -393,73 +393,6 @@ fn visible_steps(steps: &[TestStep]) -> Vec<JsonStep> {
       }
     })
     .collect()
-}
-
-/// The `config` block. Field names and shapes mirror Playwright's
-/// `FullConfig` so a consumer keying off `config.projects[].name` or
-/// `config.rootDir` works unchanged.
-fn config_block(config: &TestConfig) -> serde_json::Value {
-  let root_dir = config.test_dir.clone().unwrap_or_else(|| ".".to_string());
-  let projects: Vec<serde_json::Value> = if config.projects.is_empty() {
-    vec![serde_json::json!({
-      "outputDir": config.output_dir,
-      "repeatEach": config.repeat_each,
-      "retries": config.retries,
-      "metadata": config.metadata,
-      "id": config.name.clone().unwrap_or_default(),
-      "name": config.name.clone().unwrap_or_default(),
-      "testDir": root_dir,
-      "testIgnore": config.test_ignore,
-      "testMatch": config.test_match,
-      "timeout": config.timeout,
-    })]
-  } else {
-    config
-      .projects
-      .iter()
-      .map(|project| {
-        serde_json::json!({
-          "outputDir": project.output_dir.clone().unwrap_or_else(|| config.output_dir.display().to_string()),
-          "repeatEach": project.repeat_each.unwrap_or(config.repeat_each),
-          "retries": project.retries.unwrap_or(config.retries),
-          "metadata": serde_json::json!({ "project": project.name }),
-          "id": project.name,
-          "name": project.name,
-          "testDir": project.test_dir.clone().unwrap_or_else(|| root_dir.clone()),
-          "testIgnore": project.test_ignore.clone().unwrap_or_else(|| config.test_ignore.clone()),
-          "testMatch": project.test_match.clone().unwrap_or_else(|| config.test_match.clone()),
-          "timeout": project.timeout.unwrap_or(config.timeout),
-        })
-      })
-      .collect()
-  };
-
-  serde_json::json!({
-    "rootDir": root_dir,
-    "forbidOnly": config.forbid_only,
-    "fullyParallel": config.fully_parallel,
-    "globalSetup": config.global_setup,
-    "globalTeardown": config.global_teardown,
-    "globalTimeout": config.global_timeout,
-    "grep": config.config_grep,
-    "grepInvert": config.config_grep_invert,
-    "maxFailures": config.max_failures,
-    "metadata": config.metadata,
-    "preserveOutput": config.preserve_output,
-    "projects": projects,
-    "quiet": config.quiet,
-    "reporter": config
-      .reporter
-      .iter()
-      .map(|r| serde_json::json!([r.name, r.options]))
-      .collect::<Vec<_>>(),
-    "reportSlowTests": config.report_slow_tests,
-    "shard": serde_json::Value::Null,
-    "updateSnapshots": config.update_snapshots,
-    "version": env!("CARGO_PKG_VERSION"),
-    "workers": config.workers,
-    "webServer": config.web_server,
-  })
 }
 
 #[async_trait::async_trait]

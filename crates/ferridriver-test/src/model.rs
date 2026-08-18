@@ -581,6 +581,7 @@ impl TestInfo {
       bus.emit(crate::reporter::ReporterEvent::TestOutput(Arc::new(
         crate::reporter::TestOutputEvent {
           test_id: self.test_id.clone(),
+          project: self.project_name().unwrap_or_default(),
           stderr,
           text: text.to_string(),
         },
@@ -730,6 +731,7 @@ impl TestInfo {
       bus.emit(crate::reporter::ReporterEvent::StepStarted(Arc::new(
         crate::reporter::StepStartedEvent {
           test_id: self.test_id.clone(),
+          project: self.project_name().unwrap_or_default(),
           step_id: step_id.clone(),
           parent_step_id: parent_step_id.map(ToString::to_string),
           title: title.clone(),
@@ -754,6 +756,7 @@ impl TestInfo {
     StepHandle {
       step_id,
       test_id: self.test_id.clone(),
+      project: self.project_name().unwrap_or_default(),
       title,
       category,
       parent_step_id: parent_step_id.map(ToString::to_string),
@@ -785,6 +788,7 @@ impl TestInfo {
       bus.emit(crate::reporter::ReporterEvent::StepStarted(Arc::new(
         crate::reporter::StepStartedEvent {
           test_id: self.test_id.clone(),
+          project: self.project_name().unwrap_or_default(),
           step_id: step_id.clone(),
           parent_step_id: None,
           title: title.clone(),
@@ -795,6 +799,7 @@ impl TestInfo {
       bus.emit(crate::reporter::ReporterEvent::StepFinished(Arc::new(
         crate::reporter::StepFinishedEvent {
           test_id: self.test_id.clone(),
+          project: self.project_name().unwrap_or_default(),
           step_id: step_id.clone(),
           title: title.clone(),
           category: category.clone(),
@@ -1143,6 +1148,8 @@ enum TraceParentGuard {
 pub struct StepHandle {
   pub step_id: String,
   pub test_id: TestId,
+  /// Project the attempt belongs to — see [`crate::reporter::StepStartedEvent::project`].
+  pub project: String,
   pub title: String,
   pub category: StepCategory,
   pub parent_step_id: Option<String>,
@@ -1196,6 +1203,7 @@ impl StepHandle {
       bus.emit(crate::reporter::ReporterEvent::StepFinished(Arc::new(
         crate::reporter::StepFinishedEvent {
           test_id: self.test_id.clone(),
+          project: self.project.clone(),
           step_id: self.step_id.clone(),
           title: self.title.clone(),
           category: self.category.clone(),

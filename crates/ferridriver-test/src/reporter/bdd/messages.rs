@@ -240,6 +240,7 @@ mod tests {
     reporter
       .on_event(&ReporterEvent::StepFinished(Arc::new(
         crate::reporter::StepFinishedEvent {
+          project: String::new(),
           test_id: TestId {
             file: "features/login.feature".into(),
             suite: Some("Login".into()),

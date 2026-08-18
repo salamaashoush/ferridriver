@@ -65,6 +65,10 @@ impl Default for ProgressReporter {
 
 #[async_trait::async_trait]
 impl Reporter for ProgressReporter {
+  fn prints_to_stdio(&self) -> bool {
+    true
+  }
+
   async fn on_event(&mut self, event: &ReporterEvent) {
     self.collector.observe(event);
     let screen = self.screen;
@@ -159,6 +163,7 @@ mod tests {
         num_workers: 1,
         metadata: serde_json::Value::Null,
         start_time: std::time::SystemTime::UNIX_EPOCH,
+        preamble: std::sync::Arc::new(crate::reporter::api::RunPreamble::empty()),
       })
       .await;
     for event in &events {

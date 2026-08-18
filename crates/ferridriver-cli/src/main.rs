@@ -30,6 +30,20 @@ use ferridriver_config::FerridriverConfig;
 use ferridriver_mcp::McpServer;
 use ferridriver_script::ConsoleSink;
 
+/// Compile every JS reporter the config names and install the factory
+/// `create_reporters` consults for a name outside its built-in table.
+/// Runs before the runner is built, because a reporter that cannot load
+/// has to fail the command rather than the run.
+async fn install_js_reporters(
+  test: &ferridriver_test::config::TestConfig,
+  caps: &ferridriver_script::ScriptCaps,
+) -> anyhow::Result<()> {
+  let cwd = std::env::current_dir()?;
+  ferridriver_script::reporter::install(test, &cwd, caps)
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e.message))
+}
+
 /// Install the config's `[bundler]` section (import aliases, virtual
 /// modules, resolution controls) plus `[test].tsconfig` into the
 /// process-global slot every bundle path reads. Relative paths resolve
@@ -400,14 +414,13 @@ fn chosen_runner_name(r: cli::TestRunner) -> &'static str {
 async fn run_test_native(config: FerridriverConfig, args: cli::TestRunArgs) -> anyhow::Result<()> {
   // Thread the `[scripting]` env allow-list + sidecars into the test VM
   // — same resolution the MCP server, `ferridriver run` and BDD use.
-  ferridriver_testjs::set_test_script_caps(
-    ferridriver_script::ScriptCaps::resolve_with_commands(
-      &config.scripting.allow_env,
-      config.scripting.allow.commands.clone(),
-    )
-    .with_extension_policy(config.extensions.policy())
-    .with_extension_settings(config.extensions.settings()),
-  );
+  let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
+    &config.scripting.allow_env,
+    config.scripting.allow.commands.clone(),
+  )
+  .with_extension_policy(config.extensions.policy())
+  .with_extension_settings(config.extensions.settings());
+  ferridriver_testjs::set_test_script_caps(caps.clone());
   ferridriver_testjs::set_test_sidecars(script_setup::sidecar_specs(&config));
 
   let mut overrides = ferridriver_test::config::CliOverrides {
@@ -451,6 +464,7 @@ async fn run_test_native(config: FerridriverConfig, args: cli::TestRunArgs) -> a
   let test_config = ferridriver_test::config::resolve_config_from(config.test, &overrides)
     .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
   install_module_aliases(&test_config, &[])?;
+  install_js_reporters(&test_config, &caps).await?;
 
   let exit_code = Box::pin(ferridriver_testjs::run_ts_tests_with(test_config, overrides)).await;
   if exit_code == 0 {
@@ -464,14 +478,13 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   // Thread the `[scripting]` env allow-list into the BDD step VM — the
   // same resolution the MCP server and `ferridriver run` use. Must be
   // set before the run starts.
-  ferridriver_bdd::js::set_bdd_script_caps(
-    ferridriver_script::ScriptCaps::resolve_with_commands(
-      &config.scripting.allow_env,
-      config.scripting.allow.commands.clone(),
-    )
-    .with_extension_policy(config.extensions.policy())
-    .with_extension_settings(config.extensions.settings()),
-  );
+  let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
+    &config.scripting.allow_env,
+    config.scripting.allow.commands.clone(),
+  )
+  .with_extension_policy(config.extensions.policy())
+  .with_extension_settings(config.extensions.settings());
+  ferridriver_bdd::js::set_bdd_script_caps(caps.clone());
   ferridriver_bdd::js::set_bdd_sidecars(script_setup::sidecar_specs(&config));
   let mut overrides = ferridriver_test::config::CliOverrides {
     bdd_tags: args.tags,
@@ -522,6 +535,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
     test_config.features = args.features;
   }
   install_module_aliases(&test_config, &[])?;
+  install_js_reporters(&test_config, &caps).await?;
 
   let exit_code = Box::pin(ferridriver_bdd::run_bdd_with(test_config, overrides)).await;
   if exit_code == 0 {
