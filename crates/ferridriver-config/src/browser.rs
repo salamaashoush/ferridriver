@@ -145,6 +145,15 @@ pub struct InstanceConfig {
   /// DNS rules and a `WebKit` one asking for proxy flags, say.
   #[serde(alias = "args_command")]
   pub args_command: Option<CommandSpec>,
+  /// Command discovering an already-running browser for this instance,
+  /// replacing the section-level `instanceDiscoverCommand`.
+  ///
+  /// The section command is one template for every instance, so it can only
+  /// address them by the session-key label. Declaring it here lets an instance
+  /// name a browser process without that label having to double as whatever
+  /// the command's arguments mean.
+  #[serde(alias = "discover_command")]
+  pub discover_command: Option<CommandSpec>,
   /// Explicit WebSocket URL to connect to (skips launch entirely).
   #[serde(alias = "connect_url")]
   pub connect_url: Option<String>,
@@ -236,6 +245,35 @@ impl RoutingView<'_> {
   /// almost always a session key with no `:` that landed on `default` —
   /// and launching anyway puts the caller on an unconfigured browser),
   /// or when the instance declares proxy credentials.
+  /// Reject a name no configured instance claims, naming the ones that exist.
+  ///
+  /// This has to run BEFORE the args command. Feeding an undeclared name to a
+  /// template like `--env ${INSTANCE}` surfaces the failure as that command's
+  /// own error — a clap usage message from a binary the caller may never have
+  /// heard of — while the configured set, which is the answer, goes unmentioned.
+  fn reject_unknown_instance(&self, instance: &str) -> Result<(), String> {
+    if self.instances.is_empty() || self.config_for(instance).is_some() {
+      return Ok(());
+    }
+    let mut known: Vec<&str> = self.instances.keys().map(String::as_str).collect();
+    known.sort_unstable();
+    Err(format!(
+      "unknown instance '{instance}'; configured instances are: {}. \
+       The part before ':' in a session key names a configured browser instance, \
+       not a free-form label — add '{instance}' under [mcp.browser.instances] to \
+       give it its own browser process.",
+      known.join(", ")
+    ))
+  }
+
+  /// Resolve every launch setting for `instance`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the instance name is not substitutable, when no
+  /// configured instance claims it, when the args command fails or returns a
+  /// result carrying no launch settings (launching anyway puts the caller on an
+  /// unconfigured browser), or when the instance declares proxy credentials.
   pub fn overrides_for(&self, instance: &str) -> Result<InstanceOverrides, String> {
     validate_instance_name(instance)?;
 
@@ -252,9 +290,11 @@ impl RoutingView<'_> {
       .or(self.args_command);
 
     if let Some(spec) = command {
+      self.reject_unknown_instance(instance)?;
       let resolved = resolve_for_instance(spec, instance)?;
       let value = self.cache.get_or_exec(&resolved, self.cache_ttl)?;
-      out.args.extend(value_to_args(&value));
+      let parsed = parse_command_result(&value).map_err(|e| format!("cannot start instance '{instance}': {e}"))?;
+      apply_command_result(&mut out, parsed, self.backend);
     }
 
     Ok(out)
@@ -273,18 +313,11 @@ impl RoutingView<'_> {
          set the session to '<env>:<context>' (e.g. 'staging:admin')."
       )
     })?;
+    // Nothing can supply settings for a name no entry claims, with or without
+    // an args command: launching would produce a browser with none of the
+    // configuration the caller asked for.
+    self.reject_unknown_instance(instance)?;
     let Some(spec) = self.args_command else {
-      // Nothing can supply settings for this name: no entry, no
-      // defaults, no args command. Launching would produce a browser
-      // with none of the configuration the caller asked for.
-      if !self.instances.is_empty() && self.config_for(instance).is_none() {
-        let mut known: Vec<&str> = self.instances.keys().map(String::as_str).collect();
-        known.sort_unstable();
-        return Err(format!(
-          "unknown instance '{instance}'; configured instances are: {}",
-          known.join(", ")
-        ));
-      }
       return Ok(());
     };
     let resolved = resolve_for_instance(spec, instance)?;
@@ -340,7 +373,12 @@ impl RoutingView<'_> {
       }
     }
 
-    let spec = self.discover_command?;
+    // The instance's own command replaces the section's, exactly as its
+    // `argsCommand` does.
+    let spec = self
+      .config_for(instance)
+      .and_then(|cfg| cfg.discover_command.as_ref())
+      .or(self.discover_command)?;
     let resolved = resolve_for_instance(spec, instance).ok()?;
     self.discover_via_command(&resolved)
   }
@@ -416,6 +454,104 @@ pub fn proxy_args(proxy: &ProxyConfig, backend: BackendKind) -> Result<Vec<Strin
 /// Accepts a JSON array of strings, a JSON object with an `args` array
 /// (what `devgate browser args --json` emits), or plain text with
 /// one argument per line.
+/// What ferridriver asks a browser args command to return.
+///
+/// This is OUR contract, not any particular launcher's. A command knows things
+/// the config cannot state ahead of time — where a managed profile lives, which
+/// browser build is usable, what proxy is up — so it supplies the whole launch
+/// shape rather than only flags. Any program that emits this shape can drive an
+/// instance; nothing here is specific to the tool that happens to be configured.
+///
+/// Unknown keys are IGNORED rather than rejected: the command is a separate
+/// program on its own release cycle, and a launcher adding a field it thinks we
+/// might want must not break every instance that uses it. Known keys are typed
+/// strictly, so a wrong type is an error naming the key instead of a silently
+/// dropped setting.
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceLaunchSpec {
+  /// Browser flags, appended to whatever the instance already declares.
+  #[serde(default)]
+  pub args: Vec<String>,
+  /// Profile directory to launch with. `profileDir` is the spelling a launcher
+  /// uses for a directory it manages; `userDataDir` is Chrome's own.
+  #[serde(default, alias = "profileDir")]
+  pub user_data_dir: Option<String>,
+  /// Browser binary to launch.
+  #[serde(default)]
+  pub executable_path: Option<String>,
+  /// Environment variables for the browser process.
+  #[serde(default)]
+  pub env: BTreeMap<String, String>,
+  /// Proxy the browser should route through, lowered into launch flags.
+  #[serde(default)]
+  pub proxy_url: Option<String>,
+  /// Hosts that bypass `proxyUrl`, in Chrome's comma-separated spelling.
+  #[serde(default)]
+  pub proxy_bypass: Option<String>,
+  /// Headless override.
+  #[serde(default)]
+  pub headless: Option<bool>,
+}
+
+/// Read a command's stdout into [`InstanceLaunchSpec`].
+///
+/// Three legacy shapes stay supported because they are already documented: a
+/// JSON array of flags, and newline-delimited text. Anything else that is not
+/// an object is an error rather than an empty result — a command returning a
+/// number or a bare `true` has failed, and silently launching an unconfigured
+/// browser is the failure mode this whole path exists to prevent.
+fn parse_command_result(value: &serde_json::Value) -> Result<InstanceLaunchSpec, String> {
+  match value {
+    serde_json::Value::Object(_) => serde_json::from_value(value.clone()).map_err(|e| {
+      format!(
+        "its args command returned an unusable result: {e}. Expected an object with any of \
+         args, userDataDir (or profileDir), executablePath, env, proxyUrl, proxyBypass, headless"
+      )
+    }),
+    serde_json::Value::Array(_) | serde_json::Value::String(_) => Ok(InstanceLaunchSpec {
+      args: value_to_args(value),
+      ..InstanceLaunchSpec::default()
+    }),
+    other => Err(format!(
+      "its args command returned {}, which carries no launch settings; \
+       expected an object, an array of flags, or newline-separated flags",
+      match other {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        _ => "a number",
+      }
+    )),
+  }
+}
+
+/// Fold a parsed command result into the launch settings.
+///
+/// Explicit config wins: a value the operator wrote down is never replaced by a
+/// derived one. The command fills only what config left unset.
+fn apply_command_result(out: &mut InstanceOverrides, spec: InstanceLaunchSpec, backend: BackendKind) {
+  out.args.extend(spec.args);
+
+  if let Some(url) = spec.proxy_url.filter(|u| !u.is_empty()) {
+    out
+      .args
+      .extend(proxy_launch_flags(&url, spec.proxy_bypass.as_deref(), backend));
+  }
+  if out.user_data_dir.is_none() {
+    out.user_data_dir = spec.user_data_dir.filter(|d| !d.is_empty());
+  }
+  if out.executable_path.is_none() {
+    out.executable_path = spec.executable_path.filter(|p| !p.is_empty());
+  }
+  if out.headless.is_none() {
+    out.headless = spec.headless;
+  }
+  for (key, val) in spec.env {
+    // Config-set variables stay put; the command only adds.
+    out.env.entry(key).or_insert(val);
+  }
+}
+
 fn value_to_args(value: &serde_json::Value) -> Vec<String> {
   match value {
     serde_json::Value::Array(items) => items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
@@ -731,6 +867,160 @@ mod tests {
     }
   }
 
+  /// The failure an operator actually hits: a name no instance claims used to
+  /// reach the args command, so the error was that command's usage message
+  /// instead of the configured set — the one piece of information that answers it.
+  #[test]
+  fn an_unknown_instance_names_the_configured_ones_instead_of_running_the_command() {
+    let mut instances = std::collections::HashMap::new();
+    instances.insert("staging".to_string(), InstanceConfig::default());
+    instances.insert("dev".to_string(), InstanceConfig::default());
+    // Would exit non-zero with its own message if it were ever reached.
+    let args = spec(r#""echo boom >&2; exit 2""#);
+    let cache = CommandCache::default();
+    let v = view(&instances, Some(&args), None, &cache);
+
+    for err in [
+      v.health("desktop").expect_err("health must refuse"),
+      v.overrides_for("desktop").expect_err("overrides must refuse"),
+    ] {
+      assert!(err.contains("unknown instance 'desktop'"), "{err}");
+      assert!(err.contains("dev, staging"), "must name the configured set: {err}");
+      assert!(!err.contains("boom"), "the args command must not have run: {err}");
+    }
+
+    // A declared name reaches the command, so it fails as the COMMAND failing —
+    // which is what proves the gate did not swallow the declared case too.
+    let ran = v.health("staging").expect_err("the failing command still runs");
+    assert!(ran.contains("its args command failed"), "{ran}");
+    assert!(!ran.contains("unknown instance"), "{ran}");
+  }
+
+  /// A launcher that manages the profile, the binary and the proxy should be
+  /// able to say so — otherwise the operator hand-copies a managed path into
+  /// config, and the copy goes stale the moment the launcher moves it.
+  #[test]
+  fn an_args_command_supplies_the_whole_launch_shape() {
+    let mut instances = std::collections::HashMap::new();
+    instances.insert("staging".to_string(), InstanceConfig::default());
+    let args = spec(
+      r#""printf '{\"args\":[\"--flag\"],\"profileDir\":\"/managed/staging\",\"executablePath\":\"/bin/cft\",\"env\":{\"FROM_CMD\":\"1\"}}'""#,
+    );
+    let cache = CommandCache::default();
+    let v = view(&instances, Some(&args), None, &cache);
+
+    let out = v.overrides_for("staging").expect("overrides");
+    assert_eq!(out.args, vec!["--flag".to_string()]);
+    assert_eq!(out.user_data_dir.as_deref(), Some("/managed/staging"));
+    assert_eq!(out.executable_path.as_deref(), Some("/bin/cft"));
+    assert_eq!(out.env.get("FROM_CMD").map(String::as_str), Some("1"));
+  }
+
+  /// A value the operator wrote down is never replaced by a derived one.
+  #[test]
+  fn explicit_config_outranks_the_command_result() {
+    let mut instances = std::collections::HashMap::new();
+    instances.insert(
+      "staging".to_string(),
+      InstanceConfig {
+        user_data_dir: Some("/chosen".to_string()),
+        executable_path: Some("/chosen/chrome".to_string()),
+        env: [("FROM_CMD".to_string(), "config".to_string())].into_iter().collect(),
+        ..InstanceConfig::default()
+      },
+    );
+    let args = spec(
+      r#""printf '{\"args\":[],\"profileDir\":\"/managed\",\"executablePath\":\"/managed/chrome\",\"env\":{\"FROM_CMD\":\"command\"}}'""#,
+    );
+    let cache = CommandCache::default();
+    let v = view(&instances, Some(&args), None, &cache);
+
+    let out = v.overrides_for("staging").expect("overrides");
+    assert_eq!(out.user_data_dir.as_deref(), Some("/chosen"));
+    assert_eq!(out.executable_path.as_deref(), Some("/chosen/chrome"));
+    assert_eq!(out.env.get("FROM_CMD").map(String::as_str), Some("config"));
+  }
+
+  /// The schema is ours, so it must accept the shapes we document and refuse
+  /// the ones that carry no settings — never silently launch an unconfigured
+  /// browser because a command returned something unexpected.
+  #[test]
+  fn the_launch_spec_schema_accepts_what_we_document() {
+    // Legacy shapes stay supported.
+    let arr = parse_command_result(&serde_json::json!(["--a", "--b"])).expect("array");
+    assert_eq!(arr.args, vec!["--a".to_string(), "--b".to_string()]);
+    let text = parse_command_result(&serde_json::json!("--a\n--b\n")).expect("text");
+    assert_eq!(text.args, vec!["--a".to_string(), "--b".to_string()]);
+
+    // Both spellings of the profile directory.
+    for key in ["userDataDir", "profileDir"] {
+      let v = serde_json::json!({ key: "/managed" });
+      let spec = parse_command_result(&v).expect(key);
+      assert_eq!(spec.user_data_dir.as_deref(), Some("/managed"), "for {key}");
+    }
+
+    // A field we do not know must not break a launcher that adds one.
+    let fwd = parse_command_result(&serde_json::json!({ "args": [], "environment": "staging", "somethingNew": 7 }))
+      .expect("unknown keys are ignored");
+    assert!(fwd.args.is_empty());
+
+    // A wrong type is an error naming the key, not a dropped setting.
+    let err = parse_command_result(&serde_json::json!({ "args": "not-a-list" })).expect_err("typed");
+    assert!(err.contains("args"), "{err}");
+
+    // Shapes carrying no settings at all are refused outright.
+    for v in [serde_json::json!(null), serde_json::json!(true), serde_json::json!(42)] {
+      assert!(parse_command_result(&v).is_err(), "must refuse {v}");
+    }
+  }
+
+  /// A proxy the launcher reports has to reach the browser as flags, or the
+  /// instance silently bypasses it.
+  #[test]
+  fn a_reported_proxy_is_lowered_into_launch_flags() {
+    let mut out = InstanceOverrides::default();
+    let spec = InstanceLaunchSpec {
+      proxy_url: Some("http://127.0.0.1:3128".to_string()),
+      proxy_bypass: Some("localhost".to_string()),
+      ..InstanceLaunchSpec::default()
+    };
+    apply_command_result(&mut out, spec, BackendKind::CdpPipe);
+    assert!(
+      out.args.iter().any(|a| a.contains("127.0.0.1:3128")),
+      "proxy must reach the browser: {:?}",
+      out.args
+    );
+  }
+
+  /// An instance must be able to describe both halves of its own routing.
+  /// Without this, discovery can only address an instance by its session-key
+  /// label, which is the coupling `argsCommand` exists to remove.
+  #[test]
+  fn an_instance_discover_command_replaces_the_section_one() {
+    let _guard = port_guard();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+
+    let mut instances = std::collections::HashMap::new();
+    instances.insert(
+      "desktop".to_string(),
+      InstanceConfig {
+        discover_command: Some(spec(&format!(
+          r#""echo ws://127.0.0.1:{port}/devtools/browser/from-instance""#
+        ))),
+        ..InstanceConfig::default()
+      },
+    );
+    let section = spec(r#""echo ws://127.0.0.1:1/devtools/browser/from-section""#);
+    let cache = CommandCache::default();
+    let v = view(&instances, None, Some(&section), &cache);
+
+    match v.resolve_connect("desktop") {
+      Some(ConnectMode::ConnectUrl(url)) => assert!(url.contains("from-instance"), "{url}"),
+      other => panic!("instance command must win outright, got {other:?}"),
+    }
+  }
+
   #[test]
   fn instance_names_are_validated() {
     assert!(validate_instance_name("staging").is_ok());
@@ -866,6 +1156,9 @@ mod tests {
       },
     );
 
+    // Declared, but with no command of its own: it falls back to the section's.
+    instances.insert("chrome".to_string(), InstanceConfig::default());
+
     let section = spec(r#""echo --from-section""#);
     let view = view(&instances, Some(&section), None, &cache);
     let out = view.overrides_for("webkit").expect("overrides");
@@ -876,7 +1169,6 @@ mod tests {
       "instance command must win outright"
     );
 
-    // An instance without its own command still gets the section's.
     let other = view.overrides_for("chrome").expect("overrides");
     assert_eq!(other.args, vec!["--from-section".to_string()]);
   }

@@ -112,6 +112,15 @@ impl WsTransport {
       command.pre_exec(super::super::process::setsid_pre_exec());
     }
 
+    // Chrome writes `DevToolsActivePort` on startup and removes it on a CLEAN
+    // exit — so a browser that was killed (SIGKILL, a crash, `kill_on_drop`)
+    // leaves the file behind pointing at a port nothing listens on any more.
+    // Reading it below would then dial a dead endpoint and keep dialling it,
+    // because the stale file never changes. Remove it before the launch so the
+    // only file that can appear is the one this Chrome writes.
+    let port_file = user_data_dir.join("DevToolsActivePort");
+    let _ = std::fs::remove_file(&port_file);
+
     let mut child = command
       .spawn()
       .map_err(|e| FerriError::Backend(format!("Chrome launch: {e}")))?;
@@ -119,7 +128,6 @@ impl WsTransport {
     crate::backend::process::track_spawned(child.id().unwrap_or(0), Some(user_data_dir), owns_user_data_dir);
     let stderr_tail = crate::backend::process::drain_child_stderr(&mut child);
 
-    let port_file = user_data_dir.join("DevToolsActivePort");
     let ws_url = discover_ws_url(&port_file, &mut child, chromium_path, &stderr_tail).await?;
 
     let transport = Box::pin(Self::connect(&ws_url)).await?;
