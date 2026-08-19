@@ -221,6 +221,19 @@ pub fn attach_listeners(
             Some("Target.targetCreated") => {
               handle_provisional_target_created(&env.params, &page, provisional.clone()).await;
             },
+            // A destroyed target answers nothing ever again. Without
+            // this, a call already on the wire when the target went away
+            // waits for a response that cannot arrive — and a caller
+            // whose own deadline is only checked between polls (
+            // `wait_for_function`, the locator retry loop) never gets
+            // back to check it. A cross-process navigation destroys the
+            // old target the moment its provisional replacement commits,
+            // so this is the ordinary path, not a crash path.
+            Some("Target.targetDestroyed") => {
+              if let Some(gone) = env.params.get("targetId").and_then(Value::as_str) {
+                page.proxy_session().connection_handle().close_route(None, Some(gone));
+              }
+            },
             Some("Target.didCommitProvisionalTarget") => {
               if let Some(new_rx) =
                 handle_committed_provisional_target(&env.params, &page, provisional.clone()).await

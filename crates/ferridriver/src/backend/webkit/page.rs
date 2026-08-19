@@ -157,6 +157,13 @@ pub struct WebKitPage {
   /// on every cross-document navigation and drops active overrides, so
   /// the provisional-target handler replays them.
   pub(crate) emulated_media: Arc<std::sync::Mutex<Option<crate::options::EmulateMediaOptions>>>,
+  /// The timezone this page was started with, and the only one it can
+  /// have: `WebKit` honours `Page.setTimeZone` before a session's first
+  /// document and ignores it after, so a later CHANGE is refused rather
+  /// than silently dropped. Re-asserting the same value is a no-op and
+  /// must stay one — [`Self::apply_context_options`] re-sends the whole
+  /// bag on every context-level mutation.
+  pub(crate) applied_timezone: Arc<std::sync::Mutex<Option<String>>>,
   /// Viewport emulation currently in force, stashed for the same reason as
   /// [`Self::emulated_media`] (the target session is swapped on cross-document
   /// navigation) and because the bootstrap shim depends on `is_mobile`.
@@ -365,14 +372,23 @@ impl WebKitPage {
   ) -> std::result::Result<Self, BrowserError> {
     let conn = browser.connection();
     let proxy_id = proxy.page_proxy_id().unwrap_or_default().to_string();
-    let (target_id, is_paused) = wait_for_first_page_target(&proxy).await?;
+    // ONE proxy subscription for the whole attach, opened before the
+    // first await and handed to the listener loop at the end.
+    //
+    // `wait_for_first_page_target` used to open its own and drop it on
+    // return, so every proxy event between that drop and the loop's
+    // subscription was lost. A popup that is already navigating
+    // announces its provisional target ~10ms after its own — inside
+    // that window — and losing it meant the commit found nothing
+    // stashed, the page kept sending to the destroyed target, and every
+    // later call blocked with no response to wait for.
+    let mut proxy_rx = proxy.events();
+    let (target_id, is_paused) = wait_for_first_page_target(&mut proxy_rx).await?;
     let target = conn.target_session(&proxy_id, &target_id);
-    // Subscribe BEFORE the enables below. Everything between here and
-    // `attach_listeners` is awaited protocol work, and a popup that is
-    // already navigating creates its provisional target inside that
-    // window; the events are buffered until the loop starts.
+    // Same reason for the target session: everything between here and
+    // `attach_listeners` is awaited protocol work, and the events are
+    // buffered until the loop starts.
     let target_rx = target.events();
-    let proxy_rx = proxy.events();
 
     // Page agent before Runtime so executionContextCreated ordering holds.
     target.send("Page.enable", json!({})).await?;
@@ -399,9 +415,15 @@ impl WebKitPage {
     // initial document. Without this, `navigator.userAgent`,
     // `Intl.DateTimeFormat().resolvedOptions().timeZone`, etc. stay at
     // their default values for the lifetime of about:blank.
+    // The timezone applied here is the one this page HAS; the stash
+    // below records it so a later `apply_context_options` re-asserting
+    // the same value is recognised as a no-op rather than a change the
+    // engine can no longer make.
+    let mut pre_timezone = None;
     if let Some(ctx_id) = context_id.as_deref()
       && let Some(opts) = browser.context_options_for(ctx_id)
     {
+      pre_timezone.clone_from(&opts.timezone_id);
       apply_pre_page_overrides(&target, &proxy, &opts).await;
     }
     // File-chooser interception is enabled lazily through
@@ -456,6 +478,7 @@ impl WebKitPage {
       nav_request_slot: crate::network::NavRequestSlot::new(),
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
       intercept_enabled: Arc::new(AtomicBool::new(false)),
+      applied_timezone: Arc::new(std::sync::Mutex::new(pre_timezone)),
       frame_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
       frame_engine_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
       main_frame_id_cache,
@@ -1576,7 +1599,46 @@ impl WebKitPage {
 
   // ── Emulation ─────────────────────────────────────────────────────────
 
+  /// The timezone already in force on this page, if any.
+  fn applied_timezone(&self) -> Option<String> {
+    self
+      .applied_timezone
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
+  }
+
+  /// Whether this page has already committed a document.
+  ///
+  /// The session's first document is the boundary `WebKit` applies some
+  /// overrides at; after it the engine accepts the command and ignores
+  /// it. A page holding an execution context has one.
+  fn has_committed_document(&self) -> bool {
+    self
+      .frame_contexts
+      .try_read()
+      .is_ok_and(|contexts| !contexts.is_empty())
+  }
+
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
+    // `Page.setTimeZone` is honoured only before a session's first
+    // document. WebKit accepts the command afterwards and does nothing
+    // with it, so sending it on a live page reports success while the
+    // page keeps its old zone — the worst of both. Say so instead;
+    // `newContext({ timezoneId })` is the supported path and works.
+    let timezone_changes = match (opts.timezone_id.as_deref(), self.applied_timezone()) {
+      (Some(wanted), Some(applied)) => wanted != applied,
+      (Some(_), None) => true,
+      (None, _) => false,
+    };
+    if timezone_changes && self.has_committed_document() {
+      return Err(FerriError::Unsupported(
+        "timezoneId cannot be changed after the page has a document on WebKit: the engine honours \
+         Page.setTimeZone only before a session's first document. Pass `timezoneId` to newContext() \
+         instead."
+          .to_string(),
+      ));
+    }
     // Per-page document-time overrides (userAgent, timezone, locale,
     // JS-disabled, bypassCSP, offline, permissions) are now sent inside
     // [`Self::attach`] from the browser's stashed context options, so
@@ -1642,6 +1704,10 @@ impl WebKitPage {
         .target_session()
         .send("Page.setTimeZone", json!({ "timeZone": tz }))
         .await;
+      *self
+        .applied_timezone
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tz.to_string());
     }
     if let Some(screen) = opts.screen {
       let _ = self
@@ -2483,8 +2549,9 @@ async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crat
 /// `page` on the proxy session. Returns the target id plus whether the
 /// target arrived paused (`isPaused` — browser-created popups do; the
 /// caller resumes after session init).
-async fn wait_for_first_page_target(proxy: &Session) -> std::result::Result<(String, bool), BrowserError> {
-  let mut rx = proxy.events();
+async fn wait_for_first_page_target(
+  rx: &mut tokio::sync::mpsc::UnboundedReceiver<Envelope>,
+) -> std::result::Result<(String, bool), BrowserError> {
   while let Some(env) = rx.recv().await {
     if let Some(id) = page_target_id(&env) {
       let paused = env

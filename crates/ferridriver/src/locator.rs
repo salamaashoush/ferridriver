@@ -244,6 +244,10 @@ pub(crate) fn is_retryable_action_error(msg: &str) -> bool {
     || msg.contains("Node was not found")
     || msg.contains("no such node")
     || msg.contains("stale element")
+    // A WebKit target destroyed under us — the old side of a
+    // cross-process navigation. The page swaps to the committed target,
+    // so the very next attempt runs on a live session.
+    || msg.contains("transport closed")
     // Hit-target interception: another element covers the action point.
     // Retryable so the Locator loop keeps running locator handlers and
     // re-resolving until its deadline (Playwright retries the pointer

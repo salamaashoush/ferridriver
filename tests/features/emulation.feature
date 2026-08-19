@@ -1,10 +1,14 @@
 Feature: Emulation
   Viewport, timezone, locale, and media emulation.
 
+  # timezoneId is a context-creation option, like locale below: WebKit
+  # honours `Page.setTimeZone` only before a session's first document and
+  # ignores it afterwards, so setting it on a live page is a no-op there
+  # (now a typed refusal rather than a silent one). The `@use` tag feeds
+  # the worker's context setup, which is the path every engine supports.
+  @use(timezoneId=America/New_York)
   Scenario: Set timezone and verify
     Given I navigate to "/emulation.html"
-    And I set timezone to "America/New_York"
-    And I reload the page
     Then "#timezone" should have text "America/New_York"
 
   # locale is a context-creation option (`test.use` analog): WebKit web

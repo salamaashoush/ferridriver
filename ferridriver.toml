@@ -1,5 +1,10 @@
 [test]
 testMatch = ["tests/**/*.spec.ts", "tests/**/*.test.ts"]
+# The acceptance suites bring their OWN configs and are run by
+# `just acceptance`. Collected here they would run under this config
+# instead — against the wrong projects, with none of the settings they
+# assert.
+testIgnore = ["tests/acceptance/**"]
 steps = ["tests/steps/**/*.ts"]
 baseUrl = "http://127.0.0.1:47831"
 # Workers auto-detect (cpus/2), one browser per worker. Projects run one

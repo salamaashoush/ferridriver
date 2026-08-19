@@ -434,15 +434,11 @@ describe('context options', () => {
     }
   });
 
-  test('context_options_screen', async ({ browser, browserName }) => {
-    if (browserName === 'firefox') {
-      await expectOptionUnsupportedOnFirefox(
-        browser,
-        { viewport: { width: 640, height: 480 }, screen: { width: 1920, height: 1080 } },
-        'screen',
-      );
-      return;
-    }
+  // `screen` works on every engine, Firefox included: BiDi has
+  // `emulation.setScreenSettingsOverride`, which Playwright's own BiDi
+  // backend uses (`bidi/bidiBrowser.ts::doUpdateDefaultViewport`). It
+  // used to be refused here as unsupported.
+  test('context_options_screen', async ({ browser }) => {
     const ctx = await browser.newContext({
       viewport: { width: 640, height: 480 },
       screen: { width: 1920, height: 1080 },
