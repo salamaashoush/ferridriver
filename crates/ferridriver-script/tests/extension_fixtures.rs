@@ -151,6 +151,7 @@ fn world(title: &str) -> TestWorldData {
       snapshot_dir: "/snap".to_string(),
       snapshot_suffix: String::new(),
       project_name: Some("unit".to_string()),
+      config: serde_json::Value::Null,
     },
   }
 }
