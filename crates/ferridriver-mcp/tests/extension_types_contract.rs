@@ -92,6 +92,60 @@ fn tool_definition_declares_every_manifest_field() {
 }
 
 #[test]
+fn the_package_manifest_declares_every_field_the_loader_reads() {
+  // Fully populated, so no `Option::None` is skipped by serde and the
+  // object form of an entry serialises as an object rather than a bare
+  // string.
+  let manifest: ferridriver_config::extension_manifest::ExtensionManifest = serde_json::from_value(serde_json::json!({
+    "apiVersion": 2,
+    "name": "@acme/ext",
+    "entries": [{ "path": "./src/a.ts", "hosts": ["mcp"], "requires": { "commands": ["acme"] } }],
+    "provides": { "modules": { "@acme/x": "./src/x.ts" }, "aliases": { "@acme/y": "@acme/x" } },
+    "requires": { "commands": ["acme"], "env": ["ACME"], "net": ["*.acme.com"], "sidecars": ["gate"] },
+    "settings": { "acme": { "type": "object" } }
+  }))
+  .expect("manifest fixture");
+
+  let source = types_source();
+  assert_declares(
+    &interface_body(&source, "ExtensionPackageManifest"),
+    "ExtensionPackageManifest",
+    &wire_fields(&manifest),
+  );
+  assert_declares(
+    &interface_body(&source, "ExtensionProvides"),
+    "ExtensionProvides",
+    &wire_fields(&manifest.provides),
+  );
+  assert_declares(
+    &interface_body(&source, "ExtensionRequires"),
+    "ExtensionRequires",
+    &wire_fields(&manifest.requires),
+  );
+  // An entry that narrows nothing serialises as a bare string, which is
+  // why the fixture above narrows: `wire_fields` needs the object form.
+  assert_declares(
+    &interface_body(&source, "ExtensionEntry"),
+    "ExtensionEntry",
+    &wire_fields(&manifest.entries[0]),
+  );
+}
+
+#[test]
+fn the_host_union_names_every_host() {
+  let source = types_source();
+  let start = source.find("type ExtensionHost").expect("ExtensionHost is declared");
+  let line = &source[start..source[start..].find(';').map_or(source.len(), |i| start + i)];
+  for host in ferridriver_script::ExtensionHost::ALL {
+    assert!(
+      line.contains(&format!("'{}'", host.as_str())),
+      "`ExtensionHost` in @ferridriver/extension omits `{}` — a manifest's `hosts` filter accepts it",
+      host.as_str()
+    );
+  }
+}
+
+#[test]
 fn tool_context_declares_every_key_the_runtime_installs() {
   let source = types_source();
   let body = interface_body(&source, "ToolContext<");
