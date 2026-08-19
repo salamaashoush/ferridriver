@@ -78,32 +78,15 @@ fn live_trace_composite(test_full_name: &str) -> Option<String> {
     .cloned()
 }
 
-/// Vendored Playwright trace-viewer static app (playwright-core 1.61.1,
-/// Apache-2.0 — LICENSE ships inside the archive). Embedded so the
-/// trace viewer works fully offline; unpacked into memory on first use.
-const TRACE_VIEWER_ZIP: &[u8] = include_bytes!("ui_assets/trace_viewer.zip");
-
-static TRACE_VIEWER_ASSETS: std::sync::LazyLock<rustc_hash::FxHashMap<String, axum::body::Bytes>> =
-  std::sync::LazyLock::new(|| {
-    let mut assets = rustc_hash::FxHashMap::default();
-    let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(TRACE_VIEWER_ZIP)) else {
-      return assets;
-    };
-    for index in 0..archive.len() {
-      let Ok(mut entry) = archive.by_index(index) else {
-        continue;
-      };
-      if entry.is_dir() {
-        continue;
-      }
-      let name = entry.name().to_string();
-      let mut bytes = Vec::new();
-      if std::io::Read::read_to_end(&mut entry, &mut bytes).is_ok() {
-        assets.insert(name, axum::body::Bytes::from(bytes));
-      }
-    }
-    assets
-  });
+/// The trace viewer this server hands out.
+///
+/// It is `ferridriver-viewer`'s embedded app, not a second copy: this
+/// crate used to carry its own `ui_assets/trace_viewer.zip` at
+/// playwright-core 1.61.1 while the viewer crate carried 1.62.1, so the
+/// same UI arrived at two different versions depending on which entry
+/// point opened it, and the wire protocols implemented against the
+/// pinned version only matched one of them.
+const TRACE_VIEWER: ferridriver_viewer::App = ferridriver_viewer::App::TraceViewer;
 
 /// Command sent from a browser tab to the run loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,7 +400,7 @@ async fn trace_viewer_asset(UrlPath(path): UrlPath<String>) -> Response {
 /// revalidated so a viewer upgrade takes effect on reload.
 fn serve_trace_viewer(path: &str) -> Response {
   let key = if path.is_empty() { "index.html" } else { path };
-  match TRACE_VIEWER_ASSETS.get(key) {
+  match TRACE_VIEWER.asset(key) {
     Some(bytes) => {
       let mime = mime_guess::from_path(key).first_or_octet_stream();
       let is_html = Path::new(key)
@@ -432,7 +415,7 @@ fn serve_trace_viewer(path: &str) -> Response {
       Response::builder()
         .header(header::CONTENT_TYPE, mime.as_ref())
         .header(header::CACHE_CONTROL, cache)
-        .body(Body::from(bytes.clone()))
+        .body(Body::from(bytes))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     },
     None => StatusCode::NOT_FOUND.into_response(),

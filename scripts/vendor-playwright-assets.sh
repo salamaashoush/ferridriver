@@ -9,6 +9,11 @@
 # crates/ferridriver-viewer/assets/, and records the version so the wire
 # protocols implemented in Rust can be checked against the matching source.
 #
+# These zips are the ONLY copies. `ferridriver-test`'s UI-mode server used
+# to embed a second trace viewer of its own, one release behind, so the
+# same UI arrived at two versions depending on which entry point opened
+# it; it now serves `ferridriver_viewer::App::TraceViewer`.
+#
 # npm is needed HERE ONLY. The zips are committed; building or running
 # ferridriver never shells out to node.
 #
