@@ -674,7 +674,10 @@ mod extension_defaults {
       body[..end]
         .lines()
         .skip(1)
-        .filter_map(|line| line.trim().split('?').next().map(str::to_string))
+        .map(str::trim)
+        // A key may carry a JSDoc block; the keys are what is pinned.
+        .filter(|line| !(line.starts_with("/*") || line.starts_with('*') || line.starts_with("//")))
+        .filter_map(|line| line.split('?').next().map(str::to_string))
         .filter(|key| !key.is_empty())
         .collect()
     };
@@ -697,10 +700,20 @@ mod extension_defaults {
       "TestConfigDefaults must list every `[test]` key an extension may set, and only those",
     );
     assert_eq!(declared("McpConfigDefaults"), schema_keys("mcp", &[]));
+    // A config module may also write the document aliases, which are
+    // folded into the schema before anything deserializes.
+    let mut config_keys = schema_keys("test", &["moduleAliases"]);
+    config_keys.extend(
+      ferridriver_config::layer::DOCUMENT_ALIASES
+        .iter()
+        .map(|alias| (*alias).to_string()),
+    );
+    config_keys.sort();
     assert_eq!(
       declared_in(&config_contract, "FerridriverTestConfig"),
-      schema_keys("test", &["moduleAliases"]),
-      "FerridriverTestConfig must list every `[test]` key a config module may set, and only those",
+      config_keys,
+      "FerridriverTestConfig must list every `[test]` key a config module may set plus the document \
+       aliases, and only those",
     );
   }
 }
@@ -736,4 +749,193 @@ fn a_shared_cache_reads_each_layer_once_across_passes() {
   assert_eq!(fresh["test"]["timeout"], 9999);
 
   let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Device descriptors ──────────────────────────────────────────────
+
+#[test]
+fn a_device_pre_seeds_every_key_its_descriptor_carries() {
+  let t = Tree::new();
+  t.write("repo/ferridriver.toml", "[test.browser.use]\ndevice = \"iPhone 15\"\n");
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+  let browser = &r.config.test.browser;
+  let used = &browser.use_options;
+
+  assert!(used.user_agent.as_deref().expect("userAgent").contains("iPhone"));
+  assert!(used.is_mobile);
+  assert!(used.has_touch);
+  assert_eq!(used.device_scale_factor, Some(3.0));
+  assert_eq!(used.default_browser_type.as_deref(), Some("webkit"));
+  let viewport = used
+    .viewport
+    .as_ref()
+    .expect("viewport is set")
+    .size()
+    .expect("not null");
+  assert_eq!((viewport.width, viewport.height), (393, 659));
+  let screen = used.screen.clone().expect("screen");
+  assert_eq!((screen.width, screen.height), (393, 852));
+}
+
+#[test]
+fn a_key_written_beside_the_device_wins_over_it() {
+  let t = Tree::new();
+  t.write(
+    "repo/ferridriver.toml",
+    "[test.browser.use]\ndevice = \"iPhone 15\"\nhasTouch = false\nuserAgent = \"mine\"\n",
+  );
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+  let used = &r.config.test.browser.use_options;
+
+  assert!(!used.has_touch, "an explicit hasTouch is not overwritten by the device");
+  assert_eq!(used.user_agent.as_deref(), Some("mine"));
+  // Untouched keys still come from the descriptor.
+  assert!(used.is_mobile);
+}
+
+#[test]
+fn a_higher_layer_wins_over_a_lower_layers_device() {
+  let t = Tree::new();
+  t.write(
+    "user/ferridriver/config.toml",
+    "[test.browser.use]\ndevice = \"iPhone 15\"\n",
+  );
+  t.write(
+    "repo/ferridriver.toml",
+    "[test.browser.use]\nuserAgent = \"repo-agent\"\n",
+  );
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+  let used = &r.config.test.browser.use_options;
+
+  // Expansion happens per layer, before the fold, so the device's
+  // userAgent is an ordinary lower-layer value the repo overrides.
+  assert_eq!(used.user_agent.as_deref(), Some("repo-agent"));
+  assert!(used.is_mobile, "the rest of the descriptor still applies");
+}
+
+#[test]
+fn an_unknown_device_name_is_reported_not_expanded() {
+  let t = Tree::new();
+  t.write("repo/ferridriver.toml", "[test.browser.use]\ndevice = \"Nokia 3310\"\n");
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+  let used = &r.config.test.browser.use_options;
+
+  assert_eq!(used.device.as_deref(), Some("Nokia 3310"));
+  assert!(used.user_agent.is_none(), "nothing is invented for a name nobody ships");
+  assert!(used.viewport.is_none());
+}
+
+#[test]
+fn the_top_level_use_block_is_the_browsers_use_block() {
+  let t = Tree::new();
+  t.write(
+    "repo/ferridriver.toml",
+    "[test.use]\nlocale = \"fr-FR\"\ndevice = \"Pixel 5\"\n",
+  );
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+  let used = &r.config.test.browser.use_options;
+
+  assert_eq!(used.locale.as_deref(), Some("fr-FR"));
+  assert_eq!(used.device_scale_factor, Some(2.75));
+  assert!(
+    r.warnings.iter().all(|w| !w.message.contains("use")),
+    "the alias is folded into the schema, not reported as unknown: {:?}",
+    r.warnings
+  );
+}
+
+#[test]
+fn the_browsers_own_use_key_wins_over_the_top_level_one() {
+  let t = Tree::new();
+  t.write(
+    "repo/ferridriver.toml",
+    "[test.use]\nlocale = \"fr-FR\"\n\n[test.browser.use]\nlocale = \"de-DE\"\n",
+  );
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+  assert_eq!(r.config.test.browser.use_options.locale.as_deref(), Some("de-DE"));
+}
+
+#[test]
+fn a_projects_use_block_reaches_that_projects_context() {
+  let t = Tree::new();
+  t.write(
+    "repo/ferridriver.toml",
+    "[test.browser]\nheadless = true\n\n[[test.projects]]\nname = \"phone\"\n\n[test.projects.use]\ndevice = \"iPhone 15\"\n",
+  );
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+  let project = r.config.test.projects.first().expect("project");
+  let effective = r.config.test.merge_project(project);
+
+  assert!(effective.browser.use_options.is_mobile);
+  assert_eq!(effective.browser.browser, "webkit", "the descriptor names the engine");
+  assert_eq!(effective.browser.backend, "webkit");
+  assert!(
+    effective.browser.headless,
+    "a project `use` block must not materialise a browser block and turn headless back off",
+  );
+}
+
+#[test]
+fn an_explicit_browser_name_beats_the_devices_engine() {
+  let t = Tree::new();
+  t.write(
+    "repo/ferridriver.toml",
+    "[test.use]\ndevice = \"iPhone 15\"\nbrowserName = \"chromium\"\n",
+  );
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+  let mut browser = r.config.test.browser.clone();
+  browser.apply_use_engine();
+  browser.normalize();
+
+  assert_eq!(browser.browser, "chromium");
+}
+
+#[test]
+fn a_device_does_not_move_an_engine_someone_else_chose() {
+  let t = Tree::new();
+  t.write(
+    "repo/ferridriver.toml",
+    "[test.browser]\nbrowser = \"firefox\"\nbackend = \"bidi\"\n\n[test.use]\ndevice = \"iPhone 15\"\n",
+  );
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+  let mut browser = r.config.test.browser.clone();
+  browser.apply_use_engine();
+  browser.normalize();
+
+  assert_eq!(
+    browser.browser, "firefox",
+    "defaultBrowserType only fills an unset engine"
+  );
+  assert!(
+    browser.use_options.is_mobile,
+    "the rest of the descriptor still applies"
+  );
+}
+
+#[test]
+fn a_null_viewport_is_not_an_absent_one() {
+  let t = Tree::new();
+  t.write("repo/ferridriver.toml", "[test.use]\nviewport = { }\n");
+  let err = resolve(&t.opts(t.repo())).expect_err("an empty table is not a size");
+  assert!(err.to_string().contains("width"), "{err}");
+
+  let t2 = Tree::new();
+  t2.write("repo/ferridriver.yaml", "test:\n  use:\n    viewport: null\n");
+  let r2 = resolve(&t2.opts(t2.repo())).expect("resolve");
+  assert!(
+    matches!(
+      r2.config.test.browser.use_options.viewport,
+      Some(ferridriver_config::test::ViewportOverride::Disabled)
+    ),
+    "`viewport: null` says NO fixed viewport, which absent does not",
+  );
 }

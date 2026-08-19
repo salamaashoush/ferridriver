@@ -376,9 +376,25 @@ async fn close_test_context(ctx: &ferridriver::ContextRef) {
 
 fn build_effective_context_config(config: &TestConfig, test: &crate::model::TestCase) -> EffectiveContextConfig {
   let mut ctx_config = config.browser.use_options.clone();
-  if let Some(ref opts) = test.use_options {
+  // `test.use({ device })` pre-seeds the keys a config layer's `device`
+  // pre-seeds, through the same function — a spec and a config cannot
+  // disagree about what a device is.
+  let spec_use = test.use_options.as_ref().map(|opts| {
+    let mut expanded = opts.as_object().cloned().unwrap_or_default();
+    crate::config::expand_device_keys(&mut expanded);
+    serde_json::Value::Object(expanded)
+  });
+  if let Some(ref opts) = spec_use {
     if let Some(v) = opts.get("locale").and_then(|v| v.as_str()) {
       ctx_config.locale = Some(v.to_string());
+    }
+    if let Some(screen) = opts.get("screen").and_then(|v| v.as_object())
+      && let (Some(w), Some(h)) = (
+        screen.get("width").and_then(serde_json::Value::as_i64),
+        screen.get("height").and_then(serde_json::Value::as_i64),
+      )
+    {
+      ctx_config.screen = Some(ViewportConfig { width: w, height: h });
     }
     if let Some(v) = opts.get("colorScheme").and_then(|v| v.as_str()) {
       ctx_config.color_scheme = Some(v.to_string());
@@ -469,7 +485,7 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
     }
   }
 
-  let viewport_override = test.use_options.as_ref().and_then(|opts| {
+  let viewport_override = spec_use.as_ref().and_then(|opts| {
     opts.get("viewport").and_then(|v| {
       let w = v.get("width").and_then(|w| w.as_i64());
       let h = v.get("height").and_then(|h| h.as_i64());
@@ -480,8 +496,7 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
     })
   });
 
-  let request_base_url = test
-    .use_options
+  let request_base_url = spec_use
     .as_ref()
     .and_then(|opts| opts.get("baseURL").and_then(|v| v.as_str()).map(String::from))
     .or_else(|| config.base_url.clone())
@@ -493,9 +508,22 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
 
   EffectiveContextConfig {
     context: ctx_config,
-    default_viewport: config.browser.viewport.clone(),
+    default_viewport: config_viewport(&config.browser),
     viewport_override,
     request_base_url,
+  }
+}
+
+/// The viewport a config asks for.
+///
+/// `use: { viewport }` is Playwright's spelling and wins when present —
+/// `null` included, which is how a suite says "no fixed viewport".
+/// `[test.browser].viewport` is the spelling that predates the `use`
+/// bag and answers when `use` is silent.
+fn config_viewport(browser: &crate::config::BrowserConfig) -> Option<ViewportConfig> {
+  match browser.use_options.viewport {
+    Some(ref written) => written.size(),
+    None => browser.viewport.clone(),
   }
 }
 
@@ -507,7 +535,7 @@ fn build_suite_effective_context_config(config: &TestConfig) -> EffectiveContext
 
   EffectiveContextConfig {
     context: ctx_config,
-    default_viewport: config.browser.viewport.clone(),
+    default_viewport: config_viewport(&config.browser),
     viewport_override: None,
     request_base_url: config.base_url.clone().or_else(crate::config::base_url_from_env),
   }
@@ -543,6 +571,10 @@ fn build_context_options(
     };
   }
   opts.device_scale_factor = ctx_config.device_scale_factor;
+  opts.screen = ctx_config.screen.as_ref().map(|s| ferridriver::options::ScreenSize {
+    width: s.width,
+    height: s.height,
+  });
   if ctx_config.is_mobile {
     opts.is_mobile = Some(true);
   }
@@ -2166,5 +2198,98 @@ fn evaluate_condition(condition: &str, browser: &crate::config::BrowserConfig) -
 
     // Unknown condition: don't match.
     _ => false,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+  use super::{EffectiveContextConfig, build_context_options, config_viewport};
+  use crate::config::{ContextConfig, ViewportConfig, expand_device_keys};
+
+  /// A `use` block as a config layer leaves it: the device expanded,
+  /// then deserialized into the typed bag.
+  fn used(block: serde_json::Value) -> ContextConfig {
+    let mut map = block.as_object().cloned().expect("object");
+    expand_device_keys(&mut map);
+    serde_json::from_value(serde_json::Value::Object(map)).expect("context config")
+  }
+
+  fn effective(context: ContextConfig, fallback: Option<ViewportConfig>) -> EffectiveContextConfig {
+    let mut browser = crate::config::BrowserConfig::default();
+    browser.viewport = fallback;
+    browser.use_options = context.clone();
+    EffectiveContextConfig {
+      context,
+      default_viewport: config_viewport(&browser),
+      viewport_override: None,
+      request_base_url: None,
+    }
+  }
+
+  #[test]
+  fn a_devices_use_keys_reach_the_context_options() {
+    let context = used(serde_json::json!({ "device": "iPhone 15" }));
+    let effective = effective(context, Some(ViewportConfig::default()));
+    let opts = build_context_options(
+      &effective,
+      std::path::Path::new("."),
+      ferridriver::backend::BackendKind::CdpPipe,
+    );
+
+    assert!(matches!(
+      opts.viewport,
+      ferridriver::options::ViewportOption::Size {
+        width: 393,
+        height: 659
+      }
+    ));
+    let screen = opts.screen.expect("the descriptor's screen reaches the context");
+    assert_eq!((screen.width, screen.height), (393, 852));
+    assert_eq!(opts.device_scale_factor, Some(3.0));
+    assert_eq!(opts.is_mobile, Some(true));
+    assert_eq!(opts.has_touch, Some(true));
+    assert!(opts.user_agent.expect("userAgent").contains("iPhone"));
+  }
+
+  #[test]
+  fn a_use_viewport_wins_over_the_browsers_own() {
+    let context = used(serde_json::json!({ "viewport": { "width": 411, "height": 823 } }));
+    let effective = effective(
+      context,
+      Some(ViewportConfig {
+        width: 1280,
+        height: 720,
+      }),
+    );
+    assert!(matches!(
+      build_context_options(
+        &effective,
+        std::path::Path::new("."),
+        ferridriver::backend::BackendKind::CdpPipe,
+      )
+      .viewport,
+      ferridriver::options::ViewportOption::Size {
+        width: 411,
+        height: 823
+      }
+    ));
+  }
+
+  #[test]
+  fn a_null_use_viewport_clears_the_browsers_own() {
+    let context = used(serde_json::json!({ "viewport": null }));
+    let effective = effective(
+      context,
+      Some(ViewportConfig {
+        width: 1280,
+        height: 720,
+      }),
+    );
+    assert!(
+      effective.default_viewport.is_none(),
+      "`viewport: null` is not the same as leaving it out",
+    );
   }
 }

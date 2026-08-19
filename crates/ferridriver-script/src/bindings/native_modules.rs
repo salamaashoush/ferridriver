@@ -388,6 +388,40 @@ impl Loader for NativeModuleLoader {
 
 /// Read a property off `globalThis` (undefined when not installed —
 /// same as the old glue's `globalThis.page`).
+/// The `devices` object for this VM, built once.
+///
+/// Playwright's `devices` is ONE object shared by `playwright` and
+/// `@playwright/test` (`test.mjs` re-exports `playwright.devices`), so
+/// `require('playwright').devices === require('@playwright/test').devices`
+/// holds there and has to hold here.
+struct DevicesObject(rquickjs::Persistent<Object<'static>>);
+
+// SAFETY: holds only a `Persistent`, which is lifetime-erased by
+// construction — the same rationale as the registry userdata.
+#[allow(unsafe_code)]
+unsafe impl rquickjs::JsLifetime<'_> for DevicesObject {
+  type Changed<'to> = DevicesObject;
+}
+
+/// `devices['iPhone 15']` — Playwright's device registry.
+///
+/// Parsed from the vendored source with the engine's own JSON parser
+/// rather than assembled property by property: 207 descriptors is ~2000
+/// property writes across the boundary, and the parse gives an object
+/// with exactly upstream's keys, `screen` included.
+fn devices_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  if let Some(ud) = ctx.userdata::<DevicesObject>()
+    && let Ok(obj) = ud.0.clone().restore(ctx)
+  {
+    return Ok(obj.into_value());
+  }
+  let parsed: Value<'js> = ctx.json_parse(ferridriver::devices::SOURCE)?;
+  if let Some(obj) = parsed.as_object() {
+    let _ = ctx.store_userdata(DevicesObject(rquickjs::Persistent::save(ctx, obj.clone())));
+  }
+  Ok(parsed)
+}
+
 fn global<'js>(ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<Value<'js>> {
   ctx.globals().get(name)
 }
@@ -533,6 +567,7 @@ pub struct FerridriverModule;
 const FERRIDRIVER_EXPORTS: &[&str] = &[
   "default",
   "ferridriver",
+  "devices",
   "host",
   "tool",
   "defineTool",
@@ -564,6 +599,7 @@ fn ferridriver_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   let fd: Value<'js> = global(ctx, "ferridriver")?;
   ns.set("default", fd.clone())?;
   ns.set("ferridriver", fd)?;
+  ns.set("devices", devices_object(ctx)?)?;
   for name in [
     "host",
     "tool",
@@ -619,7 +655,7 @@ pub struct FerridriverTestModule;
 
 /// Mirrors `@playwright/test`'s own export list (`packages/playwright/
 /// test.mjs`), minus what ferridriver has not implemented yet:
-/// `devices`, `errors`, `by` and the
+/// `errors`, `by` and the
 /// `_electron` / `_android` / `_utilityTest` internals.
 /// Exporting a name that resolves to `undefined` would be worse than not
 /// exporting it — the import succeeds and the call site fails somewhere
@@ -632,6 +668,7 @@ const TEST_EXPORTS: &[&str] = &[
   "mergeExpects",
   "mergeTests",
   "defineConfig",
+  "devices",
   "selectors",
   "_baseTest",
   "chromium",
@@ -654,6 +691,7 @@ fn test_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
     ("mergeExpects", global(ctx, "mergeExpects")?),
     ("mergeTests", fd_prop(ctx, "mergeTests")?),
     ("defineConfig", fd_prop(ctx, "defineConfig")?),
+    ("devices", devices_object(ctx)?),
     ("selectors", fd_prop(ctx, "selectors")?),
     ("_baseTest", fd_prop(ctx, "baseTest")?),
     ("chromium", global(ctx, "chromium")?),

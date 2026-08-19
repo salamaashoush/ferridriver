@@ -1670,6 +1670,46 @@ impl BidiPage {
       .resolved_viewport()
       .map(|vp| async move { self.emulate_viewport(&vp).await })
       .into();
+    // Playwright drives the same pair from `doUpdateDefaultViewport`
+    // (`bidi/bidiBrowser.ts:457-483`): the screen area is whichever of
+    // `screen` / `viewport` is set, and `isMobile` only decides the
+    // orientation it reports.
+    let screen_fut: OptionFuture<_> = opts
+      .screen
+      .or_else(|| {
+        opts.resolved_viewport().map(|vp| crate::options::ScreenSize {
+          width: vp.width,
+          height: vp.height,
+        })
+      })
+      .map(|screen| async move {
+        let portrait = opts.is_mobile.unwrap_or(false) || screen.height >= screen.width;
+        let (kind, angle, natural) = if portrait {
+          ("portrait-primary", 0, "portrait")
+        } else {
+          ("landscape-primary", 0, "landscape")
+        };
+        self
+          .cmd(
+            "emulation.setScreenOrientationOverride",
+            json!({
+              "contexts": [&*self.context_id],
+              "screenOrientation": { "natural": natural, "type": kind, "angle": angle },
+            }),
+          )
+          .await?;
+        self
+          .cmd(
+            "emulation.setScreenSettingsOverride",
+            json!({
+              "contexts": [&*self.context_id],
+              "screenArea": { "width": screen.width, "height": screen.height },
+            }),
+          )
+          .await
+          .map(|_| ())
+      })
+      .into();
     let media_fut: OptionFuture<_> = opts
       .any_media_override()
       .then(|| {
@@ -1795,8 +1835,9 @@ impl BidiPage {
       })
       .into();
 
-    let (r_vp, r_ua, r_loc, r_tz, r_js, r_dl, r_hdr, r_med, r_geo, r_off, r_sw, r_perm) = tokio::join!(
+    let (r_vp, r_scr, r_ua, r_loc, r_tz, r_js, r_dl, r_hdr, r_med, r_geo, r_off, r_sw, r_perm) = tokio::join!(
       viewport_fut,
+      screen_fut,
       ua_fut,
       locale_fut,
       tz_fut,
@@ -1813,6 +1854,7 @@ impl BidiPage {
     let mut errs: Vec<String> = Vec::new();
     for (label, r) in [
       ("viewport", r_vp),
+      ("screen", r_scr),
       ("userAgent", r_ua),
       ("locale", r_loc),
       ("timezoneId", r_tz),
@@ -1833,15 +1875,20 @@ impl BidiPage {
     // primitives. Surfacing the gap to the caller (vs. silently
     // dropping) matches Playwright's Rule-4 "typed Unsupported for
     // real protocol gaps".
-    for (label, present) in [
-      ("bypassCSP", opts.bypass_csp.is_some()),
-      ("ignoreHTTPSErrors", opts.ignore_https_errors.is_some()),
-      ("screen", opts.screen.is_some()),
+    //
+    // Each is refused only when it asks for the behaviour the backend
+    // cannot produce. `hasTouch: false` asks for the default, which is
+    // what Firefox already does — and it is what a spread of a desktop
+    // device descriptor carries, so refusing it made `{ ...devices
+    // ['Desktop Firefox'] }` fail on Firefox.
+    for (label, asked) in [
+      ("bypassCSP", opts.bypass_csp == Some(true)),
+      ("ignoreHTTPSErrors", opts.ignore_https_errors == Some(true)),
       // browsingContext.setViewport has no touch-emulation field and
       // Firefox exposes no other command for it.
-      ("hasTouch", opts.has_touch.is_some()),
+      ("hasTouch", opts.has_touch == Some(true)),
     ] {
-      if present {
+      if asked {
         errs.push(format!(
           "{label}: BiDi/Firefox backend does not yet support this context option"
         ));

@@ -10,7 +10,7 @@ pub use ferridriver_config::test::{
   BrowserConfig, CliOverrides, ContextConfig, DEFAULT_EXPECT_TIMEOUT_MS, ExpectConfig, GeolocationConfig,
   GracefulShutdown, HttpCredentialsConfig, ProjectConfig, ProxyConfig, ReportSlowTestsConfig, ReporterConfig, ShardArg,
   StringOrList, TestConfig, ToHaveScreenshotConfig, ToMatchAriaSnapshotConfig, ToMatchSnapshotConfig, ToPassConfig,
-  TraceMode, UpdateSnapshotsMode, VideoConfig, VideoMode, ViewportConfig, WebServerConfig,
+  TraceMode, UpdateSnapshotsMode, VideoConfig, VideoMode, ViewportConfig, WebServerConfig, expand_device_keys,
 };
 
 use std::path::Path;
@@ -471,6 +471,7 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
   }
 
   // Normalize browser↔backend consistency after all overrides are applied.
+  config.browser.apply_use_engine();
   config.browser.normalize();
 
   Ok(config)

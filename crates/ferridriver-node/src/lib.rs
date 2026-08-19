@@ -58,6 +58,7 @@ mod clock;
 mod codegen;
 mod console_message;
 mod context;
+mod devices;
 mod dialog;
 mod disposable;
 mod download;

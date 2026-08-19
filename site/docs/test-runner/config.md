@@ -83,21 +83,60 @@ that must all be present.
 
 ## `use` and option fixtures
 
-`[test.browser.use]` is the Playwright `use` block: context options
-(`locale`, `colorScheme`, `testIdAttribute`, …) plus any key of your
-own. A key no built-in option claims is the value of a fixture
-registered with `{ option: true }`.
+`use` is the Playwright `use` block: context options (`locale`,
+`colorScheme`, `testIdAttribute`, …) plus any key of your own. A key no
+built-in option claims is the value of a fixture registered with
+`{ option: true }`.
+
+It may be written at the top of `[test]`, where Playwright writes it, or
+as `[test.browser.use]`; they are the same block, and a key written in
+both keeps the `browser.use` one. A project takes `[test.projects.use]`
+or `[test.projects.browser.use]` for the same reason.
 
 ```toml
-[test.browser.use]
+[test.use]
 locale  = "de-DE"
 profile = "guest"          # -> the `profile` option fixture
 
 [[test.projects]]
 name = "admin"
-[test.projects.browser.use]
+[test.projects.use]
 profile = "admin"          # -> only this project's tests
 ```
+
+### Devices
+
+`device` names an entry of Playwright's device registry and pre-seeds
+every key that descriptor carries — `userAgent`, `viewport`, `screen`,
+`deviceScaleFactor`, `isMobile`, `hasTouch` and `defaultBrowserType`.
+Anything you write beside it wins, in that layer or a higher one:
+
+```toml
+[[test.projects]]
+name = "phone"
+[test.projects.use]
+device = "iPhone 15"       # -> webkit, 393x659, dpr 3, touch
+locale = "de-DE"           # -> beside the device, not overwritten by it
+```
+
+The same table is a value on the framework module, so a TypeScript
+config spreads it the way a Playwright config does:
+
+```ts
+import { defineConfig, devices } from '@ferridriver/test';
+
+export default {
+  test: defineConfig({
+    projects: [{ name: 'phone', use: { ...devices['iPhone 15'] } }],
+  }),
+};
+```
+
+`defaultBrowserType` only decides the engine nobody else named — an
+explicit `browserName`, or a project browser block, wins. `viewport` in
+`use` overrides `[test.browser].viewport`, the spelling that predates
+the block, and `viewport = null` (in YAML/JSON/TS) asks for no fixed
+viewport at all, which is not the same as leaving it out.
 
 ```ts
 const test = base.extend<{ profile: string }>({
@@ -107,8 +146,9 @@ const test = base.extend<{ profile: string }>({
 test('reads it', async ({ profile }) => { /* 'guest' or 'admin' */ });
 ```
 
-Precedence, innermost first: a `test.use({ … })` in the spec, then the
-project's block, then the config's, then the fixture's own default. Each
+Precedence, innermost first: a `test.use({ … })` in the spec — which
+takes `device` too — then the project's block, then the config's, then
+the fixture's own default. Each
 layer overlays key by key, so a project setting one key keeps the
 config's others.
 

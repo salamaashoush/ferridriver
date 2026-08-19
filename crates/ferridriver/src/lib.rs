@@ -30,6 +30,7 @@ pub mod cdp_session;
 pub mod clock;
 pub mod console_message;
 pub mod context;
+pub mod devices;
 pub mod dialog;
 pub mod disposable;
 pub mod download;

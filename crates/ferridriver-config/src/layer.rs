@@ -905,6 +905,70 @@ fn normalize(value: &mut Value) {
       obj.insert("paths".to_string(), paths);
     }
   }
+  if let Some(test) = map.get_mut("test") {
+    normalize_test_section(test);
+  }
+}
+
+/// Keys a document may write outside the schema, folded into the schema
+/// by [`normalize`] before anything deserializes.
+///
+/// `use` at the top of `[test]` is where Playwright puts it, and it is
+/// the same bag as `[test.browser].use`; a config module writing one
+/// gets the other. The authoring `.d.ts` declares the alias, so the
+/// contract test reads it from here rather than carrying its own copy.
+pub const DOCUMENT_ALIASES: &[&str] = &["use"];
+
+/// Expand every `use` block in the `[test]` section, then fold the
+/// top-level one into the browser's.
+fn normalize_test_section(test: &mut Value) {
+  let Some(map) = test.as_object_mut() else { return };
+  expand_device(map.get_mut("use"));
+  if let Some(browser) = map.get_mut("browser").and_then(Value::as_object_mut) {
+    expand_device(browser.get_mut("use"));
+  }
+  if let Some(projects) = map.get_mut("projects").and_then(Value::as_array_mut) {
+    for project in projects {
+      let Some(project) = project.as_object_mut() else {
+        continue;
+      };
+      expand_device(project.get_mut("use"));
+      if let Some(browser) = project.get_mut("browser").and_then(Value::as_object_mut) {
+        expand_device(browser.get_mut("use"));
+      }
+    }
+  }
+  hoist_use(map);
+}
+
+/// Move `[test].use` into `[test.browser].use`, the one place the bag is
+/// stored. A key written in both spellings keeps the browser's, which is
+/// the more specific of the two.
+fn hoist_use(map: &mut Map<String, Value>) {
+  let Some(top) = map.remove("use") else { return };
+  let Some(top) = top.as_object().cloned() else {
+    // Not an object: put it back so deserialization reports it rather
+    // than dropping it here.
+    map.insert("use".to_string(), top);
+    return;
+  };
+  let browser = map
+    .entry("browser".to_string())
+    .or_insert_with(|| Value::Object(Map::new()));
+  let Some(browser) = browser.as_object_mut() else { return };
+  let target = browser
+    .entry("use".to_string())
+    .or_insert_with(|| Value::Object(Map::new()));
+  let Some(target) = target.as_object_mut() else { return };
+  for (key, value) in top {
+    target.entry(key).or_insert(value);
+  }
+}
+
+fn expand_device(block: Option<&mut Value>) {
+  if let Some(block) = block.and_then(Value::as_object_mut) {
+    crate::test::expand_device_keys(block);
+  }
 }
 
 /// Rewrite every relative filesystem path in `value` to be absolute

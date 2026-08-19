@@ -325,6 +325,12 @@ export interface FerridriverTestConfig {
   trace?: unknown;
   tsconfig?: unknown;
   updateSnapshots?: unknown;
+  /**
+   * Playwright's top-level `use` block. The same bag as
+   * `browser.use`; a config may write either, and a key written in both
+   * keeps the `browser.use` one.
+   */
+  use?: unknown;
   video?: unknown;
   webServer?: unknown;
   workers?: unknown;
@@ -346,6 +352,30 @@ export function defineConfig(
   config: FerridriverTestConfig,
   ...configs: FerridriverTestConfig[]
 ): FerridriverTestConfig;
+
+/**
+ * One entry of Playwright's device registry.
+ *
+ * `screen` is absent from Playwright's own `DeviceDescriptor` type but
+ * present in its data, and a `use: { ...devices[name] }` spread carries
+ * it — so it is declared here.
+ */
+export interface DeviceDescriptor {
+  userAgent: string;
+  viewport: { width: number; height: number };
+  screen?: { width: number; height: number };
+  deviceScaleFactor: number;
+  isMobile: boolean;
+  hasTouch: boolean;
+  defaultBrowserType: 'chromium' | 'firefox' | 'webkit';
+}
+
+/**
+ * Playwright's device registry, vendored at a pinned version:
+ * `use: { ...devices['iPhone 15'] }`. The same object the `ferridriver`
+ * module exports, as in Playwright.
+ */
+export const devices: Record<string, DeviceDescriptor>;
 
 /** Secondary browser factories, independent of the project's backend. */
 export const chromium: (options?: { transport?: 'pipe' | 'ws' }) => BrowserType;

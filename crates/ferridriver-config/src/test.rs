@@ -385,14 +385,127 @@ pub struct BrowserConfig {
   pub command_cache: std::sync::Arc<crate::browser::CommandCache>,
 }
 
+/// Pre-seed a `use` block from `device = "<name>"`.
+///
+/// Only keys the block does not already carry are written, so a `use`
+/// key beside the device wins — and where this runs per layer, before
+/// the fold, a HIGHER layer's key wins too, by the same rule every other
+/// key follows. An unknown device name is left alone: deserialization
+/// reports it, where the error can name the file.
+pub fn expand_device_keys(block: &mut serde_json::Map<String, serde_json::Value>) {
+  use serde_json::Value;
+
+  let Some(name) = block.get("device").and_then(Value::as_str) else {
+    return;
+  };
+  let Some(device) = ferridriver::devices::get(name) else {
+    return;
+  };
+
+  let size = |s: ferridriver::devices::DeviceSize| {
+    let mut m = serde_json::Map::new();
+    m.insert("width".to_string(), Value::from(s.width));
+    m.insert("height".to_string(), Value::from(s.height));
+    Value::Object(m)
+  };
+  let mut seed: Vec<(&str, Value)> = vec![
+    ("userAgent", Value::from(device.user_agent)),
+    ("viewport", size(device.viewport)),
+    ("isMobile", Value::from(device.is_mobile)),
+    ("hasTouch", Value::from(device.has_touch)),
+    ("deviceScaleFactor", Value::from(device.device_scale_factor)),
+    ("defaultBrowserType", Value::from(device.default_browser_type.as_str())),
+  ];
+  if let Some(screen) = device.screen {
+    seed.push(("screen", size(screen)));
+  }
+  for (key, value) in seed {
+    block.entry(key.to_string()).or_insert(value);
+  }
+}
+
+/// A written `use: { viewport }`.
+///
+/// Three states have to stay apart: absent (the browser's own viewport
+/// applies), a size, and Playwright's `viewport: null`, which asks for
+/// NO fixed viewport at all. Absent is the field's `Option`; this enum
+/// is the other two.
+#[derive(Debug, Clone)]
+pub enum ViewportOverride {
+  Size(ViewportConfig),
+  /// `viewport: null` — the window is not resized and the page gets
+  /// whatever the browser window gives it.
+  Disabled,
+}
+
+impl ViewportOverride {
+  /// The size, or `None` for `viewport: null`.
+  #[must_use]
+  pub fn size(&self) -> Option<ViewportConfig> {
+    match self {
+      Self::Size(v) => Some(v.clone()),
+      Self::Disabled => None,
+    }
+  }
+}
+
+// Hand-written rather than `#[serde(untagged)]`: an untagged enum
+// collapses every field error into "did not match any variant", so a
+// viewport missing `height` would stop naming `height`.
+impl<'de> Deserialize<'de> for ViewportOverride {
+  fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+    Ok(Option::<ViewportConfig>::deserialize(de)?.map_or(Self::Disabled, Self::Size))
+  }
+}
+
+impl Serialize for ViewportOverride {
+  fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+    match self {
+      Self::Size(v) => v.serialize(ser),
+      Self::Disabled => ser.serialize_none(),
+    }
+  }
+}
+
+/// Keep a written `viewport` — `null` included — apart from an absent
+/// one. `Option`'s own impl swallows `null` into `None`, which is the
+/// state that means "nobody said".
+fn written_viewport<'de, D>(de: D) -> Result<Option<ViewportOverride>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  ViewportOverride::deserialize(de).map(Some)
+}
+
 // Each bool field is an independent feature flag set in user TOML —
 // grouping into enums would be ceremony, not a real state machine.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ContextConfig {
+  /// A name from Playwright's device registry, pre-seeding every key a
+  /// descriptor carries. Expanded where the document is folded, so a
+  /// `use` key written beside it — in this layer or a higher one — wins
+  /// over what the device would have set.
+  pub device: Option<String>,
   pub is_mobile: bool,
   pub has_touch: bool,
+  /// `null` is not "unset": Playwright's `viewport: null` disables the
+  /// fixed viewport, so absent and explicitly-null have to stay apart.
+  /// Present here it wins over `[test.browser].viewport`, the spelling
+  /// that predates the `use` bag.
+  #[serde(default, deserialize_with = "written_viewport")]
+  pub viewport: Option<ViewportOverride>,
+  /// The window size the page reports, independent of the viewport.
+  /// Absent from Playwright's `DeviceDescriptor` TYPE but present in its
+  /// data, and carried by a `...devices[name]` spread.
+  pub screen: Option<ViewportConfig>,
+  /// Playwright's `use: { browserName }` — the engine this project runs.
+  pub browser_name: Option<String>,
+  /// What a device descriptor names. `browserName` overrides it, and it
+  /// applies only while the engine is still at its default, mirroring
+  /// Playwright's `browserName` defaulting from `defaultBrowserType`.
+  pub default_browser_type: Option<String>,
   pub color_scheme: Option<String>,
   pub locale: Option<String>,
   pub device_scale_factor: Option<f64>,
@@ -449,8 +562,13 @@ pub struct ProxyConfig {
 impl Default for ContextConfig {
   fn default() -> Self {
     Self {
+      device: None,
       is_mobile: false,
       has_touch: false,
+      viewport: None,
+      screen: None,
+      browser_name: None,
+      default_browser_type: None,
       test_id_attribute: None,
       color_scheme: None,
       locale: None,
@@ -485,6 +603,25 @@ pub struct GeolocationConfig {
 }
 
 impl BrowserConfig {
+  /// Take the engine from the `use` bag.
+  ///
+  /// Playwright makes `browserName` an option fixture that defaults from
+  /// the `defaultBrowserType` a device descriptor carries, so an
+  /// explicit `browserName` always wins while a descriptor only decides
+  /// the engine nobody else named. "Nobody else named" is the default
+  /// pair — `chromium` over `cdp-pipe` — the same reading a project
+  /// browser block already gets.
+  pub fn apply_use_engine(&mut self) {
+    if let Some(ref name) = self.use_options.browser_name {
+      self.browser.clone_from(name);
+    } else if let Some(ref name) = self.use_options.default_browser_type
+      && self.browser == "chromium"
+      && self.backend == "cdp-pipe"
+    {
+      self.browser.clone_from(name);
+    }
+  }
+
   /// Normalize browser↔backend consistency after all overrides are applied.
   ///
   /// Ensures `browser` and `backend` agree -- like Playwright where `browserName`
@@ -758,6 +895,17 @@ pub struct ProjectConfig {
   pub test_ignore: Option<Vec<String>>,
   pub test_dir: Option<String>,
   pub browser: Option<BrowserConfig>,
+  /// Playwright's project-level `use` block — where a
+  /// `...devices['iPhone 15']` spread lands.
+  ///
+  /// Merged on top of `browser.use`, this project's older spelling, so a
+  /// project may write either and a project writing both gets the more
+  /// specific one. It deliberately does NOT live inside `browser`: a
+  /// project browser block is read field-by-field against its defaults,
+  /// so materialising one to hold a `use` bag would turn `headless` back
+  /// off for that project.
+  #[serde(default, rename = "use")]
+  pub use_options: Option<ContextConfig>,
   pub output_dir: Option<String>,
   pub snapshot_dir: Option<String>,
   pub retries: Option<u32>,
@@ -804,6 +952,7 @@ impl Default for ProjectConfig {
       test_ignore: None,
       test_dir: None,
       browser: None,
+      use_options: None,
       output_dir: None,
       snapshot_dir: None,
       retries: None,
@@ -1224,7 +1373,11 @@ impl TestConfig {
       }
       merge_context(&mut merged.browser.use_options, &pb.use_options);
     }
+    if let Some(ref project_use) = project.use_options {
+      merge_context(&mut merged.browser.use_options, project_use);
+    }
 
+    merged.browser.apply_use_engine();
     merged.browser.normalize();
     merged.projects = Vec::new();
 
@@ -1236,8 +1389,23 @@ impl TestConfig {
 fn merge_context(base: &mut ContextConfig, overlay: &ContextConfig) {
   let defaults = ContextConfig::default();
 
+  if overlay.device.is_some() {
+    base.device.clone_from(&overlay.device);
+  }
   if overlay.is_mobile != defaults.is_mobile {
     base.is_mobile = overlay.is_mobile;
+  }
+  if overlay.viewport.is_some() {
+    base.viewport.clone_from(&overlay.viewport);
+  }
+  if overlay.screen.is_some() {
+    base.screen.clone_from(&overlay.screen);
+  }
+  if overlay.browser_name.is_some() {
+    base.browser_name.clone_from(&overlay.browser_name);
+  }
+  if overlay.default_browser_type.is_some() {
+    base.default_browser_type.clone_from(&overlay.default_browser_type);
   }
   if overlay.has_touch != defaults.has_touch {
     base.has_touch = overlay.has_touch;

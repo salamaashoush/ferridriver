@@ -148,7 +148,10 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
 /// shipped) and `emulate_viewport` (which compares against that
 /// seed to skip redundant RTTs). Mirrors Playwright's
 /// `_metricsOverride` shape in `crPage.ts:920`.
-fn metrics_params_for(config: &crate::options::ViewportConfig) -> serde_json::Value {
+fn metrics_params_for(
+  config: &crate::options::ViewportConfig,
+  screen: Option<crate::options::ScreenSize>,
+) -> serde_json::Value {
   let is_landscape = config.is_landscape || config.width > config.height;
   let orientation = if config.is_mobile {
     if is_landscape {
@@ -159,13 +162,23 @@ fn metrics_params_for(config: &crate::options::ViewportConfig) -> serde_json::Va
   } else {
     serde_json::json!({"angle": 0, "type": "landscapePrimary"})
   };
+  // `window.screen` reports the context's `screen` when it has one and
+  // the viewport otherwise — Playwright ships both in ONE
+  // `setDeviceMetricsOverride` (`chromium/crPage.ts::_updateViewport`),
+  // which is why the screen cannot be a command of its own: a second
+  // override would replace the width, height, scale factor and mobile
+  // flag this one just set.
+  let screen = screen.unwrap_or(crate::options::ScreenSize {
+    width: config.width,
+    height: config.height,
+  });
   serde_json::json!({
     "width": config.width,
     "height": config.height,
     "deviceScaleFactor": config.device_scale_factor,
     "mobile": config.is_mobile,
-    "screenWidth": config.width,
-    "screenHeight": config.height,
+    "screenWidth": screen.width,
+    "screenHeight": screen.height,
     "screenOrientation": orientation,
   })
 }
@@ -216,7 +229,10 @@ impl<T: CdpWrap> CdpBrowser<T> {
   ) -> Result<Option<Vec<super::FrameInfo>>> {
     let ep = &super::EMPTY_PARAMS;
 
-    let vp_params = viewport.map(metrics_params_for);
+    // Page bootstrap has no context options yet; a `screen` in the bag
+    // is applied by `apply_context_options`, which re-sends this
+    // override with it.
+    let vp_params = viewport.map(|vp| metrics_params_for(vp, None));
 
     // Fire all CDP commands in parallel — matches Playwright's FrameSession._initialize().
     // Keep default page bootstrap minimal. Domains for logging and explicit focus
@@ -661,6 +677,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
       last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
+      context_screen: Arc::new(std::sync::Mutex::new(None)),
       seeded_frame_tree: Arc::new(std::sync::Mutex::new(frame_tree_seed)),
       last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
       lifecycle: Arc::new(std::sync::Mutex::new(LifecycleState::new())),
@@ -776,6 +793,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
         main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
         last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
+        context_screen: Arc::new(std::sync::Mutex::new(None)),
         seeded_frame_tree: Arc::new(std::sync::Mutex::new(None)),
         last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
         lifecycle: lc_state.clone(),
@@ -959,7 +977,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       // just shipped, so the first `apply_context_options` call
       // skips the redundant `setDeviceMetricsOverride` RTT when the
       // bag carries the same default size.
-      last_metrics_params: Arc::new(std::sync::Mutex::new(viewport.map(metrics_params_for))),
+      last_metrics_params: Arc::new(std::sync::Mutex::new(viewport.map(|vp| metrics_params_for(vp, None)))),
+      context_screen: Arc::new(std::sync::Mutex::new(None)),
       seeded_frame_tree: Arc::new(std::sync::Mutex::new(frame_tree_seed)),
       last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
       lifecycle: lc_state.clone(),
@@ -1680,6 +1699,11 @@ pub struct CdpPage<T: CdpTransport> {
   /// own idempotent path so changing `has_touch` doesn't get masked
   /// by a metrics-only cache hit.
   last_metrics_params: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+  /// The context's `screen`, if it was given one. Held because
+  /// `window.screen` is reported by the SAME override that carries the
+  /// viewport, so every later `setViewportSize` has to re-send it or
+  /// the screen silently collapses back onto the viewport.
+  context_screen: Arc<std::sync::Mutex<Option<crate::options::ScreenSize>>>,
   /// Frame tree captured during the per-page `enable_domains` parallel
   /// batch — `Page::with_context::seed_frame_cache` consumes this
   /// instead of paying a sequential `Page.getFrameTree` RTT once
@@ -2000,6 +2024,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       http_credentials: self.http_credentials.clone(),
       main_frame_id: self.main_frame_id.clone(),
       last_metrics_params: self.last_metrics_params.clone(),
+      context_screen: self.context_screen.clone(),
       seeded_frame_tree: self.seeded_frame_tree.clone(),
       last_cursor_pos: self.last_cursor_pos.clone(),
       lifecycle: self.lifecycle.clone(),
@@ -4546,6 +4571,16 @@ impl<T: CdpWrap> CdpPage<T> {
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     use futures::future::OptionFuture;
 
+    // Stash the context's screen BEFORE the viewport override goes out:
+    // the two travel in one `setDeviceMetricsOverride`, and every later
+    // `setViewportSize` reads it back from here.
+    if let Some(screen) = opts.screen {
+      match self.context_screen.lock() {
+        Ok(mut g) => *g = Some(screen),
+        Err(p) => *p.into_inner() = Some(screen),
+      }
+    }
+
     // `viewport` and `media` compose over `EmulateMediaOptions` /
     // `ViewportConfig` helpers reused elsewhere (`emulate_viewport`,
     // `emulate_media`) — those methods are also called from
@@ -4565,22 +4600,6 @@ impl<T: CdpWrap> CdpPage<T> {
 
     // Every remaining field is a direct CDP command — inlined below
     // so no `set_*` helper lives on the backend.
-    let screen_fut: OptionFuture<_> = opts
-      .screen
-      .map(|s| async move {
-        self
-          .cmd(
-            "Emulation.setDeviceMetricsOverride",
-            serde_json::json!({
-              "width": s.width, "height": s.height, "deviceScaleFactor": 1, "mobile": false,
-              "screenWidth": s.width, "screenHeight": s.height,
-              "screenOrientation": {"angle": 0, "type": "landscapePrimary"},
-            }),
-          )
-          .await
-          .map(|_| ())
-      })
-      .into();
     let ua_fut: OptionFuture<_> = opts
       .user_agent
       .as_deref()
@@ -4743,9 +4762,8 @@ impl<T: CdpWrap> CdpPage<T> {
       })
       .into();
 
-    let (r_vp, r_scr, r_ua, r_loc, r_tz, r_js, r_csp, r_tls, r_cred, r_sw, r_dl, r_hdr, r_med, r_geo, r_perm, r_off) = tokio::join!(
+    let (r_vp, r_ua, r_loc, r_tz, r_js, r_csp, r_tls, r_cred, r_sw, r_dl, r_hdr, r_med, r_geo, r_perm, r_off) = tokio::join!(
       viewport_fut,
-      screen_fut,
       ua_fut,
       locale_fut,
       tz_fut,
@@ -4766,7 +4784,6 @@ impl<T: CdpWrap> CdpPage<T> {
     let mut errs: Vec<String> = Vec::new();
     for (label, r) in [
       ("viewport", r_vp),
-      ("screen", r_scr),
       ("userAgent", r_ua),
       ("locale", r_loc),
       ("timezoneId", r_tz),
@@ -4794,7 +4811,11 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
-    let params = metrics_params_for(config);
+    let screen = match self.context_screen.lock() {
+      Ok(g) => *g,
+      Err(p) => *p.into_inner(),
+    };
+    let params = metrics_params_for(config, screen);
 
     // Skip the `setDeviceMetricsOverride` RTT when params match the
     // last shipped value (Playwright `_metricsOverride` JSON-equality

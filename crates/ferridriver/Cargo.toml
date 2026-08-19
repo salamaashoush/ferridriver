@@ -48,6 +48,10 @@ bzip2 = "0.6"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }
 
+[build-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 tracing-subscriber = { workspace = true }
