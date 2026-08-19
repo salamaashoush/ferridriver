@@ -188,6 +188,66 @@ pub const TOOL_CONTEXT_KEYS: &[&str] = &[
   "browser",
 ];
 
+/// Every global an extension calls to contribute something.
+///
+/// The canonical list, in the same sense [`TOOL_CONTEXT_KEYS`] is: a
+/// test asserts each name is a real global in a fresh session AND that
+/// `docs/extensions.md` documents it. A contribution point nobody can
+/// find in the docs may as well not exist, and a documented one nothing
+/// installs sends an author chasing a binding that is not there.
+pub const CONTRIBUTION_POINTS: &[&str] = &[
+  // MCP tools
+  "defineTool",
+  "tool",
+  // Configuration
+  "defineDefaults",
+  // The Playwright-shaped test surface
+  "defineFixtures",
+  // Cucumber steps — kept in step with `bdd::STEP_REGISTRARS`
+  "Given",
+  "When",
+  "Then",
+  "defineStep",
+  "And",
+  "But",
+  // Cucumber hooks — kept in step with `bdd::CUCUMBER_HOOKS`
+  "Before",
+  "After",
+  "BeforeAll",
+  "AfterAll",
+  "BeforeStep",
+  "AfterStep",
+  // Cucumber support
+  "defineParameterType",
+  "setDefaultTimeout",
+  "setDefinitionFunctionWrapper",
+  "setWorldConstructor",
+  "setParallelCanAssign",
+  "bindSteps",
+];
+
+#[cfg(test)]
+mod contribution_point_tests {
+  use super::CONTRIBUTION_POINTS;
+  use crate::bindings::bdd::{CUCUMBER_HOOKS, STEP_REGISTRARS};
+
+  /// The two lists the installers loop over cannot drift out of the
+  /// documented set, because this fails the moment one grows.
+  #[test]
+  fn every_step_registrar_and_hook_is_a_contribution_point() {
+    let missing: Vec<&str> = STEP_REGISTRARS
+      .iter()
+      .map(|(name, _)| *name)
+      .chain(CUCUMBER_HOOKS.iter().copied())
+      .filter(|name| !CONTRIBUTION_POINTS.contains(name))
+      .collect();
+    assert!(
+      missing.is_empty(),
+      "installed as globals but absent from CONTRIBUTION_POINTS (so undocumented, and unchecked): {missing:?}"
+    );
+  }
+}
+
 fn rq(e: &ScriptError) -> rquickjs::Error {
   rquickjs::Error::new_from_js_message("extensions", "Error", e.message.clone())
 }

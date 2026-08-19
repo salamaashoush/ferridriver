@@ -142,6 +142,41 @@ the divergence the seal converts into a refusal.
   page, the fixtures, the step registry. An isolate boundary would
   remove exactly what makes it useful.
 
+## Trust posture
+
+An extension is **not** a sandbox boundary. Its code runs in the
+session's own VM, with the session's own objects — the page, the
+fixtures, the step registry — because that access is the entire value of
+an extension. A package can read anything the session can read and call
+anything the session can call.
+
+What that means, stated plainly so nobody has to infer it:
+
+- **Installing an extension is a trust decision about the package**, on
+  the same order as adding a dependency that runs at build time. The
+  operator ceiling narrows what a package may declare; it does not
+  contain what a package may do once running.
+- **`[extensions.policy]` is a ceiling, not a jail.** It clamps the
+  authority a tool can be GRANTED — `allow.commands`, `allow.net`, the
+  specifiers a package may claim, whether it may contribute fixtures or
+  config defaults. Those are checked at registration, statically, which
+  is what makes them reviewable in CI. They are not runtime
+  interception.
+- **`requires` is a declaration, not a grant.** A package saying it
+  needs `acme-cli` on `PATH` is telling the operator what to provide, and
+  gets a load-time diagnostic instead of a failure on the first call. It
+  never widens anything.
+- **The sandbox that does exist is the script sandbox**, and it is about
+  the ambient environment rather than the package: `process.env` is the
+  operator's allow-list intersected with the real environment, `fs` is
+  rooted at a sandbox path, and `commands` may only run what a tool
+  declared and the ceiling permitted.
+
+The alternative — an isolate or a separate process per extension — was
+considered and not built, for the reason in the section above: it would
+remove exactly what makes an extension useful. That is a deliberate
+trade, and this section exists so it is a stated one.
+
 ## Where the pieces live
 
 | Concern | Module |

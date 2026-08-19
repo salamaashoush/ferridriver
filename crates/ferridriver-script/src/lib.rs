@@ -68,10 +68,10 @@ pub mod vm;
 pub use bindings::native_modules::{is_reserved_specifier, module_aliases, native_module_names, set_module_aliases};
 pub use bindings::registry::net_entry_subsumed;
 pub use bindings::{
-  ArtifactsJs, BrowserContextJs, CollectedAnnotation, CollectedFileConfigure, CollectedFileUse, CollectedFixture,
-  CollectedHook, CollectedRegistry, CollectedStep, CollectedSuite, CollectedTest, CollectedTestHook, CollectedTests,
-  ExtensionBinding, ExtensionCommandsJs, FORWARDED_CONTEXT_KEYS, HookArg, HttpClientJs, HttpResponseJs, JsArg,
-  KeyboardJs, LocatorJs, MouseJs, PageJs, ScenarioSpec, ScriptAttachment, StepOutcome, TEST_SKIP_SENTINEL,
+  ArtifactsJs, BrowserContextJs, CONTRIBUTION_POINTS, CollectedAnnotation, CollectedFileConfigure, CollectedFileUse,
+  CollectedFixture, CollectedHook, CollectedRegistry, CollectedStep, CollectedSuite, CollectedTest, CollectedTestHook,
+  CollectedTests, ExtensionBinding, ExtensionCommandsJs, FORWARDED_CONTEXT_KEYS, HookArg, HttpClientJs, HttpResponseJs,
+  JsArg, KeyboardJs, LocatorJs, MouseJs, PageJs, ScenarioSpec, ScriptAttachment, StepOutcome, TEST_SKIP_SENTINEL,
   TOOL_CONTEXT_KEYS, begin_scenario, collect_registry, collect_tests, drain_attachments, end_scenario,
   install_extensions, invoke_hook, invoke_step, run_standalone_hook, run_test, set_hook_world,
   teardown_worker_fixtures,

@@ -52,6 +52,24 @@ pub enum StepKind {
   Step,
 }
 
+/// The step registrars installed as GLOBALS, and the kind each records.
+///
+/// A const rather than an inline array because `CONTRIBUTION_POINTS`
+/// has to name every one of them and a test checks that it does — an
+/// entry added here that nobody documented is caught rather than
+/// shipped.
+pub(crate) const STEP_REGISTRARS: &[(&str, StepKind)] = &[
+  ("Given", StepKind::Given),
+  ("When", StepKind::When),
+  ("Then", StepKind::Then),
+  ("defineStep", StepKind::Step),
+  ("And", StepKind::Step),
+  ("But", StepKind::Step),
+];
+
+/// The cucumber hooks installed as globals, in registration order.
+pub(crate) const CUCUMBER_HOOKS: &[&str] = &["Before", "After", "BeforeAll", "AfterAll", "BeforeStep", "AfterStep"];
+
 impl StepKind {
   #[must_use]
   pub fn as_str(self) -> &'static str {
@@ -384,14 +402,7 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   let bdd = Object::new(ctx.clone())?;
   Class::<DataTableJs>::define(&g)?;
 
-  for (name, kind) in [
-    ("Given", StepKind::Given),
-    ("When", StepKind::When),
-    ("Then", StepKind::Then),
-    ("defineStep", StepKind::Step),
-    ("And", StepKind::Step),
-    ("But", StepKind::Step),
-  ] {
+  for (name, kind) in STEP_REGISTRARS.iter().copied() {
     let f = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| register_step(kind, &args.0))?;
     g.set(name, f.clone())?;
     bdd.set(name, f)?;
@@ -428,7 +439,7 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
         })?;
         bound.set(name, f)?;
       }
-      for hook in ["Before", "After", "BeforeAll", "AfterAll", "BeforeStep", "AfterStep"] {
+      for hook in CUCUMBER_HOOKS.iter().copied() {
         let f = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| {
           register_hook_in(hook, &args.0, Some(set))
         })?;
@@ -441,7 +452,7 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   g.set("bindSteps", bind_steps.clone())?;
   bdd.set("bindSteps", bind_steps)?;
 
-  for hook in ["Before", "After", "BeforeAll", "AfterAll", "BeforeStep", "AfterStep"] {
+  for hook in CUCUMBER_HOOKS.iter().copied() {
     let f = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| register_hook(hook, &args.0))?;
     g.set(hook, f.clone())?;
     bdd.set(hook, f)?;

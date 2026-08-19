@@ -1,16 +1,23 @@
 # Extensions
 
 An **extension** is a single JavaScript or TypeScript file that contributes
-to ferridriver at runtime. One file can contribute to three hosts:
+to ferridriver at runtime. One file can contribute to four hosts:
 
 - **MCP server** (`ferridriver mcp`) — registers tools via `defineTool(...)`.
 - **BDD test runner** (`ferridriver bdd`) — registers Cucumber step
   definitions, hooks, and parameter types via `Given`/`When`/`Then`/
   `Before`/`After`/`defineParameterType`/...
+- **Test runner** (`ferridriver test`) — contributes fixtures onto the
+  base `test` chain with `defineFixtures(...)`, so a spec receives them
+  without importing anything.
 - **Ad-hoc scripts** (`ferridriver run`, MCP `run_script`) — the same VM
-  bindings the above two use.
+  bindings the others use.
 
-The same file can serve all three. It branches on the `ferridriver.host`
+`ferridriver test` loads extensions like every other host. It did not
+always: the test runner used to load none at all, which is why a package
+had no way to reach a spec.
+
+The same file can serve all four. It branches on the `ferridriver.host`
 global to decide what to contribute where.
 
 > Companion document: `docs/extension-architecture.md` records *why* the
@@ -25,7 +32,7 @@ global to decide what to contribute where.
 ```
 extension.ts ──► rolldown bundle (TS + node_modules + tree-shake)
              ──► QuickJS bytecode (compiled ONCE at startup)
-             ──► content-hash cache (in-memory, process-local)
+             ──► content-hash cache (in-process, then on disk)
              ──► Module::load per session VM (no re-parse)
              ──► top-level defineTool()/Given() run → Rust ExtensionRegistry
 ```
@@ -44,9 +51,9 @@ lifecycle hook — ES module top-level *is* your load hook.
 
 ## Detecting the host
 
-`ferridriver.host` is a string set once per session: `"mcp"`, `"bdd"`, or
-`"script"`. Use it so one file can ship a tool and its matching step
-without registering the wrong thing in the wrong host:
+`ferridriver.host` is a string set once per session: `"mcp"`, `"bdd"`,
+`"test"`, or `"script"`. Use it so one file can ship a tool and its
+matching step without registering the wrong thing in the wrong host:
 
 ```ts
 if (ferridriver.host === "mcp") {
@@ -67,16 +74,31 @@ if (ferridriver.host === "bdd") {
     await this.page.goto(`https://app.acme.com/login?u=${user}`);
   });
 }
+
+if (ferridriver.host === "test") {
+  defineFixtures({
+    acmeUser: async ({}, use) => { await use("someone@acme.com"); },
+  });
+}
 ```
 
 Registering for the wrong host is harmless (the host ignores kinds it does
 not consume) but wastes work and muddies intent — gate it.
+
+Branching is not the only way to scope a contribution. An `entries` item
+in a package manifest can name the hosts it loads under, which keeps the
+file out of the other hosts entirely rather than running it and having it
+decline — see [Narrowing an entry to some hosts](#narrowing-an-entry-to-some-hosts).
 
 ---
 
 ## Authoring MCP tools
 
 ### `defineTool`
+
+Also reachable as `tool(...)` — the same function under a shorter name,
+and as `ferridriver.tool`. Nothing distinguishes them; pick one and be
+consistent within a package.
 
 Two equivalent forms:
 
@@ -512,7 +534,7 @@ in the usual order:
 ```
 extension defineDefaults   <- lowest
 machine / user / repo / cwd / local config files
---config file
+--config <file>            (a .toml/.yaml/.json document, or a .ts/.js module)
 FERRIDRIVER_* environment overrides
 CLI flags                  <- highest
 ```
@@ -525,16 +547,21 @@ names the package a value came from, exactly as it names the file:
 test.timeout   60000   extension ./ext/acme.ts
 ```
 
-### Why the run reads the config twice
+### Why the run reads the config more than once
 
 The set of extensions is itself configuration, so it cannot come from an
-extension. Startup therefore has two passes:
+extension. Startup therefore resolves the layer stack in passes:
 
 1. resolve the layer stack with no contributions — this is what says
    which packages to load, which bundler options to compile them with,
    and what the `[extensions.policy]` ceiling is;
 2. load the packages, then re-resolve with whatever they contributed
-   underneath every file.
+   underneath every file;
+3. and, when `--config` names a `.ts`/`.js` module, bundle and evaluate
+   it and re-resolve once more with its document on top. It comes last
+   because compiling it needs everything the first two passes settled —
+   which is also why a config module may not set `extensions`,
+   `bundler`, `scripting` or `[test].moduleAliases`.
 
 That is also why a contribution may not set the sections that decide how
 the contributing package itself was found, compiled or trusted. Each is

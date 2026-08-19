@@ -104,8 +104,17 @@ async fn js_steps_pass_fail_and_tag_filter() {
   assert!(pass("eat some cukes").passed, "eat some cukes should pass");
   // pass: data table reached JS as a cucumber DataTable
   assert!(pass("data table sum").passed, "data table scenario should pass");
-  // pass: both scenario-outline rows
-  let outline: Vec<&JsScenarioResult> = results.iter().filter(|r| r.name.starts_with("outline math")).collect();
+  // pass: both scenario-outline rows. A row's LEAF title follows
+  // playwright-bdd's rule — the outline's own name titles the row only
+  // when it names a column in `<>`, and "outline math" names none, so
+  // these are `Example #1` / `Example #2`. The outline is identified by
+  // the describe it sits under, which is where its name went.
+  let outline: Vec<&JsScenarioResult> = scenarios
+    .iter()
+    .zip(&results)
+    .filter(|(scenario, _)| scenario.describe_path.iter().any(|d| d == "outline math"))
+    .map(|(_, result)| result)
+    .collect();
   assert_eq!(outline.len(), 2, "outline expands to 2 rows");
   assert!(outline.iter().all(|r| r.passed), "both outline rows should pass");
 

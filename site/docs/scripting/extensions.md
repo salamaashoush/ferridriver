@@ -28,8 +28,8 @@ module's top-level code running once.** There is no `activate()` /
 ## Detecting the host
 
 `ferridriver.host` is a string set once per session: `"mcp"`, `"bdd"`,
-or `"script"`. Gate your registrations so one file does not pollute the
-wrong host:
+`"test"`, or `"script"`. Gate your registrations so one file does not
+pollute the wrong host:
 
 ```ts
 import { tool } from "ferridriver";

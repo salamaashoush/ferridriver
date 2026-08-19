@@ -125,11 +125,29 @@ recorded here with the reason. No silent skips.
 | a reporter's `exclude` does not rebalance `--shard` | Playwright runs `preprocess` before sharding, so an exclusion changes which shard the remaining tests land in. ferridriver applies the edits per project after the run's own filters, so `--shard` has already been resolved. `TestRun.skipSharding()` — which is why Playwright has it, and which ferridriver honours by clearing the run's shard — is the supported way for a reporter that reshapes the corpus to take sharding over. |
 | the compat configs set `retries = 1` | The `mock-battery` demo app loads `src/index.js` with `async`, so its `getBattery()` microtask races `styles.css`; when the script wins, the app throws on `document.styleSheets[0].insertRule` and renders nothing. That is the app's race — the page error and the correctly-installed mock are both observable — but it is real, and one retry is what Playwright's own example configs use. A genuine regression fails both attempts. |
 
+### Measured elsewhere
+
+- `playwright.config.ts` is loaded natively. `--config <file.ts>` bundles
+  and evaluates the module through the same rolldown -> QuickJS pipeline
+  a spec takes, and its default export IS the `[test]` section — the
+  shape a Playwright config already has. `defineConfig` is exported from
+  `@ferridriver/test` with upstream's merge semantics
+  (`common/configLoader.ts:32-87`). Covered by
+  `ferridriver-cli/tests/script_config.rs`, which asserts a module and
+  the equivalent `ferridriver.toml` discover the same corpus, and by
+  `ferridriver-script/tests/define_config.rs`, which pins each merge
+  rule.
+
+  The compat harness still generates a `ferridriver.toml` per example
+  rather than reading the upstream config, so the 5-project corpus does
+  not exercise this path. What it does not cover is the reason the
+  driving case matters: a third-party `@playwright/test`-shaped suite
+  arrives with its own config, and until now there was nothing to point
+  at it. Four settings still cannot come from a module — `extensions`,
+  `bundler`, `scripting`, `[test].moduleAliases` — because each had to be
+  read before the module could be compiled; each is refused by name.
+
 ### Not yet measured
 
-- `playwright.config.ts` compatibility. ferridriver's config is
-  `ferridriver.toml`; the harness generates one per example rather than
-  reading the upstream config. Nothing in the corpus depends on it at
-  runtime.
 - `test.extend` overriding an option fixture with `undefined` to restore
   the original default (`_appendFixtureList`'s `optionOverride` walk).

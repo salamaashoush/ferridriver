@@ -78,8 +78,8 @@ pub use disposable::DisposableJs;
 pub use download::DownloadJs;
 pub use element_handle::ElementHandleJs;
 pub use extensions::{
-  ExtensionBinding, ExtensionCommandsJs, FORWARDED_CONTEXT_KEYS, TOOL_CONTEXT_KEYS, install_extensions,
-  invoke_tool_by_name, rebuild_tool_bindings,
+  CONTRIBUTION_POINTS, ExtensionBinding, ExtensionCommandsJs, FORWARDED_CONTEXT_KEYS, TOOL_CONTEXT_KEYS,
+  install_extensions, invoke_tool_by_name, rebuild_tool_bindings,
 };
 pub use file_chooser::FileChooserJs;
 pub use frame::FrameJs;

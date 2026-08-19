@@ -1,10 +1,41 @@
 # Playwright parity & compatibility backlog
 
-The single tracker for Playwright client-API surface and robustness
-behaviours that ferridriver does not yet fully implement, with the
-concrete blocker for each. Verified against the code (not memory) as of
-2026-08-17. Resolved items are removed, not archived — git history is the
-record.
+The single tracker for Playwright surface — client API, robustness
+behaviours AND the test-runner surface — that ferridriver does not yet
+fully implement, with the concrete blocker for each. Verified against the
+code (not memory) as of 2026-08-19. Resolved items are removed, not
+archived — git history is the record.
+
+The scope line used to say "client-API surface and robustness
+behaviours" while the contents already tracked runner-side gaps. Both
+belong here; a reader looking for the runner's parity state should not
+have to discover that the tracker covers it anyway.
+
+## Test-runner surface
+
+### `devices`
+- Playwright exports a `devices` table from `@playwright/test`
+  (`packages/isomorphic/deviceDescriptorsSource.json`, 78.8KB). Nothing
+  is vendored, so `import { devices } from '@ferridriver/test'` resolves
+  to nothing and a config spreading `...devices['iPhone 13']` cannot be
+  written. Needs the asset vendored at a pinned version with a refresh
+  recipe and a NOTICE line, then exposed as a compile-time table on the
+  `ferridriver` and `@ferridriver/test` modules, on NAPI, and as a
+  config-side `device = "..."` pre-seed later `use` keys override.
+
+### `use`-level `viewport` / `baseURL` / `video` / `trace` / timeouts
+- `baseUrl`, `video`, `trace` and `screenshotOnFailure` are top-level
+  `[test]` keys; `viewport` sits on `[test.browser]`. Playwright spells
+  all of them inside `use`, resolvable per project, and `screenshot` is a
+  mode OR an object. A JS config writing `use: { baseURL }` lands the key
+  in the open `use` bag (where a user `{ option: true }` fixture can read
+  it) rather than in the runner's own resolution — the same gap a TOML
+  config has today, for the same reason.
+
+### `test.extend` restoring an option default with `undefined`
+- Playwright's `_appendFixtureList` walks `optionOverride` so that
+  extending with `undefined` restores the original default rather than
+  setting the value to `undefined`. ferridriver treats it as a value.
 
 ## API surface not yet mapped
 
