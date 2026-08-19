@@ -113,14 +113,21 @@ fn extension_report(config: &FerridriverConfig) -> Vec<serde_json::Value> {
       let source = ferridriver_mcp::extension::requirements::source_label(r);
       let unmet: Vec<serde_json::Value> = issues
         .iter()
-        .filter(|i| i.source == source)
-        .map(|i| serde_json::json!({ "message": i.message, "blocking": i.blocking }))
+        .filter(|i| i.issue.source == source)
+        .map(|i| {
+          serde_json::json!({
+            "message": i.issue.message,
+            "blocking": i.issue.blocking,
+            "hosts": i.hosts,
+          })
+        })
         .collect();
       serde_json::json!({
         "spec": r.spec,
         "baseDir": r.base_dir,
         "packageDir": r.package_dir,
-        "files": r.files,
+        "files": r.paths().collect::<Vec<_>>(),
+        "entries": r.files,
         "manifest": r.manifest,
         "requirements": unmet,
         "error": serde_json::Value::Null,
@@ -140,25 +147,64 @@ fn extension_report(config: &FerridriverConfig) -> Vec<serde_json::Value> {
   report
 }
 
-/// Evaluate every resolved package's declared requirements against this
-/// host. Shared by `config` and `doctor` so the two never disagree about
-/// whether a package is usable.
+/// Evaluate every resolved package's declared requirements, on every
+/// host, and say which hosts each issue applies to.
+///
+/// Per host, because `requires` is scoped to the entries that load: an
+/// entry narrowed with `hosts` states preconditions only where it runs,
+/// so an issue that blocks the MCP server may be no issue at all under
+/// `ferridriver test`. Reporting the union without saying WHERE would be
+/// the old package-wide answer wearing a new shape.
 fn requirement_issues(
   config: &FerridriverConfig,
   resolved: &[ferridriver_script::ResolvedExtension],
-) -> Vec<ferridriver_mcp::extension::RequirementIssue> {
+) -> Vec<HostedIssue> {
   let policy = config.extensions.policy();
   let settings = config.extensions.settings();
   let sidecars: Vec<String> = config.sidecars.iter().map(|s| s.name.clone()).collect();
-  ferridriver_mcp::extension::requirements::check(
-    resolved,
-    &ferridriver_mcp::extension::RequirementEnv {
-      policy: &policy,
-      allow_env: &config.scripting.allow_env,
-      sidecars: &sidecars,
-      settings: &settings,
-    },
-  )
+  let env = ferridriver_mcp::extension::RequirementEnv {
+    policy: &policy,
+    allow_env: &config.scripting.allow_env,
+    sidecars: &sidecars,
+    settings: &settings,
+  };
+
+  let mut out: Vec<HostedIssue> = Vec::new();
+  for host in ferridriver_script::ExtensionHost::ALL {
+    for issue in ferridriver_mcp::extension::requirements::check(resolved, &env, *host) {
+      if let Some(existing) = out
+        .iter_mut()
+        .find(|h| h.issue.source == issue.source && h.issue.message == issue.message)
+      {
+        existing.hosts.push(host.as_str().to_string());
+      } else {
+        out.push(HostedIssue {
+          issue,
+          hosts: vec![host.as_str().to_string()],
+        });
+      }
+    }
+  }
+  out
+}
+
+/// One requirement issue plus the hosts it applies to.
+struct HostedIssue {
+  issue: ferridriver_mcp::extension::RequirementIssue,
+  hosts: Vec<String>,
+}
+
+impl HostedIssue {
+  /// How the hosts read in a report: nothing when it applies everywhere,
+  /// since that is the ordinary case and naming all four would only add
+  /// noise to it.
+  fn host_suffix(&self) -> String {
+    if self.hosts.len() == ferridriver_script::ExtensionHost::ALL.len() {
+      String::new()
+    } else {
+      format!(" (on {})", self.hosts.join(", "))
+    }
+  }
 }
 
 fn print_human_report(
@@ -422,12 +468,20 @@ async fn check_extensions(config: &FerridriverConfig) -> Vec<Check> {
   // A package that declares unmet requirements is not loaded, so report
   // the requirement rather than a downstream "no tools" symptom.
   let issues = requirement_issues(config, &resolved);
-  let blocked = ferridriver_mcp::extension::requirements::blocked_specs(&resolved, &issues);
+  let flat: Vec<ferridriver_mcp::extension::RequirementIssue> = issues.iter().map(|h| h.issue.clone()).collect();
+  // `doctor` answers "will this setup work", and a package blocked on
+  // ANY host is one the operator has to hear about — the per-host detail
+  // is on the message, not on whether it is reported.
+  let blocked = ferridriver_mcp::extension::requirements::blocked_specs(&resolved, &flat);
   for issue in &issues {
     checks.push(Check {
       name: "extension requires",
-      status: if issue.blocking { Status::Fail } else { Status::Warn },
-      detail: format!("{}: {}", issue.source, issue.message),
+      status: if issue.issue.blocking {
+        Status::Fail
+      } else {
+        Status::Warn
+      },
+      detail: format!("{}: {}{}", issue.issue.source, issue.issue.message, issue.host_suffix()),
     });
   }
 
@@ -451,7 +505,8 @@ async fn check_extensions(config: &FerridriverConfig) -> Vec<Check> {
     return checks;
   }
 
-  let (loaded, errors) = ferridriver_mcp::extension::load_all(&all_files, &config.extensions.policy()).await;
+  let paths: Vec<std::path::PathBuf> = all_files.iter().map(|e| e.path.clone()).collect();
+  let (loaded, errors) = ferridriver_mcp::extension::load_all(&paths, &config.extensions.policy()).await;
   for e in &errors {
     checks.push(Check {
       name: "extensions",

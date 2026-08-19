@@ -466,7 +466,15 @@ pub async fn run_ts_tests_with(mut config: TestConfig, overrides: CliOverrides) 
       .map(|s| s.iter().map(|s| s.name.clone()).collect())
       .unwrap_or_default();
     let env = ferridriver_script::RequirementEnv::from_caps(&caps, &sidecar_names);
-    set_test_extensions(ferridriver_script::load_bindings(&overrides.extensions, &env, &caps.extension_policy).await);
+    set_test_extensions(
+      ferridriver_script::load_bindings(
+        &overrides.extensions,
+        &env,
+        &caps.extension_policy,
+        ferridriver_script::ExtensionHost::Test,
+      )
+      .await,
+    );
   }
 
   // Positional files/globs on the CLI replace the config's testMatch.

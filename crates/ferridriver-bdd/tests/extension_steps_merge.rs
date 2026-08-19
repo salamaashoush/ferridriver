@@ -34,7 +34,13 @@ async fn session_for(dir: &Path, globs: &[String], specs: &[ExtensionSpec]) -> J
   let caps = ScriptCaps::default();
   let sidecars: Vec<String> = Vec::new();
   let env = RequirementEnv::from_caps(&caps, &sidecars);
-  let bindings = ferridriver_script::load_bindings(specs, &env, &caps.extension_policy).await;
+  let bindings = ferridriver_script::load_bindings(
+    specs,
+    &env,
+    &caps.extension_policy,
+    ferridriver_script::ExtensionHost::Bdd,
+  )
+  .await;
   JsBddSession::load(
     bundle,
     dir,

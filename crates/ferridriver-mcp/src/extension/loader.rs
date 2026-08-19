@@ -173,11 +173,11 @@ pub fn discover(path: &Path) -> Result<Vec<PathBuf>, ExtensionLoadError> {
 #[must_use]
 pub fn discover_specs(specs: &[ferridriver_config::ExtensionSpec]) -> (Vec<PathBuf>, Vec<ExtensionLoadError>) {
   let (resolved, errors) = resolve_specs(specs);
-  let mut files = Vec::new();
+  let mut files: Vec<PathBuf> = Vec::new();
   for r in resolved {
-    for f in r.files {
-      if !files.contains(&f) {
-        files.push(f);
+    for entry in r.files {
+      if !files.contains(&entry.path) {
+        files.push(entry.path);
       }
     }
   }

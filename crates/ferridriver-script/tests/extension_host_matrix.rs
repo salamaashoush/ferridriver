@@ -35,9 +35,9 @@ async fn gate_and_load(specs: &[ExtensionSpec]) -> (Vec<String>, Vec<ferridriver
   let caps = ScriptCaps::default();
   let sidecars: Vec<String> = Vec::new();
   let env = RequirementEnv::from_caps(&caps, &sidecars);
-  let gated = ferridriver_script::gate(specs, &env);
+  let gated = ferridriver_script::gate(specs, &env, ExtensionHost::Script);
   let blocked = gated.blocked.clone();
-  let bindings = ferridriver_script::load_bindings(specs, &env, &caps.extension_policy).await;
+  let bindings = ferridriver_script::load_bindings(specs, &env, &caps.extension_policy, ExtensionHost::Script).await;
   (blocked, bindings)
 }
 
@@ -94,7 +94,8 @@ async fn one_extension_registers_the_same_under_every_host() {
   let caps = ScriptCaps::default();
   let sidecars: Vec<String> = Vec::new();
   let env = RequirementEnv::from_caps(&caps, &sidecars);
-  let (_g, _c, failures) = ferridriver_script::extension_load::load(&specs, &env, &caps.extension_policy).await;
+  let (_g, _c, failures) =
+    ferridriver_script::extension_load::load(&specs, &env, &caps.extension_policy, ExtensionHost::Script).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let (blocked, bindings) = gate_and_load(&specs).await;
   assert!(blocked.is_empty(), "nothing to block");
@@ -184,7 +185,7 @@ async fn extraction_reports_what_each_host_would_see() {
   let sidecars: Vec<String> = Vec::new();
   let env = RequirementEnv::from_caps(&caps, &sidecars);
   let (_gated, compiled, failures) =
-    ferridriver_script::extension_load::load(&specs, &env, &caps.extension_policy).await;
+    ferridriver_script::extension_load::load(&specs, &env, &caps.extension_policy, ExtensionHost::Script).await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let snapshot = &compiled[0].snapshot;
 

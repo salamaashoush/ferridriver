@@ -103,11 +103,22 @@ async fn session_for(dir: &Path, specs: &[ExtensionSpec]) -> (Session, RunContex
   let caps = ScriptCaps::default();
   let sidecars: Vec<String> = Vec::new();
   let env = RequirementEnv::from_caps(&caps, &sidecars);
-  let (gated, _compiled, failures) =
-    ferridriver_script::extension_load::load(specs, &env, &caps.extension_policy).await;
+  let (gated, _compiled, failures) = ferridriver_script::extension_load::load(
+    specs,
+    &env,
+    &caps.extension_policy,
+    ferridriver_script::ExtensionHost::Script,
+  )
+  .await;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let diagnostics: Vec<String> = gated.issues.iter().map(|i| i.message.clone()).collect();
-  let bindings = ferridriver_script::load_bindings(specs, &env, &caps.extension_policy).await;
+  let bindings = ferridriver_script::load_bindings(
+    specs,
+    &env,
+    &caps.extension_policy,
+    ferridriver_script::ExtensionHost::Script,
+  )
+  .await;
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
     sandbox: Arc::new(PathSandbox::new(dir).expect("sandbox")),
@@ -259,8 +270,13 @@ async fn a_claim_arriving_after_the_table_is_sealed_is_refused() {
     spec: "./pkg".to_string(),
     base_dir: dir.clone(),
   }];
-  let (gated, _compiled, _failures) =
-    ferridriver_script::extension_load::load(&specs, &env, &caps.extension_policy).await;
+  let (gated, _compiled, _failures) = ferridriver_script::extension_load::load(
+    &specs,
+    &env,
+    &caps.extension_policy,
+    ferridriver_script::ExtensionHost::Script,
+  )
+  .await;
   assert!(
     gated
       .issues

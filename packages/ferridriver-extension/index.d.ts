@@ -302,6 +302,32 @@ export interface ExtensionProvides {
 }
 
 /**
+ * One `entries` item written in full.
+ *
+ * The bare-string form covers almost every entry. Reach for this one to
+ * say that an entry belongs to some hosts and not others, or that it
+ * needs something the rest of the package does not.
+ */
+export interface ExtensionEntry {
+  /** Path relative to the package directory. */
+  path: string;
+  /**
+   * Hosts this entry loads under. Absent means every host.
+   *
+   * Narrowing is not only about what loads: an entry's `requires` are
+   * checked only where the entry runs, so an MCP-only entry naming a
+   * binary that is absent no longer holds its whole package back under
+   * `ferridriver test`.
+   */
+  hosts?: ExtensionHost[];
+  /**
+   * Preconditions for THIS entry. Present, they REPLACE the package's
+   * own rather than adding to them.
+   */
+  requires?: ExtensionRequires;
+}
+
+/**
  * The `ferridriver` field of an extension package's `package.json`.
  *
  * ```json
@@ -326,8 +352,11 @@ export interface ExtensionPackageManifest {
    * scanned recursively). Anything not listed is reachable only as an
    * import of an entry — which is what keeps a shared `lib/` from being
    * loaded as a tool-less extension.
+   *
+   * An item is a path, or an {@link ExtensionEntry} when it needs to
+   * narrow the hosts it loads under or carry its own `requires`.
    */
-  entries?: string[];
+  entries?: (string | ExtensionEntry)[];
   requires?: ExtensionRequires;
   /**
    * JSON Schema per `[extensions.settings.<key>]` block the package

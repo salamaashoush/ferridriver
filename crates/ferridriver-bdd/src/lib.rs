@@ -455,7 +455,13 @@ pub async fn build_bdd_plan(
     let caps = js::bdd_script_caps();
     let sidecar_names: Vec<String> = js::bdd_sidecars().iter().map(|s| s.name.clone()).collect();
     let env = ferridriver_script::RequirementEnv::from_caps(&caps, &sidecar_names);
-    let bindings = ferridriver_script::load_bindings(extensions, &env, &caps.extension_policy).await;
+    let bindings = ferridriver_script::load_bindings(
+      extensions,
+      &env,
+      &caps.extension_policy,
+      ferridriver_script::ExtensionHost::Bdd,
+    )
+    .await;
     Ok(js::translate_features_js(
       &feature_set,
       config,

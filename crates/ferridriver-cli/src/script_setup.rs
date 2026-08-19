@@ -130,7 +130,13 @@ async fn load_extensions(
   sidecars: &[String],
 ) -> Vec<ferridriver_script::ExtensionBinding> {
   let env = ferridriver_script::RequirementEnv::from_caps(caps, sidecars);
-  ferridriver_script::load_bindings(roots, &env, &caps.extension_policy).await
+  ferridriver_script::load_bindings(
+    roots,
+    &env,
+    &caps.extension_policy,
+    ferridriver_script::ExtensionHost::Script,
+  )
+  .await
 }
 
 /// Lower the declared `[[sidecars]]` config entries into the scripting

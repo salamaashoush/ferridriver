@@ -171,6 +171,12 @@ struct Resolution {
   resolve_errors: Vec<(String, ferridriver_script::error::ScriptError)>,
   issues: Vec<ferridriver_mcp::extension::RequirementIssue>,
   blocked: Vec<String>,
+  /// What each host's gate decided: the entries it loads, and the specs
+  /// it holds back. An entry narrowed with `hosts`, or one whose own
+  /// `requires` are unmet, differs per host — reporting one host's
+  /// answer as THE answer is what made a narrow declaration look like a
+  /// broken package.
+  per_host: Vec<(ferridriver_script::ExtensionHost, Vec<PathBuf>, Vec<String>)>,
   /// Directories to watch: a package's own dir, or an entry's parent.
   roots: Vec<PathBuf>,
   /// Package directories, for `tsconfig` inheritance and checker lookup.
@@ -189,15 +195,23 @@ fn resolve_and_gate(config: &FerridriverConfig, specs: &[ferridriver_config::Ext
   let policy = config.extensions.policy();
   let settings = config.extensions.settings();
   let sidecars: Vec<String> = config.sidecars.iter().map(|s| s.name.clone()).collect();
-  let gated = ferridriver_script::gate(
-    specs,
-    &ferridriver_script::RequirementEnv {
-      policy: &policy,
-      allow_env: &config.scripting.allow_env,
-      sidecars: &sidecars,
-      settings: &settings,
-    },
-  );
+  let env = ferridriver_script::RequirementEnv {
+    policy: &policy,
+    allow_env: &config.scripting.allow_env,
+    sidecars: &sidecars,
+    settings: &settings,
+  };
+  let per_host: Vec<(ferridriver_script::ExtensionHost, Vec<PathBuf>, Vec<String>)> =
+    ferridriver_script::ExtensionHost::ALL
+      .iter()
+      .map(|host| {
+        let g = ferridriver_script::gate(specs, &env, *host);
+        (*host, g.files, g.blocked)
+      })
+      .collect();
+  // The report's own shape comes from the script host; what differs per
+  // host is carried in `per_host`.
+  let gated = ferridriver_script::gate(specs, &env, ferridriver_script::ExtensionHost::Script);
   let ferridriver_script::GatedExtensions {
     resolved,
     resolve_errors,
@@ -216,7 +230,7 @@ fn resolve_and_gate(config: &FerridriverConfig, specs: &[ferridriver_config::Ext
     let root = r
       .package_dir
       .clone()
-      .or_else(|| r.files.first().and_then(|f| f.parent().map(Path::to_path_buf)));
+      .or_else(|| r.paths().next().and_then(|f| f.parent().map(Path::to_path_buf)));
     if let Some(root) = root
       && !roots.contains(&root)
     {
@@ -234,6 +248,7 @@ fn resolve_and_gate(config: &FerridriverConfig, specs: &[ferridriver_config::Ext
     resolve_errors,
     issues,
     blocked,
+    per_host,
     roots,
     package_dirs,
     files,
@@ -251,17 +266,15 @@ async fn build_report(
     resolve_errors,
     issues,
     blocked,
+    per_host,
     roots,
     package_dirs,
     files,
     type_files,
   } = resolve_and_gate(config, specs);
 
-  let (loaded, load_errors) = if files.is_empty() {
-    (Vec::new(), Vec::new())
-  } else {
-    ferridriver_mcp::extension::load_all(&files, &config.extensions.policy()).await
-  };
+  let (registrations, load_errors) = extract_per_host(config, specs, &per_host).await;
+  let loaded: Vec<PathBuf> = files.clone();
 
   // The scratch dir holds the generated tsconfig + the embedded
   // declarations; it must outlive the compiler run.
@@ -299,7 +312,7 @@ async fn build_report(
 
   let payload = serde_json::json!({
     "specs": specs_json(&resolved, &issues, &blocked),
-    "loaded": loaded_json(&loaded),
+    "hosts": hosts_json(&per_host, &registrations),
     "errors": errors,
     "typecheck": {
       "checker": types.checker,
@@ -307,10 +320,128 @@ async fn build_report(
       "skipped": types.skipped,
       "diagnostics": types.diagnostics,
     },
-    "toolCount": loaded.iter().map(|f| f.tools.len()).sum::<usize>(),
     "ok": ok,
   });
   Report { payload, roots, ok }
+}
+
+/// One bundle group's registrations under one host.
+///
+/// A group, not a file: a package's entries share one rolldown graph and
+/// one set of registries, so what they registered cannot be split back
+/// apart per file. Reporting it per file would have to invent an
+/// attribution, and did — a package's whole contribution showed up under
+/// whichever entry happened to be first.
+struct CompiledGroup {
+  files: Vec<PathBuf>,
+  snapshot: ferridriver_script::ExtensionSnapshot,
+}
+
+/// What each host compiled.
+type Registrations = Vec<(ferridriver_script::ExtensionHost, Vec<CompiledGroup>)>;
+
+/// Compile and extract whatever any host would load.
+///
+/// One pass per host, because the set of entries differs per host and a
+/// package narrowed away on one is still worth reporting on the others.
+/// Passes after the first are disk-cache hits for files already seen, so
+/// the cost is one compile per distinct file, not four.
+async fn extract_per_host(
+  config: &FerridriverConfig,
+  specs: &[ferridriver_config::ExtensionSpec],
+  per_host: &[(ferridriver_script::ExtensionHost, Vec<PathBuf>, Vec<String>)],
+) -> (Registrations, Vec<String>) {
+  let policy = config.extensions.policy();
+  let settings = config.extensions.settings();
+  let sidecars: Vec<String> = config.sidecars.iter().map(|s| s.name.clone()).collect();
+  let env = ferridriver_script::RequirementEnv {
+    policy: &policy,
+    allow_env: &config.scripting.allow_env,
+    sidecars: &sidecars,
+    settings: &settings,
+  };
+
+  let mut registrations = Registrations::new();
+  let mut errors: Vec<String> = Vec::new();
+  for (host, files, _) in per_host {
+    if files.is_empty() {
+      registrations.push((*host, Vec::new()));
+      continue;
+    }
+    let (_, compiled, failures) = ferridriver_script::extension_load::load(specs, &env, &policy, *host).await;
+    registrations.push((
+      *host,
+      compiled
+        .into_iter()
+        .map(|cp| CompiledGroup {
+          files: cp.files,
+          snapshot: cp.snapshot,
+        })
+        .collect(),
+    ));
+    for (path, e) in failures {
+      let message = format!("{}: {}", path.display(), e.message);
+      if !errors.contains(&message) {
+        errors.push(message);
+      }
+    }
+  }
+  (registrations, errors)
+}
+
+/// What each host loads and what it found there.
+///
+/// The report used to be tool-shaped: it counted `defineTool` and said
+/// nothing else, so a package contributing fixtures, steps or config
+/// defaults read as an MCP server that had forgotten to register
+/// anything. Every kind the extraction snapshot carries is reported, per
+/// host, and a kind nobody registered is simply absent.
+fn hosts_json(
+  per_host: &[(ferridriver_script::ExtensionHost, Vec<PathBuf>, Vec<String>)],
+  registrations: &Registrations,
+) -> serde_json::Value {
+  let mut out = serde_json::Map::new();
+  for (host, _, blocked) in per_host {
+    let name = host.as_str();
+    let groups = registrations
+      .iter()
+      .find(|(h, _)| h == host)
+      .map(|(_, groups)| groups.as_slice())
+      .unwrap_or_default();
+    let entries: Vec<serde_json::Value> = groups
+      .iter()
+      .map(|group| {
+        let regs = group.snapshot.for_host(name);
+        let mut kinds = serde_json::Map::new();
+        if let Some(r) = regs {
+          for (kind, count) in [
+            ("tools", r.tools.len()),
+            ("steps", r.steps.len()),
+            ("hooks", r.hooks.len()),
+            ("paramTypes", r.param_types.len()),
+            ("tests", r.tests.len()),
+            ("fixtures", r.fixtures.len()),
+            ("configDefaults", r.defaults.len()),
+          ] {
+            if count > 0 {
+              kinds.insert(kind.to_string(), count.into());
+            }
+          }
+        }
+        serde_json::json!({
+          "files": group.files,
+          "kinds": kinds,
+          "tools": regs.map(|r| r.tools.clone()).unwrap_or_default(),
+          "error": regs.and_then(|r| r.error.clone()),
+        })
+      })
+      .collect();
+    out.insert(
+      name.to_string(),
+      serde_json::json!({ "entries": entries, "blocked": blocked }),
+    );
+  }
+  serde_json::Value::Object(out)
 }
 
 /// Per-spec resolution + gate result, for the report.
@@ -326,7 +457,8 @@ fn specs_json(
       serde_json::json!({
         "spec": r.spec,
         "packageDir": r.package_dir,
-        "files": r.files,
+        "files": r.paths().collect::<Vec<_>>(),
+        "entries": r.files,
         "manifest": r.manifest,
         "blocked": blocked.contains(&r.spec),
         "requirements": issues
@@ -338,38 +470,63 @@ fn specs_json(
     })
     .collect()
 }
-
-/// Per-file tool manifests, for the report.
-fn loaded_json(loaded: &[ferridriver_mcp::extension::LoadedExtension]) -> Vec<serde_json::Value> {
-  loaded
-    .iter()
-    .map(|f| {
-      serde_json::json!({
-        "path": f.path,
-        "tools": f.tools.iter().map(|t| {
-          let mut commands: Vec<&String> = t.allow.commands.keys().collect();
-          commands.sort();
-          serde_json::json!({
-            "name": t.name,
-            "title": t.title,
-            "description": t.description,
-            "exposeAsMcpTool": t.expose_as_mcp_tool,
-            "timeoutMs": t.timeout_ms,
-            "allow": { "commands": commands, "net": t.allow.net },
-            "inputSchema": t.input_schema,
-            "outputSchema": t.output_schema,
-          })
-        }).collect::<Vec<_>>(),
-      })
-    })
-    .collect()
-}
-
 /// Print one cycle's report.
 ///
 /// Flushes explicitly: `ext check` exits through `std::process::exit`,
 /// which runs no destructors, so a report piped to a file (the CI /
 /// pre-commit shape) was block-buffered and lost on the failing runs.
+/// What each host loads, and what it found there.
+///
+/// Per host, because what a package contributes is a function of the
+/// host it loads under, and one host's answer is not the package.
+fn print_hosts(out: &mut impl std::io::Write, payload: &serde_json::Value) -> anyhow::Result<()> {
+  for (host, view) in payload["hosts"].as_object().into_iter().flatten() {
+    let entries = view["entries"].as_array().cloned().unwrap_or_default();
+    let blocked = view["blocked"].as_array().map_or(0, Vec::len);
+    if entries.is_empty() {
+      let why = if blocked > 0 {
+        format!(" ({blocked} package(s) held back)")
+      } else {
+        String::new()
+      };
+      writeln!(out, "\n{host}: nothing loads{why}")?;
+      continue;
+    }
+    writeln!(out, "\n{host}")?;
+    for group in &entries {
+      for path in group["files"].as_array().into_iter().flatten() {
+        writeln!(out, "  {}", path.as_str().unwrap_or_default())?;
+      }
+      if let Some(error) = group["error"].as_str() {
+        writeln!(out, "    failed: {error}")?;
+      }
+      let kinds = group["kinds"].as_object().cloned().unwrap_or_default();
+      if kinds.is_empty() {
+        if group["error"].is_null() {
+          writeln!(out, "    registers nothing")?;
+        }
+      } else {
+        let summary: Vec<String> = kinds.iter().map(|(kind, count)| format!("{count} {kind}")).collect();
+        writeln!(out, "    {}", summary.join(", "))?;
+      }
+      for t in group["tools"].as_array().into_iter().flatten() {
+        let promoted = if t["exposeAsMcpTool"] == serde_json::Value::Bool(true) {
+          "mcp tool"
+        } else {
+          "binding only"
+        };
+        writeln!(out, "    {} [{promoted}]", t["name"].as_str().unwrap_or_default())?;
+        let commands = t["allow"]["commands"].as_array().map_or(0, Vec::len);
+        let net = t["allow"]["net"].as_array().map_or(0, Vec::len);
+        if commands > 0 || net > 0 {
+          writeln!(out, "      allow: {commands} command(s), {net} net host(s)")?;
+        }
+      }
+    }
+  }
+  Ok(())
+}
+
 fn print_report(report: &Report, json: bool) -> anyhow::Result<()> {
   let mut out = std::io::stdout().lock();
   if json {
@@ -387,8 +544,15 @@ fn print_report(report: &Report, json: bool) -> anyhow::Result<()> {
       writeln!(out, "  package {dir} ({entries} declared entry/entries)")?;
     }
     writeln!(out, "  {count} entry file(s)")?;
-    for f in spec["files"].as_array().into_iter().flatten() {
-      writeln!(out, "    {}", f.as_str().unwrap_or_default())?;
+    for entry in spec["entries"].as_array().into_iter().flatten() {
+      let narrowed = entry["hosts"]
+        .as_array()
+        .map(|hosts| {
+          let names: Vec<&str> = hosts.iter().filter_map(serde_json::Value::as_str).collect();
+          format!("  [{}]", names.join(", "))
+        })
+        .unwrap_or_default();
+      writeln!(out, "    {}{narrowed}", entry["path"].as_str().unwrap_or_default())?;
     }
     for issue in spec["requirements"].as_array().into_iter().flatten() {
       let blocking = issue["blocking"] == serde_json::Value::Bool(true);
@@ -421,23 +585,7 @@ fn print_report(report: &Report, json: bool) -> anyhow::Result<()> {
     (None, None) => writeln!(out, "  no checker available")?,
   }
 
-  writeln!(out, "\nTools ({})", report.payload["toolCount"])?;
-  for file in report.payload["loaded"].as_array().into_iter().flatten() {
-    writeln!(out, "  {}", file["path"].as_str().unwrap_or_default())?;
-    for t in file["tools"].as_array().into_iter().flatten() {
-      let promoted = if t["exposeAsMcpTool"] == serde_json::Value::Bool(true) {
-        "mcp tool"
-      } else {
-        "binding only"
-      };
-      writeln!(out, "    {} [{promoted}]", t["name"].as_str().unwrap_or_default())?;
-      let commands = t["allow"]["commands"].as_array().map_or(0, Vec::len);
-      let net = t["allow"]["net"].as_array().map_or(0, Vec::len);
-      if commands > 0 || net > 0 {
-        writeln!(out, "      allow: {commands} command(s), {net} net host(s)")?;
-      }
-    }
-  }
+  print_hosts(&mut out, &report.payload)?;
 
   let errors = report.payload["errors"].as_array().cloned().unwrap_or_default();
   if !errors.is_empty() {

@@ -46,7 +46,7 @@ pub fn walk_source_files(dir: &Path) -> Vec<PathBuf> {
 /// and what that package declared in its
 /// [`ExtensionManifest`] — the host preconditions and settings schemas
 /// that must be checked before the package is treated as usable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ResolvedExtension {
   /// The `extensions` entry exactly as configured.
   pub spec: String,
@@ -59,8 +59,56 @@ pub struct ResolvedExtension {
   pub manifest: Option<ExtensionManifest>,
   /// Entry files to load as extensions, in resolution order (manifest
   /// `entries` order for a manifest package, sorted for a directory
-  /// scan).
-  pub files: Vec<PathBuf>,
+  /// scan), each carrying whatever its manifest item narrowed it to.
+  pub files: Vec<ResolvedEntry>,
+}
+
+/// One resolved entry file, with the manifest item's narrowing attached.
+///
+/// A directory entry expands to many files; each inherits the item's
+/// `hosts` and `requires`, because the narrowing was written about the
+/// entry, not about one file inside it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedEntry {
+  pub path: PathBuf,
+  /// Hosts this entry loads under. Empty means every host.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub hosts: Vec<String>,
+  /// The entry's own preconditions, when its manifest item declared
+  /// any; otherwise the package's apply.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub requires: Option<ferridriver_config::extension_manifest::ExtensionRequires>,
+}
+
+impl ResolvedEntry {
+  /// Whether this entry loads under `host`.
+  #[must_use]
+  pub fn runs_under(&self, host: &str) -> bool {
+    self.hosts.is_empty() || self.hosts.iter().any(|h| h == host)
+  }
+}
+
+impl From<PathBuf> for ResolvedEntry {
+  fn from(path: PathBuf) -> Self {
+    Self {
+      path,
+      hosts: Vec::new(),
+      requires: None,
+    }
+  }
+}
+
+impl ResolvedExtension {
+  /// Every entry file, narrowing ignored.
+  pub fn paths(&self) -> impl Iterator<Item = &PathBuf> {
+    self.files.iter().map(|e| &e.path)
+  }
+
+  /// The entries that load under `host`.
+  pub fn entries_for_host<'a>(&'a self, host: &'a str) -> impl Iterator<Item = &'a ResolvedEntry> {
+    self.files.iter().filter(move |e| e.runs_under(host))
+  }
 }
 
 /// Resolve configured extension specifiers to concrete ESM entry files.
@@ -102,12 +150,12 @@ pub fn resolve_extension_specs_with_bases(specs: &[ExtensionSpec]) -> (Vec<PathB
   let (resolved, errors) = resolve_extensions(specs);
   let mut files: Vec<PathBuf> = Vec::new();
   for r in resolved {
-    for f in r.files {
+    for entry in r.files {
       // Dedup keeping the FIRST occurrence: a manifest's `entries` order
       // is the author's load order, and sorting the flat list would
       // silently reorder it.
-      if !files.contains(&f) {
-        files.push(f);
+      if !files.contains(&entry.path) {
+        files.push(entry.path);
       }
     }
   }
@@ -137,7 +185,7 @@ pub fn resolve_extensions(specs: &[ExtensionSpec]) -> (Vec<ResolvedExtension>, V
 
 /// What one spec resolved to, before it is paired back with its spec.
 struct SpecResolution {
-  files: Vec<PathBuf>,
+  files: Vec<ResolvedEntry>,
   package_dir: Option<PathBuf>,
   manifest: Option<ExtensionManifest>,
 }
@@ -145,7 +193,7 @@ struct SpecResolution {
 impl SpecResolution {
   fn files(files: Vec<PathBuf>) -> Self {
     Self {
-      files,
+      files: files.into_iter().map(ResolvedEntry::from).collect(),
       package_dir: None,
       manifest: None,
     }
@@ -226,7 +274,7 @@ fn resolve_package_spec(cwd: &Path, spec: &str) -> Result<SpecResolution, Script
       let entry = resolve_subpath_entry(&p, type_module).map_err(|e| ScriptError::internal(format!("{spec}: {e}")))?;
       let manifest = read_package_manifest(&candidate)?;
       return Ok(SpecResolution {
-        files: vec![entry],
+        files: vec![entry.into()],
         package_dir: Some(candidate),
         manifest,
       });
@@ -269,13 +317,19 @@ fn resolve_package(pkg_dir: &Path) -> Result<SpecResolution, ScriptError> {
     .map_err(|e| ScriptError::internal(format!("package {}: {e}", pkg_dir.display())))?;
   let type_module = json.get("type").and_then(serde_json::Value::as_str) == Some("module");
 
-  let files = match manifest.as_ref().filter(|m| !m.entries.is_empty()) {
+  let files: Vec<ResolvedEntry> = match manifest.as_ref().filter(|m| !m.entries.is_empty()) {
     Some(m) => {
-      let mut files = Vec::new();
+      let mut files: Vec<ResolvedEntry> = Vec::new();
       for entry in &m.entries {
-        for f in resolve_manifest_entry(pkg_dir, entry, type_module)? {
-          if !files.contains(&f) {
-            files.push(f);
+        // A directory entry expands to many files; each inherits what
+        // the manifest item said about the entry as a whole.
+        for path in resolve_manifest_entry(pkg_dir, &entry.path, type_module)? {
+          if !files.iter().any(|e| e.path == path) {
+            files.push(ResolvedEntry {
+              path,
+              hosts: entry.hosts.clone(),
+              requires: entry.requires.clone(),
+            });
           }
         }
       }
@@ -287,7 +341,7 @@ fn resolve_package(pkg_dir: &Path) -> Result<SpecResolution, ScriptError> {
       }
       files
     },
-    None => vec![resolve_node_package_entry(pkg_dir, &json, type_module)?],
+    None => vec![resolve_node_package_entry(pkg_dir, &json, type_module)?.into()],
   };
 
   Ok(SpecResolution {
@@ -673,7 +727,7 @@ mod tests {
     }]);
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(
-      resolved[0].files,
+      resolved[0].paths().cloned().collect::<Vec<_>>(),
       vec![pkg.join("src/login.ts")],
       "the named subpath only"
     );

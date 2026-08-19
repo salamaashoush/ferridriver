@@ -162,6 +162,12 @@ pub enum ExtensionHost {
 }
 
 impl ExtensionHost {
+  /// Every host, in the order a report lists them. Pinned against
+  /// `ferridriver_config::extension_manifest::EXTENSION_HOSTS`, which a
+  /// manifest's `hosts` filter is validated against — the two spellings
+  /// of the same set must not drift.
+  pub const ALL: &'static [Self] = &[Self::Mcp, Self::Bdd, Self::Test, Self::Script];
+
   #[must_use]
   pub fn as_str(self) -> &'static str {
     match self {

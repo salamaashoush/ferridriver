@@ -716,7 +716,7 @@ impl McpServer {
       .map(|s| s.name.clone())
       .collect();
     let env = ferridriver_script::RequirementEnv::from_caps(&self.script_caps, &sidecar_names);
-    let gated = ferridriver_script::gate(&specs, &env);
+    let gated = ferridriver_script::gate(&specs, &env, ferridriver_script::ExtensionHost::Mcp);
     for (spec, e) in &gated.resolve_errors {
       tracing::warn!(extension = %spec, error = %e.message, "extension discovery failed; skipping path");
       failures.push((spec.clone(), e.message.clone()));

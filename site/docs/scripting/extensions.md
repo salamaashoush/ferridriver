@@ -227,7 +227,28 @@ steps = ["features/steps/**/*.ts"]
 `extensions` into one module, so an extension's `Given` / `When` /
 `Then` are available to tests exactly like a step file's.
 
-Package entries use standard ESM package metadata:
+A package that declares a `ferridriver` field in its `package.json`
+names its own entries, which is what a package with several tool modules
+plus a shared `lib/` needs — Node's single-entry fields can only name
+one:
+
+```json
+{
+  "ferridriver": {
+    "entries": [
+      "./src/fixtures.ts",
+      { "path": "./src/mcp-tools.ts", "hosts": ["mcp"] }
+    ]
+  }
+}
+```
+
+An item is a path, or an object that narrows the entry to some hosts
+(`mcp`, `bdd`, `test`, `script`) or gives it its own `requires`. An
+entry's `requires` are checked only where the entry runs, so an MCP-only
+dependency does not hold the package back under `ferridriver test`.
+
+Without that field, standard ESM package metadata applies:
 
 - `exports` is preferred, including conditional `import` / `default`.
 - `module` is accepted.
@@ -235,8 +256,7 @@ Package entries use standard ESM package metadata:
 - `index.mjs`, `index.mts`, `index.ts`, and `index.js` are used as
   fallback entries; `.js` requires `"type": "module"`.
 
-CommonJS entries are intentionally rejected. There is no ferridriver
-manifest field; use normal `package.json` ESM metadata.
+CommonJS entries are intentionally rejected.
 
 Both discovery paths (MCP loader and BDD runner) share the same package
 resolver, accepted-extension set, and recursive walk. A package, package

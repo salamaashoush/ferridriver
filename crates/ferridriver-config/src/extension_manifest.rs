@@ -57,7 +57,11 @@ pub struct ExtensionManifest {
   /// extension optional, or a directory scanned recursively). Anything
   /// not named here is reachable only as an import of an entry, which is
   /// what keeps a `lib/` tree out of the extension list.
-  pub entries: Vec<String>,
+  ///
+  /// A bare string is the common case. The object form narrows an entry
+  /// to some hosts, or gives it preconditions the rest of the package
+  /// does not share.
+  pub entries: Vec<ExtensionEntry>,
   /// Import specifiers this package serves, and how.
   pub provides: ExtensionProvides,
   /// Host preconditions. See the module docs: declarations, not grants.
@@ -68,6 +72,136 @@ pub struct ExtensionManifest {
   /// at load, so a mistyped key is an error instead of an `undefined`
   /// the handler reads at 3am.
   pub settings: BTreeMap<String, serde_json::Value>,
+}
+
+/// Every host an entry may be narrowed to, in the order a report lists
+/// them.
+///
+/// The canonical set lives here rather than in the script crate because
+/// the manifest is parsed before any host exists;
+/// `ferridriver_script::ExtensionHost` is pinned against it by a test so
+/// the two cannot drift.
+pub const EXTENSION_HOSTS: &[&str] = &["mcp", "bdd", "test", "script"];
+
+/// One `ferridriver.entries` item.
+///
+/// Written as a bare string almost always. The object form exists for
+/// the two things a string cannot say: that an entry belongs to some
+/// hosts and not others, and that it needs something the rest of the
+/// package does not.
+///
+/// Scoping `requires` to the entry is what keeps a narrow declaration
+/// from being expensive: an MCP-only entry that names a binary in
+/// `commands` used to block its WHOLE package when that binary was
+/// absent, taking down fixtures and providers that never needed it,
+/// even on a host where the entry does not load at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtensionEntry {
+  /// Path relative to the package directory.
+  pub path: String,
+  /// Hosts this entry loads under. Empty means every host.
+  pub hosts: Vec<String>,
+  /// Preconditions for THIS entry, replacing the package's own when
+  /// present rather than adding to them.
+  pub requires: Option<ExtensionRequires>,
+}
+
+impl From<&str> for ExtensionEntry {
+  fn from(path: &str) -> Self {
+    Self {
+      path: path.to_string(),
+      hosts: Vec::new(),
+      requires: None,
+    }
+  }
+}
+
+impl ExtensionEntry {
+  /// Whether this entry loads under `host`.
+  #[must_use]
+  pub fn runs_under(&self, host: &str) -> bool {
+    self.hosts.is_empty() || self.hosts.iter().any(|h| h == host)
+  }
+
+  /// The preconditions to check for this entry, given its package's.
+  #[must_use]
+  pub fn effective_requires<'a>(&'a self, package: &'a ExtensionRequires) -> &'a ExtensionRequires {
+    self.requires.as_ref().unwrap_or(package)
+  }
+}
+
+/// The object form's fields, so a typo inside it is named instead of
+/// collapsing into "did not match any variant".
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct EntryObject {
+  path: String,
+  #[serde(default)]
+  hosts: Vec<String>,
+  #[serde(default)]
+  requires: Option<ExtensionRequires>,
+}
+
+impl<'de> Deserialize<'de> for ExtensionEntry {
+  fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    struct EntryVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for EntryVisitor {
+      type Value = ExtensionEntry;
+
+      fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an entry path, or an object with `path` and optionally `hosts` / `requires`")
+      }
+
+      fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(ExtensionEntry {
+          path: value.to_string(),
+          hosts: Vec::new(),
+          requires: None,
+        })
+      }
+
+      fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+        let object = EntryObject::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+        for host in &object.hosts {
+          if !EXTENSION_HOSTS.contains(&host.as_str()) {
+            return Err(serde::de::Error::custom(format!(
+              "entry `{}`: unknown host `{host}` (expected one of {})",
+              object.path,
+              EXTENSION_HOSTS.join(", ")
+            )));
+          }
+        }
+        Ok(ExtensionEntry {
+          path: object.path,
+          hosts: object.hosts,
+          requires: object.requires,
+        })
+      }
+    }
+
+    deserializer.deserialize_any(EntryVisitor)
+  }
+}
+
+impl Serialize for ExtensionEntry {
+  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    // Round-trips to what the author wrote: an entry that narrows
+    // nothing goes back out as the string it came in as.
+    if self.hosts.is_empty() && self.requires.is_none() {
+      return serializer.serialize_str(&self.path);
+    }
+    let mut map = serializer.serialize_map(None)?;
+    map.serialize_entry("path", &self.path)?;
+    if !self.hosts.is_empty() {
+      map.serialize_entry("hosts", &self.hosts)?;
+    }
+    if let Some(requires) = &self.requires {
+      map.serialize_entry("requires", requires)?;
+    }
+    map.end()
+  }
 }
 
 /// What a package SERVES: import specifiers other modules — a spec, a
@@ -190,7 +324,11 @@ mod tests {
     .expect("parse")
     .expect("manifest present");
 
-    assert_eq!(parsed.entries, ["./src/a.ts", "./src/b.ts"], "entry order is preserved");
+    assert_eq!(
+      parsed.entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+      ["./src/a.ts", "./src/b.ts"],
+      "entry order is preserved"
+    );
     assert_eq!(parsed.requires.commands, ["acme-cli"]);
     assert_eq!(parsed.requires.env, ["ACME_HOME"]);
     assert_eq!(parsed.requires.net, ["*.acme.com"]);
@@ -241,6 +379,91 @@ mod tests {
     };
     let json = serde_json::to_value(&manifest).expect("serialize");
     assert_eq!(json["requires"]["commands"][0], "acme");
+    let back: ExtensionManifest = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(back, manifest);
+  }
+  #[test]
+  fn an_entry_is_a_string_or_an_object() {
+    let parsed = ExtensionManifest::from_package_json(&pkg(
+      r#"{"ferridriver":{"entries":[
+        "./src/plain.ts",
+        {"path":"./src/mcp-only.ts","hosts":["mcp"]},
+        {"path":"./src/gated.ts","requires":{"commands":["acme-cli"]}}
+      ]}}"#,
+    ))
+    .expect("parse")
+    .expect("manifest");
+
+    assert_eq!(parsed.entries[0].path, "./src/plain.ts");
+    assert!(parsed.entries[0].hosts.is_empty(), "a bare string narrows nothing");
+    assert!(parsed.entries[0].requires.is_none());
+
+    assert_eq!(parsed.entries[1].hosts, ["mcp"]);
+    assert!(parsed.entries[1].runs_under("mcp"));
+    assert!(
+      !parsed.entries[1].runs_under("test"),
+      "a narrowed entry stays where it was put"
+    );
+    assert!(
+      parsed.entries[0].runs_under("test"),
+      "an unnarrowed entry runs everywhere"
+    );
+
+    let package = ExtensionRequires {
+      commands: vec!["package-wide".into()],
+      ..Default::default()
+    };
+    assert_eq!(
+      parsed.entries[2].effective_requires(&package).commands,
+      ["acme-cli"],
+      "an entry's own requires REPLACE the package's rather than adding to them"
+    );
+    assert_eq!(
+      parsed.entries[0].effective_requires(&package).commands,
+      ["package-wide"],
+      "an entry with none falls back to the package's"
+    );
+  }
+
+  #[test]
+  fn an_unknown_host_is_named() {
+    let err = ExtensionManifest::from_package_json(&pkg(
+      r#"{"ferridriver":{"entries":[{"path":"./a.ts","hosts":["mpc"]}]}}"#,
+    ))
+    .expect_err("unknown host");
+    assert!(err.contains("mpc"), "{err}");
+    assert!(err.contains("mcp"), "the expected set is listed: {err}");
+  }
+
+  #[test]
+  fn a_typo_inside_the_object_form_names_the_key() {
+    let err = ExtensionManifest::from_package_json(&pkg(
+      r#"{"ferridriver":{"entries":[{"path":"./a.ts","host":["mcp"]}]}}"#,
+    ))
+    .expect_err("unknown key");
+    assert!(err.contains("host"), "{err}");
+  }
+
+  #[test]
+  fn an_entry_serializes_back_to_the_form_it_was_written_in() {
+    let manifest = ExtensionManifest {
+      entries: vec![
+        "./src/plain.ts".into(),
+        ExtensionEntry {
+          path: "./src/mcp.ts".to_string(),
+          hosts: vec!["mcp".to_string()],
+          requires: None,
+        },
+      ],
+      ..Default::default()
+    };
+    let json = serde_json::to_value(&manifest).expect("serialize");
+    assert_eq!(
+      json["entries"][0], "./src/plain.ts",
+      "an unnarrowed entry stays a string"
+    );
+    assert_eq!(json["entries"][1]["path"], "./src/mcp.ts");
+    assert_eq!(json["entries"][1]["hosts"][0], "mcp");
     let back: ExtensionManifest = serde_json::from_value(json).expect("deserialize");
     assert_eq!(back, manifest);
   }

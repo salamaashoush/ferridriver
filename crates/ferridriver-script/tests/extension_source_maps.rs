@@ -29,7 +29,13 @@ async fn bindings_for(specs: &[ferridriver_script::ExtensionSpec]) -> Vec<Extens
   let caps = ScriptCaps::default();
   let sidecars: Vec<String> = Vec::new();
   let env = RequirementEnv::from_caps(&caps, &sidecars);
-  ferridriver_script::load_bindings(specs, &env, &caps.extension_policy).await
+  ferridriver_script::load_bindings(
+    specs,
+    &env,
+    &caps.extension_policy,
+    ferridriver_script::ExtensionHost::Script,
+  )
+  .await
 }
 
 async fn session_with(dir: &std::path::Path, extensions: Vec<ExtensionBinding>) -> (Session, RunContext) {

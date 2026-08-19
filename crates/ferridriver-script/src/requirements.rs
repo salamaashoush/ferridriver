@@ -67,7 +67,12 @@ pub struct RequirementIssue {
 /// files or to a package with no manifest declare nothing and produce
 /// nothing.
 #[must_use]
-pub fn check(resolved: &[ResolvedExtension], env: &RequirementEnv<'_>) -> Vec<RequirementIssue> {
+pub fn check(
+  resolved: &[ResolvedExtension],
+  env: &RequirementEnv<'_>,
+  host: crate::ExtensionHost,
+) -> Vec<RequirementIssue> {
+  let host = host.as_str();
   let mut issues = Vec::new();
   for r in resolved {
     let Some(manifest) = r.manifest.as_ref() else {
@@ -82,11 +87,26 @@ pub fn check(resolved: &[ResolvedExtension], env: &RequirementEnv<'_>) -> Vec<Re
       });
     };
 
-    check_commands(&manifest.requires.commands, env, &mut push);
-    check_env(&manifest.requires.env, env, &mut push);
-    check_net(&manifest.requires.net, env, &mut push);
-    check_sidecars(&manifest.requires.sidecars, env, &mut push);
+    // Settings are the package's contract with the operator and are
+    // read wherever it loads, so they are checked for the package.
     check_settings(&manifest.settings, env, &mut push);
+
+    // Preconditions belong to the entries that actually load here. A
+    // package whose every entry is narrowed away on this host declares
+    // nothing here, and an entry with its own `requires` REPLACES the
+    // package's rather than adding to them.
+    let mut seen: Vec<&ferridriver_config::extension_manifest::ExtensionRequires> = Vec::new();
+    for entry in r.entries_for_host(host) {
+      let requires = entry.requires.as_ref().unwrap_or(&manifest.requires);
+      if seen.iter().any(|s| std::ptr::eq(*s, requires) || *s == requires) {
+        continue;
+      }
+      seen.push(requires);
+      check_commands(&requires.commands, env, &mut push);
+      check_env(&requires.env, env, &mut push);
+      check_net(&requires.net, env, &mut push);
+      check_sidecars(&requires.sidecars, env, &mut push);
+    }
   }
   issues
 }
@@ -253,7 +273,7 @@ mod tests {
       base_dir: PathBuf::from("/base"),
       package_dir: Some(PathBuf::from("/base/node_modules/@acme/ext")),
       manifest: Some(manifest),
-      files: vec![PathBuf::from("/base/node_modules/@acme/ext/index.ts")],
+      files: vec![PathBuf::from("/base/node_modules/@acme/ext/index.ts").into()],
     }
   }
 
@@ -293,9 +313,9 @@ mod tests {
       base_dir: PathBuf::from("/base"),
       package_dir: None,
       manifest: None,
-      files: vec![PathBuf::from("/base/tool.ts")],
+      files: vec![PathBuf::from("/base/tool.ts").into()],
     };
-    assert!(check(&[loose], &env(&p, &a, &s, &st)).is_empty());
+    assert!(check(&[loose], &env(&p, &a, &s, &st), crate::ExtensionHost::Mcp).is_empty());
   }
 
   #[test]
@@ -310,6 +330,7 @@ mod tests {
         ..Default::default()
       })],
       &env(&p, &a, &s, &st),
+      crate::ExtensionHost::Mcp,
     );
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert!(issues[0].blocking);
@@ -329,6 +350,7 @@ mod tests {
         ..Default::default()
       })],
       &env(&p, &a, &s, &st),
+      crate::ExtensionHost::Mcp,
     );
     assert!(issues.is_empty(), "{issues:?}");
   }
@@ -349,6 +371,7 @@ mod tests {
         ..Default::default()
       })],
       &env(&policy, &a, &s, &st),
+      crate::ExtensionHost::Mcp,
     );
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert!(issues[0].blocking);
@@ -367,6 +390,7 @@ mod tests {
         ..Default::default()
       })],
       &env(&p, &[], &s, &st),
+      crate::ExtensionHost::Mcp,
     );
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert!(issues[0].blocking);
@@ -386,6 +410,7 @@ mod tests {
         ..Default::default()
       })],
       &env(&p, &allow, &s, &st),
+      crate::ExtensionHost::Mcp,
     );
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert!(!issues[0].blocking, "the operator granted it; absence is not fatal");
@@ -407,6 +432,7 @@ mod tests {
         ..Default::default()
       })],
       &env(&policy, &a, &s, &st),
+      crate::ExtensionHost::Mcp,
     );
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert!(issues[0].blocking);
@@ -429,6 +455,7 @@ mod tests {
         ..Default::default()
       })],
       &env(&policy, &a, &s, &st),
+      crate::ExtensionHost::Mcp,
     );
     assert!(issues.is_empty(), "{issues:?}");
   }
@@ -445,6 +472,7 @@ mod tests {
         ..Default::default()
       })],
       &env(&p, &a, &[], &st),
+      crate::ExtensionHost::Mcp,
     );
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert!(issues[0].blocking);
@@ -460,6 +488,7 @@ mod tests {
         ..Default::default()
       })],
       &env(&p, &a, &declared, &st),
+      crate::ExtensionHost::Mcp,
     );
     assert!(issues.is_empty(), "{issues:?}");
   }
@@ -481,14 +510,22 @@ mod tests {
     };
 
     // Missing block => the required field is reported, not read as undefined.
-    let issues = check(&[pkg(manifest.clone())], &env(&p, &a, &s, &BTreeMap::new()));
+    let issues = check(
+      &[pkg(manifest.clone())],
+      &env(&p, &a, &s, &BTreeMap::new()),
+      crate::ExtensionHost::Mcp,
+    );
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert!(issues[0].blocking);
     assert!(issues[0].message.contains("origin"), "{issues:?}");
 
     // A mistyped key is an error instead of a silent undefined.
     let typo = BTreeMap::from([("acme".to_string(), serde_json::json!({ "origins": "https://x" }))]);
-    let issues = check(&[pkg(manifest.clone())], &env(&p, &a, &s, &typo));
+    let issues = check(
+      &[pkg(manifest.clone())],
+      &env(&p, &a, &s, &typo),
+      crate::ExtensionHost::Mcp,
+    );
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert!(
       issues[0].message.contains("origins") || issues[0].message.contains("origin"),
@@ -497,7 +534,7 @@ mod tests {
 
     // The conforming block passes.
     let good = BTreeMap::from([("acme".to_string(), serde_json::json!({ "origin": "https://x" }))]);
-    assert!(check(&[pkg(manifest)], &env(&p, &a, &s, &good)).is_empty());
+    assert!(check(&[pkg(manifest)], &env(&p, &a, &s, &good), crate::ExtensionHost::Mcp).is_empty());
   }
 
   #[test]
@@ -510,7 +547,7 @@ mod tests {
       },
       ..Default::default()
     })];
-    let issues = check(&resolved, &env(&p, &a, &s, &st));
+    let issues = check(&resolved, &env(&p, &a, &s, &st), crate::ExtensionHost::Mcp);
     assert_eq!(blocked_specs(&resolved, &issues), vec!["@acme/ext".to_string()]);
   }
 }

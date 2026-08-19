@@ -77,9 +77,9 @@ pub use bindings::{
   teardown_worker_fixtures,
 };
 pub use bundle::{
-  BundleSourceMap, BundledSource, CompiledBundle, CompiledExtension, SourceMapper, bundle_and_compile,
-  bundle_and_compile_named, bundle_source, compile_and_extract_extensions, compile_bundled_source, eval_bundle,
-  is_typescript_path, resolve_source, source_is_es_module,
+  BundleSourceMap, BundledSource, CompiledBundle, CompiledExtension, ExtensionSnapshot, HostRegistrations,
+  SourceMapper, bundle_and_compile, bundle_and_compile_named, bundle_source, compile_and_extract_extensions,
+  compile_bundled_source, eval_bundle, is_typescript_path, resolve_source, source_is_es_module,
 };
 pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
 pub use console::{ConsoleCapture, ConsoleSink};

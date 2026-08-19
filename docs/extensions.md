@@ -648,8 +648,8 @@ extensions = ["./plugins/acme"]        # or "@acme/ferridriver-acme"
 - **`requires`** — what the host must already provide. Declarations, not
   grants: per-tool authority still comes from `defineTool`'s `allow`,
   clamped by `[extensions.policy]`. An unmet requirement stops the
-  package from loading and says which config key fixes it, rather than
-  failing on the first tool call:
+  package from loading (on the hosts it applies to — see below) and says
+  which config key fixes it, rather than failing on the first tool call:
   - `commands` — programs that must be on `PATH`.
   - `env` — names the operator must list in `[scripting].allowEnv`
     (allow-listed but unset is a warning, not a block).
@@ -665,6 +665,61 @@ extensions = ["./plugins/acme"]        # or "@acme/ferridriver-acme"
 
 `ferridriver config` prints each package's entry count, declared entries
 and unmet requirements; `ferridriver doctor` fails on them.
+
+#### Narrowing an entry to some hosts
+
+An `entries` item may be written in full instead of as a path:
+
+```json
+{
+  "ferridriver": {
+    "entries": [
+      "./src/fixtures.ts",
+      { "path": "./src/mcp-tools.ts", "hosts": ["mcp"] },
+      { "path": "./src/sign.ts", "requires": { "commands": ["acme-cli"] } }
+    ]
+  }
+}
+```
+
+- **`hosts`** — the hosts this entry loads under (`mcp`, `bdd`, `test`,
+  `script`). Absent means every host, which is what a bare string says.
+- **`requires`** — preconditions for this entry alone. Present, they
+  REPLACE the package's rather than adding to them.
+
+Narrowing is not only about what loads. An entry's `requires` are
+checked only where the entry runs, so `./src/mcp-tools.ts` naming
+`acme-cli` blocks the package under `ferridriver mcp` when that binary
+is absent — and blocks nothing under `ferridriver test`, where the entry
+would not have loaded anyway. Before this, one MCP-only dependency took
+a package's fixtures and providers down on every host.
+
+Package-level `requires` are unchanged: they apply wherever the package
+loads, and an entry that declares none inherits them.
+
+#### What `ferridriver ext check` reports
+
+Per host, because what a package registers is a function of the host it
+loads under:
+
+```
+mcp
+  /path/to/plug.ts
+    1 tools
+    acme_ping [mcp tool]
+
+bdd
+  /path/to/plug.ts
+    1 steps
+
+test: nothing loads
+```
+
+Every kind the extraction pass records is counted — tools, steps, hooks,
+parameter types, tests, fixtures and config defaults — and a kind nobody
+registered is simply absent rather than a zero to explain. A package
+that contributes only fixtures reports its fixtures and is `ok`; it used
+to read as an MCP server that had forgotten to register anything.
 
 ### The authoring loop
 

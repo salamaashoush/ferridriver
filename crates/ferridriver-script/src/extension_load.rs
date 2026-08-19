@@ -61,12 +61,19 @@ impl GatedExtensions {
 }
 
 /// Resolve + gate, without compiling anything.
+///
+/// `host` selects which entries take part: an entry narrowed with
+/// `hosts` is not loaded elsewhere, and — the point of scoping it — its
+/// `requires` are not checked elsewhere either. An MCP-only entry naming
+/// a binary that is absent no longer blocks its whole package on the
+/// test host, where the entry would not have loaded anyway.
 #[must_use]
-pub fn gate(specs: &[ExtensionSpec], env: &RequirementEnv<'_>) -> GatedExtensions {
+pub fn gate(specs: &[ExtensionSpec], env: &RequirementEnv<'_>, host: crate::ExtensionHost) -> GatedExtensions {
   let (resolved, resolve_errors) = crate::discover::resolve_extensions(specs);
-  let issues = crate::requirements::check(&resolved, env);
+  let issues = crate::requirements::check(&resolved, env, host);
   let blocked = crate::requirements::blocked_specs(&resolved, &issues);
 
+  let host = host.as_str();
   let mut files: Vec<PathBuf> = Vec::new();
   let mut all_files: Vec<PathBuf> = Vec::new();
   // Providers first, in dependency order: every entry that imports a
@@ -74,12 +81,15 @@ pub fn gate(specs: &[ExtensionSpec], env: &RequirementEnv<'_>) -> GatedExtension
   // there, and a provider importing another package's specifier has to
   // follow it.
   for r in &resolved {
-    for f in &r.files {
-      if !all_files.contains(f) {
-        all_files.push(f.clone());
+    for entry in &r.files {
+      // `all_files` is what a report calls "declared", so it keeps every
+      // entry regardless of host — otherwise a narrowed entry would look
+      // like it did not exist rather than like it did not apply.
+      if !all_files.contains(&entry.path) {
+        all_files.push(entry.path.clone());
       }
-      if !blocked.contains(&r.spec) && !files.contains(f) {
-        files.push(f.clone());
+      if !blocked.contains(&r.spec) && entry.runs_under(host) && !files.contains(&entry.path) {
+        files.push(entry.path.clone());
       }
     }
   }
@@ -176,8 +186,9 @@ pub async fn load(
   specs: &[ExtensionSpec],
   env: &RequirementEnv<'_>,
   policy: &ExtensionPolicyConfig,
+  host: crate::ExtensionHost,
 ) -> (GatedExtensions, Vec<CompiledExtension>, Vec<(PathBuf, ScriptError)>) {
-  let mut gated = gate(specs, env);
+  let mut gated = gate(specs, env, host);
   // The claim table has to be installed BEFORE anything bundles: it
   // decides which specifiers stay external, which module name a
   // provider compiles under, and what every later resolver accepts.
@@ -234,7 +245,7 @@ pub async fn extension_defaults(
   if specs.is_empty() {
     return Ok(Vec::new());
   }
-  let (_gated, compiled, failures) = load(specs, env, policy).await;
+  let (_gated, compiled, failures) = load(specs, env, policy, host).await;
 
   // An `[extensions.policy]` refusal is never skippable — the same rule
   // `install_extensions` applies when a session loads a package, moved
@@ -274,11 +285,12 @@ pub async fn load_bindings(
   specs: &[ExtensionSpec],
   env: &RequirementEnv<'_>,
   policy: &ExtensionPolicyConfig,
+  host: crate::ExtensionHost,
 ) -> Vec<ExtensionBinding> {
   if specs.is_empty() {
     return Vec::new();
   }
-  let (gated, compiled, failures) = load(specs, env, policy).await;
+  let (gated, compiled, failures) = load(specs, env, policy, host).await;
   for (spec, e) in &gated.resolve_errors {
     tracing::warn!(target: "ferridriver::extensions", extension = %spec, error = %e.message, "extension discovery failed; skipping");
   }
@@ -328,7 +340,7 @@ fn compile_groups(gated: &GatedExtensions, files: &[PathBuf]) -> Vec<Vec<PathBuf
     let package = gated
       .resolved
       .iter()
-      .find(|r| r.files.iter().any(|f| canonical_eq(f, file)))
+      .find(|r| r.paths().any(|f| canonical_eq(f, file)))
       .and_then(|r| r.package_dir.clone());
     match package {
       Some(dir) => {
