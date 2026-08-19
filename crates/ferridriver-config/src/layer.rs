@@ -803,7 +803,8 @@ fn check_module_document(path: &Path, value: &Value) -> anyhow::Result<()> {
       .is_some()
     {
       anyhow::bail!(
-        "config {}: a config module may not set `{key}` — {why}. Put it in a ferridriver.toml          layer instead.",
+        "config {}: a config module may not set `{key}` — {why}. Put it in a ferridriver.toml layer \
+         instead.",
         path.display()
       );
     }

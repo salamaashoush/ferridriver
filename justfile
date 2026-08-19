@@ -17,12 +17,15 @@ alias c := check
 alias t := test
 alias tf := test-fast
 
-# The standing parity gate: mergeTests, expect.extend, defineConfig,
-# devices and snapshotPathTemplate, run with NO extensions loaded. Every
-# one is core, so this must pass for a suite that never writes one.
+# Two acceptance runs. The parity gate — mergeTests, expect.extend,
+# defineConfig, devices, snapshotPathTemplate — with NO extensions
+# loaded, because every one of those is core. Then the driving case: a
+# BDD suite that reaches its framework through an extension package,
+# importing `playwright-bdd` with no edit to its own source.
 acceptance:
   cargo build --bin ferridriver
   ./target/debug/ferridriver test --config tests/acceptance/parity/playwright.config.ts
+  cd tests/acceptance/driving && ../../../target/debug/ferridriver bdd --no-inherit
 
 # Check compilation (default-members; ferridriver-node excluded)
 check:

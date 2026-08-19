@@ -441,17 +441,16 @@ pub async fn build_bdd_plan(
     Ok(translate::translate_features(&feature_set, registry, config, &options))
   } else {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    // rolldown-bundle + tree-shake + transpile the whole step +
-    // extension graph to one module, compiled to bytecode once per
-    // plan build.
-    let bundle = js::bundle_steps_with(js_globs, extensions, &cwd)
-      .await
-      .map_err(|e| format!("step bundle error: {e}"))?;
     // Extensions load once per plan build, through the gate every host
     // shares, and every worker VM installs the same bytecode. Before
     // this they were bundled into the step module as SOURCE: never
     // gated, never manifest-extracted, and out of reach of the
     // `[extensions.policy]` ceiling.
+    //
+    // This runs BEFORE the step bundle, and has to: loading is what
+    // installs the provided-module table, so a step file importing a
+    // specifier a package claims (`playwright-bdd`) fails to resolve if
+    // the bundle is built first.
     let caps = js::bdd_script_caps();
     let sidecar_names: Vec<String> = js::bdd_sidecars().iter().map(|s| s.name.clone()).collect();
     let env = ferridriver_script::RequirementEnv::from_caps(&caps, &sidecar_names);
@@ -462,6 +461,12 @@ pub async fn build_bdd_plan(
       ferridriver_script::ExtensionHost::Bdd,
     )
     .await;
+    // rolldown-bundle + tree-shake + transpile the whole step +
+    // extension graph to one module, compiled to bytecode once per
+    // plan build.
+    let bundle = js::bundle_steps_with(js_globs, extensions, &cwd)
+      .await
+      .map_err(|e| format!("step bundle error: {e}"))?;
     Ok(js::translate_features_js(
       &feature_set,
       config,

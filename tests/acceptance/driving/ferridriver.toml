@@ -1,0 +1,4 @@
+# The extension set, which a config module cannot decide: the packages
+# are resolved and compiled before any module is evaluated, so this has
+# to be a document layer.
+extensions = ["../../../examples/bdd-suite-extension"]

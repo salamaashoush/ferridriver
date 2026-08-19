@@ -1,0 +1,19 @@
+{
+  "name": "acme-bdd-suite",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reference ferridriver extension: serves playwright-bdd's createBdd, contributes the fixtures and config defaults one suite needs.",
+  "ferridriver": {
+    "apiVersion": 1,
+    "name": "acme-bdd-suite",
+    "entries": ["./src/extension.ts"],
+    "provides": {
+      "modules": {
+        "playwright-bdd": "./src/playwright-bdd.ts"
+      },
+      "aliases": {
+        "playwright-bdd/decorators": "playwright-bdd"
+      }
+    }
+  }
+}
