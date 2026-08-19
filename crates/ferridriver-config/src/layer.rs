@@ -50,6 +50,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -238,6 +239,47 @@ impl Provenance {
   }
 }
 
+/// Layer documents already read from disk, shared across the passes of
+/// one startup.
+///
+/// Startup resolves the stack more than once when an extension
+/// contributes defaults or a `--config` module has to be evaluated. The
+/// FOLD has to be redone each time — a contribution is the lowest layer,
+/// and that is where append-keys concatenate and relative paths anchor —
+/// but the files have not changed, so reading and parsing them again is
+/// waste. Worse than waste: a file edited between two passes would
+/// produce a merged document that no single state of the disk ever had.
+///
+/// Cheap to clone (one `Arc`), and empty by default, so a caller that
+/// resolves once pays nothing for it.
+#[derive(Debug, Clone, Default)]
+pub struct LayerCache(Arc<Mutex<BTreeMap<PathBuf, Value>>>);
+
+impl LayerCache {
+  /// The parsed document at `path`, reading it only the first time.
+  ///
+  /// # Errors
+  ///
+  /// As [`parse_file`], on the pass that actually reads it.
+  pub fn parse(&self, path: &Path) -> anyhow::Result<Value> {
+    if let Some(hit) = self
+      .0
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .get(path)
+    {
+      return Ok(hit.clone());
+    }
+    let value = parse_file(path)?;
+    self
+      .0
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert(path.to_path_buf(), value.clone());
+    Ok(value)
+  }
+}
+
 /// Inputs to a resolve. Every ambient dependency (cwd, user config
 /// directory, environment) is a field so a test can resolve a stack
 /// without mutating process state.
@@ -265,6 +307,10 @@ pub struct LoadOptions {
   /// resolution has happened. See [`Resolved`] and the CLI's two-pass
   /// startup.
   pub extension_defaults: Vec<(String, Value)>,
+  /// Layer documents already read, so the passes of one startup read
+  /// each file once between them. Default-empty; a single resolve never
+  /// notices it.
+  pub cache: LayerCache,
   /// A `--config <file.ts|.js>` the host bundled and evaluated, applied
   /// in the same slot an explicitly named document would occupy.
   ///
@@ -293,6 +339,7 @@ impl LoadOptions {
       env,
       inherit,
       extension_defaults: Vec::new(),
+      cache: LayerCache::default(),
       script_config: None,
     }
   }
@@ -310,6 +357,7 @@ impl LoadOptions {
       env: BTreeMap::new(),
       inherit: true,
       extension_defaults: Vec::new(),
+      cache: LayerCache::default(),
       script_config: None,
     }
   }
@@ -378,12 +426,15 @@ pub fn resolve(opts: &LoadOptions) -> anyhow::Result<Resolved> {
   for layer in discovered {
     apply_layer(
       &layer,
-      &mut document,
-      &mut provenance,
-      &mut layers,
-      &mut seen,
-      &mut extension_bases,
-      &mut warnings,
+      &mut Fold {
+        document: &mut document,
+        provenance: &mut provenance,
+        layers: &mut layers,
+        seen: &mut seen,
+        extension_bases: &mut extension_bases,
+        warnings: &mut warnings,
+        cache: &opts.cache,
+      },
     )?;
   }
 
@@ -578,49 +629,56 @@ fn find_git_root(from: &Path) -> Option<PathBuf> {
 
 /// Read, normalize, anchor and merge one file, after recursively
 /// applying whatever it `extends`.
-fn apply_layer(
-  layer: &ConfigLayer,
-  document: &mut Value,
-  provenance: &mut Provenance,
-  layers: &mut Vec<ConfigLayer>,
-  seen: &mut BTreeSet<PathBuf>,
-  extension_bases: &mut BTreeMap<String, PathBuf>,
-  warnings: &mut Vec<ConfigWarning>,
-) -> anyhow::Result<()> {
+/// The state one fold accumulates into, so `extends` recursion carries
+/// it in one place rather than as eight parallel arguments.
+struct Fold<'a> {
+  document: &'a mut Value,
+  provenance: &'a mut Provenance,
+  layers: &'a mut Vec<ConfigLayer>,
+  seen: &'a mut BTreeSet<PathBuf>,
+  extension_bases: &'a mut BTreeMap<String, PathBuf>,
+  warnings: &'a mut Vec<ConfigWarning>,
+  cache: &'a LayerCache,
+}
+
+fn apply_layer(layer: &ConfigLayer, fold: &mut Fold<'_>) -> anyhow::Result<()> {
   let canonical = std::fs::canonicalize(&layer.path).unwrap_or_else(|_| layer.path.clone());
-  if !seen.insert(canonical.clone()) {
+  if !fold.seen.insert(canonical.clone()) {
     // Already applied (a diamond in `extends`, or the same file
     // discovered twice). Re-applying would only duplicate append-key
     // entries.
     return Ok(());
   }
 
-  let mut value = parse_file(&layer.path)?;
+  // Through the cache: a startup that resolves more than once reads each
+  // file on the first pass only.
+  let mut value = fold.cache.parse(&layer.path)?;
   let dir = layer
     .path
     .parent()
     .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
 
-  for parent in take_extends(&mut value, &dir, warnings) {
+  for parent in take_extends(&mut value, &dir, fold.warnings) {
     apply_layer(
       &ConfigLayer {
         kind: LayerKind::Extends,
         path: parent,
       },
-      document,
-      provenance,
-      layers,
-      seen,
-      extension_bases,
-      warnings,
+      fold,
     )?;
   }
 
   normalize(&mut value);
   anchor_paths(&mut value, &dir);
-  record_extension_bases(&value, &dir, extension_bases);
-  merge(document, &value, "", &Origin::File(layer.path.clone()), provenance);
-  layers.push(layer.clone());
+  record_extension_bases(&value, &dir, fold.extension_bases);
+  merge(
+    fold.document,
+    &value,
+    "",
+    &Origin::File(layer.path.clone()),
+    fold.provenance,
+  );
+  fold.layers.push(layer.clone());
   Ok(())
 }
 

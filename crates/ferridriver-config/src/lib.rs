@@ -611,6 +611,17 @@ impl FerridriverConfig {
   /// Returns an error if the file cannot be read or parsed, or if its
   /// contents violate the schema.
   pub fn load_from(path: &Path) -> anyhow::Result<Self> {
+    // A config MODULE cannot be read here: evaluating it needs the
+    // script engine, which is configured FROM this crate. Silently
+    // resolving to defaults is the one answer that would be worse than
+    // saying so.
+    if layer::is_script_config(path) {
+      anyhow::bail!(
+        "config {}: a `.ts` / `.js` config is evaluated by the runtime, not read as a document — \
+         load it through the CLI's `--config`, which bundles it first",
+        path.display()
+      );
+    }
     let resolved = layer::resolve(&layer::LoadOptions {
       explicit: Some(path.to_path_buf()),
       cwd: path.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf),
@@ -619,6 +630,7 @@ impl FerridriverConfig {
       env: BTreeMap::new(),
       inherit: false,
       extension_defaults: Vec::new(),
+      cache: layer::LayerCache::default(),
       script_config: None,
     })?;
     for w in &resolved.warnings {
@@ -703,6 +715,57 @@ impl FerridriverConfig {
       }
     }
     Ok(())
+  }
+}
+
+/// One startup's layer stack, resolved in passes that share the files
+/// they read.
+///
+/// Startup resolves more than once only when it has to: an extension
+/// that contributed `defineDefaults` has to be folded in UNDERNEATH
+/// every file, and a `--config` module can only be compiled once the
+/// earlier passes have settled the bundler and the specifier table.
+/// Both redo the FOLD; neither should redo the reading, which is what
+/// holding one [`layer::LayerCache`] across them buys.
+pub struct Startup {
+  opts: layer::LoadOptions,
+}
+
+impl Startup {
+  /// A startup reading the real process environment.
+  #[must_use]
+  pub fn new(explicit: Option<&Path>, inherit: bool) -> Self {
+    let mut opts = layer::LoadOptions::from_process(explicit);
+    // A false argument must not re-enable inheritance that the
+    // environment already switched off.
+    opts.inherit = opts.inherit && inherit;
+    Self { opts }
+  }
+
+  /// Fold what the loaded packages contributed underneath every file.
+  pub fn set_extension_defaults(&mut self, defaults: Vec<(String, serde_json::Value)>) {
+    self.opts.extension_defaults = defaults;
+  }
+
+  /// Apply an evaluated `--config <file.ts|.js>` in the explicit slot.
+  pub fn set_script_config(&mut self, script_config: layer::ScriptConfig) {
+    self.opts.script_config = Some(script_config);
+  }
+
+  /// Resolve the stack as it currently stands.
+  ///
+  /// # Errors
+  ///
+  /// As [`FerridriverConfig::load_layered`].
+  pub fn resolve(&self) -> anyhow::Result<FerridriverConfig> {
+    let resolved = layer::resolve(&self.opts)?;
+    for w in &resolved.warnings {
+      tracing::warn!(source = %w.source, "{}", w.message);
+    }
+    for l in &resolved.layers {
+      tracing::debug!(kind = l.kind.label(), path = %l.path.display(), "config layer applied");
+    }
+    Ok(resolved.config)
   }
 }
 

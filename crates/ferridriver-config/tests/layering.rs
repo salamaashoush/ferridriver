@@ -58,6 +58,7 @@ impl Tree {
       env: BTreeMap::new(),
       inherit: true,
       extension_defaults: Vec::new(),
+      cache: ferridriver_config::layer::LayerCache::default(),
       script_config: None,
     }
   }
@@ -545,6 +546,7 @@ mod extension_defaults {
       env: BTreeMap::new(),
       inherit: true,
       extension_defaults: defaults,
+      cache: ferridriver_config::layer::LayerCache::default(),
       script_config: None,
     }
   }
@@ -699,4 +701,37 @@ mod extension_defaults {
       "FerridriverTestConfig must list every `[test]` key a config module may set, and only those",
     );
   }
+}
+
+/// The passes of one startup share the files they read.
+#[test]
+fn a_shared_cache_reads_each_layer_once_across_passes() {
+  use ferridriver_config::layer::LayerCache;
+
+  let dir = std::env::temp_dir().join(format!("ferri-cache-{}", std::process::id()));
+  let _ = std::fs::remove_dir_all(&dir);
+  std::fs::create_dir_all(&dir).expect("scratch");
+  let file = dir.join("ferridriver.toml");
+  std::fs::write(&file, "[test]\ntimeout = 1234\n").expect("write");
+
+  let cache = LayerCache::default();
+  let first = cache.parse(&file).expect("first parse");
+  assert_eq!(first["test"]["timeout"], 1234);
+
+  // Change the file underneath. A second pass must answer with what the
+  // first pass read, or a startup could merge two different states of
+  // the disk into one document.
+  std::fs::write(&file, "[test]\ntimeout = 9999\n").expect("rewrite");
+  let second = cache.parse(&file).expect("second parse");
+  assert_eq!(
+    second["test"]["timeout"], 1234,
+    "the cached document is served, not a fresh read"
+  );
+
+  // A cache that never saw the file reads it, so nothing is pinned
+  // process-wide.
+  let fresh = LayerCache::default().parse(&file).expect("fresh parse");
+  assert_eq!(fresh["test"]["timeout"], 9999);
+
+  let _ = std::fs::remove_dir_all(&dir);
 }

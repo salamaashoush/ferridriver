@@ -574,10 +574,17 @@ extension. That is the whole reason a second pass can exist:
    config module may not set `extensions`, `bundler`, `scripting` or
    `[test].moduleAliases`.
 
-A resolve is file reading and JSON merging; no VM, no bundler. The whole
-of `ferridriver config` — one resolve, extension discovery, and printing
-the result as JSON — measures ~2.2 ms above process floor on a release
-build, which is the upper bound for what one pass can cost.
+The passes SHARE the files they read. A startup holds one
+`LayerCache`, so a second or third fold re-merges documents already in
+memory rather than reading and parsing them again — which also means a
+file edited mid-startup cannot produce a merged document that no single
+state of the disk ever had. A resolve is then JSON merging and nothing
+else: no VM, no bundler, no disk.
+
+For scale: the whole of `ferridriver config` — one resolve, extension
+discovery, and printing the result as JSON — measures ~2.2 ms above
+process floor on a release build, and that is the upper bound for one
+pass including its reads.
 
 That is also why a contribution may not set the sections that decide how
 the contributing package itself was found, compiled or trusted. Each is

@@ -43,6 +43,7 @@ type ContributedDefaults = Vec<(String, serde_json::Value)>;
 async fn apply_extension_defaults(
   config: FerridriverConfig,
   args: &cli::Cli,
+  startup: &mut ferridriver_config::Startup,
 ) -> anyhow::Result<(FerridriverConfig, ContributedDefaults)> {
   let specs = config.extension_specs();
   let Some(host) = extension_host_of(&args.command) else {
@@ -70,9 +71,8 @@ async fn apply_extension_defaults(
   for (package, _) in &defaults {
     tracing::debug!(target: "ferridriver::extensions", package, host = host.as_str(), "extension.defaults.applied");
   }
-  let config =
-    FerridriverConfig::load_layered_with_defaults(args.config.as_deref(), !args.no_inherit, defaults.clone())?;
-  Ok((config, defaults))
+  startup.set_extension_defaults(defaults.clone());
+  Ok((startup.resolve()?, defaults))
 }
 
 /// Evaluate a `--config <file.ts|.js>` and re-resolve the layer stack
@@ -89,7 +89,7 @@ async fn apply_extension_defaults(
 async fn apply_script_config(
   config: FerridriverConfig,
   args: &cli::Cli,
-  contributed: ContributedDefaults,
+  startup: &mut ferridriver_config::Startup,
 ) -> anyhow::Result<(FerridriverConfig, Option<layer::ScriptConfig>)> {
   let Some(path) = args.config.as_deref().filter(|p| layer::is_script_config(p)) else {
     return Ok((config, None));
@@ -107,13 +107,8 @@ async fn apply_script_config(
     path: path.to_path_buf(),
     test: document,
   };
-  let config = FerridriverConfig::load_layered_full(
-    args.config.as_deref(),
-    !args.no_inherit,
-    contributed,
-    Some(script_config.clone()),
-  )?;
-  Ok((config, Some(script_config)))
+  startup.set_script_config(script_config.clone());
+  Ok((startup.resolve()?, Some(script_config)))
 }
 
 /// The extension host a subcommand runs as, or `None` for one that
@@ -231,11 +226,16 @@ async fn main() -> anyhow::Result<()> {
   // for the second. The operator tables go in between: extraction IS a
   // bundle, so the bundler environment and the alias table have to be
   // installed before it runs.
-  let config = FerridriverConfig::load_layered(args.config.as_deref(), !args.no_inherit)?;
+  // One startup, resolved in passes that SHARE the files they read: the
+  // stack is folded again when a package contributes defaults or a
+  // config module has to be layered, but each file is read once between
+  // them.
+  let mut startup = ferridriver_config::Startup::new(args.config.as_deref(), !args.no_inherit);
+  let config = startup.resolve()?;
   install_bundler_env(&config);
   install_module_aliases(&config.test, module_alias_flags(&args.command))?;
-  let (config, contributed) = Box::pin(apply_extension_defaults(config, &args)).await?;
-  let (config, script_config) = Box::pin(apply_script_config(config, &args, contributed.clone())).await?;
+  let (config, contributed) = Box::pin(apply_extension_defaults(config, &args, &mut startup)).await?;
+  let (config, script_config) = Box::pin(apply_script_config(config, &args, &mut startup)).await?;
 
   match args.command {
     cli::Command::Mcp(mcp_args) => Box::pin(run_mcp(config, mcp_args)).await,
