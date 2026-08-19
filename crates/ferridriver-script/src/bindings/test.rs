@@ -923,11 +923,9 @@ pub fn seal_base_fixtures(ctx: &Ctx<'_>) -> Result<(), ScriptError> {
 /// test surface is not installed at all, which is the state the
 /// extraction pass runs a non-Test host in.
 ///
-/// # Errors
-///
-/// Never; the absent-surface case answers `false`.
-pub fn base_is_sealed(ctx: &Ctx<'_>) -> Result<bool, ScriptError> {
-  Ok(with_test_registry(ctx, |r| r.base_sealed).unwrap_or(false))
+/// The absent-surface case answers `false`.
+pub fn base_is_sealed(ctx: &Ctx<'_>) -> bool {
+  with_test_registry(ctx, |r| r.base_sealed).unwrap_or(false)
 }
 
 // ── The test / describe object builders ──────────────────────────────
@@ -1316,6 +1314,7 @@ pub fn install_test(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   fd.prop("test", rquickjs::object::Property::from(test).enumerable())?;
   fd.set("describe", describe)?;
   fd.set("mergeTests", Function::new(ctx.clone(), merge_tests)?)?;
+  crate::bindings::define_config::install(ctx)?;
   fd.set("selectors", make_selectors_object(ctx)?)?;
   let define_fixtures_fn = Function::new(ctx.clone(), define_fixtures)?;
   define_fixtures_fn.set_name("defineFixtures")?;

@@ -142,7 +142,7 @@ pub struct InstanceConfig {
   ///
   /// A section command is one template for every instance, which cannot serve
   /// instances that need different commands — a Chromium instance asking for
-  /// DNS rules and a WebKit one asking for proxy flags, say.
+  /// DNS rules and a `WebKit` one asking for proxy flags, say.
   #[serde(alias = "args_command")]
   pub args_command: Option<CommandSpec>,
   /// Explicit WebSocket URL to connect to (skips launch entirely).
@@ -312,10 +312,10 @@ impl RoutingView<'_> {
 
     let cfg = self.config_for(instance);
 
-    if let Some(cfg) = cfg {
-      if let Some(url) = &cfg.connect_url {
-        return Some(ConnectMode::ConnectUrl(url.clone()));
-      }
+    if let Some(cfg) = cfg
+      && let Some(url) = &cfg.connect_url
+    {
+      return Some(ConnectMode::ConnectUrl(url.clone()));
     }
 
     // Discovery answers "is there a browser already running I can attach to",

@@ -618,7 +618,7 @@ fn define_defaults<'js>(ctx: Ctx<'js>, defaults: Value<'js>) -> rquickjs::Result
       ),
     ));
   }
-  if crate::bindings::test::base_is_sealed(&ctx).unwrap_or(false) {
+  if crate::bindings::test::base_is_sealed(&ctx) {
     return Err(throw_script_error(
       &ctx,
       &ScriptError::internal(

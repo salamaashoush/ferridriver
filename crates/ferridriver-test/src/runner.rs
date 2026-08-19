@@ -53,6 +53,43 @@ fn same_launch(a: &LaunchPlan, b: &LaunchPlan) -> bool {
     && a.env == b.env
 }
 
+/// Plans discovered per project, shared between the runner and whatever
+/// rebuilds them.
+///
+/// Written once for a one-shot run and once per cycle under watch / UI.
+/// Read once per project per run, so the lock is never on a hot path.
+#[derive(Clone, Default)]
+pub struct ProjectPlans(Arc<std::sync::RwLock<FxHashMap<String, Arc<TestPlan>>>>);
+
+impl ProjectPlans {
+  /// Replace every plan.
+  pub fn set(&self, plans: FxHashMap<String, TestPlan>) {
+    *self.0.write().unwrap_or_else(std::sync::PoisonError::into_inner) =
+      plans.into_iter().map(|(name, plan)| (name, Arc::new(plan))).collect();
+  }
+
+  /// The plan `name` runs, if it has one of its own.
+  #[must_use]
+  pub fn get(&self, name: &str) -> Option<Arc<TestPlan>> {
+    self
+      .0
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .get(name)
+      .map(Arc::clone)
+  }
+
+  /// Whether any project has a plan of its own.
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self
+      .0
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .is_empty()
+  }
+}
+
 /// One project of a run: the config it executes under, and the name its
 /// test ids are hashed with. A config without `[[test.projects]]` is
 /// itself one project.
@@ -61,6 +98,10 @@ pub struct ProjectRun {
   pub name: String,
   pub config: Arc<TestConfig>,
   project: Option<ProjectConfig>,
+  /// This project's own plan, when discovery itself differs per project
+  /// (see [`TestRunner::set_project_plans`]). `None` narrows the shared
+  /// plan instead.
+  plan: Option<Arc<TestPlan>>,
 }
 
 impl ProjectRun {
@@ -70,10 +111,11 @@ impl ProjectRun {
     self.project.as_ref()
   }
 
-  /// `plan` narrowed to the tests this project runs.
+  /// `plan` narrowed to the tests this project runs — or this project's
+  /// own plan, narrowed, when it has one.
   #[must_use]
   pub fn narrow(&self, plan: &TestPlan) -> TestPlan {
-    let mut narrowed = plan.clone();
+    let mut narrowed = self.plan.as_deref().unwrap_or(plan).clone();
     if let Some(project) = &self.project {
       filter_plan_for_project(&mut narrowed, &self.config, project);
     }
@@ -132,6 +174,20 @@ pub struct TestRunner {
   /// Something is watching this run's traces as they are recorded, so
   /// events are flushed per line instead of buffered.
   live_traces: bool,
+  /// Plans discovered per project, when discovery itself differs per
+  /// project rather than the projects narrowing one shared plan.
+  ///
+  /// Spec files are discovered once and narrowed — a project's `testDir`
+  /// and `grep` select from the same corpus. BDD is not like that: a
+  /// project names its own feature globs, its own step graph and its own
+  /// tag expression, so its scenarios are a different discovery, not a
+  /// subset of someone else's. Empty for every other host, which then
+  /// pays nothing for this.
+  /// Shared, so a watch or UI cycle can refresh it in place: the plan
+  /// factory those loops call hands back one plan, and rebinding a field
+  /// on the runner from inside the closure is not something its
+  /// signature allows.
+  project_plans: ProjectPlans,
   /// Worker numbers for the run in flight, shared with every project of
   /// it — see the reservation in [`Self::execute_with_summary`].
   worker_ids: Arc<std::sync::atomic::AtomicU32>,
@@ -235,8 +291,26 @@ impl TestRunner {
       suppress_run_boundary: false,
       run_stop: RunStop::default(),
       live_traces: false,
+      project_plans: ProjectPlans::default(),
       worker_ids: Arc::new(std::sync::atomic::AtomicU32::new(0)),
     }
+  }
+
+  /// Give each named project the plan it runs, replacing the shared one.
+  ///
+  /// A project with no entry here still narrows the plan passed to
+  /// [`Self::run`], so a host can mix the two — which is what keeps a
+  /// config that declares no per-project discovery on exactly the path
+  /// it was on before, building one plan and one bundle.
+  pub fn set_project_plans(&self, plans: FxHashMap<String, TestPlan>) {
+    self.project_plans.set(plans);
+  }
+
+  /// The store [`Self::set_project_plans`] writes to, so a watch cycle's
+  /// plan factory can refresh it as the corpus changes on disk.
+  #[must_use]
+  pub fn project_plans(&self) -> ProjectPlans {
+    self.project_plans.clone()
   }
 
   /// Playwright's `Reporter.preprocess`: hand every reporter the corpus
@@ -324,6 +398,7 @@ impl TestRunner {
       suppress_run_boundary: self.suppress_run_boundary,
       run_stop: self.run_stop.clone(),
       live_traces: self.live_traces,
+      project_plans: self.project_plans.clone(),
       worker_ids: Arc::clone(&self.worker_ids),
     }
   }
@@ -337,6 +412,7 @@ impl TestRunner {
         name: self.config.name.clone().unwrap_or_default(),
         config: Arc::clone(&self.config),
         project: None,
+        plan: None,
       }];
     }
     self
@@ -347,6 +423,7 @@ impl TestRunner {
         name: project.name.clone(),
         config: Arc::new(self.config.merge_project(project)),
         project: Some(project.clone()),
+        plan: self.project_plans.get(&project.name),
       })
       .collect()
   }
@@ -764,7 +841,10 @@ impl TestRunner {
     for &idx in &scheduled {
       let mut mc = self.config.merge_project(&projects[idx]);
       mc.web_server = Vec::new();
-      let mut p = plan.clone();
+      let mut p = self
+        .project_plans
+        .get(&projects[idx].name)
+        .map_or_else(|| plan.clone(), |own| (*own).clone());
       filter_plan_for_project(&mut p, &mc, &projects[idx]);
       self.apply_run_filters(&mut p);
       if let Some(narrow) = hooks.narrow {
@@ -2543,6 +2623,86 @@ impl BrowserHandle {
     if let Some(b) = self.cell.get() {
       let _ = b.close().await;
     }
+  }
+}
+
+#[cfg(test)]
+mod project_plan_tests {
+  use std::sync::Arc;
+
+  use rustc_hash::FxHashMap;
+
+  use super::TestRunner;
+  use crate::config::{ProjectConfig, TestConfig};
+  use crate::model::{ExpectedStatus, Hooks, SuiteMode, TestCase, TestId, TestPlan, TestSuite};
+
+  fn plan_named(suite: &str) -> TestPlan {
+    TestPlan {
+      suites: vec![TestSuite {
+        name: suite.to_string(),
+        file: format!("{suite}.feature"),
+        tests: vec![TestCase {
+          metadata: None,
+          id: TestId {
+            file: format!("{suite}.feature"),
+            suite: Some(suite.to_string()),
+            name: "a scenario".to_string(),
+            line: None,
+            column: None,
+          },
+          test_fn: Arc::new(|_| Box::pin(async { Ok(()) })),
+          fixture_requests: Vec::new(),
+          annotations: Vec::new(),
+          timeout: None,
+          retries: None,
+          expected_status: ExpectedStatus::Pass,
+          use_options: None,
+        }],
+        hooks: Hooks::default(),
+        annotations: Vec::new(),
+        mode: SuiteMode::Parallel,
+      }],
+      total_tests: 1,
+      shard: None,
+    }
+  }
+
+  fn runner_with(projects: Vec<&str>) -> TestRunner {
+    TestRunner::new(
+      TestConfig {
+        projects: projects
+          .into_iter()
+          .map(|name| ProjectConfig {
+            name: name.to_string(),
+            ..Default::default()
+          })
+          .collect(),
+        reporter: Vec::new(),
+        ..Default::default()
+      },
+      crate::config::CliOverrides::default(),
+    )
+  }
+
+  /// A project given its own plan runs THAT plan, not the shared one —
+  /// the whole point of the store, and a silent fallback to the shared
+  /// plan would look like a passing run over the wrong corpus.
+  #[test]
+  fn a_project_with_its_own_plan_runs_it_instead_of_the_shared_one() {
+    let runner = runner_with(vec!["smoke", "regression"]);
+    let mut plans = FxHashMap::default();
+    plans.insert("smoke".to_string(), plan_named("smoke-only"));
+    runner.set_project_plans(plans);
+
+    let shared = plan_named("shared");
+    let runs = runner.project_runs();
+
+    let smoke = runs.iter().find(|r| r.name == "smoke").expect("smoke run");
+    assert_eq!(smoke.narrow(&shared).suites[0].name, "smoke-only");
+
+    // And a project with no plan of its own still narrows the shared one.
+    let regression = runs.iter().find(|r| r.name == "regression").expect("regression run");
+    assert_eq!(regression.narrow(&shared).suites[0].name, "shared");
   }
 }
 

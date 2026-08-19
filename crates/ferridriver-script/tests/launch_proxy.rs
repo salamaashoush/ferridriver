@@ -63,7 +63,7 @@ async fn a_script_launching_with_a_proxy_routes_through_it() {
   // Nothing resolves this host, so a request reaching the recorder can only
   // have come through the proxy the script asked for.
   let source = format!(
-    r#"
+    r"
       const browser = await chromium().launch({{
         headless: true,
         proxy: {{ server: 'http://127.0.0.1:{port}', bypass: '127.0.0.1,localhost' }},
@@ -75,7 +75,7 @@ async fn a_script_launching_with_a_proxy_routes_through_it() {
         await browser.close();
       }}
       return true;
-    "#
+    "
   );
 
   let run = session.execute(&source, &[], RunOptions::default(), &ctx).await;

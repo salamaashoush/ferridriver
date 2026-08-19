@@ -248,6 +248,13 @@ pub struct ExpandOptions {
   /// `[test].examplesTitleFormat` — `playwright-bdd`'s config-level
   /// fallback title for a Scenario Outline row.
   pub examples_title_format: Option<String>,
+  /// The Cucumber tag expression selecting which scenarios run —
+  /// `[test].tags`, a project's own `tags`, or `--tags`.
+  ///
+  /// Applied AFTER expansion, because a tag can come from an Examples
+  /// block: an outline whose rows are tagged differently keeps only the
+  /// rows the expression selects, which is what cucumber-js does.
+  pub tag_filter: Option<crate::filter::TagExpression>,
 }
 
 /// Expand a parsed feature into concrete scenarios.
@@ -304,6 +311,9 @@ pub fn expand_feature_with(parsed: &ParsedFeature, options: &ExpandOptions) -> V
     );
   }
 
+  if let Some(expr) = &options.tag_filter {
+    crate::filter::filter_scenarios(&mut scenarios, expr);
+  }
   scenarios
 }
 

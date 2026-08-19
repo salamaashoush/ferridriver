@@ -38,10 +38,12 @@ pub fn run_config(
   explicit: Option<&Path>,
   inherit: bool,
   defaults: Vec<(String, serde_json::Value)>,
+  script_config: Option<layer::ScriptConfig>,
   args: &cli::ConfigArgs,
 ) -> anyhow::Result<()> {
   let mut options = load_options(explicit, inherit);
   options.extension_defaults = defaults;
+  options.script_config = script_config;
   let resolved = layer::resolve(&options)?;
   let effective = effective_browser(&args.browser, &resolved.config.mcp);
 
@@ -304,12 +306,14 @@ pub async fn run_doctor(
   explicit: Option<&Path>,
   inherit: bool,
   defaults: Vec<(String, serde_json::Value)>,
+  script_config: Option<layer::ScriptConfig>,
   args: cli::DoctorArgs,
 ) -> anyhow::Result<()> {
   let mut checks = Vec::new();
 
   let mut options = load_options(explicit, inherit);
   options.extension_defaults = defaults;
+  options.script_config = script_config;
   let resolved = match layer::resolve(&options) {
     Ok(r) => r,
     Err(e) => {

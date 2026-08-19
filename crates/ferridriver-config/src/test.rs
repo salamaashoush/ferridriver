@@ -775,6 +775,25 @@ pub struct ProjectConfig {
   /// deep-merged with the config-level block.
   #[serde(default)]
   pub expect: Option<ExpectConfig>,
+  /// Feature-file globs this project runs, overriding `[test].features`.
+  ///
+  /// A project's BDD corpus is a discovery of its own, not a subset of a
+  /// shared one — which is why the runner takes a plan per project when
+  /// any of these three is set.
+  #[serde(default)]
+  pub features: Option<Vec<String>>,
+  /// Step-definition globs this project loads, overriding `[test].steps`.
+  /// Two projects with different step graphs get different worker VMs.
+  #[serde(default)]
+  pub steps: Option<Vec<String>>,
+  /// A Cucumber tag EXPRESSION selecting this project's scenarios —
+  /// `@smoke and not @wip`, the same grammar `--tags` takes.
+  ///
+  /// Distinct from [`Self::tag`], which is a list of Playwright test
+  /// tags that must ALL be present. Two tag-selected projects over one
+  /// feature set is what this exists for.
+  #[serde(default)]
+  pub tags: Option<String>,
 }
 
 impl Default for ProjectConfig {
@@ -798,6 +817,9 @@ impl Default for ProjectConfig {
       metadata: serde_json::Value::Null,
       tag: None,
       expect: None,
+      features: None,
+      steps: None,
+      tags: None,
     }
   }
 }
@@ -1151,6 +1173,16 @@ impl TestConfig {
     }
     if let Some(fully_parallel) = project.fully_parallel {
       merged.fully_parallel = fully_parallel;
+    }
+
+    if let Some(ref patterns) = project.features {
+      merged.features.clone_from(patterns);
+    }
+    if let Some(ref patterns) = project.steps {
+      merged.steps.clone_from(patterns);
+    }
+    if let Some(ref tags) = project.tags {
+      merged.tags = Some(tags.clone());
     }
 
     if let Some(ref grep) = project.grep {

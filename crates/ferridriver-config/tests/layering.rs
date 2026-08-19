@@ -58,6 +58,7 @@ impl Tree {
       env: BTreeMap::new(),
       inherit: true,
       extension_defaults: Vec::new(),
+      script_config: None,
     }
   }
 }
@@ -544,6 +545,7 @@ mod extension_defaults {
       env: BTreeMap::new(),
       inherit: true,
       extension_defaults: defaults,
+      script_config: None,
     }
   }
 
@@ -567,7 +569,10 @@ mod extension_defaults {
     assert_eq!(resolved.config.test.test_dir.as_deref(), Some("from-extension"));
     assert_eq!(resolved.config.test.timeout, 12345);
     assert_eq!(
-      resolved.provenance.get("test.timeout").map(|o| o.describe()),
+      resolved
+        .provenance
+        .get("test.timeout")
+        .map(ferridriver_config::layer::Origin::describe),
       Some("extension pkg".to_string()),
       "`ferridriver config` can say where it came from",
     );
@@ -596,7 +601,10 @@ mod extension_defaults {
     .expect("resolve");
     assert_eq!(resolved.config.test.timeout, 2);
     assert_eq!(
-      resolved.provenance.get("test.timeout").map(|o| o.describe()),
+      resolved
+        .provenance
+        .get("test.timeout")
+        .map(ferridriver_config::layer::Origin::describe),
       Some("extension second".to_string()),
     );
   }
@@ -644,17 +652,21 @@ mod extension_defaults {
   /// pins it against the schema it feeds.
   #[test]
   fn the_authoring_contract_lists_exactly_the_schema_s_keys() {
-    let contract = std::fs::read_to_string(
-      Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/ferridriver-extension/index.d.ts"),
-    )
-    .expect("authoring contract");
+    let packages = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages");
+    let contract = std::fs::read_to_string(packages.join("ferridriver-extension/index.d.ts")).expect("contract");
+    // The `--config <file.ts>` authoring type is the same enumeration
+    // for the same reason, and it is a different file.
+    let config_contract = std::fs::read_to_string(packages.join("ferridriver-test/index.d.ts")).expect("contract");
 
-    let declared = |interface: &str| -> Vec<String> {
-      let start = contract
+    let declared_in = |source: &str, interface: &str| -> Vec<String> {
+      let start = source
         .find(&format!("interface {interface} {{"))
         .unwrap_or_else(|| panic!("{interface} is declared"));
-      let body = &contract[start..];
-      let end = body.find("\n  }").expect("interface closes");
+      let body = &source[start..];
+      let end = body.find("\n}").map_or_else(
+        || body.find("\n  }").expect("interface closes"),
+        |at| body.find("\n  }").map_or(at, |inner| inner.min(at)),
+      );
       body[..end]
         .lines()
         .skip(1)
@@ -662,6 +674,7 @@ mod extension_defaults {
         .filter(|key| !key.is_empty())
         .collect()
     };
+    let declared = |interface: &str| declared_in(&contract, interface);
 
     let document = serde_json::to_value(ferridriver_config::FerridriverConfig::default()).expect("serialize");
     let schema_keys = |section: &str, refused: &[&str]| -> Vec<String> {
@@ -680,5 +693,10 @@ mod extension_defaults {
       "TestConfigDefaults must list every `[test]` key an extension may set, and only those",
     );
     assert_eq!(declared("McpConfigDefaults"), schema_keys("mcp", &[]));
+    assert_eq!(
+      declared_in(&config_contract, "FerridriverTestConfig"),
+      schema_keys("test", &["moduleAliases"]),
+      "FerridriverTestConfig must list every `[test]` key a config module may set, and only those",
+    );
   }
 }

@@ -138,6 +138,7 @@ fn the_configured_format_is_the_last_fallback() {
     text,
     &ExpandOptions {
       examples_title_format: Some("row <_index_>: <url>".to_string()),
+      ..Default::default()
     },
   );
   assert_eq!(titles(&scenarios), vec!["row 1: a"]);
@@ -157,6 +158,7 @@ fn an_unknown_placeholder_is_left_as_written() {
 "#,
     &ExpandOptions {
       examples_title_format: Some("<url> and <missing>".to_string()),
+      ..Default::default()
     },
   );
   assert_eq!(titles(&scenarios), vec!["a and <missing>"]);

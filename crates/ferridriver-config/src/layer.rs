@@ -151,6 +151,37 @@ pub struct ConfigLayer {
   pub path: PathBuf,
 }
 
+/// File extensions `--config` accepts as a config MODULE rather than a
+/// document: the host has to bundle and evaluate them, so they never
+/// reach [`parse_file`].
+const SCRIPT_CONFIG_EXTENSIONS: &[&str] = &["ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx"];
+
+/// Whether `--config` named a module the host must evaluate.
+#[must_use]
+pub fn is_script_config(path: &Path) -> bool {
+  path
+    .extension()
+    .and_then(|e| e.to_str())
+    .is_some_and(|e| SCRIPT_CONFIG_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// A config module the host already evaluated, ready to layer.
+///
+/// The default export is the `[test]` section, not a whole document:
+/// the file this exists for is `playwright.config.ts`, whose keys are
+/// `testDir` / `projects` / `use` / `webServer`. Any other section stays
+/// the province of a `.toml` / `.yaml` / `.json` layer, which is also
+/// the only place the loader's own settings can be read from — by the
+/// time this document exists, the extension set, the bundler
+/// environment and the alias table have all been installed and used.
+#[derive(Debug, Clone)]
+pub struct ScriptConfig {
+  /// The module's path, which relative paths inside it anchor against.
+  pub path: PathBuf,
+  /// Its default export.
+  pub test: Value,
+}
+
 /// Where a resolved value came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "from", content = "source")]
@@ -234,6 +265,13 @@ pub struct LoadOptions {
   /// resolution has happened. See [`Resolved`] and the CLI's two-pass
   /// startup.
   pub extension_defaults: Vec<(String, Value)>,
+  /// A `--config <file.ts|.js>` the host bundled and evaluated, applied
+  /// in the same slot an explicitly named document would occupy.
+  ///
+  /// `None` on the pass that learns which extensions to load: the
+  /// module cannot be bundled until the bundler environment and the
+  /// provided-module table it might import from are installed.
+  pub script_config: Option<ScriptConfig>,
 }
 
 impl LoadOptions {
@@ -255,6 +293,7 @@ impl LoadOptions {
       env,
       inherit,
       extension_defaults: Vec::new(),
+      script_config: None,
     }
   }
 
@@ -271,6 +310,7 @@ impl LoadOptions {
       env: BTreeMap::new(),
       inherit: true,
       extension_defaults: Vec::new(),
+      script_config: None,
     }
   }
 }
@@ -347,6 +387,10 @@ pub fn resolve(opts: &LoadOptions) -> anyhow::Result<Resolved> {
     )?;
   }
 
+  if let Some(script) = &opts.script_config {
+    apply_script_layer(script, &mut document, &mut provenance, &mut layers)?;
+  }
+
   apply_env(&opts.env, &mut document, &mut provenance, &mut warnings);
   let Provenance { winners, contributors } = provenance;
 
@@ -373,14 +417,17 @@ pub fn resolve(opts: &LoadOptions) -> anyhow::Result<Resolved> {
 /// expansion.
 fn discover_layers(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec<ConfigLayer> {
   if !opts.inherit {
-    let single = opts
-      .explicit
-      .clone()
-      .map(|path| ConfigLayer {
+    // A script config is applied by `apply_script_layer`, so
+    // `--no-inherit` with one means exactly that file and nothing else
+    // — never the cwd document it would otherwise fall back to.
+    let single = match opts.explicit.clone() {
+      Some(path) if is_script_config(&path) => None,
+      Some(path) => Some(ConfigLayer {
         kind: LayerKind::Explicit,
         path,
-      })
-      .or_else(|| highest_precedence_file(opts, warnings));
+      }),
+      None => highest_precedence_file(opts, warnings),
+    };
     return single.into_iter().collect();
   }
 
@@ -441,7 +488,9 @@ fn discover_layers(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec
   }
 
   if let Some(path) = &opts.explicit {
-    if path.exists() {
+    if is_script_config(path) {
+      // Evaluated by the host, layered by `apply_script_layer`.
+    } else if path.exists() {
       layers.push(ConfigLayer {
         kind: LayerKind::Explicit,
         path: path.clone(),
@@ -572,6 +621,84 @@ fn apply_layer(
   record_extension_bases(&value, &dir, extension_bases);
   merge(document, &value, "", &Origin::File(layer.path.clone()), provenance);
   layers.push(layer.clone());
+  Ok(())
+}
+
+/// Sections a config MODULE may not set, and why. Each one had to be
+/// read before the module could be bundled at all, so a value here
+/// would be advice arriving after the decision it advises on.
+///
+/// Only `test.moduleAliases` is reachable in practice — the export IS
+/// the `[test]` section — but the check is written against the whole
+/// document so it still holds if that ever widens.
+const REFUSED_SCRIPT_CONFIG_KEYS: &[(&str, &str)] = &[
+  (
+    "extensions",
+    "the set of extensions is resolved before the config module is compiled",
+  ),
+  (
+    "bundler",
+    "the bundler compiled this config module before it could ask for a different one",
+  ),
+  (
+    "scripting",
+    "the sandbox a config module runs under is the operator's to set, never the module's",
+  ),
+  (
+    "test.moduleAliases",
+    "the alias table is sealed by the first bundle, which is the one that compiled this config",
+  ),
+];
+
+/// Layer a config module's default export as the `[test]` section.
+///
+/// It occupies the slot an explicitly named document would: above every
+/// discovered file, below `FERRIDRIVER_*` and the CLI flags. Relative
+/// paths inside it anchor against the module's own directory, the way
+/// they do in a file, and it is the LAST layer — so `configDir`, which
+/// a relative `snapshotPathTemplate` resolves against, is its directory.
+fn apply_script_layer(
+  script: &ScriptConfig,
+  document: &mut Value,
+  provenance: &mut Provenance,
+  layers: &mut Vec<ConfigLayer>,
+) -> anyhow::Result<()> {
+  let mut value = Value::Object(Map::from_iter([("test".to_string(), script.test.clone())]));
+  check_script_config(&script.path, &value)?;
+  normalize(&mut value);
+  let dir = script
+    .path
+    .parent()
+    .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+  anchor_paths(&mut value, &dir);
+  merge(document, &value, "", &Origin::File(script.path.clone()), provenance);
+  layers.push(ConfigLayer {
+    kind: LayerKind::Explicit,
+    path: script.path.clone(),
+  });
+  Ok(())
+}
+
+/// Refuse what a config module cannot decide, naming the key.
+fn check_script_config(path: &Path, value: &Value) -> anyhow::Result<()> {
+  if !value.get("test").is_some_and(Value::is_object) {
+    anyhow::bail!(
+      "config {}: its default export must be a configuration object",
+      path.display()
+    );
+  }
+  for (key, why) in REFUSED_SCRIPT_CONFIG_KEYS {
+    if key
+      .split('.')
+      .try_fold(value, |node, segment| node.get(segment))
+      .is_some()
+    {
+      anyhow::bail!(
+        "config {}: a config module may not set `{key}` — {why}. Put it in a ferridriver.toml          layer instead.",
+        path.display()
+      );
+    }
+  }
   Ok(())
 }
 
@@ -1049,12 +1176,11 @@ fn check_contributed_defaults(package: &str, value: &Value) -> anyhow::Result<()
     let mut node = value;
     let mut present = true;
     for segment in key.split('.') {
-      match node.get(segment) {
-        Some(next) => node = next,
-        None => {
-          present = false;
-          break;
-        },
+      if let Some(next) = node.get(segment) {
+        node = next;
+      } else {
+        present = false;
+        break;
       }
     }
     if present {

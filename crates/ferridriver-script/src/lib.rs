@@ -44,6 +44,7 @@ pub mod bindings;
 pub mod bundle;
 pub mod bytecode_cache;
 pub mod command_spec;
+pub mod config_module;
 pub mod console;
 pub mod console_fmt;
 pub mod debug_session;

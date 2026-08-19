@@ -258,6 +258,95 @@ type MergedFixtures<List> = List extends [TestType<infer T>, ...infer Rest] ? T 
  */
 export function mergeTests<List extends unknown[]>(...tests: List): TestType<MergedFixtures<List>>;
 
+/**
+ * What a `--config <file.ts>` module's default export may set.
+ *
+ * The export IS the `[test]` section — `testDir`, `projects`, `use`,
+ * `webServer` — which is the shape a `playwright.config.ts` already
+ * has. Every other section stays with the `.toml` / `.yaml` / `.json`
+ * layers, and so do the four the loader had to read before it could
+ * compile this file at all: `extensions`, `bundler`, `scripting` and
+ * `[test].moduleAliases` are absent by design, and setting one is
+ * refused by name rather than ignored.
+ *
+ * The keys are enumerated with no index signature, so a typo is a type
+ * error rather than a value nobody reads. A test pins this list against
+ * the schema it feeds.
+ */
+export interface FerridriverTestConfig {
+  baseUrl?: unknown;
+  browser?: unknown;
+  builtinSteps?: unknown;
+  captureGitInfo?: unknown;
+  configGrep?: unknown;
+  configGrepInvert?: unknown;
+  contextPrewarm?: unknown;
+  dryRun?: unknown;
+  examplesTitleFormat?: unknown;
+  expect?: unknown;
+  expectTimeout?: unknown;
+  failFast?: unknown;
+  failOnFlakyTests?: unknown;
+  features?: unknown;
+  forbidOnly?: unknown;
+  fullyParallel?: unknown;
+  globalSetup?: unknown;
+  globalTeardown?: unknown;
+  globalTimeout?: unknown;
+  hasBdd?: unknown;
+  ignoreSnapshots?: unknown;
+  language?: unknown;
+  maxFailures?: unknown;
+  maxParallelProjects?: unknown;
+  metadata?: unknown;
+  name?: unknown;
+  order?: unknown;
+  outputDir?: unknown;
+  passWithNoTests?: unknown;
+  preserveOutput?: unknown;
+  profiles?: unknown;
+  projects?: unknown;
+  quiet?: unknown;
+  repeatEach?: unknown;
+  reportSlowTests?: unknown;
+  reporter?: unknown;
+  retries?: unknown;
+  screenshotOnFailure?: unknown;
+  snapshotDir?: unknown;
+  snapshotPathTemplate?: unknown;
+  steps?: unknown;
+  storageState?: unknown;
+  strict?: unknown;
+  tags?: unknown;
+  testDir?: unknown;
+  testIgnore?: unknown;
+  testMatch?: unknown;
+  timeout?: unknown;
+  trace?: unknown;
+  tsconfig?: unknown;
+  updateSnapshots?: unknown;
+  video?: unknown;
+  webServer?: unknown;
+  workers?: unknown;
+  worldParameters?: unknown;
+}
+
+/**
+ * Fold configuration layers, rightmost winning.
+ *
+ * Scalars are replaced; `use`, `expect` and `build` merge one level
+ * deep; `webServer` normalizes each side to a list and concatenates;
+ * `projects` merge by `name`, each match taking the incoming project's
+ * own `use` on top, with names nothing matched appended in order.
+ *
+ * A single argument is returned unchanged, not copied.
+ */
+export function defineConfig(config: FerridriverTestConfig): FerridriverTestConfig;
+export function defineConfig(
+  config: FerridriverTestConfig,
+  ...configs: FerridriverTestConfig[]
+): FerridriverTestConfig;
+
 /** Secondary browser factories, independent of the project's backend. */
 export const chromium: (options?: { transport?: 'pipe' | 'ws' }) => BrowserType;
 export const firefox: () => BrowserType;

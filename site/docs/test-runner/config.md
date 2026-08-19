@@ -53,6 +53,34 @@ backend = "webkit"
 
 Run a single slice with `--project firefox`.
 
+### BDD projects
+
+A project can also bring its own Gherkin corpus — `features` globs,
+`steps` globs, and `tags`, a Cucumber tag EXPRESSION with the grammar
+`--tags` takes:
+
+```toml
+[[test.projects]]
+name = "smoke"
+tags = "@smoke and not @wip"
+
+[[test.projects]]
+name = "regression"
+tags = "@regression"
+```
+
+Those three are a discovery, not a narrowing: `features` chooses
+different files, `steps` a different registry, `tags` a selection made
+before the outline rows exist. So a project naming any of them is
+planned separately, and two projects with different `steps` get
+different worker VMs rather than silently sharing the first one's step
+definitions. Two projects that resolve to the same three inputs share
+one build, and a project naming none of them narrows the shared plan
+exactly as it did before.
+
+`tags` is distinct from `tag`, which is a list of Playwright test tags
+that must all be present.
+
 ## `use` and option fixtures
 
 `[test.browser.use]` is the Playwright `use` block: context options
@@ -101,15 +129,55 @@ timeout            = 60000
 
 Multiple `[[test.webServer]]` blocks can run in parallel.
 
+## Config in TypeScript
+
+`--config` also takes a module. Its default export is the `[test]`
+section, which is the shape a `playwright.config.ts` already has, so an
+existing Playwright config runs unmodified:
+
+```ts
+import { defineConfig } from '@ferridriver/test';
+
+export default defineConfig({
+  testDir: './specs',
+  use: { baseURL: 'http://localhost:3000' },
+  projects: [{ name: 'chromium' }, { name: 'firefox' }],
+});
+```
+
+```bash
+ferridriver test --config playwright.config.ts
+```
+
+The module is bundled and evaluated through the same rolldown → QuickJS
+pipeline every spec takes, so it can import helpers and be written in
+TypeScript with no build step. It layers where an explicitly named
+document would: above every discovered file, below `FERRIDRIVER_*` and
+the CLI flags.
+
+`defineConfig(...configs)` folds layers, rightmost winning. Scalars are
+replaced; `use`, `expect` and `build` merge one level deep; `webServer`
+normalizes each side to a list and concatenates; `projects` merge by
+`name`, each match taking the incoming project's `use` on top, with new
+names appended.
+
+Four settings cannot come from a module, and each is refused by name
+rather than ignored: `extensions`, `bundler`, `scripting` and
+`[test].moduleAliases`. Every one of them had to be read before the
+module could be compiled at all, so a value there would arrive after the
+decision it advises on. Put them in a `ferridriver.toml` layer.
+
 ## Priority
 
 Lowest to highest:
 
-1. Config file defaults
-2. `main!()` / `HarnessConfig` macro arguments (Rust)
-3. Environment variables — `FERRIDRIVER_BACKEND`, `FERRIDRIVER_WORKERS`,
+1. Extension `defineDefaults` contributions
+2. Config file defaults
+3. `main!()` / `HarnessConfig` macro arguments (Rust)
+4. A `--config <file.ts>` module
+5. Environment variables — `FERRIDRIVER_BACKEND`, `FERRIDRIVER_WORKERS`,
    `FERRIDRIVER_TIMEOUT`, `FERRIDRIVER_RETRIES`, …
-4. CLI flags — `--headless`, `--backend`, `--workers`, `--timeout`, …
+6. CLI flags — `--headless`, `--backend`, `--workers`, `--timeout`, …
 
 ## Profiles
 

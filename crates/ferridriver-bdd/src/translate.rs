@@ -23,16 +23,16 @@ use crate::step::MatchError;
 use crate::world::BrowserWorld;
 
 /// Translate parsed Gherkin features into a `TestPlan` for the core test runner.
-pub fn translate_features(feature_set: &FeatureSet, registry: Arc<StepRegistry>, config: &TestConfig) -> TestPlan {
+pub fn translate_features(
+  feature_set: &FeatureSet,
+  registry: Arc<StepRegistry>,
+  config: &TestConfig,
+  options: &scenario::ExpandOptions,
+) -> TestPlan {
   let mut suites = Vec::new();
 
   for feature in &feature_set.features {
-    let scenarios = scenario::expand_feature_with(
-      feature,
-      &scenario::ExpandOptions {
-        examples_title_format: config.examples_title_format.clone(),
-      },
-    );
+    let scenarios = scenario::expand_feature_with(feature, options);
     if scenarios.is_empty() {
       continue;
     }

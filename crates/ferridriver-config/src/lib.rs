@@ -560,11 +560,35 @@ impl FerridriverConfig {
     inherit: bool,
     defaults: Vec<(String, serde_json::Value)>,
   ) -> anyhow::Result<Self> {
+    Self::load_layered_full(explicit, inherit, defaults, None)
+  }
+
+  /// [`Self::load_layered_with_defaults`], plus a `--config <file.ts>`
+  /// the host has already bundled and evaluated.
+  ///
+  /// The module is layered where an explicitly named document would be:
+  /// above every discovered file, below the environment and the CLI.
+  /// It is a separate argument rather than something the loader fetches
+  /// because evaluating it needs the script engine, and the config crate
+  /// is what the script engine is configured FROM.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::load_layered_with_defaults`], plus a config module whose
+  /// default export is not an object or that sets a key a module may not
+  /// decide.
+  pub fn load_layered_full(
+    explicit: Option<&Path>,
+    inherit: bool,
+    defaults: Vec<(String, serde_json::Value)>,
+    script_config: Option<layer::ScriptConfig>,
+  ) -> anyhow::Result<Self> {
     let mut opts = layer::LoadOptions::from_process(explicit);
     // A false argument must not re-enable inheritance that the
     // environment already switched off.
     opts.inherit = opts.inherit && inherit;
     opts.extension_defaults = defaults;
+    opts.script_config = script_config;
     let resolved = layer::resolve(&opts)?;
     for w in &resolved.warnings {
       tracing::warn!(source = %w.source, "{}", w.message);
@@ -595,6 +619,7 @@ impl FerridriverConfig {
       env: BTreeMap::new(),
       inherit: false,
       extension_defaults: Vec::new(),
+      script_config: None,
     })?;
     for w in &resolved.warnings {
       tracing::warn!(source = %w.source, "{}", w.message);

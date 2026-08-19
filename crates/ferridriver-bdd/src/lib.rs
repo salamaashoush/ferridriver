@@ -290,8 +290,13 @@ pub async fn run_bdd_with(
       let js_globs = js_globs.clone();
       let extensions = extensions.clone();
       Box::pin(async move {
-        match build_bdd_plan(&config, &js_globs, &extensions, changed.as_deref()).await {
-          Ok(plan) => ferridriver_test::runner::PlanBuild::ok(plan),
+        match build_bdd_plans(&config, &js_globs, &extensions, changed.as_deref()).await {
+          // Watch and UI rebuild the shared plan only: a per-project
+          // rebuild would have to reach the runner between cycles, and
+          // the factory hands back one plan. A project-scoped BDD suite
+          // under `--watch` re-runs the union, which is a superset —
+          // never a silently narrower corpus.
+          Ok((plan, _)) => ferridriver_test::runner::PlanBuild::ok(plan),
           Err(e) => {
             ferridriver_test::runner::PlanBuild::failed(ferridriver_test::model::TestPlan::default(), e.to_string())
           },
@@ -310,28 +315,93 @@ pub async fn run_bdd_with(
     return code;
   }
 
-  let plan = match build_bdd_plan(&config, &js_globs, &extensions, None).await {
-    Ok(plan) => plan,
+  let (plan, project_plans) = match build_bdd_plans(&config, &js_globs, &extensions, None).await {
+    Ok(built) => built,
     Err(e) => {
       eprintln!("{e}");
       return 1;
     },
   };
-  if plan.total_tests == 0 {
+  if plan.total_tests == 0 && project_plans.values().all(|p| p.total_tests == 0) {
     eprintln!("no scenarios found");
     return 0;
   }
 
   let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
+  runner.set_project_plans(project_plans);
   let code = runner.run(plan).await;
   js::teardown_worker_sessions().await;
   code
 }
 
+/// Build the plan every project shares, plus a plan of its own for each
+/// project that declares one.
+///
+/// A project's BDD corpus is a DISCOVERY, not a narrowing: `features`
+/// chooses different files, `steps` a different registry, `tags` a
+/// different selection made before the outline rows even exist. So a
+/// project that names any of the three is discovered separately, and the
+/// runner is handed its plan directly.
+///
+/// A config whose projects declare none of them takes exactly the path
+/// it took before — one discovery, one bundle — and two projects that
+/// resolve to the same three inputs share a single build.
+///
+/// # Errors
+///
+/// Returns the message to print when a feature glob cannot be walked, a
+/// tag expression does not parse, or the step graph does not bundle.
+pub async fn build_bdd_plans(
+  config: &ferridriver_test::config::TestConfig,
+  js_globs: &[String],
+  extensions: &[ferridriver_script::ExtensionSpec],
+  only_features: Option<&[std::path::PathBuf]>,
+) -> Result<
+  (
+    ferridriver_test::model::TestPlan,
+    rustc_hash::FxHashMap<String, ferridriver_test::model::TestPlan>,
+  ),
+  String,
+> {
+  let shared = build_bdd_plan(config, js_globs, extensions, only_features).await?;
+  let mut per_project = rustc_hash::FxHashMap::default();
+  if config.projects.is_empty() {
+    return Ok((shared, per_project));
+  }
+
+  // (features, steps, tags) -> the plan they produce. Two projects that
+  // differ only in browser share one discovery and one step bundle.
+  let mut built: Vec<(
+    (Vec<String>, Vec<String>, Option<String>),
+    ferridriver_test::model::TestPlan,
+  )> = Vec::new();
+  for project in &config.projects {
+    if project.features.is_none() && project.steps.is_none() && project.tags.is_none() {
+      continue;
+    }
+    let merged = config.merge_project(project);
+    let globs: Vec<String> = project.steps.clone().unwrap_or_else(|| js_globs.to_vec());
+    let key = (merged.features.clone(), globs.clone(), merged.tags.clone());
+    let plan = if let Some((_, hit)) = built.iter().find(|(k, _)| *k == key) {
+      hit.clone()
+    } else {
+      let plan = build_bdd_plan(&merged, &globs, extensions, only_features).await?;
+      built.push((key, plan.clone()));
+      plan
+    };
+    per_project.insert(project.name.clone(), plan);
+  }
+  Ok((shared, per_project))
+}
+
 /// Build a BDD test plan from disk: discover + parse features (narrowed
 /// to `only_features` when given) and translate through the Rust step
 /// registry or the bundled JS/TS step graph.
-async fn build_bdd_plan(
+///
+/// # Errors
+///
+/// As [`build_bdd_plans`], of which this is the single-corpus half.
+pub async fn build_bdd_plan(
   config: &ferridriver_test::config::TestConfig,
   js_globs: &[String],
   extensions: &[ferridriver_script::ExtensionSpec],
@@ -342,6 +412,16 @@ async fn build_bdd_plan(
   let patterns: Vec<String> = match only_features {
     Some(paths) if !paths.is_empty() => paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
     _ => config.features.clone(),
+  };
+  // Parsed once per plan, and the tag expression with it: an invalid
+  // `--tags` / `[test].tags` / project `tags` fails the run naming the
+  // problem rather than quietly selecting everything.
+  let options = crate::scenario::ExpandOptions {
+    examples_title_format: config.examples_title_format.clone(),
+    tag_filter: match config.tags.as_deref() {
+      Some(expr) => Some(filter::TagExpression::parse(expr).map_err(|e| format!("invalid tag expression: {e}"))?),
+      None => None,
+    },
   };
   let feature_set = feature::FeatureSet::discover_and_parse(&patterns, &config.test_ignore)
     .map_err(|e| format!("feature discovery error: {e}"))?;
@@ -358,7 +438,7 @@ async fn build_bdd_plan(
   }
   if js_globs.is_empty() && extensions.is_empty() {
     let registry = Arc::new(registry::StepRegistry::build());
-    Ok(translate::translate_features(&feature_set, registry, config))
+    Ok(translate::translate_features(&feature_set, registry, config, &options))
   } else {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     // rolldown-bundle + tree-shake + transpile the whole step +
@@ -382,6 +462,7 @@ async fn build_bdd_plan(
       bundle,
       cwd,
       Arc::new(bindings),
+      &options,
     ))
   }
 }

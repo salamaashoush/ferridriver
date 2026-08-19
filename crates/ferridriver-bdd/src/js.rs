@@ -888,8 +888,26 @@ fn step_param_to_jsarg(p: &StepParam) -> JsArg {
 // serialised the first-scenario session load across every worker.
 
 type WorkerSessionCell = OnceCell<Arc<JsBddSession>>;
-type WorkerSessions = DashMap<u32, Arc<WorkerSessionCell>>;
+/// Keyed on the worker AND the step graph it loads.
+///
+/// Two projects can bring different `steps` globs, and a worker runs
+/// scenarios from both. Keyed on the worker alone, the second project's
+/// scenarios would silently execute against the first project's step
+/// definitions — the `OnceCell` is already initialised, so nothing
+/// fails, it just answers with the wrong registry. Projects that share
+/// a step graph still share one VM, because the key is the bundle's
+/// content.
+type WorkerSessions = DashMap<(u32, u64), Arc<WorkerSessionCell>>;
 static WORKER_SESSIONS: OnceLock<WorkerSessions> = OnceLock::new();
+
+/// Content key for a compiled step bundle.
+fn bundle_key(bundle: &CompiledBundle) -> u64 {
+  use std::hash::{Hash, Hasher};
+  let mut h = rustc_hash::FxHasher::default();
+  bundle.module_name.hash(&mut h);
+  bundle.bytecode.hash(&mut h);
+  h.finish()
+}
 
 /// The `[scripting]` sandbox caps the BDD step VM runs with. Set once
 /// by the `ferridriver bdd` entry point from resolved config (mirrors
@@ -935,9 +953,10 @@ pub fn bdd_sidecars() -> Vec<ferridriver_script::sidecar::SidecarSpec> {
 /// outlives the individual scenarios, so nothing earlier can do it.
 pub async fn teardown_worker_sessions() {
   let Some(map) = WORKER_SESSIONS.get() else { return };
-  let cells: Vec<(u32, Arc<WorkerSessionCell>)> = map.iter().map(|r| (*r.key(), Arc::clone(r.value()))).collect();
+  let cells: Vec<((u32, u64), Arc<WorkerSessionCell>)> =
+    map.iter().map(|r| (*r.key(), Arc::clone(r.value()))).collect();
   map.clear();
-  for (worker, cell) in cells {
+  for ((worker, _), cell) in cells {
     let Some(session) = cell.get() else { continue };
     if let Err(e) = session.after_all().await {
       tracing::warn!(target: "ferridriver::bdd", worker, error = %e, "AfterAll hook failed");
@@ -951,12 +970,13 @@ pub async fn teardown_worker_sessions() {
 async fn worker_session(
   worker_index: u32,
   bundle: Arc<CompiledBundle>,
+  bundle_key: u64,
   cwd: Arc<PathBuf>,
   setup: BddSessionSetup,
 ) -> Result<Arc<JsBddSession>, String> {
   let map = WORKER_SESSIONS.get_or_init(DashMap::new);
   let cell = map
-    .entry(worker_index)
+    .entry((worker_index, bundle_key))
     .or_insert_with(|| Arc::new(OnceCell::new()))
     .clone();
   cell
@@ -981,10 +1001,12 @@ pub fn translate_features_js(
   bundle: Arc<CompiledBundle>,
   cwd: PathBuf,
   extensions: Arc<Vec<ferridriver_script::ExtensionBinding>>,
+  options: &crate::scenario::ExpandOptions,
 ) -> ferridriver_test::model::TestPlan {
   use ferridriver_test::model::{ExpectedStatus, Hooks, SuiteMode, TestCase, TestFailure, TestFn, TestId, TestSuite};
 
   let cwd = Arc::new(cwd);
+  let step_graph = bundle_key(&bundle);
   // Open `use` keys travel with the plan: what each one means is only
   // decidable once a worker VM has evaluated the step bundle and its
   // `test.extend` chains exist.
@@ -997,12 +1019,7 @@ pub fn translate_features_js(
   let mut suites = Vec::new();
 
   for feature in &feature_set.features {
-    let scenarios = crate::scenario::expand_feature_with(
-      feature,
-      &crate::scenario::ExpandOptions {
-        examples_title_format: config.examples_title_format.clone(),
-      },
-    );
+    let scenarios = crate::scenario::expand_feature_with(feature, options);
     if scenarios.is_empty() {
       continue;
     }
@@ -1045,6 +1062,7 @@ pub fn translate_features_js(
         let cwd = Arc::clone(&cwd);
         let browser_config = browser_config.clone();
         let bdd_strict = bdd_strict;
+        let step_graph = step_graph;
         let setup = setup.clone();
         Box::pin(async move {
           let browser = pool
@@ -1068,7 +1086,7 @@ pub fn translate_features_js(
             .await
             .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
 
-          let session = worker_session(test_info.worker_index, bundle, cwd, setup)
+          let session = worker_session(test_info.worker_index, bundle, step_graph, cwd, setup)
             .await
             .map_err(|e| TestFailure::from(format!("JS step load failed: {e}")))?;
 

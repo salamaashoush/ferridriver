@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ferridriver_config::FerridriverConfig;
+use ferridriver_config::layer;
 use ferridriver_mcp::McpServer;
 use ferridriver_script::ConsoleSink;
 
@@ -72,6 +73,47 @@ async fn apply_extension_defaults(
   let config =
     FerridriverConfig::load_layered_with_defaults(args.config.as_deref(), !args.no_inherit, defaults.clone())?;
   Ok((config, defaults))
+}
+
+/// Evaluate a `--config <file.ts|.js>` and re-resolve the layer stack
+/// with it on top.
+///
+/// The third and last pass of startup, and the reason it is last: the
+/// module is bundled, so the bundler environment, the alias table and
+/// whatever the extension packages provide all have to be installed
+/// before it can be compiled. That ordering is also why a config module
+/// may not set any of them — [`ferridriver_config::layer`] refuses each
+/// by name.
+///
+/// A run whose `--config` is a document (or absent) does none of this.
+async fn apply_script_config(
+  config: FerridriverConfig,
+  args: &cli::Cli,
+  contributed: ContributedDefaults,
+) -> anyhow::Result<(FerridriverConfig, Option<layer::ScriptConfig>)> {
+  let Some(path) = args.config.as_deref().filter(|p| layer::is_script_config(p)) else {
+    return Ok((config, None));
+  };
+  let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
+    &config.scripting.allow_env,
+    config.scripting.allow.commands.clone(),
+  )
+  .with_extension_policy(config.extensions.policy());
+  let cwd = std::env::current_dir()?;
+  let document = ferridriver_script::config_module::evaluate(path, &cwd, caps)
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+  let script_config = layer::ScriptConfig {
+    path: path.to_path_buf(),
+    test: document,
+  };
+  let config = FerridriverConfig::load_layered_full(
+    args.config.as_deref(),
+    !args.no_inherit,
+    contributed,
+    Some(script_config.clone()),
+  )?;
+  Ok((config, Some(script_config)))
 }
 
 /// The extension host a subcommand runs as, or `None` for one that
@@ -192,7 +234,8 @@ async fn main() -> anyhow::Result<()> {
   let config = FerridriverConfig::load_layered(args.config.as_deref(), !args.no_inherit)?;
   install_bundler_env(&config);
   install_module_aliases(&config.test, module_alias_flags(&args.command))?;
-  let (config, contributed) = apply_extension_defaults(config, &args).await?;
+  let (config, contributed) = Box::pin(apply_extension_defaults(config, &args)).await?;
+  let (config, script_config) = Box::pin(apply_script_config(config, &args, contributed.clone())).await?;
 
   match args.command {
     cli::Command::Mcp(mcp_args) => Box::pin(run_mcp(config, mcp_args)).await,
@@ -217,14 +260,19 @@ async fn main() -> anyhow::Result<()> {
       };
       Box::pin(session_cmd::run(config, origin, session_args)).await
     },
-    cli::Command::Config(config_args) => {
-      config_cmd::run_config(args.config.as_deref(), !args.no_inherit, contributed, &config_args)
-    },
+    cli::Command::Config(config_args) => config_cmd::run_config(
+      args.config.as_deref(),
+      !args.no_inherit,
+      contributed,
+      script_config,
+      &config_args,
+    ),
     cli::Command::Doctor(doctor_args) => {
       Box::pin(config_cmd::run_doctor(
         args.config.as_deref(),
         !args.no_inherit,
         contributed,
+        script_config,
         doctor_args,
       ))
       .await
