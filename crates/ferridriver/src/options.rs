@@ -686,6 +686,9 @@ pub struct ElementScreenshotOptions {
   pub format: Option<ScreenshotFormat>,
   pub path: Option<std::path::PathBuf>,
   pub timeout: Option<u64>,
+  /// Drop the default white backdrop so the capture keeps its
+  /// transparency. Playwright's `omitBackground`; ignored for jpeg.
+  pub omit_background: Option<bool>,
 }
 
 /// Pixel-rectangle clip for [`ScreenshotOptions::clip`]. All values are in

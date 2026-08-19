@@ -5,6 +5,7 @@
 //! [`ferridriver_expect`] (single source of truth).
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ferridriver::Locator;
@@ -189,7 +190,31 @@ pub async fn capture_with_options(
   locator: &Locator,
   options: &ScreenshotMatcherOptions,
 ) -> Result<Vec<u8>, TestFailure> {
-  let page = locator.page();
+  capture_target(&locator.page(), Some(locator), options).await
+}
+
+/// The same capture for a PAGE subject.
+///
+/// `expect(page).toHaveScreenshot()` used to call `page.screenshot()`
+/// bare, so every capture option — animations, caret, masks, stylePath,
+/// clip — was silently dropped on that half of the matcher.
+///
+/// # Errors
+///
+/// Forwards the capture failure, with the option that caused it named.
+pub async fn capture_page_with_options(
+  page: &Arc<ferridriver::Page>,
+  options: &ScreenshotMatcherOptions,
+) -> Result<Vec<u8>, TestFailure> {
+  capture_target(page, None, options).await
+}
+
+async fn capture_target(
+  page: &Arc<ferridriver::Page>,
+  locator: Option<&Locator>,
+  options: &ScreenshotMatcherOptions,
+) -> Result<Vec<u8>, TestFailure> {
+  let page = Arc::clone(page);
 
   let mut style_blocks: Vec<String> = Vec::new();
 
@@ -269,7 +294,24 @@ pub async fn capture_with_options(
       })?;
   }
 
-  let raw_png = locator.screenshot().await.map_err(|e| TestFailure {
+  let raw_png = match locator {
+    Some(locator) => {
+      let opts = ferridriver::options::ElementScreenshotOptions {
+        omit_background: options.omit_background,
+        ..Default::default()
+      };
+      locator.screenshot().options(opts).await
+    },
+    None => {
+      let opts = ferridriver::options::ScreenshotOptions {
+        full_page: options.full_page,
+        omit_background: options.omit_background,
+        ..Default::default()
+      };
+      page.screenshot().options(opts).await
+    },
+  }
+  .map_err(|e| TestFailure {
     message: format!("screenshot failed: {e}"),
     stack: None,
     diff: None,

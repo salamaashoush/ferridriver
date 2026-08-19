@@ -407,10 +407,18 @@ export interface ScreenshotAssertionOptions {
   animations?: 'disabled' | 'allow';
   caret?: 'hide' | 'initial';
   scale?: 'css' | 'device';
-  stylePath?: string;
-  mask?: string[];
+  /** One stylesheet or several, applied before the capture. */
+  stylePath?: string | string[];
+  /** Playwright takes locators; a bare selector string works too. */
+  mask?: (string | Locator)[];
   maskColor?: string;
   clip?: { x: number; y: number; width: number; height: number };
+  /** Page subject only, as in Playwright. */
+  fullPage?: boolean;
+  /** Keep the capture transparent where the page paints no background. */
+  omitBackground?: boolean;
+  /** Overall budget for the assertion, including its retries. */
+  timeout?: number;
 }
 
 export interface GenericMatchers {

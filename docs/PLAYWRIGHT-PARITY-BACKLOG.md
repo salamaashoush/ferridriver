@@ -13,6 +13,13 @@ have to discover that the tracker covers it anyway.
 
 ## Test-runner surface
 
+### `toHaveScreenshot({ signal })`
+- Playwright takes an `AbortSignal` that cancels the assertion's polling
+  (`LocatorAssertions.toHaveScreenshot`). Every other option on that bag
+  is implemented; this one needs a cancellation token threaded through
+  `ferridriver-expect`'s poll loop and an `AbortSignal` lowered from the
+  JS host, which no matcher takes today.
+
 ### `use`-level worker options in a spec's `test.use`
 - `trace`, `video` and `screenshot` are WORKER options in Playwright, so
   setting one from a spec's `test.use({ … })` needs a worker whose

@@ -76,6 +76,11 @@ pub struct ScreenshotMatcherOptions {
   pub style_path: Vec<std::path::PathBuf>,
   pub clip: Option<ScreenshotClip>,
   pub mask: Vec<String>,
+  /// Page form only — Playwright puts `fullPage` on
+  /// `PageAssertions.toHaveScreenshot`, not the locator's.
+  pub full_page: Option<bool>,
+  /// Keep the capture transparent where the page paints no background.
+  pub omit_background: Option<bool>,
   pub ignore: bool,
   /// `expect.toHaveScreenshot.timeout`, or the per-call `timeout`, or
   /// neither — in which case the assertion's own timeout applies.
@@ -87,9 +92,8 @@ impl ScreenshotMatcherOptions {
   /// block — Playwright's `{ ...configOptions, ...callOptions }`
   /// (`matchers/toMatchSnapshot.ts:121-127`).
   ///
-  /// `clip`, `mask`, `maskColor` (and `fullPage` / `omitBackground` /
-  /// `signal`, which ferridriver does not take yet) are per-call only:
-  /// upstream strips them from the config bag first
+  /// `clip`, `mask`, `maskColor`, `fullPage` and `omitBackground` are
+  /// per-call only: upstream strips them from the config bag first
   /// (`NonConfigProperties`, `:62`).
   #[must_use]
   pub fn with_config_defaults(mut self, cfg: &crate::config::ToHaveScreenshotConfig) -> Self {

@@ -280,12 +280,7 @@ impl TestHostBridge for InfoBridge {
         async move {
           match target {
             SnapshotTarget::Locator(locator) => crate::expect::locator::capture_with_options(&locator, opts).await,
-            SnapshotTarget::Page(page) => page.screenshot().await.map_err(|e| crate::model::TestFailure {
-              message: format!("toHaveScreenshot: page screenshot failed: {e}"),
-              stack: None,
-              diff: None,
-              screenshot: None,
-            }),
+            SnapshotTarget::Page(page) => crate::expect::locator::capture_page_with_options(&page, opts).await,
             SnapshotTarget::Value(_) => Err(crate::model::TestFailure {
               message: "toHaveScreenshot applies to a locator or a page".to_string(),
               stack: None,
@@ -372,11 +367,26 @@ fn screenshot_options_from_json(
       width: c.get("width").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
       height: c.get("height").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
     }),
+    // Playwright takes `Array<Locator>`; a Locator lowers to its
+    // selector on the way through, and a bare selector string is
+    // accepted too because that is what a TOML/JSON caller can write.
     mask: v
       .get("mask")
       .and_then(serde_json::Value::as_array)
-      .map(|a| a.iter().filter_map(|m| m.as_str().map(str::to_string)).collect())
+      .map(|a| {
+        a.iter()
+          .filter_map(|m| match m {
+            serde_json::Value::String(sel) => Some(sel.clone()),
+            other => other
+              .get("selector")
+              .and_then(serde_json::Value::as_str)
+              .map(str::to_string),
+          })
+          .collect()
+      })
       .unwrap_or_default(),
+    full_page: v.get("fullPage").and_then(serde_json::Value::as_bool),
+    omit_background: v.get("omitBackground").and_then(serde_json::Value::as_bool),
     ignore: ignore_snapshots,
   }
 }
