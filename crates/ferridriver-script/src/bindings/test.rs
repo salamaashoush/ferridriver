@@ -110,11 +110,34 @@ pub(crate) struct TestHookReg {
   pub(crate) col: u32,
 }
 
+/// What `{ box }` asks for on a fixture.
+///
+/// Distinct from `test.step`'s `box`, which re-attributes an error to
+/// the step's own call site. A fixture's decides whether the fixture
+/// appears as a step at all, and under what grouping
+/// (`playwright/src/worker/fixtureRunner.ts:47-53`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FixtureBox {
+  /// `box: 'self'` — the fixture opens no step of its own.
+  SelfOnly,
+  /// `box: true` — the step exists but is grouped away from the test's
+  /// own steps.
+  Group,
+}
+
 pub(crate) struct FixtureReg {
   pub(crate) name: String,
   pub(crate) scope: FixtureScope,
   pub(crate) auto: bool,
   pub(crate) option: bool,
+  /// `{ timeout }` — the setup's own budget, separate from the test's.
+  pub(crate) timeout_ms: Option<u64>,
+  /// `{ title }` — what the step is called instead of the fixture name.
+  pub(crate) title: Option<String>,
+  /// `{ box }`. Deliberately NOT inherited when a registration shadows
+  /// another (`common/fixtures.ts:152`): an override is visible by
+  /// default even when what it overrides was boxed.
+  pub(crate) boxed: Option<FixtureBox>,
   pub(crate) factory: Option<Persistent<Function<'static>>>,
   pub(crate) static_value: Option<Persistent<Value<'static>>>,
   /// Destructured dependency names from the factory's first parameter.
@@ -686,6 +709,9 @@ fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result
   let mut scope = FixtureScope::Test;
   let mut auto = false;
   let mut option = false;
+  let mut timeout_ms: Option<u64> = None;
+  let mut title: Option<String> = None;
+  let mut boxed: Option<FixtureBox> = None;
   let mut option_specified = false;
   let (factory_val, opts): (Value<'js>, Option<Object<'js>>) = if let Some(arr) = v.as_array() {
     let val: Value<'js> = arr.get(0)?;
@@ -712,6 +738,21 @@ fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result
       .get::<_, Value<'js>>("option")
       .is_ok_and(|v| !v.is_undefined() && !v.is_null());
     option = o.get::<_, bool>("option").unwrap_or(false);
+    timeout_ms = o.get::<_, Option<f64>>("timeout").ok().flatten().map(|ms| ms as u64);
+    title = o.get::<_, Option<String>>("title").ok().flatten();
+    boxed = match o.get::<_, Value<'js>>("box") {
+      Ok(v) if v.is_string() => match v.as_string().and_then(|s| s.to_string().ok()).as_deref() {
+        Some("self") => Some(FixtureBox::SelfOnly),
+        Some(other) => {
+          return Err(rq(&ScriptError::internal(format!(
+            "fixture `{name}`: unknown box `{other}` (expected true, false or \"self\")"
+          ))));
+        },
+        None => None,
+      },
+      Ok(v) if v.as_bool() == Some(true) => Some(FixtureBox::Group),
+      _ => None,
+    };
   }
   let (factory, static_value, deps) = match factory_val.as_function() {
     Some(f) => {
@@ -726,6 +767,9 @@ fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result
       scope,
       auto,
       option,
+      timeout_ms,
+      title,
+      boxed,
       factory,
       static_value,
       deps,
@@ -769,6 +813,16 @@ fn append_fixture(r: &mut TestRegistry, visible: &mut Vec<usize>, parsed: Parsed
       reg.scope = prev.scope;
       reg.auto = prev.auto;
       reg.option = prev.option;
+    }
+    // `timeout` and `title` carry across an override; `box` does NOT.
+    // Upstream is explicit about the asymmetry
+    // (`common/fixtures.ts:152`): an override should be visible by
+    // default even when the registration it shadows was boxed away.
+    if reg.timeout_ms.is_none() {
+      reg.timeout_ms = prev.timeout_ms;
+    }
+    if reg.title.is_none() {
+      reg.title.clone_from(&prev.title);
     }
   }
   r.fixtures.push(reg);
@@ -2059,7 +2113,7 @@ async fn resolve_one_fixture<'js>(
       worker_scoped: bool,
     },
   }
-  let (name, option, plan) = with_test_registry(ctx, |r| {
+  let (name, option, plan, setup) = with_test_registry(ctx, |r| {
     let f = &r.fixtures[reg_idx];
     let plan = if let Some(cached) = r.worker_fixtures.get(&reg_idx) {
       Plan::CachedWorker(cached.value.clone())
@@ -2071,7 +2125,16 @@ async fn resolve_one_fixture<'js>(
     } else {
       Plan::Static(f.static_value.clone())
     };
-    (f.name.clone(), f.option, plan)
+    (
+      f.name.clone(),
+      f.option,
+      plan,
+      FixtureSetup {
+        timeout_ms: f.timeout_ms,
+        title: f.title.clone(),
+        boxed: f.boxed,
+      },
+    )
   })?;
 
   // An option fixture named in a `use` bag takes that value whatever
@@ -2100,8 +2163,78 @@ async fn resolve_one_fixture<'js>(
       Ok(())
     },
     (Plan::Factory { factory, worker_scoped }, None) => {
-      run_fixture_factory(ctx, world_obj, reg_idx, &name, factory, worker_scoped, source_label).await
+      setup
+        .around(ctx, &name, || {
+          run_fixture_factory(ctx, world_obj, reg_idx, &name, factory, worker_scoped, source_label)
+        })
+        .await
     },
+  }
+}
+
+/// What a fixture's step is called: `{ title }` when it has one, the
+/// fixture's own name otherwise, quoted inside `Fixture "…"`
+/// (`worker/fixtureRunner.ts:48-50`).
+fn fixture_step_title(title: Option<&str>, name: &str) -> String {
+  format!("Fixture \"{}\"", title.unwrap_or(name))
+}
+
+/// The `{ timeout, title, box }` half of a fixture's option bag.
+struct FixtureSetup {
+  timeout_ms: Option<u64>,
+  title: Option<String>,
+  boxed: Option<FixtureBox>,
+}
+
+impl FixtureSetup {
+  /// Run a fixture's setup as Playwright runs it: inside a step titled
+  /// `Fixture "name"`, under its own timeout.
+  ///
+  /// `box: 'self'` opens no step — the fixture still runs, it just does
+  /// not appear — and `box: true` keeps the step but marks it grouped,
+  /// which is what keeps a framework's own fixtures out of the way of a
+  /// test's steps (`worker/fixtureRunner.ts:47-53`).
+  async fn around<'js, F, Fut>(&self, ctx: &Ctx<'js>, name: &str, body: F) -> Result<(), ScriptError>
+  where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), ScriptError>>,
+  {
+    let run = async {
+      match self.timeout_ms {
+        Some(ms) if ms > 0 => match tokio::time::timeout(std::time::Duration::from_millis(ms), body()).await {
+          Ok(r) => r,
+          Err(_) => Err(ScriptError::internal(format!(
+            "fixture `{name}` setup timed out after {ms}ms"
+          ))),
+        },
+        _ => body().await,
+      }
+    };
+    if self.boxed == Some(FixtureBox::SelfOnly) {
+      return run.await;
+    }
+    let Some(bridge) = optional_bridge(ctx) else {
+      // No test is running (collection, a worker-scope setup outside a
+      // test): the fixture still resolves, it just has nothing to
+      // attach a step to.
+      return run.await;
+    };
+    let mut spec = ferridriver_test::step::StepSpec::new(fixture_step_title(self.title.as_deref(), name));
+    spec.category = ferridriver_test::model::StepCategory::Fixture;
+    if self.boxed == Some(FixtureBox::Group) {
+      // Upstream marks a boxed fixture's step `group: 'configuration'`
+      // for one a user registered (`worker/fixtureRunner.ts:52`).
+      // ferridriver has no framework-registered boxed fixture, so that
+      // is the only group reachable here.
+      spec.metadata = Some(serde_json::json!({ "group": "configuration" }));
+    }
+    ferridriver_test::step::run(&*bridge, spec, move |_run| async move {
+      run
+        .await
+        .map_err(|e| ferridriver_test::step::StepBodyError::new("Error", e.message))
+    })
+    .await
+    .map_err(|f| ScriptError::internal(f.message()))
   }
 }
 
@@ -2823,7 +2956,14 @@ pub async fn collect_tests(vm: &crate::vm::VmHandle) -> Result<CollectedTests, S
 
 #[cfg(test)]
 mod tests {
-  use super::{interpolate_title, parse_destructured_keys};
+  use super::{fixture_step_title, interpolate_title, parse_destructured_keys};
+
+  #[test]
+  fn a_fixture_step_is_titled_by_its_title_then_its_name() {
+    // Upstream quotes whichever it used: `Fixture "sign in"`.
+    assert_eq!(fixture_step_title(Some("sign in"), "auth"), "Fixture \"sign in\"");
+    assert_eq!(fixture_step_title(None, "auth"), "Fixture \"auth\"");
+  }
 
   #[test]
   fn destructured_keys_arrow_and_function_forms() {

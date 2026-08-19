@@ -62,6 +62,11 @@ pub enum StepFrame {
 pub struct StepSpec {
   pub title: String,
   pub category: StepCategory,
+  /// Recorded onto [`crate::model::TestStep::metadata`]. A fixture's
+  /// `{ box: true }` carries its grouping here, which is what keeps a
+  /// framework's own fixtures out of the way of a test's steps without
+  /// hiding them.
+  pub metadata: Option<serde_json::Value>,
   pub options: StepOptions,
   pub expectation: StepExpectation,
   /// Call-site frames, innermost first. `box` re-attributes the step to
@@ -75,6 +80,7 @@ impl StepSpec {
     Self {
       title: title.into(),
       category: StepCategory::TestStep,
+      metadata: None,
       options: StepOptions::default(),
       expectation: StepExpectation::Pass,
       frames: Vec::new(),

@@ -148,11 +148,29 @@ export interface DescribeFunction {
 
 export type FixtureScope = 'test' | 'worker';
 
+/**
+ * The option bag of a `test.extend` fixture tuple.
+ *
+ * `box` is not `test.step`'s: a step's re-attributes an error to the
+ * step's call site, while a fixture's decides whether the fixture
+ * appears as a step at all (`'self'` opens none) and how it is grouped
+ * (`true`). `timeout` and `title` carry across an override; `box`
+ * deliberately does not, so an override stays visible.
+ */
+export interface FixtureOptions {
+  scope?: FixtureScope;
+  auto?: boolean;
+  option?: boolean;
+  timeout?: number;
+  title?: string;
+  box?: boolean | 'self';
+}
+
 export type FixtureValue<T, TFixtures> =
   | ((fixtures: TFixtures, use: (value: T) => Promise<void>) => void | Promise<void>)
   | [
       T | ((fixtures: TFixtures, use: (value: T) => Promise<void>) => void | Promise<void>),
-      { scope?: FixtureScope; auto?: boolean; option?: boolean },
+      FixtureOptions,
     ];
 
 /// The callback form of `test.skip` / `fixme` / `fail` / `slow`, which

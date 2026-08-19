@@ -22,5 +22,9 @@
   "include": [
     "**/*.ts",
     "../packages/ferridriver-test/bdd.d.ts"
+  ],
+  "//exclude": "The driving acceptance suite imports `playwright-bdd`, a specifier served at RUN time by examples/bdd-suite-extension. In a user's tree those types come from the real package; here there is no package to resolve, and pointing `paths` at the example would type-check the acceptance suite against the stand-in rather than against what it stands in for.",
+  "exclude": [
+    "acceptance/driving/**"
   ]
 }

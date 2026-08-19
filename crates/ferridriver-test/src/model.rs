@@ -983,7 +983,7 @@ impl crate::step::StepDriver for TestInfo {
       title_path.extend(open.iter().map(|s| s.title.clone()));
       title_path.push(spec.title.clone());
 
-      let handle = match open.last().map(|s| s.handle.step_id.clone()) {
+      let mut handle = match open.last().map(|s| s.handle.step_id.clone()) {
         Some(parent) => {
           self
             .begin_child_step_at(spec.title.clone(), spec.category, &parent, location.clone())
@@ -995,6 +995,7 @@ impl crate::step::StepDriver for TestInfo {
             .await
         },
       };
+      handle.metadata.clone_from(&spec.metadata);
       let started = crate::step::StepStarted {
         step_id: handle.step_id.clone(),
         location,
