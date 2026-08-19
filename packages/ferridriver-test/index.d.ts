@@ -43,6 +43,8 @@ export interface TestInfo {
   readonly snapshotDir: string;
   readonly snapshotSuffix: string;
   readonly project: TestProject | null;
+  /** The resolved config this run used — Playwright's `FullConfig`. */
+  readonly config: Record<string, unknown>;
   readonly annotations: TestDetailsAnnotation[];
   readonly attachmentCount: number;
   readonly errors: string[];

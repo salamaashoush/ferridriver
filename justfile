@@ -8,7 +8,7 @@ setup:
   @echo "Git hooks configured"
 
 # Full CI check
-ready: fmt lint test
+ready: fmt lint test acceptance
   @echo "Ready to commit"
 
 alias r := ready
@@ -16,6 +16,13 @@ alias f := fix
 alias c := check
 alias t := test
 alias tf := test-fast
+
+# The standing parity gate: mergeTests, expect.extend, defineConfig,
+# devices and snapshotPathTemplate, run with NO extensions loaded. Every
+# one is core, so this must pass for a suite that never writes one.
+acceptance:
+  cargo build --bin ferridriver
+  ./target/debug/ferridriver test --config tests/acceptance/parity/playwright.config.ts
 
 # Check compilation (default-members; ferridriver-node excluded)
 check:

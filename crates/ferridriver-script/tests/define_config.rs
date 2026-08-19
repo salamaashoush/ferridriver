@@ -95,14 +95,20 @@ async fn use_expect_and_build_merge_one_level_deep() {
   assert_eq!(out, Ok(()), "{out:?}");
 }
 
+/// Upstream also creates an empty `build` block
+/// (`common/configLoader.ts:49-52`). ferridriver has no `build` section,
+/// so porting that literally made every config module emit a document
+/// key its own loader then reported as unknown — a warning about a key
+/// the author never wrote. The blocks that exist here are the ones the
+/// schema has.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_three_merged_blocks_exist_even_when_neither_side_had_them() {
+async fn the_merged_blocks_exist_even_when_neither_side_had_them() {
   let out = eval(&case(
     r"const merged = defineConfig({ timeout: 1 }, { retries: 2 });
     eq(merged.use, {}, 'use is created empty');
     eq(merged.expect, {}, 'expect is created empty');
-    eq(merged.build, {}, 'build is created empty');
     eq(merged.webServer, [], 'webServer is created empty');
+    ok(merged.build === undefined, 'no build block is invented');
   ",
   ))
   .await;

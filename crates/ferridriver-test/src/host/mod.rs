@@ -124,6 +124,10 @@ pub struct TestInfoData {
   pub snapshot_dir: String,
   pub snapshot_suffix: String,
   pub project_name: Option<String>,
+  /// Playwright's `testInfo.config` — the resolved `FullConfig`, the
+  /// same document the reporter API hands a reporter, so the two cannot
+  /// describe different runs.
+  pub config: serde_json::Value,
 }
 
 impl Default for TestInfoData {
@@ -145,6 +149,7 @@ impl Default for TestInfoData {
       snapshot_dir: String::new(),
       snapshot_suffix: String::new(),
       project_name: None,
+      config: serde_json::Value::Null,
     }
   }
 }

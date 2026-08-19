@@ -1643,6 +1643,12 @@ fn build_test_info<'js>(
   obj.set("outputDir", info.output_dir.clone()).map_err(se)?;
   obj.set("snapshotDir", info.snapshot_dir.clone()).map_err(se)?;
   obj.set("snapshotSuffix", info.snapshot_suffix.clone()).map_err(se)?;
+  obj
+    .set(
+      "config",
+      crate::bindings::convert::json_to_js(ctx, &info.config).map_err(se)?,
+    )
+    .map_err(se)?;
   match &info.project_name {
     Some(name) => {
       let project = Object::new(ctx.clone()).map_err(se)?;

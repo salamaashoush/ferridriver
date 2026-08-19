@@ -485,6 +485,13 @@ pub fn world_data(meta: WorldMeta<'_>) -> TestWorldData {
       // go through the bridge, which reads the live value.
       snapshot_suffix: String::new(),
       project_name: info.project_name(),
+      // The worker's own config, lowered by the SAME function the
+      // reporter API uses, so `testInfo.config` and what a reporter is
+      // handed cannot describe different runs.
+      config: info
+        .config_snapshot
+        .as_ref()
+        .map_or(serde_json::Value::Null, |cfg| crate::reporter::api::full_config(cfg)),
     },
   }
 }

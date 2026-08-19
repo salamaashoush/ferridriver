@@ -23,7 +23,10 @@ use crate::bindings::convert::throw_named;
 /// replaced wholesale. Upstream spells each one out; the list is the
 /// contract, so it lives as data rather than three copies of the same
 /// four lines.
-const SHALLOW_MERGED_KEYS: &[&str] = &["expect", "use", "build"];
+// `build` is Playwright's; ferridriver has no such section, and
+// inventing an empty one made every config module emit a document key
+// its own schema then reported as unknown.
+const SHALLOW_MERGED_KEYS: &[&str] = &["expect", "use"];
 
 /// Install `defineConfig` on the `ferridriver` global, where the
 /// `@ferridriver/test` native module reads it from.
