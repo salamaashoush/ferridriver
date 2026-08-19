@@ -173,6 +173,11 @@ pub struct BrowserConfig {
   /// Defaults for instances not listed in `instances`.
   #[serde(alias = "default_instance")]
   pub default_instance: Option<InstanceConfig>,
+  /// The top-level `[browser]` registry, copied in when the document is
+  /// resolved so this section can fall back to it. Not a user-writable key
+  /// here: it is declared once at the top level.
+  #[serde(skip)]
+  pub global_browser: Option<crate::browser::BrowserSectionConfig>,
 }
 
 /// Viewport dimensions.
@@ -257,6 +262,7 @@ impl McpConfig {
 
   fn routing(&self) -> RoutingView<'_> {
     RoutingView {
+      global: self.browser.global_browser.as_ref(),
       instances: &self.browser.instances,
       default_instance: self.browser.default_instance.as_ref(),
       args_command: self.browser.instance_args_command.as_ref(),

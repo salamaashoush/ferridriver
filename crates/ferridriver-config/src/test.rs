@@ -625,6 +625,11 @@ pub struct BrowserConfig {
   /// Runtime cache for the instance commands.
   #[serde(skip)]
   pub command_cache: std::sync::Arc<crate::browser::CommandCache>,
+  /// The top-level `[browser]` registry, copied in when the document is
+  /// resolved so this section can fall back to it. Not a user-writable key
+  /// here: it is declared once at the top level.
+  #[serde(skip)]
+  pub global_browser: Option<crate::browser::BrowserSectionConfig>,
 }
 
 /// Pre-seed a `use` block from `device = "<name>"`.
@@ -940,6 +945,7 @@ impl BrowserConfig {
   #[must_use]
   pub fn routing(&self) -> crate::browser::RoutingView<'_> {
     crate::browser::RoutingView {
+      global: self.global_browser.as_ref(),
       instances: &self.instances,
       default_instance: self.default_instance.as_ref(),
       args_command: self.instance_args_command.as_ref(),
@@ -1009,6 +1015,7 @@ impl Default for BrowserConfig {
       browser: "chromium".into(),
       backend: "cdp-pipe".into(),
       channel: None,
+      global_browser: None,
       // Default headed -- matches the new ferridriver CLI convention where
       // `--headless` opts into headless mode. Playwright defaults to
       // headless and uses `--headed` to flip; ferridriver does the inverse

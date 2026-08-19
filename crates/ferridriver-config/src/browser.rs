@@ -218,10 +218,39 @@ pub fn instance_overrides_from(
   })
 }
 
+/// The instance registry, declared once for every host.
+///
+/// An instance names a browser process and how to reach it; that fact does not
+/// change with who is asking. `[mcp.browser]` and `[test.browser]` shared the
+/// instance SCHEMA already, but each kept its own map, so a set usable by both
+/// had to be written twice — and a section that simply forgot would silently
+/// launch an unconfigured browser instead of naming the instance it could not
+/// find.
+///
+/// A section may still declare its own instances; those merge OVER these, key
+/// by key, so a host can override one entry without restating the rest.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BrowserSectionConfig {
+  /// Instances every host can select by name.
+  pub instances: std::collections::HashMap<String, InstanceConfig>,
+  /// Settings for an instance no entry claims.
+  pub default_instance: Option<InstanceConfig>,
+  /// Args command for instances that declare none of their own.
+  pub instance_args_command: Option<CommandSpec>,
+  /// Discover command for instances that declare none of their own.
+  pub instance_discover_command: Option<CommandSpec>,
+  /// Cache TTL in seconds for command outputs (default: 300).
+  pub command_cache_ttl: Option<u64>,
+}
+
 /// Borrowed view of a section's instance-routing config, so one
 /// implementation serves `[mcp.browser]` and `[test.browser]`.
 pub struct RoutingView<'a> {
   pub instances: &'a std::collections::HashMap<String, InstanceConfig>,
+  /// The top-level `[browser]` registry, consulted when the section does not
+  /// claim a name. A section entry of the same name wins outright.
+  pub global: Option<&'a BrowserSectionConfig>,
   pub default_instance: Option<&'a InstanceConfig>,
   pub args_command: Option<&'a CommandSpec>,
   pub discover_command: Option<&'a CommandSpec>,
@@ -232,8 +261,52 @@ pub struct RoutingView<'a> {
 }
 
 impl RoutingView<'_> {
+  /// The entry that claims `instance`: the section's own first, then the
+  /// top-level registry, then whichever default is declared.
   fn config_for(&self, instance: &str) -> Option<&InstanceConfig> {
-    self.instances.get(instance).or(self.default_instance)
+    self
+      .instances
+      .get(instance)
+      .or_else(|| self.global.and_then(|g| g.instances.get(instance)))
+      .or(self.default_instance)
+      .or_else(|| self.global.and_then(|g| g.default_instance.as_ref()))
+  }
+
+  /// Every instance name any layer declares, for diagnostics and for deciding
+  /// whether a name is unknown.
+  fn declared_names(&self) -> Vec<&str> {
+    let mut names: Vec<&str> = self.instances.keys().map(String::as_str).collect();
+    if let Some(g) = self.global {
+      let extra: Vec<&str> = g
+        .instances
+        .keys()
+        .map(String::as_str)
+        .filter(|n| !names.contains(n))
+        .collect();
+      names.extend(extra);
+    }
+    names.sort_unstable();
+    names
+  }
+
+  /// Whether any layer declares an instance at all. With none, a name cannot
+  /// be "unknown" — the section command answers for whatever it is given.
+  fn has_declared_instances(&self) -> bool {
+    !self.instances.is_empty() || self.global.is_some_and(|g| !g.instances.is_empty())
+  }
+
+  /// The section's args command, falling back to the top-level one.
+  fn section_args_command(&self) -> Option<&CommandSpec> {
+    self
+      .args_command
+      .or_else(|| self.global.and_then(|g| g.instance_args_command.as_ref()))
+  }
+
+  /// The section's discover command, falling back to the top-level one.
+  fn section_discover_command(&self) -> Option<&CommandSpec> {
+    self
+      .discover_command
+      .or_else(|| self.global.and_then(|g| g.instance_discover_command.as_ref()))
   }
 
   /// Resolve every launch setting for `instance`.
@@ -252,16 +325,15 @@ impl RoutingView<'_> {
   /// own error — a clap usage message from a binary the caller may never have
   /// heard of — while the configured set, which is the answer, goes unmentioned.
   fn reject_unknown_instance(&self, instance: &str) -> Result<(), String> {
-    if self.instances.is_empty() || self.config_for(instance).is_some() {
+    if !self.has_declared_instances() || self.config_for(instance).is_some() {
       return Ok(());
     }
-    let mut known: Vec<&str> = self.instances.keys().map(String::as_str).collect();
-    known.sort_unstable();
+    let known = self.declared_names();
     Err(format!(
       "unknown instance '{instance}'; configured instances are: {}. \
        The part before ':' in a session key names a configured browser instance, \
-       not a free-form label — add '{instance}' under [mcp.browser.instances] to \
-       give it its own browser process.",
+       not a free-form label — add '{instance}' under [browser.instances] to give \
+       it its own browser process.",
       known.join(", ")
     ))
   }
@@ -276,6 +348,10 @@ impl RoutingView<'_> {
   /// unconfigured browser), or when the instance declares proxy credentials.
   pub fn overrides_for(&self, instance: &str) -> Result<InstanceOverrides, String> {
     validate_instance_name(instance)?;
+    // Before anything else, and whether or not a command exists: a declared
+    // set that does not contain this name means the caller asked for a browser
+    // nothing describes, and the configured set is the answer they need.
+    self.reject_unknown_instance(instance)?;
 
     let mut out = match self.config_for(instance) {
       Some(cfg) => instance_overrides_from(cfg, instance, self.backend)?,
@@ -287,10 +363,9 @@ impl RoutingView<'_> {
     let command = self
       .config_for(instance)
       .and_then(|cfg| cfg.args_command.as_ref())
-      .or(self.args_command);
+      .or_else(|| self.section_args_command());
 
     if let Some(spec) = command {
-      self.reject_unknown_instance(instance)?;
       let resolved = resolve_for_instance(spec, instance)?;
       let value = self.cache.get_or_exec(&resolved, self.cache_ttl)?;
       let parsed = parse_command_result(&value).map_err(|e| format!("cannot start instance '{instance}': {e}"))?;
@@ -317,7 +392,7 @@ impl RoutingView<'_> {
     // an args command: launching would produce a browser with none of the
     // configuration the caller asked for.
     self.reject_unknown_instance(instance)?;
-    let Some(spec) = self.args_command else {
+    let Some(spec) = self.section_args_command() else {
       return Ok(());
     };
     let resolved = resolve_for_instance(spec, instance)?;
@@ -378,7 +453,7 @@ impl RoutingView<'_> {
     let spec = self
       .config_for(instance)
       .and_then(|cfg| cfg.discover_command.as_ref())
-      .or(self.discover_command)?;
+      .or_else(|| self.section_discover_command())?;
     let resolved = resolve_for_instance(spec, instance).ok()?;
     self.discover_via_command(&resolved)
   }
@@ -858,6 +933,7 @@ mod tests {
   ) -> RoutingView<'a> {
     RoutingView {
       instances,
+      global: None,
       default_instance: None,
       args_command: args,
       discover_command: discover,
@@ -1019,6 +1095,52 @@ mod tests {
       Some(ConnectMode::ConnectUrl(url)) => assert!(url.contains("from-instance"), "{url}"),
       other => panic!("instance command must win outright, got {other:?}"),
     }
+  }
+
+  /// An instance names a browser process, and that fact does not change with
+  /// who is asking. Declared once at the top level, both `[mcp.browser]` and
+  /// `[test.browser]` must resolve it -- and a section that declares the same
+  /// name must win, so a host can override one entry without restating the set.
+  #[test]
+  fn a_top_level_instance_serves_every_section_and_a_section_may_override_it() {
+    let mut global = BrowserSectionConfig::default();
+    global.instances.insert(
+      "staging".to_string(),
+      InstanceConfig {
+        args: vec!["--from-global".to_string()],
+        ..InstanceConfig::default()
+      },
+    );
+    global.instances.insert("prod".to_string(), InstanceConfig::default());
+
+    // This section overrides `staging` and says nothing about `prod`.
+    let mut section = std::collections::HashMap::new();
+    section.insert(
+      "staging".to_string(),
+      InstanceConfig {
+        args: vec!["--from-section".to_string()],
+        ..InstanceConfig::default()
+      },
+    );
+
+    let cache = CommandCache::default();
+    let mut v = view(&section, None, None, &cache);
+    v.global = Some(&global);
+
+    assert_eq!(
+      v.overrides_for("staging").expect("staging").args,
+      vec!["--from-section".to_string()],
+      "a section entry must win over the top-level one"
+    );
+    assert_eq!(
+      v.overrides_for("prod").expect("prod").args,
+      Vec::<String>::new(),
+      "a top-level instance the section never mentions must still resolve"
+    );
+
+    // And an unknown name is measured against BOTH layers.
+    let err = v.overrides_for("nosuch").expect_err("unknown");
+    assert!(err.contains("prod, staging"), "must name every declared layer: {err}");
   }
 
   #[test]

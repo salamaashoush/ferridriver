@@ -71,6 +71,15 @@ pub struct FerridriverConfig {
   /// extensions, `ferridriver run` scripts). Top-level because every
   /// host that bundles consumes it.
   pub bundler: BundlerConfig,
+  /// Browser instances every host can select by name. Top-level (sibling of
+  /// `[mcp]` / `[test]`) because an instance names a browser process and how
+  /// to reach it — a fact that does not change with who is asking. Declaring
+  /// it here once means an MCP session and a test project can target the same
+  /// browser without the set being written twice.
+  ///
+  /// `[mcp.browser]` and `[test.browser]` may still declare their own; those
+  /// merge OVER these, key by key.
+  pub browser: crate::browser::BrowserSectionConfig,
   /// Root of the scripting sandbox: every `fs` call and every dynamic
   /// `import` a script makes is confined here. Relative to the config
   /// file that set it. Defaults to `.ferridriver/scripts`.
@@ -604,7 +613,9 @@ impl FerridriverConfig {
       tracing::warn!(source = %w.source, "{}", w.message);
     }
     tracing::debug!("loaded ferridriver config from {}", path.display());
-    Ok(resolved.config)
+    let mut config = resolved.config;
+    config.propagate_global_browser();
+    Ok(config)
   }
 
   /// Scripting sandbox root, with the documented default applied.
@@ -698,6 +709,26 @@ pub struct Startup {
   opts: layer::LoadOptions,
 }
 
+impl FerridriverConfig {
+  /// Hand the top-level `[browser]` registry to the sections that resolve
+  /// instances, so `[mcp.browser]` and `[test.browser]` can fall back to it.
+  ///
+  /// Copied rather than merged so `ferridriver config` still reports each
+  /// layer's own keys: the section shows what its file declared, and the
+  /// fallback happens at lookup.
+  pub fn propagate_global_browser(&mut self) {
+    if self.browser.instances.is_empty()
+      && self.browser.default_instance.is_none()
+      && self.browser.instance_args_command.is_none()
+      && self.browser.instance_discover_command.is_none()
+    {
+      return;
+    }
+    self.mcp.browser.global_browser = Some(self.browser.clone());
+    self.test.browser.global_browser = Some(self.browser.clone());
+  }
+}
+
 impl Startup {
   /// A startup reading the real process environment.
   #[must_use]
@@ -777,7 +808,9 @@ impl Startup {
     for l in &resolved.layers {
       tracing::debug!(kind = l.kind.label(), path = %l.path.display(), "config layer applied");
     }
-    resolved.config
+    let mut config = resolved.config;
+    config.propagate_global_browser();
+    config
   }
 }
 
