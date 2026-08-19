@@ -478,7 +478,14 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
       let console = session.capture_console(Arc::clone(&test_info));
       session.session().arm_deadline(base_timeout);
       let result = ferridriver_script::run_test(&session.vm_handle(), spec, world, bridge.clone() as _).await;
+      let force_halted = session.session().deadline().force_halted();
       session.session().disarm_deadline();
+      if force_halted {
+        // The interpreter was stopped mid-run. Drop this worker's VM so
+        // the next test gets one rebuilt from the bundle rather than one
+        // whose state is whatever the halt left behind.
+        p.sessions.poison(test_info.worker_index);
+      }
       drop(console);
       bridge.flush().await;
 

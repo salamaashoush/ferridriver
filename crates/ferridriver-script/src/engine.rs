@@ -512,6 +512,20 @@ impl TimeoutState {
 #[derive(Clone)]
 pub struct Deadline(Arc<TimeoutState>);
 
+impl Deadline {
+  /// Whether the interrupt handler force-halted the interpreter for this
+  /// deadline.
+  ///
+  /// A force-halt stops the VM wherever it happened to be — mid-await,
+  /// mid-property-write — so the session is not trustworthy afterwards
+  /// even though its registrations still LOOK intact. A plain JS throw is
+  /// not a force-halt and leaves the session usable.
+  #[must_use]
+  pub fn force_halted(&self) -> bool {
+    self.0.timed_out.load(Ordering::Relaxed)
+  }
+}
+
 impl ferridriver_test::host::DeadlineControl for Deadline {
   fn arm(&self, timeout: Duration) {
     self.0.arm(Instant::now() + timeout);

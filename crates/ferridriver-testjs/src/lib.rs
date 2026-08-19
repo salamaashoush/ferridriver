@@ -329,6 +329,29 @@ impl SessionPool {
       .cloned()
   }
 
+  /// Drop a worker's session so the next test rebuilds it.
+  ///
+  /// A force-halt (timeout interrupt) or an allocation fault stops the
+  /// interpreter wherever it was, so everything the VM holds — module
+  /// state, a half-applied fixture chain, a half-written global — is
+  /// suspect. The registrations still look intact, which is exactly why
+  /// this cannot be left to a health check: the next `get` re-evaluates
+  /// the bundle and `JsTestSession::load` re-verifies the registration
+  /// counts against the collection snapshot before any test runs in it.
+  ///
+  /// Re-loading is also what defines what an extension's module-level
+  /// state means across a poison: it is rebuilt from the bundle, not
+  /// carried over.
+  pub fn poison(&self, worker_index: u32) {
+    if self.slots.remove(&worker_index).is_some() {
+      tracing::warn!(
+        target: "ferridriver::testjs",
+        worker = worker_index,
+        "worker VM was force-halted; rebuilding it before the next test",
+      );
+    }
+  }
+
   /// Resume every suspended worker-scoped fixture and drop the cached
   /// sessions. Call once after `TestRunner::run` returns.
   pub async fn teardown(&self) {
