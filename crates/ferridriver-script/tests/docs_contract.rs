@@ -86,17 +86,24 @@ fn every_contribution_point_is_documented() {
   );
 }
 
+/// Both extension pages: the repository's authoring contract and the
+/// public site's tour. The site page drifted out of step with the
+/// contract twice, so it is checked rather than trusted.
+const EXTENSION_PAGES: &[&str] = &["docs/extensions.md", "site/docs/scripting/extensions.md"];
+
 #[test]
 fn every_host_is_documented() {
-  let docs = read("docs/extensions.md");
-  for host in ExtensionHost::ALL {
-    let quoted = format!("\"{}\"", host.as_str());
-    assert!(
-      docs.contains(&quoted),
-      "docs/extensions.md never mentions the {} host as {quoted} — \
-       `ferridriver.host` answers it, so an author has to be able to look it up",
-      host.as_str()
-    );
+  for page in EXTENSION_PAGES {
+    let docs = read(page);
+    for host in ExtensionHost::ALL {
+      let quoted = format!("\"{}\"", host.as_str());
+      assert!(
+        docs.contains(&quoted) || docs.contains(&format!("`ferridriver {}`", host.as_str())),
+        "{page} never mentions the {} host — `ferridriver.host` answers it, \
+         so a reader has to be able to look it up",
+        host.as_str()
+      );
+    }
   }
 }
 

@@ -7,11 +7,22 @@ contributes at runtime to one or more ferridriver hosts:
 - **BDD test runner** (`ferridriver bdd`) — registers Cucumber step
   definitions, hooks, and parameter types via `Given` / `When` / `Then` /
   `Before` / `After` / `defineParameterType` / `setWorldConstructor` / `setDefaultTimeout`.
+- **Test runner** (`ferridriver test`) — contributes fixtures onto the
+  base `test` chain with `defineFixtures(...)`, so a spec receives them
+  without importing anything.
 - **Ad-hoc scripts** (`ferridriver run`, MCP `run_script`) — same VM,
   same globals.
 
-The **same file** can serve all three. Branch on the `ferridriver.host`
-global to decide which contributions apply where.
+The **same file** can serve all four. Branch on the `ferridriver.host`
+global to decide which contributions apply where, or narrow an entry to
+some hosts in the package manifest so it never loads elsewhere.
+
+Every host also reads `defineDefaults(...)`, which lets a package supply
+configuration defaults instead of asking every suite to copy them.
+
+This page is the tour. The complete authoring contract — every
+contribution point, the capability model, the operator ceiling, the
+package manifest — is `docs/extensions.md` in the repository.
 
 ## Mental model
 

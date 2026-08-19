@@ -547,21 +547,37 @@ names the package a value came from, exactly as it names the file:
 test.timeout   60000   extension ./ext/acme.ts
 ```
 
-### Why the run reads the config more than once
+### Why the run sometimes reads the config more than once
+
+Usually it does not. **A run with no extensions and no `--config
+<file.ts>` resolves the layer stack exactly once**, and so does a run
+whose extensions never call `defineDefaults`. Each further pass is
+guarded by the thing that makes it necessary.
 
 The set of extensions is itself configuration, so it cannot come from an
-extension. Startup therefore resolves the layer stack in passes:
+extension. That is the whole reason a second pass can exist:
 
 1. resolve the layer stack with no contributions — this is what says
    which packages to load, which bundler options to compile them with,
-   and what the `[extensions.policy]` ceiling is;
-2. load the packages, then re-resolve with whatever they contributed
-   underneath every file;
-3. and, when `--config` names a `.ts`/`.js` module, bundle and evaluate
-   it and re-resolve once more with its document on top. It comes last
-   because compiling it needs everything the first two passes settled —
-   which is also why a config module may not set `extensions`,
-   `bundler`, `scripting` or `[test].moduleAliases`.
+   and what the `[extensions.policy]` ceiling is. Always runs.
+2. **only if some package actually contributed** through
+   `defineDefaults`: re-resolve with that payload underneath every file.
+   It cannot be merged on top of the pass-1 result, because a
+   contribution is the LOWEST layer — putting it underneath means
+   redoing the fold, and folding is where append-keys concatenate and
+   each layer's relative paths are anchored.
+3. **only if `--config` named a `.ts`/`.js` module**: bundle and
+   evaluate it, then resolve once more with its document in the
+   explicit-file slot. It comes last because compiling it needs
+   everything the earlier passes settled — the bundler options, the
+   alias table, the specifiers packages provide — which is also why a
+   config module may not set `extensions`, `bundler`, `scripting` or
+   `[test].moduleAliases`.
+
+A resolve is file reading and JSON merging; no VM, no bundler. The whole
+of `ferridriver config` — one resolve, extension discovery, and printing
+the result as JSON — measures ~2.2 ms above process floor on a release
+build, which is the upper bound for what one pass can cost.
 
 That is also why a contribution may not set the sections that decide how
 the contributing package itself was found, compiled or trusted. Each is
