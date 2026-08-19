@@ -124,6 +124,10 @@ pub struct TracingStartOptionsJs {
   /// Flush events as they happen so a viewer can follow the recording
   /// while it is being made.
   pub live: Option<bool>,
+  /// Embed attachment bodies. Defaults to true, as upstream's tracing
+  /// always embeds them; the test runner's `use: { trace: { attachments
+  /// } }` is what turns them off.
+  pub attachments: Option<bool>,
 }
 
 impl From<TracingStartOptionsJs> for ferridriver::trace::TracingStartOptions {
@@ -134,6 +138,7 @@ impl From<TracingStartOptionsJs> for ferridriver::trace::TracingStartOptions {
       screenshots: o.screenshots.unwrap_or(false),
       snapshots: o.snapshots.unwrap_or(false),
       sources: o.sources.unwrap_or(false),
+      attachments: o.attachments.unwrap_or(true),
       streaming: ferridriver::trace::TraceStreaming::from_live(o.live.unwrap_or(false)),
     }
   }

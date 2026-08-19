@@ -454,6 +454,19 @@ async fn handle_fx(
       }
     },
     "landed" => fx_text("landed"),
+    // Holds the response open for `?ms=` milliseconds, so a navigation
+    // timeout has something to time out against.
+    "slow" => {
+      let ms: u64 = query
+        .as_deref()
+        .and_then(|q| {
+          q.split('&')
+            .find_map(|pair| pair.strip_prefix("ms=").and_then(|v| v.parse().ok()))
+        })
+        .unwrap_or(1000);
+      tokio::time::sleep(std::time::Duration::from_millis(ms.min(30_000))).await;
+      fx_text("slow")
+    },
     "api/users" => fx_json(&serde_json::json!({"users": ["alice", "bob"]})),
     "api/posts" => fx_json(&serde_json::json!({"posts": ["first"]})),
     "echo" => fx_build(200, "text/plain", body.to_vec(), &[]),

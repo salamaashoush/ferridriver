@@ -103,6 +103,7 @@ fn parse_tracing_start_options(options: &Opt<Value<'_>>) -> rquickjs::Result<fer
   out.name = obj.get::<_, Option<String>>("name")?;
   out.title = obj.get::<_, Option<String>>("title")?;
   out.screenshots = obj.get::<_, Option<bool>>("screenshots")?.unwrap_or(false);
+  out.attachments = obj.get::<_, Option<bool>>("attachments")?.unwrap_or(true);
   out.snapshots = obj.get::<_, Option<bool>>("snapshots")?.unwrap_or(false);
   out.sources = obj.get::<_, Option<bool>>("sources")?.unwrap_or(false);
   out.streaming = ferridriver::trace::TraceStreaming::from_live(obj.get::<_, Option<bool>>("live")?.unwrap_or(false));

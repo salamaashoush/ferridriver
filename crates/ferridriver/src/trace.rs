@@ -35,7 +35,12 @@ const TRACE_VERSION: u32 = 8;
 
 /// Options bag for `tracing.start` (Playwright:
 /// `tracing.start({ name?, title?, screenshots?, snapshots?, sources? })`).
-#[derive(Default, Clone)]
+// Each flag is an independent thing to record — screencast frames, DOM
+// snapshots, source files, attachment bodies — set one at a time by a
+// caller. Grouping them into an enum would be ceremony, not a real state
+// machine (the same reading `ContextConfig` carries).
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone)]
 pub struct TracingStartOptions {
   /// Prefix for intermediate artifacts (accepted for parity; the zip is
   /// written to the `stop({ path })` location).
@@ -49,9 +54,28 @@ pub struct TracingStartOptions {
   /// Embed each source file referenced by an action's stack frames as a
   /// `resources/src@<sha1>.txt` entry (the viewer's Source tab).
   pub sources: bool,
+  /// Embed attachment BODIES as `resources/` entries. The test runner's
+  /// `use: { trace: { attachments } }`; Playwright's `tracing.start()`
+  /// has no such switch and always embeds, which is why this defaults to
+  /// true while `screenshots` / `snapshots` / `sources` default to false.
+  pub attachments: bool,
   /// Whether the recording can be read while it is still being made
   /// (Playwright's `live` option).
   pub streaming: TraceStreaming,
+}
+
+impl Default for TracingStartOptions {
+  fn default() -> Self {
+    Self {
+      name: None,
+      title: None,
+      screenshots: false,
+      snapshots: false,
+      sources: false,
+      attachments: true,
+      streaming: TraceStreaming::default(),
+    }
+  }
 }
 
 /// When a recording's events reach the file.
@@ -412,6 +436,7 @@ impl Drop for TraceSpool {
 /// `tracing.stop`. All interior mutability is sync — the action hot
 /// path appends a serialized line to the disk spool under a brief
 /// mutex.
+#[allow(clippy::struct_excessive_bools)]
 pub struct TraceRecorder {
   /// Monotonic origin: event times are milliseconds since this instant.
   origin: Instant,
@@ -427,6 +452,8 @@ pub struct TraceRecorder {
   pub snapshots: bool,
   /// Whether source files referenced by action stacks are embedded.
   pub sources: bool,
+  /// Whether attachment bodies are embedded as resources.
+  pub attachments: bool,
   /// Whether every event is flushed as it is written, for a reader
   /// watching the recording as it happens.
   streaming: TraceStreaming,
@@ -499,6 +526,7 @@ impl TraceRecorder {
       screenshots: options.screenshots,
       snapshots: options.snapshots,
       sources: options.sources,
+      attachments: options.attachments,
       streaming: options.streaming,
       screencast_burst_until_ms: AtomicU64::new(0),
       sources_embedded: std::sync::Mutex::new(rustc_hash::FxHashSet::default()),
@@ -1822,10 +1850,15 @@ impl ActionSpan {
     let content_type = content_type.into();
     let ext = attachment_extension(&content_type);
     let sha1 = format!("{}.{ext}", crate::tracing::sha1_hex(&bytes));
-    recorder.push_resource(&TraceResource {
-      name: sha1.clone(),
-      bytes,
-    });
+    // `attachments: false` keeps the NAME on the action — the viewer
+    // still lists what was attached — while leaving the body out of the
+    // zip, which is the whole point of the switch.
+    if recorder.attachments {
+      recorder.push_resource(&TraceResource {
+        name: sha1.clone(),
+        bytes,
+      });
+    }
     self.attachments.push(TraceAttachment {
       name: name.into(),
       content_type,

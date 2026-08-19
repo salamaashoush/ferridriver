@@ -132,6 +132,47 @@ export default {
 };
 ```
 
+### Runner options in `use`
+
+Playwright spells `baseURL`, `actionTimeout`, `navigationTimeout`,
+`trace`, `video` and `screenshot` inside `use`, so they are resolvable
+per project. Each wins over the top-level `[test]` key that says the
+same thing:
+
+```toml
+[test.use]
+baseURL           = "http://localhost:3000"
+actionTimeout     = 5000
+navigationTimeout = 15000
+trace             = "retain-on-failure"
+video             = "off"
+screenshot        = "only-on-failure"
+```
+
+`trace`, `video` and `screenshot` each take a mode or an object:
+
+```ts
+use: {
+  trace: { mode: 'on', snapshots: true, sources: false, attachments: false },
+  video: { mode: 'retain-on-failure', size: { width: 640, height: 480 } },
+  screenshot: { mode: 'only-on-failure', fullPage: false },
+}
+```
+
+The modes are Playwright's, whole: `off`, `on`, `retain-on-failure`,
+`on-first-retry`, `on-all-retries`, `retain-on-first-failure` and
+`retain-on-failure-and-retries` for `trace` and `video`; `off`, `on`,
+`only-on-failure` and `on-first-failure` for `screenshot`. Recording and
+keeping are separate decisions — `retain-on-failure` records every
+attempt and keeps only the failures, while `on-first-retry` does not
+record the first attempt at all.
+
+`screenshotOnFailure` is the older boolean spelling of
+`screenshot = "only-on-failure"`. `actionTimeout` and `navigationTimeout`
+are test-scoped, so a spec may also set them with `test.use({ … })`;
+`trace`, `video` and `screenshot` are worker options and come from the
+config or the project.
+
 `defaultBrowserType` only decides the engine nobody else named — an
 explicit `browserName`, or a project browser block, wins. `viewport` in
 `use` overrides `[test.browser].viewport`, the spelling that predates

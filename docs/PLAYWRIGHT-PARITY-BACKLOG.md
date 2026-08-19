@@ -13,18 +13,15 @@ have to discover that the tracker covers it anyway.
 
 ## Test-runner surface
 
-### `use`-level `baseURL` / `video` / `trace` / timeouts / `screenshot`
-- `baseUrl`, `video`, `trace` and `screenshotOnFailure` are top-level
-  `[test]` keys. Playwright spells all of them inside `use`, resolvable
-  per project, and `screenshot` is a mode OR an object. A JS config
-  writing `use: { baseURL }` lands the key in the open `use` bag (where a
-  user `{ option: true }` fixture can read it) rather than in the
-  runner's own resolution — the same gap a TOML config has today, for the
-  same reason.
-- `viewport`, `screen`, `browserName` and `defaultBrowserType` ARE
-  resolved out of `use` (the keys a device descriptor carries);
-  `[test.browser].viewport` remains as the older spelling and answers
-  when `use` is silent.
+### `use`-level worker options in a spec's `test.use`
+- `trace`, `video` and `screenshot` are WORKER options in Playwright, so
+  setting one from a spec's `test.use({ … })` needs a worker whose
+  options differ — the runner resolves them per config/project only.
+  `actionTimeout`, `navigationTimeout` and `baseURL` are test-scoped and
+  do work from a spec.
+- `video: { show }` (the action/test overlay upstream draws onto the
+  recording) parses and is ignored; ferridriver's recorder has no
+  overlay.
 
 ### `test.extend` restoring an option default with `undefined`
 - Playwright's `_appendFixtureList` walks `optionOverride` so that

@@ -2093,7 +2093,42 @@ impl<T: CdpWrap> CdpPage<T> {
     flag != 0 && fired & flag != 0
   }
 
+  /// The navigation timeout guards the WHOLE navigation, `Page.navigate`
+  /// included.
+  ///
+  /// Playwright runs `Frame.goto` inside one progress controller whose
+  /// deadline covers the protocol call as well as the lifecycle wait
+  /// (`server/frames.ts::goto`). Timing only the lifecycle wait, as this
+  /// did, means a server that never answers the navigation request
+  /// leaves `page.goto` blocked past its own timeout — the request has
+  /// not committed a document yet, so the lifecycle wait has not
+  /// started.
   pub async fn goto(
+    &self,
+    url: &str,
+    lifecycle: crate::backend::NavLifecycle,
+    timeout_ms: u64,
+    referer: Option<&str>,
+  ) -> Result<Option<Response>> {
+    if timeout_ms == 0 {
+      // Playwright parity: 0 means no timeout.
+      return self.goto_inner(url, lifecycle, timeout_ms, referer).await;
+    }
+    match tokio::time::timeout(
+      std::time::Duration::from_millis(timeout_ms),
+      self.goto_inner(url, lifecycle, timeout_ms, referer),
+    )
+    .await
+    {
+      Ok(result) => result,
+      Err(_) => Err(FerriError::Timeout {
+        timeout_ms,
+        operation: Some(format!("navigating to {url}")),
+      }),
+    }
+  }
+
+  async fn goto_inner(
     &self,
     url: &str,
     lifecycle: crate::backend::NavLifecycle,

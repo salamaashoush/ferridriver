@@ -88,6 +88,9 @@ struct TraceSpec {
   traces_dir: std::path::PathBuf,
   /// Flush each event as it happens, for a UI following the run.
   live: bool,
+  /// What `use: { trace: { … } }` asked to record. Only the flags it
+  /// spelled are here; the rest keep the runner's defaults.
+  capture: crate::config::TraceOption,
   composite: Arc<std::sync::Mutex<Option<String>>>,
 }
 
@@ -169,17 +172,36 @@ impl TestBrowserResources {
     Some(Box::pin(self.pool.acquire(browser, &key, &opts, backend)).await)
   }
 
+  /// Everything a context needs before a test touches it.
+  ///
+  /// One seam for every path that produces a context — pooled, fresh, or
+  /// reused — so a per-context setting cannot be applied on some of them
+  /// and not the others.
+  async fn adopt_context(&self, ctx: &ferridriver::ContextRef) {
+    // Playwright applies `use: { actionTimeout, navigationTimeout }` to
+    // the context after creating it; neither is a `newContext` option
+    // there or here.
+    if let Some(ms) = self.effective.context.action_timeout {
+      ctx.set_default_timeout(ms);
+    }
+    if let Some(ms) = self.effective.context.navigation_timeout {
+      ctx.set_default_navigation_timeout(ms);
+    }
+    self.start_tracing(ctx).await;
+  }
+
   /// Start the per-test trace on a freshly created context.
   async fn start_tracing(&self, ctx: &ferridriver::ContextRef) {
     let Some(spec) = &self.trace else { return };
     let options = ferridriver::trace::TracingStartOptions {
       name: Some(spec.name.clone()),
       title: Some(spec.title.clone()),
-      screenshots: true,
-      snapshots: true,
+      screenshots: spec.capture.screenshots.unwrap_or(true),
+      snapshots: spec.capture.snapshots.unwrap_or(true),
       // Steps carry their .feature / call-site stack frames; embedding
       // the referenced files lights up the viewer's Source tab.
-      sources: true,
+      sources: spec.capture.sources.unwrap_or(true),
+      attachments: spec.capture.attachments.unwrap_or(true),
       streaming: ferridriver::trace::TraceStreaming::from_live(spec.live),
     };
     ctx.set_traces_dir(spec.traces_dir.clone()).await;
@@ -236,7 +258,7 @@ impl TestBrowserResources {
           && let Some(pooled) = Box::pin(self.acquire_pooled(&browser)).await
         {
           let (ctx, page) = pooled?;
-          self.start_tracing(&ctx).await;
+          self.adopt_context(&ctx).await;
           *state = TestBrowserState::Page {
             ctx: Arc::clone(&ctx),
             page,
@@ -245,7 +267,7 @@ impl TestBrowserResources {
         }
         let opts = build_context_options(&self.effective, &self.output_dir, browser.backend_kind());
         let ctx = Arc::new(new_test_context(&browser, opts).await?);
-        self.start_tracing(&ctx).await;
+        self.adopt_context(&ctx).await;
         *state = TestBrowserState::Context(Arc::clone(&ctx));
         Ok(ctx)
       },
@@ -274,7 +296,7 @@ impl TestBrowserResources {
         let backend = browser.backend_kind();
         if let Some(pooled) = Box::pin(self.acquire_pooled(&browser)).await {
           let (ctx, page) = pooled?;
-          self.start_tracing(&ctx).await;
+          self.adopt_context(&ctx).await;
           *state = TestBrowserState::Page {
             ctx,
             page: Arc::clone(&page),
@@ -283,7 +305,7 @@ impl TestBrowserResources {
         }
         let opts = build_context_options(&self.effective, &self.output_dir, backend);
         let ctx = Arc::new(new_test_context(&browser, opts.clone()).await?);
-        self.start_tracing(&ctx).await;
+        self.adopt_context(&ctx).await;
         match create_ready_page(&ctx, backend).await {
           Ok(page) => {
             *state = TestBrowserState::Page {
@@ -297,7 +319,7 @@ impl TestBrowserResources {
               self.discard_tracing(&ctx).await;
               let _ = ctx.close().await;
               let ctx = Arc::new(new_test_context(&browser, opts).await?);
-              self.start_tracing(&ctx).await;
+              self.adopt_context(&ctx).await;
               let page = create_ready_page(&ctx, backend).await?;
               *state = TestBrowserState::Page {
                 ctx,
@@ -425,6 +447,15 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
     }
     if let Some(v) = opts.get("deviceScaleFactor").and_then(|v| v.as_f64()) {
       ctx_config.device_scale_factor = Some(v);
+    }
+    // Test-scoped in Playwright, so a spec may set them; `trace`,
+    // `video` and `screenshot` are WORKER options there and stay
+    // config/project-level here for the same reason.
+    if let Some(v) = opts.get("actionTimeout").and_then(serde_json::Value::as_u64) {
+      ctx_config.action_timeout = Some(v);
+    }
+    if let Some(v) = opts.get("navigationTimeout").and_then(serde_json::Value::as_u64) {
+      ctx_config.navigation_timeout = Some(v);
     }
     if let Some(v) = opts.get("reducedMotion").and_then(|v| v.as_str()) {
       ctx_config.reduced_motion = Some(v.to_string());
@@ -1450,6 +1481,7 @@ impl Worker {
       name: test_id.stable_id(self.config.name.as_deref().unwrap_or_default()),
       traces_dir: crate::artifacts::traces_dir(&self.config.output_dir, self.id as usize),
       live: self.live_traces,
+      capture: self.config.browser.use_options.trace.clone().unwrap_or_default(),
       composite: Arc::clone(&trace_composite),
     });
     let resources = Arc::new(TestBrowserResources::new(
@@ -1478,87 +1510,85 @@ impl Worker {
     }
 
     let mut page_for_artifacts = None;
-    let video_handle: Option<VideoHandle> = match self.config.video.mode {
-      crate::config::VideoMode::Off => None,
-      crate::config::VideoMode::On | crate::config::VideoMode::RetainOnFailure => {
-        match test_pool.get::<ferridriver::Page>("page").await {
-          Ok(page) => {
-            page_for_artifacts = Some(Arc::clone(&page));
-            let _ = std::fs::create_dir_all(&test_info.output_dir);
-            match self.config.video.mode {
-              crate::config::VideoMode::On => {
-                let ext = ferridriver::video::video_extension();
-                let video_path =
-                  test_info
-                    .output_dir
-                    .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
-                match ferridriver::video::start_recording(
-                  &page,
-                  video_path,
-                  self.config.video.width,
-                  self.config.video.height,
-                  80,
-                )
-                .await
-                {
-                  Ok(h) => Some(VideoHandle::Eager(h)),
-                  Err(e) => {
-                    tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
-                    None
-                  },
-                }
+    let video_mode = self.config.video.mode;
+    let video_handle: Option<VideoHandle> = if !video_mode.should_record(attempt) {
+      None
+    } else {
+      match test_pool.get::<ferridriver::Page>("page").await {
+        Ok(page) => {
+          page_for_artifacts = Some(Arc::clone(&page));
+          let _ = std::fs::create_dir_all(&test_info.output_dir);
+          // Eager when the recording is kept even on a pass; buffered
+          // when only a failure keeps it.
+          if video_mode.records_eagerly(attempt) {
+            let ext = ferridriver::video::video_extension();
+            let video_path =
+              test_info
+                .output_dir
+                .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
+            match ferridriver::video::start_recording(
+              &page,
+              video_path,
+              self.config.video.width,
+              self.config.video.height,
+              80,
+            )
+            .await
+            {
+              Ok(h) => Some(VideoHandle::Eager(h)),
+              Err(e) => {
+                tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
+                None
               },
-              crate::config::VideoMode::RetainOnFailure => {
-                match ferridriver::video::start_buffered_recording(
-                  &page,
-                  self.config.video.width,
-                  self.config.video.height,
-                  80,
-                )
-                .await
-                {
-                  Ok(h) => Some(VideoHandle::Buffered(h)),
-                  Err(e) => {
-                    tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
-                    None
-                  },
-                }
-              },
-              crate::config::VideoMode::Off => None,
             }
-          },
-          Err(e) => {
-            let () = resources.close().await;
-            let duration = start.elapsed();
-            let failure = TestFailure::wrap("failed to create page", e);
-            let outcome = Arc::new(TestOutcome {
-              test_id: test_id.clone(),
-              status: TestStatus::Failed,
-              duration,
-              attempt,
-              max_attempts,
-              errors: vec![failure.clone()],
-              error: Some(failure),
-              annotations: test.annotations.clone(),
-              ..self.outcome_base(test, started_at)
+          } else {
+            match ferridriver::video::start_buffered_recording(
+              &page,
+              self.config.video.width,
+              self.config.video.height,
+              80,
+            )
+            .await
+            {
+              Ok(h) => Some(VideoHandle::Buffered(h)),
+              Err(e) => {
+                tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
+                None
+              },
+            }
+          }
+        },
+        Err(e) => {
+          let () = resources.close().await;
+          let duration = start.elapsed();
+          let failure = TestFailure::wrap("failed to create page", e);
+          let outcome = Arc::new(TestOutcome {
+            test_id: test_id.clone(),
+            status: TestStatus::Failed,
+            duration,
+            attempt,
+            max_attempts,
+            errors: vec![failure.clone()],
+            error: Some(failure),
+            annotations: test.annotations.clone(),
+            ..self.outcome_base(test, started_at)
+          });
+          if let Some(event_bus) = &self.event_bus {
+            event_bus.emit(ReporterEvent::TestFinished {
+              outcome: Arc::clone(&outcome),
             });
-            if let Some(event_bus) = &self.event_bus {
-              event_bus.emit(ReporterEvent::TestFinished {
-                outcome: Arc::clone(&outcome),
-              });
-            }
-            return WorkerTestResult {
-              outcome,
-              should_retry: attempt <= max_retries,
-              test_fn,
-              test_id,
-              fixture_requests,
-              suite_key,
-              hooks,
-            };
-          },
-        }
-      },
+          }
+          return WorkerTestResult {
+            outcome,
+            should_retry: attempt <= max_retries,
+            test_fn,
+            test_id,
+            fixture_requests,
+            suite_key,
+            hooks,
+          };
+        },
+      }
     };
 
     let mut before_each_err = None;
@@ -1661,9 +1691,9 @@ impl Worker {
       page_for_artifacts = test_pool.try_get_cached::<ferridriver::Page>("page");
     }
     let test_failed = timeout_result.as_ref().is_err() || timeout_result.as_ref().is_ok_and(|r| r.is_err());
-    let screenshot = if test_failed && self.config.screenshot_on_failure {
+    let screenshot = if self.config.screenshot.mode.should_capture(test_failed, attempt) {
       if let Some(ref page) = page_for_artifacts {
-        capture_screenshot(page).await
+        capture_screenshot(page, &self.config.screenshot).await
       } else {
         None
       }
@@ -1954,11 +1984,9 @@ impl Worker {
     // For buffered mode, video_path is only Some when the test failed (already filtered).
     // For eager mode, we keep or delete based on the mode.
     if let Some(ref path) = video_path {
-      let keep = match self.config.video.mode {
-        crate::config::VideoMode::On => true,
-        crate::config::VideoMode::RetainOnFailure => true, // buffered mode already filtered
-        crate::config::VideoMode::Off => false,
-      };
+      // The buffered path only produced a file when the mode's retain
+      // rule already said yes, so asking again is the same answer.
+      let keep = self.config.video.mode.should_retain(test_failed, attempt);
       if keep && path.exists() {
         attachments.push(Attachment {
           name: "video".into(),
@@ -2097,9 +2125,14 @@ fn sanitize_filename(name: &str) -> String {
     .collect()
 }
 
-async fn capture_screenshot(page: &ferridriver::Page) -> Option<Vec<u8>> {
+/// The end-of-test screenshot, taken the way `use: { screenshot }` asks
+/// for it. `fullPage` defaults to true here — Playwright's own default
+/// is the viewport, but a failure artifact nobody asked to crop is more
+/// useful whole; an explicit `fullPage: false` gets the viewport.
+async fn capture_screenshot(page: &ferridriver::Page, wanted: &crate::config::ScreenshotOption) -> Option<Vec<u8>> {
   let opts = ferridriver::options::ScreenshotOptions {
-    full_page: Some(true),
+    full_page: Some(wanted.full_page.unwrap_or(true)),
+    omit_background: wanted.omit_background,
     format: Some("png".into()),
     ..Default::default()
   };

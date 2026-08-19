@@ -17,6 +17,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex as AsyncMutex;
 
+/// No page-level default has been set, so the next level answers.
+/// Playwright models the same thing as `undefined` in `TimeoutSettings`.
+const UNSET_TIMEOUT: u64 = u64::MAX;
+
+/// Playwright's floor when nothing in the chain sets a timeout.
+const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
 /// High-level page API, mirrors Playwright's Page interface.
 /// Always constructed behind `Arc<Page>` — locators, frames, and consumers
 /// hold Arc refs. No cloning of the Page struct itself.
@@ -93,8 +100,8 @@ impl Page {
     let frame_cache = inner.frame_cache().clone();
     let page = Arc::new(Self {
       inner,
-      default_timeout: AtomicU64::new(30000),
-      default_navigation_timeout: AtomicU64::new(u64::MAX),
+      default_timeout: AtomicU64::new(UNSET_TIMEOUT),
+      default_navigation_timeout: AtomicU64::new(UNSET_TIMEOUT),
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
       mouse_position: Mutex::new((0.0, 0.0)),
       viewport: Mutex::new(None),
@@ -122,8 +129,8 @@ impl Page {
     let frame_cache = inner.frame_cache().clone();
     let page = Arc::new(Self {
       inner,
-      default_timeout: AtomicU64::new(30000),
-      default_navigation_timeout: AtomicU64::new(u64::MAX),
+      default_timeout: AtomicU64::new(UNSET_TIMEOUT),
+      default_navigation_timeout: AtomicU64::new(UNSET_TIMEOUT),
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
       mouse_position: Mutex::new((0.0, 0.0)),
       viewport: Mutex::new(None),
@@ -594,7 +601,15 @@ impl Page {
   /// Get the default timeout (milliseconds).
   #[must_use]
   pub fn default_timeout(&self) -> u64 {
-    self.default_timeout.load(Ordering::Relaxed)
+    match self.default_timeout.load(Ordering::Relaxed) {
+      UNSET_TIMEOUT => self
+        .context_ref
+        .as_ref()
+        .map(crate::context::ContextRef::default_timeout)
+        .filter(|ms| *ms != 0)
+        .unwrap_or(DEFAULT_TIMEOUT_MS),
+      v => v,
+    }
   }
 
   /// Set the default timeout for navigation-family operations
@@ -612,10 +627,24 @@ impl Page {
   /// same value as [`Self::default_timeout`].
   #[must_use]
   pub fn default_navigation_timeout(&self) -> u64 {
-    match self.default_navigation_timeout.load(Ordering::Relaxed) {
-      u64::MAX => self.default_timeout(),
-      v => v,
+    let page_nav = self.default_navigation_timeout.load(Ordering::Relaxed);
+    if page_nav != UNSET_TIMEOUT {
+      return page_nav;
     }
+    let page_default = self.default_timeout.load(Ordering::Relaxed);
+    if page_default != UNSET_TIMEOUT {
+      return page_default;
+    }
+    let context = self.context_ref.as_ref();
+    context
+      .map(crate::context::ContextRef::default_navigation_timeout)
+      .filter(|ms| *ms != 0)
+      .or_else(|| {
+        context
+          .map(crate::context::ContextRef::default_timeout)
+          .filter(|ms| *ms != 0)
+      })
+      .unwrap_or(DEFAULT_TIMEOUT_MS)
   }
 
   /// Playwright: `page.viewportSize(): null | { width: number, height:

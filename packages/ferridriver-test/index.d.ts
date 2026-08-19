@@ -311,6 +311,7 @@ export interface FerridriverTestConfig {
   reportSlowTests?: unknown;
   reporter?: unknown;
   retries?: unknown;
+  screenshot?: unknown;
   screenshotOnFailure?: unknown;
   snapshotDir?: unknown;
   snapshotPathTemplate?: unknown;

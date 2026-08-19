@@ -15,6 +15,11 @@ use std::path::PathBuf;
 // ── Trace mode ──────────────────────────────────────────────────────────────
 
 /// Trace recording mode. Mirrors Playwright's `trace`.
+/// Playwright's `TraceMode` (`playwright/types/test.d.ts:7240`), whole.
+///
+/// The five conditional modes differ only in WHEN they record and WHEN
+/// they keep what they recorded; both questions are answered here so no
+/// caller re-derives them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TraceMode {
@@ -22,51 +27,74 @@ pub enum TraceMode {
   Off,
   On,
   RetainOnFailure,
+  /// `retry-with-trace` is upstream's deprecated spelling of this
+  /// (`playwright/src/worker/testTracing.ts:100`).
+  #[serde(alias = "retry-with-trace")]
   OnFirstRetry,
+  OnAllRetries,
+  RetainOnFirstFailure,
+  RetainOnFailureAndRetries,
 }
 
 impl TraceMode {
-  /// Parse from string (config/CLI).
+  /// Parse from string (config/CLI). An unknown label is `Off`.
   #[must_use]
   pub fn parse_label(s: &str) -> Self {
     match s {
       "on" => Self::On,
       "retain-on-failure" => Self::RetainOnFailure,
-      "on-first-retry" => Self::OnFirstRetry,
+      "on-first-retry" | "retry-with-trace" => Self::OnFirstRetry,
+      "on-all-retries" => Self::OnAllRetries,
+      "retain-on-first-failure" => Self::RetainOnFirstFailure,
+      "retain-on-failure-and-retries" => Self::RetainOnFailureAndRetries,
       _ => Self::Off,
     }
   }
 
   /// Should we record for this test attempt?
+  ///
+  /// `attempt` is 1-based; upstream's `testInfo.retry` is `attempt - 1`
+  /// (`playwright/src/worker/testTracing.ts::_shouldCaptureTrace`).
   #[must_use]
   pub fn should_record(self, attempt: u32, _failed: bool) -> bool {
+    let retry = attempt.saturating_sub(1);
     match self {
       Self::Off => false,
-      Self::On | Self::RetainOnFailure => true,
-      Self::OnFirstRetry => attempt == 2,
+      Self::On | Self::RetainOnFailure | Self::RetainOnFailureAndRetries => true,
+      Self::OnFirstRetry => retry == 1,
+      Self::OnAllRetries => retry > 0,
+      Self::RetainOnFirstFailure => retry == 0,
     }
   }
 
   /// Should we keep the trace after the test finished?
+  ///
+  /// Upstream spells this as `_shouldAbandonTrace`
+  /// (`playwright/src/worker/testTracing.ts:164-171`); this is its
+  /// negation.
   #[must_use]
-  pub fn should_retain(self, failed: bool) -> bool {
+  pub fn should_retain(self, failed: bool, attempt: u32) -> bool {
+    let retry = attempt.saturating_sub(1);
     match self {
       Self::Off => false,
-      Self::On | Self::OnFirstRetry => true,
-      Self::RetainOnFailure => failed,
+      Self::On | Self::OnFirstRetry | Self::OnAllRetries => true,
+      Self::RetainOnFailure | Self::RetainOnFirstFailure => failed,
+      Self::RetainOnFailureAndRetries => failed || retry > 0,
     }
   }
 
   /// Combined check: should we actually write a trace file?
   #[must_use]
   pub fn should_write(self, attempt: u32, failed: bool) -> bool {
-    self.should_record(attempt, failed) && self.should_retain(failed)
+    self.should_record(attempt, failed) && self.should_retain(failed, attempt)
   }
 }
 
 // ── Video ───────────────────────────────────────────────────────────────────
 
-/// Video recording mode.
+/// Playwright's `VideoMode` (`playwright/types/test.d.ts:7241`) — the
+/// same seven states `TraceMode` has, decided by the same two rules
+/// (`playwright/src/index.ts::shouldCaptureVideo` / `shouldPreserveVideo`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VideoMode {
@@ -74,17 +102,64 @@ pub enum VideoMode {
   Off,
   On,
   RetainOnFailure,
+  /// `retry-with-video` is upstream's deprecated spelling
+  /// (`playwright/src/index.ts::normalizeVideoMode`).
+  #[serde(alias = "retry-with-video")]
+  OnFirstRetry,
+  OnAllRetries,
+  RetainOnFirstFailure,
+  RetainOnFailureAndRetries,
 }
 
 impl VideoMode {
-  /// Parse from string (config/CLI).
+  /// Parse from string (config/CLI). An unknown label is `Off`.
   #[must_use]
   pub fn parse_label(s: &str) -> Self {
     match s {
       "on" => Self::On,
       "retain-on-failure" => Self::RetainOnFailure,
+      "on-first-retry" | "retry-with-video" => Self::OnFirstRetry,
+      "on-all-retries" => Self::OnAllRetries,
+      "retain-on-first-failure" => Self::RetainOnFirstFailure,
+      "retain-on-failure-and-retries" => Self::RetainOnFailureAndRetries,
       _ => Self::Off,
     }
+  }
+
+  /// Should this attempt record at all? `attempt` is 1-based.
+  #[must_use]
+  pub fn should_record(self, attempt: u32) -> bool {
+    let retry = attempt.saturating_sub(1);
+    match self {
+      Self::Off => false,
+      Self::On | Self::RetainOnFailure | Self::RetainOnFailureAndRetries => true,
+      Self::OnFirstRetry => retry == 1,
+      Self::OnAllRetries => retry > 0,
+      Self::RetainOnFirstFailure => retry == 0,
+    }
+  }
+
+  /// Should the recording be kept once the test finished?
+  #[must_use]
+  pub fn should_retain(self, failed: bool, attempt: u32) -> bool {
+    let retry = attempt.saturating_sub(1);
+    match self {
+      Self::Off => false,
+      Self::On | Self::OnFirstRetry | Self::OnAllRetries => true,
+      Self::RetainOnFailure | Self::RetainOnFirstFailure => failed,
+      Self::RetainOnFailureAndRetries => failed || retry > 0,
+    }
+  }
+
+  /// Record straight to disk rather than into a ring buffer.
+  ///
+  /// True exactly when the recording is kept even if the test PASSES —
+  /// then there is nothing to decide at the end and buffering only costs
+  /// memory. The buffered path exists for the modes that keep a video
+  /// only on failure.
+  #[must_use]
+  pub fn records_eagerly(self, attempt: u32) -> bool {
+    self.should_retain(false, attempt)
   }
 }
 
@@ -106,6 +181,167 @@ impl Default for VideoConfig {
     }
   }
 }
+
+/// Playwright's `ScreenshotMode` (`playwright/types/test.d.ts:7239`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenshotMode {
+  #[default]
+  Off,
+  On,
+  OnlyOnFailure,
+  OnFirstFailure,
+}
+
+impl ScreenshotMode {
+  /// Parse from string (config/CLI). An unknown label is `Off`.
+  #[must_use]
+  pub fn parse_label(s: &str) -> Self {
+    match s {
+      "on" => Self::On,
+      "only-on-failure" => Self::OnlyOnFailure,
+      "on-first-failure" => Self::OnFirstFailure,
+      _ => Self::Off,
+    }
+  }
+
+  /// Should this attempt end with a screenshot? `attempt` is 1-based.
+  #[must_use]
+  pub fn should_capture(self, failed: bool, attempt: u32) -> bool {
+    match self {
+      Self::Off => false,
+      Self::On => true,
+      Self::OnlyOnFailure => failed,
+      Self::OnFirstFailure => failed && attempt.saturating_sub(1) == 0,
+    }
+  }
+}
+
+/// `use: { screenshot }` — a mode, or a mode with capture options
+/// (`ScreenshotMode | { mode } & Pick<PageScreenshotOptions, 'fullPage' |
+/// 'omitBackground'>`).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotOption {
+  pub mode: ScreenshotMode,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub full_page: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub omit_background: Option<bool>,
+}
+
+/// `use: { video }` — a mode, or a mode with a recording size
+/// (`VideoMode | { mode, size? }`).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoOption {
+  pub mode: VideoMode,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub size: Option<ViewportConfig>,
+}
+
+/// `use: { trace }` — a mode, or a mode with what to record
+/// (`TraceMode | { mode, screenshots?, snapshots?, sources?,
+/// attachments? }`).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceOption {
+  pub mode: TraceMode,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub screenshots: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub snapshots: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub sources: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub attachments: Option<bool>,
+}
+
+// Each of the three is `mode | { mode, ... }`. Hand-written rather than
+// `#[serde(untagged)]`: an untagged enum reports every mistake as "did
+// not match any variant", so a misspelled mode inside the object form
+// would stop naming the mode.
+macro_rules! mode_or_object {
+  ($option:ty, $fields:ty, $mode:ty) => {
+    impl<'de> Deserialize<'de> for $option {
+      fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(de).map_err(serde::de::Error::custom)?;
+        if let Some(label) = value.as_str() {
+          return Ok(Self {
+            mode: <$mode>::parse_label(label),
+            ..Self::default()
+          });
+        }
+        serde_json::from_value::<$fields>(value)
+          .map(Into::into)
+          .map_err(serde::de::Error::custom)
+      }
+    }
+  };
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ScreenshotFields {
+  #[serde(default)]
+  mode: ScreenshotMode,
+  full_page: Option<bool>,
+  omit_background: Option<bool>,
+}
+
+impl From<ScreenshotFields> for ScreenshotOption {
+  fn from(f: ScreenshotFields) -> Self {
+    Self {
+      mode: f.mode,
+      full_page: f.full_page,
+      omit_background: f.omit_background,
+    }
+  }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VideoFields {
+  #[serde(default)]
+  mode: VideoMode,
+  size: Option<ViewportConfig>,
+}
+
+impl From<VideoFields> for VideoOption {
+  fn from(f: VideoFields) -> Self {
+    Self {
+      mode: f.mode,
+      size: f.size,
+    }
+  }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TraceFields {
+  #[serde(default)]
+  mode: TraceMode,
+  screenshots: Option<bool>,
+  snapshots: Option<bool>,
+  sources: Option<bool>,
+  attachments: Option<bool>,
+}
+
+impl From<TraceFields> for TraceOption {
+  fn from(f: TraceFields) -> Self {
+    Self {
+      mode: f.mode,
+      screenshots: f.screenshots,
+      snapshots: f.snapshots,
+      sources: f.sources,
+      attachments: f.attachments,
+    }
+  }
+}
+
+mode_or_object!(ScreenshotOption, ScreenshotFields, ScreenshotMode);
+mode_or_object!(VideoOption, VideoFields, VideoMode);
+mode_or_object!(TraceOption, TraceFields, TraceMode);
 
 // ── Expect config ───────────────────────────────────────────────────────────
 
@@ -256,7 +492,13 @@ pub struct TestConfig {
   pub tags: Option<String>,
   pub dry_run: bool,
   pub fail_fast: bool,
+  /// The older spelling of `use: { screenshot: 'only-on-failure' }`.
+  /// Folded into [`Self::screenshot`] by [`Self::apply_use_options`].
   pub screenshot_on_failure: bool,
+  /// Playwright's `use: { screenshot }`, resolved. Written here rather
+  /// than read out of the `use` bag so every consumer asks one place.
+  #[serde(default)]
+  pub screenshot: ScreenshotOption,
   #[serde(default)]
   pub video: VideoConfig,
   #[serde(default)]
@@ -502,6 +744,20 @@ pub struct ContextConfig {
   pub screen: Option<ViewportConfig>,
   /// Playwright's `use: { browserName }` — the engine this project runs.
   pub browser_name: Option<String>,
+  /// Playwright spells `baseURL` inside `use`; `[test].baseUrl` is the
+  /// older top-level spelling and loses to it.
+  #[serde(rename = "baseURL", alias = "baseUrl")]
+  pub base_url: Option<String>,
+  /// Default timeout for actions (`click`, `fill`, …), in ms.
+  pub action_timeout: Option<u64>,
+  /// Default timeout for navigations (`goto`, `waitForURL`, …), in ms.
+  pub navigation_timeout: Option<u64>,
+  /// `mode | { mode, screenshots?, snapshots?, sources?, attachments? }`.
+  pub trace: Option<TraceOption>,
+  /// `mode | { mode, size? }`.
+  pub video: Option<VideoOption>,
+  /// `mode | { mode, fullPage?, omitBackground? }`.
+  pub screenshot: Option<ScreenshotOption>,
   /// What a device descriptor names. `browserName` overrides it, and it
   /// applies only while the engine is still at its default, mirroring
   /// Playwright's `browserName` defaulting from `defaultBrowserType`.
@@ -569,6 +825,12 @@ impl Default for ContextConfig {
       screen: None,
       browser_name: None,
       default_browser_type: None,
+      base_url: None,
+      action_timeout: None,
+      navigation_timeout: None,
+      trace: None,
+      video: None,
+      screenshot: None,
       test_id_attribute: None,
       color_scheme: None,
       locale: None,
@@ -1185,6 +1447,10 @@ impl Default for TestConfig {
       dry_run: false,
       fail_fast: false,
       screenshot_on_failure: true,
+      screenshot: ScreenshotOption {
+        mode: ScreenshotMode::OnlyOnFailure,
+        ..ScreenshotOption::default()
+      },
       video: VideoConfig::default(),
       trace: TraceMode::Off,
       storage_state: None,
@@ -1272,6 +1538,38 @@ impl TestConfig {
       expect.timeout = Some(self.expect_timeout);
     }
     expect
+  }
+
+  /// Resolve the `use` keys Playwright spells there and ferridriver
+  /// spells at the top of `[test]`.
+  ///
+  /// The `use` bag wins where it speaks — it is the per-project spelling
+  /// and the top-level key is not — and the resolved value is written
+  /// into the top-level field so every consumer keeps asking one place.
+  pub fn apply_use_options(&mut self) {
+    let used = self.browser.use_options.clone();
+    if let Some(ref url) = used.base_url {
+      self.base_url = Some(url.clone());
+    }
+    if let Some(ref trace) = used.trace {
+      self.trace = trace.mode;
+    }
+    if let Some(ref video) = used.video {
+      self.video.mode = video.mode;
+      if let Some(ref size) = video.size {
+        self.video.width = u32::try_from(size.width.max(0)).unwrap_or(u32::MAX);
+        self.video.height = u32::try_from(size.height.max(0)).unwrap_or(u32::MAX);
+      }
+    }
+    match used.screenshot {
+      Some(ref screenshot) => self.screenshot = screenshot.clone(),
+      // `screenshotOnFailure` predates the `use` key and says the same
+      // thing in a boolean; it applies only while nothing spells the
+      // mode itself.
+      None if !self.screenshot_on_failure => self.screenshot.mode = ScreenshotMode::Off,
+      None => {},
+    }
+    self.screenshot_on_failure = self.screenshot.mode != ScreenshotMode::Off;
   }
 
   /// Create a new config with project overrides merged on top.
@@ -1379,21 +1677,20 @@ impl TestConfig {
 
     merged.browser.apply_use_engine();
     merged.browser.normalize();
+    merged.apply_use_options();
     merged.projects = Vec::new();
 
     merged
   }
 }
 
-/// Deep-merge context config: only override fields that differ from defaults.
-fn merge_context(base: &mut ContextConfig, overlay: &ContextConfig) {
-  let defaults = ContextConfig::default();
-
+/// The `use` keys a device descriptor pre-seeds, plus the runner
+/// options Playwright spells in `use`. Split out of [`merge_context`]
+/// only for length; every one follows the same rule — the overlay wins
+/// where it speaks.
+fn merge_device_and_runner_keys(base: &mut ContextConfig, overlay: &ContextConfig) {
   if overlay.device.is_some() {
     base.device.clone_from(&overlay.device);
-  }
-  if overlay.is_mobile != defaults.is_mobile {
-    base.is_mobile = overlay.is_mobile;
   }
   if overlay.viewport.is_some() {
     base.viewport.clone_from(&overlay.viewport);
@@ -1406,6 +1703,34 @@ fn merge_context(base: &mut ContextConfig, overlay: &ContextConfig) {
   }
   if overlay.default_browser_type.is_some() {
     base.default_browser_type.clone_from(&overlay.default_browser_type);
+  }
+  if overlay.base_url.is_some() {
+    base.base_url.clone_from(&overlay.base_url);
+  }
+  if overlay.action_timeout.is_some() {
+    base.action_timeout = overlay.action_timeout;
+  }
+  if overlay.navigation_timeout.is_some() {
+    base.navigation_timeout = overlay.navigation_timeout;
+  }
+  if overlay.trace.is_some() {
+    base.trace.clone_from(&overlay.trace);
+  }
+  if overlay.video.is_some() {
+    base.video.clone_from(&overlay.video);
+  }
+  if overlay.screenshot.is_some() {
+    base.screenshot.clone_from(&overlay.screenshot);
+  }
+}
+
+/// Deep-merge context config: only override fields that differ from defaults.
+fn merge_context(base: &mut ContextConfig, overlay: &ContextConfig) {
+  let defaults = ContextConfig::default();
+
+  merge_device_and_runner_keys(base, overlay);
+  if overlay.is_mobile != defaults.is_mobile {
+    base.is_mobile = overlay.is_mobile;
   }
   if overlay.has_touch != defaults.has_touch {
     base.has_touch = overlay.has_touch;

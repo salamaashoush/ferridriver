@@ -939,3 +939,158 @@ fn a_null_viewport_is_not_an_absent_one() {
     "`viewport: null` says NO fixed viewport, which absent does not",
   );
 }
+
+// ── `use`-level runner options ──────────────────────────────────────
+
+/// Resolve a document the way a run does: fold, then settle `use`.
+fn resolved(t: &Tree) -> ferridriver_config::test::TestConfig {
+  let mut config = resolve(&t.opts(t.repo())).expect("resolve").config.test;
+  config.browser.apply_use_engine();
+  config.browser.normalize();
+  config.apply_use_options();
+  config
+}
+
+#[test]
+fn a_use_block_carries_the_runner_options_playwright_spells_there() {
+  let t = Tree::new();
+  t.write(
+    "repo/ferridriver.toml",
+    concat!(
+      "[test]\n",
+      "baseUrl = \"http://from-top-level\"\n\n",
+      "[test.use]\n",
+      "baseURL = \"http://from-use\"\n",
+      "trace = \"on-first-retry\"\n",
+      "video = \"retain-on-failure\"\n",
+      "screenshot = \"on\"\n",
+      "actionTimeout = 1500\n",
+      "navigationTimeout = 9000\n",
+    ),
+  );
+
+  let config = resolved(&t);
+  assert_eq!(config.base_url.as_deref(), Some("http://from-use"), "`use` wins");
+  assert_eq!(config.trace, ferridriver_config::test::TraceMode::OnFirstRetry);
+  assert_eq!(config.video.mode, ferridriver_config::test::VideoMode::RetainOnFailure);
+  assert_eq!(config.screenshot.mode, ferridriver_config::test::ScreenshotMode::On);
+  assert_eq!(config.browser.use_options.action_timeout, Some(1500));
+  assert_eq!(config.browser.use_options.navigation_timeout, Some(9000));
+}
+
+#[test]
+fn the_object_forms_carry_what_the_mode_alone_cannot() {
+  let t = Tree::new();
+  t.write(
+    "repo/ferridriver.yaml",
+    concat!(
+      "test:\n",
+      "  use:\n",
+      "    trace: { mode: on, snapshots: false, sources: false }\n",
+      "    video: { mode: on, size: { width: 640, height: 480 } }\n",
+      "    screenshot: { mode: only-on-failure, fullPage: false }\n",
+    ),
+  );
+
+  let config = resolved(&t);
+  assert_eq!(config.trace, ferridriver_config::test::TraceMode::On);
+  let trace = config.browser.use_options.trace.clone().expect("trace block");
+  assert_eq!(trace.snapshots, Some(false));
+  assert_eq!(trace.sources, Some(false));
+  assert_eq!(trace.screenshots, None, "an unspoken flag keeps the runner's default");
+
+  assert_eq!(config.video.mode, ferridriver_config::test::VideoMode::On);
+  assert_eq!((config.video.width, config.video.height), (640, 480));
+
+  assert_eq!(
+    config.screenshot.mode,
+    ferridriver_config::test::ScreenshotMode::OnlyOnFailure
+  );
+  assert_eq!(config.screenshot.full_page, Some(false));
+}
+
+#[test]
+fn a_misspelled_key_inside_an_object_form_is_named() {
+  let t = Tree::new();
+  t.write(
+    "repo/ferridriver.yaml",
+    "test:\n  use:\n    trace: { mode: on, snapshotz: false }\n",
+  );
+  let err = resolve(&t.opts(t.repo())).expect_err("a typo is refused");
+  assert!(
+    err.to_string().contains("snapshotz"),
+    "the error must name the key, not collapse into a variant mismatch: {err}",
+  );
+}
+
+#[test]
+fn screenshot_on_failure_is_the_older_spelling_of_the_mode() {
+  let t = Tree::new();
+  t.write("repo/ferridriver.toml", "[test]\nscreenshotOnFailure = false\n");
+  assert_eq!(
+    resolved(&t).screenshot.mode,
+    ferridriver_config::test::ScreenshotMode::Off,
+  );
+
+  let t2 = Tree::new();
+  t2.write(
+    "repo/ferridriver.toml",
+    "[test]\nscreenshotOnFailure = false\n\n[test.use]\nscreenshot = \"on\"\n",
+  );
+  let config = resolved(&t2);
+  assert_eq!(
+    config.screenshot.mode,
+    ferridriver_config::test::ScreenshotMode::On,
+    "the mode itself wins over the boolean",
+  );
+  assert!(config.screenshot_on_failure, "and the boolean is brought back in line");
+}
+
+#[test]
+fn every_trace_and_video_mode_records_and_retains_as_upstream_does() {
+  use ferridriver_config::test::{TraceMode, VideoMode};
+
+  // (mode, attempt) -> (record, retain-on-pass, retain-on-fail).
+  // Mirrors `playwright/src/worker/testTracing.ts::_shouldCaptureTrace`
+  // + `_shouldAbandonTrace` and `src/index.ts::shouldCaptureVideo` +
+  // `shouldPreserveVideo`, where `retry` is `attempt - 1`.
+  let cases: &[(&str, u32, bool, bool, bool)] = &[
+    ("off", 1, false, false, false),
+    ("on", 1, true, true, true),
+    ("retain-on-failure", 1, true, false, true),
+    ("on-first-retry", 1, false, true, true),
+    ("on-first-retry", 2, true, true, true),
+    ("on-all-retries", 1, false, true, true),
+    ("on-all-retries", 2, true, true, true),
+    ("retain-on-first-failure", 1, true, false, true),
+    ("retain-on-first-failure", 2, false, false, true),
+    ("retain-on-failure-and-retries", 1, true, false, true),
+    ("retain-on-failure-and-retries", 2, true, true, true),
+  ];
+  for &(label, attempt, record, retain_pass, retain_fail) in cases {
+    let trace = TraceMode::parse_label(label);
+    assert_eq!(trace.should_record(attempt, false), record, "trace {label} @{attempt}");
+    assert_eq!(
+      trace.should_retain(false, attempt),
+      retain_pass,
+      "trace {label} @{attempt} on pass"
+    );
+    assert_eq!(
+      trace.should_retain(true, attempt),
+      retain_fail,
+      "trace {label} @{attempt} on failure"
+    );
+
+    let video = VideoMode::parse_label(label);
+    assert_eq!(video.should_record(attempt), record, "video {label} @{attempt}");
+    assert_eq!(
+      video.records_eagerly(attempt),
+      retain_pass,
+      "video {label} @{attempt} records eagerly exactly when a pass keeps it"
+    );
+  }
+
+  // The deprecated spellings upstream still accepts.
+  assert_eq!(TraceMode::parse_label("retry-with-trace"), TraceMode::OnFirstRetry);
+  assert_eq!(VideoMode::parse_label("retry-with-video"), VideoMode::OnFirstRetry);
+}
