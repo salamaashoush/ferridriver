@@ -560,43 +560,9 @@ impl FerridriverConfig {
     inherit: bool,
     defaults: Vec<(String, serde_json::Value)>,
   ) -> anyhow::Result<Self> {
-    Self::load_layered_full(explicit, inherit, defaults, None)
-  }
-
-  /// [`Self::load_layered_with_defaults`], plus a `--config <file.ts>`
-  /// the host has already bundled and evaluated.
-  ///
-  /// The module is layered where an explicitly named document would be:
-  /// above every discovered file, below the environment and the CLI.
-  /// It is a separate argument rather than something the loader fetches
-  /// because evaluating it needs the script engine, and the config crate
-  /// is what the script engine is configured FROM.
-  ///
-  /// # Errors
-  ///
-  /// As [`Self::load_layered_with_defaults`], plus a config module whose
-  /// default export is not an object or that sets a key a module may not
-  /// decide.
-  pub fn load_layered_full(
-    explicit: Option<&Path>,
-    inherit: bool,
-    defaults: Vec<(String, serde_json::Value)>,
-    script_config: Option<layer::ScriptConfig>,
-  ) -> anyhow::Result<Self> {
-    let mut opts = layer::LoadOptions::from_process(explicit);
-    // A false argument must not re-enable inheritance that the
-    // environment already switched off.
-    opts.inherit = opts.inherit && inherit;
-    opts.extension_defaults = defaults;
-    opts.script_config = script_config;
-    let resolved = layer::resolve(&opts)?;
-    for w in &resolved.warnings {
-      tracing::warn!(source = %w.source, "{}", w.message);
-    }
-    for l in &resolved.layers {
-      tracing::debug!(kind = l.kind.label(), path = %l.path.display(), "config layer applied");
-    }
-    Ok(resolved.config)
+    let mut startup = Startup::new(explicit, inherit);
+    startup.set_extension_defaults(defaults);
+    startup.resolve()
   }
 
   /// Load ONE config file, with no inheritance.
@@ -631,7 +597,8 @@ impl FerridriverConfig {
       inherit: false,
       extension_defaults: Vec::new(),
       cache: layer::LayerCache::default(),
-      script_config: None,
+      module_loader: None,
+      documents_only: false,
     })?;
     for w in &resolved.warnings {
       tracing::warn!(source = %w.source, "{}", w.message);
@@ -747,9 +714,40 @@ impl Startup {
     self.opts.extension_defaults = defaults;
   }
 
-  /// Apply an evaluated `--config <file.ts|.js>` in the explicit slot.
-  pub fn set_script_config(&mut self, script_config: layer::ScriptConfig) {
-    self.opts.script_config = Some(script_config);
+  /// Install how a `.ts` / `.js` layer becomes a document.
+  ///
+  /// Until one is installed, [`Self::resolve_documents`] is the only
+  /// resolve that can succeed on a stack containing a module.
+  pub fn set_module_loader(&mut self, loader: layer::ModuleLoader) {
+    self.opts.module_loader = Some(loader);
+  }
+
+  /// Whether any layer in the stack is a module, and therefore whether
+  /// this startup needs a loader and a second phase at all.
+  ///
+  /// A stack of documents answers `false`, and the run never constructs
+  /// a bundler or a JavaScript runtime to read its configuration.
+  #[must_use]
+  pub fn has_module_layer(&self) -> bool {
+    layer::discovered_paths(&self.opts)
+      .iter()
+      .any(|p| layer::is_script_config(p))
+  }
+
+  /// Resolve only the layers this crate can read by itself.
+  ///
+  /// What a module layer needs in order to be compiled at all —
+  /// `extensions`, `[bundler]`, `[scripting]`, `[test].moduleAliases` —
+  /// is exactly what a module may not set, so folding the documents
+  /// alone settles every one of them.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::resolve`].
+  pub fn resolve_documents(&self) -> anyhow::Result<FerridriverConfig> {
+    let mut opts = self.opts.clone();
+    opts.documents_only = true;
+    Ok(Self::report(layer::resolve(&opts)?))
   }
 
   /// Resolve the stack as it currently stands.
@@ -758,14 +756,28 @@ impl Startup {
   ///
   /// As [`FerridriverConfig::load_layered`].
   pub fn resolve(&self) -> anyhow::Result<FerridriverConfig> {
-    let resolved = layer::resolve(&self.opts)?;
+    Ok(Self::report(layer::resolve(&self.opts)?))
+  }
+
+  /// The options this startup resolves with, loader and all.
+  ///
+  /// For a subcommand that needs the layer detail rather than the
+  /// config — `ferridriver config` and `doctor` explain the stack — and
+  /// must explain the SAME stack the run would use, including its
+  /// module layers.
+  #[must_use]
+  pub fn options(&self) -> &layer::LoadOptions {
+    &self.opts
+  }
+
+  fn report(resolved: layer::Resolved) -> FerridriverConfig {
     for w in &resolved.warnings {
       tracing::warn!(source = %w.source, "{}", w.message);
     }
     for l in &resolved.layers {
       tracing::debug!(kind = l.kind.label(), path = %l.path.display(), "config layer applied");
     }
-    Ok(resolved.config)
+    resolved.config
   }
 }
 

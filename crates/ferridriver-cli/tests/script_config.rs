@@ -1,12 +1,13 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-//! `--config <file.ts>` — a config written as a module.
+//! A config written as a module.
 //!
-//! The claim worth testing at the process boundary is equivalence: a
-//! `playwright.config.ts` calling `defineConfig` discovers the same
-//! corpus and the same project names as the `ferridriver.toml` that
-//! says the same thing. Observed through `ferridriver test --list`,
-//! which resolves config, bundles and discovers without launching a
-//! browser.
+//! `.ts` / `.js` is a config FORMAT, not a `--config` special case: a
+//! `ferridriver.config.ts` is discovered in the slots a
+//! `ferridriver.toml` is discovered in, holds the same document, layers
+//! by the same rules, and shadows the same way when two formats sit in
+//! one directory. These tests are that equivalence, observed through
+//! `ferridriver test --list`, which resolves config, bundles and
+//! discovers without launching a browser.
 //!
 //! Requires a built `ferridriver` binary (`FERRIDRIVER_BIN` or
 //! `target/{debug,release}/ferridriver`).
@@ -31,45 +32,40 @@ import { test, expect } from '@ferridriver/test';
 test('runs', async ({}) => { expect(1).toBe(1); });
 ";
 
-/// A workspace with two spec files and whatever config the case needs.
-///
-/// `ferridriver.toml` is always present and always minimal: the module
-/// layers ON TOP of the discovered stack rather than replacing it, and
-/// a case that wrote everything in one file could not tell the two
-/// apart.
-fn scratch(case: &str, toml_extra: &str, module: Option<&str>) -> PathBuf {
+/// The settings every case needs, in each format, so a case can choose
+/// which format carries them without changing what they say.
+const TOML_BASE: &str = "[test]\nworkers = 1\nreporter = [{ name = \"list\" }]\ntestMatch = [\"specs/alpha.spec.ts\"]\n\n[test.browser]\nbrowser = \"chromium\"\nbackend = \"cdp-pipe\"\nheadless = true\n";
+
+const MODULE_BASE: &str = "
+export default {
+  test: {
+    workers: 1,
+    reporter: [{ name: 'list' }],
+    testMatch: ['specs/alpha.spec.ts'],
+    browser: { browser: 'chromium', backend: 'cdp-pipe', headless: true },
+  },
+};
+";
+
+/// A workspace with two spec files and whichever config files the case
+/// names.
+fn scratch(case: &str, files: &[(&str, &str)]) -> PathBuf {
   let dir = std::env::temp_dir().join(format!("ferri-script-config-{case}-{}", std::process::id()));
   let _ = std::fs::remove_dir_all(&dir);
   std::fs::create_dir_all(dir.join("specs")).expect("workspace");
   for name in ["alpha", "beta"] {
     std::fs::write(dir.join(format!("specs/{name}.spec.ts")), SPEC).expect("spec");
   }
-  std::fs::write(
-    dir.join("ferridriver.toml"),
-    format!(
-      "[test]\n\
-       workers = 1\n\
-       reporter = [{{ name = \"list\" }}]\n\
-       {toml_extra}\n\
-       [test.browser]\n\
-       browser = \"chromium\"\n\
-       backend = \"cdp-pipe\"\n\
-       headless = true\n"
-    ),
-  )
-  .expect("config");
-  if let Some(source) = module {
-    std::fs::write(dir.join("playwright.config.ts"), source).expect("module");
+  for (name, source) in files {
+    std::fs::write(dir.join(name), source).expect("config");
   }
   dir
 }
 
-fn list(dir: &Path, extra: &[&str]) -> Output {
-  let mut args = vec!["test", "--list"];
-  args.extend_from_slice(extra);
+fn list(dir: &Path) -> Output {
   Command::new(bin())
     .current_dir(dir)
-    .args(args)
+    .args(["test", "--list"])
     .output()
     .expect("run ferridriver test --list")
 }
@@ -82,8 +78,8 @@ fn combined(output: &Output) -> String {
   )
 }
 
-/// The listed corpus, as a sorted set of lines mentioning a spec, so two
-/// runs can be compared without depending on discovery order.
+/// The listed corpus, sorted, so two runs compare without depending on
+/// discovery order.
 fn corpus(text: &str) -> Vec<String> {
   let mut lines: Vec<String> = text
     .lines()
@@ -95,27 +91,12 @@ fn corpus(text: &str) -> Vec<String> {
 }
 
 #[test]
-fn a_config_module_discovers_what_the_equivalent_toml_discovers() {
-  let module = "
-import { defineConfig } from '@ferridriver/test';
-export default defineConfig({
-  testMatch: ['specs/alpha.spec.ts'],
-  projects: [{ name: 'one' }, { name: 'two' }],
-});
-";
-  let from_module = scratch("module", "", Some(module));
-  let from_toml = scratch(
-    "toml",
-    "testMatch = [\"specs/alpha.spec.ts\"]\n\
-     [[test.projects]]\n\
-     name = \"one\"\n\
-     [[test.projects]]\n\
-     name = \"two\"\n",
-    None,
-  );
+fn a_module_and_the_toml_that_says_the_same_thing_discover_the_same_corpus() {
+  let from_module = scratch("module", &[("ferridriver.config.ts", MODULE_BASE)]);
+  let from_toml = scratch("toml", &[("ferridriver.toml", TOML_BASE)]);
 
-  let module_run = list(&from_module, &["--config", "playwright.config.ts"]);
-  let toml_run = list(&from_toml, &[]);
+  let module_run = list(&from_module);
+  let toml_run = list(&from_toml);
   let module_text = combined(&module_run);
   let toml_text = combined(&toml_run);
 
@@ -130,87 +111,122 @@ export default defineConfig({
     module_text.contains("alpha.spec.ts") && !module_text.contains("beta.spec.ts"),
     "the module's own testMatch took effect: {module_text}"
   );
-  // `--list` prints the corpus, not the project names, so the second
-  // half of the claim is read where the loader reports it: `ferridriver
-  // config` names the layer a value came from.
-  let resolved = Command::new(bin())
-    .current_dir(&from_module)
-    .args(["config", "--config", "playwright.config.ts"])
-    .output()
-    .expect("run ferridriver config");
-  let resolved_text = combined(&resolved);
-  assert!(resolved.status.success(), "{resolved_text}");
-  assert!(
-    resolved_text.contains("explicit  playwright.config.ts"),
-    "the module is a layer: {resolved_text}"
-  );
-  assert!(
-    resolved_text.contains(r#"test.projects = [{"name":"one"},{"name":"two"}]"#),
-    "the module's projects resolved: {resolved_text}"
-  );
-  assert!(
-    resolved_text.contains("<- playwright.config.ts"),
-    "and it is named as their source: {resolved_text}"
-  );
+
+  let _ = std::fs::remove_dir_all(&from_module);
+  let _ = std::fs::remove_dir_all(&from_toml);
 }
 
 #[test]
-fn the_module_layers_above_the_discovered_files() {
-  // The toml names one spec, the module the other: whichever the run
-  // lists says which layer won, and the module is the explicitly named
-  // one.
+fn a_module_is_a_discovered_layer_and_is_named_as_the_source_of_its_values() {
   let dir = scratch(
-    "precedence",
-    "testMatch = [\"specs/beta.spec.ts\"]\n",
-    Some(
+    "provenance",
+    &[(
+      "ferridriver.config.ts",
       "
 import { defineConfig } from '@ferridriver/test';
-export default defineConfig({ testMatch: ['specs/alpha.spec.ts'] });
+
+// `defineConfig` is Playwright's function and folds Playwright's shape,
+// which is ferridriver's `[test]` section. The document around it is
+// ferridriver's, exactly as a `.toml` layer's is.
+export default {
+  test: defineConfig({
+    workers: 1,
+    projects: [{ name: 'one' }, { name: 'two' }],
+  }),
+};
 ",
-    ),
+    )],
   );
-  let output = list(&dir, &["--config", "playwright.config.ts"]);
+
+  let output = Command::new(bin())
+    .current_dir(&dir)
+    .args(["config"])
+    .output()
+    .expect("run ferridriver config");
   let text = combined(&output);
   assert!(output.status.success(), "{text}");
-  assert!(text.contains("alpha.spec.ts"), "{text}");
-  assert!(!text.contains("beta.spec.ts"), "{text}");
+  assert!(
+    text.contains("ferridriver.config.ts"),
+    "the module is a layer like any other: {text}"
+  );
+  assert!(
+    text.contains(r#"test.projects = [{"name":"one"},{"name":"two"}]"#),
+    "its values resolved: {text}"
+  );
+
+  let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn two_formats_in_one_directory_shadow_by_basename_order() {
+  // The rule that already governed `.toml` beside `.yaml`, now covering
+  // `.ts` too — because it is a format, not a layer of its own.
+  let dir = scratch(
+    "shadow",
+    &[
+      ("ferridriver.toml", TOML_BASE),
+      (
+        "ferridriver.config.ts",
+        "export default { test: { testMatch: ['specs/beta.spec.ts'] } };\n",
+      ),
+    ],
+  );
+
+  let output = list(&dir);
+  let text = combined(&output);
+  assert!(output.status.success(), "{text}");
+  assert!(
+    text.contains("alpha.spec.ts") && !text.contains("beta.spec.ts"),
+    "the earlier basename wins: {text}"
+  );
+
+  let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_module_may_not_configure_the_loader_that_compiled_it() {
   let dir = scratch(
     "refused",
-    "",
-    Some(
-      "
-export default { moduleAliases: { '@acme/test': '@ferridriver/test' } };
-",
-    ),
+    &[(
+      "ferridriver.config.ts",
+      "export default { test: { moduleAliases: { '@acme/test': '@ferridriver/test' } } };\n",
+    )],
   );
-  let output = list(&dir, &["--config", "playwright.config.ts"]);
+  let output = list(&dir);
   let text = combined(&output);
   assert!(!output.status.success(), "a refusal must fail the run: {text}");
   assert!(text.contains("test.moduleAliases"), "the key is named: {text}");
+
+  let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_module_with_no_default_export_says_so() {
-  let dir = scratch("no-default", "", Some("export const config = { workers: 1 };\n"));
-  let output = list(&dir, &["--config", "playwright.config.ts"]);
+  let dir = scratch(
+    "no-default",
+    &[("ferridriver.config.ts", "export const config = { test: {} };\n")],
+  );
+  let output = list(&dir);
   let text = combined(&output);
   assert!(!output.status.success(), "{text}");
   assert!(text.contains("no default export"), "{text}");
+
+  let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_module_that_throws_fails_the_run_with_its_own_error() {
   let dir = scratch(
     "throws",
-    "",
-    Some("throw new Error('the config could not decide');\nexport default {};\n"),
+    &[(
+      "ferridriver.config.ts",
+      "throw new Error('the config could not decide');\nexport default {};\n",
+    )],
   );
-  let output = list(&dir, &["--config", "playwright.config.ts"]);
+  let output = list(&dir);
   let text = combined(&output);
   assert!(!output.status.success(), "{text}");
   assert!(text.contains("the config could not decide"), "{text}");
+
+  let _ = std::fs::remove_dir_all(&dir);
 }

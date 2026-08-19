@@ -59,7 +59,8 @@ impl Tree {
       inherit: true,
       extension_defaults: Vec::new(),
       cache: ferridriver_config::layer::LayerCache::default(),
-      script_config: None,
+      module_loader: None,
+      documents_only: false,
     }
   }
 }
@@ -547,7 +548,8 @@ mod extension_defaults {
       inherit: true,
       extension_defaults: defaults,
       cache: ferridriver_config::layer::LayerCache::default(),
-      script_config: None,
+      module_loader: None,
+      documents_only: false,
     }
   }
 
@@ -715,14 +717,14 @@ fn a_shared_cache_reads_each_layer_once_across_passes() {
   std::fs::write(&file, "[test]\ntimeout = 1234\n").expect("write");
 
   let cache = LayerCache::default();
-  let first = cache.parse(&file).expect("first parse");
+  let first = cache.parse(&file, None).expect("first parse");
   assert_eq!(first["test"]["timeout"], 1234);
 
   // Change the file underneath. A second pass must answer with what the
   // first pass read, or a startup could merge two different states of
   // the disk into one document.
   std::fs::write(&file, "[test]\ntimeout = 9999\n").expect("rewrite");
-  let second = cache.parse(&file).expect("second parse");
+  let second = cache.parse(&file, None).expect("second parse");
   assert_eq!(
     second["test"]["timeout"], 1234,
     "the cached document is served, not a fresh read"
@@ -730,7 +732,7 @@ fn a_shared_cache_reads_each_layer_once_across_passes() {
 
   // A cache that never saw the file reads it, so nothing is pinned
   // process-wide.
-  let fresh = LayerCache::default().parse(&file).expect("fresh parse");
+  let fresh = LayerCache::default().parse(&file, None).expect("fresh parse");
   assert_eq!(fresh["test"]["timeout"], 9999);
 
   let _ = std::fs::remove_dir_all(&dir);

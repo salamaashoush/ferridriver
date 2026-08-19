@@ -131,53 +131,80 @@ Multiple `[[test.webServer]]` blocks can run in parallel.
 
 ## Config in TypeScript
 
-`--config` also takes a module. Its default export is the `[test]`
-section, which is the shape a `playwright.config.ts` already has, so an
-existing Playwright config runs unmodified:
+`.ts` / `.js` is a config **format**, not a special case. A
+`ferridriver.config.ts` is discovered in the same places a
+`ferridriver.toml` is, holds the same document, layers by the same
+rules, and shadows the same way when two formats sit in one directory:
+
+```ts
+// ferridriver.config.ts — the same document ferridriver.toml holds
+export default {
+  test: {
+    testDir: './specs',
+    projects: [{ name: 'chromium' }, { name: 'firefox' }],
+  },
+};
+```
+
+```bash
+ferridriver test        # discovered; no flag needed
+```
+
+Discovered basenames, in precedence order per directory:
+`ferridriver.toml`, `.yaml`, `.yml`, `.json`, then
+`ferridriver.config.ts`, `.mts`, `.js`, `.mjs`. `--config <path>` names
+one explicitly, in any of those formats.
+
+The module is bundled and evaluated through the same rolldown → QuickJS
+pipeline every spec takes, so a config can import helpers and be written
+in TypeScript with no build step.
+
+**A configuration written in documents never constructs a bundler or a
+JavaScript runtime to read itself.** The loader is installed only when
+the stack actually holds a module layer, so a Rust suite on
+`ferridriver.toml` pays nothing for a format it does not use — measured
+at +2.1 ms above process floor for a document config against +4.9 ms for
+a module one.
+
+Four settings cannot come from a module, and each is refused by name
+rather than ignored: `extensions`, `bundler`, `scripting` and
+`[test].moduleAliases`. Every one of them had to be read before any
+module could be compiled, which is why the stack folds the documents
+first and the modules second. Put them in a `.toml` / `.yaml` / `.json`
+layer.
+
+### `defineConfig`
+
+`defineConfig` is Playwright's function and folds Playwright's shape,
+which is ferridriver's `[test]` section — so it goes inside the
+document, not around it:
 
 ```ts
 import { defineConfig } from '@ferridriver/test';
 
-export default defineConfig({
-  testDir: './specs',
-  use: { baseURL: 'http://localhost:3000' },
-  projects: [{ name: 'chromium' }, { name: 'firefox' }],
-});
+export default {
+  test: defineConfig({
+    use: { baseURL: 'http://localhost:3000' },
+    projects: [{ name: 'chromium' }],
+  }),
+};
 ```
 
-```bash
-ferridriver test --config playwright.config.ts
-```
-
-The module is bundled and evaluated through the same rolldown → QuickJS
-pipeline every spec takes, so it can import helpers and be written in
-TypeScript with no build step. It layers where an explicitly named
-document would: above every discovered file, below `FERRIDRIVER_*` and
-the CLI flags.
-
-`defineConfig(...configs)` folds layers, rightmost winning. Scalars are
-replaced; `use`, `expect` and `build` merge one level deep; `webServer`
-normalizes each side to a list and concatenates; `projects` merge by
-`name`, each match taking the incoming project's `use` on top, with new
-names appended.
-
-Four settings cannot come from a module, and each is refused by name
-rather than ignored: `extensions`, `bundler`, `scripting` and
-`[test].moduleAliases`. Every one of them had to be read before the
-module could be compiled at all, so a value there would arrive after the
-decision it advises on. Put them in a `ferridriver.toml` layer.
+It folds layers rightmost-winning: scalars are replaced; `use`, `expect`
+and `build` merge one level deep; `webServer` normalizes each side to a
+list and concatenates; `projects` merge by `name`, each match taking the
+incoming project's `use` on top, with new names appended.
 
 ## Priority
 
 Lowest to highest:
 
 1. Extension `defineDefaults` contributions
-2. Config file defaults
+2. Config file defaults, in any format — a `.ts` layer is a config file
 3. `main!()` / `HarnessConfig` macro arguments (Rust)
-4. A `--config <file.ts>` module
-5. Environment variables — `FERRIDRIVER_BACKEND`, `FERRIDRIVER_WORKERS`,
+4. Environment variables — `FERRIDRIVER_BACKEND`, `FERRIDRIVER_WORKERS`,
    `FERRIDRIVER_TIMEOUT`, `FERRIDRIVER_RETRIES`, …
-6. CLI flags — `--headless`, `--backend`, `--workers`, `--timeout`, …
+5. CLI flags — `--headless`, `--backend`, `--workers`, `--timeout`, …
 
 ## Profiles
 

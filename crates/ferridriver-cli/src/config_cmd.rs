@@ -21,10 +21,11 @@ use crate::cli::{self, EffectiveBrowser, effective_browser};
 /// show what a run will actually use, and resolving the full stack while
 /// the run resolves one file made them describe a setup nobody was going
 /// to get.
-fn load_options(explicit: Option<&Path>, inherit: bool) -> LoadOptions {
-  let mut opts = LoadOptions::from_process(explicit);
-  opts.inherit = opts.inherit && inherit;
-  opts
+/// The startup's own options, so this command explains the stack the run
+/// would actually use — including a `.ts` layer, which needs the module
+/// loader the startup already installed.
+fn load_options(startup: &ferridriver_config::Startup) -> LoadOptions {
+  startup.options().clone()
 }
 
 /// `ferridriver config`: show the layer stack and what each key
@@ -35,15 +36,12 @@ fn load_options(explicit: Option<&Path>, inherit: bool) -> LoadOptions {
 /// Without them this command would answer "where did this value come
 /// from" while omitting a whole layer.
 pub fn run_config(
-  explicit: Option<&Path>,
-  inherit: bool,
+  startup: &ferridriver_config::Startup,
   defaults: Vec<(String, serde_json::Value)>,
-  script_config: Option<layer::ScriptConfig>,
   args: &cli::ConfigArgs,
 ) -> anyhow::Result<()> {
-  let mut options = load_options(explicit, inherit);
+  let mut options = load_options(startup);
   options.extension_defaults = defaults;
-  options.script_config = script_config;
   let resolved = layer::resolve(&options)?;
   let effective = effective_browser(&args.browser, &resolved.config.mcp);
 
@@ -349,17 +347,14 @@ impl Status {
 /// `ferridriver doctor`: verify the setup end to end and exit non-zero
 /// when something will not work.
 pub async fn run_doctor(
-  explicit: Option<&Path>,
-  inherit: bool,
+  startup: &ferridriver_config::Startup,
   defaults: Vec<(String, serde_json::Value)>,
-  script_config: Option<layer::ScriptConfig>,
   args: cli::DoctorArgs,
 ) -> anyhow::Result<()> {
   let mut checks = Vec::new();
 
-  let mut options = load_options(explicit, inherit);
+  let mut options = load_options(startup);
   options.extension_defaults = defaults;
-  options.script_config = script_config;
   let resolved = match layer::resolve(&options) {
     Ok(r) => r,
     Err(e) => {

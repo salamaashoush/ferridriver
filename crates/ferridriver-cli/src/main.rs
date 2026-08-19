@@ -23,11 +23,11 @@ mod session_cmd;
 mod test_ui;
 mod trace_cmd;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use clap::Parser;
 use ferridriver_config::FerridriverConfig;
-use ferridriver_config::layer;
 use ferridriver_mcp::McpServer;
 use ferridriver_script::ConsoleSink;
 
@@ -40,17 +40,13 @@ use ferridriver_script::ConsoleSink;
 /// asks for under `mcp` need not be what it asks for under `test`.
 type ContributedDefaults = Vec<(String, serde_json::Value)>;
 
-async fn apply_extension_defaults(
-  config: FerridriverConfig,
-  args: &cli::Cli,
-  startup: &mut ferridriver_config::Startup,
-) -> anyhow::Result<(FerridriverConfig, ContributedDefaults)> {
+async fn read_extension_defaults(config: &FerridriverConfig, args: &cli::Cli) -> anyhow::Result<ContributedDefaults> {
   let specs = config.extension_specs();
   let Some(host) = extension_host_of(&args.command) else {
-    return Ok((config, Vec::new()));
+    return Ok(Vec::new());
   };
   if specs.is_empty() {
-    return Ok((config, Vec::new()));
+    return Ok(Vec::new());
   }
   let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
     &config.scripting.allow_env,
@@ -65,50 +61,47 @@ async fn apply_extension_defaults(
   let defaults = ferridriver_script::extension_defaults(&specs, &env, &caps.extension_policy, host)
     .await
     .map_err(|e| anyhow::anyhow!("{}", e.message))?;
-  if defaults.is_empty() {
-    return Ok((config, Vec::new()));
-  }
   for (package, _) in &defaults {
     tracing::debug!(target: "ferridriver::extensions", package, host = host.as_str(), "extension.defaults.applied");
   }
-  startup.set_extension_defaults(defaults.clone());
-  Ok((startup.resolve()?, defaults))
+  Ok(defaults)
 }
 
-/// Evaluate a `--config <file.ts|.js>` and re-resolve the layer stack
-/// with it on top.
+/// Install how a `.ts` / `.js` layer becomes a document.
 ///
-/// The third and last pass of startup, and the reason it is last: the
-/// module is bundled, so the bundler environment, the alias table and
-/// whatever the extension packages provide all have to be installed
-/// before it can be compiled. That ordering is also why a config module
-/// may not set any of them — [`ferridriver_config::layer`] refuses each
-/// by name.
-///
-/// A run whose `--config` is a document (or absent) does none of this.
-async fn apply_script_config(
-  config: FerridriverConfig,
-  args: &cli::Cli,
-  startup: &mut ferridriver_config::Startup,
-) -> anyhow::Result<(FerridriverConfig, Option<layer::ScriptConfig>)> {
-  let Some(path) = args.config.as_deref().filter(|p| layer::is_script_config(p)) else {
-    return Ok((config, None));
-  };
+/// Only when the stack actually has one. A configuration written
+/// entirely in `.toml` / `.yaml` / `.json` never reaches this — no
+/// bundler, no JavaScript runtime, nothing to pay for a feature it does
+/// not use. That is a property of where the loader is called from, not
+/// a flag anyone has to remember to check.
+fn install_module_loader(config: &FerridriverConfig, startup: &mut ferridriver_config::Startup) {
+  if !startup.has_module_layer() {
+    return;
+  }
   let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
     &config.scripting.allow_env,
     config.scripting.allow.commands.clone(),
   )
   .with_extension_policy(config.extensions.policy());
-  let cwd = std::env::current_dir()?;
-  let document = ferridriver_script::config_module::evaluate(path, &cwd, caps)
-    .await
-    .map_err(|e| anyhow::anyhow!("{}", e.message))?;
-  let script_config = layer::ScriptConfig {
-    path: path.to_path_buf(),
-    test: document,
-  };
-  startup.set_script_config(script_config.clone());
-  Ok((startup.resolve()?, Some(script_config)))
+  startup.set_module_loader(std::sync::Arc::new(move |path: &Path| {
+    let path = path.to_path_buf();
+    let caps = caps.clone();
+    let cwd = std::env::current_dir()?;
+    // The loader is called from a synchronous fold, and evaluating a
+    // module is async — so it runs on its own runtime rather than
+    // blocking the one the command is already on.
+    std::thread::scope(|scope| {
+      scope
+        .spawn(move || {
+          let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+          runtime
+            .block_on(ferridriver_script::config_module::evaluate(&path, &cwd, caps))
+            .map_err(|e| anyhow::anyhow!("{}", e.message))
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("config module evaluation panicked"))?
+    })
+  }));
 }
 
 /// The extension host a subcommand runs as, or `None` for one that
@@ -224,18 +217,29 @@ async fn main() -> anyhow::Result<()> {
   // from a package — then the packages are read and whatever they
   // contributed through `defineDefaults` is applied BENEATH every file
   // for the second. The operator tables go in between: extraction IS a
-  // bundle, so the bundler environment and the alias table have to be
-  // installed before it runs.
-  // One startup, resolved in passes that SHARE the files they read: the
-  // stack is folded again when a package contributes defaults or a
-  // config module has to be layered, but each file is read once between
-  // them.
+  // One startup, folded as many times as it has to be and no more. The
+  // documents are folded first because what a `.ts` layer needs in order
+  // to be compiled — `extensions`, `[bundler]`, `[scripting]`,
+  // `[test].moduleAliases` — is exactly what a `.ts` layer may not set;
+  // then the operator tables install, the packages are read, and the
+  // stack folds again with every layer in its own slot. Each file is
+  // read once across all of it.
   let mut startup = ferridriver_config::Startup::new(args.config.as_deref(), !args.no_inherit);
-  let config = startup.resolve()?;
+  let config = startup.resolve_documents()?;
   install_bundler_env(&config);
   install_module_aliases(&config.test, module_alias_flags(&args.command))?;
-  let (config, contributed) = Box::pin(apply_extension_defaults(config, &args, &mut startup)).await?;
-  let (config, script_config) = Box::pin(apply_script_config(config, &args, &mut startup)).await?;
+  install_module_loader(&config, &mut startup);
+  let contributed = Box::pin(read_extension_defaults(&config, &args)).await?;
+  // The second and last fold, and only when there is something new to
+  // fold IN: a package contributed defaults, or the stack holds a module
+  // the first fold deliberately skipped. A `.toml`-only run with no
+  // extensions never gets here — its first fold was already the answer.
+  let config = if contributed.is_empty() && !startup.has_module_layer() {
+    config
+  } else {
+    startup.set_extension_defaults(contributed.clone());
+    startup.resolve()?
+  };
 
   match args.command {
     cli::Command::Mcp(mcp_args) => Box::pin(run_mcp(config, mcp_args)).await,
@@ -260,23 +264,8 @@ async fn main() -> anyhow::Result<()> {
       };
       Box::pin(session_cmd::run(config, origin, session_args)).await
     },
-    cli::Command::Config(config_args) => config_cmd::run_config(
-      args.config.as_deref(),
-      !args.no_inherit,
-      contributed,
-      script_config,
-      &config_args,
-    ),
-    cli::Command::Doctor(doctor_args) => {
-      Box::pin(config_cmd::run_doctor(
-        args.config.as_deref(),
-        !args.no_inherit,
-        contributed,
-        script_config,
-        doctor_args,
-      ))
-      .await
-    },
+    cli::Command::Config(config_args) => config_cmd::run_config(&startup, contributed, &config_args),
+    cli::Command::Doctor(doctor_args) => Box::pin(config_cmd::run_doctor(&startup, contributed, doctor_args)).await,
     cli::Command::Ext(ext_args) => Box::pin(ext_cmd::run(config, ext_args)).await,
     cli::Command::Trace(trace_args) => Box::pin(trace_cmd::run(&config, trace_args)).await,
     cli::Command::MergeReports(merge_args) => Box::pin(merge_cmd::run(config, merge_args)).await,

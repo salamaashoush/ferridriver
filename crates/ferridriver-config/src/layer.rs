@@ -64,6 +64,10 @@ const PROJECT_BASENAMES: &[&str] = &[
   "ferridriver.yaml",
   "ferridriver.yml",
   "ferridriver.json",
+  "ferridriver.config.ts",
+  "ferridriver.config.mts",
+  "ferridriver.config.js",
+  "ferridriver.config.mjs",
 ];
 
 /// Personal-override basenames, searched alongside [`PROJECT_BASENAMES`].
@@ -72,10 +76,19 @@ const LOCAL_BASENAMES: &[&str] = &[
   "ferridriver.local.yaml",
   "ferridriver.local.yml",
   "ferridriver.local.json",
+  "ferridriver.local.ts",
+  "ferridriver.local.js",
 ];
 
 /// Basenames searched inside a machine/user config DIRECTORY.
-const DIR_BASENAMES: &[&str] = &["config.toml", "config.yaml", "config.yml", "config.json"];
+const DIR_BASENAMES: &[&str] = &[
+  "config.toml",
+  "config.yaml",
+  "config.yml",
+  "config.json",
+  "config.ts",
+  "config.js",
+];
 
 /// Array keys that concatenate across layers instead of replacing.
 /// Matched on the leaf key name at any depth.
@@ -152,37 +165,6 @@ pub struct ConfigLayer {
   pub path: PathBuf,
 }
 
-/// File extensions `--config` accepts as a config MODULE rather than a
-/// document: the host has to bundle and evaluate them, so they never
-/// reach [`parse_file`].
-const SCRIPT_CONFIG_EXTENSIONS: &[&str] = &["ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx"];
-
-/// Whether `--config` named a module the host must evaluate.
-#[must_use]
-pub fn is_script_config(path: &Path) -> bool {
-  path
-    .extension()
-    .and_then(|e| e.to_str())
-    .is_some_and(|e| SCRIPT_CONFIG_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
-}
-
-/// A config module the host already evaluated, ready to layer.
-///
-/// The default export is the `[test]` section, not a whole document:
-/// the file this exists for is `playwright.config.ts`, whose keys are
-/// `testDir` / `projects` / `use` / `webServer`. Any other section stays
-/// the province of a `.toml` / `.yaml` / `.json` layer, which is also
-/// the only place the loader's own settings can be read from — by the
-/// time this document exists, the extension set, the bundler
-/// environment and the alias table have all been installed and used.
-#[derive(Debug, Clone)]
-pub struct ScriptConfig {
-  /// The module's path, which relative paths inside it anchor against.
-  pub path: PathBuf,
-  /// Its default export.
-  pub test: Value,
-}
-
 /// Where a resolved value came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "from", content = "source")]
@@ -239,6 +221,32 @@ impl Provenance {
   }
 }
 
+/// Turns a config MODULE into a document.
+///
+/// `.ts` / `.js` are config formats like any other from where an author
+/// sits, but parsing one means bundling and evaluating it, which lives
+/// in `ferridriver-script` — a crate that depends on THIS one. So the
+/// dependency inverts: the host installs a loader, and this crate calls
+/// it for exactly the paths whose extension needs one.
+///
+/// That inversion is also what makes a module cost nothing to a stack
+/// that has none. There is no guard to forget: a run whose layers are
+/// all documents never reaches a call site that could construct a
+/// bundler or a VM.
+pub type ModuleLoader = Arc<dyn Fn(&Path) -> anyhow::Result<Value> + Send + Sync>;
+
+/// Extensions that name a config MODULE rather than a document.
+const MODULE_EXTENSIONS: &[&str] = &["ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx"];
+
+/// Whether `path` needs a [`ModuleLoader`] rather than [`parse_file`].
+#[must_use]
+pub fn is_script_config(path: &Path) -> bool {
+  path
+    .extension()
+    .and_then(|e| e.to_str())
+    .is_some_and(|e| MODULE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
 /// Layer documents already read from disk, shared across the passes of
 /// one startup.
 ///
@@ -256,12 +264,19 @@ impl Provenance {
 pub struct LayerCache(Arc<Mutex<BTreeMap<PathBuf, Value>>>);
 
 impl LayerCache {
-  /// The parsed document at `path`, reading it only the first time.
+  /// The document at `path`, read (or evaluated) only the first time.
+  ///
+  /// A module goes through `loader`; every other format is parsed here.
+  /// Evaluating a module is expensive enough that caching it matters for
+  /// its own sake, not only to spare a second read.
   ///
   /// # Errors
   ///
-  /// As [`parse_file`], on the pass that actually reads it.
-  pub fn parse(&self, path: &Path) -> anyhow::Result<Value> {
+  /// As [`parse_file`], or whatever the loader reports — on the pass
+  /// that actually reads it. A module with no loader installed is an
+  /// error naming the file: a config the author wrote and the run
+  /// silently ignored is the worst of the available answers.
+  pub fn parse(&self, path: &Path, loader: Option<&ModuleLoader>) -> anyhow::Result<Value> {
     if let Some(hit) = self
       .0
       .lock()
@@ -270,7 +285,19 @@ impl LayerCache {
     {
       return Ok(hit.clone());
     }
-    let value = parse_file(path)?;
+    let value = if is_script_config(path) {
+      let Some(loader) = loader else {
+        anyhow::bail!(
+          "config {}: this is a `.ts` / `.js` config, which has to be compiled and evaluated — \
+           this host has no JavaScript runtime. Run it through the `ferridriver` CLI, or write \
+           the config as `.toml` / `.yaml` / `.json`.",
+          path.display()
+        );
+      };
+      loader(path)?
+    } else {
+      parse_file(path)?
+    };
     self
       .0
       .lock()
@@ -283,7 +310,7 @@ impl LayerCache {
 /// Inputs to a resolve. Every ambient dependency (cwd, user config
 /// directory, environment) is a field so a test can resolve a stack
 /// without mutating process state.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LoadOptions {
   /// File named by `-c/--config`, applied above the discovered files.
   pub explicit: Option<PathBuf>,
@@ -311,13 +338,36 @@ pub struct LoadOptions {
   /// each file once between them. Default-empty; a single resolve never
   /// notices it.
   pub cache: LayerCache,
-  /// A `--config <file.ts|.js>` the host bundled and evaluated, applied
-  /// in the same slot an explicitly named document would occupy.
+  /// How a `.ts` / `.js` layer becomes a document. `None` on a host with
+  /// no JavaScript runtime, where meeting one is an error rather than a
+  /// silent skip.
+  pub module_loader: Option<ModuleLoader>,
+  /// Fold only the layers this crate can read by itself.
   ///
-  /// `None` on the pass that learns which extensions to load: the
-  /// module cannot be bundled until the bundler environment and the
-  /// provided-module table it might import from are installed.
-  pub script_config: Option<ScriptConfig>,
+  /// The first phase of a startup that has a module layer: a module
+  /// cannot be compiled until `extensions`, `[bundler]`, `[scripting]`
+  /// and `[test].moduleAliases` are known, and those are precisely the
+  /// sections a module may not set. Folding the documents alone settles
+  /// them, the host installs what it needs, and the second phase folds
+  /// the whole stack with every layer in its own slot.
+  pub documents_only: bool,
+}
+
+impl std::fmt::Debug for LoadOptions {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("LoadOptions")
+      .field("explicit", &self.explicit)
+      .field("cwd", &self.cwd)
+      .field("user_config_dir", &self.user_config_dir)
+      .field("machine_config_dir", &self.machine_config_dir)
+      .field("env", &self.env)
+      .field("inherit", &self.inherit)
+      .field("extension_defaults", &self.extension_defaults)
+      .field("cache", &self.cache)
+      .field("module_loader", &self.module_loader.is_some())
+      .field("documents_only", &self.documents_only)
+      .finish()
+  }
 }
 
 impl LoadOptions {
@@ -340,7 +390,8 @@ impl LoadOptions {
       inherit,
       extension_defaults: Vec::new(),
       cache: LayerCache::default(),
-      script_config: None,
+      module_loader: None,
+      documents_only: false,
     }
   }
 
@@ -358,7 +409,8 @@ impl LoadOptions {
       inherit: true,
       extension_defaults: Vec::new(),
       cache: LayerCache::default(),
-      script_config: None,
+      module_loader: None,
+      documents_only: false,
     }
   }
 }
@@ -386,6 +438,20 @@ pub struct Resolved {
   pub contributors: BTreeMap<String, Vec<Origin>>,
   /// The merged document, for `ferridriver config --resolved`.
   pub document: Value,
+}
+
+/// The files this stack would apply, without reading any of them.
+///
+/// Lets a host ask whether it needs a [`ModuleLoader`] before building
+/// one — the whole point being that a stack of documents never
+/// constructs a JavaScript runtime to read its configuration.
+#[must_use]
+pub fn discovered_paths(opts: &LoadOptions) -> Vec<PathBuf> {
+  let mut warnings = Vec::new();
+  discover_layers(opts, &mut warnings)
+    .into_iter()
+    .map(|l| l.path)
+    .collect()
 }
 
 /// Resolve the full layer stack.
@@ -424,6 +490,13 @@ pub fn resolve(opts: &LoadOptions) -> anyhow::Result<Resolved> {
   }
 
   for layer in discovered {
+    // Phase one folds the documents alone, to learn how a module would
+    // be compiled. A module layer joins on the second pass, in this same
+    // slot — its position in the stack is its position in the stack,
+    // whichever phase reads it.
+    if opts.documents_only && is_script_config(&layer.path) {
+      continue;
+    }
     apply_layer(
       &layer,
       &mut Fold {
@@ -434,12 +507,9 @@ pub fn resolve(opts: &LoadOptions) -> anyhow::Result<Resolved> {
         extension_bases: &mut extension_bases,
         warnings: &mut warnings,
         cache: &opts.cache,
+        loader: opts.module_loader.as_ref(),
       },
     )?;
-  }
-
-  if let Some(script) = &opts.script_config {
-    apply_script_layer(script, &mut document, &mut provenance, &mut layers)?;
   }
 
   apply_env(&opts.env, &mut document, &mut provenance, &mut warnings);
@@ -468,11 +538,7 @@ pub fn resolve(opts: &LoadOptions) -> anyhow::Result<Resolved> {
 /// expansion.
 fn discover_layers(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec<ConfigLayer> {
   if !opts.inherit {
-    // A script config is applied by `apply_script_layer`, so
-    // `--no-inherit` with one means exactly that file and nothing else
-    // — never the cwd document it would otherwise fall back to.
     let single = match opts.explicit.clone() {
-      Some(path) if is_script_config(&path) => None,
       Some(path) => Some(ConfigLayer {
         kind: LayerKind::Explicit,
         path,
@@ -539,9 +605,7 @@ fn discover_layers(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec
   }
 
   if let Some(path) = &opts.explicit {
-    if is_script_config(path) {
-      // Evaluated by the host, layered by `apply_script_layer`.
-    } else if path.exists() {
+    if path.exists() {
       layers.push(ConfigLayer {
         kind: LayerKind::Explicit,
         path: path.clone(),
@@ -582,9 +646,27 @@ fn highest_precedence_file(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>
 /// Silently taking `ferridriver.toml` while a `ferridriver.yaml` sits
 /// beside it makes every edit to the yaml look like it does nothing.
 fn first_existing_reported(dir: &Path, basenames: &[&str], warnings: &mut Vec<ConfigWarning>) -> Option<PathBuf> {
-  let mut found = basenames.iter().map(|name| dir.join(name)).filter(|c| c.is_file());
-  let winner = found.next()?;
-  let shadowed: Vec<String> = found.map(|p| p.display().to_string()).collect();
+  // ONE `read_dir` rather than one `stat` per candidate. The candidate
+  // list grew when config modules became discoverable, and statting each
+  // name in every layer directory is a cost every run pays — including
+  // the runs that only ever wanted `ferridriver.toml`. Listing the
+  // directory once is a single syscall no matter how many formats exist.
+  let Ok(entries) = std::fs::read_dir(dir) else {
+    return None;
+  };
+  let present: BTreeSet<std::ffi::OsString> = entries
+    .flatten()
+    .filter(|e| e.file_type().is_ok_and(|t| t.is_file() || t.is_symlink()))
+    .map(|e| e.file_name())
+    .collect();
+
+  // Precedence is the basename order, not the directory order.
+  let mut matched = basenames
+    .iter()
+    .filter(|name| present.contains(std::ffi::OsStr::new(**name)))
+    .map(|name| dir.join(name));
+  let winner = matched.next()?;
+  let shadowed: Vec<String> = matched.map(|p| p.display().to_string()).collect();
   if !shadowed.is_empty() {
     warnings.push(ConfigWarning {
       source: winner.display().to_string(),
@@ -639,6 +721,7 @@ struct Fold<'a> {
   extension_bases: &'a mut BTreeMap<String, PathBuf>,
   warnings: &'a mut Vec<ConfigWarning>,
   cache: &'a LayerCache,
+  loader: Option<&'a ModuleLoader>,
 }
 
 fn apply_layer(layer: &ConfigLayer, fold: &mut Fold<'_>) -> anyhow::Result<()> {
@@ -652,7 +735,10 @@ fn apply_layer(layer: &ConfigLayer, fold: &mut Fold<'_>) -> anyhow::Result<()> {
 
   // Through the cache: a startup that resolves more than once reads each
   // file on the first pass only.
-  let mut value = fold.cache.parse(&layer.path)?;
+  let mut value = fold.cache.parse(&layer.path, fold.loader)?;
+  if is_script_config(&layer.path) {
+    check_module_document(&layer.path, &value)?;
+  }
   let dir = layer
     .path
     .parent()
@@ -708,40 +794,17 @@ const REFUSED_SCRIPT_CONFIG_KEYS: &[(&str, &str)] = &[
   ),
 ];
 
-/// Layer a config module's default export as the `[test]` section.
-///
-/// It occupies the slot an explicitly named document would: above every
-/// discovered file, below `FERRIDRIVER_*` and the CLI flags. Relative
-/// paths inside it anchor against the module's own directory, the way
-/// they do in a file, and it is the LAST layer — so `configDir`, which
-/// a relative `snapshotPathTemplate` resolves against, is its directory.
-fn apply_script_layer(
-  script: &ScriptConfig,
-  document: &mut Value,
-  provenance: &mut Provenance,
-  layers: &mut Vec<ConfigLayer>,
-) -> anyhow::Result<()> {
-  let mut value = Value::Object(Map::from_iter([("test".to_string(), script.test.clone())]));
-  check_script_config(&script.path, &value)?;
-  normalize(&mut value);
-  let dir = script
-    .path
-    .parent()
-    .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-  anchor_paths(&mut value, &dir);
-  merge(document, &value, "", &Origin::File(script.path.clone()), provenance);
-  layers.push(ConfigLayer {
-    kind: LayerKind::Explicit,
-    path: script.path.clone(),
-  });
-  Ok(())
-}
-
 /// Refuse what a config module cannot decide, naming the key.
-fn check_script_config(path: &Path, value: &Value) -> anyhow::Result<()> {
-  if !value.get("test").is_some_and(Value::is_object) {
+///
+/// Applies to a module WHEREVER it sits in the stack. Every one of these
+/// had to be read before any module could be compiled — they are what
+/// the documents-only phase exists to settle — so a module setting one
+/// would be advice arriving after the decision it advises on.
+fn check_module_document(path: &Path, value: &Value) -> anyhow::Result<()> {
+  if !value.is_object() {
     anyhow::bail!(
-      "config {}: its default export must be a configuration object",
+      "config {}: its default export must be a configuration object, the same document a \
+       `.toml` layer holds",
       path.display()
     );
   }

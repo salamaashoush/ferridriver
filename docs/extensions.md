@@ -533,8 +533,8 @@ in the usual order:
 
 ```
 extension defineDefaults   <- lowest
-machine / user / repo / cwd / local config files
---config <file>            (a .toml/.yaml/.json document, or a .ts/.js module)
+machine / user / repo / cwd / local config files  (any format)
+--config <file>            (any format: .toml/.yaml/.json/.ts/.js)
 FERRIDRIVER_* environment overrides
 CLI flags                  <- highest
 ```
@@ -566,13 +566,14 @@ extension. That is the whole reason a second pass can exist:
    contribution is the LOWEST layer — putting it underneath means
    redoing the fold, and folding is where append-keys concatenate and
    each layer's relative paths are anchored.
-3. **only if `--config` named a `.ts`/`.js` module**: bundle and
-   evaluate it, then resolve once more with its document in the
-   explicit-file slot. It comes last because compiling it needs
-   everything the earlier passes settled — the bundler options, the
-   alias table, the specifiers packages provide — which is also why a
-   config module may not set `extensions`, `bundler`, `scripting` or
-   `[test].moduleAliases`.
+3. **only if the stack holds a `.ts`/`.js` layer**: such a layer is a
+   config file like any other and sits in its own discovered slot, but
+   compiling it needs everything the first fold settled — the bundler
+   options, the alias table, the specifiers packages provide. So the
+   documents fold first, the modules join the second fold, and a module
+   may not set `extensions`, `bundler`, `scripting` or
+   `[test].moduleAliases` — which is exactly what makes the first fold
+   sufficient.
 
 The passes SHARE the files they read. A startup holds one
 `LayerCache`, so a second or third fold re-merges documents already in

@@ -1,14 +1,21 @@
 //! Evaluating a `--config <file.ts|.js>`.
 //!
+//! `.ts` / `.js` is a config FORMAT, not a special case: a module layer
+//! occupies whatever slot its file occupies, and its default export is a
+//! whole configuration document, exactly as a `.toml` file's contents
+//! are. The only thing that makes it different is that parsing it needs
+//! a bundler and a JavaScript runtime — which is why the config crate
+//! calls in here through a loader rather than owning this itself.
+//!
 //! The module goes through the same rolldown -> bytecode pipeline every
 //! other script takes, so a config can `import` helpers, share types
-//! with the suite and be written in TypeScript without a build step. Its
-//! default export is handed back as JSON for
-//! [`ferridriver_config::layer`] to layer; nothing here decides what the
-//! document MEANS, which slot it occupies or which keys it may not set.
+//! with the suite and be written in TypeScript without a build step.
+//! Nothing here decides what the document MEANS, which slot it occupies
+//! or which keys it may not set.
 //!
-//! Runs only when `--config` names a module. A run without one never
-//! reaches this file, and pays nothing for it.
+//! Reached only for a stack that actually HAS a module layer. A
+//! configuration written entirely in `.toml` / `.yaml` / `.json` never
+//! constructs any of this.
 
 use std::path::Path;
 use std::sync::Arc;
