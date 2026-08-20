@@ -11,6 +11,7 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use rolldown::{Bundler, BundlerOptions, InputItem, OutputFormat, Platform, SourceMapType};
 use rolldown_common::{CodeSplittingMode, ModuleType, Output, ResolveOptions, TsConfig};
@@ -250,7 +251,44 @@ impl Plugin for FerridriverRuntimePlugin {
 pub struct CompiledBundle {
   pub module_name: String,
   pub bytecode: Arc<[u8]>,
-  source_map: Option<Arc<sourcemap::SourceMap>>,
+  source_map: LazyMap,
+}
+
+/// A bundle's source map, parsed the first time something asks to remap.
+///
+/// Parsing it costs more than reading the whole cache record, and a run that
+/// never reports a position -- anything that simply executes and succeeds --
+/// would otherwise pay it on every start.
+#[derive(Clone, Default)]
+pub struct LazyMap(Option<Arc<LazyMapInner>>);
+
+struct LazyMapInner {
+  json: Box<str>,
+  parsed: std::sync::OnceLock<Option<Arc<sourcemap::SourceMap>>>,
+}
+
+impl LazyMap {
+  #[must_use]
+  pub fn from_json(json: Option<&str>) -> Self {
+    Self(json.map(|j| {
+      Arc::new(LazyMapInner {
+        json: j.into(),
+        parsed: std::sync::OnceLock::new(),
+      })
+    }))
+  }
+
+  fn get(&self) -> Option<&Arc<sourcemap::SourceMap>> {
+    let inner = self.0.as_ref()?;
+    inner
+      .parsed
+      .get_or_init(|| {
+        sourcemap::SourceMap::from_slice(inner.json.as_bytes())
+          .ok()
+          .map(Arc::new)
+      })
+      .as_ref()
+  }
 }
 
 /// A bundle's position mapping on its own.
@@ -263,14 +301,14 @@ pub struct SourceMapper {
   /// Module name QuickJS knows the bundle by, which is what its stack
   /// frames are labelled with.
   pub module_name: String,
-  map: Option<Arc<sourcemap::SourceMap>>,
+  map: LazyMap,
 }
 
 impl std::fmt::Debug for SourceMapper {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("SourceMapper")
       .field("module_name", &self.module_name)
-      .field("mapped", &self.map.is_some())
+      .field("mapped", &self.map.0.is_some())
       .finish()
   }
 }
@@ -309,7 +347,7 @@ impl SourceMapper {
   /// to the original `.ts`/`.js` source location.
   #[must_use]
   pub fn remap(&self, line: u32, col: u32) -> Option<(String, u32, u32)> {
-    let sm = self.map.as_ref()?;
+    let sm = self.map.get()?;
     let token = sm.lookup_token(line.saturating_sub(1), col.saturating_sub(1))?;
     let src = token.get_source().unwrap_or("<unknown>").to_string();
     Some((src, token.get_src_line() + 1, token.get_src_col() + 1))
@@ -415,6 +453,10 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<Bundle
     // Hidden: emit the map but no `//# sourceMappingURL` trailer in the
     // code we feed to QuickJS.
     sourcemap: Some(SourceMapType::Hidden),
+    // Only `sources` paths and mappings are ever read back (`remap`);
+    // `sourcesContent` would inline every spec's full text, tripling the
+    // map and the cache blob it is stored in.
+    sourcemap_exclude_sources: Some(true),
     // One chunk, always. Only the entry chunk is returned and compiled,
     // so a split chunk would be a reference to code nobody wrote — and
     // its modules would be missing from the cache's input set, making an
@@ -435,6 +477,7 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<Bundle
     ..Default::default()
   };
 
+  let build_started = Instant::now();
   let mut bundler = Bundler::with_plugins(
     options,
     vec![Arc::new(FerridriverRuntimePlugin {
@@ -445,9 +488,18 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<Bundle
   .map_err(|e| ScriptError::internal(format!("rolldown init: {e:?}")))?;
   // rolldown's generate future is large; box it so it doesn't bloat the
   // enclosing future.
+  let ctor_ms = build_started.elapsed().as_secs_f64() * 1000.0;
+  let gen_started = Instant::now();
   let out = Box::pin(bundler.generate())
     .await
     .map_err(|e| ScriptError::internal(format!("rolldown bundle: {e:?}")))?;
+  tracing::debug!(
+    target: "ferridriver::bundle",
+    entries = entry_paths.len(),
+    ctor_ms,
+    generate_ms = gen_started.elapsed().as_secs_f64() * 1000.0,
+    "rolldown build"
+  );
 
   // Every tsconfig the resolver consulted, whether pinned or discovered
   // per module. rolldown reports them alongside the modules it read.
@@ -521,11 +573,20 @@ pub async fn bundle_and_compile_named(
     cwd,
     bundle_env_fingerprint(),
   );
-  if let Some(hit) = crate::bytecode_cache::load(cache_key) {
-    let source_map = hit
-      .source_map_json
-      .and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok())
-      .map(Arc::new);
+  let probe_started = Instant::now();
+  let hit = crate::bytecode_cache::load(cache_key);
+  let probe_elapsed = probe_started.elapsed();
+  if let Some(hit) = hit {
+    let map_bytes = hit.source_map_json.as_ref().map_or(0, String::len);
+    let source_map = LazyMap::from_json(hit.source_map_json.as_deref());
+    tracing::debug!(
+      target: "ferridriver::bundle",
+      module = %module_name,
+      entries = entry_paths.len(),
+      map_bytes,
+      probe_ms = probe_elapsed.as_secs_f64() * 1000.0,
+      "bundle warm path"
+    );
     return Ok(CompiledBundle {
       module_name,
       bytecode: Arc::from(hit.bytecode.into_boxed_slice()),
@@ -533,12 +594,17 @@ pub async fn bundle_and_compile_named(
     });
   }
 
+  let bundle_started = Instant::now();
   let bundled = Box::pin(bundle_source(entry_paths, cwd)).await?;
+  let bundle_elapsed = bundle_started.elapsed();
   let (code, map_json, mut modules) = (bundled.code, bundled.source_map_json, bundled.modules);
   modules.extend(bundled.config_inputs);
 
+  let compile_started = Instant::now();
   let compiled = compile_bundled_source(&code, &module_name, map_json.as_deref()).await?;
+  let compile_elapsed = compile_started.elapsed();
 
+  let store_started = Instant::now();
   let inputs = crate::bytecode_cache::input_set(entry_paths, &modules);
   crate::bytecode_cache::store(
     cache_key,
@@ -547,6 +613,22 @@ pub async fn bundle_and_compile_named(
     map_json.as_deref(),
     None,
     &inputs,
+  );
+  let store_elapsed = store_started.elapsed();
+
+  tracing::debug!(
+    target: "ferridriver::bundle",
+    module = %module_name,
+    entries = entry_paths.len(),
+    modules = modules.len(),
+    code_bytes = code.len(),
+    map_bytes = map_json.as_ref().map_or(0, String::len),
+    bytecode_bytes = compiled.bytecode.len(),
+    probe_ms = probe_elapsed.as_secs_f64() * 1000.0,
+    bundle_ms = bundle_elapsed.as_secs_f64() * 1000.0,
+    compile_ms = compile_elapsed.as_secs_f64() * 1000.0,
+    store_ms = store_elapsed.as_secs_f64() * 1000.0,
+    "bundle cold path"
   );
 
   Ok(compiled)
@@ -574,6 +656,7 @@ pub async fn compile_bundled_source(
 ) -> Result<CompiledBundle, ScriptError> {
   let name = module_name.to_string();
   let code = code.to_string();
+  let rt_started = Instant::now();
   let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("bytecode runtime: {e}")))?;
   // QuickJS resolves the module graph EAGERLY at declare, and the
   // bundle keeps native specifiers external — so even this throwaway
@@ -590,28 +673,38 @@ pub async fn compile_bundled_source(
   let ctx = AsyncContext::full(&runtime)
     .await
     .map_err(|e| ScriptError::internal(format!("bytecode context: {e}")))?;
+  let rt_elapsed = rt_started.elapsed();
   let bytecode: Vec<u8> = ctx
     .async_with(async |ctx| {
       // The bundle's only remaining imports are the external native
       // specifiers, resolved by the loader installed above.
+      let declare_started = Instant::now();
       let module = Module::declare(ctx.clone(), name.into_bytes(), code.into_bytes())
         .catch(&ctx)
         .map_err(|e| caught_to_script_error(e, ""))?;
-      module
+      let declare_elapsed = declare_started.elapsed();
+      let write_started = Instant::now();
+      let out = module
         .write(WriteOptions {
           endianness: WriteOptionsEndianness::Native,
           ..Default::default()
         })
-        .map_err(|e| ScriptError::internal(format!("module write: {e}")))
+        .map_err(|e| ScriptError::internal(format!("module write: {e}")));
+      tracing::debug!(
+        target: "ferridriver::bundle",
+        runtime_ms = rt_elapsed.as_secs_f64() * 1000.0,
+        declare_ms = declare_elapsed.as_secs_f64() * 1000.0,
+        write_ms = write_started.elapsed().as_secs_f64() * 1000.0,
+        "bundle compile split"
+      );
+      out
     })
     .await?;
 
   Ok(CompiledBundle {
     module_name: module_name.to_string(),
     bytecode: Arc::from(bytecode.into_boxed_slice()),
-    source_map: source_map_json
-      .and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok())
-      .map(Arc::new),
+    source_map: LazyMap::from_json(source_map_json),
   })
 }
 
@@ -685,7 +778,7 @@ impl CompiledBundle {
   /// to the original `.ts`/`.js` source location.
   #[must_use]
   pub fn remap(&self, line: u32, col: u32) -> Option<(String, u32, u32)> {
-    let sm = self.source_map.as_ref()?;
+    let sm = self.source_map.get()?;
     let token = sm.lookup_token(line.saturating_sub(1), col.saturating_sub(1))?;
     let src = token.get_source().unwrap_or("<unknown>").to_string();
     Some((src, token.get_src_line() + 1, token.get_src_col() + 1))
@@ -755,7 +848,7 @@ impl CompiledBundle {
   /// jail (every input must live under an allowed root).
   #[must_use]
   pub fn source_files(&self, cwd: &Path) -> Vec<PathBuf> {
-    let Some(sm) = self.source_map.as_ref() else {
+    let Some(sm) = self.source_map.get() else {
       return Vec::new();
     };
     sm.sources()
@@ -980,11 +1073,7 @@ impl CompiledExtension {
   pub fn mapper(&self) -> SourceMapper {
     SourceMapper {
       module_name: self.module_name.clone(),
-      map: self
-        .source_map_json
-        .as_deref()
-        .and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok())
-        .map(Arc::new),
+      map: LazyMap::from_json(self.source_map_json.as_deref()),
     }
   }
 }

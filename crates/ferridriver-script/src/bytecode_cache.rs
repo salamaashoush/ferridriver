@@ -31,8 +31,6 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use serde::{Deserialize, Serialize};
-
 /// One cached compile: the bytecode plus the auxiliary data each caller
 /// needs to reconstruct its result without re-running rolldown.
 pub struct CacheEntry {
@@ -51,22 +49,6 @@ pub struct CacheEntry {
   pub inputs: Vec<PathBuf>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct Manifest {
-  module_name: String,
-  source_map_json: Option<String>,
-  aux: Option<String>,
-  /// `(absolute path, content hash)` for every transitive input.
-  inputs: Vec<(String, u64)>,
-  /// Hash of the `.bin` this manifest was written with. `.bin` and
-  /// `.json` are two separate atomic writes; two processes racing a
-  /// store after an input edit can interleave so one writer's manifest
-  /// pairs with the other's bytecode. Verifying on load rejects the
-  /// torn pair (input hashes alone cannot — both writers read the same
-  /// new inputs).
-  bytecode_hash: u64,
-}
-
 fn disabled() -> bool {
   std::env::var_os("FERRIDRIVER_NO_BYTECODE_CACHE").is_some()
 }
@@ -75,9 +57,9 @@ fn disabled() -> bool {
 /// `Module::load` only by an identical toolchain. `fdbc<N>` is our own
 /// format version — bump it on any change to the manifest shape, or to
 /// anything baked into the bytecode that a reader now depends on.
-/// `fdbc4` retired extension bytecode named after the file's position in
-/// its batch: the source-map registry keys on the module name, so two
-/// extensions compiled in different batches used to collide there.
+/// `fdbc5` records each input's modification time and length rather than a
+/// hash of its contents: validating a hit no longer reads the files it is
+/// trying to avoid reading.
 ///
 /// Beyond the raw bytecode ABI (QuickJS version, arch, endianness,
 /// pointer width) the tag folds in the crate version, as a proxy for
@@ -96,7 +78,7 @@ fn abi_tag() -> &'static str {
       .unwrap_or("unknown");
     let endian = if cfg!(target_endian = "big") { "be" } else { "le" };
     format!(
-      "fdbc4-v{}-qjs{qjs}-{}-{endian}-p{}",
+      "fdbc6-v{}-qjs{qjs}-{}-{endian}-p{}",
       env!("CARGO_PKG_VERSION"),
       std::env::consts::ARCH,
       std::mem::size_of::<usize>() * 8,
@@ -133,12 +115,6 @@ fn user_cache_base() -> Option<PathBuf> {
     return Some(PathBuf::from(h).join("Library").join("Caches"));
   }
   std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache"))
-}
-
-fn hash_bytes(bytes: &[u8]) -> u64 {
-  let mut h = std::collections::hash_map::DefaultHasher::new();
-  bytes.hash(&mut h);
-  h.finish()
 }
 
 /// A stable key for a set of entry paths (canonicalized, order-independent).
@@ -218,7 +194,7 @@ pub fn inputs_fingerprint(inputs: &[PathBuf]) -> Option<u64> {
   let mut h = std::collections::hash_map::DefaultHasher::new();
   for p in inputs {
     p.hash(&mut h);
-    hash_bytes(&std::fs::read(p).ok()?).hash(&mut h);
+    source_stamp(p)?.hash(&mut h);
   }
   Some(h.finish())
 }
@@ -237,31 +213,44 @@ pub fn load(key: u64) -> Option<CacheEntry> {
   if disabled() {
     return None;
   }
-  let (bin_path, json_path) = paths(key)?;
-  let manifest: Manifest = serde_json::from_slice(&std::fs::read(json_path).ok()?).ok()?;
-  for (path, want) in &manifest.inputs {
-    let bytes = std::fs::read(path).ok()?;
-    if hash_bytes(&bytes) != *want {
-      return None;
-    }
-  }
-  let bytecode = std::fs::read(bin_path).ok()?;
-  if hash_bytes(&bytecode) != manifest.bytecode_hash {
+  let (bin_path, _) = paths(key)?;
+  let raw = std::fs::read(bin_path).ok()?;
+  let mut r = Reader::new(&raw);
+  if r.take(4)? != BUNDLE_MAGIC {
     return None;
   }
+  let n_inputs = r.u32()? as usize;
+  let mut inputs = Vec::with_capacity(n_inputs);
+  for _ in 0..n_inputs {
+    let stamp = r.u64()?;
+    let path = PathBuf::from(std::str::from_utf8(r.slice()?).ok()?);
+    // Freshness is a stat, not a read: proving 50 files are unchanged by
+    // hashing their contents costs exactly the IO the cache exists to avoid.
+    if source_stamp(&path)? != stamp {
+      return None;
+    }
+    inputs.push(path);
+  }
+  let module_name = std::str::from_utf8(r.slice()?).ok()?.to_string();
+  let source_map_json = r.opt_str().ok()?;
+  let aux = r.opt_str().ok()?;
+  let bytecode = r.slice()?.to_vec();
   Some(CacheEntry {
     bytecode,
-    module_name: manifest.module_name,
-    source_map_json: manifest.source_map_json,
-    aux: manifest.aux,
-    inputs: manifest.inputs.iter().map(|(p, _)| PathBuf::from(p)).collect(),
+    module_name,
+    source_map_json,
+    aux,
+    inputs,
   })
 }
 
-/// Persist a freshly compiled `key` -> bytecode entry. Best-effort: any
-/// IO failure is swallowed (the cache is an optimization, never a
-/// correctness dependency). Writes are atomic via temp-file + rename so a
-/// concurrent or crashed writer never exposes a torn manifest.
+/// Persist a freshly compiled `key` -> bytecode entry. Best-effort: any IO
+/// failure is swallowed (the cache is an optimization, never a correctness
+/// dependency).
+///
+/// One binary record, not a JSON manifest beside a blob: the manifest used to
+/// carry the source map as a JSON *string*, so every write re-escaped a
+/// map larger than the code it maps, and paid two write+rename pairs for it.
 pub fn store(
   key: u64,
   bytecode: &[u8],
@@ -273,32 +262,117 @@ pub fn store(
   if disabled() {
     return;
   }
-  let Some((bin_path, json_path)) = paths(key) else {
+  let Some((bin_path, _)) = paths(key) else {
     return;
   };
-  let input_hashes: Vec<(String, u64)> = inputs
+  let stamped: Vec<(String, u64)> = inputs
     .iter()
-    .filter_map(|p| {
-      let bytes = std::fs::read(p).ok()?;
-      Some((p.to_string_lossy().into_owned(), hash_bytes(&bytes)))
-    })
+    .filter_map(|p| Some((p.to_string_lossy().into_owned(), source_stamp(p)?)))
     .collect();
-  let manifest = Manifest {
-    module_name: module_name.to_string(),
-    source_map_json: source_map_json.map(str::to_string),
-    aux: aux.map(str::to_string),
-    inputs: input_hashes,
-    bytecode_hash: hash_bytes(bytecode),
-  };
-  let Ok(json) = serde_json::to_vec(&manifest) else {
-    return;
-  };
-  let _ = atomic_write(&bin_path, bytecode);
-  let _ = atomic_write(&json_path, &json);
+
+  let mut buf = Vec::with_capacity(bytecode.len() + source_map_json.map_or(0, str::len) + 4096);
+  buf.extend_from_slice(BUNDLE_MAGIC);
+  buf.extend_from_slice(&u32::try_from(stamped.len()).unwrap_or(0).to_le_bytes());
+  for (path, stamp) in &stamped {
+    buf.extend_from_slice(&stamp.to_le_bytes());
+    put_slice(&mut buf, path.as_bytes());
+  }
+  put_slice(&mut buf, module_name.as_bytes());
+  put_opt(&mut buf, source_map_json);
+  put_opt(&mut buf, aux);
+  put_slice(&mut buf, bytecode);
+  let _ = atomic_write(&bin_path, &buf);
+}
+
+/// Magic + format version of a bundle record.
+const BUNDLE_MAGIC: &[u8; 4] = b"FDB1";
+
+fn put_slice(buf: &mut Vec<u8>, bytes: &[u8]) {
+  buf.extend_from_slice(&u64::try_from(bytes.len()).unwrap_or(0).to_le_bytes());
+  buf.extend_from_slice(bytes);
+}
+
+fn put_opt(buf: &mut Vec<u8>, value: Option<&str>) {
+  match value {
+    Some(v) => {
+      buf.push(1);
+      put_slice(buf, v.as_bytes());
+    },
+    None => buf.push(0),
+  }
+}
+
+/// Cursor over a record, refusing anything that runs past the end -- which is
+/// what a write cut short by a crash looks like.
+struct Reader<'a> {
+  raw: &'a [u8],
+  at: usize,
+}
+
+impl<'a> Reader<'a> {
+  fn new(raw: &'a [u8]) -> Self {
+    Self { raw, at: 0 }
+  }
+
+  fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+    let end = self.at.checked_add(n)?;
+    let out = self.raw.get(self.at..end)?;
+    self.at = end;
+    Some(out)
+  }
+
+  fn u32(&mut self) -> Option<u32> {
+    Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+  }
+
+  fn u64(&mut self) -> Option<u64> {
+    Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+  }
+
+  fn slice(&mut self) -> Option<&'a [u8]> {
+    let len = usize::try_from(self.u64()?).ok()?;
+    self.take(len)
+  }
+
+  /// Reads an optional string, distinguishing "absent" from "unreadable":
+  /// `Err(())` is a truncated record, `Ok(None)` is a field that was never
+  /// written.
+  fn opt_str(&mut self) -> Result<Option<String>, ()> {
+    match self.take(1).ok_or(())?[0] {
+      0 => Ok(None),
+      _ => Ok(Some(
+        std::str::from_utf8(self.slice().ok_or(())?)
+          .map_err(|_| ())?
+          .to_string(),
+      )),
+    }
+  }
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
   let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
   std::fs::write(&tmp, bytes)?;
   std::fs::rename(&tmp, path)
+}
+
+/// Identity of a module's source WITHOUT reading it: modification time and
+/// length, folded together.
+///
+/// Hashing the bytes would mean reading every file on every run just to learn
+/// it had not changed -- the read the cache exists to avoid. A stamp collision
+/// needs an edit that preserves both the exact byte length and the nanosecond
+/// mtime, which is what `tsc --incremental`, vite, and webpack all settle for.
+#[must_use]
+pub fn source_stamp(path: &Path) -> Option<u64> {
+  let meta = std::fs::metadata(path).ok()?;
+  let mtime = meta
+    .modified()
+    .ok()?
+    .duration_since(std::time::UNIX_EPOCH)
+    .ok()?
+    .as_nanos() as u64;
+  let mut h = std::collections::hash_map::DefaultHasher::new();
+  mtime.hash(&mut h);
+  meta.len().hash(&mut h);
+  Some(h.finish())
 }
