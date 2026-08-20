@@ -190,7 +190,8 @@ pub async fn capture_with_options(
   locator: &Locator,
   options: &ScreenshotMatcherOptions,
 ) -> Result<Vec<u8>, TestFailure> {
-  capture_target(&locator.page(), Some(locator), options).await
+  let page = locator.page();
+  capture_target(page, Some(locator), options).await
 }
 
 /// The same capture for a PAGE subject.
@@ -214,30 +215,18 @@ async fn capture_target(
   locator: Option<&Locator>,
   options: &ScreenshotMatcherOptions,
 ) -> Result<Vec<u8>, TestFailure> {
-  let page = Arc::clone(page);
+  use ferridriver::options::{AnimationsMode, CaretMode, ScreenshotScale};
 
-  let mut style_blocks: Vec<String> = Vec::new();
-
-  if options.animations.as_deref() == Some("disabled") {
-    style_blocks.push(
-      "*, *::before, *::after { \
-        animation-duration: 0s !important; \
-        animation-delay: 0s !important; \
-        animation-iteration-count: 1 !important; \
-        transition-duration: 0s !important; \
-        transition-delay: 0s !important; \
-      }"
-      .to_string(),
-    );
-  }
-
-  if options.caret.as_deref() == Some("hide") {
-    style_blocks.push("html, body, * { caret-color: transparent !important; }".to_string());
-  }
-
+  // Every capture option is lowered onto the SAME options core's
+  // `page.screenshot()` takes, rather than re-implemented here. The
+  // matcher used to inject its own CSS for animations, caret, style and
+  // masks: two implementations of one option, and the weaker one. Its
+  // mask was a `background`/`color` rule, so a masked element's children
+  // painted straight through it, and `scale` had nowhere to go at all.
+  let mut style = String::new();
   for style_path in &options.style_path {
     match std::fs::read_to_string(style_path) {
-      Ok(content) => style_blocks.push(content),
+      Ok(content) => style.push_str(&content),
       Err(e) => {
         return Err(TestFailure {
           message: format!("toHaveScreenshot stylePath {} unreadable: {e}", style_path.display()),
@@ -249,67 +238,61 @@ async fn capture_target(
     }
   }
 
-  let mask_color = options.mask_color.as_deref().unwrap_or("#FF00FF");
-  if !options.mask.is_empty() {
-    let mut mask_css = String::new();
-    for selector in &options.mask {
-      mask_css.push_str(selector);
-      mask_css.push_str(" { background: ");
-      mask_css.push_str(mask_color);
-      mask_css.push_str(" !important; color: ");
-      mask_css.push_str(mask_color);
-      mask_css.push_str(" !important; }\n");
-    }
-    style_blocks.push(mask_css);
-  }
+  let animations = match options.animations.as_deref() {
+    Some("disabled") => Some(AnimationsMode::Disabled),
+    Some("allow") => Some(AnimationsMode::Allow),
+    _ => None,
+  };
+  // Playwright's default is `hide`; only an explicit `initial` keeps the
+  // caret, which is exactly what core's `build_css` encodes.
+  let caret = match options.caret.as_deref() {
+    Some("initial") => Some(CaretMode::Initial),
+    Some("hide") => Some(CaretMode::Hide),
+    _ => None,
+  };
+  let scale = match options.scale.as_deref() {
+    Some("css") => Some(ScreenshotScale::Css),
+    Some("device") => Some(ScreenshotScale::Device),
+    _ => None,
+  };
 
-  let token = "ferridriver-screenshot-capture";
-
-  if !style_blocks.is_empty() {
-    let combined = style_blocks.join("\n");
-    let escaped = serde_json::to_string(&combined).unwrap_or_else(|_| "\"\"".to_string());
-    let inject_script = format!(
-      "(function() {{ \
-        const s = document.createElement('style'); \
-        s.setAttribute('data-{TOK}', '1'); \
-        s.textContent = {ESC}; \
-        document.head.appendChild(s); \
-        return true; \
-      }})()",
-      TOK = token,
-      ESC = escaped,
-    );
-    let _ = page
-      .evaluate(
-        &inject_script,
-        ferridriver::protocol::SerializedArgument::default(),
-        None,
-      )
-      .await
-      .map_err(|e| TestFailure {
-        message: format!("screenshot capture-options inject failed: {e}"),
-        stack: None,
-        diff: None,
-        screenshot: None,
-      })?;
-  }
-
-  let raw_png = match locator {
-    Some(locator) => {
+  let raw_png = if let Some(locator) = locator {
+    {
+      // The element form has no `mask`/`style` of its own on the wire,
+      // so the page carries them and the element supplies the bounds.
+      let page_opts = ferridriver::options::ScreenshotOptions {
+        animations,
+        caret,
+        mask: options.mask.iter().map(|sel| page.locator(sel)).collect(),
+        mask_color: options.mask_color.clone(),
+        scale,
+        style: (!style.is_empty()).then(|| style.clone()),
+        ..Default::default()
+      };
+      let restore = install_page_capture_state(page, &page_opts).await?;
       let opts = ferridriver::options::ElementScreenshotOptions {
         omit_background: options.omit_background,
         ..Default::default()
       };
-      locator.screenshot().options(opts).await
-    },
-    None => {
+      let shot = locator.screenshot().options(opts).await;
+      restore.undo(page).await;
+      shot
+    }
+  } else {
+    {
       let opts = ferridriver::options::ScreenshotOptions {
+        animations,
+        caret,
         full_page: options.full_page,
+        mask: options.mask.iter().map(|sel| page.locator(sel)).collect(),
+        mask_color: options.mask_color.clone(),
         omit_background: options.omit_background,
+        scale,
+        style: (!style.is_empty()).then_some(style),
         ..Default::default()
       };
       page.screenshot().options(opts).await
-    },
+    }
   }
   .map_err(|e| TestFailure {
     message: format!("screenshot failed: {e}"),
@@ -318,19 +301,6 @@ async fn capture_target(
     screenshot: None,
   });
 
-  if !style_blocks.is_empty() {
-    let cleanup = format!(
-      "(function() {{ \
-        document.querySelectorAll('style[data-{TOK}]').forEach(function(n) {{ n.remove(); }}); \
-        return true; \
-      }})()",
-      TOK = token,
-    );
-    let _ = page
-      .evaluate(&cleanup, ferridriver::protocol::SerializedArgument::default(), None)
-      .await;
-  }
-
   let png = raw_png?;
 
   if let Some(clip) = options.clip {
@@ -338,6 +308,67 @@ async fn capture_target(
   } else {
     Ok(png)
   }
+}
+
+/// The page-level DOM state an ELEMENT capture still needs.
+///
+/// `locator.screenshot()` takes only the element's own options on every
+/// backend, so the style rules and mask overlays that belong to the page
+/// are installed around it and torn down after — the same pair core runs
+/// inside `page.screenshot()`, driven from here so both subjects reach
+/// one implementation.
+struct PageCaptureState {
+  style: bool,
+  mask: bool,
+}
+
+impl PageCaptureState {
+  async fn undo(self, page: &Arc<ferridriver::Page>) {
+    if self.mask {
+      let _ = eval_void(page, ferridriver::backend::screenshot_js::uninstall_mask_js()).await;
+    }
+    if self.style {
+      let _ = eval_void(page, ferridriver::backend::screenshot_js::uninstall_style_js()).await;
+    }
+  }
+}
+
+async fn eval_void(page: &Arc<ferridriver::Page>, js: &str) -> Result<(), ferridriver::error::FerriError> {
+  page
+    .evaluate(js, ferridriver::protocol::SerializedArgument::default(), None)
+    .await
+    .map(|_| ())
+}
+
+async fn install_page_capture_state(
+  page: &Arc<ferridriver::Page>,
+  opts: &ferridriver::options::ScreenshotOptions,
+) -> Result<PageCaptureState, TestFailure> {
+  let wire = opts.to_backend_opts();
+  let fail = |what: &str, e: ferridriver::error::FerriError| TestFailure {
+    message: format!("screenshot capture-options {what} failed: {e}"),
+    stack: None,
+    diff: None,
+    screenshot: None,
+  };
+
+  let css = ferridriver::backend::screenshot_js::build_css(&wire);
+  let mut state = PageCaptureState {
+    style: false,
+    mask: false,
+  };
+  if !css.is_empty() {
+    eval_void(page, &ferridriver::backend::screenshot_js::install_style_js(&css))
+      .await
+      .map_err(|e| fail("style", e))?;
+    state.style = true;
+  }
+  if let Some(install) = ferridriver::backend::screenshot_js::install_mask_js(&wire) {
+    page.ensure_engine_injected().await.map_err(|e| fail("mask", e))?;
+    eval_void(page, &install).await.map_err(|e| fail("mask", e))?;
+    state.mask = true;
+  }
+  Ok(state)
 }
 
 fn crop_png_to_clip(png: &[u8], clip: &super::ScreenshotClip) -> Result<Vec<u8>, TestFailure> {

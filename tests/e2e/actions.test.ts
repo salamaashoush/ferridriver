@@ -754,6 +754,36 @@ describe('actions', () => {
     expect(sum(plain)).toBe(sum(empty));
   });
 
+  test('script_screenshot_scale', async ({ page, browser, browserName }) => {
+    // `scale: 'css'` means one image pixel per CSS pixel even on a
+    // 2x context. CDP carries the factor on the capture CLIP, so a
+    // viewport shot -- which sends no clip of its own -- dropped the
+    // option entirely and always came back at device pixels.
+    const context = await browser.newContext({ viewport: { width: 200, height: 100 }, deviceScaleFactor: 2 });
+    try {
+      const p = await context.newPage();
+      await p.setContent('<style>html,body{margin:0;background:#334455}</style>');
+      // PNG stores width big-endian at byte 16.
+      const width = (bytes: Uint8Array): number =>
+        (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+
+      const device = await p.screenshot({ type: 'png', scale: 'device' });
+      const css = await p.screenshot({ type: 'png', scale: 'css' });
+
+      expect(width(device)).toBe(400);
+      if (browserName === 'firefox') {
+        // `browsingContext.captureScreenshot` has no scale parameter and
+        // Playwright's BiDi backend drops the argument the same way
+        // (`bidi/bidiPage.ts::takeScreenshot`).
+        expect(width(css)).toBe(400);
+      } else {
+        expect(width(css)).toBe(200);
+      }
+    } finally {
+      await context.close();
+    }
+  });
+
   test('script_add_init_script', async ({ page }) => {
     // `page.addInitScript(script, arg)` — the full Playwright surface
     // (Function + arg, string, `{ content }`), including the
@@ -1041,8 +1071,8 @@ describe('actions', () => {
     // sandboxed fs global.
     const path1 = test.info().outputPath('ferridriver_opts_a.txt');
     const path2 = test.info().outputPath('ferridriver_opts_b.txt');
-    await fs.writeFile(path1, 'alpha');
-    await fs.writeFile(path2, 'beta-beta');
+    await fs.promises.writeFile(path1, 'alpha');
+    await fs.promises.writeFile(path2, 'beta-beta');
 
     // Form 1 — single path string.
     await page.goto(dataUrl("<input type='file' id='f'>"));

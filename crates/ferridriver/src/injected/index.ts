@@ -545,6 +545,35 @@ if (!window.__fd) {
       return r.length > 0 ? r[0] : null;
     },
     selAll(parts: SelectorPart[]) { return executeSelector(parts, document); },
+
+    /**
+     * Paint `color` over every element a screenshot `mask` selector
+     * resolves to, tagging each overlay with `tag` so the teardown can
+     * remove exactly what it added. Mirrors Playwright's
+     * `injected.addMaskedElements(elements, color)`, driven from
+     * `server/screenshotter.ts::_maskElements`.
+     *
+     * Resolution goes through the selector engine, not
+     * `document.querySelectorAll`: a mask takes Locators, so `getByRole`,
+     * `internal:has-text`, `xpath=` and every other engine has to resolve
+     * here. A DOM-only query silently matched nothing for all of them and
+     * the capture came back unmasked.
+     */
+    addMaskedElements(selector: string, color: string, tag: string) {
+      let elements: Element[] = [];
+      try {
+        elements = injected.querySelectorAll(injected.parseSelector(selector), document);
+      } catch {
+        try { elements = [...document.querySelectorAll(selector)]; } catch { return; }
+      }
+      for (const el of elements) {
+        const r = el.getBoundingClientRect();
+        const o = document.createElement('div');
+        o.className = tag;
+        o.style.cssText = `all: initial; position: fixed; left: ${r.left}px; top: ${r.top}px; width: ${r.width}px; height: ${r.height}px; background: ${color}; z-index: 2147483647; pointer-events: none;`;
+        document.body.appendChild(o);
+      }
+    },
     selCount(parts: SelectorPart[]) { return executeSelector(parts, document).length; },
     scrollInfo() {
       return JSON.stringify({ scrollY: window.scrollY, scrollHeight: document.documentElement.scrollHeight, viewportHeight: window.innerHeight });

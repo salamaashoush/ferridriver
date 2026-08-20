@@ -470,6 +470,15 @@ pub mod screenshot_js {
   /// `None` when there are no selectors to mask — caller should skip
   /// the install/teardown JS entirely.
   ///
+  /// Resolution goes through the injected selector engine
+  /// (`window.__fd.addMaskedElements`), which the caller must have
+  /// injected first: a mask takes Locators, so every engine a Locator
+  /// can carry — `getByRole`, `internal:has-text`, `xpath=` — has to
+  /// resolve. A bare `document.querySelectorAll` understands only CSS
+  /// and silently matched nothing for the rest, producing an unmasked
+  /// capture with no error. Mirrors Playwright's
+  /// `screenshotter.ts::_maskElements`.
+  ///
   /// The overlay divs are tagged with a random class name stored on
   /// `window.__fd_mask_tag` so [`uninstall_mask_js`] can remove them
   /// without relying on the selectors resolving to the same matches
@@ -490,14 +499,7 @@ pub mod screenshot_js {
         window.__fd_mask_tag = tag;
         for (const sel of selectors) {{
           try {{
-            const els = document.querySelectorAll(sel);
-            for (const el of els) {{
-              const r = el.getBoundingClientRect();
-              const o = document.createElement('div');
-              o.className = tag;
-              o.style.cssText = `all: initial; position: fixed; left: ${{r.left}}px; top: ${{r.top}}px; width: ${{r.width}}px; height: ${{r.height}}px; background: ${{color}}; z-index: 2147483647; pointer-events: none;`;
-              document.body.appendChild(o);
-            }}
+            window.__fd.addMaskedElements(sel, color, tag);
           }} catch (e) {{}}
         }}
       }})()"

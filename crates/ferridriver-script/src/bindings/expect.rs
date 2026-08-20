@@ -1963,10 +1963,21 @@ impl ExpectJs {
           Some(v) if v.as_object().is_some() => (None, Some(v)),
           _ => (None, options.0),
         };
-        let opts_json: serde_json::Value = match opts_val {
-          Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(&ctx, v)?,
+        let mut opts_json: serde_json::Value = match &opts_val {
+          Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(&ctx, v.clone())?,
           _ => serde_json::json!({}),
         };
+        // `mask` is `Locator[]`, and a Locator is a native class: a plain
+        // serde walk of the bag turns each entry into an empty object and
+        // the mask silently disappears. Read the instances off the object
+        // and put their selectors back where the runner reads them. A
+        // bare selector string is accepted too, because that is what a
+        // caller with no Locator to hand can write.
+        if let Some(obj) = opts_val.as_ref().and_then(rquickjs::Value::as_object)
+          && let Some(mask) = mask_selectors(obj)?
+        {
+          opts_json["mask"] = serde_json::Value::Array(mask);
+        }
         let target = self.snapshot_target(&ctx, "toHaveScreenshot")?;
         bridge
           .match_screenshot(target, name, opts_json)
@@ -3421,3 +3432,35 @@ fn install_poll_not_getter<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquick
 // module (`locator.rs::inner_ref`, `page.rs::page_arc`,
 // `http_client.rs::inner_clone`) so they stay co-located with the
 // private field they expose.
+
+/// The `mask` entries of a `toHaveScreenshot` option bag, as selectors.
+///
+/// Returns `None` when the bag carries no `mask` at all, so an absent
+/// key stays absent rather than becoming an empty list.
+fn mask_selectors<'js>(obj: &rquickjs::Object<'js>) -> rquickjs::Result<Option<Vec<serde_json::Value>>> {
+  let v: rquickjs::Value<'js> = obj.get("mask")?;
+  if v.is_undefined() || v.is_null() {
+    return Ok(None);
+  }
+  let arr = v.into_array().ok_or_else(|| {
+    rquickjs::Error::new_from_js_message("toHaveScreenshot options", "mask", "expected an array of Locator")
+  })?;
+  let mut out = Vec::with_capacity(arr.len());
+  for item in arr.iter::<rquickjs::Value<'js>>() {
+    let item = item?;
+    if let Some(s) = item.as_string() {
+      out.push(serde_json::Value::String(s.to_string()?));
+    } else if let Ok(class) = rquickjs::Class::<crate::bindings::locator::LocatorJs>::from_value(&item) {
+      out.push(serde_json::Value::String(
+        class.borrow().inner_ref().selector().to_string(),
+      ));
+    } else {
+      return Err(rquickjs::Error::new_from_js_message(
+        "toHaveScreenshot options",
+        "mask",
+        "each mask entry must be a Locator or a selector string",
+      ));
+    }
+  }
+  Ok(Some(out))
+}

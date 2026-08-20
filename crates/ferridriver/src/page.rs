@@ -4,7 +4,7 @@
 //! Locator methods are lazy (don't query DOM until action).
 
 use crate::actions;
-use crate::backend::{AnyPage, CookieData, ImageFormat, ScreenshotOpts};
+use crate::backend::{AnyPage, CookieData};
 use crate::error::Result;
 use crate::events::{EventEmitter, PageEvent};
 use crate::frame::Frame;
@@ -1967,38 +1967,29 @@ impl Page {
     })
   }
 
+  /// Inject the selector engine into this page if it is not already
+  /// there.
+  ///
+  /// Public because a caller that installs the DOM-side half of a
+  /// capture itself — the screenshot MATCHER, which wraps an element
+  /// capture in the page's own mask and style — has to guarantee the
+  /// same precondition `screenshot()` guarantees.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the injection evaluate fails.
+  pub async fn ensure_engine_injected(&self) -> Result<()> {
+    self.inner.ensure_engine_injected().await
+  }
+
   /// Implementation of [`Self::screenshot`].
   pub(crate) async fn screenshot_impl(&self, opts: ScreenshotOptions) -> Result<Vec<u8>> {
-    let format = match opts.format.unwrap_or_default() {
-      crate::options::ScreenshotFormat::Jpeg => ImageFormat::Jpeg,
-      crate::options::ScreenshotFormat::Webp => ImageFormat::Webp,
-      crate::options::ScreenshotFormat::Png => ImageFormat::Png,
-    };
-    let scale = opts.scale.map(|s| match s {
-      crate::options::ScreenshotScale::Css => crate::backend::ScreenshotScale::Css,
-      crate::options::ScreenshotScale::Device => crate::backend::ScreenshotScale::Device,
-    });
-    let animations = opts.animations.map(|a| match a {
-      crate::options::AnimationsMode::Disabled => crate::backend::ScreenshotAnimations::Disabled,
-      crate::options::AnimationsMode::Allow => crate::backend::ScreenshotAnimations::Allow,
-    });
-    let caret = opts.caret.map(|c| match c {
-      crate::options::CaretMode::Hide => crate::backend::ScreenshotCaret::Hide,
-      crate::options::CaretMode::Initial => crate::backend::ScreenshotCaret::Initial,
-    });
-    let wire = ScreenshotOpts {
-      format,
-      quality: opts.quality,
-      full_page: opts.full_page.unwrap_or(false),
-      clip: opts.clip,
-      omit_background: opts.omit_background.unwrap_or(false),
-      scale,
-      animations,
-      caret,
-      mask: opts.mask.iter().map(|l| l.selector().to_string()).collect(),
-      mask_color: opts.mask_color.clone(),
-      style: opts.style.clone(),
-    };
+    let wire = opts.to_backend_opts();
+    // A mask resolves through the injected selector engine, so it has to
+    // be present before the backend runs the install expression.
+    if !wire.mask.is_empty() {
+      self.inner.ensure_engine_injected().await?;
+    }
     let capture = async { self.inner.screenshot(wire).await };
     let bytes = match opts.timeout {
       Some(ms) if ms > 0 => {

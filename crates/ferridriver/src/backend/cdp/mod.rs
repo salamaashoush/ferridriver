@@ -3280,6 +3280,30 @@ impl<T: CdpWrap> CdpPage<T> {
           "x": 0, "y": 0, "width": w, "height": h, "scale": scale
       });
       params["captureBeyondViewport"] = serde_json::json!(true);
+    } else if css_scale {
+      // A plain viewport capture sends no clip, and CDP's scale lives ON
+      // the clip — so `scale: "css"` was accepted and dropped, and every
+      // capture came back at device pixels. Playwright always sends a
+      // clip for exactly this reason, deriving it from the viewport when
+      // the shot is not full-page (`chromium/crPage.ts::takeScreenshot`).
+      let metrics = self.cmd("Page.getLayoutMetrics", super::empty_params()).await?;
+      let viewport = metrics
+        .get("cssVisualViewport")
+        .or_else(|| metrics.get("visualViewport"));
+      let num = |key: &str, fallback: f64| {
+        viewport
+          .and_then(|v| v.get(key))
+          .and_then(serde_json::Value::as_f64)
+          .unwrap_or(fallback)
+      };
+      let page_scale = num("scale", 1.0);
+      params["clip"] = serde_json::json!({
+          "x": num("pageX", 0.0),
+          "y": num("pageY", 0.0),
+          "width": num("clientWidth", 800.0),
+          "height": num("clientHeight", 600.0),
+          "scale": page_scale / self.device_pixel_ratio().await.unwrap_or(1.0),
+      });
     }
     Ok(params)
   }
