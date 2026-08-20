@@ -810,18 +810,16 @@ fn append_fixture(r: &mut TestRegistry, visible: &mut Vec<usize>, parsed: Parsed
         )));
       }
     } else {
+      // An override that supplies NO options bag inherits the whole bag
+      // from what it shadows -- except `box`, which upstream is explicit
+      // about withholding (`common/fixtures.ts:151-153`) so an override
+      // is visible by default even when the registration it shadows was
+      // boxed away. An override that DOES supply a bag inherits nothing:
+      // upstream takes that object as written.
       reg.scope = prev.scope;
       reg.auto = prev.auto;
       reg.option = prev.option;
-    }
-    // `timeout` and `title` carry across an override; `box` does NOT.
-    // Upstream is explicit about the asymmetry
-    // (`common/fixtures.ts:152`): an override should be visible by
-    // default even when the registration it shadows was boxed away.
-    if reg.timeout_ms.is_none() {
       reg.timeout_ms = prev.timeout_ms;
-    }
-    if reg.title.is_none() {
       reg.title.clone_from(&prev.title);
     }
   }
@@ -2194,7 +2192,7 @@ impl FixtureSetup {
   /// not appear — and `box: true` keeps the step but marks it grouped,
   /// which is what keeps a framework's own fixtures out of the way of a
   /// test's steps (`worker/fixtureRunner.ts:47-53`).
-  async fn around<'js, F, Fut>(&self, ctx: &Ctx<'js>, name: &str, body: F) -> Result<(), ScriptError>
+  async fn around<F, Fut>(&self, ctx: &Ctx<'_>, name: &str, body: F) -> Result<(), ScriptError>
   where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<(), ScriptError>>,
@@ -2956,7 +2954,80 @@ pub async fn collect_tests(vm: &crate::vm::VmHandle) -> Result<CollectedTests, S
 
 #[cfg(test)]
 mod tests {
-  use super::{fixture_step_title, interpolate_title, parse_destructured_keys};
+  use super::{
+    FixtureBox, FixtureReg, FixtureScope, ParsedFixture, TestRegistry, append_fixture, fixture_step_title,
+    interpolate_title, parse_destructured_keys,
+  };
+
+  fn reg(name: &str, timeout_ms: Option<u64>, title: Option<&str>, boxed: Option<FixtureBox>) -> FixtureReg {
+    FixtureReg {
+      name: name.to_string(),
+      scope: FixtureScope::Test,
+      auto: false,
+      option: false,
+      timeout_ms,
+      title: title.map(str::to_string),
+      boxed,
+      factory: None,
+      static_value: None,
+      deps: Vec::new(),
+    }
+  }
+
+  /// Upstream inherits the shadowed registration's whole option bag only
+  /// when the override supplies NO bag, and withholds `box` even then
+  /// (`common/fixtures.ts:151-153`). An override that DOES supply a bag
+  /// is taken as written, so a `{ box: true }` override of a
+  /// `{ timeout, title }` fixture keeps neither.
+  #[test]
+  fn a_fixture_override_inherits_by_upstream_s_asymmetry() {
+    let mut r = TestRegistry::default();
+    let mut visible: Vec<usize> = Vec::new();
+    append_fixture(
+      &mut r,
+      &mut visible,
+      ParsedFixture {
+        reg: reg("auth", Some(250), Some("sign in"), Some(FixtureBox::Group)),
+        explicit_options: true,
+        option_specified: false,
+      },
+    )
+    .expect("base registration");
+
+    // No bag: timeout and title carry, `box` does not.
+    let mut bare = visible.clone();
+    append_fixture(
+      &mut r,
+      &mut bare,
+      ParsedFixture {
+        reg: reg("auth", None, None, None),
+        explicit_options: false,
+        option_specified: false,
+      },
+    )
+    .expect("bare override");
+    let inherited = &r.fixtures[*bare.last().expect("appended")];
+    assert_eq!(inherited.timeout_ms, Some(250));
+    assert_eq!(inherited.title.as_deref(), Some("sign in"));
+    assert_eq!(inherited.boxed, None);
+
+    // A bag of its own: nothing carries, not even the keys it omits.
+    let mut bagged = visible.clone();
+    append_fixture(
+      &mut r,
+      &mut bagged,
+      ParsedFixture {
+        reg: reg("auth", None, None, Some(FixtureBox::Group)),
+        explicit_options: true,
+        option_specified: false,
+      },
+    )
+    .expect("bagged override");
+    let written = &r.fixtures[*bagged.last().expect("appended")];
+    assert_eq!(written.timeout_ms, None);
+    assert_eq!(written.title, None);
+    assert_eq!(written.boxed, Some(FixtureBox::Group));
+  }
 
   #[test]
   fn a_fixture_step_is_titled_by_its_title_then_its_name() {
