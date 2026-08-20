@@ -17,14 +17,18 @@ alias c := check
 alias t := test
 alias tf := test-fast
 
-# Two acceptance runs. The parity gate — mergeTests, expect.extend,
+# Two acceptance runs, each hermetic: `--no-inherit` so neither picks up
+# the repository layer, whose `testIgnore` excludes these very
+# directories from the repo's own run and would otherwise leave the
+# parity suite with nothing to collect.
+# The parity gate — mergeTests, expect.extend,
 # defineConfig, devices, snapshotPathTemplate — with NO extensions
 # loaded, because every one of those is core. Then the driving case: a
 # BDD suite that reaches its framework through an extension package,
 # importing `playwright-bdd` with no edit to its own source.
 acceptance:
   cargo build --bin ferridriver
-  ./target/debug/ferridriver test --config tests/acceptance/parity/playwright.config.ts
+  ./target/debug/ferridriver test --no-inherit --config tests/acceptance/parity/playwright.config.ts
   cd tests/acceptance/driving && ../../../target/debug/ferridriver bdd --no-inherit
 
 # Check compilation (default-members; ferridriver-node excluded)
