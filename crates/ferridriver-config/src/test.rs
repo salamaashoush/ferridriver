@@ -497,7 +497,13 @@ pub struct TestConfig {
   pub screenshot_on_failure: bool,
   /// Playwright's `use: { screenshot }`, resolved. Written here rather
   /// than read out of the `use` bag so every consumer asks one place.
-  #[serde(default)]
+  ///
+  /// Deliberately WITHOUT a field-level `#[serde(default)]`: the
+  /// container's `default` fills a missing field from
+  /// `TestConfig::default()`, which is `only-on-failure`, while a field
+  /// default would fill it from `ScreenshotOption::default()`, which is
+  /// `off` — silently disabling the failure screenshot for every config
+  /// that does not spell the key.
   pub screenshot: ScreenshotOption,
   #[serde(default)]
   pub video: VideoConfig,
