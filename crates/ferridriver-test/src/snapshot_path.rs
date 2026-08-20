@@ -304,10 +304,30 @@ pub fn apply_path_template(cx: &SnapshotPathContext, template: &str, name_argume
     .unwrap_or_default();
   let project_segment = sanitize_for_file_path(&cx.project_name);
 
+  // `{testDir}` and `{snapshotDir}` are ABSOLUTE in Playwright -- both
+  // are resolved relative to the directory holding the config
+  // (`types/test.d.ts:537-540`). Substituting the relative form made the
+  // template's own output relative, which the tail of this function then
+  // joined onto `config_dir` a SECOND time: a suite whose config sits in
+  // `tests/acceptance/parity` wrote its baselines to
+  // `tests/acceptance/parity/tests/acceptance/parity/__screenshots__`,
+  // and `testInfo.snapshotPath()` disagreed with the file the matcher
+  // wrote as soon as the process cwd was not the config's directory.
+  let absolute = |dir: &Path| {
+    if dir.is_absolute() {
+      dir.to_path_buf()
+    } else {
+      cx.config_dir.join(dir)
+    }
+  };
   let mut out = template.to_string();
   for (token, value, omit_when_empty) in [
-    ("testDir", cx.test_dir.to_string_lossy().into_owned(), false),
-    ("snapshotDir", cx.snapshot_dir.to_string_lossy().into_owned(), false),
+    ("testDir", absolute(&cx.test_dir).to_string_lossy().into_owned(), false),
+    (
+      "snapshotDir",
+      absolute(&cx.snapshot_dir).to_string_lossy().into_owned(),
+      false,
+    ),
     ("snapshotSuffix", cx.snapshot_suffix.clone(), true),
     ("testFileDir", file_dir, false),
     ("platform", node_platform().to_string(), false),
