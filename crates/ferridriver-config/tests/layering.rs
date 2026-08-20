@@ -196,6 +196,65 @@ fn package_specifiers_keep_their_declaring_directory() {
   assert_eq!(specs[0].base_dir, t.user_dir().join("ferridriver"));
 }
 
+/// A directory may carry a DOCUMENT config and a MODULE config at once,
+/// with the module folding on top.
+///
+/// It has to: `extensions`, `[bundler]` and `[extensions.policy]` are
+/// resolved before any module can be compiled, so a suite whose config
+/// is a TypeScript module still needs a document beside it to name the
+/// packages that serve the module's own imports. Treating the pair as a
+/// shadow made that combination unexpressible -- the document won and
+/// the module was reported as "also present and ignored".
+#[test]
+fn a_document_and_a_module_config_in_one_directory_both_apply() {
+  let t = Tree::new();
+  t.write(
+    "repo/ferridriver.toml",
+    "extensions = [\"./pkg\"]\n[test]\ntimeout = 1234\n",
+  );
+  t.write("repo/ferridriver.config.ts", "export default {};");
+
+  let mut opts = t.opts(t.repo());
+  // The module's contribution, as a loader would have evaluated it.
+  opts.module_loader = Some(std::sync::Arc::new(|_: &std::path::Path| {
+    Ok(serde_json::json!({ "test": { "timeout": 4321, "testDir": "specs" } }))
+  }));
+
+  let r = resolve(&opts).expect("resolve");
+
+  assert!(
+    r.warnings
+      .iter()
+      .all(|w| !w.message.contains("also present and ignored")),
+    "a document and a module are not rivals: {:?}",
+    r.warnings
+  );
+  // The module folds ON TOP of the document.
+  assert_eq!(r.config.test.timeout, 4321);
+  // And the document's own keys, which no module can decide, survive.
+  assert_eq!(r.config.extensions.paths().len(), 1);
+}
+
+/// Two DOCUMENTS in one directory are still rivals, and so are two
+/// modules: only the highest-precedence basename of each family is read.
+#[test]
+fn two_configs_of_the_same_family_still_shadow() {
+  let t = Tree::new();
+  t.write("repo/ferridriver.toml", "[test]\ntimeout = 1234\n");
+  t.write("repo/ferridriver.yaml", "test:\n  timeout: 9999\n");
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+
+  assert_eq!(r.config.test.timeout, 1234);
+  assert!(
+    r.warnings
+      .iter()
+      .any(|w| w.message.contains("also present and ignored") && w.message.contains("ferridriver.yaml")),
+    "the shadowed sibling must be reported: {:?}",
+    r.warnings
+  );
+}
+
 #[test]
 fn tilde_extension_specs_are_expanded_not_treated_as_packages() {
   let t = Tree::new();
@@ -671,7 +730,7 @@ mod extension_defaults {
         || body.find("\n  }").expect("interface closes"),
         |at| body.find("\n  }").map_or(at, |inner| inner.min(at)),
       );
-      body[..end]
+      let mut keys: Vec<String> = body[..end]
         .lines()
         .skip(1)
         .map(str::trim)
@@ -679,19 +738,27 @@ mod extension_defaults {
         .filter(|line| !(line.starts_with("/*") || line.starts_with('*') || line.starts_with("//")))
         .filter_map(|line| line.split('?').next().map(str::to_string))
         .filter(|key| !key.is_empty())
-        .collect()
+        .collect();
+      // The contract is the key SET. Declaration order is the `.d.ts`
+      // author's and the schema's is whatever `serde_json::Map` is built
+      // from -- a BTreeMap alone in this crate, an IndexMap once the
+      // workspace unifies `serde_json/preserve_order` in from rolldown.
+      keys.sort();
+      keys
     };
     let declared = |interface: &str| declared_in(&contract, interface);
 
     let document = serde_json::to_value(ferridriver_config::FerridriverConfig::default()).expect("serialize");
     let schema_keys = |section: &str, refused: &[&str]| -> Vec<String> {
-      document[section]
+      let mut keys: Vec<String> = document[section]
         .as_object()
         .expect("section")
         .keys()
         .filter(|key| !refused.contains(&key.as_str()))
         .cloned()
-        .collect()
+        .collect();
+      keys.sort();
+      keys
     };
 
     assert_eq!(
@@ -1093,4 +1160,40 @@ fn every_trace_and_video_mode_records_and_retains_as_upstream_does() {
   // The deprecated spellings upstream still accepts.
   assert_eq!(TraceMode::parse_label("retry-with-trace"), TraceMode::OnFirstRetry);
   assert_eq!(VideoMode::parse_label("retry-with-video"), VideoMode::OnFirstRetry);
+}
+
+/// `[browser]` declares the browser once for every host. `backend` and
+/// `headless` are read straight off each section as a concrete value, so
+/// without this they could never defer to the top level and a single
+/// `browser:` block would silently apply to the MCP server and not the runner.
+#[test]
+fn the_top_level_browser_hands_its_scalars_to_every_host() {
+  let t = Tree::new();
+  t.write(
+    "repo/ferridriver.yaml",
+    "browser:\n  backend: cdp-raw\n  headless: true\ntest:\n  browser:\n    backend: webkit\n",
+  );
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+
+  // Absent in both sections -> inherited by both.
+  assert_eq!(r.config.mcp.browser.headless, Some(true));
+  assert!(r.config.test.browser.headless, "the runner must inherit it too");
+
+  // MCP says nothing about backend, so it inherits.
+  assert_eq!(
+    r.config.mcp.browser.backend,
+    Some(ferridriver_config::mcp::BackendChoice::CdpRaw)
+  );
+  // The test section states its own, which must survive.
+  assert_eq!(
+    r.config.test.browser.backend, "webkit",
+    "a section value is never overwritten"
+  );
+
+  // Provenance names the file an operator would edit, not a synthetic source.
+  assert!(
+    r.provenance.contains_key("mcp.browser.backend"),
+    "an inherited key must still have an origin"
+  );
 }

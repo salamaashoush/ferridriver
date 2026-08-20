@@ -454,6 +454,54 @@ pub fn discovered_paths(opts: &LoadOptions) -> Vec<PathBuf> {
     .collect()
 }
 
+/// Hand the top-level `[browser]` scalars down to the sections that launch.
+///
+/// `[browser]` declares the browser once for every host. Its instance registry
+/// is resolved at lookup time, but `backend` and `headless` are read straight
+/// off `[mcp.browser]` / `[test.browser]`, where they are a `BackendChoice` and
+/// a `bool` rather than options — so a section can never say "unset" and could
+/// never defer. Copying here, on the merged DOCUMENT, is what makes the
+/// distinction available at all: a key absent from the document is absent,
+/// whereas a deserialized `backend: "cdp-pipe"` is indistinguishable from the
+/// default the same field would have taken anyway.
+///
+/// Only absent keys are filled, so a section that states its own value keeps
+/// it, and provenance records the top-level key as the source — `ferridriver
+/// config` then shows where a host's backend actually came from.
+fn apply_global_browser_defaults(document: &mut Value, provenance: &mut Provenance) {
+  const SCALARS: [&str; 2] = ["backend", "headless"];
+
+  let Some(global) = document.get("browser").and_then(Value::as_object).cloned() else {
+    return;
+  };
+  for section in ["mcp", "test"] {
+    for key in SCALARS {
+      let Some(value) = global.get(key) else { continue };
+      let target = document
+        .as_object_mut()
+        .and_then(|d| {
+          d.entry(section)
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+        })
+        .map(|s| s.entry("browser").or_insert_with(|| Value::Object(Map::new())));
+      let Some(browser) = target.and_then(Value::as_object_mut) else {
+        continue;
+      };
+      if browser.contains_key(key) {
+        continue;
+      }
+      browser.insert(key.to_string(), value.clone());
+      // Attribute it to whatever declared the top-level key, so `ferridriver
+      // config` names the file an operator would edit rather than a synthetic
+      // source they cannot find.
+      if let Some(origin) = provenance.winners.get(&format!("browser.{key}")).cloned() {
+        provenance.win(&format!("{section}.browser.{key}"), &origin);
+      }
+    }
+  }
+}
+
 /// Resolve the full layer stack.
 ///
 /// # Errors
@@ -513,6 +561,7 @@ pub fn resolve(opts: &LoadOptions) -> anyhow::Result<Resolved> {
   }
 
   apply_env(&opts.env, &mut document, &mut provenance, &mut warnings);
+  apply_global_browser_defaults(&mut document, &mut provenance);
   let Provenance { winners, contributors } = provenance;
 
   let mut config = deserialize_document(&document, &mut warnings)?;
@@ -538,34 +587,33 @@ pub fn resolve(opts: &LoadOptions) -> anyhow::Result<Resolved> {
 /// expansion.
 fn discover_layers(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec<ConfigLayer> {
   if !opts.inherit {
-    let single = match opts.explicit.clone() {
-      Some(path) => Some(ConfigLayer {
+    return match opts.explicit.clone() {
+      Some(path) => vec![ConfigLayer {
         kind: LayerKind::Explicit,
         path,
-      }),
+      }],
       None => highest_precedence_file(opts, warnings),
     };
-    return single.into_iter().collect();
   }
 
   let mut layers = Vec::new();
 
-  if let Some(dir) = &opts.machine_config_dir
-    && let Some(path) = first_existing_reported(&dir.join("ferridriver"), DIR_BASENAMES, warnings)
-  {
-    layers.push(ConfigLayer {
-      kind: LayerKind::Machine,
-      path,
-    });
+  if let Some(dir) = &opts.machine_config_dir {
+    for path in first_existing_reported(&dir.join("ferridriver"), DIR_BASENAMES, warnings) {
+      layers.push(ConfigLayer {
+        kind: LayerKind::Machine,
+        path,
+      });
+    }
   }
 
-  if let Some(dir) = &opts.user_config_dir
-    && let Some(path) = first_existing_reported(&dir.join("ferridriver"), DIR_BASENAMES, warnings)
-  {
-    layers.push(ConfigLayer {
-      kind: LayerKind::User,
-      path,
-    });
+  if let Some(dir) = &opts.user_config_dir {
+    for path in first_existing_reported(&dir.join("ferridriver"), DIR_BASENAMES, warnings) {
+      layers.push(ConfigLayer {
+        kind: LayerKind::User,
+        path,
+      });
+    }
   }
 
   // Every ancestor between the repository root and the cwd may carry a
@@ -574,7 +622,7 @@ fn discover_layers(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec
   // package overrides just its own keys.
   let git_root = find_git_root(&opts.cwd);
   for dir in ancestor_chain(git_root.as_deref(), &opts.cwd) {
-    if let Some(path) = first_existing_reported(&dir, PROJECT_BASENAMES, warnings) {
+    for path in first_existing_reported(&dir, PROJECT_BASENAMES, warnings) {
       layers.push(ConfigLayer {
         kind: LayerKind::Project,
         path,
@@ -582,7 +630,7 @@ fn discover_layers(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec
     }
   }
 
-  if let Some(path) = first_existing_reported(&opts.cwd, PROJECT_BASENAMES, warnings) {
+  for path in first_existing_reported(&opts.cwd, PROJECT_BASENAMES, warnings) {
     layers.push(ConfigLayer {
       kind: LayerKind::Cwd,
       path,
@@ -590,14 +638,14 @@ fn discover_layers(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec
   }
 
   for dir in ancestor_chain(git_root.as_deref(), &opts.cwd) {
-    if let Some(path) = first_existing_reported(&dir, LOCAL_BASENAMES, warnings) {
+    for path in first_existing_reported(&dir, LOCAL_BASENAMES, warnings) {
       layers.push(ConfigLayer {
         kind: LayerKind::Local,
         path,
       });
     }
   }
-  if let Some(path) = first_existing_reported(&opts.cwd, LOCAL_BASENAMES, warnings) {
+  for path in first_existing_reported(&opts.cwd, LOCAL_BASENAMES, warnings) {
     layers.push(ConfigLayer {
       kind: LayerKind::Local,
       path,
@@ -627,41 +675,68 @@ fn discover_layers(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec
 /// Deliberately does NOT fall back to the user or machine directory —
 /// "no inherit" has to mean it, or a reproducible run would still pick
 /// up whatever an operator installed under `~/.config`.
-fn highest_precedence_file(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Option<ConfigLayer> {
-  if let Some(path) = first_existing_reported(&opts.cwd, LOCAL_BASENAMES, warnings) {
-    return Some(ConfigLayer {
+fn highest_precedence_file(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec<ConfigLayer> {
+  let local: Vec<ConfigLayer> = first_existing_reported(&opts.cwd, LOCAL_BASENAMES, warnings)
+    .into_iter()
+    .map(|path| ConfigLayer {
       kind: LayerKind::Local,
       path,
-    });
+    })
+    .collect();
+  if !local.is_empty() {
+    return local;
   }
-  first_existing_reported(&opts.cwd, PROJECT_BASENAMES, warnings).map(|path| ConfigLayer {
-    kind: LayerKind::Cwd,
-    path,
-  })
+  first_existing_reported(&opts.cwd, PROJECT_BASENAMES, warnings)
+    .into_iter()
+    .map(|path| ConfigLayer {
+      kind: LayerKind::Cwd,
+      path,
+    })
+    .collect()
 }
 
-/// The highest-precedence config in `dir`, warning when a lower-precedence
-/// sibling is being shadowed.
+/// The configs `dir` contributes: at most one DOCUMENT and at most one
+/// MODULE, document first so the module folds on top of it.
 ///
-/// Silently taking `ferridriver.toml` while a `ferridriver.yaml` sits
-/// beside it makes every edit to the yaml look like it does nothing.
-fn first_existing_reported(dir: &Path, basenames: &[&str], warnings: &mut Vec<ConfigWarning>) -> Option<PathBuf> {
+/// A directory carries both when it has to. `extensions`, `[bundler]`
+/// and `[extensions.policy]` are resolved before any module can be
+/// compiled — that is what the two-pass load exists for — so a suite
+/// whose config is a TypeScript module still needs a document beside it
+/// to name the packages that serve the module's own imports. Treating
+/// the pair as a shadow made that combination unexpressible: the
+/// document won and the module was reported as ignored.
+///
+/// Within a family the highest-precedence basename still wins alone and
+/// a shadowed sibling still warns. Silently taking `ferridriver.toml`
+/// while a `ferridriver.yaml` sits beside it makes every edit to the
+/// yaml look like it does nothing.
+fn first_existing_reported(dir: &Path, basenames: &[&str], warnings: &mut Vec<ConfigWarning>) -> Vec<PathBuf> {
   // One `stat` per candidate, NOT one `read_dir`: the cost has to scale
   // with the number of config formats, which is a fixed handful, and not
   // with the number of files in the directory, which is unbounded.
   // Listing the directory instead measured 29ms slower in a tree with
   // 5000 files beside the config — and a repository root is exactly
   // where a config lives.
-  let mut matched = basenames.iter().map(|name| dir.join(name)).filter(|c| c.is_file());
-  let winner = matched.next()?;
-  let shadowed: Vec<String> = matched.map(|p| p.display().to_string()).collect();
-  if !shadowed.is_empty() {
-    warnings.push(ConfigWarning {
-      source: winner.display().to_string(),
-      message: format!("also present and ignored: {}", shadowed.join(", ")),
-    });
+  let (documents, modules): (Vec<PathBuf>, Vec<PathBuf>) = basenames
+    .iter()
+    .map(|name| dir.join(name))
+    .filter(|c| c.is_file())
+    .partition(|c| !is_script_config(c));
+
+  let mut winners = Vec::new();
+  for family in [documents, modules] {
+    let mut family = family.into_iter();
+    let Some(winner) = family.next() else { continue };
+    let shadowed: Vec<String> = family.map(|p| p.display().to_string()).collect();
+    if !shadowed.is_empty() {
+      warnings.push(ConfigWarning {
+        source: winner.display().to_string(),
+        message: format!("also present and ignored: {}", shadowed.join(", ")),
+      });
+    }
+    winners.push(winner);
   }
-  Some(winner)
+  winners
 }
 
 /// Directories from `root` down to (but excluding) `cwd`, outermost

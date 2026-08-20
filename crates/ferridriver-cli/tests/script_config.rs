@@ -157,18 +157,54 @@ export default {
   let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A DOCUMENT and a MODULE in one directory both apply, module on top.
+///
+/// They have to. `extensions`, `[bundler]` and `[extensions.policy]` are
+/// resolved before any module can be compiled, so a suite whose config is
+/// a TypeScript module still needs a document beside it to name the
+/// packages that serve the module's own imports. While the pair was
+/// treated as a shadow the document won, and a `ferridriver.config.ts`
+/// sitting next to a `ferridriver.toml` was reported as "also present and
+/// ignored" — which is exactly the shape the driving acceptance suite has.
 #[test]
-fn two_formats_in_one_directory_shadow_by_basename_order() {
-  // The rule that already governed `.toml` beside `.yaml`, now covering
-  // `.ts` too — because it is a format, not a layer of its own.
+fn a_document_and_a_module_in_one_directory_both_apply() {
   let dir = scratch(
-    "shadow",
+    "pair",
     &[
       ("ferridriver.toml", TOML_BASE),
       (
         "ferridriver.config.ts",
         "export default { test: { testMatch: ['specs/beta.spec.ts'] } };\n",
       ),
+    ],
+  );
+
+  let output = list(&dir);
+  let text = combined(&output);
+  assert!(output.status.success(), "{text}");
+  assert!(
+    text.contains("beta.spec.ts") && !text.contains("alpha.spec.ts"),
+    "the module folds on top of the document: {text}"
+  );
+  assert!(
+    !text.contains("also present and ignored"),
+    "a document and a module are not rivals: {text}"
+  );
+
+  let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two DOCUMENTS in one directory are still rivals: the highest-precedence
+/// basename wins alone, and the shadowed sibling is reported. Silently
+/// taking `ferridriver.toml` while a `ferridriver.yaml` sits beside it
+/// makes every edit to the yaml look like it does nothing.
+#[test]
+fn two_documents_in_one_directory_shadow_by_basename_order() {
+  let dir = scratch(
+    "shadow",
+    &[
+      ("ferridriver.toml", TOML_BASE),
+      ("ferridriver.yaml", "test:\n  testMatch:\n    - specs/beta.spec.ts\n"),
     ],
   );
 
