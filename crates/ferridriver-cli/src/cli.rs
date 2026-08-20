@@ -718,6 +718,21 @@ pub struct RunArgs {
   #[arg(short = 'e', long = "eval", conflicts_with = "script")]
   pub eval: Option<String>,
 
+  /// Bind `page` / `context` / `browser` from a configured `[browser]`
+  /// instance, launching or attaching exactly as the MCP server and the test
+  /// runner do for the same name -- including its args and discover commands.
+  ///
+  /// Without it a script owns its own browser via `chromium()` / `firefox()` /
+  /// `webkit()` and no browser is started, so a script that never opens one
+  /// costs nothing.
+  #[arg(long, conflicts_with = "session")]
+  pub instance: Option<String>,
+
+  /// Show the browser window, overriding whatever `headless` the instance or
+  /// the `[browser]` section sets. Only meaningful with `--instance`.
+  #[arg(long, requires = "instance")]
+  pub headed: bool,
+
   /// Per-script wall-clock timeout in milliseconds.
   #[arg(long)]
   pub timeout_ms: Option<u64>,

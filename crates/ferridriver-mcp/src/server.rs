@@ -485,6 +485,65 @@ impl std::fmt::Debug for McpServer {
 /// Unit struct used as the default extensions value.
 struct NoExtensions;
 
+/// Build the browser state an [`McpServerConfig`] describes: the base launch
+/// plan, the instance names it knows, and the per-instance override and
+/// connection resolvers.
+///
+/// Shared so every host that provisions a configured instance -- the MCP
+/// server and `ferridriver run --instance` -- resolves it identically. A
+/// second copy of this wiring is how one host silently stops honouring a
+/// config key the other still reads.
+#[must_use]
+pub fn browser_state_for(
+  mode: ConnectMode,
+  backend: BackendKind,
+  headless: bool,
+  config: &Arc<dyn McpServerConfig>,
+) -> BrowserState {
+  let kind = match backend {
+    BackendKind::Bidi => ferridriver::options::BrowserKind::Firefox,
+    BackendKind::WebKit => ferridriver::options::BrowserKind::WebKit,
+    _ => ferridriver::options::BrowserKind::Chromium,
+  };
+  // The base plan carries every launch setting the config expresses.
+  // `executable_path` and `viewport` were config keys the server never
+  // read, so both were silently inert.
+  //
+  // `args` stays EMPTY: `instance_overrides` returns the complete arg
+  // set for an instance (section `chromeArgs` + proxy flags + the
+  // instance's own + whatever the args command adds), and the launch
+  // path concatenates the plan's args with the callback's. Passing
+  // `chrome_args()` here too put every base flag in the command line
+  // twice — invisible for last-wins switches, wrong for repeatable ones
+  // like `--host-resolver-rules`.
+  let base = config.base_overrides();
+  let mut browser_state = BrowserState::with_plan(
+    mode,
+    ferridriver::options::LaunchPlan {
+      backend,
+      kind,
+      headless,
+      args: Vec::new(),
+      executable_path: base.executable_path.clone(),
+      user_data_dir: base.user_data_dir.clone(),
+      default_viewport: config.default_viewport(),
+      ..Default::default()
+    },
+  );
+
+  // A bare session key that names a configured instance must select
+  // that instance rather than a context on `default`.
+  browser_state.set_known_instances(config.instance_names());
+
+  // Wire per-instance launch settings from the config trait.
+  let config_clone = Arc::clone(&config);
+  browser_state.set_instance_overrides_fn(Arc::new(move |instance| config_clone.instance_overrides(instance)));
+  // Wire per-instance connection resolver from config trait.
+  let config_clone = Arc::clone(&config);
+  browser_state.set_instance_resolver_fn(Arc::new(move |instance| config_clone.resolve_instance(instance)));
+  browser_state
+}
+
 impl McpServer {
   /// Create a server with default config (standalone mode).
   #[must_use]
@@ -510,47 +569,7 @@ impl McpServer {
     headless: bool,
     config: Arc<dyn McpServerConfig>,
   ) -> Self {
-    let kind = match backend {
-      BackendKind::Bidi => ferridriver::options::BrowserKind::Firefox,
-      BackendKind::WebKit => ferridriver::options::BrowserKind::WebKit,
-      _ => ferridriver::options::BrowserKind::Chromium,
-    };
-    // The base plan carries every launch setting the config expresses.
-    // `executable_path` and `viewport` were config keys the server never
-    // read, so both were silently inert.
-    //
-    // `args` stays EMPTY: `instance_overrides` returns the complete arg
-    // set for an instance (section `chromeArgs` + proxy flags + the
-    // instance's own + whatever the args command adds), and the launch
-    // path concatenates the plan's args with the callback's. Passing
-    // `chrome_args()` here too put every base flag in the command line
-    // twice — invisible for last-wins switches, wrong for repeatable ones
-    // like `--host-resolver-rules`.
-    let base = config.base_overrides();
-    let mut browser_state = BrowserState::with_plan(
-      mode,
-      ferridriver::options::LaunchPlan {
-        backend,
-        kind,
-        headless,
-        args: Vec::new(),
-        executable_path: base.executable_path.clone(),
-        user_data_dir: base.user_data_dir.clone(),
-        default_viewport: config.default_viewport(),
-        ..Default::default()
-      },
-    );
-
-    // A bare session key that names a configured instance must select
-    // that instance rather than a context on `default`.
-    browser_state.set_known_instances(config.instance_names());
-
-    // Wire per-instance launch settings from the config trait.
-    let config_clone = Arc::clone(&config);
-    browser_state.set_instance_overrides_fn(Arc::new(move |instance| config_clone.instance_overrides(instance)));
-    // Wire per-instance connection resolver from config trait.
-    let config_clone = Arc::clone(&config);
-    browser_state.set_instance_resolver_fn(Arc::new(move |instance| config_clone.resolve_instance(instance)));
+    let browser_state = browser_state_for(mode, backend, headless, &config);
     let state = SharedState::new(browser_state);
 
     // Scripting engine + artifacts. The artifacts needs an existing canonical
