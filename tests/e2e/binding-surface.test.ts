@@ -212,3 +212,39 @@ describe('binding surface', () => {
     }
   });
 });
+
+describe('require.resolve', () => {
+  test('answers relative to the file that wrote the call', async ({}, testInfo) => {
+    // Both helper and caller are bundled into ONE module, so a per-file
+    // answer can only come from the source map — which is the point.
+    const dir = testInfo.outputPath('rr');
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(`${dir}/sibling.ts`, 'export const x = 1;\n');
+
+    const resolved = require.resolve(`${dir}/sibling.ts`);
+    expect(resolved.endsWith('sibling.ts')).toBe(true);
+    expect(fs.existsSync(resolved)).toBe(true);
+  });
+
+  test('appends an extension and answers a builtin with itself', async ({}, testInfo) => {
+    const dir = testInfo.outputPath('rr2');
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(`${dir}/leaf.ts`, 'export const y = 2;\n');
+
+    // No extension in the specifier; Node appends one.
+    expect(require.resolve(`${dir}/leaf`).endsWith('leaf.ts')).toBe(true);
+    // A builtin resolves to its own name, as in Node.
+    expect(require.resolve('fs')).toBe('fs');
+    expect(require.resolve('node:path')).toBe('node:path');
+  });
+
+  test("throws Node's message when nothing resolves", async ({}) => {
+    let message = '';
+    try {
+      require.resolve('./definitely-not-here');
+    } catch (e) {
+      message = String((e as Error).message ?? e);
+    }
+    expect(message.includes("Cannot find module './definitely-not-here'")).toBe(true);
+  });
+});

@@ -36,17 +36,12 @@ const FERRIDRIVER_MODULE_NAMES: &[&str] = &[
   "@playwright/test",
   "playwright/test",
   "@cucumber/cucumber",
-  "fs",
-  "node:fs",
 ];
 
 /// Specifiers ferridriver serves that are ONE module under several
 /// names. jsstd's own table carries the same information for the Node
 /// modules (`url` / `node:url`, ...).
-const FERRIDRIVER_SPECIFIER_GROUPS: &[&[&str]] = &[
-  &["@ferridriver/test", "@playwright/test", "playwright/test"],
-  &["fs", "node:fs"],
-];
+const FERRIDRIVER_SPECIFIER_GROUPS: &[&[&str]] = &[&["@ferridriver/test", "@playwright/test", "playwright/test"]];
 
 /// Specifier namespaces no package may claim, beyond the ones the
 /// runtime already serves.
@@ -345,8 +340,6 @@ pub fn loader() -> NativeModuleLoader {
       NativeModuleLoader::declare_fn::<FerridriverTestModule>(),
     ),
     ("@cucumber/cucumber", NativeModuleLoader::declare_fn::<CucumberModule>()),
-    ("fs", NativeModuleLoader::declare_fn::<FsModule>()),
-    ("node:fs", NativeModuleLoader::declare_fn::<FsModule>()),
   ];
   for module in ferridriver_jsstd::modules::modules() {
     for specifier in module.specifiers {
@@ -496,7 +489,6 @@ pub fn namespace<'js>(ctx: &Ctx<'js>, specifier: &str) -> rquickjs::Result<Optio
     "ferridriver" => ferridriver_namespace(ctx)?,
     "@ferridriver/test" | "@playwright/test" | "playwright/test" => test_namespace(ctx)?,
     "@cucumber/cucumber" => cucumber_namespace(ctx)?,
-    "fs" | "node:fs" => fs_namespace(ctx)?,
     // Everything else native is jsstd's, and its own table says how each
     // one builds the object `require` hands back.
     other => {
@@ -558,6 +550,30 @@ pub fn install_require<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
       }
     },
   )?;
+  // `require.resolve(spec)` — Node's, answered relative to the file that
+  // WROTE the call. The algorithm is jsstd's (`node::require_resolve`);
+  // the two host-shaped questions are answered here, because only the
+  // host knows them: which specifiers are served natively, and which
+  // original source a bundled frame came from.
+  let resolve = rquickjs::Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, specifier: String| -> rquickjs::Result<String> {
+      // Node answers a builtin with the specifier itself.
+      if native_module_names().contains(&specifier.as_str())
+        || module_aliases().iter().any(|(from, _)| *from == specifier)
+      {
+        return Ok(specifier);
+      }
+      let base = crate::bindings::call_site::caller_source_file(&ctx)
+        .and_then(|file| file.parent().map(std::path::Path::to_path_buf))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+      ferridriver_jsstd::node::require_resolve::resolve(&base, &specifier)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|message| rquickjs::Exception::throw_message(&ctx, &message))
+    },
+  )?;
+  require.set("resolve", resolve)?;
   ctx.globals().set("require", require)
 }
 
@@ -762,67 +778,5 @@ impl ModuleDef for CucumberModule {
 
   fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
     export_from(exports, &cucumber_namespace(ctx)?, CUCUMBER_EXPORTS)
-  }
-}
-
-/// `import fs from 'node:fs'` — re-exports the sandboxed `fs` global's
-/// API, plus a `promises` namespace alias so both `fs.readFile` and
-/// `fs.promises.readFile` work. Reads come in both shapes (Node's
-/// `readFileSync` alongside the promise form); writes and directory
-/// listing stay async-only.
-pub struct FsModule;
-
-const FS_MEMBERS: &[&str] = &[
-  "readFile",
-  "readFileBytes",
-  "readFileSync",
-  "readFileBytesSync",
-  "existsSync",
-  "writeFile",
-  "readdir",
-  "exists",
-  "root",
-];
-const FS_EXPORTS: &[&str] = &[
-  "default",
-  "promises",
-  "readFile",
-  "readFileBytes",
-  "readFileSync",
-  "readFileBytesSync",
-  "existsSync",
-  "writeFile",
-  "readdir",
-  "exists",
-  "root",
-];
-
-fn fs_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-  let fs = global(ctx, "fs")?.into_object();
-  // Fresh module object so `fs.promises.readFile` works off the default
-  // export (Node shape) without mutating the `fs` global.
-  let module = Object::new(ctx.clone())?;
-  let ns = Object::new(ctx.clone())?;
-  for name in FS_MEMBERS {
-    let v: Value<'js> = match &fs {
-      Some(o) => o.get(*name)?,
-      None => Value::new_undefined(ctx.clone()),
-    };
-    module.set(*name, v.clone())?;
-    ns.set(*name, v)?;
-  }
-  module.set("promises", module.clone())?;
-  ns.set("promises", module.clone())?;
-  ns.set("default", module)?;
-  Ok(ns)
-}
-
-impl ModuleDef for FsModule {
-  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    declare_all(decl, FS_EXPORTS)
-  }
-
-  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    export_from(exports, &fs_namespace(ctx)?, FS_EXPORTS)
   }
 }

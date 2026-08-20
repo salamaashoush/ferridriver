@@ -9,6 +9,7 @@ pub mod deep_equal;
 pub mod inspect;
 pub mod path;
 pub mod process;
+pub mod require_resolve;
 pub mod timers;
 pub mod util;
 

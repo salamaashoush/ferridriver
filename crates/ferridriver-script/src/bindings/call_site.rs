@@ -244,6 +244,27 @@ fn absolute(source: &str) -> String {
   }
 }
 
+/// The ORIGINAL source file the calling JS frame was written in.
+///
+/// `require.resolve('./x')` has to answer relative to the file that wrote
+/// it, the way Node does. Bundling erases that: QuickJS only knows the
+/// bundle it ran. The source map puts it back, and it is the same lookup
+/// call sites already use — so a per-module `__dirname` never has to be
+/// injected into anyone's source.
+///
+/// `None` when there is no JS frame or no map covers it: an inline
+/// `--eval`, or a plain script that was never bundled. The caller decides
+/// what to anchor on then (the working directory).
+///
+/// Unlike [`capture`] this is NOT gated on `call_origins_wanted`: a
+/// resolution has to answer whether or not anything is tracing.
+#[must_use]
+pub fn caller_source_file(ctx: &Ctx<'_>) -> Option<PathBuf> {
+  let (file, line, column) = capture_frame(ctx)?;
+  let frame = remap(ctx, &file, line, column)?;
+  Some(PathBuf::from(frame.file))
+}
+
 // ── Stack capture ──────────────────────────────────────────────────────
 
 /// `file`, `line`, `col` of the innermost JS frame in a fresh stack
