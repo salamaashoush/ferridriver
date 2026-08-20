@@ -20,6 +20,40 @@ have to discover that the tracker covers it anyway.
   `ferridriver-expect`'s poll loop and an `AbortSignal` lowered from the
   JS host, which no matcher takes today.
 
+### A screenshot `mask` naming an element inside an iframe
+- A mask resolves through the injected selector engine in ONE document,
+  so every selector engine works but a Locator that crosses an
+  `enter-frame` hop matches nothing. Playwright resolves each mask
+  entry in its own frame (`server/screenshotter.ts::_maskElements` sends
+  one `callOnSelector` per `{ frame, selector }`), which needs the frame
+  identity carried from the caller instead of just the selector string —
+  the JS host lowers a Locator to its selector today and the frame is
+  lost at that boundary.
+
+### `screenshot({ scale: 'css' })` on Firefox
+- `browsingContext.captureScreenshot` has no scale parameter, so the
+  capture is always at device pixels. Playwright's BiDi backend takes the
+  same argument and drops it the same way
+  (`bidi/bidiPage.ts::takeScreenshot`), so this is the engine's ceiling
+  rather than a shortcut; CDP and WebKit both honour it.
+
+### A bare relative reporter path is not resolved against the config's own directory
+- `reporter: [{ name: './my-reporter.ts' }]` resolves against the cwd and
+  then `testDir` (`ferridriver-script/src/reporter.rs::resolve`), not the
+  config's own directory as Playwright does, so `--config
+  sub/ferridriver.config.ts` reports "neither a known reporter name nor a
+  file that exists". `require.resolve('./my-reporter.ts')` sidesteps it
+  (it returns an absolute path), which is what a Playwright config
+  typically writes anyway.
+
+### VRT baseline layout for a BDD suite migrating from playwright-bdd
+- playwright-bdd runs generated `.feature.spec.js` leaves under a
+  per-project `testDir`, so an existing suite's committed screenshot
+  baselines sit at paths native BDD does not reproduce. Either reproduce
+  that leaf shape, or land a one-time baseline move plus the matching CI
+  snapshot-path change. The driving acceptance suite deliberately does
+  not cover it.
+
 ### `use`-level worker options in a spec's `test.use`
 - `trace`, `video` and `screenshot` are WORKER options in Playwright, so
   setting one from a spec's `test.use({ … })` needs a worker whose
