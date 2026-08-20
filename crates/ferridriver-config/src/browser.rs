@@ -232,6 +232,11 @@ pub fn instance_overrides_from(
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BrowserSectionConfig {
+  /// Transport every host launches over unless its section says otherwise.
+  pub backend: Option<BackendChoice>,
+  /// Headed/headless default every host inherits unless its section says
+  /// otherwise.
+  pub headless: Option<bool>,
   /// Instances every host can select by name.
   pub instances: std::collections::HashMap<String, InstanceConfig>,
   /// Settings for an instance no entry claims.

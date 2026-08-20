@@ -197,13 +197,21 @@ impl McpConfig {
   /// "webkit"` into a silent `cdp-pipe` run everywhere else.
   #[must_use]
   pub fn backend_kind(&self) -> BackendKind {
-    self.browser.backend.map_or(BackendKind::CdpPipe, BackendChoice::kind)
+    self
+      .browser
+      .backend
+      .or_else(|| self.browser.global_browser.as_ref().and_then(|g| g.backend))
+      .map_or(BackendKind::CdpPipe, BackendChoice::kind)
   }
 
   /// Whether headless mode is enabled (defaults to false).
   #[must_use]
   pub fn headless(&self) -> bool {
-    self.browser.headless.unwrap_or(false)
+    self
+      .browser
+      .headless
+      .or_else(|| self.browser.global_browser.as_ref().and_then(|g| g.headless))
+      .unwrap_or(false)
   }
 
   /// Cache TTL for command outputs.
@@ -239,8 +247,14 @@ impl McpConfig {
         args: self.browser.chrome_args.clone(),
         user_data_dir: self.browser.user_data_dir.clone(),
         executable_path: self.browser.executable_path.clone(),
-        headless: self.browser.headless,
-        backend: self.browser.backend,
+        headless: self
+          .browser
+          .headless
+          .or_else(|| self.browser.global_browser.as_ref().and_then(|g| g.headless)),
+        backend: self
+          .browser
+          .backend
+          .or_else(|| self.browser.global_browser.as_ref().and_then(|g| g.backend)),
         env: self.browser.env.clone(),
         proxy: self.browser.proxy.clone(),
         ignore_default_args: self.browser.ignore_default_args.clone(),
