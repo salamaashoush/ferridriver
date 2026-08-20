@@ -11,13 +11,13 @@
 
 use std::sync::Arc;
 
-use ferridriver_script::{Outcome, PathSandbox, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig};
+use ferridriver_script::{Outcome, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig};
 
 async fn run(src: &str) -> Outcome {
   let tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

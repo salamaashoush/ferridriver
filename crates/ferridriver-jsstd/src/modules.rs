@@ -406,6 +406,16 @@ pub fn modules() -> Vec<NodeModule> {
       namespace: buffer_namespace,
     },
     NodeModule {
+      specifiers: &["fs", "node:fs"],
+      declare: declare_fn::<crate::fs::FsModule>(),
+      namespace: |ctx| crate::fs::fs_object(ctx),
+    },
+    NodeModule {
+      specifiers: &["fs/promises", "node:fs/promises"],
+      declare: declare_fn::<crate::fs::FsPromisesModule>(),
+      namespace: |ctx| crate::fs::fs_promises_object(ctx),
+    },
+    NodeModule {
       specifiers: &["os", "node:os"],
       declare: declare_fn::<OsModule>(),
       namespace: os_namespace,

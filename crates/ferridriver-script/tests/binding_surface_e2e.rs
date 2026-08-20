@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use ferridriver::chromium;
 use ferridriver::options::LaunchOptions;
-use ferridriver_script::{InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session};
+use ferridriver_script::{InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, Session};
 
 fn data_url(html: &str) -> String {
   format!(
@@ -92,7 +92,7 @@ async fn harness() -> H {
   std::fs::write(tmp.path().join("seed.txt"), b"hello-fs").expect("seed file");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: Some(page),
     browser_context: Some(bcx),
@@ -381,13 +381,16 @@ async fn binding_surface_sweep() {
   let v = step(
     &h,
     "globals",
-    "const u = new URL('https://a.test:8443/p?x=1#h'); \
+    "const os = require('node:os'); \
+     const u = new URL('https://a.test:8443/p?x=1#h'); \
      const enc = new TextEncoder().encode('hi'); \
      const dec = new TextDecoder().decode(enc); \
      vars.set('k', 'v1'); \
-     const fsRead = await fs.readFile('seed.txt'); \
-     await fs.writeFile('out/o.txt', 'written'); \
-     const back = await fs.readFile('out/o.txt'); \
+     const dir = fs.mkdtempSync(os.tmpdir() + '/fd-surface-'); \
+     fs.writeFileSync(dir + '/seed.txt', 'hello-fs'); \
+     const fsRead = await fs.promises.readFile(dir + '/seed.txt', 'utf8'); \
+     await fs.promises.writeFile(dir + '/o.txt', 'written'); \
+     const back = await fs.promises.readFile(dir + '/o.txt', 'utf8'); \
      return { url: u.port === '8443' && u.hash === '#h', \
        enc: enc.length === 2, dec: dec === 'hi', \
        b64: atob(btoa('xy')) === 'xy', \

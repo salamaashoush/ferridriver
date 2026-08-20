@@ -171,7 +171,7 @@ async fn host(config: FerridriverConfig, args: SessionHostArgs) -> anyhow::Resul
     std::sync::Arc::clone(browser.state()),
     &args.id,
     ferridriver_script::SessionScriptConfig {
-      sandbox: setup.sandbox,
+      script_root: setup.script_root,
       artifacts: setup.artifacts,
       caps: setup.caps,
       extensions: setup.extensions,

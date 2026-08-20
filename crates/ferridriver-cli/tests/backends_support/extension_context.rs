@@ -34,7 +34,7 @@ defineTool({
       settingsOrigin: ctx.settings ? ctx.settings.origin : null,
       // Capabilities that must be present, not just truthy names.
       hasVars: typeof ctx.vars?.set === 'function',
-      hasFs: typeof ctx.fs?.readFile === 'function',
+      hasFs: typeof ctx.fs?.readFileSync === 'function' && typeof ctx.fs?.promises?.readFile === 'function',
       hasArtifacts: typeof ctx.artifacts?.writeBytes === 'function',
       hasSidecars: typeof ctx.sidecars?.connect === 'function',
       hasLog: typeof ctx.log === 'function',

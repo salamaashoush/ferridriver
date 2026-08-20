@@ -141,7 +141,7 @@ describe('locators', () => {
     // sandboxed fs global) exercises the path variant of setInputFiles.
     await page.goto(dataUrl("<input type='file' id='f'>"));
     const path = test.info().outputPath('ferridriver_test_upload.txt');
-    await fs.writeFile(path, 'test file content');
+    await fs.promises.writeFile(path, 'test file content');
     await page.setInputFiles('#f', [path]);
     expect(await page.evaluate("document.getElementById('f').files.length")).toBe(1);
     expect(await page.evaluate("document.getElementById('f').files[0].name")).toBe('ferridriver_test_upload.txt');

@@ -109,7 +109,7 @@ pub struct ToolManifest {
 ///   ungated authority (an automation extension must be able to navigate).
 ///   There is no `fs` capability: the only filesystem reachable from a
 ///   handler is the session's `fs`/`artifacts` globals, both already
-///   confined to their `PathSandbox` roots — an extension-level scope on
+///   confined to their `OutputDir` roots — an extension-level scope on
 ///   top of that has no ungated authority left to gate (see
 ///   `docs/extension-architecture.md`).
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]

@@ -84,7 +84,7 @@ catching protocol exceptions.
 | `args`    | Positional arguments bound to the script. Access via `args[0]`, `args[1]`. **Use this for any caller-controlled data** — bound values are safe from source-level injection |
 | `vars`    | Session-scoped string store: `get` / `set` / `has` / `delete` / `keys`. Persists across `run_script` calls in the same session |
 | `console` | Captured `log` / `info` / `warn` / `error` / `debug` — 1000 entries / 1 MiB total / 8 KiB per entry, ANSI-stripped, returned in the result |
-| `fs`      | Scoped to `script_root`: `readFile`, `readFileBytes`, `writeFile`, `readdir`, `exists`. Absolute paths, `..`, and symlink escapes are rejected |
+| `fs`      | Node's `node:fs`: `readFileSync`, `writeFileSync`, `readdirSync`, `existsSync`, `statSync`, … plus `fs.promises`. Paths resolve as they do in Node |
 | `artifacts` | Dedicated output dir: `write`, `writeBytes`, `read`, `readBytes`, `list`, `exists`, `remove`. For screenshots, PDFs, traces |
 | `fetch` / `Headers` / `Request` / `Response` / `AbortController` / `AbortSignal` / `Blob` / `FormData` / `ReadableStream` | Standard web APIs — see [Sandbox](/scripting/sandbox) |
 | `process` | Sandbox-safe subset. `process.env` is `{}` by default; opt-in keys via `[scripting] allowEnv` |

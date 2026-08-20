@@ -1,4 +1,4 @@
-//! Module loader rooted at the `script_root` sandbox.
+//! Module loader for relative ES module imports.
 //!
 //! Scripts can import other JS files via ES module syntax:
 //!
@@ -7,59 +7,51 @@
 //! import data from './fixtures/users.js';
 //! ```
 //!
-//! All import paths are:
-//! 1. Resolved relative to the importing module's directory (or the sandbox
-//!    root for inline scripts with no base).
-//! 2. Validated against the [`PathSandbox`] just like `fs.readFile` — absolute
-//!    paths, `..` components, and symlink escapes are rejected.
-//! 3. Loaded from disk via rquickjs's built-in `ScriptLoader` (`.js` by
-//!    default; `.mjs` also accepted).
+//! An import path is resolved relative to the importing module's
+//! directory, or to `script_root` for an inline script with no base, and
+//! read from disk (`.js` / `.mjs`).
 //!
-//! Bare specifiers (e.g. `import lodash from 'lodash'`) are rejected — there
-//! is no node_modules resolution on purpose, the sandbox is self-contained.
+//! Bare specifiers (e.g. `import lodash from 'lodash'`) are rejected:
+//! there is no node_modules resolution here on purpose. A suite that
+//! needs one is bundled by rolldown before it ever reaches this loader.
 //! Native module specifiers (`ferridriver`, `@cucumber/cucumber`, the
-//! node-compat set) never reach this resolver: the engine chains
+//! node-compat set) never reach this resolver either: the engine chains
 //! [`crate::bindings::native_modules`]'s resolver/loader AHEAD of this
 //! pair, so this file handles real files only.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use rquickjs::{Ctx, Error, Module, Result, loader::Loader, loader::Resolver, module::Declared};
 
-use crate::fs::PathSandbox;
-
-/// Path-sanitising resolver that maps ES module specifiers to absolute paths
-/// inside the sandbox root.
+/// Resolves relative ES module specifiers to absolute paths.
 #[derive(Debug, Clone)]
-pub struct SandboxResolver {
-  sandbox: Arc<PathSandbox>,
+pub struct RelativeModuleResolver {
+  root: PathBuf,
 }
 
-impl SandboxResolver {
+impl RelativeModuleResolver {
   #[must_use]
-  pub fn new(sandbox: Arc<PathSandbox>) -> Self {
-    Self { sandbox }
+  pub fn new(root: PathBuf) -> Self {
+    Self { root }
   }
 
-  /// Resolve `name` against `base` and return the path relative to the
-  /// sandbox root (without canonicalising — that happens in [`PathSandbox`]).
+  /// Resolve `name` against `base`, falling back to the script root when
+  /// the importer has no directory of its own.
+  ///
+  /// An inline script's base is empty, and a dynamic `import()` from one
+  /// carries the eval's NAME (`eval_script`) — whose parent is the empty
+  /// path, not a directory. Both mean "no importer directory", so both
+  /// resolve from the root.
   fn join_relative(&self, base: &str, name: &str) -> PathBuf {
-    // `base` is an absolute path inside the sandbox root (what a previous
-    // resolve returned) or empty for inline scripts. Take its parent dir and
-    // append `name`; if base is empty we're at the sandbox root.
-    let base_dir: PathBuf = if base.is_empty() {
-      self.sandbox.root().to_path_buf()
-    } else {
-      Path::new(base)
-        .parent()
-        .map_or_else(|| self.sandbox.root().to_path_buf(), PathBuf::from)
-    };
+    let base_dir = Path::new(base)
+      .parent()
+      .filter(|parent| !parent.as_os_str().is_empty())
+      .map_or_else(|| self.root.clone(), Path::to_path_buf);
     base_dir.join(name)
   }
 }
 
-impl Resolver for SandboxResolver {
+impl Resolver for RelativeModuleResolver {
   fn resolve<'js>(
     &mut self,
     _ctx: &Ctx<'js>,
@@ -67,68 +59,42 @@ impl Resolver for SandboxResolver {
     name: &str,
     _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
   ) -> Result<String> {
-    // Reject bare specifiers up front — we don't support node_modules or
-    // package resolution. Only relative (`./x`, `../x`) and explicit absolute
-    // paths inside the sandbox are allowed; the latter is still rejected
-    // syntactically by PathSandbox::resolve_read.
+    // Reject bare specifiers up front — there is no node_modules or
+    // package resolution here. Relative and absolute paths both resolve.
     if !(name.starts_with("./") || name.starts_with("../") || name.starts_with('/')) {
       return Err(Error::new_loading_message(
         name,
-        "bare module specifiers are not supported inside the sandbox",
+        "bare module specifiers are not supported; bundle the suite instead",
       ));
     }
 
     let joined = self.join_relative(base, name);
-
-    // Re-express as a path relative to the sandbox root so PathSandbox's
-    // sanitizer runs — it canonicalises and verifies no escape.
-    let rel = joined
-      .strip_prefix(self.sandbox.root())
-      .unwrap_or(&joined)
-      .to_string_lossy()
-      .into_owned();
-
-    let resolved = self
-      .sandbox
-      .resolve_read(&rel)
-      .map_err(|e| Error::new_loading_message(name, e.message.clone()))?;
+    let resolved = std::fs::canonicalize(&joined)
+      .map_err(|e| Error::new_loading_message(name, format!("cannot resolve {}: {e}", joined.display())))?;
 
     Ok(resolved.to_string_lossy().into_owned())
   }
 }
 
-/// Loader wrapper that accepts only paths the [`SandboxResolver`] produced.
-///
-/// rquickjs splits resolution from loading; we re-check path containment here
-/// so a future resolver bug cannot smuggle a path outside the sandbox into
-/// the loader. Reading the file itself goes through `tokio::fs` synchronously
-/// via `std::fs::read` — same as rquickjs's built-in `ScriptLoader`.
-#[derive(Debug, Clone)]
-pub struct SandboxLoader {
-  sandbox: Arc<PathSandbox>,
-}
+/// Reads a module the [`RelativeModuleResolver`] resolved.
+#[derive(Debug, Clone, Default)]
+pub struct RelativeModuleLoader;
 
-impl SandboxLoader {
+impl RelativeModuleLoader {
   #[must_use]
-  pub fn new(sandbox: Arc<PathSandbox>) -> Self {
-    Self { sandbox }
+  pub fn new() -> Self {
+    Self
   }
 }
 
-impl Loader for SandboxLoader {
+impl Loader for RelativeModuleLoader {
   fn load<'js>(
     &mut self,
     ctx: &Ctx<'js>,
     name: &str,
     _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
   ) -> Result<Module<'js, Declared>> {
-    // Defensive check: the resolver should have returned a path inside the
-    // sandbox, but verify before reading from disk.
     let path = Path::new(name);
-    if !path.starts_with(self.sandbox.root()) {
-      return Err(Error::new_loading_message(name, "path escapes script_root"));
-    }
-
     let allowed_ext = matches!(path.extension().and_then(|e| e.to_str()), Some("js" | "mjs"));
     if !allowed_ext {
       return Err(Error::new_loading_message(
@@ -146,48 +112,54 @@ impl Loader for SandboxLoader {
 mod tests {
   use super::*;
 
-  fn mk_sandbox() -> (tempfile::TempDir, Arc<PathSandbox>) {
+  fn mk_root() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let sb = Arc::new(PathSandbox::new(tmp.path()).expect("sandbox"));
-    (tmp, sb)
+    let root = std::fs::canonicalize(tmp.path()).expect("canonical");
+    (tmp, root)
   }
 
   #[test]
   fn resolver_rejects_bare_specifiers() {
-    let (_tmp, sb) = mk_sandbox();
-    let mut r = SandboxResolver::new(sb);
-    // We need a Ctx but the resolver only uses it in its trait contract for
-    // error construction — construct a fresh runtime to get one.
+    let (_tmp, root) = mk_root();
+    let mut r = RelativeModuleResolver::new(root);
+    // The resolver only uses `Ctx` to construct its error.
     let rt = rquickjs::Runtime::new().expect("runtime");
     let cx = rquickjs::Context::full(&rt).expect("context");
     cx.with(|ctx| {
-      let err = r.resolve(&ctx, "", "lodash", None).unwrap_err();
+      let err = r.resolve(&ctx, "", "lodash", None).expect_err("bare specifier");
       assert!(err.to_string().contains("bare module"));
     });
   }
 
   #[test]
-  fn resolver_rejects_traversal() {
-    let (_tmp, sb) = mk_sandbox();
-    let mut r = SandboxResolver::new(sb);
-    let rt = rquickjs::Runtime::new().expect("runtime");
-    let cx = rquickjs::Context::full(&rt).expect("context");
-    cx.with(|ctx| {
-      let err = r.resolve(&ctx, "", "../escape.js", None).unwrap_err();
-      assert!(err.is_loading());
-    });
-  }
-
-  #[test]
-  fn resolver_accepts_valid_relative() {
-    let (tmp, sb) = mk_sandbox();
-    std::fs::write(tmp.path().join("helper.js"), b"export const x = 1;").unwrap();
-    let mut r = SandboxResolver::new(sb);
+  fn resolver_answers_for_a_relative_import() {
+    let (tmp, root) = mk_root();
+    std::fs::write(tmp.path().join("helper.js"), b"export const x = 1;").expect("write");
+    let mut r = RelativeModuleResolver::new(root.clone());
     let rt = rquickjs::Runtime::new().expect("runtime");
     let cx = rquickjs::Context::full(&rt).expect("context");
     cx.with(|ctx| {
       let resolved = r.resolve(&ctx, "", "./helper.js", None).expect("resolve");
-      assert!(resolved.ends_with("helper.js"));
+      assert_eq!(PathBuf::from(resolved), root.join("helper.js"));
+    });
+  }
+
+  /// A relative import that climbs out of the root resolves like any
+  /// other path. The loader is an anchor, not a jail — a suite whose
+  /// helpers live one directory up is ordinary.
+  #[test]
+  fn resolver_follows_a_parent_import() {
+    let (tmp, root) = mk_root();
+    let nested = tmp.path().join("specs");
+    std::fs::create_dir_all(&nested).expect("mkdir");
+    std::fs::write(tmp.path().join("shared.js"), b"export const x = 1;").expect("write");
+    let mut r = RelativeModuleResolver::new(nested.clone());
+    let rt = rquickjs::Runtime::new().expect("runtime");
+    let cx = rquickjs::Context::full(&rt).expect("context");
+    cx.with(|ctx| {
+      let base = nested.join("a.js").to_string_lossy().into_owned();
+      let resolved = r.resolve(&ctx, &base, "../shared.js", None).expect("resolve");
+      assert_eq!(PathBuf::from(resolved), root.join("shared.js"));
     });
   }
 }

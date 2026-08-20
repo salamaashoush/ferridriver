@@ -15,18 +15,18 @@ use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
 use crate::error::ScriptError;
-use crate::fs::PathSandbox;
+use crate::output_dir::OutputDir;
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "Artifacts")]
 pub struct ArtifactsJs {
   #[qjs(skip_trace)]
-  sandbox: Arc<PathSandbox>,
+  sandbox: Arc<OutputDir>,
 }
 
 impl ArtifactsJs {
   #[must_use]
-  pub fn new(sandbox: Arc<PathSandbox>) -> Self {
+  pub fn new(sandbox: Arc<OutputDir>) -> Self {
     Self { sandbox }
   }
 
@@ -34,7 +34,7 @@ impl ArtifactsJs {
     rquickjs::Error::new_from_js_message("artifacts", op, msg)
   }
 
-  fn sandbox_err(err: &ScriptError) -> rquickjs::Error {
+  fn path_err(err: &ScriptError) -> rquickjs::Error {
     rquickjs::Error::new_from_js_message("artifacts", "sandbox", err.message.clone())
   }
 }
@@ -51,7 +51,7 @@ impl ArtifactsJs {
   #[qjs(rename = "write")]
   pub async fn write(&self, name: String, contents: String) -> rquickjs::Result<()> {
     let sb = self.sandbox.clone();
-    let resolved = sb.resolve_write(&name).map_err(|e| Self::sandbox_err(&e))?;
+    let resolved = sb.resolve_write(&name).map_err(|e| Self::path_err(&e))?;
     tokio::fs::write(&resolved, contents)
       .await
       .map_err(|e| Self::io_err("write", e.to_string()))
@@ -62,7 +62,7 @@ impl ArtifactsJs {
   #[qjs(rename = "writeBytes")]
   pub async fn write_bytes(&self, name: String, bytes: Vec<u8>) -> rquickjs::Result<()> {
     let sb = self.sandbox.clone();
-    let resolved = sb.resolve_write(&name).map_err(|e| Self::sandbox_err(&e))?;
+    let resolved = sb.resolve_write(&name).map_err(|e| Self::path_err(&e))?;
     tokio::fs::write(&resolved, bytes)
       .await
       .map_err(|e| Self::io_err("writeBytes", e.to_string()))
@@ -72,7 +72,7 @@ impl ArtifactsJs {
   #[qjs(rename = "read")]
   pub async fn read(&self, name: String) -> rquickjs::Result<String> {
     let sb = self.sandbox.clone();
-    let resolved = sb.resolve_read(&name).map_err(|e| Self::sandbox_err(&e))?;
+    let resolved = sb.resolve_read(&name).map_err(|e| Self::path_err(&e))?;
     tokio::fs::read_to_string(&resolved)
       .await
       .map_err(|e| Self::io_err("read", e.to_string()))
@@ -82,7 +82,7 @@ impl ArtifactsJs {
   #[qjs(rename = "readBytes")]
   pub async fn read_bytes(&self, name: String) -> rquickjs::Result<Vec<u8>> {
     let sb = self.sandbox.clone();
-    let resolved = sb.resolve_read(&name).map_err(|e| Self::sandbox_err(&e))?;
+    let resolved = sb.resolve_read(&name).map_err(|e| Self::path_err(&e))?;
     tokio::fs::read(&resolved)
       .await
       .map_err(|e| Self::io_err("readBytes", e.to_string()))
@@ -110,7 +110,7 @@ impl ArtifactsJs {
   #[qjs(rename = "readdir")]
   pub async fn readdir(&self, subpath: String) -> rquickjs::Result<Vec<String>> {
     let sb = self.sandbox.clone();
-    let resolved = sb.resolve_read(&subpath).map_err(|e| Self::sandbox_err(&e))?;
+    let resolved = sb.resolve_read(&subpath).map_err(|e| Self::path_err(&e))?;
     let mut entries = tokio::fs::read_dir(&resolved)
       .await
       .map_err(|e| Self::io_err("readdir", e.to_string()))?;

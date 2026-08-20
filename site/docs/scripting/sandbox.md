@@ -136,17 +136,26 @@ fetch classes.
 
 ## `fs`
 
-Scoped file I/O bound to `script_root`:
+Node's `fs`, as a global — the same object `import fs from "node:fs"`
+answers with, sync entry points plus `fs.promises`:
 
 ```ts
-const text = await fs.readFile("input.txt");
-const bytes = await fs.readFileBytes("photo.png");
-await fs.writeFile("out.txt", "hello");
-const entries = await fs.readdir(".");
-const exists = await fs.exists("config.json");
+const text = await fs.promises.readFile("input.txt", "utf8");
+const bytes = await fs.promises.readFile("photo.png");
+await fs.promises.writeFile("out.txt", "hello");
+const entries = await fs.promises.readdir(".");
+const exists = fs.existsSync("config.json");
 ```
 
-Absolute paths, `..`, and symlink escapes are rejected.
+A relative path resolves against the process working directory and an
+absolute path is used as written, as in Node. There is no path
+confinement: the paths a suite handles are produced by the runner
+(`testInfo.outputPath()`, `testInfo.snapshotPath()`, `download.path()`),
+they are absolute, and a prefix check on one module was never a boundary
+while the same script reaches the network, the browser and `commands`.
+
+Not served: the callback API (`fs.readFile(path, cb)`) and streams. Use
+the promise or sync form.
 
 ## `artifacts`
 
@@ -160,12 +169,31 @@ const items = await artifacts.list();
 await artifacts.remove("old.html");
 ```
 
-Same sandbox rules as `fs`.
+A relative name is anchored at the artifacts root; an absolute path is
+used as written.
+
+## `require.resolve`
+
+Node's, answered relative to the file that wrote the call — including a
+file that was bundled into a larger module, because the position is
+mapped back through the bundle's source map:
+
+```ts
+require.resolve("./reporter");        // absolute path, extension appended
+require.resolve("@acme/kit/helper");  // walks node_modules upward
+require.resolve("fs");                // a builtin answers with itself
+```
+
+Throws `Cannot find module '<specifier>' from <dir>` when nothing
+resolves, as Node does. Absent: the `{ paths }` option and
+`require.resolve.paths()` — both describe a module search path this
+runtime does not have.
 
 ## What is absent
 
-- `require()`, `module`, `__dirname`, `__filename` — no CommonJS at
-  runtime (rolldown handles `require` calls at bundle time).
+- `module`, `__dirname`, `__filename` — no CommonJS at runtime (rolldown
+  handles `require` calls at bundle time; `require` itself serves the
+  native specifiers, and `require.resolve` answers paths).
 - Node's `child_process`, `cluster`, `http`, `https`, `net`, `tls`,
   `dgram`, `dns`, `vm`, `worker_threads`, `crypto.createServer`, …
 - Browser DOM globals (`window`, `document`, `localStorage`, …) — these

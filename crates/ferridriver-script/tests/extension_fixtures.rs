@@ -17,9 +17,9 @@ use std::sync::Arc;
 
 use ferridriver_config::ExtensionPolicyConfig;
 use ferridriver_script::{
-  CollectedTests, CompiledBundle, ExtensionBinding, ExtensionHost, InMemoryVars, Outcome, PathSandbox, RunContext,
-  RunOptions, ScriptCaps, ScriptEngineConfig, Session, bundle_and_compile_named, collect_tests,
-  compile_and_extract_extensions, eval_bundle, run_test,
+  CollectedTests, CompiledBundle, ExtensionBinding, ExtensionHost, InMemoryVars, Outcome, RunContext, RunOptions,
+  ScriptCaps, ScriptEngineConfig, Session, bundle_and_compile_named, collect_tests, compile_and_extract_extensions,
+  eval_bundle, run_test,
 };
 use ferridriver_test::host::{RunTestSpec, TestInfoData, TestWorldData};
 
@@ -75,7 +75,7 @@ async fn extensions_from(
 fn run_context(dir: &std::path::Path, extensions: Vec<ExtensionBinding>, policy: ExtensionPolicyConfig) -> RunContext {
   RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir).expect("sandbox")),
+    script_root: dir.into(),
     artifacts: None,
     page: None,
     browser_context: None,

@@ -14,8 +14,6 @@ pub enum ScriptErrorKind {
   Timeout,
   /// `QuickJS` memory quota was exceeded.
   MemoryLimit,
-  /// A sandboxed operation (e.g., `fs.readFile` with a traversal path) was rejected.
-  SandboxViolation,
   /// Engine-level failure unrelated to user script (binding setup, module loader, etc.).
   Internal,
 }
@@ -27,7 +25,6 @@ impl fmt::Display for ScriptErrorKind {
       Self::Runtime => write!(f, "runtime_error"),
       Self::Timeout => write!(f, "timeout"),
       Self::MemoryLimit => write!(f, "memory_limit"),
-      Self::SandboxViolation => write!(f, "sandbox_violation"),
       Self::Internal => write!(f, "internal_error"),
     }
   }
@@ -142,19 +139,6 @@ impl ScriptError {
       kind: ScriptErrorKind::MemoryLimit,
       name: None,
       message: format!("script exceeded memory limit of {limit_bytes} bytes"),
-      stack: None,
-      line: None,
-      column: None,
-      source_snippet: None,
-    }
-  }
-
-  #[must_use]
-  pub fn sandbox(message: impl Into<String>) -> Self {
-    Self {
-      kind: ScriptErrorKind::SandboxViolation,
-      name: None,
-      message: message.into(),
       stack: None,
       line: None,
       column: None,

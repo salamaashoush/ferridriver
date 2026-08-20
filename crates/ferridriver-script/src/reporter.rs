@@ -241,10 +241,9 @@ impl ReporterModule {
   /// Create the VM, evaluate the module, `new` its default export and
   /// probe its interface.
   async fn start(&self) -> Result<Live, ScriptError> {
-    let sandbox = Arc::new(crate::fs::PathSandbox::new(&self.cwd)?);
     let run_ctx = RunContext {
       vars: Arc::new(crate::vars::InMemoryVars::new()),
-      sandbox,
+      script_root: self.cwd.clone(),
       artifacts: None,
       page: None,
       browser_context: None,

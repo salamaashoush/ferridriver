@@ -211,13 +211,9 @@ impl JsTestSession {
   /// Fails when the session cannot be created, the bundle fails to
   /// evaluate, or the registration count diverges from the plan's.
   pub async fn load(bundle: Arc<CompiledBundle>, cwd: &Path, expected: Registrations) -> anyhow::Result<Self> {
-    let sandbox = Arc::new(
-      ferridriver_script::PathSandbox::new(cwd)
-        .map_err(|e| anyhow::anyhow!("sandbox {}: {}", cwd.display(), e.message))?,
-    );
     let run_ctx = ferridriver_script::RunContext {
       vars: Arc::new(ferridriver_script::InMemoryVars::new()),
-      sandbox,
+      script_root: cwd.to_path_buf(),
       artifacts: None,
       page: None,
       browser_context: None,
@@ -401,13 +397,9 @@ pub async fn load_ts_tests(config: &TestConfig, cwd: &Path) -> anyhow::Result<Op
 
   // Collection session: evaluate once, snapshot registrations. The
   // session is discarded — workers build their own.
-  let sandbox = Arc::new(
-    ferridriver_script::PathSandbox::new(cwd)
-      .map_err(|e| anyhow::anyhow!("sandbox {}: {}", cwd.display(), e.message))?,
-  );
   let run_ctx = ferridriver_script::RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
-    sandbox,
+    script_root: cwd.to_path_buf(),
     artifacts: None,
     page: None,
     browser_context: None,

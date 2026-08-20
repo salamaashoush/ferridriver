@@ -5,13 +5,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session, bundle_and_compile,
+  InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, Session, bundle_and_compile,
 };
 
 fn ctx(dir: &Path) -> RunContext {
   RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir).expect("sandbox")),
+    script_root: dir.into(),
     artifacts: None,
     page: None,
     browser_context: None,

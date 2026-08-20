@@ -166,10 +166,10 @@ describe('playwright compat: bindings and files', () => {
   test('fs exposes synchronous reads', async ({ page }) => {
     void page;
     const path = test.info().outputPath('sync-read.txt');
-    await fs.writeFile(path, 'sync-payload');
+    await fs.promises.writeFile(path, 'sync-payload');
     expect(fs.existsSync(path)).toBe(true);
-    expect(fs.readFileSync(path)).toBe('sync-payload');
-    expect(fs.readFileBytesSync(path).length).toBe('sync-payload'.length);
+    expect(fs.readFileSync(path, 'utf8')).toBe('sync-payload');
+    expect(fs.readFileSync(path).length).toBe('sync-payload'.length);
     expect(fs.existsSync(test.info().outputPath('absent.txt'))).toBe(false);
   });
 
@@ -184,7 +184,7 @@ describe('playwright compat: bindings and files', () => {
     // The download lands in a backend-owned temp dir, outside the script
     // sandbox root; reading it back is the standard Playwright pattern.
     const downloaded = await download.path();
-    expect(fs.readFileSync(downloaded)).toBe('fx-download-payload');
+    expect(fs.readFileSync(downloaded, 'utf8')).toBe('fx-download-payload');
   });
 });
 

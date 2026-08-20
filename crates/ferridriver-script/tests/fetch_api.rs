@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
 
-use ferridriver_script::{Outcome, PathSandbox, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig};
+use ferridriver_script::{Outcome, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig};
 
 /// Tiny HTTP/1.1 server: replies `{"method","path","body"}`. Lives for
 /// the test, handles a handful of sequential requests, then the socket
@@ -92,7 +92,7 @@ async fn run(src: &str) -> Outcome {
   let tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -781,7 +781,7 @@ async fn json_arg_proto_key_does_not_pollute() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

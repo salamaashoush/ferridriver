@@ -14,8 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ferridriver_script::{
-  ExtensionSpec, InMemoryVars, Outcome, PathSandbox, RequirementEnv, RunContext, RunOptions, ScriptCaps,
-  ScriptEngineConfig, Session,
+  ExtensionSpec, InMemoryVars, Outcome, RequirementEnv, RunContext, RunOptions, ScriptCaps, ScriptEngineConfig, Session,
 };
 
 /// ONE package for the whole binary.
@@ -121,7 +120,7 @@ async fn session_for(dir: &Path, specs: &[ExtensionSpec]) -> (Session, RunContex
   .await;
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir).expect("sandbox")),
+    script_root: dir.into(),
     artifacts: None,
     page: None,
     browser_context: None,

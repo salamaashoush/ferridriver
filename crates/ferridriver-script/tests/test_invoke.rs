@@ -7,9 +7,8 @@
 use std::sync::Arc;
 
 use ferridriver_script::{
-  CollectedTests, CompiledBundle, ExtensionHost, InMemoryVars, PathSandbox, RunContext, ScriptCaps, ScriptEngineConfig,
-  Session, TEST_SKIP_SENTINEL, bundle_and_compile_named, collect_tests, eval_bundle, run_test,
-  teardown_worker_fixtures,
+  CollectedTests, CompiledBundle, ExtensionHost, InMemoryVars, RunContext, ScriptCaps, ScriptEngineConfig, Session,
+  TEST_SKIP_SENTINEL, bundle_and_compile_named, collect_tests, eval_bundle, run_test, teardown_worker_fixtures,
 };
 use ferridriver_test::host::{RunTestSpec, TestInfoData, TestWorldData};
 
@@ -32,7 +31,7 @@ async fn harness(source: &str) -> Harness {
     .expect("bundle");
   let context = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    script_root: dir.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

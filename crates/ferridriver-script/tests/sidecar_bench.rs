@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ferridriver_script::sidecar::{Sidecar, SidecarSpec};
-use ferridriver_script::{InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session};
+use ferridriver_script::{InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, Session};
 
 const FIXTURE: &str = env!("CARGO_BIN_EXE_sidecar_echo");
 const WARMUP: usize = 300;
@@ -54,7 +54,7 @@ fn bench_spec() -> SidecarSpec {
 fn ctx(tmp: &tempfile::TempDir) -> RunContext {
   RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

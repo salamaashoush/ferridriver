@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferridriver_script::{
-  ExtensionBinding, InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, ScriptErrorKind,
-  Session, compile_and_extract_extensions,
+  ExtensionBinding, InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, ScriptErrorKind, Session,
+  compile_and_extract_extensions,
 };
 
 /// A one-tool plugin whose handler bumps a `globalThis` counter so a
@@ -44,10 +44,9 @@ async fn demo_binding() -> (tempfile::TempDir, ExtensionBinding) {
 async fn run_demo_plugin_twice() {
   let (_plugin_tmp, binding) = demo_binding().await;
   let tmp = tempfile::tempdir().expect("tempdir");
-  let sandbox = PathSandbox::new(tmp.path()).expect("sandbox");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(sandbox),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -104,7 +103,7 @@ async fn dotted_tool_names_are_projected_as_namespaces() {
   let sb_tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    script_root: sb_tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -183,7 +182,7 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
   let sb_tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    script_root: sb_tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -234,7 +233,7 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
   ));
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    script_root: sb_tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -319,7 +318,7 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
   ));
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    script_root: sb_tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -403,7 +402,7 @@ async fn fetch_net_policy_does_not_leak_between_concurrent_tools() {
   let sb_tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    script_root: sb_tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -475,7 +474,7 @@ async fn extension_branches_on_ferridriver_host_flag() {
     let sb = tempfile::tempdir().expect("tempdir");
     let ctx = RunContext {
       vars: Arc::new(InMemoryVars::new()),
-      sandbox: Arc::new(PathSandbox::new(sb.path()).expect("sandbox")),
+      script_root: sb.path().into(),
       artifacts: None,
       page: None,
       browser_context: None,
@@ -531,10 +530,9 @@ async fn plugin_bytecode_path_installs_and_persists() {
 
 fn make_ctx() -> (tempfile::TempDir, RunContext) {
   let tmp = tempfile::tempdir().expect("tempdir");
-  let sandbox = PathSandbox::new(tmp.path()).expect("sandbox");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(sandbox),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -983,10 +981,9 @@ async fn per_tool_timeout_ms_is_enforced_for_every_caller() {
   let binding = binding.expect("compiles");
 
   let tmp = tempfile::tempdir().expect("tempdir");
-  let sandbox = PathSandbox::new(tmp.path()).expect("sandbox");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(sandbox),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -1051,7 +1048,7 @@ async fn plugin_top_level_await_registers_tools_in_session() {
   let sb_tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    script_root: sb_tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -1117,7 +1114,7 @@ async fn broken_plugin_is_skipped_without_killing_the_session() {
   let sb_tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    script_root: sb_tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -1400,7 +1397,7 @@ async fn allow_net_capability_binds_the_global_request_binding() {
   let sb_tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    script_root: sb_tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -1503,7 +1500,7 @@ async fn allow_net_follows_timer_callbacks_registered_by_a_restricted_tool() {
   let sb_tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    script_root: sb_tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -1600,7 +1597,7 @@ async fn extraction_environment_matches_session_for_top_level_globals() {
   let sb_tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    script_root: sb_tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -1642,7 +1639,7 @@ async fn execute_tool_invokes_natively_and_reports_missing_tools() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -1710,7 +1707,7 @@ async fn execute_tool_propagates_handler_failures_and_timeouts() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

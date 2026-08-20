@@ -7,15 +7,13 @@
 
 use std::sync::Arc;
 
-use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig,
-};
+use ferridriver_script::{InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig};
 
 fn engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
   let tmp = tempfile::tempdir().expect("tempdir");
   let context = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use ferridriver_script::{
-  ExtensionHost, HookArg, InMemoryVars, PathSandbox, RunContext, ScenarioSpec, ScriptEngineConfig, Session,
-  begin_scenario, bundle_and_compile, collect_registry, drain_attachments, eval_bundle, invoke_hook, invoke_step,
+  ExtensionHost, HookArg, InMemoryVars, RunContext, ScenarioSpec, ScriptEngineConfig, Session, begin_scenario,
+  bundle_and_compile, collect_registry, drain_attachments, eval_bundle, invoke_hook, invoke_step,
 };
 use ferridriver_test::host::TestWorldData;
 
@@ -46,10 +46,9 @@ async fn this_attach_and_log_reach_drain_attachments() {
     .await
     .expect("bundle");
 
-  let sandbox = PathSandbox::new(dir.path()).expect("sandbox");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(sandbox),
+    script_root: dir.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -123,7 +122,7 @@ async fn after_hook_receives_cucumber_result_arg() {
     .expect("bundle");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    script_root: dir.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -184,7 +183,7 @@ async fn define_parameter_type_transformer_yields_typed_arg() {
     .expect("bundle");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    script_root: dir.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -251,7 +250,7 @@ async fn set_definition_function_wrapper_wraps_steps() {
     .expect("bundle");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    script_root: dir.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -303,7 +302,7 @@ async fn per_step_timeout_option_is_enforced() {
     .expect("bundle");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    script_root: dir.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -346,7 +345,7 @@ async fn world_parameters_are_exposed_as_this_parameters() {
     .expect("bundle");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    script_root: dir.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -397,7 +396,7 @@ async fn this_skip_marks_step_skipped() {
     .expect("bundle");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    script_root: dir.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

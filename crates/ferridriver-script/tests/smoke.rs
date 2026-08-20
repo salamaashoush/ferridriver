@@ -6,17 +6,16 @@
 use std::sync::Arc;
 
 use ferridriver_script::{
-  CommandSpec, InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig,
+  CommandSpec, InMemoryVars, Outcome, OutputDir, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig,
   ScriptErrorKind,
 };
 
 fn make_engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
   let tmp = tempfile::tempdir().expect("tempdir");
-  let sandbox = PathSandbox::new(tmp.path()).expect("sandbox");
   let vars = Arc::new(InMemoryVars::new());
   let context = RunContext {
     vars: vars.clone(),
-    sandbox: Arc::new(sandbox),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -34,13 +33,12 @@ fn make_engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
 fn make_engine_with_artifacts() -> (ScriptEngine, tempfile::TempDir, tempfile::TempDir, RunContext) {
   let scripts_tmp = tempfile::tempdir().expect("scripts tempdir");
   let artifacts_tmp = tempfile::tempdir().expect("artifacts tempdir");
-  let sandbox = PathSandbox::new(scripts_tmp.path()).expect("scripts sandbox");
-  let artifacts_sandbox = PathSandbox::new(artifacts_tmp.path()).expect("artifacts sandbox");
+  let artifacts_dir = OutputDir::new(artifacts_tmp.path()).expect("artifacts dir");
   let vars = Arc::new(InMemoryVars::new());
   let context = RunContext {
     vars: vars.clone(),
-    sandbox: Arc::new(sandbox),
-    artifacts: Some(Arc::new(artifacts_sandbox)),
+    script_root: scripts_tmp.path().into(),
+    artifacts: Some(Arc::new(artifacts_dir)),
     page: None,
     browser_context: None,
     request: None,
@@ -187,44 +185,70 @@ async fn vars_round_trip() {
   assert_eq!(ctx.vars.get("greeting").as_deref(), Some("hi"));
 }
 
+/// `fs` is Node's, so a script reads and writes the way Node does.
 #[tokio::test]
-async fn fs_read_write_inside_root() {
-  let (engine, _tmp, ctx) = make_engine();
+async fn fs_reads_and_writes_through_the_node_surface() {
+  let (engine, tmp, ctx) = make_engine();
+  let note = tmp.path().join("note.txt").to_string_lossy().into_owned();
   let result = engine
     .run(
-      r"
-      await fs.writeFile('note.txt', 'hello world');
-      const read = await fs.readFile('note.txt');
-      return read;
-      ",
+      &format!(
+        r"
+      const note = {note:?};
+      await fs.promises.writeFile(note, 'hello world');
+      const viaPromise = await fs.promises.readFile(note, 'utf8');
+      const viaSync = fs.readFileSync(note, 'utf8');
+      const bytes = fs.readFileSync(note);
+      return {{ viaPromise, viaSync, length: bytes.length }};
+      "
+      ),
       &[],
       RunOptions::default(),
       ctx,
     )
     .await;
   match result.outcome {
-    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("hello world")),
+    Outcome::Ok { success } => assert_eq!(
+      success.value,
+      serde_json::json!({ "viaPromise": "hello world", "viaSync": "hello world", "length": 11 })
+    ),
     Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
   }
 }
 
+/// A `..` component resolves; it is not a refusal.
+///
+/// `fs` used to be confined to a root and rejected any path that climbed
+/// out of it. That boundary is gone: the paths a suite legitimately
+/// handles are produced by the runner and absolute, and a prefix check on
+/// one module was never a sandbox while the same script reaches the
+/// network, the browser and `commands`.
 #[tokio::test]
-async fn fs_rejects_traversal() {
-  let (engine, _tmp, ctx) = make_engine();
+async fn fs_follows_a_parent_component() {
+  let (engine, tmp, ctx) = make_engine();
+  let outside = tmp.path().parent().expect("parent").join("fd-smoke-outside.txt");
+  std::fs::write(&outside, b"reachable").expect("seed");
+  let nested = tmp.path().join("nested");
+  std::fs::create_dir_all(&nested).expect("mkdir");
+  let via_parent = nested
+    .join("..")
+    .join("..")
+    .join("fd-smoke-outside.txt")
+    .to_string_lossy()
+    .into_owned();
+
   let result = engine
     .run(
-      "try { await fs.readFile('../escape'); return 'no-error'; } catch (e) { return String(e); }",
+      &format!("return fs.readFileSync({via_parent:?}, 'utf8');"),
       &[],
       RunOptions::default(),
       ctx,
     )
     .await;
+  let _ = std::fs::remove_file(&outside);
   match result.outcome {
-    Outcome::Ok { success } => {
-      let s = success.value.as_str().unwrap_or_default().to_string();
-      assert!(s.contains("traversal"), "got: {s}");
-    },
-    Outcome::Error { error } => panic!("expected caught error to surface, got: {error:?}"),
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("reachable")),
+    Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
   }
 }
 
@@ -265,7 +289,7 @@ async fn timeout_is_enforced() {
 }
 
 #[tokio::test]
-async fn imports_module_from_sandbox() {
+async fn imports_a_relative_module() {
   let (engine, tmp, ctx) = make_engine();
   std::fs::write(
     tmp.path().join("helper.js"),
@@ -286,24 +310,30 @@ async fn imports_module_from_sandbox() {
   }
 }
 
+/// A relative import that climbs above the script root resolves.
+///
+/// It used to be refused. A suite whose helpers live one directory up is
+/// ordinary, and the refusal was never a boundary — see
+/// `fs_follows_a_parent_component`.
 #[tokio::test]
-async fn import_rejects_traversal() {
+async fn import_follows_a_parent_specifier() {
   let (engine, tmp, ctx) = make_engine();
-  // Put a file OUTSIDE the sandbox that ../ would reach if traversal worked.
   let parent = tmp.path().parent().expect("parent").to_path_buf();
-  std::fs::write(parent.join("secret.js"), "export const leak = 'x';").ok();
+  let helper = parent.join("fd-smoke-shared.js");
+  std::fs::write(&helper, "export const shared = 'from above';").expect("seed");
 
   let result = engine
     .run(
-      "try { await import('../secret.js'); return 'no-error'; } catch (e) { return String(e).includes('traversal') || String(e).includes('loading') ? 'rejected' : String(e); }",
+      "const m = await import('../fd-smoke-shared.js'); return m.shared;",
       &[],
       RunOptions::default(),
       ctx,
     )
     .await;
+  let _ = std::fs::remove_file(&helper);
   match result.outcome {
-    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("rejected")),
-    Outcome::Error { error } => panic!("unexpected engine error: {error:?}"),
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("from above")),
+    Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
   }
 }
 
@@ -397,15 +427,16 @@ async fn args_support_complex_types() {
 }
 
 #[tokio::test]
-async fn fs_readdir_lists_sandbox_contents() {
+async fn fs_readdir_lists_directory_contents() {
   let (engine, tmp, ctx) = make_engine();
   std::fs::write(tmp.path().join("a.txt"), b"x").unwrap();
   std::fs::write(tmp.path().join("b.txt"), b"y").unwrap();
   std::fs::create_dir_all(tmp.path().join("sub")).unwrap();
 
+  let dir = tmp.path().to_string_lossy().into_owned();
   let result = engine
     .run(
-      "const entries = await fs.readdir('.'); entries.sort(); return entries;",
+      &format!("const entries = await fs.promises.readdir({dir:?}); entries.sort(); return entries;"),
       &[],
       RunOptions::default(),
       ctx,
@@ -418,31 +449,30 @@ async fn fs_readdir_lists_sandbox_contents() {
 }
 
 #[tokio::test]
-async fn fs_exists_reports_presence_and_missing() {
+async fn fs_exists_reports_presence_and_absence() {
   let (engine, tmp, ctx) = make_engine();
   std::fs::write(tmp.path().join("present.txt"), b"x").unwrap();
 
+  let present = tmp.path().join("present.txt").to_string_lossy().into_owned();
+  let absent = tmp.path().join("nothing.txt").to_string_lossy().into_owned();
   let result = engine
     .run(
-      r"
-      const has = await fs.exists('present.txt');
-      const missing = await fs.exists('nothing.txt');
-      const escape = await fs.exists('../secret');
-      return { has, missing, escape };
-      ",
+      &format!(
+        r"
+      return {{ has: fs.existsSync({present:?}), missing: fs.existsSync({absent:?}) }};
+      "
+      ),
       &[],
       RunOptions::default(),
       ctx,
     )
     .await;
   match result.outcome {
-    // `exists` returns false for both missing and escape attempts — this
-    // is the documented contract (sandbox violations do not leak as errors
-    // to scripts that are just probing for presence).
-    Outcome::Ok { success } => assert_eq!(
-      success.value,
-      serde_json::json!({ "has": true, "missing": false, "escape": false })
-    ),
+    // `false` means the file is not there, and nothing else — the answer
+    // used to double as "the sandbox refused", which made a spec asking
+    // whether its baseline had been written answer no for a file that was
+    // sitting right there.
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "has": true, "missing": false })),
     Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
   }
 }
@@ -555,22 +585,23 @@ async fn artifacts_write_read_list_remove() {
   assert!(artifacts_tmp.path().join("bin.dat").exists());
 }
 
+/// `artifacts` roots a relative name; it does not confine one.
 #[tokio::test]
-async fn artifacts_rejects_traversal() {
-  let (engine, _scripts_tmp, _artifacts_tmp, ctx) = make_engine_with_artifacts();
+async fn artifacts_anchors_a_relative_name_at_its_root() {
+  let (engine, _scripts_tmp, artifacts_tmp, ctx) = make_engine_with_artifacts();
   let result = engine
     .run(
-      "try { await artifacts.write('../escape.txt', 'x'); return 'no-error'; } \
-       catch (e) { return String(e).includes('traversal') ? 'rejected' : String(e); }",
+      "await artifacts.write('nested/out.txt', 'x'); return 'written';",
       &[],
       RunOptions::default(),
       ctx,
     )
     .await;
   match result.outcome {
-    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("rejected")),
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("written")),
     Outcome::Error { error } => panic!("unexpected engine error: {error:?}"),
   }
+  assert!(artifacts_tmp.path().join("nested/out.txt").is_file());
 }
 
 #[tokio::test]

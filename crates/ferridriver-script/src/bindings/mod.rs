@@ -251,7 +251,7 @@ pub fn install_request_on<'js>(
 
 /// Install the `artifacts` global — a dedicated sandboxed directory for
 /// script outputs (screenshots, PDFs, traces, downloaded bodies).
-pub fn install_artifacts(ctx: &Ctx<'_>, sandbox: Arc<crate::fs::PathSandbox>) -> rquickjs::Result<()> {
+pub fn install_artifacts(ctx: &Ctx<'_>, sandbox: Arc<crate::output_dir::OutputDir>) -> rquickjs::Result<()> {
   let js_art = Class::instance(ctx.clone(), ArtifactsJs::new(sandbox))?;
   ctx.globals().set("artifacts", js_art)?;
   crate::bindings::runtime::mirror_global(ctx, "artifacts")?;

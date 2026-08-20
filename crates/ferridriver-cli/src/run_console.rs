@@ -226,7 +226,6 @@ fn error_name(kind: ferridriver_script::ScriptErrorKind) -> &'static str {
     K::Runtime => "Error",
     K::Timeout => "TimeoutError",
     K::MemoryLimit => "MemoryLimitError",
-    K::SandboxViolation => "SandboxViolationError",
     K::Internal => "InternalError",
   }
 }

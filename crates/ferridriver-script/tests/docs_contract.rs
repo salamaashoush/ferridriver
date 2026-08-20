@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ferridriver_script::{
-  CONTRIBUTION_POINTS, ExtensionHost, InMemoryVars, PathSandbox, RunContext, ScriptCaps, ScriptEngineConfig, Session,
+  CONTRIBUTION_POINTS, ExtensionHost, InMemoryVars, RunContext, ScriptCaps, ScriptEngineConfig, Session,
 };
 
 fn repo_root() -> PathBuf {
@@ -33,7 +33,7 @@ async fn every_contribution_point_is_a_real_global() {
   let dir = tempfile::tempdir().expect("tempdir");
   let context = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    script_root: dir.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

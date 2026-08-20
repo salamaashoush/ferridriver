@@ -130,7 +130,7 @@ struct Published {
 /// Publishes each test as a session and stops it where the mode says.
 pub struct SessionDebugHook {
   /// Resolved scripting environment — the published session gets the same
-  /// sandboxes, caps and extensions a `session open` would, so a script
+  /// roots, caps and extensions a `session open` would, so a script
   /// written against one runs against the other.
   script: Arc<crate::SessionScriptConfig>,
   mode: DebugMode,
@@ -167,16 +167,16 @@ pub fn install(mode: DebugMode, script: crate::SessionScriptConfig, overrides: &
 ///
 /// # Errors
 ///
-/// Returns an error if the current directory cannot be used as a sandbox
+/// Returns an error if the current directory cannot be used as an output
 /// root.
 pub fn install_default(mode: DebugMode, overrides: &mut CliOverrides) -> Result<(), crate::ScriptError> {
   let cwd = std::env::current_dir().map_err(|e| crate::ScriptError::internal(format!("current directory: {e}")))?;
-  let sandbox = Arc::new(crate::PathSandbox::new(&cwd)?);
+  let artifacts = Arc::new(crate::OutputDir::new(&cwd)?);
   install(
     mode,
     crate::SessionScriptConfig {
-      sandbox: Arc::clone(&sandbox),
-      artifacts: Some(sandbox),
+      script_root: cwd.clone(),
+      artifacts: Some(artifacts),
       caps: crate::ScriptCaps::default(),
       extensions: Vec::new(),
       engine: crate::ScriptEngineConfig::default(),
@@ -216,7 +216,7 @@ impl SessionDebugHook {
       Arc::clone(test.browser.state()),
       &id,
       crate::SessionScriptConfig {
-        sandbox: self.script.sandbox.clone(),
+        script_root: self.script.script_root.clone(),
         artifacts: self.script.artifacts.clone(),
         caps: self.script.caps.clone(),
         extensions: self.script.extensions.clone(),

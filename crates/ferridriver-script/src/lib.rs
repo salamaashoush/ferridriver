@@ -19,7 +19,7 @@
   // take `&self` to be callable on `new TextEncoder()` — not a fixable smell.
   clippy::unused_self
 )]
-//! ferridriver-script: sandboxed `QuickJS` scripting engine.
+//! ferridriver-script: the `QuickJS` scripting engine.
 //!
 //! Exposes a `ScriptEngine` that runs user-provided JS against ferridriver's
 //! Page/Browser/Context API with:
@@ -31,7 +31,7 @@
 //!   invalidation.
 //! - Bound args (never interpolated into source) to prevent prompt injection.
 //! - Wall-clock and memory quotas enforced by the `QuickJS` runtime.
-//! - Sandboxed globals: scoped `fs`, captured `console`, session `vars`.
+//! - Host globals: Node `fs`, captured `console`, session `vars`.
 //! - Module loader rooted at a configured `scripts/` directory with path
 //!   sanitization (rejects `..`, absolute paths, symlinks escaping root).
 //! - A poisoning timeout/OOM discards the session VM so the next
@@ -52,8 +52,8 @@ pub mod discover;
 pub mod engine;
 pub mod error;
 pub mod extension_load;
-pub mod fs;
 pub mod modules;
+pub mod output_dir;
 pub mod provided_modules;
 pub mod reporter;
 pub mod requirements;
@@ -90,7 +90,7 @@ pub use engine::{
 pub use error::{ScriptError, ScriptErrorKind};
 pub use extension_load::{GatedExtensions, extension_defaults, gate, load_bindings};
 pub use ferridriver_config::ExtensionSpec;
-pub use fs::PathSandbox;
+pub use output_dir::OutputDir;
 pub use provided_modules::{PackageClaims, ProvidedModule, ProvidedModuleTable};
 pub use reporter::{JsReporter, JsReporterFactory, ReporterModule};
 pub use requirements::{RequirementEnv, RequirementIssue};

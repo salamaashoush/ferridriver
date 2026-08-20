@@ -819,20 +819,10 @@ impl RouteJs {
       }
 
       if let Some(path) = o.get::<_, Option<String>>("path").ok().flatten() {
-        let sandbox = ctx
-          .userdata::<crate::engine::SandboxUd>()
-          .ok_or_else(|| {
-            rquickjs::Error::new_from_js_message(
-              "route.fulfill",
-              "Error",
-              "`path` needs a session filesystem sandbox".to_string(),
-            )
-          })?
-          .0
-          .clone();
-        let resolved = sandbox
-          .resolve_read(&path)
-          .map_err(|e| rquickjs::Error::new_from_js_message("route.fulfill", "Error", e.message))?;
+        // Read the way `fs` reads: an absolute path as written, a
+        // relative one against the process cwd.
+        let resolved = std::fs::canonicalize(&path)
+          .map_err(|e| rquickjs::Error::new_from_js_message("route.fulfill", "Error", format!("path {path}: {e}")))?;
         let bytes = std::fs::read(&resolved).map_err(|e| {
           rquickjs::Error::new_from_js_message("route.fulfill", "Error", format!("read {}: {e}", resolved.display()))
         })?;

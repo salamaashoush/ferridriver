@@ -729,7 +729,7 @@ async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> a
   // Read off before the struct is spread into the run context below.
   let setup_secrets = setup.secrets.clone();
   let artifacts_budget = setup.artifacts_budget;
-  let artifacts_sandbox = setup.artifacts.clone();
+  let artifacts_dir = setup.artifacts.clone();
 
   // Installed AFTER the config resolves, because the echoed source has to
   // know the declared secrets: an observer registered earlier would render
@@ -746,7 +746,7 @@ async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> a
 
   let ctx = ferridriver_script::RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
-    sandbox: setup.sandbox,
+    script_root: setup.script_root.clone(),
     artifacts: setup.artifacts,
     page: None,
     browser_context: None,
@@ -794,7 +794,7 @@ async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> a
   };
 
   finish_code(&collected_code, code_language, args.code_out.as_deref())?;
-  sweep_artifacts(artifacts_budget, artifacts_sandbox.as_deref()).await;
+  sweep_artifacts(artifacts_budget, artifacts_dir.as_deref()).await;
   // A local run's script launches and owns its own browser, so this process
   // never holds a page to read state from.
   let report = args
@@ -891,7 +891,7 @@ async fn run_against_session(
 /// thing the run was for.
 async fn sweep_artifacts(
   budget: Option<ferridriver::response::OutputBudget>,
-  artifacts: Option<&ferridriver_script::PathSandbox>,
+  artifacts: Option<&ferridriver_script::OutputDir>,
 ) {
   let (Some(budget), Some(artifacts)) = (budget, artifacts) else {
     return;

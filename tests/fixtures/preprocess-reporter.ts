@@ -18,6 +18,6 @@ export default class PreprocessReporter {
     const skipped = tests.find((test) => test.title.includes('skipped'));
     if (skipped) testRun.skip(skipped, 'a reporter said so');
     testRun.skipSharding();
-    await fs.writeFile(this.outputFile, JSON.stringify({ seen }));
+    await fs.promises.writeFile(this.outputFile, JSON.stringify({ seen }));
   }
 }

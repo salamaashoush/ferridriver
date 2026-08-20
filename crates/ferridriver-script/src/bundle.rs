@@ -751,7 +751,7 @@ impl CompiledBundle {
   /// imports), resolved to absolute paths against `cwd`. Read from the
   /// source map's `sources`; synthetic (non-file) sources are skipped.
   ///
-  /// Callers running untrusted bundles use this to enforce a sandbox
+  /// Callers running untrusted bundles use this to enforce a
   /// jail (every input must live under an allowed root).
   #[must_use]
   pub fn source_files(&self, cwd: &Path) -> Vec<PathBuf> {

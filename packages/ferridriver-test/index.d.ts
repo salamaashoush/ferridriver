@@ -1729,17 +1729,69 @@ declare global {
   function firefox(): BrowserType;
   function webkit(): BrowserType;
 
-  // Sandboxed file access rooted at the runner's working directory
-  // (writes are additionally scoped -- see the engine's PathSandbox).
+  // `require` serves the native specifiers; `require.resolve` answers a
+  // path the way Node does, relative to the file that wrote the call.
+  const require: {
+    (specifier: string): unknown;
+    resolve(specifier: string): string;
+  };
+
+  // Node's `fs`, as a global. The same object `import fs from "node:fs"`
+  // answers with: sync entry points plus `fs.promises`. A relative path
+  // resolves against the process working directory, as in Node.
+  interface Stats {
+    isFile(): boolean;
+    isDirectory(): boolean;
+    isSymbolicLink(): boolean;
+    size: number;
+    mtimeMs: number;
+  }
+
+  interface Dirent {
+    name: string;
+    isFile(): boolean;
+    isDirectory(): boolean;
+    isSymbolicLink(): boolean;
+  }
+
+  interface FsPromises {
+    access(path: string, mode?: number): Promise<void>;
+    readFile(path: string): Promise<Buffer>;
+    readFile(path: string, options: string | { encoding: string }): Promise<string>;
+    writeFile(path: string, data: string | Uint8Array, options?: string | { encoding?: string }): Promise<void>;
+    rename(from: string, to: string): Promise<void>;
+    readdir(path: string, options?: { recursive?: boolean }): Promise<string[]>;
+    readdir(path: string, options: { withFileTypes: true; recursive?: boolean }): Promise<Dirent[]>;
+    mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<string | undefined>;
+    mkdtemp(prefix: string): Promise<string>;
+    rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+    rmdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+    stat(path: string): Promise<Stats>;
+    lstat(path: string): Promise<Stats>;
+    chmod(path: string, mode: number | string): Promise<void>;
+    symlink(target: string, path: string, type?: string): Promise<void>;
+    constants: { F_OK: number; R_OK: number; W_OK: number; X_OK: number };
+  }
+
   const fs: {
-    readFile(path: string): Promise<string>;
-    readFileBytes(path: string): Promise<number[]>;
-    readFileSync(path: string): string;
-    readFileBytesSync(path: string): number[];
+    promises: FsPromises;
+    constants: { F_OK: number; R_OK: number; W_OK: number; X_OK: number };
+    accessSync(path: string, mode?: number): void;
     existsSync(path: string): boolean;
-    writeFile(path: string, contents: string): Promise<void>;
-    readdir(path: string): Promise<string[]>;
-    exists(path: string): Promise<boolean>;
+    readFileSync(path: string): Buffer;
+    readFileSync(path: string, options: string | { encoding: string }): string;
+    writeFileSync(path: string, data: string | Uint8Array, options?: string | { encoding?: string }): void;
+    readdirSync(path: string, options?: { recursive?: boolean }): string[];
+    readdirSync(path: string, options: { withFileTypes: true; recursive?: boolean }): Dirent[];
+    mkdirSync(path: string, options?: { recursive?: boolean; mode?: number }): string | undefined;
+    mkdtempSync(prefix: string): string;
+    rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
+    rmdirSync(path: string, options?: { recursive?: boolean }): void;
+    statSync(path: string): Stats;
+    lstatSync(path: string): Stats;
+    chmodSync(path: string, mode: number | string): void;
+    renameSync(from: string, to: string): void;
+    symlinkSync(target: string, path: string, type?: string): void;
   };
 
   class Buffer extends Uint8Array {

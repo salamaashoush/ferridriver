@@ -134,7 +134,7 @@ export default class CountingReporter implements Reporter {
       startTimeIsDate: result.startTime instanceof Date,
     };
     const target = this.options.outputFile ?? 'counting-reporter.json';
-    await fs.writeFile(target, JSON.stringify(summary, null, 2));
+    await fs.promises.writeFile(target, JSON.stringify(summary, null, 2));
   }
 
   printsToStdio(): boolean {

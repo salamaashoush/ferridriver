@@ -1,8 +1,9 @@
-//! Scripting tool — run sandboxed `QuickJS` against the live session.
+//! Scripting tool — run `QuickJS` against the live session.
 //!
 //! Each invocation gets a fresh `rquickjs` context (no state bleeds between
 //! calls). `vars` persists per session so scripts can share computed values
-//! across invocations. `fs` is scoped to the configured `script_root`.
+//! across invocations. `fs` is Node's, and a relative `path` resolves
+//! against the configured `script_root`.
 //!
 //! Args are passed as a positional array bound to the `args` global; they
 //! are never interpolated into the source string, which prevents prompt-
@@ -32,7 +33,7 @@ pub struct RunScriptParams {
     `args` (array of bound parameters), \
     `vars` (session-level string store: get/set/has/delete/keys), \
     `console` (log/info/warn/error/debug — captured and returned), \
-    `fs` (readFile/readFileBytes/writeFile/readdir/exists — scoped to the configured script_root), \
+    `fs` (Node's `node:fs`: readFileSync/writeFileSync/readdirSync/existsSync plus `promises`), \
     `artifacts` (write/writeBytes/read/readBytes/list/exists/remove — dedicated output dir for \
     screenshots, PDFs, traces; scoped to the configured artifacts_root), \
     `page` / `context` / `request` (live browser bindings). \
@@ -41,14 +42,13 @@ pub struct RunScriptParams {
   pub source: Option<String>,
 
   #[schemars(
-    description = "Path to a script file under the configured script_root, relative. Accepts \
+    description = "Path to a script file, relative to the configured script_root. Accepts \
     `.js`/`.mjs` and `.ts`/`.tsx`/`.mts`/`.cts`. Mutually exclusive with `source`. Lets the LLM \
     iterate on a saved script by editing the file and re-invoking `run_script` without re-sending \
     the full source. A TypeScript file, or any file with top-level `import`/`export`, is bundled \
     + transpiled and run as an ES module: top-level `await` works and the result is the module's \
     `default` export (use `export default <value>`); a plain `.js` file keeps the `return <value>` \
-    convention. Imports are resolved off disk but every resolved file must stay under script_root \
-    (a traversal/symlink escape is rejected). The path itself is validated against script_root: \
+    convention. Imports are resolved off disk. The path itself resolves against script_root: \
     absolute paths, `..` components, and symlinks escaping the root are rejected. Error line \
     numbers are remapped to the original source."
   )]
@@ -181,14 +181,14 @@ impl McpServer {
     name = "run_script",
     title = "Run Browser Script",
     annotations(read_only_hint = false, open_world_hint = true),
-    description = "Execute JavaScript in a sandboxed QuickJS runtime against the current session. \
-    Provide `source` (inline JS) or `path` (a .js/.mjs file under script_root) — exactly one. \
+    description = "Execute JavaScript in a QuickJS runtime against the current session. \
+    Provide `source` (inline JS) or `path` (a .js/.mjs file) — exactly one. \
     Use `path` to iterate on a saved script: edit the file, re-invoke, no need to resend the body. \
     Use this for imperative browser-automation logic that needs loops, conditionals, try/catch, \
     or computed values. \
     Globals available: `args` (bound parameters, never interpolated into source — prompt-injection safe), \
     `vars` (session-level get/set/has/delete), `console.*` (captured with limits), \
-    `fs` (readFile/writeFile/readdir/exists, scoped to script_root, rejects path traversal), \
+    `fs` (Node's `node:fs`, including `fs.promises`), \
     `artifacts` (write/writeBytes/read/readBytes/list/exists/remove, dedicated output dir for \
     screenshots / PDFs / traces; pair with `page.screenshot()` or `page.pdf()` to save bytes), \
     `page` / `context` / `request` (live browser bindings). \
@@ -217,7 +217,7 @@ impl McpServer {
     let guard = self.session_guard(&session).await;
     McpServer::emit_progress(&peer, token.as_ref(), 0.0, Some(1.0), "executing script").await;
 
-    let Some(sandbox) = self.script_sandbox.clone() else {
+    let Some(script_root) = self.script_root.clone() else {
       return Err(McpServer::err(
         "scripting is disabled: the configured script_root could not be prepared at server startup. \
         Check the server log for the underlying error.",
@@ -237,7 +237,7 @@ impl McpServer {
     // call's outputs from every earlier call's. The sandbox outlives the
     // call, so its whole record is not "what this call wrote".
     let artifacts_before = self
-      .artifacts_sandbox
+      .artifacts_dir
       .as_ref()
       .map(|sandbox| sandbox.written())
       .unwrap_or_default();
@@ -252,21 +252,27 @@ impl McpServer {
       },
       (None, None) => {
         return Err(McpServer::err(
-          "run_script requires either `source` (inline JS) or `path` (file under script_root)",
+          "run_script requires either `source` (inline JS) or `path` (a JS/TS file)",
         ));
       },
       // Inline source stays on the raw wrap-and-eval path (top-level
       // `return` yields the result); only file paths are bundled.
       (Some(src), None) => (src.to_string(), None),
       (None, Some(rel)) => {
-        let resolved = sandbox
-          .resolve_read(rel)
-          .map_err(|e| McpServer::err(format!("run_script path: {}", e.message)))?;
+        // Resolved the way `fs` resolves: relative to the script root,
+        // absolute as written.
+        let joined = if std::path::Path::new(rel).is_absolute() {
+          std::path::PathBuf::from(rel)
+        } else {
+          script_root.join(rel)
+        };
+        let resolved = std::fs::canonicalize(&joined)
+          .map_err(|e| McpServer::err(format!("run_script path {}: {e}", joined.display())))?;
         match resolved.extension().and_then(|e| e.to_str()) {
           Some("js" | "mjs" | "ts" | "tsx" | "mts" | "cts") => {},
           _ => {
             return Err(McpServer::err(
-              "run_script `path` must point at a .js/.mjs/.ts/.tsx/.mts/.cts file under script_root",
+              "run_script `path` must point at a .js/.mjs/.ts/.tsx/.mts/.cts file",
             ));
           },
         }
@@ -309,26 +315,13 @@ impl McpServer {
 
     let result = if let Some(entry) = module_entry {
       // ES-module file: rolldown-bundle (TypeScript + imports, disk-cached)
-      // and run as a module — the result is its `default` export. Bundling
-      // resolves imports off disk, so every transitive input must be
-      // re-validated under script_root before execution; an import that
-      // escapes the sandbox is rejected (never run).
+      // and run as a module — the result is its `default` export.
       let bundle_cwd = entry
         .parent()
-        .map_or_else(|| sandbox.root().to_path_buf(), std::path::Path::to_path_buf);
+        .map_or_else(|| script_root.clone(), std::path::Path::to_path_buf);
       let bundle = ferridriver_script::bundle_and_compile(std::slice::from_ref(&entry), &bundle_cwd)
         .await
         .map_err(|e| McpServer::err(format!("run_script bundle {}: {}", entry.display(), e.message)))?;
-      for input in bundle.source_files(&bundle_cwd) {
-        let canon = std::fs::canonicalize(&input)
-          .map_err(|e| McpServer::err(format!("run_script input {}: {e}", input.display())))?;
-        if !canon.starts_with(sandbox.root()) {
-          return Err(McpServer::err(format!(
-            "run_script: import escapes script_root: {}",
-            input.display()
-          )));
-        }
-      }
       self
         .run_module_on_session_vm(&session, &guard, &bundle, &args, options, context)
         .await
@@ -346,7 +339,7 @@ impl McpServer {
     // Bring the artifacts root back under its ceiling, keeping whatever this
     // call produced — a script that writes a report and then has it deleted
     // on the way out has done nothing.
-    if let (Some(budget), Some(sandbox)) = (self.artifacts_budget, self.artifacts_sandbox.as_ref()) {
+    if let (Some(budget), Some(sandbox)) = (self.artifacts_budget, self.artifacts_dir.as_ref()) {
       let mine: std::collections::BTreeSet<_> = sandbox
         .written()
         .into_iter()

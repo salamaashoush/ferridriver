@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use ferridriver_config::{ExtensionCommandsCeiling, ExtensionPolicyConfig};
 use ferridriver_script::{
-  ExtensionBinding, InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptCaps, ScriptEngineConfig,
-  Session, compile_and_extract_extensions,
+  ExtensionBinding, InMemoryVars, Outcome, RunContext, RunOptions, ScriptCaps, ScriptEngineConfig, Session,
+  compile_and_extract_extensions,
 };
 
 async fn binding_from(name: &str, src: &str) -> (tempfile::TempDir, ExtensionBinding) {
@@ -39,7 +39,7 @@ fn run_context(extensions: Vec<ExtensionBinding>, policy: ExtensionPolicyConfig)
   ));
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

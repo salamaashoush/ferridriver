@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ferridriver_script::{
-  ExtensionBinding, InMemoryVars, Outcome, PathSandbox, RequirementEnv, RunContext, RunOptions, ScriptCaps,
-  ScriptEngineConfig, Session,
+  ExtensionBinding, InMemoryVars, Outcome, RequirementEnv, RunContext, RunOptions, ScriptCaps, ScriptEngineConfig,
+  Session,
 };
 
 fn scratch(tag: &str) -> PathBuf {
@@ -41,7 +41,7 @@ async fn bindings_for(specs: &[ferridriver_script::ExtensionSpec]) -> Vec<Extens
 async fn session_with(dir: &std::path::Path, extensions: Vec<ExtensionBinding>) -> (Session, RunContext) {
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir).expect("sandbox")),
+    script_root: dir.into(),
     artifacts: None,
     page: None,
     browser_context: None,

@@ -9,13 +9,13 @@
 use std::sync::Arc;
 
 use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session, bundle_and_compile,
+  InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, Session, bundle_and_compile,
 };
 
 fn ctx(dir: &std::path::Path) -> RunContext {
   RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir).expect("sandbox")),
+    script_root: dir.into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -37,13 +37,14 @@ async fn bundled_module_uses_native_fs_path_buffer() {
   std::fs::write(
     &entry,
     "import fs from 'node:fs';\n\
-     import { readFile } from 'fs';\n\
+     import { readFileSync } from 'fs';\n\
+     import { readFile } from 'node:fs/promises';\n\
      import path from 'node:path';\n\
      import { Buffer } from 'node:buffer';\n\
-     const dbg: string = JSON.stringify({ t1: typeof fs, g: typeof (globalThis as any).fs });\n\
-     const viaDefault: string = await fs.readFile('data.txt');\n\
-     const viaNamed: string = await readFile('data.txt');\n\
-     const viaPromises: string = await fs.promises.readFile('data.txt');\n\
+     const file: string = FILE;\n\
+     const viaDefault: string = fs.readFileSync(file, 'utf8');\n\
+     const viaNamed: string = readFileSync(file, 'utf8');\n\
+     const viaPromises: string = await readFile(file, 'utf8');\n\
      const joined: string = path.join('a', '..', 'b', 'c.txt');\n\
      const ext: string = path.extname(joined);\n\
      const b64: string = Buffer.from('hi').toString('base64');\n\
@@ -51,6 +52,13 @@ async fn bundled_module_uses_native_fs_path_buffer() {
      export default { viaDefault, viaNamed, viaPromises, joined, ext, b64, round };\n",
   )
   .expect("entry");
+  // Node resolves a relative path against the process cwd, so the test
+  // names the file it wrote outright rather than relying on a root.
+  let source = std::fs::read_to_string(&entry).expect("read entry").replace(
+    "FILE",
+    &serde_json::to_string(&dir.path().join("data.txt").to_string_lossy().into_owned()).expect("json"),
+  );
+  std::fs::write(&entry, source).expect("entry");
 
   let bundle = bundle_and_compile(std::slice::from_ref(&entry), dir.path())
     .await

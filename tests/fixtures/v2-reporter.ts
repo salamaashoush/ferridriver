@@ -32,7 +32,7 @@ export default class V2Reporter implements ReporterV2 {
   }
 
   async onEnd(_result: ReporterFullResult): Promise<void> {
-    await fs.writeFile(
+    await fs.promises.writeFile(
       this.outputFile,
       JSON.stringify({ rootDir: this.rootDir, beganType: this.beganType, beganWith: this.beganWith })
     );

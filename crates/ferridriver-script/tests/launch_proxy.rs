@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ferridriver_script::{InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session};
+use ferridriver_script::{InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, Session};
 
 /// A proxy that answers nothing and records the request lines it is sent.
 fn spawn_recording_proxy() -> (u16, Arc<Mutex<Vec<String>>>) {
@@ -43,7 +43,7 @@ async fn a_script_launching_with_a_proxy_routes_through_it() {
 
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

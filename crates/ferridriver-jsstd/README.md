@@ -18,13 +18,18 @@ Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@e987d2b` (main, 2026-08-
 | `llrt_json`        | `json`       |
 | `llrt_crypto`      | `crypto`     |
 | `llrt_os`          | `os`         |
+| `llrt_fs`          | `fs`         |
+| `llrt_path`        | `pathutil`   |
 | `llrt_stream_web`  | `stream_web` |
 | `llrt_url`         | `url`        |
 | `llrt_util`        | `text`       |
 | `llrt_test`        | `test` (dev) |
 
 The rest of llrt — its hyper/fetch stack, timers, console — is deliberately
-not vendored: ferridriver has its own, over `reqwest`. `os` is vendored
+not vendored: ferridriver has its own, over `reqwest`. `fs` is vendored
+because it IS Node's `fs`, which is what a suite expects; only the Rust
+path helpers of `llrt_path` come with it (`pathutil`) — the `path` MODULE
+stays ferridriver's. `os` is vendored
 because ferridriver has nothing equivalent and the module is pure host
 introspection with no overlap with the automation stack. From `llrt_util`
 only the four text codecs are taken (`TextEncoder`, `TextDecoder` and their
@@ -101,6 +106,7 @@ for m in utils:libs/llrt_utils context:libs/llrt_context \
          encoding:libs/llrt_encoding exceptions:modules/llrt_exceptions \
          events:modules/llrt_events abort:modules/llrt_abort \
          os:modules/llrt_os buffer:modules/llrt_buffer \
+         fs:modules/llrt_fs \
          json:libs/llrt_json crypto:modules/llrt_crypto \
          url:modules/llrt_url \
          stream_web:modules/llrt_stream_web; do
@@ -299,3 +305,16 @@ strings), `swap16` / `swap32` / `swap64`, `compare`, and `Buffer.poolSize`.
     credentials. `URL::inner_url` was upstream's only reader for the
     omitted-hash branch and goes with it; the `percent-encoding` dep is
     for the credential decode (`url` keeps that crate private).
+
+24. **`fs/mod.rs` — `existsSync`.** Node has it and a large share of real
+    code calls it; upstream ships neither it nor a callback API, so
+    without it the only way to ask whether a file is there is to catch a
+    `stat` rejection.
+
+25. **`fs/mod.rs` — one namespace per VM.** Upstream builds a fresh
+    exports object per module evaluation. Node answers the SAME object
+    for `require("fs")`, `require("node:fs")` and `fs.promises` vs
+    `require("fs/promises")`, so the namespaces are built once per
+    context and remembered; the `fs` global is that object too. Without
+    it, identity comparisons are false and a caller who patches a method
+    patches a copy nobody else sees.

@@ -12,6 +12,8 @@
 //! | `llrt_events`       | [`events`]    |
 //! | `llrt_abort`        | [`abort`]     |
 //! | `llrt_os`           | [`os`]        |
+//! | `llrt_fs`           | [`fs`]        |
+//! | `llrt_path` (helpers)| [`pathutil`] |
 //! | `llrt_encoding`     | [`encoding`]  |
 //! | `llrt_buffer`       | [`buffer`]    |
 //! | `llrt_json`         | [`json`]      |
@@ -33,6 +35,7 @@ pub mod crypto;
 pub mod encoding;
 pub mod events;
 pub mod exceptions;
+pub mod fs;
 pub mod json;
 pub mod modules;
 /// Node modules ferridriver implements itself, because upstream llrt has
@@ -42,6 +45,10 @@ pub mod modules;
 /// JS values.
 pub mod node;
 pub mod os;
+/// Path helpers the vendored `fs` needs (upstream `llrt_path`). The
+/// `path` MODULE is ferridriver's own; only these Rust helpers come from
+/// upstream, so `fs` stays byte-close to it.
+pub mod pathutil;
 pub mod stream_web;
 pub mod text;
 pub mod url;
@@ -57,8 +64,8 @@ use rquickjs::{Ctx, Result};
 
 /// Install every vendored global on `ctx`: `DOMException`, `Event` /
 /// `EventTarget`, `AbortController` / `AbortSignal`, the full Streams
-/// surface, `Buffer` / `Blob` / `File`, `crypto`, the text codecs and
-/// `URL` / `URLSearchParams`.
+/// surface, `Buffer` / `Blob` / `File`, `crypto`, the text codecs,
+/// `URL` / `URLSearchParams` and `fs`.
 ///
 /// One entry point, so a host cannot install half the crate.
 pub fn init(ctx: &Ctx<'_>) -> Result<()> {
@@ -71,5 +78,6 @@ pub fn init(ctx: &Ctx<'_>) -> Result<()> {
   text::init(ctx)?;
   url::init(ctx)?;
   web::init(ctx)?;
+  fs::init(ctx)?;
   Ok(())
 }

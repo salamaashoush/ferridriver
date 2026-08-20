@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ferridriver_script::{
-  ExtensionBinding, InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session,
+  ExtensionBinding, InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, Session,
   compile_and_extract_extensions,
 };
 
@@ -40,7 +40,7 @@ async fn session_with(extensions: Vec<ExtensionBinding>) -> (tempfile::TempDir, 
   let tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

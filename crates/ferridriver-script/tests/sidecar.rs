@@ -7,9 +7,7 @@
 use std::sync::Arc;
 
 use ferridriver_script::sidecar::{Sidecar, SidecarSpec};
-use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig,
-};
+use ferridriver_script::{InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig};
 
 const FIXTURE: &str = env!("CARGO_BIN_EXE_sidecar_echo");
 
@@ -153,10 +151,9 @@ async fn pushed_event_arrives_on_subscriber() {
 
 fn engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
   let tmp = tempfile::tempdir().expect("tempdir");
-  let sandbox = PathSandbox::new(tmp.path()).expect("sandbox");
   let context = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(sandbox),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

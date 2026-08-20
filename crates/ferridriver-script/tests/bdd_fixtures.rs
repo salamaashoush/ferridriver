@@ -7,9 +7,9 @@
 use std::sync::Arc;
 
 use ferridriver_script::{
-  ExtensionHost, InMemoryVars, PathSandbox, RunContext, ScenarioSpec, ScriptCaps, ScriptEngineConfig, Session,
-  begin_scenario, bundle_and_compile, collect_registry, drain_attachments, end_scenario, eval_bundle, invoke_hook,
-  invoke_step, teardown_worker_fixtures,
+  ExtensionHost, InMemoryVars, RunContext, ScenarioSpec, ScriptCaps, ScriptEngineConfig, Session, begin_scenario,
+  bundle_and_compile, collect_registry, drain_attachments, end_scenario, eval_bundle, invoke_hook, invoke_step,
+  teardown_worker_fixtures,
 };
 use ferridriver_test::fixture_graph::dominant_fixture_set;
 use ferridriver_test::host::TestWorldData;
@@ -32,7 +32,7 @@ async fn suite(source: &str) -> Suite {
   let bundle = bundle_and_compile(&[entry], dir.path()).await.expect("bundle");
   let context = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    script_root: dir.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

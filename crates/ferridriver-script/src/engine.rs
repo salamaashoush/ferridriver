@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use rquickjs::function::{Async, Func};
+use rquickjs::function::Func;
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx, Module, Object, Value};
 
 use crate::vm_with;
@@ -20,7 +20,9 @@ use crate::vm_with;
 use crate::console::ConsoleCapture;
 use crate::console_fmt::install_console;
 use crate::error::{ScriptError, ScriptErrorKind};
-use crate::fs::PathSandbox;
+use std::path::PathBuf;
+
+use crate::output_dir::OutputDir;
 use crate::result::ScriptResult;
 use crate::vars::VarsStore;
 
@@ -185,25 +187,23 @@ impl ExtensionHost {
 /// the matching global so pure-compute scripts don't need the extra
 /// infrastructure.
 ///
-/// # Trust contract
+/// # Filesystem posture
 ///
-/// There is exactly ONE runtime posture: jailed. Everything a live VM
-/// touches by path — `fs.*`, `artifacts`, ES module imports — goes
-/// through a [`PathSandbox`]. The trusted tier is the BUNDLING step,
-/// not the VM: extension files and BDD step files are read from
-/// anywhere on disk by rolldown because the OPERATOR named them in
-/// config/CLI; by the time they execute they are bytecode, and any
-/// `import` they kept (the native `ferridriver`/node-compat set) is
-/// served by Rust `ModuleDef`s. Source handed to a live session at
-/// call time (MCP `run_script`) never gets that bundling privilege —
-/// its imports resolve only inside the sandbox root.
+/// A script reaches the filesystem the way Node does: `fs` is the
+/// vendored `node:fs`, and a relative path resolves against the process
+/// cwd. `script_root` is where a relative ES module import resolves from,
+/// and `artifacts` is where outputs are written by default — anchors,
+/// not boundaries. There is no path jail; a script already reaches the
+/// network, the browser and `commands`, so a prefix check on one module
+/// was never the boundary it read as.
 #[derive(Clone)]
 pub struct RunContext {
   pub vars: Arc<dyn VarsStore>,
-  pub sandbox: Arc<PathSandbox>,
+  /// Directory a relative ES module import resolves against.
+  pub script_root: PathBuf,
   /// Optional dedicated output directory, exposed to scripts as `artifacts`.
   /// Typically `.ferridriver/artifacts/` alongside `script_root`.
-  pub artifacts: Option<Arc<PathSandbox>>,
+  pub artifacts: Option<Arc<OutputDir>>,
   pub page: Option<Arc<ferridriver::Page>>,
   pub browser_context: Option<Arc<ferridriver::context::ContextRef>>,
   pub request: Option<Arc<ferridriver::http_client::HttpClient>>,
@@ -539,7 +539,7 @@ impl ferridriver_test::host::DeadlineControl for Deadline {
 impl Session {
   /// Build the persistent VM: runtime, resource limits, sandbox-rooted
   /// module loader, context, and one-time extension install. The module
-  /// loader is bound to `context.sandbox` for the VM's lifetime, so a
+  /// loader is bound to `context.script_root` for the VM's lifetime, so a
   /// session must always be driven with the same `script_root`.
   pub async fn create(config: ScriptEngineConfig, context: &RunContext) -> Result<Self, ScriptError> {
     let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("rquickjs runtime init: {e}")))?;
@@ -583,11 +583,11 @@ impl Session {
       .set_loader(
         (
           crate::bindings::native_modules::resolver(),
-          crate::modules::SandboxResolver::new(context.sandbox.clone()),
+          crate::modules::RelativeModuleResolver::new(context.script_root.clone()),
         ),
         (
           crate::bindings::native_modules::loader(),
-          crate::modules::SandboxLoader::new(context.sandbox.clone()),
+          crate::modules::RelativeModuleLoader::new(),
         ),
       )
       .await;
@@ -606,8 +606,8 @@ impl Session {
     // Cloned out of `context` (a `&RunContext`) so the async_with future
     // owns them rather than borrowing across the await.
     let vars = context.vars.clone();
-    let sandbox = context.sandbox.clone();
-    let sandbox_root = context.sandbox.root().to_string_lossy().into_owned();
+    let script_root = context.script_root.clone();
+    let script_root_str = script_root.to_string_lossy().into_owned();
     let artifacts = context.artifacts.clone();
     let host = context.host;
     let caps = context.caps.clone();
@@ -621,7 +621,7 @@ impl Session {
     // below). The engine config goes without its console sink: that sink
     // belongs to THIS process's stdout, and a session host routes each run's
     // output to whichever client asked for it.
-    let (env_sandbox, env_artifacts, env_extensions) = (sandbox.clone(), artifacts.clone(), extensions.clone());
+    let (env_script_root, env_artifacts, env_extensions) = (script_root.clone(), artifacts.clone(), extensions.clone());
     let env_engine = ScriptEngineConfig {
       console_sink: None,
       ..config.clone()
@@ -671,7 +671,7 @@ impl Session {
       // session, it is a registry entry.
       let _ = ctx.store_userdata(crate::session_host::ScriptEnvUd(std::sync::Arc::new(
         crate::session_host::SessionScriptConfig {
-          sandbox: env_sandbox,
+          script_root: env_script_root,
           artifacts: env_artifacts,
           caps: caps.clone(),
           extensions: env_extensions,
@@ -702,12 +702,13 @@ impl Session {
       crate::bindings::define_classes(&ctx)
         .map_err(|e| ScriptError::internal(format!("failed to define classes: {e}")))?;
       install_vars(&ctx, vars).map_err(|e| ScriptError::internal(format!("failed to install vars: {e}")))?;
-      install_fs(&ctx, sandbox).map_err(|e| ScriptError::internal(format!("failed to install fs: {e}")))?;
+      crate::bindings::runtime::mirror_global(&ctx, "fs")
+        .map_err(|e| ScriptError::internal(format!("failed to mirror fs: {e}")))?;
       // `process.env` is the operator's allow-list already intersected
       // with the real environment, and `cwd()` answers the sandbox root
       // rather than the real process cwd — the two host-supplied values
       // the standard-library `process` takes.
-      ferridriver_jsstd::node::process::install(&ctx, &caps.env, &sandbox_root)
+      ferridriver_jsstd::node::process::install(&ctx, &caps.env, &script_root_str)
         .and_then(|()| crate::bindings::runtime::mirror_global(&ctx, "process"))
         .map_err(|e| ScriptError::internal(format!("failed to install process: {e}")))?;
       install_commands(&ctx, &caps, None)
@@ -1140,6 +1141,76 @@ impl Session {
 
 /// Wrap user source in an async IIFE so `await` works at the top level and
 /// the expression evaluates to a `Promise<value>` the engine can await.
+/// Install the session-lifetime runtime shims: timers, URL, and a few
+/// hand-rolled web globals. Called once at [`Session::create`]; these
+/// PERSIST across executions (browser/REPL-like) and are cancelled only
+/// when the session VM is dropped (poison / eviction / session end) —
+/// dropping the `AsyncRuntime` aborts every `setInterval`/`setTimeout`
+/// task `ctx.spawn`ed by the timers module, so no per-call teardown is
+/// needed.
+pub(crate) fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+  // Native timers (setTimeout/Interval, ctx.spawn-backed) plus
+  // queueMicrotask, which shares their net-policy carry-over.
+  crate::bindings::timers::install(ctx)?;
+  // `require` for the native specifiers only — what a CommonJS source
+  // bundles down to for an external module.
+  crate::bindings::native_modules::install_require(ctx)?;
+  Ok(())
+}
+
+fn install_vars(ctx: &Ctx<'_>, vars: Arc<dyn VarsStore>) -> rquickjs::Result<()> {
+  let obj = Object::new(ctx.clone())?;
+
+  {
+    let v = vars.clone();
+    obj.set("get", Func::from(move |name: String| v.get(&name)))?;
+  }
+  {
+    let v = vars.clone();
+    obj.set(
+      "set",
+      Func::from(move |name: String, value: String| {
+        v.set(&name, value);
+      }),
+    )?;
+  }
+  {
+    let v = vars.clone();
+    obj.set("has", Func::from(move |name: String| v.has(&name)))?;
+  }
+  {
+    let v = vars.clone();
+    obj.set(
+      "delete",
+      Func::from(move |name: String| {
+        v.delete(&name);
+      }),
+    )?;
+  }
+  {
+    let v = vars.clone();
+    obj.set("keys", Func::from(move || v.keys()))?;
+  }
+
+  ctx.globals().set("vars", obj)?;
+  crate::bindings::runtime::mirror_global(ctx, "vars")?;
+  Ok(())
+}
+
+fn install_commands(
+  ctx: &Ctx<'_>,
+  caps: &ScriptCaps,
+  procs: Option<Arc<crate::session_procs::SessionProcs>>,
+) -> rquickjs::Result<()> {
+  let commands = rquickjs::class::Class::instance(
+    ctx.clone(),
+    crate::bindings::ExtensionCommandsJs::new(Arc::new(caps.commands.clone()), procs),
+  )?;
+  ctx.globals().set("commands", commands)?;
+  crate::bindings::runtime::mirror_global(ctx, "commands")?;
+  Ok(())
+}
+
 fn wrap_source(source: &str) -> String {
   format!("(async () => {{\n{source}\n}})()")
 }
@@ -1208,229 +1279,6 @@ fn install_call_globals(ctx: &Ctx<'_>, args: &[serde_json::Value], inst: Globals
   }
 
   Ok(())
-}
-
-/// Install the session-lifetime runtime shims: timers, URL, and a few
-/// hand-rolled web globals. Called once at [`Session::create`]; these
-/// PERSIST across executions (browser/REPL-like) and are cancelled only
-/// when the session VM is dropped (poison / eviction / session end) —
-/// dropping the `AsyncRuntime` aborts every `setInterval`/`setTimeout`
-/// task `ctx.spawn`ed by the timers module, so no per-call teardown is
-/// needed. Sandbox-safe surface only — `os` / `sqlite` are deliberately
-/// excluded so scripts cannot escape the filesystem/db sandbox.
-pub(crate) fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-  // Native timers (setTimeout/Interval, ctx.spawn-backed) plus
-  // queueMicrotask, which shares their net-policy carry-over.
-  crate::bindings::timers::install(ctx)?;
-  // `require` for the native specifiers only — what a CommonJS source
-  // bundles down to for an external module.
-  crate::bindings::native_modules::install_require(ctx)?;
-  Ok(())
-}
-
-fn install_vars(ctx: &Ctx<'_>, vars: Arc<dyn VarsStore>) -> rquickjs::Result<()> {
-  let obj = Object::new(ctx.clone())?;
-
-  {
-    let v = vars.clone();
-    obj.set("get", Func::from(move |name: String| v.get(&name)))?;
-  }
-  {
-    let v = vars.clone();
-    obj.set(
-      "set",
-      Func::from(move |name: String, value: String| {
-        v.set(&name, value);
-      }),
-    )?;
-  }
-  {
-    let v = vars.clone();
-    obj.set("has", Func::from(move |name: String| v.has(&name)))?;
-  }
-  {
-    let v = vars.clone();
-    obj.set(
-      "delete",
-      Func::from(move |name: String| {
-        v.delete(&name);
-      }),
-    )?;
-  }
-  {
-    let v = vars.clone();
-    obj.set("keys", Func::from(move || v.keys()))?;
-  }
-
-  ctx.globals().set("vars", obj)?;
-  crate::bindings::runtime::mirror_global(ctx, "vars")?;
-  Ok(())
-}
-
-fn install_commands(
-  ctx: &Ctx<'_>,
-  caps: &ScriptCaps,
-  procs: Option<Arc<crate::session_procs::SessionProcs>>,
-) -> rquickjs::Result<()> {
-  let commands = rquickjs::class::Class::instance(
-    ctx.clone(),
-    crate::bindings::ExtensionCommandsJs::new(Arc::new(caps.commands.clone()), procs),
-  )?;
-  ctx.globals().set("commands", commands)?;
-  crate::bindings::runtime::mirror_global(ctx, "commands")?;
-  Ok(())
-}
-
-/// The session's filesystem sandbox, reachable from a class binding
-/// that has only a `Ctx` — `route.fulfill({ path })` reads through it,
-/// so a mocked response body obeys the same root as `fs.readFile`.
-pub(crate) struct SandboxUd(pub(crate) Arc<PathSandbox>);
-
-// SAFETY: holds only `'static` data behind an `Arc`, so re-stating the
-// unused `'js` lifetime is sound — same rationale as the other userdata.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for SandboxUd {
-  type Changed<'to> = SandboxUd;
-}
-
-fn install_fs(ctx: &Ctx<'_>, sandbox: Arc<PathSandbox>) -> rquickjs::Result<()> {
-  let _ = ctx.store_userdata(SandboxUd(sandbox.clone()));
-  let obj = Object::new(ctx.clone())?;
-
-  {
-    let sb = sandbox.clone();
-    obj.set(
-      "readFile",
-      Func::from(Async(move |path: String| {
-        let sb = sb.clone();
-        async move {
-          let resolved = sb.resolve_read(&path).map_err(|e| to_rq_error(&e))?;
-          tokio::fs::read_to_string(&resolved)
-            .await
-            .map_err(|e| rquickjs::Error::new_from_js_message("fs", "readFile", e.to_string()))
-        }
-      })),
-    )?;
-  }
-  {
-    let sb = sandbox.clone();
-    obj.set(
-      "readFileBytes",
-      Func::from(Async(move |path: String| {
-        let sb = sb.clone();
-        async move {
-          let resolved = sb.resolve_read(&path).map_err(|e| to_rq_error(&e))?;
-          tokio::fs::read(&resolved)
-            .await
-            .map_err(|e| rquickjs::Error::new_from_js_message("fs", "readFileBytes", e.to_string()))
-        }
-      })),
-    )?;
-  }
-  // Node's sync reads. The jail check (`resolve_read`) is already
-  // synchronous, so these are the same path minus the await — and a
-  // spec that does `fs.readFileSync(await download.path())` is common
-  // enough that omitting them just breaks otherwise-portable suites.
-  // They block the interpreter thread for the duration of the read,
-  // exactly as `readFileSync` does in Node.
-  {
-    let sb = sandbox.clone();
-    obj.set(
-      "readFileSync",
-      Func::from(move |path: String| {
-        let resolved = sb.resolve_read(&path).map_err(|e| to_rq_error(&e))?;
-        std::fs::read_to_string(&resolved)
-          .map_err(|e| rquickjs::Error::new_from_js_message("fs", "readFileSync", e.to_string()))
-      }),
-    )?;
-  }
-  {
-    let sb = sandbox.clone();
-    obj.set(
-      "readFileBytesSync",
-      Func::from(move |path: String| {
-        let resolved = sb.resolve_read(&path).map_err(|e| to_rq_error(&e))?;
-        std::fs::read(&resolved)
-          .map_err(|e| rquickjs::Error::new_from_js_message("fs", "readFileBytesSync", e.to_string()))
-      }),
-    )?;
-  }
-  {
-    let sb = sandbox.clone();
-    obj.set(
-      "existsSync",
-      Func::from(move |path: String| sb.resolve_read(&path).is_ok_and(|p| p.exists())),
-    )?;
-  }
-  {
-    let sb = sandbox.clone();
-    obj.set(
-      "writeFile",
-      Func::from(Async(move |path: String, contents: String| {
-        let sb = sb.clone();
-        async move {
-          let resolved = sb.resolve_write(&path).map_err(|e| to_rq_error(&e))?;
-          tokio::fs::write(&resolved, contents)
-            .await
-            .map_err(|e| rquickjs::Error::new_from_js_message("fs", "writeFile", e.to_string()))
-        }
-      })),
-    )?;
-  }
-  {
-    let sb = sandbox.clone();
-    obj.set(
-      "readdir",
-      Func::from(Async(move |path: String| {
-        let sb = sb.clone();
-        async move {
-          let resolved = sb.resolve_read(&path).map_err(|e| to_rq_error(&e))?;
-          let mut entries = tokio::fs::read_dir(&resolved)
-            .await
-            .map_err(|e| rquickjs::Error::new_from_js_message("fs", "readdir", e.to_string()))?;
-          let mut names: Vec<String> = Vec::new();
-          while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| rquickjs::Error::new_from_js_message("fs", "readdir", e.to_string()))?
-          {
-            names.push(entry.file_name().to_string_lossy().into_owned());
-          }
-          Ok::<_, rquickjs::Error>(names)
-        }
-      })),
-    )?;
-  }
-  {
-    let sb = sandbox.clone();
-    obj.set(
-      "exists",
-      Func::from(Async(move |path: String| {
-        let sb = sb.clone();
-        async move {
-          // Syntactic checks still apply; absence or sandbox-escape returns false.
-          match sb.resolve_read(&path) {
-            Ok(resolved) => Ok::<bool, rquickjs::Error>(tokio::fs::try_exists(&resolved).await.unwrap_or(false)),
-            Err(_) => Ok(false),
-          }
-        }
-      })),
-    )?;
-  }
-
-  // Expose the sandbox root so scripts can build relative paths confidently.
-  obj.set("root", sandbox.root().to_string_lossy().into_owned())?;
-
-  ctx.globals().set("fs", obj)?;
-  crate::bindings::runtime::mirror_global(ctx, "fs")?;
-  Ok(())
-}
-
-fn to_rq_error(err: &ScriptError) -> rquickjs::Error {
-  // The `from`/`to` static labels are used only in rquickjs's Display impl.
-  // We route sandbox-rejection errors through the FromJs variant so the
-  // message propagates to JS as a thrown exception with our reason string.
-  rquickjs::Error::new_from_js_message("fs", "sandbox", err.message.clone())
 }
 
 /// Convert the script's return value to `serde_json::Value`.

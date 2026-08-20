@@ -75,6 +75,6 @@ describe('parity acceptance', () => {
 
     await page.setContent('<div style="width:40px;height:40px;background:#123456"></div>');
     await expect(page.locator('div')).toHaveScreenshot('shot.png');
-    expect(await fs.exists(declared)).toBe(true);
+    expect(fs.existsSync(declared)).toBe(true);
   });
 });

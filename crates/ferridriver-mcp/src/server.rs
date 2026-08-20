@@ -160,7 +160,7 @@ pub use self::ctx as sess;
 /// any domain-specific concepts (environments, auth, etc.) belong in the
 /// consumer's own `ServerHandler` wrapper.
 pub trait McpServerConfig: Send + Sync + 'static {
-  /// Root directory for the scripting sandbox used by `run_script`.
+  /// Root directory for the scripting artifacts used by `run_script`.
   ///
   /// All `fs` operations inside scripts (`readFile`, `writeFile`, `readdir`,
   /// `exists`) and all dynamic `import(...)` calls are constrained to this
@@ -181,7 +181,7 @@ pub trait McpServerConfig: Send + Sync + 'static {
   /// downloaded bodies). Exposed to scripts as the `artifacts` global.
   ///
   /// Kept separate from `script_root` so outputs don't pollute the source
-  /// tree. Same sandbox rules apply. The directory is created at server
+  /// tree. Same artifacts rules apply. The directory is created at server
   /// startup if it does not exist.
   ///
   /// Default: `./.ferridriver/artifacts` relative to cwd.
@@ -367,7 +367,7 @@ only exposed via the `page` tool.\n\
 \n\
 == SCRIPTING SAFETY ==\n\
 `run_script` runs in a sandboxed QuickJS runtime: no raw filesystem access (only \
-`fs.*` scoped to script_root for source files + `artifacts.*` scoped to artifacts_root \
+`fs.*` (Node) for source files + `artifacts.*` rooted at artifacts_root \
 for outputs), no runner-side network except via `request.*` (HttpClient), no \
 `process` / `require` / bare `import`. Caller-controlled data MUST be passed via the \
 `args` array, never interpolated into the `source` string — the engine does not protect \
@@ -418,14 +418,14 @@ pub struct McpServer {
   custom_ext: Arc<dyn std::any::Any + Send + Sync>,
   /// `QuickJS` scripting engine -- fresh context per `run_script` invocation.
   pub(crate) script_engine: Arc<ferridriver_script::ScriptEngine>,
-  /// Filesystem sandbox for scripts (`None` if the configured root could not
+  /// Filesystem artifacts for scripts (`None` if the configured root could not
   /// be created or canonicalised; `run_script` will return an error).
-  pub(crate) script_sandbox: Option<Arc<ferridriver_script::PathSandbox>>,
-  /// Filesystem sandbox for script outputs, exposed as the `artifacts`
+  pub(crate) script_root: Option<std::path::PathBuf>,
+  /// Filesystem artifacts for script outputs, exposed as the `artifacts`
   /// global. `None` if the configured artifacts root could not be prepared;
   /// in that case scripts just don't get an `artifacts` binding and must
   /// use `fs` for output (which pollutes the script source directory).
-  pub(crate) artifacts_sandbox: Option<Arc<ferridriver_script::PathSandbox>>,
+  pub(crate) artifacts_dir: Option<Arc<ferridriver_script::OutputDir>>,
   /// Ceiling on the artifacts root, swept after each call that writes one.
   /// `None` lets the directory grow without bound.
   pub(crate) artifacts_budget: Option<ferridriver::response::OutputBudget>,
@@ -439,7 +439,7 @@ pub struct McpServer {
   /// REPL-style; a browser relaunch under the same name discards the VM
   /// (stale handles) but keeps `vars`.
   pub(crate) sessions: Arc<ferridriver_script::SessionTable>,
-  /// Resolved scripting sandbox relaxations (env allow-list / node
+  /// Resolved scripting artifacts relaxations (env allow-list / node
   /// compat). Default = locked down; set by [`McpServer::with_script_caps`]
   /// from the operator's `[scripting]` config.
   pub(crate) script_caps: ferridriver_script::ScriptCaps,
@@ -553,7 +553,7 @@ impl McpServer {
     browser_state.set_instance_resolver_fn(Arc::new(move |instance| config_clone.resolve_instance(instance)));
     let state = SharedState::new(browser_state);
 
-    // Scripting engine + sandbox. The sandbox needs an existing canonical
+    // Scripting engine + artifacts. The artifacts needs an existing canonical
     // directory; we create the configured root up front and log (not panic)
     // if initialisation fails so the rest of the server still works.
     let script_engine = Arc::new(ferridriver_script::ScriptEngine::new(config.script_engine_config()));
@@ -562,11 +562,11 @@ impl McpServer {
       script_engine.config().session_idle_ttl,
     ));
     let script_root = config.script_root();
-    let script_sandbox = match std::fs::create_dir_all(&script_root)
+    let script_root = match std::fs::create_dir_all(&script_root)
       .map_err(|e| format!("{e}"))
-      .and_then(|()| ferridriver_script::PathSandbox::new(&script_root).map_err(|e| e.message.clone()))
+      .and_then(|()| std::fs::canonicalize(&script_root).map_err(|e| format!("{e}")))
     {
-      Ok(sb) => Some(Arc::new(sb)),
+      Ok(root) => Some(root),
       Err(msg) => {
         tracing::warn!(
           script_root = %script_root.display(),
@@ -577,20 +577,21 @@ impl McpServer {
       },
     };
 
-    // Artifacts sandbox — separate directory for script outputs. If it
+    // Artifacts directory — separate from the script root so outputs do
+    // not pollute the source tree. If it
     // fails to prepare we log and disable the `artifacts` global only;
     // `run_script` itself keeps working.
     let artifacts_root = config.artifacts_root();
-    let artifacts_sandbox = match std::fs::create_dir_all(&artifacts_root)
+    let artifacts_dir = match std::fs::create_dir_all(&artifacts_root)
       .map_err(|e| format!("{e}"))
-      .and_then(|()| ferridriver_script::PathSandbox::new(&artifacts_root).map_err(|e| e.message.clone()))
+      .and_then(|()| ferridriver_script::OutputDir::new(&artifacts_root).map_err(|e| e.message.clone()))
     {
       Ok(sb) => Some(Arc::new(sb)),
       Err(msg) => {
         tracing::warn!(
           artifacts_root = %artifacts_root.display(),
           error = %msg,
-          "artifacts binding disabled: failed to prepare artifacts_root; scripts can still write via fs into script_root"
+          "artifacts binding disabled: failed to prepare artifacts_root; scripts can still write via fs"
         );
         None
       },
@@ -608,8 +609,8 @@ impl McpServer {
       config,
       custom_ext: Arc::new(NoExtensions),
       script_engine,
-      script_sandbox,
-      artifacts_sandbox,
+      script_root,
+      artifacts_dir,
       artifacts_budget,
       secrets,
       sessions,
@@ -1063,8 +1064,8 @@ impl McpServer {
   }
 
   /// Assemble the `RunContext` an MCP script/extension call needs: live
-  /// page/context/request/browser handles for `session`, the script and
-  /// artifacts sandboxes, and the loaded extension bytecode. Shared by
+  /// page/context/request/browser handles for `session`, the script root
+  /// and artifacts directory, and the loaded extension bytecode. Shared by
   /// `run_script` and `invoke_extension_tool` so the wiring lives in one place.
   ///
   /// `vars` is a throwaway here: a session's `vars` is the durable tier
@@ -1074,7 +1075,7 @@ impl McpServer {
   /// because the one-shot/CLI/BDD constructors legitimately supply their
   /// own; making it optional is a wider ripple, deliberately not done.
   pub(crate) async fn mcp_run_context(&self, session: &str) -> Result<ferridriver_script::RunContext, ErrorData> {
-    let Some(sandbox) = self.script_sandbox.clone() else {
+    let Some(script_root) = self.script_root.clone() else {
       return Err(Self::err(
         "scripting is disabled: the configured script_root could not be prepared at server startup.",
       ));
@@ -1083,8 +1084,8 @@ impl McpServer {
     let browser = Arc::new(ferridriver::Browser::from_shared_state(self.state.state_arc()));
     Ok(ferridriver_script::RunContext {
       vars: Arc::new(ferridriver_script::InMemoryVars::new()),
-      sandbox,
-      artifacts: self.artifacts_sandbox.clone(),
+      script_root,
+      artifacts: self.artifacts_dir.clone(),
       page: Some(page),
       browser_context: Some(Arc::new(ctx_ref)),
       // Placeholder like `vars`: the run_*_on_session_vm entry points
@@ -1203,8 +1204,8 @@ impl McpServer {
     self
   }
 
-  /// Set the scripting sandbox relaxations (resolved from the
-  /// operator's `[scripting]` config). Without this the sandbox stays
+  /// Set the scripting artifacts relaxations (resolved from the
+  /// operator's `[scripting]` config). Without this the artifacts stays
   /// fully locked down (`process.env` empty).
   #[must_use]
   pub fn with_script_caps(mut self, caps: ferridriver_script::ScriptCaps) -> Self {
@@ -1368,13 +1369,13 @@ impl McpServer {
   /// Serve an `artifact://<relpath>` resource: raw bytes of a file the
   /// scripting layer wrote under `artifacts_root`. Binary payloads
   /// (screenshots, PDFs, traces) ship as base64 blobs; UTF-8 text ships as
-  /// text. The sandbox rejects traversal / symlink escapes.
+  /// text. The artifacts rejects traversal / symlink escapes.
   async fn read_artifact_resource(&self, rel: &str, uri: &str) -> Result<ReadResourceResult, ErrorData> {
-    let sandbox = self
-      .artifacts_sandbox
+    let artifacts = self
+      .artifacts_dir
       .as_ref()
       .ok_or_else(|| Self::err("artifacts are disabled: artifacts_root could not be prepared at startup"))?;
-    let resolved = sandbox
+    let resolved = artifacts
       .resolve_read(rel)
       .map_err(|e| Self::err(format!("artifact path: {}", e.message)))?;
     let bytes = tokio::fs::read(&resolved)
@@ -1402,8 +1403,8 @@ impl McpServer {
   /// disabled or the write fails — artifact persistence is best-effort and
   /// never fails the caller's primary result.
   pub(crate) async fn persist_artifact(&self, rel: &str, bytes: &[u8], mime: &str) -> Option<ContentBlock> {
-    let sandbox = self.artifacts_sandbox.as_ref()?;
-    let resolved = sandbox.resolve_write(rel).ok()?;
+    let artifacts = self.artifacts_dir.as_ref()?;
+    let resolved = artifacts.resolve_write(rel).ok()?;
     if let Some(parent) = resolved.parent() {
       tokio::fs::create_dir_all(parent).await.ok()?;
     }
@@ -1412,7 +1413,7 @@ impl McpServer {
     // link handed back below must still resolve when the caller follows it.
     if let Some(budget) = self.artifacts_budget {
       let keep = std::collections::BTreeSet::from([resolved.clone()]);
-      let evicted = budget.enforce(sandbox.root(), &keep).await;
+      let evicted = budget.enforce(artifacts.root(), &keep).await;
       if evicted.files > 0 {
         tracing::info!(
           files = evicted.files,
@@ -1439,10 +1440,10 @@ impl McpServer {
     /// Scan bound: enough to sort recency over years of accumulated
     /// outputs without letting a runaway directory stall the listing.
     const SCAN_MAX: usize = 4096;
-    let Some(sandbox) = self.artifacts_sandbox.as_ref() else {
+    let Some(artifacts) = self.artifacts_dir.as_ref() else {
       return;
     };
-    let root = sandbox.root().to_path_buf();
+    let root = artifacts.root().to_path_buf();
     let mut found: Vec<(std::time::SystemTime, Resource)> = Vec::new();
     let mut stack = vec![root.clone()];
     'walk: while let Some(dir) = stack.pop() {
@@ -1897,7 +1898,7 @@ impl ServerHandler for McpServer {
     {
       let name = request.name.to_string();
       let args = serde_json::Value::Object(request.arguments.unwrap_or_default());
-      return match self.invoke_extension_tool(&name, args).instrument(span).await {
+      return match Box::pin(self.invoke_extension_tool(&name, args).instrument(span)).await {
         Ok(result) => Ok(result.into()),
         Err(e) if e.code == rmcp::model::ErrorCode::INTERNAL_ERROR => Ok(Self::tool_failure(&e).into()),
         Err(e) => Err(e),
@@ -2556,7 +2557,7 @@ mod tests {
       .expect("valid base64");
     assert_eq!(decoded, png);
 
-    // A traversal attempt is rejected by the sandbox, not served.
+    // A traversal attempt is rejected by the artifacts, not served.
     assert!(
       server
         .read_artifact_resource("../secret", "artifact://../secret")

@@ -17,9 +17,7 @@ use std::sync::Arc;
 
 use ferridriver::chromium;
 use ferridriver::options::LaunchOptions;
-use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig,
-};
+use ferridriver_script::{InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig};
 
 fn data_url(html: &str) -> String {
   format!(
@@ -48,12 +46,11 @@ async fn harness() -> Harness {
   let page = browser.page().await.expect("get page");
 
   let tmp = tempfile::tempdir().expect("tempdir");
-  let sandbox = Arc::new(PathSandbox::new(tmp.path()).expect("sandbox"));
   let vars = Arc::new(InMemoryVars::new());
 
   let ctx = RunContext {
     vars,
-    sandbox,
+    script_root: tmp.path().into(),
     artifacts: None,
     page: Some(page),
     browser_context: None,

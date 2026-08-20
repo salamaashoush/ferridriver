@@ -1,0 +1,484 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+#![allow(clippy::uninlined_format_args)]
+
+use std::borrow::Cow;
+use std::path::PathBuf;
+
+use either::Either;
+use crate::buffer::{ArrayBufferView, Buffer};
+use crate::encoding::Encoder;
+use crate::utils::{
+    object::ObjectExt,
+    result::{OptionExt, ResultExt},
+};
+use rquickjs::function::Opt;
+use rquickjs::{Ctx, Error, Exception, FromJs, Null, Object, Result, Value};
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
+
+use super::{read_file, Stats};
+
+const DEFAULT_BUFFER_SIZE: usize = 16384;
+const DEFAULT_ENCODING: &str = "utf8";
+
+#[allow(dead_code)]
+#[rquickjs::class]
+#[derive(rquickjs::class::Trace, rquickjs::JsLifetime)]
+pub struct FileHandle {
+    #[qjs(skip_trace)]
+    file: Option<File>,
+    #[qjs(skip_trace)]
+    path: PathBuf,
+}
+
+impl FileHandle {
+    pub fn new(file: File, path: PathBuf) -> Self {
+        Self {
+            file: Some(file),
+            path,
+        }
+    }
+
+    fn file(&self, ctx: &Ctx<'_>) -> Result<&File> {
+        self.file.as_ref().or_throw_msg(ctx, "FileHandle is closed")
+    }
+
+    fn file_mut(&mut self, ctx: &Ctx<'_>) -> Result<&mut File> {
+        self.file.as_mut().or_throw_msg(ctx, "FileHandle is closed")
+    }
+}
+
+#[rquickjs::methods(rename_all = "camelCase")]
+impl FileHandle {
+    #[allow(unused_variables)]
+    async fn chmod(&self, ctx: Ctx<'_>, mode: u32) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perm = std::fs::Permissions::from_mode(mode);
+            self.file(&ctx)?
+                .set_permissions(perm)
+                .await
+                .or_throw_msg(&ctx, "Can't modify file permissions")?;
+        }
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    async fn chown(&self, ctx: Ctx<'_>, uid: u32, gid: u32) -> Result<()> {
+        #[cfg(unix)]
+        {
+            let path = self.path.clone();
+            tokio::task::spawn_blocking(move || {
+                std::os::unix::fs::chown(&path, Some(uid), Some(gid))
+            })
+            .await
+            .or_throw(&ctx)?
+            .or_throw_msg(&ctx, "Can't modify file owner")?;
+        }
+        Ok(())
+    }
+
+    async fn close(&mut self) {
+        if let Some(file) = self.file.take() {
+            drop(file.into_std().await);
+        }
+    }
+
+    async fn datasync(&self, ctx: Ctx<'_>) -> Result<()> {
+        self.file(&ctx)?
+            .sync_data()
+            .await
+            .or_throw_msg(&ctx, "Can't sync file data")?;
+        Ok(())
+    }
+
+    #[qjs(get)]
+    async fn fd(&self, ctx: Ctx<'_>) -> Result<i32> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            Ok(self.file(&ctx)?.as_raw_fd())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            let handle = self.file(&ctx)?.as_raw_handle();
+            Ok(handle as i32)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(0)
+        }
+    }
+
+    async fn read<'js>(
+        &mut self,
+        ctx: Ctx<'js>,
+        buffer_or_options: Opt<Either<ArrayBufferView<'js>, ReadOptions<'js>>>,
+        options_or_offset: Opt<Either<ReadOptions<'js>, usize>>,
+        length: Opt<usize>,
+        position: Opt<Option<u64>>, // -1 is not supported
+    ) -> Result<Object<'js>> {
+        let options_1 = match buffer_or_options.0 {
+            Some(Either::Left(buffer)) => ReadOptions {
+                buffer: Some(buffer),
+                ..Default::default()
+            },
+            Some(Either::Right(options)) => options,
+            None => ReadOptions::default(),
+        };
+        let options_2 = match options_or_offset.0 {
+            Some(Either::Left(options)) => options,
+            Some(Either::Right(offset)) => ReadOptions {
+                offset: Some(offset),
+                ..Default::default()
+            },
+            None => ReadOptions::default(),
+        };
+
+        let mut buffer = options_1
+            .buffer
+            .or(options_2.buffer)
+            .unwrap_or_else_ok(|| {
+                ArrayBufferView::from_buffer(&ctx, Buffer::alloc(DEFAULT_BUFFER_SIZE))
+            })?;
+        let offset = options_1.offset.or(options_2.offset).unwrap_or(0);
+        let length = options_1
+            .length
+            .or(options_2.length)
+            .or(length.0)
+            .unwrap_or_else(|| buffer.len() - offset);
+        let position = options_1
+            .position
+            .or(options_2.position)
+            .or(position.0.flatten());
+        validate_length_offset(&ctx, length, offset, buffer.len())?;
+
+        // It is not safe to pass the buffer from `ArrayBufferView` to `File::read`
+        // since the read is done in a different thread and we cannot garantee
+        // that multiple read calls are not done with the same buffer.
+        // Ideally, we should make our own version of `BufReader` to reuse the buffer
+        // instead of doing an allocation on each read.
+        let mut buf = vec![0u8; length];
+        let file = self.file_mut(&ctx)?;
+
+        // Tokio doesn't offer an API for positional reads. This means we have
+        // to seek to the position, read the file, and then seek back to the original
+        // position. See https://github.com/tokio-rs/tokio/issues/699
+        let mut cursor = None;
+        if let Some(position) = position {
+            cursor = Some(
+                file.seek(SeekFrom::Current(0))
+                    .await
+                    .or_throw_msg(&ctx, "Can't get cursor")?,
+            );
+            file.seek(SeekFrom::Start(position))
+                .await
+                .or_throw_msg(&ctx, "Can't seek file")?;
+        }
+
+        let bytes_read = file
+            .read(&mut buf)
+            .await
+            .or_throw_msg(&ctx, "Failed to read file")?;
+
+        // Reset the file at the original position. If there is an error while
+        // resetting the cursor, we close the file pre-emptively since future
+        // reads would be invalid.
+        if let Some(cursor) = cursor {
+            if let Err(err) = file
+                .seek(SeekFrom::Start(cursor))
+                .await
+                .or_throw_msg(&ctx, "Failed to reset cursor")
+            {
+                self.close().await;
+                return Err(err);
+            }
+        }
+
+        let dst_buf = buffer
+            .as_bytes_mut()
+            .or_throw_msg(&ctx, "Buffer is detached")?;
+        dst_buf[offset..].copy_from_slice(&buf);
+
+        let result = Object::new(ctx)?;
+        result.set("bytesRead", bytes_read)?;
+        result.set("buffer", buffer)?;
+        Ok(result)
+    }
+
+    async fn read_file<'js>(
+        &mut self,
+        ctx: Ctx<'js>,
+        options: Opt<Either<String, read_file::ReadFileOptions>>,
+    ) -> Result<Value<'js>> {
+        let size = self
+            .file(&ctx)?
+            .metadata()
+            .await
+            .map(|m| m.len() as usize)
+            .ok();
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(size.unwrap_or(0))
+            .or_throw_msg(&ctx, "Out of memory")?;
+
+        self.file_mut(&ctx)?
+            .read_to_end(&mut bytes)
+            .await
+            .or_throw_msg(&ctx, "Failed to read file")?;
+        read_file::handle_read_file_bytes(&ctx, options, bytes)
+    }
+
+    async fn stat(&self, ctx: Ctx<'_>) -> Result<Stats> {
+        let metadata = self
+            .file(&ctx)?
+            .metadata()
+            .await
+            .or_throw_msg(&ctx, "Can't stat file")?;
+        Ok(Stats::new(metadata))
+    }
+
+    async fn sync(&self, ctx: Ctx<'_>) -> Result<()> {
+        self.file(&ctx)?
+            .sync_all()
+            .await
+            .or_throw_msg(&ctx, "Can't sync file")
+    }
+
+    async fn truncate(&mut self, ctx: Ctx<'_>, len: Opt<u64>) -> Result<()> {
+        let len = len.0.unwrap_or(0);
+        self.file_mut(&ctx)?
+            .set_len(len)
+            .await
+            .or_throw_msg(&ctx, "Can't truncate file")
+    }
+
+    // Setting times not supported in tokio
+    // See https://github.com/tokio-rs/tokio/issues/6368
+    // async fn utimes(&mut self,  ctx: Ctx<'_>, atime: Value<'_>, mtime: Value<'_>) -> Result<()>
+
+    async fn write<'js>(
+        &mut self,
+        ctx: Ctx<'js>,
+        buffer_or_string: Either<ArrayBufferView<'js>, String>,
+        offset_or_options_or_position: Opt<Either<Either<usize, Null>, WriteOptions>>,
+        length_or_encoding: Opt<Either<usize, String>>,
+        position: Opt<Option<u64>>,
+    ) -> Result<Object<'js>> {
+        let mut options = match offset_or_options_or_position.0 {
+            Some(Either::Left(Either::Left(offset_or_position))) => {
+                if buffer_or_string.is_left() {
+                    WriteOptions {
+                        offset: Some(offset_or_position),
+                        ..Default::default()
+                    }
+                } else {
+                    WriteOptions::default()
+                }
+            },
+            Some(Either::Right(options)) => options,
+            _ => WriteOptions::default(),
+        };
+        if let Some(Either::Left(length)) = length_or_encoding.0 {
+            options.length = Some(length);
+        }
+
+        let buffer = match &buffer_or_string {
+            Either::Left(buffer) => {
+                let buffer = buffer.as_bytes().or_throw_msg(&ctx, "Buffer is detached")?;
+                Cow::Borrowed(buffer)
+            },
+            Either::Right(string) => {
+                let encoding = length_or_encoding
+                    .0
+                    .and_then(|e| e.right())
+                    .unwrap_or_else(|| DEFAULT_ENCODING.to_string());
+                let buffer = Encoder::from_str(&encoding)
+                    .and_then(|enc| enc.decode_from_string(string.clone()))
+                    .or_throw(&ctx)?;
+                Cow::Owned(buffer)
+            },
+        };
+
+        let offset = options.offset.unwrap_or(0);
+        let length = options.length.unwrap_or(buffer.len() - offset);
+        let position = options.position.or(position.0.flatten());
+        validate_length_offset(&ctx, length, offset, buffer.len())?;
+
+        let file = self.file_mut(&ctx)?;
+
+        // Tokio doesn't offer an API for positional writes. This means we have
+        // to seek to the position, write to the file, and then seek back to the original
+        // position. See https://github.com/tokio-rs/tokio/issues/699
+        let mut cursor = None;
+        if let Some(position) = position {
+            cursor = Some(
+                file.seek(SeekFrom::Current(0))
+                    .await
+                    .or_throw_msg(&ctx, "Can't get cursor")?,
+            );
+            file.seek(SeekFrom::Start(position))
+                .await
+                .or_throw_msg(&ctx, "Can't seek file")?;
+        }
+
+        file.write_all(&buffer[offset..length])
+            .await
+            .or_throw_msg(&ctx, "Failed to write to file")?;
+
+        // Reset the file at the original position. If there is an error while
+        // resetting the cursor, we close the file pre-emptively since future
+        // writes would be invalid.
+        if let Some(cursor) = cursor {
+            if let Err(err) = file
+                .seek(SeekFrom::Start(cursor))
+                .await
+                .or_throw_msg(&ctx, "Failed to reset cursor")
+            {
+                self.close().await;
+                return Err(err);
+            }
+        }
+
+        let result = Object::new(ctx)?;
+        result.set("bytesWritten", length)?;
+        result.set("buffer", buffer_or_string)?;
+        Ok(result)
+    }
+
+    async fn write_file<'js>(
+        &mut self,
+        ctx: Ctx<'js>,
+        data: Either<ArrayBufferView<'js>, String>,
+        options_or_encoding: Opt<Either<WriteFileOptions, String>>,
+    ) -> Result<()> {
+        let file = self.file_mut(&ctx)?;
+
+        // Always overwrite the whole file
+        file.set_len(0)
+            .await
+            .or_throw_msg(&ctx, "Failed to truncate file")?;
+
+        let encoding = match options_or_encoding.0 {
+            Some(Either::Left(options)) => options.encoding,
+            Some(Either::Right(encoding)) => Some(encoding),
+            _ => None,
+        }
+        .unwrap_or_else(|| DEFAULT_ENCODING.to_string());
+
+        let buffer = match &data {
+            Either::Left(buffer) => {
+                let buffer = buffer.as_bytes().or_throw_msg(&ctx, "Buffer is detached")?;
+                Cow::Borrowed(buffer)
+            },
+            Either::Right(string) => {
+                let buffer = Encoder::from_str(&encoding)
+                    .and_then(|enc| enc.decode_from_string(string.clone()))
+                    .or_throw(&ctx)?;
+                Cow::Owned(buffer)
+            },
+        };
+
+        file.write_all(&buffer)
+            .await
+            .or_throw_msg(&ctx, "Failed to write to file")?;
+        Ok(())
+    }
+}
+
+fn validate_length_offset(
+    ctx: &Ctx<'_>,
+    length: usize,
+    offset: usize,
+    buffer_length: usize,
+) -> Result<()> {
+    if offset > buffer_length {
+        return Err(Exception::throw_range(
+            ctx,
+            &format!("offset ({}) <= {}", offset, buffer_length),
+        ));
+    }
+    if length > buffer_length - offset {
+        return Err(Exception::throw_range(
+            ctx,
+            &format!("length ({}) <= {}", length, buffer_length - offset),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct ReadOptions<'js> {
+    buffer: Option<ArrayBufferView<'js>>,
+    offset: Option<usize>,
+    length: Option<usize>,
+    position: Option<u64>,
+}
+
+impl<'js> FromJs<'js> for ReadOptions<'js> {
+    fn from_js(_ctx: &Ctx<'js>, value: Value<'js>) -> Result<Self> {
+        let ty_name = value.type_name();
+        let obj = value
+            .as_object()
+            .ok_or(Error::new_from_js(ty_name, "Object"))?;
+
+        let buffer = obj.get_optional::<_, ArrayBufferView<'js>>("buffer")?;
+        let offset = obj.get_optional::<_, usize>("offset")?;
+        let length = obj.get_optional::<_, usize>("length")?;
+        let position = obj.get_optional::<_, u64>("position")?;
+
+        Ok(Self {
+            buffer,
+            offset,
+            length,
+            position,
+        })
+    }
+}
+
+#[derive(Default)]
+struct WriteOptions {
+    offset: Option<usize>,
+    length: Option<usize>,
+    position: Option<u64>,
+}
+
+impl<'js> FromJs<'js> for WriteOptions {
+    fn from_js(_ctx: &Ctx<'js>, value: Value<'js>) -> Result<Self> {
+        let ty_name = value.type_name();
+        let obj = value
+            .as_object()
+            .ok_or(Error::new_from_js(ty_name, "Object"))?;
+
+        let offset = obj.get_optional::<_, usize>("offset")?;
+        let length = obj.get_optional::<_, usize>("length")?;
+        let position = obj.get_optional::<_, u64>("position")?;
+
+        Ok(Self {
+            offset,
+            length,
+            position,
+        })
+    }
+}
+
+#[derive(Default)]
+struct WriteFileOptions {
+    encoding: Option<String>,
+}
+
+impl<'js> FromJs<'js> for WriteFileOptions {
+    fn from_js(_ctx: &Ctx<'js>, value: Value<'js>) -> Result<Self> {
+        let ty_name = value.type_name();
+        let obj = value
+            .as_object()
+            .ok_or(Error::new_from_js(ty_name, "Object"))?;
+
+        let encoding = obj.get_optional::<_, String>("encoding")?;
+
+        Ok(Self { encoding })
+    }
+}

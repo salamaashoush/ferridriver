@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use ferridriver_script::{
-  CollectedTests, ExtensionHost, InMemoryVars, PathSandbox, RunContext, ScriptCaps, ScriptEngineConfig, Session,
+  CollectedTests, ExtensionHost, InMemoryVars, RunContext, ScriptCaps, ScriptEngineConfig, Session,
   bundle_and_compile_named, collect_tests, eval_bundle,
 };
 
@@ -55,7 +55,7 @@ fn captured_logs() -> &'static CapturedLogs {
 fn ctx(dir: &std::path::Path) -> RunContext {
   RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir).expect("sandbox")),
+    script_root: dir.into(),
     artifacts: None,
     page: None,
     browser_context: None,

@@ -21,13 +21,13 @@ describe('testInfo.snapshotPath', () => {
 
     // The matcher wrote (or matched) a PNG at exactly the path the
     // resolver reported — the agreement this whole phase exists for.
-    expect(await fs.exists(declared)).toBe(true);
-    const baseline = await fs.readFileBytes(declared);
-    expect(baseline.slice(0, 4)).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    expect(fs.existsSync(declared)).toBe(true);
+    const baseline = await fs.promises.readFile(declared);
+    expect(Array.from(baseline.slice(0, 4))).toEqual([0x89, 0x50, 0x4e, 0x47]);
     // And it is THIS element's image, not a leftover: the same capture
     // compared equal, byte for byte.
     const fresh = await page.locator('div').screenshot();
-    expect(Array.from(fresh)).toEqual(baseline);
+    expect(Array.from(fresh)).toEqual(Array.from(baseline));
   });
 
   test('a project qualifies the baseline it owns', async ({}, testInfo) => {
@@ -79,7 +79,7 @@ describe('testInfo.snapshotPath', () => {
   test('toMatchSnapshot writes where snapshotPath says', async ({}, testInfo) => {
     const declared = testInfo.snapshotPath('text.txt');
     await expect('hello snapshot').toMatchSnapshot('text.txt');
-    expect(await fs.exists(declared)).toBe(true);
-    expect((await fs.readFile(declared)).trim()).toBe('hello snapshot');
+    expect(fs.existsSync(declared)).toBe(true);
+    expect((await fs.promises.readFile(declared, 'utf8')).trim()).toBe('hello snapshot');
   });
 });

@@ -24,23 +24,25 @@ use tokio::sync::RwLock;
 use crate::bindings::ExtensionBinding;
 use crate::console::{ConsoleSink, strip_ansi};
 use crate::engine::{ExtensionHost, RunContext, RunOptions, ScriptCaps, ScriptEngineConfig};
-use crate::fs::PathSandbox;
+use crate::output_dir::OutputDir;
 use crate::result::{ConsoleEntry, ScriptResult};
 use crate::session_table::SessionTable;
 use crate::vars::InMemoryVars;
 
 /// Everything a [`SessionScriptHost`] needs that it cannot derive from the
-/// browser: the sandboxes, the sandbox relaxations, and the extension bytecode
+/// browser: where relative imports and outputs go, the capability grants,
+/// and the extension bytecode
 /// whose `tool` registrations scripts call as `tools.*`.
 ///
 /// The caller resolves these from its config, so this crate never has to know
 /// how a config layer is discovered.
 #[derive(Clone)]
 pub struct SessionScriptConfig {
-  /// Root for `fs.*` — the directory the session was opened from.
-  pub sandbox: Arc<PathSandbox>,
+  /// Directory a relative ES module import resolves against — where the
+  /// session was opened from.
+  pub script_root: std::path::PathBuf,
   /// Root for `artifacts.*`. `None` disables the binding.
-  pub artifacts: Option<Arc<PathSandbox>>,
+  pub artifacts: Option<Arc<OutputDir>>,
   pub caps: ScriptCaps,
   pub extensions: Vec<ExtensionBinding>,
   pub engine: ScriptEngineConfig,
@@ -60,7 +62,7 @@ pub struct SessionScriptHost {
 }
 
 /// The live scripting environment, stashed in VM userdata so a script calling
-/// `browser.bind()` can publish a session that scripts with the same sandboxes,
+/// `browser.bind()` can publish a session that scripts with the same roots,
 /// caps and extensions it has itself.
 pub(crate) struct ScriptEnvUd(pub(crate) Arc<SessionScriptConfig>);
 
@@ -97,7 +99,7 @@ impl SessionScriptHost {
   }
 
   /// Assemble the `RunContext` for one call: the live page and context for
-  /// `context`, the sandboxes, and the loaded extensions.
+  /// `context`, the roots, and the loaded extensions.
   ///
   /// Also returns the browser-state composite key (`instance:context`) the
   /// context resolved to. That is NOT the same string as `RunContext.session`:
@@ -115,7 +117,7 @@ impl SessionScriptHost {
       // same way the MCP server does it: `vars` belong to the session, not
       // to one call.
       vars: Arc::new(InMemoryVars::new()),
-      sandbox: self.config.sandbox.clone(),
+      script_root: self.config.script_root.clone(),
       artifacts: self.config.artifacts.clone(),
       page: Some(page),
       browser_context: Some(Arc::new(ctx_ref)),
@@ -198,13 +200,13 @@ impl ScriptHost for SessionScriptHost {
     // Captured before the run so the page handle is in scope afterwards; the
     // read itself happens once the script is done.
     let reported_page = request.page_state.then(|| run_context.page.clone()).flatten();
-    // The sandbox outlives this run, so its record has to be diffed to tell
-    // this run's outputs from every earlier run's.
+    // The output directory outlives this run, so its record has to be
+    // diffed to tell this run's outputs from every earlier run's.
     let artifacts_before = self
       .config
       .artifacts
       .as_ref()
-      .map(|sandbox| sandbox.written())
+      .map(|artifacts| artifacts.written())
       .unwrap_or_default();
 
     // `epoch` stays `None`: a session host owns exactly one browser for its
@@ -223,13 +225,13 @@ impl ScriptHost for SessionScriptHost {
       },
     };
 
-    if let (Some(budget), Some(sandbox)) = (self.config.engine.artifacts_budget, self.config.artifacts.as_ref()) {
-      let mine: std::collections::BTreeSet<_> = sandbox
+    if let (Some(budget), Some(artifacts)) = (self.config.engine.artifacts_budget, self.config.artifacts.as_ref()) {
+      let mine: std::collections::BTreeSet<_> = artifacts
         .written()
         .into_iter()
         .filter(|path| !artifacts_before.contains(path))
         .collect();
-      let evicted = budget.enforce(sandbox.root(), &mine).await;
+      let evicted = budget.enforce(artifacts.root(), &mine).await;
       if evicted.files > 0 {
         tracing::info!(
           files = evicted.files,

@@ -160,7 +160,7 @@ describe('network', () => {
       },
     });
     const harPath = test.info().outputPath('rec.har');
-    await fs.writeFile(harPath, har);
+    await fs.promises.writeFile(harPath, har);
     try {
       await page.routeFromHAR(harPath, { notFound: 'fallback' });
       const served = (await page.evaluate("fetch('/fx/api/users').then(r => r.text())")) as string;

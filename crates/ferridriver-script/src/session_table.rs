@@ -383,13 +383,12 @@ mod tests {
   use std::sync::Arc;
 
   use super::*;
-  use crate::fs::PathSandbox;
 
   fn ctx_with(vars: Arc<InMemoryVars>) -> (tempfile::TempDir, RunContext) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let ctx = RunContext {
       vars,
-      sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+      script_root: tmp.path().to_path_buf(),
       artifacts: None,
       page: None,
       browser_context: None,

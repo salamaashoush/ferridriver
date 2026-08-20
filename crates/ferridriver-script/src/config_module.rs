@@ -40,10 +40,9 @@ pub async fn evaluate(path: &Path, cwd: &Path, caps: ScriptCaps) -> Result<serde
   let bundle =
     bundle_and_compile_named(std::slice::from_ref(&entry), cwd, &format!("config:{}", path.display())).await?;
 
-  let sandbox = Arc::new(crate::fs::PathSandbox::new(cwd)?);
   let run_ctx = RunContext {
     vars: Arc::new(crate::vars::InMemoryVars::new()),
-    sandbox,
+    script_root: cwd.to_path_buf(),
     artifacts: None,
     page: None,
     browser_context: None,

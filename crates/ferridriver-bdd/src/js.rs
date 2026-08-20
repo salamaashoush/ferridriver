@@ -26,10 +26,9 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use ferridriver_script::{
-  CompiledBundle, HookArg, InMemoryVars, JsArg, PathSandbox, RunContext, ScenarioSpec, ScriptAttachment,
-  ScriptEngineConfig, Session, StepOutcome, VmHandle, begin_scenario, bundle_and_compile, collect_registry,
-  drain_attachments, end_scenario, eval_bundle, invoke_hook, invoke_step, is_source_file, set_hook_world,
-  walk_source_files,
+  CompiledBundle, HookArg, InMemoryVars, JsArg, RunContext, ScenarioSpec, ScriptAttachment, ScriptEngineConfig,
+  Session, StepOutcome, VmHandle, begin_scenario, bundle_and_compile, collect_registry, drain_attachments,
+  end_scenario, eval_bundle, invoke_hook, invoke_step, is_source_file, set_hook_world, walk_source_files,
 };
 use ferridriver_test::FixturePool;
 use ferridriver_test::fixture_graph::dominant_fixture_set;
@@ -295,11 +294,9 @@ impl JsBddSession {
   pub async fn load(bundle: Arc<CompiledBundle>, cwd: &Path, setup: &BddSessionSetup) -> anyhow::Result<Self> {
     let world_parameters = setup.world_parameters.clone();
     let open_use_keys: &[String] = &setup.open_use_keys;
-    let sandbox =
-      Arc::new(PathSandbox::new(cwd).map_err(|e| anyhow::anyhow!("sandbox {}: {}", cwd.display(), e.message))?);
     let run_ctx = RunContext {
       vars: Arc::new(InMemoryVars::new()),
-      sandbox,
+      script_root: cwd.to_path_buf(),
       artifacts: None,
       page: None,
       browser_context: None,

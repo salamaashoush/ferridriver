@@ -183,7 +183,7 @@ export default class FailureReporter implements Reporter {
   }
 
   async onEnd(): Promise<void> {
-    await fs.writeFile(this.options.outputFile ?? 'failures.json', JSON.stringify(this.failed));
+    await fs.promises.writeFile(this.options.outputFile ?? 'failures.json', JSON.stringify(this.failed));
   }
 }
 ```

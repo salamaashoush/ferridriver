@@ -20,14 +20,13 @@
 //!    with real sessions (VM evicted, `vars` survive; idle record
 //!    reaped).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ferridriver::chromium;
 use ferridriver::options::LaunchOptions;
-use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, SessionTable,
-};
+use ferridriver_script::{InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, SessionTable};
 
 fn data_url(html: &str) -> String {
   format!(
@@ -43,11 +42,11 @@ fn data_url(html: &str) -> String {
 }
 
 /// Build the per-call `RunContext` exactly like the MCP server does:
-/// the slot's durable `vars`, the live page, a fresh sandbox.
-fn ctx_for(vars: Arc<InMemoryVars>, sandbox: Arc<PathSandbox>, page: Option<Arc<ferridriver::Page>>) -> RunContext {
+/// the slot's durable `vars`, the live page, a fresh script root.
+fn ctx_for(vars: Arc<InMemoryVars>, script_root: PathBuf, page: Option<Arc<ferridriver::Page>>) -> RunContext {
   RunContext {
     vars,
-    sandbox,
+    script_root,
     artifacts: None,
     page,
     browser_context: None,
@@ -75,7 +74,7 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
     .expect("launch browser");
   let page = browser.page().await.expect("page");
   let tmp = tempfile::tempdir().expect("tmp");
-  let sandbox = Arc::new(PathSandbox::new(tmp.path()).expect("sandbox"));
+  let script_root = tmp.path().to_path_buf();
 
   let table = SessionTable::new(64, Some(Duration::from_mins(30)));
   let slot = table.acquire("mcp-1");
@@ -85,7 +84,7 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
   {
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), Some(page.clone()));
+    let ctx = ctx_for(vars, script_root.clone(), Some(page.clone()));
     let r = s
       .run(
         cfg.clone(),
@@ -108,7 +107,7 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
   for i in 1..=40u32 {
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), Some(page.clone()));
+    let ctx = ctx_for(vars, script_root.clone(), Some(page.clone()));
     let r = s
       .run(
         cfg.clone(),
@@ -133,7 +132,7 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
   {
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), Some(page.clone()));
+    let ctx = ctx_for(vars, script_root.clone(), Some(page.clone()));
     let r = s
       .run(
         cfg.clone(),
@@ -157,7 +156,7 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
   for i in 0..250u32 {
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), None);
+    let ctx = ctx_for(vars, script_root.clone(), None);
     let r = s
       .run(
         cfg.clone(),
@@ -178,7 +177,7 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
   {
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), None);
+    let ctx = ctx_for(vars, script_root.clone(), None);
     let r = s
       .run(
         cfg.clone(),
@@ -201,7 +200,7 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
   {
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), None);
+    let ctx = ctx_for(vars, script_root.clone(), None);
     let r = s
       .run(
         cfg.clone(),
@@ -223,7 +222,7 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
   {
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), None);
+    let ctx = ctx_for(vars, script_root.clone(), None);
     let r = s
       .run(
         cfg.clone(),
@@ -252,7 +251,7 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
   {
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), None);
+    let ctx = ctx_for(vars, script_root.clone(), None);
     let r = s
       .run(
         cfg.clone(),
@@ -277,14 +276,14 @@ async fn session_table_cap_and_idle_ttl_end_to_end() {
   let table = SessionTable::new(1, Some(Duration::from_millis(150)));
   let cfg = ScriptEngineConfig::default();
   let tmp = tempfile::tempdir().expect("tmp");
-  let sandbox = Arc::new(PathSandbox::new(tmp.path()).expect("sandbox"));
+  let script_root = tmp.path().to_path_buf();
 
   // Session "a": build a VM, set globalThis + durable vars.
   {
     let slot = table.acquire("a");
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), None);
+    let ctx = ctx_for(vars, script_root.clone(), None);
     let r = s
       .run(
         cfg.clone(),
@@ -305,7 +304,7 @@ async fn session_table_cap_and_idle_ttl_end_to_end() {
     let slot = table.acquire("b");
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), None);
+    let ctx = ctx_for(vars, script_root.clone(), None);
     let r = s
       .run(
         cfg.clone(),
@@ -326,7 +325,7 @@ async fn session_table_cap_and_idle_ttl_end_to_end() {
     let slot = table.acquire("a");
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), None);
+    let ctx = ctx_for(vars, script_root.clone(), None);
     let r = s
       .run(
         cfg.clone(),
@@ -350,7 +349,7 @@ async fn session_table_cap_and_idle_ttl_end_to_end() {
   {
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), None);
+    let ctx = ctx_for(vars, script_root.clone(), None);
     let _ = s
       .run(cfg.clone(), "return 1;", &[], RunOptions::default(), ctx, None)
       .await;
@@ -361,7 +360,7 @@ async fn session_table_cap_and_idle_ttl_end_to_end() {
     let slot = table.acquire("a");
     let mut s = slot.lock().await;
     let vars = s.vars();
-    let ctx = ctx_for(vars, sandbox.clone(), None);
+    let ctx = ctx_for(vars, script_root.clone(), None);
     let r = s
       .run(
         cfg.clone(),

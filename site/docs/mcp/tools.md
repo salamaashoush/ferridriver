@@ -76,7 +76,7 @@ session: "staging:qa"     context "qa" on Chrome instance "staging"
 | `args`    | Positional arguments. Bound, never interpolated into the source — use this for any caller-controlled data (prompt-injection safe) |
 | `vars`    | Session-scoped string store: `get` / `set` / `has` / `delete` / `keys`. Persists across `run_script` calls in the same session |
 | `console` | Captured `log` / `info` / `warn` / `error` / `debug` — 1000 entries / 1 MiB total / 8 KiB per entry, ANSI-stripped, returned in the result |
-| `fs`      | Scoped I/O: `readFile`, `readFileBytes`, `writeFile`, `readdir`, `exists`. Bound to the configured `script_root`. Absolute paths, `..`, and symlink escapes are rejected |
+| `fs`      | Node's `node:fs`: the sync entry points plus `fs.promises`. Paths resolve as they do in Node |
 | `artifacts` | Dedicated output directory: `write`, `writeBytes`, `read`, `readBytes`, `list`, `exists`, `remove`. For screenshots, PDFs, traces |
 | `fetch`, `Headers`, `Request`, `Response`, `AbortController`, `Blob`, `FormData`, `ReadableStream` | Standard web APIs |
 | `process` | Sandbox-safe subset (`platform`, `arch`, `versions`, `cwd`, `stdout`, `stderr`). `process.env` is `{}` by default; opt-in keys via `[scripting] allowEnv`. `process.exit` and friends are absent |

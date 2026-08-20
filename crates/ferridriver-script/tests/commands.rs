@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferridriver_script::{
-  ExtensionBinding, InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, ScriptResult,
-  SessionTable, compile_and_extract_extensions,
+  ExtensionBinding, InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, ScriptResult, SessionTable,
+  compile_and_extract_extensions,
 };
 
 async fn binding(src: &str) -> (tempfile::TempDir, ExtensionBinding) {
@@ -35,7 +35,7 @@ async fn binding(src: &str) -> (tempfile::TempDir, ExtensionBinding) {
 fn ctx(sandbox_tmp: &std::path::Path, b: ExtensionBinding) -> RunContext {
   RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(sandbox_tmp).expect("sandbox")),
+    script_root: sandbox_tmp.into(),
     artifacts: None,
     page: None,
     browser_context: None,

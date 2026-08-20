@@ -166,11 +166,11 @@ What that means, stated plainly so nobody has to infer it:
   needs `acme-cli` on `PATH` is telling the operator what to provide, and
   gets a load-time diagnostic instead of a failure on the first call. It
   never widens anything.
-- **The sandbox that does exist is the script sandbox**, and it is about
-  the ambient environment rather than the package: `process.env` is the
-  operator's allow-list intersected with the real environment, `fs` is
-  rooted at a sandbox path, and `commands` may only run what a tool
-  declared and the ceiling permitted.
+- **What limits DO exist are about the ambient environment rather than
+  the package**: `process.env` is the operator's allow-list intersected
+  with the real environment, and `commands` may only run what a tool
+  declared and the ceiling permitted. The filesystem is not among them —
+  `fs` is Node's, unconfined.
 
 The alternative — an isolate or a separate process per extension — was
 considered and not built, for the reason in the section above: it would

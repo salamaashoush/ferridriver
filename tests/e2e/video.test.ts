@@ -31,11 +31,11 @@ describe('video', () => {
     await recPage.close();
     const filePath = await video!.path();
     expect(filePath.includes('video-recordings')).toBe(true);
-    expect(await fs.exists(filePath)).toBe(true);
+    expect(fs.existsSync(filePath)).toBe(true);
     if (browserName === 'chromium') {
       // CDP recordings must be non-empty; a fast-close polyfill file on
       // Firefox can legitimately be tiny.
-      const bytes = await fs.readFileBytes(filePath);
+      const bytes = await fs.promises.readFile(filePath);
       expect(bytes.length).toBeGreaterThan(0);
     }
   });

@@ -32,7 +32,7 @@ describe('tracing har', () => {
     await page.goto('/fx/landed');
     await page.goto('/fx/landed?second');
     await context.tracing.stopHar();
-    const har = JSON.parse(await fs.readFile(harPath)) as HarFile;
+    const har = JSON.parse(await fs.promises.readFile(harPath, 'utf8')) as HarFile;
     const origin = new URL(baseURL!).host;
     expect(har.log.entries.some((e) => e.request.url.includes(origin))).toBe(true);
     expect(har.log.entries.some((e) => e.response.status === 200)).toBe(true);
@@ -58,7 +58,7 @@ describe('tracing har', () => {
     await page.goto(`${baseURL}/fx/set-cookie?c=${encodeURIComponent('e2ehar=set; Path=/')}`);
     await page.setContent('<!doctype html><title>HAR Title E2E</title><body>x</body>');
     await context.tracing.stopHar();
-    const har = JSON.parse(await fs.readFile(harPath)) as HarFile;
+    const har = JSON.parse(await fs.promises.readFile(harPath, 'utf8')) as HarFile;
     const setCookieEntry = har.log.entries.find((e) => e.request.url.includes('/fx/set-cookie'));
     expect(setCookieEntry?.response.cookies.some((c) => c.name === 'e2ehar' && c.value === 'set')).toBe(true);
     // The settled page title is captured at flush.
@@ -74,7 +74,7 @@ describe('tracing har', () => {
     await ctx.routeFromHAR(harPath, { update: true, updateContent: 'embed' });
     await p.goto(`${baseURL}/fx/landed`);
     await ctx.close();
-    const har = JSON.parse(await fs.readFile(harPath)) as HarFile;
+    const har = JSON.parse(await fs.promises.readFile(harPath, 'utf8')) as HarFile;
     const origin = new URL(baseURL!).host;
     expect(har.log.entries.some((e) => e.request.url.includes(origin))).toBe(true);
   });
@@ -91,7 +91,7 @@ describe('tracing har', () => {
     await a.goto(`${baseURL}/fx/landed`);
     await b.goto(`${baseURL}/fx/api/users`);
     await ctx.close();
-    const har = JSON.parse(await fs.readFile(harPath)) as HarFile;
+    const har = JSON.parse(await fs.promises.readFile(harPath, 'utf8')) as HarFile;
     expect(har.log.entries.some((e) => e.request.url.endsWith('/fx/landed'))).toBe(true);
     expect(har.log.entries.some((e) => e.request.url.endsWith('/fx/api/users'))).toBe(false);
     expect(har.log.pages?.length).toBe(1);

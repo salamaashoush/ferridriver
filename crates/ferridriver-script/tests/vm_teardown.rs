@@ -9,13 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferridriver_script::engine::{RunContext, RunOptions, ScriptEngineConfig, Session};
-use ferridriver_script::fs::PathSandbox;
 use ferridriver_script::vars::InMemoryVars;
 
 fn make_ctx(dir: &std::path::Path) -> RunContext {
   RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir).unwrap()),
+    script_root: dir.to_path_buf(),
     artifacts: None,
     page: None,
     browser_context: None,

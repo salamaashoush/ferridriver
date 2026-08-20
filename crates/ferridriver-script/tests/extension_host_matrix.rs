@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ferridriver_script::{
-  ExtensionHost, ExtensionSpec, InMemoryVars, Outcome, PathSandbox, RequirementEnv, RunContext, RunOptions, ScriptCaps,
+  ExtensionHost, ExtensionSpec, InMemoryVars, Outcome, RequirementEnv, RunContext, RunOptions, ScriptCaps,
   ScriptEngineConfig, Session,
 };
 
@@ -48,7 +48,7 @@ async fn snapshot_under(
 ) -> serde_json::Value {
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(dir).expect("sandbox")),
+    script_root: dir.into(),
     artifacts: None,
     page: None,
     browser_context: None,

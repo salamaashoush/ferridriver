@@ -2,6 +2,12 @@
 name = "ferridriver-jsstd"
 description = "Vendored WHATWG Streams / Events / AbortController / DOMException / node:os implementation for the ferridriver QuickJS runtime (derived from awslabs/llrt, Apache-2.0)."
 version.workspace = true
+# NOT the workspace's 2024, deliberately: most of this crate is vendored
+# llrt, which is edition 2021. Under 2024 the match-ergonomics rule
+# rejects an explicit `ref` inside an implicitly-borrowing pattern, which
+# is exactly what two `stream_web` files do -- and `stream_web` is the one
+# vendored tree that actually drifts upstream, so keeping it byte-identical
+# is worth more than the newer edition in a crate whose own code is thin.
 edition = "2021"
 license = "Apache-2.0"
 authors.workspace = true
@@ -54,6 +60,7 @@ statistics = ["system"]
 network = ["sysinfo/network", "system"]
 
 [dependencies]
+either = "1"
 base64 = { workspace = true }
 # `llrt_crypto` (crypto-rust provider) and the `llrt_json` it needs for JWK
 # import/export. Versions match upstream's manifest at the vendored commit.
@@ -99,7 +106,7 @@ once_cell = { version = "1", features = ["std"], default-features = false }
 sysinfo = { version = "0.39", default-features = false, optional = true }
 # `half` backs `Float16Array`, which the vendored BYOB reader and
 # `ObjectBytes` handle as of the latest llrt sync.
-rquickjs = { version = "0.12", features = ["full-async", "parallel", "macro", "loader", "array-buffer", "half"] }
+rquickjs = { version = "0.12", features = ["full-async", "parallel", "macro", "loader", "array-buffer", "half", "either"] }
 simdutf8 = { version = "0.1", features = ["std", "aarch64_neon"] }
 url = { version = "2", features = ["std"], default-features = false }
 # gzip / deflate for `CompressionStream` / `DecompressionStream`.
@@ -114,5 +121,6 @@ tracing = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { workspace = true, features = ["full", "test-util"] }
 uuid = { version = "1", features = ["v4"] }

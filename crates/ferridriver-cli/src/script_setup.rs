@@ -1,8 +1,8 @@
 //! The scripting environment a `ferridriver` process hands to the engine.
 //!
 //! `ferridriver run` and a `ferridriver session host` resolve the same things
-//! from the same config document — the `fs` and `artifacts` sandboxes, the
-//! sandbox relaxations, the loaded extensions, the engine limits and declared
+//! from the same config document — the script root and `artifacts`
+//! directory, the capability grants, the loaded extensions, the engine limits and declared
 //! sidecars — so they resolve them here, once. A script must not behave
 //! differently depending on whether it runs locally or against a bound
 //! session.
@@ -14,10 +14,10 @@ use ferridriver_config::FerridriverConfig;
 
 /// The resolved scripting environment.
 pub struct ScriptSetup {
-  /// Root for `fs.*`.
-  pub sandbox: Arc<ferridriver_script::PathSandbox>,
+  /// Directory a relative ES module import resolves against.
+  pub script_root: std::path::PathBuf,
   /// Root for `artifacts.*`, or `None` when it could not be prepared.
-  pub artifacts: Option<Arc<ferridriver_script::PathSandbox>>,
+  pub artifacts: Option<Arc<ferridriver_script::OutputDir>>,
   pub caps: ferridriver_script::ScriptCaps,
   pub extensions: Vec<ferridriver_script::ExtensionBinding>,
   pub engine: ferridriver_script::ScriptEngineConfig,
@@ -36,7 +36,7 @@ impl ScriptSetup {
   #[must_use]
   pub fn into_session_script(self) -> ferridriver_script::SessionScriptConfig {
     ferridriver_script::SessionScriptConfig {
-      sandbox: self.sandbox,
+      script_root: self.script_root,
       artifacts: self.artifacts,
       caps: self.caps,
       extensions: self.extensions,
@@ -51,7 +51,7 @@ impl ScriptSetup {
 ///
 /// # Errors
 ///
-/// Returns an error only when the `fs` sandbox root itself cannot be prepared;
+/// Returns an error only when the script root itself cannot be prepared;
 /// a missing artifacts root degrades to `None` (scripts can still write
 /// through `fs`), and an unloadable extension is warned about and skipped.
 pub async fn resolve(
@@ -59,17 +59,14 @@ pub async fn resolve(
   cwd: &Path,
   extra_extensions: &[String],
 ) -> anyhow::Result<ScriptSetup> {
-  let sandbox = Arc::new(
-    ferridriver_script::PathSandbox::new(cwd)
-      .map_err(|e| anyhow::anyhow!("sandbox init ({}): {}", cwd.display(), e.message))?,
-  );
+  let script_root = std::fs::canonicalize(cwd).map_err(|e| anyhow::anyhow!("script root ({}): {e}", cwd.display()))?;
 
   let artifacts_root = config.artifacts_root();
   let artifacts = match std::fs::create_dir_all(&artifacts_root)
     .map_err(|e| e.to_string())
-    .and_then(|()| ferridriver_script::PathSandbox::new(&artifacts_root).map_err(|e| e.message.clone()))
+    .and_then(|()| ferridriver_script::OutputDir::new(&artifacts_root).map_err(|e| e.message.clone()))
   {
-    Ok(sandbox) => Some(Arc::new(sandbox)),
+    Ok(dir) => Some(Arc::new(dir)),
     Err(e) => {
       tracing::warn!(
         artifacts_root = %artifacts_root.display(),
@@ -109,7 +106,7 @@ pub async fn resolve(
   };
 
   Ok(ScriptSetup {
-    sandbox,
+    script_root,
     artifacts,
     caps,
     extensions,

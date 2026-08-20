@@ -263,7 +263,7 @@ fn cpu_microbenches() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "samply target; run under: samply record -- <binary> --ignored profile_concurrent_quickjs"]
 async fn profile_concurrent_quickjs() {
-  use ferridriver_script::{InMemoryVars, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session};
+  use ferridriver_script::{InMemoryVars, RunContext, RunOptions, ScriptEngineConfig, Session};
   let batches: usize = std::env::var("FERRIDRIVER_ATTRIB_BATCHES")
     .ok()
     .and_then(|s| s.parse().ok())
@@ -271,7 +271,7 @@ async fn profile_concurrent_quickjs() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let rc = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,
@@ -322,7 +322,7 @@ async fn profile_concurrent_quickjs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "batching bench; run with --ignored --nocapture"]
 async fn bench_batching() {
-  use ferridriver_script::{InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session};
+  use ferridriver_script::{InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, Session};
   const N: usize = 5_000;
   const ROUNDS: usize = 6;
   eprintln!(
@@ -358,7 +358,7 @@ async fn bench_batching() {
   let tmp = tempfile::tempdir().expect("tempdir");
   let rc = RunContext {
     vars: Arc::new(InMemoryVars::new()),
-    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    script_root: tmp.path().into(),
     artifacts: None,
     page: None,
     browser_context: None,

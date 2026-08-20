@@ -154,7 +154,7 @@ describe('dialogs and files', () => {
     // and the page sees files[0].name.
     await page.goto(dataUrl(SINGLE_FORM_HTML));
     const path = test.info().outputPath('fc-a.txt');
-    await fs.writeFile(path, 'alpha');
+    await fs.promises.writeFile(path, 'alpha');
     const chooserPromise = page.waitForEvent('filechooser', { timeout: 10000 });
     await page.click('#b');
     const chooser = (await chooserPromise) as FileChooser;
@@ -179,8 +179,8 @@ describe('dialogs and files', () => {
     await page.goto(dataUrl(MULTIPLE_FORM_HTML));
     const p1 = test.info().outputPath('fc-a-multi.txt');
     const p2 = test.info().outputPath('fc-b-multi.txt');
-    await fs.writeFile(p1, 'alpha');
-    await fs.writeFile(p2, 'beta');
+    await fs.promises.writeFile(p1, 'alpha');
+    await fs.promises.writeFile(p2, 'beta');
     const chooserPromise = page.waitForEvent('filechooser', { timeout: 10000 });
     await page.click('#b');
     const chooser = (await chooserPromise) as FileChooser;
@@ -250,7 +250,7 @@ describe('dialogs and files', () => {
     expect(dl.suggestedFilename()).toBe('greeting.txt');
     expect(dl.page()?.url()).toBe(page.url());
     await dl.saveAs(savePath);
-    expect(await fs.readFile(savePath)).toBe('fx-download-payload');
+    expect(await fs.promises.readFile(savePath, 'utf8')).toBe('fx-download-payload');
   });
 
   test('download_path_contents', async ({ page }) => {
@@ -266,7 +266,7 @@ describe('dialogs and files', () => {
     expect(path.length).toBeGreaterThan(0);
     const savePath = test.info().outputPath('path-contents.bin');
     await dl.saveAs(savePath);
-    expect(await fs.readFile(savePath)).toBe('fx-download-payload');
+    expect(await fs.promises.readFile(savePath, 'utf8')).toBe('fx-download-payload');
   });
 
   test('download_cancel_surfaces_failure', async ({ page, browserName }) => {
