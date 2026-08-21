@@ -670,8 +670,7 @@ impl Page {
   /// Returns the main-document `Response` when the backend can observe
   /// it, or `None` for same-document navigations (no new request was
   /// issued) / backends that genuinely cannot expose the main-document
-  /// response (stock `WKWebView` has no public API for this — see the
-  /// backend gap matrix in `docs/PLAYWRIGHT-PARITY-BACKLOG.md`). Mirrors
+  /// response (stock `WKWebView` has no public API for this). Mirrors
   /// Playwright's `Promise<Response | null>` contract on `page.goto`.
   ///
   /// # Errors

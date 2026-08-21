@@ -136,8 +136,7 @@ pub fn compare_screenshot_png(actual_png: &[u8], name: &str) -> Result<(), TestF
 ///
 /// `mask`, `mask_color`, `animations`, `caret`, `clip`, `scale`,
 /// `style_path` are accepted on the option struct for parity but
-/// not yet wired into the screenshot capture path; see
-/// `docs/PLAYWRIGHT-PARITY-BACKLOG.md` for the carry-forward list.
+/// not yet wired into the screenshot capture path.
 ///
 /// # Errors
 ///

@@ -1433,8 +1433,7 @@ impl ElementHandle {
     // Backend path today: element-level screenshot takes only a format
     // argument; the other fields of `ScreenshotOpts` are accepted at
     // this layer for API parity with Playwright and are honoured
-    // transparently when the backend grows support (tracked as a
-    // locator-level parity gap in docs/PLAYWRIGHT-PARITY-BACKLOG.md).
+    // transparently when the backend grows support.
     self.any_element().screenshot(opts.format).await
   }
 }

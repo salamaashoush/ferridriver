@@ -7,7 +7,7 @@
 //
 // Identity is asserted with `===` rather than `expect(a).toBe(b)`: the
 // value matchers compare a JSON snapshot of the subject, so a function
-// cannot be their subject (see docs/PLAYWRIGHT-PARITY-BACKLOG.md).
+// cannot be their subject.
 
 import ferridriverDefault, {
   test,

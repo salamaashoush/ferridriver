@@ -20,11 +20,6 @@ had no way to reach a spec.
 The same file can serve all four. It branches on the `ferridriver.host`
 global to decide what to contribute where.
 
-> Companion document: `docs/extension-architecture.md` records *why* the
-> system is shaped this way (the comparison against VS Code / Deno / WASM /
-> Rollup and the decisions deferred). This document is the *how*: the
-> authoring contract and reference.
-
 ---
 
 ## Mental model

@@ -36,8 +36,8 @@ CHROMIUM="${PW_CHROMIUM:-$(ls -d "$HOME"/Library/Caches/ms-playwright/chromium_h
 # NOT covered here: --disable-dev-shm-usage. It is a boolean switch with no
 # "un-set" form, so it cannot be A/B'd through args -- testing it means
 # deleting it from CHROMIUM_SWITCHES (crates/ferridriver/src/state.rs) and
-# rebuilding. See docs/perf-scaling-handover.md; it is Linux-only and
-# potentially the biggest lever there, so it is worth the rebuild.
+# rebuilding. It matters on Linux (where /dev/shm is small in containers)
+# and is potentially the biggest lever there, so it is worth the rebuild.
 SETS=(
   "baseline|"
   "in-process|--in-process-gpu --enable-features=NetworkServiceInProcess2"

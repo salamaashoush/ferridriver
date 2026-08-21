@@ -110,8 +110,7 @@ pub struct ToolManifest {
 ///   There is no `fs` capability: the only filesystem reachable from a
 ///   handler is the session's `fs`/`artifacts` globals, both already
 ///   confined to their `OutputDir` roots — an extension-level scope on
-///   top of that has no ungated authority left to gate (see
-///   `docs/extension-architecture.md`).
+///   top of that has no ungated authority left to gate.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolAllow {
