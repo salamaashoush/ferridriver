@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 
 /// `@ferridriver/extension` — `defineTool`, the handler context, the
 /// package manifest.
-pub const EXTENSION_DTS: &str = include_str!("../../../packages/ferridriver-extension/index.d.ts");
+pub const EXTENSION_DTS: &str = include_str!("../../../../../packages/ferridriver-extension/index.d.ts");
 
 /// `@ferridriver/test` — the browser bindings (`Page`, `BrowserContext`,
 /// `Locator`, ...) the extension declarations build on.
-pub const TEST_DTS: &str = include_str!("../../../packages/ferridriver-test/index.d.ts");
+pub const TEST_DTS: &str = include_str!("../../../../../packages/ferridriver-test/index.d.ts");
 
 /// One embedded declaration package.
 pub struct TypesPackage {

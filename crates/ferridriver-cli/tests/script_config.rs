@@ -138,9 +138,12 @@ export default {
     )],
   );
 
+  // `--no-inherit` so the report describes THIS directory: the machine and
+  // user layers are whatever the developer running the suite happens to have,
+  // and they widen the key column enough to change how values are laid out.
   let output = Command::new(bin())
     .current_dir(&dir)
-    .args(["config"])
+    .args(["config", "--no-inherit"])
     .output()
     .expect("run ferridriver config");
   let text = combined(&output);
@@ -149,9 +152,17 @@ export default {
     text.contains("ferridriver.config.ts"),
     "the module is a layer like any other: {text}"
   );
+  let row = text
+    .lines()
+    .find(|l| l.contains("test.projects"))
+    .unwrap_or_else(|| panic!("its values resolved: {text}"));
   assert!(
-    text.contains(r#"test.projects = [{"name":"one"},{"name":"two"}]"#),
-    "its values resolved: {text}"
+    row.contains(r#"[{"name":"one"},{"name":"two"}]"#),
+    "the module's value, in full: {row}"
+  );
+  assert!(
+    row.contains("ferridriver.config.ts"),
+    "attributed to the module that set it: {row}"
   );
 
   let _ = std::fs::remove_dir_all(&dir);

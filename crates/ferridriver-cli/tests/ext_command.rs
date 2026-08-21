@@ -120,7 +120,15 @@ fn check_reports_the_declared_entries_and_registered_tools() {
 
   assert!(run.success, "a clean package must pass: {}", run.stdout);
   assert!(run.stdout.contains("1 declared entry/entries"), "{}", run.stdout);
-  assert!(run.stdout.contains("probe.tool [mcp tool]"), "{}", run.stdout);
+  // The tool, and the fact that it is promoted to an MCP tool rather than
+  // staying a script-only binding. Reported as two columns of one row now,
+  // so the row is matched rather than the old `name [mcp tool]` string.
+  let row = run
+    .stdout
+    .lines()
+    .find(|l| l.contains("probe.tool"))
+    .unwrap_or_else(|| panic!("the tool is reported: {}", run.stdout));
+  assert!(row.contains("mcp tool"), "and reported as promoted: {row}");
   assert!(
     !run.stdout.contains("shared.ts"),
     "the helper is bundled through the entry, not listed as one: {}",
@@ -169,7 +177,7 @@ fn a_type_error_fails_the_check_and_is_reported_verbatim() {
 
   assert!(!run.success, "a type error must fail the command: {}", run.stdout);
   assert!(run.stdout.contains("error TS2339"), "{}", run.stdout);
-  assert!(run.stdout.contains("FAILED"), "{}", run.stdout);
+  assert!(run.stdout.contains("failed"), "{}", run.stdout);
   // The extension still loaded — the failure is the type pass, and the
   // report has to say which.
   assert!(run.stdout.contains("probe.tool"), "{}", run.stdout);
@@ -284,13 +292,13 @@ fn unmet_requirements_block_the_package_and_fail_the_check() {
   );
 
   assert!(!run.success, "{}", run.stdout);
-  assert!(run.stdout.contains("UNMET:"), "{}", run.stdout);
+  assert!(run.stdout.contains("unmet:"), "{}", run.stdout);
   assert!(
     run.stdout.contains("definitely-not-a-real-binary-xyz"),
     "{}",
     run.stdout
   );
-  assert!(run.stdout.contains("SKIPPED"), "{}", run.stdout);
+  assert!(run.stdout.contains("skipped:"), "{}", run.stdout);
 }
 
 #[test]

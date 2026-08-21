@@ -19,6 +19,7 @@ use ferridriver_session::{BindOptions, Command, RUN_VERB, Registry, ScriptReques
 use crate::cli::{
   BrowserArgs, SessionArgs, SessionCommand, SessionHostArgs, SessionListArgs, SessionOpenArgs, SessionTargetArgs,
 };
+use crate::ui;
 
 /// The script `session attach` runs to render a session's current state. It is
 /// an ordinary script for the same reason everything else is: there is one
@@ -127,12 +128,18 @@ async fn open(args: SessionOpenArgs, origin: ConfigOrigin<'_>) -> anyhow::Result
   // Wait for the host to publish its descriptor (bounded — the browser
   // launch dominates this).
   let descriptor = wait_for_descriptor(&registry, &args.id, std::time::Duration::from_mins(1)).await?;
-  println!(
-    "session '{}' open (pid {}) at {}",
-    args.id,
-    child.id(),
-    descriptor.endpoint
-  );
+  ui::say(&ui::success(&format!(
+    "session {} open {}",
+    ui::bold(&args.id),
+    ui::dim(&format!("(pid {}) {}", child.id(), descriptor.endpoint))
+  )));
+  ui::next_steps(&[
+    (
+      "drive it",
+      format!("ferridriver run -e \"await page.goto('…')\" --session {}", args.id),
+    ),
+    ("close it", format!("ferridriver session close {}", args.id)),
+  ]);
   Ok(())
 }
 
@@ -166,7 +173,7 @@ async fn host(config: FerridriverConfig, args: SessionHostArgs) -> anyhow::Resul
   }
 
   let cwd = std::env::current_dir()?;
-  let setup = crate::script_setup::resolve(&config, &cwd, &args.extensions).await?;
+  let setup = crate::commands::script_setup::resolve(&config, &cwd, &args.extensions).await?;
   let script_host = std::sync::Arc::new(ferridriver_script::SessionScriptHost::new(
     std::sync::Arc::clone(browser.state()),
     &args.id,
@@ -300,7 +307,7 @@ pub async fn run_on_session(
         if json {
           streamed.push(entry);
         } else {
-          crate::run_console::print_entry(&entry);
+          crate::commands::run::console::print_entry(&entry);
         }
       },
       ferridriver_session::EventPayload::Code { line } => {
@@ -341,19 +348,19 @@ pub async fn run_on_session(
         ..
       } => match phase {
         ferridriver_session::ActionPhase::Begin => {
-          crate::run_console::print_action_begin(
+          crate::commands::run::console::print_action_begin(
             &title,
             params.as_ref().unwrap_or(&serde_json::Value::Null),
             location.as_deref(),
           );
         },
         ferridriver_session::ActionPhase::Log => {
-          crate::run_console::print_action_log(message.as_deref().unwrap_or_default());
+          crate::commands::run::console::print_action_log(message.as_deref().unwrap_or_default());
         },
         ferridriver_session::ActionPhase::End => {
           #[allow(clippy::cast_precision_loss)] // display only, and milliseconds never reach 2^53
           let ms = duration_ms.unwrap_or_default() as f64;
-          crate::run_console::print_action_end(&title, ms, error.as_deref());
+          crate::commands::run::console::print_action_end(&title, ms, error.as_deref());
         },
       },
     })
@@ -375,21 +382,27 @@ fn console_level(level: &str) -> ferridriver_script::ConsoleLevel {
 }
 
 /// `list`: read the registry and print live sessions.
-fn list(args: &SessionListArgs) -> anyhow::Result<()> {
+fn list(_args: &SessionListArgs) -> anyhow::Result<()> {
   let registry = Registry::open()?;
   let sessions = registry.list()?;
-  if args.json {
-    println!("{}", serde_json::to_string_pretty(&sessions)?);
-    return Ok(());
+  if ui::json() {
+    return ui::print_json(&sessions);
   }
   if sessions.is_empty() {
-    println!("no live sessions");
+    ui::say(&ui::info("no live sessions"));
+    ui::next_steps(&[("open one", "ferridriver session open dev".to_string())]);
     return Ok(());
   }
-  println!("{:<20} {:<10} {:<8} ENDPOINT", "ID", "BROWSER", "PID");
+  let mut table = ui::Table::new(&["ID", "BROWSER", "PID", "ENDPOINT"]).flex(3);
   for s in &sessions {
-    println!("{:<20} {:<10} {:<8} {}", s.id, s.browser_name, s.pid, s.endpoint);
+    table.row([
+      ui::bold(&s.id),
+      s.browser_name.clone(),
+      ui::dim(&s.pid.to_string()),
+      ui::dim(&s.endpoint),
+    ]);
   }
+  table.print(ui::width());
   Ok(())
 }
 
@@ -405,9 +418,9 @@ fn close(args: &SessionTargetArgs) -> anyhow::Result<()> {
   }
   ferridriver_session::unbind(&args.id)?;
   if descriptor.is_some() {
-    println!("closed session '{}'", args.id);
+    ui::say(&ui::success(&format!("closed session {}", ui::bold(&args.id))));
   } else {
-    println!("no session '{}'", args.id);
+    ui::say(&ui::info(&format!("no session {}", ui::bold(&args.id))));
   }
   Ok(())
 }
@@ -420,7 +433,7 @@ fn close_all() -> anyhow::Result<()> {
     terminate_owner(s.pid);
     ferridriver_session::unbind(&s.id)?;
   }
-  println!("closed {} session(s)", sessions.len());
+  ui::say(&ui::success(&format!("closed {} session(s)", sessions.len())));
   Ok(())
 }
 

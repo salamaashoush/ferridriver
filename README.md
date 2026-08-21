@@ -16,7 +16,7 @@ WebKit, Firefox over WebDriver BiDi) behind one surface. Ships as:
 - A test runner — `ferridriver-test` with `#[ferritest]`, fixtures, hooks, expect matchers
 - A BDD framework — `ferridriver-bdd` with native Gherkin and step bodies in Rust or JavaScript/TypeScript
 - A core browser binding for Node.js / Bun — `@ferridriver/node` (NAPI-RS)
-- A CLI binary — `ferridriver` (MCP server, BDD runner, script runner, test wrapper, browser installer)
+- A CLI binary — `ferridriver` (project scaffolding, MCP server, test runner, BDD runner, script runner, trace viewer, browser installer)
 
 JavaScript / TypeScript BDD step files run **natively** through the single
 Rust binary: they are bundled with rolldown, compiled to QuickJS bytecode
@@ -86,6 +86,32 @@ webkit` downloads it into ferridriver's own cache. Alternatively, set
 `FERRIDRIVER_WEBKIT` to a Playwright WebKit checkout containing
 `pw_run.sh`, or install Playwright once (`npx playwright install webkit`)
 and ferridriver picks up that cache.
+
+### Scaffold a project
+
+```bash
+ferridriver init                     # config + a first spec + the editor's type declarations
+ferridriver init --bdd               # also a feature file and a step file
+ferridriver init --config-format yaml
+ferridriver doctor                   # check config, extensions, sidecars and browsers
+```
+
+### Shell completions
+
+```bash
+ferridriver completions zsh > ~/.zfunc/_ferridriver
+ferridriver completions bash >> ~/.bashrc
+ferridriver completions fish > ~/.config/fish/completions/ferridriver.fish
+```
+
+### Output conventions
+
+Every command takes the same global flags: `--format json` (or `--json`)
+for a machine-readable document — including failures, which are rendered
+as JSON too — `--quiet` to drop progress narration, `--color
+auto|always|never`, and `-v`/`-vv` for debug and protocol tracing. Colour
+is dropped automatically when output is redirected, when `NO_COLOR` is
+set, and when a coding agent rather than a person is reading it.
 
 ### Node.js / Bun (core browser binding only)
 

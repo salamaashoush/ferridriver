@@ -1,324 +1,23 @@
-//! `ferridriver config` and `ferridriver doctor`.
+//! `ferridriver doctor` — will this setup actually work?
 //!
-//! Both exist because the config system had no observable surface: the
-//! loader picked files, resolved paths and discovered extensions
-//! entirely in silence, so a dangling extension path or a config file
-//! that was never being read looked identical to a working setup. Every
-//! check here answers a question that previously required reading
-//! ferridriver's source.
+//! Every check answers a question someone would otherwise answer by running
+//! the thing and reading a stack trace: is there a config, do the extensions
+//! load, are the sidecars on PATH, is there a browser, will the instances
+//! launch. Split from `config` because that command explains a resolution
+//! and this one judges it.
 
-use std::io::Write as _;
 use std::path::Path;
 
 use ferridriver_config::FerridriverConfig;
-use ferridriver_config::layer::{self, LoadOptions};
+use ferridriver_config::layer;
 
-use crate::cli::{self, EffectiveBrowser, effective_browser};
+use crate::cli;
+use crate::ui;
 
-/// The load options a run with these global flags would use.
-///
-/// `--no-inherit` has to reach HERE too: `config` and `doctor` exist to
-/// show what a run will actually use, and resolving the full stack while
-/// the run resolves one file made them describe a setup nobody was going
-/// to get.
-/// The startup's own options, so this command explains the stack the run
-/// would actually use — including a `.ts` layer, which needs the module
-/// loader the startup already installed.
-fn load_options(startup: &ferridriver_config::Startup) -> LoadOptions {
-  startup.options().clone()
-}
+use super::{load_options, requirement_issues};
 
-/// `ferridriver config`: show the layer stack and what each key
-/// resolved to.
-///
-/// `defaults` is what the configured extension packages contributed
-/// through `defineDefaults`, already read by startup's second pass.
-/// Without them this command would answer "where did this value come
-/// from" while omitting a whole layer.
-pub fn run_config(
-  startup: &ferridriver_config::Startup,
-  defaults: Vec<(String, serde_json::Value)>,
-  args: &cli::ConfigArgs,
-) -> anyhow::Result<()> {
-  let mut options = load_options(startup);
-  options.extension_defaults = defaults;
-  let resolved = layer::resolve(&options)?;
-  let effective = effective_browser(&args.browser, &resolved.config.mcp);
-
-  if args.resolved {
-    // TOML is the canonical authoring format, but a merged document can
-    // hold shapes TOML cannot express (a null from an explicit JSON
-    // null); fall back rather than fail the command.
-    let out = match (args.json, toml::to_string_pretty(&resolved.document)) {
-      (false, Ok(text)) => text,
-      _ => serde_json::to_string_pretty(&resolved.document)?,
-    };
-    println!("{out}");
-    return Ok(());
-  }
-
-  let specs = extension_report(&resolved.config);
-
-  if args.json {
-    let payload = serde_json::json!({
-      "layers": resolved.layers,
-      "warnings": resolved.warnings,
-      "provenance": resolved
-        .provenance
-        .iter()
-        .map(|(k, v)| (k.clone(), v.describe()))
-        .collect::<std::collections::BTreeMap<_, _>>(),
-      // Per-key contributor lists for the additive arrays, whose value is
-      // the concatenation of several layers rather than any one layer's.
-      "contributors": resolved
-        .contributors
-        .iter()
-        .map(|(k, v)| (k.clone(), v.iter().map(layer::Origin::describe).collect::<Vec<_>>()))
-        .collect::<std::collections::BTreeMap<_, _>>(),
-      "effective": {
-        "mcp": {
-          "browser": {
-            "backend": format!("{:?}", effective.backend),
-            "headless": effective.headless,
-            "backendFromCli": effective.backend_from_cli,
-            "headlessFromCli": effective.headless_from_cli,
-          },
-        },
-      },
-      "extensions": specs,
-      "document": resolved.document,
-    });
-    println!("{}", serde_json::to_string_pretty(&payload)?);
-    return Ok(());
-  }
-
-  print_human_report(&resolved, &effective, &specs)
-}
-
-/// Per-spec extension resolution, so the report answers "is this
-/// extension actually being found?" without starting a server. Includes
-/// the package's `ferridriver` manifest when it declares one, because
-/// its `entries` decide which files load and its `requires` decide
-/// whether the package can work here at all.
-fn extension_report(config: &FerridriverConfig) -> Vec<serde_json::Value> {
-  let specs = config.extension_specs();
-  let (resolved, errors) = ferridriver_script::discover::resolve_extensions(&specs);
-  let issues = requirement_issues(config, &resolved);
-
-  let mut report: Vec<serde_json::Value> = resolved
-    .iter()
-    .map(|r| {
-      let source = ferridriver_mcp::extension::requirements::source_label(r);
-      let unmet: Vec<serde_json::Value> = issues
-        .iter()
-        .filter(|i| i.issue.source == source)
-        .map(|i| {
-          serde_json::json!({
-            "message": i.issue.message,
-            "blocking": i.issue.blocking,
-            "hosts": i.hosts,
-          })
-        })
-        .collect();
-      serde_json::json!({
-        "spec": r.spec,
-        "baseDir": r.base_dir,
-        "packageDir": r.package_dir,
-        "files": r.paths().collect::<Vec<_>>(),
-        "entries": r.files,
-        "manifest": r.manifest,
-        "requirements": unmet,
-        "error": serde_json::Value::Null,
-      })
-    })
-    .collect();
-
-  report.extend(errors.iter().map(|(spec, e)| {
-    let base = specs.iter().find(|s| &s.spec == spec).map(|s| s.base_dir.clone());
-    serde_json::json!({
-      "spec": spec,
-      "baseDir": base,
-      "files": [],
-      "error": e.message,
-    })
-  }));
-  report
-}
-
-/// Evaluate every resolved package's declared requirements, on every
-/// host, and say which hosts each issue applies to.
-///
-/// Per host, because `requires` is scoped to the entries that load: an
-/// entry narrowed with `hosts` states preconditions only where it runs,
-/// so an issue that blocks the MCP server may be no issue at all under
-/// `ferridriver test`. Reporting the union without saying WHERE would be
-/// the old package-wide answer wearing a new shape.
-fn requirement_issues(
-  config: &FerridriverConfig,
-  resolved: &[ferridriver_script::ResolvedExtension],
-) -> Vec<HostedIssue> {
-  let policy = config.extensions.policy();
-  let settings = config.extensions.settings();
-  let sidecars: Vec<String> = config.sidecars.iter().map(|s| s.name.clone()).collect();
-  let env = ferridriver_mcp::extension::RequirementEnv {
-    policy: &policy,
-    allow_env: &config.scripting.allow_env,
-    sidecars: &sidecars,
-    settings: &settings,
-  };
-
-  let mut out: Vec<HostedIssue> = Vec::new();
-  for host in ferridriver_script::ExtensionHost::ALL {
-    for issue in ferridriver_mcp::extension::requirements::check(resolved, &env, *host) {
-      if let Some(existing) = out
-        .iter_mut()
-        .find(|h| h.issue.source == issue.source && h.issue.message == issue.message)
-      {
-        existing.hosts.push(host.as_str().to_string());
-      } else {
-        out.push(HostedIssue {
-          issue,
-          hosts: vec![host.as_str().to_string()],
-        });
-      }
-    }
-  }
-  out
-}
-
-/// One requirement issue plus the hosts it applies to.
-struct HostedIssue {
-  issue: ferridriver_mcp::extension::RequirementIssue,
-  hosts: Vec<String>,
-}
-
-impl HostedIssue {
-  /// How the hosts read in a report: nothing when it applies everywhere,
-  /// since that is the ordinary case and naming all four would only add
-  /// noise to it.
-  fn host_suffix(&self) -> String {
-    if self.hosts.len() == ferridriver_script::ExtensionHost::ALL.len() {
-      String::new()
-    } else {
-      format!(" (on {})", self.hosts.join(", "))
-    }
-  }
-}
-
-fn print_human_report(
-  resolved: &layer::Resolved,
-  effective: &EffectiveBrowser,
-  specs: &[serde_json::Value],
-) -> anyhow::Result<()> {
-  let mut out = std::io::stdout().lock();
-
-  writeln!(out, "Layers (lowest precedence first)")?;
-  if resolved.layers.is_empty() {
-    writeln!(
-      out,
-      "  (none — running on built-in defaults; no ferridriver.{{toml,yaml,yml,json}} found)"
-    )?;
-  }
-  for l in &resolved.layers {
-    writeln!(out, "  {:<9} {}", l.kind.label(), l.path.display())?;
-  }
-
-  writeln!(out, "\nEffective browser (CLI flags override the file)")?;
-  writeln!(
-    out,
-    "  backend    {:?}{}",
-    effective.backend,
-    if effective.backend_from_cli {
-      "  (from --backend)"
-    } else {
-      ""
-    }
-  )?;
-  writeln!(
-    out,
-    "  headless   {}{}",
-    effective.headless,
-    if effective.headless_from_cli {
-      "  (from --headless/--headed)"
-    } else {
-      ""
-    }
-  )?;
-
-  writeln!(out, "\nExtensions")?;
-  if specs.is_empty() {
-    writeln!(out, "  (none configured)")?;
-  }
-  for s in specs {
-    let spec = s["spec"].as_str().unwrap_or_default();
-    if let Some(err) = s["error"].as_str() {
-      writeln!(out, "  {spec}\n    UNRESOLVED: {err}")?;
-      continue;
-    }
-    let count = s["files"].as_array().map_or(0, Vec::len);
-    writeln!(out, "  {spec}\n    {count} entry file(s), base {}", s["baseDir"])?;
-    if s["manifest"].is_object() {
-      let entries = s["manifest"]["entries"].as_array().map_or(0, Vec::len);
-      writeln!(out, "    package manifest: {entries} declared entry/entries")?;
-    }
-    for issue in s["requirements"].as_array().into_iter().flatten() {
-      let blocking = issue["blocking"] == serde_json::Value::Bool(true);
-      writeln!(
-        out,
-        "    {} {}",
-        if blocking { "UNMET:" } else { "note: " },
-        issue["message"].as_str().unwrap_or_default()
-      )?;
-    }
-  }
-
-  writeln!(out, "\nResolved values (key = value  <- source)")?;
-  for (key, origin) in &resolved.provenance {
-    let value = value_at(&resolved.document, key);
-    // An appended array belongs to every layer that added to it; naming
-    // only the last one sent people editing the wrong file.
-    let source = match resolved.contributors.get(key) {
-      Some(list) if list.len() > 1 => list.iter().map(layer::Origin::describe).collect::<Vec<_>>().join(" + "),
-      _ => origin.describe(),
-    };
-    writeln!(out, "  {key} = {value}  <- {source}")?;
-  }
-
-  if !resolved.warnings.is_empty() {
-    writeln!(out, "\nWarnings")?;
-    for w in &resolved.warnings {
-      writeln!(out, "  {}: {}", w.source, w.message)?;
-    }
-  }
-  Ok(())
-}
-
-/// Read a dotted key out of the merged document for display.
-fn value_at(document: &serde_json::Value, dotted: &str) -> String {
-  let mut current = document;
-  for segment in dotted.split('.') {
-    match current.get(segment) {
-      Some(next) => current = next,
-      None => return "?".to_string(),
-    }
-  }
-  let rendered = current.to_string();
-  // Instructions blocks and host-resolver rules are kilobytes long;
-  // a report that scrolls them off the screen is not a report.
-  //
-  // Truncated on a CHARACTER boundary: a byte slice panics the whole
-  // command the moment a value carries a multi-byte character, which
-  // server instructions and any non-ASCII path routinely do.
-  let count = rendered.chars().count();
-  if count <= VALUE_DISPLAY_LIMIT {
-    return rendered;
-  }
-  let head: String = rendered.chars().take(VALUE_DISPLAY_LIMIT - 3).collect();
-  format!("{head}… ({count} chars)")
-}
-
-/// Longest value `ferridriver config` prints in full, in characters.
-const VALUE_DISPLAY_LIMIT: usize = 120;
+/// How many extension tools `doctor` names before it falls back to a count.
+const TOOLS_NAMED: usize = 3;
 
 /// One doctor check outcome.
 struct Check {
@@ -327,7 +26,7 @@ struct Check {
   detail: String,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Status {
   Pass,
   Warn,
@@ -335,18 +34,21 @@ enum Status {
 }
 
 impl Status {
-  fn label(&self) -> &'static str {
+  /// The status column: a glyph, because the eye finds a shape in a list
+  /// faster than it reads a word, and the colour carries the same meaning
+  /// again for anyone who has both.
+  fn glyph(self) -> String {
     match self {
-      Self::Pass => "ok  ",
-      Self::Warn => "warn",
-      Self::Fail => "FAIL",
+      Self::Pass => ui::glyph_ok(),
+      Self::Warn => ui::glyph_warn(),
+      Self::Fail => ui::glyph_fail(),
     }
   }
 }
 
 /// `ferridriver doctor`: verify the setup end to end and exit non-zero
 /// when something will not work.
-pub async fn run_doctor(
+pub async fn run(
   startup: &ferridriver_config::Startup,
   defaults: Vec<(String, serde_json::Value)>,
   args: cli::DoctorArgs,
@@ -360,14 +62,11 @@ pub async fn run_doctor(
     Err(e) => {
       // A config that does not parse is the whole answer; nothing
       // downstream is meaningful.
-      report(
-        &[Check {
-          name: "config",
-          status: Status::Fail,
-          detail: e.to_string(),
-        }],
-        args.json,
-      )?;
+      report(&[Check {
+        name: "config",
+        status: Status::Fail,
+        detail: e.to_string(),
+      }])?;
       std::process::exit(1);
     },
   };
@@ -384,10 +83,13 @@ pub async fn run_doctor(
     Check {
       name: "config",
       status: Status::Pass,
+      // Short paths: a check line is scanned, not read, and the column it
+      // lives in is whatever the terminal has left after the status and the
+      // name — an absolute path spends all of it on the part everyone shares.
       detail: resolved
         .layers
         .iter()
-        .map(|l| format!("{} ({})", l.path.display(), l.kind.label()))
+        .map(|l| format!("{} ({})", ui::rel_path(&l.path), l.kind.label()))
         .collect::<Vec<_>>()
         .join(", "),
     }
@@ -424,7 +126,7 @@ pub async fn run_doctor(
   checks.extend(blocking_checks);
 
   let failed = checks.iter().any(|c| c.status == Status::Fail);
-  report(&checks, args.json)?;
+  report(&checks)?;
   if failed {
     std::process::exit(1);
   }
@@ -513,15 +215,22 @@ async fn check_extensions(config: &FerridriverConfig) -> Vec<Check> {
     .iter()
     .flat_map(|f| f.tools.iter().map(|t| t.name.clone()))
     .collect();
+  // A count and a few names. The full list belongs to `ferridriver ext
+  // check`, which is the command for reading it; naming all of them here
+  // pushed every other check's detail off the line.
+  let sample = if tools.len() > TOOLS_NAMED {
+    format!(
+      "{}, +{} more",
+      tools[..TOOLS_NAMED].join(", "),
+      tools.len() - TOOLS_NAMED
+    )
+  } else {
+    tools.join(", ")
+  };
   checks.push(Check {
     name: "extensions",
     status: if tools.is_empty() { Status::Warn } else { Status::Pass },
-    detail: format!(
-      "{} file(s), {} tool(s): {}",
-      loaded.len(),
-      tools.len(),
-      tools.join(", ")
-    ),
+    detail: format!("{} file(s), {} tool(s): {sample}", loaded.len(), tools.len()),
   });
   checks
 }
@@ -607,7 +316,7 @@ fn check_sidecars(config: &FerridriverConfig) -> Vec<Check> {
         Ok(p) => Check {
           name: "sidecars",
           status: Status::Pass,
-          detail: format!("{} -> {}", s.name, p.display()),
+          detail: format!("{} -> {}", s.name, ui::rel_path(&p)),
         },
         Err(_) => Check {
           name: "sidecars",
@@ -639,7 +348,7 @@ fn check_browser(config: &FerridriverConfig) -> Vec<Check> {
     Some(path) => Check {
       name: "browser",
       status: Status::Pass,
-      detail: format!("{backend:?} -> {path}"),
+      detail: format!("{backend:?} -> {}", ui::rel_path(Path::new(&path))),
     },
     None => Check {
       name: "browser",
@@ -748,9 +457,8 @@ fn check_instances(config: &FerridriverConfig) -> Vec<Check> {
 /// runs no destructors, and piping the command to a file (the CI shape)
 /// makes stdout block-buffered — so the whole report was discarded on
 /// exactly the failing runs someone would want the log of.
-fn report(checks: &[Check], json: bool) -> anyhow::Result<()> {
-  let mut out = std::io::stdout().lock();
-  if json {
+fn report(checks: &[Check]) -> anyhow::Result<()> {
+  if ui::json() {
     let payload: Vec<serde_json::Value> = checks
       .iter()
       .map(|c| {
@@ -761,23 +469,45 @@ fn report(checks: &[Check], json: bool) -> anyhow::Result<()> {
         })
       })
       .collect();
-    writeln!(out, "{}", serde_json::to_string_pretty(&payload)?)?;
-    out.flush()?;
-    return Ok(());
+    return ui::print_json(&payload);
   }
 
+  // Wrapped, not tabulated: a failing check's detail is the whole answer, and
+  // a column that truncates cuts off exactly the half that says what to do.
+  let name_width = checks.iter().map(|c| c.name.len()).max().unwrap_or(0);
+  let gutter = 3 + name_width + 2;
+  let body = ui::width().saturating_sub(gutter);
   for c in checks {
-    writeln!(out, "[{}] {:<14} {}", c.status.label(), c.name, c.detail)?;
+    let lines = ui::wrap(&c.detail, body);
+    let name = console::pad_str(c.name, name_width, console::Alignment::Left, None).into_owned();
+    ui::say(&format!("{}  {}  {}", c.status.glyph(), ui::bold(&name), lines[0]));
+    for line in &lines[1..] {
+      ui::say(&format!("{}{line}", " ".repeat(gutter)));
+    }
   }
+
   let fails = checks.iter().filter(|c| c.status == Status::Fail).count();
   let warns = checks.iter().filter(|c| c.status == Status::Warn).count();
-  writeln!(
-    out,
-    "\n{} check(s): {} failed, {} warning(s)",
-    checks.len(),
-    fails,
-    warns
-  )?;
-  out.flush()?;
+  let total = ui::number(checks.len());
+  let summary = match (fails, warns) {
+    (0, 0) => ui::success(&format!("{total} check(s) passed")),
+    (0, w) => ui::warning(&format!("{total} check(s), {} warning(s)", ui::number(w))),
+    (f, w) => ui::failure(&format!(
+      "{total} check(s), {} failed, {} warning(s)",
+      ui::number(f),
+      ui::number(w)
+    )),
+  };
+  ui::say(&format!("\n{summary}"));
+  if fails > 0 || warns > 0 {
+    ui::next_steps(&[
+      ("see what resolved", "ferridriver config".to_string()),
+      ("install a browser", "ferridriver install chromium".to_string()),
+    ]);
+  }
+  // `doctor` exits through `std::process::exit`, which runs no destructors,
+  // and a piped stdout is block-buffered — so the whole report was discarded
+  // on exactly the failing runs someone would want the log of.
+  std::io::Write::flush(&mut std::io::stdout())?;
   Ok(())
 }

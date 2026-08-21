@@ -190,10 +190,14 @@ fn view_serves_the_embedded_viewer_and_the_trace_behind_it() {
   let stdout = child.stdout.take().expect("stdout");
   let _guard = KillOnDrop(child);
 
+  // The URL is found by looking for a URL, not by matching the sentence
+  // around it: a wording change used to leave this loop reading a stream that
+  // never ends, so the test hung instead of failing. Bounded for the same
+  // reason.
   let mut url = String::new();
-  for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-    if let Some(rest) = line.strip_prefix("Serving the trace viewer on ") {
-      url = rest.trim().to_string();
+  for line in BufReader::new(stdout).lines().map_while(Result::ok).take(20) {
+    if let Some(at) = line.find("http://127.0.0.1:") {
+      url = line[at..].split_whitespace().next().unwrap_or_default().to_string();
       break;
     }
   }

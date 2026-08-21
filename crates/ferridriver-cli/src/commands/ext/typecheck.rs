@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::ext_types;
+use super::types;
 
 /// What the TypeScript pass produced.
 pub struct TypecheckOutcome {
@@ -202,7 +202,7 @@ pub fn run(entries: &[PathBuf], package_dirs: &[PathBuf], scratch: &Path) -> Typ
   }
 
   let types_root = scratch.join("types");
-  if let Err(e) = ext_types::materialize(&types_root) {
+  if let Err(e) = types::materialize(&types_root) {
     return TypecheckOutcome {
       checker: Some(checker.label),
       diagnostics: vec![format!("could not write the embedded type declarations: {e}")],

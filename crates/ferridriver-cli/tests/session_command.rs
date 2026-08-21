@@ -69,7 +69,7 @@ fn session_open_run_list_close_lifecycle() {
     ],
   );
   assert!(ok, "open failed: {out}{err}");
-  assert!(out.contains(&format!("session '{id}' open")), "{out}");
+  assert!(out.contains(&format!("session {id} open")), "{out}");
 
   // list shows the live session.
   let (ok, out, _e) = session(dir.path(), &["list"]);

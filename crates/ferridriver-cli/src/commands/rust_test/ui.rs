@@ -285,14 +285,14 @@ impl CycleSpawner {
       // `--tests` selects every test target while skipping doctests
       // (which cannot hello and would only burn compile time).
       CycleKind::List => {
-        let mut cmd = crate::base_test_command(&self.args, cli::TestRunner::Cargo);
+        let mut cmd = super::base_test_command(&self.args, cli::TestRunner::Cargo);
         cmd.arg("--tests");
         cmd.arg("--").arg("--list");
         cmd.env(ui_wire::LIST_ENV, "1");
         cmd
       },
       CycleKind::Run => {
-        let mut cmd = crate::base_test_command(&self.args, cli::TestRunner::Cargo);
+        let mut cmd = super::base_test_command(&self.args, cli::TestRunner::Cargo);
         cmd.env_remove(ui_wire::LIST_ENV);
         cmd
       },

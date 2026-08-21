@@ -2,7 +2,7 @@
 //! one.
 //!
 //! Sharded CI runs each write a `blob` zip; this replays every recorded
-//! event through a fresh reporter set, so the merged HTML / JUnit / JSON
+//! event through a fresh reporter set, so the merged HTML / `JUnit` / JSON
 //! is identical to what an unsharded run would have produced. Mirrors
 //! Playwright's `merge-reports` command.
 
@@ -13,6 +13,7 @@ use ferridriver_test::config::ReporterConfig;
 use ferridriver_test::reporter::{ReporterEvent, RunStatus, blob};
 
 use crate::cli::MergeReportsArgs;
+use crate::ui;
 
 /// Run the merge. Exit code is the merged run's: non-zero when any test
 /// ended unexpectedly, so a merge step can gate a pipeline the same way
@@ -76,19 +77,21 @@ pub async fn run(config: FerridriverConfig, args: MergeReportsArgs) -> anyhow::R
   }
   reporters.finalize().await;
 
-  eprintln!(
+  ui::note(&format!(
     "merged {} blob report{} from {}",
-    blobs.len(),
+    ui::number(blobs.len()),
     if blobs.len() == 1 { "" } else { "s" },
     blobs
       .iter()
-      .map(|p| p.display().to_string())
+      .map(|p| ui::short_path(p, 40))
       .collect::<Vec<_>>()
       .join(", ")
-  );
+  ));
 
   if failed {
-    std::process::exit(1);
+    // The reporters just wrote the report that says what failed; the process
+    // needs the status, not a second banner over the top of it.
+    return Err(crate::error::AlreadyReported.into());
   }
   Ok(())
 }

@@ -21,6 +21,7 @@ use ferridriver_viewer::model::{TraceModel, TraceSource};
 use ferridriver_viewer::{App, FileRoots, dump};
 
 use crate::cli;
+use crate::ui;
 
 pub async fn run(config: &FerridriverConfig, args: cli::TraceArgs) -> anyhow::Result<()> {
   match args.command {
@@ -64,13 +65,13 @@ async fn view_trace(config: &FerridriverConfig, args: cli::TraceViewArgs) -> any
   let url = serve_viewer(&args.host, args.port, roots, "index.html", &[("trace", trace_param)]).await?;
 
   if args.no_open {
-    println!("Serving the trace viewer on {url}");
-    println!("Press Ctrl-C to stop.");
+    ui::say(&ui::success(&format!("trace viewer on {}", ui::url(&url))));
+    ui::say(&ui::dim("Ctrl-C to stop"));
     tokio::signal::ctrl_c().await.ok();
     return Ok(());
   }
 
-  println!("Opening {url}");
+  ui::say(&ui::info(&format!("opening {}", ui::url(&url))));
   open_app_window(&url).await
 }
 
@@ -135,8 +136,9 @@ async fn open_app_window(url: &str) -> anyhow::Result<()> {
     Err(e) => {
       // No browser installed is a normal state for someone who only wanted
       // to read a trace, so say where it is instead of failing.
-      eprintln!("could not open a browser window ({e})");
-      println!("Open this URL yourself: {url}");
+      ui::say(&ui::warning(&format!("could not open a browser window ({e})")));
+      let url = ui::url(url);
+      ui::say(&format!("  open it yourself: {url}"));
       tokio::signal::ctrl_c().await.ok();
       return Ok(());
     },
@@ -162,7 +164,7 @@ fn show_trace(config: &FerridriverConfig, args: &cli::TraceShowArgs) -> anyhow::
   };
   let model = load(&path)?;
 
-  if args.json {
+  if ui::json() {
     println!("{}", serde_json::to_string_pretty(&dump::to_json(&model))?);
     return Ok(());
   }
@@ -179,20 +181,12 @@ fn show_trace(config: &FerridriverConfig, args: &cli::TraceShowArgs) -> anyhow::
       network: !args.hide.contains(&cli::TraceSection::Network),
     },
     limit: args.limit,
-    color: use_color(&args.color),
+    // The one colour decision this process made, in `ui::init` — a trace
+    // dump is not a place to re-derive it from a second flag.
+    color: console::colors_enabled(),
   };
   print!("{}", dump::render(&model, &options));
   Ok(())
-}
-
-fn use_color(setting: &str) -> bool {
-  match setting {
-    "always" => true,
-    "never" => false,
-    // `auto`: a pipe gets plain text, a terminal gets color, and NO_COLOR
-    // wins over both (https://no-color.org).
-    _ => std::env::var_os("NO_COLOR").is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout()),
-  }
 }
 
 // ── ls ──────────────────────────────────────────────────────────────────
@@ -204,10 +198,14 @@ fn list_traces(config: &FerridriverConfig, args: &cli::TraceLsArgs) -> anyhow::R
   }
   let traces = collect_traces(&dir);
   if traces.is_empty() {
-    if args.json {
+    if ui::json() {
       println!("[]");
     } else {
-      println!("no traces under {}", dir.display());
+      ui::say(&ui::info(&format!(
+        "no traces under {}",
+        ui::path(&ui::short_path(&dir, 60))
+      )));
+      ui::next_steps(&[("record some", "ferridriver test --reporter list".to_string())]);
     }
     return Ok(());
   }
@@ -219,7 +217,7 @@ fn list_traces(config: &FerridriverConfig, args: &cli::TraceLsArgs) -> anyhow::R
     rows.push((path, size, summary));
   }
 
-  if args.json {
+  if ui::json() {
     let entries: Vec<serde_json::Value> = rows
       .iter()
       .map(|(path, size, summary)| {
@@ -235,24 +233,32 @@ fn list_traces(config: &FerridriverConfig, args: &cli::TraceLsArgs) -> anyhow::R
     return Ok(());
   }
 
+  let count = rows.len();
+  // Two lines per trace rather than three columns. Both halves are wanted in
+  // full — the path is what the next command takes as an argument, and the
+  // summary ends in the verdict — and side by side one of them always loses:
+  // the summary carries a test title, so together they overrun any terminal.
+  let size_width = rows
+    .iter()
+    .map(|(_, size, _)| console::measure_text_width(&ui::bytes(*size)))
+    .max()
+    .unwrap_or(0);
   for (path, size, summary) in rows {
+    let size = console::pad_str(&ui::bytes(size), size_width, console::Alignment::Right, None).into_owned();
+    ui::say(&format!("{}  {}", ui::path(&ui::rel_path(&path)), ui::dim(&size)));
     let detail = match summary {
-      Ok(summary) => summary,
-      Err(error) => format!("unreadable: {error}"),
+      Ok(summary) => ui::dim(&summary),
+      Err(error) => ui::failure(&format!("unreadable: {error}")),
     };
-    println!("{}  {:>9}  {detail}", path.display(), human_bytes(size));
+    ui::say(&format!("  {detail}"));
   }
+  let count = ui::number(count);
+  ui::say(&format!(
+    "\n{count} trace(s) under {}",
+    ui::path(&ui::short_path(&dir, 60))
+  ));
+  ui::next_steps(&[("open the newest", "ferridriver trace view".to_string())]);
   Ok(())
-}
-
-fn human_bytes(bytes: u64) -> String {
-  #[allow(clippy::cast_precision_loss)]
-  let bytes = bytes as f64;
-  match bytes {
-    b if b >= 1024.0 * 1024.0 => format!("{:.1}MB", b / (1024.0 * 1024.0)),
-    b if b >= 1024.0 => format!("{:.0}KB", b / 1024.0),
-    b => format!("{b:.0}B"),
-  }
 }
 
 // ── shared ──────────────────────────────────────────────────────────────
@@ -360,21 +366,8 @@ mod tests {
   }
 
   #[test]
-  fn color_setting_is_explicit_or_terminal_bound() {
-    assert!(use_color("always"));
-    assert!(!use_color("never"));
-  }
-
-  #[test]
   fn unspecified_bind_addresses_are_printed_as_loopback() {
     assert_eq!(displayable("0.0.0.0:9323".parse().expect("addr")), "127.0.0.1:9323");
     assert_eq!(displayable("127.0.0.1:9323".parse().expect("addr")), "127.0.0.1:9323");
-  }
-
-  #[test]
-  fn byte_sizes_read_as_sizes() {
-    assert_eq!(human_bytes(512), "512B");
-    assert_eq!(human_bytes(2048), "2KB");
-    assert_eq!(human_bytes(3 * 1024 * 1024), "3.0MB");
   }
 }

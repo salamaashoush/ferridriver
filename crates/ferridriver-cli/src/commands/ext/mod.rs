@@ -13,14 +13,17 @@
 //! load the MCP server runs, so a green report means the server will load
 //! the same set.
 
+pub mod report;
+pub mod typecheck;
+pub mod types;
+
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use ferridriver_config::FerridriverConfig;
 
 use crate::cli;
-use crate::ext_typecheck;
-use crate::ext_types;
+use crate::ui;
 
 pub async fn run(config: FerridriverConfig, args: cli::ExtArgs) -> anyhow::Result<()> {
   match args.command {
@@ -40,7 +43,7 @@ fn write_types(args: cli::ExtTypesArgs) -> anyhow::Result<()> {
     Some(dir) => dir,
     None => std::env::current_dir()?.join("node_modules"),
   };
-  let written = ext_types::materialize(&root)?;
+  let written = types::materialize(&root)?;
   let mut out = std::io::stdout().lock();
   for (name, path) in &written {
     writeln!(out, "{name} -> {}", path.display())?;
@@ -54,11 +57,11 @@ fn write_types(args: cli::ExtTypesArgs) -> anyhow::Result<()> {
 }
 
 /// One report cycle's outcome.
-struct Report {
-  payload: serde_json::Value,
+pub struct Report {
+  pub payload: serde_json::Value,
   /// Roots to watch: an entry file's directory, or a package's own dir.
-  roots: Vec<PathBuf>,
-  ok: bool,
+  pub roots: Vec<PathBuf>,
+  pub ok: bool,
 }
 
 async fn check_once(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyhow::Result<()> {
@@ -67,7 +70,7 @@ async fn check_once(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyho
   }
   let specs = specs_from(&config, &args.paths)?;
   let report = Box::pin(build_report(&config, &specs, !args.no_typecheck)).await;
-  print_report(&report, args.json)?;
+  report::print(&report)?;
   if report.ok {
     return Ok(());
   }
@@ -77,14 +80,19 @@ async fn check_once(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyho
 async fn check_loop(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyhow::Result<()> {
   let specs = specs_from(&config, &args.paths)?;
   let mut report = Box::pin(build_report(&config, &specs, !args.no_typecheck)).await;
-  print_report(&report, args.json)?;
+  report::print(&report)?;
 
   let mut watched: Vec<PathBuf> = Vec::new();
   let mut watchers = watch_roots(&report.roots, &mut watched)?;
 
   let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
   loop {
-    println!("\n[ext dev] watching {} root(s) (Ctrl-C to quit)\n", watchers.len());
+    ui::say(&format!(
+      "\n{}  watching {} root(s) {}\n",
+      ui::badge("ext dev", &console::Style::new().on_cyan().black()),
+      ui::number(watchers.len()),
+      ui::dim("(Ctrl-C to quit)")
+    ));
     let changed = {
       let recvs: Vec<_> = watchers.iter().map(|w| Box::pin(w.recv())).collect();
       tokio::select! {
@@ -104,7 +112,7 @@ async fn check_loop(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyho
     // so reusing the previous file list would keep loading stale entries.
     let specs = specs_from(&config, &args.paths)?;
     report = Box::pin(build_report(&config, &specs, !args.no_typecheck)).await;
-    print_report(&report, args.json)?;
+    report::print(&report)?;
 
     // ...and the root set with it: adding an `entries` item under a new
     // directory, or fixing the spec that made a package resolve at all,
@@ -126,7 +134,7 @@ fn watch_roots(
   for root in roots {
     match ferridriver_test::watch::FileWatcher::new(root, &[], &[]) {
       Ok(w) => watchers.push(w),
-      Err(e) => eprintln!("[ext dev] cannot watch {}: {e}", root.display()),
+      Err(e) => ui::note(&ui::warning(&format!("cannot watch {}: {e}", ui::short_path(root, 60)))),
     }
   }
   if watchers.is_empty() {
@@ -284,8 +292,8 @@ async fn build_report(
     None
   };
   let types = match &scratch {
-    Some(dir) => ext_typecheck::run(&type_files, &package_dirs, dir.path()),
-    None => ext_typecheck::TypecheckOutcome {
+    Some(dir) => typecheck::run(&type_files, &package_dirs, dir.path()),
+    None => typecheck::TypecheckOutcome {
       checker: None,
       diagnostics: Vec::new(),
       passed: true,
@@ -469,132 +477,4 @@ fn specs_json(
       })
     })
     .collect()
-}
-/// Print one cycle's report.
-///
-/// Flushes explicitly: `ext check` exits through `std::process::exit`,
-/// which runs no destructors, so a report piped to a file (the CI /
-/// pre-commit shape) was block-buffered and lost on the failing runs.
-/// What each host loads, and what it found there.
-///
-/// Per host, because what a package contributes is a function of the
-/// host it loads under, and one host's answer is not the package.
-fn print_hosts(out: &mut impl std::io::Write, payload: &serde_json::Value) -> anyhow::Result<()> {
-  for (host, view) in payload["hosts"].as_object().into_iter().flatten() {
-    let entries = view["entries"].as_array().cloned().unwrap_or_default();
-    let blocked = view["blocked"].as_array().map_or(0, Vec::len);
-    if entries.is_empty() {
-      let why = if blocked > 0 {
-        format!(" ({blocked} package(s) held back)")
-      } else {
-        String::new()
-      };
-      writeln!(out, "\n{host}: nothing loads{why}")?;
-      continue;
-    }
-    writeln!(out, "\n{host}")?;
-    for group in &entries {
-      for path in group["files"].as_array().into_iter().flatten() {
-        writeln!(out, "  {}", path.as_str().unwrap_or_default())?;
-      }
-      if let Some(error) = group["error"].as_str() {
-        writeln!(out, "    failed: {error}")?;
-      }
-      let kinds = group["kinds"].as_object().cloned().unwrap_or_default();
-      if kinds.is_empty() {
-        if group["error"].is_null() {
-          writeln!(out, "    registers nothing")?;
-        }
-      } else {
-        let summary: Vec<String> = kinds.iter().map(|(kind, count)| format!("{count} {kind}")).collect();
-        writeln!(out, "    {}", summary.join(", "))?;
-      }
-      for t in group["tools"].as_array().into_iter().flatten() {
-        let promoted = if t["exposeAsMcpTool"] == serde_json::Value::Bool(true) {
-          "mcp tool"
-        } else {
-          "binding only"
-        };
-        writeln!(out, "    {} [{promoted}]", t["name"].as_str().unwrap_or_default())?;
-        let commands = t["allow"]["commands"].as_array().map_or(0, Vec::len);
-        let net = t["allow"]["net"].as_array().map_or(0, Vec::len);
-        if commands > 0 || net > 0 {
-          writeln!(out, "      allow: {commands} command(s), {net} net host(s)")?;
-        }
-      }
-    }
-  }
-  Ok(())
-}
-
-fn print_report(report: &Report, json: bool) -> anyhow::Result<()> {
-  let mut out = std::io::stdout().lock();
-  if json {
-    writeln!(out, "{}", serde_json::to_string_pretty(&report.payload)?)?;
-    out.flush()?;
-    return Ok(());
-  }
-
-  for spec in report.payload["specs"].as_array().into_iter().flatten() {
-    let name = spec["spec"].as_str().unwrap_or_default();
-    let count = spec["files"].as_array().map_or(0, Vec::len);
-    writeln!(out, "{name}")?;
-    if let Some(dir) = spec["packageDir"].as_str() {
-      let entries = spec["manifest"]["entries"].as_array().map_or(0, Vec::len);
-      writeln!(out, "  package {dir} ({entries} declared entry/entries)")?;
-    }
-    writeln!(out, "  {count} entry file(s)")?;
-    for entry in spec["entries"].as_array().into_iter().flatten() {
-      let narrowed = entry["hosts"]
-        .as_array()
-        .map(|hosts| {
-          let names: Vec<&str> = hosts.iter().filter_map(serde_json::Value::as_str).collect();
-          format!("  [{}]", names.join(", "))
-        })
-        .unwrap_or_default();
-      writeln!(out, "    {}{narrowed}", entry["path"].as_str().unwrap_or_default())?;
-    }
-    for issue in spec["requirements"].as_array().into_iter().flatten() {
-      let blocking = issue["blocking"] == serde_json::Value::Bool(true);
-      writeln!(
-        out,
-        "  {} {}",
-        if blocking { "UNMET:" } else { "note: " },
-        issue["message"].as_str().unwrap_or_default()
-      )?;
-    }
-    if spec["blocked"] == serde_json::Value::Bool(true) {
-      writeln!(out, "  SKIPPED: requirements above are unmet")?;
-    }
-  }
-
-  let types = &report.payload["typecheck"];
-  writeln!(out, "\nTypes")?;
-  match (types["checker"].as_str(), types["skipped"].as_str()) {
-    (_, Some(reason)) => writeln!(out, "  skipped: {reason}")?,
-    (Some(checker), None) => {
-      if types["passed"] == serde_json::Value::Bool(true) {
-        writeln!(out, "  {checker}: no errors")?;
-      } else {
-        writeln!(out, "  {checker}:")?;
-        for d in types["diagnostics"].as_array().into_iter().flatten() {
-          writeln!(out, "    {}", d.as_str().unwrap_or_default())?;
-        }
-      }
-    },
-    (None, None) => writeln!(out, "  no checker available")?,
-  }
-
-  print_hosts(&mut out, &report.payload)?;
-
-  let errors = report.payload["errors"].as_array().cloned().unwrap_or_default();
-  if !errors.is_empty() {
-    writeln!(out, "\nErrors")?;
-    for e in &errors {
-      writeln!(out, "  {}", e.as_str().unwrap_or_default())?;
-    }
-  }
-  writeln!(out, "\n{}", if report.ok { "ok" } else { "FAILED" })?;
-  out.flush()?;
-  Ok(())
 }
