@@ -730,22 +730,31 @@ enum ScriptOrigin {
   Inline,
 }
 
-async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::Result<()> {
+/// The script a `run` invocation names, and where it came from.
+///
+/// The origin decides more than diagnostics: a file is bundled relative to
+/// its own directory and its bytecode is disk-cached, while inline source is
+/// neither.
+fn read_script_source(args: &cli::RunArgs) -> anyhow::Result<(String, ScriptOrigin)> {
   use std::io::Read as _;
 
-  let (source, origin) = match (args.eval.clone(), args.script.as_deref()) {
-    (Some(code), _) => (code, ScriptOrigin::Inline),
+  match (args.eval.clone(), args.script.as_deref()) {
+    (Some(code), _) => Ok((code, ScriptOrigin::Inline)),
     (None, Some("-")) => {
-      let mut s = String::new();
-      std::io::stdin().read_to_string(&mut s)?;
-      (s, ScriptOrigin::Inline)
+      let mut source = String::new();
+      std::io::stdin().read_to_string(&mut source)?;
+      Ok((source, ScriptOrigin::Inline))
     },
-    (None, Some(path)) => (
+    (None, Some(path)) => Ok((
       std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("read {path}: {e}"))?,
       ScriptOrigin::File(std::path::PathBuf::from(path)),
-    ),
+    )),
     (None, None) => anyhow::bail!("provide a script path, `-` for stdin, or --eval <code>"),
-  };
+  }
+}
+
+async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::Result<()> {
+  let (source, origin) = read_script_source(&args)?;
 
   let cwd = std::env::current_dir()?;
   let script_args: Vec<serde_json::Value> = args
@@ -810,7 +819,10 @@ async fn run_script_cli(file_config: FerridriverConfig, args: cli::RunArgs) -> a
   // discover commands mean here what they mean there. Absent the flag nothing
   // is launched: a script that never opens a browser pays for none.
   let provisioned = match args.instance.as_deref() {
-    Some(name) => Some(provision_instance(file_config.mcp, name, args.headed).await?),
+    // Boxed: the future holds the whole `[mcp]` config plus the launch
+    // state it builds, which is several kilobytes to carry inline on the
+    // stack of every `run` -- including the ones that provision nothing.
+    Some(name) => Some(Box::pin(provision_instance(file_config.mcp, name, args.headed)).await?),
     None => None,
   };
   let (page, browser_context, browser) = match provisioned {

@@ -704,6 +704,11 @@ pub enum TestRunner {
 
 // ── run subcommand ──────────────────────────────────────────────────────
 
+// `headed`, `json`, `trace` and `report` are independent command-line flags
+// with no relationship to each other -- grouping them into an enum would
+// model a state machine that does not exist, and would change the CLI
+// surface to satisfy a lint about the struct behind it.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Args)]
 pub struct RunArgs {
   /// Script file, or `-` to read source from stdin. Omit when using

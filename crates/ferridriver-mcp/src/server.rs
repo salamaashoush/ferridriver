@@ -544,10 +544,10 @@ pub fn browser_state_for(
   browser_state.set_known_instances(config.instance_names());
 
   // Wire per-instance launch settings from the config trait.
-  let config_clone = Arc::clone(&config);
+  let config_clone = Arc::clone(config);
   browser_state.set_instance_overrides_fn(Arc::new(move |instance| config_clone.instance_overrides(instance)));
   // Wire per-instance connection resolver from config trait.
-  let config_clone = Arc::clone(&config);
+  let config_clone = Arc::clone(config);
   browser_state.set_instance_resolver_fn(Arc::new(move |instance| config_clone.resolve_instance(instance)));
   browser_state
 }
