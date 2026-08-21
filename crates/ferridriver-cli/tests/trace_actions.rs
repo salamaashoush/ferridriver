@@ -8,6 +8,12 @@
 //! actions back with `trace show --json`.
 //!
 //! Requires a built `ferridriver` binary and a Chromium.
+//!
+//! `--instance default` is what provisions `page` / `context` / `browser`:
+//! a bare `run` launches nothing, so a script that touches them would only
+//! report that they are undefined. `--no-inherit` keeps a config in the
+//! user's own directories out of the run, which would otherwise decide the
+//! backend and headedness of a test that has an opinion about neither.
 
 use std::process::Command;
 
@@ -53,7 +59,7 @@ fn a_script_records_one_action_per_call_it_makes() {
   std::fs::write(dir.path().join("script.ts"), SCRIPT).expect("write script");
 
   let run = Command::new(bin())
-    .args(["run", "script.ts"])
+    .args(["--no-inherit", "run", "--instance", "default", "script.ts"])
     .current_dir(dir.path())
     .output()
     .expect("run script");
@@ -64,7 +70,7 @@ fn a_script_records_one_action_per_call_it_makes() {
   );
 
   let shown = Command::new(bin())
-    .args(["trace", "show", "trace.zip", "--json"])
+    .args(["--no-inherit", "trace", "show", "trace.zip", "--json"])
     .current_dir(dir.path())
     .output()
     .expect("trace show");
