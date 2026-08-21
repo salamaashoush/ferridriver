@@ -261,9 +261,17 @@ pub trait McpServerConfig: Send + Sync + 'static {
     ferridriver::options::InstanceOverrides::default()
   }
 
-  /// Default viewport for new pages.
+  /// Viewport emulated on the pages this server opens.
+  ///
+  /// Playwright's default (1280x720) rather than `None`: returning
+  /// nothing here means no `Emulation.setDeviceMetricsOverride` at all,
+  /// which is Playwright's `viewport: null`. On a persistent profile
+  /// that leaves every page at whatever window bounds Chrome restored
+  /// from the profile's last run, so one `--window-size` launch pins the
+  /// size of every session afterwards. `None` stays reachable through an
+  /// explicit `viewport: null`.
   fn default_viewport(&self) -> Option<ferridriver::options::ViewportConfig> {
-    None
+    Some(ferridriver::options::ViewportConfig::default())
   }
 
   /// Resolve how to connect to a browser instance by name.

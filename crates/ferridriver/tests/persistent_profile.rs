@@ -100,3 +100,67 @@ async fn a_throwaway_profile_is_still_cleaned_up() {
   state.open_page("default", "about:blank").await.expect("open page");
   state.shutdown().await;
 }
+
+/// A profile Chrome has already saved a window size into must not decide
+/// the viewport of the pages ferridriver opens from it.
+///
+/// Chrome writes `browser.window_placement` into `Default/Preferences`
+/// when it exits and restores it on the next launch. A host that
+/// emulates no viewport therefore inherits whatever size that profile
+/// was last left at — one `--window-size` launch by another tool, or one
+/// manual resize, and every later session silently reports it. Playwright
+/// never has this problem because it emulates 1280x720 unless told
+/// `viewport: null`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_saved_window_size_does_not_leak_into_the_viewport() {
+  let root = tempfile::tempdir().expect("tempdir");
+  let profile = root.path().join("profile");
+  std::fs::create_dir_all(profile.join("Default")).expect("profile dir");
+
+  // Deliberately unlike the default viewport in BOTH dimensions, so a
+  // pass cannot come from one of them coinciding.
+  std::fs::write(
+    profile.join("Default").join("Preferences"),
+    serde_json::json!({
+      "browser": {
+        "window_placement": {
+          "left": 0, "top": 0, "right": 1001, "bottom": 777, "maximized": false,
+        }
+      }
+    })
+    .to_string(),
+  )
+  .expect("seed preferences");
+
+  let mut state = BrowserState::with_plan(
+    ConnectMode::Launch,
+    LaunchPlan {
+      backend: BackendKind::CdpPipe,
+      kind: BrowserKind::Chromium,
+      headless: true,
+      ..Default::default()
+    },
+  );
+  let dir = profile.clone();
+  state.set_instance_overrides_fn(std::sync::Arc::new(move |_| {
+    Ok(ferridriver::options::InstanceOverrides {
+      user_data_dir: Some(dir.display().to_string()),
+      ..Default::default()
+    })
+  }));
+
+  state.ensure_instance("default").await.expect("launch");
+  let page = state.open_page("default", "about:blank").await.expect("open page");
+  let size = page
+    .evaluate("[window.innerWidth, window.innerHeight]")
+    .await
+    .expect("evaluate")
+    .expect("a size");
+  state.shutdown().await;
+
+  assert_eq!(
+    size,
+    serde_json::json!([1280, 720]),
+    "the default viewport must win over the size saved in the profile"
+  );
+}
