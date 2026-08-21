@@ -239,3 +239,73 @@ async fn an_adopted_page_gets_the_configured_viewport() {
     "an adopted page must be emulated with the configured viewport"
   );
 }
+
+/// A maximized window still gets the viewport it was configured with.
+///
+/// Chrome refuses `Browser.setWindowBounds` with a size while the window
+/// is maximized, minimized or fullscreen, and a persistent profile
+/// restores the state it was last left in — so a browser somebody
+/// maximized once would keep every later resize from landing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_maximized_window_is_normalised_before_it_is_resized() {
+  let mut state = BrowserState::with_plan(
+    ConnectMode::Launch,
+    LaunchPlan {
+      backend: BackendKind::CdpPipe,
+      kind: BrowserKind::Chromium,
+      headless: true,
+      ..Default::default()
+    },
+  );
+  state.ensure_instance("default").await.expect("launch");
+  let page = state.open_page("default", "about:blank").await.expect("open page");
+
+  let session = page.new_cdp_session().await.expect("cdp session");
+  let window_id = session
+    .send("Browser.getWindowForTarget", serde_json::json!({}))
+    .await
+    .expect("window for target")
+    .get("windowId")
+    .and_then(serde_json::Value::as_i64)
+    .expect("a window id");
+  session
+    .send(
+      "Browser.setWindowBounds",
+      serde_json::json!({ "windowId": window_id, "bounds": { "windowState": "maximized" } }),
+    )
+    .await
+    .expect("maximize");
+
+  // Prove the scenario is real before relying on it: a window that did
+  // not actually maximize would make the assertion below pass for the
+  // wrong reason.
+  let state_now = session
+    .send("Browser.getWindowBounds", serde_json::json!({ "windowId": window_id }))
+    .await
+    .expect("window bounds");
+  assert_eq!(
+    state_now["bounds"]["windowState"], "maximized",
+    "precondition: the window has to be maximized for this to test anything"
+  );
+
+  page
+    .emulate_viewport(&ferridriver::options::ViewportConfig {
+      width: 900,
+      height: 600,
+      ..Default::default()
+    })
+    .await
+    .expect("emulate viewport");
+  let size = page
+    .evaluate("[window.innerWidth, window.innerHeight]")
+    .await
+    .expect("evaluate")
+    .expect("a size");
+  state.shutdown().await;
+
+  assert_eq!(
+    size,
+    serde_json::json!([900, 600]),
+    "the viewport must land even on a window that started maximized"
+  );
+}

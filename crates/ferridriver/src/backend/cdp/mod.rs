@@ -72,6 +72,14 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// (its initializer stores the same value and returns it synchronously).
   /// Example: `"HeadlessChrome/120.0.6099.109"`.
   version: Arc<str>,
+  /// Whether this browser draws real window chrome, so a viewport has
+  /// to account for the title bar and borders when it sizes the window
+  /// (Playwright's `browser.options.headful`).
+  ///
+  /// Read off the product string rather than a launch flag: the connect
+  /// and discover paths never saw one, and the browser on the other end
+  /// of a discover command is the only thing that knows how it started.
+  headful: bool,
   /// Popup announcement subscriptions (see
   /// [`crate::backend::PopupInfo`]). Arc-shared across browser clones
   /// so a pump subscribed through any clone observes popups claimed by
@@ -133,6 +141,7 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
       child: Arc::clone(&self.child),
       attached_targets: Arc::clone(&self.attached_targets),
       version: Arc::clone(&self.version),
+      headful: self.headful,
       popup_taps: Arc::clone(&self.popup_taps),
       create_ledger: Arc::clone(&self.create_ledger),
       user_data_dir: self.user_data_dir.as_ref().map(Arc::clone),
@@ -183,6 +192,36 @@ fn metrics_params_for(
   })
 }
 
+/// How much bigger than its viewport a browser window has to be for the
+/// page to actually get that viewport.
+///
+/// Window chrome (title bar, tab strip, borders) eats into the content
+/// area, so a window sized to the viewport renders a smaller one.
+/// Numbers are Playwright's, per platform
+/// (`chromium/crPage.ts::_updateViewport`); a browser with no UI window
+/// has no chrome to account for.
+///
+/// Playwright adds another 46px of height for a persistent context, to
+/// leave room for the automation infobar. Deliberately not mirrored:
+/// ferridriver's switch list asks Chrome to suppress that bar
+/// (`--disable-infobars`), and the page gets its exact size from the
+/// metrics override either way — the insets only decide how much of the
+/// window the page fills.
+const fn window_insets(headful: bool) -> (i64, i64) {
+  if !headful {
+    return (0, 0);
+  }
+  if cfg!(target_os = "windows") {
+    (16, 88)
+  } else if cfg!(target_os = "linux") {
+    (8, 85)
+  } else if cfg!(target_os = "macos") {
+    (2, 80)
+  } else {
+    (24, 88)
+  }
+}
+
 /// Shared targetId -> sessionId cache. See [`CdpBrowser::attached_targets`].
 type AttachedTargets = Arc<std::sync::Mutex<FxHashMap<String, Option<String>>>>;
 
@@ -194,6 +233,7 @@ struct AttachCtx<T: CdpTransport> {
   downloads_dir: Arc<tempfile::TempDir>,
   ledger: Arc<CreateLedger>,
   attached: AttachedTargets,
+  headful: bool,
 }
 
 /// A paused page target the attach listener could not attribute yet:
@@ -358,6 +398,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .get("product")
       .and_then(|v| v.as_str())
       .map_or_else(|| Arc::from("Unknown"), Arc::from);
+    // Chrome reports "HeadlessChrome/<v>" only when it has no UI window.
+    let headful = !version.starts_with("HeadlessChrome");
 
     transport
       .send_command(
@@ -378,13 +420,14 @@ impl<T: CdpWrap> CdpBrowser<T> {
     }
     let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
     let (popup_taps, create_ledger, attach_tasks) =
-      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets);
+      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets, headful);
 
     Ok(Self {
       transport,
       child: Arc::new(tokio::sync::Mutex::new(child)),
       attached_targets,
       version,
+      headful,
       user_data_dir: user_data_dir.map(|td| Arc::new(super::async_tempdir::AsyncTempDir::new(td))),
       downloads_dir,
       popup_taps,
@@ -417,6 +460,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     transport: &Arc<T>,
     downloads_dir: &Arc<tempfile::TempDir>,
     attached: &AttachedTargets,
+    headful: bool,
   ) -> (
     crate::backend::PopupTaps,
     Arc<CreateLedger>,
@@ -439,6 +483,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       downloads_dir: Arc::clone(downloads_dir),
       ledger: Arc::clone(&ledger),
       attached: Arc::clone(attached),
+      headful,
     };
     // Flush channel: `end_create` (called from new_page, no transport
     // access) signals the listener side to claim leftovers.
@@ -447,10 +492,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let flush_transport = Arc::clone(transport);
     let flush_taps = Arc::clone(&popup_taps);
     let flush_ledger = Arc::clone(&ledger);
+    let flush_headful = headful;
     let flush_task = tokio::spawn(async move {
       while flush_rx.recv().await.is_some() {
         for parked in flush_ledger.take_unowned_parked() {
-          Self::claim_parked_popup(&flush_transport, &flush_taps, &flush_downloads, parked);
+          Self::claim_parked_popup(&flush_transport, &flush_taps, &flush_downloads, parked, flush_headful);
         }
       }
     });
@@ -560,7 +606,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       return;
     }
     claimed.insert(target_id);
-    Self::claim_parked_popup(&ctx.transport, &ctx.taps, &ctx.downloads_dir, parked);
+    Self::claim_parked_popup(&ctx.transport, &ctx.taps, &ctx.downloads_dir, parked, ctx.headful);
   }
 
   /// Claim one resolved popup target: build the paused [`CdpPage`] and
@@ -571,6 +617,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     taps: &crate::backend::PopupTaps,
     downloads_dir: &Arc<tempfile::TempDir>,
     parked: ParkedTarget,
+    headful: bool,
   ) {
     let transport = Arc::clone(transport);
     let taps = Arc::clone(taps);
@@ -588,6 +635,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         &session_id,
         &target_id,
         browser_context_id.as_deref(),
+        headful,
       )
       .await;
       let deliver_failed = match claimed_page {
@@ -630,6 +678,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     session_id: &str,
     target_id: &str,
     browser_context_id: Option<&str>,
+    headful: bool,
   ) -> Result<CdpPage<T>> {
     let inject_src = crate::selectors::build_lazy_inject_js();
     // Same-process popups answer session commands while parked on
@@ -677,6 +726,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
       last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
+      headful,
+      window_id: Arc::new(tokio::sync::OnceCell::new()),
       context_screen: Arc::new(std::sync::Mutex::new(None)),
       seeded_frame_tree: Arc::new(std::sync::Mutex::new(frame_tree_seed)),
       last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
@@ -793,6 +844,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
         http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
         main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
         last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
+        headful: self.headful,
+        window_id: Arc::new(tokio::sync::OnceCell::new()),
         context_screen: Arc::new(std::sync::Mutex::new(None)),
         seeded_frame_tree: Arc::new(std::sync::Mutex::new(None)),
         last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
@@ -978,6 +1031,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       // skips the redundant `setDeviceMetricsOverride` RTT when the
       // bag carries the same default size.
       last_metrics_params: Arc::new(std::sync::Mutex::new(viewport.map(|vp| metrics_params_for(vp, None)))),
+      headful: self.headful,
+      window_id: Arc::new(tokio::sync::OnceCell::new()),
       context_screen: Arc::new(std::sync::Mutex::new(None)),
       seeded_frame_tree: Arc::new(std::sync::Mutex::new(frame_tree_seed)),
       last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
@@ -1217,6 +1272,7 @@ impl CdpBrowser<ws::WsTransport> {
       .get("product")
       .and_then(|v| v.as_str())
       .map_or_else(|| Arc::from("Unknown"), Arc::from);
+    let headful = !version.starts_with("HeadlessChrome");
 
     transport
       .send_command(
@@ -1245,7 +1301,7 @@ impl CdpBrowser<ws::WsTransport> {
     let downloads_dir = new_downloads_dir()?;
     let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
     let (popup_taps, create_ledger, attach_tasks) =
-      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets);
+      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets, headful);
 
     // Find existing page targets
     let result = transport
@@ -1302,6 +1358,7 @@ impl CdpBrowser<ws::WsTransport> {
       child: Arc::new(tokio::sync::Mutex::new(None)),
       attached_targets,
       version,
+      headful,
       attach_tasks: Arc::new(attach_tasks),
       popup_taps,
       create_ledger,
@@ -1699,6 +1756,18 @@ pub struct CdpPage<T: CdpTransport> {
   /// own idempotent path so changing `has_touch` doesn't get masked
   /// by a metrics-only cache hit.
   last_metrics_params: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+  /// Whether the browser draws real window chrome (see
+  /// [`CdpBrowser::headful`]).
+  headful: bool,
+  /// The browser window this page's target lives in, resolved on first
+  /// use by `Browser.getWindowForTarget`.
+  ///
+  /// Fetched lazily rather than at page init (where Playwright fetches
+  /// it) so a page that never emulates a viewport pays no RTT for it.
+  /// Chrome answers with an error for targets that have no real window
+  /// — Edge's internal UI pages, and every target in a browser with no
+  /// UI at all — so the cell simply stays empty and nothing is resized.
+  window_id: Arc<tokio::sync::OnceCell<i64>>,
   /// The context's `screen`, if it was given one. Held because
   /// `window.screen` is reported by the SAME override that carries the
   /// viewport, so every later `setViewportSize` has to re-send it or
@@ -2024,6 +2093,8 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       http_credentials: self.http_credentials.clone(),
       main_frame_id: self.main_frame_id.clone(),
       last_metrics_params: self.last_metrics_params.clone(),
+      headful: self.headful,
+      window_id: self.window_id.clone(),
       context_screen: self.context_screen.clone(),
       seeded_frame_tree: self.seeded_frame_tree.clone(),
       last_cursor_pos: self.last_cursor_pos.clone(),
@@ -4869,6 +4940,65 @@ impl<T: CdpWrap> CdpPage<T> {
     }
   }
 
+  /// Resolve, once, the browser window this page's target lives in.
+  ///
+  /// `Browser.getWindowForTarget` fails for targets that have no real
+  /// window; that is not an error worth surfacing, it just means there
+  /// is nothing to resize.
+  async fn window_id(&self) -> Option<i64> {
+    if let Some(id) = self.window_id.get() {
+      return Some(*id);
+    }
+    let resp = self
+      .cmd("Browser.getWindowForTarget", serde_json::json!({}))
+      .await
+      .ok()?;
+    let id = resp.get("windowId").and_then(serde_json::Value::as_i64)?;
+    let _ = self.window_id.set(id);
+    Some(id)
+  }
+
+  /// Size the browser window so its content area is exactly `config`.
+  ///
+  /// Playwright resizes the window alongside every viewport emulation
+  /// (`chromium/crPage.ts::_updateViewport`) and ferridriver did not,
+  /// which left a headed browser showing the viewport letterboxed
+  /// inside whatever bounds the window happened to have — and a browser
+  /// launched against a persistent profile starts at the bounds Chrome
+  /// restored from that profile's last run, so the window carried a
+  /// stale size across every later session.
+  async fn resize_window_for(&self, config: &crate::options::ViewportConfig) {
+    let Some(window_id) = self.window_id().await else {
+      return;
+    };
+    let (inset_w, inset_h) = window_insets(self.headful);
+    let bounds = serde_json::json!({
+      "windowId": window_id,
+      "bounds": {
+        "width": config.width + inset_w,
+        "height": config.height + inset_h,
+      },
+    });
+    let Err(e) = self.cmd("Browser.setWindowBounds", bounds.clone()).await else {
+      return;
+    };
+
+    // Chrome refuses to give a size to a window that is maximized,
+    // minimized or fullscreen. A persistent profile restores the state
+    // it was left in, so a browser someone maximized once comes back
+    // maximized and every resize after it fails — normalise and retry
+    // rather than leave the viewport unenforced. Done on the failure
+    // path so the ordinary case still costs one command.
+    let normal = serde_json::json!({ "windowId": window_id, "bounds": { "windowState": "normal" } });
+    if let Err(state_err) = self.cmd("Browser.setWindowBounds", normal).await {
+      tracing::debug!("could not resize the window for viewport emulation: {e}; {state_err}");
+      return;
+    }
+    if let Err(retry_err) = self.cmd("Browser.setWindowBounds", bounds).await {
+      tracing::debug!("could not resize the window for viewport emulation: {retry_err}");
+    }
+  }
+
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
     let screen = match self.context_screen.lock() {
       Ok(g) => *g,
@@ -4889,6 +5019,11 @@ impl<T: CdpWrap> CdpPage<T> {
       last.as_ref() == Some(&params)
     };
     if !metrics_unchanged {
+      // Window first, override second — Playwright's ordering
+      // (`crPage.ts::_updateViewport`): the embedder resize can clobber
+      // the emulated size if it lands after it. Both hang off the same
+      // unchanged-metrics guard, so a re-applied viewport costs nothing.
+      self.resize_window_for(config).await;
       self.cmd("Emulation.setDeviceMetricsOverride", params.clone()).await?;
       let mut last = match self.last_metrics_params.lock() {
         Ok(g) => g,
