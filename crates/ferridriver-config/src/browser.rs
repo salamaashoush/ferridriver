@@ -218,6 +218,75 @@ pub fn instance_overrides_from(
   })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewportConfig {
+  pub width: i64,
+  pub height: i64,
+}
+
+impl Default for ViewportConfig {
+  fn default() -> Self {
+    Self {
+      width: ferridriver::state::DEFAULT_VIEWPORT_WIDTH,
+      height: ferridriver::state::DEFAULT_VIEWPORT_HEIGHT,
+    }
+  }
+}
+
+/// A written `viewport` key, wherever it is spelled.
+///
+/// Three states have to stay apart: absent (the Playwright default
+/// 1280x720 applies), a size, and Playwright's `viewport: null`, which
+/// asks for NO fixed viewport at all. Absent is the field's `Option`;
+/// this enum is the other two.
+#[derive(Debug, Clone)]
+pub enum ViewportOverride {
+  Size(ViewportConfig),
+  /// `viewport: null` — the window is not resized and the page gets
+  /// whatever the browser window gives it.
+  Disabled,
+}
+
+impl ViewportOverride {
+  /// The size, or `None` for `viewport: null`.
+  #[must_use]
+  pub fn size(&self) -> Option<ViewportConfig> {
+    match self {
+      Self::Size(v) => Some(v.clone()),
+      Self::Disabled => None,
+    }
+  }
+}
+
+// Hand-written rather than `#[serde(untagged)]`: an untagged enum
+// collapses every field error into "did not match any variant", so a
+// viewport missing `height` would stop naming `height`.
+impl<'de> Deserialize<'de> for ViewportOverride {
+  fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+    Ok(Option::<ViewportConfig>::deserialize(de)?.map_or(Self::Disabled, Self::Size))
+  }
+}
+
+impl Serialize for ViewportOverride {
+  fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+    match self {
+      Self::Size(v) => v.serialize(ser),
+      Self::Disabled => ser.serialize_none(),
+    }
+  }
+}
+
+/// Keep a written `viewport` — `null` included — apart from an absent
+/// one. `Option`'s own impl swallows `null` into `None`, which is the
+/// state that means "nobody said".
+pub(crate) fn written_viewport<'de, D>(de: D) -> Result<Option<ViewportOverride>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  ViewportOverride::deserialize(de).map(Some)
+}
+
 /// The instance registry, declared once for every host.
 ///
 /// An instance names a browser process and how to reach it; that fact does not
@@ -237,6 +306,16 @@ pub struct BrowserSectionConfig {
   /// Headed/headless default every host inherits unless its section says
   /// otherwise.
   pub headless: Option<bool>,
+  /// Viewport every host emulates on the pages it opens, unless its
+  /// section says otherwise.
+  ///
+  /// Absent means Playwright's default 1280x720 — NOT "no viewport".
+  /// A browser reached through a persistent profile restores the window
+  /// bounds its last run left behind, so a host that emulates nothing
+  /// silently inherits whatever size someone resized that window to.
+  /// `viewport: null` is how a config asks for that on purpose.
+  #[serde(default, deserialize_with = "written_viewport")]
+  pub viewport: Option<ViewportOverride>,
   /// Instances every host can select by name.
   pub instances: std::collections::HashMap<String, InstanceConfig>,
   /// Settings for an instance no entry claims.

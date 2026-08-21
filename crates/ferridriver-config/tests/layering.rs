@@ -1162,10 +1162,11 @@ fn every_trace_and_video_mode_records_and_retains_as_upstream_does() {
   assert_eq!(VideoMode::parse_label("retry-with-video"), VideoMode::OnFirstRetry);
 }
 
-/// `[browser]` declares the browser once for every host. `backend` and
-/// `headless` are read straight off each section as a concrete value, so
-/// without this they could never defer to the top level and a single
-/// `browser:` block would silently apply to the MCP server and not the runner.
+/// `[browser]` declares the browser once for every host. `backend`,
+/// `headless` and `viewport` are read straight off each section as a
+/// concrete value, so without this they could never defer to the top level
+/// and a single `browser:` block would silently apply to the MCP server and
+/// not the runner.
 #[test]
 fn the_top_level_browser_hands_its_scalars_to_every_host() {
   let t = Tree::new();
@@ -1195,5 +1196,49 @@ fn the_top_level_browser_hands_its_scalars_to_every_host() {
   assert!(
     r.provenance.contains_key("mcp.browser.backend"),
     "an inherited key must still have an origin"
+  );
+}
+
+/// A viewport declared once at the top level reaches every host.
+///
+/// Both sections default it to Playwright's 1280x720, so neither can
+/// express "nobody asked" after deserialization — without the document-level
+/// copy a single `browser: { viewport }` would apply to nothing at all.
+#[test]
+fn the_top_level_browser_hands_its_viewport_to_every_host() {
+  let t = Tree::new();
+  t.write(
+    "repo/ferridriver.yaml",
+    "browser:\n  viewport: { width: 1600, height: 900 }\ntest:\n  browser:\n    viewport: { width: 800, height: 600 }\n",
+  );
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+
+  let mcp = r.config.mcp.viewport().expect("the inherited viewport");
+  assert_eq!((mcp.width, mcp.height), (1600, 900));
+
+  let test = r.config.test.browser.viewport.as_ref().expect("the section's own");
+  assert_eq!(
+    (test.width, test.height),
+    (800, 600),
+    "a section value is never overwritten"
+  );
+}
+
+/// `viewport: null` at the top level has to arrive as a null, not as an
+/// absent key: absent means Playwright's default, null means no fixed
+/// viewport at all, and collapsing the two turns an opt-out into a 1280x720
+/// nobody asked for.
+#[test]
+fn a_top_level_null_viewport_reaches_every_host_as_a_null() {
+  let t = Tree::new();
+  t.write("repo/ferridriver.yaml", "browser:\n  viewport: null\n");
+
+  let r = resolve(&t.opts(t.repo())).expect("resolve");
+
+  assert!(r.config.mcp.viewport().is_none(), "the MCP server must opt out");
+  assert!(
+    r.config.test.browser.viewport.is_none(),
+    "the runner must opt out as well"
   );
 }

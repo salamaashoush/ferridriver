@@ -457,10 +457,10 @@ pub fn discovered_paths(opts: &LoadOptions) -> Vec<PathBuf> {
 /// Hand the top-level `[browser]` scalars down to the sections that launch.
 ///
 /// `[browser]` declares the browser once for every host. Its instance registry
-/// is resolved at lookup time, but `backend` and `headless` are read straight
-/// off `[mcp.browser]` / `[test.browser]`, where they are a `BackendChoice` and
-/// a `bool` rather than options — so a section can never say "unset" and could
-/// never defer. Copying here, on the merged DOCUMENT, is what makes the
+/// is resolved at lookup time, but `backend`, `headless` and `viewport` are
+/// read straight off `[mcp.browser]` / `[test.browser]`, where each carries a
+/// default of its own rather than an "unset" state — so a section can never
+/// say "nobody asked" and could never defer. Copying here, on the merged DOCUMENT, is what makes the
 /// distinction available at all: a key absent from the document is absent,
 /// whereas a deserialized `backend: "cdp-pipe"` is indistinguishable from the
 /// default the same field would have taken anyway.
@@ -469,13 +469,19 @@ pub fn discovered_paths(opts: &LoadOptions) -> Vec<PathBuf> {
 /// it, and provenance records the top-level key as the source — `ferridriver
 /// config` then shows where a host's backend actually came from.
 fn apply_global_browser_defaults(document: &mut Value, provenance: &mut Provenance) {
-  const SCALARS: [&str; 2] = ["backend", "headless"];
+  // `viewport` is here for the same reason, one step further: both
+  // sections give it a non-null default, so a deserialized 1280x720 is
+  // indistinguishable from a config that never mentioned it — and an
+  // explicit `viewport: null` has to reach the section as a null, not be
+  // lost as "absent", because that is how Playwright spells "no fixed
+  // viewport".
+  const INHERITED: [&str; 3] = ["backend", "headless", "viewport"];
 
   let Some(global) = document.get("browser").and_then(Value::as_object).cloned() else {
     return;
   };
   for section in ["mcp", "test"] {
-    for key in SCALARS {
+    for key in INHERITED {
       let Some(value) = global.get(key) else { continue };
       let target = document
         .as_object_mut()

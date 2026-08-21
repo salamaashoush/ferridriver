@@ -6,7 +6,7 @@
 
 pub use ferridriver_config::browser::InstanceConfig;
 pub use ferridriver_config::mcp::{
-  BrowserConfig, DEFAULT_CACHE_TTL, DEFAULT_SERVER_NAME, DISCOVER_TCP_TIMEOUT, McpConfig, ServerConfig, ViewportDef,
+  BrowserConfig, DEFAULT_CACHE_TTL, DEFAULT_SERVER_NAME, DISCOVER_TCP_TIMEOUT, McpConfig, ServerConfig,
 };
 
 /// Backwards-compatible alias. Prefer `McpConfig`.
@@ -35,10 +35,10 @@ impl McpServerConfig for McpConfig {
   }
 
   fn default_viewport(&self) -> Option<ferridriver::options::ViewportConfig> {
-    let viewport = self.browser.viewport.as_ref()?;
+    let viewport = McpConfig::viewport(self)?;
     Some(ferridriver::options::ViewportConfig {
-      width: viewport.width.unwrap_or(ferridriver::state::DEFAULT_VIEWPORT_WIDTH),
-      height: viewport.height.unwrap_or(ferridriver::state::DEFAULT_VIEWPORT_HEIGHT),
+      width: viewport.width,
+      height: viewport.height,
       ..Default::default()
     })
   }

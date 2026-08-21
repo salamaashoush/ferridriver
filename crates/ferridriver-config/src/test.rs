@@ -8,6 +8,9 @@
 //! on a separate `TestHooks` struct in `ferridriver-test::model` so this crate
 //! avoids depending on runtime fixture/test types.
 
+pub use crate::browser::{ViewportConfig, ViewportOverride};
+
+use crate::browser::written_viewport;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -677,59 +680,6 @@ pub fn expand_device_keys(block: &mut serde_json::Map<String, serde_json::Value>
   }
 }
 
-/// A written `use: { viewport }`.
-///
-/// Three states have to stay apart: absent (the browser's own viewport
-/// applies), a size, and Playwright's `viewport: null`, which asks for
-/// NO fixed viewport at all. Absent is the field's `Option`; this enum
-/// is the other two.
-#[derive(Debug, Clone)]
-pub enum ViewportOverride {
-  Size(ViewportConfig),
-  /// `viewport: null` — the window is not resized and the page gets
-  /// whatever the browser window gives it.
-  Disabled,
-}
-
-impl ViewportOverride {
-  /// The size, or `None` for `viewport: null`.
-  #[must_use]
-  pub fn size(&self) -> Option<ViewportConfig> {
-    match self {
-      Self::Size(v) => Some(v.clone()),
-      Self::Disabled => None,
-    }
-  }
-}
-
-// Hand-written rather than `#[serde(untagged)]`: an untagged enum
-// collapses every field error into "did not match any variant", so a
-// viewport missing `height` would stop naming `height`.
-impl<'de> Deserialize<'de> for ViewportOverride {
-  fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-    Ok(Option::<ViewportConfig>::deserialize(de)?.map_or(Self::Disabled, Self::Size))
-  }
-}
-
-impl Serialize for ViewportOverride {
-  fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-    match self {
-      Self::Size(v) => v.serialize(ser),
-      Self::Disabled => ser.serialize_none(),
-    }
-  }
-}
-
-/// Keep a written `viewport` — `null` included — apart from an absent
-/// one. `Option`'s own impl swallows `null` into `None`, which is the
-/// state that means "nobody said".
-fn written_viewport<'de, D>(de: D) -> Result<Option<ViewportOverride>, D::Error>
-where
-  D: serde::Deserializer<'de>,
-{
-  ViewportOverride::deserialize(de).map(Some)
-}
-
 // Each bool field is an independent feature flag set in user TOML —
 // grouping into enums would be ceremony, not a real state machine.
 #[allow(clippy::struct_excessive_bools)]
@@ -1039,22 +989,6 @@ impl Default for BrowserConfig {
       instance_discover_command: None,
       command_cache_ttl: None,
       command_cache: std::sync::Arc::default(),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ViewportConfig {
-  pub width: i64,
-  pub height: i64,
-}
-
-impl Default for ViewportConfig {
-  fn default() -> Self {
-    Self {
-      width: 1280,
-      height: 720,
     }
   }
 }

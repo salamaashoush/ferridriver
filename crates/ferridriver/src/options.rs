@@ -2104,8 +2104,8 @@ impl LaunchPlan {
 impl Default for ViewportConfig {
   fn default() -> Self {
     Self {
-      width: 1280,
-      height: 720,
+      width: crate::state::DEFAULT_VIEWPORT_WIDTH,
+      height: crate::state::DEFAULT_VIEWPORT_HEIGHT,
       device_scale_factor: 1.0,
       is_mobile: false,
       has_touch: false,
@@ -2477,7 +2477,10 @@ impl BrowserContextOptions {
   pub fn resolved_viewport(&self) -> Option<ViewportConfig> {
     let (width, height) = match self.viewport {
       ViewportOption::Null => return None,
-      ViewportOption::Default => (1280, 720),
+      ViewportOption::Default => (
+        crate::state::DEFAULT_VIEWPORT_WIDTH,
+        crate::state::DEFAULT_VIEWPORT_HEIGHT,
+      ),
       ViewportOption::Size { width, height } => (width, height),
     };
     Some(ViewportConfig {

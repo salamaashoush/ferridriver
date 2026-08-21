@@ -136,8 +136,13 @@ pub struct BrowserConfig {
   /// Path to the browser executable.
   #[serde(alias = "executable_path")]
   pub executable_path: Option<String>,
-  /// Default viewport dimensions for new pages.
-  pub viewport: Option<ViewportDef>,
+  /// Viewport emulated on pages this server opens.
+  ///
+  /// Falls back to the top-level `[browser].viewport`, then to
+  /// Playwright's 1280x720. `null` opts out of viewport emulation
+  /// entirely.
+  #[serde(default, deserialize_with = "crate::browser::written_viewport")]
+  pub viewport: Option<crate::browser::ViewportOverride>,
   /// Base browser arguments applied to ALL instances.
   #[serde(alias = "chrome_args")]
   pub chrome_args: Vec<String>,
@@ -180,15 +185,26 @@ pub struct BrowserConfig {
   pub global_browser: Option<crate::browser::BrowserSectionConfig>,
 }
 
-/// Viewport dimensions.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ViewportDef {
-  pub width: Option<i64>,
-  pub height: Option<i64>,
-}
-
 impl McpConfig {
+  /// The viewport pages opened by this server are emulated with.
+  ///
+  /// `[mcp.browser].viewport` first, then the top-level
+  /// `[browser].viewport`, then Playwright's default. `None` is
+  /// returned only for an explicit `viewport: null`, which is the one
+  /// way to ask for no emulation at all.
+  #[must_use]
+  pub fn viewport(&self) -> Option<crate::browser::ViewportConfig> {
+    self
+      .browser
+      .viewport
+      .as_ref()
+      .or_else(|| self.browser.global_browser.as_ref().and_then(|g| g.viewport.as_ref()))
+      .map_or_else(
+        || Some(crate::browser::ViewportConfig::default()),
+        crate::browser::ViewportOverride::size,
+      )
+  }
+
   /// Resolve the `BackendKind` from config (defaults to `CdpPipe`).
   ///
   /// No platform gate: the `WebKit` backend drives Playwright's
@@ -632,5 +648,81 @@ mod tests {
     // legal character in one).
     assert!(config.resolve_instance("staging:admin").is_none());
     assert!(config.instance_overrides("staging:admin").is_err());
+  }
+
+  /// A config that says nothing about the viewport gets Playwright's,
+  /// not "no viewport at all".
+  ///
+  /// The difference is invisible on a throwaway profile and decisive on
+  /// a persistent one: with no emulation the page inherits the window
+  /// Chrome restored from the profile's last run, so whatever size that
+  /// browser was left at silently becomes every session's viewport.
+  #[test]
+  fn an_unwritten_viewport_is_playwrights_default() {
+    let config = McpConfig::default();
+    let viewport = config.viewport().expect("a default viewport");
+    assert_eq!((viewport.width, viewport.height), (1280, 720));
+  }
+
+  #[test]
+  fn the_top_level_browser_section_supplies_the_viewport() {
+    let mut config = McpConfig::default();
+    config.browser.global_browser = Some(crate::browser::BrowserSectionConfig {
+      viewport: Some(crate::browser::ViewportOverride::Size(crate::browser::ViewportConfig {
+        width: 1600,
+        height: 900,
+      })),
+      ..Default::default()
+    });
+    let viewport = config.viewport().expect("the section's viewport");
+    assert_eq!((viewport.width, viewport.height), (1600, 900));
+  }
+
+  #[test]
+  fn the_mcp_section_wins_over_the_top_level_one() {
+    let mut config = McpConfig::default();
+    config.browser.global_browser = Some(crate::browser::BrowserSectionConfig {
+      viewport: Some(crate::browser::ViewportOverride::Size(crate::browser::ViewportConfig {
+        width: 1600,
+        height: 900,
+      })),
+      ..Default::default()
+    });
+    config.browser.viewport = Some(crate::browser::ViewportOverride::Size(crate::browser::ViewportConfig {
+      width: 800,
+      height: 600,
+    }));
+    let viewport = config.viewport().expect("the mcp section's viewport");
+    assert_eq!((viewport.width, viewport.height), (800, 600));
+  }
+
+  /// `viewport: null` is the one way to ask for no emulation, and it has
+  /// to survive at either spelling — absent and explicitly-null are
+  /// different answers.
+  #[test]
+  fn an_explicit_null_viewport_disables_emulation() {
+    let mut config = McpConfig::default();
+    config.browser.viewport = Some(crate::browser::ViewportOverride::Disabled);
+    assert!(config.viewport().is_none());
+
+    let mut config = McpConfig::default();
+    config.browser.global_browser = Some(crate::browser::BrowserSectionConfig {
+      viewport: Some(crate::browser::ViewportOverride::Disabled),
+      ..Default::default()
+    });
+    assert!(config.viewport().is_none());
+  }
+
+  #[test]
+  fn a_written_null_viewport_parses_as_disabled_not_absent() {
+    let config: McpConfig = serde_json::from_str(r#"{"browser": {"viewport": null}}"#).expect("parse");
+    assert!(
+      matches!(
+        config.browser.viewport,
+        Some(crate::browser::ViewportOverride::Disabled)
+      ),
+      "null must reach the field, not collapse into None"
+    );
+    assert!(config.viewport().is_none());
   }
 }
