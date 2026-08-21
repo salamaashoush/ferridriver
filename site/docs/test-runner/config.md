@@ -179,6 +179,52 @@ explicit `browserName`, or a project browser block, wins. `viewport` in
 the block, and `viewport = null` (in YAML/JSON/TS) asks for no fixed
 viewport at all, which is not the same as leaving it out.
 
+## Viewport
+
+Written nowhere, the viewport is Playwright's default — **1280x720** —
+for every host: the test runner, the MCP server and `ferridriver run`
+alike. `viewport = null` is the only way to ask for none, and it means
+the page takes whatever size the browser window happens to have.
+
+The distinction matters most on a persistent profile. A browser launched
+with a `userDataDir` comes back at the window bounds its last run left
+behind, so a host that emulates nothing inherits whatever size that
+browser was resized to — and one launch then decides the viewport of
+every session after it. Emulating the default is what keeps a run
+reproducible.
+
+Declare it once at the top level and every host inherits it:
+
+```toml
+[browser.viewport]
+width  = 1280
+height = 720
+```
+
+```yaml
+# Or opt out of viewport emulation entirely
+browser:
+  viewport: null
+```
+
+A section that states its own wins: `[mcp.browser].viewport` and
+`[test.browser].viewport` (or `use: { viewport }`) each override the
+top-level key without restating the rest of it. Precedence, most
+specific first:
+
+| Where | Applies to |
+|-------|------------|
+| `use: { viewport }` in a spec or project | that test / project |
+| `[test.browser].viewport` | the test runner |
+| `[mcp.browser].viewport` | the MCP server |
+| `[browser].viewport` | every host |
+| unwritten | 1280x720 |
+
+Pages ferridriver opens are emulated with
+`Emulation.setDeviceMetricsOverride`, and on a headed Chromium the
+window is resized to match (viewport plus the platform's window chrome),
+so what you see is what the page reports.
+
 ```ts
 const test = base.extend<{ profile: string }>({
   profile: ['guest', { option: true }],
