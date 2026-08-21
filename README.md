@@ -87,6 +87,36 @@ webkit` downloads it into ferridriver's own cache. Alternatively, set
 `pw_run.sh`, or install Playwright once (`npx playwright install webkit`)
 and ferridriver picks up that cache.
 
+### Staying current
+
+```bash
+ferridriver upgrade              # newest release on your channel
+ferridriver upgrade --check      # report what is available, change nothing
+ferridriver upgrade --canary     # follow the rolling build from main
+ferridriver upgrade --stable     # move a canary build back onto releases
+ferridriver upgrade --tag v0.4.0 # install one exact release
+```
+
+`upgrade` replaces the running binary in place, after verifying the
+`.sha256` published beside the archive. Two channels:
+
+| Channel | Published | Version |
+|---|---|---|
+| `stable` | a release per tag, `v0.5.0` | `0.5.0` |
+| `canary` | one rolling prerelease, replaced on every push to `main` | `0.5.0-canary.<sha>` |
+
+A build follows its own channel by default, so a canary never silently
+moves itself onto stable. `--version` names the artifact:
+
+```
+$ ferridriver --version
+ferridriver 0.5.0-canary.3945f9357 (3945f9357, canary, aarch64-apple-darwin)
+```
+
+Install a canary from scratch with `install.sh --canary`. Set
+`GITHUB_TOKEN` (or `GH_TOKEN`) if the unauthenticated API rate limit
+bites.
+
 ### Scaffold a project
 
 ```bash

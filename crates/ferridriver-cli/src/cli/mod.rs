@@ -32,7 +32,7 @@ pub use run::RunArgs;
 pub use runner::RunnerArgs;
 pub use session::{SessionArgs, SessionCommand, SessionHostArgs, SessionListArgs, SessionOpenArgs, SessionTargetArgs};
 pub use test::{RustTestArgs, TestRunArgs, TestRunner};
-pub use tools::{CodegenArgs, CompletionsArgs, InitArgs, InstallArgs, McpArgs, MergeReportsArgs};
+pub use tools::{CodegenArgs, CompletionsArgs, InitArgs, InstallArgs, McpArgs, MergeReportsArgs, UpgradeArgs};
 pub use trace::{TraceArgs, TraceCommand, TraceLsArgs, TraceSection, TraceShowArgs, TraceViewArgs};
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -47,7 +47,11 @@ use crate::ui;
   long_about = "ferridriver drives Chromium, Firefox and WebKit behind one Playwright-shaped API.\n\
     The same binary serves an MCP server for coding agents, runs TypeScript and Gherkin suites\n\
     natively without Node, executes one-off scripts, and reads the traces any of them recorded.",
-  version,
+  // `-V` is the short answer — the version a canary carries already names
+  // its commit — while `--version` adds the channel and the target, so a bug
+  // report names an artifact rather than a number anyone could be running.
+  version = crate::build_info::VERSION,
+  long_version = crate::build_info::LONG_VERSION,
   propagate_version = true,
   arg_required_else_help = true,
   // Wrap long help against a readable measure rather than the full width of
@@ -297,6 +301,15 @@ pub enum Command {
       ferridriver merge-reports shard-*/report.zip --reporter html --reporter junit"
   )]
   MergeReports(MergeReportsArgs),
+
+  /// Replace this binary with the newest release.
+  #[command(after_help = "Examples:\n  \
+    ferridriver upgrade                 the newest release on your channel\n  \
+    ferridriver upgrade --check         report what is available, change nothing\n  \
+    ferridriver upgrade --canary        follow the builds from every push to main\n  \
+    ferridriver upgrade --stable        move a canary build back onto releases\n  \
+    ferridriver upgrade --tag v0.4.0    install one exact release")]
+  Upgrade(UpgradeArgs),
 
   /// Generate a shell completion script.
   #[command(after_help = "Examples:\n  \

@@ -1,0 +1,159 @@
+name: Canary
+
+# One rolling prerelease, replaced on every push to main, so
+# `ferridriver upgrade --canary` always resolves to the newest build without
+# the repository accruing a release per commit. The tag is moved rather than
+# added; assets are named for the channel, not the version, so re-uploading
+# replaces them instead of piling up beside the old ones.
+#
+# The version a canary carries lives in the release NAME
+# (`0.5.0-canary.<sha>`), because its tag never changes and cannot say which
+# build is behind it. `commands/upgrade.rs` reads it from there.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: canary
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  FERRIDRIVER_CANARY: "1"
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          RELEASE="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          echo "version=${RELEASE}-canary.$(git rev-parse --short=9 HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Canary ${{ matrix.target }}
+    needs: [version]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `build.rs` reads the commit; a shallow clone still has HEAD, but
+          # the tag walk `git describe` would need does not survive depth 1.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Add target to pinned toolchain
+        if: '!matrix.cross'
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux' && !matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libclang-dev pkg-config
+
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install pkg-config llvm
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p ferridriver-cli
+          else
+            cargo build --release --target ${{ matrix.target }} -p ferridriver-cli
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          ARCHIVE="ferridriver-canary-${{ matrix.target }}.tar.gz"
+          cd target/${{ matrix.target }}/release
+          if [ -f fd_webkit_host ]; then
+            tar czf "../../../${ARCHIVE}" ferridriver fd_webkit_host
+          else
+            tar czf "../../../${ARCHIVE}" ferridriver
+          fi
+          cd ../../..
+          shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canary-${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+          retention-days: 1
+
+  publish:
+    name: Publish canary
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: canary-*
+          merge-multiple: true
+          path: dist
+
+      - name: Move the canary tag
+        run: |
+          git tag --force canary "$GITHUB_SHA"
+          git push --force origin canary
+
+      # Recreated rather than edited: `gh release edit` cannot move a tag it
+      # already points at, and a stale asset set is worse than a brief gap.
+      - name: Replace the canary release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release delete canary --yes --cleanup-tag=false || true
+          printf '%s\n' \
+            "Rolling build from the tip of \`main\`. Replaced on every push." \
+            "" \
+            "    ferridriver upgrade --canary" \
+            "" \
+            "Commit: ${GITHUB_SHA}" > notes.md
+          gh release create canary \
+            --prerelease \
+            --title "$VERSION" \
+            --notes-file notes.md \
+            dist/*

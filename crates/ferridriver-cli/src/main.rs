@@ -11,6 +11,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod build_info;
 mod cli;
 mod commands;
 mod error;

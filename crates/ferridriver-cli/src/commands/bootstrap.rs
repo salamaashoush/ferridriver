@@ -109,6 +109,7 @@ pub(crate) fn extension_host_of(command: &cli::Command) -> Option<ferridriver_sc
     | cli::Command::Ext(_)
     | cli::Command::Trace(_)
     | cli::Command::MergeReports(_)
+    | cli::Command::Upgrade(_)
     | cli::Command::Completions(_) => None,
   }
 }

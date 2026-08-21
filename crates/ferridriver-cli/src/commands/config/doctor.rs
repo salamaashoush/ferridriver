@@ -11,6 +11,7 @@ use std::path::Path;
 use ferridriver_config::FerridriverConfig;
 use ferridriver_config::layer;
 
+use crate::build_info;
 use crate::cli;
 use crate::ui;
 
@@ -18,6 +19,23 @@ use super::{load_options, requirement_issues};
 
 /// How many extension tools `doctor` names before it falls back to a count.
 const TOOLS_NAMED: usize = 3;
+
+/// What binary is answering. First line of every bug report, and the only
+/// check that cannot fail — it reports rather than judges.
+fn build_check() -> Check {
+  let mut parts = vec![format!("{} ({})", build_info::VERSION, build_info::CHANNEL)];
+  if !build_info::GIT_SHA.is_empty() {
+    parts.push(format!("{}{}", build_info::GIT_SHA, build_info::DIRTY));
+  }
+  if !build_info::TARGET.is_empty() {
+    parts.push(build_info::TARGET.to_string());
+  }
+  Check {
+    name: "build",
+    status: Status::Pass,
+    detail: parts.join(" "),
+  }
+}
 
 /// One doctor check outcome.
 struct Check {
@@ -53,7 +71,7 @@ pub async fn run(
   defaults: Vec<(String, serde_json::Value)>,
   args: cli::DoctorArgs,
 ) -> anyhow::Result<()> {
-  let mut checks = Vec::new();
+  let mut checks = vec![build_check()];
 
   let mut options = load_options(startup);
   options.extension_defaults = defaults;

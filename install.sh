@@ -9,22 +9,26 @@ set -euo pipefail
 #   # or with options:
 #   curl -fsSL ... | bash -s -- --no-browser    # skip browser download
 #   curl -fsSL ... | bash -s -- --deps-only     # only install system deps
+#   curl -fsSL ... | bash -s -- --canary        # the rolling build from main
 
 REPO="salamaashoush/ferridriver"
 INSTALL_DIR="${FERRIDRIVER_INSTALL_DIR:-$HOME/.ferridriver/bin}"
 NO_BROWSER=false
 DEPS_ONLY=false
+CANARY=false
 
 for arg in "$@"; do
   case "$arg" in
     --no-browser) NO_BROWSER=true ;;
     --deps-only)  DEPS_ONLY=true ;;
+    --canary)     CANARY=true ;;
     --help|-h)
       echo "Usage: install.sh [OPTIONS]"
       echo ""
       echo "Options:"
       echo "  --no-browser   Skip downloading Chromium after install"
       echo "  --deps-only    Only install system dependencies, skip binary"
+      echo "  --canary       Install the rolling build from main, not a release"
       echo "  --help         Show this help"
       exit 0
       ;;
@@ -152,14 +156,22 @@ install_system_deps() {
 # --- Download and install binary ---
 
 install_binary() {
-  info "Fetching latest release..."
   local tag
-  tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+  if [ "$CANARY" = true ]; then
+    # One rolling prerelease, replaced on every push to main. Its assets are
+    # named for the channel rather than the version, because the tag never
+    # moves off `canary`.
+    tag="canary"
+    info "Channel: canary (rolling build from main)"
+  else
+    info "Fetching latest release..."
+    tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
 
-  if [ -z "$tag" ]; then
-    error "Could not determine latest release"
+    if [ -z "$tag" ]; then
+      error "Could not determine latest release"
+    fi
+    info "Latest release: $tag"
   fi
-  info "Latest release: $tag"
 
   # Map to release artifact target triple
   local target
@@ -171,8 +183,12 @@ install_binary() {
     *)              error "No pre-built binary for ${PLATFORM}-${ARCH}" ;;
   esac
 
-  local version="${tag#v}"
-  local archive="ferridriver-${version}-${target}.tar.gz"
+  local archive
+  if [ "$CANARY" = true ]; then
+    archive="ferridriver-canary-${target}.tar.gz"
+  else
+    archive="ferridriver-${tag#v}-${target}.tar.gz"
+  fi
   local url="https://github.com/$REPO/releases/download/$tag/$archive"
 
   info "Downloading $archive..."
@@ -181,6 +197,22 @@ install_binary() {
   trap 'rm -rf "$tmpdir"' EXIT
 
   curl -fsSL "$url" -o "$tmpdir/$archive"
+
+  # The checksum is published beside the archive; a truncated download must
+  # not become the binary on someone's PATH.
+  if curl -fsSL "$url.sha256" -o "$tmpdir/$archive.sha256" 2>/dev/null; then
+    local expected actual
+    expected="$(awk '{print $1}' "$tmpdir/$archive.sha256")"
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual="$(sha256sum "$tmpdir/$archive" | awk '{print $1}')"
+    else
+      actual="$(shasum -a 256 "$tmpdir/$archive" | awk '{print $1}')"
+    fi
+    [ "$expected" = "$actual" ] || error "Checksum mismatch for $archive"
+    info "Checksum verified"
+  else
+    warn "No checksum published for $archive; skipping verification"
+  fi
 
   info "Extracting to $INSTALL_DIR..."
   mkdir -p "$INSTALL_DIR"

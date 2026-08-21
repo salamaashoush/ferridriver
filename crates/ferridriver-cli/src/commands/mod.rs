@@ -22,6 +22,7 @@ pub mod session;
 pub mod suite;
 pub mod test;
 pub mod trace;
+pub mod upgrade;
 
 use ferridriver_config::FerridriverConfig;
 
@@ -73,6 +74,7 @@ pub async fn dispatch(
     cli::Command::Ext(ext_args) => Box::pin(ext::run(config, ext_args)).await,
     cli::Command::Trace(trace_args) => Box::pin(trace::run(&config, trace_args)).await,
     cli::Command::MergeReports(merge_args) => Box::pin(merge::run(config, merge_args)).await,
+    cli::Command::Upgrade(upgrade_args) => Box::pin(upgrade::run(upgrade_args)).await,
     cli::Command::Completions(completions_args) => completions::run(&completions_args),
   }
 }
