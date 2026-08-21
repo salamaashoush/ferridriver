@@ -181,7 +181,7 @@ fn devtools_ws_url(stderr: std::process::ChildStderr) -> String {
 /// Pages adopted from a browser someone else started are emulated with
 /// the configured viewport, not with that browser's window size.
 ///
-/// This is the shape an external manager (box-dev-gate and the like)
+/// This is the shape an external manager (a dev gateway or similar)
 /// produces: it launches one browser per environment at whatever size it
 /// was asked for, ferridriver discovers that browser instead of starting
 /// a second one, and every session works through the tab already open in
