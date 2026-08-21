@@ -62,12 +62,16 @@ async fn run() -> anyhow::Result<()> {
   // A named config that is not there is a typo, and continuing on the
   // discovered layers instead runs the command against a configuration the
   // user did not ask for. It used to warn and carry on.
-  if let Some(path) = args.config.as_deref()
+  //
+  // Only the commands that read configuration accept the flag, so this can
+  // no longer fail a command that would never have opened the file.
+  let source = args.config_source();
+  if let Some(path) = source.path.as_deref()
     && !path.exists()
   {
     anyhow::bail!("--config {} does not exist", path.display());
   }
-  let mut startup = ferridriver_config::Startup::new(args.config.as_deref(), !args.no_inherit);
+  let mut startup = ferridriver_config::Startup::new(source.path.as_deref(), source.inherit());
   let config = startup.resolve_documents()?;
   bootstrap::install_bundler_env(&config);
   bootstrap::install_module_aliases(&config.test, bootstrap::module_alias_flags(&args.command))?;

@@ -59,7 +59,7 @@ fn a_script_records_one_action_per_call_it_makes() {
   std::fs::write(dir.path().join("script.ts"), SCRIPT).expect("write script");
 
   let run = Command::new(bin())
-    .args(["--no-inherit", "run", "--instance", "default", "script.ts"])
+    .args(["run", "--no-inherit", "--instance", "default", "script.ts"])
     .current_dir(dir.path())
     .output()
     .expect("run script");
@@ -70,7 +70,7 @@ fn a_script_records_one_action_per_call_it_makes() {
   );
 
   let shown = Command::new(bin())
-    .args(["--no-inherit", "trace", "show", "trace.zip", "--json"])
+    .args(["trace", "show", "trace.zip", "--no-inherit", "--json"])
     .current_dir(dir.path())
     .output()
     .expect("trace show");

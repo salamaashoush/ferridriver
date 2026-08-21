@@ -11,6 +11,9 @@ use clap::Args;
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Args)]
 pub struct RunArgs {
+  #[command(flatten)]
+  pub config: super::ConfigSource,
+
   /// Script file, or `-` to read source from stdin. Omit when using
   /// `--eval`. A `.ts`/`.tsx` file, or any source with top-level
   /// `import`/`export`, is rolldown-bundled + transpiled + run as an ES

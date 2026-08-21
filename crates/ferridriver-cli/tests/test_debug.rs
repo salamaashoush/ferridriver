@@ -47,7 +47,7 @@ fn workspace(spec_name: &str, spec: &str, extra_test_config: &str) -> tempfile::
 }
 
 fn spawn_debug(work: &std::path::Path, session_dir: &std::path::Path, mode: &[&str]) -> Child {
-  let mut args = vec!["--no-inherit", "test"];
+  let mut args = vec!["test", "--no-inherit"];
   args.extend_from_slice(mode);
   Command::new(bin())
     .args(&args)
@@ -62,7 +62,7 @@ fn spawn_debug(work: &std::path::Path, session_dir: &std::path::Path, mode: &[&s
 
 /// `ferridriver run --session <id> …` against the stopped test.
 fn run_on(session_dir: &std::path::Path, cwd: &std::path::Path, args: &[&str]) -> (bool, String) {
-  let mut all = vec!["--no-inherit", "run"];
+  let mut all = vec!["run", "--no-inherit"];
   all.extend_from_slice(args);
   let out = Command::new(bin())
     .args(&all)
@@ -77,7 +77,7 @@ fn run_on(session_dir: &std::path::Path, cwd: &std::path::Path, args: &[&str]) -
 /// The session the stopped worker published, or `None` before it appears.
 fn published_session(session_dir: &std::path::Path) -> Option<String> {
   let out = Command::new(bin())
-    .args(["--no-inherit", "session", "list"])
+    .args(["session", "list", "--no-inherit"])
     .env("FERRIDRIVER_SESSION_DIR", session_dir)
     .stdin(Stdio::null())
     .output()
@@ -309,7 +309,7 @@ fn bdd_debug_stops_inside_the_step_body_that_wrote_the_call() {
   .unwrap();
 
   let mut child = Command::new(bin())
-    .args(["--no-inherit", "bdd", "--debug", "--steps", "steps/*.ts", "features/"])
+    .args(["bdd", "--no-inherit", "--debug", "--steps", "steps/*.ts", "features/"])
     .current_dir(work.path())
     .env("FERRIDRIVER_SESSION_DIR", session_dir.path())
     .stdin(Stdio::null())

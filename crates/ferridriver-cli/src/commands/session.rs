@@ -92,14 +92,15 @@ async fn open(args: SessionOpenArgs, origin: ConfigOrigin<'_>) -> anyhow::Result
 
   let exe = std::env::current_exe().context("resolving the ferridriver executable")?;
   let mut cmd = std::process::Command::new(exe);
-  // Global flags come before the subcommand.
+  // The config flags belong to the commands that read configuration, so they
+  // go after the subcommand names rather than before them.
+  cmd.arg("session").arg("host").arg(&args.id);
   if let Some(path) = origin.explicit {
     cmd.arg("--config").arg(path);
   }
   if !origin.inherit {
     cmd.arg("--no-inherit");
   }
-  cmd.arg("session").arg("host").arg(&args.id);
   if let Some(url) = &args.url {
     cmd.arg(url);
   }

@@ -6,6 +6,9 @@ use clap::{Args, Subcommand};
 
 #[derive(Args)]
 pub struct ExtArgs {
+  #[command(flatten)]
+  pub config: super::ConfigSource,
+
   #[command(subcommand)]
   pub command: ExtCommand,
 }

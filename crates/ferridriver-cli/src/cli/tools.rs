@@ -31,6 +31,9 @@ pub struct InitArgs {
 #[derive(Args)]
 pub struct McpArgs {
   #[command(flatten)]
+  pub config: super::ConfigSource,
+
+  #[command(flatten)]
   pub browser: BrowserArgs,
 
   #[command(flatten)]
@@ -69,6 +72,9 @@ pub struct CodegenArgs {
 
 #[derive(Args)]
 pub struct MergeReportsArgs {
+  #[command(flatten)]
+  pub config: super::ConfigSource,
+
   /// Directory holding the shards' blob zips, or the zips themselves.
   #[arg(default_value = ".")]
   pub inputs: Vec<PathBuf>,

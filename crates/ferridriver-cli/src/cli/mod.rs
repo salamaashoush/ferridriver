@@ -106,20 +106,6 @@ pub struct Cli {
   )]
   pub color: ColorArg,
 
-  /// Config file path, applied on top of the discovered config layers
-  /// (machine, user, repository, cwd). Format inferred from the
-  /// extension.
-  #[arg(short, long, global = true, value_name = "PATH", help_heading = "Global")]
-  pub config: Option<PathBuf>,
-
-  /// Ignore every config layer except `--config` (or, without it, the
-  /// config in the current directory). For reproducible runs that must
-  /// not pick up machine-, user- or repository-level settings. Also
-  /// settable as `FERRIDRIVER_NO_INHERIT=1` (read by the loader, so it
-  /// applies to child processes too).
-  #[arg(long, global = true, help_heading = "Global")]
-  pub no_inherit: bool,
-
   #[command(subcommand)]
   pub command: Command,
 }
@@ -132,6 +118,49 @@ pub enum FormatArg {
   Json,
 }
 
+/// Which configuration layers a command reads.
+///
+/// Declared per command rather than on the root, because only some commands
+/// read configuration at all: `install`, `codegen`, `init`, `upgrade` and
+/// `completions` never see the resolved document, and advertising these
+/// flags on them promised something they could not do — and, once a missing
+/// `--config` became an error, failed them for naming a file they would
+/// never have opened.
+///
+/// Still `global`, so they propagate into a command's own subcommands:
+/// `session --config x open dev` and `session open dev --config x` both
+/// parse, as they did when the root owned them.
+#[derive(clap::Args, Clone, Default, Debug)]
+pub struct ConfigSource {
+  /// Config file path, applied on top of the discovered config layers
+  /// (machine, user, repository, cwd). Format inferred from the
+  /// extension.
+  #[arg(
+    short = 'c',
+    long = "config",
+    global = true,
+    value_name = "PATH",
+    help_heading = "Config"
+  )]
+  pub path: Option<PathBuf>,
+
+  /// Ignore every config layer except `--config` (or, without it, the
+  /// config in the current directory). For reproducible runs that must
+  /// not pick up machine-, user- or repository-level settings. Also
+  /// settable as `FERRIDRIVER_NO_INHERIT=1` (read by the loader, so it
+  /// applies to child processes too).
+  #[arg(long = "no-inherit", global = true, help_heading = "Config")]
+  pub no_inherit: bool,
+}
+
+impl ConfigSource {
+  /// Whether the discovered layers apply underneath `path`.
+  #[must_use]
+  pub fn inherit(&self) -> bool {
+    !self.no_inherit
+  }
+}
+
 /// `--color`, mapped onto [`ui::ColorChoice`].
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ColorArg {
@@ -141,6 +170,32 @@ pub enum ColorArg {
 }
 
 impl Cli {
+  /// The configuration layers this invocation reads.
+  ///
+  /// Read back off the chosen command because `main` resolves the layer
+  /// stack before dispatch, while the flags now belong to the commands that
+  /// actually consume it. A command that reads no configuration answers with
+  /// the default, and the stack it never looks at is the discovered one.
+  #[must_use]
+  pub fn config_source(&self) -> ConfigSource {
+    match &self.command {
+      Command::Mcp(a) => a.config.clone(),
+      Command::Bdd(a) => a.config.clone(),
+      Command::Test(a) => a.config.clone(),
+      Command::RustTest(a) => a.config.clone(),
+      Command::Run(a) => a.config.clone(),
+      Command::Session(a) => a.config.clone(),
+      Command::Config(a) => a.config.clone(),
+      Command::Doctor(a) => a.config.clone(),
+      Command::Ext(a) => a.config.clone(),
+      Command::Trace(a) => a.config.clone(),
+      Command::MergeReports(a) => a.config.clone(),
+      Command::Init(_) | Command::Install(_) | Command::Codegen(_) | Command::Upgrade(_) | Command::Completions(_) => {
+        ConfigSource::default()
+      },
+    }
+  }
+
   /// The presentation policy these flags describe.
   #[must_use]
   pub fn presentation(&self) -> (ui::ColorChoice, ui::Format, bool) {

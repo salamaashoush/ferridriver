@@ -260,11 +260,11 @@ fn report_describes_the_page_the_run_left_and_redacts_declared_secrets() {
   let (ok, _o, err) = ferridriver(
     dir.path(),
     &[
-      "--config",
-      config,
       "session",
       "open",
       id,
+      "--config",
+      config,
       "--headless",
       "data:text/html,<p>seed</p>",
     ],

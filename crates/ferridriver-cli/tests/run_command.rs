@@ -39,8 +39,8 @@ fn run(extra: &[&str], stdin: Option<&str>) -> (bool, String, String) {
 fn run_with(flags: &[&str], extra: &[&str], stdin: Option<&str>) -> (bool, String, String) {
   let mut cmd = Command::new(bin());
   cmd
-    .arg("--no-inherit")
     .arg("run")
+    .arg("--no-inherit")
     .args(flags)
     .args(extra)
     .stdin(Stdio::piped())
@@ -445,10 +445,10 @@ fn code_out_writes_a_file_that_replays_standalone() {
 /// (extensions, a different backend) would decide what these assertions see.
 fn run_configured(config: &std::path::Path, flags: &[&str], extra: &[&str]) -> (bool, String, String) {
   let out = Command::new(bin())
+    .arg("run")
     .arg("--config")
     .arg(config)
     .arg("--no-inherit")
-    .arg("run")
     .args(flags)
     .args(extra)
     .stdin(Stdio::null())

@@ -6,6 +6,9 @@ use super::browser::BrowserArgs;
 
 #[derive(Args)]
 pub struct SessionArgs {
+  #[command(flatten)]
+  pub config: super::ConfigSource,
+
   #[command(subcommand)]
   pub command: SessionCommand,
 }

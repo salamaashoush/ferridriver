@@ -62,10 +62,10 @@ impl McpClient {
       }
     });
     let mut cmd = Command::new(&binary);
+    cmd.arg("mcp").arg("--backend").arg(backend);
     if let Some(cfg) = config {
       cmd.arg("--config").arg(cfg);
     }
-    cmd.arg("mcp").arg("--backend").arg(backend);
     if std::env::var("FERRIDRIVER_HEADED").is_err() {
       cmd.arg("--headless");
     }

@@ -10,6 +10,9 @@ use super::runner::RunnerArgs;
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Args)]
 pub struct BddArgs {
+  #[command(flatten)]
+  pub config: super::ConfigSource,
+
   /// Feature file globs. Overrides `[bdd].features` from config.
   pub features: Vec<String>,
 

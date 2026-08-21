@@ -8,6 +8,9 @@ use super::runner::RunnerArgs;
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Args)]
 pub struct TestRunArgs {
+  #[command(flatten)]
+  pub config: super::ConfigSource,
+
   /// Test file paths or globs. Overrides `[test].testMatch` from config.
   pub files: Vec<String>,
 
@@ -71,6 +74,9 @@ pub struct TestRunArgs {
 
 #[derive(Args)]
 pub struct RustTestArgs {
+  #[command(flatten)]
+  pub config: super::ConfigSource,
+
   /// Test name filter passed through to the underlying runner.
   pub filter: Option<String>,
 

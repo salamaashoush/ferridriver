@@ -26,8 +26,8 @@ struct Run {
 /// here reads the developer's own `~/.config/ferridriver`.
 fn run(cwd: &Path, args: &[&str]) -> Run {
   let out = Command::new(bin())
-    .arg("--no-inherit")
     .args(args)
+    .arg("--no-inherit")
     .current_dir(cwd)
     .output()
     .expect("spawn ferridriver");

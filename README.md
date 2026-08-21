@@ -143,6 +143,16 @@ auto|always|never`, and `-v`/`-vv` for debug and protocol tracing. Colour
 is dropped automatically when output is redirected, when `NO_COLOR` is
 set, and when a coding agent rather than a person is reading it.
 
+The config flags belong to the commands that read configuration, so they
+follow the command rather than preceding it, and the commands that never
+open a config file (`install`, `codegen`, `init`, `upgrade`,
+`completions`) do not accept them at all:
+
+```bash
+ferridriver test --config ./ci.toml --no-inherit
+ferridriver session --config ./ci.toml open dev   # or: session open dev --config …
+```
+
 ### Node.js / Bun (core browser binding only)
 
 ```bash

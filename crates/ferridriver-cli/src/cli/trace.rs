@@ -6,6 +6,9 @@ use clap::{Args, Subcommand, ValueEnum};
 
 #[derive(Args)]
 pub struct TraceArgs {
+  #[command(flatten)]
+  pub config: super::ConfigSource,
+
   #[command(subcommand)]
   pub command: TraceCommand,
 }

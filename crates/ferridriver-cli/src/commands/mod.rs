@@ -39,12 +39,6 @@ pub async fn dispatch(
   startup: &ferridriver_config::Startup,
   contributed: bootstrap::ContributedDefaults,
 ) -> anyhow::Result<()> {
-  // Global flags this command still needs after the parse: `session` spawns a
-  // detached host and has to hand it the same config layers this process
-  // resolved, which `--config` / `--no-inherit` describe.
-  let config_path = args.config.clone();
-  let inherit = !args.no_inherit;
-
   match args.command {
     cli::Command::Init(init_args) => init::run(&init_args),
     cli::Command::Mcp(mcp_args) => Box::pin(mcp::run(config, mcp_args)).await,
@@ -63,9 +57,12 @@ pub async fn dispatch(
     cli::Command::Install(install_args) => Box::pin(install::run(install_args)).await,
     cli::Command::Codegen(codegen_args) => Box::pin(codegen::run(codegen_args)).await,
     cli::Command::Session(session_args) => {
+      // The detached host has to resolve the same layers this process did,
+      // so `session open` hands its own `--config` / `--no-inherit` on.
+      let source = session_args.config.clone();
       let origin = session::ConfigOrigin {
-        explicit: config_path.as_deref(),
-        inherit,
+        explicit: source.path.as_deref(),
+        inherit: source.inherit(),
       };
       Box::pin(session::run(config, origin, session_args)).await
     },

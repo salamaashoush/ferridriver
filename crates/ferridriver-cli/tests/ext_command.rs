@@ -95,7 +95,7 @@ struct Run {
 
 fn run_check(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> Run {
   let mut cmd = Command::new(bin());
-  cmd.arg("--no-inherit").arg("ext").args(args).current_dir(cwd);
+  cmd.arg("ext").args(args).arg("--no-inherit").current_dir(cwd);
   for (k, v) in envs {
     cmd.env(k, v);
   }
