@@ -15,7 +15,14 @@ use crate::context::BrowserContext;
 use crate::error::{FerriError, Result};
 use rustc_hash::FxHashMap as HashMap;
 
-/// Default viewport dimensions -- consistent across all backends.
+/// Playwright's default viewport, applied unless a caller asks for a
+/// size of its own or opts out with `viewport: null`
+/// (`server/browserContext.ts::validateBrowserContextOptions`).
+///
+/// The one definition every layer resolves to -- core options, the
+/// config schema and the MCP server all read it here, so the default
+/// cannot drift between the host that launches a browser and the host
+/// that emulates a page in it.
 pub const DEFAULT_VIEWPORT_WIDTH: i64 = 1280;
 pub const DEFAULT_VIEWPORT_HEIGHT: i64 = 720;
 
@@ -847,16 +854,38 @@ impl BrowserState {
       generation: 0,
     };
     // Adopt existing pages into the "default" context of this instance.
-    // When connecting to an existing browser, skip viewport override to
-    // preserve the user's current window size. For launch mode, pages
-    // are created on demand by the caller (the test runner creates
-    // isolated contexts, MCP creates pages lazily).
+    // For launch mode, pages are created on demand by the caller (the
+    // test runner creates isolated contexts, MCP creates pages lazily).
+    //
+    // An adopted page is emulated with the configured viewport, exactly
+    // as a page this instance opened would be. The browser on the other
+    // end of a discover command is one this config declares and both
+    // sides share, not a stranger's: a browser reached through a
+    // persistent profile comes up at whatever window bounds Chrome
+    // restored from the profile's last run, so adopting a page without
+    // emulating anything hands every later call that stale size.
+    // `viewport: null` is how a config asks to leave it alone; the
+    // explicit `connect` tool ([`Self::connect_to_url`]) never touches
+    // it, matching Playwright's `connectOverCDP`.
     if adopt_pages {
       let existing_pages = Box::pin(inst.browser.pages()).await.unwrap_or_default();
+      let viewport = self.default_viewport.clone();
       let ctx = inst.context_mut("default");
       for page in existing_pages {
         page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
         ctx.pages.push(page);
+      }
+      if let Some(ref vp) = viewport {
+        for page in &inst.context_mut("default").pages {
+          if let Err(e) = page.emulate_viewport(vp).await {
+            tracing::warn!(
+              target: "ferridriver::state",
+              instance = instance_name,
+              error = %e,
+              "could not emulate the configured viewport on an adopted page",
+            );
+          }
+        }
       }
     }
     inst.generation = self.next_instance_generation();
@@ -1748,6 +1777,7 @@ impl BrowserState {
   /// Returns an error if the instance or context does not exist, or page discovery fails.
   pub async fn refresh_pages(&mut self, context: &str) -> Result<usize> {
     let key = self.session_key(context);
+    let viewport = self.default_viewport.clone();
     let inst = self.instance_mut(&key.instance)?;
     let current_pages = Box::pin(inst.browser.pages()).await?;
     let ctx = inst.context_mut_checked(&key.context)?;
@@ -1758,13 +1788,32 @@ impl BrowserState {
     ctx.prune_closed_pages();
 
     let existing_count = ctx.pages.len();
+    let mut adopted = Vec::new();
     if current_pages.len() > existing_count {
       for page in current_pages.into_iter().skip(existing_count) {
         page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+        adopted.push(page.clone());
         ctx.pages.push(page);
       }
     }
-    Ok(ctx.pages.len())
+    let total = ctx.pages.len();
+
+    // A tab that appeared in the browser after the instance was adopted
+    // is as new to this context as the ones adopted at connect time, and
+    // needs the same emulation — otherwise the one tab a user opened by
+    // hand is the one that reports the browser's own window size.
+    if let Some(ref vp) = viewport {
+      for page in &adopted {
+        if let Err(e) = page.emulate_viewport(vp).await {
+          tracing::warn!(
+            target: "ferridriver::state",
+            error = %e,
+            "could not emulate the configured viewport on a newly adopted page",
+          );
+        }
+      }
+    }
+    Ok(total)
   }
 
   /// # Errors

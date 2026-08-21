@@ -164,3 +164,78 @@ async fn a_saved_window_size_does_not_leak_into_the_viewport() {
     "the default viewport must win over the size saved in the profile"
   );
 }
+
+/// Read the WebSocket endpoint out of a Chrome we launched ourselves,
+/// the way an external browser manager's discover command would.
+fn devtools_ws_url(stderr: std::process::ChildStderr) -> String {
+  use std::io::BufRead;
+  for line in std::io::BufReader::new(stderr).lines() {
+    let line = line.expect("chrome stderr");
+    if let Some(url) = line.split("DevTools listening on ").nth(1) {
+      return url.to_string();
+    }
+  }
+  panic!("chrome never announced a DevTools endpoint");
+}
+
+/// Pages adopted from a browser someone else started are emulated with
+/// the configured viewport, not with that browser's window size.
+///
+/// This is the shape an external manager (box-dev-gate and the like)
+/// produces: it launches one browser per environment at whatever size it
+/// was asked for, ferridriver discovers that browser instead of starting
+/// a second one, and every session works through the tab already open in
+/// it. Adopting that tab without emulating anything hands the manager's
+/// window size to every later call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adopted_page_gets_the_configured_viewport() {
+  let mut child = std::process::Command::new(ferridriver::state::detect_chromium())
+    .args([
+      "--headless=new",
+      "--remote-debugging-port=0",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-gpu",
+      "--no-sandbox",
+      "--temp-profile",
+      // The manager's size, unlike the default in both dimensions.
+      "--window-size=1001,777",
+      "about:blank",
+    ])
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::piped())
+    .spawn()
+    .expect("launch chrome");
+  let ws_url = devtools_ws_url(child.stderr.take().expect("piped stderr"));
+
+  let mut state = BrowserState::with_plan(
+    ConnectMode::Launch,
+    LaunchPlan {
+      backend: BackendKind::CdpRaw,
+      kind: BrowserKind::Chromium,
+      headless: true,
+      ..Default::default()
+    },
+  );
+  state.set_instance_resolver_fn(std::sync::Arc::new(move |_| {
+    Some(ConnectMode::ConnectUrl(ws_url.clone()))
+  }));
+
+  state.ensure_instance("default").await.expect("adopt browser");
+  let size = state
+    .active_page("default")
+    .expect("an adopted page")
+    .evaluate("[window.innerWidth, window.innerHeight]")
+    .await
+    .expect("evaluate")
+    .expect("a size");
+  state.shutdown().await;
+  let _ = child.kill();
+  let _ = child.wait();
+
+  assert_eq!(
+    size,
+    serde_json::json!([1280, 720]),
+    "an adopted page must be emulated with the configured viewport"
+  );
+}
