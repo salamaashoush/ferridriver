@@ -335,14 +335,20 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // top-level frame_id) — no RTT for the navigate-then-query flow
     // that all bench / typical tests follow. `peek_main_frame_id()`
     // exposes the cached id from `Page.navigate`'s response.
-    // `DOM.enable` rides the parallel batch so `DOM.requestNode` /
-    // `DOM.getBoxModel` / `DOM.scrollIntoViewIfNeeded` (used by the
-    // element-handle action path: scrollIntoViewIfNeeded, screenshot,
-    // setFileInputFiles) return real nodeIds. Without it, those CDP
-    // calls return `nodeId: 0` and every "Element not found" error
-    // bubbles back to the user even when the page-side selector lookup
-    // succeeded. Mirrors Playwright's `_initialize`
-    // (`crPage.ts`) which also fires `DOM.enable` per session.
+    // `DOM.enable` is NOT required, and Playwright does not send it —
+    // the only one in its tree is `crCoverage.ts`, when coverage starts.
+    // `DOM.getDocument` enables the agent implicitly, which is what
+    // `find_element` (`page.$`) reaches it through; the element ACTION
+    // path never needs it at all, because `scroll_into_view`,
+    // `screenshot` and `set_input_files` address nodes by Runtime
+    // `objectId` and bypass the DOM agent entirely. Nothing subscribes
+    // to a `DOM.*` event either, so the agent has no standing work to do.
+    //
+    // It is kept only because dropping it buys nothing: measured at
+    // 0.35ms of a ~42ms page, inside the run-to-run spread. The
+    // bootstrap batch is dominated by a fixed ~67ms wait for the new
+    // target's renderer, after which all ten responses land inside
+    // 15ms — so command count is not what this costs.
     let lifecycle_params = serde_json::json!({"enabled": true});
     let autoattach_params = serde_json::json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true});
     // Focus emulation keeps the page believing it is focused for its
