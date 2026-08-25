@@ -197,6 +197,12 @@ async fn an_adopted_page_gets_the_configured_viewport() {
       "--no-default-browser-check",
       "--disable-gpu",
       "--no-sandbox",
+      // See `connect_select.rs`: without these macOS asks the developer
+      // running the suite for their login keychain password. Every
+      // ferridriver launch passes them; a hand-written stand-in for an
+      // externally started browser has to repeat them.
+      "--use-mock-keychain",
+      "--password-store=basic",
       "--temp-profile",
       // The manager's size, unlike the default in both dimensions.
       "--window-size=1001,777",

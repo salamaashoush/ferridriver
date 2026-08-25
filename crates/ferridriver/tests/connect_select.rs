@@ -23,6 +23,15 @@ async fn connect_and_select_pages() {
       "--no-default-browser-check",
       "--disable-gpu",
       "--no-sandbox",
+      // Not policy, and not part of what this test simulates: without
+      // them macOS pops a GUI keychain prompt asking the developer
+      // running the suite for their login password, because Chrome
+      // opens "Chromium Safe Storage" to init its password store. Every
+      // launch ferridriver itself performs passes both
+      // (`state::CHROMIUM_SWITCHES`); this list is hand-written to stand
+      // in for a browser someone else started, so it has to repeat them.
+      "--use-mock-keychain",
+      "--password-store=basic",
       "--temp-profile",
       "about:blank",
     ])
