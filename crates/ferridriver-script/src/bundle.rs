@@ -27,6 +27,63 @@ use crate::error::ScriptError;
 /// Id prefix for operator-declared virtual modules (`[bundler.virtualModules]`).
 const VIRTUAL_USER_PREFIX: &str = "\0fd-virtual:";
 
+/// A bundle failure, rendered with the file and line it points at.
+///
+/// `BatchedBuildDiagnostic`'s `Debug` prints `BuildDiagnostic { kind:
+/// "PARSE_ERROR", message: "Unexpected token", .. }` — and the `..` is
+/// the label span, which is the only place the offending file appears.
+/// Reporting that verbatim leaves the reader bisecting an import graph
+/// by hand to find which of several hundred modules rolldown could not
+/// parse. `to_diagnostic()` resolves the labels against the source it
+/// read, so the file and line come back.
+fn render_bundle_diagnostics(err: &rolldown_error::BatchedBuildDiagnostic) -> String {
+  let rendered: Vec<String> = err
+    .iter()
+    .map(|d| {
+      let diagnostic = d.to_diagnostic();
+      let kind = diagnostic.kind();
+      match diagnostic.get_primary_location() {
+        Some((file, line, column, _)) => format!("{kind} at {file}:{line}:{column}: {d}"),
+        None => format!("{kind}: {d}"),
+      }
+    })
+    .collect();
+  if rendered.is_empty() {
+    return format!("rolldown bundle: {err}");
+  }
+  format!("rolldown bundle: {}", rendered.join("; "))
+}
+
+/// Extensions a JS parser must not be pointed at, mapped to the module
+/// type that makes importing one a no-op.
+///
+/// A stylesheet import is a side effect of the bundler that built the
+/// package, not something the importing module reads. An analytics
+/// package shipping `require("./styles/guides.scss")` inside its dist
+/// is enough: with no rule for the extension rolldown hands the SCSS to
+/// oxc and reports `PARSE_ERROR: Unexpected token` against a file that
+/// is not JavaScript and was never going to be. There is no CSS in a
+/// headless QuickJS runtime for the import to mean anything, so `Empty`
+/// is the honest answer rather than a stub with a default export.
+///
+/// Images and fonts get `Empty` for the same reason; JSON and the text
+/// formats keep a real value, because code that imports one reads it.
+fn asset_module_types() -> rustc_hash::FxHashMap<String, ModuleType> {
+  let mut m = rustc_hash::FxHashMap::default();
+  for ext in ["css", "scss", "sass", "less", "styl", "stylus"] {
+    m.insert(ext.to_string(), ModuleType::Empty);
+  }
+  for ext in [
+    "png", "jpg", "jpeg", "gif", "webp", "avif", "ico", "woff", "woff2", "ttf", "eot", "mp4", "webm",
+  ] {
+    m.insert(ext.to_string(), ModuleType::Empty);
+  }
+  for ext in ["svg", "txt", "md", "graphql", "gql", "html"] {
+    m.insert(ext.to_string(), ModuleType::Text);
+  }
+  m
+}
+
 /// Operator-facing bundler options: the `[bundler]` section of the
 /// unified config (shim aliases, inline virtual modules, and the module
 /// resolution controls) plus the `[test].tsconfig` selection. Applied to
@@ -474,6 +531,7 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<Bundle
     }),
     // Unset leaves rolldown's per-module upward discovery (its default).
     tsconfig: env.tsconfig.clone().map(TsConfig::Manual),
+    module_types: Some(asset_module_types()),
     ..Default::default()
   };
 
@@ -492,7 +550,7 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<Bundle
   let gen_started = Instant::now();
   let out = Box::pin(bundler.generate())
     .await
-    .map_err(|e| ScriptError::internal(format!("rolldown bundle: {e:?}")))?;
+    .map_err(|e| ScriptError::internal(render_bundle_diagnostics(&e)))?;
   tracing::debug!(
     target: "ferridriver::bundle",
     entries = entry_paths.len(),
@@ -1596,6 +1654,8 @@ async fn install_extraction_env(
       crate::bindings::define_classes(&ctx).map_err(|e| ScriptError::internal(format!("install classes: {e}")))?;
       crate::engine::install_runtime_shims(&ctx)
         .map_err(|e| ScriptError::internal(format!("install runtime shims: {e}")))?;
+      install_extraction_process(&ctx).map_err(|e| ScriptError::internal(format!("install process: {e}")))?;
+      install_extraction_fetch(&ctx).map_err(|e| ScriptError::internal(format!("install fetch: {e}")))?;
       crate::bindings::expect::install_expect(&ctx)
         .map_err(|e| ScriptError::internal(format!("install expect: {e}")))?;
       crate::bindings::test::install_test(&ctx)
@@ -1609,6 +1669,43 @@ async fn install_extraction_env(
       Ok(())
     })
     .await
+}
+
+/// `process`, with the two host-supplied values extraction cannot know.
+///
+/// `env` is empty and `cwd()` answers the directory the pass runs in:
+/// extraction sees neither the operator's `[scripting].allowEnv` nor a
+/// session sandbox root. What matters is that the global EXISTS. A
+/// library that reads `process.versions` or `process.env.NODE_ENV` at
+/// module scope is asking which runtime it is on, and an absent
+/// `process` answers that question wrong rather than not at all — the
+/// module takes its browser branch and then demands a browser global,
+/// so the file throws under every host and never reaches the session
+/// that would have run it.
+fn install_extraction_process(ctx: &rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+  let cwd = std::env::current_dir().unwrap_or_default();
+  ferridriver_jsstd::node::process::install(ctx, std::iter::empty::<(&str, &str)>(), &cwd.to_string_lossy())?;
+  crate::bindings::runtime::mirror_global(ctx, "process")
+}
+
+/// `fetch`, present but refusing.
+///
+/// Extraction reads a manifest off a throwaway context; a module-scope
+/// request would put a network call inside `ferridriver ext check` and
+/// make the pass depend on a live host. The function still has to be
+/// THERE, because `typeof fetch === 'function'` is how a library picks
+/// between the native client and a bundled polyfill, and picking the
+/// polyfill drags in the transport stack that has no business here.
+fn install_extraction_fetch(ctx: &rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+  let f = rquickjs::Function::new(ctx.clone(), || -> rquickjs::Result<()> {
+    Err(rquickjs::Error::new_from_js_message(
+      "fetch",
+      "extraction",
+      "no HTTP during extension extraction: move the call into a handler or a hook, \
+       where the session's client and its `allow.net` grant exist",
+    ))
+  })?;
+  ctx.globals().set("fetch", f)
 }
 
 /// One extraction runtime + context per host.

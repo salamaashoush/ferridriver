@@ -88,6 +88,10 @@ rquickjs = { version = "0.12", features = [
 rolldown = "1"
 rolldown_common = "1"
 rolldown_plugin = "1"
+# A bundle failure's own diagnostics. `BatchedBuildDiagnostic`'s Debug
+# elides the label spans, so the file and line a parse error points at
+# are only reachable through `to_diagnostic()`.
+rolldown_error = "1"
 # Remap QuickJS error line:col (bundled output) back to original .ts/.js.
 sourcemap = "9"
 regex = { workspace = true }

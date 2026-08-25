@@ -271,3 +271,51 @@ async fn one_native_module_instance_serves_every_file_in_a_vm() {
     "every importer keeps the value the module exported: {facts}"
   );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extraction_and_a_session_agree_on_the_ambient_globals() {
+  // The globals a package can reach at MODULE scope, pinned across both
+  // passes at once. `process` was absent from extraction while every
+  // session had it, and the failure is silent in the worst way: a
+  // library that reads `process.versions` to ask which runtime it is on
+  // gets no answer, takes its browser branch, demands a browser global
+  // and throws — so the file is skipped with a warning and never
+  // reaches the session that would have run it fine.
+  //
+  // Recording the answer in the tool's DESCRIPTION is what makes this
+  // one test cover both sides: the description is computed at module
+  // scope and travels in the manifest (extraction's view), while the
+  // handler recomputes it when called (the session's view).
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let path = tmp.path().join("ambient.ts");
+  std::fs::write(
+    &path,
+    "const NAMES = ['process', 'console', 'fetch', 'Buffer', 'URL', 'TextEncoder',\n\
+     \x20 'setTimeout', 'queueMicrotask', 'structuredClone', 'performance', 'crypto',\n\
+     \x20 'AbortController', 'ReadableStream', 'require', 'expect'];\n\
+     const present = () => NAMES.filter((n) => typeof (globalThis as any)[n] !== 'undefined').join(',');\n\
+     defineTool({ name: 'ambient', description: present(), handler: async () => present() });\n",
+  )
+  .expect("write");
+
+  let (ok, err) = compile(std::slice::from_ref(&path)).await;
+  assert!(err.is_empty(), "extraction failed: {err:?}");
+
+  let manifests: serde_json::Value = serde_json::from_str(&ok[0].manifests_json()).expect("manifests parse");
+  let at_extraction = manifests
+    .as_array()
+    .and_then(|a| a.first())
+    .and_then(|m| m.get("description"))
+    .and_then(serde_json::Value::as_str)
+    .expect("the tool's description carries extraction's view")
+    .to_string();
+
+  let (_tmp, session, ctx) = session_with(vec![binding(&ok[0])]).await;
+  let in_session = eval(&session, &ctx, "return await tools.ambient({});").await;
+
+  assert_eq!(
+    serde_json::Value::String(at_extraction),
+    in_session,
+    "extraction and the session disagree about which globals a package can reach"
+  );
+}
