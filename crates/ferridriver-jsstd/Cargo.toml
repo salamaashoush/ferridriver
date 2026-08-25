@@ -41,7 +41,17 @@ perf = { level = "deny", priority = -1 }
 suspicious = { level = "deny", priority = -1 }
 
 [features]
-default = ["fs", "sleep-tokio", "system", "statistics", "network", "crypto-rust"]
+default = [
+  "fs",
+  "sleep-tokio",
+  "system",
+  "statistics",
+  "network",
+  "crypto-rust",
+  "brotli-rust",
+  "flate2-rust",
+  "zstd-c",
+]
 fs = []
 bytearray-buffer = []
 sleep-tokio = []
@@ -52,6 +62,20 @@ sleep-tokio = []
 _subtle-full = []
 _rustcrypto = ["_subtle-full"]
 crypto-rust = ["_rustcrypto"]
+
+# Upstream `llrt_compression`'s own feature split, kept verbatim so its
+# `#[cfg]` arms stay exactly as upstream wrote them. The `-c` variants
+# link a system library; the `-rust` ones build from source, which is
+# what this crate takes wherever a pure-Rust back-end exists. zstd has
+# none (upstream says so in its own manifest), so `zstd-c` is the only
+# way to have it -- and the `zstd` crate vendors and compiles the C
+# rather than needing one installed, same as rquickjs-sys does.
+brotli-c = ["brotlic"]
+brotli-rust = ["brotli"]
+flate2-c = ["flate2/zlib-ng"]
+flate2-rust = ["flate2/rust_backend"]
+zstd-c = ["zstd"]
+zstd-rust = ["zstd"]
 
 # Upstream `llrt_os`'s own feature split over the `sysinfo` facilities the
 # `os` module reads.
@@ -109,8 +133,14 @@ sysinfo = { version = "0.39", default-features = false, optional = true }
 rquickjs = { version = "0.12", features = ["full-async", "parallel", "macro", "loader", "array-buffer", "half", "either"] }
 simdutf8 = { version = "0.1", features = ["std", "aarch64_neon"] }
 url = { version = "2", features = ["std"], default-features = false }
-# gzip / deflate for `CompressionStream` / `DecompressionStream`.
+# gzip / deflate for `CompressionStream` / `DecompressionStream` and for
+# the `zlib` module.
 flate2 = "1"
+# `zlib`'s brotli and zstd codecs, via the vendored `llrt_compression`.
+# Optional so the feature arms upstream wrote compile out unchanged.
+brotli = { version = "8", features = ["std"], default-features = false, optional = true }
+brotlic = { version = "0.8", default-features = false, optional = true }
+zstd = { version = "0.13", default-features = false, optional = true }
 # `urlToHttpOptions` decodes the credentials the way `decodeURIComponent`
 # does; `url` keeps this crate private rather than re-exporting it.
 percent-encoding = { version = "2", default-features = false, features = ["std"] }

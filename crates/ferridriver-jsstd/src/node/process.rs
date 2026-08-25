@@ -140,7 +140,14 @@ where
 
   // hrtime([prev]) -> [seconds, nanos], monotonic from session start;
   // hrtime.bigint() -> BigInt nanoseconds (Node parity).
-  let start = Instant::now();
+  //
+  // The SAME base `performance.now()` counts from, so the two clocks
+  // line up: Node derives both from one libuv hrtime, and a script that
+  // takes an hrtime reading and a `performance.now()` reading of the
+  // same moment expects them to agree on how far apart two moments are.
+  // A second `Instant::now()` here would start a few hundred
+  // microseconds later and put a constant, invisible skew between them.
+  let start = crate::web::performance::monotonic_base();
   let hrtime = rquickjs::Function::new(ctx.clone(), move |prev: Rest<Value<'_>>| -> Vec<i64> {
     let now = start.elapsed();
     let (mut s, mut n) = (

@@ -10,6 +10,7 @@ pub mod blob_bytes;
 pub mod compression;
 pub mod form_data;
 pub mod js_iterator;
+pub mod performance;
 pub mod timers;
 
 use base64::Engine as _;
@@ -17,18 +18,6 @@ use base64::engine::GeneralPurpose;
 use base64::engine::general_purpose::GeneralPurposeConfig;
 use rquickjs::function::{Func, This};
 use rquickjs::{Class, Ctx, Object, TypedArray, Value};
-
-/// Monotonic base for `performance.now()`, and the wall-clock instant it
-/// corresponds to (`performance.timeOrigin`). Both are fixed at first
-/// use, which is process start for any real session.
-static PROCESS_START: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
-static TIME_ORIGIN: std::sync::LazyLock<f64> = std::sync::LazyLock::new(|| {
-  // Touch the monotonic base first so the two are taken together.
-  let _ = *PROCESS_START;
-  std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .map_or(0.0, |d| d.as_secs_f64() * 1000.0)
-});
 
 /// Install `atob`, `btoa`, `structuredClone`, `performance`, `FormData`
 /// and `CompressionStream` / `DecompressionStream`.
@@ -69,14 +58,7 @@ pub fn init(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
 
   globals.set("structuredClone", Func::from(structured_clone))?;
 
-  // `performance.now()` — milliseconds (fractional) since the session's
-  // process start, plus the `timeOrigin` those are relative to. A
-  // monotonic `Instant` base, so it cannot go backwards across a wall-
-  // clock adjustment the way `Date.now()` deltas can.
-  let performance = Object::new(ctx.clone())?;
-  performance.set("now", Func::from(|| PROCESS_START.elapsed().as_secs_f64() * 1000.0))?;
-  performance.set("timeOrigin", *TIME_ORIGIN)?;
-  globals.set("performance", performance)?;
+  performance::init(ctx)?;
 
   rquickjs::Class::<form_data::FormDataJs>::define(&globals)?;
   compression::install(ctx)?;

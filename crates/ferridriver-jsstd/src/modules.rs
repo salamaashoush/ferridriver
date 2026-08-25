@@ -465,5 +465,154 @@ pub fn modules() -> Vec<NodeModule> {
       declare: declare_fn::<crate::crypto::CryptoModule>(),
       namespace: crypto_namespace,
     },
+    NodeModule {
+      specifiers: &["zlib", "node:zlib"],
+      declare: declare_fn::<crate::zlib::ZlibModule>(),
+      namespace: zlib_namespace,
+    },
+    NodeModule {
+      specifiers: &["string_decoder", "node:string_decoder"],
+      declare: declare_fn::<crate::string_decoder::StringDecoderModule>(),
+      namespace: string_decoder_namespace,
+    },
+    NodeModule {
+      specifiers: &["perf_hooks", "node:perf_hooks"],
+      declare: declare_fn::<crate::perf_hooks::PerfHooksModule>(),
+      namespace: perf_hooks_namespace,
+    },
+    NodeModule {
+      specifiers: &["tty", "node:tty"],
+      declare: declare_fn::<crate::tty::TtyModule>(),
+      namespace: tty_namespace,
+    },
+    // The implementation was already here as globals; without a
+    // specifier `import { ReadableStream } from 'node:stream/web'` --
+    // which is how Node names it and how a library reaches it without
+    // assuming a browser -- resolved to nothing.
+    NodeModule {
+      specifiers: &["stream/web", "node:stream/web"],
+      declare: declare_fn::<StreamWebModule>(),
+      namespace: stream_web_namespace,
+    },
   ]
+}
+
+/// `zlib`'s members, read back off the module's own default export so
+/// the ES and `require()` forms cannot list different sets.
+const ZLIB_MEMBERS: &[&str] = &[
+  "deflate",
+  "deflateSync",
+  "deflateRaw",
+  "deflateRawSync",
+  "gzip",
+  "gzipSync",
+  "inflate",
+  "inflateSync",
+  "inflateRaw",
+  "inflateRawSync",
+  "gunzip",
+  "gunzipSync",
+  "brotliCompress",
+  "brotliCompressSync",
+  "brotliDecompress",
+  "brotliDecompressSync",
+  "zstdCompress",
+  "zstdCompressSync",
+  "zstdDecompress",
+  "zstdDecompressSync",
+];
+
+fn zlib_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  module_default_object::<crate::zlib::ZlibModule>(ctx, "zlib", ZLIB_MEMBERS)
+}
+
+fn string_decoder_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  module_default_object::<crate::string_decoder::StringDecoderModule>(ctx, "string_decoder", &["StringDecoder"])
+}
+
+fn perf_hooks_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  module_default_object::<crate::perf_hooks::PerfHooksModule>(ctx, "perf_hooks", &["performance"])
+}
+
+fn tty_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  module_default_object::<crate::tty::TtyModule>(ctx, "tty", &["isatty"])
+}
+
+/// The Streams surface under its Node module name. Every class is
+/// already a global (`jsstd::init`), so the module only has to name
+/// them.
+const STREAM_WEB_MEMBERS: &[&str] = &[
+  "ReadableStream",
+  "ReadableStreamDefaultReader",
+  "ReadableStreamBYOBReader",
+  "ReadableStreamDefaultController",
+  "ReadableByteStreamController",
+  "ReadableStreamBYOBRequest",
+  "WritableStream",
+  "WritableStreamDefaultWriter",
+  "WritableStreamDefaultController",
+  "TransformStream",
+  "TransformStreamDefaultController",
+  "ByteLengthQueuingStrategy",
+  "CountQueuingStrategy",
+];
+
+pub struct StreamWebModule;
+
+impl ModuleDef for StreamWebModule {
+  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
+    declare_all(decl, STREAM_WEB_MEMBERS)?;
+    decl.declare("default")?;
+    Ok(())
+  }
+
+  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
+    let ns = stream_web_namespace(ctx)?;
+    export_from(exports, &ns, STREAM_WEB_MEMBERS)?;
+    exports.export("default", ns)?;
+    Ok(())
+  }
+}
+
+fn stream_web_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  let globals = ctx.globals();
+  let ns = Object::new(ctx.clone())?;
+  for name in STREAM_WEB_MEMBERS {
+    if let Ok(value) = globals.get::<_, Value<'js>>(*name) {
+      if !value.is_undefined() {
+        ns.set(*name, value)?;
+      }
+    }
+  }
+  Ok(ns)
+}
+
+/// Evaluate a vendored module and hand back its `default` export as the
+/// `require()` namespace.
+///
+/// The vendored modules build their exports inside `evaluate` through
+/// upstream's `export_default`, so there is no Rust-side object to
+/// borrow the way `crypto` and `events` do. Reading the default export
+/// back is what keeps the two forms one implementation instead of two
+/// lists that drift.
+fn module_default_object<'js, D: ModuleDef>(
+  ctx: &Ctx<'js>,
+  name: &str,
+  members: &[&str],
+) -> rquickjs::Result<Object<'js>> {
+  // `evaluate_def` hands back the module and the promise its evaluation
+  // returns. Every module here is synchronous, so the promise is already
+  // settled and the namespace is readable straight away.
+  let (module, _promise) = Module::evaluate_def::<D, _>(ctx.clone(), name)?;
+  let namespace = module.namespace()?;
+  if let Ok(default) = namespace.get::<_, Object<'js>>("default") {
+    return Ok(default);
+  }
+  let ns = Object::new(ctx.clone())?;
+  for member in members {
+    if let Ok(value) = namespace.get::<_, Value<'js>>(*member) {
+      ns.set(*member, value)?;
+    }
+  }
+  Ok(ns)
 }

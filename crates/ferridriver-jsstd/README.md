@@ -4,7 +4,9 @@ Vendored subset of [awslabs/llrt](https://github.com/awslabs/llrt) (Apache
 License 2.0), providing the WHATWG Streams implementation, the `node:os`
 module, and the pieces they depend on for the ferridriver QuickJS runtime.
 
-Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@e987d2b` (main, 2026-08-16).
+Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@e987d2b` (main, 2026-08-16);
+`zlib`, `compression`, `string_decoder`, `perf_hooks`, `tty` and `navigator`
+taken from `awslabs/llrt@7b95c82` (main, 2026-08-24).
 
 | upstream crate     | module here  |
 | ------------------ | ------------ |
@@ -21,9 +23,22 @@ Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@e987d2b` (main, 2026-08-
 | `llrt_fs`          | `fs`         |
 | `llrt_path`        | `pathutil`   |
 | `llrt_stream_web`  | `stream_web` |
+| `llrt_zlib`        | `zlib`       |
+| `llrt_compression` | `compression`|
+| `llrt_string_decoder` | `string_decoder` |
+| `llrt_perf_hooks`  | `perf_hooks` |
+| `llrt_tty`         | `tty`        |
+| `llrt_navigator`   | `navigator`  |
 | `llrt_url`         | `url`        |
 | `llrt_util`        | `text`       |
 | `llrt_test`        | `test` (dev) |
+
+`llrt_stream` is NOT vendored, and not because we chose against it: llrt has
+no node `stream` module. `llrt_stream` registers no `ModuleDef` and answers
+no specifier — it is an internal trait library (`Readable` / `Writable` /
+`SteamEvents`) that llrt's own `fs`, `net` and `child_process` implement.
+`llrt_stream_web` is the module, and it is `stream/web`. There is likewise
+no `querystring` anywhere in llrt.
 
 The rest of llrt — its hyper/fetch stack, timers, console — is deliberately
 not vendored: ferridriver has its own, over `reqwest`. `fs` is vendored
@@ -49,7 +64,8 @@ Two entry points, and nothing else to remember:
   entry carrying its specifiers, the `ModuleDef` the ES loader declares,
   and the object `require()` returns: `path`, `buffer`, `os`, `util`,
   `events`, `assert` (+ `/strict`), `url`, `process`, `timers` (+
-  `/promises`), `crypto`. The host merges that list into its own loader,
+  `/promises`), `crypto`, `zlib`, `string_decoder`, `perf_hooks`, `tty`,
+  `stream/web`. The host merges that list into its own loader,
   its `require` table and its bundler's external list, so the three
   cannot drift apart.
 
@@ -103,6 +119,9 @@ Re-sync recipe (from a checkout of llrt):
 
 ```sh
 for m in utils:libs/llrt_utils context:libs/llrt_context \
+         zlib:modules/llrt_zlib string_decoder:modules/llrt_string_decoder \
+         perf_hooks:modules/llrt_perf_hooks tty:modules/llrt_tty \
+         navigator:modules/llrt_navigator compression:libs/llrt_compression \
          encoding:libs/llrt_encoding exceptions:modules/llrt_exceptions \
          events:modules/llrt_events abort:modules/llrt_abort \
          os:modules/llrt_os buffer:modules/llrt_buffer \
@@ -118,7 +137,8 @@ for f in text_encoder text_decoder text_encoder_stream text_decoder_stream; do
   cp "$LLRT/modules/llrt_util/src/$f.rs" "src/text/$f.rs"
 done
 # per-module first, then the cross-crate rewrite (BSD sed has no \b — use perl)
-for name in utils context encoding exceptions events abort os buffer json crypto url text stream_web; do
+for name in utils context encoding exceptions events abort os buffer json crypto url text stream_web \
+            zlib string_decoder perf_hooks tty navigator compression; do
   find "src/$name" -name '*.rs' | while read -r f; do
     perl -pi -e "s/\bcrate::/crate::${name}::/g" "$f"
   done
@@ -318,3 +338,130 @@ strings), `swap16` / `swap32` / `swap64`, `compare`, and `Buffer.poolSize`.
     context and remembered; the `fs` global is that object too. Without
     it, identity comparisons are false and a caller who patches a method
     patches a copy nobody else sees.
+
+26. **`zlib` — the codec back-ends taken.** Upstream's default is
+    `compression-c`, which links a system zlib-ng, brotli and zstd. This
+    crate takes the pure-Rust back-end wherever one exists
+    (`flate2/rust_backend`, which is also what `CompressionStream`
+    already used, and the `brotli` crate) and `zstd-c` for zstd, which
+    upstream's own manifest says has no pure-Rust implementation. The
+    `zstd` crate vendors and compiles the C rather than needing one
+    installed, so the build still has no system dependency — the same
+    posture as `rquickjs-sys` compiling QuickJS. All six upstream feature
+    names are declared, so its `#[cfg]` arms stay exactly as written.
+
+27. **`compression/streaming.rs` is not vendored.** Its only consumer
+    upstream is `llrt_fetch`'s response decoder, and this crate does not
+    vendor `llrt_fetch` (ferridriver's `fetch` is its own, over
+    `reqwest`). Carrying it would be dead code that also trips
+    `clippy::large_enum_variant` — `StreamingDecoder`'s zstd variant is
+    ~336 bytes larger than the next — and boxing a variant to satisfy a
+    lint in code nothing calls is worse than not taking the file. Same
+    reasoning as `buffer/blob.rs`, `crypto/provider/ring.rs` and
+    `os/windows.rs`.
+
+28. **`zlib/codec.rs` and `string_decoder/decoder.rs`** are upstream's
+    `zlib.rs` and `string_decoder.rs`, renamed. A module with its
+    parent's name trips `clippy::module_inception`, which is on by
+    default and the repo's gate runs `-D warnings`. Same fix as delta 14.
+
+29. **`zlib/{brotli,codec,zstd}.rs` — macro imports.** `define_sync_function`
+    and `define_cb_function` are `#[macro_export]`ed, so they live at the
+    crate root rather than under `zlib`. The `use super::{...}` lines are
+    split: the two macros come from `crate::`, the plain items still from
+    `super::`. Same cause as delta 18.
+
+30. **`perf_hooks` — the module only, not the global.** Upstream's `init`
+    installs its own `Performance` class on `globalThis`, and taking it
+    would be a regression: `Performance::now` reads
+    `llrt_utils::time::now_nanos`, which is `SystemTime::now()` — the
+    WALL clock. High Resolution Time exists to give a monotonic reading,
+    so upstream's `now()` steps backwards whenever the system clock
+    does, and `saturating_sub` clamps that to `0` rather than surfacing
+    it. `web::init`'s reads `Instant::elapsed`, which is monotonic by
+    construction. Upstream also leaves `origin_nanos()` at `0` until a
+    host calls `time::init()`, and an unset origin makes `now()` return
+    the whole Unix epoch in milliseconds.
+
+    Upstream's MODULE body only reads `globalThis.performance` and
+    re-exports it, so dropping `init` (and `performance.rs` with it)
+    leaves `perf_hooks` serving ferridriver's own.
+
+    The two things upstream's class had over the old plain object —
+    `toJSON()` and being a real class instance — are in `web::performance`
+    now, along with the User Timing and Performance Timeline surface
+    neither side had. See "`performance`" below.
+
+31. **`navigator` — this runtime's name.** Upstream hardcodes
+    `userAgent` to `llrt <version>`. Shipping that verbatim would answer
+    every user-agent sniffer with the wrong runtime. It reads
+    `ferridriver/<version>` here, which is the shape Node 21+ uses.
+
+    Worth knowing before relying on it: a `navigator` global is still how
+    some libraries decide they are in a browser, the mirror image of the
+    `process.versions.node` check. It is Node parity, not a browser
+    claim, but a package that misroutes on it is misrouting for this
+    reason.
+
+32. **`stream/web` registered as a specifier.** The implementation was
+    vendored from the start but only ever installed as globals, so
+    `import { ReadableStream } from 'node:stream/web'` — Node's own name
+    for it, and how a library reaches it without assuming a browser —
+    resolved to nothing. `modules.rs` now serves it, reading the classes
+    back off the globals so there is still one implementation.
+
+## `performance`
+
+`web::performance` is ferridriver's, not vendored, and covers three
+specs rather than the `now()` / `timeOrigin` pair it started as:
+
+- **High Resolution Time** — `now()`, `timeOrigin`, `toJSON()`.
+  `now()` reads `Instant::elapsed`; the wall clock appears exactly once,
+  as `timeOrigin`, which is what the monotonic readings are relative to.
+- **User Timing** — `mark()`, `measure()`, `clearMarks()`,
+  `clearMeasures()`, and the `PerformanceMark` / `PerformanceMeasure`
+  classes with their `detail`. `measure` implements all three overloads
+  (bare name, start-mark, options bag) and refuses the two combinations
+  the spec calls out: an options bag together with a trailing `endMark`,
+  and `start` + `end` + `duration` all at once.
+- **Performance Timeline** — `getEntries()`, `getEntriesByName()`,
+  `getEntriesByType()`, sorted chronologically by `startTime` rather
+  than by insertion, because `mark(name, { startTime })` can backdate an
+  entry. The sort is stable, so entries sharing a `startTime` keep the
+  order they were recorded in.
+
+`PerformanceMark` and `PerformanceMeasure` chain their prototype to
+`PerformanceEntry`, so `mark instanceof PerformanceEntry` holds.
+Constructibility follows the IDL: `PerformanceMark` takes
+`(name, options)` and does NOT buffer (only `performance.mark()`
+records), while `PerformanceEntry`, `PerformanceMeasure` and
+`Performance` throw `Illegal constructor`.
+
+`performance.now()` and `process.hrtime()` count from ONE base
+(`performance::monotonic_base`), so the two are correlatable the way
+Node's are — it derives both from a single libuv hrtime. Two separate
+`Instant::now()` calls would put a constant, invisible skew between
+them; a test asserts they agree within a millisecond.
+
+Not implemented: `PerformanceObserver` (it needs a task-queue hook this
+runtime has no equivalent of), the resource and navigation entry types
+(no document), Node's `eventLoopUtilization` / `nodeTiming`, and a
+buffer size limit — nothing evicts, so a program marking in a hot loop
+grows the buffer until it calls `clearMarks`.
+
+## `Intl` is absent, and llrt cannot fill it
+
+QuickJS-ng as vendored by `rquickjs-sys` contains no ECMA-402 at all —
+no `Intl` object, and no build flag that would add one. `react-intl` and
+anything like it fails with `Intl is not defined`.
+
+`llrt_intl` does not close this. It is `Intl.DateTimeFormat` plus
+`supportedValuesOf` and `Date.prototype.toLocaleString`, aimed at
+timezone support, and it carries a `jiff` dependency and ~3k lines of
+bundled CLDR data. There is no `NumberFormat`, `PluralRules` or
+`Collator` — which is the part a formatting library actually reaches
+for.
+
+Until that changes, a suite that needs `Intl` supplies a JS polyfill
+through `[bundler.alias]`, which keeps the choice (and its weight) in
+the extension that needs it.

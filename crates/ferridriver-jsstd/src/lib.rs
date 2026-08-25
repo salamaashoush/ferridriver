@@ -19,6 +19,12 @@
 //! | `llrt_json`         | [`json`]      |
 //! | `llrt_crypto`       | [`crypto`]    |
 //! | `llrt_stream_web`   | [`stream_web`]|
+//! | `llrt_zlib`         | [`zlib`]      |
+//! | `llrt_compression`  | [`compression`]|
+//! | `llrt_string_decoder`| [`string_decoder`]|
+//! | `llrt_perf_hooks`   | [`perf_hooks`]|
+//! | `llrt_tty`          | [`tty`]       |
+//! | `llrt_navigator`    | [`navigator`] |
 //! | `llrt_url`          | [`url`]       |
 //! | `llrt_util` (codecs)| [`text`]      |
 //! | `llrt_test`         | `test` (dev)  |
@@ -31,6 +37,8 @@
 pub mod abort;
 pub mod context;
 pub mod buffer;
+/// Codec back-ends behind `zlib` (upstream `llrt_compression`).
+pub mod compression;
 pub mod crypto;
 pub mod encoding;
 pub mod events;
@@ -38,6 +46,7 @@ pub mod exceptions;
 pub mod fs;
 pub mod json;
 pub mod modules;
+pub mod navigator;
 /// Node modules ferridriver implements itself, because upstream llrt has
 /// none or only a stub. Written to the repo's style, but compiled under
 /// this crate's relaxed lints: pedantic's `needless_pass_by_value` is
@@ -45,14 +54,18 @@ pub mod modules;
 /// JS values.
 pub mod node;
 pub mod os;
+pub mod perf_hooks;
 /// Path helpers the vendored `fs` needs (upstream `llrt_path`). The
 /// `path` MODULE is ferridriver's own; only these Rust helpers come from
 /// upstream, so `fs` stays byte-close to it.
 pub mod pathutil;
 pub mod stream_web;
+pub mod string_decoder;
 pub mod text;
+pub mod tty;
 pub mod url;
 pub mod utils;
+pub mod zlib;
 /// Web-platform globals with no upstream in llrt, written here so the
 /// runtime has exactly one implementation of each.
 pub mod web;
@@ -79,5 +92,6 @@ pub fn init(ctx: &Ctx<'_>) -> Result<()> {
   url::init(ctx)?;
   web::init(ctx)?;
   fs::init(ctx)?;
+  navigator::init(ctx)?;
   Ok(())
 }

@@ -576,6 +576,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "brotlic"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f552f56f302af0006c32b50bfa2bdb4696fd6ba33c3ab9f6225fefdb1efdc680"
+dependencies = [
+ "brotlic-sys",
+]
+
+[[package]]
+name = "brotlic-sys"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "afdec5c62bc97b56349053cf66ba503af5c2448591be61c3ad70a5f11b57e574"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "bstr"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1842,6 +1860,7 @@ dependencies = [
  "ferridriver-viewer",
  "flate2",
  "futures",
+ "json-strip-comments",
  "libc",
  "mimalloc",
  "regex",
@@ -1925,6 +1944,8 @@ dependencies = [
  "aes-kw",
  "base64 0.23.1",
  "base64-simd",
+ "brotli",
+ "brotlic",
  "cbc",
  "const-oid",
  "crc32c",
@@ -1970,6 +1991,7 @@ dependencies = [
  "url",
  "uuid",
  "x25519-dalek",
+ "zstd",
 ]
 
 [[package]]
@@ -2042,6 +2064,7 @@ dependencies = [
  "regex",
  "rolldown",
  "rolldown_common",
+ "rolldown_error",
  "rolldown_plugin",
  "rquickjs",
  "rquickjs-serde",
@@ -2215,6 +2238,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
+ "libz-ng-sys",
  "miniz_oxide 0.8.9",
  "zlib-rs",
 ]
@@ -3291,6 +3315,16 @@ version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2026a5056764a10b2bf5d56488cba40da507f5493a6a429340e2004d9ed085fa"
 dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "libz-ng-sys"
+version = "1.1.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "879917b256f6317769b9f374b435805a8697013098aacce5a38ac106cd6a9469"
+dependencies = [
+ "cmake",
  "libc",
 ]
 
@@ -6598,7 +6632,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
