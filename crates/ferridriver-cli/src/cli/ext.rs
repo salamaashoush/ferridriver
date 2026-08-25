@@ -51,6 +51,14 @@ pub struct ExtCheckArgs {
   /// Skip the TypeScript pass (only resolve + load).
   #[arg(long)]
   pub no_typecheck: bool,
+
+  /// Let the extended `tsconfig.json` decide `strict`,
+  /// `verbatimModuleSyntax` and `isolatedModules`, instead of the
+  /// stricter values the check applies by default. For an extension
+  /// that imports source from a project with its own rules. Also
+  /// settable as `[extensions] inheritCompilerOptions = true`.
+  #[arg(long)]
+  pub inherit_compiler_options: bool,
 }
 
 #[derive(Args)]

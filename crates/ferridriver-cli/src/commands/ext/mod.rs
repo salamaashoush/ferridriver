@@ -69,7 +69,13 @@ async fn check_once(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyho
     return Box::pin(check_loop(config, args)).await;
   }
   let specs = specs_from(&config, &args.paths)?;
-  let report = Box::pin(build_report(&config, &specs, !args.no_typecheck)).await;
+  let report = Box::pin(build_report(
+    &config,
+    &specs,
+    !args.no_typecheck,
+    args.inherit_compiler_options || config.extensions.inherit_compiler_options(),
+  ))
+  .await;
   report::print(&report)?;
   if report.ok {
     return Ok(());
@@ -79,7 +85,13 @@ async fn check_once(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyho
 
 async fn check_loop(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyhow::Result<()> {
   let specs = specs_from(&config, &args.paths)?;
-  let mut report = Box::pin(build_report(&config, &specs, !args.no_typecheck)).await;
+  let mut report = Box::pin(build_report(
+    &config,
+    &specs,
+    !args.no_typecheck,
+    args.inherit_compiler_options || config.extensions.inherit_compiler_options(),
+  ))
+  .await;
   report::print(&report)?;
 
   let mut watched: Vec<PathBuf> = Vec::new();
@@ -111,7 +123,13 @@ async fn check_loop(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyho
     // Re-resolve from scratch: a manifest edit can change the entry set,
     // so reusing the previous file list would keep loading stale entries.
     let specs = specs_from(&config, &args.paths)?;
-    report = Box::pin(build_report(&config, &specs, !args.no_typecheck)).await;
+    report = Box::pin(build_report(
+      &config,
+      &specs,
+      !args.no_typecheck,
+      args.inherit_compiler_options || config.extensions.inherit_compiler_options(),
+    ))
+    .await;
     report::print(&report)?;
 
     // ...and the root set with it: adding an `entries` item under a new
@@ -268,6 +286,7 @@ async fn build_report(
   config: &FerridriverConfig,
   specs: &[ferridriver_config::ExtensionSpec],
   typecheck: bool,
+  inherit_compiler_options: bool,
 ) -> Report {
   let Resolution {
     resolved,
@@ -291,8 +310,29 @@ async fn build_report(
   } else {
     None
   };
+  // The tsconfig the BUNDLER resolves against, so the type pass and the
+  // bundle agree on what an import means.
+  let pinned_tsconfig = config.test.tsconfig.as_deref().map(|t| {
+    let p = std::path::Path::new(t);
+    if p.is_absolute() {
+      p.to_path_buf()
+    } else {
+      config
+        .source_dir
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(p)
+    }
+  });
   let types = match &scratch {
-    Some(dir) => typecheck::run(&type_files, &package_dirs, dir.path()),
+    Some(dir) => typecheck::run(
+      &type_files,
+      &package_dirs,
+      dir.path(),
+      pinned_tsconfig.as_deref(),
+      inherit_compiler_options,
+    ),
     None => typecheck::TypecheckOutcome {
       checker: None,
       diagnostics: Vec::new(),

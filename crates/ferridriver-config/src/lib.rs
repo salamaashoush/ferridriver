@@ -301,6 +301,16 @@ impl ExtensionsConfig {
       Self::Detailed(d) => d.settings.clone(),
     }
   }
+
+  /// Whether `ext check` defers to the extended tsconfig for the
+  /// authoring-style compiler options. Off for the shorthand shape.
+  #[must_use]
+  pub fn inherit_compiler_options(&self) -> bool {
+    match self {
+      Self::Paths(_) => false,
+      Self::Detailed(d) => d.inherit_compiler_options,
+    }
+  }
 }
 
 /// The detailed `[extensions]` table.
@@ -320,6 +330,20 @@ pub struct ExtensionsDetailed {
   pub settings: BTreeMap<String, serde_json::Value>,
   /// Operator policy ceiling applied to every loaded extension.
   pub policy: ExtensionPolicyConfig,
+  /// Let the extended `tsconfig.json` decide the authoring-style
+  /// compiler options in `ferridriver ext check`, instead of the
+  /// stricter ones the check applies by default
+  /// (`verbatimModuleSyntax`, `isolatedModules`, `strict`).
+  ///
+  /// Off by default, because those three are true of the bundle
+  /// regardless of who wrote it: rolldown transpiles file by file, so
+  /// an extension that violates `isolatedModules` is genuinely broken.
+  ///
+  /// Turn it on when the extension imports source from a project with
+  /// its own rules — the check then reports that project's files
+  /// against that project's config, rather than failing on a style it
+  /// never opted into.
+  pub inherit_compiler_options: bool,
 }
 
 /// Operator ceiling over extension capability manifests. An extension
@@ -1276,6 +1300,7 @@ fixtures = false
         commands: ExtensionCommandsCeiling::ArgvOnly,
         ..ExtensionPolicyConfig::default()
       },
+      inherit_compiler_options: false,
     });
     let json = serde_json::to_value(&detailed).unwrap();
     assert_eq!(json["policy"]["commands"], serde_json::json!("argvOnly"));

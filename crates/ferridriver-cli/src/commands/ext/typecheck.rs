@@ -164,7 +164,19 @@ fn find_checker(search_roots: &[PathBuf]) -> Option<Checker> {
 
 /// Type-check `entries`. `package_dirs` are the packages the entries came
 /// from, used to find a checker and to inherit an author `tsconfig.json`.
-pub fn run(entries: &[PathBuf], package_dirs: &[PathBuf], scratch: &Path) -> TypecheckOutcome {
+///
+/// `pinned` is the resolved `[test].tsconfig`, the one the BUNDLER
+/// resolves imports against. It wins over a package's own, because a
+/// disagreement between the two is the check reporting `TS2307: cannot
+/// find module` for every import that rolldown resolves without
+/// complaint.
+pub fn run(
+  entries: &[PathBuf],
+  package_dirs: &[PathBuf],
+  scratch: &Path,
+  pinned: Option<&Path>,
+  inherit_compiler_options: bool,
+) -> TypecheckOutcome {
   let ts_entries: Vec<&PathBuf> = entries
     .iter()
     .filter(|p| {
@@ -212,7 +224,10 @@ pub fn run(entries: &[PathBuf], package_dirs: &[PathBuf], scratch: &Path) -> Typ
   }
 
   let config_path = scratch.join("tsconfig.json");
-  if let Err(e) = std::fs::write(&config_path, tsconfig(&ts_entries, package_dirs, &types_root)) {
+  if let Err(e) = std::fs::write(
+    &config_path,
+    tsconfig(&ts_entries, package_dirs, &types_root, pinned, inherit_compiler_options),
+  ) {
     return TypecheckOutcome {
       checker: Some(checker.label),
       diagnostics: vec![format!("could not write {}: {e}", config_path.display())],
@@ -317,13 +332,65 @@ fn run_bounded(mut cmd: Command, timeout: Duration) -> std::io::Result<std::proc
   })
 }
 
+/// The `paths` of an extended tsconfig, rebased to absolute.
+///
+/// `extends` merges `compilerOptions` key by key, so the generated
+/// config's own `paths` REPLACES the inherited one rather than adding
+/// to it. Re-stating the author's mappings is what keeps an app-source
+/// alias resolving; making them absolute is what keeps them resolving
+/// from the scratch directory the generated config lives in, since
+/// `paths` is read relative to `baseUrl` (or, without one, to the
+/// tsconfig that declared it).
+///
+/// A tsconfig that cannot be read or parsed yields `None`: the check
+/// then behaves exactly as it did before, and TypeScript reports the
+/// malformed file itself.
+fn inherited_paths(tsconfig_path: &Path) -> Option<serde_json::Value> {
+  let mut text = std::fs::read_to_string(tsconfig_path).ok()?;
+  json_strip_comments::strip(&mut text).ok()?;
+  let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
+  let options = parsed.get("compilerOptions")?;
+  let paths = options.get("paths")?.as_object()?;
+
+  let dir = tsconfig_path.parent()?;
+  let base = match options.get("baseUrl").and_then(serde_json::Value::as_str) {
+    Some(b) => dir.join(b),
+    None => dir.to_path_buf(),
+  };
+
+  let rebased: serde_json::Map<String, serde_json::Value> = paths
+    .iter()
+    .map(|(pattern, targets)| {
+      let absolute: Vec<serde_json::Value> = targets
+        .as_array()
+        .map(|t| {
+          t.iter()
+            .map(|target| match target.as_str() {
+              Some(s) => serde_json::Value::String(base.join(s).display().to_string()),
+              None => target.clone(),
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+      (pattern.clone(), serde_json::Value::Array(absolute))
+    })
+    .collect();
+  Some(serde_json::Value::Object(rebased))
+}
+
 /// The generated `tsconfig.json`.
 ///
 /// `files` lists the entry files plus the embedded `@ferridriver/extension`
 /// declaration: its `declare global` block is what makes a bare
 /// `defineTool(...)` call type-check, and an ambient block only applies to
 /// files in the program.
-fn tsconfig(entries: &[&PathBuf], package_dirs: &[PathBuf], types_root: &Path) -> String {
+fn tsconfig(
+  entries: &[&PathBuf],
+  package_dirs: &[PathBuf],
+  types_root: &Path,
+  pinned: Option<&Path>,
+  inherit_compiler_options: bool,
+) -> String {
   let quote = |p: &Path| serde_json::Value::String(p.display().to_string());
 
   let mut files: Vec<serde_json::Value> = vec![quote(&types_root.join("@ferridriver/extension/index.d.ts"))];
@@ -360,18 +427,50 @@ fn tsconfig(entries: &[&PathBuf], package_dirs: &[PathBuf], types_root: &Path) -
     "include": [],
   });
 
+  // `--inherit-compiler-options`: drop the three that describe how
+  // source may be WRITTEN, so the extended tsconfig's values survive the
+  // key-by-key merge below. Everything else stays ours, because it
+  // describes the RUNTIME (`types: []`, `lib`, `moduleResolution`) or
+  // the check itself (`noEmit`, `files`), and an inherited value there
+  // would describe an environment the extension does not run in.
+  if inherit_compiler_options && let Some(options) = config["compilerOptions"].as_object_mut() {
+    for key in ["strict", "verbatimModuleSyntax", "isolatedModules"] {
+      options.remove(key);
+    }
+  }
+
   // Inherit the package's own options when it has a tsconfig, so an
   // author's `jsx`, `target` or stricter flags still apply. Ours are
   // applied on top and REPLACE the inherited value key by key (that is
   // how `extends` merges `compilerOptions`), so an author's own `paths`
   // does not survive — the two `@ferridriver/*` mappings below have to
   // win or nothing resolves without an install.
-  if let Some(existing) = package_dirs
-    .iter()
-    .map(|d| d.join("tsconfig.json"))
-    .find(|p| p.is_file())
-  {
+  //
+  // `[test].tsconfig` first: it is what the bundler resolves against,
+  // and an extension importing an app-source alias (`~/constants`)
+  // resolves there and nowhere else.
+  if let Some(existing) = pinned.filter(|p| p.is_file()).map(Path::to_path_buf).or_else(|| {
+    package_dirs
+      .iter()
+      .map(|d| d.join("tsconfig.json"))
+      .find(|p| p.is_file())
+  }) {
     config["extends"] = serde_json::Value::String(existing.display().to_string());
+    // An inherited `paths` is dropped by the key-by-key merge above, so
+    // re-state the author's mappings under ours, rebased onto the
+    // tsconfig that declared them. Without this, extending a repo
+    // tsconfig for its `paths` deletes the very thing it was extended
+    // for.
+    if let Some(inherited) = inherited_paths(&existing) {
+      let ours = config["compilerOptions"]["paths"].clone();
+      let mut merged = inherited;
+      if let (Some(m), Some(o)) = (merged.as_object_mut(), ours.as_object()) {
+        for (k, v) in o {
+          m.insert(k.clone(), v.clone());
+        }
+      }
+      config["compilerOptions"]["paths"] = merged;
+    }
   }
 
   serde_json::to_string_pretty(&config).unwrap_or_else(|_| String::from("{}"))

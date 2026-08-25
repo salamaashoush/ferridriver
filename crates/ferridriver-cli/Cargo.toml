@@ -61,6 +61,10 @@ toml = "1"
 # `ext check` writes a generated tsconfig + the embedded type
 # declarations into a scratch dir for the TypeScript pass.
 tempfile = "3"
+# `tsconfig.json` is JSONC. This is the crate oxc_resolver strips with
+# before handing a tsconfig to serde_json, so `ext check` reads an
+# author's `paths` through the same parser the bundler resolved it with.
+json-strip-comments = "3"
 
 [dev-dependencies]
 serde_json = { workspace = true }
