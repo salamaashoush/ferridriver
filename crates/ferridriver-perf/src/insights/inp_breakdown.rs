@@ -11,10 +11,29 @@ use crate::insights::{Check, Insight, Item, Severity};
 /// Google's "good" threshold for INP.
 const GOOD_INP_MS: f64 = 200.0;
 
+const DESCRIPTION: &str = "Start investigating with the longest subpart. Delays can be minimized. To reduce \
+                           processing duration, optimize the main-thread costs, often JS.";
+
 #[must_use]
-pub fn run(interactions: &[Interaction]) -> Option<Insight> {
-  // Sorted longest-first by the handler, so the worst is the first.
-  let worst = interactions.first()?;
+pub fn run(interactions: &[Interaction]) -> Insight {
+  // Sorted longest-first by the handler, so the worst is the first. A
+  // page nobody interacted with has no INP, which is a pass rather than
+  // an absent insight: "no slow interaction" is a real answer.
+  let Some(worst) = interactions.first() else {
+    return Insight {
+      key: "INPBreakdown".into(),
+      title: "INP breakdown".into(),
+      description: DESCRIPTION.into(),
+      severity: Severity::Pass,
+      checks: vec![Check {
+        name: "inpIsGood".into(),
+        passed: true,
+        detail: "No interactions were recorded".into(),
+      }],
+      metrics: Vec::new(),
+      items: Vec::new(),
+    };
+  };
 
   let items = vec![
     Item {
@@ -36,13 +55,14 @@ pub fn run(interactions: &[Interaction]) -> Option<Insight> {
 
   let total = worst.duration_ms();
   let passed = total <= GOOD_INP_MS;
-  Some(Insight {
+  // Like the LCP breakdown, this reports where the time went rather than
+  // rendering a verdict, so it stays informative whenever there is an
+  // interaction to break down.
+  Insight {
     key: "INPBreakdown".into(),
     title: "INP breakdown".into(),
-    description: "Start investigating with the longest subpart. Delays can be minimized. To reduce processing \
-                  duration, optimize the main-thread costs, often JS."
-      .into(),
-    severity: if passed { Severity::Pass } else { Severity::Fail },
+    description: DESCRIPTION.into(),
+    severity: Severity::Informative,
     checks: vec![Check {
       name: "inpIsGood".into(),
       passed,
@@ -53,5 +73,5 @@ pub fn run(interactions: &[Interaction]) -> Option<Insight> {
     }],
     metrics: vec![("inpMs".into(), total)],
     items,
-  })
+  }
 }

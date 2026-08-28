@@ -144,9 +144,7 @@ pub fn analyze(events: &[event::TraceEvent]) -> Report {
   if let Some(insight) = insights::render_blocking::run(&requests, first_paint_ts, &meta.main_frame_url) {
     insights.push(insight);
   }
-  if let Some(insight) = insights::inp_breakdown::run(&interactions) {
-    insights.push(insight);
-  }
+  insights.push(insights::inp_breakdown::run(&interactions));
   insights.push(insights::dom_size::run(&renderer));
   insights.push(insights::forced_reflow::run(&renderer));
   insights.push(insights::cls_culprits::run(

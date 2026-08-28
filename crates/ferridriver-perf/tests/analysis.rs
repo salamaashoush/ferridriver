@@ -657,7 +657,12 @@ fn inp_breaks_the_longest_interaction_into_three_phases() {
   assert!((by("Processing duration") - 40.0).abs() < 0.01);
   // 100 + 300 - 150 = 250.
   assert!((by("Presentation delay") - 250.0).abs() < 0.01);
-  assert_eq!(inp.severity, Severity::Fail, "300ms is over the 200ms bar");
+  // A breakdown reports where the time went; the verdict on whether
+  // 300ms is too slow belongs to the INP metric, not to this insight.
+  // Upstream marks it informative for the same reason.
+  assert_eq!(inp.severity, Severity::Informative);
+  let (_, inp_ms) = inp.metrics.iter().find(|(k, _)| k == "inpMs").unwrap();
+  assert!((inp_ms - 300.0).abs() < 0.01);
 }
 
 /// A tap emits pointerdown, pointerup and click under one interactionId.
@@ -935,9 +940,11 @@ fn a_long_chain_of_critical_requests_is_reported_with_its_depth() {
   assert_eq!(tree.items[0].label.trim(), "https://site.example/");
 }
 
-/// Requests the parser found itself are not a chain, however many.
+/// Upstream fails at a chain of two, so the document plus one critical
+/// resource already counts. What separates a healthy page from a bad one
+/// is the DEPTH, so that is what this pins.
 #[test]
-fn parallel_requests_are_not_a_chain() {
+fn parser_found_requests_stay_at_depth_two_however_many_there_are() {
   let mut events = trace(vec![]);
   events.extend(request(
     "1",
@@ -961,7 +968,12 @@ fn parallel_requests_are_not_a_chain() {
     events.extend(req);
   }
   let report = ferridriver_perf::analyze_values(&events);
-  assert_eq!(insight(&report, "NetworkDependencyTree").severity, Severity::Pass);
+  let tree = insight(&report, "NetworkDependencyTree");
+  let (_, depth) = tree.metrics.iter().find(|(k, _)| k == "maxChainLength").unwrap();
+  assert!(
+    (depth - 2.0).abs() < f64::EPSILON,
+    "four parser-found scripts should stay two deep, got {depth}"
+  );
 }
 
 fn shift(ts: i64, score: f64) -> serde_json::Value {
@@ -1071,12 +1083,23 @@ fn a_late_meta_charset_and_no_header_fails() {
   assert!(cs.checks.iter().any(|c| c.detail.contains("after the first 1024")));
 }
 
+/// Detection only runs on scripts over the 5000-byte floor, so the
+/// fixture is padded past it. A smaller script is covered separately.
 #[test]
 fn core_js_polyfills_and_babel_transforms_are_detected() {
-  let source = "function _classCallCheck(a,n){if(!(a instanceof n))throw new TypeError(\
-                \"Cannot call a class as a function\");}\n\
-                Array.prototype.at = function(i){return this[i];};\n\
-                Object.fromEntries = function(e){return {};};\n";
+  let source = format!(
+    "function _classCallCheck(a,n){{if(!(a instanceof n))throw new TypeError(\
+     \"Cannot call a class as a function\");}}\n\
+     Array.prototype.at = function(i){{return this[i];}};\n\
+     Object.fromEntries = function(e){{return {{}};}};\n\
+     Array.prototype.flat = function(){{return this;}};\n\
+     Array.prototype.includes = function(x){{return false;}};\n\
+     String.prototype.padStart = function(n){{return this;}};\n\
+     Promise.allSettled = function(p){{return p;}};\n\
+     Object.entries = function(o){{return [];}};\n{}",
+    "// pad\n".repeat(1200)
+  );
+  let source = source.as_str();
   let events = trace(vec![script_source(1, "https://site.example/bundle.js", source)]);
   let report = ferridriver_perf::analyze_values(&events);
 
@@ -1086,6 +1109,17 @@ fn core_js_polyfills_and_babel_transforms_are_detected() {
   assert!(label.contains("Array.prototype.at"), "{label}");
   assert!(label.contains("Object.fromEntries"), "{label}");
   assert!(label.contains("@babel/plugin-transform-classes"), "{label}");
+}
+
+/// A few hundred bytes of hand-written compatibility code is not a
+/// bundling problem, and reporting it as one is a false positive. Both
+/// the script size and the estimated saving have to clear 5000 bytes.
+#[test]
+fn a_small_script_with_a_polyfill_is_below_the_reporting_floor() {
+  let source = "Array.prototype.at = function(i){return this[i];};\n";
+  let events = trace(vec![script_source(1, "https://site.example/tiny.js", source)]);
+  let report = ferridriver_perf::analyze_values(&events);
+  assert_eq!(insight(&report, "LegacyJavaScript").severity, Severity::Pass);
 }
 
 /// Modern source must not be flagged; a false positive here tells people

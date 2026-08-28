@@ -15,8 +15,11 @@ use crate::handlers::network::NetworkRequest;
 use crate::insights::{Check, Insight, Item, Severity};
 use crate::units::{len_to_f64, micros_to_ms};
 
-/// Chains at or under this length are ordinary and not worth reporting.
-const MAX_ACCEPTABLE_CHAIN_LENGTH: usize = 2;
+/// A chain this long is a finding. Upstream fails on `path.length >= 2`,
+/// so the document plus one critical resource is already a chain: the
+/// resource could not be discovered until the HTML arrived. It reads
+/// aggressive, but matching it is the point of a port.
+const MIN_REPORTABLE_CHAIN_LENGTH: usize = 2;
 
 #[must_use]
 pub fn run(requests: &[NetworkRequest], document_url: &str) -> Insight {
@@ -47,7 +50,7 @@ pub fn run(requests: &[NetworkRequest], document_url: &str) -> Insight {
     }
   }
 
-  let passed = longest.len() <= MAX_ACCEPTABLE_CHAIN_LENGTH;
+  let passed = longest.len() < MIN_REPORTABLE_CHAIN_LENGTH;
   let items: Vec<Item> = longest
     .iter()
     .enumerate()

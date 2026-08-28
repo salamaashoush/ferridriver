@@ -14,11 +14,16 @@ use crate::units::micros_to_ms;
 
 #[must_use]
 pub fn run(renderer: &Renderer) -> Insight {
-  // Grouped by reflow step: thirty layouts forced in one loop is one
-  // thing to fix, not thirty findings.
+  // Grouped by the script frame that forced them, as upstream does:
+  // thirty layouts forced in one loop is one thing to fix, not thirty
+  // findings, and the function is what a developer would go and change.
   let mut by_function: FxHashMap<&str, (f64, usize)> = FxHashMap::default();
   for reflow in &renderer.forced_reflows {
-    let key = reflow.kind.as_str();
+    let key = if reflow.function.is_empty() {
+      "(unattributed)"
+    } else {
+      reflow.function.as_str()
+    };
     let entry = by_function.entry(key).or_insert((0.0, 0));
     entry.0 += micros_to_ms(reflow.dur);
     entry.1 += 1;
@@ -26,8 +31,8 @@ pub fn run(renderer: &Renderer) -> Insight {
 
   let mut items: Vec<Item> = by_function
     .into_iter()
-    .map(|(kind, (total_ms, count))| Item {
-      label: format!("{kind} x{count}"),
+    .map(|(function, (total_ms, count))| Item {
+      label: format!("{function} x{count}"),
       value: total_ms,
       unit: "ms",
     })

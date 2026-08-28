@@ -31,3 +31,6 @@ name = "capture"
 
 [[example]]
 name = "bench"
+
+[[example]]
+name = "report"

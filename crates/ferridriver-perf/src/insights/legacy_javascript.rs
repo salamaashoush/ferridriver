@@ -7,11 +7,16 @@
 //! strings that only appear in Babel's output, and match them against
 //! the script source the trace carried.
 //!
-//! Upstream also uses the script's source map to attribute the exact
-//! byte cost of each polyfill module. Source maps are not in the trace
-//! and fetching them would make this crate do network I/O, so the byte
-//! figure here is an estimate from how many patterns matched, and is
-//! reported as such rather than as a measured saving.
+//! The byte cost comes from upstream's own module-size graph: a
+//! polyfill pulls in a set of core-js modules, and the cost is their
+//! combined size counted once per script.
+//!
+//! One thing upstream does that this cannot: with a source map it also
+//! finds polyfills by looking for core-js module paths among the
+//! sources, catching ones whose emitted code no pattern matches. Maps
+//! are not in the trace and fetching them would make this crate do
+//! network I/O, so that second pass is absent and a heavily-minified
+//! bundle may under-report.
 
 use std::fmt::Write as _;
 use std::sync::OnceLock;
@@ -20,9 +25,8 @@ use regex::RegexSet;
 use rustc_hash::FxHashSet;
 
 use crate::handlers::scripts::Script;
-use crate::insights::polyfills::CORE_JS_POLYFILLS;
+use crate::insights::polyfills::{CORE_JS_POLYFILLS, MAX_POLYFILL_SIZE, MODULE_SIZES, POLYFILL_DEPENDENCIES};
 use crate::insights::{Check, Insight, Item, Severity};
-use crate::units::{count_to_f64, len_to_f64};
 
 /// Strings that appear only in the output of a specific Babel
 /// transform. From `getTransformPatterns`.
@@ -38,10 +42,11 @@ const TRANSFORM_PATTERNS: [(&str, &str); 3] = [
   ),
 ];
 
-/// Rough bytes a single polyfill module costs once shipped. Upstream
-/// derives this per module from the source map; without one this is a
-/// flat approximation, deliberately conservative.
-const ESTIMATED_BYTES_PER_POLYFILL: i64 = 400;
+/// Scripts smaller than this are not worth analysing, and neither are
+/// savings smaller than this. Both gates are upstream's `BYTE_THRESHOLD`
+/// and both matter: without them a few hundred bytes of hand-written
+/// compatibility code is reported as a bundling problem.
+const BYTE_THRESHOLD: usize = 5000;
 
 /// The regex a polyfill is recognised by.
 ///
@@ -113,9 +118,15 @@ fn matcher() -> &'static (RegexSet, Vec<String>) {
 pub fn run(scripts: &[Script]) -> Insight {
   let (set, names) = matcher();
   let mut items = Vec::new();
-  let mut total_matches = 0usize;
+  let mut total_bytes = 0u32;
 
   for script in scripts {
+    // A script this small cannot be a transpiled bundle, and reporting
+    // one is a false positive: a few hundred bytes of hand-written
+    // compatibility code is not a bundling problem.
+    if script.content.len() < BYTE_THRESHOLD {
+      continue;
+    }
     let matched: FxHashSet<&str> = set
       .matches(&script.content)
       .into_iter()
@@ -124,7 +135,12 @@ pub fn run(scripts: &[Script]) -> Insight {
     if matched.is_empty() {
       continue;
     }
-    total_matches += matched.len();
+    let wasted = wasted_bytes(&matched);
+    if (wasted as usize) < BYTE_THRESHOLD {
+      continue;
+    }
+    total_bytes = total_bytes.saturating_add(wasted);
+
     let mut found: Vec<&str> = matched.into_iter().collect();
     found.sort_unstable();
     items.push(Item {
@@ -133,18 +149,14 @@ pub fn run(scripts: &[Script]) -> Insight {
         if script.url.is_empty() { "(inline)" } else { &script.url },
         found.join(", ")
       ),
-      value: len_to_f64(found.len()),
-      unit: "patterns",
+      value: f64::from(wasted),
+      unit: "bytes",
     });
   }
 
   items.sort_by(|a, b| b.value.total_cmp(&a.value));
   let passed = items.is_empty();
-  let estimated_bytes = count_to_f64(
-    i64::try_from(total_matches)
-      .unwrap_or(i64::MAX)
-      .saturating_mul(ESTIMATED_BYTES_PER_POLYFILL),
-  );
+  let estimated_bytes = f64::from(total_bytes);
 
   Insight {
     key: "LegacyJavaScript".into(),
@@ -164,12 +176,31 @@ pub fn run(scripts: &[Script]) -> Insight {
         }
       } else {
         format!(
-          "{} scripts ship {total_matches} legacy patterns (roughly {estimated_bytes:.0} bytes, estimated)",
-          items.len()
+          "{} scripts ship legacy polyfills or transforms, about {:.0} KB of core-js",
+          items.len(),
+          estimated_bytes / 1024.0
         )
       },
     }],
     metrics: vec![("estimatedWastedBytes".into(), estimated_bytes)],
     items,
   }
+}
+
+/// Bytes the matched polyfills cost, from upstream's module-size graph.
+///
+/// Modules are counted ONCE across every polyfill in the script: two
+/// polyfills that both pull in the same core-js internals do not pay for
+/// it twice. Capped at the size of core-js itself.
+fn wasted_bytes(matched: &FxHashSet<&str>) -> u32 {
+  let mut modules: FxHashSet<usize> = FxHashSet::default();
+  for name in matched {
+    // Transform patterns are named `@babel/...` and have no core-js
+    // modules behind them.
+    if let Some((_, ids)) = POLYFILL_DEPENDENCIES.iter().find(|(key, _)| key == name) {
+      modules.extend(ids.iter().copied());
+    }
+  }
+  let total: u32 = modules.into_iter().filter_map(|id| MODULE_SIZES.get(id).copied()).sum();
+  total.min(MAX_POLYFILL_SIZE)
 }

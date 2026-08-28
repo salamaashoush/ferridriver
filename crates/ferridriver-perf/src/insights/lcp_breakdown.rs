@@ -76,6 +76,9 @@ pub fn run(
   }
 
   let total = micros_to_ms(lcp_ts - navigation_ts);
+  // A breakdown reports where the time went; it does not pass or fail.
+  // Upstream marks it informative for the same reason, and the LCP
+  // number itself is already in the metrics.
   let passed = total <= GOOD_LCP_MS;
   Some(Insight {
     key: "LCPBreakdown".into(),
@@ -83,7 +86,7 @@ pub fn run(
     description: "Each subpart has specific improvement strategies. Ideally, most of the LCP time should be \
                   spent on loading the resource, not within delays."
       .into(),
-    severity: if passed { Severity::Pass } else { Severity::Fail },
+    severity: Severity::Informative,
     checks: vec![Check {
       name: "lcpIsGood".into(),
       passed,

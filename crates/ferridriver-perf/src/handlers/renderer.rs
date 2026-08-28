@@ -49,8 +49,8 @@ pub struct Update {
 pub struct ForcedReflow {
   pub ts: Micro,
   pub dur: Micro,
-  /// The reflow step that was forced.
-  pub kind: String,
+  /// The outermost script frame that forced it.
+  pub function: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -117,58 +117,87 @@ impl Renderer {
   }
 }
 
-/// Reflows that ran inside a script, grouped by the task that paid for
-/// them and kept only when that task's total crosses the threshold.
+/// Reflows that ran inside a script.
 ///
-/// Nesting is reconstructed from timestamps: the trace is a flat list,
-/// but a complete (`X`) event contains every event that starts before it
-/// ends. Sorting by start, then by descending duration, puts a parent
-/// ahead of its children.
+/// Mirrors `WarningsHandler.processForcedReflowWarning` exactly, and the
+/// exactness matters. Events are walked in TRACE ORDER, not sorted:
+/// sorting by timestamp interleaves events from different threads and
+/// processes, which corrupts the containment stack and made this find
+/// nothing at all on a page that really was thrashing layout.
+///
+/// Two stacks are maintained. `all_events` holds whatever encloses the
+/// current event, and returning to depth one means a new top-level task
+/// began, which is when the previous task's reflow total is final.
+/// `js_invocations` holds only script frames, so a non-empty one means
+/// the layout below it was forced rather than scheduled.
 fn find_forced_reflows(events: &[TraceEvent]) -> Vec<ForcedReflow> {
-  let mut ordered: Vec<&TraceEvent> = events.iter().filter(|e| e.ph == "X" || e.dur.is_some()).collect();
-  ordered.sort_by_key(|e| (e.ts, std::cmp::Reverse(e.dur.unwrap_or(0))));
-
   let threshold = f64_to_micros(FORCED_REFLOW_THRESHOLD_MS * MILLIS_TO_MICROS);
   let mut found = Vec::new();
-  // Ends of the JS invocations currently open around us.
-  let mut js_stack: Vec<Micro> = Vec::new();
-  let mut task_end: Option<Micro> = None;
+  let mut all_events: Vec<Micro> = Vec::new();
+  let mut js_invocations: Vec<(Micro, String)> = Vec::new();
   let mut task_reflows: Vec<ForcedReflow> = Vec::new();
 
-  let flush = |task_reflows: &mut Vec<ForcedReflow>, found: &mut Vec<ForcedReflow>| {
-    let total: Micro = task_reflows.iter().map(|r| r.dur).sum();
-    if total >= threshold {
-      found.append(task_reflows);
-    }
-    task_reflows.clear();
-  };
+  for event in events {
+    let end = event.end();
+    // Anything that finished before this event started no longer
+    // encloses it.
+    all_events.retain(|open_end| event.ts <= *open_end);
+    all_events.push(end);
+    js_invocations.retain(|(open_end, _)| event.ts <= *open_end);
 
-  for event in ordered {
-    // A task ends when an event starts after it; that is the point at
-    // which its reflow total is final.
-    if task_end.is_some_and(|end| event.ts > end) {
-      flush(&mut task_reflows, &mut found);
-      task_end = None;
-    }
-    js_stack.retain(|end| event.ts <= *end);
-
-    if event.name == "RunTask" {
-      task_end = Some(event.end());
-    }
     if is_js_invocation(&event.name) {
-      js_stack.push(event.end());
+      js_invocations.push((end, script_frame(event)));
       continue;
     }
-    if !js_stack.is_empty() && REFLOW_EVENTS.contains(&event.name.as_str()) {
+    if !js_invocations.is_empty() && REFLOW_EVENTS.contains(&event.name.as_str()) {
       task_reflows.push(ForcedReflow {
         ts: event.ts,
         dur: event.dur.unwrap_or(0),
-        kind: event.name.clone(),
+        // The INNERMOST frame that names a function. Upstream walks up
+        // from the reflow to the first enclosing `FunctionCall`, and
+        // that is what a developer would go and change; the outermost
+        // frame is usually `EventDispatch`, which names only the event
+        // type and attributes every reflow on the page to "click".
+        function: js_invocations
+          .iter()
+          .rev()
+          .find(|(_, name)| !name.is_empty())
+          .map(|(_, name)| name.clone())
+          .unwrap_or_default(),
       });
+      continue;
+    }
+    if all_events.len() == 1 {
+      let total: Micro = task_reflows.iter().map(|r| r.dur).sum();
+      if total >= threshold {
+        found.append(&mut task_reflows);
+      }
+      task_reflows.clear();
     }
   }
-  flush(&mut task_reflows, &mut found);
+  let total: Micro = task_reflows.iter().map(|r| r.dur).sum();
+  if total >= threshold {
+    found.append(&mut task_reflows);
+  }
   found
+}
+
+/// The function a JS invocation event names, for attribution.
+fn script_frame(event: &TraceEvent) -> String {
+  let Some(data) = event.data() else {
+    return String::new();
+  };
+  let name = data
+    .get("functionName")
+    .and_then(serde_json::Value::as_str)
+    .unwrap_or_default();
+  let url = data.get("url").and_then(serde_json::Value::as_str).unwrap_or_default();
+  match (name.is_empty(), url.is_empty()) {
+    (true, true) => String::new(),
+    (false, true) => name.to_string(),
+    (true, false) => url.to_string(),
+    (false, false) => format!("{name} ({url})"),
+  }
 }
 
 fn is_js_invocation(name: &str) -> bool {
