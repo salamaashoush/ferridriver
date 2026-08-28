@@ -1007,3 +1007,146 @@ fn a_page_that_never_moved_passes_cls_culprits() {
   let report = ferridriver_perf::analyze_values(&trace(vec![]));
   assert_eq!(insight(&report, "CLSCulprits").severity, Severity::Pass);
 }
+
+// ── charset, scripts, selectors ────────────────────────────────────────
+
+/// Source text only arrives on `ScriptCatchup` under the
+/// v8-source-rundown-sources category; the same event name under the
+/// plain rundown category carries metadata only.
+fn script_source(script_id: i64, url: &str, source: &str) -> serde_json::Value {
+  json!({"name":"ScriptCatchup","ph":"X","ts":60_000,"dur":10,"pid":1,"tid":1,
+         "cat":"disabled-by-default-devtools.v8-source-rundown-sources",
+         "args":{"data":{"isolate":"ISO1","scriptId":script_id,"url":url,"sourceText":source}}})
+}
+
+#[test]
+fn a_charset_in_the_content_type_header_passes() {
+  let mut events = trace(vec![]);
+  let mut req = request("1", "https://site.example/", "text/html", "blocking", 3000, 500);
+  req[1]["args"]["data"]["headers"] = json!([{"name":"content-type","value":"text/html; charset=utf-8"}]);
+  events.extend(req);
+
+  let report = ferridriver_perf::analyze_values(&events);
+  let cs = insight(&report, "CharacterSet");
+  assert_eq!(cs.severity, Severity::Pass);
+  assert!(cs.checks.iter().find(|c| c.name == "httpCharset").unwrap().passed);
+}
+
+/// An early meta tag is enough on its own.
+#[test]
+fn an_early_meta_charset_passes_without_the_header() {
+  let mut events = trace(vec![
+    json!({"name":"MetaCharsetCheck","ph":"I","ts":50_000,"pid":1,"tid":1,
+                                     "args":{"data":{"disposition":"found-in-first-1024-bytes"}}}),
+  ]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    500,
+  ));
+  let report = ferridriver_perf::analyze_values(&events);
+  assert_eq!(insight(&report, "CharacterSet").severity, Severity::Pass);
+}
+
+#[test]
+fn a_late_meta_charset_and_no_header_fails() {
+  let mut events = trace(vec![
+    json!({"name":"MetaCharsetCheck","ph":"I","ts":50_000,"pid":1,"tid":1,
+                                     "args":{"data":{"disposition":"found-after-first-1024-bytes"}}}),
+  ]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    500,
+  ));
+  let report = ferridriver_perf::analyze_values(&events);
+  let cs = insight(&report, "CharacterSet");
+  assert_eq!(cs.severity, Severity::Fail);
+  assert!(cs.checks.iter().any(|c| c.detail.contains("after the first 1024")));
+}
+
+#[test]
+fn core_js_polyfills_and_babel_transforms_are_detected() {
+  let source = "function _classCallCheck(a,n){if(!(a instanceof n))throw new TypeError(\
+                \"Cannot call a class as a function\");}\n\
+                Array.prototype.at = function(i){return this[i];};\n\
+                Object.fromEntries = function(e){return {};};\n";
+  let events = trace(vec![script_source(1, "https://site.example/bundle.js", source)]);
+  let report = ferridriver_perf::analyze_values(&events);
+
+  let legacy = insight(&report, "LegacyJavaScript");
+  assert_eq!(legacy.severity, Severity::Fail);
+  let label = &legacy.items[0].label;
+  assert!(label.contains("Array.prototype.at"), "{label}");
+  assert!(label.contains("Object.fromEntries"), "{label}");
+  assert!(label.contains("@babel/plugin-transform-classes"), "{label}");
+}
+
+/// Modern source must not be flagged; a false positive here tells people
+/// to remove code they need.
+#[test]
+fn modern_javascript_is_not_flagged_as_legacy() {
+  let source = "const x = [1,2,3].at(-1);\nconst y = Object.fromEntries(new Map());\nclass A { b() {} }\n";
+  let events = trace(vec![script_source(1, "https://site.example/modern.js", source)]);
+  let report = ferridriver_perf::analyze_values(&events);
+  assert_eq!(insight(&report, "LegacyJavaScript").severity, Severity::Pass);
+}
+
+#[test]
+fn the_same_bundle_served_from_two_urls_is_duplicated() {
+  let source = "x".repeat(4096);
+  let events = trace(vec![
+    script_source(1, "https://site.example/a/vendor.js", &source),
+    script_source(2, "https://site.example/b/vendor.js", &source),
+  ]);
+  let report = ferridriver_perf::analyze_values(&events);
+  let dup = insight(&report, "DuplicatedJavaScript");
+  assert_eq!(dup.severity, Severity::Fail);
+  // One redundant copy, so one bundle's worth of bytes.
+  let (_, wasted) = dup.metrics.iter().find(|(k, _)| k == "wastedBytes").unwrap();
+  assert!((wasted - 4096.0).abs() < f64::EPSILON, "got {wasted}");
+}
+
+/// One script fetched twice is a caching question, not duplication.
+#[test]
+fn the_same_url_seen_twice_is_not_duplicated() {
+  let source = "y".repeat(4096);
+  let events = trace(vec![
+    script_source(1, "https://site.example/vendor.js", &source),
+    script_source(2, "https://site.example/vendor.js", &source),
+  ]);
+  let report = ferridriver_perf::analyze_values(&events);
+  assert_eq!(insight(&report, "DuplicatedJavaScript").severity, Severity::Pass);
+}
+
+/// Selector stats need profiling turned on. Absent them the answer is
+/// "not measured", which is not the same claim as "fast".
+#[test]
+fn selector_costs_are_reported_as_unmeasured_without_stats() {
+  let report = ferridriver_perf::analyze_values(&trace(vec![]));
+  let sel = insight(&report, "SlowCSSSelector");
+  assert_eq!(sel.severity, Severity::Informative);
+  assert!(sel.checks[0].detail.contains("Not measured"));
+}
+
+#[test]
+fn a_slow_selector_is_reported_when_stats_are_present() {
+  let events = trace(vec![
+    json!({"name":"SelectorStats","ph":"X","ts":60_000,"dur":100,"pid":1,"tid":1,
+    "args":{"selector_stats":{"selector_timings":[
+      {"selector":"div > .a *","elapsed (us)":2500,"match_attempts":9000,"match_count":12},
+      {"selector":".b","elapsed (us)":10,"match_attempts":5,"match_count":5}
+    ]}}}),
+  ]);
+  let report = ferridriver_perf::analyze_values(&events);
+  let sel = insight(&report, "SlowCSSSelector");
+  assert_eq!(sel.severity, Severity::Fail);
+  assert_eq!(sel.items.len(), 1, "only the slow one: {:?}", sel.items);
+  assert!(sel.items[0].label.starts_with("div > .a *"));
+}

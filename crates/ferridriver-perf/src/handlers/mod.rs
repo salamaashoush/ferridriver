@@ -10,3 +10,4 @@ pub mod page_load;
 pub mod page_signals;
 pub mod paint;
 pub mod renderer;
+pub mod scripts;

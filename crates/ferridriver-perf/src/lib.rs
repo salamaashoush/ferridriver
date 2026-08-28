@@ -125,6 +125,7 @@ pub fn analyze(events: &[event::TraceEvent]) -> Report {
   let interactions = handlers::interactions::from_events(events);
   let painted_images = handlers::paint::painted_images(events);
   let culprits = handlers::page_signals::layout_shift_culprits(events);
+  let scripts = handlers::scripts::from_events(events);
   let lcp_ts = metrics
     .largest_contentful_paint
     .map(|ms| meta.time_origin() + units::ms_to_micros(ms));
@@ -154,6 +155,12 @@ pub fn analyze(events: &[event::TraceEvent]) -> Report {
   ));
   insights.push(insights::image_delivery::run(&requests, &painted_images));
   insights.push(insights::network_dependency_tree::run(&requests, &meta.main_frame_url));
+  if let Some(insight) = insights::character_set::run(document, signals.meta_charset) {
+    insights.push(insight);
+  }
+  insights.push(insights::duplicated_javascript::run(&scripts));
+  insights.push(insights::legacy_javascript::run(&scripts));
+  insights.push(insights::slow_css_selector::run(&signals.selector_timings));
   insights.push(insights::cache::run(&requests));
   insights.push(insights::font_display::run(&signals.fonts, &requests));
   insights.push(insights::viewport::run(&signals.viewport));

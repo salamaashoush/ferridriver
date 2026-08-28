@@ -8,13 +8,17 @@
 
 use crate::event::TraceEvent;
 use crate::handlers::meta::Meta;
+use crate::insights::character_set::MetaCharset;
 use crate::insights::font_display::RemoteFont;
+use crate::insights::slow_css_selector::SelectorTiming;
 use crate::insights::viewport::ViewportState;
 
 #[derive(Debug, Clone, Default)]
 pub struct PageSignals {
   pub viewport: ViewportState,
   pub fonts: Vec<RemoteFont>,
+  pub meta_charset: MetaCharset,
+  pub selector_timings: Vec<SelectorTiming>,
 }
 
 impl PageSignals {
@@ -64,11 +68,52 @@ impl PageSignals {
             }
           }
         },
+        "MetaCharsetCheck" => {
+          if let Some(disposition) = event
+            .data()
+            .and_then(|d| d.get("disposition"))
+            .and_then(serde_json::Value::as_str)
+          {
+            signals.meta_charset = MetaCharset::from_disposition(disposition);
+          }
+        },
+        // Only present when selector profiling was enabled; the insight
+        // reports "not measured" rather than "fast" when it is absent.
+        "SelectorStats" => signals.selector_timings.extend(selector_timings(event)),
         _ => {},
       }
     }
     signals
   }
+}
+
+/// Blink writes selector statistics as an array of records whose keys
+/// carry their units in the name, such as `elapsed (us)`.
+fn selector_timings(event: &TraceEvent) -> Vec<SelectorTiming> {
+  let Some(rows) = event
+    .args
+    .get("selector_stats")
+    .and_then(|s| s.get("selector_timings"))
+    .and_then(serde_json::Value::as_array)
+  else {
+    return Vec::new();
+  };
+  rows
+    .iter()
+    .map(|row| {
+      let num = |k: &str| row.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
+      SelectorTiming {
+        selector: row
+          .get("selector")
+          .and_then(serde_json::Value::as_str)
+          .unwrap_or_default()
+          .to_string(),
+        elapsed_us: num("elapsed (us)"),
+        match_attempts: num("match_attempts"),
+        match_count: num("match_count"),
+      }
+    })
+    .collect()
 }
 
 fn frame_of(event: &TraceEvent) -> Option<&str> {

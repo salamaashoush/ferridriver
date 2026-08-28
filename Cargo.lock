@@ -2039,6 +2039,7 @@ name = "ferridriver-perf"
 version = "0.5.0"
 dependencies = [
  "ferridriver",
+ "regex",
  "rustc-hash",
  "serde",
  "serde_json",
