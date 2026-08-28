@@ -47,11 +47,62 @@ fn read_script_source(args: &cli::RunArgs) -> anyhow::Result<(String, ScriptOrig
   }
 }
 
+/// `--fresh` discards the cookies and storage a run starts from; a session
+/// exists to carry exactly those between runs. Asking for both names no
+/// coherent state for the script to see.
+fn reject_conflicting_state_flags(args: &cli::RunArgs) -> anyhow::Result<()> {
+  if args.fresh && args.session.is_some() {
+    anyhow::bail!(
+      "--fresh cannot be combined with --session: a session keeps its cookies, storage and open \
+       pages between runs, which is what it is for. Drop --session to run against a throwaway \
+       context, or `ferridriver session close` and open a new one."
+    );
+  }
+  Ok(())
+}
+
+/// What `--instance` provisioned, split into the pieces `RunContext` takes.
+struct RunBrowser {
+  page: Option<Arc<ferridriver::Page>>,
+  context: Option<Arc<ferridriver::context::ContextRef>>,
+  browser: Option<Arc<ferridriver::Browser>>,
+  /// The browser this process must close when the script ends, kept separate
+  /// because the other three are moved into the run context. `run` is a
+  /// one-shot: no session or MCP host outlives it to own the browser, so one
+  /// left running is inherited by the next run, which then starts from
+  /// whatever state this one ended in.
+  owned: Option<Arc<ferridriver::Browser>>,
+}
+
+/// Provision the browser `--instance` names, if any. Absent the flag nothing
+/// is launched: a script that never opens a browser pays for none.
+async fn provision_for_run(mcp: ferridriver_config::mcp::McpConfig, args: &cli::RunArgs) -> anyhow::Result<RunBrowser> {
+  let Some(name) = args.instance.as_deref() else {
+    return Ok(RunBrowser {
+      page: None,
+      context: None,
+      browser: None,
+      owned: None,
+    });
+  };
+  // Boxed: the future holds the whole `[mcp]` config plus the launch state it
+  // builds, which is several kilobytes to carry inline on the stack.
+  let p = Box::pin(instance::provision_instance(mcp, name, args.headed, args.fresh)).await?;
+  let owned = (p.launched && args.fresh).then(|| Arc::clone(&p.browser));
+  Ok(RunBrowser {
+    page: Some(p.page),
+    context: Some(p.context),
+    browser: Some(p.browser),
+    owned,
+  })
+}
+
 /// Execute a JS script through the ferridriver-script engine with the
 /// full Playwright-style binding surface. The script launches its own
 /// browser via `chromium()` / `firefox()` / `webkit()`; `--backend`
 /// chooses what a plain `chromium()` resolves to. No page is pre-bound.
 pub async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::Result<()> {
+  reject_conflicting_state_flags(&args)?;
   let (source, origin) = read_script_source(&args)?;
 
   let cwd = std::env::current_dir()?;
@@ -116,17 +167,12 @@ pub async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::
   // through the same state the MCP server builds -- so an instance's args and
   // discover commands mean here what they mean there. Absent the flag nothing
   // is launched: a script that never opens a browser pays for none.
-  let provisioned = match args.instance.as_deref() {
-    // Boxed: the future holds the whole `[mcp]` config plus the launch
-    // state it builds, which is several kilobytes to carry inline on the
-    // stack of every `run` -- including the ones that provision nothing.
-    Some(name) => Some(Box::pin(instance::provision_instance(file_config.mcp, name, args.headed)).await?),
-    None => None,
-  };
-  let (page, browser_context, browser) = match provisioned {
-    Some((page, ctx_ref, browser)) => (Some(page), Some(ctx_ref), Some(browser)),
-    None => (None, None, None),
-  };
+  let RunBrowser {
+    page,
+    context: browser_context,
+    browser,
+    owned: owned_browser,
+  } = provision_for_run(file_config.mcp, &args).await?;
 
   let ctx = ferridriver_script::RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
@@ -158,33 +204,46 @@ pub async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::
     console_sink: (!ui::json()).then(|| Arc::new(console::StreamingConsole) as Arc<dyn ConsoleSink>),
     ..setup.engine
   };
-  let session = ferridriver_script::Session::create(engine_config, &ctx)
-    .await
-    .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
-
-  // ES-module sources (TypeScript, or static `import`/`export`) are
-  // rolldown-bundled + transpiled + compiled to bytecode (disk-cached for
-  // file inputs), then run as a module; the run result is its `default`
-  // export. Plain scripts keep the wrap-and-eval path where top-level
-  // `return` yields the result.
-  let result = if needs_bundle(&origin, &source) {
-    let (entry, bundle_cwd, _tmp) = bundle_entry(&origin, &source, &cwd)?;
-    let bundle = ferridriver_script::bundle_and_compile(std::slice::from_ref(&entry), &bundle_cwd)
+  // The browser has to be closed whichever way the rest of this ends, including
+  // the bundle and session-create failures that would otherwise return past it.
+  let outcome: anyhow::Result<()> = async {
+    let session = ferridriver_script::Session::create(engine_config, &ctx)
       .await
-      .map_err(|e| anyhow::anyhow!("bundle {}: {}", entry.display(), e.message))?;
-    session.execute_module(&bundle, &script_args, opts, &ctx).await.result
-  } else {
-    session.execute(&source, &script_args, opts, &ctx).await.result
-  };
+      .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
 
-  finish_code(&collected_code, code_language, args.code_out.as_deref())?;
-  sweep_artifacts(artifacts_budget, artifacts_dir.as_deref()).await;
-  // A local run's script launches and owns its own browser, so this process
-  // never holds a page to read state from.
-  let report = args
-    .report
-    .then(|| RunReport::collect(code_language, &collected_code, None, setup_secrets));
-  report_code_result(&result, &collected_code, report.as_ref())
+    // ES-module sources (TypeScript, or static `import`/`export`) are
+    // rolldown-bundled + transpiled + compiled to bytecode (disk-cached for
+    // file inputs), then run as a module; the run result is its `default`
+    // export. Plain scripts keep the wrap-and-eval path where top-level
+    // `return` yields the result.
+    let result = if needs_bundle(&origin, &source) {
+      let (entry, bundle_cwd, _tmp) = bundle_entry(&origin, &source, &cwd)?;
+      let bundle = ferridriver_script::bundle_and_compile(std::slice::from_ref(&entry), &bundle_cwd)
+        .await
+        .map_err(|e| anyhow::anyhow!("bundle {}: {}", entry.display(), e.message))?;
+      session.execute_module(&bundle, &script_args, opts, &ctx).await.result
+    } else {
+      session.execute(&source, &script_args, opts, &ctx).await.result
+    };
+
+    finish_code(&collected_code, code_language, args.code_out.as_deref())?;
+    sweep_artifacts(artifacts_budget, artifacts_dir.as_deref()).await;
+    // A local run's script launches and owns its own browser, so this process
+    // never holds a page to read state from.
+    let report = args
+      .report
+      .then(|| RunReport::collect(code_language, &collected_code, None, setup_secrets));
+    report_code_result(&result, &collected_code, report.as_ref())
+  }
+  .await;
+
+  if let Some(browser) = owned_browser {
+    // Best effort: the script's verdict is what the caller is waiting for, and a
+    // browser that has already gone leaves nothing to close.
+    let _ = browser.close().await;
+  }
+
+  outcome
 }
 
 /// Write the generated source to `out`, wrapped in the language's test

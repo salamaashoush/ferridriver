@@ -41,6 +41,16 @@ pub struct RunArgs {
   #[arg(long, requires = "instance", help_heading = "Browser")]
   pub headed: bool,
 
+  /// Start from a browser context with no cookies or storage, and close the
+  /// browser this run launched when the script ends. An instance configured
+  /// with a `userDataDir` otherwise hands every run the profile's logged-in
+  /// state, so whatever the last run left behind decides what this one tests.
+  /// The configured profile is not modified. Only meaningful with
+  /// `--instance`; rejected with `--session`, where the state persisting
+  /// between runs is the point.
+  #[arg(long, requires = "instance", help_heading = "Browser")]
+  pub fresh: bool,
+
   /// Per-script wall-clock timeout in milliseconds.
   #[arg(long, help_heading = "Run")]
   pub timeout_ms: Option<u64>,

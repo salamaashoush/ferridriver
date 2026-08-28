@@ -15,15 +15,21 @@ use std::sync::Arc;
 /// the section defaults all have to resolve the same way they do for the MCP
 /// server, or `--instance staging` would mean something different depending on
 /// which host read it.
+pub struct Provisioned {
+  pub page: Arc<ferridriver::Page>,
+  pub context: Arc<ferridriver::context::ContextRef>,
+  pub browser: Arc<ferridriver::Browser>,
+  /// Whether this process started the browser. Closing one it merely attached
+  /// to would take down something another host is holding open.
+  pub launched: bool,
+}
+
 pub async fn provision_instance(
   mcp_config: ferridriver_config::mcp::McpConfig,
   instance: &str,
   headed: bool,
-) -> anyhow::Result<(
-  Arc<ferridriver::Page>,
-  Arc<ferridriver::context::ContextRef>,
-  Arc<ferridriver::Browser>,
-)> {
+  fresh: bool,
+) -> anyhow::Result<Provisioned> {
   let mcp_config: Arc<dyn ferridriver_mcp::server::McpServerConfig> = Arc::new(mcp_config);
   mcp_config
     .instance_health(instance)
@@ -41,6 +47,8 @@ pub async fn provision_instance(
   let mode = mcp_config
     .resolve_instance(instance)
     .unwrap_or(ferridriver::state::ConnectMode::Launch);
+  // Read before `mode` is handed to the state builder.
+  let launched = matches!(mode, ferridriver::state::ConnectMode::Launch);
 
   let mut state = ferridriver_mcp::server::browser_state_for(mode, backend, headless, &mcp_config);
   if headed {
@@ -60,10 +68,21 @@ pub async fn provision_instance(
   // The full `instance:context` key, not the bare name: `ContextRef` does not
   // run the async bare-name resolution the MCP server does, so a bare label
   // would be read as a context on `default` and launch the wrong browser.
-  let ctx_ref = ferridriver::context::ContextRef::new(state_arc, format!("{instance}:default"));
+  //
+  // `default` is the browser's own context, which for an instance carrying a
+  // `userDataDir` is the profile on disk and everything the last run left in
+  // it. Any other name is created through `Target.createBrowserContext`, so it
+  // starts empty and leaves the profile alone.
+  let context = if fresh { "fresh" } else { "default" };
+  let ctx_ref = ferridriver::context::ContextRef::new(state_arc, format!("{instance}:{context}"));
   let page = ctx_ref
     .new_page()
     .await
     .map_err(|e| anyhow::anyhow!("opening a page on instance `{instance}`: {e}"))?;
-  Ok((page, Arc::new(ctx_ref), Arc::new(browser)))
+  Ok(Provisioned {
+    page,
+    context: Arc::new(ctx_ref),
+    browser: Arc::new(browser),
+    launched,
+  })
 }
