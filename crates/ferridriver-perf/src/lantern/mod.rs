@@ -17,13 +17,15 @@
 //! # use ferridriver_perf::lantern;
 //! # fn main() {
 //! # let (requests, document_url) = (vec![], "");
-//! let savings = lantern::savings_from_removing(&requests, document_url, &[]);
+//! let savings = lantern::savings_from_removing(&requests, document_url, &[], &[], None);
 //! # let _ = savings;
 //! # }
 //! ```
 
 pub mod constants;
+pub mod cpu_graph;
 pub mod graph;
+pub mod metrics;
 pub mod network_analyzer;
 pub mod page_graph;
 pub mod simulator;
@@ -62,13 +64,30 @@ pub fn savings_from_removing(
   requests: &[NetworkRequest],
   document_url: &str,
   removed_urls: &[&str],
+  events: &[crate::event::TraceEvent],
+  first_paint_ts: Option<crate::event::Micro>,
 ) -> Option<Estimate> {
   if requests.is_empty() {
     return None;
   }
   let facts = page_graph::facts(requests);
   let analysis = NetworkAnalysis::analyze(requests, &facts);
-  let (graph, node_of) = page_graph::build(requests, document_url);
+  let (mut graph, node_of) = page_graph::build(requests, document_url);
+  if graph.is_empty() {
+    return None;
+  }
+  // Main-thread work goes in too, or a page held up by script rather
+  // than by fetching simulates as though the script were free.
+  cpu_graph::add_cpu_nodes(&mut graph, events, requests, &node_of);
+
+  // A saving is measured against the graph the metric depends on, not
+  // the whole load. Without a paint timestamp there is no such subgraph,
+  // so the whole graph is the honest fallback and the answer is a
+  // load-time saving rather than a paint one.
+  let graph = match first_paint_ts {
+    Some(cutoff) => metrics::first_contentful_paint_graph(&graph, requests, &node_of, cutoff),
+    None => graph,
+  };
   if graph.is_empty() {
     return None;
   }
@@ -76,13 +95,18 @@ pub fn savings_from_removing(
   let simulator = Simulator::new(&facts, &analysis, MOBILE_SLOW_4G);
   let observed = simulator.simulate(&graph).ok()?;
 
-  let removed: FxHashSet<graph::NodeId> = requests
+  // Node ids are re-numbered by the subgraph, so removal is matched on
+  // the URL the node carries rather than on the original index.
+  let removed: FxHashSet<graph::NodeId> = graph
+    .nodes
     .iter()
     .enumerate()
-    .filter(|(_, request)| removed_urls.contains(&request.url.as_str()))
-    .filter_map(|(index, _)| node_of[index])
-    // The document itself is never removable: without it there is no
-    // page to load.
+    .filter(|(_, node)| !node.is_main_document)
+    .filter(|(_, node)| match node.kind {
+      graph::NodeKind::Network(index) => removed_urls.contains(&requests[index].url.as_str()),
+      graph::NodeKind::Cpu { .. } => false,
+    })
+    .map(|(id, _)| id)
     .filter(|node| *node != graph.root)
     .collect();
 
@@ -95,7 +119,10 @@ pub fn savings_from_removing(
   Some(Estimate {
     observed: observed.time_ms,
     without: without.time_ms,
-    savings: (observed.time_ms - without.time_ms).max(0.0),
+    // Rounded to whole milliseconds, as upstream does: the input is a
+    // simulation, and a fractional millisecond implies precision it does
+    // not have.
+    savings: (observed.time_ms - without.time_ms).max(0.0).round(),
   })
 }
 

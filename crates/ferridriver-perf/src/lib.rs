@@ -141,7 +141,7 @@ pub fn analyze(events: &[event::TraceEvent]) -> Report {
   if let Some(insight) = insights::lcp_discovery::run(document, &requests, &paint) {
     insights.push(insight);
   }
-  if let Some(insight) = insights::render_blocking::run(&requests, first_paint_ts, &meta.main_frame_url) {
+  if let Some(insight) = insights::render_blocking::run(&requests, first_paint_ts, &meta.main_frame_url, events) {
     insights.push(insight);
   }
   insights.push(insights::inp_breakdown::run(&interactions));

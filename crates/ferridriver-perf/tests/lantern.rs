@@ -200,3 +200,101 @@ fn wasted_bytes_convert_to_a_rounded_millisecond_saving() {
   );
   assert!(lantern::wasted_ms_from_bytes(0.0, &analysis).abs() < f64::EPSILON);
 }
+
+/// A saving is measured against the graph the metric depends on, not the
+/// whole page. Simulating everything answers a different, larger
+/// question: on the differential fixture that is 300ms where the
+/// paint-only graph gives 75, which is what devtools-frontend reports.
+#[test]
+fn the_first_paint_graph_keeps_only_what_the_paint_waited_on() {
+  use ferridriver_perf::lantern::metrics::first_contentful_paint_graph;
+
+  let mut graph = Graph::default();
+  let root = graph.add_node(Node {
+    kind: NodeKind::Network(0),
+    start_time_us: 0,
+    end_time_us: 1_000,
+    is_main_document: true,
+  });
+  graph.root = root;
+  // Blocking, and done before the paint: kept.
+  let blocking = graph.add_node(Node {
+    kind: NodeKind::Network(1),
+    start_time_us: 1_000,
+    end_time_us: 50_000,
+    is_main_document: false,
+  });
+  graph.add_dependency(blocking, root);
+  // Finishes after the paint, so it cannot have blocked it: dropped.
+  let late = graph.add_node(Node {
+    kind: NodeKind::Network(2),
+    start_time_us: 1_000,
+    end_time_us: 900_000,
+    is_main_document: false,
+  });
+  graph.add_dependency(late, root);
+
+  let mut requests = vec![
+    request_facts_stub("https://a.example/", "blocking", ""),
+    request_facts_stub("https://a.example/blocking.css", "blocking", ""),
+    request_facts_stub("https://a.example/late.js", "blocking", ""),
+  ];
+  requests[0].end_time = 1_000;
+  requests[1].end_time = 50_000;
+  requests[2].end_time = 900_000;
+
+  let node_of = vec![Some(root), Some(blocking), Some(late)];
+  let pruned = first_contentful_paint_graph(&graph, &requests, &node_of, 100_000);
+
+  // Document plus the one request that finished in time.
+  assert_eq!(pruned.reachable().len(), 2, "expected document + blocking.css");
+}
+
+/// A resource that only looks render-blocking but was fetched by a
+/// script does not actually block the paint, and upstream's optimistic
+/// graph leaves it out.
+#[test]
+fn a_script_initiated_request_is_not_treated_as_render_blocking() {
+  use ferridriver_perf::lantern::metrics::first_contentful_paint_graph;
+
+  let mut graph = Graph::default();
+  let root = graph.add_node(Node {
+    kind: NodeKind::Network(0),
+    start_time_us: 0,
+    end_time_us: 1_000,
+    is_main_document: true,
+  });
+  graph.root = root;
+  let injected = graph.add_node(Node {
+    kind: NodeKind::Network(1),
+    start_time_us: 1_000,
+    end_time_us: 50_000,
+    is_main_document: false,
+  });
+  graph.add_dependency(injected, root);
+
+  let mut requests = vec![
+    request_facts_stub("https://a.example/", "blocking", ""),
+    request_facts_stub("https://a.example/injected.css", "blocking", "script"),
+  ];
+  requests[0].end_time = 1_000;
+  requests[1].end_time = 50_000;
+
+  let pruned = first_contentful_paint_graph(&graph, &requests, &[Some(root), Some(injected)], 100_000);
+  assert_eq!(pruned.reachable().len(), 1, "only the document should survive");
+}
+
+/// A minimal request record for the graph-pruning tests.
+fn request_facts_stub(
+  url: &str,
+  render_blocking: &str,
+  initiator_type: &str,
+) -> ferridriver_perf::handlers::network::NetworkRequest {
+  ferridriver_perf::handlers::network::NetworkRequest {
+    url: url.into(),
+    render_blocking: render_blocking.into(),
+    initiator_type: initiator_type.into(),
+    priority: "VeryHigh".into(),
+    ..Default::default()
+  }
+}

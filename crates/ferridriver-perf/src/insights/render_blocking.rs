@@ -18,7 +18,12 @@ use crate::lantern;
 const MINIMUM_WASTED_MS: f64 = 50.0;
 
 #[must_use]
-pub fn run(requests: &[NetworkRequest], first_paint_ts: Option<Micro>, document_url: &str) -> Option<Insight> {
+pub fn run(
+  requests: &[NetworkRequest],
+  first_paint_ts: Option<Micro>,
+  document_url: &str,
+  events: &[crate::event::TraceEvent],
+) -> Option<Insight> {
   let first_paint = first_paint_ts?;
 
   let blocking: Vec<&NetworkRequest> = requests
@@ -47,7 +52,7 @@ pub fn run(requests: &[NetworkRequest], first_paint_ts: Option<Micro>, document_
     .iter()
     .filter_map(|item| requests.iter().find(|r| r.url == item.label).map(|r| r.url.as_str()))
     .collect();
-  let estimate = lantern::savings_from_removing(requests, document_url, &blocking_urls);
+  let estimate = lantern::savings_from_removing(requests, document_url, &blocking_urls, events, Some(first_paint));
 
   let mut metrics: Vec<(String, f64)> = vec![
     ("renderBlockingRequests".into(), crate::units::len_to_f64(items.len())),
