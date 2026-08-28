@@ -236,6 +236,35 @@ describe('locators', () => {
     expect(await page.evaluate("document.querySelector('[data-testid=save-btn]').dataset.hit")).toBe('1');
   });
 
+  test('script_locator_generate_locator', async ({ page }) => {
+    // generateLocator() returns the EXPRESSION to paste into a test,
+    // where normalize() returns the selector. It prefers a test id,
+    // falls back to role plus accessible name (taken from the <label>,
+    // not the id), and reaches for text rather than a build-generated
+    // class that would not survive the next release.
+    await page.goto(
+      dataUrl(
+        "<h1>Sign in</h1>" +
+          "<label for='email'>Email address</label><input id='email' type='email'>" +
+          "<button data-testid='submit-btn'>Sign in</button>" +
+          "<div class='x9f2a3'>nested</div>",
+      ),
+    );
+    expect(await page.locator('button').generateLocator()).toBe("getByTestId('submit-btn')");
+    expect(await page.locator('#email').generateLocator()).toBe(
+      "getByRole('textbox', { name: 'Email address' })",
+    );
+    expect(await page.locator('h1').generateLocator()).toBe("getByRole('heading', { name: 'Sign in' })");
+    expect(await page.locator('.x9f2a3').generateLocator()).toBe("getByText('nested')");
+  });
+
+  test('script_locator_generate_locator_is_strict', async ({ page }) => {
+    // An expression matching two elements is not one anybody can paste,
+    // so this refuses rather than picking one.
+    await page.goto(dataUrl('<button>One</button><button>Two</button>'));
+    await expect(page.locator('button').generateLocator()).rejects.toThrow(/strict mode violation/);
+  });
+
   test('script_locator_highlight', async ({ page }) => {
     // highlight() installs the Playwright glass-pane overlay
     // (<x-pw-glass>); dispose()/hideHighlight() tear it down. The

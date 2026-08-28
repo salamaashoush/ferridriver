@@ -922,6 +922,13 @@ export interface Locator {
   // setStrict(), and rightClick() (= click({ button: 'right' })).
   description(): string | null;
   normalize(): Promise<Locator>;
+  /**
+   * The locator expression to paste into a test, such as
+   * `getByRole('button', { name: 'Sign in' })`, rather than the selector
+   * `normalize()` returns. Strict: rejects if the locator matches more
+   * than one element.
+   */
+  generateLocator(language?: 'typescript' | 'rust' | 'gherkin'): Promise<string>;
   readonly selector: string;
   readonly isStrict: boolean;
   setStrict(strict: boolean): Locator;

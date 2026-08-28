@@ -861,6 +861,42 @@ pub fn build_selone_js(selector: &str, fd: &str, strict: bool) -> Result<String>
 ///
 /// Returns an error if selector parsing fails, no element matches, or
 /// (strict, like Playwright's `query`) more than one element matches.
+/// Decode the `{ok} | {strict} | {none}` result the injected
+/// `resolveOne` returns.
+///
+/// The shapes are data rather than exceptions because a thrown message
+/// does not survive evaluation: the host sees `Uncaught` and the match
+/// count is gone, so a strict violation was indistinguishable from any
+/// other failure.
+fn decode_resolve_one(raw: Option<serde_json::Value>, selector: &str) -> Result<String> {
+  let text = raw
+    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+    .ok_or_else(|| FerriError::invalid_selector(selector, "no result from the injected engine"))?;
+  let value: serde_json::Value =
+    serde_json::from_str(&text).map_err(|e| FerriError::invalid_selector(selector, e.to_string()))?;
+
+  if let Some(ok) = value.get("ok").and_then(serde_json::Value::as_str) {
+    return Ok(ok.to_string());
+  }
+  if let Some(count) = value.get("strict").and_then(serde_json::Value::as_u64) {
+    return Err(FerriError::strict(
+      selector,
+      usize::try_from(count).unwrap_or(usize::MAX),
+    ));
+  }
+  Err(FerriError::invalid_selector(selector, "no element found"))
+}
+
+/// Resolve `selector` to a single element in `frame_id`'s execution
+/// context and return the canonical selector Playwright's
+/// recorder/codegen would emit for it (`injected.generateSelectorSimple`).
+/// Mirrors `Frame.resolveSelector` in
+/// `/tmp/playwright/packages/playwright-core/src/server/frames.ts:1274`.
+///
+/// # Errors
+///
+/// Returns an error if selector parsing fails, no element matches, or
+/// (strict, like Playwright's `query`) more than one element matches.
 pub async fn normalize_selector(page: &AnyPage, selector: &str, frame_id: Option<&str>) -> Result<String> {
   let parsed = parse(selector)?;
   let parts_json = build_parts_json(&parsed);
@@ -870,16 +906,39 @@ pub async fn normalize_selector(page: &AnyPage, selector: &str, frame_id: Option
     Some(fid) => page.evaluate_in_frame(&js, fid).await,
     None => page.evaluate(&js).await,
   };
-  let value = result.map_err(|err| {
-    if let Some(count) = parse_strict_violation_count(&err) {
-      FerriError::strict(selector, count)
-    } else {
-      err
-    }
-  })?;
-  value
-    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-    .ok_or_else(|| FerriError::invalid_selector(selector, "no element found"))
+  decode_resolve_one(result?, selector)
+}
+
+/// Resolve `selector` to a single element and return the locator
+/// EXPRESSION a developer would paste into a test, rather than the
+/// selector string [`normalize_selector`] returns.
+///
+/// `page.getByRole('button', { name: 'Sign in' })` instead of
+/// `internal:role=button[name="Sign in"s]`. Mirrors Playwright's
+/// `playwright.locator(element)` console helper.
+///
+/// # Errors
+///
+/// Returns an error if selector parsing fails, no element matches, or
+/// more than one element matches.
+pub async fn generate_locator(
+  page: &AnyPage,
+  selector: &str,
+  frame_id: Option<&str>,
+  language: crate::codegen::OutputLanguage,
+) -> Result<String> {
+  let parsed = parse(selector)?;
+  let parts_json = build_parts_json(&parsed);
+  page.ensure_engine_injected().await?;
+  let js = format!(
+    "window.__fd.generateLocator({parts_json},{})",
+    serde_json::json!(language.as_injected_language())
+  );
+  let result = match frame_id {
+    Some(fid) => page.evaluate_in_frame(&js, fid).await,
+    None => page.evaluate(&js).await,
+  };
+  decode_resolve_one(result?, selector)
 }
 
 /// Parse a `strict mode violation: <count>` exception message thrown

@@ -961,6 +961,26 @@ impl LocatorJs {
       .await
   }
 
+  /// The locator expression to paste into a test, such as
+  /// `getByRole('button', { name: 'Sign in' })`, rather than the
+  /// selector `normalize()` returns.
+  #[qjs(rename = "generateLocator")]
+  pub async fn generate_locator(
+    &self,
+    language: rquickjs::function::Opt<String>,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<String> {
+    let language = language
+      .0
+      .map_or(ferridriver::codegen::OutputLanguage::TypeScript, |l| {
+        ferridriver::codegen::OutputLanguage::parse_cli(&l)
+      });
+    call_site
+      .scope(async move { self.inner.generate_locator(language).await.into_js_with(&ctx) })
+      .await
+  }
+
   /// Playwright: `locator.normalize(): Promise<Locator>`. Resolves the
   /// selector to its canonical recorder/codegen form and returns a new
   /// locator built from it.

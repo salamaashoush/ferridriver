@@ -15,6 +15,7 @@ import { getAriaDisabled, getAriaRole, getCheckedWithoutMixed, getElementAccessi
 import { escapeForTextSelector, escapeForAttributeSelector } from '@isomorphic/stringUtils';
 import { UtilityScript } from './utilityScript';
 import { parseEvaluationResultValue, serializeAsCallArgument } from '@isomorphic/utilityScriptSerializers';
+import { asLocator, type Language } from '@isomorphic/locatorGenerators';
 
 // ── Types ──
 
@@ -502,6 +503,23 @@ function normalizeWS(s: string): string {
   return (s || '').replace(/[\u200b\u00ad]/g, '').trim().replace(/\s+/g, ' ');
 }
 
+/**
+ * Resolve `parts` to exactly one element and map it, reporting the
+ * failure modes as DATA rather than as a thrown error.
+ *
+ * A thrown message does not survive the round trip: the host sees only
+ * `Uncaught`, so a strict-mode violation arrived indistinguishable from
+ * any other failure and the match count was lost with it.
+ */
+function resolveOne<T>(parts: SelectorPart[], map: (el: Element) => T): { ok: T } | { strict: number } | { none: true } {
+  const r = executeSelector(parts, document);
+  if (r.length === 0)
+    return { none: true };
+  if (r.length > 1)
+    return { strict: r.length };
+  return { ok: map(r[0]) };
+}
+
 // ── Install on window.__fd ──
 
 declare global {
@@ -589,12 +607,23 @@ if (!window.__fd) {
      * 0 matches so the Rust host can surface a typed error.
      */
     normalizeSelector(parts: SelectorPart[]): string {
-      const r = executeSelector(parts, document);
-      if (r.length === 0)
-        throw new Error('normalize: no element found');
-      if (r.length > 1)
-        throw new Error('strict mode violation: ' + r.length);
-      return injected.generateSelectorSimple(r[0]);
+      return JSON.stringify(resolveOne(parts, el => injected.generateSelectorSimple(el)));
+    },
+
+    /**
+     * As `normalizeSelector`, but returns the locator EXPRESSION a
+     * developer would paste into a test rather than the selector string.
+     * `page.getByRole('button', { name: 'Sign in' })` instead of
+     * `internal:role=button[name="Sign in"s]`.
+     *
+     * Mirrors Playwright's `playwright.locator(element)` console helper
+     * (`consoleApi.ts::_generateLocator`), which is the same
+     * `generateSelectorSimple` result passed through `asLocator`.
+     */
+    generateLocator(parts: SelectorPart[], language?: Language): string {
+      return JSON.stringify(
+        resolveOne(parts, el => asLocator(language || 'javascript', injected.generateSelectorSimple(el))),
+      );
     },
 
     // Playwright selector API (direct access)

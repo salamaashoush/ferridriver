@@ -1630,6 +1630,23 @@ impl Locator {
     Ok(Locator::new(self.frame.clone(), new_selector))
   }
 
+  /// The locator expression a developer would paste into a test.
+  ///
+  /// `page.getByRole('button', { name: 'Sign in' })` rather than the
+  /// selector [`Locator::normalize`] returns. Strict, for the same
+  /// reason: an expression that matches two elements is not one anybody
+  /// can use.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing fails, no element matches, or
+  /// more than one element matches.
+  pub async fn generate_locator(&self, language: crate::codegen::OutputLanguage) -> Result<String> {
+    let (rf, rsel) = self.resolved().await?;
+    let frame_id: Option<&str> = if rf.is_main_frame() { None } else { Some(rf.id()) };
+    selectors::generate_locator(rf.page_arc().inner(), &rsel, frame_id, language).await
+  }
+
   /// Return the bounding box of the element, or `None` if the element is not found.
   ///
   /// # Errors

@@ -63,6 +63,20 @@ pub enum OutputLanguage {
 }
 
 impl OutputLanguage {
+  /// The name the injected `asLocator` knows this language by.
+  ///
+  /// It generates locator EXPRESSIONS and so only speaks the languages
+  /// Playwright ships clients for. Rust and Gherkin have no expression
+  /// form there, and JavaScript is the closest readable stand-in: a
+  /// Rust caller wants `getByRole('button')` to render from, not a raw
+  /// selector.
+  #[must_use]
+  pub fn as_injected_language(self) -> &'static str {
+    match self {
+      Self::TypeScript | Self::Rust | Self::Gherkin => "javascript",
+    }
+  }
+
   /// Parse from a CLI string (e.g. `"typescript"`, `"ts"`, `"gherkin"`).
   /// Unrecognised values default to Rust.
   #[must_use]

@@ -565,6 +565,21 @@ impl Locator {
     Ok(Self::wrap(inner))
   }
 
+  /// The locator expression to paste into a test, such as
+  /// `getByRole('button', { name: 'Sign in' })`, rather than the
+  /// selector `normalize()` returns.
+  #[napi(ts_args_type = "language?: 'typescript' | 'rust' | 'gherkin'")]
+  pub async fn generate_locator(&self, language: Option<String>) -> Result<String> {
+    let language = language.map_or(ferridriver::codegen::OutputLanguage::TypeScript, |l| {
+      ferridriver::codegen::OutputLanguage::parse_cli(&l)
+    });
+    self
+      .inner
+      .generate_locator(language)
+      .await
+      .map_err(crate::error::to_napi)
+  }
+
   #[napi]
   pub async fn bounding_box(&self) -> Result<Option<BoundingBox>> {
     let bb = self.inner.bounding_box().await.map_err(crate::error::to_napi)?;
