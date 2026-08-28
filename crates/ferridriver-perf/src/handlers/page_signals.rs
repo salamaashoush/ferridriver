@@ -78,3 +78,37 @@ fn frame_of(event: &TraceEvent) -> Option<&str> {
     .or_else(|| event.args.get("frame"))
     .and_then(serde_json::Value::as_str)
 }
+
+/// Everything the trace saw that can move layout, for `CLSCulprits`.
+///
+/// The events are all Blink markers whose only consumer is that
+/// insight, so they are collected in the same pass as the rest.
+#[must_use]
+pub fn layout_shift_culprits(events: &[TraceEvent]) -> Vec<crate::insights::cls_culprits::Culprit> {
+  use crate::insights::cls_culprits::{Culprit, CulpritKind};
+
+  let mut culprits = Vec::new();
+  for event in events {
+    let kind = match event.name.as_str() {
+      "LayoutImageUnsized" => CulpritKind::UnsizedImage,
+      "BeginRemoteFontLoad" => CulpritKind::WebFont,
+      "RenderFrameImpl::createChildFrame" => CulpritKind::InjectedIframe,
+      _ => continue,
+    };
+    let detail = event
+      .data()
+      .and_then(|d| {
+        d.get("url")
+          .or_else(|| d.get("nodeName"))
+          .and_then(serde_json::Value::as_str)
+      })
+      .unwrap_or("(unnamed)")
+      .to_string();
+    culprits.push(Culprit {
+      kind,
+      end_ts: event.end(),
+      detail,
+    });
+  }
+  culprits
+}

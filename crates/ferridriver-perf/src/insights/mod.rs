@@ -4,14 +4,17 @@
 //! testable against a recorded trace without a browser anywhere near it.
 
 pub mod cache;
+pub mod cls_culprits;
 pub mod document_latency;
 pub mod dom_size;
 pub mod font_display;
 pub mod forced_reflow;
+pub mod image_delivery;
 pub mod inp_breakdown;
 pub mod lcp_breakdown;
 pub mod lcp_discovery;
 pub mod modern_http;
+pub mod network_dependency_tree;
 pub mod render_blocking;
 pub mod third_parties;
 pub mod viewport;

@@ -758,3 +758,252 @@ fn reflow_outside_a_script_is_not_forced() {
     Severity::Pass
   );
 }
+
+// ── images, dependency chains, layout shift causes ─────────────────────
+
+fn image_request(id: &str, url: &str, mime: &str, bytes: i64, start_us: i64) -> Vec<serde_json::Value> {
+  let mut req = request(id, url, mime, "none", start_us, bytes);
+  req[0]["args"]["data"]["resourceType"] = json!("Image");
+  req
+}
+
+fn paint_image(url: &str, src: (i64, i64), displayed: (i64, i64), is_css: bool) -> serde_json::Value {
+  json!({"name":"PaintImage","ph":"I","ts":200_000,"pid":1,"tid":1,
+         "args":{"data":{"url":url,"srcWidth":src.0,"srcHeight":src.1,
+                         "width":displayed.0,"height":displayed.1,"isCSS":is_css}}})
+}
+
+#[test]
+fn an_image_heavier_than_its_pixels_justify_is_flagged() {
+  let mut events = trace(vec![paint_image(
+    "https://site.example/big.png",
+    (600, 400),
+    (600, 400),
+    false,
+  )]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    500,
+  ));
+  // 240k pixels at the 2/12 target is 40k bytes; 100k is well over.
+  events.extend(image_request(
+    "2",
+    "https://site.example/big.png",
+    "image/png",
+    100_000,
+    5000,
+  ));
+
+  let report = ferridriver_perf::analyze_values(&events);
+  let img = insight(&report, "ImageDelivery");
+  assert_eq!(img.severity, Severity::Fail);
+  assert!(img.items[0].label.contains("modern format"), "{}", img.items[0].label);
+}
+
+/// A well-compressed image is not a finding, however large the picture.
+#[test]
+fn a_well_compressed_image_is_not_flagged() {
+  let mut events = trace(vec![paint_image(
+    "https://site.example/ok.png",
+    (600, 400),
+    (600, 400),
+    false,
+  )]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    500,
+  ));
+  events.extend(image_request(
+    "2",
+    "https://site.example/ok.png",
+    "image/png",
+    4_660,
+    5000,
+  ));
+  assert!(
+    insight(&ferridriver_perf::analyze_values(&events), "ImageDelivery")
+      .items
+      .is_empty()
+  );
+}
+
+/// An image served far larger than it is drawn wastes the difference.
+#[test]
+fn an_oversized_image_is_flagged_for_responsive_serving() {
+  let mut events = trace(vec![paint_image(
+    "https://site.example/huge.png",
+    (2000, 2000),
+    (100, 100),
+    false,
+  )]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    500,
+  ));
+  // Cheap per pixel, so only the responsive rule can fire.
+  events.extend(image_request(
+    "2",
+    "https://site.example/huge.png",
+    "image/png",
+    200_000,
+    5000,
+  ));
+
+  let report = ferridriver_perf::analyze_values(&events);
+  let img = insight(&report, "ImageDelivery");
+  assert!(
+    img.items.iter().any(|i| i.label.contains("responsive images")),
+    "{:?}",
+    img.items
+  );
+}
+
+/// CSS backgrounds are exempt from the responsive advice upstream.
+#[test]
+fn an_oversized_css_background_is_not_flagged_for_responsive_serving() {
+  let mut events = trace(vec![paint_image(
+    "https://site.example/bg.png",
+    (2000, 2000),
+    (100, 100),
+    true,
+  )]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    500,
+  ));
+  events.extend(image_request(
+    "2",
+    "https://site.example/bg.png",
+    "image/png",
+    200_000,
+    5000,
+  ));
+  let report = ferridriver_perf::analyze_values(&events);
+  let img = insight(&report, "ImageDelivery");
+  assert!(!img.items.iter().any(|i| i.label.contains("responsive images")));
+}
+
+#[test]
+fn a_long_chain_of_critical_requests_is_reported_with_its_depth() {
+  let mut events = trace(vec![]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    500,
+  ));
+
+  // Each script is initiated by the one before it, so none can start
+  // until its parent finished.
+  let mut chained = |id: &str, url: &str, parent: &str, start: i64| {
+    let mut req = request(id, url, "text/javascript", "blocking", start, 1000);
+    req[0]["args"]["data"]["resourceType"] = json!("Script");
+    req[0]["args"]["data"]["initiator"] = json!({"type":"script","url":parent});
+    events.extend(req);
+  };
+  chained("2", "https://site.example/a.js", "https://site.example/", 10_000);
+  chained("3", "https://site.example/b.js", "https://site.example/a.js", 100_000);
+  chained("4", "https://site.example/c.js", "https://site.example/b.js", 200_000);
+
+  let report = ferridriver_perf::analyze_values(&events);
+  let tree = insight(&report, "NetworkDependencyTree");
+  assert_eq!(tree.severity, Severity::Fail);
+  let (_, depth) = tree.metrics.iter().find(|(k, _)| k == "maxChainLength").unwrap();
+  assert!(
+    (depth - 4.0).abs() < f64::EPSILON,
+    "expected a 4-deep chain, got {depth}"
+  );
+  // Root first, so the document heads the list.
+  assert_eq!(tree.items[0].label.trim(), "https://site.example/");
+}
+
+/// Requests the parser found itself are not a chain, however many.
+#[test]
+fn parallel_requests_are_not_a_chain() {
+  let mut events = trace(vec![]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    500,
+  ));
+  for (n, id) in ["2", "3", "4", "5"].iter().enumerate() {
+    let mut req = request(
+      id,
+      &format!("https://site.example/{n}.js"),
+      "text/javascript",
+      "blocking",
+      10_000,
+      1000,
+    );
+    req[0]["args"]["data"]["resourceType"] = json!("Script");
+    req[0]["args"]["data"]["initiator"] = json!({"type":"parser","url":"https://site.example/"});
+    events.extend(req);
+  }
+  let report = ferridriver_perf::analyze_values(&events);
+  assert_eq!(insight(&report, "NetworkDependencyTree").severity, Severity::Pass);
+}
+
+fn shift(ts: i64, score: f64) -> serde_json::Value {
+  json!({"name":"LayoutShift","ph":"I","ts":ts,"pid":1,"tid":1,
+         "args":{"data":{"frame":"FRAME1","weighted_score_delta":score,"had_recent_input":false}}})
+}
+
+#[test]
+fn a_shift_is_blamed_on_a_cause_that_finished_just_before_it() {
+  let events = trace(vec![
+    json!({"name":"LayoutImageUnsized","ph":"I","ts":900_000,"pid":1,"tid":1,
+           "args":{"data":{"nodeName":"IMG"}}}),
+    shift(1_000_000, 0.3),
+  ]);
+  let report = ferridriver_perf::analyze_values(&events);
+  let cls = insight(&report, "CLSCulprits");
+  assert_eq!(cls.severity, Severity::Fail);
+  assert!(
+    cls.items[0].label.starts_with("Unsized image"),
+    "{}",
+    cls.items[0].label
+  );
+}
+
+/// The half-second window is what stops an unrelated event elsewhere in
+/// the load being blamed for a shift.
+#[test]
+fn a_cause_outside_the_root_cause_window_is_not_blamed() {
+  let events = trace(vec![
+    json!({"name":"LayoutImageUnsized","ph":"I","ts":100_000,"pid":1,"tid":1,
+           "args":{"data":{"nodeName":"IMG"}}}),
+    shift(2_000_000, 0.3),
+  ]);
+  let report = ferridriver_perf::analyze_values(&events);
+  let cls = insight(&report, "CLSCulprits");
+  assert_eq!(cls.severity, Severity::Fail, "the page still moved");
+  assert!(cls.items.is_empty(), "but nothing should be blamed: {:?}", cls.items);
+  assert!(cls.checks[0].detail.contains("no cause identified"));
+}
+
+#[test]
+fn a_page_that_never_moved_passes_cls_culprits() {
+  let report = ferridriver_perf::analyze_values(&trace(vec![]));
+  assert_eq!(insight(&report, "CLSCulprits").severity, Severity::Pass);
+}

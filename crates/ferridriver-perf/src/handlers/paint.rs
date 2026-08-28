@@ -139,3 +139,65 @@ fn match_by_timing(
     .min_by(|a, b| a.1.total_cmp(&b.1))
     .map(|(i, _)| i)
 }
+
+/// An image the page actually painted, with both the size the file
+/// carries and the size it was drawn at.
+///
+/// From `PaintImage`, which names `srcWidth`/`srcHeight` for the
+/// intrinsic size and `width`/`height` for the painted one.
+#[derive(Debug, Clone)]
+pub struct PaintedImage {
+  pub url: String,
+  /// Intrinsic width of the file.
+  pub width: i64,
+  /// Intrinsic height of the file.
+  pub height: i64,
+  /// Largest width it was painted at.
+  pub displayed_width: i64,
+  pub displayed_height: i64,
+  /// CSS backgrounds are excluded from the responsive-image advice
+  /// upstream, because serving breakpoints for them is disproportionate
+  /// effort.
+  pub is_css: bool,
+}
+
+/// Every painted image, keeping the LARGEST painted size per URL: an
+/// image drawn in several places is only oversized relative to the
+/// biggest one.
+#[must_use]
+pub fn painted_images(events: &[TraceEvent]) -> Vec<PaintedImage> {
+  let mut images: Vec<PaintedImage> = Vec::new();
+
+  for event in events.iter().filter(|e| e.name == "PaintImage") {
+    let Some(data) = event.data() else { continue };
+    let num = |k: &str| data.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let url = data
+      .get("url")
+      .and_then(serde_json::Value::as_str)
+      .unwrap_or_default()
+      .to_string();
+    if url.is_empty() {
+      continue;
+    }
+    let (width, height) = (num("srcWidth"), num("srcHeight"));
+    let (displayed_width, displayed_height) = (num("width"), num("height"));
+
+    match images.iter_mut().find(|i| i.url == url) {
+      Some(existing) => {
+        if displayed_width * displayed_height > existing.displayed_width * existing.displayed_height {
+          existing.displayed_width = displayed_width;
+          existing.displayed_height = displayed_height;
+        }
+      },
+      None => images.push(PaintedImage {
+        url,
+        width,
+        height,
+        displayed_width,
+        displayed_height,
+        is_css: data.get("isCSS").and_then(serde_json::Value::as_bool).unwrap_or(false),
+      }),
+    }
+  }
+  images
+}
