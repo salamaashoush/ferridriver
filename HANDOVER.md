@@ -29,14 +29,17 @@ Eleven commits on `main`, oldest first:
 
 ## Verification state
 
-**Unconfirmed at handover.** `cargo test --workspace --exclude
-ferridriver-cli` and `cargo test -p ferridriver-cli -- --test-threads=1`
-were still running when the last commit was made, at my request to skip
-waiting. Run both before trusting `main`.
+All green as of `4e8d3c7c`:
 
-Confirmed green as of the last commit: `cargo clippy --workspace
---all-targets -- -D warnings`, 2011 e2e tests across all four backends,
-1090 bun tests, 62 `ferridriver-perf` tests.
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace --exclude ferridriver-cli`
+- `cargo test -p ferridriver-cli -- --test-threads=1`
+- 2011 e2e tests across all four backends
+- 1090 bun tests, 62 `ferridriver-perf` tests
+
+The last two Rust suites finished after the commit was made and are
+confirmed clean; `4e8d3c7c`'s message says they were unconfirmed, which
+was true when it was written and is not now.
 
 ## The differential harness — read this first
 
@@ -135,14 +138,13 @@ helpers should return `{ok} | {strict} | {none}` as data.
 
 ## Immediate next steps, in the order I would take them
 
-1. Run the two unconfirmed test suites.
-2. Move the differential harness into the repo and wire it into `just`.
+1. Move the differential harness into the repo and wire it into `just`.
    Without it the next change to `ferridriver-perf` is unverifiable.
-3. `site/docs/comparison/index.md` is stamped 2026-05-25 and is wrong.
+2. `site/docs/comparison/index.md` is stamped 2026-05-25 and is wrong.
    playwright-mcp now ships 69 tools including `browser_run_code_unsafe`,
    a `playwright-cli` with named sessions, and an agent skills bundle
    with test generation. chrome-devtools-mcp is at ~56 tools.
-4. Trace parsing: `args` deserialisation is the remaining cost. Deferring
+3. Trace parsing: `args` deserialisation is the remaining cost. Deferring
    it further means a borrowed `&RawValue` and a lifetime through the
    handlers. simd-json is not the lever; it measured 7%.
 
