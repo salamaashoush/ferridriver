@@ -44,6 +44,7 @@ ferridriver-bdd          BDD/Cucumber framework: step registry, Gherkin parser, 
 ferridriver-bdd-macros   Proc macros: #[given], #[when], #[then], #[step]
 ferridriver-script       QuickJS engine: JS/TS step bodies + `ferridriver run` scripts
 ferridriver-expect       Auto-retrying assertions (Playwright poll schedule); thin shims in bindings
+ferridriver-perf         Chrome trace analysis: Core Web Vitals, 19 DevTools insights, Lantern simulator
 ```
 
 There is no TypeScript CLI. JavaScript/TypeScript test files

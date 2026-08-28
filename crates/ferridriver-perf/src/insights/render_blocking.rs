@@ -10,6 +10,7 @@
 use crate::event::Micro;
 use crate::handlers::network::NetworkRequest;
 use crate::insights::{Check, Insight, Item, Severity};
+use crate::lantern;
 
 /// Stylesheets that finish this fast may be `link[rel=preload]` with an
 /// onload handler (the loadCSS pattern) rather than genuinely blocking,
@@ -17,7 +18,7 @@ use crate::insights::{Check, Insight, Item, Severity};
 const MINIMUM_WASTED_MS: f64 = 50.0;
 
 #[must_use]
-pub fn run(requests: &[NetworkRequest], first_paint_ts: Option<Micro>) -> Option<Insight> {
+pub fn run(requests: &[NetworkRequest], first_paint_ts: Option<Micro>, document_url: &str) -> Option<Insight> {
   let first_paint = first_paint_ts?;
 
   let blocking: Vec<&NetworkRequest> = requests
@@ -39,6 +40,23 @@ pub fn run(requests: &[NetworkRequest], first_paint_ts: Option<Micro>) -> Option
     .collect();
   items.sort_by(|a, b| b.value.total_cmp(&a.value));
 
+  // What the page would cost without these requests in its dependency
+  // graph. `None` when the graph could not be simulated, in which case
+  // only the observed duration is reported.
+  let blocking_urls: Vec<&str> = items
+    .iter()
+    .filter_map(|item| requests.iter().find(|r| r.url == item.label).map(|r| r.url.as_str()))
+    .collect();
+  let estimate = lantern::savings_from_removing(requests, document_url, &blocking_urls);
+
+  let mut metrics: Vec<(String, f64)> = vec![
+    ("renderBlockingRequests".into(), crate::units::len_to_f64(items.len())),
+    ("observedDurationMs".into(), items.iter().map(|i| i.value).sum::<f64>()),
+  ];
+  if let Some(estimate) = &estimate {
+    metrics.push(("estimatedSavingsMs".into(), estimate.savings));
+  }
+
   let passed = items.is_empty();
   Some(Insight {
     key: "RenderBlocking".into(),
@@ -52,14 +70,17 @@ pub fn run(requests: &[NetworkRequest], first_paint_ts: Option<Micro>) -> Option
       passed,
       detail: if passed {
         "No render-blocking requests for this navigation".into()
+      } else if let Some(estimate) = &estimate {
+        format!(
+          "{} render-blocking requests before first paint, worth about {:.0} ms on Slow 4G",
+          items.len(),
+          estimate.savings
+        )
       } else {
         format!("{} render-blocking requests before first paint", items.len())
       },
     }],
-    metrics: vec![
-      ("renderBlockingRequests".into(), crate::units::len_to_f64(items.len())),
-      ("observedDurationMs".into(), items.iter().map(|i| i.value).sum::<f64>()),
-    ],
+    metrics,
     items,
   })
 }

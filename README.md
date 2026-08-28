@@ -30,7 +30,7 @@ expect breaking changes between minor versions.
 
 ## Project layout
 
-11 workspace crates plus one example crate.
+12 workspace crates plus one example crate.
 
 | Crate                          | Purpose |
 |--------------------------------|---------|
@@ -43,6 +43,7 @@ expect breaking changes between minor versions.
 | `ferridriver-test`             | Test runner core — parallel workers, fixtures, hooks, retries, reporters, snapshots, traces |
 | `ferridriver-test-macros`      | `#[ferritest]`, `#[ferritest_each]`, `#[fixture]`, `#[ferritest_suite]`, hook attribute macros |
 | `ferridriver-expect`           | Auto-retrying assertion library — locator, page, value, polling matchers |
+| `ferridriver-perf`             | Chrome trace analysis — Core Web Vitals, the 19 DevTools insights, and the Lantern load simulator |
 | `ferridriver-bdd`              | BDD framework — Gherkin parser, step / hook registry, scenario translator, executor |
 | `ferridriver-bdd-macros`       | `#[given]`, `#[when]`, `#[then]`, `#[step]`, `#[before]`, `#[after]`, `#[param_type]` |
 | `examples/bdd-example`         | Reference Rust BDD suite (feature files + Rust step bodies) |

@@ -367,13 +367,19 @@ async fn performance_now_and_process_hrtime_share_one_base() {
   let session = Session::create(ScriptEngineConfig::default(), &context)
     .await
     .expect("session");
+  // `performance.now()` is read BETWEEN two `hrtime()` readings and has
+  // to land between them. Comparing a single reading of each against a
+  // fixed tolerance instead measures how long the VM took to run two
+  // statements, which on a loaded machine exceeds any tolerance small
+  // enough to catch a shared-base regression.
   let run = session
     .execute(
       r"
-      const hr = process.hrtime();
+      const before = process.hrtime();
       const now = performance.now();
-      const hrMs = hr[0] * 1000 + hr[1] / 1e6;
-      return { skewMs: Math.abs(hrMs - now) };
+      const after = process.hrtime();
+      const toMs = hr => hr[0] * 1000 + hr[1] / 1e6;
+      return { before: toMs(before), now, after: toMs(after) };
       ",
       &[],
       RunOptions::default(),
@@ -382,11 +388,12 @@ async fn performance_now_and_process_hrtime_share_one_base() {
     .await;
   match run.result.outcome {
     Outcome::Ok { success, .. } => {
-      let skew = success.value["skewMs"].as_f64().expect("skewMs is a number");
+      let number = |key: &str| success.value[key].as_f64().expect("reading is a number");
+      let (before, now, after) = (number("before"), number("now"), number("after"));
       assert!(
-        skew < 1.0,
-        "performance.now() and process.hrtime() disagree by {skew}ms, so they are not counting \
-         from the same base"
+        before <= now && now <= after,
+        "performance.now() ({now}ms) fell outside the hrtime readings around it \
+         ({before}ms..{after}ms), so they are not counting from the same base"
       );
     },
     Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),

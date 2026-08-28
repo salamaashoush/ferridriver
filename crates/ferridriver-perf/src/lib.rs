@@ -23,6 +23,7 @@
 pub mod event;
 pub mod handlers;
 pub mod insights;
+pub mod lantern;
 pub mod units;
 
 use serde::Serialize;
@@ -140,7 +141,7 @@ pub fn analyze(events: &[event::TraceEvent]) -> Report {
   if let Some(insight) = insights::lcp_discovery::run(document, &requests, &paint) {
     insights.push(insight);
   }
-  if let Some(insight) = insights::render_blocking::run(&requests, first_paint_ts) {
+  if let Some(insight) = insights::render_blocking::run(&requests, first_paint_ts, &meta.main_frame_url) {
     insights.push(insight);
   }
   if let Some(insight) = insights::inp_breakdown::run(&interactions) {
