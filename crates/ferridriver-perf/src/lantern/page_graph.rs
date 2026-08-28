@@ -2,13 +2,9 @@
 //!
 //! From devtools-frontend `lantern/graph/PageDependencyGraph.ts`.
 //!
-//! The full upstream builder also threads CPU tasks in, attaching each
-//! to the requests it initiated by walking the main thread's task tree.
-//! This builds the network half, which is what the savings estimates
-//! read, and leaves the CPU nodes for when the renderer handler grows a
-//! task tree. A network-only graph under-counts a page whose critical
-//! path is script execution rather than fetching, so the estimate is
-//! reported as network-bound and not as a whole-page prediction.
+//! This builds the network half. Main-thread tasks are added on top by
+//! [`crate::lantern::cpu_graph`], which needs the requests to already be
+//! in place so it can attach each task to the ones it waited on.
 
 use rustc_hash::FxHashMap;
 
