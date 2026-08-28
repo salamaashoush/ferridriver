@@ -50,6 +50,7 @@ dbg_macro = "warn"
 [workspace.dependencies]
 ferridriver = { path = "crates/ferridriver", version = "0.5.0" }
 ferridriver-mcp = { path = "crates/ferridriver-mcp", version = "0.5.0" }
+ferridriver-perf = { path = "crates/ferridriver-perf", version = "0.5.0" }
 ferridriver-test = { path = "crates/ferridriver-test", version = "0.5.0" }
 ferridriver-test-macros = { path = "crates/ferridriver-test-macros", version = "0.5.0" }
 ferridriver-bdd = { path = "crates/ferridriver-bdd", version = "0.5.0" }

@@ -2070,12 +2070,12 @@ impl BidiPage {
 
   // ── Tracing ─────────────────────────────────────────────────────────────
 
-  pub fn start_tracing(&self) -> impl std::future::Future<Output = Result<()>> {
+  pub fn start_tracing(&self, _categories: Option<&[String]>) -> impl std::future::Future<Output = Result<()>> {
     let _ = &self.context_id;
     std::future::ready(Err(FerriError::unsupported("Tracing not supported on BiDi backend")))
   }
 
-  pub fn stop_tracing(&self) -> impl std::future::Future<Output = Result<()>> {
+  pub fn stop_tracing(&self) -> impl std::future::Future<Output = Result<Vec<serde_json::Value>>> {
     let _ = &self.context_id;
     std::future::ready(Err(FerriError::unsupported("Tracing not supported on BiDi backend")))
   }

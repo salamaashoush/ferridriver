@@ -2001,6 +2001,7 @@ dependencies = [
  "ferridriver",
  "ferridriver-bdd",
  "ferridriver-config",
+ "ferridriver-perf",
  "ferridriver-script",
  "ferridriver-test",
  "jsonschema",
@@ -2031,6 +2032,18 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ferridriver-perf"
+version = "0.5.0"
+dependencies = [
+ "ferridriver",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

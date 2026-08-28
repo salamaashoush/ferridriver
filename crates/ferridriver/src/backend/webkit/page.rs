@@ -1998,19 +1998,29 @@ impl WebKitPage {
 
   // ── Tracing ───────────────────────────────────────────────────────────
 
-  pub async fn start_tracing(&self) -> Result<()> {
+  /// Chrome's `Tracing` domain has no `WebKit` Inspector counterpart, and
+  /// every insight computed downstream reads Chrome trace events. These
+  /// used to return `Ok`, so a `WebKit` session reported a trace it had
+  /// never recorded and the caller got an empty analysis with no error.
+  pub async fn start_tracing(&self, _categories: Option<&[String]>) -> Result<()> {
     tokio::task::yield_now().await;
-    Ok(())
+    Err(FerriError::unsupported(
+      "Performance tracing is Chromium-only: the WebKit Inspector protocol has no Tracing domain",
+    ))
   }
 
-  pub async fn stop_tracing(&self) -> Result<()> {
+  pub async fn stop_tracing(&self) -> Result<Vec<serde_json::Value>> {
     tokio::task::yield_now().await;
-    Ok(())
+    Err(FerriError::unsupported(
+      "Performance tracing is Chromium-only: the WebKit Inspector protocol has no Tracing domain",
+    ))
   }
 
   pub async fn metrics(&self) -> Result<Vec<MetricData>> {
     tokio::task::yield_now().await;
-    Ok(Vec::new())
+    Err(FerriError::unsupported(
+      "Performance metrics are Chromium-only: the WebKit Inspector protocol has no Performance.getMetrics",
+    ))
   }
 
   // ── Listeners ─────────────────────────────────────────────────────────

@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 ferridriver = { workspace = true }
+ferridriver-perf = { workspace = true }
 ferridriver-script = { workspace = true }
 ferridriver-config = { workspace = true }
 ferridriver-bdd = { workspace = true }

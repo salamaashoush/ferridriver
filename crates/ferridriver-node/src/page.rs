@@ -1623,13 +1623,20 @@ impl Page {
 
   // ── Tracing ─────────────────────────────────────────────────────────────
 
-  #[napi]
-  pub async fn start_tracing(&self) -> Result<()> {
-    self.inner.start_tracing().await.map_err(crate::error::to_napi)
+  /// Start a Chrome performance trace. Omit `categories` to record the
+  /// set DevTools uses. Chromium only.
+  #[napi(ts_args_type = "categories?: Array<string>")]
+  pub async fn start_tracing(&self, categories: Option<Vec<String>>) -> Result<()> {
+    self
+      .inner
+      .start_tracing(categories.as_deref())
+      .await
+      .map_err(crate::error::to_napi)
   }
 
-  #[napi]
-  pub async fn stop_tracing(&self) -> Result<()> {
+  /// End the trace and return every event recorded.
+  #[napi(ts_return_type = "Promise<Array<any>>")]
+  pub async fn stop_tracing(&self) -> Result<Vec<serde_json::Value>> {
     self.inner.stop_tracing().await.map_err(crate::error::to_napi)
   }
 

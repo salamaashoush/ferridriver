@@ -93,9 +93,12 @@ pub fn test_network_requests(c: &mut McpClient) {
 }
 
 pub fn test_trace(c: &mut McpClient) {
-  // BiDi has no per-page CDP-style tracing; metrics() returns
-  // Unsupported. CDP / webkit produce real metrics.
-  if c.backend == "bidi" {
+  // Chromium only. Neither WebDriver BiDi nor the WebKit Inspector
+  // protocol has a `Tracing` domain, and the report is computed from
+  // Chrome trace events. WebKit used to return `Ok` from `start_tracing`
+  // and an empty metric list, so this test passed against a trace that
+  // was never recorded; both now return `Unsupported`.
+  if c.backend == "bidi" || c.backend == "webkit" {
     return;
   }
   c.nav("<body></body>");
@@ -105,10 +108,11 @@ pub fn test_trace(c: &mut McpClient) {
     json!({"expression": "for(let i=0;i<1000;i++) Math.sqrt(i)"}),
   );
   let t = c.tool_text("diagnostics", json!({"type": "trace_stop"}));
-  assert!(
-    t.contains("Metrics") || t.contains("Trace stopped") || t.contains("metric"),
-    "trace should return metrics: {t}"
-  );
+  // The report is derived from real events, so it names the request
+  // count: a capture that collected nothing would not.
+  assert!(t.contains("Trace stopped"), "trace should report: {t}");
+  assert!(t.contains("Requests:"), "trace should carry an analysed waterfall: {t}");
+  assert!(t.contains("Insights"), "trace should carry insights: {t}");
 }
 
 pub fn register(set: &mut crate::TestSet<'_>) {

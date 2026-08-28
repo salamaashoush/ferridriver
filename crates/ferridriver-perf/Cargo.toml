@@ -1,0 +1,32 @@
+[package]
+name = "ferridriver-perf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Chrome performance trace analysis: metrics and insights, in Rust"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rustc-hash = "2"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+ferridriver = { workspace = true }
+tokio = { workspace = true }
+
+[[example]]
+name = "capture"
+
+[[example]]
+name = "bench"

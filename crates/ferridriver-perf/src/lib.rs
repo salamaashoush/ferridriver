@@ -1,0 +1,163 @@
+//! Chrome performance trace analysis in Rust.
+//!
+//! Takes the events `Page::stop_tracing` returns and produces Core Web
+//! Vitals, a resolved network waterfall, and the insights `DevTools` shows
+//! in its Performance panel. Nothing here drives a browser or evaluates
+//! JavaScript: input is a trace, output is a report, so an analysis is
+//! reproducible from a saved trace file and testable without a browser.
+//!
+//! Ported from `devtools-frontend`'s `models/trace` (`handlers/` and
+//! `insights/`). Where a number is a threshold or a magic multiplier, it
+//! is carried over verbatim and its origin named, so our output stays
+//! comparable with what `DevTools` reports for the same page.
+//!
+//! ```no_run
+//! # fn main() -> Result<(), ferridriver_perf::Error> {
+//! let bytes = std::fs::read("trace.json").unwrap();
+//! let report = ferridriver_perf::analyze_json(&bytes)?;
+//! println!("LCP {:?} ms", report.metrics.largest_contentful_paint);
+//! # Ok(())
+//! # }
+//! ```
+
+pub mod event;
+pub mod handlers;
+pub mod insights;
+pub mod units;
+
+use serde::Serialize;
+
+use handlers::meta::Meta;
+use handlers::network::NetworkRequest;
+use handlers::page_load::PageLoadMetrics;
+use insights::Insight;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+  #[error("trace is not valid JSON: {0}")]
+  Json(#[from] serde_json::Error),
+  #[error("input is neither a trace-event array nor an object with `traceEvents`")]
+  NotATrace,
+}
+
+/// Everything derived from one trace.
+#[derive(Debug, Clone, Serialize)]
+pub struct Report {
+  pub url: String,
+  /// Wall time the trace covers, in milliseconds.
+  pub duration_ms: f64,
+  pub event_count: usize,
+  pub metrics: Metrics,
+  pub insights: Vec<Insight>,
+  /// The resolved waterfall, slowest first.
+  pub requests: Vec<RequestSummary>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Metrics {
+  pub first_paint: Option<f64>,
+  pub first_contentful_paint: Option<f64>,
+  pub largest_contentful_paint: Option<f64>,
+  pub dom_content_loaded: Option<f64>,
+  pub load: Option<f64>,
+  pub cumulative_layout_shift: f64,
+  pub total_requests: usize,
+  pub total_transfer_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestSummary {
+  pub url: String,
+  pub status: i64,
+  pub mime_type: String,
+  pub protocol: String,
+  pub transfer_bytes: i64,
+  pub duration_ms: f64,
+  pub server_response_ms: f64,
+  pub render_blocking: bool,
+}
+
+/// Analyse a trace read from disk, or as Chrome's `DevTools` saves it.
+///
+/// # Errors
+///
+/// [`Error::Json`] or [`Error::NotATrace`] when the input is not a trace.
+pub fn analyze_json(bytes: &[u8]) -> Result<Report, Error> {
+  Ok(analyze(&event::parse(bytes)?))
+}
+
+/// Analyse the events `Page::stop_tracing` returned.
+///
+/// An unrecognisable trace yields an empty report rather than an error:
+/// a caller that traced a page which did nothing should see zero
+/// insights, not a failure.
+#[must_use]
+pub fn analyze_values(values: &[serde_json::Value]) -> Report {
+  analyze(&event::from_values(values))
+}
+
+/// The analysis proper, over already-typed events.
+#[must_use]
+pub fn analyze(events: &[event::TraceEvent]) -> Report {
+  let meta = Meta::from_events(events);
+  let requests = handlers::network::from_events(events);
+  let metrics = PageLoadMetrics::from_events(events, &meta);
+
+  // The main document is the first request on the main frame that the
+  // navigation actually loaded; falling back to the first request at all
+  // keeps insights working for a trace with no navigation in it.
+  let document = requests
+    .iter()
+    .find(|r| !meta.main_frame_url.is_empty() && r.url == meta.main_frame_url)
+    .or_else(|| requests.first());
+
+  let first_paint_ts = metrics
+    .first_contentful_paint
+    .map(|ms| meta.time_origin() + units::ms_to_micros(ms));
+
+  let mut insights = Vec::new();
+  if let Some(insight) = insights::document_latency::run(document) {
+    insights.push(insight);
+  }
+  if let Some(insight) = insights::render_blocking::run(&requests, first_paint_ts) {
+    insights.push(insight);
+  }
+  insights.push(insights::modern_http::run(&requests));
+  insights.push(insights::third_parties::run(&requests, &meta.main_frame_url));
+
+  let mut summaries: Vec<RequestSummary> = requests.iter().map(summarize).collect();
+  summaries.sort_by(|a, b| b.duration_ms.total_cmp(&a.duration_ms));
+
+  Report {
+    url: meta.main_frame_url.clone(),
+    duration_ms: units::micros_to_ms(meta.trace_end - meta.trace_start),
+    event_count: events.len(),
+    metrics: Metrics {
+      first_paint: metrics.first_paint,
+      first_contentful_paint: metrics.first_contentful_paint,
+      largest_contentful_paint: metrics.largest_contentful_paint,
+      dom_content_loaded: metrics.dom_content_loaded,
+      load: metrics.load,
+      cumulative_layout_shift: metrics.cumulative_layout_shift,
+      total_requests: requests.len(),
+      total_transfer_bytes: requests.iter().map(|r| r.encoded_data_length).sum(),
+    },
+    insights,
+    requests: summaries,
+  }
+}
+
+fn summarize(r: &NetworkRequest) -> RequestSummary {
+  RequestSummary {
+    url: r.url.clone(),
+    status: r.status_code,
+    mime_type: r.mime_type.clone(),
+    protocol: r.protocol.clone(),
+    transfer_bytes: r.encoded_data_length,
+    duration_ms: crate::units::micros_to_ms(r.end_time - r.start_time),
+    server_response_ms: crate::units::micros_to_ms(r.timing.server_response_time),
+    render_blocking: matches!(r.render_blocking.as_str(), "blocking" | "in_body_parser_blocking"),
+  }
+}

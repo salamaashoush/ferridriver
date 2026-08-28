@@ -105,28 +105,92 @@ impl McpServer {
       DiagnosticsKind::TraceStart => {
         self
           .on_page(p.session.as_opt(), async |page, _s| {
-            page.start_tracing().await.map_err(Self::err)?;
-            Ok(self.ok_text("Trace started."))
+            page.start_tracing(None).await.map_err(Self::err)?;
+            Ok(self.ok_text("Trace started. Navigate or interact, then call trace_stop."))
           })
           .await
       },
       DiagnosticsKind::TraceStop => {
         self
           .on_page(p.session.as_opt(), async |page, _s| {
-            page.stop_tracing().await.map_err(Self::err)?;
-            let metrics = page.metrics().await.map_err(Self::err)?;
-            let mut out = String::from("Trace stopped.\n\n### Performance Metrics\n");
-            for m in &metrics {
-              if m.value > 0.0 {
-                let _ = writeln!(out, "- {}: {:.2}", m.name, m.value);
-              }
-            }
-            Ok(self.ok_text(out))
+            // The paint markers (first paint, LCP candidates) are emitted
+            // when the compositor commits a frame, which happens after
+            // `load`. Ending the trace the moment the caller asks yields a
+            // report with no Core Web Vitals in it at all, which is the
+            // main thing they were tracing for. Two frames, because the
+            // first rAF can run before the commit that carries the paint.
+            let _ = page
+              .evaluate(
+                "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))",
+                ferridriver::protocol::serializers::SerializedArgument::default(),
+                None,
+              )
+              .await;
+            let events = page.stop_tracing().await.map_err(Self::err)?;
+            let report = ferridriver_perf::analyze_values(&events);
+            Ok(self.ok_text(render_trace_report(&report)))
           })
           .await
       },
     }
   }
+}
+
+/// Render a trace report as the compact markdown an agent reads, rather
+/// than the full JSON: a real trace carries hundreds of requests, and
+/// the point of the analysis is that the caller does not have to wade
+/// through them.
+fn render_trace_report(report: &ferridriver_perf::Report) -> String {
+  let mut out = String::from("Trace stopped.\n\n");
+  let _ = writeln!(
+    out,
+    "{} events over {:.0} ms{}",
+    report.event_count,
+    report.duration_ms,
+    if report.url.is_empty() {
+      String::new()
+    } else {
+      format!(" on {}", report.url)
+    }
+  );
+
+  out.push_str("\n### Metrics\n");
+  let m = &report.metrics;
+  let row = |out: &mut String, label: &str, value: Option<f64>| {
+    if let Some(v) = value {
+      let _ = writeln!(out, "- {label}: {v:.0} ms");
+    }
+  };
+  row(&mut out, "First Contentful Paint", m.first_contentful_paint);
+  row(&mut out, "Largest Contentful Paint", m.largest_contentful_paint);
+  row(&mut out, "DOM Content Loaded", m.dom_content_loaded);
+  row(&mut out, "Load", m.load);
+  let _ = writeln!(out, "- Cumulative Layout Shift: {:.4}", m.cumulative_layout_shift);
+  let _ = writeln!(
+    out,
+    "- Requests: {} ({:.0} KB transferred)",
+    m.total_requests,
+    f64::from(u32::try_from(m.total_transfer_bytes.max(0)).unwrap_or(u32::MAX)) / 1024.0
+  );
+
+  out.push_str("\n### Insights\n");
+  for insight in &report.insights {
+    let mark = match insight.severity {
+      ferridriver_perf::insights::Severity::Pass => "PASS",
+      ferridriver_perf::insights::Severity::Informative => "INFO",
+      ferridriver_perf::insights::Severity::Fail => "FAIL",
+    };
+    let _ = writeln!(out, "\n**[{mark}] {}**", insight.title);
+    for check in &insight.checks {
+      let _ = writeln!(out, "- {} {}", if check.passed { "ok" } else { "!!" }, check.detail);
+    }
+    // Only the worst few: the tail of a render-blocking list is noise
+    // once the caller knows what the top offenders are.
+    for item in insight.items.iter().take(5) {
+      let _ = writeln!(out, "  - {} ({:.0} {})", item.label, item.value, item.unit);
+    }
+  }
+  out
 }
 
 #[cfg(test)]

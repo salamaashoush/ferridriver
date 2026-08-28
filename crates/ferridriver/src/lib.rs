@@ -84,6 +84,7 @@ pub mod route;
 pub mod snapshot;
 pub mod state;
 pub mod trace;
+pub mod trace_categories;
 pub mod tracing;
 pub mod web_socket_route;
 

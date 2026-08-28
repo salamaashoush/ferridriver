@@ -2450,21 +2450,29 @@ impl Page {
 
   // ── Tracing ─────────────────────────────────────────────────────────────
 
-  /// Start performance tracing.
+  /// Start a Chrome performance trace. `None` records
+  /// [`crate::trace_categories::DEFAULT`], the set `DevTools` and
+  /// Lighthouse use.
+  ///
+  /// Chromium only.
   ///
   /// # Errors
   ///
-  /// Returns an error if tracing cannot be started.
-  pub async fn start_tracing(&self) -> Result<()> {
-    self.inner.start_tracing().await
+  /// [`crate::error::FerriError::Unsupported`] on the `BiDi` and `WebKit`
+  /// backends, whose protocols have no `Tracing` domain.
+  pub async fn start_tracing(&self, categories: Option<&[String]>) -> Result<()> {
+    self.inner.start_tracing(categories).await
   }
 
-  /// Stop performance tracing.
+  /// End the trace and return every event recorded, in wire order.
+  ///
+  /// Feed the result to `ferridriver-perf` to turn it into metrics and
+  /// insights.
   ///
   /// # Errors
   ///
-  /// Returns an error if tracing cannot be stopped.
-  pub async fn stop_tracing(&self) -> Result<()> {
+  /// [`crate::error::FerriError::Unsupported`] on the `BiDi` and `WebKit` backends.
+  pub async fn stop_tracing(&self) -> Result<Vec<serde_json::Value>> {
     self.inner.stop_tracing().await
   }
 

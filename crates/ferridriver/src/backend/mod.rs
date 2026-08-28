@@ -1566,11 +1566,11 @@ impl AnyPage {
 
   // ── Tracing ──
 
-  pub async fn start_tracing(&self) -> Result<()> {
-    page_dispatch!(self, start_tracing())
+  pub async fn start_tracing(&self, categories: Option<&[String]>) -> Result<()> {
+    page_dispatch!(self, start_tracing(categories))
   }
 
-  pub async fn stop_tracing(&self) -> Result<()> {
+  pub async fn stop_tracing(&self) -> Result<Vec<serde_json::Value>> {
     page_dispatch!(self, stop_tracing())
   }
 
