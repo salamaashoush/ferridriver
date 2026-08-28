@@ -1,0 +1,80 @@
+//! Assorted single-purpose signals Blink emits about the document.
+//!
+//! Each of these is one event kind that exactly one insight reads, so
+//! they share a pass rather than each walking the trace again.
+//!
+//! Draws on devtools-frontend `handlers/UserInteractionsHandler.ts`
+//! (viewport) and `handlers/LayoutShiftsHandler.ts` (fonts).
+
+use crate::event::TraceEvent;
+use crate::handlers::meta::Meta;
+use crate::insights::font_display::RemoteFont;
+use crate::insights::viewport::ViewportState;
+
+#[derive(Debug, Clone, Default)]
+pub struct PageSignals {
+  pub viewport: ViewportState,
+  pub fonts: Vec<RemoteFont>,
+}
+
+impl PageSignals {
+  #[must_use]
+  pub fn from_events(events: &[TraceEvent], meta: &Meta) -> Self {
+    let mut signals = Self::default();
+    let mut viewport_ts = None;
+
+    for event in events {
+      match event.name.as_str() {
+        "ParseMetaViewport" => {
+          if frame_of(event).is_none_or(|f| meta.main_frame_id.is_empty() || f == meta.main_frame_id) {
+            signals.viewport.saw_meta_viewport = true;
+            viewport_ts.get_or_insert(event.ts);
+          }
+        },
+        "BeginCommitCompositorFrame" => {
+          // Frames committed before the viewport tag was parsed cannot
+          // reflect it, so they say nothing about whether the page is
+          // mobile optimized.
+          if viewport_ts.is_some_and(|ts| event.ts < ts) {
+            continue;
+          }
+          let optimized = event
+            .args
+            .get("is_mobile_optimized")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+          // Every committed frame has to be optimized, so one that is
+          // not decides the answer.
+          signals.viewport.mobile_optimized = Some(signals.viewport.mobile_optimized.unwrap_or(true) && optimized);
+        },
+        "BeginRemoteFontLoad" => {
+          if let Some(data) = event.data() {
+            let url = data
+              .get("url")
+              .and_then(serde_json::Value::as_str)
+              .unwrap_or_default()
+              .to_string();
+            let display = data
+              .get("display")
+              .and_then(serde_json::Value::as_str)
+              .unwrap_or_default()
+              .to_string();
+            if !url.is_empty() {
+              signals.fonts.push(RemoteFont { url, display });
+            }
+          }
+        },
+        _ => {},
+      }
+    }
+    signals
+  }
+}
+
+fn frame_of(event: &TraceEvent) -> Option<&str> {
+  event
+    .data()
+    .and_then(|d| d.get("frame"))
+    .or_else(|| event.args.get("frame"))
+    .and_then(serde_json::Value::as_str)
+}

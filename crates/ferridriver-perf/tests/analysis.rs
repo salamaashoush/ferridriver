@@ -354,3 +354,269 @@ fn a_non_trace_document_is_rejected() {
   assert!(ferridriver_perf::analyze_json(b"{\"nope\":1}").is_err());
   assert!(ferridriver_perf::analyze_json(b"not json").is_err());
 }
+
+// ── LCP, cache, fonts, viewport ────────────────────────────────────────
+
+/// An image LCP candidate as current Chrome writes it: no `imageUrl`,
+/// but `imageLoadStart` / `imageLoadEnd` in ms from the navigation.
+fn image_lcp(load_start_ms: f64, load_end_ms: f64, loading_attr: &str) -> serde_json::Value {
+  json!({"name":"largestContentfulPaint::Candidate","ph":"I","ts":420_000,"pid":1,"tid":1,
+         "args":{"frame":"FRAME1","data":{"frame":"FRAME1","type":"image","size":240_000,
+                 "loadingAttr":loading_attr,
+                 "imageLoadStart":load_start_ms,"imageLoadEnd":load_end_ms}}})
+}
+
+fn text_lcp() -> serde_json::Value {
+  json!({"name":"largestContentfulPaint::Candidate","ph":"I","ts":300_000,"pid":1,"tid":1,
+         "args":{"frame":"FRAME1","data":{"frame":"FRAME1","type":"text","size":6048}}})
+}
+
+#[test]
+fn a_text_lcp_breaks_into_ttfb_and_render_delay() {
+  let mut events = trace(vec![text_lcp()]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    500,
+  ));
+  let report = ferridriver_perf::analyze_values(&events);
+
+  let lcp = insight(&report, "LCPBreakdown");
+  let labels: Vec<&str> = lcp.items.iter().map(|i| i.label.as_str()).collect();
+  assert_eq!(labels, vec!["Time to first byte", "Element render delay"]);
+  assert!(lcp.checks[0].detail.starts_with("Text LCP"), "{}", lcp.checks[0].detail);
+}
+
+/// The image request is recovered from the candidate's load timings,
+/// because Chrome no longer puts the URL on the candidate.
+#[test]
+fn an_image_lcp_breaks_into_four_parts_and_finds_its_request() {
+  let mut events = trace(vec![]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    500,
+  ));
+  // Image runs 100ms..400ms after the navigation at ts=2000.
+  let mut img = request(
+    "2",
+    "https://site.example/hero.png",
+    "image/png",
+    "none",
+    102_000,
+    40_000,
+  );
+  img[0]["args"]["data"]["resourceType"] = json!("Image");
+  events.extend(img);
+  events.push(image_lcp(100.0, 180.0, "eager"));
+
+  let report = ferridriver_perf::analyze_values(&events);
+  let lcp = insight(&report, "LCPBreakdown");
+  let labels: Vec<&str> = lcp.items.iter().map(|i| i.label.as_str()).collect();
+  assert_eq!(
+    labels,
+    vec![
+      "Time to first byte",
+      "Resource load delay",
+      "Resource load duration",
+      "Element render delay"
+    ]
+  );
+  assert!(
+    lcp.checks[0].detail.starts_with("Image LCP"),
+    "{}",
+    lcp.checks[0].detail
+  );
+}
+
+#[test]
+fn a_lazy_loaded_lcp_image_without_a_priority_hint_is_flagged() {
+  let mut events = trace(vec![]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    500,
+  ));
+  let mut img = request(
+    "2",
+    "https://site.example/hero.png",
+    "image/png",
+    "none",
+    102_000,
+    40_000,
+  );
+  img[0]["args"]["data"]["resourceType"] = json!("Image");
+  img[0]["args"]["data"]["initiator"] = json!({"type":"parser","url":"https://site.example/"});
+  events.extend(img);
+  events.push(image_lcp(100.0, 180.0, "lazy"));
+
+  let report = ferridriver_perf::analyze_values(&events);
+  let d = insight(&report, "LCPDiscovery");
+  let check = |name: &str| d.checks.iter().find(|c| c.name == name).unwrap();
+  assert!(!check("priorityHinted").passed);
+  // Parser-initiated from the main document, so the scanner did see it.
+  assert!(check("requestDiscoverable").passed);
+  assert!(!check("eagerlyLoaded").passed, "lazy should be flagged");
+}
+
+/// A text LCP has no request to discover, so the insight does not apply.
+#[test]
+fn lcp_discovery_is_absent_for_a_text_lcp() {
+  let mut events = trace(vec![text_lcp()]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    500,
+  ));
+  let report = ferridriver_perf::analyze_values(&events);
+  assert!(report.insights.iter().all(|i| i.key != "LCPDiscovery"));
+}
+
+fn static_asset(id: &str, url: &str, cache_control: Option<&str>, bytes: i64) -> Vec<serde_json::Value> {
+  let mut req = request(id, url, "text/css", "none", 5000, bytes);
+  req[0]["args"]["data"]["resourceType"] = json!("Stylesheet");
+  if let Some(cc) = cache_control {
+    req[1]["args"]["data"]["headers"] = json!([{"name":"cache-control","value":cc}]);
+  } else {
+    req[1]["args"]["data"]["headers"] = json!([{"name":"content-type","value":"text/css"}]);
+  }
+  req
+}
+
+#[test]
+fn a_short_cache_lifetime_is_flagged_and_a_long_one_is_not() {
+  let mut short = trace(vec![]);
+  short.extend(static_asset(
+    "1",
+    "https://site.example/a.css",
+    Some("max-age=60"),
+    50_000,
+  ));
+  assert_eq!(
+    insight(&ferridriver_perf::analyze_values(&short), "Cache").items.len(),
+    1
+  );
+
+  let mut long = trace(vec![]);
+  long.extend(static_asset(
+    "1",
+    "https://site.example/a.css",
+    Some("max-age=31536000"),
+    50_000,
+  ));
+  assert!(
+    insight(&ferridriver_perf::analyze_values(&long), "Cache")
+      .items
+      .is_empty()
+  );
+}
+
+/// Opting out of caching is a decision, not a defect.
+#[test]
+fn a_no_store_response_is_not_a_cache_finding() {
+  let mut events = trace(vec![]);
+  events.extend(static_asset(
+    "1",
+    "https://site.example/a.css",
+    Some("no-store"),
+    50_000,
+  ));
+  assert!(
+    insight(&ferridriver_perf::analyze_values(&events), "Cache")
+      .items
+      .is_empty()
+  );
+}
+
+/// Documents and XHR are not static assets, so their lifetime is not
+/// this insight's business.
+#[test]
+fn a_non_static_resource_is_not_a_cache_finding() {
+  let mut events = trace(vec![]);
+  events.extend(request(
+    "1",
+    "https://site.example/",
+    "text/html",
+    "blocking",
+    3000,
+    50_000,
+  ));
+  assert!(
+    insight(&ferridriver_perf::analyze_values(&events), "Cache")
+      .items
+      .is_empty()
+  );
+}
+
+fn font(url: &str, display: &str) -> serde_json::Value {
+  json!({"name":"BeginRemoteFontLoad","ph":"I","ts":6000,"pid":1,"tid":1,
+         "args":{"data":{"url":url,"display":display}}})
+}
+
+#[test]
+fn a_blocking_font_display_is_flagged_and_swap_is_not() {
+  let mut blocking = trace(vec![font("https://site.example/f.woff2", "block")]);
+  blocking.extend(request(
+    "1",
+    "https://site.example/f.woff2",
+    "font/woff2",
+    "none",
+    5000,
+    20_000,
+  ));
+  assert_eq!(
+    insight(&ferridriver_perf::analyze_values(&blocking), "FontDisplay")
+      .items
+      .len(),
+    1
+  );
+
+  let mut swap = trace(vec![font("https://site.example/f.woff2", "swap")]);
+  swap.extend(request(
+    "1",
+    "https://site.example/f.woff2",
+    "font/woff2",
+    "none",
+    5000,
+    20_000,
+  ));
+  assert!(
+    insight(&ferridriver_perf::analyze_values(&swap), "FontDisplay")
+      .items
+      .is_empty()
+  );
+}
+
+#[test]
+fn a_non_mobile_optimized_frame_fails_the_viewport_check() {
+  let frame = |optimized: bool| {
+    json!({"name":"BeginCommitCompositorFrame","ph":"I","ts":50_000,"pid":1,"tid":1,
+           "args":{"frame":"FRAME1","is_mobile_optimized":optimized}})
+  };
+  let bad = ferridriver_perf::analyze_values(&trace(vec![frame(false)]));
+  assert_eq!(insight(&bad, "Viewport").severity, Severity::Fail);
+
+  let good = ferridriver_perf::analyze_values(&trace(vec![frame(true)]));
+  assert_eq!(insight(&good, "Viewport").severity, Severity::Pass);
+}
+
+/// Without a committed frame the trace simply does not say.
+#[test]
+fn viewport_is_not_judged_without_a_compositor_frame() {
+  let report = ferridriver_perf::analyze_values(&trace(vec![]));
+  let v = insight(&report, "Viewport");
+  assert_eq!(v.severity, Severity::Informative);
+  assert!(v.checks[0].detail.contains("Not evaluated"));
+}

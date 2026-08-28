@@ -6,3 +6,5 @@
 pub mod meta;
 pub mod network;
 pub mod page_load;
+pub mod page_signals;
+pub mod paint;

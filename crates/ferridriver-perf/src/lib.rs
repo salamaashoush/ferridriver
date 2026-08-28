@@ -117,13 +117,28 @@ pub fn analyze(events: &[event::TraceEvent]) -> Report {
     .first_contentful_paint
     .map(|ms| meta.time_origin() + units::ms_to_micros(ms));
 
+  let paint = handlers::paint::LargestPaint::from_events(events, &meta, &requests, meta.time_origin());
+  let signals = handlers::page_signals::PageSignals::from_events(events, &meta);
+  let lcp_ts = metrics
+    .largest_contentful_paint
+    .map(|ms| meta.time_origin() + units::ms_to_micros(ms));
+
   let mut insights = Vec::new();
   if let Some(insight) = insights::document_latency::run(document) {
+    insights.push(insight);
+  }
+  if let Some(insight) = insights::lcp_breakdown::run(document, &requests, &paint, lcp_ts, meta.time_origin()) {
+    insights.push(insight);
+  }
+  if let Some(insight) = insights::lcp_discovery::run(document, &requests, &paint) {
     insights.push(insight);
   }
   if let Some(insight) = insights::render_blocking::run(&requests, first_paint_ts) {
     insights.push(insight);
   }
+  insights.push(insights::cache::run(&requests));
+  insights.push(insights::font_display::run(&signals.fonts, &requests));
+  insights.push(insights::viewport::run(&signals.viewport));
   insights.push(insights::modern_http::run(&requests));
   insights.push(insights::third_parties::run(&requests, &meta.main_frame_url));
 

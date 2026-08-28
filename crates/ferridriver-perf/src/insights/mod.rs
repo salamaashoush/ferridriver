@@ -3,10 +3,15 @@
 //! Each insight is a pure function over the parsed model, so it is
 //! testable against a recorded trace without a browser anywhere near it.
 
+pub mod cache;
 pub mod document_latency;
+pub mod font_display;
+pub mod lcp_breakdown;
+pub mod lcp_discovery;
 pub mod modern_http;
 pub mod render_blocking;
 pub mod third_parties;
+pub mod viewport;
 
 use serde::Serialize;
 

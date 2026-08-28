@@ -31,6 +31,12 @@ pub struct NetworkRequest {
   pub frame: String,
   pub render_blocking: String,
   pub response_headers: Vec<(String, String)>,
+  /// `high`, `low` or `auto` from a `fetchpriority` attribute.
+  pub fetch_priority_hint: String,
+  /// What caused the request: `parser`, `script`, `preload`, ...
+  pub initiator_type: String,
+  /// The URL of whatever initiated it, when the trace recorded one.
+  pub initiator_url: String,
   pub decoded_body_length: i64,
   pub encoded_data_length: i64,
   pub flags: Flags,
@@ -108,6 +114,10 @@ pub struct Timing {
   pub total_time: Micro,
   pub send_start_time: Micro,
   pub finish_time: Micro,
+  /// When the response headers began arriving: `requestTime` plus
+  /// `receiveHeadersStart`. This is the "first byte" every TTFB-shaped
+  /// metric measures to.
+  pub first_byte_ts: Option<Micro>,
   pub is_disk_cached: bool,
   pub is_memory_cached: bool,
   pub is_https: bool,
@@ -138,6 +148,18 @@ struct SendData {
   resource_type: String,
   #[serde(default, rename = "isLinkPreload")]
   is_link_preload: bool,
+  #[serde(default, rename = "fetchPriorityHint")]
+  fetch_priority_hint: String,
+  #[serde(default)]
+  initiator: Option<Initiator>,
+}
+
+#[derive(Deserialize)]
+struct Initiator {
+  #[serde(default)]
+  r#type: String,
+  #[serde(default)]
+  url: String,
 }
 
 #[derive(Deserialize)]
@@ -278,6 +300,11 @@ fn resolve(id: &str, partial: &Partial) -> Option<NetworkRequest> {
     t.send_start_time = us(request_time_us + timing.send_start * MILLIS_TO_MICROS);
     t.download_start = us(request_time_us + timing.receive_headers_end * MILLIS_TO_MICROS);
     t.download = finish_time - t.download_start;
+    // `receiveHeadersStart` is absent on older traces; headers-end is
+    // close enough and is what DevTools falls back to.
+    t.first_byte_ts = Some(us(
+      request_time_us + timing.receive_headers_start.unwrap_or(timing.receive_headers_end) * MILLIS_TO_MICROS,
+    ));
   } else {
     t.stalled = partial.receive_response.as_ref().map_or(0, |e| e.ts - start_time);
     t.send_start_time = start_time;
@@ -311,6 +338,13 @@ fn resolve(id: &str, partial: &Partial) -> Option<NetworkRequest> {
     status_code: response_data.as_ref().map_or(0, |r| r.status_code),
     frame: send_data.frame,
     render_blocking: send_data.render_blocking,
+    fetch_priority_hint: send_data.fetch_priority_hint,
+    initiator_type: send_data
+      .initiator
+      .as_ref()
+      .map(|i| i.r#type.clone())
+      .unwrap_or_default(),
+    initiator_url: send_data.initiator.as_ref().map(|i| i.url.clone()).unwrap_or_default(),
     response_headers: response_data
       .as_ref()
       .and_then(|r| r.headers.as_ref())

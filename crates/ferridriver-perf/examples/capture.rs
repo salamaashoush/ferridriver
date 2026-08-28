@@ -33,7 +33,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   // paint metrics in it at all.
   page
     .evaluate(
-      "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))",
+      "Promise.all([...document.images].map(i => i.complete ? 0 : new Promise(r => { i.onload = r; i.onerror = r; })))\
+         .then(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(1)))))",
       ferridriver::protocol::serializers::SerializedArgument::default(),
       None,
     )
