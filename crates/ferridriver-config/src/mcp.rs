@@ -119,6 +119,16 @@ pub struct ServerConfig {
   /// Ignored if `instructions` is set.
   #[serde(alias = "extra_instructions")]
   pub extra_instructions: Option<String>,
+  /// How long to let work an action triggered settle before the snapshot
+  /// that follows it, in milliseconds. `0` disables the wait.
+  ///
+  /// An action returns as soon as the click lands, but what the caller
+  /// wants to see is the page the click produced: the fetch it kicked
+  /// off, the re-render that followed. Without this the snapshot catches
+  /// the page mid-flight and the agent's next decision is made against a
+  /// state that no longer exists.
+  #[serde(alias = "settle_timeout_ms")]
+  pub settle_timeout_ms: Option<u64>,
 }
 
 /// Browser launch and per-instance configuration.

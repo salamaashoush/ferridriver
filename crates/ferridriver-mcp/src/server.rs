@@ -314,7 +314,18 @@ pub trait McpServerConfig: Send + Sync + 'static {
   fn server_instructions(&self) -> &str {
     DEFAULT_INSTRUCTIONS
   }
+
+  /// Milliseconds to let work an action triggered settle before the
+  /// snapshot that follows. `0` disables the wait.
+  fn settle_timeout_ms(&self) -> u64 {
+    DEFAULT_SETTLE_TIMEOUT_MS
+  }
 }
+
+/// Long enough for the fetch a click kicked off to land, short enough
+/// that a polling page does not hold the tool open. Playwright's MCP
+/// settles on the same number.
+pub const DEFAULT_SETTLE_TIMEOUT_MS: u64 = 500;
 
 /// Default server name for MCP `get_info`.
 pub const DEFAULT_SERVER_NAME: &str = "ferridriver";
@@ -1670,9 +1681,29 @@ impl McpServer {
   ///
   /// Returns an `ErrorData` if snapshot acquisition fails critically
   /// (soft failures produce inline error text instead).
-  pub async fn action_ok(&self, page: &Page, context: &str, msg: &str) -> Result<CallToolResult, ErrorData> {
+  pub async fn action_ok(&self, page: &Arc<Page>, context: &str, msg: &str) -> Result<CallToolResult, ErrorData> {
+    self.settle(page).await;
     let snap = self.snap(page, context).await;
     Ok(self.ok_text(format!("{msg}\n\n{snap}")))
+  }
+
+  /// Let work the action triggered finish before anyone looks at the page.
+  ///
+  /// Network quiet is the signal, capped by the configured budget: a page
+  /// that polls never goes quiet, and waiting for it would hang the tool
+  /// rather than answer it. Failure is ignored on purpose. This is a
+  /// courtesy wait, and a page that will not settle is still a page the
+  /// caller should get a snapshot of.
+  pub(crate) async fn settle(&self, page: &Arc<Page>) {
+    let budget = self.config.settle_timeout_ms();
+    if budget == 0 {
+      return;
+    }
+    let _ = tokio::time::timeout(
+      std::time::Duration::from_millis(budget),
+      page.wait_for_load_state(Some("networkidle")),
+    )
+    .await;
   }
 
   /// Resolve `session`, hold its lock for the whole call, and hand the live

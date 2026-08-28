@@ -1824,7 +1824,12 @@ impl Page {
   /// Wait for a specific load state. Supported states:
   /// - `"load"` (default) - wait for `document.readyState === "complete"`
   /// - `"domcontentloaded"` - wait for `document.readyState !== "loading"`
-  /// - `"networkidle"` - wait for no network activity for 500ms
+  /// - `"networkidle"` - wait for no network activity for 500ms.
+  ///   Counts `fetch` and `XMLHttpRequest` while they are in flight
+  ///   (the injected counter) as well as completed resource timings. A
+  ///   resource timing entry only exists once its request has finished,
+  ///   so without the counter a pending `fetch` was invisible and this
+  ///   returned while an action's request was still running.
   ///
   /// Playwright: `page.waitForLoadState(state?, options?: { timeout? })`.
   ///
@@ -1875,6 +1880,7 @@ impl Page {
     const JS_WAIT_NETWORKIDLE: &str = "() => new Promise(function(resolve) { \
        var idleSince = performance.now(); \
        function pending() { \
+         if (window.__fd_inflight > 0) return true; \
          var rs = performance.getEntriesByType('resource'); \
          var now = performance.now(); \
          for (var i = 0; i < rs.length; i++) { \

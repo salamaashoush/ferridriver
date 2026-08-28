@@ -520,6 +520,61 @@ function resolveOne<T>(parts: SelectorPart[], map: (el: Element) => T): { ok: T 
   return { ok: map(r[0]) };
 }
 
+/**
+ * Count requests that are STILL IN FLIGHT.
+ *
+ * `performance.getEntriesByType('resource')` only gains an entry once a
+ * request finishes, so a pending `fetch` is invisible to it and
+ * `networkidle` fired while an action's XHR was still running. Wrapping
+ * the two APIs a page actually starts work with is what makes the state
+ * mean what it says.
+ *
+ * Installed at document start, before page script runs, so a fetch
+ * issued from an inline script is counted.
+ */
+function installInFlightCounter(): void {
+  const w = window as any;
+  if (w.__fd_inflight !== undefined)
+    return;
+  w.__fd_inflight = 0;
+
+  const originalFetch = w.fetch;
+  if (typeof originalFetch === 'function') {
+    w.fetch = function(...args: unknown[]) {
+      w.__fd_inflight++;
+      // `finally` and not `then`: a rejected fetch has also stopped
+      // occupying the network, and leaving the count raised would mean
+      // the page never goes idle again.
+      return originalFetch.apply(this, args).finally(() => { w.__fd_inflight--; });
+    };
+  }
+
+  const XHR = w.XMLHttpRequest;
+  if (typeof XHR === 'function' && XHR.prototype && typeof XHR.prototype.send === 'function') {
+    const originalSend = XHR.prototype.send;
+    XHR.prototype.send = function(this: XMLHttpRequest, ...args: unknown[]) {
+      w.__fd_inflight++;
+      let settled = false;
+      const done = () => {
+        if (settled)
+          return;
+        settled = true;
+        w.__fd_inflight--;
+      };
+      this.addEventListener('loadend', done);
+      try {
+        return originalSend.apply(this, args);
+      } catch (e) {
+        // A synchronous throw means the request never started.
+        done();
+        throw e;
+      }
+    };
+  }
+}
+
+installInFlightCounter();
+
 // ── Install on window.__fd ──
 
 declare global {

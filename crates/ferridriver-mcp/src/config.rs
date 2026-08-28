@@ -20,6 +20,13 @@ impl McpServerConfig for McpConfig {
     McpConfig::chrome_args(self)
   }
 
+  fn settle_timeout_ms(&self) -> u64 {
+    self
+      .server
+      .settle_timeout_ms
+      .unwrap_or(crate::server::DEFAULT_SETTLE_TIMEOUT_MS)
+  }
+
   fn instance_overrides(&self, instance: &str) -> Result<ferridriver::options::InstanceOverrides, String> {
     McpConfig::instance_overrides(self, instance)
   }
@@ -71,6 +78,14 @@ impl McpServerConfig for McpConfig {
 impl McpServerConfig for ferridriver_config::FerridriverConfig {
   fn script_root(&self) -> std::path::PathBuf {
     ferridriver_config::FerridriverConfig::script_root(self)
+  }
+
+  fn settle_timeout_ms(&self) -> u64 {
+    self
+      .mcp
+      .server
+      .settle_timeout_ms
+      .unwrap_or(crate::server::DEFAULT_SETTLE_TIMEOUT_MS)
   }
 
   fn artifacts_root(&self) -> std::path::PathBuf {
