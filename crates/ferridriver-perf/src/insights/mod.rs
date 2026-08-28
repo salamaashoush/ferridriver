@@ -5,7 +5,10 @@
 
 pub mod cache;
 pub mod document_latency;
+pub mod dom_size;
 pub mod font_display;
+pub mod forced_reflow;
+pub mod inp_breakdown;
 pub mod lcp_breakdown;
 pub mod lcp_discovery;
 pub mod modern_http;

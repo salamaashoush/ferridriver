@@ -62,6 +62,8 @@ pub struct Metrics {
   pub dom_content_loaded: Option<f64>,
   pub load: Option<f64>,
   pub cumulative_layout_shift: f64,
+  /// Longest interaction, which is what INP reports.
+  pub interaction_to_next_paint: Option<f64>,
   pub total_requests: usize,
   pub total_transfer_bytes: i64,
 }
@@ -119,6 +121,8 @@ pub fn analyze(events: &[event::TraceEvent]) -> Report {
 
   let paint = handlers::paint::LargestPaint::from_events(events, &meta, &requests, meta.time_origin());
   let signals = handlers::page_signals::PageSignals::from_events(events, &meta);
+  let renderer = handlers::renderer::Renderer::from_events(events);
+  let interactions = handlers::interactions::from_events(events);
   let lcp_ts = metrics
     .largest_contentful_paint
     .map(|ms| meta.time_origin() + units::ms_to_micros(ms));
@@ -136,6 +140,11 @@ pub fn analyze(events: &[event::TraceEvent]) -> Report {
   if let Some(insight) = insights::render_blocking::run(&requests, first_paint_ts) {
     insights.push(insight);
   }
+  if let Some(insight) = insights::inp_breakdown::run(&interactions) {
+    insights.push(insight);
+  }
+  insights.push(insights::dom_size::run(&renderer));
+  insights.push(insights::forced_reflow::run(&renderer));
   insights.push(insights::cache::run(&requests));
   insights.push(insights::font_display::run(&signals.fonts, &requests));
   insights.push(insights::viewport::run(&signals.viewport));
@@ -156,6 +165,9 @@ pub fn analyze(events: &[event::TraceEvent]) -> Report {
       dom_content_loaded: metrics.dom_content_loaded,
       load: metrics.load,
       cumulative_layout_shift: metrics.cumulative_layout_shift,
+      interaction_to_next_paint: interactions
+        .first()
+        .map(handlers::interactions::Interaction::duration_ms),
       total_requests: requests.len(),
       total_transfer_bytes: requests.iter().map(|r| r.encoded_data_length).sum(),
     },

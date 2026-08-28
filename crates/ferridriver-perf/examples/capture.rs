@@ -39,6 +39,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
       None,
     )
     .await?;
+  // Optional `interact` mode drives a click whose handler thrashes
+  // layout, so the INP and forced-reflow insights have something real to
+  // report.
+  if std::env::args().nth(3).as_deref() == Some("interact") {
+    page
+      .evaluate(
+        "(() => { const b = document.createElement('button'); b.id='thrash'; b.textContent='go';\
+           b.onclick = () => { const d = document.createElement('div');\
+             for (let i = 0; i < 4000; i++) { d.style.width = i + 'px'; void d.offsetHeight;\
+               document.body.appendChild(d); void document.body.offsetHeight; } };\
+           document.body.appendChild(b); return 1; })()",
+        ferridriver::protocol::serializers::SerializedArgument::default(),
+        None,
+      )
+      .await?;
+    page.click("#thrash").await?;
+    page
+      .evaluate(
+        "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(1))))",
+        ferridriver::protocol::serializers::SerializedArgument::default(),
+        None,
+      )
+      .await?;
+  }
+
   let events = page.stop_tracing().await?;
 
   std::fs::write(&out, serde_json::to_vec(&events)?)?;

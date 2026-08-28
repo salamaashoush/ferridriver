@@ -620,3 +620,141 @@ fn viewport_is_not_judged_without_a_compositor_frame() {
   assert_eq!(v.severity, Severity::Informative);
   assert!(v.checks[0].detail.contains("Not evaluated"));
 }
+
+// ── interactions, DOM size, forced reflow ──────────────────────────────
+
+/// `EventTiming` as Chrome writes it: a begin/end pair, with the timing
+/// fields in `performance.now()` milliseconds rather than trace
+/// microseconds, and several events sharing one `interactionId`.
+fn event_timing(
+  id: i64,
+  kind: &str,
+  ts: i64,
+  time_stamp: f64,
+  proc_start: f64,
+  proc_end: f64,
+  duration: f64,
+) -> Vec<serde_json::Value> {
+  vec![
+    json!({"name":"EventTiming","ph":"b","ts":ts,"pid":1,"tid":1,
+           "args":{"data":{"interactionId":id,"type":kind,"timeStamp":time_stamp,
+                           "processingStart":proc_start,"processingEnd":proc_end,"duration":duration}}}),
+    json!({"name":"EventTiming","ph":"e","ts":ts + 1000,"pid":1,"tid":1,"args":{"data":{"interactionId":id}}}),
+  ]
+}
+
+#[test]
+fn inp_breaks_the_longest_interaction_into_three_phases() {
+  let mut events = trace(vec![]);
+  // timeStamp 100, handler runs 110..150, total 300ms.
+  events.extend(event_timing(7, "click", 500_000, 100.0, 110.0, 150.0, 300.0));
+  let report = ferridriver_perf::analyze_values(&events);
+
+  assert_eq!(report.metrics.interaction_to_next_paint, Some(300.0));
+  let inp = insight(&report, "INPBreakdown");
+  let by = |label: &str| inp.items.iter().find(|i| i.label == label).unwrap().value;
+  assert!((by("Input delay") - 10.0).abs() < 0.01);
+  assert!((by("Processing duration") - 40.0).abs() < 0.01);
+  // 100 + 300 - 150 = 250.
+  assert!((by("Presentation delay") - 250.0).abs() < 0.01);
+  assert_eq!(inp.severity, Severity::Fail, "300ms is over the 200ms bar");
+}
+
+/// A tap emits pointerdown, pointerup and click under one interactionId.
+/// Treating them as separate interactions, or letting the last overwrite
+/// the first, both give the wrong breakdown.
+#[test]
+fn events_sharing_an_interaction_id_merge_into_one_interaction() {
+  let mut events = trace(vec![]);
+  events.extend(event_timing(9, "pointerdown", 500_000, 100.0, 110.0, 115.0, 80.0));
+  events.extend(event_timing(9, "pointerup", 501_000, 102.0, 116.0, 120.0, 80.0));
+  events.extend(event_timing(9, "click", 502_000, 102.0, 120.0, 160.0, 80.0));
+
+  let report = ferridriver_perf::analyze_values(&events);
+  let inp = insight(&report, "INPBreakdown");
+  // One interaction, named for the click, spanning the widest window:
+  // earliest timeStamp 100, earliest processingStart 110, latest
+  // processingEnd 160.
+  assert!(inp.checks[0].detail.contains("click"), "{}", inp.checks[0].detail);
+  let by = |label: &str| inp.items.iter().find(|i| i.label == label).unwrap().value;
+  assert!((by("Input delay") - 10.0).abs() < 0.01);
+  assert!((by("Processing duration") - 50.0).abs() < 0.01);
+}
+
+#[test]
+fn an_interaction_chrome_did_not_count_is_ignored() {
+  let mut events = trace(vec![]);
+  events.extend(event_timing(0, "click", 500_000, 100.0, 110.0, 150.0, 300.0));
+  let report = ferridriver_perf::analyze_values(&events);
+  assert!(report.metrics.interaction_to_next_paint.is_none());
+}
+
+/// `Layout` hides its size under `args.beginData` and `UpdateLayoutTree`
+/// puts it directly on `args`. Reading `args.data` for either, as every
+/// other event in the trace does, silently finds nothing.
+#[test]
+fn large_layout_and_style_updates_are_read_from_their_own_arg_shapes() {
+  let events = trace(vec![
+    json!({"name":"Layout","ph":"X","ts":50_000,"dur":60_000,"pid":1,"tid":1,
+           "args":{"beginData":{"dirtyObjects":500}}}),
+    json!({"name":"UpdateLayoutTree","ph":"X","ts":120_000,"dur":50_000,"pid":1,"tid":1,
+           "args":{"elementCount":900}}),
+    json!({"name":"DOMStats","ph":"I","ts":150_000,"pid":1,"tid":1,
+           "args":{"data":{"totalElements":4200,"maxDepth":18,"maxChildren":90}}}),
+  ]);
+  let report = ferridriver_perf::analyze_values(&events);
+
+  let dom = insight(&report, "DOMSize");
+  assert_eq!(dom.severity, Severity::Fail);
+  assert_eq!(dom.items.len(), 2, "{:?}", dom.items);
+  let (_, total) = dom.metrics.iter().find(|(k, _)| k == "totalElements").unwrap();
+  assert!((total - 4200.0).abs() < f64::EPSILON);
+}
+
+/// Small or quick updates are not a DOM-size problem.
+#[test]
+fn a_fast_layout_is_not_a_dom_size_finding() {
+  let events = trace(vec![
+    json!({"name":"Layout","ph":"X","ts":50_000,"dur":5000,"pid":1,"tid":1,
+                                 "args":{"beginData":{"dirtyObjects":5000}}}),
+  ]);
+  assert!(
+    insight(&ferridriver_perf::analyze_values(&events), "DOMSize")
+      .items
+      .is_empty()
+  );
+}
+
+/// A layout nested inside a script was forced by that script. Below the
+/// 30ms per-task threshold it is noise, above it is a finding.
+#[test]
+fn reflow_inside_a_script_is_forced_only_once_it_crosses_the_threshold() {
+  let build = |reflow_us: i64| {
+    trace(vec![
+      json!({"name":"RunTask","ph":"X","ts":50_000,"dur":100_000,"pid":1,"tid":1,"args":{}}),
+      json!({"name":"FunctionCall","ph":"X","ts":51_000,"dur":90_000,"pid":1,"tid":1,"args":{}}),
+      json!({"name":"Layout","ph":"X","ts":52_000,"dur":reflow_us,"pid":1,"tid":1,
+             "args":{"beginData":{"dirtyObjects":10}}}),
+    ])
+  };
+  let quiet = ferridriver_perf::analyze_values(&build(5_000));
+  assert_eq!(insight(&quiet, "ForcedReflow").severity, Severity::Pass);
+
+  let loud = ferridriver_perf::analyze_values(&build(40_000));
+  assert_eq!(insight(&loud, "ForcedReflow").severity, Severity::Fail);
+}
+
+/// The same layout outside any script is the browser doing its normal
+/// work, not a forced reflow.
+#[test]
+fn reflow_outside_a_script_is_not_forced() {
+  let events = trace(vec![
+    json!({"name":"RunTask","ph":"X","ts":50_000,"dur":100_000,"pid":1,"tid":1,"args":{}}),
+    json!({"name":"Layout","ph":"X","ts":52_000,"dur":40_000,"pid":1,"tid":1,
+           "args":{"beginData":{"dirtyObjects":10}}}),
+  ]);
+  assert_eq!(
+    insight(&ferridriver_perf::analyze_values(&events), "ForcedReflow").severity,
+    Severity::Pass
+  );
+}
