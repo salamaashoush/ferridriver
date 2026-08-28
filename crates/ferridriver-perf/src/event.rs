@@ -16,6 +16,13 @@ pub type Micro = i64;
 ///
 /// `args` stays a `Value`: the union across event names is far too wide
 /// to model, and each handler deserializes only the shape it needs.
+///
+/// Building those `Value`s is measurably the expensive part of loading a
+/// trace: 51ms against 14ms for the same 13MB file parsed without them.
+/// Deferring them (a raw slice parsed on demand) is the optimization
+/// available here, and it is a real refactor rather than a swap, because
+/// every handler reaches through `args`. A faster tokenizer is not the
+/// lever; simd-json was measured at 7%.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TraceEvent {
   #[serde(default)]
