@@ -97,7 +97,7 @@ impl Meta {
         "navigationStart" => meta.absorb_navigation(event, &mut seen_navigations),
         "process_name" => {
           if matches!(
-            event.args.get("name").and_then(serde_json::Value::as_str),
+            event.args_get("name").and_then(serde_json::Value::as_str),
             Some("Browser" | "HeadlessBrowser")
           ) {
             meta.browser_pid = Some(event.pid);
@@ -163,8 +163,7 @@ impl Meta {
     }
     let frame = if data.frame.is_empty() {
       event
-        .args
-        .get("frame")
+        .args_get("frame")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string()

@@ -7,22 +7,24 @@
 //! match what its name implies is skipped, never a hard error, because a
 //! single malformed event must not cost the whole trace.
 
+use std::sync::OnceLock;
+
 use serde::Deserialize;
+use serde_json::value::RawValue;
 
 /// Microseconds since an arbitrary trace-local origin.
 pub type Micro = i64;
 
 /// One event as Chrome wrote it.
 ///
-/// `args` stays a `Value`: the union across event names is far too wide
-/// to model, and each handler deserializes only the shape it needs.
-///
-/// Building those `Value`s is measurably the expensive part of loading a
-/// trace: 51ms against 14ms for the same 13MB file parsed without them.
-/// Deferring them (a raw slice parsed on demand) is the optimization
-/// available here, and it is a real refactor rather than a swap, because
-/// every handler reaches through `args`. A faster tokenizer is not the
-/// lever; simd-json was measured at 7%.
+/// `args` is kept as an unparsed slice. The union across event names is
+/// far too wide to model, and building a `Value` for every event was
+/// measurably three quarters of the cost of loading a trace: 51ms
+/// against 14ms on the same 13MB file. Most events are never looked at
+/// (a layout-heavy trace is over half `ScheduleStyleRecalculation` and
+/// `InvalidateLayout`, which no handler reads), so the parse is deferred
+/// to whoever actually wants it. A faster tokenizer is not the lever;
+/// simd-json measured at 7%.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TraceEvent {
   #[serde(default)]
@@ -39,21 +41,60 @@ pub struct TraceEvent {
   pub pid: i64,
   #[serde(default)]
   pub tid: i64,
+  /// Unparsed. Reach it through [`TraceEvent::data`] or
+  /// [`TraceEvent::args_get`], never directly.
   #[serde(default)]
-  pub args: serde_json::Value,
+  args: Option<Box<RawValue>>,
+  /// `args` once someone has asked for it. Parsed at most once per
+  /// event, and not at all for an event nobody reads.
+  #[serde(skip)]
+  parsed: OnceLock<Option<serde_json::Value>>,
 }
 
 impl TraceEvent {
+  /// `args`, parsed on first use and cached.
+  fn args(&self) -> Option<&serde_json::Value> {
+    self
+      .parsed
+      .get_or_init(|| self.args.as_ref().and_then(|raw| serde_json::from_str(raw.get()).ok()))
+      .as_ref()
+  }
+
+  /// A top-level key of `args`.
+  #[must_use]
+  pub fn args_get(&self, key: &str) -> Option<&serde_json::Value> {
+    self.args()?.get(key)
+  }
+
   /// `args.data`, where nearly every `DevTools` payload lives.
   #[must_use]
   pub fn data(&self) -> Option<&serde_json::Value> {
-    self.args.get("data")
+    self.args_get("data")
+  }
+
+  /// Deserialize `args` into `T`.
+  ///
+  /// Straight from the unparsed slice when there is one, which builds
+  /// only the fields `T` declares instead of a whole `Value` tree. An
+  /// event built from an already-parsed value has no slice, so that path
+  /// deserializes from the cached value instead: both callers get the
+  /// same answer, and neither pays to convert into the other's form.
+  #[must_use]
+  pub fn args_as<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
+    match self.args.as_ref() {
+      Some(raw) => serde_json::from_str(raw.get()).ok(),
+      None => serde_json::from_value(self.args()?.clone()).ok(),
+    }
   }
 
   /// Deserialize `args.data` into `T`, or `None` when it does not match.
   #[must_use]
   pub fn data_as<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
-    serde_json::from_value(self.data()?.clone()).ok()
+    #[derive(Deserialize)]
+    struct Wrapper<T> {
+      data: T,
+    }
+    self.args_as::<Wrapper<T>>().map(|w| w.data)
   }
 
   /// End timestamp for a complete (`X`) event; `ts` for anything without
@@ -115,53 +156,62 @@ pub const MILLIS_TO_MICROS: f64 = 1_000.0;
 ///
 /// When the input is not JSON, or is neither of those two shapes.
 pub fn parse(bytes: &[u8]) -> Result<Vec<TraceEvent>, crate::Error> {
-  /// Either shape, deserialized straight into the target type.
-  ///
-  /// Going via `serde_json::Value` first builds a whole intermediate
-  /// tree and then clones every event out of it, which measured about
-  /// 50x the cost of the analysis that follows.
   #[derive(Deserialize)]
-  #[serde(untagged)]
-  enum TraceFile {
-    Bare(Vec<TraceEvent>),
-    Wrapped {
-      #[serde(rename = "traceEvents")]
-      trace_events: Vec<TraceEvent>,
-    },
+  struct Wrapped {
+    #[serde(rename = "traceEvents")]
+    trace_events: Vec<TraceEvent>,
   }
 
-  if let Ok(TraceFile::Bare(events) | TraceFile::Wrapped { trace_events: events }) =
-    serde_json::from_slice::<TraceFile>(bytes)
-  {
-    return Ok(events);
+  // The shape is decided by the first non-space byte rather than by
+  // `#[serde(untagged)]`. Untagged buffers the whole document into an
+  // intermediate that `RawValue` cannot be rebuilt from, so the fast
+  // path silently failed and every trace was parsed twice: 129ms where
+  // this takes 16ms.
+  match bytes.iter().find(|b| !b.is_ascii_whitespace()) {
+    Some(b'[') => Ok(serde_json::from_slice::<Vec<TraceEvent>>(bytes)?),
+    Some(b'{') => Ok(serde_json::from_slice::<Wrapped>(bytes)?.trace_events),
+    _ => Err(crate::Error::NotATrace),
   }
-
-  // The fast path is all-or-nothing: one event whose field types differ
-  // from the declarations above fails the whole document. Chrome's own
-  // traces vary between versions, so fall back to per-event decoding,
-  // which drops only what it cannot read.
-  let value: serde_json::Value = serde_json::from_slice(bytes)?;
-  let array = match &value {
-    serde_json::Value::Array(a) => a,
-    serde_json::Value::Object(o) => o
-      .get("traceEvents")
-      .and_then(serde_json::Value::as_array)
-      .ok_or(crate::Error::NotATrace)?,
-    _ => return Err(crate::Error::NotATrace),
-  };
-  Ok(from_values(array))
 }
 
 /// Build the typed event list from already-parsed values, as
 /// `Page::stop_tracing` returns them.
 ///
-/// Events that do not deserialize are dropped rather than failing the
-/// batch: Chrome mixes in metadata records that carry no `ts`, and a
+/// Built field by field rather than through serde. The `args` value is
+/// moved straight into the parse cache, because a caller holding a
+/// `Value` has already paid for it: round-tripping it back through the
+/// raw form to satisfy the deserializer meant re-serialising every
+/// event, which measured four times slower than this.
+///
+/// An event missing `name` or `ts` is kept with defaults rather than
+/// dropped; Chrome mixes in metadata records that carry neither, and a
 /// trace is still analysable without them.
 #[must_use]
 pub fn from_values(values: &[serde_json::Value]) -> Vec<TraceEvent> {
   values
     .iter()
-    .filter_map(|v| serde_json::from_value::<TraceEvent>(v.clone()).ok())
+    .map(|value| {
+      let string = |key: &str| {
+        value
+          .get(key)
+          .and_then(serde_json::Value::as_str)
+          .unwrap_or_default()
+          .to_string()
+      };
+      let int = |key: &str| value.get(key).and_then(serde_json::Value::as_i64).unwrap_or(0);
+      let parsed = OnceLock::new();
+      let _ = parsed.set(value.get("args").cloned());
+      TraceEvent {
+        name: string("name"),
+        cat: string("cat"),
+        ph: string("ph"),
+        ts: int("ts"),
+        dur: value.get("dur").and_then(serde_json::Value::as_i64),
+        pid: int("pid"),
+        tid: int("tid"),
+        args: None,
+        parsed,
+      }
+    })
     .collect()
 }

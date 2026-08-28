@@ -211,6 +211,19 @@ pub fn from_events(events: &[TraceEvent]) -> Vec<NetworkRequest> {
   let mut partials: FxHashMap<String, Partial> = FxHashMap::default();
 
   for event in events {
+    // Match the name FIRST. Reading `requestId` up front meant touching
+    // `args` on every event in the trace, and on a layout-heavy one that
+    // is tens of thousands of events none of which are requests.
+    if !matches!(
+      event.name.as_str(),
+      "ResourceSendRequest"
+        | "ResourceWillSendRequest"
+        | "ResourceReceiveResponse"
+        | "ResourceFinish"
+        | "ResourceMarkAsCached"
+    ) {
+      continue;
+    }
     let Some(id) = event
       .data()
       .and_then(|d| d.get("requestId"))

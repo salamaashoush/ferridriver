@@ -24,7 +24,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   }
   let analyze = t.elapsed() / iters;
 
+  // The MCP server hands over already-parsed values rather than bytes,
+  // so that path is timed too.
+  let values: Vec<serde_json::Value> = serde_json::from_slice::<serde_json::Value>(&bytes)
+    .ok()
+    .and_then(|v| match v {
+      serde_json::Value::Array(a) => Some(a),
+      serde_json::Value::Object(o) => o.get("traceEvents").and_then(|t| t.as_array()).cloned(),
+      _ => None,
+    })
+    .unwrap_or_default();
+  let t = std::time::Instant::now();
+  for _ in 0..iters {
+    std::hint::black_box(ferridriver_perf::analyze_values(&values));
+  }
+  let from_values = t.elapsed() / iters;
+
   println!("parse:   {parse:?}");
+  println!("from values (MCP path): {from_values:?}");
   println!("analyze: {analyze:?}");
   println!("total:   {:?}", parse + analyze);
   Ok(())

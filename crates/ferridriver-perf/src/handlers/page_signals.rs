@@ -43,8 +43,7 @@ impl PageSignals {
             continue;
           }
           let optimized = event
-            .args
-            .get("is_mobile_optimized")
+            .args_get("is_mobile_optimized")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
           // Every committed frame has to be optimized, so one that is
@@ -91,8 +90,7 @@ impl PageSignals {
 /// carry their units in the name, such as `elapsed (us)`.
 fn selector_timings(event: &TraceEvent) -> Vec<SelectorTiming> {
   let Some(rows) = event
-    .args
-    .get("selector_stats")
+    .args_get("selector_stats")
     .and_then(|s| s.get("selector_timings"))
     .and_then(serde_json::Value::as_array)
   else {
@@ -120,7 +118,7 @@ fn frame_of(event: &TraceEvent) -> Option<&str> {
   event
     .data()
     .and_then(|d| d.get("frame"))
-    .or_else(|| event.args.get("frame"))
+    .or_else(|| event.args_get("frame"))
     .and_then(serde_json::Value::as_str)
 }
 

@@ -67,26 +67,29 @@ impl Renderer {
 
     for event in events {
       match event.name.as_str() {
+        // These two are more than half the events in a layout-heavy
+        // trace, and each needs one integer, so both read through a
+        // targeted struct rather than materialising `args`.
+        //
         // `dirtyObjects` sits under `args.beginData`, not `args.data`,
         // because Blink splits this event's payload across the begin and
-        // end halves it was built from.
+        // end halves it was built from. `elementCount` sits directly on
+        // `args`.
         "Layout" => {
           renderer.layouts.push(Update {
             ts: event.ts,
             dur: event.dur.unwrap_or(0),
-            size: nested_i64(event, &["beginData", "dirtyObjects"]).unwrap_or(0),
+            size: event
+              .args_as::<LayoutArgs>()
+              .and_then(|a| a.begin_data)
+              .map_or(0, |b| b.dirty_objects),
           });
         },
-        // `elementCount` sits directly on `args`.
         "UpdateLayoutTree" => {
           renderer.style_recalcs.push(Update {
             ts: event.ts,
             dur: event.dur.unwrap_or(0),
-            size: event
-              .args
-              .get("elementCount")
-              .and_then(serde_json::Value::as_i64)
-              .unwrap_or(0),
+            size: event.args_as::<StyleRecalcArgs>().map_or(0, |a| a.element_count),
           });
         },
         "DOMStats" => {
@@ -204,10 +207,20 @@ fn is_js_invocation(name: &str) -> bool {
   JS_INVOCATION_EVENTS.contains(&name) || name.starts_with("v8") || name.starts_with("V8")
 }
 
-fn nested_i64(event: &TraceEvent, path: &[&str]) -> Option<i64> {
-  let mut current = &event.args;
-  for key in path {
-    current = current.get(key)?;
-  }
-  current.as_i64()
+#[derive(serde::Deserialize)]
+struct LayoutArgs {
+  #[serde(default, rename = "beginData")]
+  begin_data: Option<LayoutBeginData>,
+}
+
+#[derive(serde::Deserialize)]
+struct LayoutBeginData {
+  #[serde(default, rename = "dirtyObjects")]
+  dirty_objects: i64,
+}
+
+#[derive(serde::Deserialize)]
+struct StyleRecalcArgs {
+  #[serde(default, rename = "elementCount")]
+  element_count: i64,
 }

@@ -58,7 +58,7 @@ impl LargestPaint {
       let frame = event
         .data()
         .and_then(|d| d.get("frame"))
-        .or_else(|| event.args.get("frame"))
+        .or_else(|| event.args_get("frame"))
         .and_then(serde_json::Value::as_str);
       if let Some(frame) = frame
         && !meta.main_frame_id.is_empty()

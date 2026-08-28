@@ -106,7 +106,7 @@ fn belongs_to_main_frame(event: &TraceEvent, main_frame: &str) -> bool {
   let frame = event
     .data()
     .and_then(|d| d.get("frame"))
-    .or_else(|| event.args.get("frame"))
+    .or_else(|| event.args_get("frame"))
     .and_then(serde_json::Value::as_str);
   match frame {
     Some(f) => f == main_frame,
