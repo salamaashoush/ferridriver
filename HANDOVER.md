@@ -49,16 +49,18 @@ Running it against the real devtools-frontend engine on the same trace
 files found four defects I had no other way to see, including a false
 positive that told people to delete code they need.
 
-Everything for it is in the scratchpad, which is temporary. **Move it
-into the repo before it is lost.**
+It lives in `handover-artifacts/`, rescued from a session scratchpad
+that gets deleted. That directory has its own README with the commands.
 
 ```
-<scratchpad>/cdtrun/          npm install chrome-devtools-mcp@1.8.0
-<scratchpad>/cdtrun/diff.mjs  drives the real engine on a saved trace
-<scratchpad>/final.json       differential trace 1
-<scratchpad>/t2.json          differential trace 2 (interaction + layout thrash)
-<scratchpad>/perfserver.py    the fixture the traces came from
+handover-artifacts/diff.mjs        drives the real engine on a saved trace
+handover-artifacts/final.json.gz   differential trace 1 (plain load)
+handover-artifacts/t2.json.gz      differential trace 2 (interaction + thrash)
+handover-artifacts/perfserver.py   the fixture the traces came from
 ```
+
+The engine itself is not vendored: `npm install chrome-devtools-mcp@1.8.0`
+brings the prebuilt devtools-frontend bundle with it.
 
 `diff.mjs` needs one non-obvious bootstrap or every insight fails with
 "No LanguageSelector instance exists yet": create the `DevToolsLocale`
@@ -138,8 +140,9 @@ helpers should return `{ok} | {strict} | {none}` as data.
 
 ## Immediate next steps, in the order I would take them
 
-1. Move the differential harness into the repo and wire it into `just`.
-   Without it the next change to `ferridriver-perf` is unverifiable.
+1. Wire `handover-artifacts/diff.mjs` into `just` as a real recipe.
+   Without it the next change to `ferridriver-perf` is unverifiable, and
+   a harness nobody runs rots.
 2. `site/docs/comparison/index.md` is stamped 2026-05-25 and is wrong.
    playwright-mcp now ships 69 tools including `browser_run_code_unsafe`,
    a `playwright-cli` with named sessions, and an agent skills bundle
@@ -150,7 +153,9 @@ helpers should return `{ok} | {strict} | {none}` as data.
 
 ## One thing I would push back on
 
-`ferridriver-perf` has no fixture traces of its own in the repo. Its 62
-tests are hand-built event arrays, which are precise but prove only that
-the code does what I thought. The two real traces in the scratchpad are
-what caught the actual bugs. Check one of them in.
+`ferridriver-perf` has no fixture trace in its own `tests/`. Its 62 tests
+are hand-built event arrays, which are precise but prove only that the
+code does what I thought. The real traces are what caught the actual
+bugs, and they currently sit in `handover-artifacts/` where no test
+reads them. Wire `final.json.gz` into the crate's tests so a regression
+against real Chrome output fails the build.
