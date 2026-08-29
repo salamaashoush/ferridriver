@@ -36,13 +36,22 @@ pub fn run(timings: &[SelectorTiming]) -> Insight {
         passed: true,
         detail: "Not measured: the trace carries no selector statistics".into(),
       }],
-      metrics: Vec::new(),
+      // Zeros rather than nothing: they are the honest sum over no
+      // timings, and a consumer reading the numbers should not have to
+      // handle two shapes. What the trace could not tell us is in the
+      // detail above, not in a missing key.
+      metrics: vec![
+        ("totalElapsedMs".into(), 0.0),
+        ("totalMatchAttempts".into(), 0.0),
+        ("totalMatchCount".into(), 0.0),
+      ],
       items: Vec::new(),
     };
   }
 
   let total_elapsed_us: i64 = timings.iter().map(|t| t.elapsed_us).sum();
   let total_attempts: i64 = timings.iter().map(|t| t.match_attempts).sum();
+  let total_matches: i64 = timings.iter().map(|t| t.match_count).sum();
 
   let mut items: Vec<Item> = timings
     .iter()
@@ -65,7 +74,10 @@ pub fn run(timings: &[SelectorTiming]) -> Insight {
     description: "If recalculate style costs remain high, selector optimization can reduce them. Simpler \
                   selectors, fewer selectors, a smaller DOM and a shallower DOM all reduce matching costs."
       .into(),
-    severity: if passed { Severity::Pass } else { Severity::Fail },
+    // Never a failure. There is no cost at which a selector is wrong,
+    // only one at which it is worth looking at, so upstream reports
+    // this as information and so does this.
+    severity: Severity::Informative,
     checks: vec![Check {
       name: "selectorsAreFast".into(),
       passed,
@@ -82,6 +94,7 @@ pub fn run(timings: &[SelectorTiming]) -> Insight {
     metrics: vec![
       ("totalElapsedMs".into(), micros_to_ms(total_elapsed_us)),
       ("totalMatchAttempts".into(), count_to_f64(total_attempts)),
+      ("totalMatchCount".into(), count_to_f64(total_matches)),
     ],
     items,
   }

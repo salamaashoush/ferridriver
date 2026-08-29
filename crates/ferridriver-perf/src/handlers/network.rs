@@ -26,7 +26,15 @@ pub struct NetworkRequest {
   pub mime_type: String,
   pub resource_type: String,
   pub protocol: String,
+  /// The priority the request ended on. Chrome re-prioritises as the
+  /// page reveals what it needs — a lazily-loaded image is fetched at
+  /// Low and boosted to High the moment it enters the viewport — and
+  /// every judgement about what the page waited for wants the priority
+  /// it waited at, not the one it started at.
   pub priority: String,
+  /// The priority it started at, kept because the difference between
+  /// the two is itself a finding.
+  pub initial_priority: String,
   pub status_code: i64,
   pub frame: String,
   pub render_blocking: String,
@@ -45,6 +53,18 @@ pub struct NetworkRequest {
   pub start_time: Micro,
   pub end_time: Micro,
   pub timing: Timing,
+  /// The response's `timing` block exactly as Chrome wrote it.
+  ///
+  /// [`Timing`] holds the durations everything downstream reads;
+  /// this holds the phase boundaries they were derived from, which the
+  /// network analyser needs because it reasons about which phases are
+  /// present at all rather than about how long they took.
+  pub resource_timing: Option<crate::event::ResourceTiming>,
+  /// Which connection carried it, and whether that connection already
+  /// existed. The analyser only trusts these when every connection in
+  /// the trace was seen being opened.
+  pub connection_id: i64,
+  pub connection_reused: bool,
 }
 
 /// How far the request got.
@@ -123,12 +143,20 @@ pub struct Timing {
   pub is_https: bool,
 }
 
+/// The events for one request, borrowed while they are stitched
+/// together. Nothing here is copied: a request is assembled from four
+/// events the caller's trace already holds.
 #[derive(Default)]
-struct Partial {
-  send_request: Option<TraceEvent>,
-  will_send_requests: Vec<TraceEvent>,
-  receive_response: Option<TraceEvent>,
-  resource_finish: Option<TraceEvent>,
+struct Partial<'a> {
+  /// Every `ResourceSendRequest` for this id, in order. A redirected
+  /// request has one per hop, and the URL of hop N is only on the Nth:
+  /// `ResourceWillSendRequest` carries the request id and nothing else,
+  /// so the hop timings and the hop URLs come from different events.
+  send_requests: Vec<&'a TraceEvent<'a>>,
+  will_send_requests: Vec<&'a TraceEvent<'a>>,
+  receive_response: Option<&'a TraceEvent<'a>>,
+  resource_finish: Option<&'a TraceEvent<'a>>,
+  change_priority: Option<&'a TraceEvent<'a>>,
   mark_as_cached: bool,
 }
 
@@ -180,6 +208,10 @@ struct ResponseData {
   timing: Option<ResourceTiming>,
   #[serde(default)]
   headers: Option<Vec<Header>>,
+  #[serde(default, rename = "connectionId")]
+  connection_id: i64,
+  #[serde(default, rename = "connectionReused")]
+  connection_reused: bool,
 }
 
 #[derive(Deserialize)]
@@ -207,16 +239,17 @@ struct FinishData {
 /// Requests with no `ResourceSendRequest` are dropped: without one there
 /// is no URL, no start time and nothing an insight could say.
 #[must_use]
-pub fn from_events(events: &[TraceEvent]) -> Vec<NetworkRequest> {
-  let mut partials: FxHashMap<String, Partial> = FxHashMap::default();
+pub fn from_events(events: &[TraceEvent<'_>]) -> Vec<NetworkRequest> {
+  let mut partials: FxHashMap<&str, Partial<'_>> = FxHashMap::default();
 
   for event in events {
     // Match the name FIRST. Reading `requestId` up front meant touching
     // `args` on every event in the trace, and on a layout-heavy one that
     // is tens of thousands of events none of which are requests.
     if !matches!(
-      event.name.as_str(),
+      event.name.as_ref(),
       "ResourceSendRequest"
+        | "ResourceChangePriority"
         | "ResourceWillSendRequest"
         | "ResourceReceiveResponse"
         | "ResourceFinish"
@@ -231,12 +264,13 @@ pub fn from_events(events: &[TraceEvent]) -> Vec<NetworkRequest> {
     else {
       continue;
     };
-    let entry = partials.entry(id.to_string()).or_default();
-    match event.name.as_str() {
-      "ResourceSendRequest" => entry.send_request = Some(event.clone()),
-      "ResourceWillSendRequest" => entry.will_send_requests.push(event.clone()),
-      "ResourceReceiveResponse" => entry.receive_response = Some(event.clone()),
-      "ResourceFinish" => entry.resource_finish = Some(event.clone()),
+    let entry = partials.entry(id).or_default();
+    match event.name.as_ref() {
+      "ResourceSendRequest" => entry.send_requests.push(event),
+      "ResourceWillSendRequest" => entry.will_send_requests.push(event),
+      "ResourceChangePriority" => entry.change_priority = Some(event),
+      "ResourceReceiveResponse" => entry.receive_response = Some(event),
+      "ResourceFinish" => entry.resource_finish = Some(event),
       "ResourceMarkAsCached" => entry.mark_as_cached = true,
       _ => {},
     }
@@ -244,21 +278,32 @@ pub fn from_events(events: &[TraceEvent]) -> Vec<NetworkRequest> {
 
   let mut requests: Vec<NetworkRequest> = partials
     .into_iter()
-    .filter_map(|(id, partial)| resolve(&id, &partial))
+    .filter_map(|(id, partial)| resolve(id, &partial))
     .collect();
   requests.sort_by_key(|r| r.start_time);
   requests
 }
 
 #[allow(clippy::too_many_lines)]
-fn resolve(id: &str, partial: &Partial) -> Option<NetworkRequest> {
-  let send = partial.send_request.as_ref()?;
+fn resolve(id: &str, partial: &Partial<'_>) -> Option<NetworkRequest> {
+  // The LAST send is the request that actually completed; the earlier
+  // ones are the redirect hops.
+  let send = *partial.send_requests.last()?;
   let send_data: SendData = send.data_as()?;
-  let response_data: Option<ResponseData> = partial.receive_response.as_ref().and_then(TraceEvent::data_as);
-  let finish_data: Option<FinishData> = partial.resource_finish.as_ref().and_then(TraceEvent::data_as);
+  let response_data: Option<ResponseData> = partial.receive_response.and_then(TraceEvent::data_as);
+  let finish_data: Option<FinishData> = partial.resource_finish.and_then(TraceEvent::data_as);
   let timing = response_data.as_ref().and_then(|r| r.timing.clone());
 
-  let start_time = send.ts;
+  // The FIRST willSendRequest is when the renderer queued the request,
+  // which is earlier than the send: Chrome emits one even where nothing
+  // redirected. Taking the send instead loses the queueing, and every
+  // graph built on it starts the document later than the tasks that
+  // were already running, which leaves those tasks unattached.
+  let start_time = partial
+    .will_send_requests
+    .first()
+    .or(partial.send_requests.first())
+    .map_or(send.ts, |e| e.ts);
   // The LAST willSendRequest is where the non-redirect part of the
   // request actually begins; everything before it was redirect hops.
   let end_redirect_time = partial.will_send_requests.last().map_or(send.ts, |e| e.ts);
@@ -325,14 +370,15 @@ fn resolve(id: &str, partial: &Partial) -> Option<NetworkRequest> {
     t.download = partial.receive_response.as_ref().map_or(0, |e| end_time - e.ts);
   }
 
-  let redirects = partial
+  let redirects: Vec<Redirect> = partial
     .will_send_requests
     .windows(2)
-    .map(|pair| Redirect {
-      url: pair[0]
-        .data()
-        .and_then(|d| d.get("url"))
-        .and_then(serde_json::Value::as_str)
+    .enumerate()
+    .map(|(hop, pair)| Redirect {
+      url: partial
+        .send_requests
+        .get(hop)
+        .and_then(|event| event.data()?.get("url")?.as_str())
         .unwrap_or_default()
         .to_string(),
       ts: pair[0].ts,
@@ -347,8 +393,21 @@ fn resolve(id: &str, partial: &Partial) -> Option<NetworkRequest> {
     mime_type: response_data.as_ref().map(|r| r.mime_type.clone()).unwrap_or_default(),
     resource_type: send_data.resource_type,
     protocol: response_data.as_ref().map(|r| r.protocol.clone()).unwrap_or_default(),
-    priority: send_data.priority,
+    priority: partial
+      .change_priority
+      .and_then(|event| {
+        event
+          .data()?
+          .get("priority")
+          .and_then(serde_json::Value::as_str)
+          .map(str::to_string)
+      })
+      .unwrap_or_else(|| send_data.priority.clone()),
+    initial_priority: send_data.priority,
     status_code: response_data.as_ref().map_or(0, |r| r.status_code),
+    resource_timing: timing.clone(),
+    connection_id: response_data.as_ref().map_or(0, |r| r.connection_id),
+    connection_reused: response_data.as_ref().is_some_and(|r| r.connection_reused),
     frame: send_data.frame,
     render_blocking: send_data.render_blocking,
     fetch_priority_hint: send_data.fetch_priority_hint,

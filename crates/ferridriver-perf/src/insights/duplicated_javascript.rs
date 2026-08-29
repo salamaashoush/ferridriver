@@ -23,7 +23,7 @@ use crate::units::{count_to_f64, len_to_f64};
 const MIN_DUPLICATE_BYTES: usize = 1024;
 
 #[must_use]
-pub fn run(scripts: &[Script]) -> Insight {
+pub fn run(scripts: &[Script], lantern: Option<&crate::lantern::Context>) -> Insight {
   // Grouped by content. Hashing the body is enough: two scripts with the
   // same bytes are the same script whatever they are called.
   let mut by_content: FxHashMap<&str, Vec<&Script>> = FxHashMap::default();
@@ -35,6 +35,7 @@ pub fn run(scripts: &[Script]) -> Insight {
 
   let mut wasted_bytes = 0i64;
   let mut items: Vec<Item> = Vec::new();
+  let mut wasted_by_url: FxHashMap<&str, f64> = FxHashMap::default();
   for (content, group) in by_content {
     // Distinct URLs, because one script fetched twice is a caching
     // question, not a duplication one.
@@ -51,6 +52,12 @@ pub fn run(scripts: &[Script]) -> Insight {
     let copies = urls.len() - 1;
     let wasted = i64::try_from(content.len() * copies).unwrap_or(i64::MAX);
     wasted_bytes += wasted;
+    // The first copy is the one the page needed; the waste belongs to
+    // the requests that shipped it again. An inline script has no
+    // request to attribute anything to.
+    for url in urls.iter().skip(1).filter(|url| **url != "(inline)") {
+      *wasted_by_url.entry(url).or_default() += len_to_f64(content.len());
+    }
     items.push(Item {
       label: format!(
         "{} bytes shipped {} times: {}",
@@ -65,6 +72,9 @@ pub fn run(scripts: &[Script]) -> Insight {
 
   items.sort_by(|a, b| b.value.total_cmp(&a.value));
   let passed = items.is_empty();
+  let mut metrics = vec![("wastedBytes".into(), count_to_f64(wasted_bytes))];
+  crate::insights::push_byte_savings(&mut metrics, lantern, &wasted_by_url);
+
   Insight {
     key: "DuplicatedJavaScript".into(),
     title: "Duplicated JavaScript".into(),
@@ -89,7 +99,7 @@ pub fn run(scripts: &[Script]) -> Insight {
         )
       },
     }],
-    metrics: vec![("wastedBytes".into(), count_to_f64(wasted_bytes))],
+    metrics,
     items,
   }
 }

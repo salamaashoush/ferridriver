@@ -49,14 +49,18 @@ Running it against the real devtools-frontend engine on the same trace
 files found four defects I had no other way to see, including a false
 positive that told people to delete code they need.
 
-It lives in `handover-artifacts/`, rescued from a session scratchpad
-that gets deleted. That directory has its own README with the commands.
+It is now wired in: `just perf-diff` runs it, and
+`cargo test -p ferridriver-perf --test differential` compares against
+the recorded verdicts on every `just test`.
+`scripts/perf-diff/README.md` has the detail.
 
 ```
-handover-artifacts/diff.mjs        drives the real engine on a saved trace
-handover-artifacts/final.json.gz   differential trace 1 (plain load)
-handover-artifacts/t2.json.gz      differential trace 2 (interaction + thrash)
-handover-artifacts/perfserver.py   the fixture the traces came from
+scripts/perf-diff/engine.mjs                        drives the real engine on a saved trace
+scripts/perf-diff/fixture-server.py                 the fixture the traces came from
+crates/ferridriver-perf/tests/fixtures/
+  plain-load.json.gz                                differential trace 1 (plain load)
+  interaction-and-thrash.json.gz                    differential trace 2 (interaction + thrash)
+  *.upstream.json                                   what the real engine says about each
 ```
 
 The engine itself is not vendored: `npm install chrome-devtools-mcp@1.8.0`
@@ -89,10 +93,26 @@ Speed on the same input: 484KB trace 1.6ms against upstream's 48.9ms;
 
 ## What is NOT done
 
-- **Lighthouse audits.** None. Accessibility is axe-core, which runs in
-  the page — inject it and format results, do not port 78 audit wrappers.
-  The ~25 SEO/security/dobetterweb audits are pure functions over
-  artifacts we already collect.
+- **The 26 live-page SEO/security audits.** `doctype`,
+  `meta-description`, `crawlable-anchors`, `link-text`,
+  `image-aspect-ratio`, `image-size-responsive` and
+  `paste-preventing-inputs` are reachable through snapshot mode and
+  checkable with `just lh-audit`; `is-on-https`, `csp-xss`, `has-hsts`,
+  `canonical`, `is-crawlable` and `http-status-code` need a network log,
+  so verifying those needs navigation mode and a harness that does not
+  exist yet.
+- **Lighthouse audits.** Accessibility is DONE, by running the engine
+  rather than porting its wrappers: `page.checkAccessibility()` covers
+  all 67 at once and `just a11y-diff` checks it against Lighthouse. The
+  rest of the shape of the job is now measured
+  rather than guessed (`scripts/perf-diff/README.md`): 67 of them are
+  axe-core wrappers, so running axe-core in the page covers all 67 at
+  once; 26 need artifacts gathered from a live DOM and NOT one of them
+  runs off a trace, which is where the earlier note that they were
+  "pure functions over artifacts we already collect" was wrong; and the
+  performance audits are wrappers around the insights already ported.
+  `just lh-audit <url>` runs Lighthouse's own audits so anything built
+  here can be checked against them.
 - **Heap snapshot analysis** (13 upstream tools).
 - **Chrome extension management, PWA tools, WebMCP, third-party devtools
   hooks.**
@@ -140,9 +160,9 @@ helpers should return `{ok} | {strict} | {none}` as data.
 
 ## Immediate next steps, in the order I would take them
 
-1. Wire `handover-artifacts/diff.mjs` into `just` as a real recipe.
-   Without it the next change to `ferridriver-perf` is unverifiable, and
-   a harness nobody runs rots.
+1. ~~Wire the differential into `just`.~~ Done: `just perf-diff`,
+   `just perf-diff-update`, and a `differential` test in the crate.
+   Running it found four more divergences, all now fixed.
 2. `site/docs/comparison/index.md` is stamped 2026-05-25 and is wrong.
    playwright-mcp now ships 69 tools including `browser_run_code_unsafe`,
    a `playwright-cli` with named sessions, and an agent skills bundle
@@ -156,6 +176,6 @@ helpers should return `{ok} | {strict} | {none}` as data.
 `ferridriver-perf` has no fixture trace in its own `tests/`. Its 62 tests
 are hand-built event arrays, which are precise but prove only that the
 code does what I thought. The real traces are what caught the actual
-bugs, and they currently sit in `handover-artifacts/` where no test
-reads them. Wire `final.json.gz` into the crate's tests so a regression
-against real Chrome output fails the build.
+bugs. They now live in the crate's own `tests/fixtures/` and
+`tests/differential.rs` reads them, so a regression against real Chrome
+output fails the build.

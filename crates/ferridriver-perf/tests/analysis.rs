@@ -468,9 +468,13 @@ fn a_lazy_loaded_lcp_image_without_a_priority_hint_is_flagged() {
   assert!(!check("eagerlyLoaded").passed, "lazy should be flagged");
 }
 
-/// A text LCP has no request to discover, so the insight does not apply.
+/// A text LCP has no request to discover, so there is no checklist to
+/// run. The insight is still reported, and passes: this once dropped the
+/// insight entirely, which left a text-LCP page with eighteen findings
+/// where every other page has nineteen. The differential against
+/// devtools-frontend is what caught it.
 #[test]
-fn lcp_discovery_is_absent_for_a_text_lcp() {
+fn lcp_discovery_passes_with_no_checks_for_a_text_lcp() {
   let mut events = trace(vec![text_lcp()]);
   events.extend(request(
     "1",
@@ -481,7 +485,9 @@ fn lcp_discovery_is_absent_for_a_text_lcp() {
     500,
   ));
   let report = ferridriver_perf::analyze_values(&events);
-  assert!(report.insights.iter().all(|i| i.key != "LCPDiscovery"));
+  let discovery = insight(&report, "LCPDiscovery");
+  assert_eq!(discovery.severity, Severity::Pass);
+  assert!(discovery.checks.is_empty());
 }
 
 fn static_asset(id: &str, url: &str, cache_control: Option<&str>, bytes: i64) -> Vec<serde_json::Value> {
@@ -560,9 +566,13 @@ fn a_non_static_resource_is_not_a_cache_finding() {
   );
 }
 
+/// `url`, `display` and `id` sit directly on `args`, NOT under
+/// `args.data`. This fixture said `args.data` and passed for months
+/// while no real trace produced a single font, because the handler was
+/// reading the same wrong place.
 fn font(url: &str, display: &str) -> serde_json::Value {
   json!({"name":"BeginRemoteFontLoad","ph":"I","ts":6000,"pid":1,"tid":1,
-         "args":{"data":{"url":url,"display":display}}})
+         "args":{"url":url,"display":display,"id":1}})
 }
 
 #[test]
@@ -710,7 +720,8 @@ fn large_layout_and_style_updates_are_read_from_their_own_arg_shapes() {
   let report = ferridriver_perf::analyze_values(&events);
 
   let dom = insight(&report, "DOMSize");
-  assert_eq!(dom.severity, Severity::Fail);
+  // A large DOM is a cost to weigh, not a rule broken.
+  assert_eq!(dom.severity, Severity::Informative);
   assert_eq!(dom.items.len(), 2, "{:?}", dom.items);
   let (_, total) = dom.metrics.iter().find(|(k, _)| k == "totalElements").unwrap();
   assert!((total - 4200.0).abs() < f64::EPSILON);
@@ -906,7 +917,9 @@ fn an_oversized_css_background_is_not_flagged_for_responsive_serving() {
 
 #[test]
 fn a_long_chain_of_critical_requests_is_reported_with_its_depth() {
-  let mut events = trace(vec![]);
+  // The LCP is what gives the analysis a graph to walk; without one
+  // there is no dependency tree to report, upstream included.
+  let mut events = trace(vec![text_lcp()]);
   events.extend(request(
     "1",
     "https://site.example/",
@@ -945,7 +958,7 @@ fn a_long_chain_of_critical_requests_is_reported_with_its_depth() {
 /// is the DEPTH, so that is what this pins.
 #[test]
 fn parser_found_requests_stay_at_depth_two_however_many_there_are() {
-  let mut events = trace(vec![]);
+  let mut events = trace(vec![text_lcp()]);
   events.extend(request(
     "1",
     "https://site.example/",
@@ -1180,7 +1193,9 @@ fn a_slow_selector_is_reported_when_stats_are_present() {
   ]);
   let report = ferridriver_perf::analyze_values(&events);
   let sel = insight(&report, "SlowCSSSelector");
-  assert_eq!(sel.severity, Severity::Fail);
+  // Informative, never a failure: there is no cost at which a selector
+  // is wrong, only one at which it is worth looking at.
+  assert_eq!(sel.severity, Severity::Informative);
   assert_eq!(sel.items.len(), 1, "only the slow one: {:?}", sel.items);
   assert!(sel.items[0].label.starts_with("div > .a *"));
 }

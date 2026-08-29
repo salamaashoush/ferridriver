@@ -22,7 +22,15 @@ use crate::units::{len_to_f64, micros_to_ms};
 const MIN_REPORTABLE_CHAIN_LENGTH: usize = 2;
 
 #[must_use]
-pub fn run(requests: &[NetworkRequest], document_url: &str) -> Insight {
+pub fn run(requests: &[NetworkRequest], document_url: &str, lantern: Option<&crate::lantern::Context>) -> Insight {
+  // Upstream builds its chains by walking the Lantern graph, so a page
+  // with no graph — one that never reached a largest paint — reports no
+  // chains at all. The walk below needs only the initiator links and
+  // could answer anyway, but answering where upstream declines would
+  // put every such page out of step with the panel for no gain.
+  if lantern.is_none() {
+    return not_measured();
+  }
   // A request's parent is whatever request its initiator names.
   let by_url: FxHashMap<&str, usize> = requests
     .iter()
@@ -32,6 +40,7 @@ pub fn run(requests: &[NetworkRequest], document_url: &str) -> Insight {
 
   let mut longest: Vec<usize> = Vec::new();
   let mut longest_latency: Micro = 0;
+  let mut any_chain = false;
 
   for (index, request) in requests.iter().enumerate() {
     // Only critical resources block rendering; an async image at the end
@@ -40,17 +49,29 @@ pub fn run(requests: &[NetworkRequest], document_url: &str) -> Insight {
       continue;
     }
     let chain = chain_to_root(requests, &by_url, index, document_url);
-    // The chain's cost is measured from where it starts to where it ends,
-    // not by summing hops, because hops can overlap.
-    let latency = chain.iter().map(|i| requests[*i].timing.finish_time).max().unwrap_or(0)
-      - chain.iter().map(|i| requests[*i].start_time).min().unwrap_or(0);
-    if chain.len() > longest.len() || (chain.len() == longest.len() && latency > longest_latency) {
+    // Upstream discards a chain that passes through anything
+    // non-critical: the page did not have to wait for it.
+    if chain.iter().any(|i| !is_critical(&requests[*i])) {
+      continue;
+    }
+    if chain.len() >= MIN_REPORTABLE_CHAIN_LENGTH {
+      any_chain = true;
+    }
+    // The chain's cost runs from where its root was queued to where its
+    // last request finished being processed, not the sum of the hops,
+    // because hops can overlap. Which chain is reported is decided by
+    // that time alone, so a short slow chain wins over a long fast one.
+    let (Some(first), Some(last)) = (chain.first(), chain.last()) else {
+      continue;
+    };
+    let latency = requests[*last].end_time - requests[*first].start_time;
+    if latency > longest_latency {
       longest = chain;
       longest_latency = latency;
     }
   }
 
-  let passed = longest.len() < MIN_REPORTABLE_CHAIN_LENGTH;
+  let passed = !any_chain;
   let items: Vec<Item> = longest
     .iter()
     .enumerate()
@@ -75,7 +96,7 @@ pub fn run(requests: &[NetworkRequest], document_url: &str) -> Insight {
         "No long chains of critical network requests".into()
       } else {
         format!(
-          "Longest critical chain is {} requests over {:.0} ms",
+          "Critical path is {} requests over {:.0} ms",
           longest.len(),
           micros_to_ms(longest_latency)
         )
@@ -86,6 +107,25 @@ pub fn run(requests: &[NetworkRequest], document_url: &str) -> Insight {
       ("maxCriticalPathLatencyMs".into(), micros_to_ms(longest_latency)),
     ],
     items,
+  }
+}
+
+/// A page whose dependency graph could not be built.
+fn not_measured() -> Insight {
+  Insight {
+    key: "NetworkDependencyTree".into(),
+    title: "Network dependency tree".into(),
+    description: "Avoid chaining critical requests by reducing the length of chains, reducing the download size \
+                  of resources, or deferring the download of unnecessary resources."
+      .into(),
+    severity: Severity::Pass,
+    checks: vec![Check {
+      name: "noLongCriticalChain".into(),
+      passed: true,
+      detail: "Not evaluated: the page has no paint to build a dependency graph against".into(),
+    }],
+    metrics: vec![("maxChainLength".into(), 0.0), ("maxCriticalPathLatencyMs".into(), 0.0)],
+    items: Vec::new(),
   }
 }
 

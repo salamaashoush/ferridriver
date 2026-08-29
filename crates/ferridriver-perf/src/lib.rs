@@ -103,7 +103,7 @@ pub fn analyze_values(values: &[serde_json::Value]) -> Report {
 
 /// The analysis proper, over already-typed events.
 #[must_use]
-pub fn analyze(events: &[event::TraceEvent]) -> Report {
+pub fn analyze(events: &[event::TraceEvent<'_>]) -> Report {
   let meta = Meta::from_events(events);
   let requests = handlers::network::from_events(events);
   let metrics = PageLoadMetrics::from_events(events, &meta);
@@ -131,17 +131,25 @@ pub fn analyze(events: &[event::TraceEvent]) -> Report {
     .largest_contentful_paint
     .map(|ms| meta.time_origin() + units::ms_to_micros(ms));
 
+  // One graph for the whole report. Every predicted saving below is
+  // measured against it, and building it per insight would collect the
+  // main thread's tasks eight times over.
+  let lantern = lantern::Context::build(&requests, &meta.main_frame_url, events, first_paint_ts, lcp_ts);
+  let lantern = lantern.as_ref();
+
   let mut insights = Vec::new();
   if let Some(insight) = insights::document_latency::run(document) {
     insights.push(insight);
   }
-  if let Some(insight) = insights::lcp_breakdown::run(document, &requests, &paint, lcp_ts, meta.time_origin()) {
-    insights.push(insight);
-  }
-  if let Some(insight) = insights::lcp_discovery::run(document, &requests, &paint) {
-    insights.push(insight);
-  }
-  if let Some(insight) = insights::render_blocking::run(&requests, first_paint_ts, &meta.main_frame_url, events) {
+  insights.push(insights::lcp_breakdown::run(
+    document,
+    &requests,
+    &paint,
+    lcp_ts,
+    meta.time_origin(),
+  ));
+  insights.push(insights::lcp_discovery::run(document, &requests, &paint));
+  if let Some(insight) = insights::render_blocking::run(&requests, first_paint_ts, lantern, paint.request.is_some()) {
     insights.push(insight);
   }
   insights.push(insights::inp_breakdown::run(&interactions));
@@ -152,18 +160,22 @@ pub fn analyze(events: &[event::TraceEvent]) -> Report {
     &culprits,
     metrics.cumulative_layout_shift,
   ));
-  insights.push(insights::image_delivery::run(&requests, &painted_images));
-  insights.push(insights::network_dependency_tree::run(&requests, &meta.main_frame_url));
+  insights.push(insights::image_delivery::run(&requests, &painted_images, lantern));
+  insights.push(insights::network_dependency_tree::run(
+    &requests,
+    &meta.main_frame_url,
+    lantern,
+  ));
   if let Some(insight) = insights::character_set::run(document, signals.meta_charset) {
     insights.push(insight);
   }
-  insights.push(insights::duplicated_javascript::run(&scripts));
-  insights.push(insights::legacy_javascript::run(&scripts));
+  insights.push(insights::duplicated_javascript::run(&scripts, lantern));
+  insights.push(insights::legacy_javascript::run(&scripts, lantern));
   insights.push(insights::slow_css_selector::run(&signals.selector_timings));
-  insights.push(insights::cache::run(&requests));
+  insights.push(insights::cache::run(&requests, lantern));
   insights.push(insights::font_display::run(&signals.fonts, &requests));
   insights.push(insights::viewport::run(&signals.viewport));
-  insights.push(insights::modern_http::run(&requests));
+  insights.push(insights::modern_http::run(&requests, lantern));
   insights.push(insights::third_parties::run(&requests, &meta.main_frame_url));
 
   let mut summaries: Vec<RequestSummary> = requests.iter().map(summarize).collect();

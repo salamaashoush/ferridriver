@@ -1780,6 +1780,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "sha1 0.11.0",
+ "sha2",
  "tar",
  "tempfile",
  "thiserror",
@@ -2039,6 +2040,7 @@ name = "ferridriver-perf"
 version = "0.5.0"
 dependencies = [
  "ferridriver",
+ "flate2",
  "regex",
  "rustc-hash",
  "serde",

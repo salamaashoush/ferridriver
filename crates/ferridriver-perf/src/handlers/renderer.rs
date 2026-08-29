@@ -62,11 +62,22 @@ pub struct DomStats {
 
 impl Renderer {
   #[must_use]
-  pub fn from_events(events: &[TraceEvent]) -> Self {
+  pub fn from_events(events: &[TraceEvent<'_>]) -> Self {
     let mut renderer = Self::default();
+    // Layout and style work is attributed to the renderer's main
+    // thread only. A trace carries several processes, and counting a
+    // worker's or another frame's layout against this page reports
+    // updates the page never did.
+    let main = crate::handlers::main_thread(events);
 
     for event in events {
-      match event.name.as_str() {
+      if let Some((pid, tid)) = main
+        && (event.pid != pid || event.tid != tid)
+        && matches!(event.name.as_ref(), "Layout" | "UpdateLayoutTree")
+      {
+        continue;
+      }
+      match event.name.as_ref() {
         // These two are more than half the events in a layout-heavy
         // trace, and each needs one integer, so both read through a
         // targeted struct rather than materialising `args`.
@@ -133,7 +144,7 @@ impl Renderer {
 /// began, which is when the previous task's reflow total is final.
 /// `js_invocations` holds only script frames, so a non-empty one means
 /// the layout below it was forced rather than scheduled.
-fn find_forced_reflows(events: &[TraceEvent]) -> Vec<ForcedReflow> {
+fn find_forced_reflows(events: &[TraceEvent<'_>]) -> Vec<ForcedReflow> {
   let threshold = f64_to_micros(FORCED_REFLOW_THRESHOLD_MS * MILLIS_TO_MICROS);
   let mut found = Vec::new();
   let mut all_events: Vec<Micro> = Vec::new();
@@ -152,7 +163,7 @@ fn find_forced_reflows(events: &[TraceEvent]) -> Vec<ForcedReflow> {
       js_invocations.push((end, script_frame(event)));
       continue;
     }
-    if !js_invocations.is_empty() && REFLOW_EVENTS.contains(&event.name.as_str()) {
+    if !js_invocations.is_empty() && REFLOW_EVENTS.contains(&event.name.as_ref()) {
       task_reflows.push(ForcedReflow {
         ts: event.ts,
         dur: event.dur.unwrap_or(0),
@@ -186,7 +197,7 @@ fn find_forced_reflows(events: &[TraceEvent]) -> Vec<ForcedReflow> {
 }
 
 /// The function a JS invocation event names, for attribution.
-fn script_frame(event: &TraceEvent) -> String {
+fn script_frame(event: &TraceEvent<'_>) -> String {
   let Some(data) = event.data() else {
     return String::new();
   };

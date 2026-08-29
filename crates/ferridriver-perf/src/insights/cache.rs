@@ -22,7 +22,7 @@ const NON_NETWORK_SCHEMES: [&str; 6] = ["blob", "data", "intent", "file", "files
 const SECONDS_PER_DAY: f64 = 86_400.0;
 
 #[must_use]
-pub fn run(requests: &[NetworkRequest]) -> Insight {
+pub fn run(requests: &[NetworkRequest], lantern: Option<&crate::lantern::Context>) -> Insight {
   let mut items = Vec::new();
   let mut wasted_total = 0.0;
 
@@ -65,6 +65,11 @@ pub fn run(requests: &[NetworkRequest]) -> Insight {
 
   items.sort_by(|a, b| b.value.total_cmp(&a.value));
   let passed = items.is_empty();
+  let wasted_by_url: rustc_hash::FxHashMap<&str, f64> =
+    items.iter().map(|item| (item.label.as_str(), item.value)).collect();
+  let mut metrics = vec![("wastedBytes".into(), wasted_total)];
+  crate::insights::push_byte_savings(&mut metrics, lantern, &wasted_by_url);
+
   Insight {
     key: "Cache".into(),
     title: "Use efficient cache lifetimes".into(),
@@ -83,7 +88,7 @@ pub fn run(requests: &[NetworkRequest]) -> Insight {
         )
       },
     }],
-    metrics: vec![("wastedBytes".into(), wasted_total)],
+    metrics,
     items,
   }
 }

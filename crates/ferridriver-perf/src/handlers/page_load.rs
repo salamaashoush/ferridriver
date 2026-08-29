@@ -41,7 +41,7 @@ const SESSION_WINDOW_MAX_US: Micro = 5_000_000;
 
 impl PageLoadMetrics {
   #[must_use]
-  pub fn from_events(events: &[TraceEvent], meta: &Meta) -> Self {
+  pub fn from_events(events: &[TraceEvent<'_>], meta: &Meta) -> Self {
     let origin = meta.time_origin();
     let mut metrics = Self::default();
     let to_ms = |ts: Micro| crate::units::micros_to_ms(ts - origin);
@@ -54,7 +54,7 @@ impl PageLoadMetrics {
       if !meta.main_frame_id.is_empty() && !belongs_to_main_frame(event, &meta.main_frame_id) {
         continue;
       }
-      match event.name.as_str() {
+      match event.name.as_ref() {
         "firstPaint" => metrics.first_paint = Some(to_ms(event.ts)),
         "firstContentfulPaint" => metrics.first_contentful_paint = Some(to_ms(event.ts)),
         // Candidates supersede one another; the last before load wins,
@@ -102,7 +102,7 @@ impl PageLoadMetrics {
 /// no frame at all are kept: `firstPaint` on some Chrome versions
 /// carries only a `frame` inside `args`, and dropping those would lose
 /// the metric entirely.
-fn belongs_to_main_frame(event: &TraceEvent, main_frame: &str) -> bool {
+fn belongs_to_main_frame(event: &TraceEvent<'_>, main_frame: &str) -> bool {
   let frame = event
     .data()
     .and_then(|d| d.get("frame"))

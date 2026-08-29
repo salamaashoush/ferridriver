@@ -28,12 +28,12 @@ pub struct Script {
 /// Every script the trace carried source for, keyed by isolate and id
 /// so two isolates using the same numeric id stay separate.
 #[must_use]
-pub fn from_events(events: &[TraceEvent]) -> Vec<Script> {
+pub fn from_events(events: &[TraceEvent<'_>]) -> Vec<Script> {
   let mut scripts: FxHashMap<(String, i64), Script> = FxHashMap::default();
 
   for event in events {
     if !matches!(
-      event.name.as_str(),
+      event.name.as_ref(),
       "ScriptCatchup" | "LargeScriptCatchup" | "ScriptCompiled"
     ) {
       continue;

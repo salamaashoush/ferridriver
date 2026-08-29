@@ -1,0 +1,226 @@
+{
+ "engine": "chrome-devtools-mcp@1.8.0",
+ "metrics": {
+  "DCL": 260.267,
+  "L": 260.349,
+  "FCP": 267.935,
+  "FP": 267.935,
+  "LCP": 420.837,
+  "CLS": 0,
+  "requests": 5
+ },
+ "insights": {
+  "INPBreakdown": {
+   "state": "informative",
+   "counts": {
+    "relatedEvents": 1
+   }
+  },
+  "LCPBreakdown": {
+   "state": "informative",
+   "scalars": {
+    "lcpMs": 420.837,
+    "lcpTs": 647006608.507
+   },
+   "counts": {
+    "relatedEvents": 2
+   }
+  },
+  "LCPDiscovery": {
+   "state": "fail",
+   "checklist": {
+    "priorityHinted": false,
+    "requestDiscoverable": true,
+    "eagerlyLoaded": false
+   },
+   "scalars": {
+    "earliestDiscoveryTimeTs": 647006189606
+   },
+   "counts": {
+    "relatedEvents": 2
+   }
+  },
+  "CLSCulprits": {
+   "state": "pass",
+   "counts": {
+    "relatedEvents": 0,
+    "animationFailures": 0,
+    "clusters": 0
+   }
+  },
+  "RenderBlocking": {
+   "state": "fail",
+   "metricSavings": {
+    "FCP": 77,
+    "LCP": 0
+   },
+   "counts": {
+    "relatedEvents": 3,
+    "renderBlockingRequests": 3
+   }
+  },
+  "NetworkDependencyTree": {
+   "state": "fail",
+   "scalars": {
+    "maxTime": 259098
+   },
+   "counts": {
+    "rootNodes": 1,
+    "preconnectedOrigins": 0,
+    "preconnectCandidates": 0
+   }
+  },
+  "ImageDelivery": {
+   "state": "pass",
+   "metricSavings": {
+    "FCP": 0,
+    "LCP": 0
+   },
+   "scalars": {
+    "wastedBytes": 0
+   },
+   "counts": {
+    "optimizableImages": 0
+   }
+  },
+  "DocumentLatency": {
+   "state": "pass",
+   "metricSavings": {
+    "FCP": 0,
+    "LCP": 0
+   },
+   "checklist": {
+    "noRedirects": true,
+    "serverResponseIsFast": true,
+    "usesCompression": true
+   },
+   "scalars": {
+    "wastedBytes": 0,
+    "serverResponseTime": 0,
+    "redirectDuration": 0,
+    "uncompressedResponseBytes": 0
+   },
+   "counts": {
+    "relatedEvents": 1
+   }
+  },
+  "FontDisplay": {
+   "state": "pass",
+   "metricSavings": {
+    "FCP": null
+   },
+   "counts": {
+    "relatedEvents": 0,
+    "fonts": 0
+   }
+  },
+  "Viewport": {
+   "state": "pass"
+  },
+  "DOMSize": {
+   "state": "pass",
+   "counts": {
+    "largeLayoutUpdates": 0,
+    "largeStyleRecalcs": 0,
+    "largeUpdates": 0,
+    "relatedEvents": 0
+   }
+  },
+  "ThirdParties": {
+   "state": "informative",
+   "counts": {
+    "relatedEvents": 9,
+    "entitySummaries": 2
+   }
+  },
+  "DuplicatedJavaScript": {
+   "state": "pass",
+   "metricSavings": {
+    "FCP": 0,
+    "LCP": 0
+   },
+   "scalars": {
+    "wastedBytes": 0
+   },
+   "counts": {
+    "relatedEvents": 0,
+    "scriptsWithDuplication": 0,
+    "scripts": 15
+   }
+  },
+  "SlowCSSSelector": {
+   "state": "pass",
+   "scalars": {
+    "totalElapsedMs": 0,
+    "totalMatchAttempts": 0,
+    "totalMatchCount": 0
+   },
+   "counts": {
+    "relatedEvents": 0
+   }
+  },
+  "ForcedReflow": {
+   "state": "fail",
+   "counts": {
+    "relatedEvents": 15999,
+    "aggregatedBottomUpData": 3
+   }
+  },
+  "Cache": {
+   "state": "fail",
+   "metricSavings": {
+    "FCP": 0,
+    "LCP": 0
+   },
+   "scalars": {
+    "wastedBytes": 53982.9
+   },
+   "counts": {
+    "relatedEvents": 4,
+    "requests": 4
+   }
+  },
+  "CharacterSet": {
+   "state": "pass",
+   "checklist": {
+    "httpCharset": false,
+    "metaCharset": true
+   },
+   "counts": {
+    "relatedEvents": 1
+   }
+  },
+  "ModernHTTP": {
+   "state": "pass",
+   "metricSavings": {
+    "FCP": 0,
+    "LCP": 0
+   },
+   "counts": {
+    "http1Requests": 0,
+    "relatedEvents": 0
+   }
+  },
+  "LegacyJavaScript": {
+   "state": "pass",
+   "metricSavings": {
+    "FCP": 0,
+    "LCP": 0
+   },
+   "scalars": {
+    "wastedBytes": 0
+   },
+   "counts": {
+    "relatedEvents": 0
+   }
+  }
+ },
+ "lantern": {
+  "rtt": 0.263,
+  "throughput": 525847919.322,
+  "observed": {
+   "firstContentfulPaintMs": 157.518,
+   "largestContentfulPaintMs": 157.781
+  }
+ }
+}

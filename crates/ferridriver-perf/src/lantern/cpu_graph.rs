@@ -30,6 +30,22 @@ const SIGNIFICANT_DURATION_MS: f64 = 10.0;
 /// returns zero.
 const LINKABLE_RESOURCE_TYPES: [&str; 3] = ["XHR", "Fetch", "Script"];
 
+/// The events inside a task that say anything about what it waited on
+/// or what it started. Everything else in a task is ignored, and this
+/// list is what lets that be decided without parsing the payload.
+const LINKING_EVENTS: [&str; 10] = [
+  "TimerInstall",
+  "TimerFire",
+  "InvalidateLayout",
+  "ScheduleStyleRecalculation",
+  "EvaluateScript",
+  "XHRReadyStateChange",
+  "FunctionCall",
+  "v8.compile",
+  "ParseAuthorStyleSheet",
+  "ResourceSendRequest",
+];
+
 const SCHEDULABLE_TASKS: [&str; 4] = [
   "RunTask",
   "ThreadControllerImpl::RunTask",
@@ -39,8 +55,8 @@ const SCHEDULABLE_TASKS: [&str; 4] = [
 
 /// One schedulable task and everything that ran inside it.
 struct Task<'a> {
-  event: &'a TraceEvent,
-  children: Vec<&'a TraceEvent>,
+  event: &'a TraceEvent<'a>,
+  children: Vec<&'a TraceEvent<'a>>,
   /// Chrome sometimes emits overlapping tasks (crbug 329678173); the end
   /// is pulled back to just before the next task starts.
   end: Micro,
@@ -52,7 +68,7 @@ struct Task<'a> {
 /// [`crate::lantern::page_graph::build`] returns it.
 pub fn add_cpu_nodes(
   graph: &mut Graph,
-  events: &[TraceEvent],
+  events: &[TraceEvent<'_>],
   requests: &[NetworkRequest],
   node_of: &[Option<NodeId>],
 ) {
@@ -62,14 +78,14 @@ pub fn add_cpu_nodes(
   // containment scan stops at the next schedulable task it sees in
   // document order. That produced a thousand tasks totalling 28ms on a
   // trace whose click handler alone ran for 60.
-  let Some((pid, tid)) = main_thread(events) else {
+  let Some((pid, tid)) = crate::handlers::main_thread(events) else {
     return;
   };
-  let main_thread_events: Vec<TraceEvent> = events
-    .iter()
-    .filter(|e| e.pid == pid && e.tid == tid)
-    .cloned()
-    .collect();
+  // Borrowed, not cloned. On a layout-heavy trace nearly every event is
+  // on this thread, and copying them was two thirds of the cost of the
+  // whole analysis: each clone is three heap strings and the boxed
+  // `args` slice, thirty thousand times over.
+  let main_thread_events: Vec<&TraceEvent<'_>> = events.iter().filter(|e| e.pid == pid && e.tid == tid).collect();
   let tasks = collect_tasks(&main_thread_events);
   if tasks.is_empty() {
     return;
@@ -93,6 +109,9 @@ pub fn add_cpu_nodes(
       kind: NodeKind::Cpu {
         duration_us: task.end - task.event.ts,
         did_perform_layout: task.children.iter().any(|e| e.name == "Layout"),
+        did_paint: task.children.iter().any(|e| e.name == "Paint"),
+        did_parse_html: task.children.iter().any(|e| e.name == "ParseHTML"),
+        evaluate_script_urls: evaluate_script_urls(task),
       },
       start_time_us: task.event.ts,
       end_time_us: task.end,
@@ -118,6 +137,24 @@ pub fn add_cpu_nodes(
   prune_short_tasks(graph, &tasks, &cpu_nodes);
 }
 
+/// The scripts a task evaluated, deduplicated, from `CPUNode`'s
+/// `getEvaluateScriptURLs`.
+fn evaluate_script_urls(task: &Task<'_>) -> Vec<String> {
+  let mut urls: Vec<String> = Vec::new();
+  for child in task.children.iter().filter(|e| e.name == "EvaluateScript") {
+    let Some(url) = child
+      .data()
+      .and_then(|d| d.get("url").and_then(serde_json::Value::as_str))
+    else {
+      continue;
+    };
+    if !urls.iter().any(|seen| seen == url) {
+      urls.push(url.to_string());
+    }
+  }
+  urls
+}
+
 /// Everything the linking needs to resolve a reference to a request.
 struct Links<'a> {
   by_request_id: FxHashMap<&'a str, usize>,
@@ -140,6 +177,13 @@ fn link_task(
 ) {
   let node = cpu_nodes[position];
   for child in &task.children {
+    // The name decides everything, so it is checked BEFORE the payload
+    // is touched. Reading `args` first parses a `Value` for every event
+    // inside the task, and on a layout-heavy trace half of them are
+    // `Layout` and `UpdateLayoutTree`, which nothing below reads.
+    if !LINKING_EVENTS.contains(&child.name.as_ref()) {
+      continue;
+    }
     let Some(data) = child.data() else { continue };
     let args_url = data.get("url").and_then(serde_json::Value::as_str).unwrap_or_default();
     let frame = data.get("frame").and_then(serde_json::Value::as_str);
@@ -154,7 +198,7 @@ fn link_task(
       })
       .unwrap_or_default();
 
-    match child.name.as_str() {
+    match child.name.as_ref() {
       "TimerInstall" => {
         if let Some(id) = data.get("timerId").and_then(serde_json::Value::as_str) {
           timers.insert(id.to_string(), position);
@@ -232,38 +276,15 @@ fn link_task(
   }
 }
 
-/// `(pid, tid)` of `CrRendererMain`, the thread a page's own script and
-/// layout run on.
-///
-/// The renderer with the most top-level tasks is taken when several are
-/// named, which happens with out-of-process iframes; the page's own
-/// renderer is the busy one.
-fn main_thread(events: &[TraceEvent]) -> Option<(i64, i64)> {
-  let mut candidates: Vec<(i64, i64)> = events
-    .iter()
-    .filter(|e| e.name == "thread_name")
-    .filter(|e| e.args_get("name").and_then(serde_json::Value::as_str) == Some("CrRendererMain"))
-    .map(|e| (e.pid, e.tid))
-    .collect();
-  if candidates.len() > 1 {
-    let mut counts: FxHashMap<(i64, i64), usize> = FxHashMap::default();
-    for event in events.iter().filter(|e| SCHEDULABLE_TASKS.contains(&e.name.as_str())) {
-      *counts.entry((event.pid, event.tid)).or_default() += 1;
-    }
-    candidates.sort_by_key(|key| std::cmp::Reverse(counts.get(key).copied().unwrap_or(0)));
-  }
-  candidates.first().copied()
-}
-
 /// Tasks, each carrying the events that ran inside it.
-fn collect_tasks(events: &[TraceEvent]) -> Vec<Task<'_>> {
+fn collect_tasks<'a>(events: &[&'a TraceEvent<'a>]) -> Vec<Task<'a>> {
   let mut tasks = Vec::new();
   let mut index = 0;
 
   while index < events.len() {
-    let event = &events[index];
+    let event = events[index];
     index += 1;
-    if !SCHEDULABLE_TASKS.contains(&event.name.as_str()) || event.dur.is_none() {
+    if !SCHEDULABLE_TASKS.contains(&event.name.as_ref()) || event.dur.is_none() {
       continue;
     }
 
@@ -271,10 +292,10 @@ fn collect_tasks(events: &[TraceEvent]) -> Vec<Task<'_>> {
     let mut end = declared_end;
     let mut children = Vec::new();
     while index < events.len() && events[index].ts < declared_end {
-      let child = &events[index];
+      let child = events[index];
       // Chrome can emit overlapping tasks; the earlier one is treated as
       // ending just before the later starts.
-      if SCHEDULABLE_TASKS.contains(&child.name.as_str()) && child.dur.is_some() {
+      if SCHEDULABLE_TASKS.contains(&child.name.as_ref()) && child.dur.is_some() {
         end = child.ts - 1;
         break;
       }

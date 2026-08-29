@@ -13,7 +13,7 @@ use crate::units::{count_to_f64, f64_to_micros, micros_to_ms};
 /// DOM size.
 const DURATION_THRESHOLD_MS: f64 = 40.0;
 
-/// A layout touching fewer objects than this was not slow because of
+/// A layout touching this many objects or fewer was not slow because of
 /// the DOM.
 const LAYOUT_OBJECTS_THRESHOLD: i64 = 100;
 
@@ -26,7 +26,7 @@ pub fn run(renderer: &Renderer) -> Insight {
   let mut items = Vec::new();
 
   for layout in &renderer.layouts {
-    if layout.dur >= threshold_us && layout.size >= LAYOUT_OBJECTS_THRESHOLD {
+    if layout.dur >= threshold_us && layout.size > LAYOUT_OBJECTS_THRESHOLD {
       items.push(Item {
         label: format!("Layout ({} objects)", layout.size),
         value: micros_to_ms(layout.dur),
@@ -35,7 +35,7 @@ pub fn run(renderer: &Renderer) -> Insight {
     }
   }
   for recalc in &renderer.style_recalcs {
-    if recalc.dur >= threshold_us && recalc.size >= STYLE_RECALC_ELEMENTS_THRESHOLD {
+    if recalc.dur >= threshold_us && recalc.size > STYLE_RECALC_ELEMENTS_THRESHOLD {
       items.push(Item {
         label: format!("Style recalculation ({} elements)", recalc.size),
         value: micros_to_ms(recalc.dur),
@@ -59,7 +59,9 @@ pub fn run(renderer: &Renderer) -> Insight {
     description: "A large DOM can increase the duration of style calculations and layout reflows, impacting \
                   responsiveness."
       .into(),
-    severity: if passed { Severity::Pass } else { Severity::Fail },
+    // A large DOM is a cost to weigh, not a rule broken: upstream
+    // reports the slow updates and leaves the judgement to the reader.
+    severity: if passed { Severity::Pass } else { Severity::Informative },
     checks: vec![Check {
       name: "domIsNotTooLarge".into(),
       passed,

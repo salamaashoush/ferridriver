@@ -22,7 +22,7 @@ use std::fmt::Write as _;
 use std::sync::OnceLock;
 
 use regex::RegexSet;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::handlers::scripts::Script;
 use crate::insights::polyfills::{CORE_JS_POLYFILLS, MAX_POLYFILL_SIZE, MODULE_SIZES, POLYFILL_DEPENDENCIES};
@@ -115,10 +115,11 @@ fn matcher() -> &'static (RegexSet, Vec<String>) {
 }
 
 #[must_use]
-pub fn run(scripts: &[Script]) -> Insight {
+pub fn run(scripts: &[Script], lantern: Option<&crate::lantern::Context>) -> Insight {
   let (set, names) = matcher();
   let mut items = Vec::new();
   let mut total_bytes = 0u32;
+  let mut wasted_by_url: FxHashMap<&str, f64> = FxHashMap::default();
 
   for script in scripts {
     // A script this small cannot be a transpiled bundle, and reporting
@@ -140,6 +141,9 @@ pub fn run(scripts: &[Script]) -> Insight {
       continue;
     }
     total_bytes = total_bytes.saturating_add(wasted);
+    if !script.url.is_empty() {
+      *wasted_by_url.entry(script.url.as_str()).or_default() += f64::from(wasted);
+    }
 
     let mut found: Vec<&str> = matched.into_iter().collect();
     found.sort_unstable();
@@ -157,6 +161,8 @@ pub fn run(scripts: &[Script]) -> Insight {
   items.sort_by(|a, b| b.value.total_cmp(&a.value));
   let passed = items.is_empty();
   let estimated_bytes = f64::from(total_bytes);
+  let mut metrics = vec![("estimatedWastedBytes".into(), estimated_bytes)];
+  crate::insights::push_byte_savings(&mut metrics, lantern, &wasted_by_url);
 
   Insight {
     key: "LegacyJavaScript".into(),
@@ -182,7 +188,7 @@ pub fn run(scripts: &[Script]) -> Insight {
         )
       },
     }],
-    metrics: vec![("estimatedWastedBytes".into(), estimated_bytes)],
+    metrics,
     items,
   }
 }

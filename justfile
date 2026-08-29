@@ -117,6 +117,120 @@ test-e2e *args:
   cargo build --bin ferridriver --bin ferridriver-fixtures
   ./target/debug/ferridriver test {{args}}
 
+# Check ferridriver-perf against the engine it is a port of.
+#
+# `ferridriver-perf` is a port of devtools-frontend's trace analysis, so
+# its own tests can only show it does what its author thought. This runs
+# the real engine (the prebuilt devtools-frontend bundle that ships
+# inside chrome-devtools-mcp) over the same traces, diffs its verdicts
+# against the recordings checked in beside them, and then runs the
+# comparison. Needs node and one npm install.
+#
+# The offline half is `cargo test -p ferridriver-perf --test
+# differential`, which reads those recordings and runs in `just test`.
+# This recipe is what proves the recordings are still what the engine
+# says. One insight differs on purpose; scripts/perf-diff/README.md says
+# which and why.
+perf-diff:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  root="{{justfile_directory()}}"
+  cd "$root/scripts/perf-diff"
+  [ -d node_modules ] || npm install --registry=https://registry.npmjs.org --no-audit --no-fund
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' EXIT
+  stale=0
+  for trace in "$root"/crates/ferridriver-perf/tests/fixtures/*.json.gz; do
+    name="$(basename "$trace" .json.gz)"
+    echo "=== $name"
+    node engine.mjs "$trace" > "$work/$name.json"
+    if ! diff -u "$root/crates/ferridriver-perf/tests/fixtures/$name.upstream.json" "$work/$name.json"; then
+      echo "  recording is out of date with the engine -- run: just perf-diff-update" >&2
+      stale=1
+    fi
+  done
+  [ "$stale" -eq 0 ]
+  cd "$root" && cargo test -p ferridriver-perf --test differential
+
+# Re-record what the real engine says about each fixture trace.
+#
+# Run after deliberately changing what we compare, or after bumping the
+# chrome-devtools-mcp pin in scripts/perf-diff/package.json. Read the
+# resulting diff before committing it: every line of it is a change in
+# what we are being measured against.
+perf-diff-update:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  root="{{justfile_directory()}}"
+  cd "$root/scripts/perf-diff"
+  [ -d node_modules ] || npm install --registry=https://registry.npmjs.org --no-audit --no-fund
+  for trace in "$root"/crates/ferridriver-perf/tests/fixtures/*.json.gz; do
+    name="$(basename "$trace" .json.gz)"
+    node engine.mjs "$trace" > "$root/crates/ferridriver-perf/tests/fixtures/$name.upstream.json"
+  done
+  cd "$root" && git diff --stat -- crates/ferridriver-perf/tests/fixtures
+
+# What Lighthouse's own audits conclude about a page.
+#
+# The trace differential cannot reach these: Lighthouse audits read
+# artifacts gathered from a live DOM, not a saved trace, so this drives a
+# real page instead. Snapshot mode, so a static fixture answers the same
+# way every run and the comparison is a gate rather than a race.
+#
+# Serve the fixtures first (`python3 scripts/perf-diff/fixture-server.py`)
+# and pass a page, e.g. `just lh-audit http://127.0.0.1:8732/rich/`.
+# CHROME_PATH overrides the browser; otherwise the one `ferridriver
+# install` put in the Playwright cache is used.
+lh-audit url:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cd "{{justfile_directory()}}/scripts/perf-diff"
+  [ -d node_modules ] || npm install --registry=https://registry.npmjs.org --no-audit --no-fund
+  if [ -z "${CHROME_PATH:-}" ]; then
+    for candidate in \
+      "$HOME/Library/Caches/ms-playwright"/chromium-*/chrome-mac-*/"Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" \
+      "$HOME/.cache/ms-playwright"/chromium-*/chrome-linux/chrome; do
+      [ -x "$candidate" ] && export CHROME_PATH="$candidate" && break
+    done
+  fi
+  if [ -z "${CHROME_PATH:-}" ]; then
+    echo "no Chrome found; set CHROME_PATH or run: ferridriver install chromium" >&2
+    exit 1
+  fi
+  node lighthouse.mjs "{{url}}"
+
+# Check our accessibility audit against Lighthouse's, on a live page.
+#
+# Both run axe-core, so where they overlap they must agree exactly. What
+# they do not share is scope: Lighthouse wraps 67 of axe's rules and
+# reports only those, while this runs the engine and reports every rule
+# it has. Extra rules on our side are the point; the script compares the
+# intersection.
+#
+# Serve the fixtures first and pass a page, e.g.
+# `just a11y-diff http://127.0.0.1:8732/rich/`.
+a11y-diff url:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cd "{{justfile_directory()}}/scripts/perf-diff"
+  [ -d node_modules ] || npm install --registry=https://registry.npmjs.org --no-audit --no-fund
+  cd "{{justfile_directory()}}"
+  python3 scripts/perf-diff/compare-accessibility.py "{{url}}"
+
+# Print our own analysis of a trace, in the shape the recordings use.
+perf-report trace:
+  cargo run -p ferridriver-perf --example report -- {{trace}}
+
+# Time a trace analysis end to end, and then phase by phase.
+#
+# `bench` says how long; `phases` says which part to go and look at.
+# Release build: the debug numbers are dominated by bounds checks and
+# say nothing useful about where the work is.
+perf-bench trace iters="30":
+  cargo run --release -p ferridriver-perf --example bench -- {{trace}} {{iters}}
+  @echo ""
+  cargo run --release -p ferridriver-perf --example phases -- {{trace}} {{iters}}
+
 # Stress the MCP server: concurrent load across sessions, page/context/
 # instance churn, and a browser killed behind its back. An agent session
 # drives one tool at a time, so none of this is reachable in normal use —

@@ -65,7 +65,7 @@ impl Meta {
   /// Walk the trace once and pull out the frame tree, the navigations
   /// and the trace bounds.
   #[must_use]
-  pub fn from_events(events: &[TraceEvent]) -> Self {
+  pub fn from_events(events: &[TraceEvent<'_>]) -> Self {
     let mut meta = Self {
       trace_start: Micro::MAX,
       ..Default::default()
@@ -82,7 +82,7 @@ impl Meta {
         meta.trace_end = meta.trace_end.max(event.end());
       }
 
-      match event.name.as_str() {
+      match event.name.as_ref() {
         "TracingStartedInBrowser" => meta.absorb_frame_tree(event),
         "FrameCommittedInBrowser" => {
           if let Some(frame) = event.data_as::<FrameRecord>()
@@ -128,7 +128,7 @@ impl Meta {
   /// present is exact, `isOutermostMainFrame` alone is a good guess, and
   /// the oldest traces are left with the historical `DevTools` heuristic
   /// of "has a URL and no parent".
-  fn absorb_frame_tree(&mut self, event: &TraceEvent) {
+  fn absorb_frame_tree(&mut self, event: &TraceEvent<'_>) {
     let Some(frames) = event
       .data()
       .and_then(|d| d.get("frames"))
@@ -152,7 +152,7 @@ impl Meta {
     }
   }
 
-  fn absorb_navigation(&mut self, event: &TraceEvent, seen: &mut FxHashSet<String>) {
+  fn absorb_navigation(&mut self, event: &TraceEvent<'_>, seen: &mut FxHashSet<String>) {
     let Some(data) = event.data_as::<NavigationData>() else {
       return;
     };

@@ -27,6 +27,16 @@ pub enum NodeKind {
     /// Layout is less CPU-bound than script, so it is scaled by a
     /// smaller multiplier under simulated throttling.
     did_perform_layout: bool,
+    /// Whether the task painted, and whether it parsed HTML. Neither
+    /// affects the simulation; a paint-time subgraph keeps the first
+    /// task of each kind, because a paint the page never reached is
+    /// not a paint the page waited for.
+    did_paint: bool,
+    did_parse_html: bool,
+    /// Scripts this task ran, by URL. The link from a script request to
+    /// the work it caused is what tells a paint subgraph whether that
+    /// request was on the critical path or merely early.
+    evaluate_script_urls: Vec<String>,
   },
 }
 

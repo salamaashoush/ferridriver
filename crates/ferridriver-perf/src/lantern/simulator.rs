@@ -22,9 +22,6 @@ const MAXIMUM_CONCURRENT_REQUESTS: usize = 10;
 /// Connections a browser opens per origin over HTTP/1.
 const CONNECTIONS_PER_ORIGIN: usize = 6;
 
-/// Layout is less CPU-bound than script, so throttling stretches it less.
-const LAYOUT_TASK_MULTIPLIER: f64 = 0.5;
-
 /// Past this a task is almost certainly not CPU-bound, and scaling it
 /// further just invents time.
 const MAXIMUM_CPU_TASK_DURATION_MS: f64 = 10_000.0;
@@ -78,6 +75,7 @@ pub struct Simulator<'a> {
   rtt: f64,
   throughput: f64,
   cpu_slowdown: f64,
+  layout_slowdown: f64,
   analysis: &'a NetworkAnalysis,
 }
 
@@ -89,6 +87,9 @@ impl<'a> Simulator<'a> {
       rtt: throttling.rtt_ms,
       throughput: throttling.throughput_bps,
       cpu_slowdown: throttling.cpu_slowdown_multiplier,
+      // Upstream stacks the two rather than choosing between them, so
+      // Slow 4G lays out at 2x and not at half speed.
+      layout_slowdown: throttling.cpu_slowdown_multiplier * throttling.layout_task_multiplier,
       analysis,
     }
   }
@@ -262,9 +263,10 @@ impl<'a> Simulator<'a> {
       NodeKind::Cpu {
         duration_us,
         did_perform_layout,
+        ..
       } => {
         let multiplier = if did_perform_layout {
-          LAYOUT_TASK_MULTIPLIER
+          self.layout_slowdown
         } else {
           self.cpu_slowdown
         };
@@ -428,10 +430,17 @@ impl ConnectionPool {
         .get(&fact.origin)
         .copied()
         .unwrap_or(0.0);
+      // A measured zero means the estimate was clamped: the observed
+      // time to first byte came out no larger than the round trip, so
+      // the trace could not separate the server from the network. No
+      // server answers instantly, and upstream reads a zero the same
+      // way — `serverResponseTimeByOrigin.get(origin) || DEFAULT` in
+      // JavaScript falls through on zero as well as on absence.
       let response = analysis
         .server_response_time_by_origin
         .get(&fact.origin)
         .copied()
+        .filter(|measured| *measured > 0.0)
         .unwrap_or(DEFAULT_SERVER_RESPONSE_TIME);
       let connection = TcpConnection::new(
         rtt + additional,

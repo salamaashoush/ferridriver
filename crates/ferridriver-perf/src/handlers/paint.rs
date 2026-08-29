@@ -48,7 +48,7 @@ impl LargestPaint {
   /// The last candidate wins: candidates supersede one another as the
   /// page paints, and only the final one is the LCP.
   #[must_use]
-  pub fn from_events(events: &[TraceEvent], meta: &Meta, requests: &[NetworkRequest], time_origin: Micro) -> Self {
+  pub fn from_events(events: &[TraceEvent<'_>], meta: &Meta, requests: &[NetworkRequest], time_origin: Micro) -> Self {
     let mut winner = Candidate::default();
 
     for event in events {
@@ -159,13 +159,18 @@ pub struct PaintedImage {
   /// upstream, because serving breakpoints for them is disproportionate
   /// effort.
   pub is_css: bool,
+  /// Whether the markup already offered the browser a choice of sizes.
+  /// An author who wrote `srcset` has done the work responsive-image
+  /// advice asks for, so the advice only stands where the waste is
+  /// large enough to be worth another breakpoint.
+  pub had_breakpoints: bool,
 }
 
 /// Every painted image, keeping the LARGEST painted size per URL: an
 /// image drawn in several places is only oversized relative to the
 /// biggest one.
 #[must_use]
-pub fn painted_images(events: &[TraceEvent]) -> Vec<PaintedImage> {
+pub fn painted_images(events: &[TraceEvent<'_>]) -> Vec<PaintedImage> {
   let mut images: Vec<PaintedImage> = Vec::new();
 
   for event in events.iter().filter(|e| e.name == "PaintImage") {
@@ -196,6 +201,14 @@ pub fn painted_images(events: &[TraceEvent]) -> Vec<PaintedImage> {
         displayed_width,
         displayed_height,
         is_css: data.get("isCSS").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        had_breakpoints: data
+          .get("isPicture")
+          .and_then(serde_json::Value::as_bool)
+          .unwrap_or(false)
+          || data
+            .get("srcsetAttribute")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|attr| !attr.is_empty()),
       }),
     }
   }

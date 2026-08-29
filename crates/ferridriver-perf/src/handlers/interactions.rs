@@ -49,7 +49,7 @@ struct Partial {
 
 /// Every interaction the trace caught, longest first.
 #[must_use]
-pub fn from_events(events: &[TraceEvent]) -> Vec<Interaction> {
+pub fn from_events(events: &[TraceEvent<'_>]) -> Vec<Interaction> {
   let mut partials: FxHashMap<i64, Partial> = FxHashMap::default();
 
   for event in events {

@@ -45,8 +45,14 @@ pub fn run(requests: &[NetworkRequest], first_party_url: &str) -> Insight {
     title: "Third parties".into(),
     description: "Third-party code you do not control still competes for the main thread and the network.".into(),
     // Third-party weight is context the developer judges, not something
-    // with a threshold to fail against.
-    severity: Severity::Informative,
+    // with a threshold to fail against. A page with no third party at
+    // all has nothing to weigh, which is a pass rather than a finding
+    // with an empty list.
+    severity: if items.is_empty() {
+      Severity::Pass
+    } else {
+      Severity::Informative
+    },
     checks: vec![Check {
       name: "hasThirdParties".into(),
       // Informative: third-party weight is a fact to weigh, not a

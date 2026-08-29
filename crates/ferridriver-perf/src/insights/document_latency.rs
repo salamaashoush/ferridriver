@@ -15,13 +15,21 @@ const TOO_SLOW_THRESHOLD_MS: f64 = 600.0;
 /// Compression savings below this are not worth reporting.
 const IGNORE_THRESHOLD_IN_BYTES: i64 = 1400;
 
+/// What a server response should be aiming at. The saving is stated
+/// against this rather than against zero, because no server answers
+/// instantly.
+const TARGET_MS: f64 = 100.0;
+
 #[must_use]
 pub fn run(document: Option<&NetworkRequest>) -> Option<Insight> {
   let document = document?;
 
   let server_response_ms = crate::units::micros_to_ms(document.timing.server_response_time).round();
   let redirect_total: i64 = document.redirects.iter().map(|r| r.dur).sum();
-  let redirect_ms = crate::units::micros_to_ms(redirect_total);
+  // Whole milliseconds, as upstream reports it: this is wall time spent
+  // on hops the page did not need, and a fraction of a millisecond of
+  // it is not a finding.
+  let redirect_ms = crate::units::micros_to_ms(redirect_total).round();
   let savings = compression_savings(document);
 
   let checks = vec![
@@ -57,6 +65,15 @@ pub fn run(document: Option<&NetworkRequest>) -> Option<Insight> {
     },
   ];
 
+  // Only a server that is over the reporting line contributes: the gap
+  // between a merely-unhurried response and the target is not a saving
+  // anyone is being asked to make.
+  let response_savings_ms = if server_response_ms > TOO_SLOW_THRESHOLD_MS {
+    (server_response_ms - TARGET_MS).max(0.0)
+  } else {
+    0.0
+  };
+  let overall_savings_ms = response_savings_ms + redirect_ms;
   let failed = checks.iter().any(|c| !c.passed);
   Some(Insight {
     key: "DocumentLatency".into(),
@@ -70,6 +87,12 @@ pub fn run(document: Option<&NetworkRequest>) -> Option<Insight> {
       ("serverResponseTimeMs".into(), server_response_ms),
       ("redirectDurationMs".into(), redirect_ms),
       ("uncompressedResponseBytes".into(), crate::units::count_to_f64(savings)),
+      // Both paints wait on the document, so what the document stops
+      // wasting, both of them gain. Unlike the byte savings elsewhere
+      // this needs no simulation: a redirect that never happened is
+      // time nothing else could have overlapped.
+      ("estimatedSavingsFcpMs".into(), overall_savings_ms),
+      ("estimatedSavingsLcpMs".into(), overall_savings_ms),
     ],
     items: Vec::new(),
   })

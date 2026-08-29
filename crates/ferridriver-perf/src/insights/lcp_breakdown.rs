@@ -26,12 +26,17 @@ pub fn run(
   paint: &LargestPaint,
   lcp_ts: Option<Micro>,
   navigation_ts: Micro,
-) -> Option<Insight> {
-  let document = document?;
-  let lcp_ts = lcp_ts?;
-  // Without the response-header timestamp there is no boundary between
-  // ttfb and everything after it, so no breakdown is possible.
-  let first_byte_ts = document.timing.first_byte_ts?;
+) -> Insight {
+  // Without an LCP, or without the response-header timestamp that
+  // separates ttfb from everything after it, there is no breakdown to
+  // give. Upstream still reports the insight, passing: a page that
+  // never reached a largest paint has no largest paint to improve.
+  let (Some(document), Some(lcp_ts)) = (document, lcp_ts) else {
+    return nothing_to_break_down();
+  };
+  let Some(first_byte_ts) = document.timing.first_byte_ts else {
+    return nothing_to_break_down();
+  };
 
   let mut items = Vec::new();
   let ttfb = micros_to_ms(first_byte_ts - navigation_ts);
@@ -72,7 +77,7 @@ pub fn run(
   // traces missing some of what this reads. Reporting the arithmetic
   // anyway would be worse than reporting nothing.
   if items.iter().any(|i| i.value < 0.0) {
-    return None;
+    return nothing_to_break_down();
   }
 
   let total = micros_to_ms(lcp_ts - navigation_ts);
@@ -80,13 +85,16 @@ pub fn run(
   // Upstream marks it informative for the same reason, and the LCP
   // number itself is already in the metrics.
   let passed = total <= GOOD_LCP_MS;
-  Some(Insight {
+  Insight {
     key: "LCPBreakdown".into(),
     title: "LCP breakdown".into(),
     description: "Each subpart has specific improvement strategies. Ideally, most of the LCP time should be \
                   spent on loading the resource, not within delays."
       .into(),
-    severity: Severity::Informative,
+    // A breakdown reports where the time went, so it never fails on its
+    // own account; it fails when the LCP it is breaking down is not
+    // good, which is the same judgement the metric already carries.
+    severity: if passed { Severity::Informative } else { Severity::Fail },
     checks: vec![Check {
       name: "lcpIsGood".into(),
       passed,
@@ -97,5 +105,25 @@ pub fn run(
     }],
     metrics: vec![("lcpMs".into(), total)],
     items,
-  })
+  }
+}
+
+/// A page with no largest contentful paint, or a trace missing the
+/// timestamps the breakdown is measured between.
+fn nothing_to_break_down() -> Insight {
+  Insight {
+    key: "LCPBreakdown".into(),
+    title: "LCP breakdown".into(),
+    description: "Each subpart has specific improvement strategies. Ideally, most of the LCP time should be \
+                  spent on loading the resource, not within delays."
+      .into(),
+    severity: Severity::Pass,
+    checks: vec![Check {
+      name: "lcpIsGood".into(),
+      passed: true,
+      detail: "No largest contentful paint was recorded".into(),
+    }],
+    metrics: Vec::new(),
+    items: Vec::new(),
+  }
 }

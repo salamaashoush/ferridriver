@@ -7,6 +7,7 @@
 //! match what its name implies is skipped, never a hard error, because a
 //! single malformed event must not cost the whole trace.
 
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use serde::Deserialize;
@@ -26,13 +27,13 @@ pub type Micro = i64;
 /// to whoever actually wants it. A faster tokenizer is not the lever;
 /// simd-json measured at 7%.
 #[derive(Debug, Clone, Deserialize)]
-pub struct TraceEvent {
-  #[serde(default)]
-  pub name: String,
-  #[serde(default)]
-  pub cat: String,
-  #[serde(default)]
-  pub ph: String,
+pub struct TraceEvent<'a> {
+  #[serde(default, borrow)]
+  pub name: Cow<'a, str>,
+  #[serde(default, borrow)]
+  pub cat: Cow<'a, str>,
+  #[serde(default, borrow)]
+  pub ph: Cow<'a, str>,
   #[serde(default)]
   pub ts: Micro,
   #[serde(default)]
@@ -41,22 +42,37 @@ pub struct TraceEvent {
   pub pid: i64,
   #[serde(default)]
   pub tid: i64,
-  /// Unparsed. Reach it through [`TraceEvent::data`] or
-  /// [`TraceEvent::args_get`], never directly.
-  #[serde(default)]
-  args: Option<Box<RawValue>>,
+  /// Unparsed, borrowed from the trace buffer. Reach it through
+  /// [`TraceEvent::data`] or [`TraceEvent::args_get`], never directly.
+  #[serde(rename = "args", default, borrow)]
+  raw_args: Option<&'a RawValue>,
+  /// `args` a caller had already parsed, borrowed from their tree.
+  ///
+  /// Never deserialized into; [`from_values`] sets it. Kept as a second
+  /// field rather than an untagged enum with the raw form, because an
+  /// untagged enum makes serde buffer the whole document to decide which
+  /// variant it is looking at, which is the exact cost this borrows to
+  /// avoid.
+  #[serde(skip)]
+  value_args: Option<&'a serde_json::Value>,
   /// `args` once someone has asked for it. Parsed at most once per
   /// event, and not at all for an event nobody reads.
   #[serde(skip)]
   parsed: OnceLock<Option<serde_json::Value>>,
 }
 
-impl TraceEvent {
+impl TraceEvent<'_> {
   /// `args`, parsed on first use and cached.
+  ///
+  /// A caller who already had a `Value` pays nothing here at all.
   fn args(&self) -> Option<&serde_json::Value> {
+    if let Some(value) = self.value_args {
+      return Some(value);
+    }
+    let raw = self.raw_args?;
     self
       .parsed
-      .get_or_init(|| self.args.as_ref().and_then(|raw| serde_json::from_str(raw.get()).ok()))
+      .get_or_init(|| serde_json::from_str(raw.get()).ok())
       .as_ref()
   }
 
@@ -81,9 +97,10 @@ impl TraceEvent {
   /// same answer, and neither pays to convert into the other's form.
   #[must_use]
   pub fn args_as<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
-    match self.args.as_ref() {
-      Some(raw) => serde_json::from_str(raw.get()).ok(),
-      None => serde_json::from_value(self.args()?.clone()).ok(),
+    match (self.raw_args, self.value_args) {
+      (Some(raw), _) => serde_json::from_str(raw.get()).ok(),
+      (None, Some(value)) => T::deserialize(value).ok(),
+      (None, None) => None,
     }
   }
 
@@ -155,11 +172,11 @@ pub const MILLIS_TO_MICROS: f64 = 1_000.0;
 /// # Errors
 ///
 /// When the input is not JSON, or is neither of those two shapes.
-pub fn parse(bytes: &[u8]) -> Result<Vec<TraceEvent>, crate::Error> {
+pub fn parse(bytes: &[u8]) -> Result<Vec<TraceEvent<'_>>, crate::Error> {
   #[derive(Deserialize)]
-  struct Wrapped {
-    #[serde(rename = "traceEvents")]
-    trace_events: Vec<TraceEvent>,
+  struct Wrapped<'a> {
+    #[serde(rename = "traceEvents", borrow)]
+    trace_events: Vec<TraceEvent<'a>>,
   }
 
   // The shape is decided by the first non-space byte rather than by
@@ -168,8 +185,8 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<TraceEvent>, crate::Error> {
   // path silently failed and every trace was parsed twice: 129ms where
   // this takes 16ms.
   match bytes.iter().find(|b| !b.is_ascii_whitespace()) {
-    Some(b'[') => Ok(serde_json::from_slice::<Vec<TraceEvent>>(bytes)?),
-    Some(b'{') => Ok(serde_json::from_slice::<Wrapped>(bytes)?.trace_events),
+    Some(b'[') => Ok(serde_json::from_slice::<Vec<TraceEvent<'_>>>(bytes)?),
+    Some(b'{') => Ok(serde_json::from_slice::<Wrapped<'_>>(bytes)?.trace_events),
     _ => Err(crate::Error::NotATrace),
   }
 }
@@ -187,20 +204,12 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<TraceEvent>, crate::Error> {
 /// dropped; Chrome mixes in metadata records that carry neither, and a
 /// trace is still analysable without them.
 #[must_use]
-pub fn from_values(values: &[serde_json::Value]) -> Vec<TraceEvent> {
+pub fn from_values(values: &[serde_json::Value]) -> Vec<TraceEvent<'_>> {
   values
     .iter()
     .map(|value| {
-      let string = |key: &str| {
-        value
-          .get(key)
-          .and_then(serde_json::Value::as_str)
-          .unwrap_or_default()
-          .to_string()
-      };
+      let string = |key: &str| Cow::Borrowed(value.get(key).and_then(serde_json::Value::as_str).unwrap_or_default());
       let int = |key: &str| value.get(key).and_then(serde_json::Value::as_i64).unwrap_or(0);
-      let parsed = OnceLock::new();
-      let _ = parsed.set(value.get("args").cloned());
       TraceEvent {
         name: string("name"),
         cat: string("cat"),
@@ -209,8 +218,9 @@ pub fn from_values(values: &[serde_json::Value]) -> Vec<TraceEvent> {
         dur: value.get("dur").and_then(serde_json::Value::as_i64),
         pid: int("pid"),
         tid: int("tid"),
-        args: None,
-        parsed,
+        raw_args: None,
+        value_args: value.get("args"),
+        parsed: OnceLock::new(),
       }
     })
     .collect()

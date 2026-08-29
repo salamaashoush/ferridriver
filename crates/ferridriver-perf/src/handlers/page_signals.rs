@@ -23,12 +23,12 @@ pub struct PageSignals {
 
 impl PageSignals {
   #[must_use]
-  pub fn from_events(events: &[TraceEvent], meta: &Meta) -> Self {
+  pub fn from_events(events: &[TraceEvent<'_>], meta: &Meta) -> Self {
     let mut signals = Self::default();
     let mut viewport_ts = None;
 
     for event in events {
-      match event.name.as_str() {
+      match event.name.as_ref() {
         "ParseMetaViewport" => {
           if frame_of(event).is_none_or(|f| meta.main_frame_id.is_empty() || f == meta.main_frame_id) {
             signals.viewport.saw_meta_viewport = true;
@@ -50,21 +50,31 @@ impl PageSignals {
           // not decides the answer.
           signals.viewport.mobile_optimized = Some(signals.viewport.mobile_optimized.unwrap_or(true) && optimized);
         },
+        // `url`, `display` and `id` sit directly on `args`, not under
+        // the `args.data` every other payload uses. Reading `data` here
+        // found no fonts at all, on any trace, silently.
         "BeginRemoteFontLoad" => {
-          if let Some(data) = event.data() {
-            let url = data
-              .get("url")
+          let string_of = |key: &str| {
+            event
+              .args_get(key)
               .and_then(serde_json::Value::as_str)
               .unwrap_or_default()
-              .to_string();
-            let display = data
-              .get("display")
-              .and_then(serde_json::Value::as_str)
-              .unwrap_or_default()
-              .to_string();
-            if !url.is_empty() {
-              signals.fonts.push(RemoteFont { url, display });
-            }
+              .to_string()
+          };
+          let url = string_of("url");
+          if !url.is_empty() {
+            signals.fonts.push(RemoteFont {
+              url,
+              display: string_of("display"),
+              // Upstream matches the request by `{pid}.{id}` rather
+              // than by URL, which is what tells two fetches of the
+              // same font apart.
+              request_id: event
+                .args_get("id")
+                .and_then(serde_json::Value::as_i64)
+                .map(|id| format!("{}.{id}", event.pid))
+                .unwrap_or_default(),
+            });
           }
         },
         "MetaCharsetCheck" => {
@@ -88,7 +98,7 @@ impl PageSignals {
 
 /// Blink writes selector statistics as an array of records whose keys
 /// carry their units in the name, such as `elapsed (us)`.
-fn selector_timings(event: &TraceEvent) -> Vec<SelectorTiming> {
+fn selector_timings(event: &TraceEvent<'_>) -> Vec<SelectorTiming> {
   let Some(rows) = event
     .args_get("selector_stats")
     .and_then(|s| s.get("selector_timings"))
@@ -114,7 +124,7 @@ fn selector_timings(event: &TraceEvent) -> Vec<SelectorTiming> {
     .collect()
 }
 
-fn frame_of(event: &TraceEvent) -> Option<&str> {
+fn frame_of<'a>(event: &'a TraceEvent<'a>) -> Option<&'a str> {
   event
     .data()
     .and_then(|d| d.get("frame"))
@@ -127,12 +137,12 @@ fn frame_of(event: &TraceEvent) -> Option<&str> {
 /// The events are all Blink markers whose only consumer is that
 /// insight, so they are collected in the same pass as the rest.
 #[must_use]
-pub fn layout_shift_culprits(events: &[TraceEvent]) -> Vec<crate::insights::cls_culprits::Culprit> {
+pub fn layout_shift_culprits(events: &[TraceEvent<'_>]) -> Vec<crate::insights::cls_culprits::Culprit> {
   use crate::insights::cls_culprits::{Culprit, CulpritKind};
 
   let mut culprits = Vec::new();
   for event in events {
-    let kind = match event.name.as_str() {
+    let kind = match event.name.as_ref() {
       "LayoutImageUnsized" => CulpritKind::UnsizedImage,
       "BeginRemoteFontLoad" => CulpritKind::WebFont,
       "RenderFrameImpl::createChildFrame" => CulpritKind::InjectedIframe,

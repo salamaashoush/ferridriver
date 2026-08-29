@@ -15,6 +15,7 @@ default-members = [
   "crates/ferridriver-session",
   "crates/ferridriver-node",
   "crates/ferridriver-expect",
+  "crates/ferridriver-perf",
   "crates/ferridriver-viewer",
   "examples/bdd-example",
 ]

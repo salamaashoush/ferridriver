@@ -24,6 +24,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 ferridriver = { workspace = true }
+flate2 = { workspace = true }
 tokio = { workspace = true }
 
 [[example]]
@@ -34,3 +35,9 @@ name = "bench"
 
 [[example]]
 name = "report"
+
+[[example]]
+name = "phases"
+
+[[example]]
+name = "accessibility"

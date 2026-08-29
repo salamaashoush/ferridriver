@@ -392,6 +392,48 @@ Concrete exception to Rule 10's "no `#[allow(dead_code)]`": apply `#[allow(dead_
 
 Bias toward continuing to implement the next phase in the same session so the scaffolding gets consumed before commit.
 
+### A port is checked against the thing it is a port of
+
+`ferridriver-perf` passed 62 of its own hand-built tests and was still
+wrong. Run against the real devtools-frontend engine on the same traces
+it gave up four defects, then six, then ten more once fixtures existed
+that actually tripped the insights. Among them: a render-blocking count
+that reported one request where the engine reported three; a Lantern
+simulation running the Slow 4G preset where `DevTools` runs the
+conditions the trace recorded; a request start time taken from
+`ResourceSendRequest` rather than the renderer queue, which left
+main-thread tasks unattached and silently unsimulated; a font handler
+that had never once seen a font, because `BeginRemoteFontLoad` puts its
+payload on `args` and not `args.data`, and the test fixture said
+`args.data` too; and a request priority read before Chrome had finished
+changing it.
+
+`just perf-diff` re-derives the engine's verdicts and diffs them against
+the recordings in `crates/ferridriver-perf/tests/fixtures/`;
+`cargo test -p ferridriver-perf --test differential` compares our
+analysis against those recordings on every `just test`. Before claiming
+any change to that crate is correct, run the first one. Tests that pass
+are not evidence of agreement with upstream.
+
+Two corollaries, both learned the hard way.
+
+**A fixture that makes everything pass is not evidence either.** The
+first two traces agreed with upstream largely by both finding nothing,
+so most of the comparison was passing on empty input. Pages that
+redirect, paint text rather than an image, load a web font and serve
+oversized images found ten defects the first two could not see.
+
+**Comparing derived differences is not comparing the model.** Every
+predicted saving is one simulation minus another, so a round trip that
+is wrong in the same direction on both sides cancels out: the insight
+comparison stayed exact for a whole session while the network analyser
+underneath had one RTT estimator where upstream has four. Compare what
+the model itself produced — the analyser's own numbers, the estimates
+straight out of the simulator — not only the conclusions drawn from it.
+
+`scripts/perf-diff/README.md` has the rest, including the one insight
+that differs on purpose.
+
 ### Never commit with failing tests or red clippy
 
 Run every time, before every commit:

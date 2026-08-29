@@ -1,7 +1,14 @@
 //! Capture a real trace to a file, so the analysis can be iterated on
 //! without relaunching a browser each time.
 //!
-//! `cargo run -p ferridriver-perf --example capture -- <url> <out.json>`
+//! `cargo run -p ferridriver-perf --example capture -- <url> <out.json> [mode] [+category,...]`
+//!
+//! `mode` is `prenav` or `interact`. A `+` argument adds trace
+//! categories on top of the default set, which is how the optional ones
+//! get recorded: CSS selector statistics need
+//! `+disabled-by-default-blink.debug,disabled-by-default-devtools.timeline.invalidationTracking`,
+//! and neither Lighthouse nor the `DevTools` panel records them unless
+//! asked.
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,7 +31,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     page.goto(&url).await?;
     page.wait_for_load_state(None).await?;
   }
-  page.start_tracing(None).await?;
+  // Extra categories, if any were named. The default set is what
+  // Lighthouse records; anything beyond it is opt-in on both sides,
+  // which is why an insight that reads one can report "not measured"
+  // on an ordinary trace.
+  let extra: Vec<String> = std::env::args()
+    .find_map(|arg| arg.strip_prefix('+').map(str::to_string))
+    .map(|list| list.split(',').map(str::to_string).collect())
+    .unwrap_or_default();
+  let categories: Option<Vec<String>> = (!extra.is_empty()).then(|| {
+    let mut all: Vec<String> = ferridriver::trace_categories::DEFAULT
+      .iter()
+      .map(|c| (*c).to_string())
+      .collect();
+    all.extend(extra);
+    all
+  });
+  page.start_tracing(categories.as_deref()).await?;
   page.goto(&url).await?;
   page.wait_for_load_state(None).await?;
   // `load` fires before the compositor has necessarily committed a

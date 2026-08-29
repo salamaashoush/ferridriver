@@ -24,6 +24,7 @@ pub mod slow_css_selector;
 pub mod third_parties;
 pub mod viewport;
 
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -52,6 +53,24 @@ pub struct Item {
   /// Milliseconds, bytes or count, depending on the insight.
   pub value: f64,
   pub unit: &'static str,
+}
+
+/// Record what each paint would gain if the named requests transferred
+/// that many fewer bytes.
+///
+/// `metricSavingsForWastedBytes` in devtools-frontend, which four
+/// insights share. Nothing is recorded when the page had no paint to
+/// simulate: upstream leaves `metricSavings` off the model entirely
+/// rather than reporting a zero it did not compute.
+pub(crate) fn push_byte_savings(
+  metrics: &mut Vec<(String, f64)>,
+  lantern: Option<&crate::lantern::Context>,
+  wasted_by_url: &FxHashMap<&str, f64>,
+) {
+  let Some(context) = lantern else { return };
+  let savings = context.savings_from_wasted_bytes(wasted_by_url);
+  metrics.push(("estimatedSavingsFcpMs".into(), savings.fcp_ms));
+  metrics.push(("estimatedSavingsLcpMs".into(), savings.lcp_ms));
 }
 
 #[derive(Debug, Clone, Serialize)]

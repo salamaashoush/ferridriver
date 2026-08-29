@@ -1,16 +1,20 @@
 //! Whether the browser could find the LCP image early enough.
 //!
-//! Mirrors devtools-frontend `insights/LCPDiscovery.ts`. Only applies to
-//! an image LCP; a text LCP has nothing to discover.
+//! Mirrors devtools-frontend `insights/LCPDiscovery.ts`. Only an image
+//! LCP has anything to discover, but the insight is still reported for a
+//! text LCP: upstream returns a model with no checklist and a passing
+//! state, and dropping it instead would leave a report with eighteen
+//! insights where every other page has nineteen.
 
 use crate::handlers::network::NetworkRequest;
 use crate::handlers::paint::LargestPaint;
 use crate::insights::{Check, Insight, Severity};
 
 #[must_use]
-pub fn run(document: Option<&NetworkRequest>, requests: &[NetworkRequest], paint: &LargestPaint) -> Option<Insight> {
-  let lcp_request = requests.get(paint.request?)?;
-  let document = document?;
+pub fn run(document: Option<&NetworkRequest>, requests: &[NetworkRequest], paint: &LargestPaint) -> Insight {
+  let Some((lcp_request, document)) = paint.request.and_then(|i| requests.get(i)).zip(document) else {
+    return nothing_to_discover();
+  };
 
   // Discoverable means the preload scanner could reach it from the HTML
   // itself: either the parser found it in the main document, or a
@@ -65,15 +69,31 @@ pub fn run(document: Option<&NetworkRequest>, requests: &[NetworkRequest], paint
   ];
 
   let failed = checks.iter().any(|c| !c.passed);
-  Some(Insight {
+  Insight {
     key: "LCPDiscovery".into(),
-    title: "LCP request discovery".into(),
-    description: "Optimize LCP by making the LCP image discoverable from the HTML immediately, and avoiding \
-                  lazy-loading."
-      .into(),
+    title: TITLE.into(),
+    description: DESCRIPTION.into(),
     severity: if failed { Severity::Fail } else { Severity::Pass },
     checks,
     metrics: Vec::new(),
     items: Vec::new(),
-  })
+  }
+}
+
+const TITLE: &str = "LCP request discovery";
+const DESCRIPTION: &str = "Optimize LCP by making the LCP image discoverable from the HTML immediately, and \
+                           avoiding lazy-loading.";
+
+/// A text LCP, or an image whose request the trace never named. There is
+/// no checklist to run, and nothing failed.
+fn nothing_to_discover() -> Insight {
+  Insight {
+    key: "LCPDiscovery".into(),
+    title: TITLE.into(),
+    description: DESCRIPTION.into(),
+    severity: Severity::Pass,
+    checks: Vec::new(),
+    metrics: Vec::new(),
+    items: Vec::new(),
+  }
 }
