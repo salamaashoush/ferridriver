@@ -361,6 +361,25 @@ impl WebKitBrowser {
     let proxy = options.and_then(|o| o.proxy.as_ref());
     let ctx_id = self.new_context(proxy).await?;
     if let Some(opts) = options {
+      // `new_context` opened this one with `allow`, which is the
+      // default; a context that refuses downloads re-sends the
+      // per-context command. WebKit then reports a refused download as
+      // a cancelled one, and the download listener turns that into
+      // Playwright's wording.
+      if opts.accept_downloads == Some(false) {
+        self
+          .root
+          .send(
+            "Playwright.setDownloadBehavior",
+            json!({
+              "behavior": "deny",
+              "downloadPath": self.downloads_dir.to_string_lossy(),
+              "browserContextId": ctx_id.clone(),
+            }),
+          )
+          .await
+          .map_err(BrowserError::from)?;
+      }
       if let Some(locale) = opts.locale.as_deref() {
         let _ = self
           .root
@@ -645,12 +664,10 @@ fn spawn_download_listener(root: &Session, pages: Arc<Mutex<Vec<WebKitPage>>>, d
           let pages_snapshot: Vec<WebKitPage> = pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
           for p in &pages_snapshot {
             if let Some(dl) = p.download_manager.take_for_guid(uuid) {
-              let final_path = if error.is_none() {
-                Some(downloads_dir.join(uuid))
-              } else {
-                None
-              };
-              dl.report_finished(final_path, error.clone());
+              match error.as_deref() {
+                None => dl.report_finished(Some(downloads_dir.join(uuid)), None),
+                Some(reason) => p.download_manager.report_canceled(&dl, reason),
+              }
               break;
             }
           }

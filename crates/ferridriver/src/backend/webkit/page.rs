@@ -1754,6 +1754,13 @@ impl WebKitPage {
   }
 
   async fn apply_browser_session_overrides(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
+    // The behaviour itself is sent per context when the context is
+    // created (`WebKitBrowser::new_context_with_options`); this is the
+    // page-side half, so a refused download says which option refused
+    // it rather than just `cancelled`.
+    if let Some(accept) = opts.accept_downloads {
+      self.download_manager.set_accept_downloads(accept);
+    }
     let Some(ctx) = &self.context_id else {
       return Ok(());
     };

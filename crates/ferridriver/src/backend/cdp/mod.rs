@@ -746,6 +746,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       download_manager: crate::download::DownloadManager::new(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(downloads_dir),
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
@@ -864,6 +865,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         download_manager: crate::download::DownloadManager::new(),
         download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         downloads_dir: Arc::clone(&self.downloads_dir),
         page_backref: crate::backend::PageBackref::new(),
         frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
@@ -1051,6 +1053,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       download_manager: crate::download::DownloadManager::new(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(&self.downloads_dir),
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
@@ -1846,6 +1849,16 @@ pub struct CdpPage<T: CdpTransport> {
   /// set in the bag, so opt-in callers keep working without needing
   /// to register a listener first.
   pub download_behavior_enabled: Arc<std::sync::atomic::AtomicBool>,
+  /// Whether this context accepts downloads at all
+  /// (`BrowserContextOptions::accept_downloads`, default `true`).
+  ///
+  /// Read by [`Self::enable_download_behavior`] rather than sent from
+  /// `apply_context_options`, because there is only room for one
+  /// `Browser.setDownloadBehavior` answer per context and two senders
+  /// would race: the lazy latch used to overwrite an explicit `deny`
+  /// with `allowAndName` the moment anything registered a download
+  /// listener, which is why `acceptDownloads: false` did nothing.
+  pub accept_downloads: Arc<std::sync::atomic::AtomicBool>,
   /// Per-page temp directory that Chrome is configured to write
   /// downloads into (via `Browser.setDownloadBehavior({ behavior:
   /// 'allowAndName', downloadPath, eventsEnabled: true })`). Held as
@@ -2113,6 +2126,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       file_chooser_intercept_enabled: self.file_chooser_intercept_enabled.clone(),
       download_manager: self.download_manager.clone(),
       download_behavior_enabled: self.download_behavior_enabled.clone(),
+      accept_downloads: self.accept_downloads.clone(),
       downloads_dir: self.downloads_dir.clone(),
       page_backref: self.page_backref.clone(),
       frame_cache: self.frame_cache.clone(),
@@ -2603,22 +2617,31 @@ impl<T: CdpWrap> CdpPage<T> {
     {
       return Ok(());
     }
-    let params = if let Some(ref ctx) = self.browser_context_id {
-      serde_json::json!({
-        "behavior": "allowAndName",
-        "browserContextId": &**ctx,
-        "downloadPath": self.downloads_dir.path().to_string_lossy(),
-        "eventsEnabled": true,
-      })
+    // `allowAndName` writes each download to `<downloadPath>/<guid>`
+    // rather than the server's suggested name, so parallel downloads
+    // sharing a tempdir cannot collide. `deny` still needs
+    // `eventsEnabled` and a path: Chrome reports the refusal as a
+    // `downloadProgress` state of `canceled`, which is how
+    // `download.path()` learns to reject.
+    let behavior = if self.accept_downloads.load(std::sync::atomic::Ordering::Relaxed) {
+      "allowAndName"
     } else {
-      serde_json::json!({
-        "behavior": "allowAndName",
-        "downloadPath": self.downloads_dir.path().to_string_lossy(),
-        "eventsEnabled": true,
-      })
+      "deny"
     };
-    let _ = self.cmd("Browser.setDownloadBehavior", params).await;
-    Ok(())
+    let mut params = serde_json::json!({
+      "behavior": behavior,
+      "downloadPath": self.downloads_dir.path().to_string_lossy(),
+      "eventsEnabled": true,
+    });
+    if let Some(ref ctx) = self.browser_context_id
+      && let Some(map) = params.as_object_mut()
+    {
+      map.insert(
+        "browserContextId".into(),
+        serde_json::Value::String((**ctx).to_string()),
+      );
+    }
+    self.cmd("Browser.setDownloadBehavior", params).await.map(|_| ())
   }
 
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
@@ -4825,17 +4848,24 @@ impl<T: CdpWrap> CdpPage<T> {
         }
       })
       .into();
+    // Record rather than send: `enable_download_behavior` owns the one
+    // `Browser.setDownloadBehavior` this context gets, so the lazy latch
+    // cannot overwrite an explicit `deny`. Denial is applied eagerly
+    // because the browser's own default is to allow, so waiting for
+    // something to show interest in downloads would let the first one
+    // through; acceptance stays lazy and keeps saving that round trip.
     let dl_fut: OptionFuture<_> = opts
       .accept_downloads
       .map(|accept| async move {
-        let behavior = if accept { "allow" } else { "deny" };
         self
-          .cmd(
-            "Browser.setDownloadBehavior",
-            serde_json::json!({"behavior": behavior, "downloadPath": "", "eventsEnabled": true}),
-          )
-          .await
-          .map(|_| ())
+          .accept_downloads
+          .store(accept, std::sync::atomic::Ordering::Relaxed);
+        self.download_manager.set_accept_downloads(accept);
+        if accept {
+          Ok(())
+        } else {
+          self.enable_download_behavior().await
+        }
       })
       .into();
     let headers_fut: OptionFuture<_> = opts
@@ -5927,7 +5957,7 @@ impl<T: CdpWrap> CdpPage<T> {
               },
               "canceled" => {
                 if let Some(d) = download_manager.take_for_guid(&guid) {
-                  d.report_finished(None, Some("canceled".to_string()));
+                  download_manager.report_canceled(&d, "canceled");
                 }
               },
               // "inProgress" — no-op; we only surface terminal state.

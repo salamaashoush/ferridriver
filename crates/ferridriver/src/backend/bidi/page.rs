@@ -264,6 +264,15 @@ pub struct BidiPage {
   pub downloads_dir: Arc<tempfile::TempDir>,
   /// This page's own folder inside `downloads_dir`. See `create`.
   pub downloads_subdir: Arc<std::path::PathBuf>,
+  /// Whether this context accepts downloads at all
+  /// (`BrowserContextOptions::accept_downloads`, default `true`).
+  ///
+  /// Recorded rather than sent from `apply_context_options`: there is
+  /// one `browser.setDownloadBehavior` answer per browser, and
+  /// `attach_listeners` used to send an unconditional `allowed` from a
+  /// detached task, so an explicit `denied` was overwritten by whichever
+  /// finished last.
+  pub accept_downloads: Arc<std::sync::atomic::AtomicBool>,
   /// Weak back-reference to the outer [`crate::page::Page`]. Same
   /// purpose as the CDP page's field — the file-chooser listener
   /// upgrades it to build the `ElementHandle`.
@@ -427,6 +436,7 @@ impl BidiPage {
     let _ = std::fs::create_dir_all(&downloads_subdir);
     Self {
       downloads_subdir: Arc::new(downloads_subdir),
+      accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       session,
       context_id: Arc::from(context_id),
       user_context: Arc::from(user_context.unwrap_or("default")),
@@ -1630,6 +1640,20 @@ impl BidiPage {
 
   // ── Emulation ───────────────────────────────────────────────────────────
 
+  /// Send this page's download behaviour, allowed or denied.
+  ///
+  /// Browser-scoped and best-effort in Firefox, the same way Playwright
+  /// treats it; the tempdir drop cleans up if the command never landed.
+  pub async fn send_download_behavior(&self) -> Result<()> {
+    self
+      .cmd(
+        "browser.setDownloadBehavior",
+        download_behavior_params(&self.accept_downloads, &self.downloads_subdir),
+      )
+      .await
+      .map(|_| ())
+  }
+
   /// Apply a [`crate::options::BrowserContextOptions`] bag to this
   /// page. Every `BiDi` command is inlined — no per-field helpers
   /// remain. Mirrors Playwright's
@@ -1771,15 +1795,16 @@ impl BidiPage {
     let dl_fut: OptionFuture<_> = opts
       .accept_downloads
       .map(|accept| async move {
-        let dl = if accept {
-          json!({ "type": "allowed", "destinationFolder": "" })
-        } else {
-          json!({ "type": "denied" })
-        };
+        // Record and re-assert: `attach_listeners` sends the same
+        // command with this page's real destination folder, and the two
+        // must not disagree. The re-send here is what makes a `denied`
+        // reach the browser before anything registers interest in
+        // downloads, since Firefox's own default is to allow.
         self
-          .cmd("browser.setDownloadBehavior", json!({"downloadBehavior": dl}))
-          .await
-          .map(|_| ())
+          .accept_downloads
+          .store(accept, std::sync::atomic::Ordering::Relaxed);
+        self.download_manager.set_accept_downloads(accept);
+        self.send_download_behavior().await
       })
       .into();
     let headers_fut: OptionFuture<_> = opts
@@ -2128,16 +2153,14 @@ impl BidiPage {
     {
       let session = self.session.clone();
       let downloads_subdir = self.downloads_subdir.clone();
+      let accept_downloads = self.accept_downloads.clone();
       tokio::spawn(async move {
-        let params = serde_json::json!({
-          "downloadBehavior": {
-            "type": "allowed",
-            "destinationFolder": downloads_subdir.to_string_lossy(),
-          },
-        });
         let _ = session
           .transport
-          .send_command("browser.setDownloadBehavior", params)
+          .send_command(
+            "browser.setDownloadBehavior",
+            download_behavior_params(&accept_downloads, &downloads_subdir),
+          )
           .await;
       });
     }
@@ -2713,7 +2736,7 @@ impl BidiPage {
               .unwrap_or("complete");
             if let Some(d) = download_manager.take_for_guid(navigation) {
               if status == "canceled" {
-                d.report_finished(None, Some("canceled".to_string()));
+                download_manager.report_canceled(&d, "canceled");
               } else {
                 // `complete` carries the absolute `filepath` Firefox
                 // wrote to — override the default
@@ -4262,4 +4285,23 @@ fn parse_bidi_cookie(c: &serde_json::Value) -> CookieData {
     same_site,
     url: None,
   }
+}
+
+/// The one `browser.setDownloadBehavior` payload both senders use.
+///
+/// Firefox takes a destination folder only for the allowed case; a
+/// `denied` behaviour carrying one is rejected.
+fn download_behavior_params(
+  accept_downloads: &std::sync::atomic::AtomicBool,
+  downloads_subdir: &std::path::Path,
+) -> serde_json::Value {
+  let behavior = if accept_downloads.load(std::sync::atomic::Ordering::Relaxed) {
+    serde_json::json!({
+      "type": "allowed",
+      "destinationFolder": downloads_subdir.to_string_lossy(),
+    })
+  } else {
+    serde_json::json!({ "type": "denied" })
+  };
+  serde_json::json!({ "downloadBehavior": behavior })
 }

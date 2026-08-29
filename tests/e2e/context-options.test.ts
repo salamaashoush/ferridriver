@@ -434,6 +434,61 @@ describe('context options', () => {
     }
   });
 
+  // `acceptDownloads` used to do nothing on any backend. Two senders
+  // were fighting over the one `setDownloadBehavior` each context gets:
+  // an explicit `deny` from the options bag, then an unconditional
+  // `allow` from the lazy path that runs the moment anything registers
+  // interest in downloads. Whichever landed last won, and it was
+  // usually the wrong one.
+  test('context_options_accept_downloads_denies', async ({ browser, baseURL }) => {
+    const ctx = await browser.newContext({ acceptDownloads: false });
+    try {
+      const p = await ctx.newPage();
+      await p.goto(`${baseURL}/fx/iframe`);
+      await p.evaluate(
+        `const a = document.createElement('a'); a.id = 'dl'; a.href = '/fx/download'; a.textContent = 'dl'; document.body.appendChild(a); null`,
+      );
+      const downloadPromise = p.waitForEvent('download', { timeout: 15000 });
+      await p.click('#dl');
+      const dl = (await downloadPromise) as { path(): Promise<string>; failure(): Promise<string | null> };
+
+      // The refusal has to name the option that caused it, identically
+      // on every engine: Chromium and Firefox report `canceled`, WebKit
+      // `cancelled`, and none of them says why.
+      const failure = await dl.failure();
+      expect(failure).toBe('Pass { acceptDownloads: true } when you are creating your browser context.');
+      let message = '';
+      try {
+        await dl.path();
+      } catch (e) {
+        message = String((e as Error)?.message ?? e);
+      }
+      expect(message).toContain('acceptDownloads');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('context_options_accept_downloads_allows', async ({ browser, baseURL }) => {
+    // The other half: the default still writes the file. Without this
+    // a backend that refused everything would pass the test above.
+    const ctx = await browser.newContext({ acceptDownloads: true });
+    try {
+      const p = await ctx.newPage();
+      await p.goto(`${baseURL}/fx/iframe`);
+      await p.evaluate(
+        `const a = document.createElement('a'); a.id = 'dl'; a.href = '/fx/download'; a.textContent = 'dl'; document.body.appendChild(a); null`,
+      );
+      const downloadPromise = p.waitForEvent('download', { timeout: 15000 });
+      await p.click('#dl');
+      const dl = (await downloadPromise) as { path(): Promise<string>; failure(): Promise<string | null> };
+      expect(await dl.failure()).toBe(null);
+      expect((await dl.path()).length).toBeGreaterThan(0);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   // `screen` works on every engine, Firefox included: BiDi has
   // `emulation.setScreenSettingsOverride`, which Playwright's own BiDi
   // backend uses (`bidi/bidiBrowser.ts::doUpdateDefaultViewport`). It

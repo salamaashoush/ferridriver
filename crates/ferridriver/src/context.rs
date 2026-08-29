@@ -1879,13 +1879,18 @@ fn bind_source(binding: crate::events::ExposedBinding, context_key: String) -> c
 /// (`/tmp/playwright/packages/playwright-core/src/server/browserContext.ts`):
 /// emulation before navigation, permissions last.
 ///
-/// Fields deferred to a follow-up session (no-op here): `proxy`,
-/// `record_har`, `storage_state`, `screen`, `base_url`, `service_workers`,
-/// `accept_downloads`, `ignore_https_errors`, `strict_selectors` beyond
-/// storage, `bypass_csp`. Each gets a dedicated implementation when the
-/// supporting infrastructure lands. (`http_credentials` is now wired
-/// through CDP both at context-creation time and via the dynamic
-/// `ContextRef::set_http_credentials` setter.)
+/// Two fields on the bag still do nothing: `record_har` and
+/// `strict_selectors`. Neither is read anywhere outside
+/// `crate::options`, and both bindings hard-code `record_har: None`, so
+/// a caller passing either gets silence rather than an error. Every
+/// other field IS applied, each with a test in
+/// `tests/e2e/context-options.test.ts` that observes an effect only the
+/// option produces.
+///
+/// That list was much longer and most of it was wrong: it had claimed
+/// `proxy`, `storage_state`, `screen`, `base_url`, `service_workers`,
+/// `ignore_https_errors`, `accept_downloads` and `bypass_csp` were all
+/// no-ops long after they were implemented. Check before adding to it.
 /// Apply a context-options bag to a freshly-opened page. This
 /// delegates to the backend's single `apply_context_options` dispatch
 /// which fires every protocol command in parallel and aggregates

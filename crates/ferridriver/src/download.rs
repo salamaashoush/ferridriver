@@ -421,10 +421,22 @@ pub struct DownloadManager {
   inner: Arc<DownloadManagerState>,
 }
 
-#[derive(Default)]
+/// What a context that refused downloads reports instead of the
+/// protocol's own word for it.
+///
+/// Chromium says `canceled`, Firefox `canceled`, `WebKit` `cancelled`, and
+/// none of the three says why. Playwright's wording names the option
+/// that caused it, and is the same sentence on every engine so a test
+/// can assert it without asking which browser it is on.
+pub const DOWNLOADS_DENIED: &str = "Pass { acceptDownloads: true } when you are creating your browser context.";
+
 struct DownloadManagerState {
   handlers: std::sync::Mutex<Vec<DownloadHandlerEntry>>,
   next_id: AtomicU64,
+  /// Whether the owning context accepts downloads at all. Set once by
+  /// the backend when it applies the context options; read when a
+  /// download ends in cancellation, to say why.
+  accept_downloads: std::sync::atomic::AtomicBool,
   /// All downloads dispatched through this manager. The backend needs
   /// to look up the handle by `guid` when a `downloadProgress` event
   /// arrives; keeping them here (as weak-ish clones — the `Download`
@@ -438,10 +450,45 @@ struct DownloadManagerState {
   by_guid: std::sync::Mutex<Vec<Download>>,
 }
 
+impl Default for DownloadManagerState {
+  fn default() -> Self {
+    Self {
+      handlers: std::sync::Mutex::default(),
+      next_id: AtomicU64::default(),
+      // Accepted unless a context says otherwise, which is both
+      // Playwright's default and the browsers' own.
+      accept_downloads: std::sync::atomic::AtomicBool::new(true),
+      by_guid: std::sync::Mutex::default(),
+    }
+  }
+}
+
 impl DownloadManager {
   #[must_use]
   pub fn new() -> Self {
     Self::default()
+  }
+
+  /// Record whether the owning context accepts downloads.
+  pub fn set_accept_downloads(&self, accept: bool) {
+    self
+      .inner
+      .accept_downloads
+      .store(accept, std::sync::atomic::Ordering::Relaxed);
+  }
+
+  /// Report a download the browser ended without completing.
+  ///
+  /// The backends each have their own spelling of "cancelled" and none
+  /// of them says why; when the context refused downloads, that is the
+  /// reason, and [`DOWNLOADS_DENIED`] says so identically on all four.
+  pub fn report_canceled(&self, download: &Download, protocol_reason: &str) {
+    let reason = if self.inner.accept_downloads.load(std::sync::atomic::Ordering::Relaxed) {
+      protocol_reason.to_string()
+    } else {
+      DOWNLOADS_DENIED.to_string()
+    };
+    download.report_finished(None, Some(reason));
   }
 
   /// Register a download handler. Returns a [`DownloadHandlerId`] for
