@@ -1,0 +1,79 @@
+<!doctype html>
+<!-- No lang attribute: html-has-lang. -->
+<html>
+<head>
+<meta charset="utf-8">
+<!-- user-scalable=no: meta-viewport. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<!-- No <title>: document-title. -->
+<style>
+  body { font-family: sans-serif; background: #ffffff; margin: 0; padding: 16px }
+  /* 14px #949494 on white is 3.0:1, under the 4.5:1 this size needs.
+     Both sizes are explicit so the threshold axe picks cannot move. */
+  .faint { color: #949494; background: #ffffff; font-size: 14px; line-height: 20px }
+  table, td, th { border: 1px solid #000 }
+</style>
+</head>
+<body>
+
+<!-- image-alt -->
+<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAoCAIAAAADnC86AAAAMElEQVR42u3NQQkAAAgEsIttCEMY1RKCn8H+S/W8iFgsFovFYrFYLBaLxWKxWHxnATslQZci8E7yAAAAAElFTkSuQmCC" width="40" height="40">
+
+<!-- empty-heading, then a jump from h1 to h4 for heading-order -->
+<h1></h1>
+<h4>Second heading, two levels down</h4>
+
+<!-- link-name -->
+<a href="/elsewhere"></a>
+
+<!-- button-name -->
+<button></button>
+
+<!-- label -->
+<input type="text" name="unlabelled">
+
+<!-- select-name -->
+<select name="pick"><option>one</option></select>
+
+<!-- input-image-alt -->
+<input type="image" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+
+<!-- object-alt -->
+<object data="data:text/plain,x" width="40" height="40"></object>
+
+<!-- list: a ul whose child is not an li -->
+<ul><div>not a list item</div></ul>
+
+<!-- listitem: an li with no list parent -->
+<li>orphaned list item</li>
+
+<!-- definition-list: a dl whose child is neither dt nor dd -->
+<dl><span>neither term nor definition</span></dl>
+
+<!-- dlitem: a dd with no dl parent -->
+<dd>orphaned definition</dd>
+
+<!-- aria-roles -->
+<div role="notarole">unknown role</div>
+
+<!-- aria-required-attr: checkbox without aria-checked -->
+<div role="checkbox" aria-label="Agree"></div>
+
+<!-- aria-valid-attr -->
+<div aria-bogus="1">invented aria attribute</div>
+
+<!-- aria-valid-attr-value: labelledby pointing at nothing -->
+<div role="button" aria-labelledby="no-such-element">labelled by nothing</div>
+
+<!-- color-contrast -->
+<p class="faint">Grey text that does not meet the contrast this size requires.</p>
+
+<!-- td-has-header / th-has-data-cells: a data table with no headers at all -->
+<table>
+  <tr><td>a1</td><td>b1</td><td>c1</td></tr>
+  <tr><td>a2</td><td>b2</td><td>c2</td></tr>
+  <tr><td>a3</td><td>b3</td><td>c3</td></tr>
+</table>
+
+</body>
+</html>

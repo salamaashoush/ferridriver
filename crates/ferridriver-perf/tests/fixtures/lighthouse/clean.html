@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A page with nothing wrong with it</title>
+<meta name="description" content="The negative control for the accessibility comparison: a page every rule should pass.">
+<style>
+  body { font-family: sans-serif; background: #ffffff; color: #1a1a1a; margin: 0; padding: 16px }
+  a { color: #0b4f9e }
+</style>
+</head>
+<body>
+<main>
+  <h1>Accessible page</h1>
+  <p>Body text at the default size, dark on white.</p>
+  <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAoCAIAAAADnC86AAAAMElEQVR42u3NQQkAAAgEsIttCEMY1RKCn8H+S/W8iFgsFovFYrFYLBaLxWKxWHxnATslQZci8E7yAAAAAElFTkSuQmCC" width="40" height="40" alt="A grey square">
+  <h2>A form</h2>
+  <label for="name">Your name</label>
+  <input type="text" id="name" name="name">
+  <label for="colour">Favourite colour</label>
+  <select id="colour" name="colour"><option>Blue</option></select>
+  <button type="submit">Send</button>
+  <h2>A list</h2>
+  <ul><li>First</li><li>Second</li></ul>
+  <p><a href="/documentation">Read the documentation</a></p>
+  <h2>A table</h2>
+  <table>
+    <caption>Three columns of nothing in particular</caption>
+    <tr><th scope="col">A</th><th scope="col">B</th><th scope="col">C</th></tr>
+    <tr><td>a1</td><td>b1</td><td>c1</td></tr>
+    <tr><td>a2</td><td>b2</td><td>c2</td></tr>
+  </table>
+</main>
+</body>
+</html>

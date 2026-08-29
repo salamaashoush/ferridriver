@@ -3,8 +3,9 @@
 use crate::error::IntoNapi;
 use crate::locator::Locator;
 use crate::types::{
-  AccessibilityAuditOptions, AccessibilityReport, DragAndDropOptions, GotoOptions, MetricData, RoleOptions,
-  ScreenshotOptions, SnapshotForAiOptions, TextOptions, WaitForFunctionOptions, WaitOptions,
+  AccessibilityAuditOptions, AccessibilityReport, DragAndDropOptions, GotoOptions, MetricData, PageQualityOptions,
+  PageQualityReport, RoleOptions, ScreenshotOptions, SnapshotForAiOptions, TextOptions, WaitForFunctionOptions,
+  WaitOptions,
 };
 use std::sync::{Arc, Mutex};
 
@@ -1443,6 +1444,20 @@ impl Page {
     let report = self
       .inner
       .check_accessibility(options.map(Into::into))
+      .await
+      .into_napi()?;
+    Ok(report.into())
+  }
+
+  /// Audit the page against the seven Lighthouse checks that score a
+  /// live DOM: `doctype`, `meta-description`, `crawlable-anchors`,
+  /// `link-text`, `image-aspect-ratio`, `image-size-responsive` and
+  /// `paste-preventing-inputs`.
+  #[napi]
+  pub async fn check_page_quality(&self, options: Option<PageQualityOptions>) -> Result<PageQualityReport> {
+    let report = self
+      .inner
+      .check_page_quality(options.map(Into::into))
       .await
       .into_napi()?;
     Ok(report.into())

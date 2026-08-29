@@ -233,6 +233,14 @@ pub(super) struct JsAccessibilityOptions {
   pub tags: Option<Vec<String>>,
 }
 
+/// `page.checkPageQuality(options?)`. Also a ferridriver extension; the
+/// ids are Lighthouse's own audit ids.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(super) struct JsPageQualityOptions {
+  pub only: Option<Vec<String>>,
+}
+
 /// `PageScreenshotOptions` surface per
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280`.
 #[derive(Debug, Default, Deserialize)]

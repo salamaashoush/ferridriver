@@ -57,6 +57,21 @@ for (const backend of BACKENDS) {
       expect(report.violations.map((v) => v.id)).not.toContain("html-has-lang");
     });
 
+    it("runs the rules axe hides unless asked, which Lighthouse asks for", async () => {
+      // `target-size` ships `enabled: false` and `td-has-header` is
+      // tagged `experimental`, so axe's defaults drop both. Lighthouse
+      // enables them, so an audit claiming to cover what Lighthouse
+      // covers has to reach them too.
+      await page.setContent("<html lang='en'><head><title>t</title></head><body><p>x</p></body></html>");
+      const report = await page.checkAccessibility();
+      const evaluated = new Set(
+        [...report.violations, ...report.passes, ...report.incomplete, ...report.inapplicable].map((r) => r.id),
+      );
+      for (const rule of ["target-size", "td-has-header", "table-fake-caption", "identical-links-same-purpose"]) {
+        expect(evaluated.has(rule)).toBe(true);
+      }
+    });
+
     it("tags narrow which rules run", async () => {
       await page.setContent(BROKEN_PAGE);
       const all = await page.checkAccessibility();

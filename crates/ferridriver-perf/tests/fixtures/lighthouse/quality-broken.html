@@ -1,0 +1,44 @@
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A page that fails every one of the seven</title>
+<!-- meta-description: present but empty, which is the branch with its
+     own explanation rather than the one with none. -->
+<meta name="description" content="   ">
+<style>
+  body { font-family: sans-serif; color: #1a1a1a; background: #fff; margin: 0; padding: 16px }
+  /* Drawn square, so the 40x10 image is stretched: image-aspect-ratio.
+     Drawn far larger than 20x20, so the other is upscaled:
+     image-size-responsive. Both sizes are set here rather than by
+     attribute so the audits read a laid-out box and not a guess. */
+  .stretched { width: 120px; height: 120px }
+  .upscaled { width: 200px; height: 200px }
+</style>
+</head>
+<body>
+<main>
+<h1>Seven failures</h1>
+
+<!-- crawlable-anchors: a javascript:void(0) href, and an anchor with no
+     href at all whose only affordance is an inline handler. -->
+<p><a href="javascript:void(0)">Open the dialog</a></p>
+<p><a onclick="window.scrollTo(0, 0)">Back to top</a></p>
+
+<!-- link-text: real destination, text that says nothing about it. -->
+<p><a href="/pricing">click here</a></p>
+<p><a href="/features">learn more</a></p>
+
+<!-- image-aspect-ratio: 40x10 natural, drawn 120x120. -->
+<img class="stretched" alt="A wide image squeezed into a square box"
+     src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAKCAIAAABJ+IsHAAAAGklEQVR42mM4YaMxIIhh1OJRi0ctHrWYXAQACXXU0JIB5A4AAAAASUVORK5CYII=">
+
+<!-- image-size-responsive: 20x20 natural, drawn 200x200. -->
+<img class="upscaled" alt="A small image drawn ten times its size"
+     src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAGklEQVR42mM4YaNBNmIY1TyqeVTzqOaB1QwAMcbU0Nyv1RcAAAAASUVORK5CYII=">
+
+<!-- paste-preventing-inputs -->
+<label for="card">Card number</label>
+<input id="card" name="card" type="text" onpaste="return false">
+</main>
+</body>
+</html>

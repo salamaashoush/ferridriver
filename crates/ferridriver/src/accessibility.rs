@@ -3,7 +3,9 @@
 //! Lighthouse's accessibility category is 67 audits, and every one of
 //! them is a wrapper that looks up a rule id in what axe-core already
 //! decided. Porting the wrappers would port nothing; running the engine
-//! they wrap covers all 67 at once and stays current with it.
+//! they wrap covers all 67 at once and stays current with it, provided
+//! it is asked for the rules it hides by default
+//! ([`LIGHTHOUSE_ENABLED_RULES`]).
 //!
 //! axe-core is not vendored here. It is a third-party artifact under a
 //! different licence, fetched to the same cache as the browsers by
@@ -133,6 +135,34 @@ const INJECT_AND_RUN: &str = r"
 })
 ";
 
+/// The rules axe will not run unless it is asked to, which Lighthouse
+/// asks for.
+///
+/// Copied from the `rules` map Lighthouse hands `axe.run`
+/// (`core/gather/gatherers/accessibility.js`; every id here is one it
+/// sets `enabled: true`). Most are on by default and repeating them
+/// costs nothing, but five are not, and without this an audit that
+/// claims to cover what Lighthouse covers is missing them:
+/// `identical-links-same-purpose` and `target-size` ship `enabled:
+/// false`, and `label-content-name-mismatch`, `table-fake-caption` and
+/// `td-has-header` are tagged `experimental`, which axe's default
+/// `tagExclude` drops. A per-rule flag is the only lever that reaches
+/// both, since it is consulted before either filter.
+///
+/// Lighthouse's matching `enabled: false` entries are deliberately NOT
+/// mirrored. It narrows axe to the rules its own 67 audits wrap; this
+/// reports everything the engine has, so its exclusions would only lose
+/// findings.
+const LIGHTHOUSE_ENABLED_RULES: &str = concat!(
+  "'accesskeys','aria-allowed-role','aria-conditional-attr','aria-deprecated-role',",
+  "'aria-dialog-name','aria-prohibited-attr','aria-treeitem-name','aria-text',",
+  "'autocomplete-valid','empty-heading','heading-order','html-xml-lang-mismatch',",
+  "'identical-links-same-purpose','image-redundant-alt','input-button-name',",
+  "'label-content-name-mismatch','landmark-one-main','link-in-text-block','meta-viewport',",
+  "'presentation-role-conflict','select-name','skip-link','svg-img-alt','tabindex',",
+  "'table-duplicate-name','table-fake-caption','target-size','td-has-header'",
+);
+
 /// The call that runs axe once it is on the page.
 ///
 /// `axe.run` resolves to an object far larger than the verdicts: every
@@ -148,7 +178,15 @@ const RUN_AXE: &str = r"
   if (options.include.length) context.include = options.include.map(s => [s]);
   if (options.exclude.length) context.exclude = options.exclude.map(s => [s]);
   const runOptions = { resultTypes: ['violations', 'incomplete'] };
-  if (options.tags.length) runOptions.runOnly = { type: 'tag', values: options.tags };
+  // A per-rule flag wins over runOnly, so asking for tags has to mean
+  // those tags and nothing else; the extra rules are for the unfiltered
+  // run, where 'every rule axe has' is the promise being kept.
+  if (options.tags.length) {
+    runOptions.runOnly = { type: 'tag', values: options.tags };
+  } else {
+    runOptions.rules = {};
+    for (const id of [ENABLED_RULES]) runOptions.rules[id] = { enabled: true };
+  }
   try {
     const result = await axe.run(Object.keys(context).length ? context : document, runOptions);
     const rule = r => ({
@@ -196,7 +234,7 @@ pub fn parse_report(payload: &str) -> Result<AccessibilityReport> {
 /// The single expression that loads axe and runs it.
 #[must_use]
 pub fn inject_and_run_source() -> String {
-  INJECT_AND_RUN.replace("SCRIPT", RUN_AXE)
+  INJECT_AND_RUN.replace("SCRIPT", &RUN_AXE.replace("ENABLED_RULES", LIGHTHOUSE_ENABLED_RULES))
 }
 
 /// What the page-side call needs, as one argument.

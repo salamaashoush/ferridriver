@@ -149,8 +149,11 @@ jobs:
       - name: Build ferridriver binary
         run: cargo build --bin ferridriver
 
-      - name: Install browsers (Chromium with system deps, WebKit)
-        run: cargo run --bin ferridriver -- install --with-deps chromium webkit
+      - name: Install browsers (Chromium with system deps, WebKit) and axe-core
+        # axe is not a browser: it is the engine behind
+        # page.checkAccessibility(), which the ferridriver-perf
+        # accessibility differential needs on disk.
+        run: cargo run --bin ferridriver -- install --with-deps chromium webkit axe
 
       - name: Run unit + integration tests
         env:

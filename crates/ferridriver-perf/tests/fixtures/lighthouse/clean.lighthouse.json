@@ -1,0 +1,236 @@
+{
+ "audits": {
+  "agent-accessibility-tree": {
+   "mode": "binary",
+   "score": 1
+  },
+  "aria-hidden-body": {
+   "mode": "binary",
+   "score": 1
+  },
+  "button-name": {
+   "mode": "binary",
+   "score": 1
+  },
+  "color-contrast": {
+   "mode": "binary",
+   "score": 1
+  },
+  "crawlable-anchors": {
+   "mode": "binary",
+   "score": 1
+  },
+  "custom-controls-labels": {
+   "mode": "manual",
+   "score": null
+  },
+  "custom-controls-roles": {
+   "mode": "manual",
+   "score": null
+  },
+  "doctype": {
+   "mode": "binary",
+   "score": 1
+  },
+  "document-title": {
+   "mode": "binary",
+   "score": 1
+  },
+  "focus-traps": {
+   "mode": "manual",
+   "score": null
+  },
+  "focusable-controls": {
+   "mode": "manual",
+   "score": null
+  },
+  "heading-order": {
+   "mode": "binary",
+   "score": 1
+  },
+  "html-has-lang": {
+   "mode": "binary",
+   "score": 1
+  },
+  "html-lang-valid": {
+   "mode": "binary",
+   "score": 1
+  },
+  "image-alt": {
+   "mode": "binary",
+   "score": 1
+  },
+  "image-aspect-ratio": {
+   "mode": "binary",
+   "score": 1
+  },
+  "image-size-responsive": {
+   "mode": "binary",
+   "score": 1
+  },
+  "interactive-element-affordance": {
+   "mode": "manual",
+   "score": null
+  },
+  "label": {
+   "mode": "binary",
+   "score": 1
+  },
+  "landmark-one-main": {
+   "mode": "binary",
+   "score": 1
+  },
+  "link-name": {
+   "mode": "binary",
+   "score": 1
+  },
+  "link-text": {
+   "mode": "binary",
+   "score": 1
+  },
+  "list": {
+   "mode": "binary",
+   "score": 1
+  },
+  "listitem": {
+   "mode": "binary",
+   "score": 1
+  },
+  "logical-tab-order": {
+   "mode": "manual",
+   "score": null
+  },
+  "managed-focus": {
+   "mode": "manual",
+   "score": null
+  },
+  "meta-description": {
+   "mode": "binary",
+   "score": 1
+  },
+  "meta-viewport": {
+   "mode": "binary",
+   "score": 1
+  },
+  "offscreen-content-hidden": {
+   "mode": "manual",
+   "score": null
+  },
+  "paste-preventing-inputs": {
+   "mode": "binary",
+   "score": 1
+  },
+  "select-name": {
+   "mode": "binary",
+   "score": 1
+  },
+  "structured-data": {
+   "mode": "manual",
+   "score": null
+  },
+  "table-fake-caption": {
+   "mode": "binary",
+   "score": 1
+  },
+  "target-size": {
+   "mode": "binary",
+   "score": 1
+  },
+  "td-has-header": {
+   "mode": "binary",
+   "score": 1
+  },
+  "td-headers-attr": {
+   "mode": "binary",
+   "score": 1
+  },
+  "use-landmarks": {
+   "mode": "manual",
+   "score": null
+  },
+  "visual-order-follows-dom": {
+   "mode": "manual",
+   "score": null
+  }
+ },
+ "axeRules": [
+  "accesskeys",
+  "aria-allowed-attr",
+  "aria-allowed-role",
+  "aria-command-name",
+  "aria-conditional-attr",
+  "aria-deprecated-role",
+  "aria-dialog-name",
+  "aria-hidden-body",
+  "aria-hidden-focus",
+  "aria-input-field-name",
+  "aria-meter-name",
+  "aria-progressbar-name",
+  "aria-prohibited-attr",
+  "aria-required-attr",
+  "aria-required-children",
+  "aria-required-parent",
+  "aria-roles",
+  "aria-text",
+  "aria-toggle-field-name",
+  "aria-tooltip-name",
+  "aria-treeitem-name",
+  "aria-valid-attr",
+  "aria-valid-attr-value",
+  "autocomplete-valid",
+  "button-name",
+  "bypass",
+  "color-contrast",
+  "custom-controls-labels",
+  "custom-controls-roles",
+  "definition-list",
+  "dlitem",
+  "document-title",
+  "duplicate-id-aria",
+  "empty-heading",
+  "focus-traps",
+  "focusable-controls",
+  "form-field-multiple-labels",
+  "frame-title",
+  "heading-order",
+  "html-has-lang",
+  "html-lang-valid",
+  "html-xml-lang-mismatch",
+  "identical-links-same-purpose",
+  "image-alt",
+  "image-redundant-alt",
+  "input-button-name",
+  "input-image-alt",
+  "interactive-element-affordance",
+  "label",
+  "label-content-name-mismatch",
+  "landmark-one-main",
+  "link-in-text-block",
+  "link-name",
+  "list",
+  "listitem",
+  "logical-tab-order",
+  "managed-focus",
+  "meta-refresh",
+  "meta-viewport",
+  "object-alt",
+  "offscreen-content-hidden",
+  "presentation-role-conflict",
+  "select-name",
+  "skip-link",
+  "svg-img-alt",
+  "tabindex",
+  "table-duplicate-name",
+  "table-fake-caption",
+  "target-size",
+  "td-has-header",
+  "td-headers-attr",
+  "th-has-data-cells",
+  "use-landmarks",
+  "valid-lang",
+  "video-caption",
+  "visual-order-follows-dom"
+ ],
+ "lighthouse": "13.4.1",
+ "page": "clean.html"
+}

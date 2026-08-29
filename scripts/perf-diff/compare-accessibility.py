@@ -23,12 +23,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 
-# Lighthouse audit ids that are not axe rules, so nothing to compare.
-NOT_AXE = {"agent-accessibility-tree", "meta-description", "doctype", "crawlable-anchors",
-           "link-text", "image-aspect-ratio", "image-size-responsive",
-           "paste-preventing-inputs", "structured-data", "focusable-controls"}
-
-
 def chrome_path():
     if os.environ.get("CHROME_PATH"):
         return os.environ["CHROME_PATH"]
@@ -48,7 +42,8 @@ def lighthouse(url):
         ["node", "lighthouse.mjs", url, chrome_path()],
         cwd=HERE, capture_output=True, text=True, check=True,
     )
-    return json.loads(out.stdout)["audits"]
+    report = json.loads(out.stdout)
+    return report["audits"], set(report["axeRules"])
 
 
 def ferridriver(url):
@@ -64,24 +59,28 @@ def main():
         sys.exit(__doc__)
     url = sys.argv[1]
 
-    theirs = lighthouse(url)
+    theirs, axe_rules = lighthouse(url)
     ours = ferridriver(url)
     print(f"{ours['engine']} against Lighthouse, on {url}\n")
 
     # Lighthouse scores each wrapped rule 0 or 1; we report the rule only
     # when it failed, so a missing rule on our side means it passed.
     ours_failing = {rule["id"]: len(rule["nodes"]) for rule in ours["violations"]}
-    ours_known = ours_failing.keys() | {r["id"] for r in ours["passes"]} | {r["id"] for r in ours["incomplete"]}
+    # Every rule the engine reached, whatever it concluded. `inapplicable`
+    # belongs here: a rule that found nothing to look at still ran, and
+    # leaving it out would read as a coverage gap.
+    ours_known = {r["id"] for key in ("violations", "passes", "incomplete", "inapplicable")
+                  for r in ours[key]}
 
     differences, compared = [], 0
     for audit_id, audit in sorted(theirs.items()):
-        if audit_id in NOT_AXE or audit["mode"] != "binary":
+        if audit_id not in axe_rules or audit["mode"] != "binary":
             continue
         if audit_id not in ours_known:
-            # A rule Lighthouse ran and axe never reached on our side.
-            # Only worth flagging when Lighthouse says it failed.
-            if audit["score"] == 0:
-                differences.append(f"{audit_id}: Lighthouse failed it, we never evaluated the rule")
+            # Lighthouse reached a verdict on an axe rule and we never ran
+            # it. A gap whichever way their verdict went: ours is meant to
+            # be the superset.
+            differences.append(f"{audit_id}: Lighthouse evaluated the rule, we never ran it")
             continue
         compared += 1
         their_nodes = audit.get("itemCount", 0) if audit["score"] == 0 else 0

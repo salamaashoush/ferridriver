@@ -117,6 +117,94 @@ impl From<ferridriver::accessibility::AccessibilityReport> for AccessibilityRepo
   }
 }
 
+/// Options for `page.checkPageQuality`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct PageQualityOptions {
+  /// Lighthouse audit ids to run, e.g. `meta-description`. Omitted or
+  /// empty runs all seven.
+  pub only: Option<Vec<String>>,
+}
+
+impl From<PageQualityOptions> for ferridriver::audits::PageQualityOptions {
+  fn from(options: PageQualityOptions) -> Self {
+    Self {
+      only: options.only.unwrap_or_default(),
+    }
+  }
+}
+
+/// One element an audit objected to.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct PageAuditItem {
+  /// A CSS selector locating the element.
+  pub selector: String,
+  /// The element's opening tag, truncated.
+  pub snippet: String,
+  /// Whatever the audit has to say about this element: the offending
+  /// link text, the two aspect ratios, the size it should have been.
+  pub detail: String,
+}
+
+/// One audit's verdict.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct PageAuditResult {
+  /// Lighthouse's own audit id, e.g. `image-aspect-ratio`.
+  pub id: String,
+  /// `seo` or `best-practices`.
+  pub category: String,
+  /// Lighthouse's title for the state this audit is in.
+  pub title: String,
+  pub passed: bool,
+  /// Why it failed, where the audit has more to say than its title.
+  pub explanation: Option<String>,
+  /// The elements behind a failure, which is the part anyone acts on.
+  pub items: Vec<PageAuditItem>,
+}
+
+/// What the seven live-DOM Lighthouse audits concluded.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct PageQualityReport {
+  pub audits: Vec<PageAuditResult>,
+}
+
+impl From<ferridriver::audits::AuditItem> for PageAuditItem {
+  fn from(item: ferridriver::audits::AuditItem) -> Self {
+    Self {
+      selector: item.selector,
+      snippet: item.snippet,
+      detail: item.detail,
+    }
+  }
+}
+
+impl From<ferridriver::audits::AuditResult> for PageAuditResult {
+  fn from(audit: ferridriver::audits::AuditResult) -> Self {
+    Self {
+      id: audit.id,
+      category: match audit.category {
+        ferridriver::audits::AuditCategory::Seo => "seo".into(),
+        ferridriver::audits::AuditCategory::BestPractices => "best-practices".into(),
+      },
+      title: audit.title,
+      passed: audit.passed,
+      explanation: audit.explanation,
+      items: audit.items.into_iter().map(Into::into).collect(),
+    }
+  }
+}
+
+impl From<ferridriver::audits::PageQualityReport> for PageQualityReport {
+  fn from(report: ferridriver::audits::PageQualityReport) -> Self {
+    Self {
+      audits: report.audits.into_iter().map(Into::into).collect(),
+    }
+  }
+}
+
 /// Options for `page.route` / `browserContext.route`.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]

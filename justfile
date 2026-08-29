@@ -80,9 +80,11 @@ test-backend backend:
 leak-check *args:
   cargo test -p ferridriver-script --features js-dump-leaks {{args}} -- --nocapture --test-threads=1
 
-# Lint (default-members; ferridriver-node excluded)
+# Lint. `--workspace` so this is the same set CI lints: without it
+# clippy runs over default-members, which excludes ferridriver-node, and
+# a NAPI binding can then fail CI having passed locally.
 lint:
-  cargo clippy --all-targets -- -D warnings
+  cargo clippy --workspace --all-targets -- -D warnings
 
 # Format check
 fmt:
@@ -92,9 +94,9 @@ fmt:
 fmt-fix:
   cargo fmt --all
 
-# Fix lint + format (default-members; ferridriver-node excluded)
+# Fix lint + format, over the same set `lint` checks.
 fix: fmt-fix
-  cargo clippy --all-targets --fix --allow-dirty
+  cargo clippy --workspace --all-targets --fix --allow-dirty
 
 # Build release
 build:
@@ -199,23 +201,76 @@ lh-audit url:
   fi
   node lighthouse.mjs "{{url}}"
 
-# Check our accessibility audit against Lighthouse's, on a live page.
+# Check our accessibility audit against Lighthouse's.
 #
 # Both run axe-core, so where they overlap they must agree exactly. What
-# they do not share is scope: Lighthouse wraps 67 of axe's rules and
-# reports only those, while this runs the engine and reports every rule
-# it has. Extra rules on our side are the point; the script compares the
-# intersection.
+# they do not share is scope: Lighthouse narrows axe to the rules its own
+# audits wrap, while this runs the engine and reports every rule it has.
+# Extra rules on our side are the point; the comparison is over the
+# intersection. A rule Lighthouse reached and we never ran is NOT, and
+# fails: ours is meant to be the superset.
 #
-# Serve the fixtures first and pass a page, e.g.
-# `just a11y-diff http://127.0.0.1:8732/rich/`.
-a11y-diff url:
+# With no argument this is the gate — it re-derives Lighthouse's verdicts
+# for the fixture pages, fails if they have drifted from the recordings
+# checked in beside them, and then runs the comparison. That comparison
+# is `cargo test -p ferridriver-perf --test lighthouse`, which reads the
+# recordings and so runs offline, in `just test`.
+#
+# With a URL it is the exploratory half, against any live page:
+# `just a11y-diff http://127.0.0.1:8732/rich/` (serve the fixtures
+# first). Nothing is recorded and nothing gates.
+a11y-diff url="":
   #!/usr/bin/env bash
   set -euo pipefail
   cd "{{justfile_directory()}}/scripts/perf-diff"
   [ -d node_modules ] || npm install --registry=https://registry.npmjs.org --no-audit --no-fund
   cd "{{justfile_directory()}}"
-  python3 scripts/perf-diff/compare-accessibility.py "{{url}}"
+  if [ -n "{{url}}" ]; then
+    python3 scripts/perf-diff/compare-accessibility.py "{{url}}"
+  else
+    python3 scripts/perf-diff/record-lighthouse.py
+    cargo test -p ferridriver-perf --test lighthouse -- accessibility_
+  fi
+
+# Check our seven live-DOM audits against Lighthouse's own.
+#
+# `doctype`, `meta-description`, `crawlable-anchors`, `link-text`,
+# `image-aspect-ratio`, `image-size-responsive` and
+# `paste-preventing-inputs`, ported in `ferridriver::audits`. Nothing
+# here agrees by construction the way the axe comparison does: both
+# sides are separate implementations of the same arithmetic, so this is
+# the only thing saying the port is right.
+#
+# With no argument this is the gate; with a URL it is the exploratory
+# half, against any live page. Same shape as `a11y-diff`.
+quality-diff url="":
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cd "{{justfile_directory()}}/scripts/perf-diff"
+  [ -d node_modules ] || npm install --registry=https://registry.npmjs.org --no-audit --no-fund
+  cd "{{justfile_directory()}}"
+  if [ -n "{{url}}" ]; then
+    python3 scripts/perf-diff/compare-page-quality.py "{{url}}"
+  else
+    python3 scripts/perf-diff/record-lighthouse.py
+    cargo test -p ferridriver-perf --test lighthouse -- page_quality_
+  fi
+
+# Re-record what Lighthouse says about each fixture page.
+#
+# One recording per page serves both comparisons. Run after deliberately
+# changing a fixture page, or after bumping the chrome-devtools-mcp pin
+# in scripts/perf-diff/package.json. Read the resulting diff before
+# committing it: every line of it is a change in what we are being
+# measured against.
+lh-record:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cd "{{justfile_directory()}}/scripts/perf-diff"
+  [ -d node_modules ] || npm install --registry=https://registry.npmjs.org --no-audit --no-fund
+  cd "{{justfile_directory()}}"
+  python3 scripts/perf-diff/record-lighthouse.py --update
+  git diff --stat -- crates/ferridriver-perf/tests/fixtures/lighthouse
 
 # Print our own analysis of a trace, in the shape the recordings use.
 perf-report trace:

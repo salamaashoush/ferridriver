@@ -726,6 +726,94 @@ export interface ScreenshotOptions extends TimeoutOption {
   maskColor?: string;
 }
 
+/** Options for `page.checkAccessibility`. */
+export interface AccessibilityAuditOptions {
+  /** CSS selectors to audit. Omitted or empty audits the whole document. */
+  include?: string[];
+  /** Subtrees to leave out, for regions the page does not own. */
+  exclude?: string[];
+  /**
+   * Rule tags to run, such as `wcag2a` or `best-practice`. Omitted or
+   * empty runs every rule axe-core has.
+   */
+  tags?: string[];
+}
+
+/** One element a rule had something to say about. */
+export interface AccessibilityNode {
+  /** CSS selectors locating the element, outermost frame first. */
+  target: string[];
+  html: string;
+  /** Why the rule fired here, in axe-core's words. */
+  failureSummary: string;
+}
+
+/** One rule's verdict, with the elements behind it. */
+export interface AccessibilityRule {
+  id: string;
+  /** `minor`, `moderate`, `serious` or `critical`. */
+  impact?: string;
+  help: string;
+  helpUrl: string;
+  /** Which standards the rule belongs to (`wcag2a`, `best-practice`). */
+  tags: string[];
+  nodes: AccessibilityNode[];
+}
+
+/**
+ * What axe-core found. Four outcomes, not two: `incomplete` is a
+ * question axe could not settle without a human, which is not a pass.
+ */
+export interface AccessibilityReport {
+  violations: AccessibilityRule[];
+  passes: AccessibilityRule[];
+  incomplete: AccessibilityRule[];
+  inapplicable: AccessibilityRule[];
+  /** The engine that produced this, e.g. `axe-core/4.12.1`. */
+  engine: string;
+}
+
+/** Options for `page.checkPageQuality`. */
+export interface PageQualityOptions {
+  /**
+   * Lighthouse audit ids to run, e.g. `meta-description`. Omitted or
+   * empty runs all seven.
+   */
+  only?: string[];
+}
+
+/** One element an audit objected to. */
+export interface PageAuditItem {
+  /** A CSS selector locating the element. */
+  selector: string;
+  /** The element's opening tag, truncated. */
+  snippet: string;
+  /**
+   * Whatever the audit has to say about this element: the offending
+   * link text, the two aspect ratios, the size it should have been.
+   */
+  detail: string;
+}
+
+/** One audit's verdict. */
+export interface PageAuditResult {
+  /** Lighthouse's own audit id, e.g. `image-aspect-ratio`. */
+  id: string;
+  category: 'seo' | 'best-practices';
+  /** Lighthouse's title for the state this audit is in. */
+  title: string;
+  passed: boolean;
+  /** Why it failed, where the audit has more to say than its title. */
+  explanation?: string | null;
+  /** The elements behind a failure, which is the part anyone acts on. */
+  items: PageAuditItem[];
+}
+
+/** What the seven live-DOM Lighthouse audits concluded. */
+export interface PageQualityReport {
+  audits: PageAuditResult[];
+}
+
 export interface GetByRoleOptions {
   checked?: boolean;
   description?: string | RegExp;
@@ -1281,6 +1369,16 @@ export interface Page {
 
   screenshot(options?: ScreenshotOptions): Promise<Uint8Array>;
   pdf(options?: Record<string, unknown>): Promise<Uint8Array>;
+
+  // A ferridriver extension, not a Playwright method: Playwright's
+  // `page.accessibility` is the accessibility TREE, a different
+  // question. This runs axe-core in the page and reports what it found.
+  // Needs the engine on disk: `ferridriver install axe`.
+  checkAccessibility(options?: AccessibilityAuditOptions): Promise<AccessibilityReport>;
+
+  // The seven Lighthouse audits that score a page as it stands, ported
+  // from Lighthouse's own source. Also a ferridriver extension.
+  checkPageQuality(options?: PageQualityOptions): Promise<PageQualityReport>;
 
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   viewportSize(): { width: number; height: number } | null;

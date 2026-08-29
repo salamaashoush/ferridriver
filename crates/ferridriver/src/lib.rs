@@ -25,6 +25,7 @@
 // ── Public API (Playwright-compatible) ──
 pub mod accessibility;
 pub mod action;
+pub mod audits;
 pub mod browser;
 pub mod browser_type;
 pub mod cdp_session;

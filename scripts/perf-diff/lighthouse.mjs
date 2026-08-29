@@ -47,7 +47,15 @@ try {
     }
     audits[id] = record;
   }
-  console.log(JSON.stringify({ url, lighthouse: lhr.lighthouseVersion, audits }, null, 1));
+  // Which audit ids are axe rules, straight from the category rather
+  // than from a list someone maintains here. Everything Lighthouse files
+  // under accessibility is a wrapper that looks up a rule id in what axe
+  // already decided, so this is the set the two engines can be compared
+  // over: outside it an id like `meta-description` is Lighthouse's own
+  // audit and means nothing to axe.
+  const axeRules = (lhr.categories?.accessibility?.auditRefs ?? []).map(ref => ref.id).sort();
+
+  console.log(JSON.stringify({ url, lighthouse: lhr.lighthouseVersion, axeRules, audits }, null, 1));
 } finally {
   await browser.close();
 }

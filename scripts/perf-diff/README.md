@@ -125,16 +125,82 @@ just lh-audit http://127.0.0.1:8732/rich/
 
 ### Accessibility
 
-`just a11y-diff <url>` compares ferridriver's own audit against
-Lighthouse's on the same page. Both run axe-core, so where they overlap
-they must agree exactly — same rules failing, same element counts. What
-they do not share is scope: Lighthouse wraps 67 of axe's rules and
-reports only those, while `page.checkAccessibility()` runs the engine
-and reports every rule it has. Extra rules on our side are the point,
-so the comparison is over the intersection.
+`just a11y-diff` compares ferridriver's own audit against Lighthouse's.
+Both run axe-core, so where they overlap they must agree exactly — same
+rules failing, same element counts. What they do not share is scope:
+Lighthouse narrows axe to the rules its own audits wrap, while
+`page.checkAccessibility()` runs the engine and reports every rule it
+has. Extra rules on our side are the point, so the comparison is over
+the intersection. In that direction only: a rule Lighthouse reached and
+we never ran fails, because ours is meant to be the superset. It was
+not. Lighthouse hands `axe.run` a `rules` map turning on five the
+defaults drop — `target-size` and `identical-links-same-purpose` ship
+`enabled: false`, and `label-content-name-mismatch`,
+`table-fake-caption` and `td-has-header` are tagged `experimental` —
+and until the fixture below existed, nothing noticed we were missing
+them.
 
 axe-core is pinned to the version Lighthouse bundles. A rule that only
 one of them has would otherwise read as a disagreement about the page.
+
+### The seven that are a port
+
+Everything else Lighthouse scores in snapshot mode is `doctype`,
+`meta-description`, `crawlable-anchors`, `link-text`,
+`image-aspect-ratio`, `image-size-responsive` and
+`paste-preventing-inputs`. Those are ported, in
+`crates/ferridriver/src/audits.rs`, and `just quality-diff` compares
+them.
+
+This comparison is the one that matters most, because it is the only
+one with no shared engine underneath. The accessibility comparison has
+axe-core doing the work on both sides, so a disagreement means we
+called it wrong; here both sides are separate implementations of the
+same arithmetic, and nothing agrees by construction. Verdicts and
+element counts are both compared: an audit can reach the right answer
+from the wrong set of elements, and a count is the cheapest way to
+notice.
+
+One thing it cannot see. `crawlable-anchors` asks whether an anchor
+with no `href` has an event listener, and Lighthouse answers with CDP's
+`DOMDebugger.getEventListeners`. Nothing page-side enumerates
+listeners and no BiDi command exposes them, so ours answers the visible
+half: an `onclick` attribute, which Chrome also reports as a listener.
+The two part company on an anchor whose only handler came from
+`addEventListener`. Stated in the module doc rather than papered over.
+
+### The fixtures, and the gate
+
+The input cannot be a recording, because an audit has to look at a live
+DOM. So the PAGE is what is checked in, in
+`crates/ferridriver-perf/tests/fixtures/lighthouse/`, and Lighthouse's
+whole verdict about it is the recording beside it. That puts the gate
+back offline: `cargo test -p ferridriver-perf --test lighthouse` serves
+the page itself
+and needs neither node nor Lighthouse, so both comparisons run in
+`just test`. One recording covers both. `just lh-record` re-records
+after a deliberate change; `just a11y-diff` and `just quality-diff`
+with no argument re-derive the verdicts and fail if they have drifted.
+
+Three pages, for the reason the trace fixtures grew from two to four.
+`a11y-broken.html` fails 22 axe rules and one of the seven;
+`quality-broken.html` fails all seven and no axe rule; `clean.html`
+fails nothing. Each is broken in one dimension and sound in the other,
+so neither comparison can agree because both sides found nothing —
+which is what the first two pages were doing. Before `a11y-broken.html`
+existed the accessibility comparison ran over seven rules on pages
+where all seven passed, and the five missing rules above sat behind
+that. Both tests assert floors on how much each page compares and how
+much it trips, so a fixture cannot be quietly defused.
+
+`just a11y-diff <url>` and `just quality-diff <url>` still take a live
+page, for anything not in the fixtures. Nothing is recorded and nothing
+gates.
+
+Behaviour, as opposed to agreement, is `tests/e2e/accessibility.test.ts`
+and `tests/e2e/page-quality.test.ts` on all four backends, and
+`crates/ferridriver-node/test/accessibility-audit.test.ts` and
+`page-quality.test.ts` through NAPI.
 
 ### What is actually in Lighthouse, measured rather than assumed
 
@@ -143,14 +209,17 @@ Of the ~93 non-performance audits the bundle implements:
 - **67 are axe-core wrappers.** Every one requires the `Accessibility`
   artifact and does nothing but look up a rule id in what axe-core
   already decided. Porting them means porting nothing; running axe-core
-  in the page and formatting its output covers all 67.
+  in the page and formatting its output covers all 67, once axe is
+  asked for the five rules it hides by default. **Done.**
 - **26 need artifacts gathered from a live page.** Not one of them runs
   off a trace. In snapshot mode seven get a score on a normal page:
   `doctype`, `meta-description`, `crawlable-anchors`, `link-text`,
   `image-aspect-ratio`, `image-size-responsive`,
-  `paste-preventing-inputs`. The rest — `is-on-https`, `csp-xss`,
-  `has-hsts`, `canonical`, `is-crawlable`, `http-status-code` and
-  friends — need a network log, which means navigation mode.
+  `paste-preventing-inputs`. **Those seven are done**
+  (`crates/ferridriver/src/audits.rs`). The rest — `is-on-https`,
+  `csp-xss`, `has-hsts`, `canonical`, `is-crawlable`,
+  `http-status-code` and friends — need a network log, which means
+  navigation mode and a harness that does not exist yet.
 - **The performance audits are wrappers around the DevTools insights**,
   which `ferridriver-perf` has already ported and checks against the
   engine on every `just test`. There is nothing left to port there.

@@ -1822,6 +1822,35 @@ impl PageJs {
       .await
   }
 
+  /// ferridriver extension: `page.checkPageQuality(options?)`.
+  ///
+  /// The seven Lighthouse audits that score a page as it stands. Pass
+  /// `{ only: ['meta-description'] }` to run a subset.
+  #[qjs(rename = "checkPageQuality")]
+  pub async fn check_page_quality<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let parsed: JsPageQualityOptions = match options.into_inner() {
+          Some(value) if !value.is_undefined() && !value.is_null() => serde_from_js(&ctx, value)?,
+          _ => JsPageQualityOptions::default(),
+        };
+        let report = self
+          .inner
+          .check_page_quality(Some(ferridriver::audits::PageQualityOptions {
+            only: parsed.only.unwrap_or_default(),
+          }))
+          .await
+          .into_js_with(&ctx)?;
+        crate::bindings::convert::serde_to_js(&ctx, &report)
+      })
+      .await
+  }
+
   #[qjs(rename = "screenshot")]
   pub async fn screenshot<'js>(
     &self,

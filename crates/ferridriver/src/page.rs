@@ -1264,6 +1264,42 @@ impl Page {
     crate::accessibility::parse_report(payload)
   }
 
+  /// Audit the page against the Lighthouse checks that read a live DOM.
+  ///
+  /// Seven of them: `doctype`, `meta-description`, `crawlable-anchors`,
+  /// `link-text`, `image-aspect-ratio`, `image-size-responsive` and
+  /// `paste-preventing-inputs`. Everything is read from the page as it
+  /// stands, so this navigates nothing and a static page answers the
+  /// same way every time.
+  ///
+  /// See [`crate::audits`] for what these are ported from, and for the
+  /// one input `crawlable-anchors` cannot see.
+  ///
+  /// # Errors
+  ///
+  /// [`crate::error::FerriError::Backend`] when the page could not be
+  /// read.
+  pub async fn check_page_quality(
+    self: &Arc<Self>,
+    options: Option<crate::audits::PageQualityOptions>,
+  ) -> Result<crate::audits::PageQualityReport> {
+    let value = self
+      .evaluate(
+        crate::audits::gather_source(),
+        crate::protocol::SerializedArgument::default(),
+        Some(true),
+      )
+      .await?;
+    // A JSON string rather than a structure, for the reason the
+    // accessibility audit does the same: each backend re-serialises a
+    // returned object through its own remote-value format.
+    let payload = value
+      .as_str()
+      .ok_or_else(|| crate::error::FerriError::backend("page audit gatherer returned a non-string result"))?;
+    let artifacts = crate::audits::parse_artifacts(payload)?;
+    Ok(crate::audits::run(&artifacts, &options.unwrap_or_default()))
+  }
+
   /// Playwright: `page.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
   /// Delegates to the main frame.
   ///
