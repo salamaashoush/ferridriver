@@ -4,7 +4,7 @@ Cucumber / Gherkin framework for ferridriver. Translates `.feature` files
 into parallel test execution via the core `TestRunner` — same worker
 pool, retries, reporters, and fixtures as Rust tests.
 
-**145 built-in steps** backed by the Page / Locator API (not raw JS
+**146 built-in steps** backed by the Page / Locator API (not raw JS
 `evaluate`). All selectors support the Playwright engine syntax
 (`role=`, `text=`, `label=`, …).
 
@@ -171,6 +171,6 @@ Scenario Outline: user <name> is <age>
 
 ## Learn more
 
-- [Built-in steps](/bdd/steps) — all 145 steps grouped by category
+- [Built-in steps](/bdd/steps) — all 146 steps grouped by category
 - [Hooks](/bdd/hooks) — lifecycle points and tag filters
 - [Running](/bdd/running) — CLI, reporters, profiles

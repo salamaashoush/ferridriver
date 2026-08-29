@@ -1,4 +1,4 @@
-# Built-in steps (145)
+# Built-in steps (146)
 
 Grouped by source module in
 [`crates/ferridriver-bdd/src/steps/`](https://github.com/salamaashoush/ferridriver/tree/main/crates/ferridriver-bdd/src/steps).
@@ -22,7 +22,7 @@ registrations.
 | `keyboard`   | 4     | Press key, press on selector, type, press with modifier |
 | `javascript` | 3     | Evaluate an expression, store its result, evaluate and assert the result |
 | `cookie`     | 3     | Add, delete, clear all |
-| `screenshot` | 3     | Full page, element-scoped, accessibility snapshot |
+| `screenshot` | 4     | Page, full page, element-scoped, accessibility snapshot |
 | `variable`   | 3     | Set a variable, store the text or value of a selector as a variable |
 | `file`       | 2     | Attach one file or multiple files to an input |
 
