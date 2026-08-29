@@ -3,8 +3,8 @@
 use crate::error::IntoNapi;
 use crate::locator::Locator;
 use crate::types::{
-  DragAndDropOptions, GotoOptions, MetricData, RoleOptions, ScreenshotOptions, SnapshotForAiOptions, TextOptions,
-  WaitForFunctionOptions, WaitOptions,
+  AccessibilityAuditOptions, AccessibilityReport, DragAndDropOptions, GotoOptions, MetricData, RoleOptions,
+  ScreenshotOptions, SnapshotForAiOptions, TextOptions, WaitForFunctionOptions, WaitOptions,
 };
 use std::sync::{Arc, Mutex};
 
@@ -1429,6 +1429,23 @@ impl Page {
       .wait_for_navigation(timeout_ms.map(crate::types::f64_to_u64))
       .await
       .map_err(crate::error::to_napi)
+  }
+
+  // ── Accessibility ───────────────────────────────────────────────────────
+
+  /// Audit the page with axe-core, covering what Lighthouse's whole
+  /// accessibility category covers.
+  ///
+  /// axe-core is fetched by `ferridriver install axe` rather than
+  /// bundled, so this throws until it has been.
+  #[napi]
+  pub async fn check_accessibility(&self, options: Option<AccessibilityAuditOptions>) -> Result<AccessibilityReport> {
+    let report = self
+      .inner
+      .check_accessibility(options.map(Into::into))
+      .await
+      .into_napi()?;
+    Ok(report.into())
   }
 
   // ── Screenshots ─────────────────────────────────────────────────────────

@@ -1790,6 +1790,38 @@ impl PageJs {
   /// Capture the page as a PNG (raw bytes — Uint8Array in JS). Pair with
   /// `await artifacts.writeBytes('page.png', bytes)` to save to disk.
   /// Optional `options` accept `{ fullPage?: boolean, format?: 'png'|'jpeg'|'webp', quality?: number }`.
+  /// ferridriver extension: `page.checkAccessibility(options?)`.
+  ///
+  /// Not a Playwright method — Playwright's `page.accessibility` is the
+  /// accessibility TREE, which is a different question. This runs
+  /// axe-core and reports what it found.
+  #[qjs(rename = "checkAccessibility")]
+  pub async fn check_accessibility<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let parsed: JsAccessibilityOptions = match options.into_inner() {
+          Some(value) if !value.is_undefined() && !value.is_null() => serde_from_js(&ctx, value)?,
+          _ => JsAccessibilityOptions::default(),
+        };
+        let report = self
+          .inner
+          .check_accessibility(Some(ferridriver::accessibility::AccessibilityOptions {
+            include: parsed.include.unwrap_or_default(),
+            exclude: parsed.exclude.unwrap_or_default(),
+            tags: parsed.tags.unwrap_or_default(),
+          }))
+          .await
+          .into_js_with(&ctx)?;
+        crate::bindings::convert::serde_to_js(&ctx, &report)
+      })
+      .await
+  }
+
   #[qjs(rename = "screenshot")]
   pub async fn screenshot<'js>(
     &self,

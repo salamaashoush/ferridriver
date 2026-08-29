@@ -1224,6 +1224,46 @@ impl Page {
     self.main_frame().eval_with(fn_source, arg).await
   }
 
+  /// Audit the page for accessibility problems with axe-core.
+  ///
+  /// Covers what Lighthouse's whole accessibility category covers,
+  /// because that category is 67 wrappers around this same engine.
+  ///
+  /// axe-core is fetched by `ferridriver install axe` rather than
+  /// bundled, so the first call on a machine without it fails with a
+  /// [`crate::error::FerriError::Unsupported`] saying so.
+  ///
+  /// # Errors
+  ///
+  /// [`crate::error::FerriError::Unsupported`] when axe-core is not
+  /// installed, and [`crate::error::FerriError::Backend`] when the page
+  /// could not run it.
+  pub async fn check_accessibility(
+    self: &Arc<Self>,
+    options: Option<crate::accessibility::AccessibilityOptions>,
+  ) -> Result<crate::accessibility::AccessibilityReport> {
+    let path = crate::install::BrowserInstaller::new().axe_core_path();
+    let source = crate::accessibility::load_axe_source(&path)?;
+    let argument = crate::accessibility::AuditArgument {
+      source: &source,
+      options: options.unwrap_or_default().into(),
+    };
+    let value = self
+      .evaluate(
+        &crate::accessibility::inject_and_run_source(),
+        crate::protocol::serializers::argument_from_serde(&argument)?,
+        Some(true),
+      )
+      .await?;
+    // The page hands back a JSON string, not a structure: axe's own
+    // result is large enough that letting each backend re-serialise it
+    // through its remote-value format is both slow and lossy.
+    let payload = value
+      .as_str()
+      .ok_or_else(|| crate::error::FerriError::backend("axe-core returned a non-string result"))?;
+    crate::accessibility::parse_report(payload)
+  }
+
   /// Playwright: `page.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
   /// Delegates to the main frame.
   ///

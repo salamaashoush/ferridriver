@@ -31,6 +31,18 @@ fn backend_err(context: impl std::fmt::Display) -> FerriError {
   FerriError::backend(context.to_string())
 }
 
+/// Lowercase hex SHA-256, for pinning a downloaded artifact to its
+/// published bytes.
+fn sha256_hex(bytes: &[u8]) -> String {
+  use sha2::{Digest, Sha256};
+  let digest = Sha256::digest(bytes);
+  digest.iter().fold(String::with_capacity(64), |mut out, byte| {
+    use std::fmt::Write as _;
+    let _ = write!(out, "{byte:02x}");
+    out
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Chrome for Testing API types
 // ---------------------------------------------------------------------------
@@ -43,6 +55,18 @@ const FIREFOX_VERSIONS_URL: &str = "https://product-details.mozilla.org/1.0/fire
 
 /// Base URL for Firefox stable releases.
 const FIREFOX_RELEASES_URL: &str = "https://archive.mozilla.org/pub/firefox/releases";
+
+/// axe-core, the accessibility rule engine.
+///
+/// Pinned to the version Lighthouse bundles rather than to the latest
+/// release: the two are compared against each other, and a rule that
+/// only one of them has would read as a disagreement about the page.
+const AXE_CORE_VERSION: &str = "4.12.1";
+
+/// Published tarball contents are immutable per version, so the digest
+/// pins the bytes as well as the number. A mismatch means the artifact
+/// changed under a fixed version, which is not a thing to shrug at.
+const AXE_CORE_SHA256: &str = "66a8aaa95a8b044a7fd74a5435873bf04ff65a1ca75567c921b7509742085a14";
 
 /// Download retry count (matches Playwright's 5 attempts).
 const DOWNLOAD_RETRIES: u32 = 5;
@@ -306,6 +330,76 @@ impl BrowserInstaller {
     });
 
     Ok(path)
+  }
+
+  /// Where axe-core lives once installed.
+  ///
+  /// Alongside the browsers rather than inside the binary: it is a
+  /// third-party artifact under a different licence to this repository,
+  /// and it is fetched the same way and to the same place as every
+  /// other third-party artifact ferridriver needs.
+  #[must_use]
+  pub fn axe_core_path(&self) -> PathBuf {
+    self
+      .cache_dir
+      .join(format!("axe-core-{AXE_CORE_VERSION}"))
+      .join("axe.min.js")
+  }
+
+  /// Install axe-core, the engine behind every accessibility check.
+  ///
+  /// Returns the path to the script. Already-installed is decided by
+  /// the digest and not by the file merely existing, so a truncated
+  /// download is re-fetched rather than injected into a page.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the download fails after all retries, or if
+  /// what arrived does not match [`AXE_CORE_SHA256`].
+  pub async fn install_axe_core<F>(&self, progress: F) -> Result<String>
+  where
+    F: Fn(InstallProgress),
+  {
+    let dest = self.axe_core_path();
+    let display = dest.display().to_string();
+    if let Ok(existing) = tokio::fs::read(&dest).await
+      && sha256_hex(&existing) == AXE_CORE_SHA256
+    {
+      progress(InstallProgress::AlreadyInstalled {
+        version: AXE_CORE_VERSION.to_string(),
+        path: display.clone(),
+      });
+      return Ok(display);
+    }
+
+    progress(InstallProgress::Resolving);
+    if let Some(parent) = dest.parent() {
+      tokio::fs::create_dir_all(parent).await?;
+    }
+    let url = format!("https://cdn.jsdelivr.net/npm/axe-core@{AXE_CORE_VERSION}/axe.min.js");
+
+    let mut last: Option<FerriError> = None;
+    for _ in 0..DOWNLOAD_RETRIES {
+      match self.download_file(&url, &dest, &progress).await {
+        Ok(()) => {
+          let bytes = tokio::fs::read(&dest).await?;
+          let digest = sha256_hex(&bytes);
+          if digest == AXE_CORE_SHA256 {
+            progress(InstallProgress::Complete {
+              version: AXE_CORE_VERSION.to_string(),
+              path: display.clone(),
+            });
+            return Ok(display);
+          }
+          let _ = tokio::fs::remove_file(&dest).await;
+          last = Some(backend_err(format!(
+            "axe-core {AXE_CORE_VERSION} digest mismatch: expected {AXE_CORE_SHA256}, got {digest}"
+          )));
+        },
+        Err(e) => last = Some(e),
+      }
+    }
+    Err(last.unwrap_or_else(|| backend_err("axe-core download failed")))
   }
 
   /// Download a file with streaming progress.

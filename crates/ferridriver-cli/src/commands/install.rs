@@ -13,9 +13,11 @@ use ferridriver::install::{BrowserInstaller, InstallProgress};
 use crate::cli;
 use crate::ui;
 
-/// The browsers this command knows how to fetch, in the order `--help` lists
-/// them.
-const KNOWN: [&str; 4] = ["chromium", "chromium-headless-shell", "firefox", "webkit"];
+/// What this command knows how to fetch, in the order `--help` lists
+/// them. `axe` is not a browser; it is the accessibility engine, and it
+/// is here because it is provisioned the same way and to the same
+/// place, rather than vendored into the repository.
+const KNOWN: [&str; 5] = ["chromium", "chromium-headless-shell", "firefox", "webkit", "axe"];
 
 pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
   let mut browsers = args.browsers;
@@ -23,7 +25,7 @@ pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
     browsers.push("chromium".to_string());
   }
   if let Some(rejected) = browsers.iter().find(|b| !KNOWN.contains(&b.as_str())) {
-    anyhow::bail!("unknown browser {rejected:?} (expected one of: {})", KNOWN.join(", "));
+    anyhow::bail!("unknown target {rejected:?} (expected one of: {})", KNOWN.join(", "));
   }
 
   let installer = BrowserInstaller::new();
@@ -42,8 +44,9 @@ pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
       "chromium-headless-shell" => installer.install_chromium_headless_shell(phase.callback()).await,
       "firefox" => installer.install_firefox(phase.callback()).await,
       "webkit" => installer.install_webkit(phase.callback()).await,
+      "axe" => installer.install_axe_core(phase.callback()).await,
       // Rejected above, before any download started.
-      other => unreachable!("unvalidated browser {other:?}"),
+      other => unreachable!("unvalidated target {other:?}"),
     };
     // The bar owns the line the failure has to be readable on, so it closes
     // itself before the error propagates and `main` prints it.

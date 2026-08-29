@@ -23,6 +23,7 @@
 //! ```
 
 // ── Public API (Playwright-compatible) ──
+pub mod accessibility;
 pub mod action;
 pub mod browser;
 pub mod browser_type;

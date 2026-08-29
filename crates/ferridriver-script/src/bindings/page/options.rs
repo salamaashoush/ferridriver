@@ -221,6 +221,18 @@ pub(crate) fn parse_har_options<'js>(
 }
 
 /// Shape of `page.screenshot` options accepted from JS. Full Playwright
+/// `page.checkAccessibility(options?)`. A ferridriver extension, so
+/// there is no Playwright declaration to mirror; the fields are
+/// axe-core's own `context` and `runOnly` narrowed to what a caller
+/// reaches for.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(super) struct JsAccessibilityOptions {
+  pub include: Option<Vec<String>>,
+  pub exclude: Option<Vec<String>>,
+  pub tags: Option<Vec<String>>,
+}
+
 /// `PageScreenshotOptions` surface per
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280`.
 #[derive(Debug, Default, Deserialize)]

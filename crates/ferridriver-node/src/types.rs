@@ -18,6 +18,105 @@ pub(crate) fn f64_to_u64(v: f64) -> u64 {
   }
 }
 
+/// Options for `page.checkAccessibility`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct AccessibilityAuditOptions {
+  /// CSS selectors to audit. Omitted or empty audits the whole document.
+  pub include: Option<Vec<String>>,
+  /// Subtrees to leave out, for regions the page does not own.
+  pub exclude: Option<Vec<String>>,
+  /// Rule tags to run, such as `wcag2a` or `best-practice`. Omitted or
+  /// empty runs every rule axe-core has.
+  pub tags: Option<Vec<String>>,
+}
+
+impl From<AccessibilityAuditOptions> for ferridriver::accessibility::AccessibilityOptions {
+  fn from(options: AccessibilityAuditOptions) -> Self {
+    Self {
+      include: options.include.unwrap_or_default(),
+      exclude: options.exclude.unwrap_or_default(),
+      tags: options.tags.unwrap_or_default(),
+    }
+  }
+}
+
+/// One element a rule had something to say about.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct AccessibilityNode {
+  /// CSS selectors locating the element, outermost frame first.
+  pub target: Vec<String>,
+  pub html: String,
+  /// Why the rule fired here, in axe-core's words.
+  pub failure_summary: String,
+}
+
+/// One rule's verdict, with the elements behind it.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct AccessibilityRule {
+  pub id: String,
+  /// `minor`, `moderate`, `serious` or `critical`.
+  pub impact: Option<String>,
+  pub help: String,
+  pub help_url: String,
+  /// Which standards the rule belongs to (`wcag2a`, `best-practice`).
+  pub tags: Vec<String>,
+  pub nodes: Vec<AccessibilityNode>,
+}
+
+/// What axe-core found. Four outcomes, not two: `incomplete` is a
+/// question axe could not settle without a human, which is not a pass.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct AccessibilityReport {
+  pub violations: Vec<AccessibilityRule>,
+  pub passes: Vec<AccessibilityRule>,
+  pub incomplete: Vec<AccessibilityRule>,
+  pub inapplicable: Vec<AccessibilityRule>,
+  /// The engine that produced this, e.g. `axe-core/4.12.1`.
+  pub engine: String,
+}
+
+impl From<ferridriver::accessibility::AccessibilityNode> for AccessibilityNode {
+  fn from(node: ferridriver::accessibility::AccessibilityNode) -> Self {
+    Self {
+      target: node.target,
+      html: node.html,
+      failure_summary: node.failure_summary,
+    }
+  }
+}
+
+impl From<ferridriver::accessibility::AccessibilityRule> for AccessibilityRule {
+  fn from(rule: ferridriver::accessibility::AccessibilityRule) -> Self {
+    Self {
+      id: rule.id,
+      impact: rule.impact,
+      help: rule.help,
+      help_url: rule.help_url,
+      tags: rule.tags,
+      nodes: rule.nodes.into_iter().map(Into::into).collect(),
+    }
+  }
+}
+
+impl From<ferridriver::accessibility::AccessibilityReport> for AccessibilityReport {
+  fn from(report: ferridriver::accessibility::AccessibilityReport) -> Self {
+    let rules = |list: Vec<ferridriver::accessibility::AccessibilityRule>| -> Vec<AccessibilityRule> {
+      list.into_iter().map(Into::into).collect()
+    };
+    Self {
+      violations: rules(report.violations),
+      passes: rules(report.passes),
+      incomplete: rules(report.incomplete),
+      inapplicable: rules(report.inapplicable),
+      engine: report.engine,
+    }
+  }
+}
+
 /// Options for `page.route` / `browserContext.route`.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
