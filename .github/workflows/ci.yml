@@ -49,6 +49,23 @@ jobs:
           persist-credentials: false
       - uses: crate-ci/typos@v1
 
+  typecheck:
+    name: Typecheck e2e specs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+      # The specs are typed against `packages/ferridriver-test`, which is
+      # written by hand rather than generated. A binding can ship with no
+      # declaration and nothing else notices — `checkAccessibility` and
+      # `strictSelectors` both did.
+      - name: Typecheck
+        working-directory: tests
+        run: bun x tsc --noEmit -p tsconfig.json
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -97,13 +114,14 @@ jobs:
   basics:
     name: Basics gate
     runs-on: ubuntu-latest
-    needs: [fmt, typos, clippy, doc]
+    needs: [fmt, typos, typecheck, clippy, doc]
     if: always()
     steps:
       - name: Verify all checks passed
         run: |
           if [[ "${{ needs.fmt.result }}" != "success" ||
                 "${{ needs.typos.result }}" != "success" ||
+                "${{ needs.typecheck.result }}" != "success" ||
                 "${{ needs.clippy.result }}" != "success" ||
                 "${{ needs.doc.result }}" != "success" ]]; then
             echo "One or more basic checks failed"
@@ -169,6 +187,22 @@ jobs:
 
       - name: Run doc tests
         run: cargo test --doc --workspace
+
+      # The NAPI binding has its own suite and CI never ran it, so a
+      # regression in the Node surface shipped unnoticed. It needs the
+      # addon built, which is why it lives here rather than in the cheap
+      # gate.
+      - name: Build the NAPI addon
+        run: |
+          bun install -g @napi-rs/cli@3
+          bun install
+          cd crates/ferridriver-node && bun run build:debug
+
+      - name: Run NAPI binding tests
+        env:
+          FERRIDRIVER_BIN: ${{ github.workspace }}/target/debug/ferridriver
+        working-directory: crates/ferridriver-node
+        run: bun test
 
   # ---------------------------------------------------------------------------
   # Security: audit dependencies for known vulnerabilities

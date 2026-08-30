@@ -36,16 +36,38 @@ check:
   cargo check --all-targets
 
 # Run all tests: Rust workspace, CLI infra + MCP smoke (serial), the
-# TS e2e suite (4 projects), and the BDD feature suite.
+# TS e2e suite (4 projects), the BDD feature suite, the NAPI binding
+# suite, and the e2e typecheck.
+#
 # CLI integration tests run serially: under bare `cargo test`
 # parallelism, dozens of concurrent browsers starve each other and
 # Firefox dies mid-startup with cascade failures at any commit.
-test:
+#
+# The last two used to be neither here nor in CI, so a NAPI regression
+# or a binding shipped without its type declaration failed nothing.
+# `bun test` needs the addon rebuilt, which is the slowest step in this
+# recipe; `just test-fast` and `just test-backend` are the quick loops.
+test: test-rust test-node
+  @echo "All suites green"
+
+# The Rust, e2e and BDD half of `just test`.
+test-rust:
   cargo build --bin ferridriver --bin ferridriver-fixtures
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --workspace --exclude ferridriver-cli
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli -- --test-threads=1
   ./target/debug/ferridriver test
   ./target/debug/ferridriver bdd tests/features/
+
+# The JS half: the NAPI binding suite, and the typecheck that proves the
+# hand-written `packages/ferridriver-test` declares what the bindings
+# actually expose.
+#
+# `bun x` fetches typescript, and a bun pointed at a private mirror
+# fails that with a 403 — the same trap `perf-diff` passes `--registry`
+# for. The public registry is named explicitly for the same reason.
+test-node:
+  cd crates/ferridriver-node && bun run build:debug && bun test
+  cd tests && BUN_CONFIG_REGISTRY=https://registry.npmjs.org bun x tsc --noEmit -p tsconfig.json
 
 # Run all tests with maximum parallelism (browser-heavy suites race;
 # see the serial `test` recipe for the trustworthy gate)

@@ -13,7 +13,9 @@ Uses `just` (justfile) and cargo aliases (`.cargo/config.toml`):
 | Command | Purpose |
 |---|---|
 | `just check` (or `just c`) | Type-check workspace |
-| `just test` | Build binary + NAPI, run all Rust tests, TS tests, backend integration tests, BDD features |
+| `just test` | The full gate: `test-rust` then `test-node` |
+| `just test-rust` | Rust workspace + CLI serial + TS e2e (4 backends) + BDD features |
+| `just test-node` | NAPI addon build + `bun test`, then the e2e typecheck |
 | `just test-backend cdp_pipe` | Run tests for a single backend (`cdp_pipe`, `cdp_raw`, `webkit`) |
 | `just test-ts` | NAPI/TypeScript tests with Bun |
 | `just bdd *args` | Run BDD feature tests |
@@ -151,10 +153,13 @@ backend/
 integration binaries serially (including the per-backend MCP smoke
 suite `crates/ferridriver-cli/tests/mcp_smoke.rs`), the TypeScript e2e
 suite (`./target/debug/ferridriver test`, `tests/e2e/*.test.ts` across
-the 4 backend projects in `ferridriver.toml`), and the BDD feature
-suite. Tests require a Chrome/Chromium binary (install with
-`ferridriver install --with-deps chromium`) plus the Firefox/WebKit
-builds for the non-CDP projects, and the fixture web server binary
+the 4 backend projects in `ferridriver.toml`), the BDD feature suite,
+and then `test-node`: the NAPI addon build with its `bun test` suite,
+and the typecheck of the e2e specs against
+`packages/ferridriver-test`. Tests require a Chrome/Chromium binary
+(install with `ferridriver install --with-deps chromium axe`, where
+`axe` backs `page.checkAccessibility()`) plus the Firefox/WebKit builds
+for the non-CDP projects, and the fixture web server binary
 (`ferridriver-fixtures`, built by the recipe) that `ferridriver.toml`
 wires in as a `webServer` command.
 
@@ -439,15 +444,15 @@ that differs on purpose.
 Run every time, before every commit:
 
 ```bash
-cargo clippy --workspace --all-targets -- -D warnings
-FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver cargo test --workspace --exclude ferridriver-cli
-FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
-  cargo test -p ferridriver-cli -- --test-threads=1
-./target/debug/ferridriver test
-./target/debug/ferridriver bdd tests/features/
-cd crates/ferridriver-node && bun run build:debug && bun test
-cd tests && bun x tsc --noEmit -p tsconfig.json
+just lint      # clippy --workspace --all-targets -D warnings
+just test      # Rust + CLI serial + e2e + BDD, then NAPI + the e2e typecheck
 ```
+
+`just test` is `test-rust` then `test-node`; run either alone for a
+shorter loop. The NAPI suite and the typecheck used to be in neither
+that recipe nor CI, so a Node regression, or a binding shipped with no
+declaration in `packages/ferridriver-test`, failed nothing. Both are now
+in both places.
 
 If a pre-existing test is failing, fix it in the same commit. "Pre-existing failure unrelated to this task" / "flagging for follow-up" is the pattern to kill.
 
