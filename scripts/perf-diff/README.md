@@ -143,14 +143,22 @@ them.
 axe-core is pinned to the version Lighthouse bundles. A rule that only
 one of them has would otherwise read as a disagreement about the page.
 
-### The seven that are a port
+### The audits that are a port
 
-Everything else Lighthouse scores in snapshot mode is `doctype`,
+Everything Lighthouse scores in snapshot mode is `doctype`,
 `meta-description`, `crawlable-anchors`, `link-text`,
 `image-aspect-ratio`, `image-size-responsive` and
-`paste-preventing-inputs`. Those are ported, in
-`crates/ferridriver/src/audits.rs`, and `just quality-diff` compares
-them.
+`paste-preventing-inputs`, plus `canonical` after a navigation. Those
+are ported, in `crates/ferridriver/src/audits.rs`, and
+`just quality-diff` compares them.
+
+`lighthouse.mjs --navigation` drives a real load instead of reading the
+page as it stands, which is the only way Lighthouse scores the audits
+needing a network log, so every fixture carries a second recording.
+Snapshot stays the recording of record and navigation only fills in what
+snapshot cannot score at all: navigation applies its own emulation, so
+merging its axe verdicts over the snapshot ones would silently change
+what is being compared.
 
 This comparison is the one that matters most, because it is the only
 one with no shared engine underneath. The accessibility comparison has
@@ -216,10 +224,23 @@ Of the ~93 non-performance audits the bundle implements:
   `doctype`, `meta-description`, `crawlable-anchors`, `link-text`,
   `image-aspect-ratio`, `image-size-responsive`,
   `paste-preventing-inputs`. **Those seven are done**
-  (`crates/ferridriver/src/audits.rs`). The rest — `is-on-https`,
-  `csp-xss`, `has-hsts`, `canonical`, `is-crawlable`,
-  `http-status-code` and friends — need a network log, which means
-  navigation mode and a harness that does not exist yet.
+  (`crates/ferridriver/src/audits.rs`), and so is `canonical`, which
+  needs a navigation. The remaining five are measured rather than
+  guessed, and only two of them are even comparable:
+
+  - `has-hsts` and `csp-xss` score `informative` in Lighthouse, not
+    `binary`. There is no pass/fail verdict to agree with.
+  - `is-on-https` treats localhost as secure
+    (`URL.isLikeLocalhost`), so every request a hermetic fixture can
+    make already passes it. Porting it would add a gate that agrees
+    by finding nothing, which is the trap the fixtures above exist to
+    avoid.
+  - `http-status-code` reads the main resource's status, and
+    `performance.getEntriesByType('navigation')[0].responseStatus` is
+    undefined on WebKit, so a DOM-only port would answer differently
+    per backend. It needs the response plumbed in from the network log.
+  - `is-crawlable` needs a robots.txt parser; Lighthouse vendors
+    `robots-parser` for it.
 - **The performance audits are wrappers around the DevTools insights**,
   which `ferridriver-perf` has already ported and checks against the
   engine on every `just test`. There is nothing left to port there.

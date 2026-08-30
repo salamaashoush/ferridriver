@@ -92,10 +92,28 @@ fn fixtures_dir() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lighthouse")
 }
 
-fn recording(name: &str) -> Recording {
-  let path = fixtures_dir().join(format!("{name}.lighthouse.json"));
-  let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+fn read_recording(path: &std::path::Path) -> Recording {
+  let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
   serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+}
+
+/// What Lighthouse said about a page, snapshot first.
+///
+/// Snapshot is the recording of record: it reads the page as it stands,
+/// so its verdicts are the ones a `checkPageQuality()` on a settled page
+/// should match. Navigation only fills in the audits snapshot cannot
+/// score at all -- `canonical` resolves against the main resource, so
+/// Lighthouse marks it notApplicable without a network log. Merging the
+/// other way would silently swap in verdicts reached under navigation's
+/// own emulation.
+fn recording(name: &str) -> Recording {
+  let dir = fixtures_dir();
+  let mut snapshot = read_recording(&dir.join(format!("{name}.lighthouse.json")));
+  let navigation = read_recording(&dir.join(format!("{name}.navigation.json")));
+  for (id, audit) in navigation.audits {
+    snapshot.audits.entry(id).or_insert(audit);
+  }
+  snapshot
 }
 
 /// Serve the fixture directory on a loopback port, returning its origin.
@@ -363,7 +381,16 @@ fn compare_page_quality(name: &str, expected_failures: usize) {
 
 #[test]
 fn page_quality_on_a_page_failing_all_seven() {
-  compare_page_quality("quality-broken", AUDIT_IDS.len());
+  // Seven of the eight: `canonical` is not one this page breaks, and a
+  // page with no canonical link is notApplicable rather than a failure.
+  compare_page_quality("quality-broken", 7);
+}
+
+/// The eighth audit, which only navigation mode scores. Its own fixture
+/// because a relative canonical is the whole point of the page.
+#[test]
+fn page_quality_on_a_page_with_a_relative_canonical() {
+  compare_page_quality("canonical-broken", 1);
 }
 
 #[test]

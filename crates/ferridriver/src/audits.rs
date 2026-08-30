@@ -121,6 +121,8 @@ pub struct Artifacts {
   #[serde(default)]
   pub inputs: Vec<Input>,
   #[serde(default)]
+  pub links: Vec<Link>,
+  #[serde(default)]
   pub viewport: Viewport,
   /// The document's own URL, which both anchor audits resolve against.
   #[serde(default)]
@@ -213,6 +215,22 @@ pub struct Input {
   pub prevents_paste: Option<bool>,
   pub selector: String,
   pub snippet: String,
+}
+
+/// A `<link>` in the document head.
+///
+/// Body links are dropped by the gatherer, matching Lighthouse's
+/// `link.source === 'body'` skip: a canonical outside the head is not
+/// one a crawler honours.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Link {
+  pub rel: String,
+  /// The `href` attribute exactly as written.
+  pub href_raw: String,
+  /// The resolved `href` property. Empty when it would not resolve.
+  pub href: String,
+  pub hreflang: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -330,6 +348,15 @@ const GATHER: &str = r"
     };
   });
 
+  // Head only: Lighthouse skips `link.source === 'body'`, because a
+  // canonical a crawler will not honour is not one worth reporting.
+  const links = [...document.querySelectorAll('head link')].map(link => ({
+    rel: (link.rel || '').toLowerCase(),
+    hrefRaw: link.getAttribute('href') || '',
+    href: link.href || '',
+    hreflang: link.hreflang || '',
+  }));
+
   const inputs = [...document.querySelectorAll('textarea, input, select')].map(el => ({
     type: el.type || '',
     preventsPaste: el.readOnly ? null : !el.dispatchEvent(new ClipboardEvent('paste', { cancelable: true })),
@@ -343,6 +370,7 @@ const GATHER: &str = r"
     anchors,
     images,
     inputs,
+    links,
     viewport: {
       innerWidth: window.innerWidth,
       innerHeight: window.innerHeight,
@@ -373,9 +401,10 @@ pub fn parse_artifacts(payload: &str) -> Result<Artifacts> {
 
 /// Every audit id this module implements, in the order they are
 /// reported.
-pub const AUDIT_IDS: [&str; 7] = [
+pub const AUDIT_IDS: [&str; 8] = [
   "doctype",
   "meta-description",
+  "canonical",
   "crawlable-anchors",
   "link-text",
   "image-aspect-ratio",
@@ -393,6 +422,9 @@ pub fn run(artifacts: &Artifacts, options: &PageQualityOptions) -> PageQualityRe
   }
   if wanted("meta-description") {
     audits.push(meta_description(artifacts));
+  }
+  if wanted("canonical") {
+    audits.push(canonical(artifacts));
   }
   if wanted("crawlable-anchors") {
     audits.push(crawlable_anchors(artifacts));
@@ -484,6 +516,99 @@ pub fn meta_description(artifacts: &Artifacts) -> AuditResult {
   };
   if meta.content.trim().is_empty() {
     return failed(ID, category, FAIL, Some("Description text is empty."), Vec::new());
+  }
+  passed(ID, category, PASS)
+}
+
+/// `canonical`: the document names one valid, absolute canonical URL.
+///
+/// Lighthouse scores this only in navigation mode, because it resolves
+/// the canonical against the MAIN RESOURCE's url rather than the
+/// document's. For a page that did not redirect the two are the same,
+/// which is every fixture here; a redirect would need the network log.
+///
+/// Ported from `core/audits/seo/canonical.js`, whose three helpers this
+/// keeps as three branches: an unusable href, then the conflict and
+/// count checks, then the two common mistakes.
+#[must_use]
+pub fn canonical(artifacts: &Artifacts) -> AuditResult {
+  const ID: &str = "canonical";
+  const PASS: &str = "Document has a valid `rel=canonical`";
+  const FAIL: &str = "Document does not have a valid `rel=canonical`";
+  let category = AuditCategory::Seo;
+
+  let mut unique: Vec<String> = Vec::new();
+  let mut hreflangs: Vec<String> = Vec::new();
+  let mut invalid: Option<&str> = None;
+  let mut relative: Option<&str> = None;
+
+  for link in &artifacts.links {
+    if link.rel == "canonical" {
+      if link.href_raw.is_empty() {
+        continue;
+      }
+      if link.href.is_empty() {
+        invalid = Some(&link.href_raw);
+        continue;
+      }
+      // Upstream's test is which of two parses succeed: unparseable
+      // even against a base is invalid, parseable only against a base
+      // is relative, and parseable alone is the one it keeps.
+      if resolve(&link.href_raw, "https://example.com").is_none() {
+        invalid = Some(&link.href_raw);
+      } else if reqwest::Url::parse(&link.href_raw).is_err() {
+        relative = Some(&link.href_raw);
+      } else if !unique.contains(&link.href) {
+        unique.push(link.href.clone());
+      }
+    } else if link.rel == "alternate" && !link.href.is_empty() && !link.hreflang.is_empty() {
+      hreflangs.push(link.href.clone());
+    }
+  }
+
+  if let Some(href) = invalid {
+    return failed(ID, category, FAIL, Some(&format!("Invalid URL ({href})")), Vec::new());
+  }
+  if let Some(href) = relative {
+    return failed(ID, category, FAIL, Some(&format!("Relative URL ({href})")), Vec::new());
+  }
+  if unique.is_empty() {
+    // Nothing to look at. Lighthouse reports this as notApplicable, and
+    // the recorder drops those, so the comparison skips it.
+    return passed(ID, category, PASS);
+  }
+  if unique.len() > 1 {
+    return failed(
+      ID,
+      category,
+      FAIL,
+      Some(&format!("Multiple conflicting URLs ({})", unique.join(", "))),
+      Vec::new(),
+    );
+  }
+
+  let (Some(canonical), Some(base)) = (
+    reqwest::Url::parse(&unique[0]).ok(),
+    reqwest::Url::parse(&artifacts.url).ok(),
+  ) else {
+    return passed(ID, category, PASS);
+  };
+  // Two pages that name each other as alternates cannot also name one
+  // of them as the canonical of the other.
+  if hreflangs.iter().any(|h| h == base.as_str())
+    && hreflangs.iter().any(|h| h == canonical.as_str())
+    && base != canonical
+  {
+    return failed(
+      ID,
+      category,
+      FAIL,
+      Some("Points to another `hreflang` location"),
+      Vec::new(),
+    );
+  }
+  if canonical.origin() == base.origin() && canonical.path() == "/" && base.path() != "/" {
+    return failed(ID, category, FAIL, Some("Points to the domain's root URL"), Vec::new());
   }
   passed(ID, category, PASS)
 }
@@ -1330,6 +1455,107 @@ mod tests {
     assert!(!of(input(Some(true))));
     assert!(of(input(Some(false))));
     assert!(of(input(None)), "read-only, so upstream never dispatched the event");
+  }
+
+  fn link(rel: &str, href_raw: &str, href: &str) -> Link {
+    Link {
+      rel: rel.into(),
+      href_raw: href_raw.into(),
+      href: href.into(),
+      hreflang: String::new(),
+    }
+  }
+
+  #[test]
+  fn a_relative_canonical_and_an_absolute_one_are_different_verdicts() {
+    let of = |links: Vec<Link>, url: &str| {
+      let report = canonical(&Artifacts {
+        links,
+        url: url.into(),
+        ..Artifacts::default()
+      });
+      (report.passed, report.explanation)
+    };
+
+    let (passed, _) = of(
+      vec![link(
+        "canonical",
+        "https://example.com/page",
+        "https://example.com/page",
+      )],
+      "https://example.com/page",
+    );
+    assert!(passed);
+
+    // Resolvable only against a base: upstream calls that relative.
+    let (passed, why) = of(
+      vec![link("canonical", "/page", "https://example.com/page")],
+      "https://example.com/page",
+    );
+    assert!(!passed);
+    assert!(why.unwrap_or_default().contains("Relative"));
+  }
+
+  #[test]
+  fn two_canonicals_conflict_and_one_repeated_does_not() {
+    let two = canonical(&Artifacts {
+      links: vec![
+        link("canonical", "https://example.com/a", "https://example.com/a"),
+        link("canonical", "https://example.com/b", "https://example.com/b"),
+      ],
+      url: "https://example.com/a".into(),
+      ..Artifacts::default()
+    });
+    assert!(!two.passed);
+    assert!(two.explanation.unwrap_or_default().contains("conflicting"));
+
+    let repeated = canonical(&Artifacts {
+      links: vec![
+        link("canonical", "https://example.com/a", "https://example.com/a"),
+        link("canonical", "https://example.com/a", "https://example.com/a"),
+      ],
+      url: "https://example.com/a".into(),
+      ..Artifacts::default()
+    });
+    assert!(repeated.passed, "the set is deduplicated before it is counted");
+  }
+
+  #[test]
+  fn a_canonical_pointing_at_the_domain_root_from_a_subpage_fails() {
+    let report = canonical(&Artifacts {
+      links: vec![link("canonical", "https://example.com/", "https://example.com/")],
+      url: "https://example.com/deep/page".into(),
+      ..Artifacts::default()
+    });
+    assert!(!report.passed);
+    assert!(report.explanation.unwrap_or_default().contains("root"));
+
+    // The same canonical is fine when the page IS the root.
+    let root = canonical(&Artifacts {
+      links: vec![link("canonical", "https://example.com/", "https://example.com/")],
+      url: "https://example.com/".into(),
+      ..Artifacts::default()
+    });
+    assert!(root.passed);
+  }
+
+  #[test]
+  fn a_canonical_pointing_at_another_hreflang_alternate_fails() {
+    let mut alternate_self = link("alternate", "https://example.com/en", "https://example.com/en");
+    alternate_self.hreflang = "en".into();
+    let mut alternate_other = link("alternate", "https://example.com/de", "https://example.com/de");
+    alternate_other.hreflang = "de".into();
+    let report = canonical(&Artifacts {
+      links: vec![
+        link("canonical", "https://example.com/de", "https://example.com/de"),
+        alternate_self,
+        alternate_other,
+      ],
+      url: "https://example.com/en".into(),
+      ..Artifacts::default()
+    });
+    assert!(!report.passed);
+    assert!(report.explanation.unwrap_or_default().contains("hreflang"));
   }
 
   #[test]

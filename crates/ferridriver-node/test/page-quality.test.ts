@@ -1,5 +1,5 @@
-// NAPI coverage for page.checkPageQuality(), the seven Lighthouse
-// audits that score a page as it stands.
+// NAPI coverage for page.checkPageQuality(), the Lighthouse audits that
+// score a page as it stands.
 //
 // Not a Playwright method. What these agree with is checked elsewhere
 // (`just quality-diff`, and the recorded gate in ferridriver-perf); this
@@ -31,13 +31,14 @@ for (const backend of BACKENDS) {
       await browser.close();
     });
 
-    it("reports all seven with a category on each", async () => {
+    it("reports every audit with a category on each", async () => {
       await page.setContent(SOUND);
       const report = await page.checkPageQuality();
 
       expect(report.audits.map((a) => a.id)).toEqual([
         "doctype",
         "meta-description",
+        "canonical",
         "crawlable-anchors",
         "link-text",
         "image-aspect-ratio",

@@ -1,5 +1,8 @@
-// `page.checkPageQuality()` — the seven Lighthouse audits that score a
-// page as it stands, ported in `ferridriver::audits`.
+// `page.checkPageQuality()` — the Lighthouse audits that score a page
+// as it stands, ported in `ferridriver::audits`. Seven of them
+// Lighthouse also scores in snapshot mode; `canonical` it scores only
+// after a navigation, which is why the recorded gate keeps a second
+// recording per fixture page.
 //
 // What these agree with is checked elsewhere: `just quality-diff` compares
 // the verdicts against Lighthouse's on the same pages and
@@ -20,6 +23,7 @@ import type { PageQualityReport } from '@ferridriver/test';
 const AUDIT_IDS = [
   'doctype',
   'meta-description',
+  'canonical',
   'crawlable-anchors',
   'link-text',
   'image-aspect-ratio',
@@ -41,6 +45,7 @@ describe('page.checkPageQuality', () => {
 
     expect(report.audits.map((a) => a.id)).toEqual(AUDIT_IDS);
     expect(failing(report)).toEqual([]);
+    expect(audit(report, 'canonical').category).toBe('seo');
     expect(audit(report, 'meta-description').category).toBe('seo');
     expect(audit(report, 'doctype').category).toBe('best-practices');
     expect(audit(report, 'doctype').title).toBe('Page has the HTML doctype');
@@ -112,6 +117,24 @@ describe('page.checkPageQuality', () => {
     expect(paste.items.length).toBe(1);
     expect(paste.items[0].selector).toBe('#blocked');
     expect(paste.items[0].detail).toBe('text');
+  });
+
+  test('a relative canonical fails and an absolute one passes', async ({ page }) => {
+    const withCanonical = (href: string) =>
+      "<!doctype html><html lang='en'><head><title>t</title>" +
+      "<meta name='description' content='d'>" +
+      `<link rel='canonical' href='${href}'>` +
+      '</head><body><main><p>x</p></main></body></html>';
+
+    await page.setContent(withCanonical('https://example.com/page'));
+    expect(audit(await page.checkPageQuality(), 'canonical').passed).toBe(true);
+
+    // Relative: it resolves, but only against this document, so it
+    // names no address a crawler arriving from elsewhere can use.
+    await page.setContent(withCanonical('/page'));
+    const relative = audit(await page.checkPageQuality(), 'canonical');
+    expect(relative.passed).toBe(false);
+    expect(relative.explanation).toContain('Relative');
   });
 
   test('only narrows the run', async ({ page }) => {

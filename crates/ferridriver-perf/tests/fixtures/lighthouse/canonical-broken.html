@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A page whose canonical a crawler cannot use</title>
+<meta name="description" content="Everything here is sound except the canonical, which is relative.">
+<!-- canonical: relative, so it resolves against this document rather
+     than naming one absolute address. Lighthouse scores this only in
+     navigation mode, which is why this fixture needs a second
+     recording. -->
+<link rel="canonical" href="/canonical-broken.html">
+</head>
+<body>
+<main>
+  <h1>Relative canonical</h1>
+  <p>A crawler reaching this page from another host cannot resolve the canonical it names.</p>
+</main>
+</body>
+</html>

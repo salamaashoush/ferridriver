@@ -223,5 +223,6 @@
   "visual-order-follows-dom"
  ],
  "lighthouse": "13.4.1",
+ "mode": "snapshot",
  "page": "quality-broken.html"
 }

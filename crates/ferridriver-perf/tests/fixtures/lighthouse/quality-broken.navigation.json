@@ -1,24 +1,6 @@
 {
  "audits": {
   "agent-accessibility-tree": {
-   "itemCount": 1,
-   "items": [],
-   "mode": "binary",
-   "score": 0
-  },
-  "aria-allowed-attr": {
-   "mode": "binary",
-   "score": 1
-  },
-  "aria-command-name": {
-   "mode": "binary",
-   "score": 1
-  },
-  "aria-conditional-attr": {
-   "mode": "binary",
-   "score": 1
-  },
-  "aria-deprecated-role": {
    "mode": "binary",
    "score": 1
   },
@@ -26,60 +8,44 @@
    "mode": "binary",
    "score": 1
   },
-  "aria-prohibited-attr": {
+  "baseline": {
+   "mode": "informative",
+   "score": 1
+  },
+  "charset": {
    "mode": "binary",
    "score": 1
   },
-  "aria-required-attr": {
+  "clickjacking-mitigation": {
    "itemCount": 1,
-   "items": [
-    "body > div"
-   ],
-   "mode": "binary",
-   "score": 0
-  },
-  "aria-roles": {
-   "itemCount": 1,
-   "items": [
-    "body > div"
-   ],
-   "mode": "binary",
-   "score": 0
-  },
-  "aria-toggle-field-name": {
-   "mode": "binary",
+   "items": [],
+   "mode": "informative",
    "score": 1
-  },
-  "aria-valid-attr": {
-   "itemCount": 1,
-   "items": [
-    "body > div"
-   ],
-   "mode": "binary",
-   "score": 0
-  },
-  "aria-valid-attr-value": {
-   "mode": "binary",
-   "score": 1
-  },
-  "button-name": {
-   "itemCount": 1,
-   "items": [
-    "body > button"
-   ],
-   "mode": "binary",
-   "score": 0
   },
   "color-contrast": {
-   "itemCount": 1,
+   "mode": "binary",
+   "score": 1
+  },
+  "crawlable-anchors": {
+   "itemCount": 2,
    "items": [
-    "body > p.faint"
+    "body > main > p > a",
+    "body > main > p > a"
    ],
    "mode": "binary",
    "score": 0
   },
-  "crawlable-anchors": {
-   "mode": "binary",
+  "csp-xss": {
+   "itemCount": 1,
+   "items": [],
+   "mode": "informative",
+   "score": 1
+  },
+  "cumulative-layout-shift": {
+   "itemCount": 1,
+   "items": [],
+   "mode": "numeric",
+   "numericValue": 0,
    "score": 1
   },
   "custom-controls-labels": {
@@ -90,41 +56,23 @@
    "mode": "manual",
    "score": null
   },
-  "definition-list": {
-   "itemCount": 1,
-   "items": [
-    "body > dl"
-   ],
+  "deprecations": {
    "mode": "binary",
-   "score": 0
-  },
-  "dlitem": {
-   "itemCount": 1,
-   "items": [
-    "body > dd"
-   ],
-   "mode": "binary",
-   "score": 0
+   "score": 1
   },
   "doctype": {
    "mode": "binary",
-   "score": 1
-  },
-  "document-title": {
-   "itemCount": 1,
-   "items": [
-    "html"
-   ],
-   "mode": "binary",
    "score": 0
   },
-  "empty-heading": {
-   "itemCount": 1,
-   "items": [
-    "body > h1"
-   ],
-   "mode": "informative",
+  "document-title": {
+   "mode": "binary",
    "score": 1
+  },
+  "errors-in-console": {
+   "itemCount": 1,
+   "items": [],
+   "mode": "binary",
+   "score": 0
   },
   "focus-traps": {
    "mode": "manual",
@@ -134,90 +82,90 @@
    "mode": "manual",
    "score": null
   },
-  "heading-order": {
-   "itemCount": 1,
-   "items": [
-    "body > h4"
-   ],
+  "geolocation-on-start": {
    "mode": "binary",
-   "score": 0
+   "score": 1
+  },
+  "has-hsts": {
+   "itemCount": 1,
+   "items": [],
+   "mode": "informative",
+   "score": 1
+  },
+  "heading-order": {
+   "mode": "binary",
+   "score": 1
+  },
+  "hreflang": {
+   "mode": "binary",
+   "score": 1
   },
   "html-has-lang": {
-   "itemCount": 1,
-   "items": [
-    "html"
-   ],
    "mode": "binary",
-   "score": 0
+   "score": 1
+  },
+  "html-lang-valid": {
+   "mode": "binary",
+   "score": 1
+  },
+  "http-status-code": {
+   "mode": "binary",
+   "score": 1
   },
   "image-alt": {
-   "itemCount": 1,
-   "items": [
-    "body > img"
-   ],
    "mode": "binary",
-   "score": 0
+   "score": 1
   },
   "image-aspect-ratio": {
-   "mode": "binary",
-   "score": 1
-  },
-  "image-size-responsive": {
-   "mode": "binary",
-   "score": 1
-  },
-  "input-image-alt": {
    "itemCount": 1,
    "items": [
-    "body > input"
+    "body > main > img.stretched"
    ],
    "mode": "binary",
    "score": 0
+  },
+  "image-size-responsive": {
+   "itemCount": 2,
+   "items": [
+    "body > main > img.upscaled",
+    "body > main > img.stretched"
+   ],
+   "mode": "binary",
+   "score": 0
+  },
+  "inspector-issues": {
+   "mode": "binary",
+   "score": 1
   },
   "interactive-element-affordance": {
    "mode": "manual",
    "score": null
   },
-  "label": {
-   "itemCount": 1,
-   "items": [
-    "body > input"
-   ],
-   "mode": "binary",
-   "score": 0
-  },
-  "landmark-one-main": {
-   "itemCount": 1,
-   "items": [
-    "html"
-   ],
-   "mode": "binary",
-   "score": 0
-  },
-  "link-name": {
-   "itemCount": 1,
-   "items": [
-    "body > a"
-   ],
-   "mode": "binary",
-   "score": 0
-  },
-  "link-text": {
+  "is-crawlable": {
    "mode": "binary",
    "score": 1
   },
-  "list": {
-   "itemCount": 1,
-   "items": [
-    "body > ul"
-   ],
+  "is-on-https": {
    "mode": "binary",
-   "score": 0
+   "score": 1
   },
-  "listitem": {
-   "itemCount": 1,
+  "label": {
+   "mode": "binary",
+   "score": 1
+  },
+  "landmark-one-main": {
+   "mode": "binary",
+   "score": 1
+  },
+  "link-name": {
+   "mode": "binary",
+   "score": 1
+  },
+  "link-text": {
+   "itemCount": 2,
    "items": [
-    "body > li"
+    "http://fixture/pricing",
+    "http://fixture/features"
    ],
    "mode": "binary",
    "score": 0
@@ -234,34 +182,24 @@
    "mode": "binary",
    "score": 0
   },
-  "meta-viewport": {
-   "itemCount": 1,
-   "items": [
-    "head > meta"
-   ],
+  "notification-on-start": {
    "mode": "binary",
-   "score": 0
-  },
-  "object-alt": {
-   "itemCount": 1,
-   "items": [
-    "body > object"
-   ],
-   "mode": "binary",
-   "score": 0
+   "score": 1
   },
   "offscreen-content-hidden": {
    "mode": "manual",
    "score": null
   },
-  "paste-preventing-inputs": {
-   "mode": "binary",
+  "origin-isolation": {
+   "itemCount": 1,
+   "items": [],
+   "mode": "informative",
    "score": 1
   },
-  "select-name": {
+  "paste-preventing-inputs": {
    "itemCount": 1,
    "items": [
-    "body > select"
+    "body > main > input#card"
    ],
    "mode": "binary",
    "score": 0
@@ -270,33 +208,27 @@
    "mode": "manual",
    "score": null
   },
-  "table-fake-caption": {
+  "target-size": {
    "mode": "binary",
    "score": 1
   },
-  "target-size": {
-   "itemCount": 1,
-   "items": [
-    "body > input"
-   ],
+  "third-party-cookies": {
    "mode": "binary",
-   "score": 0
+   "score": 1
   },
-  "td-has-header": {
+  "trusted-types-xss": {
    "itemCount": 1,
-   "items": [
-    "body > table"
-   ],
-   "mode": "binary",
-   "score": 0
-  },
-  "td-headers-attr": {
-   "mode": "binary",
+   "items": [],
+   "mode": "informative",
    "score": 1
   },
   "use-landmarks": {
    "mode": "manual",
    "score": null
+  },
+  "valid-source-maps": {
+   "mode": "binary",
+   "score": 1
   },
   "visual-order-follows-dom": {
    "mode": "manual",
@@ -382,6 +314,6 @@
   "visual-order-follows-dom"
  ],
  "lighthouse": "13.4.1",
- "mode": "snapshot",
- "page": "a11y-broken.html"
+ "mode": "navigation",
+ "page": "quality-broken.html"
 }

@@ -68,10 +68,19 @@ def serve(directory):
     return server, server.server_address[1]
 
 
-def record(page, port):
+# Snapshot reads the page as it stands; navigation drives a real load,
+# which is the only way Lighthouse scores `canonical` and the other
+# audits that need a network log. Both are recorded because neither is a
+# superset: navigation applies its own emulation, so the axe verdicts
+# under it are not the ones snapshot reaches, and the comparison uses
+# the snapshot recording wherever it has an answer.
+MODES = {"snapshot": [], "navigation": ["--navigation"]}
+
+
+def record(page, port, mode):
     url = f"http://127.0.0.1:{port}/{page.name}"
     out = subprocess.run(
-        ["node", "lighthouse.mjs", url, chrome_path()],
+        ["node", "lighthouse.mjs", url, chrome_path(), *MODES[mode]],
         cwd=HERE, capture_output=True, text=True, check=True,
     )
     report = json.loads(out.stdout)
@@ -95,14 +104,16 @@ def main():
     try:
         stale = []
         for page in pages:
-            recorded = page.with_suffix(".lighthouse.json")
-            fresh = record(page, port)
-            if update:
-                recorded.write_text(fresh)
-                print(f"recorded {recorded.relative_to(ROOT)}")
-            elif not recorded.exists() or recorded.read_text() != fresh:
-                stale.append(recorded)
-                print(f"{recorded.relative_to(ROOT)}: out of date with Lighthouse")
+            for mode in MODES:
+                suffix = ".lighthouse.json" if mode == "snapshot" else ".navigation.json"
+                recorded = page.with_suffix(suffix)
+                fresh = record(page, port, mode)
+                if update:
+                    recorded.write_text(fresh)
+                    print(f"recorded {recorded.relative_to(ROOT)}")
+                elif not recorded.exists() or recorded.read_text() != fresh:
+                    stale.append(recorded)
+                    print(f"{recorded.relative_to(ROOT)}: out of date with Lighthouse")
     finally:
         server.shutdown()
 
@@ -110,7 +121,7 @@ def main():
         print("\nrun: just lh-record", file=sys.stderr)
         return 1
     if not update:
-        print(f"{len(pages)} recording(s) still match Lighthouse")
+        print(f"{len(pages) * len(MODES)} recording(s) still match Lighthouse")
     return 0
 
 

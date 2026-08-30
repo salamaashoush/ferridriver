@@ -2,31 +2,42 @@
 // concluded, so an audit ported into ferridriver can be checked against
 // the one it was modelled on.
 //
-//   node lighthouse.mjs <url> [chrome-executable]
+//   node lighthouse.mjs <url> [chrome-executable] [--navigation]
 //
-// Snapshot mode, deliberately: it reads the DOM as it stands and
-// navigates nothing, so a static fixture gives the same answer every
-// run. That makes the comparison a real gate rather than a timing race.
-// The trade is that audits needing a network log (`is-on-https`,
-// `csp-xss`, `has-hsts`, `canonical`, `is-crawlable`, ...) do not run
-// here; those need navigation mode and a different kind of harness.
+// Snapshot mode by default: it reads the DOM as it stands and navigates
+// nothing, so a static fixture gives the same answer every run. That
+// makes the comparison a gate rather than a timing race.
+//
+// `--navigation` drives a real load instead, which is the only way to
+// reach the audits that need a network log: `canonical`,
+// `http-status-code`, `is-on-https`, `is-crawlable`, `has-hsts`,
+// `csp-xss`. Their verdicts are still deterministic against a static
+// fixture, because each is a function of the response headers, the
+// status and the DOM rather than of timing — the performance numbers
+// in the same run are NOT, which is why nothing here compares them.
 //
 // Chrome is not bundled. Pass the executable, or set CHROME_PATH.
 import puppeteer from 'puppeteer-core';
-import { snapshot } from 'chrome-devtools-mcp/build/src/third_party/lighthouse-devtools-mcp-bundle.js';
+import { navigation, snapshot } from 'chrome-devtools-mcp/build/src/third_party/lighthouse-devtools-mcp-bundle.js';
 
-const [url, chromeArg] = process.argv.slice(2);
+const args = process.argv.slice(2);
+const navigate = args.includes('--navigation');
+const [url, chromeArg] = args.filter(a => a !== '--navigation');
 const executablePath = chromeArg ?? process.env.CHROME_PATH;
 if (!url || !executablePath) {
-  console.error('usage: node lighthouse.mjs <url> [chrome-executable]   (or set CHROME_PATH)');
+  console.error('usage: node lighthouse.mjs <url> [chrome-executable] [--navigation]   (or set CHROME_PATH)');
   process.exit(2);
 }
 
 const browser = await puppeteer.launch({ executablePath, headless: true, args: ['--no-sandbox'] });
 try {
   const page = await browser.newPage();
-  await page.goto(url, { waitUntil: 'networkidle0' });
-  const { lhr } = await snapshot(page, { flags: { output: 'json' } });
+  const { lhr } = navigate
+    ? await navigation(page, url, { flags: { output: 'json' } })
+    : await (async () => {
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        return snapshot(page, { flags: { output: 'json' } });
+      })();
 
   // `notApplicable` means the page had nothing for the audit to look
   // at, which is not a verdict and nothing to compare against.
@@ -55,7 +66,7 @@ try {
   // audit and means nothing to axe.
   const axeRules = (lhr.categories?.accessibility?.auditRefs ?? []).map(ref => ref.id).sort();
 
-  console.log(JSON.stringify({ url, lighthouse: lhr.lighthouseVersion, axeRules, audits }, null, 1));
+  console.log(JSON.stringify({ url, mode: navigate ? 'navigation' : 'snapshot', lighthouse: lhr.lighthouseVersion, axeRules, audits }, null, 1));
 } finally {
   await browser.close();
 }
