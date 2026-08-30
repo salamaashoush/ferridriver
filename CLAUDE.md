@@ -237,7 +237,13 @@ When a `pub` signature in `crates/ferridriver/src/` changes, grep both `crates/f
 
 ### 6. Always verify against the cloned Playwright source before implementing
 
-The cloned Playwright repo is at `/tmp/playwright/`. Read it before touching ferridriver code. Specifically:
+The cloned Playwright repo is at `/tmp/playwright/`. Read it before touching ferridriver code. `/tmp` does not survive a reboot, and an interrupted clone leaves a `.git` husk that `git status` reports as "not a git repository" — check the worktree is actually there, and re-clone if not:
+
+```bash
+git clone --depth 1 https://github.com/microsoft/playwright.git /tmp/playwright
+```
+
+Specifically:
 
 - `packages/playwright-core/src/client/*.ts` — user-facing API shapes
 - `packages/playwright/types/test.d.ts` — test runner types
