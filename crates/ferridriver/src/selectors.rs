@@ -1217,17 +1217,29 @@ mod tests {
 /// first), so the count costs nothing extra.
 #[must_use]
 pub fn build_read_js(parts_json: &str, strict: bool, js_body: &str, fd: &str) -> String {
-  let strict_lit = if strict { "true" } else { "false" };
+  // A non-strict read cannot breach, so it keeps the original shape and
+  // the value crosses unwrapped. Wrapping it unconditionally measured 7%
+  // slower per read, because the envelope serialised the value and the
+  // backend then serialised that again.
+  if !strict {
+    return format!("(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return null; {js_body} }})()");
+  }
   format!(
     "(function() {{ \
        var __a = {fd}.selAll({parts_json}); \
-       if ({strict_lit} && __a.length > 1) return JSON.stringify({{s: __a.length}}); \
+       if (__a.length > 1) return {{{STRICT_KEY}: __a.length}}; \
        if (!__a.length) return null; \
        var el = __a[0]; \
-       return JSON.stringify({{v: (function() {{ {js_body} }})()}}); \
+       return {{{VALUE_KEY}: (function() {{ {js_body} }})()}}; \
      }})()"
   )
 }
+
+/// Keys of the envelope a strict [`build_read_js`] returns. Prefixed
+/// because the value beside them is arbitrary, and a plain `v` could be
+/// mistaken for one of the value's own fields.
+const STRICT_KEY: &str = "__fdStrict";
+const VALUE_KEY: &str = "__fdValue";
 
 /// Decode what [`build_read_js`] returned.
 ///
@@ -1236,18 +1248,19 @@ pub fn build_read_js(parts_json: &str, strict: bool, js_body: &str, fd: &str) ->
 /// [`FerriError::StrictModeViolation`] when the selector matched more
 /// than one element and the locator was strict.
 pub fn decode_read_result(raw: Option<serde_json::Value>, selector: &str) -> Result<Option<serde_json::Value>> {
-  let Some(serde_json::Value::String(text)) = raw else {
-    // `null` (nothing matched) and anything unexpected keep the old
-    // contract: the caller's retry loop decides what to do next.
+  let Some(value) = raw.as_ref() else {
     return Ok(raw);
   };
-  let envelope: serde_json::Value = serde_json::from_str(&text)
-    .map_err(|e| FerriError::invalid_selector(selector, format!("unreadable read result: {e}")))?;
-  if let Some(count) = envelope.get("s").and_then(serde_json::Value::as_u64) {
+  if let Some(count) = value.get(STRICT_KEY).and_then(serde_json::Value::as_u64) {
     return Err(FerriError::strict(
       selector,
       usize::try_from(count).unwrap_or(usize::MAX),
     ));
   }
-  Ok(Some(envelope.get("v").cloned().unwrap_or(serde_json::Value::Null)))
+  match value.get(VALUE_KEY) {
+    Some(inner) => Ok(Some(inner.clone())),
+    // A non-strict read is unwrapped, and `null` (nothing matched) keeps
+    // the old contract either way: the caller's retry loop decides.
+    None => Ok(raw),
+  }
 }
