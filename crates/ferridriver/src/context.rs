@@ -487,29 +487,9 @@ impl ContextRef {
     // context.newPage rejects" contract.
     if let Some(opts) = ctx_opts.as_ref() {
       apply_context_options(&page, opts).await?;
-      // Hydrate `storageState` once per context — cookies + localStorage
-      // applied to the first page; subsequent pages in the same
-      // context inherit. Mirrors Playwright's
-      // `/tmp/playwright/packages/playwright-core/src/server/browserContext.ts::setStorageState`.
-      if let Some(ref storage) = opts.storage_state {
-        let should_hydrate = {
-          let state = self.state.read().await;
-          state.claim_storage_state_hydration(&self.key.to_composite())
-        };
-        if should_hydrate {
-          let state_value = match storage {
-            crate::options::StorageStateInput::Inline(v) => v.clone(),
-            crate::options::StorageStateInput::Path(p) => {
-              let text = std::fs::read_to_string(p)
-                .map_err(|e| crate::error::FerriError::Backend(format!("storageState: read {}: {e}", p.display())))?;
-              serde_json::from_str(&text).map_err(|e| {
-                crate::error::FerriError::Backend(format!("storageState: parse JSON from {}: {e}", p.display()))
-              })?
-            },
-          };
-          page.set_storage_state(&state_value).await?;
-        }
-      }
+      self.install_record_har(opts).await;
+
+      self.hydrate_storage_state(opts, &page).await?;
     }
 
     // If the context was configured with `recordVideo`, spawn the
@@ -1139,6 +1119,64 @@ impl ContextRef {
       state.shutdown().await;
     }
     Ok(())
+  }
+
+  /// Apply `storageState` to the context, once.
+  ///
+  /// Cookies and localStorage go on with the first page; later pages in
+  /// the same context inherit them (cookies are context-scoped,
+  /// localStorage persists per origin). Mirrors Playwright's
+  /// `server/browserContext.ts::setStorageState`.
+  async fn hydrate_storage_state(&self, opts: &crate::options::BrowserContextOptions, page: &Arc<Page>) -> Result<()> {
+    let Some(storage) = opts.storage_state.as_ref() else {
+      return Ok(());
+    };
+    let should_hydrate = {
+      let state = self.state.read().await;
+      state.claim_storage_state_hydration(&self.key.to_composite())
+    };
+    if !should_hydrate {
+      return Ok(());
+    }
+    let state_value = match storage {
+      crate::options::StorageStateInput::Inline(v) => v.clone(),
+      crate::options::StorageStateInput::Path(path) => {
+        let text = std::fs::read_to_string(path)
+          .map_err(|e| crate::error::FerriError::Backend(format!("storageState: read {}: {e}", path.display())))?;
+        serde_json::from_str(&text).map_err(|e| {
+          crate::error::FerriError::Backend(format!("storageState: parse JSON from {}: {e}", path.display()))
+        })?
+      },
+    };
+    page.set_storage_state(&state_value).await
+  }
+
+  /// Register the context's `recordHar` recorder, once.
+  ///
+  /// Nothing is written here: the archive lands when the context closes,
+  /// through the same registry `routeFromHAR(update: true)` uses and the
+  /// same flush in `close_impl`. Once, on the first page, because the
+  /// option bag is applied per page while the archive spans the context.
+  async fn install_record_har(&self, opts: &crate::options::BrowserContextOptions) {
+    let Some(har) = opts.record_har.as_ref() else {
+      return;
+    };
+    let composite = self.key.to_composite();
+    let should_install = {
+      let state = self.state.read().await;
+      state.claim_record_har(&composite)
+    };
+    if !should_install {
+      return;
+    }
+    let recorder = crate::tracing::recorder_for_record_har(har);
+    let registry = self.state.read().await.context_har_updates.clone();
+    registry
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .entry(composite)
+      .or_default()
+      .push(recorder);
   }
 
   /// Write every `routeFromHAR(update: true)` recording registered on

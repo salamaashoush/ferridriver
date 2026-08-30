@@ -172,6 +172,36 @@ for (const backend of BACKENDS) {
       }
     });
 
+    it("recordHar writes the archive when the context closes", async () => {
+      // Both bindings used to hard-code `record_har: None`, so the
+      // option was accepted and silently dropped. The recorder itself
+      // already existed behind `tracing.startHar`.
+      const fs = await import("node:fs/promises");
+      const tmpDir = `/tmp/ferri-bun-har-${Math.random().toString(36).slice(2)}`;
+      await fs.mkdir(tmpDir, { recursive: true });
+      const harPath = `${tmpDir}/recorded.har`;
+      try {
+        const ctx = browser.newContext({ recordHar: { path: harPath } });
+        const page = await ctx.newPage();
+        await page.goto("data:text/html,<h1>har</h1>");
+        // Nothing on disk until close.
+        let existsEarly = true;
+        try {
+          await fs.stat(harPath);
+        } catch {
+          existsEarly = false;
+        }
+        expect(existsEarly).toBe(false);
+
+        await ctx.close();
+        const har = JSON.parse(await fs.readFile(harPath, "utf8"));
+        expect(har.log.creator.name).toBe("ferridriver");
+        expect(Array.isArray(har.log.entries)).toBe(true);
+      } finally {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("setHTTPCredentials answers a 401 challenge", async () => {
       const srv = await startBasicAuthServer();
       const ctx = browser.newContext({});

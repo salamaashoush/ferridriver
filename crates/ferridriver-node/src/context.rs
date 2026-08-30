@@ -953,6 +953,24 @@ pub struct RecordVideoOptionsJs {
   pub size: Option<VideoSizeJs>,
 }
 
+/// NAPI shape for Playwright's `recordHar` context option. The archive
+/// is written when the context closes.
+#[napi(object)]
+pub struct RecordHarOptionsJs {
+  /// Where to write the archive. A `.zip` path packs bodies as separate
+  /// entries; anything else writes JSON with bodies inlined.
+  pub path: String,
+  /// `omit` | `embed` | `attach`. Defaults by path extension.
+  pub content: Option<String>,
+  /// `full` | `minimal`. Defaults to `full`.
+  pub mode: Option<String>,
+  /// Deprecated alias for `content: 'omit'`.
+  pub omit_content: Option<bool>,
+  /// Only record requests whose URL matches. Glob string or RegExp.
+  #[napi(ts_type = "string | RegExp")]
+  pub url_filter: Option<napi::Either<String, crate::types::JsRegExpLike>>,
+}
+
 /// NAPI shape for Playwright's `recordVideo.size: { width, height }`.
 #[napi(object)]
 pub struct VideoSizeJs {
@@ -997,6 +1015,7 @@ pub struct NapiBrowserContextOptions {
   pub offline: Option<bool>,
   pub permissions: Option<Vec<String>>,
   pub proxy: Option<NapiProxyConfig>,
+  pub record_har: Option<RecordHarOptionsJs>,
   pub record_video: Option<RecordVideoOptionsJs>,
   pub reduced_motion: Option<String>,
   pub screen: Option<NapiScreenSize>,
@@ -1231,7 +1250,27 @@ impl NapiBrowserContextOptions {
       offline: self.offline,
       permissions: self.permissions,
       proxy,
-      record_har: None,
+      record_har: self.record_har.map(|h| fo::RecordHarOptions {
+        path: std::path::PathBuf::from(h.path),
+        content: match h.content.as_deref() {
+          Some("omit") => Some(fo::RecordHarContent::Omit),
+          Some("embed") => Some(fo::RecordHarContent::Embed),
+          Some("attach") => Some(fo::RecordHarContent::Attach),
+          _ => None,
+        },
+        mode: match h.mode.as_deref() {
+          Some("minimal") => Some(fo::RecordHarMode::Minimal),
+          Some("full") => Some(fo::RecordHarMode::Full),
+          _ => None,
+        },
+        omit_content: h.omit_content,
+        url_filter: h.url_filter.and_then(|f| match f {
+          napi::Either::A(glob) => ferridriver::url_matcher::UrlMatcher::glob(&glob).ok(),
+          napi::Either::B(re) => {
+            ferridriver::url_matcher::UrlMatcher::regex_from_source(&re.source, re.flags.as_deref().unwrap_or("")).ok()
+          },
+        }),
+      }),
       record_video,
       reduced_motion,
       screen,

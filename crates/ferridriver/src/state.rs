@@ -394,6 +394,10 @@ pub struct BrowserState {
   /// origin across subsequent pages). Mirrors Playwright's
   /// "set storage state once at context creation".
   pub storage_state_hydrated: Arc<std::sync::Mutex<rustc_hash::FxHashSet<String>>>,
+  /// Contexts whose `recordHar` recorder has been installed. Same
+  /// once-per-context reason as `storage_state_hydrated`: the option
+  /// bag is applied on every page, and the archive covers the context.
+  pub record_har_installed: Arc<std::sync::Mutex<rustc_hash::FxHashSet<String>>>,
   /// Set by [`crate::BrowserType::launch_persistent_context`] to mark
   /// this `BrowserState` as backing a persistent-context launch.
   /// When the persistent default context closes, the whole browser
@@ -481,6 +485,7 @@ impl BrowserState {
       clock_installed: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
+      record_har_installed: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       persistent_context: false,
       popup_pumps: HashMap::default(),
       launch_permits: Arc::new(std::sync::Mutex::new(HashMap::default())),
@@ -554,6 +559,20 @@ impl BrowserState {
   #[must_use]
   pub fn backend_kind(&self) -> BackendKind {
     self.backend_kind
+  }
+
+  /// Claim the one-time `recordHar` registration for a context.
+  ///
+  /// Context options are applied per page, and the recorder covers the
+  /// whole context, so only the first page may install it; a second
+  /// would write the same archive twice.
+  #[must_use]
+  pub fn claim_record_har(&self, composite_key: &str) -> bool {
+    let mut set = match self.record_har_installed.lock() {
+      Ok(g) => g,
+      Err(p) => p.into_inner(),
+    };
+    set.insert(composite_key.to_string())
   }
 
   /// Mark a context composite-key as having had its storageState
@@ -1585,6 +1604,11 @@ impl BrowserState {
       .remove(composite);
     self
       .storage_state_hydrated
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(composite);
+    self
+      .record_har_installed
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .remove(composite);

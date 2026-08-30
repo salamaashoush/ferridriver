@@ -1570,6 +1570,19 @@ export interface BrowserContextOptions {
    * and are always strict.
    */
   strictSelectors?: boolean;
+  /**
+   * Record a HAR archive of everything the context requests, written
+   * when the context closes. A `.zip` path packs bodies as separate
+   * entries; anything else writes JSON with bodies inlined.
+   */
+  recordHar?: {
+    path: string;
+    content?: 'omit' | 'embed' | 'attach';
+    mode?: 'full' | 'minimal';
+    /** @deprecated Use `content: 'omit'`. */
+    omitContent?: boolean;
+    urlFilter?: string | RegExp;
+  };
 }
 
 export interface Browser {

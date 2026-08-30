@@ -47,8 +47,13 @@ impl BrowserJs {
       None => None,
       Some(v) if v.is_undefined() || v.is_null() => None,
       Some(v) => {
+        let har_filter = record_har_url_filter(&ctx, &v)?;
         let parsed: JsBrowserContextOptions = serde_from_js(&ctx, v)?;
-        Some(parsed.into_core())
+        let mut core = parsed.into_core();
+        if let Some(har) = core.record_har.as_mut() {
+          har.url_filter = har_filter;
+        }
+        Some(core)
       },
     };
     let ctx_ref = Arc::new(
@@ -428,6 +433,7 @@ pub(super) struct JsBrowserContextOptions {
   offline: Option<bool>,
   permissions: Option<Vec<String>>,
   proxy: Option<JsProxyConfig>,
+  record_har: Option<JsRecordHarOptions>,
   record_video: Option<JsRecordVideoOptions>,
   reduced_motion: Option<serde_json::Value>,
   screen: Option<JsScreenSize>,
@@ -470,6 +476,17 @@ struct JsProxyConfig {
 struct JsScreenSize {
   width: i64,
   height: i64,
+}
+
+/// `recordHar` minus its `urlFilter`, which is read straight off the JS
+/// value: it may be a live `RegExp`, and serde has nowhere to put one.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JsRecordHarOptions {
+  path: String,
+  content: Option<String>,
+  mode: Option<String>,
+  omit_content: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -579,7 +596,23 @@ impl JsBrowserContextOptions {
       offline: self.offline,
       permissions: self.permissions,
       proxy,
-      record_har: None,
+      record_har: self.record_har.map(|h| fo::RecordHarOptions {
+        path: std::path::PathBuf::from(h.path),
+        content: match h.content.as_deref() {
+          Some("omit") => Some(fo::RecordHarContent::Omit),
+          Some("embed") => Some(fo::RecordHarContent::Embed),
+          Some("attach") => Some(fo::RecordHarContent::Attach),
+          _ => None,
+        },
+        mode: match h.mode.as_deref() {
+          Some("minimal") => Some(fo::RecordHarMode::Minimal),
+          Some("full") => Some(fo::RecordHarMode::Full),
+          _ => None,
+        },
+        omit_content: h.omit_content,
+        // Filled in by the caller, which still has the JS value.
+        url_filter: None,
+      }),
       record_video,
       reduced_motion: lower_media(self.reduced_motion),
       screen,
@@ -763,4 +796,32 @@ impl BrowserJs {
     }
     Ok(())
   }
+}
+
+/// Read `recordHar.urlFilter` off the raw options object.
+///
+/// Playwright takes `string | RegExp` there, and a live `RegExp` cannot
+/// round-trip through serde, so it is lifted out before the rest of the
+/// bag is deserialized. Reusing `url_value_to_matcher` keeps this the
+/// same union `route()` and `waitForResponse()` accept.
+fn record_har_url_filter<'js>(
+  ctx: &Ctx<'js>,
+  options: &Value<'js>,
+) -> rquickjs::Result<Option<ferridriver::url_matcher::UrlMatcher>> {
+  let Some(obj) = options.as_object() else {
+    return Ok(None);
+  };
+  let Ok(har) = obj.get::<_, Value<'js>>("recordHar") else {
+    return Ok(None);
+  };
+  let Some(har) = har.as_object() else {
+    return Ok(None);
+  };
+  let Ok(filter) = har.get::<_, Value<'js>>("urlFilter") else {
+    return Ok(None);
+  };
+  if filter.is_undefined() || filter.is_null() {
+    return Ok(None);
+  }
+  crate::bindings::page::options::url_value_to_matcher(ctx, filter).map(Some)
 }

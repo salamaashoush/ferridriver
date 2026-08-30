@@ -462,6 +462,41 @@ async fn export_blocking(
     .map_err(|e| FerriError::backend(format!("trace export task: {e}")))?
 }
 
+/// Build the recorder a context's `recordHar` option asks for.
+///
+/// Same defaulting as `startHar`, because it is the same archive: a
+/// `.zip` path attaches bodies as separate entries, anything else
+/// embeds them, and the deprecated `omitContent` still means `omit`.
+/// `start_len` is zero — `recordHar` covers the context's whole life,
+/// unlike `startHar`, which begins where it was called.
+#[must_use]
+pub fn recorder_for_record_har(options: &crate::options::RecordHarOptions) -> HarRecorder {
+  let default_content = if is_zip_path(&options.path) {
+    HarContentPolicy::Attach
+  } else {
+    HarContentPolicy::Embed
+  };
+  let content = match options.content {
+    Some(crate::options::RecordHarContent::Omit) => HarContentPolicy::Omit,
+    Some(crate::options::RecordHarContent::Embed) => HarContentPolicy::Embed,
+    Some(crate::options::RecordHarContent::Attach) => HarContentPolicy::Attach,
+    None if options.omit_content == Some(true) => HarContentPolicy::Omit,
+    None => default_content,
+  };
+  HarRecorder {
+    path: options.path.clone(),
+    content,
+    mode: match options.mode {
+      Some(crate::options::RecordHarMode::Minimal) => HarMode::Minimal,
+      _ => HarMode::Full,
+    },
+    url_filter: options.url_filter.clone().unwrap_or_else(UrlMatcher::any),
+    resources_dir: None,
+    start_len: 0,
+    page_filter: None,
+  }
+}
+
 fn is_zip_path(path: &std::path::Path) -> bool {
   path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))
 }

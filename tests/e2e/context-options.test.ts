@@ -437,6 +437,46 @@ describe('context options', () => {
     }
   });
 
+  // `recordHar` was accepted on the bag and dropped on the floor: both
+  // bindings hard-coded `record_har: None`, so no archive was ever
+  // written and nothing said so. The recorder itself already existed —
+  // `tracing.startHar` and `routeFromHAR(update: true)` share it — so
+  // this is the same archive, registered at context creation and
+  // flushed on close.
+  test('context_options_record_har', async ({ browser, baseURL }) => {
+    const harPath = test.info().outputPath('recorded.har');
+    const ctx = await browser.newContext({ recordHar: { path: harPath } });
+    const p = await ctx.newPage();
+    await p.goto(`${baseURL}/fx/landed`);
+    // The archive is written on close, not before.
+    await ctx.close();
+
+    const har = JSON.parse(await fs.promises.readFile(harPath, 'utf8')) as {
+      log: { creator: { name: string }; entries: { request: { url: string }; response: { status: number } }[] };
+    };
+    expect(har.log.creator.name).toBe('ferridriver');
+    const landed = har.log.entries.find((e) => e.request.url.includes('/fx/landed'));
+    expect(landed).toBeTruthy();
+    expect(landed!.response.status).toBe(200);
+  });
+
+  test('context_options_record_har_url_filter_narrows_it', async ({ browser, baseURL }) => {
+    const harPath = test.info().outputPath('filtered.har');
+    // A RegExp, not a wire shape: the same union `route()` takes.
+    const ctx = await browser.newContext({ recordHar: { path: harPath, urlFilter: /fx\/landed/ } });
+    const p = await ctx.newPage();
+    await p.goto(`${baseURL}/fx/landed`);
+    await p.goto(`${baseURL}/fx/iframe`);
+    await ctx.close();
+
+    const har = JSON.parse(await fs.promises.readFile(harPath, 'utf8')) as {
+      log: { entries: { request: { url: string } }[] };
+    };
+    const urls = har.log.entries.map((e) => e.request.url);
+    expect(urls.some((u) => u.includes('/fx/landed'))).toBe(true);
+    expect(urls.some((u) => u.includes('/fx/iframe'))).toBe(false);
+  });
+
   // `strictSelectors` used to do nothing, and the two halves it
   // controls were both wrong in opposite directions: selector-taking
   // methods were ALWAYS strict (Playwright defaults them to false) and
