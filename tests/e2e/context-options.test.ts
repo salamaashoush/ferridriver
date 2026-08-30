@@ -477,6 +477,93 @@ describe('context options', () => {
     expect(urls.some((u) => u.includes('/fx/iframe'))).toBe(false);
   });
 
+  // `recordHar`'s option fields were wired through and only the default
+  // path had a test, which is the shape of a parity gap rather than a
+  // feature: each field has an observable effect and none of them was
+  // observed.
+  test('context_options_record_har_content_and_mode', async ({ browser, baseURL }) => {
+    const har = async (options: Record<string, unknown>, name: string) => {
+      const harPath = test.info().outputPath(name);
+      const ctx = await browser.newContext({ recordHar: { path: harPath, ...options } });
+      const p = await ctx.newPage();
+      await p.goto(`${baseURL}/fx/landed`);
+      await ctx.close();
+      const parsed = JSON.parse(await fs.promises.readFile(harPath, 'utf8')) as {
+        log: {
+          entries: {
+            request: { url: string };
+            timings: Record<string, number | null>;
+            response: { content: { size: number; text?: string; _file?: string } };
+          }[];
+        };
+      };
+      const entry = parsed.log.entries.find((e) => e.request.url.includes('/fx/landed'))!;
+      expect(entry).toBeTruthy();
+      return { entry, harPath };
+    };
+
+    // embed (the default for a non-zip path): the body is inline.
+    const embedded = await har({}, 'embed.har');
+    expect(typeof embedded.entry.response.content.text).toBe('string');
+    expect(embedded.entry.response.content.text!.length).toBeGreaterThan(0);
+
+    // omit: no body at all, and the size collapses with it.
+    const omitted = await har({ content: 'omit' }, 'omit.har');
+    expect(omitted.entry.response.content.text).toBe(undefined);
+    expect(omitted.entry.response.content.size).toBe(0);
+
+    // omitContent is the deprecated spelling of the same thing.
+    const legacy = await har({ omitContent: true }, 'legacy.har');
+    expect(legacy.entry.response.content.text).toBe(undefined);
+
+    // attach: the body moves to a `<sha1>.<ext>` file beside the archive.
+    const attached = await har({ content: 'attach' }, 'attach.har');
+    expect(attached.entry.response.content.text).toBe(undefined);
+    const file = attached.entry.response.content._file;
+    expect(typeof file).toBe('string');
+    expect(file).toMatch(/^[0-9a-f]{40}\./);
+    const beside = `${attached.harPath.slice(0, attached.harPath.lastIndexOf('/'))}/${file}`;
+    expect((await fs.promises.readFile(beside, 'utf8')).length).toBeGreaterThan(0);
+
+    // minimal: the timing breakdown is dropped, which is the whole
+    // difference between the two modes.
+    const full = await har({ mode: 'full' }, 'full.har');
+    const minimal = await har({ mode: 'minimal' }, 'minimal.har');
+    // Absent rather than null: Playwright's own unpopulated entry is
+    // `{ send: -1, wait: -1, receive: -1 }` with no dns/connect/ssl keys
+    // (`server/har/harTracer.ts:767`).
+    expect('dns' in minimal.entry.timings).toBe(false);
+    expect('connect' in minimal.entry.timings).toBe(false);
+    expect(minimal.entry.timings.send).toBe(-1);
+    expect(minimal.entry.timings.wait).toBe(-1);
+    // Full keeps at least one of them as a real measurement.
+    expect(full.entry.timings.send === -1 && full.entry.timings.wait === -1).toBe(false);
+  });
+
+  test('context_options_record_har_zip_attaches_bodies', async ({ browser, baseURL }) => {
+    // A `.zip` path defaults to `attach` rather than `embed`, and packs
+    // the archive as `har.har` plus one `<sha1>.<ext>` entry per body.
+    const zipPath = test.info().outputPath('recorded.zip');
+    const ctx = await browser.newContext({ recordHar: { path: zipPath } });
+    const p = await ctx.newPage();
+    await p.goto(`${baseURL}/fx/landed`);
+    await ctx.close();
+
+    const bytes = await fs.promises.readFile(zipPath);
+    // Read the central directory's file names without a zip library:
+    // every local entry starts with the PK\x03\x04 signature and carries
+    // its name length at offset 26.
+    const names: string[] = [];
+    for (let i = 0; i + 30 < bytes.length; i++) {
+      if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x03 && bytes[i + 3] === 0x04) {
+        const nameLen = bytes[i + 26] | (bytes[i + 27] << 8);
+        names.push(new TextDecoder().decode(bytes.slice(i + 30, i + 30 + nameLen)));
+      }
+    }
+    expect(names).toContain('har.har');
+    expect(names.some((n) => /^[0-9a-f]{40}\./.test(n))).toBe(true);
+  });
+
   // `strictSelectors` used to do nothing, and the two halves it
   // controls were both wrong in opposite directions: selector-taking
   // methods were ALWAYS strict (Playwright defaults them to false) and
