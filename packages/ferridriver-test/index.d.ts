@@ -1563,6 +1563,13 @@ export interface BrowserContextOptions {
   proxy?: { server: string; bypass?: string; username?: string; password?: string };
   serviceWorkers?: 'allow' | 'block';
   screen?: { width: number; height: number };
+  /**
+   * Make the selector-taking methods (`page.click(selector)`,
+   * `page.textContent(selector)`, ...) throw when the selector matches
+   * more than one element. Defaults to false. Locator APIs ignore this
+   * and are always strict.
+   */
+  strictSelectors?: boolean;
 }
 
 export interface Browser {

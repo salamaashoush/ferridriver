@@ -2507,15 +2507,20 @@ impl Locator {
         let inner = rf.page_arc().inner();
         inner.ensure_engine_injected().await?;
         let fd = "window.__fd";
-        let js = format!("(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return null; {js_body} }})()");
-        if rf.is_main_frame() {
+        let js = selectors::build_read_js(&parts_json, self.strict, js_body, fd);
+        let raw = if rf.is_main_frame() {
           inner.evaluate(&js).await
         } else {
           inner.evaluate_in_frame(&js, rf.id()).await
-        }
+        }?;
+        selectors::decode_read_result(raw, &rsel)
       }
       .await;
       match attempt {
+        // A strict-mode breach is settled: more elements will not
+        // become fewer, so retrying only burns the timeout before
+        // reporting the same thing.
+        Err(e) if e.is_strict_mode_violation() => return Err(e),
         // Element not found, frame not ready, or eval failed -- retry
         // if attempts remain.
         Ok(Some(serde_json::Value::Null) | None) | Err(_) if i < Self::RETRY_BACKOFFS_MS.len() - 1 => {},
@@ -2592,12 +2597,13 @@ impl Locator {
     let inner = rframe.page_arc().inner();
     inner.ensure_engine_injected().await?;
     let fd = "window.__fd";
-    let js = format!("(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return null; {js_body} }})()");
-    if rframe.is_main_frame() {
+    let js = selectors::build_read_js(&parts_json, self.strict, js_body, fd);
+    let raw = if rframe.is_main_frame() {
       inner.evaluate(&js).await
     } else {
       inner.evaluate_in_frame(&js, rframe.id()).await
-    }
+    }?;
+    selectors::decode_read_result(raw, &rsel)
   }
 }
 

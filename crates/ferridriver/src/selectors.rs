@@ -1200,3 +1200,54 @@ mod tests {
     assert!(json.contains(r#""capture":true"#), "{json}");
   }
 }
+
+/// Build the one-round-trip read expression a Locator uses for
+/// `textContent`, `getAttribute`, `isChecked` and the rest.
+///
+/// The result is always a JSON string, or JS `null` when nothing
+/// matched. A string because a strict-mode breach has to come back as
+/// DATA: these run through a plain `evaluate`, where a thrown message
+/// degrades to `Uncaught` and the match count is lost, and the retry
+/// loop would then treat a settled breach as "not ready yet" and spin
+/// until the timeout. `null` for no-match because that IS "not ready
+/// yet", and the loop already knows to retry it.
+///
+/// `selAll` rather than `selOne`: the engine materialises every match
+/// either way (`selOne` calls the same `executeSelector` and takes the
+/// first), so the count costs nothing extra.
+#[must_use]
+pub fn build_read_js(parts_json: &str, strict: bool, js_body: &str, fd: &str) -> String {
+  let strict_lit = if strict { "true" } else { "false" };
+  format!(
+    "(function() {{ \
+       var __a = {fd}.selAll({parts_json}); \
+       if ({strict_lit} && __a.length > 1) return JSON.stringify({{s: __a.length}}); \
+       if (!__a.length) return null; \
+       var el = __a[0]; \
+       return JSON.stringify({{v: (function() {{ {js_body} }})()}}); \
+     }})()"
+  )
+}
+
+/// Decode what [`build_read_js`] returned.
+///
+/// # Errors
+///
+/// [`FerriError::StrictModeViolation`] when the selector matched more
+/// than one element and the locator was strict.
+pub fn decode_read_result(raw: Option<serde_json::Value>, selector: &str) -> Result<Option<serde_json::Value>> {
+  let Some(serde_json::Value::String(text)) = raw else {
+    // `null` (nothing matched) and anything unexpected keep the old
+    // contract: the caller's retry loop decides what to do next.
+    return Ok(raw);
+  };
+  let envelope: serde_json::Value = serde_json::from_str(&text)
+    .map_err(|e| FerriError::invalid_selector(selector, format!("unreadable read result: {e}")))?;
+  if let Some(count) = envelope.get("s").and_then(serde_json::Value::as_u64) {
+    return Err(FerriError::strict(
+      selector,
+      usize::try_from(count).unwrap_or(usize::MAX),
+    ));
+  }
+  Ok(Some(envelope.get("v").cloned().unwrap_or(serde_json::Value::Null)))
+}

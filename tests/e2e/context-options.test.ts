@@ -290,9 +290,12 @@ describe('context options', () => {
     const ctx = await browser.newContext({});
     try {
       ctx.setDefaultTimeout(50);
-      ctx.setDefaultNavigationTimeout(50);
       const p = await ctx.newPage();
       await p.goto('data:text/html,<body>timeout-probe</body>');
+      // Set AFTER the navigation: what this asserts is the selector
+      // timeout, and a 50ms budget over a real navigation is a race the
+      // test loses under load rather than a behaviour worth pinning.
+      ctx.setDefaultNavigationTimeout(50);
       let err = '';
       try {
         await p.waitForSelector('#never-ever', { timeout: 50 });
@@ -429,6 +432,51 @@ describe('context options', () => {
       if (result.hasSW) {
         expect(result.rejected).toBe(true);
       }
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  // `strictSelectors` used to do nothing, and the two halves it
+  // controls were both wrong in opposite directions: selector-taking
+  // methods were ALWAYS strict (Playwright defaults them to false) and
+  // Locator reads were NEVER strict (Playwright's locators always are).
+  test('context_options_strict_selectors_off_by_default', async ({ browser }) => {
+    const ctx = await browser.newContext({});
+    try {
+      const p = await ctx.newPage();
+      await p.setContent('<div>a</div><div>b</div>');
+      // Two matches, and the selector form takes the first.
+      expect(await p.textContent('div')).toBe('a');
+      // A Locator over the same selector is strict regardless.
+      let message = '';
+      try {
+        await p.locator('div').textContent();
+      } catch (e) {
+        message = String((e as Error)?.message ?? e);
+      }
+      expect(message).toContain('strict mode violation');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('context_options_strict_selectors_on', async ({ browser }) => {
+    const ctx = await browser.newContext({ strictSelectors: true });
+    try {
+      const p = await ctx.newPage();
+      await p.setContent('<div>a</div><div>b</div>');
+      for (const call of [() => p.textContent('div'), () => p.click('div', { timeout: 2000 })]) {
+        let message = '';
+        try {
+          await call();
+        } catch (e) {
+          message = String((e as Error)?.message ?? e);
+        }
+        expect(message).toContain('strict mode violation');
+      }
+      // A selector matching exactly one element is unaffected.
+      expect(await p.textContent('div:nth-of-type(2)')).toBe('b');
     } finally {
       await ctx.close();
     }

@@ -44,6 +44,15 @@ pub struct Page {
   /// or a page the runner never configured). Updated by
   /// [`Self::set_viewport_size`] and [`Self::apply_context_options`].
   viewport: Mutex<Option<(i64, i64)>>,
+  /// The context's `strictSelectors`, cached so the selector-taking
+  /// methods can read it without a lock or an await.
+  ///
+  /// Playwright resolves strictness once per query
+  /// (`server/frameSelectors.ts:53`): an explicit per-call `strict`
+  /// wins, otherwise the context option, which defaults to false. That
+  /// is why `page.click(selector)` tolerates several matches while
+  /// `page.locator(selector).click()` never does.
+  strict_selectors: std::sync::atomic::AtomicBool,
   context_ref: Option<crate::context::ContextRef>,
   /// Human-readable `reason` passed to the last `close({ reason })` call,
   /// surfaced on subsequent `TargetClosed` errors — Playwright parity.
@@ -105,6 +114,7 @@ impl Page {
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
       mouse_position: Mutex::new((0.0, 0.0)),
       viewport: Mutex::new(None),
+      strict_selectors: std::sync::atomic::AtomicBool::new(false),
       context_ref: None,
       close_reason: Mutex::new(None),
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
@@ -134,6 +144,7 @@ impl Page {
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
       mouse_position: Mutex::new((0.0, 0.0)),
       viewport: Mutex::new(None),
+      strict_selectors: std::sync::atomic::AtomicBool::new(false),
       context_ref: Some(context),
       close_reason: Mutex::new(None),
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
@@ -661,6 +672,19 @@ impl Page {
   /// `effective_viewport`).
   pub(crate) fn set_cached_viewport(&self, viewport: Option<(i64, i64)>) {
     *self.viewport.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = viewport;
+  }
+
+  /// Whether selector-taking methods on this page resolve strictly.
+  /// Locator APIs ignore this and are always strict.
+  #[must_use]
+  pub fn strict_selectors(&self) -> bool {
+    self.strict_selectors.load(std::sync::atomic::Ordering::Relaxed)
+  }
+
+  pub(crate) fn set_strict_selectors(&self, strict: bool) {
+    self
+      .strict_selectors
+      .store(strict, std::sync::atomic::Ordering::Relaxed);
   }
 
   // ── Navigation ──────────────────────────────────────────────────────────
@@ -2396,6 +2420,11 @@ impl Page {
   /// apply. The aggregated message lists each failing field by name.
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     Box::pin(self.inner.apply_context_options(opts)).await?;
+    // Purely host-side: no protocol command carries it, the selector
+    // methods just read it when they build their locator.
+    if let Some(strict) = opts.strict_selectors {
+      self.set_strict_selectors(strict);
+    }
     // Track the emulated viewport for the sync `viewport_size` accessor
     // (`viewport: null` opts out — the accessor then reports None).
     *self.viewport.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =

@@ -159,7 +159,7 @@ async fn scroll_to(world: &mut BrowserWorld, selector: String) {
 
 #[when("I drag {string} to {string}")]
 async fn drag(world: &mut BrowserWorld, source: String, target: String) {
-  let target_locator = world.page().locator(&target);
+  let target_locator = crate::steps::selector_locator(world.page(), &target);
   world
     .page()
     .locator(&source)

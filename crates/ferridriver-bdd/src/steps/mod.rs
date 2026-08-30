@@ -22,6 +22,21 @@ pub mod variable;
 pub mod wait;
 pub mod window;
 
+/// The locator a step built from a SELECTOR resolves through.
+///
+/// Steps name a selector, not a Locator, so they take their strictness
+/// from the context's `strictSelectors` the same way `page.click(sel)`
+/// does — false unless the context asked for it. Building a plain
+/// `page.locator(sel)` would make every step strict instead, and a
+/// feature saying `"p" should contain text ...` on a page with two
+/// paragraphs would fail where Playwright passes.
+pub(crate) fn selector_locator(
+  page: &std::sync::Arc<ferridriver::Page>,
+  selector: &str,
+) -> ferridriver::locator::Locator {
+  page.locator(selector).strict(page.strict_selectors())
+}
+
 /// Resolve relative URLs against `FERRIDRIVER_BASE_URL` (set by the test
 /// runner when a `webServer` fixture is configured). Absolute `http(s)`
 /// and `data:` URLs pass through untouched. Shared by navigation and API

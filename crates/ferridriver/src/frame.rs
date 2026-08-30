@@ -421,6 +421,18 @@ impl Frame {
     Locator::new(self.clone(), selector.to_string())
   }
 
+  /// The locator a SELECTOR-taking method resolves through.
+  ///
+  /// Not the same as [`Self::locator`]: a Locator is always strict,
+  /// while `frame.click(selector)` and friends take their strictness
+  /// from the context's `strictSelectors`, which defaults to false.
+  /// Playwright makes the same split in one place
+  /// (`server/frameSelectors.ts:53`), where an explicit per-call
+  /// `strict` wins and the context option is the fallback.
+  fn selector_locator(&self, selector: &str) -> Locator {
+    self.locator(selector).strict(self.page.strict_selectors())
+  }
+
   /// [`Self::locator`] with Playwright's `LocatorOptions` filter bag
   /// (including `visible`).
   #[must_use]
@@ -629,7 +641,7 @@ impl Frame {
     opts: WaitOptions,
   ) -> Result<Option<crate::element_handle::ElementHandle>> {
     let state = opts.state;
-    let locator = self.locator(selector);
+    let locator = self.selector_locator(selector);
     locator.wait_for_impl(opts).await?;
     // Playwright returns a handle only when the element is present; the
     // `hidden` / `detached` states resolve precisely because it is not.
@@ -830,7 +842,7 @@ impl Frame {
   //
   // Mirrors Playwright's frame action surface from
   // `/tmp/playwright/packages/playwright-core/src/client/frame.ts:296-447`.
-  // Each method delegates to `self.locator(selector).<action>()` —
+  // Each method delegates to `self.selector_locator(selector).<action>()` —
   // Frame's locator already scopes by `frame_id`, so the action runs in
   // the iframe's execution context (CDP) or against the synthesized
   // iframe (WebKit). Option bags are intentionally minimal here; they
@@ -853,7 +865,7 @@ impl Frame {
   }
 
   pub(crate) async fn click_impl(&self, selector: &str, opts: Option<crate::options::ClickOptions>) -> Result<()> {
-    self.locator(selector).click_impl(opts).await
+    self.selector_locator(selector).click_impl(opts).await
   }
 
   /// Double-click the element matched by `selector`.
@@ -873,7 +885,7 @@ impl Frame {
     selector: &str,
     opts: Option<crate::options::DblClickOptions>,
   ) -> Result<()> {
-    self.locator(selector).dblclick_impl(opts).await
+    self.selector_locator(selector).dblclick_impl(opts).await
   }
 
   /// Hover the element matched by `selector`.
@@ -889,7 +901,7 @@ impl Frame {
   }
 
   pub(crate) async fn hover_impl(&self, selector: &str, opts: Option<crate::options::HoverOptions>) -> Result<()> {
-    self.locator(selector).hover_impl(opts).await
+    self.selector_locator(selector).hover_impl(opts).await
   }
 
   /// Tap (touch) the element matched by `selector`. Mirrors
@@ -907,7 +919,7 @@ impl Frame {
   }
 
   pub(crate) async fn tap_impl(&self, selector: &str, opts: Option<crate::options::TapOptions>) -> Result<()> {
-    self.locator(selector).tap_impl(opts).await
+    self.selector_locator(selector).tap_impl(opts).await
   }
 
   /// Focus the element matched by `selector`.
@@ -916,7 +928,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found or focus fails.
   pub async fn focus(&self, selector: &str) -> Result<()> {
-    self.locator(selector).focus().await
+    self.selector_locator(selector).focus().await
   }
 
   // -- Form input --------------------------------------------------------
@@ -942,7 +954,7 @@ impl Frame {
     value: &str,
     opts: Option<crate::options::FillOptions>,
   ) -> Result<()> {
-    self.locator(selector).fill_impl(value, opts).await
+    self.selector_locator(selector).fill_impl(value, opts).await
   }
 
   /// Type characters into an element matching `selector`.
@@ -964,7 +976,7 @@ impl Frame {
     text: &str,
     opts: Option<crate::options::TypeOptions>,
   ) -> Result<()> {
-    self.locator(selector).type_impl(text, opts).await
+    self.selector_locator(selector).type_impl(text, opts).await
   }
 
   /// Press a key on an element matching `selector`.
@@ -986,7 +998,7 @@ impl Frame {
     key: &str,
     opts: Option<crate::options::PressOptions>,
   ) -> Result<()> {
-    self.locator(selector).press_impl(key, opts).await
+    self.selector_locator(selector).press_impl(key, opts).await
   }
 
   /// Check a checkbox/radio matching `selector`.
@@ -1002,7 +1014,7 @@ impl Frame {
   }
 
   pub(crate) async fn check_impl(&self, selector: &str, opts: Option<crate::options::CheckOptions>) -> Result<()> {
-    self.locator(selector).check_impl(opts).await
+    self.selector_locator(selector).check_impl(opts).await
   }
 
   /// Uncheck a checkbox matching `selector`.
@@ -1018,7 +1030,7 @@ impl Frame {
   }
 
   pub(crate) async fn uncheck_impl(&self, selector: &str, opts: Option<crate::options::CheckOptions>) -> Result<()> {
-    self.locator(selector).uncheck_impl(opts).await
+    self.selector_locator(selector).uncheck_impl(opts).await
   }
 
   /// Set the checked state of a checkbox/radio matching `selector`.
@@ -1045,7 +1057,7 @@ impl Frame {
     checked: bool,
     opts: Option<crate::options::CheckOptions>,
   ) -> Result<()> {
-    self.locator(selector).set_checked_impl(checked, opts).await
+    self.selector_locator(selector).set_checked_impl(checked, opts).await
   }
 
   /// Select a `<select>` option in the element matched by `selector`.
@@ -1074,7 +1086,7 @@ impl Frame {
     values: Vec<crate::options::SelectOptionValue>,
     opts: Option<crate::options::SelectOptionOptions>,
   ) -> Result<Vec<String>> {
-    self.locator(selector).select_option_impl(values, opts).await
+    self.selector_locator(selector).select_option_impl(values, opts).await
   }
 
   /// Set input files on a `<input type=file>` matching `selector`.
@@ -1102,7 +1114,7 @@ impl Frame {
     files: crate::options::InputFiles,
     opts: Option<crate::options::SetInputFilesOptions>,
   ) -> Result<()> {
-    self.locator(selector).set_input_files_impl(files, opts).await
+    self.selector_locator(selector).set_input_files_impl(files, opts).await
   }
 
   // -- Drag and drop -----------------------------------------------------
@@ -1136,8 +1148,8 @@ impl Frame {
     options: Option<crate::options::DragAndDropOptions>,
   ) -> Result<()> {
     let opts = options.unwrap_or_default();
-    let src = self.locator(source);
-    let tgt = self.locator(target);
+    let src = self.selector_locator(source);
+    let tgt = self.selector_locator(target);
     let (src, tgt) = match opts.strict {
       Some(s) => (src.strict(s), tgt.strict(s)),
       None => (src, tgt),
@@ -1192,7 +1204,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found.
   pub async fn text_content(&self, selector: &str) -> Result<Option<String>> {
-    self.locator(selector).text_content().await
+    self.selector_locator(selector).text_content().await
   }
 
   /// Get `innerText` of the element matched by `selector`.
@@ -1201,7 +1213,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found.
   pub async fn inner_text(&self, selector: &str) -> Result<String> {
-    self.locator(selector).inner_text().await
+    self.selector_locator(selector).inner_text().await
   }
 
   /// Get `innerHTML` of the element matched by `selector`.
@@ -1210,7 +1222,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found.
   pub async fn inner_html(&self, selector: &str) -> Result<String> {
-    self.locator(selector).inner_html().await
+    self.selector_locator(selector).inner_html().await
   }
 
   /// Get an attribute on the element matched by `selector`.
@@ -1219,7 +1231,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found.
   pub async fn get_attribute(&self, selector: &str, name: &str) -> Result<Option<String>> {
-    self.locator(selector).get_attribute(name).await
+    self.selector_locator(selector).get_attribute(name).await
   }
 
   /// Get `value` from a form control matched by `selector`.
@@ -1228,7 +1240,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found.
   pub async fn input_value(&self, selector: &str) -> Result<String> {
-    self.locator(selector).input_value().await
+    self.selector_locator(selector).input_value().await
   }
 
   // -- State checks ------------------------------------------------------
@@ -1239,7 +1251,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_visible(&self, selector: &str) -> Result<bool> {
-    self.locator(selector).is_visible().await
+    self.selector_locator(selector).is_visible().await
   }
 
   /// True if the element matched by `selector` is hidden.
@@ -1248,7 +1260,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_hidden(&self, selector: &str) -> Result<bool> {
-    self.locator(selector).is_hidden().await
+    self.selector_locator(selector).is_hidden().await
   }
 
   /// True if the element matched by `selector` is enabled.
@@ -1257,7 +1269,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_enabled(&self, selector: &str) -> Result<bool> {
-    self.locator(selector).is_enabled().await
+    self.selector_locator(selector).is_enabled().await
   }
 
   /// True if the element matched by `selector` is disabled.
@@ -1266,7 +1278,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_disabled(&self, selector: &str) -> Result<bool> {
-    self.locator(selector).is_disabled().await
+    self.selector_locator(selector).is_disabled().await
   }
 
   /// True if the element matched by `selector` is editable.
@@ -1275,7 +1287,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_editable(&self, selector: &str) -> Result<bool> {
-    self.locator(selector).is_editable().await
+    self.selector_locator(selector).is_editable().await
   }
 
   /// True if a checkbox/radio matched by `selector` is checked.
@@ -1284,7 +1296,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_checked(&self, selector: &str) -> Result<bool> {
-    self.locator(selector).is_checked().await
+    self.selector_locator(selector).is_checked().await
   }
 }
 
