@@ -124,6 +124,136 @@ impl Analysis {
     self.flags[ordinal] & FLAG_PAGE_OBJECT != 0
   }
 
+  /// The name `DevTools` shows, which is the raw name only for the
+  /// nodes that need no help.
+  ///
+  /// Two do. A concatenated string is stored as a tree of pieces and has
+  /// no name of its own, so it is assembled by walking it. A plain
+  /// `Object` is named for every other `Object` too, which tells a
+  /// reader nothing, so it is named after the properties it carries.
+  #[must_use]
+  pub fn node_name(&self, ordinal: usize) -> String {
+    let snapshot = &self.snapshot;
+    let kind = snapshot.node_type(ordinal);
+    if kind == snapshot.node_types.cons_string {
+      return self.cons_string_name(ordinal);
+    }
+    if kind == snapshot.node_types.object && snapshot.raw_node_name(ordinal) == "Object" {
+      return self.plain_object_name(ordinal);
+    }
+    snapshot.raw_node_name(ordinal).to_string()
+  }
+
+  /// Assemble a concatenated string from its pieces.
+  ///
+  /// V8 stores `a + b` as a node with `first` and `second` internal
+  /// edges rather than as text. Pushing second before first pops them
+  /// in reading order; upstream stops at 1024 characters and so does
+  /// this, since the result is a label rather than the value.
+  fn cons_string_name(&self, ordinal: usize) -> String {
+    let snapshot = &self.snapshot;
+    let mut name = String::new();
+    let mut stack = vec![ordinal];
+
+    while let Some(current) = stack.pop() {
+      if name.chars().count() >= 1024 {
+        break;
+      }
+      if snapshot.node_type(current) != snapshot.node_types.cons_string {
+        name.push_str(snapshot.raw_node_name(current));
+        continue;
+      }
+      let (mut first, mut second) = (None, None);
+      for edge in snapshot.first_edge_index[current]..snapshot.first_edge_index[current + 1] {
+        if first.is_some() && second.is_some() {
+          break;
+        }
+        if snapshot.edge_type(edge) != snapshot.edge_types.internal {
+          continue;
+        }
+        match snapshot.edge_name(edge) {
+          Some("first") => first = snapshot.edge_target(edge).ok(),
+          Some("second") => second = snapshot.edge_target(edge).ok(),
+          _ => {},
+        }
+      }
+      // A missing half is an ordinal of 0 upstream, which is the root;
+      // leaving it out says the same thing without inventing text.
+      if let Some(second) = second {
+        stack.push(second);
+      }
+      if let Some(first) = first {
+        stack.push(first);
+      }
+    }
+    name
+  }
+
+  /// `{first, second, …, secondToLast, last}`.
+  ///
+  /// Properties are taken alternately from each end so the label shows
+  /// both what an object starts and ends with, and the budget stops it
+  /// growing past what fits in a panel.
+  fn plain_object_name(&self, ordinal: usize) -> String {
+    let snapshot = &self.snapshot;
+    let mut start = String::from("{");
+    let mut end = String::from("}");
+    // Signed, because the end cursor is allowed to cross the start one:
+    // that crossing is exactly how upstream knows nothing was left out,
+    // and clamping it invents an ellipsis for an object that fitted.
+    let mut from_start = snapshot.first_edge_index[ordinal].cast_signed();
+    let mut from_end = snapshot.first_edge_index[ordinal + 1].cast_signed() - 1;
+    let mut take_from_end = false;
+
+    while from_start <= from_end {
+      let edge = if take_from_end { from_end } else { from_start };
+      let Ok(edge) = usize::try_from(edge) else {
+        break;
+      };
+      let name = snapshot.edge_name(edge);
+      // `__proto__` is on every object and says nothing about this one.
+      if snapshot.edge_type(edge) != snapshot.edge_types.property || name == Some("__proto__") {
+        if take_from_end {
+          from_end -= 1;
+        } else {
+          from_start += 1;
+        }
+        continue;
+      }
+      let formatted = format_property_name(name.unwrap_or_default());
+
+      // The first property goes in whatever its length; past that the
+      // label has to stay short enough to read.
+      if start.len() > 1 && start.len() + end.len() + formatted.len() > 100 {
+        break;
+      }
+
+      if take_from_end {
+        from_end -= 1;
+        if end.len() > 1 {
+          end.insert_str(0, ", ");
+        }
+        end.insert_str(0, &formatted);
+      } else {
+        from_start += 1;
+        if start.len() > 1 {
+          start.push_str(", ");
+        }
+        start.push_str(&formatted);
+      }
+      take_from_end = !take_from_end;
+    }
+
+    if from_start <= from_end {
+      start.push_str(", …");
+    }
+    if end.len() > 1 {
+      start.push_str(", ");
+    }
+    start.push_str(&end);
+    start
+  }
+
   /// The whole heap, which is what the root retains plus whatever V8
   /// accounted for outside the graph it walked.
   #[must_use]
@@ -233,6 +363,15 @@ pub struct V8Statistics {
   pub js_arrays: u64,
   pub strings: u64,
   pub system: u64,
+}
+
+/// A property name that could be mistaken for the punctuation around it
+/// is quoted, exactly as `JSON.stringify` would quote it.
+fn format_property_name(name: &str) -> String {
+  if name.contains([',', '\'', '"', '{', '}']) {
+    return serde_json::to_string(name).unwrap_or_else(|_| name.to_string());
+  }
+  name.to_string()
 }
 
 // ── Predicates ──────────────────────────────────────────────────────────

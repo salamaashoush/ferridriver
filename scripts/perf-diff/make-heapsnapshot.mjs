@@ -112,6 +112,24 @@ const weakValue = node({ type: 'object', name: 'Value', id: 29, selfSize: 256 })
 // pass has to pick it up in its second walk.
 const weaklyHeld = node({ type: 'object', name: 'WeaklyHeld', id: 31, selfSize: 96 });
 
+// A concatenated string, which V8 stores as a tree of pieces with no
+// name of its own: the name has to be assembled by walking `first` and
+// `second`, in that order.
+const consString = node({ type: 'concatenated string', name: '', id: 41, selfSize: 40 });
+const consLeft = node({ type: 'string', name: 'hello ', id: 43, selfSize: 24 });
+const consRight = node({ type: 'concatenated string', name: '', id: 45, selfSize: 40 });
+const consRightLeft = node({ type: 'string', name: 'brave ', id: 47, selfSize: 24 });
+const consRightRight = node({ type: 'string', name: 'world', id: 49, selfSize: 24 });
+
+// A plain `Object`, which is named for every other plain object too, so
+// it gets named after its properties instead. `__proto__` is skipped
+// and a name carrying punctuation is quoted.
+const plainObject = node({ type: 'object', name: 'Object', id: 51, selfSize: 56 });
+// A plain object with more properties than the label can hold, so the
+// budget truncates and the ellipsis appears.
+const wideObject = node({ type: 'object', name: 'Object', id: 53, selfSize: 56 });
+const propertyTarget = node({ type: 'object', name: 'Leaf', id: 55, selfSize: 8 });
+
 const code = node({ type: 'code', name: 'compiled', id: 33, selfSize: 200 });
 const text = node({ type: 'string', name: 'a string', id: 35, selfSize: 80 });
 const buffer = node({ type: 'native', name: 'system / JSArrayBufferData', id: 37, selfSize: 2048 });
@@ -133,6 +151,9 @@ edge(window, { type: 'property', name: str('map'), to: weakMap });
 edge(window, { type: 'property', name: str('key'), to: weakKey });
 edge(window, { type: 'property', name: str('text'), to: text });
 edge(window, { type: 'property', name: str('buffer'), to: buffer });
+edge(window, { type: 'property', name: str('cons'), to: consString });
+edge(window, { type: 'property', name: str('plain'), to: plainObject });
+edge(window, { type: 'property', name: str('wide'), to: wideObject });
 // Weak edges retain nothing, so `weaklyHeld` is unreachable for the
 // dominator walk and reachable for the distance walk to skip.
 edge(window, { type: 'weak', name: str('weaklyHeld'), to: weaklyHeld });
@@ -144,6 +165,24 @@ edge(sharedArray, { type: 'internal', name: str('elements'), to: sharedElements 
 edge(otherHolder, { type: 'property', name: str('alsoElements'), to: sharedElements });
 
 edge(detached, { type: 'element', name: 1, to: detachedChild });
+
+edge(consString, { type: 'internal', name: str('first'), to: consLeft });
+edge(consString, { type: 'internal', name: str('second'), to: consRight });
+edge(consRight, { type: 'internal', name: str('first'), to: consRightLeft });
+edge(consRight, { type: 'internal', name: str('second'), to: consRightRight });
+
+// Taken alternately from each end, so the order of these decides the
+// label. `__proto__` is skipped wherever it falls, and the quoted one
+// proves the escaping.
+edge(plainObject, { type: 'property', name: str('alpha'), to: propertyTarget });
+edge(plainObject, { type: 'property', name: str('__proto__'), to: propertyTarget });
+edge(plainObject, { type: 'property', name: str('be, ta'), to: propertyTarget });
+edge(plainObject, { type: 'internal', name: str('map'), to: propertyTarget });
+edge(plainObject, { type: 'property', name: str('gamma'), to: propertyTarget });
+
+for (let i = 0; i < 12; i++) {
+  edge(wideObject, { type: 'property', name: str(`aPropertyNameLongEnoughToCount${i}`), to: propertyTarget });
+}
 
 // The pair the dominator pass has to break: the table's edge is
 // dropped so the value is dominated by the key.

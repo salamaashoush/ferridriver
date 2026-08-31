@@ -262,6 +262,10 @@ fn the_analysis_agrees_with_the_engine() {
           node.retained_size
         ));
       }
+      let name = analysis.node_name(ordinal);
+      if name != node.name {
+        differences.push(format!("node {ordinal}: engine name {:?}, ours {name:?}", node.name));
+      }
       let distance = analysis.distance(ordinal);
       if distance != node.distance {
         differences.push(format!(
@@ -359,36 +363,65 @@ fn the_fixtures_still_carry_something_worth_comparing() {
     );
 
     if handmade {
-      // The shapes this fixture exists for. Each is what makes one
-      // branch tell itself apart from its own absence, so losing any of
-      // them turns a passing comparison back into a vacuous one.
-      assert!(
-        recording.statistics.v8heap.system > 0,
-        "{name}: nothing hidden has a size, so the statistics early exit is untested"
-      );
-      assert!(
-        recording.nodes.iter().any(|node| node.distance == 1),
-        "{name}: no node sits at distance 1, so there are no user roots and three passes do not run"
-      );
-      assert!(
-        recording.nodes.iter().any(|node| node.detachedness == 2),
-        "{name}: nothing is detached, so the propagation is untested"
-      );
-      assert!(
-        recording.nodes.iter().any(|node| node.name.starts_with("Detached ")),
-        "{name}: nothing was renamed, so the detached-name rewrite is untested"
-      );
-      assert!(
-        recording.nodes.iter().any(|node| node.distance < 0),
-        "{name}: everything is reachable, so the weak-retainer walk is untested"
-      );
-      assert!(
-        recording
-          .nodes
-          .iter()
-          .any(|node| node.self_size == 0 && node.kind == "array"),
-        "{name}: no backing store was emptied, so the shallow-size transfer is untested"
-      );
+      the_handmade_shapes_are_all_still_there(&name, &recording);
     }
   }
+}
+
+/// The shapes the hand-built fixture exists for.
+///
+/// Each is what makes one branch tell itself apart from its own
+/// absence -- every one of them was confirmed by deleting the code that
+/// handles it and watching this comparison go red. Losing a shape turns
+/// a passing comparison back into a vacuous one, which is the failure
+/// this whole file is arranged against.
+fn the_handmade_shapes_are_all_still_there(name: &str, recording: &Recording) {
+  // The shapes this fixture exists for. Each is what makes one
+  // branch tell itself apart from its own absence, so losing any of
+  // them turns a passing comparison back into a vacuous one.
+  assert!(
+    recording.statistics.v8heap.system > 0,
+    "{name}: nothing hidden has a size, so the statistics early exit is untested"
+  );
+  assert!(
+    recording.nodes.iter().any(|node| node.distance == 1),
+    "{name}: no node sits at distance 1, so there are no user roots and three passes do not run"
+  );
+  assert!(
+    recording.nodes.iter().any(|node| node.detachedness == 2),
+    "{name}: nothing is detached, so the propagation is untested"
+  );
+  assert!(
+    recording.nodes.iter().any(|node| node.name.starts_with("Detached ")),
+    "{name}: nothing was renamed, so the detached-name rewrite is untested"
+  );
+  assert!(
+    recording.nodes.iter().any(|node| node.distance < 0),
+    "{name}: everything is reachable, so the weak-retainer walk is untested"
+  );
+  assert!(
+    recording
+      .nodes
+      .iter()
+      .any(|node| node.self_size == 0 && node.kind == "array"),
+    "{name}: no backing store was emptied, so the shallow-size transfer is untested"
+  );
+  assert!(
+    recording
+      .nodes
+      .iter()
+      .any(|node| node.kind == "concatenated string" && node.name.contains(' ')),
+    "{name}: no assembled string, so the cons-string walk is untested"
+  );
+  assert!(
+    recording
+      .nodes
+      .iter()
+      .any(|node| node.name.starts_with('{') && node.name.contains('"')),
+    "{name}: no plain object with a quoted property, so the label escaping is untested"
+  );
+  assert!(
+    recording.nodes.iter().any(|node| node.name.contains('…')),
+    "{name}: no plain object overflowed its label, so the budget is untested"
+  );
 }

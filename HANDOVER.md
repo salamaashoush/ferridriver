@@ -137,10 +137,9 @@ owned nodes onto their owners BEFORE retained sizes propagate:
    a plain `Object` is named from its constructor.
 7. `getStatistics`, which needs all of the above.
 
-Of those, 1 through 5 and 7 have landed and agree with the engine on
-the fixture: total size, per-node self and retained sizes, distances,
-and all eight statistics fields. Node naming (6) has not, and
-`engine.json` already carries the engine's answer for it.
+All seven have landed and agree with the engine on both fixtures. Every
+field the engine reports is compared: ids, types, detachedness, names,
+self and retained sizes, distances, and all eight statistics.
 
 ### The fixture that a browser will not give you
 
@@ -168,10 +167,20 @@ branch would otherwise claim, an ephemeron pair, a weak-only retainer,
 a detached subtree. It is still a differential -- the real engine
 analyses it too.
 
-It found a bug on its first run: the ephemeron name parser matched
+It has found two bugs so far. The ephemeron name parser matched
 nothing, so both edges of a `WeakMap` pair counted and the value came
-out dominated by the window rather than by its key. Four passes were
-then confirmed live by deleting each and watching the gate go red.
+out dominated by the window rather than by its key. And a plain
+object's label carried an ellipsis for properties that had all fitted,
+because the cursor walking in from the end was clamped where upstream
+lets it cross the start.
+
+Nine branches are confirmed live by deleting each and watching the gate
+go red: the shallow-size transfer, the statistics early exit for hidden
+nodes, the single-retainer test in the JS-array measurement, the
+`WeakMap` table-edge exclusion, both naming rules, the `__proto__`
+skip, the property-name escaping, and the label budget. Do the same for
+anything added here; three of those passed with the code removed until
+this fixture existed.
 
 Then the 13 tools themselves, the CDP capture with `Unsupported` on the
 other three backends, and the three binding layers.

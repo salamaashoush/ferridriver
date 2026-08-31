@@ -2027,24 +2027,24 @@
  "handmade": {
   "nodeFieldCount": 6,
   "statistics": {
-   "total": 8784,
+   "total": 9056,
    "native": {
     "total": 6216,
     "typedArrays": 2048
    },
    "v8heap": {
-    "total": 2568,
+    "total": 2840,
     "code": 200,
     "jsArrays": 576,
-    "strings": 80,
+    "strings": 232,
     "system": 192
    }
   },
   "staticData": {
-   "nodeCount": 20,
+   "nodeCount": 28,
    "rootNodeIndex": 0,
-   "totalSize": 8784,
-   "maxJSObjectId": 39
+   "totalSize": 9056,
+   "maxJSObjectId": 55
   },
   "nodes": [
    {
@@ -2053,7 +2053,7 @@
     "name": "",
     "type": "synthetic",
     "selfSize": 0,
-    "retainedSize": 4688,
+    "retainedSize": 4960,
     "distance": 100000000,
     "detachedness": 0
    },
@@ -2073,7 +2073,7 @@
     "name": "Window",
     "type": "object",
     "selfSize": 64,
-    "retainedSize": 4128,
+    "retainedSize": 4400,
     "distance": 1,
     "detachedness": 0
    },
@@ -2219,6 +2219,86 @@
    },
    {
     "ordinal": 17,
+    "id": 41,
+    "name": "hello brave world",
+    "type": "concatenated string",
+    "selfSize": 40,
+    "retainedSize": 152,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 18,
+    "id": 43,
+    "name": "hello ",
+    "type": "string",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 19,
+    "id": 45,
+    "name": "brave world",
+    "type": "concatenated string",
+    "selfSize": 40,
+    "retainedSize": 88,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 20,
+    "id": 47,
+    "name": "brave ",
+    "type": "string",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 21,
+    "id": 49,
+    "name": "world",
+    "type": "string",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 22,
+    "id": 51,
+    "name": "{alpha, \"be, ta\", gamma}",
+    "type": "object",
+    "selfSize": 56,
+    "retainedSize": 56,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 23,
+    "id": 53,
+    "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+    "type": "object",
+    "selfSize": 56,
+    "retainedSize": 56,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 24,
+    "id": 55,
+    "name": "Leaf",
+    "type": "object",
+    "selfSize": 8,
+    "retainedSize": 8,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 25,
     "id": 33,
     "name": "compiled",
     "type": "code",
@@ -2228,7 +2308,7 @@
     "detachedness": 0
    },
    {
-    "ordinal": 18,
+    "ordinal": 26,
     "id": 35,
     "name": "a string",
     "type": "string",
@@ -2238,7 +2318,7 @@
     "detachedness": 0
    },
    {
-    "ordinal": 19,
+    "ordinal": 27,
     "id": 37,
     "name": "system / JSArrayBufferData",
     "type": "native",
