@@ -1449,10 +1449,15 @@ impl Page {
     Ok(report.into())
   }
 
-  /// Audit the page against the seven Lighthouse checks that score a
-  /// live DOM: `doctype`, `meta-description`, `crawlable-anchors`,
-  /// `link-text`, `image-aspect-ratio`, `image-size-responsive` and
-  /// `paste-preventing-inputs`.
+  /// Audit the page against the ten Lighthouse checks that score a
+  /// live page: `doctype`, `meta-description`, `canonical`,
+  /// `crawlable-anchors`, `link-text`, `image-aspect-ratio`,
+  /// `image-size-responsive`, `paste-preventing-inputs`,
+  /// `http-status-code` and `is-crawlable`.
+  ///
+  /// The last two read the main document's own response rather than the
+  /// DOM, and are absent from the report for a document that arrived
+  /// without one.
   #[napi]
   pub async fn check_page_quality(&self, options: Option<PageQualityOptions>) -> Result<PageQualityReport> {
     let report = self

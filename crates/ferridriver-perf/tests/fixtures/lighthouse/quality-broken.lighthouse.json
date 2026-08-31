@@ -127,6 +127,10 @@
    "mode": "binary",
    "score": 0
   },
+  "robots-txt": {
+   "mode": "binary",
+   "score": 1
+  },
   "structured-data": {
    "mode": "manual",
    "score": null

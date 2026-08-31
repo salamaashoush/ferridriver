@@ -5,10 +5,11 @@ it is right, so this one is built to be deleted a piece at a time:
 every section below is a unit of work with the check that closes it.
 Delete the section when it lands.
 
-Written against `83c1def2`. Every number here was measured with the
-command beside it, not taken from anyone's documentation, including
-mine — a count of upstream heap tools in `site/docs/comparison/index.md`
-said 11 for a week; it is 13.
+Written against `83c1def2`, minus the two sections that have since
+landed. Every number here was measured with the command beside it, not
+taken from anyone's documentation, including mine — a count of upstream
+heap tools in `site/docs/comparison/index.md` said 11 for a week; it is
+13.
 
 ## Where the line currently is
 
@@ -18,10 +19,11 @@ Gates that exist, and what each one actually proves:
 |---|---|
 | `just perf-diff` | The 19 trace insights and the Lantern model still agree with the real devtools-frontend engine on four recorded traces |
 | `just a11y-diff` | `page.checkAccessibility()` still agrees with Lighthouse's axe verdicts on three fixture pages |
-| `just quality-diff` | The eight ported live-DOM audits still agree with Lighthouse |
+| `just quality-diff` | The ten ported live-page audits still agree with Lighthouse |
+| `just robots-diff` | Our `robots.txt` parser still agrees with `robots-parser` 3.0.1, which is what `is-crawlable` really has to agree with |
 | `just lh-record` | Re-derives the recordings the two above compare against |
 | `just lh-audit <url>` | What Lighthouse concludes about any live page, for exploring |
-| `just test` | All of the offline halves, plus 2091 e2e across four backends, 598 BDD, 1100 NAPI, and the e2e typecheck |
+| `just test` | All of the offline halves, plus 2131 e2e across four backends, 598 BDD, 1102 NAPI, and the e2e typecheck |
 
 Ported and gated: all 67 axe wrappers (by running the engine, not the
 wrappers), and eight audits in `crates/ferridriver/src/audits.rs` —
@@ -37,67 +39,7 @@ accessibility comparison ran over seven rules on pages where all seven
 passed, and it agreed with Lighthouse about almost nothing while missing
 five rules entirely.
 
-## 1. `http-status-code`
-
-Lighthouse fails the page when the main document's status is 400-599.
-Trivial arithmetic; the whole cost is getting the status.
-
-`performance.getEntriesByType('navigation')[0].responseStatus` is
-**undefined on WebKit** (measured: Chromium 200/404, Firefox 200/404,
-WebKit `{has: true}` with no status), so a DOM-only gatherer would answer
-differently per backend, which is the one thing not to ship. `goto()`
-returns a `Response` with the right status on all three engines, so the
-status exists — it is just not reachable from `check_page_quality()`,
-which runs later and takes no arguments.
-
-Two routes, neither free:
-
-- Cache the last main-frame navigation status on `Page`. Correct only if
-  it updates on every main-frame navigation, not just `goto` — link
-  clicks, `reload`, and redirects all have to land there.
-- Read the context's `network_log` (`ContextRef::network_log_handle`,
-  already `pub(crate)`) and find the navigation request for the current
-  URL. Populated on all four backends, but pages opened outside a
-  context have no log, and redirects make "which request is the main
-  one" a real question rather than a filter.
-
-Worth asking first whether it earns its place: a ferridriver caller gets
-this status from `page.goto()` directly. Lighthouse needs the audit
-because its users do not drive the navigation. I left it for that
-reason, not because it is hard.
-
-**Fixture and gate.** A 404 has no file to put in the fixtures
-directory, so both servers need to agree on how to serve one. Suggest a
-name-driven convention — `<name>.status404.html` served with that status
-by both `record-lighthouse.py`'s server and the one in
-`crates/ferridriver-perf/tests/lighthouse.rs` — so the two cannot
-drift. Then it records like any other page.
-
-## 2. `is-crawlable`
-
-The one with real work in it. Three independent blocking sources,
-checked against five bot user agents (`undefined`, `Googlebot`,
-`bingbot`, `DuckDuckBot`, `archive.org_bot`), scoring 0 only when ALL
-five are blocked:
-
-1. `<meta name="robots">`, or a per-bot `<meta name="googlebot">`, whose
-   content contains `noindex` or `none`. Pure DOM.
-2. An `X-Robots-Tag` response header, optionally prefixed with a user
-   agent (`X-Robots-Tag: googlebot: noindex`). Needs response headers,
-   so it shares problem 1's plumbing.
-3. `/robots.txt` disallowing the URL. Needs the file fetched and parsed.
-
-Source: `core/audits/seo/is-crawlable.js`, and the parser it leans on is
-vendored `robots-parser` — user-agent groups, `*` and `$` wildcards, and
-Allow-beats-Disallow specificity, none of which is guessable. Porting
-only source 1 would answer wrongly whenever 2 or 3 blocks, silently,
-which is worse than not having the audit.
-
-If you take this on, the parser deserves its own differential against
-`robots-parser` over a table of (robots.txt, url, user-agent) triples
-before it is wired into the audit at all.
-
-## 3. `has-hsts` and `csp-xss` — decide what parity means
+## 1. `has-hsts` and `csp-xss` — decide what parity means
 
 Both score `informative` in Lighthouse, not `binary`: they emit findings
 but no pass/fail. Measured with
@@ -111,7 +53,7 @@ here and accepting that the recorded gate cannot check it — you would be
 comparing findings by hand, or building a different kind of comparison.
 That is a product decision, not an implementation one.
 
-## 4. `crawlable-anchors`, the listener branch — decide, do not drift
+## 2. `crawlable-anchors`, the listener branch — decide, do not drift
 
 The audit asks whether an anchor with no `href` and no href-associated
 attribute has an event listener. Lighthouse answers with CDP's
@@ -132,7 +74,7 @@ page shape that is not rare.
 `element_handle_remote()` in `backend/mod.rs` already hands you the
 per-backend object id if you do take it on. Do not do half of it.
 
-## 5. Heap snapshots — 13 tools, the largest single gap
+## 3. Heap snapshots — 13 tools, the largest single gap
 
 `chrome-devtools-mcp` 1.8.0 exposes 13 (verify:
 `node --input-type=module -e "import {createTools} from
@@ -162,7 +104,7 @@ Do not port it against your own reading of the format; that is exactly
 how `ferridriver-perf` passed 62 of its own tests and was still wrong in
 ten places.
 
-## 6. Extensions, PWA, WebMCP, third-party devtools — 12 tools
+## 4. Extensions, PWA, WebMCP, third-party devtools — 12 tools
 
 `install_extension`, `list_extensions`, `reload_extension`,
 `trigger_extension_action`, `uninstall_extension` (5);
@@ -180,7 +122,7 @@ Note the naming collision before you start: `ferridriver_extensions` is
 already an MCP tool, and it means ferridriver's OWN extension packages,
 not Chrome's.
 
-## 7. Smaller, already-stated gaps
+## 5. Smaller, already-stated gaps
 
 Each is recorded in the module doc where it applies; this is the index,
 not the detail.
@@ -199,7 +141,7 @@ not the detail.
   `STATE_DIVERGENCES` in `crates/ferridriver-perf/tests/differential.rs`
   records why. Do not "fix" it to reach nineteen out of nineteen.
 
-## 8. `@playwright/mcp` parity is probably not the goal
+## 6. `@playwright/mcp` parity is probably not the goal
 
 It ships 69 tools to our 11. Before treating that as a gap, read the
 argument already made in `site/docs/comparison/index.md`: Microsoft's own

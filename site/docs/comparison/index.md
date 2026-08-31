@@ -104,6 +104,7 @@ something aimed at agents, and they have picked different shapes.
 | Arbitrary code in the page | `run_script`, `evaluate` | `browser_evaluate`, `browser_run_code_unsafe` | `evaluate_script` |
 | Performance analysis | `diagnostics` (`trace_start` / `trace_stop`): the same 19 DevTools insights, checked against the engine | no | `performance_start_trace`, `performance_analyze_insight` |
 | Accessibility | `page.checkAccessibility()` from `run_script` (axe-core in the page) | no | inside `lighthouse_audit` |
+| SEO and best-practices audits | `page.checkPageQuality()` from `run_script`: ten of Lighthouse's own, checked against Lighthouse | no | inside `lighthouse_audit` |
 | Heap snapshots | no | no | 13 tools |
 | Chrome extensions / PWA / WebMCP | no | no | yes |
 | Extending the SERVER itself | `ferridriver_extensions`: add your own tools, reloadable without a restart | no | no |

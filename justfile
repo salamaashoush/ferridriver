@@ -254,14 +254,15 @@ a11y-diff url="":
     cargo test -p ferridriver-perf --test lighthouse -- accessibility_
   fi
 
-# Check our seven live-DOM audits against Lighthouse's own.
+# Check our ten live-page audits against Lighthouse's own.
 #
-# `doctype`, `meta-description`, `crawlable-anchors`, `link-text`,
-# `image-aspect-ratio`, `image-size-responsive` and
-# `paste-preventing-inputs`, ported in `ferridriver::audits`. Nothing
-# here agrees by construction the way the axe comparison does: both
-# sides are separate implementations of the same arithmetic, so this is
-# the only thing saying the port is right.
+# `doctype`, `meta-description`, `canonical`, `crawlable-anchors`,
+# `link-text`, `image-aspect-ratio`, `image-size-responsive`,
+# `paste-preventing-inputs`, `http-status-code` and `is-crawlable`,
+# ported in `ferridriver::audits`. Nothing here agrees by construction
+# the way the axe comparison does: both sides are separate
+# implementations of the same arithmetic, so this is the only thing
+# saying the port is right.
 #
 # With no argument this is the gate; with a URL it is the exploratory
 # half, against any live page. Same shape as `a11y-diff`.
@@ -277,6 +278,27 @@ quality-diff url="":
     python3 scripts/perf-diff/record-lighthouse.py
     cargo test -p ferridriver-perf --test lighthouse -- page_quality_
   fi
+
+# Check our robots.txt parser against the package it is a port of.
+#
+# `is-crawlable` does not parse robots.txt itself -- Lighthouse imports
+# `robots-parser`, so agreeing with Lighthouse means agreeing with that
+# package, down to the parts no specification pins: which of two
+# equal-length rules wins, what an empty `Disallow:` does to the `*`
+# fallback, how a pattern is percent-encoded before it is matched.
+#
+# `scripts/perf-diff/record-robots.mjs` holds the cases and asks the
+# real package; the answers are checked in, so the comparison
+# (`cargo test -p ferridriver-perf --test robots`) runs offline in
+# `just test`. Pass `--update` to re-record after adding a case.
+robots-diff *args:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cd "{{justfile_directory()}}/scripts/perf-diff"
+  [ -d node_modules ] || npm install --registry=https://registry.npmjs.org --no-audit --no-fund
+  node record-robots.mjs {{args}}
+  cd "{{justfile_directory()}}"
+  cargo test -p ferridriver-perf --test robots
 
 # Re-record what Lighthouse says about each fixture page.
 #

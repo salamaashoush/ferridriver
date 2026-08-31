@@ -8,49 +8,12 @@
    "mode": "binary",
    "score": 1
   },
-  "baseline": {
-   "itemCount": 1,
-   "items": [],
-   "mode": "informative",
-   "score": 1
-  },
-  "button-name": {
-   "mode": "binary",
-   "score": 1
-  },
-  "canonical": {
-   "mode": "binary",
-   "score": 1
-  },
-  "charset": {
-   "mode": "binary",
-   "score": 1
-  },
-  "clickjacking-mitigation": {
-   "itemCount": 1,
-   "items": [],
-   "mode": "informative",
-   "score": 1
-  },
   "color-contrast": {
    "mode": "binary",
    "score": 1
   },
   "crawlable-anchors": {
    "mode": "binary",
-   "score": 1
-  },
-  "csp-xss": {
-   "itemCount": 1,
-   "items": [],
-   "mode": "informative",
-   "score": 1
-  },
-  "cumulative-layout-shift": {
-   "itemCount": 1,
-   "items": [],
-   "mode": "numeric",
-   "numericValue": 0,
    "score": 1
   },
   "custom-controls-labels": {
@@ -61,10 +24,6 @@
    "mode": "manual",
    "score": null
   },
-  "deprecations": {
-   "mode": "binary",
-   "score": 1
-  },
   "doctype": {
    "mode": "binary",
    "score": 1
@@ -72,12 +31,6 @@
   "document-title": {
    "mode": "binary",
    "score": 1
-  },
-  "errors-in-console": {
-   "itemCount": 1,
-   "items": [],
-   "mode": "binary",
-   "score": 0
   },
   "focus-traps": {
    "mode": "manual",
@@ -87,21 +40,7 @@
    "mode": "manual",
    "score": null
   },
-  "geolocation-on-start": {
-   "mode": "binary",
-   "score": 1
-  },
-  "has-hsts": {
-   "itemCount": 1,
-   "items": [],
-   "mode": "informative",
-   "score": 1
-  },
   "heading-order": {
-   "mode": "binary",
-   "score": 1
-  },
-  "hreflang": {
    "mode": "binary",
    "score": 1
   },
@@ -113,27 +52,11 @@
    "mode": "binary",
    "score": 1
   },
-  "http-status-code": {
-   "mode": "binary",
-   "score": 1
-  },
-  "image-alt": {
-   "mode": "binary",
-   "score": 1
-  },
   "image-aspect-ratio": {
    "mode": "binary",
    "score": 1
   },
   "image-size-responsive": {
-   "itemCount": 1,
-   "items": [
-    "body > main > img"
-   ],
-   "mode": "binary",
-   "score": 0
-  },
-  "inspector-issues": {
    "mode": "binary",
    "score": 1
   },
@@ -141,35 +64,11 @@
    "mode": "manual",
    "score": null
   },
-  "is-crawlable": {
-   "mode": "binary",
-   "score": 1
-  },
-  "is-on-https": {
-   "mode": "binary",
-   "score": 1
-  },
-  "label": {
-   "mode": "binary",
-   "score": 1
-  },
   "landmark-one-main": {
    "mode": "binary",
    "score": 1
   },
-  "link-name": {
-   "mode": "binary",
-   "score": 1
-  },
   "link-text": {
-   "mode": "binary",
-   "score": 1
-  },
-  "list": {
-   "mode": "binary",
-   "score": 1
-  },
-  "listitem": {
    "mode": "binary",
    "score": 1
   },
@@ -185,23 +84,9 @@
    "mode": "binary",
    "score": 1
   },
-  "meta-viewport": {
-   "mode": "binary",
-   "score": 1
-  },
-  "notification-on-start": {
-   "mode": "binary",
-   "score": 1
-  },
   "offscreen-content-hidden": {
    "mode": "manual",
    "score": null
-  },
-  "origin-isolation": {
-   "itemCount": 1,
-   "items": [],
-   "mode": "informative",
-   "score": 1
   },
   "paste-preventing-inputs": {
    "mode": "binary",
@@ -211,47 +96,13 @@
    "mode": "binary",
    "score": 1
   },
-  "select-name": {
-   "mode": "binary",
-   "score": 1
-  },
   "structured-data": {
    "mode": "manual",
    "score": null
   },
-  "table-fake-caption": {
-   "mode": "binary",
-   "score": 1
-  },
-  "target-size": {
-   "mode": "binary",
-   "score": 1
-  },
-  "td-has-header": {
-   "mode": "binary",
-   "score": 1
-  },
-  "td-headers-attr": {
-   "mode": "binary",
-   "score": 1
-  },
-  "third-party-cookies": {
-   "mode": "binary",
-   "score": 1
-  },
-  "trusted-types-xss": {
-   "itemCount": 1,
-   "items": [],
-   "mode": "informative",
-   "score": 1
-  },
   "use-landmarks": {
    "mode": "manual",
    "score": null
-  },
-  "valid-source-maps": {
-   "mode": "binary",
-   "score": 1
   },
   "visual-order-follows-dom": {
    "mode": "manual",
@@ -337,6 +188,6 @@
   "visual-order-follows-dom"
  ],
  "lighthouse": "13.4.1",
- "mode": "navigation",
- "page": "clean.html"
+ "mode": "snapshot",
+ "page": "meta-robots-blocked.html"
 }

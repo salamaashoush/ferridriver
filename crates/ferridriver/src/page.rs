@@ -1290,11 +1290,18 @@ impl Page {
 
   /// Audit the page against the Lighthouse checks that read a live DOM.
   ///
-  /// Seven of them: `doctype`, `meta-description`, `crawlable-anchors`,
-  /// `link-text`, `image-aspect-ratio`, `image-size-responsive` and
-  /// `paste-preventing-inputs`. Everything is read from the page as it
-  /// stands, so this navigates nothing and a static page answers the
-  /// same way every time.
+  /// Ten of them: `doctype`, `meta-description`, `canonical`,
+  /// `crawlable-anchors`, `link-text`, `image-aspect-ratio`,
+  /// `image-size-responsive`, `paste-preventing-inputs`,
+  /// `http-status-code` and `is-crawlable`. This navigates nothing, so
+  /// a static page answers the same way every time.
+  ///
+  /// The last two also read the main document's own response, which
+  /// comes from the context's network log rather than the DOM, and
+  /// `is-crawlable` fetches `/robots.txt` from the page. Both are left
+  /// out of the report when the current document arrived without a
+  /// response of its own -- `about:blank`, `setContent`, or a network
+  /// log that has since lapped past it.
   ///
   /// See [`crate::audits`] for what these are ported from, and for the
   /// one input `crawlable-anchors` cannot see.
@@ -1307,6 +1314,7 @@ impl Page {
     self: &Arc<Self>,
     options: Option<crate::audits::PageQualityOptions>,
   ) -> Result<crate::audits::PageQualityReport> {
+    let options = options.unwrap_or_default();
     let value = self
       .evaluate(
         crate::audits::gather_source(),
@@ -1320,8 +1328,90 @@ impl Page {
     let payload = value
       .as_str()
       .ok_or_else(|| crate::error::FerriError::backend("page audit gatherer returned a non-string result"))?;
-    let artifacts = crate::audits::parse_artifacts(payload)?;
-    Ok(crate::audits::run(&artifacts, &options.unwrap_or_default()))
+    let mut artifacts = crate::audits::parse_artifacts(payload)?;
+
+    if options.wants("http-status-code") || options.wants("is-crawlable") {
+      artifacts.main_document = self.main_document(&artifacts.url).await;
+    }
+    if options.wants("is-crawlable") && artifacts.main_document.is_some() {
+      artifacts.robots_txt = self.fetch_robots_txt(&artifacts.url).await;
+    }
+    Ok(crate::audits::run(&artifacts, &options))
+  }
+
+  /// The response that produced the document now at `url`.
+  ///
+  /// Lighthouse's rule, from `core/computed/main-resource.js`: the LAST
+  /// navigation request whose URL matches the document's once fragments
+  /// are dropped. Taking the last is what makes `location.reload()`
+  /// resolve to the response on screen rather than the evicted first
+  /// one, and matching on the FINAL URL is what steps over a redirect
+  /// chain, whose hops each carry a different one.
+  ///
+  /// `is_navigation_request` stands in for Lighthouse's
+  /// `resourceType === 'Document'` filter: `BiDi` infers a resource
+  /// type from the initiator and would answer differently there, while
+  /// the navigation flag is set from the protocol's own signal on every
+  /// backend.
+  async fn main_document(self: &Arc<Self>, url: &str) -> Option<crate::audits::MainDocument> {
+    let log = self.context_ref.as_ref()?.network_log_handle().await?;
+    let guid = self.inner.page_guid();
+    let requests: Vec<crate::network::Request> = log.read().await.clone();
+
+    for request in requests.iter().rev() {
+      if !request.is_navigation_request()
+        || request.page_guid() != Some(guid.as_str())
+        || request.failure().is_some()
+        || !same_document_url(request.url(), url)
+      {
+        continue;
+      }
+      let Some(response) = request.existing_response().await else {
+        continue;
+      };
+      return Some(crate::audits::MainDocument {
+        url: response.url().to_string(),
+        status_code: response.status(),
+        response_headers: response.headers_array().await,
+      });
+    }
+    None
+  }
+
+  /// Fetch `/robots.txt` for the document's origin, from the page.
+  ///
+  /// Lighthouse fetches it over `Network.loadNetworkResource`, which is
+  /// Chromium-only; the file is always same-origin with the document,
+  /// so an in-page `fetch` reaches it on every backend with the same
+  /// cookies and the same 2s budget. A body is kept only for a 2xx,
+  /// which is what stops a 404 page's HTML being parsed as rules.
+  ///
+  /// Every failure answers `None`, meaning "no rules", because that is
+  /// what a site without a `robots.txt` means and what Lighthouse's own
+  /// gatherer returns when the fetch throws.
+  async fn fetch_robots_txt(self: &Arc<Self>, document_url: &str) -> Option<crate::audits::RobotsTxt> {
+    let robots_url = crate::audits::robots_txt_url(document_url)?;
+    let source = format!(
+      r"
+(async () => {{
+  const url = {url};
+  const deadline = new Promise(resolve => setTimeout(() => resolve(null), 2000));
+  const fetched = (async () => {{
+    const response = await fetch(url, {{ cache: 'no-store', credentials: 'include' }});
+    const status = response.status;
+    const content = status >= 200 && status <= 299 ? await response.text() : null;
+    return {{ status, content }};
+  }})().catch(() => ({{ status: null, content: null }}));
+  return JSON.stringify(await Promise.race([fetched, deadline]) ?? {{ status: null, content: null }});
+}})
+",
+      url = serde_json::to_string(&robots_url).ok()?
+    );
+    let value = self
+      .evaluate(&source, crate::protocol::SerializedArgument::default(), Some(true))
+      .await
+      .ok()?;
+    serde_json::from_str(value.as_str()?).ok()
   }
 
   /// Playwright: `page.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
@@ -4851,6 +4941,22 @@ fn web_storage_global(kind: crate::options::WebStorageKind) -> &'static str {
 /// into an evaluated expression — equivalent to `JSON.stringify(s)`.
 fn web_storage_js_string(s: &str) -> String {
   serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// Lighthouse's `UrlUtils.equalWithExcludedFragments`: a request URL
+/// never carries a fragment and `document.location.href` may, so the
+/// two are compared with both dropped.
+fn same_document_url(request_url: &str, document_url: &str) -> bool {
+  let strip = |url: &str| {
+    reqwest::Url::parse(url).ok().map(|mut url| {
+      url.set_fragment(None);
+      url
+    })
+  };
+  match (strip(request_url), strip(document_url)) {
+    (Some(a), Some(b)) => a == b,
+    _ => false,
+  }
 }
 
 fn is_element_not_found(err: &crate::error::FerriError) -> bool {

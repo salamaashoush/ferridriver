@@ -1,4 +1,4 @@
-//! Run the seven live-DOM Lighthouse audits against a page and print
+//! Run the ten live-page Lighthouse audits against a page and print
 //! what they found.
 //!
 //! `cargo run -p ferridriver-perf --example page-quality -- <url>`

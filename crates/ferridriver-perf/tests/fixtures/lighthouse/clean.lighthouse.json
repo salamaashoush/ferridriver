@@ -120,6 +120,10 @@
    "mode": "binary",
    "score": 1
   },
+  "robots-txt": {
+   "mode": "binary",
+   "score": 1
+  },
   "select-name": {
    "mode": "binary",
    "score": 1

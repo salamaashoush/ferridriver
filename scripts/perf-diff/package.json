@@ -2,9 +2,10 @@
   "name": "ferridriver-perf-diff",
   "private": true,
   "type": "module",
-  "description": "Drives the real devtools-frontend trace engine and Lighthouse so ferridriver-perf can be checked against them",
+  "description": "Drives the real devtools-frontend trace engine, Lighthouse and robots-parser so ferridriver can be checked against them",
   "dependencies": {
     "chrome-devtools-mcp": "1.8.0",
-    "puppeteer-core": "^24.0.0"
+    "puppeteer-core": "^24.0.0",
+    "robots-parser": "3.0.1"
   }
 }

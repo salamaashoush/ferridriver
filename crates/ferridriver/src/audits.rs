@@ -4,19 +4,25 @@
 //! seven are axe-core wrappers and are covered by running the engine
 //! instead ([`crate::accessibility`]). The performance ones wrap the
 //! `DevTools` trace insights, which `ferridriver-perf` has ported. What is
-//! left needs artifacts gathered from a live DOM, and of those, seven
-//! score on a page that is simply sitting there: no network log, no
-//! navigation, no trace.
+//! left needs artifacts gathered from a live DOM, and ten of those are
+//! here.
 //!
-//! Those seven are here. Each is a pure function over the artifact
-//! struct below, ported from Lighthouse's own source and checked against
-//! it: `just lh-audit <url>` prints what Lighthouse concludes about a
-//! page, and `cargo test -p ferridriver-perf --test lighthouse`
-//! compares these verdicts against recorded ones for the fixture pages.
+//! Each is a pure function over the artifact struct below, ported from
+//! Lighthouse's own source and checked against it: `just lh-audit <url>`
+//! prints what Lighthouse concludes about a page, and
+//! `cargo test -p ferridriver-perf --test lighthouse` compares these
+//! verdicts against recorded ones for the fixture pages.
 //!
-//! The rest of that group -- `is-on-https`, `csp-xss`, `has-hsts`,
-//! `canonical`, `is-crawlable`, `http-status-code` -- need a network
-//! log, which means navigation mode, and are not here.
+//! Eight of the ten read nothing but the DOM. [`http_status_code`] and
+//! [`is_crawlable`] also need the main document's own response, and
+//! `is-crawlable` needs `/robots.txt` as well, so both return `None`
+//! when [`Artifacts::main_document`] was not filled in --
+//! `check_page_quality` leaves the audit out of the report rather than
+//! guessing, which is what Lighthouse's `notApplicable` amounts to.
+//!
+//! Still missing from the group: `is-on-https`, `csp-xss` and
+//! `has-hsts`. The last two score `informative` in Lighthouse, so there
+//! is no verdict for the recorded gate to compare against.
 //!
 //! # The one place this cannot see what Lighthouse sees
 //!
@@ -35,11 +41,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{FerriError, Result};
 
-/// Which audits to run. Empty runs all seven.
+pub mod robots;
+
+/// Which audits to run. Empty runs all ten.
 #[derive(Debug, Clone, Default)]
 pub struct PageQualityOptions {
   /// Audit ids to run, e.g. `meta-description`. Empty runs every one.
   pub only: Vec<String>,
+}
+
+impl PageQualityOptions {
+  /// Whether `id` is in the run. Also decides what
+  /// `check_page_quality` has to collect beyond the DOM: narrowing to
+  /// audits that need neither the main document nor `/robots.txt`
+  /// leaves both uncollected.
+  #[must_use]
+  pub fn wants(&self, id: &str) -> bool {
+    self.only.is_empty() || self.only.iter().any(|want| want == id)
+  }
 }
 
 /// Which Lighthouse category an audit belongs to.
@@ -127,6 +146,56 @@ pub struct Artifacts {
   /// The document's own URL, which both anchor audits resolve against.
   #[serde(default)]
   pub url: String,
+  /// The response that produced the current document. Not gathered from
+  /// the page -- nothing page-side can read a status or a response
+  /// header -- so `check_page_quality` fills it in from the context's
+  /// network log and it is `None` for a document that arrived without
+  /// one (`about:blank`, `setContent`, a log that has since lapped).
+  #[serde(default)]
+  pub main_document: Option<MainDocument>,
+  /// `/robots.txt` for the document's origin, fetched only when
+  /// `is-crawlable` is in the run.
+  #[serde(default)]
+  pub robots_txt: Option<RobotsTxt>,
+}
+
+/// The main document's own response, which is where both the status and
+/// `X-Robots-Tag` live.
+///
+/// Lighthouse reads it out of the `DevtoolsLog` the same way
+/// (`core/computed/main-resource.js`): the LAST document request whose
+/// URL matches the document's, so a `location.reload()` and a redirect
+/// chain both resolve to the response actually on screen.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainDocument {
+  pub url: String,
+  pub status_code: i64,
+  /// In wire order, duplicates preserved where the engine preserves
+  /// them: `X-Robots-Tag` is a header a server sends more than once,
+  /// and each copy is its own directive.
+  ///
+  /// Gecko joins repeated response headers before `WebDriver` `BiDi`
+  /// sees them, so on Firefox a header sent twice arrives as one entry
+  /// holding both values (Playwright's own `BiDi` backend is in the
+  /// same position). It changes how many items `is-crawlable` reports
+  /// and not what it concludes, because a comma already separates
+  /// directives within one value.
+  pub response_headers: Vec<crate::network::HeaderEntry>,
+}
+
+/// What `/robots.txt` answered, in the shape Lighthouse's `RobotsTxt`
+/// gatherer produces.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RobotsTxt {
+  /// `None` when the request could not be made at all.
+  #[serde(default)]
+  pub status: Option<i64>,
+  /// Only present for a 2xx: Lighthouse's fetcher discards the body of
+  /// anything else, so a 404 page's HTML is never parsed as rules.
+  #[serde(default)]
+  pub content: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -145,6 +214,12 @@ pub struct Meta {
   /// Lowercased, as Lighthouse's gatherer lowercases it.
   pub name: String,
   pub content: String,
+  /// `is-crawlable` reports the offending element, so a `<meta>` needs
+  /// the same locating pair every other artifact carries.
+  #[serde(default)]
+  pub selector: String,
+  #[serde(default)]
+  pub snippet: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -292,6 +367,8 @@ const GATHER: &str = r"
   const metas = [...document.querySelectorAll('head meta')].map(meta => ({
     name: (meta.name || '').toLowerCase(),
     content: meta.content || '',
+    selector: selectorFor(meta),
+    snippet: snippetFor(meta),
   }));
 
   // Lighthouse's own rule for which lang applies to a link's text: one
@@ -400,8 +477,9 @@ pub fn parse_artifacts(payload: &str) -> Result<Artifacts> {
 // ── The audits ──────────────────────────────────────────────────────────
 
 /// Every audit id this module implements, in the order they are
-/// reported.
-pub const AUDIT_IDS: [&str; 8] = [
+/// reported. The last two come last because they are the two that need
+/// more than the DOM, and so the two a report can be missing.
+pub const AUDIT_IDS: [&str; 10] = [
   "doctype",
   "meta-description",
   "canonical",
@@ -410,36 +488,43 @@ pub const AUDIT_IDS: [&str; 8] = [
   "image-aspect-ratio",
   "image-size-responsive",
   "paste-preventing-inputs",
+  "http-status-code",
+  "is-crawlable",
 ];
 
 /// Run the audits over gathered artifacts.
 #[must_use]
 pub fn run(artifacts: &Artifacts, options: &PageQualityOptions) -> PageQualityReport {
-  let wanted = |id: &str| options.only.is_empty() || options.only.iter().any(|want| want == id);
   let mut audits = Vec::new();
-  if wanted("doctype") {
+  if options.wants("doctype") {
     audits.push(doctype(artifacts));
   }
-  if wanted("meta-description") {
+  if options.wants("meta-description") {
     audits.push(meta_description(artifacts));
   }
-  if wanted("canonical") {
+  if options.wants("canonical") {
     audits.push(canonical(artifacts));
   }
-  if wanted("crawlable-anchors") {
+  if options.wants("crawlable-anchors") {
     audits.push(crawlable_anchors(artifacts));
   }
-  if wanted("link-text") {
+  if options.wants("link-text") {
     audits.push(link_text(artifacts));
   }
-  if wanted("image-aspect-ratio") {
+  if options.wants("image-aspect-ratio") {
     audits.push(image_aspect_ratio(artifacts));
   }
-  if wanted("image-size-responsive") {
+  if options.wants("image-size-responsive") {
     audits.push(image_size_responsive(artifacts));
   }
-  if wanted("paste-preventing-inputs") {
+  if options.wants("paste-preventing-inputs") {
     audits.push(paste_preventing_inputs(artifacts));
+  }
+  if options.wants("http-status-code") {
+    audits.extend(http_status_code(artifacts));
+  }
+  if options.wants("is-crawlable") {
+    audits.extend(is_crawlable(artifacts));
   }
   PageQualityReport { audits }
 }
@@ -1198,9 +1283,382 @@ pub fn paste_preventing_inputs(artifacts: &Artifacts) -> AuditResult {
   }
 }
 
+/// `http-status-code`: the main document did not answer 4xx or 5xx.
+///
+/// `None` when no main-document response is known, which is the whole
+/// of the difficulty: the arithmetic is a range check, and the status
+/// is the part that has to be carried here from the network log.
+///
+/// Ported from `core/audits/seo/http-status-code.js`.
+#[must_use]
+pub fn http_status_code(artifacts: &Artifacts) -> Option<AuditResult> {
+  const ID: &str = "http-status-code";
+  const PASS: &str = "Page has successful HTTP status code";
+  const FAIL: &str = "Page has unsuccessful HTTP status code";
+  let category = AuditCategory::Seo;
+
+  let status = artifacts.main_document.as_ref()?.status_code;
+  Some(if (400..=599).contains(&status) {
+    failed(ID, category, FAIL, Some(&status.to_string()), Vec::new())
+  } else {
+    passed(ID, category, PASS)
+  })
+}
+
+/// The crawlers `is-crawlable` asks about. `None` is the generic one,
+/// which reads the `robots` meta and an unprefixed `X-Robots-Tag`.
+const BOT_USER_AGENTS: [Option<&str>; 5] = [
+  None,
+  Some("Googlebot"),
+  Some("bingbot"),
+  Some("DuckDuckBot"),
+  Some("archive.org_bot"),
+];
+
+/// Directives that keep a page out of an index.
+const BLOCKLIST: [&str; 2] = ["noindex", "none"];
+
+const ROBOTS_HEADER: &str = "x-robots-tag";
+const UNAVAILABLE_AFTER: &str = "unavailable_after";
+
+/// `is-crawlable`: at least one crawler may still index the page.
+///
+/// Three sources can block, and the audit only fails when ALL FIVE bots
+/// are blocked by at least one of them: a `robots` meta (or one named
+/// for a specific bot), an `X-Robots-Tag` response header (optionally
+/// prefixed with a user agent), and `/robots.txt`. Reporting only the
+/// meta would pass pages the other two block, silently, which is why
+/// this waited for the response headers and the fetch to exist.
+///
+/// `None` when no main-document response is known: two of the three
+/// sources are then unreadable, and a verdict from the third alone is
+/// the wrong answer rather than a partial one.
+///
+/// Ported from `core/audits/seo/is-crawlable.js`; the `robots.txt`
+/// half is [`robots`].
+#[must_use]
+pub fn is_crawlable(artifacts: &Artifacts) -> Option<AuditResult> {
+  const ID: &str = "is-crawlable";
+  const PASS: &str = "Page isn’t blocked from indexing";
+  const FAIL: &str = "Page is blocked from indexing";
+  let category = AuditCategory::Seo;
+
+  let main = artifacts.main_document.as_ref()?;
+  let parsed = artifacts
+    .robots_txt
+    .as_ref()
+    .and_then(|file| file.content.as_ref())
+    .zip(robots_txt_url(&main.url))
+    .map(|(content, url)| (robots::Robots::parse(&url, content), url));
+
+  let mut blocked = 0usize;
+  let mut generic = Vec::new();
+  for user_agent in BOT_USER_AGENTS {
+    let directives = blocking_directives(user_agent, artifacts, main, parsed.as_ref());
+    if !directives.is_empty() {
+      blocked += 1;
+    }
+    if user_agent.is_none() {
+      generic = directives;
+    }
+  }
+
+  Some(if blocked == BOT_USER_AGENTS.len() {
+    failed(ID, category, FAIL, None, generic)
+  } else {
+    passed(ID, category, PASS)
+  })
+}
+
+/// Everything blocking `user_agent`, as the elements and lines that did it.
+fn blocking_directives(
+  user_agent: Option<&str>,
+  artifacts: &Artifacts,
+  main: &MainDocument,
+  robots: Option<&(robots::Robots, String)>,
+) -> Vec<AuditItem> {
+  let mut items = Vec::new();
+
+  // A meta named for this bot wins over the generic one, and only one
+  // of the two is consulted -- so `<meta name="googlebot" content="all">`
+  // lifts a `<meta name="robots" content="noindex">` for Googlebot.
+  let named = user_agent.and_then(|agent| {
+    let lowered = agent.to_lowercase();
+    artifacts.metas.iter().find(|meta| meta.name == lowered)
+  });
+  if let Some(meta) = named.or_else(|| artifacts.metas.iter().find(|meta| meta.name == "robots"))
+    && has_blocking_directive(&meta.content)
+  {
+    items.push(AuditItem {
+      selector: meta.selector.clone(),
+      snippet: format!("<meta name=\"{}\" content=\"{}\" />", meta.name, meta.content),
+      detail: meta.content.clone(),
+    });
+  }
+
+  for header in &main.response_headers {
+    if !header.name.eq_ignore_ascii_case(ROBOTS_HEADER) {
+      continue;
+    }
+    // A prefix naming a DIFFERENT bot is not this bot's business; no
+    // prefix at all applies to every bot.
+    let prefix = header_directive_user_agent(&header.value);
+    if prefix.is_some() && prefix != user_agent.map(str::to_string) {
+      continue;
+    }
+    let directives = match user_agent {
+      Some(agent) if header.value.starts_with(&format!("{agent}:")) => {
+        header.value.replacen(&format!("{agent}:"), "", 1)
+      },
+      _ => header.value.trim().to_string(),
+    };
+    if !has_blocking_directive(&directives) {
+      continue;
+    }
+    items.push(AuditItem {
+      selector: String::new(),
+      snippet: format!("{}: {}", header.name, header.value),
+      detail: header.value.clone(),
+    });
+  }
+
+  if let Some((robots, url)) = robots
+    // A URL this file does not govern answers `None`, which the audit
+    // reads as blocking -- upstream negates `undefined` and lands in
+    // the same place.
+    && robots.is_allowed(&main.url, user_agent) != Some(true)
+  {
+    // Looked up against the generic agent's rules whichever bot was
+    // asked about, matching upstream's argument-less call.
+    let line = robots.matching_line_number(&main.url, None);
+    items.push(AuditItem {
+      selector: String::new(),
+      snippet: url.clone(),
+      detail: format!("line {line}"),
+    });
+  }
+
+  items
+}
+
+/// `<meta name="robots" content="noindex, nofollow">`: any one directive
+/// in the list can block.
+fn has_blocking_directive(directives: &str) -> bool {
+  directives.split(',').map(str::to_lowercase).any(|directive| {
+    let directive = directive.trim();
+    BLOCKLIST.contains(&directive) || is_unavailable(directive)
+  })
+}
+
+/// `unavailable_after: <date>` blocks once that date has passed.
+fn is_unavailable(directive: &str) -> bool {
+  let Some((field, date)) = directive.split_once(':') else {
+    return false;
+  };
+  if field != UNAVAILABLE_AFTER {
+    return false;
+  }
+  let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
+  parse_directive_date(date).is_some_and(|when| when < now)
+}
+
+/// Seconds since the epoch for the date formats `unavailable_after` is
+/// written in.
+///
+/// `Date.parse`, which is what upstream calls, is specified only for
+/// ISO 8601; every engine layers its own dialect on top and none of
+/// that is portable. Both formats anyone writes are here: ISO 8601, and
+/// the RFC 1123 shape Google's own documentation uses
+/// (`25 Jun 2010 15:00:00 PST`), with the weekday optional. Anything
+/// else answers `None`, and an unparseable date does not block
+/// upstream either.
+///
+/// A date carrying no zone is read as UTC. `Date.parse` reads it as
+/// local time, which would make the verdict depend on the machine's
+/// timezone; the difference can only matter for a date within a day of
+/// now.
+fn parse_directive_date(value: &str) -> Option<i64> {
+  let value = value.trim().to_lowercase();
+  parse_iso_8601(&value).or_else(|| parse_rfc_1123(&value))
+}
+
+const MONTHS: [&str; 12] = [
+  "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+];
+
+/// `2010-06-25`, optionally `T15:00:00` and a zone.
+fn parse_iso_8601(value: &str) -> Option<i64> {
+  let (date, rest) = match value.find(['t', ' ']) {
+    Some(at) => (&value[..at], &value[at + 1..]),
+    None => (value, ""),
+  };
+  let mut parts = date.split('-');
+  let year: i64 = parts.next()?.parse().ok()?;
+  let month: i64 = parts.next()?.parse().ok()?;
+  let day: i64 = parts.next()?.parse().ok()?;
+  if parts.next().is_some() || !(1..=12).contains(&month) {
+    return None;
+  }
+
+  let (time, zone) = split_zone(rest);
+  let seconds = if time.is_empty() { 0 } else { parse_time(time)? };
+  Some(days_from_civil(year, month, day) * 86_400 + seconds - zone_offset(zone)?)
+}
+
+/// `[sun,] 25 jun 2010 15:00:00 pst`.
+fn parse_rfc_1123(value: &str) -> Option<i64> {
+  let flattened = value.replace(',', " ");
+  let mut tokens = flattened.split_whitespace().peekable();
+  if !tokens.peek()?.starts_with(|c: char| c.is_ascii_digit()) {
+    tokens.next();
+  }
+  let day: i64 = tokens.next()?.parse().ok()?;
+  let name = tokens.next()?;
+  let month = i64::try_from(MONTHS.iter().position(|m| name.starts_with(m))?).ok()? + 1;
+  let year: i64 = tokens.next()?.parse().ok()?;
+  let seconds = match tokens.next() {
+    Some(time) => parse_time(time)?,
+    None => 0,
+  };
+  Some(days_from_civil(year, month, day) * 86_400 + seconds - zone_offset(tokens.next().unwrap_or(""))?)
+}
+
+/// Split a time from the zone that may follow it with no separator
+/// (`15:00:00z`, `15:00:00+01:00`).
+fn split_zone(value: &str) -> (&str, &str) {
+  match value.find(['z', '+']).or_else(|| value.rfind('-')) {
+    Some(at) => (&value[..at], &value[at..]),
+    None => (value, ""),
+  }
+}
+
+/// `hh:mm` or `hh:mm:ss`, with any fractional seconds discarded.
+fn parse_time(value: &str) -> Option<i64> {
+  let value = value.split('.').next()?;
+  let mut parts = value.split(':');
+  let hours: i64 = parts.next()?.trim().parse().ok()?;
+  let minutes: i64 = parts.next()?.parse().ok()?;
+  let seconds: i64 = match parts.next() {
+    Some(s) => s.parse().ok()?,
+    None => 0,
+  };
+  Some(hours * 3600 + minutes * 60 + seconds)
+}
+
+/// The zone abbreviations RFC 2822 lists as obsolete and still in use,
+/// against the hours to SUBTRACT from a local reading to reach UTC.
+const NAMED_ZONES: [(&str, i64); 13] = [
+  ("", 0),
+  ("z", 0),
+  ("ut", 0),
+  ("utc", 0),
+  ("gmt", 0),
+  ("est", -5),
+  ("edt", -4),
+  ("cst", -6),
+  ("cdt", -5),
+  ("mst", -7),
+  ("mdt", -6),
+  ("pst", -8),
+  ("pdt", -7),
+];
+
+/// Seconds to subtract from a local reading to reach UTC.
+fn zone_offset(zone: &str) -> Option<i64> {
+  let zone = zone.trim();
+  match NAMED_ZONES.iter().find(|(name, _)| *name == zone) {
+    Some((_, hours)) => Some(hours * 3600),
+    None => parse_numeric_zone(zone),
+  }
+}
+
+/// `+0100`, `-08:00`.
+fn parse_numeric_zone(zone: &str) -> Option<i64> {
+  let (sign, rest) = match zone.strip_prefix('+') {
+    Some(rest) => (1, rest),
+    None => (-1, zone.strip_prefix('-')?),
+  };
+  let digits: String = rest.chars().filter(char::is_ascii_digit).collect();
+  if digits.len() != 4 {
+    return None;
+  }
+  let hours: i64 = digits[..2].parse().ok()?;
+  let minutes: i64 = digits[2..].parse().ok()?;
+  Some(sign * (hours * 3600 + minutes * 60))
+}
+
+/// Days from 1970-01-01 to `y-m-d`, by Howard Hinnant's `days_from_civil`.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+  let year = if month <= 2 { year - 1 } else { year };
+  let era = if year >= 0 { year } else { year - 399 } / 400;
+  let year_of_era = year - era * 400;
+  let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+  let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+  era * 146_097 + day_of_era - 719_468
+}
+
+/// The `googlebot` in `X-Robots-Tag: googlebot: noindex`, if there is
+/// one. `unavailable_after:` looks the same and is not one.
+fn header_directive_user_agent(value: &str) -> Option<String> {
+  // Upstream's `/^([^,:]+):/`: at least one character, none of them a
+  // comma, then a colon.
+  let head = value.split(':').next()?;
+  if head.is_empty() || head.len() == value.len() || head.contains(',') {
+    return None;
+  }
+  if head.eq_ignore_ascii_case(UNAVAILABLE_AFTER) {
+    return None;
+  }
+  Some(head.to_string())
+}
+
+/// `/robots.txt` on `document_url`'s origin, when that origin can
+/// serve one at all. `about:blank` and `data:` documents cannot, and
+/// neither can a page opened from disk.
+#[must_use]
+pub fn robots_txt_url(document_url: &str) -> Option<String> {
+  let base = reqwest::Url::parse(document_url).ok()?;
+  if !matches!(base.scheme(), "http" | "https") {
+    return None;
+  }
+  base.join("/robots.txt").ok().map(String::from)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn meta(name: &str, content: &str) -> Meta {
+    Meta {
+      name: name.into(),
+      content: content.into(),
+      selector: format!("meta[name={name}]"),
+      snippet: format!("<meta name=\"{name}\" content=\"{content}\">"),
+    }
+  }
+
+  fn header(name: &str, value: &str) -> crate::network::HeaderEntry {
+    crate::network::HeaderEntry {
+      name: name.into(),
+      value: value.into(),
+    }
+  }
+
+  /// Artifacts for a page that arrived over HTTP with `status` and
+  /// `headers`, and nothing else worth auditing.
+  fn served(status: i64, headers: Vec<crate::network::HeaderEntry>) -> Artifacts {
+    Artifacts {
+      url: "https://example.com/page".into(),
+      main_document: Some(MainDocument {
+        url: "https://example.com/page".into(),
+        status_code: status,
+        response_headers: headers,
+      }),
+      ..Artifacts::default()
+    }
+  }
 
   fn anchor(raw_href: &str, attribute_names: &[&str]) -> Anchor {
     Anchor {
@@ -1260,10 +1718,7 @@ mod tests {
   #[test]
   fn a_whitespace_only_meta_description_fails_with_its_own_explanation() {
     let report = meta_description(&Artifacts {
-      metas: vec![Meta {
-        name: "description".into(),
-        content: "   ".into(),
-      }],
+      metas: vec![meta("description", "   ")],
       ..Artifacts::default()
     });
     assert!(!report.passed);
@@ -1560,8 +2015,8 @@ mod tests {
 
   #[test]
   fn only_narrows_the_run_and_an_empty_list_runs_everything() {
-    let all = run(&Artifacts::default(), &PageQualityOptions::default());
-    assert_eq!(all.audits.len(), AUDIT_IDS.len());
+    let all = run(&served(200, Vec::new()), &PageQualityOptions::default());
+    assert_eq!(all.audits.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), AUDIT_IDS);
 
     let one = run(
       &Artifacts::default(),
@@ -1579,5 +2034,172 @@ mod tests {
     assert_eq!(guess_mime_type("data:image/svg+xml;base64,AAA"), Some("image/svg+xml"));
     assert_eq!(guess_mime_type("https://example.com/a.PNG"), Some("image/png"));
     assert_eq!(guess_mime_type("https://example.com/a"), None);
+  }
+
+  // -- http-status-code --------------------------------------------------
+
+  #[test]
+  fn only_the_four_hundreds_and_five_hundreds_fail_the_status_audit() {
+    for status in [200, 204, 301, 302, 399, 600] {
+      let report = http_status_code(&served(status, Vec::new())).expect("a status is known");
+      assert!(report.passed, "{status} should pass");
+    }
+    for status in [400, 404, 451, 500, 599] {
+      let report = http_status_code(&served(status, Vec::new())).expect("a status is known");
+      assert!(!report.passed, "{status} should fail");
+      assert_eq!(report.explanation.as_deref(), Some(status.to_string().as_str()));
+    }
+  }
+
+  #[test]
+  fn a_document_that_arrived_without_a_response_is_not_scored() {
+    // `setContent` and `about:blank` both land here. Reporting a pass
+    // would claim a status nothing observed.
+    assert!(http_status_code(&Artifacts::default()).is_none());
+    assert!(is_crawlable(&Artifacts::default()).is_none());
+  }
+
+  // -- is-crawlable ------------------------------------------------------
+
+  fn crawlable(artifacts: &Artifacts) -> AuditResult {
+    is_crawlable(artifacts).expect("a main document is known")
+  }
+
+  #[test]
+  fn a_page_with_nothing_blocking_it_is_crawlable() {
+    assert!(crawlable(&served(200, Vec::new())).passed);
+  }
+
+  #[test]
+  fn a_robots_meta_saying_noindex_blocks_every_bot() {
+    let mut artifacts = served(200, Vec::new());
+    artifacts.metas = vec![meta("robots", "noindex, nofollow")];
+    let report = crawlable(&artifacts);
+    assert!(!report.passed);
+    assert_eq!(report.items.len(), 1);
+    assert_eq!(report.items[0].selector, "meta[name=robots]");
+  }
+
+  #[test]
+  fn a_bot_specific_meta_lifts_the_generic_one_for_that_bot_alone() {
+    // Only one meta is consulted per bot, so `googlebot` naming itself
+    // replaces `robots` rather than adding to it -- one bot left
+    // crawling is enough to pass.
+    let mut artifacts = served(200, Vec::new());
+    artifacts.metas = vec![meta("robots", "noindex"), meta("googlebot", "all")];
+    assert!(crawlable(&artifacts).passed);
+  }
+
+  #[test]
+  fn an_unprefixed_robots_header_blocks_and_a_prefixed_one_blocks_its_own_bot() {
+    let blocked = crawlable(&served(200, vec![header("X-Robots-Tag", "noindex")]));
+    assert!(!blocked.passed);
+    assert_eq!(blocked.items.len(), 1);
+    assert_eq!(blocked.items[0].snippet, "X-Robots-Tag: noindex");
+
+    // Googlebot is blocked, the other four are not, so the page passes.
+    let one_bot = crawlable(&served(200, vec![header("X-Robots-Tag", "Googlebot: noindex")]));
+    assert!(one_bot.passed);
+    assert!(one_bot.items.is_empty());
+  }
+
+  #[test]
+  fn every_bot_blocked_by_its_own_header_still_fails() {
+    let headers = BOT_USER_AGENTS
+      .iter()
+      .map(|agent| match agent {
+        Some(agent) => header("X-Robots-Tag", &format!("{agent}: noindex")),
+        None => header("X-Robots-Tag", "noindex"),
+      })
+      .collect();
+    let report = crawlable(&served(200, headers));
+    assert!(!report.passed);
+    // The report lists what blocks the GENERIC agent, which is the one
+    // unprefixed header and not the four aimed at named bots.
+    assert_eq!(report.items.len(), 1);
+  }
+
+  #[test]
+  fn unavailable_after_blocks_once_the_date_has_gone_by() {
+    let past = crawlable(&served(
+      200,
+      vec![header("X-Robots-Tag", "unavailable_after: 25 Jun 2010 15:00:00 PST")],
+    ));
+    assert!(!past.passed);
+
+    let future = crawlable(&served(
+      200,
+      vec![header("X-Robots-Tag", "unavailable_after: 25 Jun 2999 15:00:00 PST")],
+    ));
+    assert!(future.passed);
+
+    // `unavailable_after:` reads like a user-agent prefix and is not
+    // one; mistaking it for one would skip the directive for every bot.
+    assert_eq!(header_directive_user_agent("unavailable_after: 25 Jun 2010"), None);
+    assert_eq!(
+      header_directive_user_agent("Googlebot: noindex"),
+      Some("Googlebot".to_string())
+    );
+    assert_eq!(header_directive_user_agent("noindex"), None);
+    assert_eq!(header_directive_user_agent("noindex, nofollow: x"), None);
+  }
+
+  #[test]
+  fn both_written_date_formats_parse_and_an_unreadable_one_does_not_block() {
+    // 2010-06-25T15:00:00-08:00 is 23:00 UTC.
+    assert_eq!(parse_directive_date("2010-06-25t15:00:00-08:00"), Some(1_277_506_800));
+    assert_eq!(parse_directive_date("25 jun 2010 15:00:00 pst"), Some(1_277_506_800));
+    assert_eq!(
+      parse_directive_date("fri, 25 jun 2010 23:00:00 gmt"),
+      Some(1_277_506_800)
+    );
+    assert_eq!(parse_directive_date("2010-06-25"), Some(1_277_424_000));
+    assert_eq!(parse_directive_date("the day after tomorrow"), None);
+    assert!(!is_unavailable("unavailable_after: never"));
+  }
+
+  #[test]
+  fn a_robots_txt_disallowing_the_page_blocks_every_bot() {
+    let mut artifacts = served(200, Vec::new());
+    artifacts.robots_txt = Some(RobotsTxt {
+      status: Some(200),
+      content: Some("User-agent: *\nDisallow: /page".into()),
+    });
+    let report = crawlable(&artifacts);
+    assert!(!report.passed);
+    assert_eq!(report.items.len(), 1);
+    assert_eq!(report.items[0].snippet, "https://example.com/robots.txt");
+    assert_eq!(report.items[0].detail, "line 2");
+  }
+
+  #[test]
+  fn a_robots_txt_that_leaves_one_bot_alone_does_not_fail_the_page() {
+    let mut artifacts = served(200, Vec::new());
+    artifacts.robots_txt = Some(RobotsTxt {
+      status: Some(200),
+      content: Some("User-agent: *\nDisallow: /\n\nUser-agent: bingbot\nDisallow:".into()),
+    });
+    assert!(crawlable(&artifacts).passed);
+  }
+
+  #[test]
+  fn a_robots_txt_that_was_not_served_blocks_nothing() {
+    let mut artifacts = served(200, Vec::new());
+    artifacts.robots_txt = Some(RobotsTxt {
+      status: Some(404),
+      content: None,
+    });
+    assert!(crawlable(&artifacts).passed);
+  }
+
+  #[test]
+  fn robots_txt_sits_at_the_origin_root_or_nowhere() {
+    assert_eq!(
+      robots_txt_url("https://example.com/a/b?c=d#e").as_deref(),
+      Some("https://example.com/robots.txt")
+    );
+    assert_eq!(robots_txt_url("about:blank"), None);
+    assert_eq!(robots_txt_url("data:text/html,<p>x</p>"), None);
+    assert_eq!(robots_txt_url("not a url"), None);
   }
 }

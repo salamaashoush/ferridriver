@@ -203,6 +203,16 @@ fn fx_redirect(location: &str) -> Response<Body> {
   fx_build(302, "text/plain", Vec::new(), &[("location", location.to_string())])
 }
 
+/// A page sound enough that `checkPageQuality()` fails it on nothing
+/// except whatever the route serving it did to the response.
+fn fx_auditable(heading: &str) -> String {
+  format!(
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+     <title>{heading}</title><meta name=\"description\" content=\"A page the quality audits pass.\">\
+     </head><body><main><h1>{heading}</h1></main></body></html>"
+  )
+}
+
 /// Body compressed with one of the four HTTP content codings, served
 /// with the matching `Content-Encoding`. The plaintext embeds the
 /// `Accept-Encoding` the request carried, so one assertion covers both
@@ -539,7 +549,47 @@ async fn handle_fx(
       }
       fx_json(&serde_json::json!({"hits": lines.len(), "lines": *lines}))
     },
-    _ => fx_build(404, "text/plain", b"unknown fixture route".to_vec(), &[]),
+    _ => fx_page_quality(&path, query.as_deref()).unwrap_or_else(fx_unknown_route),
+  }
+}
+
+fn fx_unknown_route() -> Response<Body> {
+  fx_build(404, "text/plain", b"unknown fixture route".to_vec(), &[])
+}
+
+/// The routes `page.checkPageQuality()` needs, which are the ones where
+/// the RESPONSE rather than the page is what an audit reads.
+fn fx_page_quality(path: &str, query: Option<&str>) -> Option<Response<Body>> {
+  // `http-status-code` reads the main document's status and nothing
+  // else, so a page has to be servable with an arbitrary one.
+  if let Some(code) = path.strip_prefix("status/") {
+    let code = code.parse::<u16>().ok()?;
+    return Some(fx_build(
+      code,
+      "text/html",
+      fx_auditable("Served with a status").into_bytes(),
+      &[],
+    ));
+  }
+  match path {
+    // Each `?tag=` becomes its own `X-Robots-Tag`: a repeated header is
+    // one directive apiece, and `is-crawlable` reads them separately.
+    "robots-header" => {
+      let tags: Vec<(&str, String)> = query_values(query, "tag")
+        .into_iter()
+        .map(|tag| ("x-robots-tag", tag))
+        .collect();
+      Some(fx_build(
+        200,
+        "text/html",
+        fx_auditable("Blocked by a header").into_bytes(),
+        &tags,
+      ))
+    },
+    // The path `tests/assets/robots.txt` disallows. Nothing on the page
+    // objects to being indexed; the file does.
+    "robots-blocked" => Some(fx_html(&fx_auditable("Disallowed by robots.txt"))),
+    _ => None,
   }
 }
 

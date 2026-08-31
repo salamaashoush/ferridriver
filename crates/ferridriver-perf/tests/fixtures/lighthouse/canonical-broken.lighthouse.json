@@ -92,6 +92,10 @@
    "mode": "binary",
    "score": 1
   },
+  "robots-txt": {
+   "mode": "binary",
+   "score": 1
+  },
   "structured-data": {
    "mode": "manual",
    "score": null

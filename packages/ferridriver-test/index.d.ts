@@ -777,7 +777,7 @@ export interface AccessibilityReport {
 export interface PageQualityOptions {
   /**
    * Lighthouse audit ids to run, e.g. `meta-description`. Omitted or
-   * empty runs all seven.
+   * empty runs all ten.
    */
   only?: string[];
 }
@@ -809,7 +809,14 @@ export interface PageAuditResult {
   items: PageAuditItem[];
 }
 
-/** What the seven live-DOM Lighthouse audits concluded. */
+/**
+ * What the live-page Lighthouse audits concluded.
+ *
+ * Eight of the ten read nothing but the DOM. `http-status-code` and
+ * `is-crawlable` also read the main document's own response, and are
+ * absent from `audits` for a document that arrived without one --
+ * `about:blank`, `setContent`, or a page opened outside a context.
+ */
 export interface PageQualityReport {
   audits: PageAuditResult[];
 }

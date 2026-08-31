@@ -122,7 +122,7 @@ impl From<ferridriver::accessibility::AccessibilityReport> for AccessibilityRepo
 #[derive(Debug, Clone, Default)]
 pub struct PageQualityOptions {
   /// Lighthouse audit ids to run, e.g. `meta-description`. Omitted or
-  /// empty runs all seven.
+  /// empty runs all ten.
   pub only: Option<Vec<String>>,
 }
 
@@ -164,7 +164,11 @@ pub struct PageAuditResult {
   pub items: Vec<PageAuditItem>,
 }
 
-/// What the seven live-DOM Lighthouse audits concluded.
+/// What the live-page Lighthouse audits concluded.
+///
+/// Eight of the ten read nothing but the DOM. `http-status-code` and
+/// `is-crawlable` also read the main document's own response, and are
+/// absent for a document that arrived without one.
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct PageQualityReport {

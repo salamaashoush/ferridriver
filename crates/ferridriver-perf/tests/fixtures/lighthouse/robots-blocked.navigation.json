@@ -9,17 +9,7 @@
    "score": 1
   },
   "baseline": {
-   "itemCount": 1,
-   "items": [],
    "mode": "informative",
-   "score": 1
-  },
-  "button-name": {
-   "mode": "binary",
-   "score": 1
-  },
-  "canonical": {
-   "mode": "binary",
    "score": 1
   },
   "charset": {
@@ -117,21 +107,13 @@
    "mode": "binary",
    "score": 1
   },
-  "image-alt": {
-   "mode": "binary",
-   "score": 1
-  },
   "image-aspect-ratio": {
    "mode": "binary",
    "score": 1
   },
   "image-size-responsive": {
-   "itemCount": 1,
-   "items": [
-    "body > main > img"
-   ],
    "mode": "binary",
-   "score": 0
+   "score": 1
   },
   "inspector-issues": {
    "mode": "binary",
@@ -142,14 +124,14 @@
    "score": null
   },
   "is-crawlable": {
+   "itemCount": 1,
+   "items": [
+    "http://fixture/robots.txt"
+   ],
    "mode": "binary",
-   "score": 1
+   "score": 0
   },
   "is-on-https": {
-   "mode": "binary",
-   "score": 1
-  },
-  "label": {
    "mode": "binary",
    "score": 1
   },
@@ -157,19 +139,7 @@
    "mode": "binary",
    "score": 1
   },
-  "link-name": {
-   "mode": "binary",
-   "score": 1
-  },
   "link-text": {
-   "mode": "binary",
-   "score": 1
-  },
-  "list": {
-   "mode": "binary",
-   "score": 1
-  },
-  "listitem": {
    "mode": "binary",
    "score": 1
   },
@@ -182,10 +152,6 @@
    "score": null
   },
   "meta-description": {
-   "mode": "binary",
-   "score": 1
-  },
-  "meta-viewport": {
    "mode": "binary",
    "score": 1
   },
@@ -211,29 +177,9 @@
    "mode": "binary",
    "score": 1
   },
-  "select-name": {
-   "mode": "binary",
-   "score": 1
-  },
   "structured-data": {
    "mode": "manual",
    "score": null
-  },
-  "table-fake-caption": {
-   "mode": "binary",
-   "score": 1
-  },
-  "target-size": {
-   "mode": "binary",
-   "score": 1
-  },
-  "td-has-header": {
-   "mode": "binary",
-   "score": 1
-  },
-  "td-headers-attr": {
-   "mode": "binary",
-   "score": 1
   },
   "third-party-cookies": {
    "mode": "binary",
@@ -338,5 +284,5 @@
  ],
  "lighthouse": "13.4.1",
  "mode": "navigation",
- "page": "clean.html"
+ "page": "robots-blocked.html"
 }

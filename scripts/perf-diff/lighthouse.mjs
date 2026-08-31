@@ -32,8 +32,14 @@ if (!url || !executablePath) {
 const browser = await puppeteer.launch({ executablePath, headless: true, args: ['--no-sandbox'] });
 try {
   const page = await browser.newPage();
+  // `ignoreStatusCode` keeps a 4xx page auditable. Without it Lighthouse
+  // treats an error status as a failed run (`ERRORED_DOCUMENT_REQUEST`)
+  // and every audit comes back `mode: "error"` with no score -- which
+  // would leave `http-status-code`'s own failing branch with nothing to
+  // compare against. It changes nothing for a page that answered 200:
+  // the check it disables is only reached by a status of 400 or more.
   const { lhr } = navigate
-    ? await navigation(page, url, { flags: { output: 'json' } })
+    ? await navigation(page, url, { flags: { output: 'json', ignoreStatusCode: true } })
     : await (async () => {
         await page.goto(url, { waitUntil: 'networkidle0' });
         return snapshot(page, { flags: { output: 'json' } });

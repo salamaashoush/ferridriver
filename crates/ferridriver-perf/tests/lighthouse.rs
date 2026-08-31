@@ -21,7 +21,7 @@
 //!
 //! # Page quality
 //!
-//! The seven audits that score a live DOM, ported in
+//! The ten audits that score a live page, ported in
 //! `ferridriver::audits`. This is the comparison with no shared engine
 //! underneath: both sides are separate implementations of the same
 //! arithmetic, so nothing agrees by construction. Verdicts and element
@@ -38,10 +38,16 @@
 //! and `scripts/perf-diff/record-lighthouse.py` with no argument proves
 //! they have not drifted.
 //!
-//! Three pages, each broken in one dimension and sound in the other, so
+//! Each page is broken in one dimension and sound in the others, so
 //! neither comparison can agree because both sides found nothing. That
 //! is what the first two fixtures were doing: seven rules compared, all
-//! seven passing.
+//! seven passing. `is-crawlable` gets three pages of its own for the
+//! same reason -- it has three independent blocking sources, and a page
+//! tripping all three would agree whichever two went unread.
+//!
+//! Two of the pages are not just a page: a `<name>.http` sidecar gives
+//! the status and headers the fixture is served with, and both this
+//! server and the recorder's read it, so the two cannot drift.
 //!
 //! Needs a Chromium and axe-core on disk:
 //! `ferridriver install chromium axe`.
@@ -116,6 +122,26 @@ fn recording(name: &str) -> Recording {
   snapshot
 }
 
+/// The status line and extra headers a `<name>.http` sidecar asks for.
+///
+/// `http-status-code` and `is-crawlable` are functions of the response
+/// rather than of the page, and a status or a header has nowhere to
+/// live in an HTML file. The sidecar carries them: one line of status,
+/// then headers, reading as the response head it becomes.
+/// `scripts/perf-diff/record-lighthouse.py` parses the same file, which
+/// is why it is a file rather than a rule written twice.
+fn response_head(page: &std::path::Path) -> (String, Vec<String>) {
+  let Ok(sidecar) = std::fs::read_to_string(page.with_extension("http")) else {
+    return ("200 OK".to_string(), Vec::new());
+  };
+  let mut lines = sidecar.lines();
+  let status = lines.next().unwrap_or("200 OK").to_string();
+  (
+    status,
+    lines.filter(|line| line.contains(':')).map(str::to_string).collect(),
+  )
+}
+
 /// Serve the fixture directory on a loopback port, returning its origin.
 ///
 /// A thread per connection and `Connection: close` on every reply, both
@@ -140,18 +166,30 @@ fn serve() -> String {
         }
         let path = request_line.split_whitespace().nth(1).unwrap_or("/").to_string();
         // A file name and nothing else: no traversal, no directories.
-        let name = path.trim_start_matches('/');
+        let name = path.split('?').next().unwrap_or("/").trim_start_matches('/');
+        let page = dir.join(name);
         let body = if name.contains('/') || name.contains("..") {
           None
         } else {
-          std::fs::read(dir.join(name)).ok()
+          std::fs::read(&page).ok()
         };
         let response = match body {
           Some(bytes) => {
-            let head = format!(
-              "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            let (status, extra) = response_head(&page);
+            let content_type = match page.extension().and_then(std::ffi::OsStr::to_str) {
+              Some("html") => "text/html; charset=utf-8",
+              Some("txt") => "text/plain; charset=utf-8",
+              _ => "application/octet-stream",
+            };
+            let mut head = format!(
+              "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
               bytes.len()
             );
+            for header in extra {
+              head.push_str(&header);
+              head.push_str("\r\n");
+            }
+            head.push_str("\r\n");
             [head.into_bytes(), bytes].concat()
           },
           None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
@@ -369,25 +407,26 @@ fn compare_page_quality(name: &str, expected_failures: usize) {
   );
   assert_eq!(
     failures, expected_failures,
-    "{} was expected to fail {expected_failures} of the seven and Lighthouse failed {failures}",
+    "{} was expected to fail {expected_failures} of the ten and Lighthouse failed {failures}",
     recording.page
   );
   assert!(
     compared > 0,
-    "{} scored none of the seven, so this compared nothing",
+    "{} scored none of the ten, so this compared nothing",
     recording.page
   );
 }
 
 #[test]
-fn page_quality_on_a_page_failing_all_seven() {
-  // Seven of the eight: `canonical` is not one this page breaks, and a
-  // page with no canonical link is notApplicable rather than a failure.
+fn page_quality_on_a_page_failing_seven_of_the_ten() {
+  // Not `canonical`, which a page with no canonical link scores as
+  // notApplicable rather than a failure, and not either of the two that
+  // read the response: this page is served 200 and blocks no crawler.
   compare_page_quality("quality-broken", 7);
 }
 
-/// The eighth audit, which only navigation mode scores. Its own fixture
-/// because a relative canonical is the whole point of the page.
+/// A relative canonical, which only navigation mode scores. Its own
+/// fixture because that is the whole point of the page.
 #[test]
 fn page_quality_on_a_page_with_a_relative_canonical() {
   compare_page_quality("canonical-broken", 1);
@@ -403,4 +442,34 @@ fn page_quality_on_a_page_with_nothing_wrong_with_it() {
 #[test]
 fn page_quality_on_a_page_broken_in_the_other_dimension() {
   compare_page_quality("a11y-broken", 1);
+}
+
+/// `http-status-code`: the status is the only thing wrong with the page.
+#[test]
+fn page_quality_on_a_page_served_with_a_404() {
+  compare_page_quality("status-404", 1);
+}
+
+// `is-crawlable` has three independent blocking sources and scores 0
+// only when all five bot user agents are blocked. One fixture apiece,
+// because a page blocked by all three would agree with Lighthouse even
+// if two of the three were never read.
+
+#[test]
+fn page_quality_on_a_page_whose_meta_says_noindex() {
+  compare_page_quality("meta-robots-blocked", 1);
+}
+
+/// Two `X-Robots-Tag` headers, so this also pins that a repeated header
+/// arrives as two directives rather than one joined string, and that
+/// `unavailable_after:` is read as a directive and not as a user-agent
+/// prefix.
+#[test]
+fn page_quality_on_a_page_whose_headers_block_indexing() {
+  compare_page_quality("x-robots-blocked", 1);
+}
+
+#[test]
+fn page_quality_on_a_page_disallowed_by_robots_txt() {
+  compare_page_quality("robots-blocked", 1);
 }

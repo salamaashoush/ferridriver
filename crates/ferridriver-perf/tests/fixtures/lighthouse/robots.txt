@@ -1,0 +1,5 @@
+# Served for every fixture page, because they share one origin. Only
+# robots-blocked.html is named, so this is the third of is-crawlable's
+# three blocking sources and it isolates that page.
+User-agent: *
+Disallow: /robots-blocked.html

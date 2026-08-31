@@ -1,0 +1,2195 @@
+{
+ "parser": "3.0.1",
+ "files": {
+  "empty": "",
+  "blockAll": "User-agent: *\nDisallow: /",
+  "allowAll": "User-agent: *\nDisallow:",
+  "precedence": "User-agent: *\nDisallow: /a/\nAllow: /a/b/\nDisallow: /page\nAllow: /page",
+  "wildcards": "User-agent: *\nDisallow: /*.pdf$\nDisallow: /private*\nDisallow: /*?session=",
+  "perBot": "User-agent: *\nDisallow: /\n\nUser-agent: Googlebot\nAllow: /\n\nUser-agent: bingbot\nDisallow:\n\nUser-agent: slowbot\nCrawl-delay: 10",
+  "groups": "User-agent: a\nUser-agent: b\nDisallow: /x\n\nUser-agent: c\nDisallow: /y",
+  "comments": "User-agent: * # everyone\nDisallow: /x # not this\n# nothing at all\n\nAllow: /x/ok",
+  "encoded": "User-agent: *\nDisallow: /a%2fb\nDisallow: /café\nDisallow: /a b\nDisallow: /100%25",
+  "ragged": "User-agent: *\nthis line has no colon\n: empty field\nDisallow: /x",
+  "crlf": "User-agent: *\r\nDisallow: /x\r\nAllow: /x/ok",
+  "directives": "Sitemap: http://example.com/sitemap.xml\nHost: example.com\nUser-agent: *\nDisallow: /x"
+ },
+ "cases": [
+  {
+   "file": "empty",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/anything",
+   "agent": null,
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "empty",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/anything",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "empty",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/anything",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "empty",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/anything",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "empty",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/anything",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "empty",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/anything",
+   "agent": "a",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "empty",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/anything",
+   "agent": "c",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "empty",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/anything",
+   "agent": "DuckDuckBot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/",
+   "agent": null,
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/",
+   "agent": "a",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/",
+   "agent": "c",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/deep/path",
+   "agent": null,
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/deep/path",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/deep/path",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/deep/path",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/deep/path",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/deep/path",
+   "agent": "a",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/deep/path",
+   "agent": "c",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/deep/path",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://elsewhere.com/",
+   "agent": null,
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://elsewhere.com/",
+   "agent": "Googlebot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://elsewhere.com/",
+   "agent": "googlebot/2.1",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://elsewhere.com/",
+   "agent": "bingbot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://elsewhere.com/",
+   "agent": "slowbot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://elsewhere.com/",
+   "agent": "a",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://elsewhere.com/",
+   "agent": "c",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://elsewhere.com/",
+   "agent": "DuckDuckBot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "https://example.com/",
+   "agent": null,
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "https://example.com/",
+   "agent": "Googlebot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "https://example.com/",
+   "agent": "googlebot/2.1",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "https://example.com/",
+   "agent": "bingbot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "https://example.com/",
+   "agent": "slowbot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "https://example.com/",
+   "agent": "a",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "https://example.com/",
+   "agent": "c",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "https://example.com/",
+   "agent": "DuckDuckBot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com:8080/",
+   "agent": null,
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com:8080/",
+   "agent": "Googlebot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com:8080/",
+   "agent": "googlebot/2.1",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com:8080/",
+   "agent": "bingbot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com:8080/",
+   "agent": "slowbot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com:8080/",
+   "agent": "a",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com:8080/",
+   "agent": "c",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com:8080/",
+   "agent": "DuckDuckBot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com:80/robots.txt",
+   "url": "http://example.com/",
+   "agent": null,
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com:80/robots.txt",
+   "url": "http://example.com/",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com:80/robots.txt",
+   "url": "http://example.com/",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com:80/robots.txt",
+   "url": "http://example.com/",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com:80/robots.txt",
+   "url": "http://example.com/",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com:80/robots.txt",
+   "url": "http://example.com/",
+   "agent": "a",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com:80/robots.txt",
+   "url": "http://example.com/",
+   "agent": "c",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com:80/robots.txt",
+   "url": "http://example.com/",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "https://example.com:443/robots.txt",
+   "url": "https://example.com/",
+   "agent": null,
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "https://example.com:443/robots.txt",
+   "url": "https://example.com/",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "https://example.com:443/robots.txt",
+   "url": "https://example.com/",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "https://example.com:443/robots.txt",
+   "url": "https://example.com/",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "https://example.com:443/robots.txt",
+   "url": "https://example.com/",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "https://example.com:443/robots.txt",
+   "url": "https://example.com/",
+   "agent": "a",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "https://example.com:443/robots.txt",
+   "url": "https://example.com/",
+   "agent": "c",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "blockAll",
+   "at": "https://example.com:443/robots.txt",
+   "url": "https://example.com/",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "allowAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": null,
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "allowAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "allowAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "allowAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "allowAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "allowAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "a",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "allowAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "c",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "allowAll",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "DuckDuckBot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/c",
+   "agent": null,
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/c",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/c",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/c",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/c",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/c",
+   "agent": "a",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/c",
+   "agent": "c",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/c",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c",
+   "agent": null,
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c",
+   "agent": "a",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c",
+   "agent": "c",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c",
+   "agent": "DuckDuckBot",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/page",
+   "agent": null,
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/page",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/page",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/page",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/page",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/page",
+   "agent": "a",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/page",
+   "agent": "c",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "precedence",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/page",
+   "agent": "DuckDuckBot",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf",
+   "agent": null,
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf",
+   "agent": "a",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf",
+   "agent": "c",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf.html",
+   "agent": null,
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf.html",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf.html",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf.html",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf.html",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf.html",
+   "agent": "a",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf.html",
+   "agent": "c",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a/b/c.pdf.html",
+   "agent": "DuckDuckBot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/private/thing",
+   "agent": null,
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/private/thing",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/private/thing",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/private/thing",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/private/thing",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/private/thing",
+   "agent": "a",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/private/thing",
+   "agent": "c",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/private/thing",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?session=1",
+   "agent": null,
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?session=1",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?session=1",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?session=1",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?session=1",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?session=1",
+   "agent": "a",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?session=1",
+   "agent": "c",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?session=1",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?other=1",
+   "agent": null,
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?other=1",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?other=1",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?other=1",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?other=1",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?other=1",
+   "agent": "a",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?other=1",
+   "agent": "c",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?other=1",
+   "agent": "DuckDuckBot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?",
+   "agent": null,
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?",
+   "agent": "a",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?",
+   "agent": "c",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x?",
+   "agent": "DuckDuckBot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x#session=1",
+   "agent": null,
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x#session=1",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x#session=1",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x#session=1",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x#session=1",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x#session=1",
+   "agent": "a",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x#session=1",
+   "agent": "c",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "wildcards",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x#session=1",
+   "agent": "DuckDuckBot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "perBot",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": null,
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "perBot",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "perBot",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "perBot",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "perBot",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "perBot",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "a",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "perBot",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "c",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "perBot",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": null,
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "a",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "c",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "DuckDuckBot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/y",
+   "agent": null,
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/y",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/y",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/y",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/y",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/y",
+   "agent": "a",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/y",
+   "agent": "c",
+   "allowed": false,
+   "line": 6
+  },
+  {
+   "file": "groups",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/y",
+   "agent": "DuckDuckBot",
+   "allowed": true,
+   "line": -1
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": null,
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "a",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "c",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": null,
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "a",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "c",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "comments",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "DuckDuckBot",
+   "allowed": true,
+   "line": 5
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2Fb",
+   "agent": null,
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2Fb",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2Fb",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2Fb",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2Fb",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2Fb",
+   "agent": "a",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2Fb",
+   "agent": "c",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2Fb",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2fb",
+   "agent": null,
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2fb",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2fb",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2fb",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2fb",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2fb",
+   "agent": "a",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2fb",
+   "agent": "c",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%2fb",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/café",
+   "agent": null,
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/café",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/café",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/café",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/café",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/café",
+   "agent": "a",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/café",
+   "agent": "c",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/café",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 3
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%20b",
+   "agent": null,
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%20b",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%20b",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%20b",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%20b",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%20b",
+   "agent": "a",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%20b",
+   "agent": "c",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/a%20b",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/100%25",
+   "agent": null,
+   "allowed": false,
+   "line": 5
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/100%25",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 5
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/100%25",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 5
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/100%25",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 5
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/100%25",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 5
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/100%25",
+   "agent": "a",
+   "allowed": false,
+   "line": 5
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/100%25",
+   "agent": "c",
+   "allowed": false,
+   "line": 5
+  },
+  {
+   "file": "encoded",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/100%25",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 5
+  },
+  {
+   "file": "ragged",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": null,
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "ragged",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "ragged",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "ragged",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "ragged",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "ragged",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "a",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "ragged",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "c",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "ragged",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": null,
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "a",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "c",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 2
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": null,
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "Googlebot",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "googlebot/2.1",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "bingbot",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "slowbot",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "a",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "c",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "crlf",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x/ok",
+   "agent": "DuckDuckBot",
+   "allowed": true,
+   "line": 3
+  },
+  {
+   "file": "directives",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": null,
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "directives",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "Googlebot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "directives",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "googlebot/2.1",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "directives",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "bingbot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "directives",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "slowbot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "directives",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "a",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "directives",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "c",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "directives",
+   "at": "http://example.com/robots.txt",
+   "url": "http://example.com/x",
+   "agent": "DuckDuckBot",
+   "allowed": false,
+   "line": 4
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "/x",
+   "agent": null,
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "/x",
+   "agent": "Googlebot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "/x",
+   "agent": "googlebot/2.1",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "/x",
+   "agent": "bingbot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "/x",
+   "agent": "slowbot",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "/x",
+   "agent": "a",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "/x",
+   "agent": "c",
+   "allowed": null,
+   "line": -1
+  },
+  {
+   "file": "blockAll",
+   "at": "http://example.com/robots.txt",
+   "url": "/x",
+   "agent": "DuckDuckBot",
+   "allowed": null,
+   "line": -1
+  }
+ ]
+}

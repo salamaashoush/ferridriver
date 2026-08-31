@@ -1,0 +1,4 @@
+# Served at the origin root for the whole e2e suite, so it names one
+# path and leaves every other fixture page crawlable.
+User-agent: *
+Disallow: /fx/robots-blocked

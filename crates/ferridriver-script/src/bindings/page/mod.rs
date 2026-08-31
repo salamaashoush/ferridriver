@@ -1824,8 +1824,10 @@ impl PageJs {
 
   /// ferridriver extension: `page.checkPageQuality(options?)`.
   ///
-  /// The seven Lighthouse audits that score a page as it stands. Pass
-  /// `{ only: ['meta-description'] }` to run a subset.
+  /// The ten Lighthouse audits that score a page as it stands. Pass
+  /// `{ only: ['meta-description'] }` to run a subset. `http-status-code`
+  /// and `is-crawlable` need the main document's own response and are
+  /// absent for a document that arrived without one.
   #[qjs(rename = "checkPageQuality")]
   pub async fn check_page_quality<'js>(
     &self,

@@ -4,14 +4,21 @@ The trace differential can be offline because a trace is a file. An
 audit over a live DOM is not: both engines have to look at the page. So
 the page is what gets checked in, and Lighthouse's whole verdict about
 it is recorded beside it, which puts the gate back offline. One
-recording serves both comparisons -- `--test lighthouse` covers
-both the axe-core rules and the seven live-DOM audits, and and neither needs node, Lighthouse or the network.
+recording serves both comparisons -- `--test lighthouse` covers both
+the axe-core rules and the ten live-page audits, and neither needs
+node, Lighthouse or the network.
 
     python3 scripts/perf-diff/record-lighthouse.py           # check
     python3 scripts/perf-diff/record-lighthouse.py --update  # re-record
 
 Read the diff an update produces before committing it. Every line is a
 change in what we are being measured against.
+
+A page can also carry a `<name>.http` sidecar giving the status and the
+headers it is served with, because `http-status-code` and
+`is-crawlable` read the response rather than the page. The server in
+`crates/ferridriver-perf/tests/lighthouse.rs` reads the same file, so
+the two cannot drift.
 
 The pages are served here rather than by `fixture-server.py`, on an
 ephemeral port, so recording needs nothing else running and two runs
@@ -51,7 +58,54 @@ def chrome_path():
     sys.exit("no Chrome found; set CHROME_PATH or run: ferridriver install chromium")
 
 
-class Quiet(http.server.SimpleHTTPRequestHandler):
+CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".txt": "text/plain; charset=utf-8"}
+
+
+def response_head(page):
+    """The status and extra headers a `<name>.http` sidecar asks for.
+
+    Two of the audits are functions of the response rather than of the
+    page, and a status or a header has nowhere to live in an HTML file.
+    The sidecar is one line of status followed by headers, so it reads
+    as the response head it becomes -- and `tests/lighthouse.rs` parses
+    the same file the same way, which is the point of a file rather than
+    a rule in each server.
+    """
+    sidecar = page.with_suffix(".http")
+    if not sidecar.exists():
+        return 200, "OK", []
+    lines = sidecar.read_text().splitlines()
+    status, _, reason = lines[0].partition(" ")
+    headers = [line.split(":", 1) for line in lines[1:] if ":" in line]
+    return int(status), reason or "OK", [(name, value.strip()) for name, value in headers]
+
+
+class Fixtures(http.server.BaseHTTPRequestHandler):
+    def __init__(self, *args, directory, **kwargs):
+        # Set before the base constructor, which handles the request.
+        self.directory = directory
+        super().__init__(*args, **kwargs)
+
+    def do_GET(self):  # noqa: N802 -- BaseHTTPRequestHandler's own name
+        # A file name and nothing else: no traversal, no directories.
+        name = self.path.split("?")[0].lstrip("/")
+        page = self.directory / name
+        if "/" in name or ".." in name or not page.is_file():
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        status, reason, extra = response_head(page)
+        body = page.read_bytes()
+        self.send_response(status, reason)
+        self.send_header("Content-Type", CONTENT_TYPES.get(page.suffix, "application/octet-stream"))
+        self.send_header("Content-Length", str(len(body)))
+        for header, value in extra:
+            self.send_header(header, value)
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *args):
         pass
 
@@ -62,7 +116,7 @@ class Threaded(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def serve(directory):
-    handler = functools.partial(Quiet, directory=str(directory))
+    handler = functools.partial(Fixtures, directory=directory)
     server = Threaded(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, server.server_address[1]
