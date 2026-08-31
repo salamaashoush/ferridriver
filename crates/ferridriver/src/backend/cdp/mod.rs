@@ -7690,10 +7690,13 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       Box::pin(async move {
         // Fall back to whatever headers the request currently has if no
         // extraInfo arrived (matches Playwright when CDP doesn't fire
-        // it, e.g. in Service-Worker-served responses).
+        // it, e.g. in Service-Worker-served responses). The PROVISIONAL
+        // ones specifically: `headers_array()` resolves through this
+        // closure, so reading it here would not terminate. Split the
+        // same way `parse_raw_headers` splits the pushed ones, so a
+        // repeated header survives whichever path delivered it.
         if let Some(req) = tracker.requests.lock().await.get(&request_id) {
-          let arr = req.headers_array().await;
-          return Ok(arr);
+          return Ok(crate::network::headers_map_to_split_array(&req.headers(), "\n", "\n"));
         }
         Ok(Vec::new())
       })
@@ -7707,8 +7710,9 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       let tracker = tracker.clone();
       let request_id = request_id.clone();
       Box::pin(async move {
+        // Provisional, split, for the reason the request fallback is.
         if let Some(resp) = tracker.responses.lock().await.get(&request_id) {
-          return Ok(resp.headers_array().await);
+          return Ok(crate::network::headers_map_to_split_array(&resp.headers(), "\n", "\n"));
         }
         Ok(Vec::new())
       })

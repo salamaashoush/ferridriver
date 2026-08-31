@@ -22,8 +22,7 @@ use crate::console_message::{ConsoleMessage, ConsoleMessageLocation};
 use crate::error::{FerriError, Result};
 use crate::events::{EventEmitter, PageEvent};
 use crate::network::{
-  self, BodyFn, RawHeadersFn, RemoteAddr, Request as NetworkRequest, RequestInit, Response, ResponseInit,
-  SecurityDetails,
+  self, BodyFn, RemoteAddr, Request as NetworkRequest, RequestInit, Response, ResponseInit, SecurityDetails,
 };
 use crate::state::DialogEvent;
 
@@ -3913,9 +3912,10 @@ impl BidiNetworkTracker {
       .get("fromCache")
       .and_then(serde_json::Value::as_bool)
       .unwrap_or(false);
-    let headers = resp.get("headers").map(parse_bidi_headers).unwrap_or_default();
+    let entries = resp.get("headers").map(parse_bidi_header_entries).unwrap_or_default();
+    let headers = crate::network::headers_array_to_map(&entries);
     let body_fn = self.make_body_fn(request_id);
-    let raw_headers_fn = self.make_raw_headers_fn(request_id);
+    let raw_headers_fn = crate::network::known_raw_headers(entries);
     Response::new(ResponseInit {
       request,
       url,
@@ -3975,21 +3975,6 @@ impl BidiNetworkTracker {
       })
     })
   }
-
-  fn make_raw_headers_fn(self: &Arc<Self>, request_id: &str) -> RawHeadersFn {
-    let tracker = self.clone();
-    let request_id = request_id.to_string();
-    Arc::new(move || {
-      let tracker = tracker.clone();
-      let request_id = request_id.clone();
-      Box::pin(async move {
-        if let Some(resp) = tracker.responses.lock().await.get(&request_id) {
-          return Ok(resp.headers_array().await);
-        }
-        Ok(Vec::new())
-      })
-    })
-  }
 }
 
 /// Serialized origin (`scheme://host[:port]`) for permission grants and
@@ -4031,19 +4016,28 @@ fn parse_bidi_security_details(resp: &serde_json::Value) -> Option<SecurityDetai
 
 /// Parse BiDi-format headers `[{name, value: {type, value}}]` into a `FxHashMap`.
 fn parse_bidi_headers(headers_val: &serde_json::Value) -> FxHashMap<String, String> {
+  crate::network::headers_array_to_map(&parse_bidi_header_entries(headers_val))
+}
+
+/// `BiDi` reports headers as an ARRAY, so a header sent twice arrives
+/// as two entries and nothing has to be un-joined to see them. Reading
+/// it straight into a map is what used to lose them.
+fn parse_bidi_header_entries(headers_val: &serde_json::Value) -> Vec<crate::network::HeaderEntry> {
   headers_val
     .as_array()
     .map(|arr| {
       arr
         .iter()
         .filter_map(|entry| {
-          let name = entry.get("name")?.as_str()?;
-          let value = entry
-            .get("value")
-            .and_then(|v| v.get("value"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-          Some((name.to_string(), value.to_string()))
+          Some(crate::network::HeaderEntry {
+            name: entry.get("name")?.as_str()?.to_string(),
+            value: entry
+              .get("value")
+              .and_then(|v| v.get("value"))
+              .and_then(|v| v.as_str())
+              .unwrap_or("")
+              .to_string(),
+          })
         })
         .collect()
     })

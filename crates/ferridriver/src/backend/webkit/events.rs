@@ -760,6 +760,16 @@ async fn handle_request_will_be_sent(
   emitter.emit(crate::events::PageEvent::Request(req));
 }
 
+/// What Playwright's `WebKit` build joins repeated `Set-Cookie` values
+/// with. A comma is ambiguous inside a cookie's `Expires` date, so off
+/// macOS the build substitutes a marker no header can contain
+/// (`wkInterceptableRequest.ts::wkSetCookieSeparator`).
+const SET_COOKIE_SEPARATOR: &str = if cfg!(target_os = "macos") {
+  ","
+} else {
+  "playwright-set-cookie-separator"
+};
+
 /// Build a [`Response`] for `request` from a PW `WebKit`
 /// `response` JSON payload. When `target` is `Some`, attach a body
 /// fetcher closure that issues `Network.getResponseBody({requestId})`
@@ -780,6 +790,14 @@ fn build_response(request: NetworkRequest, response: &Value, body_fn: Option<Bod
       }
     }
   }
+  // The protocol reports response headers as a map, so a header the
+  // server sent twice arrives joined and would otherwise be one entry.
+  // Playwright splits the same value the same way
+  // (`wkInterceptableRequest.ts`: `headersObjectToArray(headers, ',',
+  // wkSetCookieSeparator)`), and its WebKit build joins `Set-Cookie`
+  // with a marker off macOS precisely so that one can be split back
+  // without guessing.
+  let raw_headers = crate::network::headers_map_to_split_array(&headers, ",", SET_COOKIE_SEPARATOR);
   let remote_addr = response
     .get("remoteIPAddress")
     .and_then(Value::as_str)
@@ -808,7 +826,7 @@ fn build_response(request: NetworkRequest, response: &Value, body_fn: Option<Bod
     remote_addr,
     security_details,
     body_fn,
-    raw_headers_fn: None,
+    raw_headers_fn: Some(crate::network::known_raw_headers(raw_headers)),
   })
 }
 

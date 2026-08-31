@@ -24,7 +24,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock};
 pub type Headers = FxHashMap<String, String>;
 
 /// Single header entry preserving original case and duplicate keys.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HeaderEntry {
   pub name: String,
   pub value: String,
@@ -335,14 +335,16 @@ impl Request {
   }
 
   /// Headers as `[{name, value}]` preserving order and duplicates.
-  /// Returns provisional headers when raw headers haven't arrived yet.
+  ///
+  /// Playwright's `headersArray()`, which resolves the ACTUAL headers
+  /// (`_actualHeaders()` in `client/network.ts`) rather than the
+  /// provisional ones -- duplicates only survive there. Falls back to
+  /// the provisional list when the backend cannot produce them.
   pub async fn headers_array(&self) -> Vec<HeaderEntry> {
-    let state = self.inner.state.read().await;
-    if let Some(raw) = state.raw_headers.clone() {
-      return raw;
-    }
-    drop(state);
-    headers_to_array(&self.inner.provisional_headers)
+    self
+      .fetch_raw_headers()
+      .await
+      .unwrap_or_else(|_| headers_to_array(&self.inner.provisional_headers))
   }
 
   /// All headers, awaiting raw header push or fetch if needed.
@@ -787,13 +789,13 @@ impl Response {
     Ok(headers_array_to_map(&raw))
   }
 
+  /// See [`Request::headers_array`]: the actual headers, so a header the
+  /// server sent twice is two entries.
   pub async fn headers_array(&self) -> Vec<HeaderEntry> {
-    let state = self.inner.state.read().await;
-    if let Some(raw) = state.raw_headers.clone() {
-      return raw;
-    }
-    drop(state);
-    headers_to_array(&self.inner.provisional_headers)
+    self
+      .fetch_raw_headers()
+      .await
+      .unwrap_or_else(|_| headers_to_array(&self.inner.provisional_headers))
   }
 
   /// Single header value (case-insensitive). Per Playwright, multi-value
@@ -1062,6 +1064,46 @@ pub fn headers_to_array(map: &Headers) -> Vec<HeaderEntry> {
       value: v.clone(),
     })
     .collect()
+}
+
+/// Playwright's `headersObjectToArray` (`packages/isomorphic/headers.ts`).
+///
+/// A protocol that reports response headers as a MAP has already joined
+/// a repeated header's values, and `separator` is what it joined them
+/// with. Splitting is the only way a header sent twice survives at all:
+/// `X-Robots-Tag` and `Set-Cookie` are both headers a server repeats,
+/// and each copy means something on its own.
+///
+/// The cost is a header whose single value contains the separator --
+/// `Date: Mon, 06 Nov 1994 08:49:37 GMT` becomes two entries. Nothing
+/// in the map distinguishes the two cases, which is why Playwright's
+/// own `WebKit` backend splits the same way and lives with it.
+#[must_use]
+pub fn headers_map_to_split_array(map: &Headers, separator: &str, set_cookie_separator: &str) -> Vec<HeaderEntry> {
+  let mut out = Vec::new();
+  for (name, values) in map {
+    let sep = if name.eq_ignore_ascii_case("set-cookie") {
+      set_cookie_separator
+    } else {
+      separator
+    };
+    for value in values.split(sep) {
+      out.push(HeaderEntry {
+        name: name.clone(),
+        value: value.trim().to_string(),
+      });
+    }
+  }
+  out
+}
+
+/// A [`RawHeadersFn`] that answers with headers already in hand.
+#[must_use]
+pub fn known_raw_headers(headers: Vec<HeaderEntry>) -> RawHeadersFn {
+  Arc::new(move || {
+    let headers = headers.clone();
+    Box::pin(async move { Ok(headers) })
+  })
 }
 
 #[must_use]
