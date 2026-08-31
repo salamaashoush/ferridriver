@@ -137,10 +137,37 @@ owned nodes onto their owners BEFORE retained sizes propagate:
    a plain `Object` is named from its constructor.
 7. `getStatistics`, which needs all of the above.
 
-`engine.json` already carries the engine's answers for every one of
-those (`statistics`, and per-node `name`, `selfSize`, `retainedSize`,
-`distance`), so each layer is finished when the field it fills in stops
-disagreeing. The differential's module doc lists them.
+Of those, 1 through 5 and 7 have landed and agree with the engine on
+the fixture: total size, per-node self and retained sizes, distances,
+and all eight statistics fields. Node naming (6) has not, and
+`engine.json` already carries the engine's answer for it.
+
+### The fixture cannot exercise everything, and this is the part to fix next
+
+A snapshot taken over CDP has NO USER ROOTS. The synthetic root's only
+child is `(GC roots)` and every child of that is synthetic too.
+Measured over http and file, with and without `exposeInternals`,
+`captureNumericValue` and `treatGlobalObjectsAsRoots`, and through
+Puppeteer's own `captureHeapSnapshot`, which is what
+`chrome-devtools-mcp` calls.
+
+Upstream reads that as "internals were exposed" and skips
+`calculateShallowSizes`, so three passes never run on either side: the
+shallow-size transfer, the page-object marking that feeds the
+essential-edge filter, and the first half of the distance walk. The
+comparison passes because both sides skip them, which is agreement
+about a branch neither takes rather than evidence.
+
+Two smaller branches are unexercised too, each established by deleting
+the code and watching the gate stay green: the hidden-node branch of
+the statistics pass (`system` is 0 here) and the single-retainer test
+in the JS-array measurement (every backing store has exactly one).
+
+The fix is a hand-built snapshot with user roots, a `(Document DOM
+trees)` synthetic, an owned backing store with two retainers, a hidden
+node with a size, and a `WeakMap` ephemeron pair -- run through the same
+engine, exactly as upstream's own `HeapSnapshot.test.ts` builds
+snapshots by hand. Do that before trusting any of those three passes.
 
 Then the 13 tools themselves, the CDP capture with `Unsupported` on the
 other three backends, and the three binding layers.

@@ -1,4 +1,4 @@
-//! V8 heap snapshot analysis, ported from DevTools' own engine.
+//! V8 heap snapshot analysis, ported from `DevTools`' own engine.
 //!
 //! A `.heapsnapshot` is flat integer arrays plus a `meta` describing the
 //! column layout; every question anyone asks of it -- what retains this
@@ -24,8 +24,10 @@
 //! it was a port of. A heap snapshot is a worse case still, because
 //! almost nothing in it is checkable by eye.
 
+pub mod analysis;
 pub mod error;
 pub mod format;
 
+pub use analysis::{Analysis, NativeStatistics, Statistics, V8Statistics};
 pub use error::{HeapError, Result};
 pub use format::Snapshot;

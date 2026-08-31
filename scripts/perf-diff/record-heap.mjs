@@ -45,17 +45,21 @@ async function capture(name) {
   try {
     const page = await browser.newPage();
     await page.goto(`file://${join(FIXTURES, `${name}.html`)}`, { waitUntil: 'networkidle0' });
-    const cdp = await page.createCDPSession();
-    const chunks = [];
-    cdp.on('HeapProfiler.addHeapSnapshotChunk', event => chunks.push(event.chunk));
-    // `captureNumericValue` matches what chrome-devtools-mcp's
-    // take_heapsnapshot sends, so the file has the shape its tools read.
-    await cdp.send('HeapProfiler.takeHeapSnapshot', { reportProgress: false, captureNumericValue: true });
-    const text = chunks.join('');
+    // Puppeteer's own `captureHeapSnapshot`, which is exactly what
+    // chrome-devtools-mcp's `take_heapsnapshot` calls: it collects
+    // garbage first and takes the snapshot on the PRIMARY target
+    // client. Taking it on a session of one's own instead produces a
+    // snapshot whose root has no user roots under it at all, which
+    // silently skips the shallow-size pass, the page-object marking and
+    // the first half of the distance walk.
+    const plain = join(tmpdir(), `ferridriver-heap-capture-${name}-${process.pid}.heapsnapshot`);
+    await page.captureHeapSnapshot({ path: plain });
+    const text = readFileSync(plain, 'utf-8');
     const out = join(FIXTURES, `${name}.heapsnapshot.gz`);
     // Gzipped because a snapshot of even a trivial page is megabytes.
-    writeFileSync(out, gzipSync(text, { level: 9 }));
-    console.log(`captured ${relative(ROOT, out)} (${text.length} bytes, ${gzipSync(text, { level: 9 }).length} stored)`);
+    const stored = gzipSync(text, { level: 9 });
+    writeFileSync(out, stored);
+    console.log(`captured ${relative(ROOT, out)} (${text.length} bytes, ${stored.length} stored)`);
   } finally {
     await browser.close();
   }

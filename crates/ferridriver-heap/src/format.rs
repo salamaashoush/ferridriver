@@ -134,6 +134,13 @@ pub const DOM_LINK_STATE_UNKNOWN: u8 = 0;
 pub const DOM_LINK_STATE_ATTACHED: u8 = 1;
 pub const DOM_LINK_STATE_DETACHED: u8 = 2;
 
+/// A stored value used as an index. On a 64-bit target this is exact;
+/// anywhere narrower, a value too large to be an index is a malformed
+/// file, and every lookup that uses one already answers for a miss.
+fn index_of(value: u64) -> usize {
+  usize::try_from(value).unwrap_or(usize::MAX)
+}
+
 fn offset_of(fields: &[String], name: &str) -> Result<usize> {
   fields
     .iter()
@@ -425,13 +432,13 @@ impl Snapshot {
   /// string table grows during load.
   fn add_detached_prefix(&mut self, ordinal: usize, renamed: &mut rustc_hash::FxHashMap<usize, usize>) {
     let slot = ordinal * self.node_layout.field_count + self.node_layout.name_offset;
-    let old = self.nodes[slot] as usize;
+    let old = index_of(self.nodes[slot]);
     let new = *renamed.entry(old).or_insert_with(|| {
       let name = format!("Detached {}", self.strings.get(old).map_or("", String::as_str));
       self.strings.push(name);
       self.strings.len() - 1
     });
-    self.nodes[slot] = new as u64;
+    self.nodes[slot] = new.try_into().unwrap_or(u64::MAX);
   }
 
   // ── Node accessors, by ordinal ────────────────────────────────────────
@@ -447,7 +454,7 @@ impl Snapshot {
 
   #[must_use]
   pub fn node_type_name(&self, ordinal: usize) -> &str {
-    let raw = self.node_type(ordinal) as usize;
+    let raw = index_of(self.node_type(ordinal));
     self.node_type_names.get(raw).map_or("", String::as_str)
   }
 
@@ -455,7 +462,7 @@ impl Snapshot {
   /// string or a plain object readable.
   #[must_use]
   pub fn raw_node_name(&self, ordinal: usize) -> &str {
-    let at = self.node_field(ordinal, self.node_layout.name_offset) as usize;
+    let at = index_of(self.node_field(ordinal, self.node_layout.name_offset));
     self.strings.get(at).map_or("", String::as_str)
   }
 
@@ -469,12 +476,19 @@ impl Snapshot {
     self.node_field(ordinal, self.node_layout.self_size_offset)
   }
 
-  #[must_use]
-  pub fn node_edge_count(&self, ordinal: usize) -> usize {
-    self.node_field(ordinal, self.node_layout.edge_count_offset) as usize
+  /// Used by the pass that moves an owned node's size onto its owner,
+  /// which is the one place a snapshot's numbers are rewritten.
+  pub fn set_node_self_size(&mut self, ordinal: usize, size: u64) {
+    let slot = ordinal * self.node_layout.field_count + self.node_layout.self_size_offset;
+    self.nodes[slot] = size;
   }
 
-  /// Attachment state AFTER propagation, which is what DevTools
+  #[must_use]
+  pub fn node_edge_count(&self, ordinal: usize) -> usize {
+    index_of(self.node_field(ordinal, self.node_layout.edge_count_offset))
+  }
+
+  /// Attachment state AFTER propagation, which is what `DevTools`
   /// reports; the raw field is only the seed.
   #[must_use]
   pub fn node_detachedness(&self, ordinal: usize) -> u64 {
@@ -508,7 +522,7 @@ impl Snapshot {
     if kind == self.edge_types.element || kind == self.edge_types.hidden {
       return None;
     }
-    let at = self.edge_name_or_index(edge_ordinal) as usize;
+    let at = index_of(self.edge_name_or_index(edge_ordinal));
     self.strings.get(at).map(String::as_str)
   }
 
@@ -520,8 +534,8 @@ impl Snapshot {
   /// boundary, which means the file's field widths and its data
   /// disagree.
   pub fn edge_target(&self, edge_ordinal: usize) -> Result<usize> {
-    let index = self.edge_field(edge_ordinal, self.edge_layout.to_node_offset) as usize;
-    if index % self.node_layout.field_count != 0 {
+    let index = index_of(self.edge_field(edge_ordinal, self.edge_layout.to_node_offset));
+    if !index.is_multiple_of(self.node_layout.field_count) {
       return Err(HeapError::Format(format!(
         "edge {edge_ordinal} points at {index}, which is not the start of a node"
       )));
