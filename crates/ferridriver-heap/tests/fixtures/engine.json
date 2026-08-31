@@ -1,0 +1,2027 @@
+{
+ "leaky": {
+  "nodeFieldCount": 6,
+  "statistics": {
+   "total": 1181984,
+   "native": {
+    "total": 692200,
+    "typedArrays": 65536
+   },
+   "v8heap": {
+    "total": 489784,
+    "code": 31160,
+    "jsArrays": 7920,
+    "strings": 35128,
+    "system": 0
+   }
+  },
+  "staticData": {
+   "nodeCount": 30595,
+   "rootNodeIndex": 0,
+   "totalSize": 1181984,
+   "maxJSObjectId": 59991
+  },
+  "nodes": [
+   {
+    "ordinal": 0,
+    "id": 1,
+    "name": "",
+    "type": "synthetic",
+    "selfSize": 0,
+    "retainedSize": 953664,
+    "distance": 0,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 152,
+    "id": 305,
+    "name": "system / Map",
+    "type": "native",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 304,
+    "id": 609,
+    "name": "languageDisplay",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 456,
+    "id": 913,
+    "name": "K",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 608,
+    "id": 1217,
+    "name": "ã",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 760,
+    "id": 1521,
+    "name": "growable",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 912,
+    "id": 1825,
+    "name": "Symbol.replace",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 1064,
+    "id": 2129,
+    "name": "system / Map",
+    "type": "native",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 1216,
+    "id": 2433,
+    "name": "system / Code / ConstructForwardAllArgs_WithFeedback (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 1368,
+    "id": 2737,
+    "name": "system / Code / ArrayNoArgumentConstructor_PackedSmi_DisableAllocationSites (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 1520,
+    "id": 3041,
+    "name": "system / Code / DatePrototypeToISOString (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 1672,
+    "id": 3345,
+    "name": "system / Code / IterableToFixedArrayWithSymbolLookupSlow (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 1824,
+    "id": 3649,
+    "name": "system / Code / ForInEnumerate (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 1976,
+    "id": 3953,
+    "name": "system / Code / AsyncGeneratorReturn (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 2128,
+    "id": 4257,
+    "name": "system / Code / BigIntModulusNoThrow (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 2280,
+    "id": 4561,
+    "name": "system / Code / MathAsinh (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 2432,
+    "id": 4865,
+    "name": "system / Code / SetPrototypeIsSupersetOf (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 2584,
+    "id": 5169,
+    "name": "system / Code / WasmStackGuardLoop (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 2736,
+    "id": 5473,
+    "name": "system / Code / StoreTypedElementNumeric_Float16Elements_0 (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 2888,
+    "id": 5777,
+    "name": "system / Code / TemporalPlainDatePrototypeYearOfWeek (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 3040,
+    "id": 6081,
+    "name": "system / Code / TemporalDurationPrototypeSubtract (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 3192,
+    "id": 6385,
+    "name": "system / Code / ShiftRightLogicalSmiHandler (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 3344,
+    "id": 6689,
+    "name": "system / Code / SetNamedPropertyWideHandler (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 3496,
+    "id": 6993,
+    "name": "system / Code / LdaLookupSlotInsideTypeofExtraWideHandler (builtin)",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 3648,
+    "id": 7297,
+    "name": "system / ObjectTemplateInfo",
+    "type": "native",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 3800,
+    "id": 7601,
+    "name": "system / SharedFunctionInfo / normalize",
+    "type": "code",
+    "selfSize": 48,
+    "retainedSize": 48,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 3952,
+    "id": 7905,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 64,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 4104,
+    "id": 8209,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 64,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 4256,
+    "id": 8513,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 64,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 4408,
+    "id": 8817,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 64,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 4560,
+    "id": 9121,
+    "name": "system / SharedFunctionInfo",
+    "type": "code",
+    "selfSize": 48,
+    "retainedSize": 180,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 4712,
+    "id": 9425,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 64,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 4864,
+    "id": 9729,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 64,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 5016,
+    "id": 10033,
+    "name": "74",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 5168,
+    "id": 10337,
+    "name": "WeakMap.prototype.has",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 5320,
+    "id": 10641,
+    "name": "set webkitHidden",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": -5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 5472,
+    "id": 10945,
+    "name": "get ariaRelevant",
+    "type": "string",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 5624,
+    "id": 11249,
+    "name": "CSSKeyframeRule",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 5776,
+    "id": 11553,
+    "name": "CallSite",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 5928,
+    "id": 11857,
+    "name": "get firstDayOfWeek",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 6080,
+    "id": 12161,
+    "name": "get ontimeupdate",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 6232,
+    "id": 12465,
+    "name": "setContinuationPreservedEmbedderData",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 6384,
+    "id": 12769,
+    "name": "get vlinkColor",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 6536,
+    "id": 13073,
+    "name": "HTMLOptionsCollection",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 6688,
+    "id": 13377,
+    "name": "Window",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 6840,
+    "id": 13681,
+    "name": "SVGFEGaussianBlurElement",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 6992,
+    "id": 13985,
+    "name": "FileSystemWritableFileStream",
+    "type": "string",
+    "selfSize": 40,
+    "retainedSize": 40,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 7144,
+    "id": 14289,
+    "name": "CookieStoreManager",
+    "type": "string",
+    "selfSize": 32,
+    "retainedSize": 32,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 7296,
+    "id": 14593,
+    "name": "onlostpointercapture",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 7448,
+    "id": 14897,
+    "name": "decodeURI",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 7600,
+    "id": 15201,
+    "name": "NamedNodeMap",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 7752,
+    "id": 15505,
+    "name": "findLast",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 7904,
+    "id": 15809,
+    "name": "chrome",
+    "type": "string",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 8056,
+    "id": 16113,
+    "name": "XRReferenceSpaceEvent",
+    "type": "string",
+    "selfSize": 36,
+    "retainedSize": 36,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 8208,
+    "id": 16417,
+    "name": "get classList",
+    "type": "string",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 8360,
+    "id": 16721,
+    "name": "193",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 8512,
+    "id": 17025,
+    "name": "23",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 8664,
+    "id": 17329,
+    "name": "154",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 8816,
+    "id": 17633,
+    "name": "int",
+    "type": "number",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 8968,
+    "id": 17937,
+    "name": "284",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 9120,
+    "id": 18241,
+    "name": "int",
+    "type": "number",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 9272,
+    "id": 18545,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 9424,
+    "id": 18849,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 9576,
+    "id": 19153,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 9728,
+    "id": 19457,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 9880,
+    "id": 19761,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 10032,
+    "id": 20065,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 10184,
+    "id": 20369,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 10336,
+    "id": 20673,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 10488,
+    "id": 20977,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 10640,
+    "id": 21281,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 10792,
+    "id": 21585,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 10944,
+    "id": 21889,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 11096,
+    "id": 22193,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 11248,
+    "id": 22497,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 11400,
+    "id": 22801,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 11552,
+    "id": 23105,
+    "name": "system / CodeWrapper",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 11704,
+    "id": 23409,
+    "name": "int",
+    "type": "number",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 11856,
+    "id": 23713,
+    "name": "int",
+    "type": "number",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 12008,
+    "id": 24017,
+    "name": "ArrayEvery",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 12160,
+    "id": 24321,
+    "name": "995",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 12312,
+    "id": 24625,
+    "name": "1694",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 12464,
+    "id": 24929,
+    "name": "331",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 9,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 12616,
+    "id": 25233,
+    "name": "system / SharedFunctionInfo / get flags",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 12768,
+    "id": 25537,
+    "name": "system / SharedFunctionInfo / set $9",
+    "type": "code",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 12920,
+    "id": 25841,
+    "name": "1113",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 9,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 13072,
+    "id": 26145,
+    "name": "1673",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 9,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 13224,
+    "id": 26449,
+    "name": "1626",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 9,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 13376,
+    "id": 26753,
+    "name": "int",
+    "type": "number",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 13528,
+    "id": 27057,
+    "name": "1341",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 13680,
+    "id": 27361,
+    "name": "MapPrototypeForEach",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 13832,
+    "id": 27665,
+    "name": "1077",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 13984,
+    "id": 27969,
+    "name": "AsyncGeneratorFunctionConstructor",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 14136,
+    "id": 28273,
+    "name": "304",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 9,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 14288,
+    "id": 28577,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 14440,
+    "id": 28881,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 14592,
+    "id": 29185,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 14744,
+    "id": 29489,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 14896,
+    "id": 29793,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 15048,
+    "id": 30097,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 15200,
+    "id": 30401,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 15352,
+    "id": 30705,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 15504,
+    "id": 31009,
+    "name": "228",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 15656,
+    "id": 31313,
+    "name": "Number",
+    "type": "closure",
+    "selfSize": 32,
+    "retainedSize": 900,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 15808,
+    "id": 31617,
+    "name": "getOwnPropertyDescriptor",
+    "type": "closure",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 15960,
+    "id": 31921,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 64,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 16112,
+    "id": 32225,
+    "name": "system / ArrayBoilerplateDescription",
+    "type": "code",
+    "selfSize": 12,
+    "retainedSize": 28,
+    "distance": 10,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 16264,
+    "id": 32529,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 16416,
+    "id": 32833,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 64,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 16568,
+    "id": 33137,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 64,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 16720,
+    "id": 33441,
+    "name": "2.718281828459045",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 16872,
+    "id": 33745,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 17024,
+    "id": 34049,
+    "name": "system / PrototypeInfo",
+    "type": "object shape",
+    "selfSize": 40,
+    "retainedSize": 40,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 17176,
+    "id": 34353,
+    "name": "system / DescriptorArray",
+    "type": "object shape",
+    "selfSize": 68,
+    "retainedSize": 68,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 17328,
+    "id": 34657,
+    "name": "dirxml",
+    "type": "closure",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 17480,
+    "id": 34961,
+    "name": "get format",
+    "type": "closure",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 17632,
+    "id": 35265,
+    "name": "Intl.DisplayNames",
+    "type": "object",
+    "selfSize": 28,
+    "retainedSize": 232,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 17784,
+    "id": 35569,
+    "name": "PACKED_DOUBLE_ELEMENTS",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 17936,
+    "id": 35873,
+    "name": "system / PropertyArray",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 18088,
+    "id": 36177,
+    "name": "get rightContext",
+    "type": "closure",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 18240,
+    "id": 36481,
+    "name": "Async-from-Sync Iterator",
+    "type": "object",
+    "selfSize": 28,
+    "retainedSize": 220,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 18392,
+    "id": 36785,
+    "name": "system / Map",
+    "type": "object shape",
+    "selfSize": 40,
+    "retainedSize": 40,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 18544,
+    "id": 37089,
+    "name": "system / Map",
+    "type": "object shape",
+    "selfSize": 40,
+    "retainedSize": 120,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 18696,
+    "id": 37393,
+    "name": "system / PropertyArray",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 18848,
+    "id": 37697,
+    "name": "get disposed",
+    "type": "string",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 19000,
+    "id": 38001,
+    "name": "system / Map",
+    "type": "object shape",
+    "selfSize": 40,
+    "retainedSize": 136,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 19152,
+    "id": 38305,
+    "name": "system / AccessorPair",
+    "type": "native",
+    "selfSize": 12,
+    "retainedSize": 12,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 19304,
+    "id": 38609,
+    "name": "system / AccessorPair",
+    "type": "native",
+    "selfSize": 12,
+    "retainedSize": 12,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 19456,
+    "id": 38913,
+    "name": "{constructor, __defineGetter__, __defineSetter__, …, get __proto__, set __proto__, toLocaleString}",
+    "type": "object",
+    "selfSize": 28,
+    "retainedSize": 268,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 19608,
+    "id": 39217,
+    "name": "get onscrollsnapchanging",
+    "type": "closure",
+    "selfSize": 28,
+    "retainedSize": 140,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 19760,
+    "id": 39521,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 19912,
+    "id": 39825,
+    "name": "Collator",
+    "type": "closure",
+    "selfSize": 32,
+    "retainedSize": 484,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 20064,
+    "id": 40129,
+    "name": "RangeError",
+    "type": "closure",
+    "selfSize": 32,
+    "retainedSize": 576,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 20216,
+    "id": 40433,
+    "name": "system / AccessorPair",
+    "type": "native",
+    "selfSize": 12,
+    "retainedSize": 12,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 20368,
+    "id": 40737,
+    "name": "system / AccessorPair",
+    "type": "native",
+    "selfSize": 12,
+    "retainedSize": 12,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 20520,
+    "id": 41041,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 20672,
+    "id": 41345,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 20824,
+    "id": 41649,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 20976,
+    "id": 41953,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 44,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 21128,
+    "id": 42257,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 21280,
+    "id": 42561,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 44,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 21432,
+    "id": 42865,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 44,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 21584,
+    "id": 43169,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 21736,
+    "id": 43473,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 21888,
+    "id": 43777,
+    "name": "toString",
+    "type": "closure",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 22040,
+    "id": 44081,
+    "name": "system / AccessorPair",
+    "type": "native",
+    "selfSize": 12,
+    "retainedSize": 12,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 22192,
+    "id": 44385,
+    "name": "{at, copyWithin, entries, fill, find, findIndex, …, keys, toReversed, toSorted, toSpliced, values}",
+    "type": "object",
+    "selfSize": 28,
+    "retainedSize": 336,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 22344,
+    "id": 44689,
+    "name": "system / PropertyArray",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 22496,
+    "id": 44993,
+    "name": "system / Context / scope @32251",
+    "type": "object",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 22648,
+    "id": 45297,
+    "name": "supportedValuesOf",
+    "type": "closure",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 22800,
+    "id": 45601,
+    "name": "get variants",
+    "type": "closure",
+    "selfSize": 28,
+    "retainedSize": 100,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 22952,
+    "id": 45905,
+    "name": "system / Map",
+    "type": "object shape",
+    "selfSize": 40,
+    "retainedSize": 280,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 23104,
+    "id": 46209,
+    "name": "system / DescriptorArray",
+    "type": "object shape",
+    "selfSize": 44,
+    "retainedSize": 44,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 23256,
+    "id": 46513,
+    "name": "system / AccessorPair",
+    "type": "native",
+    "selfSize": 12,
+    "retainedSize": 12,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 23408,
+    "id": 46817,
+    "name": "system / AccessorPair",
+    "type": "native",
+    "selfSize": 12,
+    "retainedSize": 12,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 23560,
+    "id": 47121,
+    "name": "system / Map",
+    "type": "object shape",
+    "selfSize": 40,
+    "retainedSize": 40,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 23712,
+    "id": 47425,
+    "name": "",
+    "type": "closure",
+    "selfSize": 32,
+    "retainedSize": 52,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 23864,
+    "id": 47729,
+    "name": "system / PrototypeInfo",
+    "type": "object shape",
+    "selfSize": 40,
+    "retainedSize": 40,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 24016,
+    "id": 48033,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 24168,
+    "id": 48337,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 24320,
+    "id": 48641,
+    "name": "system / ExternalStringData",
+    "type": "native",
+    "selfSize": 18,
+    "retainedSize": 18,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 24472,
+    "id": 48945,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 88,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 24624,
+    "id": 49249,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 64,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 24776,
+    "id": 49553,
+    "name": "querySelector",
+    "type": "closure",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 24928,
+    "id": 49857,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 64,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 25080,
+    "id": 50161,
+    "name": "system / FunctionTemplateInfo",
+    "type": "native",
+    "selfSize": 64,
+    "retainedSize": 88,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 25232,
+    "id": 50465,
+    "name": "system / AccessorPair",
+    "type": "native",
+    "selfSize": 12,
+    "retainedSize": 12,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 25384,
+    "id": 50769,
+    "name": "system / Map",
+    "type": "object shape",
+    "selfSize": 40,
+    "retainedSize": 40,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 25536,
+    "id": 51073,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 25688,
+    "id": 51377,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 25840,
+    "id": 51681,
+    "name": "system / AccessorInfo",
+    "type": "native",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 25992,
+    "id": 51985,
+    "name": "system / PropertyArray",
+    "type": "native",
+    "selfSize": 92,
+    "retainedSize": 92,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 26144,
+    "id": 52289,
+    "name": "Promise",
+    "type": "object",
+    "selfSize": 28,
+    "retainedSize": 236,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 26296,
+    "id": 52593,
+    "name": "Detached <p>",
+    "type": "native",
+    "selfSize": 104,
+    "retainedSize": 184,
+    "distance": 36,
+    "detachedness": 2
+   },
+   {
+    "ordinal": 26448,
+    "id": 52897,
+    "name": "system / AccessorPair",
+    "type": "native",
+    "selfSize": 12,
+    "retainedSize": 12,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 26600,
+    "id": 53201,
+    "name": "Detached <p>",
+    "type": "native",
+    "selfSize": 104,
+    "retainedSize": 184,
+    "distance": 101,
+    "detachedness": 2
+   },
+   {
+    "ordinal": 26752,
+    "id": 53505,
+    "name": "Widget",
+    "type": "object",
+    "selfSize": 20,
+    "retainedSize": 44,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 26904,
+    "id": 53809,
+    "name": "Widget",
+    "type": "object",
+    "selfSize": 20,
+    "retainedSize": 44,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 27056,
+    "id": 54113,
+    "name": "12",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 27208,
+    "id": 54417,
+    "name": "widget 77",
+    "type": "string",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 27360,
+    "id": 54721,
+    "name": "widget 137",
+    "type": "string",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 27512,
+    "id": 55025,
+    "name": "smi number",
+    "type": "number",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 27664,
+    "id": 55329,
+    "name": "smi number",
+    "type": "number",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 8,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 27816,
+    "id": 55633,
+    "name": "Float32Array",
+    "type": "closure",
+    "selfSize": 32,
+    "retainedSize": 212,
+    "distance": 4,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 27968,
+    "id": 55937,
+    "name": "{constructor}",
+    "type": "object",
+    "selfSize": 28,
+    "retainedSize": 100,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 28120,
+    "id": 56241,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 28272,
+    "id": 56545,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 28424,
+    "id": 56849,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 28576,
+    "id": 57153,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 28728,
+    "id": 57457,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 28880,
+    "id": 57761,
+    "name": "system / PropertyCell",
+    "type": "native",
+    "selfSize": 20,
+    "retainedSize": 20,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 29032,
+    "id": 58065,
+    "name": "toString",
+    "type": "closure",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 29184,
+    "id": 58369,
+    "name": "system / PrototypeInfo",
+    "type": "object shape",
+    "selfSize": 40,
+    "retainedSize": 40,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 29336,
+    "id": 58673,
+    "name": "get $+",
+    "type": "closure",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 29488,
+    "id": 58977,
+    "name": "system / DescriptorArray",
+    "type": "object shape",
+    "selfSize": 80,
+    "retainedSize": 80,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 29640,
+    "id": 59281,
+    "name": "trimStart",
+    "type": "closure",
+    "selfSize": 28,
+    "retainedSize": 28,
+    "distance": 5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 29792,
+    "id": 59585,
+    "name": "system / Map",
+    "type": "object shape",
+    "selfSize": 40,
+    "retainedSize": 108,
+    "distance": 6,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 29944,
+    "id": 59889,
+    "name": "system / AccessorPair",
+    "type": "native",
+    "selfSize": 12,
+    "retainedSize": 12,
+    "distance": 7,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 30096,
+    "id": 202,
+    "name": "Detached Text",
+    "type": "native",
+    "selfSize": 80,
+    "retainedSize": 80,
+    "distance": 89,
+    "detachedness": 2
+   },
+   {
+    "ordinal": 30248,
+    "id": 506,
+    "name": "InternalNode",
+    "type": "native",
+    "selfSize": 152,
+    "retainedSize": 152,
+    "distance": 6,
+    "detachedness": 1
+   }
+  ]
+ }
+}

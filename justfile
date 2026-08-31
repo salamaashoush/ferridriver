@@ -316,6 +316,35 @@ lh-record:
   python3 scripts/perf-diff/record-lighthouse.py --update
   git diff --stat -- crates/ferridriver-perf/tests/fixtures/lighthouse
 
+# Check our heap snapshot analysis against the engine it is a port of.
+#
+# The engine is the real `devtools-heap-snapshot-worker.js` that ships
+# inside chrome-devtools-mcp, the same one DevTools itself runs, driven
+# through the proxy its own tools use. Nothing on that side is
+# reimplemented, so a disagreement means the port is wrong.
+#
+# The SNAPSHOT is what is checked in, not the page: a heap snapshot of a
+# live page differs run to run in object ids, addresses and how much of
+# V8 happens to be alive, so re-capturing would make the comparison a
+# race rather than a gate. `just heap-diff --capture` re-takes them,
+# which is a deliberate act that changes what we are measured against;
+# `--update` re-records the engine's verdicts about them.
+heap-diff *args:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cd "{{justfile_directory()}}/scripts/perf-diff"
+  [ -d node_modules ] || npm install --registry=https://registry.npmjs.org --no-audit --no-fund
+  if [ -z "${CHROME_PATH:-}" ]; then
+    for candidate in \
+      "$HOME/Library/Caches/ms-playwright"/chromium-*/chrome-mac-*/"Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" \
+      "$HOME/.cache/ms-playwright"/chromium-*/chrome-linux/chrome; do
+      [ -x "$candidate" ] && export CHROME_PATH="$candidate" && break
+    done
+  fi
+  node record-heap.mjs {{args}}
+  cd "{{justfile_directory()}}"
+  cargo test -p ferridriver-heap --test differential
+
 # Print our own analysis of a trace, in the shape the recordings use.
 perf-report trace:
   cargo run -p ferridriver-perf --example report -- {{trace}}

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A page holding on to things</title>
+</head>
+<body>
+<main><h1>Retained</h1></main>
+<script>
+// Shapes the queries are meant to find, each a different retainer path.
+// A snapshot of a page that lets go of everything agrees with upstream
+// by both sides finding nothing, which is the trap the trace fixtures
+// grew from two to four to escape.
+globalThis.__kept = (() => {
+  // A detached DOM subtree: built, filled, never attached.
+  const detached = document.createElement('div');
+  for (let i = 0; i < 200; i++) {
+    const row = document.createElement('p');
+    row.textContent = 'row ' + i;
+    detached.append(row);
+  }
+
+  // Duplicate strings, which get_heapsnapshot_duplicate_strings reports.
+  const duplicated = [];
+  for (let i = 0; i < 500; i++) {
+    duplicated.push(('a repeated string that is long enough not to be interned away').slice(0));
+  }
+
+  // A closure retaining a buffer, so a retaining path runs through a
+  // context rather than a property.
+  const buffer = new Uint8Array(64 * 1024);
+  const closure = () => buffer.length;
+
+  // A WeakMap, which the dominator pass treats specially: the value is
+  // retained by key and table together and only the key's edge counts.
+  const table = new WeakMap();
+  const key = { name: 'weakmap key' };
+  table.set(key, { payload: new Array(1000).fill('weak value') });
+
+  class Widget {
+    constructor(n) { this.n = n; this.label = 'widget ' + n; }
+  }
+  const widgets = Array.from({ length: 300 }, (_, n) => new Widget(n));
+
+  return { detached, duplicated, closure, table, key, widgets };
+})();
+</script>
+</body>
+</html>

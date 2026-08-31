@@ -1930,6 +1930,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferridriver-heap"
+version = "0.5.0"
+dependencies = [
+ "flate2",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "ferridriver-jsstd"
 version = "0.5.0"
 dependencies = [

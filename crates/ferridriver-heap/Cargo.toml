@@ -1,0 +1,25 @@
+[package]
+name = "ferridriver-heap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "V8 heap snapshot analysis: retained sizes, dominators and retaining paths, in Rust"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rustc-hash = "2"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+flate2 = { workspace = true }

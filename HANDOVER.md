@@ -21,6 +21,7 @@ Gates that exist, and what each one actually proves:
 | `just a11y-diff` | `page.checkAccessibility()` still agrees with Lighthouse's axe verdicts on three fixture pages |
 | `just quality-diff` | The ten ported live-page audits still agree with Lighthouse |
 | `just robots-diff` | Our `robots.txt` parser still agrees with `robots-parser` 3.0.1, which is what `is-crawlable` really has to agree with |
+| `just heap-diff` | Our reading of a `.heapsnapshot` still agrees with DevTools' own heap engine, node by node over a sample of 200 |
 | `just lh-record` | Re-derives the recordings the two above compare against |
 | `just lh-audit <url>` | What Lighthouse concludes about any live page, for exploring |
 | `just test` | All of the offline halves, plus 2131 e2e across four backends, 598 BDD, 1102 NAPI, and the e2e typecheck |
@@ -93,16 +94,56 @@ Playwright exposes neither, so `Unsupported` on the other three is the
 honest shape here and does not violate the no-divergence rule, because
 the feature is absent rather than approximated.
 
-The analysis is the work: a `.heapsnapshot` is a flat typed-array
-encoding of nodes and edges with a separate `meta` describing the field
-layout, and every tool above is a query over the resulting graph
-(dominator tree, retaining paths, shortest path to a GC root). This is
-the same shape of job as `ferridriver-perf` and deserves the same
-treatment — a `ferridriver-heap` crate with a differential against
-devtools-frontend's own `HeapSnapshotWorker`, over checked-in snapshots.
-Do not port it against your own reading of the format; that is exactly
-how `ferridriver-perf` passed 62 of its own tests and was still wrong in
-ten places.
+### What has landed
+
+The harness and the format layer, in `crates/ferridriver-heap`. The
+engine this is a port of turned out to be drivable: the real
+`devtools-heap-snapshot-worker.js` ships inside `chrome-devtools-mcp`
+and takes the same `HeapSnapshotWorkerProxy` its own tools use, so
+`just heap-diff` runs it over a checked-in snapshot and records what it
+concluded, and `cargo test -p ferridriver-heap --test differential`
+replays that offline in `just test`.
+
+It earned its place on the first run. 198 of 200 sampled nodes agreed
+immediately; the two that did not disagreed on DETACHEDNESS, because
+what DevTools reports is not the field V8 wrote — `propagateDOMState`
+walks attachment through the graph, stops at the first non-native node,
+and renames what it finds to `Detached <name>`. A port written against
+a reading of the format would have shipped the raw field and been wrong
+about exactly the objects a leak hunt is looking for.
+
+The snapshot rather than the page is checked in
+(`tests/fixtures/leaky.heapsnapshot.gz`, 550KB), because object ids and
+how much of V8 is alive differ run to run; `just heap-diff --capture`
+re-takes it deliberately.
+
+### What is left
+
+Everything downstream of the format, in the order `HeapSnapshot.ts`
+does it — the order is load-bearing, since shallow sizes move from
+owned nodes onto their owners BEFORE retained sizes propagate:
+
+1. `calculateFlags` — detached DOM, queriable, page-owned.
+2. `calculateShallowSizes` — moves an owned array or hidden node's size
+   onto its owner, which changes every size downstream.
+3. `initEssentialEdges` — which edges count for dominance. Weak edges
+   never retain; a WeakMap value is retained by key and table together
+   and only the key's edge counts; shortcuts at the root are markers.
+4. Lengauer-Tarjan dominators, then retained sizes propagated up in
+   reverse DFS order, then `buildDominatedNodes`.
+5. `calculateDistances` — a two-phase breadth-first walk, user roots
+   first and then everything else.
+6. Node naming — cons strings are assembled by walking their parts, and
+   a plain `Object` is named from its constructor.
+7. `getStatistics`, which needs all of the above.
+
+`engine.json` already carries the engine's answers for every one of
+those (`statistics`, and per-node `name`, `selfSize`, `retainedSize`,
+`distance`), so each layer is finished when the field it fills in stops
+disagreeing. The differential's module doc lists them.
+
+Then the 13 tools themselves, the CDP capture with `Unsupported` on the
+other three backends, and the three binding layers.
 
 ## 4. Extensions, PWA, WebMCP, third-party devtools — 12 tools
 
