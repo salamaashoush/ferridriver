@@ -33,6 +33,17 @@ const FIXTURES = join(ROOT, 'crates/ferridriver-heap/tests/fixtures');
 /** Fixture pages, each captured to `<name>.heapsnapshot.gz` beside it. */
 const PAGES = ['leaky'];
 
+/**
+ * Snapshots built by `make-heapsnapshot.mjs` rather than captured, and
+ * stored plain because they are small enough to read.
+ *
+ * A browser will not produce a snapshot with user roots in it, so the
+ * three passes that need them are only reachable from a hand-built one.
+ */
+const HANDMADE = ['handmade'];
+
+const ALL = [...PAGES, ...HANDMADE];
+
 /** How many nodes the per-node comparisons cover. */
 const SAMPLE_SIZE = 200;
 
@@ -74,7 +85,9 @@ function findChrome() {
 /** Load a fixture into the real worker and hand back its snapshot proxy. */
 async function load(name) {
   const gz = join(FIXTURES, `${name}.heapsnapshot.gz`);
-  const text = gunzipSync(readFileSync(gz)).toString('utf-8');
+  const text = HANDMADE.includes(name)
+    ? readFileSync(join(FIXTURES, `${name}.heapsnapshot`), 'utf-8')
+    : gunzipSync(readFileSync(gz)).toString('utf-8');
   const plain = join(tmpdir(), `ferridriver-heap-${name}-${process.pid}.heapsnapshot`);
   writeFileSync(plain, text);
   // The engine's `staticData` does not carry the field layout, and
@@ -133,7 +146,7 @@ async function analyse(snapshot, nodeFieldCount) {
 
 async function record() {
   const out = {};
-  for (const name of PAGES) {
+  for (const name of ALL) {
     const { snapshot, worker, nodeFieldCount } = await load(name);
     try {
       out[name] = { nodeFieldCount, ...(await analyse(snapshot, nodeFieldCount)) };
@@ -168,6 +181,6 @@ if (process.argv.includes('--update')) {
     console.error(`${where}: out of date with the DevTools heap engine\n\nrun: just heap-diff --update`);
     process.exit(1);
   }
-  console.log(`${PAGES.length} snapshot(s) still match the DevTools heap engine`);
+  console.log(`${ALL.length} snapshot(s) still match the DevTools heap engine`);
 }
 process.exit(0);

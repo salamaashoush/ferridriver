@@ -2023,5 +2023,230 @@
     "detachedness": 1
    }
   ]
+ },
+ "handmade": {
+  "nodeFieldCount": 6,
+  "statistics": {
+   "total": 8784,
+   "native": {
+    "total": 6216,
+    "typedArrays": 2048
+   },
+   "v8heap": {
+    "total": 2568,
+    "code": 200,
+    "jsArrays": 576,
+    "strings": 80,
+    "system": 192
+   }
+  },
+  "staticData": {
+   "nodeCount": 20,
+   "rootNodeIndex": 0,
+   "totalSize": 8784,
+   "maxJSObjectId": 39
+  },
+  "nodes": [
+   {
+    "ordinal": 0,
+    "id": 1,
+    "name": "",
+    "type": "synthetic",
+    "selfSize": 0,
+    "retainedSize": 4688,
+    "distance": 100000000,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 1,
+    "id": 3,
+    "name": "(GC roots)",
+    "type": "synthetic",
+    "selfSize": 0,
+    "retainedSize": 392,
+    "distance": 100000001,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 2,
+    "id": 5,
+    "name": "Window",
+    "type": "object",
+    "selfSize": 64,
+    "retainedSize": 4128,
+    "distance": 1,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 3,
+    "id": 7,
+    "name": "(Document DOM trees)",
+    "type": "synthetic",
+    "selfSize": 0,
+    "retainedSize": 72,
+    "distance": 1,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 4,
+    "id": 9,
+    "name": "Array",
+    "type": "object",
+    "selfSize": 544,
+    "retainedSize": 544,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 5,
+    "id": 11,
+    "name": "(object elements)",
+    "type": "array",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 6,
+    "id": 13,
+    "name": "Array",
+    "type": "object",
+    "selfSize": 32,
+    "retainedSize": 32,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 7,
+    "id": 15,
+    "name": "(object elements)",
+    "type": "array",
+    "selfSize": 1024,
+    "retainedSize": 1024,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 8,
+    "id": 17,
+    "name": "Holder",
+    "type": "object",
+    "selfSize": 16,
+    "retainedSize": 16,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 9,
+    "id": 19,
+    "name": "system / hidden",
+    "type": "hidden",
+    "selfSize": 128,
+    "retainedSize": 128,
+    "distance": 100000002,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 10,
+    "id": 39,
+    "name": "Array",
+    "type": "hidden",
+    "selfSize": 64,
+    "retainedSize": 64,
+    "distance": 100000002,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 11,
+    "id": 21,
+    "name": "Detached HTMLDivElement",
+    "type": "native",
+    "selfSize": 48,
+    "retainedSize": 72,
+    "distance": 2,
+    "detachedness": 2
+   },
+   {
+    "ordinal": 12,
+    "id": 23,
+    "name": "Detached HTMLParagraphElement",
+    "type": "native",
+    "selfSize": 24,
+    "retainedSize": 24,
+    "distance": 3,
+    "detachedness": 2
+   },
+   {
+    "ordinal": 13,
+    "id": 25,
+    "name": "WeakMap",
+    "type": "object",
+    "selfSize": 40,
+    "retainedSize": 40,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 14,
+    "id": 27,
+    "name": "Key",
+    "type": "object",
+    "selfSize": 24,
+    "retainedSize": 280,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 15,
+    "id": 29,
+    "name": "Value",
+    "type": "object",
+    "selfSize": 256,
+    "retainedSize": 256,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 16,
+    "id": 31,
+    "name": "WeaklyHeld",
+    "type": "object",
+    "selfSize": 96,
+    "retainedSize": 96,
+    "distance": -5,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 17,
+    "id": 33,
+    "name": "compiled",
+    "type": "code",
+    "selfSize": 200,
+    "retainedSize": 200,
+    "distance": 100000002,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 18,
+    "id": 35,
+    "name": "a string",
+    "type": "string",
+    "selfSize": 80,
+    "retainedSize": 80,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 19,
+    "id": 37,
+    "name": "system / JSArrayBufferData",
+    "type": "native",
+    "selfSize": 2048,
+    "retainedSize": 2048,
+    "distance": 2,
+    "detachedness": 0
+   }
+  ]
  }
 }

@@ -329,6 +329,12 @@ lh-record:
 # race rather than a gate. `just heap-diff --capture` re-takes them,
 # which is a deliberate act that changes what we are measured against;
 # `--update` re-records the engine's verdicts about them.
+#
+# One fixture is not captured at all. A browser will not produce a
+# snapshot with user roots in it, so `handmade.heapsnapshot` is built by
+# `scripts/perf-diff/make-heapsnapshot.mjs`; without it the shallow-size
+# transfer, the page-object marking and half the distance walk are
+# branches neither side takes.
 heap-diff *args:
   #!/usr/bin/env bash
   set -euo pipefail

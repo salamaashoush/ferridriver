@@ -142,7 +142,7 @@ the fixture: total size, per-node self and retained sizes, distances,
 and all eight statistics fields. Node naming (6) has not, and
 `engine.json` already carries the engine's answer for it.
 
-### The fixture cannot exercise everything, and this is the part to fix next
+### The fixture that a browser will not give you
 
 A snapshot taken over CDP has NO USER ROOTS. The synthetic root's only
 child is `(GC roots)` and every child of that is synthetic too.
@@ -152,22 +152,26 @@ Puppeteer's own `captureHeapSnapshot`, which is what
 `chrome-devtools-mcp` calls.
 
 Upstream reads that as "internals were exposed" and skips
-`calculateShallowSizes`, so three passes never run on either side: the
-shallow-size transfer, the page-object marking that feeds the
-essential-edge filter, and the first half of the distance walk. The
-comparison passes because both sides skip them, which is agreement
-about a branch neither takes rather than evidence.
+`calculateShallowSizes`, so over a captured snapshot three passes never
+run on either side: the shallow-size transfer, the page-object marking
+that feeds the essential-edge filter, and the first half of the
+distance walk. Agreement there is agreement about a branch neither side
+takes, which is not evidence.
 
-Two smaller branches are unexercised too, each established by deleting
-the code and watching the gate stay green: the hidden-node branch of
-the statistics pass (`system` is 0 here) and the single-retainer test
-in the JS-array measurement (every backing store has exactly one).
+So there is a second fixture,
+`tests/fixtures/handmade.heapsnapshot`, built by
+`scripts/perf-diff/make-heapsnapshot.mjs` the way upstream's own
+`HeapSnapshot.test.ts` builds snapshots. Twenty nodes, each there to
+make one branch tell itself apart from its absence: a backing store
+with one retainer and another with two, a hidden node the JS-array
+branch would otherwise claim, an ephemeron pair, a weak-only retainer,
+a detached subtree. It is still a differential -- the real engine
+analyses it too.
 
-The fix is a hand-built snapshot with user roots, a `(Document DOM
-trees)` synthetic, an owned backing store with two retainers, a hidden
-node with a size, and a `WeakMap` ephemeron pair -- run through the same
-engine, exactly as upstream's own `HeapSnapshot.test.ts` builds
-snapshots by hand. Do that before trusting any of those three passes.
+It found a bug on its first run: the ephemeron name parser matched
+nothing, so both edges of a `WeakMap` pair counted and the value came
+out dominated by the window rather than by its key. Four passes were
+then confirmed live by deleting each and watching the gate go red.
 
 Then the 13 tools themselves, the CDP capture with `Unsupported` on the
 other three backends, and the three binding layers.

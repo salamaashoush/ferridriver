@@ -27,37 +27,35 @@
 //! is a matter of comparing a field that is already there, and so the
 //! gap is visible in the fixture rather than only in someone's memory.
 //!
-//! # What this fixture cannot exercise
+//! # Two fixtures, because one of them cannot reach half the engine
 //!
 //! A snapshot taken over CDP -- by `HeapProfiler.takeHeapSnapshot`,
 //! which is the only way this tool will ever obtain one -- has no user
 //! roots: the synthetic root's single child is `(GC roots)`, and every
 //! child of that is synthetic too. Measured, not assumed: over http and
 //! file, with and without `exposeInternals`, `captureNumericValue` and
-//! `treatGlobalObjectsAsRoots`.
+//! `treatGlobalObjectsAsRoots`, and through Puppeteer's own
+//! `captureHeapSnapshot`, which is what `chrome-devtools-mcp` calls.
 //!
 //! Upstream reads no user roots as "the snapshot was taken with
 //! internals exposed" and skips `calculateShallowSizes` entirely, so
-//! three passes never run on either side -- the shallow-size transfer,
-//! the page-object marking that feeds the essential-edge filter, and
-//! the first half of the distance walk. Both implementations agree
-//! about that, which is why this comparison passes; it is agreement
-//! about a branch neither side takes.
+//! over `leaky` three passes never run on either side -- the
+//! shallow-size transfer, the page-object marking that feeds the
+//! essential-edge filter, and the first half of the distance walk.
+//! Agreement there is agreement about a branch neither side takes.
 //!
-//! Two smaller branches are unexercised for their own reasons, both
-//! established by removing the code and watching this pass: the
-//! hidden-node branch of the statistics pass, because nothing hidden in
-//! this snapshot has a size (`system` is 0), and the single-retainer
-//! test in the JS-array measurement, because every backing store here
-//! has exactly one retainer. The measurement itself IS gated -- drop
-//! the backing store and `jsArrays` reports 256 against the engine's
-//! 7920.
+//! `handmade` exists for exactly those branches, built by
+//! `scripts/perf-diff/make-heapsnapshot.mjs` the way upstream's own
+//! `HeapSnapshot.test.ts` builds snapshots. It is still a differential:
+//! the real engine analyses it too, and the recording is whatever IT
+//! concluded. Twenty nodes, each there to make one branch discriminate
+//! -- a backing store with one retainer and another with two, a hidden
+//! node the JS-array branch would otherwise claim, an ephemeron pair,
+//! a weak-only retainer, a detached subtree.
 //!
-//! Closing these needs a snapshot with user roots in it, which a
-//! browser will not produce over CDP; it has to be built by hand and
-//! run through the same engine. Until then this comparison is evidence
-//! about the format, the dominator tree, the distance walk from the
-//! system root, and the statistics -- and about nothing else.
+//! It earned its place immediately: it found the ephemeron name parser
+//! matching nothing, so both edges of a `WeakMap` pair counted and the
+//! value came out dominated by the window rather than by its key.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -138,19 +136,27 @@ fn recordings() -> BTreeMap<String, Recording> {
   serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
-/// Snapshots are stored gzipped: even a trivial page's is megabytes.
 fn analysed(name: &str) -> Analysis {
   Analysis::new(snapshot(name))
 }
 
+/// Captured snapshots are stored gzipped, because even a trivial page's
+/// is megabytes; the hand-built one is stored plain, because the point
+/// of it is that a reader can follow it.
 fn snapshot(name: &str) -> Snapshot {
-  let path = fixtures_dir().join(format!("{name}.heapsnapshot.gz"));
-  let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-  let mut text = String::new();
-  flate2::read::GzDecoder::new(&bytes[..])
-    .read_to_string(&mut text)
-    .unwrap_or_else(|e| panic!("decompress {}: {e}", path.display()));
-  Snapshot::parse(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+  let plain = fixtures_dir().join(format!("{name}.heapsnapshot"));
+  let text = if plain.exists() {
+    std::fs::read_to_string(&plain).unwrap_or_else(|e| panic!("read {}: {e}", plain.display()))
+  } else {
+    let path = fixtures_dir().join(format!("{name}.heapsnapshot.gz"));
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(&bytes[..])
+      .read_to_string(&mut text)
+      .unwrap_or_else(|e| panic!("decompress {}: {e}", path.display()));
+    text
+  };
+  Snapshot::parse(&text).unwrap_or_else(|e| panic!("parse {name}: {e}"))
 }
 
 /// The format layer: the column layout resolved from `meta`, and the
@@ -282,7 +288,12 @@ fn the_analysis_agrees_with_the_engine() {
 fn the_fixtures_still_carry_something_worth_comparing() {
   for (name, recording) in recordings() {
     let sampled = recording.nodes.len();
-    assert!(sampled >= 100, "{name}: only {sampled} nodes sampled");
+    // The hand-built snapshot is small on purpose: every node in it
+    // exists to make one branch discriminate, and the assertions below
+    // name them.
+    let handmade = name == "handmade";
+    let (least_nodes, least_retaining) = if handmade { (15, 10) } else { (100, 20) };
+    assert!(sampled >= least_nodes, "{name}: only {sampled} nodes sampled");
 
     let kinds: std::collections::BTreeSet<&str> = recording.nodes.iter().map(|node| node.kind.as_str()).collect();
     assert!(
@@ -293,7 +304,7 @@ fn the_fixtures_still_carry_something_worth_comparing() {
 
     let retaining = recording.nodes.iter().filter(|node| node.retained_size > 0).count();
     assert!(
-      retaining >= 20,
+      retaining >= least_retaining,
       "{name}: only {retaining} sampled nodes retain anything, so the dominator tree is barely exercised"
     );
 
@@ -346,5 +357,38 @@ fn the_fixtures_still_carry_something_worth_comparing() {
       recording.statistics.v8heap.system <= recording.statistics.v8heap.total,
       "{name}: the system size exceeds the heap it is part of"
     );
+
+    if handmade {
+      // The shapes this fixture exists for. Each is what makes one
+      // branch tell itself apart from its own absence, so losing any of
+      // them turns a passing comparison back into a vacuous one.
+      assert!(
+        recording.statistics.v8heap.system > 0,
+        "{name}: nothing hidden has a size, so the statistics early exit is untested"
+      );
+      assert!(
+        recording.nodes.iter().any(|node| node.distance == 1),
+        "{name}: no node sits at distance 1, so there are no user roots and three passes do not run"
+      );
+      assert!(
+        recording.nodes.iter().any(|node| node.detachedness == 2),
+        "{name}: nothing is detached, so the propagation is untested"
+      );
+      assert!(
+        recording.nodes.iter().any(|node| node.name.starts_with("Detached ")),
+        "{name}: nothing was renamed, so the detached-name rewrite is untested"
+      );
+      assert!(
+        recording.nodes.iter().any(|node| node.distance < 0),
+        "{name}: everything is reachable, so the weak-retainer walk is untested"
+      );
+      assert!(
+        recording
+          .nodes
+          .iter()
+          .any(|node| node.self_size == 0 && node.kind == "array"),
+        "{name}: no backing store was emptied, so the shallow-size transfer is untested"
+      );
+    }
   }
 }

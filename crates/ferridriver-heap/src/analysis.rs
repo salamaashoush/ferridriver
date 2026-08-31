@@ -263,18 +263,27 @@ fn is_user_root(snapshot: &Snapshot, ordinal: usize) -> bool {
 /// distance pass drops whichever of the pair it meets first so the
 /// value's distance comes from the later, larger one.
 fn parse_weak_map_edge_name(name: &str) -> Option<(&str, &str)> {
-  let (count, rest) = name.split_once(' ')?;
-  if count.is_empty() || !count.bytes().all(|b| b.is_ascii_digit()) {
+  // Upstream's `^\d+(?<duplicatedPart> \/ part of key \(.*? @\d+\) ->
+  // value \(.*? @\d+\) pair in WeakMap \(table @(?<tableId>\d+)\))$`.
+  // The captured part starts at the SPACE after the leading digits, and
+  // it is what identifies the pair: both edges of one ephemeron carry
+  // the same text there.
+  let digits = name.len() - name.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+  if digits == 0 {
     return None;
   }
-  if !rest.starts_with("part of key (") {
+  let duplicated = name.get(digits..)?;
+  if !duplicated.starts_with(" / part of key (") {
     return None;
   }
-  let table = rest.rsplit_once("pair in `WeakMap` (table @")?.1.strip_suffix(')')?;
+  let table = duplicated
+    .rsplit_once("pair in WeakMap (table @")?
+    .1
+    .strip_suffix(')')?;
   if table.is_empty() || !table.bytes().all(|b| b.is_ascii_digit()) {
     return None;
   }
-  Some((rest, table))
+  Some((duplicated, table))
 }
 
 // ── Flags ───────────────────────────────────────────────────────────────
@@ -876,4 +885,38 @@ fn distance_filter(
   }
 
   true
+}
+
+#[cfg(test)]
+mod tests {
+  use super::parse_weak_map_edge_name;
+
+  const EPHEMERON: &str = "1 / part of key (Key @27) -> value (Value @29) pair in WeakMap (table @25)";
+
+  #[test]
+  fn an_ephemeron_edge_name_splits_into_its_pair_and_its_table() {
+    let (pair, table) = parse_weak_map_edge_name(EPHEMERON).expect("an ephemeron name");
+    assert_eq!(table, "25");
+    // Both edges of one pair carry the same text after the count, which
+    // is what lets the distance walk match them up.
+    assert_eq!(
+      pair,
+      " / part of key (Key @27) -> value (Value @29) pair in WeakMap (table @25)"
+    );
+  }
+
+  #[test]
+  fn an_ordinary_edge_name_is_not_an_ephemeron() {
+    for name in [
+      "elements",
+      "",
+      "1 / part of key (Key @27)",
+      // No leading count.
+      "/ part of key (K @1) -> value (V @2) pair in WeakMap (table @3)",
+      // A table id that is not a number.
+      "1 / part of key (K @1) -> value (V @2) pair in WeakMap (table @x)",
+    ] {
+      assert_eq!(parse_weak_map_edge_name(name), None, "{name:?} is not an ephemeron");
+    }
+  }
 }
