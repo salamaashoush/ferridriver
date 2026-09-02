@@ -204,13 +204,19 @@ looks right until something else answers the same question:
   `(Document DOM trees)`). Seeding from the wrong one marks the whole
   DOM queriable.
 
+`getDuplicateStrings` has landed too. It needed three exclusions a
+straight group-by-text would miss. A cons string V8 has already
+flattened has an empty half, and is not a duplicate of its own content.
+A string node of zero size is V8 encoding a NUMBER. And a truncated
+string is only a prefix, so two that read alike may differ past the
+cut; those group on length and hash as well.
+
 Still to write: `aggregatesWithFilter` and the class-node provider
 (`get_heapsnapshot_class_nodes`, and the aggregate half of
-`get_heapsnapshot_details`), `getRetainingPaths`, `getDuplicateStrings`,
-`queryObjects`, and `calculateSnapshotDiff` for
-`compare_heapsnapshots`. Then the 13 tools themselves, the CDP capture
-with `Unsupported` on the other three backends, and the three binding
-layers.
+`get_heapsnapshot_details`), `getRetainingPaths`, `queryObjects`, and
+`calculateSnapshotDiff` for `compare_heapsnapshots`. Then the 13 tools
+themselves, the CDP capture with `Unsupported` on the other three
+backends, and the three binding layers.
 
 ## 4. Extensions, PWA, WebMCP, third-party devtools — 12 tools
 

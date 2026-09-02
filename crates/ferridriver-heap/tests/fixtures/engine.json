@@ -5548,29 +5548,235 @@
      }
     ]
    }
+  ],
+  "duplicateStrings": [
+   {
+    "value": "get disposed",
+    "count": 6,
+    "totalSelfSize": 144,
+    "totalRetainedSize": 144,
+    "nodes": [
+     {
+      "id": 37299,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 8
+     },
+     {
+      "id": 37393,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 8
+     },
+     {
+      "id": 46795,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 8
+     },
+     {
+      "id": 46861,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 8
+     },
+     {
+      "id": 47153,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 8
+     },
+     {
+      "id": 47405,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 8
+     }
+    ],
+    "truncated": false
+   },
+   {
+    "value": "WebAssembly.Suspending",
+    "count": 3,
+    "totalSelfSize": 108,
+    "totalRetainedSize": 108,
+    "nodes": [
+     {
+      "id": 51465,
+      "selfSize": 36,
+      "retainedSize": 36,
+      "distance": 6
+     },
+     {
+      "id": 52005,
+      "selfSize": 36,
+      "retainedSize": 36,
+      "distance": 6
+     },
+     {
+      "id": 52131,
+      "selfSize": 36,
+      "retainedSize": 36,
+      "distance": 6
+     }
+    ],
+    "truncated": false
+   },
+   {
+    "value": "extensions::SafeBuiltins",
+    "count": 2,
+    "totalSelfSize": 72,
+    "totalRetainedSize": 72,
+    "nodes": [
+     {
+      "id": 30881,
+      "selfSize": 36,
+      "retainedSize": 36,
+      "distance": 6
+     },
+     {
+      "id": 32213,
+      "selfSize": 36,
+      "retainedSize": 36,
+      "distance": 4
+     }
+    ],
+    "truncated": false
+   },
+   {
+    "value": "get variants",
+    "count": 3,
+    "totalSelfSize": 72,
+    "totalRetainedSize": 72,
+    "nodes": [
+     {
+      "id": 37615,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 8
+     },
+     {
+      "id": 45543,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 8
+     },
+     {
+      "id": 46991,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 8
+     }
+    ],
+    "truncated": false
+   },
+   {
+    "value": "WebAssembly",
+    "count": 2,
+    "totalSelfSize": 48,
+    "totalRetainedSize": 48,
+    "nodes": [
+     {
+      "id": 7565,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 3
+     },
+     {
+      "id": 15133,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 7
+     }
+    ],
+    "truncated": false
+   },
+   {
+    "value": "EventTarget",
+    "count": 2,
+    "totalSelfSize": 48,
+    "totalRetainedSize": 48,
+    "nodes": [
+     {
+      "id": 30951,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 4
+     },
+     {
+      "id": 32085,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 4
+     }
+    ],
+    "truncated": false
+   },
+   {
+    "value": "v8/LoadTimes",
+    "count": 2,
+    "totalSelfSize": 48,
+    "totalRetainedSize": 48,
+    "nodes": [
+     {
+      "id": 32267,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 6
+     },
+     {
+      "id": 32313,
+      "selfSize": 24,
+      "retainedSize": 24,
+      "distance": 4
+     }
+    ],
+    "truncated": false
+   },
+   {
+    "value": "Document",
+    "count": 2,
+    "totalSelfSize": 40,
+    "totalRetainedSize": 40,
+    "nodes": [
+     {
+      "id": 31869,
+      "selfSize": 20,
+      "retainedSize": 20,
+      "distance": 4
+     },
+     {
+      "id": 32545,
+      "selfSize": 20,
+      "retainedSize": 20,
+      "distance": 4
+     }
+    ],
+    "truncated": false
+   }
   ]
  },
  "handmade": {
   "nodeFieldCount": 6,
   "statistics": {
-   "total": 9056,
+   "total": 9288,
    "native": {
     "total": 6216,
     "typedArrays": 2048
    },
    "v8heap": {
-    "total": 2840,
+    "total": 3072,
     "code": 200,
     "jsArrays": 576,
-    "strings": 232,
+    "strings": 464,
     "system": 192
    }
   },
   "staticData": {
-   "nodeCount": 28,
+   "nodeCount": 38,
    "rootNodeIndex": 0,
-   "totalSize": 9056,
-   "maxJSObjectId": 55
+   "totalSize": 9288,
+   "maxJSObjectId": 75
   },
   "nodes": [
    {
@@ -5579,7 +5785,7 @@
     "name": "",
     "type": "synthetic",
     "selfSize": 0,
-    "retainedSize": 4960,
+    "retainedSize": 5192,
     "distance": 100000000,
     "detachedness": 0
    },
@@ -5599,7 +5805,7 @@
     "name": "Window",
     "type": "object",
     "selfSize": 64,
-    "retainedSize": 4400,
+    "retainedSize": 4632,
     "distance": 1,
     "detachedness": 0
    },
@@ -5795,6 +6001,106 @@
    },
    {
     "ordinal": 22,
+    "id": 57,
+    "name": "dup text",
+    "type": "concatenated string",
+    "selfSize": 40,
+    "retainedSize": 72,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 23,
+    "id": 59,
+    "name": "dup ",
+    "type": "string",
+    "selfSize": 16,
+    "retainedSize": 16,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 24,
+    "id": 61,
+    "name": "text",
+    "type": "string",
+    "selfSize": 16,
+    "retainedSize": 16,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 25,
+    "id": 63,
+    "name": "dup text",
+    "type": "concatenated string",
+    "selfSize": 40,
+    "retainedSize": 72,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 26,
+    "id": 65,
+    "name": "du",
+    "type": "string",
+    "selfSize": 16,
+    "retainedSize": 16,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 27,
+    "id": 67,
+    "name": "p text",
+    "type": "string",
+    "selfSize": 16,
+    "retainedSize": 16,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 28,
+    "id": 69,
+    "name": "dup text",
+    "type": "concatenated string",
+    "selfSize": 40,
+    "retainedSize": 88,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 29,
+    "id": 71,
+    "name": "",
+    "type": "string",
+    "selfSize": 16,
+    "retainedSize": 16,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 30,
+    "id": 73,
+    "name": "dup text",
+    "type": "string",
+    "selfSize": 32,
+    "retainedSize": 32,
+    "distance": 3,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 31,
+    "id": 75,
+    "name": "dup text",
+    "type": "string",
+    "selfSize": 0,
+    "retainedSize": 0,
+    "distance": 2,
+    "detachedness": 0
+   },
+   {
+    "ordinal": 32,
     "id": 51,
     "name": "{alpha, \"be, ta\", gamma}",
     "type": "object",
@@ -5804,7 +6110,7 @@
     "detachedness": 0
    },
    {
-    "ordinal": 23,
+    "ordinal": 33,
     "id": 53,
     "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
     "type": "object",
@@ -5814,7 +6120,7 @@
     "detachedness": 0
    },
    {
-    "ordinal": 24,
+    "ordinal": 34,
     "id": 55,
     "name": "Leaf",
     "type": "object",
@@ -5824,7 +6130,7 @@
     "detachedness": 0
    },
    {
-    "ordinal": 25,
+    "ordinal": 35,
     "id": 33,
     "name": "compiled",
     "type": "code",
@@ -5834,7 +6140,7 @@
     "detachedness": 0
    },
    {
-    "ordinal": 26,
+    "ordinal": 36,
     "id": 35,
     "name": "a string",
     "type": "string",
@@ -5844,7 +6150,7 @@
     "detachedness": 0
    },
    {
-    "ordinal": 27,
+    "ordinal": 37,
     "id": 37,
     "name": "system / JSArrayBufferData",
     "type": "native",
@@ -5864,7 +6170,7 @@
      "nodeIndex": 0,
      "detachedness": 0,
      "selfSize": 0,
-     "retainedSize": 4960,
+     "retainedSize": 5192,
      "distance": 100000000,
      "edgeCount": 3,
      "retainerCount": 0
@@ -5874,7 +6180,7 @@
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -5905,7 +6211,7 @@
        "name": "Window",
        "distance": 1,
        "nodeIndex": 12,
-       "retainedSize": 4400,
+       "retainedSize": 4632,
        "selfSize": 64,
        "type": "object",
        "canBeQueried": true,
@@ -5965,7 +6271,7 @@
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -5976,7 +6282,7 @@
        "id": 33,
        "name": "compiled",
        "distance": 100000002,
-       "nodeIndex": 150,
+       "nodeIndex": 210,
        "retainedSize": 200,
        "selfSize": 200,
        "type": "code",
@@ -6039,9 +6345,9 @@
      "nodeIndex": 12,
      "detachedness": 0,
      "selfSize": 64,
-     "retainedSize": 4400,
+     "retainedSize": 4632,
      "distance": 1,
-     "edgeCount": 11,
+     "edgeCount": 15,
      "retainerCount": 1
     },
     "dominators": [
@@ -6049,14 +6355,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -6162,7 +6468,7 @@
        "id": 35,
        "name": "a string",
        "distance": 2,
-       "nodeIndex": 156,
+       "nodeIndex": 216,
        "retainedSize": 80,
        "selfSize": 80,
        "type": "string",
@@ -6181,7 +6487,7 @@
        "id": 37,
        "name": "system / JSArrayBufferData",
        "distance": 2,
-       "nodeIndex": 162,
+       "nodeIndex": 222,
        "retainedSize": 2048,
        "selfSize": 2048,
        "type": "native",
@@ -6219,7 +6525,7 @@
        "id": 51,
        "name": "{alpha, \"be, ta\", gamma}",
        "distance": 2,
-       "nodeIndex": 132,
+       "nodeIndex": 192,
        "retainedSize": 56,
        "selfSize": 56,
        "type": "object",
@@ -6238,7 +6544,7 @@
        "id": 53,
        "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
        "distance": 2,
-       "nodeIndex": 138,
+       "nodeIndex": 198,
        "retainedSize": 56,
        "selfSize": 56,
        "type": "object",
@@ -6249,6 +6555,82 @@
       },
       "type": "property",
       "edgeIndex": 45,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "dupA",
+      "node": {
+       "id": 57,
+       "name": "dup text",
+       "distance": 2,
+       "nodeIndex": 132,
+       "retainedSize": 72,
+       "selfSize": 40,
+       "type": "concatenated string",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 48,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "dupB",
+      "node": {
+       "id": 63,
+       "name": "dup text",
+       "distance": 2,
+       "nodeIndex": 150,
+       "retainedSize": 72,
+       "selfSize": 40,
+       "type": "concatenated string",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 51,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "dupFlat",
+      "node": {
+       "id": 69,
+       "name": "dup text",
+       "distance": 2,
+       "nodeIndex": 168,
+       "retainedSize": 88,
+       "selfSize": 40,
+       "type": "concatenated string",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 54,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "numberish",
+      "node": {
+       "id": 75,
+       "name": "dup text",
+       "distance": 2,
+       "nodeIndex": 186,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "string",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 57,
       "isAddedNotRemoved": null
      },
      {
@@ -6267,7 +6649,7 @@
        "ignored": false
       },
       "type": "weak",
-      "edgeIndex": 48,
+      "edgeIndex": 60,
       "isAddedNotRemoved": null
      }
     ],
@@ -6299,7 +6681,7 @@
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -6320,7 +6702,7 @@
        "ignored": false
       },
       "type": "element",
-      "edgeIndex": 51,
+      "edgeIndex": 63,
       "isAddedNotRemoved": null
      }
     ],
@@ -6352,14 +6734,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -6380,7 +6762,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 54,
+      "edgeIndex": 66,
       "isAddedNotRemoved": null
      }
     ],
@@ -6392,7 +6774,7 @@
        "name": "Window",
        "distance": 1,
        "nodeIndex": 12,
-       "retainedSize": 4400,
+       "retainedSize": 4632,
        "selfSize": 64,
        "type": "object",
        "canBeQueried": true,
@@ -6439,14 +6821,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -6468,7 +6850,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 54,
+      "edgeIndex": 66,
       "isAddedNotRemoved": null
      }
     ]
@@ -6499,14 +6881,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -6527,7 +6909,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 57,
+      "edgeIndex": 69,
       "isAddedNotRemoved": null
      }
     ],
@@ -6539,7 +6921,7 @@
        "name": "Window",
        "distance": 1,
        "nodeIndex": 12,
-       "retainedSize": 4400,
+       "retainedSize": 4632,
        "selfSize": 64,
        "type": "object",
        "canBeQueried": true,
@@ -6579,14 +6961,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -6608,7 +6990,7 @@
        "ignored": false
       },
       "type": "property",
-      "edgeIndex": 60,
+      "edgeIndex": 72,
       "isAddedNotRemoved": null
      },
      {
@@ -6627,7 +7009,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 57,
+      "edgeIndex": 69,
       "isAddedNotRemoved": null
      }
     ]
@@ -6658,14 +7040,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -6686,7 +7068,7 @@
        "ignored": false
       },
       "type": "property",
-      "edgeIndex": 60,
+      "edgeIndex": 72,
       "isAddedNotRemoved": null
      }
     ],
@@ -6698,7 +7080,7 @@
        "name": "Window",
        "distance": 1,
        "nodeIndex": 12,
-       "retainedSize": 4400,
+       "retainedSize": 4632,
        "selfSize": 64,
        "type": "object",
        "canBeQueried": true,
@@ -6745,7 +7127,7 @@
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -6805,7 +7187,7 @@
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -6865,7 +7247,7 @@
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -6886,7 +7268,7 @@
        "ignored": false
       },
       "type": "element",
-      "edgeIndex": 63,
+      "edgeIndex": 75,
       "isAddedNotRemoved": null
      }
     ],
@@ -6907,7 +7289,7 @@
        "ignored": false
       },
       "type": "element",
-      "edgeIndex": 51,
+      "edgeIndex": 63,
       "isAddedNotRemoved": null
      }
     ]
@@ -6952,7 +7334,7 @@
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -6974,7 +7356,7 @@
        "ignored": false
       },
       "type": "element",
-      "edgeIndex": 63,
+      "edgeIndex": 75,
       "isAddedNotRemoved": null
      }
     ]
@@ -7005,14 +7387,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -7033,7 +7415,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 66,
+      "edgeIndex": 78,
       "isAddedNotRemoved": null
      }
     ],
@@ -7045,7 +7427,7 @@
        "name": "Window",
        "distance": 1,
        "nodeIndex": 12,
-       "retainedSize": 4400,
+       "retainedSize": 4632,
        "selfSize": 64,
        "type": "object",
        "canBeQueried": true,
@@ -7085,14 +7467,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -7113,7 +7495,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 69,
+      "edgeIndex": 81,
       "isAddedNotRemoved": null
      }
     ],
@@ -7125,7 +7507,7 @@
        "name": "Window",
        "distance": 1,
        "nodeIndex": 12,
-       "retainedSize": 4400,
+       "retainedSize": 4632,
        "selfSize": 64,
        "type": "object",
        "canBeQueried": true,
@@ -7172,14 +7554,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -7201,7 +7583,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 69,
+      "edgeIndex": 81,
       "isAddedNotRemoved": null
      },
      {
@@ -7220,7 +7602,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 66,
+      "edgeIndex": 78,
       "isAddedNotRemoved": null
      }
     ]
@@ -7251,7 +7633,7 @@
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -7284,14 +7666,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -7312,7 +7694,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 72,
+      "edgeIndex": 84,
       "isAddedNotRemoved": null
      },
      {
@@ -7331,7 +7713,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 75,
+      "edgeIndex": 87,
       "isAddedNotRemoved": null
      }
     ],
@@ -7343,7 +7725,7 @@
        "name": "Window",
        "distance": 1,
        "nodeIndex": 12,
-       "retainedSize": 4400,
+       "retainedSize": 4632,
        "selfSize": 64,
        "type": "object",
        "canBeQueried": true,
@@ -7390,14 +7772,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -7419,7 +7801,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 72,
+      "edgeIndex": 84,
       "isAddedNotRemoved": null
      }
     ]
@@ -7457,14 +7839,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -7485,7 +7867,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 78,
+      "edgeIndex": 90,
       "isAddedNotRemoved": null
      },
      {
@@ -7504,7 +7886,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 81,
+      "edgeIndex": 93,
       "isAddedNotRemoved": null
      }
     ],
@@ -7525,7 +7907,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 75,
+      "edgeIndex": 87,
       "isAddedNotRemoved": null
      }
     ]
@@ -7570,14 +7952,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -7599,7 +7981,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 78,
+      "edgeIndex": 90,
       "isAddedNotRemoved": null
      }
     ]
@@ -7644,14 +8026,14 @@
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
@@ -7673,7 +8055,7 @@
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 81,
+      "edgeIndex": 93,
       "isAddedNotRemoved": null
      }
     ]
@@ -7681,146 +8063,89 @@
    {
     "ordinal": 22,
     "objectInfo": {
-     "id": 51,
-     "name": "{alpha, \"be, ta\", gamma}",
-     "type": "object",
+     "id": 57,
+     "name": "dup text",
+     "type": "concatenated string",
      "nodeIndex": 132,
      "detachedness": 0,
-     "selfSize": 56,
-     "retainedSize": 56,
+     "selfSize": 40,
+     "retainedSize": 72,
      "distance": 2,
-     "edgeCount": 5,
+     "edgeCount": 2,
      "retainerCount": 1
     },
     "dominators": [
      {
-      "nodeId": 51,
+      "nodeId": 57,
       "nodeIndex": 132,
-      "nodeName": "{alpha, \"be, ta\", gamma}",
-      "retainedSize": 56,
-      "selfSize": 56
+      "nodeName": "dup text",
+      "retainedSize": 72,
+      "selfSize": 40
      },
      {
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
     "edges": [
      {
-      "name": "alpha",
+      "name": "first",
       "node": {
-       "id": 55,
-       "name": "Leaf",
+       "id": 59,
+       "name": "dup ",
        "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 84,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "__proto__",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 87,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "be, ta",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 90,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "map",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
+       "nodeIndex": 138,
+       "retainedSize": 16,
+       "selfSize": 16,
+       "type": "string",
+       "canBeQueried": false,
        "detachedDOMTreeNode": false,
        "isAddedNotRemoved": null,
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 93,
+      "edgeIndex": 96,
       "isAddedNotRemoved": null
      },
      {
-      "name": "gamma",
+      "name": "second",
       "node": {
-       "id": 55,
-       "name": "Leaf",
+       "id": 61,
+       "name": "text",
        "distance": 3,
        "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
+       "retainedSize": 16,
+       "selfSize": 16,
+       "type": "string",
+       "canBeQueried": false,
        "detachedDOMTreeNode": false,
        "isAddedNotRemoved": null,
        "ignored": false
       },
-      "type": "property",
-      "edgeIndex": 96,
+      "type": "internal",
+      "edgeIndex": 99,
       "isAddedNotRemoved": null
      }
     ],
     "retainers": [
      {
-      "name": "plain",
+      "name": "dupA",
       "node": {
        "id": 5,
        "name": "Window",
        "distance": 1,
        "nodeIndex": 12,
-       "retainedSize": 4400,
+       "retainedSize": 4632,
        "selfSize": 64,
        "type": "object",
        "canBeQueried": true,
@@ -7829,7 +8154,7 @@
        "ignored": false
       },
       "type": "property",
-      "edgeIndex": 42,
+      "edgeIndex": 48,
       "isAddedNotRemoved": null
      }
     ]
@@ -7837,288 +8162,66 @@
    {
     "ordinal": 23,
     "objectInfo": {
-     "id": 53,
-     "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-     "type": "object",
+     "id": 59,
+     "name": "dup ",
+     "type": "string",
      "nodeIndex": 138,
      "detachedness": 0,
-     "selfSize": 56,
-     "retainedSize": 56,
-     "distance": 2,
-     "edgeCount": 12,
+     "selfSize": 16,
+     "retainedSize": 16,
+     "distance": 3,
+     "edgeCount": 0,
      "retainerCount": 1
     },
     "dominators": [
      {
-      "nodeId": 53,
+      "nodeId": 59,
       "nodeIndex": 138,
-      "nodeName": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-      "retainedSize": 56,
-      "selfSize": 56
+      "nodeName": "dup ",
+      "retainedSize": 16,
+      "selfSize": 16
+     },
+     {
+      "nodeId": 57,
+      "nodeIndex": 132,
+      "nodeName": "dup text",
+      "retainedSize": 72,
+      "selfSize": 40
      },
      {
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
-    "edges": [
-     {
-      "name": "aPropertyNameLongEnoughToCount0",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 99,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount1",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 102,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount2",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 105,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount3",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 108,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount4",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 111,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount5",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 114,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount6",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 117,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount7",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 120,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount8",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 123,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount9",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 126,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount10",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 129,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount11",
-      "node": {
-       "id": 55,
-       "name": "Leaf",
-       "distance": 3,
-       "nodeIndex": 144,
-       "retainedSize": 8,
-       "selfSize": 8,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 132,
-      "isAddedNotRemoved": null
-     }
-    ],
+    "edges": [],
     "retainers": [
      {
-      "name": "wide",
+      "name": "first",
       "node": {
-       "id": 5,
-       "name": "Window",
-       "distance": 1,
-       "nodeIndex": 12,
-       "retainedSize": 4400,
-       "selfSize": 64,
-       "type": "object",
+       "id": 57,
+       "name": "dup text",
+       "distance": 2,
+       "nodeIndex": 132,
+       "retainedSize": 72,
+       "selfSize": 40,
+       "type": "concatenated string",
        "canBeQueried": true,
        "detachedDOMTreeNode": false,
        "isAddedNotRemoved": null,
        "ignored": false
       },
-      "type": "property",
-      "edgeIndex": 45,
+      "type": "internal",
+      "edgeIndex": 96,
       "isAddedNotRemoved": null
      }
     ]
@@ -8126,366 +8229,98 @@
    {
     "ordinal": 24,
     "objectInfo": {
-     "id": 55,
-     "name": "Leaf",
-     "type": "object",
+     "id": 61,
+     "name": "text",
+     "type": "string",
      "nodeIndex": 144,
      "detachedness": 0,
-     "selfSize": 8,
-     "retainedSize": 8,
+     "selfSize": 16,
+     "retainedSize": 16,
      "distance": 3,
      "edgeCount": 0,
-     "retainerCount": 17
+     "retainerCount": 1
     },
     "dominators": [
      {
-      "nodeId": 55,
+      "nodeId": 61,
       "nodeIndex": 144,
-      "nodeName": "Leaf",
-      "retainedSize": 8,
-      "selfSize": 8
+      "nodeName": "text",
+      "retainedSize": 16,
+      "selfSize": 16
+     },
+     {
+      "nodeId": 57,
+      "nodeIndex": 132,
+      "nodeName": "dup text",
+      "retainedSize": 72,
+      "selfSize": 40
      },
      {
       "nodeId": 5,
       "nodeIndex": 12,
       "nodeName": "Window",
-      "retainedSize": 4400,
+      "retainedSize": 4632,
       "selfSize": 64
      },
      {
       "nodeId": 1,
       "nodeIndex": 0,
       "nodeName": "",
-      "retainedSize": 4960,
+      "retainedSize": 5192,
       "selfSize": 0
      }
     ],
     "edges": [],
     "retainers": [
      {
-      "name": "aPropertyNameLongEnoughToCount11",
+      "name": "second",
       "node": {
-       "id": 53,
-       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-       "distance": 2,
-       "nodeIndex": 138,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 132,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount10",
-      "node": {
-       "id": 53,
-       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-       "distance": 2,
-       "nodeIndex": 138,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 129,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount9",
-      "node": {
-       "id": 53,
-       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-       "distance": 2,
-       "nodeIndex": 138,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 126,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount8",
-      "node": {
-       "id": 53,
-       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-       "distance": 2,
-       "nodeIndex": 138,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 123,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount7",
-      "node": {
-       "id": 53,
-       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-       "distance": 2,
-       "nodeIndex": 138,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 120,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount6",
-      "node": {
-       "id": 53,
-       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-       "distance": 2,
-       "nodeIndex": 138,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 117,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount5",
-      "node": {
-       "id": 53,
-       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-       "distance": 2,
-       "nodeIndex": 138,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 114,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount4",
-      "node": {
-       "id": 53,
-       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-       "distance": 2,
-       "nodeIndex": 138,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 111,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount3",
-      "node": {
-       "id": 53,
-       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-       "distance": 2,
-       "nodeIndex": 138,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 108,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount2",
-      "node": {
-       "id": 53,
-       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-       "distance": 2,
-       "nodeIndex": 138,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 105,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount1",
-      "node": {
-       "id": 53,
-       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-       "distance": 2,
-       "nodeIndex": 138,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 102,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "aPropertyNameLongEnoughToCount0",
-      "node": {
-       "id": 53,
-       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
-       "distance": 2,
-       "nodeIndex": 138,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 99,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "gamma",
-      "node": {
-       "id": 51,
-       "name": "{alpha, \"be, ta\", gamma}",
+       "id": 57,
+       "name": "dup text",
        "distance": 2,
        "nodeIndex": 132,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 96,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "map",
-      "node": {
-       "id": 51,
-       "name": "{alpha, \"be, ta\", gamma}",
-       "distance": 2,
-       "nodeIndex": 132,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
+       "retainedSize": 72,
+       "selfSize": 40,
+       "type": "concatenated string",
        "canBeQueried": true,
        "detachedDOMTreeNode": false,
        "isAddedNotRemoved": null,
        "ignored": false
       },
       "type": "internal",
-      "edgeIndex": 93,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "be, ta",
-      "node": {
-       "id": 51,
-       "name": "{alpha, \"be, ta\", gamma}",
-       "distance": 2,
-       "nodeIndex": 132,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 90,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "__proto__",
-      "node": {
-       "id": 51,
-       "name": "{alpha, \"be, ta\", gamma}",
-       "distance": 2,
-       "nodeIndex": 132,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 87,
-      "isAddedNotRemoved": null
-     },
-     {
-      "name": "alpha",
-      "node": {
-       "id": 51,
-       "name": "{alpha, \"be, ta\", gamma}",
-       "distance": 2,
-       "nodeIndex": 132,
-       "retainedSize": 56,
-       "selfSize": 56,
-       "type": "object",
-       "canBeQueried": true,
-       "detachedDOMTreeNode": false,
-       "isAddedNotRemoved": null,
-       "ignored": false
-      },
-      "type": "property",
-      "edgeIndex": 84,
+      "edgeIndex": 99,
       "isAddedNotRemoved": null
      }
     ]
+   }
+  ],
+  "duplicateStrings": [
+   {
+    "value": "dup text",
+    "count": 3,
+    "totalSelfSize": 112,
+    "totalRetainedSize": 176,
+    "nodes": [
+     {
+      "id": 57,
+      "selfSize": 40,
+      "retainedSize": 72,
+      "distance": 2
+     },
+     {
+      "id": 63,
+      "selfSize": 40,
+      "retainedSize": 72,
+      "distance": 2
+     },
+     {
+      "id": 73,
+      "selfSize": 32,
+      "retainedSize": 32,
+      "distance": 3
+     }
+    ],
+    "truncated": false
    }
   ]
  }

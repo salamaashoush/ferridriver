@@ -61,7 +61,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-use ferridriver_heap::{Analysis, DominatorStep, EdgeSummary, ObjectInfo, Snapshot};
+use ferridriver_heap::{Analysis, DominatorStep, DuplicateStringGroup, EdgeSummary, ObjectInfo, Snapshot};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -74,6 +74,8 @@ struct Recording {
   nodes: Vec<NodeInfo>,
   /// The node-addressed queries, over a sub-sample of `nodes`.
   queried: Vec<Queried>,
+  #[serde(rename = "duplicateStrings")]
+  duplicate_strings: Vec<DuplicateStringGroup>,
 }
 
 /// What the engine's providers answered about one node.
@@ -361,6 +363,18 @@ fn the_queries_answer_what_the_engine_answers() {
       !recording.queried.is_empty(),
       "{name}: no node was queried, so this compared nothing"
     );
+
+    let ours = analysis.duplicate_strings();
+    assert_eq!(
+      ours.len(),
+      recording.duplicate_strings.len(),
+      "{name}: engine found {} duplicated string(s), we found {}",
+      recording.duplicate_strings.len(),
+      ours.len()
+    );
+    for (at, (ours, engine)) in ours.iter().zip(&recording.duplicate_strings).enumerate() {
+      assert_eq!(ours, engine, "{name}: duplicated string group {at}");
+    }
   }
 }
 
@@ -526,5 +540,20 @@ fn the_handmade_shapes_are_all_still_there(name: &str, recording: &Recording) {
   assert!(
     recording.nodes.iter().any(|node| node.name.contains('…')),
     "{name}: no plain object overflowed its label, so the budget is untested"
+  );
+
+  let duplicated = recording
+    .duplicate_strings
+    .iter()
+    .find(|group| group.value == "dup text")
+    .unwrap_or_else(|| panic!("{name}: the duplicated-string group is gone"));
+  // Two concatenations and one plain string read the same. A
+  // concatenation V8 has flattened and a zero-sized encoding of a
+  // number read the same too and are excluded, so a count of anything
+  // but three means one of those exclusions stopped mattering.
+  assert_eq!(
+    duplicated.count, 3,
+    "{name}: the duplicated-string group holds {} members, so an exclusion has stopped discriminating",
+    duplicated.count
   );
 }

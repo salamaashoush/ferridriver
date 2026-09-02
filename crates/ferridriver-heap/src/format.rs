@@ -82,6 +82,9 @@ pub struct NodeTypes {
   pub closure: u64,
   pub native: u64,
   pub synthetic: u64,
+  /// V8 encodes booleans and integers as `number` nodes named `bool`
+  /// and `int`, with the value on an internal `value` edge.
+  pub number: u64,
   pub cons_string: u64,
   pub sliced_string: u64,
 }
@@ -230,6 +233,7 @@ impl Snapshot {
       closure: require(&node_type_names, "closure")?,
       native: require(&node_type_names, "native")?,
       synthetic: require(&node_type_names, "synthetic")?,
+      number: require(&node_type_names, "number")?,
       // Both are absent from very old snapshots. `u64::MAX` matches
       // nothing, which is the same as the type never occurring.
       cons_string: value_of(&node_type_names, "concatenated string").unwrap_or(u64::MAX),

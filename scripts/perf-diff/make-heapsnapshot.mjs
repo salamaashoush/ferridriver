@@ -121,6 +121,24 @@ const consRight = node({ type: 'concatenated string', name: '', id: 45, selfSize
 const consRightLeft = node({ type: 'string', name: 'brave ', id: 47, selfSize: 24 });
 const consRightRight = node({ type: 'string', name: 'world', id: 49, selfSize: 24 });
 
+// Two concatenated strings that assemble to the same text out of
+// different pieces, and a third that V8 has already flattened -- its
+// `first` half is the empty string. The flat one reads the same and
+// must NOT be grouped with them: reporting a string as a duplicate of
+// its own content tells nobody anything.
+const consDupA = node({ type: 'concatenated string', name: '', id: 57, selfSize: 40 });
+const consDupALeft = node({ type: 'string', name: 'dup ', id: 59, selfSize: 16 });
+const consDupARight = node({ type: 'string', name: 'text', id: 61, selfSize: 16 });
+const consDupB = node({ type: 'concatenated string', name: '', id: 63, selfSize: 40 });
+const consDupBLeft = node({ type: 'string', name: 'du', id: 65, selfSize: 16 });
+const consDupBRight = node({ type: 'string', name: 'p text', id: 67, selfSize: 16 });
+const consFlat = node({ type: 'concatenated string', name: '', id: 69, selfSize: 40 });
+const emptyPiece = node({ type: 'string', name: '', id: 71, selfSize: 16 });
+const flatContent = node({ type: 'string', name: 'dup text', id: 73, selfSize: 32 });
+// A string node of zero size is how V8 encodes a number, not a string,
+// so it is skipped however its text reads.
+const numberish = node({ type: 'string', name: 'dup text', id: 75, selfSize: 0 });
+
 // A plain `Object`, which is named for every other plain object too, so
 // it gets named after its properties instead. `__proto__` is skipped
 // and a name carrying punctuation is quoted.
@@ -154,6 +172,10 @@ edge(window, { type: 'property', name: str('buffer'), to: buffer });
 edge(window, { type: 'property', name: str('cons'), to: consString });
 edge(window, { type: 'property', name: str('plain'), to: plainObject });
 edge(window, { type: 'property', name: str('wide'), to: wideObject });
+edge(window, { type: 'property', name: str('dupA'), to: consDupA });
+edge(window, { type: 'property', name: str('dupB'), to: consDupB });
+edge(window, { type: 'property', name: str('dupFlat'), to: consFlat });
+edge(window, { type: 'property', name: str('numberish'), to: numberish });
 // Weak edges retain nothing, so `weaklyHeld` is unreachable for the
 // dominator walk and reachable for the distance walk to skip.
 edge(window, { type: 'weak', name: str('weaklyHeld'), to: weaklyHeld });
@@ -170,6 +192,13 @@ edge(consString, { type: 'internal', name: str('first'), to: consLeft });
 edge(consString, { type: 'internal', name: str('second'), to: consRight });
 edge(consRight, { type: 'internal', name: str('first'), to: consRightLeft });
 edge(consRight, { type: 'internal', name: str('second'), to: consRightRight });
+
+edge(consDupA, { type: 'internal', name: str('first'), to: consDupALeft });
+edge(consDupA, { type: 'internal', name: str('second'), to: consDupARight });
+edge(consDupB, { type: 'internal', name: str('first'), to: consDupBLeft });
+edge(consDupB, { type: 'internal', name: str('second'), to: consDupBRight });
+edge(consFlat, { type: 'internal', name: str('first'), to: emptyPiece });
+edge(consFlat, { type: 'internal', name: str('second'), to: flatContent });
 
 // Taken alternately from each end, so the order of these decides the
 // label. `__proto__` is skipped wherever it falls, and the quoted one

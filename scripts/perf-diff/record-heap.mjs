@@ -159,7 +159,7 @@ async function analyse(snapshot, nodeFieldCount) {
     });
   }
 
-  return { statistics, staticData, nodes, queried };
+  return { statistics, staticData, nodes, queried, duplicateStrings: await snapshot.getDuplicateStrings() };
 }
 
 // ── Recording ───────────────────────────────────────────────────────────
