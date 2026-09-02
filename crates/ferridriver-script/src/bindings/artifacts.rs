@@ -48,24 +48,34 @@ impl ArtifactsJs {
   }
 
   /// Write UTF-8 text to `name`. Creates parent directories as needed.
+  ///
+  /// Returns the absolute path written. The artifacts root defaults to a
+  /// *relative* `.ferridriver/artifacts`, resolved against the server
+  /// process's working directory rather than the caller's, so a bare "ok" left
+  /// no way to find the file from a shell.
   #[qjs(rename = "write")]
-  pub async fn write(&self, name: String, contents: String) -> rquickjs::Result<()> {
+  pub async fn write(&self, name: String, contents: String) -> rquickjs::Result<String> {
     let sb = self.sandbox.clone();
     let resolved = sb.resolve_write(&name).map_err(|e| Self::path_err(&e))?;
     tokio::fs::write(&resolved, contents)
       .await
-      .map_err(|e| Self::io_err("write", e.to_string()))
+      .map_err(|e| Self::io_err("write", e.to_string()))?;
+    Ok(resolved.to_string_lossy().into_owned())
   }
 
   /// Write raw bytes to `name`. Creates parent directories as needed.
   /// Use this for screenshots, PDFs, downloads, or any binary payload.
+  ///
+  /// Returns the absolute path written, for the same reason [`Self::write`]
+  /// does.
   #[qjs(rename = "writeBytes")]
-  pub async fn write_bytes(&self, name: String, bytes: Vec<u8>) -> rquickjs::Result<()> {
+  pub async fn write_bytes(&self, name: String, bytes: Vec<u8>) -> rquickjs::Result<String> {
     let sb = self.sandbox.clone();
     let resolved = sb.resolve_write(&name).map_err(|e| Self::path_err(&e))?;
     tokio::fs::write(&resolved, bytes)
       .await
-      .map_err(|e| Self::io_err("writeBytes", e.to_string()))
+      .map_err(|e| Self::io_err("writeBytes", e.to_string()))?;
+    Ok(resolved.to_string_lossy().into_owned())
   }
 
   /// Read `name` as UTF-8 text.

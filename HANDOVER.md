@@ -182,8 +182,35 @@ skip, the property-name escaping, and the label budget. Do the same for
 anything added here; three of those passed with the code removed until
 this fixture existed.
 
-Then the 13 tools themselves, the CDP capture with `Unsupported` on the
-other three backends, and the three binding layers.
+### The query layer
+
+The node-addressed reads the tools are built from have landed and are
+compared whole against the engine's own providers: `object_info`
+(`get_heapsnapshot_object_details`), `dominator_chain`
+(`get_heapsnapshot_dominators`), `edges_of` (`get_heapsnapshot_edges`)
+and `retainers_of` (`get_heapsnapshot_retainers`), plus
+`ordinal_for_id`, over 25 nodes per fixture.
+
+Three more bugs came out of that comparison, all of them the kind that
+looks right until something else answers the same question:
+
+- A retaining edge is read from the other end. Its result embeds the
+  node doing the RETAINING, not the one retained, and we had the target.
+- `retainingEdgesFilter` drops three kinds -- invisible edges, the root
+  as a retainer, and weak edges -- so a node held only by those reports
+  no retainers. We reported them.
+- `markQueriableHeapObjects` seeds from the NODE's `isUserRoot` (only
+  "not synthetic"), not the snapshot's (which also admits
+  `(Document DOM trees)`). Seeding from the wrong one marks the whole
+  DOM queriable.
+
+Still to write: `aggregatesWithFilter` and the class-node provider
+(`get_heapsnapshot_class_nodes`, and the aggregate half of
+`get_heapsnapshot_details`), `getRetainingPaths`, `getDuplicateStrings`,
+`queryObjects`, and `calculateSnapshotDiff` for
+`compare_heapsnapshots`. Then the 13 tools themselves, the CDP capture
+with `Unsupported` on the other three backends, and the three binding
+layers.
 
 ## 4. Extensions, PWA, WebMCP, third-party devtools — 12 tools
 

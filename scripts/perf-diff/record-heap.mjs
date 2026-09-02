@@ -47,6 +47,9 @@ const ALL = [...PAGES, ...HANDMADE];
 /** How many nodes the per-node comparisons cover. */
 const SAMPLE_SIZE = 200;
 
+/** How many of those the edge and retainer comparisons cover. */
+const QUERY_SAMPLE_SIZE = 25;
+
 // ── Capture ─────────────────────────────────────────────────────────────
 
 async function capture(name) {
@@ -139,7 +142,24 @@ async function analyse(snapshot, nodeFieldCount) {
     });
   }
 
-  return { statistics, staticData, nodes };
+  // The node-addressed queries, over a smaller sub-sample: each one
+  // embeds a whole node per edge, so recording them for every sampled
+  // node would bury the fixture in its own output.
+  const queried = [];
+  for (const sampled of nodes.slice(0, QUERY_SAMPLE_SIZE)) {
+    const nodeIndex = sampled.ordinal * nodeFieldCount;
+    const edges = snapshot.createEdgesProvider(nodeIndex, {});
+    const retainers = snapshot.createRetainingEdgesProvider(nodeIndex);
+    queried.push({
+      ordinal: sampled.ordinal,
+      objectInfo: await snapshot.getObjectInfo(nodeIndex),
+      dominators: await snapshot.getDominatorsOf(nodeIndex),
+      edges: (await edges.serializeItemsRange(0, Infinity)).items,
+      retainers: (await retainers.serializeItemsRange(0, Infinity)).items,
+    });
+  }
+
+  return { statistics, staticData, nodes, queried };
 }
 
 // ── Recording ───────────────────────────────────────────────────────────

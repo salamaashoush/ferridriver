@@ -61,7 +61,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-use ferridriver_heap::{Analysis, Snapshot};
+use ferridriver_heap::{Analysis, DominatorStep, EdgeSummary, ObjectInfo, Snapshot};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -72,6 +72,19 @@ struct Recording {
   #[serde(rename = "staticData")]
   static_data: StaticData,
   nodes: Vec<NodeInfo>,
+  /// The node-addressed queries, over a sub-sample of `nodes`.
+  queried: Vec<Queried>,
+}
+
+/// What the engine's providers answered about one node.
+#[derive(Deserialize)]
+struct Queried {
+  ordinal: usize,
+  #[serde(rename = "objectInfo")]
+  object_info: ObjectInfo,
+  dominators: Vec<DominatorStep>,
+  edges: Vec<EdgeSummary>,
+  retainers: Vec<EdgeSummary>,
 }
 
 #[derive(Deserialize)]
@@ -282,6 +295,96 @@ fn the_analysis_agrees_with_the_engine() {
       recording.nodes.len(),
       differences.join("\n  ")
     );
+  }
+}
+
+/// The reads the heap-snapshot tools are made of: what a node is, what
+/// it points at, what points at it, and what would have to let go for
+/// it to be freed.
+///
+/// Compared whole rather than field by field. These are the structures
+/// the tools hand back, and a field that quietly stopped being filled
+/// in would be invisible to a comparison that only checked the fields
+/// someone remembered to name.
+#[test]
+fn the_queries_answer_what_the_engine_answers() {
+  for (name, recording) in recordings() {
+    let analysis = analysed(&name);
+    let mut differences = Vec::new();
+
+    for queried in &recording.queried {
+      let ordinal = queried.ordinal;
+
+      let ours = analysis.object_info(ordinal);
+      if ours != queried.object_info {
+        differences.push(format!(
+          "node {ordinal} object info:\n    engine {:?}\n    ours   {ours:?}",
+          queried.object_info
+        ));
+      }
+
+      let ours = analysis.dominator_chain(ordinal);
+      if ours != queried.dominators {
+        differences.push(format!(
+          "node {ordinal} dominators: engine {} step(s), ours {}\n    engine {:?}\n    ours   {ours:?}",
+          queried.dominators.len(),
+          ours.len(),
+          queried.dominators
+        ));
+      }
+
+      compare_edges(
+        &mut differences,
+        ordinal,
+        "edges",
+        &analysis.edges_of(ordinal),
+        &queried.edges,
+      );
+      compare_edges(
+        &mut differences,
+        ordinal,
+        "retainers",
+        &analysis.retainers_of(ordinal),
+        &queried.retainers,
+      );
+    }
+
+    assert!(
+      differences.is_empty(),
+      "our queries over {name} disagree with the `DevTools` heap engine on {} of {} nodes:\n  {}",
+      differences.len(),
+      recording.queried.len(),
+      differences.join("\n  ")
+    );
+
+    assert!(
+      !recording.queried.is_empty(),
+      "{name}: no node was queried, so this compared nothing"
+    );
+  }
+}
+
+fn compare_edges(
+  differences: &mut Vec<String>,
+  ordinal: usize,
+  what: &str,
+  ours: &[EdgeSummary],
+  engine: &[EdgeSummary],
+) {
+  if ours.len() != engine.len() {
+    differences.push(format!(
+      "node {ordinal} {what}: engine {} , ours {}",
+      engine.len(),
+      ours.len()
+    ));
+    return;
+  }
+  for (at, (ours, engine)) in ours.iter().zip(engine).enumerate() {
+    if ours != engine {
+      differences.push(format!(
+        "node {ordinal} {what}[{at}]:\n    engine {engine:?}\n    ours   {ours:?}"
+      ));
+    }
   }
 }
 

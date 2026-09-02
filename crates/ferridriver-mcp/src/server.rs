@@ -912,8 +912,9 @@ impl McpServer {
             None
           }
         };
-        let input_schema = as_schema_obj(t.input_schema.clone(), "inputSchema")
+        let declared = as_schema_obj(t.input_schema.clone(), "inputSchema")
           .unwrap_or_else(|| Arc::new(serde_json::Map::new()));
+        let input_schema = advertise_session(declared);
         let output_schema = as_schema_obj(t.output_schema.clone(), "outputSchema");
         let mut tool = Tool::new(name.clone(), t.description.clone().unwrap_or_default(), input_schema);
         tool.title.clone_from(&t.title);
@@ -952,6 +953,37 @@ impl McpServer {
   /// Names of the currently-advertised extension tools, in list order.
   pub(crate) fn promoted_tool_names(&self) -> Vec<String> {
     self.extensions().promoted.iter().map(|t| t.name.to_string()).collect()
+  }
+
+  /// The configured instructions, plus the paths this process actually
+  /// resolved.
+  ///
+  /// `artifacts_root` defaults to the *relative* `.ferridriver/artifacts`,
+  /// resolved against the server process's working directory rather than the
+  /// caller's. Told only the relative default, a caller cannot find what a
+  /// script wrote -- the file is there, in one of however many
+  /// `.ferridriver/artifacts` directories exist on the machine.
+  fn instructions_with_paths(&self) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = self.config.server_instructions().to_string();
+    match self.artifacts_dir.as_ref() {
+      Some(dir) => {
+        let _ = write!(
+          out,
+          "\n\n== ARTIFACTS ROOT (resolved for this process) ==\n{}\n\
+           Everything `artifacts.*` and the `artifact://` resources address lives under it, and \
+           `artifacts.write`/`writeBytes` return the absolute path they wrote. Use that path to \
+           reach a file from outside this server.",
+          dir.root().display()
+        );
+      },
+      None => out.push_str(
+        "\n\n== ARTIFACTS ROOT ==\nUnavailable: the configured artifacts_root could not be \
+         prepared, so scripts get no `artifacts` global and `run_script` will say so.",
+      ),
+    }
+    out
   }
 
   /// Invoke a extension by manifest name with the given argument object.
@@ -1830,6 +1862,35 @@ fn validate_tool_args(
   ))
 }
 
+/// Declare the reserved `session` routing key on a promoted tool's advertised
+/// schema, so the browser it acts in is selectable from `tools/list` rather
+/// than only from reading the dispatch. An extension that declares its own
+/// `session` keeps it.
+fn advertise_session(
+  schema: Arc<serde_json::Map<String, serde_json::Value>>,
+) -> Arc<serde_json::Map<String, serde_json::Value>> {
+  let Some(session) = crate::params::session_property_schema() else {
+    return schema;
+  };
+  let mut out = (*schema).clone();
+  {
+    let properties = out
+      .entry("properties")
+      .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    match properties.as_object_mut() {
+      Some(properties) if !properties.contains_key("session") => {
+        properties.insert("session".to_string(), session);
+      },
+      // Already declared, or a `properties` this cannot extend: leave it be.
+      _ => return schema,
+    }
+  }
+  out
+    .entry("type")
+    .or_insert_with(|| serde_json::Value::String("object".to_string()));
+  Arc::new(out)
+}
+
 /// Best-effort MIME type from a file extension, for `artifact://` resources.
 /// Covers the formats the scripting layer actually emits (screenshots, PDFs,
 /// traces, text); everything else falls back to `application/octet-stream`.
@@ -1922,7 +1983,7 @@ impl ServerHandler for McpServer {
         .enable_prompts()
         .build(),
     )
-    .with_instructions(self.config.server_instructions().to_string())
+    .with_instructions(self.instructions_with_paths())
   }
 
   /// Manual `call_tool` (replaces the one `#[tool_handler]` would generate)
@@ -2408,6 +2469,69 @@ mod tests {
       "allow": { "net": ["anywhere.example"], "commands": { "sh": "echo hi" } }
     }))];
     assert!(server.policy_conflicts(&loaded).is_empty());
+  }
+
+  /// `session` is honoured on a promoted tool (stripped before the declared
+  /// schema validates, then handed to the handler), so it has to be visible in
+  /// `tools/list`. Advertised without it, a caller reads a strict schema, gets
+  /// no way to name a browser, and hand-rolls the interaction the tool exists
+  /// to replace.
+  #[test]
+  fn a_promoted_tool_advertises_the_session_routing_key() {
+    let server = test_server();
+    let registry = crate::extension::ExtensionRegistry::new(
+      vec![loaded_extension(serde_json::json!({
+        "name": "box.sign.send",
+        "exposeAsMcpTool": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": { "email": { "type": "string" } },
+          "additionalProperties": false
+        }
+      }))],
+      Vec::new(),
+    );
+    let promoted = server.promoted_tool_list(&registry);
+    let tool = promoted.first().expect("one promoted tool");
+    let properties = tool.input_schema.get("properties").expect("properties");
+
+    assert!(
+      properties.get("session").is_some(),
+      "session must be advertised: {properties:?}"
+    );
+    assert!(properties.get("email").is_some(), "the declared properties survive");
+    assert!(
+      tool
+        .input_schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .is_none_or(|r| !r.iter().any(|v| v.as_str() == Some("session"))),
+      "session stays optional"
+    );
+  }
+
+  #[test]
+  fn an_extension_that_declares_its_own_session_keeps_it() {
+    let server = test_server();
+    let registry = crate::extension::ExtensionRegistry::new(
+      vec![loaded_extension(serde_json::json!({
+        "name": "mine",
+        "exposeAsMcpTool": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": { "session": { "type": "string", "description": "mine" } }
+        }
+      }))],
+      Vec::new(),
+    );
+    let promoted = server.promoted_tool_list(&registry);
+    let session = promoted[0]
+      .input_schema
+      .get("properties")
+      .and_then(|p| p.get("session"))
+      .and_then(|s| s.get("description"))
+      .and_then(|d| d.as_str());
+    assert_eq!(session, Some("mine"));
   }
 
   #[test]

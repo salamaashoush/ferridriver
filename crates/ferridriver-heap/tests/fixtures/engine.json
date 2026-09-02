@@ -2022,6 +2022,3532 @@
     "distance": 11,
     "detachedness": 1
    }
+  ],
+  "queried": [
+   {
+    "ordinal": 0,
+    "objectInfo": {
+     "id": 1,
+     "name": "",
+     "type": "synthetic",
+     "nodeIndex": 0,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 945296,
+     "distance": 0,
+     "edgeCount": 1,
+     "retainerCount": 0
+    },
+    "dominators": [
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "1",
+      "node": {
+       "id": 3,
+       "name": "(GC roots)",
+       "distance": 1,
+       "nodeIndex": 6,
+       "retainedSize": 945296,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "element",
+      "edgeIndex": 0,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": []
+   },
+   {
+    "ordinal": 149,
+    "objectInfo": {
+     "id": 299,
+     "name": "system / Map",
+     "type": "native",
+     "nodeIndex": 894,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 11,
+     "retainerCount": 5
+    },
+    "dominators": [
+     {
+      "nodeId": 299,
+      "nodeIndex": 894,
+      "nodeName": "system / Map",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "dependent_code",
+      "node": {
+       "id": 119,
+       "name": "system / WeakArrayList",
+       "distance": 3,
+       "nodeIndex": 354,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 30717,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "instance_type",
+      "node": {
+       "id": 17999,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 53994,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 30720,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "instance_type_name",
+      "node": {
+       "id": 18001,
+       "name": "UNCOMPILED_DATA_WITHOUT_PREPARSE_DATA_TYPE",
+       "distance": 4,
+       "nodeIndex": 54000,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "string",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 30723,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "instance_size",
+      "node": {
+       "id": 16493,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 49476,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 30726,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "visitor_id",
+      "node": {
+       "id": 18005,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 54012,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 30729,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "visitor_name",
+      "node": {
+       "id": 18007,
+       "name": "UncompiledDataWithoutPreparseData",
+       "distance": 4,
+       "nodeIndex": 54018,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "string",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 30732,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "elements_kind",
+      "node": {
+       "id": 16445,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 49332,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 30735,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "elements_kind_name",
+      "node": {
+       "id": 16447,
+       "name": "HOLEY_ELEMENTS",
+       "distance": 4,
+       "nodeIndex": 49338,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "string",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 30738,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "enum_length",
+      "node": {
+       "id": 16451,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 49350,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 30741,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "number_of_own_descriptors",
+      "node": {
+       "id": 16429,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 49284,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 30744,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 143,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 426,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 30747,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "map",
+      "node": {
+       "id": 48359,
+       "name": "system / UncompiledDataWithoutPreparseData",
+       "distance": 8,
+       "nodeIndex": 145074,
+       "retainedSize": 100,
+       "selfSize": 20,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 317622,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 32235,
+       "name": "system / UncompiledDataWithoutPreparseData",
+       "distance": 8,
+       "nodeIndex": 96702,
+       "retainedSize": 64,
+       "selfSize": 20,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 155604,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 32215,
+       "name": "system / UncompiledDataWithoutPreparseData",
+       "distance": 7,
+       "nodeIndex": 96642,
+       "retainedSize": 20,
+       "selfSize": 20,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 155505,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 32139,
+       "name": "system / UncompiledDataWithoutPreparseData",
+       "distance": 8,
+       "nodeIndex": 96414,
+       "retainedSize": 64,
+       "selfSize": 20,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 155172,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "uncompiled_data_without_preparse_data_map",
+      "node": {
+       "id": 31,
+       "name": "(Read-only roots)",
+       "distance": 2,
+       "nodeIndex": 90,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 8778,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 298,
+    "objectInfo": {
+     "id": 597,
+     "name": "ignorePunctuation",
+     "type": "string",
+     "nodeIndex": 1788,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 597,
+      "nodeIndex": 1788,
+      "nodeName": "ignorePunctuation",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 31,
+      "nodeIndex": 90,
+      "nodeName": "(Read-only roots)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "length",
+      "node": {
+       "id": 17925,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 53772,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 33240,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 93,
+       "name": "system / Map (InternalizedOneByteString)",
+       "distance": 3,
+       "nodeIndex": 276,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 33243,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "ignorePunctuation_string",
+      "node": {
+       "id": 31,
+       "name": "(Read-only roots)",
+       "distance": 2,
+       "nodeIndex": 90,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 9225,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 447,
+    "objectInfo": {
+     "id": 895,
+     "name": "B",
+     "type": "string",
+     "nodeIndex": 2682,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 895,
+      "nodeIndex": 2682,
+      "nodeName": "B",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 31,
+      "nodeIndex": 90,
+      "nodeName": "(Read-only roots)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "length",
+      "node": {
+       "id": 17749,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 53244,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 34134,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 93,
+       "name": "system / Map (InternalizedOneByteString)",
+       "distance": 3,
+       "nodeIndex": 276,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 34137,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "B_string",
+      "node": {
+       "id": 31,
+       "name": "(Read-only roots)",
+       "distance": 2,
+       "nodeIndex": 90,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 9672,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 596,
+    "objectInfo": {
+     "id": 1193,
+     "name": "×",
+     "type": "string",
+     "nodeIndex": 3576,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 1193,
+      "nodeIndex": 3576,
+      "nodeName": "×",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 31,
+      "nodeIndex": 90,
+      "nodeName": "(Read-only roots)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "length",
+      "node": {
+       "id": 17749,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 53244,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 35028,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 93,
+       "name": "system / Map (InternalizedOneByteString)",
+       "distance": 3,
+       "nodeIndex": 276,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 35031,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "latin1_d7_string",
+      "node": {
+       "id": 31,
+       "name": "(Read-only roots)",
+       "distance": 2,
+       "nodeIndex": 90,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 10119,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 745,
+    "objectInfo": {
+     "id": 1491,
+     "name": "Function.prototype.call",
+     "type": "string",
+     "nodeIndex": 4470,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 1491,
+      "nodeIndex": 4470,
+      "nodeName": "Function.prototype.call",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 31,
+      "nodeIndex": 90,
+      "nodeName": "(Read-only roots)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "length",
+      "node": {
+       "id": 17027,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 51078,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 35922,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 93,
+       "name": "system / Map (InternalizedOneByteString)",
+       "distance": 3,
+       "nodeIndex": 276,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 35925,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "Function_prototype_call_string",
+      "node": {
+       "id": 31,
+       "name": "(Read-only roots)",
+       "distance": 2,
+       "nodeIndex": 90,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 10566,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 894,
+    "objectInfo": {
+     "id": 1789,
+     "name": "short",
+     "type": "string",
+     "nodeIndex": 5364,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 1789,
+      "nodeIndex": 5364,
+      "nodeName": "short",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 31,
+      "nodeIndex": 90,
+      "nodeName": "(Read-only roots)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "length",
+      "node": {
+       "id": 16805,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 50412,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 36816,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 93,
+       "name": "system / Map (InternalizedOneByteString)",
+       "distance": 3,
+       "nodeIndex": 276,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 36819,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "short_string",
+      "node": {
+       "id": 31,
+       "name": "(Read-only roots)",
+       "distance": 2,
+       "nodeIndex": 90,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 11013,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 1043,
+    "objectInfo": {
+     "id": 2087,
+     "name": "system / Map",
+     "type": "native",
+     "nodeIndex": 6258,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 11,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 2087,
+      "nodeIndex": 6258,
+      "nodeName": "system / Map",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 31,
+      "nodeIndex": 90,
+      "nodeName": "(Read-only roots)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "dependent_code",
+      "node": {
+       "id": 119,
+       "name": "system / WeakArrayList",
+       "distance": 3,
+       "nodeIndex": 354,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 38622,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "instance_type",
+      "node": {
+       "id": 17443,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 52326,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 38625,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "instance_type_name",
+      "node": {
+       "id": 17445,
+       "name": "TUPLE2_TYPE",
+       "distance": 4,
+       "nodeIndex": 52332,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "string",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 38628,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "instance_size",
+      "node": {
+       "id": 16669,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 50004,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 38631,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "visitor_id",
+      "node": {
+       "id": 16833,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 50496,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 38634,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "visitor_name",
+      "node": {
+       "id": 16835,
+       "name": "Struct",
+       "distance": 4,
+       "nodeIndex": 50502,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "string",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 38637,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "elements_kind",
+      "node": {
+       "id": 16445,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 49332,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 38640,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "elements_kind_name",
+      "node": {
+       "id": 16447,
+       "name": "HOLEY_ELEMENTS",
+       "distance": 4,
+       "nodeIndex": 49338,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "string",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 38643,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "enum_length",
+      "node": {
+       "id": 16451,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 49350,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 38646,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "number_of_own_descriptors",
+      "node": {
+       "id": 16429,
+       "name": "int",
+       "distance": 4,
+       "nodeIndex": 49284,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "number",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 38649,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 143,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 426,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 38652,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "tuple2_map",
+      "node": {
+       "id": 31,
+       "name": "(Read-only roots)",
+       "distance": 2,
+       "nodeIndex": 90,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 11460,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 1192,
+    "objectInfo": {
+     "id": 2385,
+     "name": "system / Code / CallVarargs (builtin)",
+     "type": "code",
+     "nodeIndex": 7152,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 2385,
+      "nodeIndex": 7152,
+      "nodeName": "system / Code / CallVarargs (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 41490,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 18423,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 55266,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 41493,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 18423,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 55266,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 94941,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "34 / CallVarargs",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 192,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 1341,
+    "objectInfo": {
+     "id": 2683,
+     "name": "system / Code / KeyedHasIC_PolymorphicName (builtin)",
+     "type": "code",
+     "nodeIndex": 8046,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 2683,
+      "nodeIndex": 8046,
+      "nodeName": "system / Code / KeyedHasIC_PolymorphicName (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 42384,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 18721,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 56160,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 42387,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 18721,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 56160,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 95835,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "183 / KeyedHasIC_PolymorphicName",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 639,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 1490,
+    "objectInfo": {
+     "id": 2981,
+     "name": "system / Code / DatePrototypeGetUTCDate (builtin)",
+     "type": "code",
+     "nodeIndex": 8940,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 5
+    },
+    "dominators": [
+     {
+      "nodeId": 2981,
+      "nodeIndex": 8940,
+      "nodeName": "system / Code / DatePrototypeGetUTCDate (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 43278,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 19019,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 57054,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 43281,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "code",
+      "node": {
+       "id": 51509,
+       "name": "getUTCDate",
+       "distance": 6,
+       "nodeIndex": 154524,
+       "retainedSize": 28,
+       "selfSize": 28,
+       "type": "closure",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 346467,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "code",
+      "node": {
+       "id": 43915,
+       "name": "getUTCDate",
+       "distance": 6,
+       "nodeIndex": 131742,
+       "retainedSize": 28,
+       "selfSize": 28,
+       "type": "closure",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 263676,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "code",
+      "node": {
+       "id": 34661,
+       "name": "getUTCDate",
+       "distance": 6,
+       "nodeIndex": 103980,
+       "retainedSize": 28,
+       "selfSize": 28,
+       "type": "closure",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 177423,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 19019,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 57054,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 96729,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "332 / DatePrototypeGetUTCDate",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 1086,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 1639,
+    "objectInfo": {
+     "id": 3279,
+     "name": "system / Code / LookupContextNoCellTrampoline (builtin)",
+     "type": "code",
+     "nodeIndex": 9834,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 3279,
+      "nodeIndex": 9834,
+      "nodeName": "system / Code / LookupContextNoCellTrampoline (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 44172,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 19317,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 57948,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 44175,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 19317,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 57948,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 97623,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "481 / LookupContextNoCellTrampoline",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 1533,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 1788,
+    "objectInfo": {
+     "id": 3577,
+     "name": "system / Code / Negate_Baseline (builtin)",
+     "type": "code",
+     "nodeIndex": 10728,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 3577,
+      "nodeIndex": 10728,
+      "nodeName": "system / Code / Negate_Baseline (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 45066,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 19615,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 58842,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 45069,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 19615,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 58842,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 98517,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "630 / Negate_Baseline",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 1980,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 1937,
+    "objectInfo": {
+     "id": 3875,
+     "name": "system / Code / WasmDebugBreak (builtin)",
+     "type": "code",
+     "nodeIndex": 11622,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 3875,
+      "nodeIndex": 11622,
+      "nodeName": "system / Code / WasmDebugBreak (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 45960,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 19913,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 59736,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 45963,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 19913,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 59736,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 99411,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "779 / WasmDebugBreak",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 2427,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 2086,
+    "objectInfo": {
+     "id": 4173,
+     "name": "system / Code / ArrayReduceLoopLazyDeoptContinuation (builtin)",
+     "type": "code",
+     "nodeIndex": 12516,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 4173,
+      "nodeIndex": 12516,
+      "nodeName": "system / Code / ArrayReduceLoopLazyDeoptContinuation (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 46854,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 20211,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 60630,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 46857,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 20211,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 60630,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 100305,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "928 / ArrayReduceLoopLazyDeoptContinuation",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 2874,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 2235,
+    "objectInfo": {
+     "id": 4471,
+     "name": "system / Code / IteratorPrototypeGetConstructor (builtin)",
+     "type": "code",
+     "nodeIndex": 13410,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 5
+    },
+    "dominators": [
+     {
+      "nodeId": 4471,
+      "nodeIndex": 13410,
+      "nodeName": "system / Code / IteratorPrototypeGetConstructor (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 47748,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 20509,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 61524,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 47751,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "code",
+      "node": {
+       "id": 58045,
+       "name": "get constructor",
+       "distance": 5,
+       "nodeIndex": 174132,
+       "retainedSize": 28,
+       "selfSize": 28,
+       "type": "closure",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 412725,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "code",
+      "node": {
+       "id": 45553,
+       "name": "get constructor",
+       "distance": 5,
+       "nodeIndex": 136656,
+       "retainedSize": 28,
+       "selfSize": 28,
+       "type": "closure",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 281487,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "code",
+      "node": {
+       "id": 34057,
+       "name": "get constructor",
+       "distance": 5,
+       "nodeIndex": 102168,
+       "retainedSize": 28,
+       "selfSize": 28,
+       "type": "closure",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 171669,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 20509,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 61524,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 101199,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "1077 / IteratorPrototypeGetConstructor",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 3321,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 2384,
+    "objectInfo": {
+     "id": 4769,
+     "name": "system / Code / ProxyConstructor (builtin)",
+     "type": "code",
+     "nodeIndex": 14304,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 5
+    },
+    "dominators": [
+     {
+      "nodeId": 4769,
+      "nodeIndex": 14304,
+      "nodeName": "system / Code / ProxyConstructor (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 48642,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 20807,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 62418,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 48645,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "code",
+      "node": {
+       "id": 39645,
+       "name": "Proxy",
+       "distance": 4,
+       "nodeIndex": 118932,
+       "retainedSize": 172,
+       "selfSize": 28,
+       "type": "closure",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 230205,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "code",
+      "node": {
+       "id": 38747,
+       "name": "Proxy",
+       "distance": 4,
+       "nodeIndex": 116238,
+       "retainedSize": 172,
+       "selfSize": 28,
+       "type": "closure",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 220095,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "code",
+      "node": {
+       "id": 31303,
+       "name": "Proxy",
+       "distance": 4,
+       "nodeIndex": 93906,
+       "retainedSize": 172,
+       "selfSize": 28,
+       "type": "closure",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 141732,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 20807,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 62418,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 102093,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "1226 / ProxyConstructor",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 3768,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 2533,
+    "objectInfo": {
+     "id": 5067,
+     "name": "system / Code / Load_FastSmiElements_0 (builtin)",
+     "type": "code",
+     "nodeIndex": 15198,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 5067,
+      "nodeIndex": 15198,
+      "nodeName": "system / Code / Load_FastSmiElements_0 (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 49536,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 21105,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 63312,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 49539,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 21105,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 63312,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 102987,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "1375 / Load_FastSmiElements_0",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 4215,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 2682,
+    "objectInfo": {
+     "id": 5365,
+     "name": "system / Code / WasmLiftoffIsStructRefUnshared (builtin)",
+     "type": "code",
+     "nodeIndex": 16092,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 5365,
+      "nodeIndex": 16092,
+      "nodeName": "system / Code / WasmLiftoffIsStructRefUnshared (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 50430,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 21403,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 64206,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 50433,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 21403,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 64206,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 103881,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "1524 / WasmLiftoffIsStructRefUnshared",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 4662,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 2831,
+    "objectInfo": {
+     "id": 5663,
+     "name": "system / Code / PluralRulesConstructor (builtin)",
+     "type": "code",
+     "nodeIndex": 16986,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 5
+    },
+    "dominators": [
+     {
+      "nodeId": 5663,
+      "nodeIndex": 16986,
+      "nodeName": "system / Code / PluralRulesConstructor (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 51324,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 21701,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 65100,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 51327,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "code",
+      "node": {
+       "id": 54463,
+       "name": "PluralRules",
+       "distance": 4,
+       "nodeIndex": 163386,
+       "retainedSize": 532,
+       "selfSize": 32,
+       "type": "closure",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 379509,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "code",
+      "node": {
+       "id": 39527,
+       "name": "PluralRules",
+       "distance": 4,
+       "nodeIndex": 118578,
+       "retainedSize": 532,
+       "selfSize": 32,
+       "type": "closure",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 227958,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "code",
+      "node": {
+       "id": 31185,
+       "name": "PluralRules",
+       "distance": 4,
+       "nodeIndex": 93552,
+       "retainedSize": 532,
+       "selfSize": 32,
+       "type": "closure",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 139485,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 21701,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 65100,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 104775,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "1673 / PluralRulesConstructor",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 5109,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 2980,
+    "objectInfo": {
+     "id": 5961,
+     "name": "system / Code / TemporalZonedDateTimePrototypeDay (builtin)",
+     "type": "code",
+     "nodeIndex": 17880,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 5961,
+      "nodeIndex": 17880,
+      "nodeName": "system / Code / TemporalZonedDateTimePrototypeDay (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 52218,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 21999,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 65994,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 52221,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 21999,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 65994,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 105669,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "1822 / TemporalZonedDateTimePrototypeDay",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 5556,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 3129,
+    "objectInfo": {
+     "id": 6259,
+     "name": "system / Code / MovHandler (builtin)",
+     "type": "code",
+     "nodeIndex": 18774,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 6259,
+      "nodeIndex": 18774,
+      "nodeName": "system / Code / MovHandler (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 53112,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 22297,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 66888,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 53115,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 22297,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 66888,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 106563,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "1971 / MovHandler",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 6003,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 3278,
+    "objectInfo": {
+     "id": 6557,
+     "name": "system / Code / SwitchOnSmiNoFeedbackHandler (builtin)",
+     "type": "code",
+     "nodeIndex": 19668,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 6557,
+      "nodeIndex": 19668,
+      "nodeName": "system / Code / SwitchOnSmiNoFeedbackHandler (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 54006,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 22595,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 67782,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 54009,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 22595,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 67782,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 107457,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "2120 / SwitchOnSmiNoFeedbackHandler",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 6450,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 3427,
+    "objectInfo": {
+     "id": 6855,
+     "name": "system / Code / JumpLoopWideHandler (builtin)",
+     "type": "code",
+     "nodeIndex": 20562,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 6855,
+      "nodeIndex": 20562,
+      "nodeName": "system / Code / JumpLoopWideHandler (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 54900,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 22893,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 68676,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 54903,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 22893,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 68676,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 108351,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "2269 / JumpLoopWideHandler",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 6897,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 3576,
+    "objectInfo": {
+     "id": 7153,
+     "name": "system / Code / ToNumericExtraWideHandler (builtin)",
+     "type": "code",
+     "nodeIndex": 21456,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 7153,
+      "nodeIndex": 21456,
+      "nodeName": "system / Code / ToNumericExtraWideHandler (builtin)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Builtins)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 945296,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 945296,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "map",
+      "node": {
+       "id": 165,
+       "name": "system / Map",
+       "distance": 3,
+       "nodeIndex": 492,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 55794,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "0",
+      "node": {
+       "id": 23191,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 69570,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 55797,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "0",
+      "node": {
+       "id": 23191,
+       "name": "system / CodeWrapper",
+       "distance": 4,
+       "nodeIndex": 69570,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "hidden",
+      "edgeIndex": 109245,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "2418 / ToNumericExtraWideHandler",
+      "node": {
+       "id": 7,
+       "name": "(Builtins)",
+       "distance": 2,
+       "nodeIndex": 18,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 7344,
+      "isAddedNotRemoved": null
+     }
+    ]
+   }
   ]
  },
  "handmade": {
@@ -2326,6 +5852,2640 @@
     "retainedSize": 2048,
     "distance": 2,
     "detachedness": 0
+   }
+  ],
+  "queried": [
+   {
+    "ordinal": 0,
+    "objectInfo": {
+     "id": 1,
+     "name": "",
+     "type": "synthetic",
+     "nodeIndex": 0,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 4960,
+     "distance": 100000000,
+     "edgeCount": 3,
+     "retainerCount": 0
+    },
+    "dominators": [
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "1",
+      "node": {
+       "id": 3,
+       "name": "(GC roots)",
+       "distance": 100000001,
+       "nodeIndex": 6,
+       "retainedSize": 392,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "element",
+      "edgeIndex": 0,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "global",
+      "node": {
+       "id": 5,
+       "name": "Window",
+       "distance": 1,
+       "nodeIndex": 12,
+       "retainedSize": 4400,
+       "selfSize": 64,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "shortcut",
+      "edgeIndex": 3,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "2",
+      "node": {
+       "id": 7,
+       "name": "(Document DOM trees)",
+       "distance": 1,
+       "nodeIndex": 18,
+       "retainedSize": 72,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "element",
+      "edgeIndex": 6,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": []
+   },
+   {
+    "ordinal": 1,
+    "objectInfo": {
+     "id": 3,
+     "name": "(GC roots)",
+     "type": "synthetic",
+     "nodeIndex": 6,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 392,
+     "distance": 100000001,
+     "edgeCount": 3,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 392,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "1",
+      "node": {
+       "id": 33,
+       "name": "compiled",
+       "distance": 100000002,
+       "nodeIndex": 150,
+       "retainedSize": 200,
+       "selfSize": 200,
+       "type": "code",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "element",
+      "edgeIndex": 9,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "2",
+      "node": {
+       "id": 19,
+       "name": "system / hidden",
+       "distance": 100000002,
+       "nodeIndex": 54,
+       "retainedSize": 128,
+       "selfSize": 128,
+       "type": "hidden",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "element",
+      "edgeIndex": 12,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "3",
+      "node": {
+       "id": 39,
+       "name": "Array",
+       "distance": 100000002,
+       "nodeIndex": 60,
+       "retainedSize": 64,
+       "selfSize": 64,
+       "type": "hidden",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "element",
+      "edgeIndex": 15,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": []
+   },
+   {
+    "ordinal": 2,
+    "objectInfo": {
+     "id": 5,
+     "name": "Window",
+     "type": "object",
+     "nodeIndex": 12,
+     "detachedness": 0,
+     "selfSize": 64,
+     "retainedSize": 4400,
+     "distance": 1,
+     "edgeCount": 11,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "owned",
+      "node": {
+       "id": 9,
+       "name": "Array",
+       "distance": 2,
+       "nodeIndex": 24,
+       "retainedSize": 544,
+       "selfSize": 544,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 18,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "shared",
+      "node": {
+       "id": 13,
+       "name": "Array",
+       "distance": 2,
+       "nodeIndex": 36,
+       "retainedSize": 32,
+       "selfSize": 32,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 21,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "holder",
+      "node": {
+       "id": 17,
+       "name": "Holder",
+       "distance": 2,
+       "nodeIndex": 48,
+       "retainedSize": 16,
+       "selfSize": 16,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 24,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 25,
+       "name": "WeakMap",
+       "distance": 2,
+       "nodeIndex": 78,
+       "retainedSize": 40,
+       "selfSize": 40,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 27,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "key",
+      "node": {
+       "id": 27,
+       "name": "Key",
+       "distance": 2,
+       "nodeIndex": 84,
+       "retainedSize": 280,
+       "selfSize": 24,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 30,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "text",
+      "node": {
+       "id": 35,
+       "name": "a string",
+       "distance": 2,
+       "nodeIndex": 156,
+       "retainedSize": 80,
+       "selfSize": 80,
+       "type": "string",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 33,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "buffer",
+      "node": {
+       "id": 37,
+       "name": "system / JSArrayBufferData",
+       "distance": 2,
+       "nodeIndex": 162,
+       "retainedSize": 2048,
+       "selfSize": 2048,
+       "type": "native",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 36,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "cons",
+      "node": {
+       "id": 41,
+       "name": "hello brave world",
+       "distance": 2,
+       "nodeIndex": 102,
+       "retainedSize": 152,
+       "selfSize": 40,
+       "type": "concatenated string",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 39,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "plain",
+      "node": {
+       "id": 51,
+       "name": "{alpha, \"be, ta\", gamma}",
+       "distance": 2,
+       "nodeIndex": 132,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 42,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "wide",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 45,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "weaklyHeld",
+      "node": {
+       "id": 31,
+       "name": "WeaklyHeld",
+       "distance": -5,
+       "nodeIndex": 96,
+       "retainedSize": 96,
+       "selfSize": 96,
+       "type": "object",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "weak",
+      "edgeIndex": 48,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": []
+   },
+   {
+    "ordinal": 3,
+    "objectInfo": {
+     "id": 7,
+     "name": "(Document DOM trees)",
+     "type": "synthetic",
+     "nodeIndex": 18,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 72,
+     "distance": 1,
+     "edgeCount": 1,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Document DOM trees)",
+      "retainedSize": 72,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "1",
+      "node": {
+       "id": 21,
+       "name": "Detached HTMLDivElement",
+       "distance": 2,
+       "nodeIndex": 66,
+       "retainedSize": 72,
+       "selfSize": 48,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": true,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "element",
+      "edgeIndex": 51,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": []
+   },
+   {
+    "ordinal": 4,
+    "objectInfo": {
+     "id": 9,
+     "name": "Array",
+     "type": "object",
+     "nodeIndex": 24,
+     "detachedness": 0,
+     "selfSize": 544,
+     "retainedSize": 544,
+     "distance": 2,
+     "edgeCount": 1,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 9,
+      "nodeIndex": 24,
+      "nodeName": "Array",
+      "retainedSize": 544,
+      "selfSize": 544
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "elements",
+      "node": {
+       "id": 11,
+       "name": "(object elements)",
+       "distance": 3,
+       "nodeIndex": 30,
+       "retainedSize": 0,
+       "selfSize": 0,
+       "type": "array",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 54,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "owned",
+      "node": {
+       "id": 5,
+       "name": "Window",
+       "distance": 1,
+       "nodeIndex": 12,
+       "retainedSize": 4400,
+       "selfSize": 64,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 18,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 5,
+    "objectInfo": {
+     "id": 11,
+     "name": "(object elements)",
+     "type": "array",
+     "nodeIndex": 30,
+     "detachedness": 0,
+     "selfSize": 0,
+     "retainedSize": 0,
+     "distance": 3,
+     "edgeCount": 0,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 11,
+      "nodeIndex": 30,
+      "nodeName": "(object elements)",
+      "retainedSize": 0,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 9,
+      "nodeIndex": 24,
+      "nodeName": "Array",
+      "retainedSize": 544,
+      "selfSize": 544
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [],
+    "retainers": [
+     {
+      "name": "elements",
+      "node": {
+       "id": 9,
+       "name": "Array",
+       "distance": 2,
+       "nodeIndex": 24,
+       "retainedSize": 544,
+       "selfSize": 544,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 54,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 6,
+    "objectInfo": {
+     "id": 13,
+     "name": "Array",
+     "type": "object",
+     "nodeIndex": 36,
+     "detachedness": 0,
+     "selfSize": 32,
+     "retainedSize": 32,
+     "distance": 2,
+     "edgeCount": 1,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 13,
+      "nodeIndex": 36,
+      "nodeName": "Array",
+      "retainedSize": 32,
+      "selfSize": 32
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "elements",
+      "node": {
+       "id": 15,
+       "name": "(object elements)",
+       "distance": 3,
+       "nodeIndex": 42,
+       "retainedSize": 1024,
+       "selfSize": 1024,
+       "type": "array",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 57,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "shared",
+      "node": {
+       "id": 5,
+       "name": "Window",
+       "distance": 1,
+       "nodeIndex": 12,
+       "retainedSize": 4400,
+       "selfSize": 64,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 21,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 7,
+    "objectInfo": {
+     "id": 15,
+     "name": "(object elements)",
+     "type": "array",
+     "nodeIndex": 42,
+     "detachedness": 0,
+     "selfSize": 1024,
+     "retainedSize": 1024,
+     "distance": 3,
+     "edgeCount": 0,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 15,
+      "nodeIndex": 42,
+      "nodeName": "(object elements)",
+      "retainedSize": 1024,
+      "selfSize": 1024
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [],
+    "retainers": [
+     {
+      "name": "alsoElements",
+      "node": {
+       "id": 17,
+       "name": "Holder",
+       "distance": 2,
+       "nodeIndex": 48,
+       "retainedSize": 16,
+       "selfSize": 16,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 60,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "elements",
+      "node": {
+       "id": 13,
+       "name": "Array",
+       "distance": 2,
+       "nodeIndex": 36,
+       "retainedSize": 32,
+       "selfSize": 32,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 57,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 8,
+    "objectInfo": {
+     "id": 17,
+     "name": "Holder",
+     "type": "object",
+     "nodeIndex": 48,
+     "detachedness": 0,
+     "selfSize": 16,
+     "retainedSize": 16,
+     "distance": 2,
+     "edgeCount": 1,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 17,
+      "nodeIndex": 48,
+      "nodeName": "Holder",
+      "retainedSize": 16,
+      "selfSize": 16
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "alsoElements",
+      "node": {
+       "id": 15,
+       "name": "(object elements)",
+       "distance": 3,
+       "nodeIndex": 42,
+       "retainedSize": 1024,
+       "selfSize": 1024,
+       "type": "array",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 60,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "holder",
+      "node": {
+       "id": 5,
+       "name": "Window",
+       "distance": 1,
+       "nodeIndex": 12,
+       "retainedSize": 4400,
+       "selfSize": 64,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 24,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 9,
+    "objectInfo": {
+     "id": 19,
+     "name": "system / hidden",
+     "type": "hidden",
+     "nodeIndex": 54,
+     "detachedness": 0,
+     "selfSize": 128,
+     "retainedSize": 128,
+     "distance": 100000002,
+     "edgeCount": 0,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 19,
+      "nodeIndex": 54,
+      "nodeName": "system / hidden",
+      "retainedSize": 128,
+      "selfSize": 128
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 392,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [],
+    "retainers": [
+     {
+      "name": "2",
+      "node": {
+       "id": 3,
+       "name": "(GC roots)",
+       "distance": 100000001,
+       "nodeIndex": 6,
+       "retainedSize": 392,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "element",
+      "edgeIndex": 12,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 10,
+    "objectInfo": {
+     "id": 39,
+     "name": "Array",
+     "type": "hidden",
+     "nodeIndex": 60,
+     "detachedness": 0,
+     "selfSize": 64,
+     "retainedSize": 64,
+     "distance": 100000002,
+     "edgeCount": 0,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 39,
+      "nodeIndex": 60,
+      "nodeName": "Array",
+      "retainedSize": 64,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 3,
+      "nodeIndex": 6,
+      "nodeName": "(GC roots)",
+      "retainedSize": 392,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [],
+    "retainers": [
+     {
+      "name": "3",
+      "node": {
+       "id": 3,
+       "name": "(GC roots)",
+       "distance": 100000001,
+       "nodeIndex": 6,
+       "retainedSize": 392,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "element",
+      "edgeIndex": 15,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 11,
+    "objectInfo": {
+     "id": 21,
+     "name": "Detached HTMLDivElement",
+     "type": "native",
+     "nodeIndex": 66,
+     "detachedness": 2,
+     "selfSize": 48,
+     "retainedSize": 72,
+     "distance": 2,
+     "edgeCount": 1,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 21,
+      "nodeIndex": 66,
+      "nodeName": "Detached HTMLDivElement",
+      "retainedSize": 72,
+      "selfSize": 48
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Document DOM trees)",
+      "retainedSize": 72,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "1",
+      "node": {
+       "id": 23,
+       "name": "Detached HTMLParagraphElement",
+       "distance": 3,
+       "nodeIndex": 72,
+       "retainedSize": 24,
+       "selfSize": 24,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": true,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "element",
+      "edgeIndex": 63,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "1",
+      "node": {
+       "id": 7,
+       "name": "(Document DOM trees)",
+       "distance": 1,
+       "nodeIndex": 18,
+       "retainedSize": 72,
+       "selfSize": 0,
+       "type": "synthetic",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "element",
+      "edgeIndex": 51,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 12,
+    "objectInfo": {
+     "id": 23,
+     "name": "Detached HTMLParagraphElement",
+     "type": "native",
+     "nodeIndex": 72,
+     "detachedness": 2,
+     "selfSize": 24,
+     "retainedSize": 24,
+     "distance": 3,
+     "edgeCount": 0,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 23,
+      "nodeIndex": 72,
+      "nodeName": "Detached HTMLParagraphElement",
+      "retainedSize": 24,
+      "selfSize": 24
+     },
+     {
+      "nodeId": 21,
+      "nodeIndex": 66,
+      "nodeName": "Detached HTMLDivElement",
+      "retainedSize": 72,
+      "selfSize": 48
+     },
+     {
+      "nodeId": 7,
+      "nodeIndex": 18,
+      "nodeName": "(Document DOM trees)",
+      "retainedSize": 72,
+      "selfSize": 0
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [],
+    "retainers": [
+     {
+      "name": "1",
+      "node": {
+       "id": 21,
+       "name": "Detached HTMLDivElement",
+       "distance": 2,
+       "nodeIndex": 66,
+       "retainedSize": 72,
+       "selfSize": 48,
+       "type": "native",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": true,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "element",
+      "edgeIndex": 63,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 13,
+    "objectInfo": {
+     "id": 25,
+     "name": "WeakMap",
+     "type": "object",
+     "nodeIndex": 78,
+     "detachedness": 0,
+     "selfSize": 40,
+     "retainedSize": 40,
+     "distance": 2,
+     "edgeCount": 1,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 25,
+      "nodeIndex": 78,
+      "nodeName": "WeakMap",
+      "retainedSize": 40,
+      "selfSize": 40
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "1 / part of key (Key @27) -> value (Value @29) pair in WeakMap (table @25)",
+      "node": {
+       "id": 29,
+       "name": "Value",
+       "distance": 3,
+       "nodeIndex": 90,
+       "retainedSize": 256,
+       "selfSize": 256,
+       "type": "object",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 66,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "map",
+      "node": {
+       "id": 5,
+       "name": "Window",
+       "distance": 1,
+       "nodeIndex": 12,
+       "retainedSize": 4400,
+       "selfSize": 64,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 27,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 14,
+    "objectInfo": {
+     "id": 27,
+     "name": "Key",
+     "type": "object",
+     "nodeIndex": 84,
+     "detachedness": 0,
+     "selfSize": 24,
+     "retainedSize": 280,
+     "distance": 2,
+     "edgeCount": 1,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 27,
+      "nodeIndex": 84,
+      "nodeName": "Key",
+      "retainedSize": 280,
+      "selfSize": 24
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "1 / part of key (Key @27) -> value (Value @29) pair in WeakMap (table @25)",
+      "node": {
+       "id": 29,
+       "name": "Value",
+       "distance": 3,
+       "nodeIndex": 90,
+       "retainedSize": 256,
+       "selfSize": 256,
+       "type": "object",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 69,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "key",
+      "node": {
+       "id": 5,
+       "name": "Window",
+       "distance": 1,
+       "nodeIndex": 12,
+       "retainedSize": 4400,
+       "selfSize": 64,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 30,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 15,
+    "objectInfo": {
+     "id": 29,
+     "name": "Value",
+     "type": "object",
+     "nodeIndex": 90,
+     "detachedness": 0,
+     "selfSize": 256,
+     "retainedSize": 256,
+     "distance": 3,
+     "edgeCount": 0,
+     "retainerCount": 2
+    },
+    "dominators": [
+     {
+      "nodeId": 29,
+      "nodeIndex": 90,
+      "nodeName": "Value",
+      "retainedSize": 256,
+      "selfSize": 256
+     },
+     {
+      "nodeId": 27,
+      "nodeIndex": 84,
+      "nodeName": "Key",
+      "retainedSize": 280,
+      "selfSize": 24
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [],
+    "retainers": [
+     {
+      "name": "1 / part of key (Key @27) -> value (Value @29) pair in WeakMap (table @25)",
+      "node": {
+       "id": 27,
+       "name": "Key",
+       "distance": 2,
+       "nodeIndex": 84,
+       "retainedSize": 280,
+       "selfSize": 24,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 69,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "1 / part of key (Key @27) -> value (Value @29) pair in WeakMap (table @25)",
+      "node": {
+       "id": 25,
+       "name": "WeakMap",
+       "distance": 2,
+       "nodeIndex": 78,
+       "retainedSize": 40,
+       "selfSize": 40,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 66,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 16,
+    "objectInfo": {
+     "id": 31,
+     "name": "WeaklyHeld",
+     "type": "object",
+     "nodeIndex": 96,
+     "detachedness": 0,
+     "selfSize": 96,
+     "retainedSize": 96,
+     "distance": -5,
+     "edgeCount": 0,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 31,
+      "nodeIndex": 96,
+      "nodeName": "WeaklyHeld",
+      "retainedSize": 96,
+      "selfSize": 96
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [],
+    "retainers": []
+   },
+   {
+    "ordinal": 17,
+    "objectInfo": {
+     "id": 41,
+     "name": "hello brave world",
+     "type": "concatenated string",
+     "nodeIndex": 102,
+     "detachedness": 0,
+     "selfSize": 40,
+     "retainedSize": 152,
+     "distance": 2,
+     "edgeCount": 2,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 41,
+      "nodeIndex": 102,
+      "nodeName": "hello brave world",
+      "retainedSize": 152,
+      "selfSize": 40
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "first",
+      "node": {
+       "id": 43,
+       "name": "hello ",
+       "distance": 3,
+       "nodeIndex": 108,
+       "retainedSize": 24,
+       "selfSize": 24,
+       "type": "string",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 72,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "second",
+      "node": {
+       "id": 45,
+       "name": "brave world",
+       "distance": 3,
+       "nodeIndex": 114,
+       "retainedSize": 88,
+       "selfSize": 40,
+       "type": "concatenated string",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 75,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "cons",
+      "node": {
+       "id": 5,
+       "name": "Window",
+       "distance": 1,
+       "nodeIndex": 12,
+       "retainedSize": 4400,
+       "selfSize": 64,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 39,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 18,
+    "objectInfo": {
+     "id": 43,
+     "name": "hello ",
+     "type": "string",
+     "nodeIndex": 108,
+     "detachedness": 0,
+     "selfSize": 24,
+     "retainedSize": 24,
+     "distance": 3,
+     "edgeCount": 0,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 43,
+      "nodeIndex": 108,
+      "nodeName": "hello ",
+      "retainedSize": 24,
+      "selfSize": 24
+     },
+     {
+      "nodeId": 41,
+      "nodeIndex": 102,
+      "nodeName": "hello brave world",
+      "retainedSize": 152,
+      "selfSize": 40
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [],
+    "retainers": [
+     {
+      "name": "first",
+      "node": {
+       "id": 41,
+       "name": "hello brave world",
+       "distance": 2,
+       "nodeIndex": 102,
+       "retainedSize": 152,
+       "selfSize": 40,
+       "type": "concatenated string",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 72,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 19,
+    "objectInfo": {
+     "id": 45,
+     "name": "brave world",
+     "type": "concatenated string",
+     "nodeIndex": 114,
+     "detachedness": 0,
+     "selfSize": 40,
+     "retainedSize": 88,
+     "distance": 3,
+     "edgeCount": 2,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 45,
+      "nodeIndex": 114,
+      "nodeName": "brave world",
+      "retainedSize": 88,
+      "selfSize": 40
+     },
+     {
+      "nodeId": 41,
+      "nodeIndex": 102,
+      "nodeName": "hello brave world",
+      "retainedSize": 152,
+      "selfSize": 40
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "first",
+      "node": {
+       "id": 47,
+       "name": "brave ",
+       "distance": 4,
+       "nodeIndex": 120,
+       "retainedSize": 24,
+       "selfSize": 24,
+       "type": "string",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 78,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "second",
+      "node": {
+       "id": 49,
+       "name": "world",
+       "distance": 4,
+       "nodeIndex": 126,
+       "retainedSize": 24,
+       "selfSize": 24,
+       "type": "string",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 81,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "second",
+      "node": {
+       "id": 41,
+       "name": "hello brave world",
+       "distance": 2,
+       "nodeIndex": 102,
+       "retainedSize": 152,
+       "selfSize": 40,
+       "type": "concatenated string",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 75,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 20,
+    "objectInfo": {
+     "id": 47,
+     "name": "brave ",
+     "type": "string",
+     "nodeIndex": 120,
+     "detachedness": 0,
+     "selfSize": 24,
+     "retainedSize": 24,
+     "distance": 4,
+     "edgeCount": 0,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 47,
+      "nodeIndex": 120,
+      "nodeName": "brave ",
+      "retainedSize": 24,
+      "selfSize": 24
+     },
+     {
+      "nodeId": 45,
+      "nodeIndex": 114,
+      "nodeName": "brave world",
+      "retainedSize": 88,
+      "selfSize": 40
+     },
+     {
+      "nodeId": 41,
+      "nodeIndex": 102,
+      "nodeName": "hello brave world",
+      "retainedSize": 152,
+      "selfSize": 40
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [],
+    "retainers": [
+     {
+      "name": "first",
+      "node": {
+       "id": 45,
+       "name": "brave world",
+       "distance": 3,
+       "nodeIndex": 114,
+       "retainedSize": 88,
+       "selfSize": 40,
+       "type": "concatenated string",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 78,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 21,
+    "objectInfo": {
+     "id": 49,
+     "name": "world",
+     "type": "string",
+     "nodeIndex": 126,
+     "detachedness": 0,
+     "selfSize": 24,
+     "retainedSize": 24,
+     "distance": 4,
+     "edgeCount": 0,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 49,
+      "nodeIndex": 126,
+      "nodeName": "world",
+      "retainedSize": 24,
+      "selfSize": 24
+     },
+     {
+      "nodeId": 45,
+      "nodeIndex": 114,
+      "nodeName": "brave world",
+      "retainedSize": 88,
+      "selfSize": 40
+     },
+     {
+      "nodeId": 41,
+      "nodeIndex": 102,
+      "nodeName": "hello brave world",
+      "retainedSize": 152,
+      "selfSize": 40
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [],
+    "retainers": [
+     {
+      "name": "second",
+      "node": {
+       "id": 45,
+       "name": "brave world",
+       "distance": 3,
+       "nodeIndex": 114,
+       "retainedSize": 88,
+       "selfSize": 40,
+       "type": "concatenated string",
+       "canBeQueried": false,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 81,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 22,
+    "objectInfo": {
+     "id": 51,
+     "name": "{alpha, \"be, ta\", gamma}",
+     "type": "object",
+     "nodeIndex": 132,
+     "detachedness": 0,
+     "selfSize": 56,
+     "retainedSize": 56,
+     "distance": 2,
+     "edgeCount": 5,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 51,
+      "nodeIndex": 132,
+      "nodeName": "{alpha, \"be, ta\", gamma}",
+      "retainedSize": 56,
+      "selfSize": 56
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "alpha",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 84,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "__proto__",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 87,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "be, ta",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 90,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 93,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "gamma",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 96,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "plain",
+      "node": {
+       "id": 5,
+       "name": "Window",
+       "distance": 1,
+       "nodeIndex": 12,
+       "retainedSize": 4400,
+       "selfSize": 64,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 42,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 23,
+    "objectInfo": {
+     "id": 53,
+     "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+     "type": "object",
+     "nodeIndex": 138,
+     "detachedness": 0,
+     "selfSize": 56,
+     "retainedSize": 56,
+     "distance": 2,
+     "edgeCount": 12,
+     "retainerCount": 1
+    },
+    "dominators": [
+     {
+      "nodeId": 53,
+      "nodeIndex": 138,
+      "nodeName": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+      "retainedSize": 56,
+      "selfSize": 56
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [
+     {
+      "name": "aPropertyNameLongEnoughToCount0",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 99,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount1",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 102,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount2",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 105,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount3",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 108,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount4",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 111,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount5",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 114,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount6",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 117,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount7",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 120,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount8",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 123,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount9",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 126,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount10",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 129,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount11",
+      "node": {
+       "id": 55,
+       "name": "Leaf",
+       "distance": 3,
+       "nodeIndex": 144,
+       "retainedSize": 8,
+       "selfSize": 8,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 132,
+      "isAddedNotRemoved": null
+     }
+    ],
+    "retainers": [
+     {
+      "name": "wide",
+      "node": {
+       "id": 5,
+       "name": "Window",
+       "distance": 1,
+       "nodeIndex": 12,
+       "retainedSize": 4400,
+       "selfSize": 64,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 45,
+      "isAddedNotRemoved": null
+     }
+    ]
+   },
+   {
+    "ordinal": 24,
+    "objectInfo": {
+     "id": 55,
+     "name": "Leaf",
+     "type": "object",
+     "nodeIndex": 144,
+     "detachedness": 0,
+     "selfSize": 8,
+     "retainedSize": 8,
+     "distance": 3,
+     "edgeCount": 0,
+     "retainerCount": 17
+    },
+    "dominators": [
+     {
+      "nodeId": 55,
+      "nodeIndex": 144,
+      "nodeName": "Leaf",
+      "retainedSize": 8,
+      "selfSize": 8
+     },
+     {
+      "nodeId": 5,
+      "nodeIndex": 12,
+      "nodeName": "Window",
+      "retainedSize": 4400,
+      "selfSize": 64
+     },
+     {
+      "nodeId": 1,
+      "nodeIndex": 0,
+      "nodeName": "",
+      "retainedSize": 4960,
+      "selfSize": 0
+     }
+    ],
+    "edges": [],
+    "retainers": [
+     {
+      "name": "aPropertyNameLongEnoughToCount11",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 132,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount10",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 129,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount9",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 126,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount8",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 123,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount7",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 120,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount6",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 117,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount5",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 114,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount4",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 111,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount3",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 108,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount2",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 105,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount1",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 102,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "aPropertyNameLongEnoughToCount0",
+      "node": {
+       "id": 53,
+       "name": "{aPropertyNameLongEnoughToCount0, aPropertyNameLongEnoughToCount1, …, aPropertyNameLongEnoughToCount11}",
+       "distance": 2,
+       "nodeIndex": 138,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 99,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "gamma",
+      "node": {
+       "id": 51,
+       "name": "{alpha, \"be, ta\", gamma}",
+       "distance": 2,
+       "nodeIndex": 132,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 96,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "map",
+      "node": {
+       "id": 51,
+       "name": "{alpha, \"be, ta\", gamma}",
+       "distance": 2,
+       "nodeIndex": 132,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "internal",
+      "edgeIndex": 93,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "be, ta",
+      "node": {
+       "id": 51,
+       "name": "{alpha, \"be, ta\", gamma}",
+       "distance": 2,
+       "nodeIndex": 132,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 90,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "__proto__",
+      "node": {
+       "id": 51,
+       "name": "{alpha, \"be, ta\", gamma}",
+       "distance": 2,
+       "nodeIndex": 132,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 87,
+      "isAddedNotRemoved": null
+     },
+     {
+      "name": "alpha",
+      "node": {
+       "id": 51,
+       "name": "{alpha, \"be, ta\", gamma}",
+       "distance": 2,
+       "nodeIndex": 132,
+       "retainedSize": 56,
+       "selfSize": 56,
+       "type": "object",
+       "canBeQueried": true,
+       "detachedDOMTreeNode": false,
+       "isAddedNotRemoved": null,
+       "ignored": false
+      },
+      "type": "property",
+      "edgeIndex": 84,
+      "isAddedNotRemoved": null
+     }
+    ]
    }
   ]
  }

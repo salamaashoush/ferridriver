@@ -27,7 +27,9 @@
 pub mod analysis;
 pub mod error;
 pub mod format;
+pub mod query;
 
 pub use analysis::{Analysis, NativeStatistics, Statistics, V8Statistics};
 pub use error::{HeapError, Result};
 pub use format::Snapshot;
+pub use query::{DominatorStep, EdgeSummary, NodeSummary, ObjectInfo};

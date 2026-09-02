@@ -453,8 +453,12 @@ fn mark_detached_dom_tree_nodes(snapshot: &Snapshot, flags: &mut [u8]) {
 fn mark_queriable_heap_objects(snapshot: &Snapshot, flags: &mut [u8]) {
   let mut list: Vec<usize> = Vec::new();
   for edge in snapshot.first_edge_index[0]..snapshot.first_edge_index[1] {
+    // The NODE's own `isUserRoot`, which is only "not synthetic".
+    // `(Document DOM trees)` passes the snapshot-level test and fails
+    // this one, and seeding from the wrong one marks the whole DOM as
+    // queriable when `DevTools` says it is not.
     if let Ok(child) = snapshot.edge_target(edge)
-      && is_user_root(snapshot, child)
+      && !is_synthetic(snapshot, child)
     {
       list.push(child);
     }

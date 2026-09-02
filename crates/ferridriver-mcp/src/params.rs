@@ -26,6 +26,20 @@ impl SessionParam {
   }
 }
 
+/// The advertised schema for the `session` property alone.
+///
+/// Promoted extension tools honour `session` (it is stripped before their
+/// declared schema is validated, then handed to the handler) but declare their
+/// own input schema, so without this the routing key is invisible in
+/// `tools/list` -- a caller reading the schema concludes the tool cannot be
+/// pointed at a session and hand-rolls the interaction instead. Taken from
+/// [`SessionParam`]'s own derive so both surfaces describe it identically.
+#[must_use]
+pub fn session_property_schema() -> Option<serde_json::Value> {
+  let schema = serde_json::to_value(schemars::schema_for!(SessionParam)).ok()?;
+  schema.get("properties")?.get("session").cloned()
+}
+
 /// How far a navigation should be awaited before the tool returns.
 ///
 /// A closed set rather than a free `String` so the milestones reach the caller
@@ -248,6 +262,12 @@ pub struct ScreenshotParams_ {
   pub full_page: Option<bool>,
   #[schemars(description = "CSS selector to screenshot a specific element instead of the full page.")]
   pub selector: Option<String>,
+  #[schemars(
+    description = "Milliseconds to wait for `selector` to resolve before failing. Default: the \
+    page's action timeout (30000). Lower it when you are probing whether an element exists — a \
+    selector that matches nothing otherwise burns the full default before reporting."
+  )]
+  pub timeout: Option<u64>,
   #[serde(flatten)]
   pub session: SessionParam,
 }

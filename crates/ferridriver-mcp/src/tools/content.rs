@@ -66,7 +66,20 @@ impl McpServer {
         let format = p.format.unwrap_or_default();
         let mime = format.mime();
         let bytes = if let Some(sel) = &p.selector {
-          page.screenshot_element(sel).await.map_err(Self::err)?
+          // Through the locator rather than `screenshot_element`, which takes
+          // neither the format nor a timeout: an element capture used to answer
+          // PNG bytes under a jpeg mime type, and a selector that matched
+          // nothing waited the full default with no way to shorten it.
+          page
+            .locator(sel)
+            .screenshot()
+            .options(ferridriver::options::ElementScreenshotOptions {
+              format: Some(format.into()),
+              timeout: p.timeout,
+              ..Default::default()
+            })
+            .await
+            .map_err(Self::err)?
         } else {
           let opts = ScreenshotOptions {
             format: Some(format.into()),
