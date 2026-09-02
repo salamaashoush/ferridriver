@@ -32,4 +32,6 @@ pub mod query;
 pub use analysis::{Analysis, NativeStatistics, Statistics, V8Statistics};
 pub use error::{HeapError, Result};
 pub use format::Snapshot;
-pub use query::{DominatorStep, DuplicateStringGroup, DuplicateStringNode, EdgeSummary, NodeSummary, ObjectInfo};
+pub use query::{
+  Aggregate, DominatorStep, DuplicateStringGroup, DuplicateStringNode, EdgeSummary, NodeSummary, ObjectInfo,
+};

@@ -27,6 +27,9 @@ pub struct Meta {
   pub node_types: Vec<serde_json::Value>,
   pub edge_fields: Vec<String>,
   pub edge_types: Vec<serde_json::Value>,
+  /// Absent from snapshots that carry no `locations` array.
+  #[serde(default)]
+  pub location_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +50,10 @@ pub struct RawProfile {
   pub nodes: Vec<u64>,
   pub edges: Vec<u64>,
   pub strings: Vec<String>,
+  /// Where the constructor that made each object was defined. Absent
+  /// from older snapshots.
+  #[serde(default)]
+  pub locations: Vec<u64>,
 }
 
 /// Where each node column sits, resolved by name.
@@ -125,6 +132,10 @@ pub struct Snapshot {
   /// grouped by source node in node order, so a node's edges are the
   /// half-open range to the next entry.
   pub first_edge_index: Vec<usize>,
+  /// Node ordinal to where its constructor was defined. Two classes
+  /// with the same name from different scripts are different classes,
+  /// which is what this is for.
+  pub locations: rustc_hash::FxHashMap<usize, Location>,
   /// Attachment state after propagation, NOT the raw field: an object
   /// reachable from an attached one is attached, and one reachable only
   /// from a detached one is detached. See [`Snapshot::propagate_dom_state`].
@@ -137,10 +148,57 @@ pub const DOM_LINK_STATE_UNKNOWN: u8 = 0;
 pub const DOM_LINK_STATE_ATTACHED: u8 = 1;
 pub const DOM_LINK_STATE_DETACHED: u8 = 2;
 
+/// Where a constructor was defined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Location {
+  pub script_id: u64,
+  pub line: u64,
+  pub column: u64,
+}
+
+/// The `locations` array, keyed by the node ORDINAL it describes.
+///
+/// Its `object_index` is a node index rather than an ordinal, which is
+/// the same trap as everywhere else in this format.
+fn parse_locations(
+  locations: &[u64],
+  fields: &[String],
+  node_field_count: usize,
+) -> rustc_hash::FxHashMap<usize, Location> {
+  let mut out = rustc_hash::FxHashMap::default();
+  let (Some(object_at), Some(script_at), Some(line_at), Some(column_at)) = (
+    fields.iter().position(|field| field == "object_index"),
+    fields.iter().position(|field| field == "script_id"),
+    fields.iter().position(|field| field == "line"),
+    fields.iter().position(|field| field == "column"),
+  ) else {
+    return out;
+  };
+  let width = fields.len();
+  if width == 0 || node_field_count == 0 {
+    return out;
+  }
+  for record in locations.chunks_exact(width) {
+    let node_index = index_of(record[object_at]);
+    if !node_index.is_multiple_of(node_field_count) {
+      continue;
+    }
+    out.insert(
+      node_index / node_field_count,
+      Location {
+        script_id: record[script_at],
+        line: record[line_at],
+        column: record[column_at],
+      },
+    );
+  }
+  out
+}
+
 /// A stored value used as an index. On a 64-bit target this is exact;
 /// anywhere narrower, a value too large to be an index is a malformed
 /// file, and every lookup that uses one already answers for a miss.
-fn index_of(value: u64) -> usize {
+pub(crate) fn index_of(value: u64) -> usize {
   usize::try_from(value).unwrap_or(usize::MAX)
 }
 
@@ -201,6 +259,7 @@ impl Snapshot {
 
   fn from_raw(raw: RawProfile) -> Result<Self> {
     let meta = &raw.snapshot.meta;
+    let meta_location_fields = meta.location_fields.clone();
 
     let node_type_offset = offset_of(&meta.node_fields, "type")?;
     let node_layout = NodeLayout {
@@ -284,6 +343,7 @@ impl Snapshot {
       node_type_names,
       edge_type_names,
       first_edge_index: Vec::new(),
+      locations: parse_locations(&raw.locations, &meta_location_fields, node_layout.field_count),
       detachedness: Vec::new(),
     };
     snapshot.build_edge_index();

@@ -61,7 +61,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-use ferridriver_heap::{Analysis, DominatorStep, DuplicateStringGroup, EdgeSummary, ObjectInfo, Snapshot};
+use ferridriver_heap::{Aggregate, Analysis, DominatorStep, DuplicateStringGroup, EdgeSummary, ObjectInfo, Snapshot};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -76,6 +76,7 @@ struct Recording {
   queried: Vec<Queried>,
   #[serde(rename = "duplicateStrings")]
   duplicate_strings: Vec<DuplicateStringGroup>,
+  aggregates: BTreeMap<String, Aggregate>,
 }
 
 /// What the engine's providers answered about one node.
@@ -375,6 +376,30 @@ fn the_queries_answer_what_the_engine_answers() {
     for (at, (ours, engine)) in ours.iter().zip(&recording.duplicate_strings).enumerate() {
       assert_eq!(ours, engine, "{name}: duplicated string group {at}");
     }
+
+    let ours = analysis.aggregates();
+    let mut differences = Vec::new();
+    for (key, engine) in &recording.aggregates {
+      match ours.get(key) {
+        None => differences.push(format!("class {key}: the engine has it, we do not")),
+        Some(ours) if ours != engine => {
+          differences.push(format!("class {key}:\n    engine {engine:?}\n    ours   {ours:?}"));
+        },
+        Some(_) => {},
+      }
+    }
+    for key in ours.keys() {
+      if !recording.aggregates.contains_key(key) {
+        differences.push(format!("class {key}: we have it, the engine does not"));
+      }
+    }
+    assert!(
+      differences.is_empty(),
+      "our aggregates over {name} disagree with the `DevTools` heap engine on {} of {} classes:\n  {}",
+      differences.len(),
+      recording.aggregates.len(),
+      differences.join("\n  ")
+    );
   }
 }
 

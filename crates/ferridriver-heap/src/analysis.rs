@@ -9,7 +9,7 @@
 //! Checked against the engine rather than against this description --
 //! see `tests/differential.rs`.
 
-use crate::format::Snapshot;
+use crate::format::{Snapshot, index_of};
 
 /// `HeapSnapshotModel.baseSystemDistance`. Anything only the system can
 /// reach is pushed past every real distance so it sorts last.
@@ -48,6 +48,13 @@ pub struct Analysis {
   pub retained_sizes: Vec<u64>,
   /// Edges from the root, in the shortest walk that reaches each node.
   pub distances: Vec<i64>,
+  /// Per node, the string index of the class it is grouped under.
+  pub class_index: Vec<usize>,
+  /// `dominated_nodes[first_dominated[o]..first_dominated[o + 1]]` are
+  /// the ordinals `o` immediately dominates. The dominator tree read
+  /// downwards; [`Analysis::dominators`] reads it upwards.
+  pub dominated_nodes: Vec<usize>,
+  pub first_dominated: Vec<usize>,
 }
 
 impl Analysis {
@@ -82,6 +89,10 @@ impl Analysis {
       &self_sizes,
     );
     let distances = calculate_distances(&snapshot, root);
+    let mut class_index = calculate_object_names(&mut snapshot);
+    let interfaces = infer_interface_definitions(&snapshot);
+    apply_interface_definitions(&mut snapshot, &mut class_index, &interfaces);
+    let (dominated_nodes, first_dominated) = build_dominated_nodes(root, &dominators);
 
     Self {
       snapshot,
@@ -93,7 +104,22 @@ impl Analysis {
       dominators,
       retained_sizes,
       distances,
+      class_index,
+      dominated_nodes,
+      first_dominated,
     }
+  }
+
+  /// The name this node is grouped under, which is not its own name: a
+  /// `<div id="a">` is grouped as `<div>`, and everything hidden as
+  /// `(system)`.
+  #[must_use]
+  pub fn class_name(&self, ordinal: usize) -> &str {
+    self
+      .snapshot
+      .strings
+      .get(self.class_index[ordinal])
+      .map_or("", String::as_str)
   }
 
   /// Everything the node's dominated subtree holds, itself included.
@@ -523,6 +549,334 @@ fn mark_page_owned_nodes(snapshot: &Snapshot, flags: &mut [u8]) {
       flags[child] |= FLAG_PAGE_OBJECT;
     }
   }
+}
+
+/// Group every node under a class, as `calculateObjectNames` does.
+///
+/// The grouping name is not the node's name. An element carrying
+/// attributes is grouped by its tag alone, so `<div id="a">` and
+/// `<div class="b">` land together; everything hidden is `(system)`,
+/// compiled code is `(compiled code)`, and a function is `Function`
+/// whatever it is called.
+///
+/// New names are appended to the string table, and objects and natives
+/// deliberately reuse their existing name index rather than adding one,
+/// because two nodes only group together when their class index is the
+/// same number.
+fn calculate_object_names(snapshot: &mut Snapshot) -> Vec<usize> {
+  let mut interned: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
+  let mut intern = |snapshot: &mut Snapshot, value: &str| -> usize {
+    if let Some(&at) = interned.get(value) {
+      return at;
+    }
+    snapshot.strings.push(value.to_string());
+    let at = snapshot.strings.len() - 1;
+    interned.insert(value.to_string(), at);
+    at
+  };
+
+  let hidden_class = intern(snapshot, "(system)");
+  let code_class = intern(snapshot, "(compiled code)");
+  let function_class = intern(snapshot, "Function");
+  let regexp_class = intern(snapshot, "RegExp");
+  let regexp_type = snapshot
+    .node_type_names
+    .iter()
+    .position(|name| name == "regexp")
+    .map_or(u64::MAX, |at| at as u64);
+
+  let mut class_index = vec![0usize; snapshot.node_count];
+  for (ordinal, slot) in class_index.iter_mut().enumerate() {
+    let kind = snapshot.node_type(ordinal);
+    let types = snapshot.node_types;
+    *slot = if kind == types.hidden {
+      hidden_class
+    } else if kind == types.code {
+      code_class
+    } else if kind == types.closure {
+      function_class
+    } else if kind == regexp_type {
+      regexp_class
+    } else if kind == types.object || kind == types.native {
+      let name = snapshot.raw_node_name(ordinal).to_string();
+      // `<div id="a">` groups as `<div>`. The prefixed form is what a
+      // detached node was renamed to earlier.
+      if let Some(tag) = element_tag(&name) {
+        intern(snapshot, &tag)
+      } else {
+        // The name's own index, NOT a fresh one: an interned copy would
+        // put identically named objects in different groups.
+        index_of(snapshot.nodes[ordinal * snapshot.node_layout.field_count + snapshot.node_layout.name_offset])
+      }
+    } else {
+      let label = format!("({})", snapshot.node_type_name(ordinal));
+      intern(snapshot, &label)
+    };
+  }
+  class_index
+}
+
+/// `<div id="a">` -> `<div>`, and the same for a detached one.
+fn element_tag(name: &str) -> Option<String> {
+  for prefix in ["<", "Detached <"] {
+    if !name.starts_with(prefix) {
+      continue;
+    }
+    let Some(space) = name[prefix.len() - 1..].find(' ').map(|at| at + prefix.len() - 1) else {
+      return Some(name.to_string());
+    };
+    return Some(format!("{}>", &name[..space]));
+  }
+  None
+}
+
+/// After this many characters an inferred interface name stops taking
+/// properties, unless it has none yet.
+const MAX_INTERFACE_NAME_LENGTH: usize = 120;
+/// An interface matching one object is not a category.
+const MIN_OBJECT_COUNT_PER_INTERFACE: usize = 2;
+/// And one matching fewer than a thousandth of the plain objects is a
+/// long tail nobody reads.
+const MIN_OBJECT_PROPORTION_PER_INTERFACE: usize = 1000;
+
+/// One shape that enough plain objects share to be worth naming.
+#[derive(Debug, Clone)]
+struct InterfaceDefinition {
+  name: String,
+  properties: Vec<String>,
+}
+
+/// Only a plain `Object` is reshaped; everything else already has a
+/// name worth grouping by.
+fn is_plain_js_object(snapshot: &Snapshot, ordinal: usize) -> bool {
+  snapshot.node_type(ordinal) == snapshot.node_types.object && snapshot.raw_node_name(ordinal) == "Object"
+}
+
+/// Name the shapes that plain objects keep repeating.
+///
+/// Every plain `Object` reports as `Object`, which groups a page's
+/// entire object graph into one line. Upstream instead reads each one's
+/// properties IN ORDER, counts how often each sequence recurs, and
+/// keeps the sequences shared by at least two objects and a thousandth
+/// of them.
+fn infer_interface_definitions(snapshot: &Snapshot) -> Vec<InterfaceDefinition> {
+  // Insertion-ordered, because ties are broken by which was seen first.
+  let mut order: Vec<String> = Vec::new();
+  let mut candidates: rustc_hash::FxHashMap<String, (Vec<String>, usize)> = rustc_hash::FxHashMap::default();
+  let mut total = 0usize;
+
+  for ordinal in 0..snapshot.node_count {
+    if !is_plain_js_object(snapshot, ordinal) {
+      continue;
+    }
+    total += 1;
+    let mut name = String::from("{");
+    let mut properties: Vec<String> = Vec::new();
+    for edge in snapshot.first_edge_index[ordinal]..snapshot.first_edge_index[ordinal + 1] {
+      if snapshot.edge_type(edge) != snapshot.edge_types.property {
+        continue;
+      }
+      let Some(raw) = snapshot.edge_name(edge) else {
+        continue;
+      };
+      if raw == "__proto__" {
+        continue;
+      }
+      let formatted = format_property_name(raw);
+      if name.len() > 1 && name.len() + formatted.len() > MAX_INTERFACE_NAME_LENGTH {
+        break;
+      }
+      if name.len() != 1 {
+        name.push_str(", ");
+      }
+      name.push_str(&formatted);
+      properties.push(raw.to_string());
+    }
+    // An object with no properties is not a shape, and reading `{}` as
+    // "objects with nothing in them" would be wrong anyway.
+    if properties.is_empty() {
+      continue;
+    }
+    name.push('}');
+    if let Some(entry) = candidates.get_mut(&name) {
+      entry.1 += 1;
+    } else {
+      order.push(name.clone());
+      candidates.insert(name, (properties, 1));
+    }
+  }
+
+  let least = MIN_OBJECT_COUNT_PER_INTERFACE.max(total / MIN_OBJECT_PROPORTION_PER_INTERFACE);
+  let mut sorted: Vec<InterfaceDefinition> = Vec::new();
+  let mut counted: Vec<(String, usize)> = order
+    .into_iter()
+    .filter_map(|name| candidates.get(&name).map(|entry| (name, entry.1)))
+    .collect();
+  // Most popular first, ties in the order they were met, so the
+  // commonest ordering of the same properties wins.
+  counted.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+  for (name, count) in counted {
+    if count < least {
+      break;
+    }
+    let properties = candidates.get(&name).map(|entry| entry.0.clone()).unwrap_or_default();
+    sorted.push(InterfaceDefinition { name, properties });
+  }
+  sorted
+}
+
+/// Re-file every plain object under the best interface it matches.
+///
+/// "Best" is the one naming the most properties, and among equals the
+/// one defined earliest. The definitions are held in a tree keyed by
+/// sorted property name, so one walk over an object's sorted properties
+/// visits every definition it could match.
+fn apply_interface_definitions(
+  snapshot: &mut Snapshot,
+  class_index: &mut [usize],
+  definitions: &[InterfaceDefinition],
+) {
+  if definitions.is_empty() {
+    return;
+  }
+  let mut tree = vec![PropertyTreeNode::default()];
+  for (at, definition) in definitions.iter().enumerate() {
+    let mut properties = definition.properties.clone();
+    properties.sort();
+    let mut current = 0usize;
+    for property in &properties {
+      current = if let Some(node) = tree[current].next.get(property).copied() {
+        node
+      } else {
+        tree.push(PropertyTreeNode::default());
+        let node = tree.len() - 1;
+        tree[current].next.insert(property.clone(), node);
+        node
+      };
+    }
+    // An earlier definition keeps the slot, which is what makes the
+    // popularity order above decide ties.
+    if tree[current].matched.is_none() {
+      tree[current].matched = Some(Match {
+        name: definition.name.clone(),
+        property_count: properties.len(),
+        at,
+      });
+    }
+  }
+
+  let mut interned: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
+  for (ordinal, slot) in class_index.iter_mut().enumerate() {
+    if !is_plain_js_object(snapshot, ordinal) {
+      continue;
+    }
+    let mut properties: Vec<String> = (snapshot.first_edge_index[ordinal]..snapshot.first_edge_index[ordinal + 1])
+      .filter(|&edge| snapshot.edge_type(edge) == snapshot.edge_types.property)
+      .filter_map(|edge| snapshot.edge_name(edge).map(std::string::ToString::to_string))
+      .collect();
+    properties.sort();
+
+    let mut states: Vec<usize> = vec![0];
+    let mut best: Option<Match> = tree[0].matched.clone();
+    for property in &properties {
+      let mut next_states = Vec::new();
+      for &state in &states {
+        // Sorted properties mean a state whose greatest key is behind
+        // us can never advance again.
+        let exhausted = tree[state]
+          .next
+          .keys()
+          .max()
+          .is_none_or(|greatest| property >= greatest);
+        if !exhausted {
+          next_states.push(state);
+        }
+        if let Some(&node) = tree[state].next.get(property) {
+          next_states.push(node);
+          best = better_match(best, tree[node].matched.clone());
+        }
+      }
+      states = next_states;
+    }
+
+    let Some(best) = best else {
+      continue;
+    };
+    let at = *interned.entry(best.name.clone()).or_insert_with(|| {
+      snapshot.strings.push(best.name.clone());
+      snapshot.strings.len() - 1
+    });
+    *slot = at;
+  }
+}
+
+#[derive(Debug, Default)]
+struct PropertyTreeNode {
+  next: std::collections::BTreeMap<String, usize>,
+  matched: Option<Match>,
+}
+
+#[derive(Debug, Clone)]
+struct Match {
+  name: String,
+  property_count: usize,
+  at: usize,
+}
+
+fn better_match(a: Option<Match>, b: Option<Match>) -> Option<Match> {
+  match (a, b) {
+    (Some(a), Some(b)) => Some(if a.property_count > b.property_count {
+      a
+    } else if b.property_count > a.property_count {
+      b
+    } else if a.at <= b.at {
+      a
+    } else {
+      b
+    }),
+    (some, None) | (None, some) => some,
+  }
+}
+
+/// The dominator tree read downwards: which nodes each node dominates.
+///
+/// A counting sort like the retainer index, filling each slice
+/// backwards from a count parked in its first slot.
+fn build_dominated_nodes(root: usize, dominators: &[usize]) -> (Vec<usize>, Vec<usize>) {
+  let node_count = dominators.len();
+  let mut first_dominated = vec![0usize; node_count + 1];
+  if node_count == 0 {
+    return (Vec::new(), first_dominated);
+  }
+  // Every node but the root has a dominator; the root dominates itself
+  // and is skipped so it does not appear in its own slice.
+  let mut dominated = vec![0usize; node_count - 1];
+  for ordinal in 0..node_count {
+    if ordinal == root {
+      continue;
+    }
+    first_dominated[dominators[ordinal]] += 1;
+  }
+  let mut next_slot = 0usize;
+  for slot in first_dominated.iter_mut().take(node_count) {
+    let count = *slot;
+    *slot = next_slot;
+    if count > 0 {
+      dominated[next_slot] = count;
+    }
+    next_slot += count;
+  }
+  first_dominated[node_count] = dominated.len();
+  for ordinal in 0..node_count {
+    if ordinal == root {
+      continue;
+    }
+    let slice_start = first_dominated[dominators[ordinal]];
+    dominated[slice_start] -= 1;
+    let at = slice_start + dominated[slice_start];
+    dominated[at] = ordinal;
+  }
+  (dominated, first_dominated)
 }
 
 // ── Retainers ───────────────────────────────────────────────────────────

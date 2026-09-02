@@ -470,3 +470,162 @@ impl Analysis {
       .and_then(|target| self.node_value_as_int(target))
   }
 }
+
+/// Every object of one class, counted and measured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Aggregate {
+  pub count: usize,
+  /// The nearest any of them sits to a user root.
+  pub distance: i64,
+  /// Their sizes added up.
+  #[serde(rename = "self")]
+  pub self_size: u64,
+  /// What the class holds that nothing outside it holds: the retained
+  /// sizes of its members, counting each byte once even where one
+  /// member dominates another.
+  pub max_ret: u64,
+  pub name: String,
+  /// Node indexes, in node order.
+  ///
+  /// Upstream can sort these by object id, which is stable across
+  /// snapshots where a node index is not, but `aggregatesWithFilter`
+  /// asks it not to -- and that is the call the tools make.
+  pub idxs: Vec<usize>,
+}
+
+impl Analysis {
+  /// Group every sized node by its class, the way
+  /// `get_heapsnapshot_class_nodes` and the aggregate half of
+  /// `get_heapsnapshot_details` report it.
+  ///
+  /// Keyed as upstream exposes it: `,<name>` for an ordinary class, and
+  /// `<script>,<line>,<column>,<name>` for an object whose constructor
+  /// has a location. Two constructors of the same name from different
+  /// scripts are different classes, and a key that ignored the location
+  /// would merge them.
+  #[must_use]
+  pub fn aggregates(&self) -> std::collections::BTreeMap<String, Aggregate> {
+    let snapshot = &self.snapshot;
+    let mut by_key: rustc_hash::FxHashMap<ClassKey, Aggregate> = rustc_hash::FxHashMap::default();
+
+    for ordinal in 0..snapshot.node_count {
+      // A node with no size of its own adds nothing to a total, and
+      // upstream leaves it out rather than reporting a class of zeroes.
+      let self_size = snapshot.node_self_size(ordinal);
+      if self_size == 0 {
+        continue;
+      }
+      let distance = self.distance(ordinal);
+      by_key
+        .entry(self.class_key(ordinal))
+        .and_modify(|aggregate| {
+          aggregate.distance = aggregate.distance.min(distance);
+          aggregate.count += 1;
+          aggregate.self_size += self_size;
+          aggregate.idxs.push(self.node_index(ordinal));
+        })
+        .or_insert_with(|| Aggregate {
+          count: 1,
+          distance,
+          self_size,
+          max_ret: 0,
+          name: self.class_name(ordinal).to_string(),
+          idxs: vec![self.node_index(ordinal)],
+        });
+    }
+
+    self.add_retained_sizes_per_class(&mut by_key);
+
+    let mut out = std::collections::BTreeMap::new();
+    for (key, aggregate) in by_key {
+      out.insert(key.exposed(&snapshot.strings), aggregate);
+    }
+    out
+  }
+
+  /// What each class retains, walking the dominator tree downwards.
+  ///
+  /// The obvious sum -- add up every member's retained size -- double
+  /// counts, because one member of a class often dominates another and
+  /// the inner one's bytes are already inside the outer one's total.
+  /// Upstream walks down from the root and stops crediting a class
+  /// again while it is already inside one of its own members, which is
+  /// what `seen` tracks.
+  fn add_retained_sizes_per_class(&self, aggregates: &mut rustc_hash::FxHashMap<ClassKey, Aggregate>) {
+    let mut stack = vec![0usize];
+    // Where in the walk each currently-open class was entered.
+    let mut open_at: Vec<usize> = Vec::new();
+    let mut open_keys: Vec<ClassKey> = Vec::new();
+    let mut seen: rustc_hash::FxHashSet<ClassKey> = rustc_hash::FxHashSet::default();
+
+    while let Some(ordinal) = stack.pop() {
+      let key = self.class_key(ordinal);
+      let already_inside = seen.contains(&key);
+      let dominated = self.first_dominated[ordinal]..self.first_dominated[ordinal + 1];
+
+      if !already_inside
+        && self.snapshot.node_self_size(ordinal) > 0
+        && let Some(aggregate) = aggregates.get_mut(&key)
+      {
+        aggregate.max_ret += self.retained_size(ordinal);
+        if !dominated.is_empty() {
+          seen.insert(key.clone());
+          open_at.push(stack.len());
+          open_keys.push(key);
+        }
+      }
+
+      for at in dominated {
+        stack.push(self.dominated_nodes[at]);
+      }
+
+      // Anything opened at this depth is now behind us.
+      while open_at.last() == Some(&stack.len()) {
+        open_at.pop();
+        if let Some(key) = open_keys.pop() {
+          seen.remove(&key);
+        }
+      }
+    }
+  }
+
+  fn class_key(&self, ordinal: usize) -> ClassKey {
+    let snapshot = &self.snapshot;
+    // Only objects carry a location worth splitting on. Functions have
+    // one too, and splitting by it would give most categories a single
+    // member.
+    if snapshot.node_type(ordinal) == snapshot.node_types.object
+      && let Some(location) = snapshot.locations.get(&ordinal)
+    {
+      return ClassKey::Located(format!(
+        "{},{},{},{}",
+        location.script_id,
+        location.line,
+        location.column,
+        self.class_name(ordinal)
+      ));
+    }
+    ClassKey::Index(self.class_index[ordinal])
+  }
+}
+
+/// How a class is identified while aggregating.
+///
+/// Cheap to produce, which matters over every node in the heap; the
+/// string form callers see is derived once at the end.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ClassKey {
+  Index(usize),
+  Located(String),
+}
+
+impl ClassKey {
+  fn exposed(self, strings: &[String]) -> String {
+    match self {
+      // The empty field before the comma is where a location would be.
+      Self::Index(at) => format!(",{}", strings.get(at).map_or("", String::as_str)),
+      Self::Located(key) => key,
+    }
+  }
+}

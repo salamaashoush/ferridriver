@@ -211,11 +211,35 @@ A string node of zero size is V8 encoding a NUMBER. And a truncated
 string is only a prefix, so two that read alike may differ past the
 cut; those group on length and hash as well.
 
-Still to write: `aggregatesWithFilter` and the class-node provider
-(`get_heapsnapshot_class_nodes`, and the aggregate half of
-`get_heapsnapshot_details`), `getRetainingPaths`, `queryObjects`, and
-`calculateSnapshotDiff` for `compare_heapsnapshots`. Then the 13 tools
-themselves, the CDP capture with `Unsupported` on the other three
+`aggregatesWithFilter` has landed, which needed four more passes and
+agrees on all 190 classes of the captured fixture and all 17 of the
+hand-built one. The four are worth knowing about, because each is a
+place where the obvious implementation is wrong:
+
+- Objects are grouped by a CLASS name, not their own.
+  `calculateObjectNames` files `<div id="a">` under `<div>`, everything
+  hidden under `(system)`, and a function under `Function`. Objects and
+  natives reuse their existing name index rather than interning a
+  fresh one, because two nodes group together only when that index is
+  the same number.
+- A plain `Object` is renamed after the shape it shares with others.
+  `inferInterfaceDefinitions` reads each one's properties in order,
+  counts recurring sequences and keeps those shared by at least two
+  objects and a thousandth of them; `applyInterfaceDefinitions` files
+  each object under the longest definition it matches. Without it a
+  page's whole object graph collapses onto one line called `Object`.
+- The class key carries the constructor's LOCATION for object nodes
+  (`script,line,column,name`), so two constructors of the same name
+  from different scripts stay apart.
+- `maxRet` is not the sum of its members' retained sizes. One member
+  usually dominates another, so upstream walks down the dominator tree
+  and stops crediting a class again while already inside one of its
+  own members.
+
+Still to write: the class-node provider itself
+(`get_heapsnapshot_class_nodes`), `getRetainingPaths`, `queryObjects`,
+and `calculateSnapshotDiff` for `compare_heapsnapshots`. Then the 13
+tools themselves, the CDP capture with `Unsupported` on the other three
 backends, and the three binding layers.
 
 ## 4. Extensions, PWA, WebMCP, third-party devtools — 12 tools

@@ -159,7 +159,17 @@ async function analyse(snapshot, nodeFieldCount) {
     });
   }
 
-  return { statistics, staticData, nodes, queried, duplicateStrings: await snapshot.getDuplicateStrings() };
+  const filter = new DevTools.HeapSnapshotModel.HeapSnapshotModel.NodeFilter();
+  const aggregates = await snapshot.aggregatesWithFilter(filter);
+
+  return {
+    statistics,
+    staticData,
+    nodes,
+    queried,
+    duplicateStrings: await snapshot.getDuplicateStrings(),
+    aggregates,
+  };
 }
 
 // ── Recording ───────────────────────────────────────────────────────────
