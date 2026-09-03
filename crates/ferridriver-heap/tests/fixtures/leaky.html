@@ -42,6 +42,19 @@ globalThis.__kept = (() => {
   }
   const widgets = Array.from({ length: 300 }, (_, n) => new Widget(n));
 
+  // A snapshot diff merges two snapshots on object id, so the pair has
+  // to come from one page session with something changing in between.
+  // Each line below makes one branch of the merge discriminate: a class
+  // that loses members, one that gains them, and one the earlier
+  // snapshot had never seen.
+  globalThis.__grow = () => {
+    duplicated.length = 250;
+    for (let n = 300; n < 600; n++) {
+      widgets.push(new Widget(n));
+    }
+    globalThis.__kept.fresh = Array.from({ length: 40 }, (_, n) => ({ tag: 'fresh ' + n, index: n }));
+  };
+
   return { detached, duplicated, closure, table, key, widgets };
 })();
 </script>

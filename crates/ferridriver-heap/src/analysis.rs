@@ -9,7 +9,7 @@
 //! Checked against the engine rather than against this description --
 //! see `tests/differential.rs`.
 
-use crate::format::{Snapshot, index_of};
+use crate::format::Snapshot;
 
 /// `HeapSnapshotModel.baseSystemDistance`. Anything only the system can
 /// reach is pushed past every real distance so it sorts last.
@@ -55,6 +55,9 @@ pub struct Analysis {
   /// downwards; [`Analysis::dominators`] reads it upwards.
   pub dominated_nodes: Vec<usize>,
   pub first_dominated: Vec<usize>,
+  /// The plain-object shapes this snapshot named for itself. A diff
+  /// against another snapshot re-classifies one side under the other's.
+  pub interfaces: Vec<InterfaceDefinition>,
 }
 
 impl Analysis {
@@ -107,6 +110,7 @@ impl Analysis {
       class_index,
       dominated_nodes,
       first_dominated,
+      interfaces,
     }
   }
 
@@ -120,6 +124,47 @@ impl Analysis {
       .strings
       .get(self.class_index[ordinal])
       .map_or("", String::as_str)
+  }
+
+  /// Re-file every plain object under ANOTHER snapshot's interface
+  /// definitions, without disturbing this one's own classification.
+  ///
+  /// A diff needs both sides grouped by the same names. Each snapshot
+  /// infers its shapes from the objects it happens to hold, so the same
+  /// class can be `{id, name}` in one and `Object` in the other, and
+  /// comparing those keys reports a class wholly added and a class
+  /// wholly removed where nothing changed.
+  #[must_use]
+  pub fn classify_under(&self, definitions: &[InterfaceDefinition]) -> Classification {
+    let index = InterfaceIndex::build(definitions);
+    let mut class_index = self.class_index.clone();
+    let mut extra: Vec<String> = Vec::new();
+    let mut interned: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
+    for (ordinal, slot) in class_index.iter_mut().enumerate() {
+      if !is_plain_js_object(&self.snapshot, ordinal) {
+        continue;
+      }
+      // No match means the object's own name index, not the one this
+      // snapshot's own definitions gave it.
+      *slot = match index.best_match(&self.snapshot, ordinal) {
+        None => self.snapshot.raw_node_name_index(ordinal),
+        Some(best) => *interned.entry(best.name.clone()).or_insert_with(|| {
+          extra.push(best.name);
+          self.snapshot.strings.len() + extra.len() - 1
+        }),
+      };
+    }
+    Classification { class_index, extra }
+  }
+
+  /// The name at a class index, which may name one of the strings a
+  /// [`Classification`] added rather than one the snapshot carries.
+  #[must_use]
+  pub fn class_name_at<'a>(&'a self, at: usize, extra: &'a [String]) -> &'a str {
+    if at < self.snapshot.strings.len() {
+      return &self.snapshot.strings[at];
+    }
+    extra.get(at - self.snapshot.strings.len()).map_or("", String::as_str)
   }
 
   /// Everything the node's dominated subtree holds, itself included.
@@ -606,7 +651,7 @@ fn calculate_object_names(snapshot: &mut Snapshot) -> Vec<usize> {
       } else {
         // The name's own index, NOT a fresh one: an interned copy would
         // put identically named objects in different groups.
-        index_of(snapshot.nodes[ordinal * snapshot.node_layout.field_count + snapshot.node_layout.name_offset])
+        snapshot.raw_node_name_index(ordinal)
       }
     } else {
       let label = format!("({})", snapshot.node_type_name(ordinal));
@@ -640,10 +685,28 @@ const MIN_OBJECT_COUNT_PER_INTERFACE: usize = 2;
 const MIN_OBJECT_PROPORTION_PER_INTERFACE: usize = 1000;
 
 /// One shape that enough plain objects share to be worth naming.
+///
+/// Public because a snapshot diff has to classify the BASE snapshot
+/// under the CURRENT one's definitions: two snapshots infer their own
+/// shapes independently, and a class named `{a, b}` in one and `Object`
+/// in the other would compare as a whole class added and a whole class
+/// removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceDefinition {
+  pub(crate) name: String,
+  pub(crate) properties: Vec<String>,
+}
+
+/// One snapshot's nodes grouped under a foreign set of interface
+/// definitions.
+///
+/// Indexes below the snapshot's own string count name a string it
+/// already holds; the rest name one of `extra`, so classifying under
+/// someone else's definitions never rewrites the string table.
 #[derive(Debug, Clone)]
-struct InterfaceDefinition {
-  name: String,
-  properties: Vec<String>,
+pub struct Classification {
+  pub class_index: Vec<usize>,
+  pub extra: Vec<String>,
 }
 
 /// Only a plain `Object` is reshaped; everything else already has a
@@ -725,88 +788,111 @@ fn infer_interface_definitions(snapshot: &Snapshot) -> Vec<InterfaceDefinition> 
   sorted
 }
 
-/// Re-file every plain object under the best interface it matches.
+/// The definitions arranged so one walk over an object's sorted
+/// properties visits every definition it could match.
 ///
-/// "Best" is the one naming the most properties, and among equals the
-/// one defined earliest. The definitions are held in a tree keyed by
-/// sorted property name, so one walk over an object's sorted properties
-/// visits every definition it could match.
+/// Each edge adds one property name, so a definition is a path from the
+/// root and an object matches every definition whose path its own
+/// sorted properties contain.
+#[derive(Debug)]
+struct InterfaceIndex {
+  tree: Vec<PropertyTreeNode>,
+}
+
+impl InterfaceIndex {
+  fn build(definitions: &[InterfaceDefinition]) -> Self {
+    let mut tree = vec![PropertyTreeNode::default()];
+    for (at, definition) in definitions.iter().enumerate() {
+      let mut properties = definition.properties.clone();
+      properties.sort();
+      let mut current = 0usize;
+      for property in &properties {
+        current = if let Some(node) = tree[current].next.get(property).copied() {
+          node
+        } else {
+          tree.push(PropertyTreeNode::default());
+          let node = tree.len() - 1;
+          tree[current].next.insert(property.clone(), node);
+          node
+        };
+      }
+      // An earlier definition keeps the slot, which is what makes the
+      // popularity order that produced them decide ties.
+      if tree[current].matched.is_none() {
+        tree[current].matched = Some(Match {
+          name: definition.name.clone(),
+          property_count: properties.len(),
+          at,
+        });
+      }
+    }
+    Self { tree }
+  }
+
+  /// The best interface this object matches: the one naming the most
+  /// properties, and among equals the one defined earliest.
+  fn best_match(&self, snapshot: &Snapshot, ordinal: usize) -> Option<Match> {
+    let mut properties: Vec<&str> = (snapshot.first_edge_index[ordinal]..snapshot.first_edge_index[ordinal + 1])
+      .filter(|&edge| snapshot.edge_type(edge) == snapshot.edge_types.property)
+      .filter_map(|edge| snapshot.edge_name(edge))
+      .collect();
+    properties.sort_unstable();
+
+    let mut states: Vec<usize> = vec![0];
+    let mut best: Option<Match> = self.tree[0].matched.clone();
+    for property in properties {
+      let mut next_states = Vec::new();
+      for &state in &states {
+        // Sorted properties mean a state whose greatest key is behind
+        // us can never advance again.
+        let exhausted = self.tree[state]
+          .next
+          .keys()
+          .max()
+          .is_none_or(|greatest| property >= greatest.as_str());
+        if !exhausted {
+          next_states.push(state);
+        }
+        if let Some(&node) = self.tree[state].next.get(property) {
+          next_states.push(node);
+          best = better_match(best, self.tree[node].matched.clone());
+        }
+      }
+      states = next_states;
+    }
+    best
+  }
+}
+
+/// Re-file every plain object under the best interface it matches,
+/// interning the names it needs into the snapshot's string table.
+///
+/// An object matching nothing goes back to its own name index, which is
+/// what makes a second pass over a different definition list correct
+/// rather than a merge of the two.
 fn apply_interface_definitions(
   snapshot: &mut Snapshot,
   class_index: &mut [usize],
   definitions: &[InterfaceDefinition],
 ) {
-  if definitions.is_empty() {
-    return;
-  }
-  let mut tree = vec![PropertyTreeNode::default()];
-  for (at, definition) in definitions.iter().enumerate() {
-    let mut properties = definition.properties.clone();
-    properties.sort();
-    let mut current = 0usize;
-    for property in &properties {
-      current = if let Some(node) = tree[current].next.get(property).copied() {
-        node
-      } else {
-        tree.push(PropertyTreeNode::default());
-        let node = tree.len() - 1;
-        tree[current].next.insert(property.clone(), node);
-        node
-      };
-    }
-    // An earlier definition keeps the slot, which is what makes the
-    // popularity order above decide ties.
-    if tree[current].matched.is_none() {
-      tree[current].matched = Some(Match {
-        name: definition.name.clone(),
-        property_count: properties.len(),
-        at,
-      });
-    }
-  }
+  let index = InterfaceIndex::build(definitions);
+  // Matched first and applied second, because interning a new name
+  // needs the string table mutably while matching still needs to read
+  // the graph.
+  let matched: Vec<(usize, Option<String>)> = (0..snapshot.node_count)
+    .filter(|&ordinal| is_plain_js_object(snapshot, ordinal))
+    .map(|ordinal| (ordinal, index.best_match(snapshot, ordinal).map(|best| best.name)))
+    .collect();
 
   let mut interned: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
-  for (ordinal, slot) in class_index.iter_mut().enumerate() {
-    if !is_plain_js_object(snapshot, ordinal) {
-      continue;
-    }
-    let mut properties: Vec<String> = (snapshot.first_edge_index[ordinal]..snapshot.first_edge_index[ordinal + 1])
-      .filter(|&edge| snapshot.edge_type(edge) == snapshot.edge_types.property)
-      .filter_map(|edge| snapshot.edge_name(edge).map(std::string::ToString::to_string))
-      .collect();
-    properties.sort();
-
-    let mut states: Vec<usize> = vec![0];
-    let mut best: Option<Match> = tree[0].matched.clone();
-    for property in &properties {
-      let mut next_states = Vec::new();
-      for &state in &states {
-        // Sorted properties mean a state whose greatest key is behind
-        // us can never advance again.
-        let exhausted = tree[state]
-          .next
-          .keys()
-          .max()
-          .is_none_or(|greatest| property >= greatest);
-        if !exhausted {
-          next_states.push(state);
-        }
-        if let Some(&node) = tree[state].next.get(property) {
-          next_states.push(node);
-          best = better_match(best, tree[node].matched.clone());
-        }
-      }
-      states = next_states;
-    }
-
-    let Some(best) = best else {
-      continue;
+  for (ordinal, name) in matched {
+    class_index[ordinal] = match name {
+      None => snapshot.raw_node_name_index(ordinal),
+      Some(name) => *interned.entry(name.clone()).or_insert_with(|| {
+        snapshot.strings.push(name);
+        snapshot.strings.len() - 1
+      }),
     };
-    let at = *interned.entry(best.name.clone()).or_insert_with(|| {
-      snapshot.strings.push(best.name.clone());
-      snapshot.strings.len() - 1
-    });
-    *slot = at;
   }
 }
 

@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::analysis::Analysis;
+use crate::analysis::{Analysis, InterfaceDefinition};
 
 /// A node as the providers embed it in their results.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +506,32 @@ impl Analysis {
   /// would merge them.
   #[must_use]
   pub fn aggregates(&self) -> std::collections::BTreeMap<String, Aggregate> {
+    self.aggregates_under(&self.class_index, &[], false)
+  }
+
+  /// The same grouping under another snapshot's shape names, with each
+  /// class's members ordered by object id.
+  ///
+  /// Both halves of that matter to a diff. Two snapshots name their
+  /// plain objects after the shapes each one holds, so comparing keys
+  /// derived independently reports classes added and removed where
+  /// nothing changed. And the id order is what makes the comparison a
+  /// merge: it walks both lists once.
+  #[must_use]
+  pub fn aggregates_for_diff(
+    &self,
+    definitions: &[InterfaceDefinition],
+  ) -> std::collections::BTreeMap<String, Aggregate> {
+    let classification = self.classify_under(definitions);
+    self.aggregates_under(&classification.class_index, &classification.extra, true)
+  }
+
+  fn aggregates_under(
+    &self,
+    class_index: &[usize],
+    extra: &[String],
+    by_id: bool,
+  ) -> std::collections::BTreeMap<String, Aggregate> {
     let snapshot = &self.snapshot;
     let mut by_key: rustc_hash::FxHashMap<ClassKey, Aggregate> = rustc_hash::FxHashMap::default();
 
@@ -518,7 +544,7 @@ impl Analysis {
       }
       let distance = self.distance(ordinal);
       by_key
-        .entry(self.class_key(ordinal))
+        .entry(self.class_key(ordinal, class_index, extra))
         .and_modify(|aggregate| {
           aggregate.distance = aggregate.distance.min(distance);
           aggregate.count += 1;
@@ -530,16 +556,21 @@ impl Analysis {
           distance,
           self_size,
           max_ret: 0,
-          name: self.class_name(ordinal).to_string(),
+          name: self.class_name_at(class_index[ordinal], extra).to_string(),
           idxs: vec![self.node_index(ordinal)],
         });
     }
 
-    self.add_retained_sizes_per_class(&mut by_key);
+    self.add_retained_sizes_per_class(&mut by_key, class_index, extra);
 
     let mut out = std::collections::BTreeMap::new();
-    for (key, aggregate) in by_key {
-      out.insert(key.exposed(&snapshot.strings), aggregate);
+    for (key, mut aggregate) in by_key {
+      if by_id {
+        aggregate
+          .idxs
+          .sort_by_key(|&at| snapshot.node_id(at / snapshot.node_layout.field_count));
+      }
+      out.insert(key.exposed(self, extra), aggregate);
     }
     out
   }
@@ -552,7 +583,12 @@ impl Analysis {
   /// Upstream walks down from the root and stops crediting a class
   /// again while it is already inside one of its own members, which is
   /// what `seen` tracks.
-  fn add_retained_sizes_per_class(&self, aggregates: &mut rustc_hash::FxHashMap<ClassKey, Aggregate>) {
+  fn add_retained_sizes_per_class(
+    &self,
+    aggregates: &mut rustc_hash::FxHashMap<ClassKey, Aggregate>,
+    class_index: &[usize],
+    extra: &[String],
+  ) {
     let mut stack = vec![0usize];
     // Where in the walk each currently-open class was entered.
     let mut open_at: Vec<usize> = Vec::new();
@@ -560,7 +596,7 @@ impl Analysis {
     let mut seen: rustc_hash::FxHashSet<ClassKey> = rustc_hash::FxHashSet::default();
 
     while let Some(ordinal) = stack.pop() {
-      let key = self.class_key(ordinal);
+      let key = self.class_key(ordinal, class_index, extra);
       let already_inside = seen.contains(&key);
       let dominated = self.first_dominated[ordinal]..self.first_dominated[ordinal + 1];
 
@@ -590,7 +626,7 @@ impl Analysis {
     }
   }
 
-  fn class_key(&self, ordinal: usize) -> ClassKey {
+  fn class_key(&self, ordinal: usize, class_index: &[usize], extra: &[String]) -> ClassKey {
     let snapshot = &self.snapshot;
     // Only objects carry a location worth splitting on. Functions have
     // one too, and splitting by it would give most categories a single
@@ -603,10 +639,28 @@ impl Analysis {
         location.script_id,
         location.line,
         location.column,
-        self.class_name(ordinal)
+        self.class_name_at(class_index[ordinal], extra)
       ));
     }
-    ClassKey::Index(self.class_index[ordinal])
+    ClassKey::Index(class_index[ordinal])
+  }
+
+  /// Every member of one class, as `get_heapsnapshot_class_nodes`
+  /// reports them.
+  ///
+  /// In the order the heap holds them rather than by id: upstream's
+  /// provider is handed `aggregatesWithFilter`'s indexes, which are the
+  /// unsorted ones, and serialises them without a comparator.
+  #[must_use]
+  pub fn nodes_for_class(&self, class_key: &str) -> Option<Vec<NodeSummary>> {
+    let aggregate = self.aggregates().remove(class_key)?;
+    Some(
+      aggregate
+        .idxs
+        .into_iter()
+        .map(|at| self.node_summary(at / self.snapshot.node_layout.field_count))
+        .collect(),
+    )
   }
 }
 
@@ -621,10 +675,10 @@ enum ClassKey {
 }
 
 impl ClassKey {
-  fn exposed(self, strings: &[String]) -> String {
+  fn exposed(self, analysis: &Analysis, extra: &[String]) -> String {
     match self {
       // The empty field before the comma is where a location would be.
-      Self::Index(at) => format!(",{}", strings.get(at).map_or("", String::as_str)),
+      Self::Index(at) => format!(",{}", analysis.class_name_at(at, extra)),
       Self::Located(key) => key,
     }
   }

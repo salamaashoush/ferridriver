@@ -20,14 +20,10 @@
 //! where upstream has four. So this compares the MODEL, node by node,
 //! sampled across the whole node array.
 //!
-//! # What the recording holds that nothing here compares yet
+//! # Four snapshots, in two pairs
 //!
-//! Per-node `name`, which needs the cons-string and plain-object naming
-//! rules. It is recorded rather than left out so that adding the layer
-//! is a matter of comparing a field that is already there, and so the
-//! gap is visible in the fixture rather than only in someone's memory.
-//!
-//! # Two fixtures, because one of them cannot reach half the engine
+//! Two, because one of them cannot reach half the engine; and each of
+//! those twice, because a diff needs two snapshots of one heap.
 //!
 //! A snapshot taken over CDP -- by `HeapProfiler.takeHeapSnapshot`,
 //! which is the only way this tool will ever obtain one -- has no user
@@ -48,20 +44,34 @@
 //! `scripts/perf-diff/make-heapsnapshot.mjs` the way upstream's own
 //! `HeapSnapshot.test.ts` builds snapshots. It is still a differential:
 //! the real engine analyses it too, and the recording is whatever IT
-//! concluded. Twenty nodes, each there to make one branch discriminate
-//! -- a backing store with one retainer and another with two, a hidden
-//! node the JS-array branch would otherwise claim, an ephemeron pair,
-//! a weak-only retainer, a detached subtree.
+//! concluded. Forty-five nodes, each there to make one branch
+//! discriminate -- a backing store with one retainer and another with
+//! two, a hidden node the JS-array branch would otherwise claim, an
+//! ephemeron pair, a weak-only retainer, a detached subtree.
 //!
 //! It earned its place immediately: it found the ephemeron name parser
 //! matching nothing, so both edges of a `WeakMap` pair counted and the
 //! value came out dominated by the window rather than by its key.
+//!
+//! # And the second half of each pair
+//!
+//! A diff merges two snapshots on OBJECT ID, and an id means the same
+//! object only within one page session, so `leaky` and `leaky-grown`
+//! are captured either side of the page's own `__grow()` in one browser
+//! run. `handmade-grown` is the same graph rebuilt with one object
+//! collected, one allocated, a class gone, a class arrived, and a
+//! plain-object shape the two snapshots name differently -- which is
+//! what makes re-classifying the base under the current's names
+//! something other than a no-op.
 
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-use ferridriver_heap::{Aggregate, Analysis, DominatorStep, DuplicateStringGroup, EdgeSummary, ObjectInfo, Snapshot};
+use ferridriver_heap::{
+  Aggregate, Analysis, ClassDiff, DominatorStep, DuplicateStringGroup, EdgeSummary, NodeSummary, ObjectInfo,
+  PathLimits, RetainingPaths, Snapshot, search::ObjectQuery,
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -77,7 +87,71 @@ struct Recording {
   #[serde(rename = "duplicateStrings")]
   duplicate_strings: Vec<DuplicateStringGroup>,
   aggregates: BTreeMap<String, Aggregate>,
+  /// Every route from one node back to a root, under one set of limits.
+  #[serde(rename = "retainingPaths")]
+  retaining_paths: Vec<RecordedPaths>,
+  /// The head of what the class-node provider answered, per class.
+  #[serde(rename = "classNodes")]
+  class_nodes: Vec<RecordedClass>,
+  /// The head of what the object query answered, per query.
+  queries: Vec<RecordedQuery>,
+  /// Which snapshot this one is a diff against, and what changed.
+  #[serde(rename = "diffFrom")]
+  diff_from: Option<String>,
+  /// The engine's own `Diff` per class, with the six per-object lists
+  /// cut to their head. What is NOT cut is the counts and the sizes
+  /// they add up to, so a list that went wrong past the head still has
+  /// to show up in a total.
+  diff: Option<BTreeMap<String, ClassDiff>>,
 }
+
+#[derive(Deserialize)]
+struct RecordedPaths {
+  ordinal: usize,
+  /// Recorded so the assertions can tell a node a path can start from
+  /// apart from one that IS a root, whose answer is the empty forest.
+  distance: i64,
+  limits: RecordedLimits,
+  result: RetainingPaths,
+}
+
+#[derive(Deserialize)]
+struct RecordedLimits {
+  #[serde(rename = "maxDepth")]
+  depth: usize,
+  #[serde(rename = "maxNodes")]
+  nodes: usize,
+  #[serde(rename = "maxSiblings")]
+  siblings: usize,
+}
+
+impl From<&RecordedLimits> for PathLimits {
+  fn from(limits: &RecordedLimits) -> Self {
+    Self {
+      depth: limits.depth,
+      nodes: limits.nodes,
+      siblings: limits.siblings,
+    }
+  }
+}
+
+#[derive(Deserialize)]
+struct RecordedClass {
+  #[serde(rename = "classKey")]
+  class_key: String,
+  total: usize,
+  items: Vec<NodeSummary>,
+}
+
+#[derive(Deserialize)]
+struct RecordedQuery {
+  query: ObjectQuery,
+  total: usize,
+  items: Vec<NodeSummary>,
+}
+
+/// How many members of a provider's answer the recording holds.
+const ITEM_SAMPLE_SIZE: usize = 20;
 
 /// What the engine's providers answered about one node.
 #[derive(Deserialize)]
@@ -403,6 +477,198 @@ fn the_queries_answer_what_the_engine_answers() {
   }
 }
 
+/// The searches: everything holding one node, every member of one
+/// class, and every object matching a description.
+///
+/// These are the three that do not start from a node someone already
+/// has, and the two that answer with a LIST rather than a value, where
+/// the order is as much of the answer as the membership.
+#[test]
+fn the_searches_answer_what_the_engine_answers() {
+  for (name, recording) in recordings() {
+    let analysis = analysed(&name);
+    let mut differences = Vec::new();
+
+    for recorded in &recording.retaining_paths {
+      let limits = PathLimits::from(&recorded.limits);
+      let ours = analysis.retaining_paths(recorded.ordinal, limits);
+      if ours != recorded.result {
+        differences.push(format!(
+          "node {} retaining paths under {limits:?}:\n    engine {:?}\n    ours   {ours:?}",
+          recorded.ordinal, recorded.result
+        ));
+      }
+    }
+
+    for recorded in &recording.class_nodes {
+      let Some(ours) = analysis.nodes_for_class(&recorded.class_key) else {
+        differences.push(format!(
+          "class {}: the engine has members, we have none",
+          recorded.class_key
+        ));
+        continue;
+      };
+      compare_items(
+        &mut differences,
+        &format!("class {}", recorded.class_key),
+        &ours,
+        recorded.total,
+        &recorded.items,
+      );
+    }
+
+    for recorded in &recording.queries {
+      let ours = analysis
+        .query_objects(&recorded.query)
+        .unwrap_or_else(|e| panic!("{name}: query {:?}: {e}", recorded.query));
+      compare_items(
+        &mut differences,
+        &format!("query {:?}", recorded.query),
+        &ours,
+        recorded.total,
+        &recorded.items,
+      );
+    }
+
+    assert!(
+      differences.is_empty(),
+      "our searches over {name} disagree with the `DevTools` heap engine in {} place(s):\n  {}",
+      differences.len(),
+      differences.join("\n  ")
+    );
+  }
+}
+
+/// What one snapshot holds that the earlier one did not.
+#[test]
+fn the_diff_agrees_with_the_engine() {
+  let recordings = recordings();
+  let mut compared = 0;
+  for (name, recording) in &recordings {
+    let (Some(base), Some(engine)) = (recording.diff_from.as_ref(), recording.diff.as_ref()) else {
+      continue;
+    };
+    compared += 1;
+    let ours = analysed(name).diff_since(&analysed(base));
+
+    let mut differences = Vec::new();
+    for (key, engine) in engine {
+      match ours.get(key) {
+        None => differences.push(format!("class {key}: the engine sees it change, we do not")),
+        Some(ours) => compare_diff(&mut differences, key, ours, engine),
+      }
+    }
+    for key in ours.keys() {
+      if !engine.contains_key(key) {
+        differences.push(format!("class {key}: we see it change, the engine does not"));
+      }
+    }
+    assert!(
+      differences.is_empty(),
+      "our diff of {name} against {base} disagrees with the `DevTools` heap engine on {} of {} classes:\n  {}",
+      differences.len(),
+      engine.len(),
+      differences.join("\n  ")
+    );
+  }
+  assert!(
+    compared > 0,
+    "no pair of snapshots was diffed, so this compared nothing"
+  );
+}
+
+/// Every scalar, then the head of every list. The engine's recording
+/// holds only the first [`ITEM_SAMPLE_SIZE`] of each list, so the
+/// counts and sizes are what stand in for the rest.
+fn compare_diff(differences: &mut Vec<String>, key: &str, ours: &ClassDiff, engine: &ClassDiff) {
+  let scalars = ClassDiff {
+    added_indexes: Vec::new(),
+    added_ids: Vec::new(),
+    added_self_sizes: Vec::new(),
+    deleted_indexes: Vec::new(),
+    deleted_ids: Vec::new(),
+    deleted_self_sizes: Vec::new(),
+    ..ours.clone()
+  };
+  let engine_scalars = ClassDiff {
+    added_indexes: Vec::new(),
+    added_ids: Vec::new(),
+    added_self_sizes: Vec::new(),
+    deleted_indexes: Vec::new(),
+    deleted_ids: Vec::new(),
+    deleted_self_sizes: Vec::new(),
+    ..engine.clone()
+  };
+  if scalars != engine_scalars {
+    differences.push(format!(
+      "class {key}:\n    engine {engine_scalars:?}\n    ours   {scalars:?}"
+    ));
+  }
+  compare_head(
+    differences,
+    key,
+    "addedIndexes",
+    &ours.added_indexes,
+    &engine.added_indexes,
+  );
+  compare_head(differences, key, "addedIds", &ours.added_ids, &engine.added_ids);
+  compare_head(
+    differences,
+    key,
+    "addedSelfSizes",
+    &ours.added_self_sizes,
+    &engine.added_self_sizes,
+  );
+  compare_head(
+    differences,
+    key,
+    "deletedIndexes",
+    &ours.deleted_indexes,
+    &engine.deleted_indexes,
+  );
+  compare_head(differences, key, "deletedIds", &ours.deleted_ids, &engine.deleted_ids);
+  compare_head(
+    differences,
+    key,
+    "deletedSelfSizes",
+    &ours.deleted_self_sizes,
+    &engine.deleted_self_sizes,
+  );
+}
+
+fn compare_head<T: std::fmt::Debug + PartialEq>(
+  differences: &mut Vec<String>,
+  key: &str,
+  what: &str,
+  ours: &[T],
+  engine: &[T],
+) {
+  let head = &ours[..ours.len().min(ITEM_SAMPLE_SIZE)];
+  if head != engine {
+    differences.push(format!("class {key} {what}: engine {engine:?}, ours {head:?}"));
+  }
+}
+
+/// A provider's answer against the head of what the engine's answered,
+/// plus how long the whole answer was.
+fn compare_items(
+  differences: &mut Vec<String>,
+  what: &str,
+  ours: &[NodeSummary],
+  total: usize,
+  engine: &[NodeSummary],
+) {
+  if ours.len() != total {
+    differences.push(format!("{what}: engine found {total} node(s), we found {}", ours.len()));
+    return;
+  }
+  for (at, (ours, engine)) in ours.iter().zip(engine).enumerate() {
+    if ours != engine {
+      differences.push(format!("{what}[{at}]:\n    engine {engine:?}\n    ours   {ours:?}"));
+    }
+  }
+}
+
 fn compare_edges(
   differences: &mut Vec<String>,
   ordinal: usize,
@@ -432,12 +698,13 @@ fn compare_edges(
 /// comparison passed for a week over seven rules that all passed.
 #[test]
 fn the_fixtures_still_carry_something_worth_comparing() {
-  for (name, recording) in recordings() {
+  let recordings = recordings();
+  for (name, recording) in &recordings {
     let sampled = recording.nodes.len();
-    // The hand-built snapshot is small on purpose: every node in it
+    // The hand-built snapshots are small on purpose: every node in them
     // exists to make one branch discriminate, and the assertions below
     // name them.
-    let handmade = name == "handmade";
+    let handmade = name.starts_with("handmade");
     let (least_nodes, least_retaining) = if handmade { (15, 10) } else { (100, 20) };
     assert!(sampled >= least_nodes, "{name}: only {sampled} nodes sampled");
 
@@ -505,9 +772,156 @@ fn the_fixtures_still_carry_something_worth_comparing() {
     );
 
     if handmade {
-      the_handmade_shapes_are_all_still_there(&name, &recording);
+      the_handmade_shapes_are_all_still_there(name, recording);
     }
+    the_search_answers_are_worth_comparing(name, recording);
   }
+
+  the_recording_covers_both_halves_of_a_pair(&recordings);
+}
+
+/// A search that matches nothing agrees with the engine by both sides
+/// finding nothing, which is how the accessibility comparison passed
+/// for a week. Each assertion below names one answer that has to be
+/// non-trivial for the comparison over it to mean anything.
+fn the_search_answers_are_worth_comparing(name: &str, recording: &Recording) {
+  let found = recording
+    .retaining_paths
+    .iter()
+    .filter(|recorded| !recorded.result.paths.is_empty())
+    .count();
+  assert!(
+    found >= 4,
+    "{name}: only {found} of {} recorded retaining-path answers hold a path, so most of that comparison is over the empty forest",
+    recording.retaining_paths.len()
+  );
+  assert!(
+    recording
+      .retaining_paths
+      .iter()
+      .any(|recorded| recorded.result.paths.iter().any(|path| !path.children.is_empty())),
+    "{name}: every retaining path is one edge long, so the recursion is untested"
+  );
+  // A node that is already a root, asked under a budget of one node:
+  // the only shape that tells the check which says so apart from a walk
+  // that climbs to the synthetic root and reports nothing either way.
+  assert!(
+    recording
+      .retaining_paths
+      .iter()
+      .any(|recorded| recorded.distance <= 2 && recorded.limits.nodes == 1),
+    "{name}: no root was asked for its own retaining paths under a budget of one"
+  );
+  assert!(
+    recording
+      .retaining_paths
+      .iter()
+      .any(|recorded| recorded.limits.depth == 0),
+    "{name}: no answer was asked for with no depth at all, so the depth budget is untested"
+  );
+
+  let biggest = recording.class_nodes.iter().map(|class| class.total).max().unwrap_or(0);
+  assert!(
+    biggest > 1,
+    "{name}: no sampled class holds more than one node, so the provider's ordering is untested"
+  );
+  assert!(
+    recording.class_nodes.iter().any(|class| class.total == 1),
+    "{name}: no sampled class holds exactly one node, so nothing separates a class from the heap"
+  );
+  // Only a captured page has a class whose key carries a script
+  // location, and it has exactly one.
+  assert_eq!(
+    recording
+      .class_nodes
+      .iter()
+      .any(|class| !class.class_key.starts_with(',')),
+    !name.starts_with("handmade"),
+    "{name}: the class key that carries a constructor's location is not among those sampled"
+  );
+
+  let matching = recording.queries.iter().filter(|query| query.total > 0).count();
+  assert_eq!(
+    matching,
+    recording.queries.len(),
+    "{name}: {} of {} queries match nothing, so those filters are compared over an empty list",
+    recording.queries.len() - matching,
+    recording.queries.len()
+  );
+  let totals: std::collections::BTreeSet<usize> = recording.queries.iter().map(|query| query.total).collect();
+  assert!(
+    totals.len() >= 4,
+    "{name}: the queries return only {} distinct counts, so most of them are not filtering",
+    totals.len()
+  );
+}
+
+/// The pair, and the five ways one snapshot can differ from another.
+///
+/// Every one of them was confirmed by deleting the code that handles it
+/// and watching the diff comparison go red. A pair that lost any of
+/// these shapes would leave that branch agreeing about nothing.
+fn the_recording_covers_both_halves_of_a_pair(recordings: &BTreeMap<String, Recording>) {
+  // Each of the three bounds, somewhere in the recording. A hand-built
+  // snapshot's retainer graph is too small to overrun a budget, so this
+  // is asked of the recording as a whole rather than of each fixture.
+  let answers = || recordings.values().flat_map(|recording| &recording.retaining_paths);
+  for (what, hit) in [
+    ("depth", answers().any(|path| path.result.limits_reached.depth)),
+    ("nodes", answers().any(|path| path.result.limits_reached.nodes)),
+    ("siblings", answers().any(|path| path.result.limits_reached.siblings)),
+  ] {
+    assert!(hit, "no recorded retaining-path answer hit the {what} limit");
+  }
+
+  let mut pairs = 0;
+  for (name, recording) in recordings {
+    let (Some(base), Some(diff)) = (recording.diff_from.as_ref(), recording.diff.as_ref()) else {
+      continue;
+    };
+    pairs += 1;
+    assert!(
+      recordings.contains_key(base),
+      "{name}: diffed against {base}, which is not in the recording"
+    );
+    assert!(
+      diff.values().any(|class| class.added_count > 0),
+      "{name}: nothing was allocated between the two snapshots"
+    );
+    assert!(
+      diff.values().any(|class| class.removed_count > 0),
+      "{name}: nothing was collected between the two snapshots"
+    );
+    assert!(
+      diff
+        .values()
+        .any(|class| class.added_count > 0 && class.removed_count > 0),
+      "{name}: no class both gained and lost, so the two-sided merge is untested"
+    );
+    // A class whose members all survived is left out of the diff
+    // entirely, so a class present in the aggregates and absent here is
+    // what proves ids were matched rather than everything reported as
+    // replaced.
+    assert!(
+      recording.aggregates.keys().any(|key| !diff.contains_key(key)),
+      "{name}: every class changed, so nothing survived and the matching branch is untested"
+    );
+    let base_only = recordings[base]
+      .aggregates
+      .keys()
+      .filter(|key| !recording.aggregates.contains_key(*key))
+      .count();
+    let current_only = recording
+      .aggregates
+      .keys()
+      .filter(|key| !recordings[base].aggregates.contains_key(*key))
+      .count();
+    assert!(
+      base_only > 0 && current_only > 0,
+      "{name}: {base_only} class(es) only in {base} and {current_only} only here, so one half of the diff never runs"
+    );
+  }
+  assert!(pairs > 0, "no snapshot is a diff of another, so the pair is gone");
 }
 
 /// The shapes the hand-built fixture exists for.

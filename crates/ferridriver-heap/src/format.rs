@@ -530,6 +530,13 @@ impl Snapshot {
     self.strings.get(at).map_or("", String::as_str)
   }
 
+  /// Where that name sits in the string table, which is the number two
+  /// nodes have to share to group together.
+  #[must_use]
+  pub fn raw_node_name_index(&self, ordinal: usize) -> usize {
+    index_of(self.node_field(ordinal, self.node_layout.name_offset))
+  }
+
   #[must_use]
   pub fn node_id(&self, ordinal: usize) -> u64 {
     self.node_field(ordinal, self.node_layout.id_offset)

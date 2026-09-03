@@ -1934,6 +1934,7 @@ name = "ferridriver-heap"
 version = "0.5.0"
 dependencies = [
  "flate2",
+ "regex",
  "rustc-hash",
  "serde",
  "serde_json",

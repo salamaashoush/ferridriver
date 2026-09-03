@@ -24,14 +24,28 @@
 //! it was a port of. A heap snapshot is a worse case still, because
 //! almost nothing in it is checkable by eye.
 
+//!
+//! # What is here
+//!
+//! The graph and everything derived from it ([`analysis`]), the reads a
+//! caller addresses by node ([`query`]), the two searches that find a
+//! node in the first place ([`paths`], [`search`]) and what changed
+//! between two snapshots of one heap ([`diff`]).
+
 pub mod analysis;
+pub mod diff;
 pub mod error;
 pub mod format;
+pub mod paths;
 pub mod query;
+pub mod search;
 
-pub use analysis::{Analysis, NativeStatistics, Statistics, V8Statistics};
+pub use analysis::{Analysis, Classification, InterfaceDefinition, NativeStatistics, Statistics, V8Statistics};
+pub use diff::ClassDiff;
 pub use error::{HeapError, Result};
 pub use format::Snapshot;
+pub use paths::{LimitsReached, PathLimits, RetainingEdge, RetainingPaths};
 pub use query::{
   Aggregate, DominatorStep, DuplicateStringGroup, DuplicateStringNode, EdgeSummary, NodeSummary, ObjectInfo,
 };
+pub use search::{ObjectQuery, QuerySort};

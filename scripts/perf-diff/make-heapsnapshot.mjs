@@ -19,6 +19,13 @@
 // Each shape below exists to make one branch discriminate. Removing the
 // code that handles it has to change an answer, or the fixture is not
 // evidence.
+//
+// It is built twice. A snapshot diff needs two snapshots of one heap,
+// and the pair has to differ in the ways the merge takes branches on:
+// an object that survived, one that was collected, one that was
+// allocated in between, a class only the older one has, a class only
+// the newer one has, and a plain-object shape the two snapshots name
+// differently from each other.
 
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +33,7 @@ import { dirname, join, relative } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '../..');
-const OUT = join(ROOT, 'crates/ferridriver-heap/tests/fixtures/handmade.heapsnapshot');
+const FIXTURES = join(ROOT, 'crates/ferridriver-heap/tests/fixtures');
 
 // The field layout and enum tables Chrome writes today. Kept verbatim
 // so a reader that resolves offsets by name is exercised the same way.
@@ -49,6 +56,10 @@ const NODE_TYPES = [
 ];
 const EDGE_TYPES = ['context', 'element', 'property', 'internal', 'hidden', 'shortcut', 'weak'];
 
+/**
+ * @param {boolean} grown Build the later snapshot of the pair.
+ */
+function build(grown) {
 const strings = [];
 function str(value) {
   const at = strings.indexOf(value);
@@ -152,6 +163,40 @@ const code = node({ type: 'code', name: 'compiled', id: 33, selfSize: 200 });
 const text = node({ type: 'string', name: 'a string', id: 35, selfSize: 80 });
 const buffer = node({ type: 'native', name: 'system / JSArrayBufferData', id: 37, selfSize: 2048 });
 
+// A class whose members straddle the pair: 101 and 105 survive, 103 is
+// collected and 107 is allocated after the first snapshot. Merging two
+// id lists takes a different branch for each of those three, and a
+// class where every member survives takes only the fourth.
+//
+// Declared out of id order deliberately. A diff merges two id lists by
+// walking each once, which is a merge only if both ascend, and a class
+// whose members happen to sit in the heap in id order would agree with
+// or without the sort that puts them there.
+const widgets = (grown ? [107, 101, 105] : [105, 101, 103]).map(id =>
+  node({ type: 'object', name: 'Widget', id, selfSize: 48 }),
+);
+// One class in the older snapshot only, and one in the newer only:
+// each is reached by a different half of the diff, and a pair sharing
+// every class would exercise neither.
+const onlyBefore = grown ? null : node({ type: 'object', name: 'Collected', id: 111, selfSize: 72 });
+const onlyAfter = grown ? node({ type: 'object', name: 'Allocated', id: 113, selfSize: 88 }) : null;
+
+// The shape names the two snapshots disagree about. An interface has
+// to be shared by at least two objects, so `{p, q}` is a named shape in
+// the older snapshot and `Object` in the newer, and `{r, s}` the other
+// way round. Comparing each side under its OWN names would report both
+// classes wholly replaced; the diff classifies the older snapshot under
+// the newer one's names, and only then do these line up.
+const pairwise = [];
+for (const [property, ids] of [
+  ['p', grown ? [121] : [121, 123]],
+  ['r', grown ? [131, 133] : [131]],
+]) {
+  for (const id of ids) {
+    pairwise.push({ property, at: node({ type: 'object', name: 'Object', id, selfSize: 40 }) });
+  }
+}
+
 const ephemeron = `1 / part of key (Key @${27}) -> value (Value @${29}) pair in WeakMap (table @${25})`;
 
 edge(root, { type: 'element', name: 1, to: gcRoots });
@@ -181,6 +226,13 @@ edge(window, { type: 'property', name: str('numberish'), to: numberish });
 edge(window, { type: 'weak', name: str('weaklyHeld'), to: weaklyHeld });
 
 edge(domTrees, { type: 'element', name: 1, to: detached });
+
+// An unreachable node that points at a reachable one, so `Leaf` has a
+// retainer no path can start from. Dropping it changes no answer on its
+// own -- the recursion would find nothing and give up -- but it is one
+// more sibling and one more node against the search's budgets, which is
+// where the difference shows.
+edge(weaklyHeld, { type: 'property', name: str('leaf'), to: propertyTarget });
 
 edge(ownedArray, { type: 'internal', name: str('elements'), to: ownedElements });
 edge(sharedArray, { type: 'internal', name: str('elements'), to: sharedElements });
@@ -213,6 +265,24 @@ for (let i = 0; i < 12; i++) {
   edge(wideObject, { type: 'property', name: str(`aPropertyNameLongEnoughToCount${i}`), to: propertyTarget });
 }
 
+for (const [at, ordinal] of widgets.entries()) {
+  edge(window, { type: 'property', name: str(`widget${at}`), to: ordinal });
+}
+for (const [property, ordinal] of [
+  ['collected', onlyBefore],
+  ['allocated', onlyAfter],
+]) {
+  if (ordinal !== null) {
+    edge(window, { type: 'property', name: str(property), to: ordinal });
+  }
+}
+for (const [at, { property, at: ordinal }] of pairwise.entries()) {
+  edge(window, { type: 'property', name: str(`shaped${at}`), to: ordinal });
+  // Two properties apiece, which is what makes them a shape at all.
+  edge(ordinal, { type: 'property', name: str(property), to: propertyTarget });
+  edge(ordinal, { type: 'property', name: str(property === 'p' ? 'q' : 's'), to: propertyTarget });
+}
+
 // The pair the dominator pass has to break: the table's edge is
 // dropped so the value is dominated by the key.
 edge(weakMap, { type: 'internal', name: str(ephemeron), to: weakValue });
@@ -234,7 +304,7 @@ for (const entry of nodes) {
   }
 }
 
-const profile = {
+return {
   snapshot: {
     meta: {
       node_fields: NODE_FIELDS,
@@ -259,6 +329,13 @@ const profile = {
   locations: [],
   strings,
 };
+}
 
-writeFileSync(OUT, `${JSON.stringify(profile)}\n`);
-console.log(`wrote ${relative(ROOT, OUT)} (${nodes.length} nodes, ${profile.snapshot.edge_count} edges)`);
+for (const [name, grown] of [['handmade', false], ['handmade-grown', true]]) {
+  const profile = build(grown);
+  const out = join(FIXTURES, `${name}.heapsnapshot`);
+  writeFileSync(out, `${JSON.stringify(profile)}\n`);
+  console.log(
+    `wrote ${relative(ROOT, out)} (${profile.snapshot.node_count} nodes, ${profile.snapshot.edge_count} edges)`,
+  );
+}
