@@ -53,6 +53,7 @@ pub mod network;
 pub mod observed;
 pub mod options;
 pub mod page;
+pub mod page_tools;
 pub mod pause;
 pub mod protocol;
 pub mod response;

@@ -4,8 +4,8 @@ use crate::error::IntoNapi;
 use crate::locator::Locator;
 use crate::types::{
   AccessibilityAuditOptions, AccessibilityReport, DragAndDropOptions, GotoOptions, MetricData, PageQualityOptions,
-  PageQualityReport, RoleOptions, ScreenshotOptions, SnapshotForAiOptions, TextOptions, WaitForFunctionOptions,
-  WaitOptions,
+  PageQualityReport, PageToolGroup, RoleOptions, ScreenshotOptions, SnapshotForAiOptions, TextOptions,
+  WaitForFunctionOptions, WaitOptions,
 };
 use std::sync::{Arc, Mutex};
 
@@ -1447,6 +1447,39 @@ impl Page {
       .await
       .into_napi()?;
     Ok(report.into())
+  }
+
+  /// The tools this page offers about itself, from its own answer to a
+  /// `devtoolstooldiscovery` event. Empty where it offers none.
+  ///
+  /// Not a protocol call, so this answers the same on every backend.
+  #[napi]
+  pub async fn developer_tools(&self) -> Result<Vec<PageToolGroup>> {
+    Ok(
+      self
+        .inner
+        .developer_tools()
+        .await
+        .into_napi()?
+        .into_iter()
+        .map(Into::into)
+        .collect(),
+    )
+  }
+
+  /// Call one of them. `params` has to satisfy that tool's own
+  /// `inputSchema`; what comes back is whatever it returned, with the
+  /// values JSON cannot carry replaced.
+  #[napi(
+    ts_args_type = "name: string, params?: Record<string, unknown>",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn execute_developer_tool(
+    &self,
+    name: String,
+    params: Option<serde_json::Value>,
+  ) -> Result<serde_json::Value> {
+    self.inner.execute_developer_tool(&name, params).await.into_napi()
   }
 
   /// Capture a V8 heap snapshot of this page, garbage collected first,

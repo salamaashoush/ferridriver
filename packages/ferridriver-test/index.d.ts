@@ -821,6 +821,22 @@ export interface PageQualityReport {
   audits: PageAuditResult[];
 }
 
+/** One callable a page exposes about itself. */
+export interface PageTool {
+  name: string;
+  description: string;
+  /** The JSON schema its input has to satisfy, as the page wrote it. */
+  inputSchema: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+}
+
+/** One group of them. */
+export interface PageToolGroup {
+  name: string;
+  description?: string;
+  tools: PageTool[];
+}
+
 /**
  * One object as every heap-snapshot list reports it.
  */
@@ -1625,6 +1641,12 @@ export interface Page {
   // a handle with the queries on it. Chromium-only: the format is V8's,
   // so this rejects with Unsupported on webkit and bidi.
   takeHeapSnapshot(): Promise<HeapSnapshot>;
+
+  // The tools the page offers about itself, from its own answer to a
+  // `devtoolstooldiscovery` event. A DOM event rather than a protocol,
+  // so it answers the same on every backend.
+  developerTools(): Promise<PageToolGroup[]>;
+  executeDeveloperTool(name: string, params?: Record<string, unknown>): Promise<unknown>;
 
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   viewportSize(): { width: number; height: number } | null;

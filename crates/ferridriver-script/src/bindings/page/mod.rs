@@ -1822,6 +1822,49 @@ impl PageJs {
       .await
   }
 
+  /// ferridriver extension: `page.developerTools()`.
+  ///
+  /// The tools the page offers about itself, from its own answer to a
+  /// `devtoolstooldiscovery` event. Empty where it offers none.
+  #[qjs(rename = "developerTools")]
+  pub async fn developer_tools<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let groups = self.inner.developer_tools().await.into_js_with(&ctx)?;
+        crate::bindings::convert::serde_to_js(&ctx, &groups)
+      })
+      .await
+  }
+
+  /// ferridriver extension: `page.executeDeveloperTool(name, params?)`.
+  #[qjs(rename = "executeDeveloperTool")]
+  pub async fn execute_developer_tool<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    name: String,
+    params: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let parsed: Option<serde_json::Value> = match params.into_inner() {
+          Some(value) if !value.is_undefined() && !value.is_null() => Some(serde_from_js(&ctx, value)?),
+          _ => None,
+        };
+        let result = self
+          .inner
+          .execute_developer_tool(&name, parsed)
+          .await
+          .into_js_with(&ctx)?;
+        crate::bindings::convert::json_to_js(&ctx, &result)
+      })
+      .await
+  }
+
   /// ferridriver extension: `page.takeHeapSnapshot()`.
   ///
   /// Captures a V8 heap snapshot, garbage collected first, and hands

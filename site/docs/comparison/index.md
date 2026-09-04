@@ -106,6 +106,7 @@ something aimed at agents, and they have picked different shapes.
 | Accessibility | `page.checkAccessibility()` from `run_script` (axe-core in the page) | no | inside `lighthouse_audit` |
 | SEO and best-practices audits | `page.checkPageQuality()` from `run_script`: ten of Lighthouse's own, checked against Lighthouse | no | inside `lighthouse_audit` |
 | Heap snapshots | `page.takeHeapSnapshot()` from `run_script`: capture, analyse and diff, checked against DevTools' own heap engine | no | 13 tools |
+| Tools a page exposes about itself | `page.developerTools()` / `page.executeDeveloperTool()` from `run_script`, on every backend | no | `list_3p_developer_tools`, `execute_3p_developer_tool` |
 | Chrome extensions / PWA / WebMCP | no | no | yes |
 | Extending the SERVER itself | `ferridriver_extensions`: add your own tools, reloadable without a restart | no | no |
 | Test generation | `run_bdd`, `codegen` | via `@playwright/cli` skills | no |

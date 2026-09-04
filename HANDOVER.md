@@ -23,7 +23,7 @@ Gates that exist, and what each one actually proves:
 | `just heap-diff` | Our reading of a `.heapsnapshot` still agrees with DevTools' own heap engine, over four snapshots in two pairs: 200 nodes apiece, every node-addressed query, the searches, and what a diff of each pair reports |
 | `just lh-record` | Re-derives the recordings the two above compare against |
 | `just lh-audit <url>` | What Lighthouse concludes about any live page, for exploring |
-| `just test` | All of the offline halves, plus 2131 e2e across four backends, 598 BDD, 1102 NAPI, and the e2e typecheck |
+| `just test` | All of the offline halves, plus 2163 e2e across four backends, 598 BDD, 1111 NAPI, and the e2e typecheck |
 
 Ported and gated: `crates/ferridriver-heap`, which is what
 `page.takeHeapSnapshot()` hands back and covers all thirteen of
@@ -77,46 +77,53 @@ page shape that is not rare.
 `element_handle_remote()` in `backend/mod.rs` already hands you the
 per-backend object id if you do take it on. Do not do half of it.
 
-## 3. Extensions, PWA, WebMCP, third-party devtools — 12 tools
+## 3. Extensions, PWA and WebMCP — 10 tools, and why none of them landed
 
 `install_extension`, `list_extensions`, `reload_extension`,
 `trigger_extension_action`, `uninstall_extension` (5);
-`install_pwa`, `launch_pwa`, `uninstall_pwa` (3);
-`list_webmcp_tools`, `execute_webmcp_tool` (2);
-`list_3p_developer_tools`, `execute_3p_developer_tool` (2).
+`install_pwa`, `launch_pwa`, `uninstall_pwa`, `get_os_app_state` (4);
+`list_webmcp_tools`, `execute_webmcp_tool` (2).
 
-All Chromium-only, all thin protocol wrappers rather than analysis.
-Cheap per tool, and the least interesting work on this list — but it is
-the row where `site/docs/comparison/index.md` currently says plainly
-that if that is your job, use `chrome-devtools-mcp`. Closing it changes
-what that page can claim.
+The fourth category, `list_3p_developer_tools` and
+`execute_3p_developer_tool`, HAS landed: `page.developerTools()` and
+`page.executeDeveloperTool()`, on every backend, because it is a DOM
+event rather than a protocol.
 
-Note the naming collision before you start: `ferridriver_extensions` is
-already an MCP tool, and it means ferridriver's OWN extension packages,
-not Chrome's.
+The rest read like thin protocol wrappers and are not, for reasons that
+only a probe finds. Note the naming collision before you start:
+`ferridriver_extensions` is already an MCP tool, and it means
+ferridriver's OWN extension packages, not Chrome's.
 
 ### What the browser actually offers, measured
 
-Two of the four are not reachable the way the suite runs. Measured on
-`HeadlessChrome/151.0.7922.34`, over a browser CDP session:
+Measured on `HeadlessChrome/151.0.7922.34` over a browser CDP session,
+not read anywhere:
 
 | Domain | Headless | Headful |
 |---|---|---|
 | `Extensions.*` | absent | present, once `--disable-extensions` is dropped and `--enable-unsafe-extension-debugging` added |
 | `PWA.*` | absent | present (`getOsAppState` answers "Unknown web-app manifest id", which is the domain replying) |
-| `WebMCP.enable` | present | present |
-| third-party developer tools | n/a, it is a page-side `devtoolstooldiscovery` event | same |
+| `WebMCP.*` | present | present |
 
-So `Extensions` and `PWA` are headful-only, and the e2e projects run
+**`Extensions` and `PWA` are headful-only**, and every e2e project runs
 headless. That is not a backend-dependent verdict to route around; it is
-a browser mode the suite does not currently have, and closing it means
+a browser mode the suite does not have, and closing the row means
 deciding how a headful-only spec runs at all. It also needs
 `ignoreDefaultArgs` on the launch surface, which the Rust core has
-(`LaunchOptions::ignore_default_args`) and neither binding layer
-exposes -- a parity gap of its own, and the smallest first step here.
+(`LaunchOptions::ignore_default_args`) and NEITHER binding layer
+exposes. That is a parity gap of its own and the smallest first step
+here.
 
-`WebMCP` and the third-party tools have no such problem, and are the two
-worth doing first.
+**`WebMCP` has the domain and not the API.** `WebMCP.enable` succeeds,
+but nothing on the page can register a tool for it to report:
+`navigator.modelContext` is undefined, and with
+`--enable-features=WebMCP` (the flag `chrome-devtools-mcp`'s own
+`--categoryExperimentalWebmcp` documents) the page gains only
+`window.WebMCPEvent`, whose whole prototype is `toolName`. So a port
+could send `WebMCP.invokeTool` and never be able to show it working,
+which rule 9 says is not done. Re-probe on a newer Chrome before
+starting: `Object.getOwnPropertyNames(Object.getPrototypeOf(navigator))`
+is the one-line check.
 
 ### Two of them are addressed by TAB target, not page target
 
@@ -128,6 +135,17 @@ lists tab targets but nothing links one to its page: the exact route is
 to attach to the tab and read the child it auto-attaches. Matching a tab
 to a page by url or by set difference around the call is the shortcut,
 and it is wrong the moment two pages share a url.
+
+### What the landed half does not do
+
+`executeDeveloperTool` takes JSON and returns JSON. Upstream also
+substitutes real elements for snapshot uids in a tool's PARAMETERS, and
+adopts elements out of its result into the next snapshot. Ours parks a
+returned element on `window.__dtmcp.stashedElements` and hands back the
+`stashedId`, which is upstream's own mechanism and reachable from
+`page.evaluate`; what is missing is the bridge from a `ref=eN` to a
+page-side element, in both directions. That is a decision about the
+snapshot ref surface rather than about these two methods.
 
 ## 4. Smaller, already-stated gaps
 

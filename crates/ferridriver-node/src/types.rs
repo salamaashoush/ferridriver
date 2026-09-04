@@ -117,6 +117,47 @@ impl From<ferridriver::accessibility::AccessibilityReport> for AccessibilityRepo
   }
 }
 
+/// One group of tools a page announced about itself.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct PageToolGroup {
+  pub name: String,
+  pub description: Option<String>,
+  pub tools: Vec<PageTool>,
+}
+
+/// One callable the page exposes.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct PageTool {
+  pub name: String,
+  pub description: String,
+  /// The JSON schema its input has to satisfy, as the page wrote it.
+  #[napi(ts_type = "Record<string, unknown>")]
+  pub input_schema: serde_json::Value,
+  #[napi(ts_type = "Record<string, unknown>")]
+  pub annotations: Option<serde_json::Value>,
+}
+
+impl From<ferridriver::page_tools::PageToolGroup> for PageToolGroup {
+  fn from(group: ferridriver::page_tools::PageToolGroup) -> Self {
+    Self {
+      name: group.name,
+      description: group.description,
+      tools: group
+        .tools
+        .into_iter()
+        .map(|tool| PageTool {
+          name: tool.name,
+          description: tool.description,
+          input_schema: tool.input_schema,
+          annotations: tool.annotations,
+        })
+        .collect(),
+    }
+  }
+}
+
 /// Options for `page.checkPageQuality`.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]

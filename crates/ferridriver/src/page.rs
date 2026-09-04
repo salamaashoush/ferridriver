@@ -1288,6 +1288,71 @@ impl Page {
     crate::accessibility::parse_report(payload)
   }
 
+  /// The tools this page offers about itself.
+  ///
+  /// A page answers a `devtoolstooldiscovery` event with groups of
+  /// named callables, each with a JSON schema for its input, so an
+  /// agent can use the site's own vocabulary instead of its DOM. Empty
+  /// where the page exposes none, which is most pages.
+  ///
+  /// Works on every backend: it is a DOM event, not a protocol.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::Backend`] where the page
+  /// answered with something other than the shape the event asks for.
+  pub async fn developer_tools(self: &Arc<Self>) -> Result<Vec<crate::page_tools::PageToolGroup>> {
+    let value = self
+      .evaluate(
+        crate::page_tools::discover_source(),
+        crate::protocol::SerializedArgument::default(),
+        Some(true),
+      )
+      .await?;
+    // A JSON string rather than a structure, for the reason the
+    // accessibility audit does the same: each backend re-serialises a
+    // returned object through its own remote-value format.
+    let payload = value
+      .as_str()
+      .ok_or_else(|| crate::error::FerriError::backend("tool discovery returned a non-string result"))?;
+    crate::page_tools::parse_groups(payload)
+  }
+
+  /// Call one of the tools [`Page::developer_tools`] found.
+  ///
+  /// `params` has to satisfy that tool's own `inputSchema`; the page
+  /// decides what it means. What comes back is whatever the tool
+  /// returned, with the values JSON cannot carry replaced: an element
+  /// by a `stashedId` naming its slot in `window.__dtmcp.stashedElements`,
+  /// a cycle by `<Circular reference>`, a function by `<Function object>`.
+  ///
+  /// Passing an element IN is not wired: upstream substitutes elements
+  /// for snapshot uids in the parameters, and this has no equivalent
+  /// bridge from a `ref=eN` to a page-side element yet.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::Backend`] where the page
+  /// exposes no tools, the named tool does not exist, or the tool threw.
+  pub async fn execute_developer_tool(
+    self: &Arc<Self>,
+    name: &str,
+    params: Option<serde_json::Value>,
+  ) -> Result<serde_json::Value> {
+    let call = serde_json::json!({ "name": name, "params": params });
+    let value = self
+      .evaluate(
+        crate::page_tools::execute_source(),
+        crate::protocol::serializers::argument_from_serde(&call)?,
+        Some(true),
+      )
+      .await?;
+    let payload = value
+      .as_str()
+      .ok_or_else(|| crate::error::FerriError::backend("tool execution returned a non-string result"))?;
+    crate::page_tools::parse_result(payload)
+  }
+
   /// Capture a V8 heap snapshot of this page, analysed.
   ///
   /// Garbage is collected first, so what comes back is what the page is
