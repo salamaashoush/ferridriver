@@ -42,13 +42,15 @@ pub struct RetainingEdge {
 
 /// Which limit stopped the walk, so a caller can tell a complete answer
 /// from a truncated one.
+///
+/// Upstream leaves a bound out of its own JSON when it did not bite;
+/// all three are always present here, because a caller reading
+/// `limitsReached.depth` should not have to tell `false` from absent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LimitsReached {
-  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub depth: bool,
-  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub nodes: bool,
-  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub siblings: bool,
 }
 

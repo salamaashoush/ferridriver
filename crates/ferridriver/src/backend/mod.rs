@@ -1564,6 +1564,28 @@ impl AnyPage {
     page_dispatch!(self, reset_permissions())
   }
 
+  // ── Heap profiling ──
+
+  /// Take a V8 heap snapshot, as a `.heapsnapshot` file holds it.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::Unsupported`] on `WebKit` and
+  /// `BiDi`. The format is V8's. `JavaScriptCore` and `SpiderMonkey` each
+  /// write something of their own that no reader of this one could open,
+  /// and Playwright exposes neither, so this is a capability those
+  /// backends do not have rather than one they have differently. There
+  /// is nothing here to approximate.
+  pub async fn take_heap_snapshot(&self) -> Result<String> {
+    match self {
+      Self::CdpPipe(p) => p.take_heap_snapshot().await,
+      Self::CdpRaw(p) => p.take_heap_snapshot().await,
+      Self::WebKit(_) | Self::Bidi(_) => Err(crate::error::FerriError::unsupported(
+        "heap snapshots are V8's format, so they are only available on Chromium (cdp-pipe / cdp-raw backends)",
+      )),
+    }
+  }
+
   // ── Tracing ──
 
   pub async fn start_tracing(&self, categories: Option<&[String]>) -> Result<()> {

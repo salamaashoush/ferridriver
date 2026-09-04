@@ -105,7 +105,7 @@ something aimed at agents, and they have picked different shapes.
 | Performance analysis | `diagnostics` (`trace_start` / `trace_stop`): the same 19 DevTools insights, checked against the engine | no | `performance_start_trace`, `performance_analyze_insight` |
 | Accessibility | `page.checkAccessibility()` from `run_script` (axe-core in the page) | no | inside `lighthouse_audit` |
 | SEO and best-practices audits | `page.checkPageQuality()` from `run_script`: ten of Lighthouse's own, checked against Lighthouse | no | inside `lighthouse_audit` |
-| Heap snapshots | no | no | 13 tools |
+| Heap snapshots | `page.takeHeapSnapshot()` from `run_script`: capture, analyse and diff, checked against DevTools' own heap engine | no | 13 tools |
 | Chrome extensions / PWA / WebMCP | no | no | yes |
 | Extending the SERVER itself | `ferridriver_extensions`: add your own tools, reloadable without a restart | no | no |
 | Test generation | `run_bdd`, `codegen` | via `@playwright/cli` skills | no |
@@ -122,9 +122,14 @@ are deliberate: `run_script` takes a whole program with `page`,
 tool call rather than a tool per verb.
 
 **Where the depth is differs.** `chrome-devtools-mcp` is the only one
-of the three with heap-snapshot analysis, PWA and extension
-installation, and WebMCP; if that is the job, use it. ferridriver's
-performance analysis covers the same 19 DevTools insights and is
+of the three with PWA and extension installation and WebMCP; if that is
+the job, use it. Its thirteen heap-snapshot tools are one capability
+here rather than thirteen: `page.takeHeapSnapshot()` hands back a handle
+carrying the same queries, and the analysis behind them is [checked
+against DevTools' own heap engine node by
+node](https://github.com/salamaashoush/ferridriver/blob/main/crates/ferridriver-heap/tests/differential.rs).
+ferridriver's performance analysis covers the same 19 DevTools insights
+and is
 [checked against the real devtools-frontend engine on recorded
 traces](https://github.com/salamaashoush/ferridriver/blob/main/scripts/perf-diff/README.md),
 which is a claim the others do not make about theirs, and it runs

@@ -41,6 +41,7 @@ pub mod fetch;
 pub mod file_chooser;
 pub mod frame;
 pub mod frame_locator;
+pub mod heap;
 pub mod http_client;
 pub mod js_handle;
 pub mod keyboard;

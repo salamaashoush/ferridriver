@@ -67,6 +67,7 @@ mod error;
 mod file_chooser;
 mod frame;
 mod frame_locator;
+mod heap;
 mod http_client;
 #[allow(dead_code)]
 mod install;

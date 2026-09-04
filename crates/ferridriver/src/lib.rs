@@ -44,6 +44,7 @@ pub mod file_chooser;
 pub mod frame;
 pub(crate) mod frame_cache;
 pub mod har;
+pub mod heap;
 pub mod js_handle;
 pub mod locator;
 pub mod locator_builder;

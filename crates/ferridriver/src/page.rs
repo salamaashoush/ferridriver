@@ -1288,6 +1288,26 @@ impl Page {
     crate::accessibility::parse_report(payload)
   }
 
+  /// Capture a V8 heap snapshot of this page, analysed.
+  ///
+  /// Garbage is collected first, so what comes back is what the page is
+  /// still holding rather than what it has merely not dropped yet.
+  ///
+  /// Take two of these either side of the thing under suspicion and ask
+  /// the second what changed: `heap.diff_since(&before)` names the
+  /// classes that grew, and `retaining_paths` on one of their objects
+  /// says what is holding it.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::Unsupported`] on the `WebKit`
+  /// and `BiDi` backends: the format is V8's, and neither engine writes
+  /// anything a reader of it could open.
+  pub async fn take_heap_snapshot(self: &Arc<Self>) -> Result<crate::heap::HeapSnapshot> {
+    let json = self.inner.take_heap_snapshot().await?;
+    crate::heap::HeapSnapshot::parse(json)
+  }
+
   /// Audit the page against the Lighthouse checks that read a live DOM.
   ///
   /// Ten of them: `doctype`, `meta-description`, `canonical`,

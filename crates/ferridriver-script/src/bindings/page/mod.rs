@@ -1822,6 +1822,27 @@ impl PageJs {
       .await
   }
 
+  /// ferridriver extension: `page.takeHeapSnapshot()`.
+  ///
+  /// Captures a V8 heap snapshot, garbage collected first, and hands
+  /// back a handle with the queries on it. Chromium-only: the format is
+  /// V8's, so `webkit` and `bidi` throw `Unsupported`.
+  #[qjs(rename = "takeHeapSnapshot")]
+  pub async fn take_heap_snapshot<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let snapshot = self.inner.take_heap_snapshot().await.into_js_with(&ctx)?;
+        let instance =
+          rquickjs::class::Class::instance(ctx.clone(), crate::bindings::heap::HeapSnapshotJs::new(snapshot))?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      })
+      .await
+  }
+
   /// ferridriver extension: `page.checkPageQuality(options?)`.
   ///
   /// The ten Lighthouse audits that score a page as it stands. Pass

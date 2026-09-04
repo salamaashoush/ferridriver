@@ -414,20 +414,23 @@ impl Analysis {
 }
 
 /// The heap broken down the way `get_heapsnapshot_summary` reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Statistics {
   pub total: u64,
   pub native: NativeStatistics,
   pub v8heap: V8Statistics,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NativeStatistics {
   pub total: u64,
   pub typed_arrays: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct V8Statistics {
   pub total: u64,
   pub code: u64,

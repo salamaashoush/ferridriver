@@ -821,6 +821,240 @@ export interface PageQualityReport {
   audits: PageAuditResult[];
 }
 
+/**
+ * One object as every heap-snapshot list reports it.
+ */
+export interface HeapNode {
+  id: number;
+  /**
+   * What DevTools shows: a concatenated string assembled from its
+   * pieces, a plain object named after the properties it carries.
+   */
+  name: string;
+  /**
+   * Edges from a user root, or a number past every real distance for an
+   * object only the system can reach.
+   */
+  distance: number;
+  /** The object's offset in the snapshot's flat node array. */
+  nodeIndex: number;
+  retainedSize: number;
+  selfSize: number;
+  type: string;
+  canBeQueried: boolean;
+  detachedDOMTreeNode: boolean;
+}
+
+/** One reference, with the object at the other end of it. */
+export interface HeapEdge {
+  /** The property, element index or internal slot it sits in. */
+  name: string;
+  node: HeapNode;
+  type: string;
+  edgeIndex: number;
+}
+
+/** Everything known about one object. */
+export interface HeapObject {
+  id: number;
+  name: string;
+  type: string;
+  nodeIndex: number;
+  /**
+   * `0` attached, `1` reachable from a detached node, `2` detached,
+   * after propagation through the graph.
+   */
+  detachedness: number;
+  selfSize: number;
+  retainedSize: number;
+  distance: number;
+  edgeCount: number;
+  retainerCount: number;
+}
+
+/** One step of the chain from an object up to the root. */
+export interface HeapDominator {
+  nodeId: number;
+  nodeIndex: number;
+  nodeName: string;
+  retainedSize: number;
+  selfSize: number;
+}
+
+/** One retaining edge, with everything IT is retained by. */
+export interface HeapRetainingEdge {
+  edgeIndex: number;
+  edgeName: string;
+  edgeType: string;
+  nodeId: number;
+  nodeIndex: number;
+  nodeName: string;
+  distance: number;
+  children: HeapRetainingEdge[];
+}
+
+/** Which bound stopped the search, so a truncated answer says so. */
+export interface HeapPathLimitsReached {
+  depth: boolean;
+  nodes: boolean;
+  siblings: boolean;
+}
+
+/** Everything holding one object, and what the search gave up on. */
+export interface HeapRetainingPaths {
+  paths: HeapRetainingEdge[];
+  limitsReached: HeapPathLimitsReached;
+}
+
+/**
+ * How far a retaining-path search may go. Omitted fields keep the
+ * defaults DevTools sends: 30, 5000, 100.
+ */
+export interface HeapRetainingPathOptions {
+  maxDepth?: number;
+  maxNodes?: number;
+  maxSiblings?: number;
+}
+
+/** One class of objects, counted and measured. */
+export interface HeapClass {
+  /**
+   * What `classObjects` takes. `,<name>` for an ordinary class, and
+   * `<script>,<line>,<column>,<name>` where the constructor has a
+   * location, so two constructors of the same name from different
+   * scripts stay apart.
+   */
+  classKey: string;
+  name: string;
+  count: number;
+  distance: number;
+  selfSize: number;
+  /**
+   * What the class holds that nothing outside it holds. The number to
+   * read when asking where the memory went.
+   */
+  maxRetainedSize: number;
+}
+
+/** How one class changed between two snapshots. */
+export interface HeapClassDiff {
+  classKey: string;
+  name: string;
+  addedCount: number;
+  removedCount: number;
+  addedSize: number;
+  removedSize: number;
+  countDelta: number;
+  sizeDelta: number;
+  /** The objects allocated since the base snapshot, oldest first. */
+  addedIds: number[];
+  addedSelfSizes: number[];
+  /** And the ones collected. */
+  deletedIds: number[];
+  deletedSelfSizes: number[];
+}
+
+export interface HeapDuplicateStringNode {
+  id: number;
+  selfSize: number;
+  retainedSize: number;
+  distance: number;
+}
+
+/** One string the page holds more than one copy of. */
+export interface HeapDuplicateString {
+  value: string;
+  count: number;
+  totalSelfSize: number;
+  totalRetainedSize: number;
+  nodes: HeapDuplicateStringNode[];
+  /**
+   * V8 stores only a prefix of a very long string, so two that read
+   * alike can differ past the cut. Those group on length and hash too.
+   */
+  truncated: boolean;
+  length?: number;
+  hash?: number;
+}
+
+export interface HeapNativeStatistics {
+  total: number;
+  typedArrays: number;
+}
+
+export interface HeapV8Statistics {
+  total: number;
+  code: number;
+  jsArrays: number;
+  strings: number;
+  system: number;
+}
+
+/** The heap broken down the way the Memory panel's summary reports it. */
+export interface HeapStatistics {
+  total: number;
+  native: HeapNativeStatistics;
+  v8heap: HeapV8Statistics;
+}
+
+/** What to look for. Every field left out is a filter not applied. */
+export interface HeapQueryOptions {
+  /**
+   * A regular expression against the object's displayed name, matched
+   * case-insensitively and unanchored.
+   */
+  className?: string;
+  /** The same, against the name of any reference the object holds. */
+  propertyName?: string;
+  /** A V8 node type: `object`, `closure`, `string`, `array`, `code`. */
+  nodeType?: string;
+  minRetainedSize?: number;
+  maxRetainedSize?: number;
+  minSelfSize?: number;
+  maxSelfSize?: number;
+  isDetached?: boolean;
+  sortBy?: 'retainedSize' | 'selfSize' | 'id';
+}
+
+/**
+ * A captured V8 heap, with the queries on it.
+ *
+ * Returned by `page.takeHeapSnapshot()`. Every object is addressed by
+ * `id`, which is what the answers carry and what survives from one
+ * snapshot to the next.
+ */
+export interface HeapSnapshot {
+  /**
+   * The snapshot as a `.heapsnapshot` file holds it. Pair with
+   * `artifacts.writeBytes` to open it in the DevTools Memory panel.
+   */
+  bytes(): Uint8Array;
+  statistics(): HeapStatistics;
+  totalSize(): number;
+  nodeCount(): number;
+  /** Every class, heaviest first. */
+  classes(): HeapClass[];
+  /** Every object of one class, by the `classKey` from `classes()`. */
+  classObjects(classKey: string): HeapNode[];
+  object(nodeId: number): HeapObject;
+  /** What this object points at. */
+  edges(nodeId: number): HeapEdge[];
+  /** What points at it; each answer names the retainer. */
+  retainers(nodeId: number): HeapEdge[];
+  /** Every route back to a GC root: why the object is still alive. */
+  retainingPaths(nodeId: number, options?: HeapRetainingPathOptions): HeapRetainingPaths;
+  /** What would have to let go, itself first and the root last. */
+  dominators(nodeId: number): HeapDominator[];
+  duplicateStrings(): HeapDuplicateString[];
+  query(options?: HeapQueryOptions): HeapNode[];
+  /**
+   * Every class that gained or lost an object since an earlier snapshot
+   * of the same page, by how much it grew. Both have to come from one
+   * page session: objects are matched by id.
+   */
+  diffSince(base: HeapSnapshot): HeapClassDiff[];
+}
+
 export interface GetByRoleOptions {
   checked?: boolean;
   description?: string | RegExp;
@@ -1386,6 +1620,11 @@ export interface Page {
   // The seven Lighthouse audits that score a page as it stands, ported
   // from Lighthouse's own source. Also a ferridriver extension.
   checkPageQuality(options?: PageQualityOptions): Promise<PageQualityReport>;
+
+  // Capture a V8 heap snapshot, garbage collected first, and hand back
+  // a handle with the queries on it. Chromium-only: the format is V8's,
+  // so this rejects with Unsupported on webkit and bidi.
+  takeHeapSnapshot(): Promise<HeapSnapshot>;
 
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   viewportSize(): { width: number; height: number } | null;

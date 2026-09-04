@@ -15,6 +15,7 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+ferridriver-heap = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

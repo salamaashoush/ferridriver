@@ -5,8 +5,7 @@ it is right, so this one is built to be deleted a piece at a time:
 every section below is a unit of work with the check that closes it.
 Delete the section when it lands.
 
-Written against `83c1def2`, minus the two sections that have since
-landed. Every number here was measured with the command beside it, not
+Written against `83c1def2`, minus the sections that have since landed. Every number here was measured with the command beside it, not
 taken from anyone's documentation, including mine — a count of upstream
 heap tools in `site/docs/comparison/index.md` said 11 for a week; it is
 13.
@@ -21,13 +20,16 @@ Gates that exist, and what each one actually proves:
 | `just a11y-diff` | `page.checkAccessibility()` still agrees with Lighthouse's axe verdicts on three fixture pages |
 | `just quality-diff` | The ten ported live-page audits still agree with Lighthouse |
 | `just robots-diff` | Our `robots.txt` parser still agrees with `robots-parser` 3.0.1, which is what `is-crawlable` really has to agree with |
-| `just heap-diff` | Our reading of a `.heapsnapshot` still agrees with DevTools' own heap engine, node by node over a sample of 200 |
+| `just heap-diff` | Our reading of a `.heapsnapshot` still agrees with DevTools' own heap engine, over four snapshots in two pairs: 200 nodes apiece, every node-addressed query, the searches, and what a diff of each pair reports |
 | `just lh-record` | Re-derives the recordings the two above compare against |
 | `just lh-audit <url>` | What Lighthouse concludes about any live page, for exploring |
 | `just test` | All of the offline halves, plus 2131 e2e across four backends, 598 BDD, 1102 NAPI, and the e2e typecheck |
 
-Ported and gated: all 67 axe wrappers (by running the engine, not the
-wrappers), and eight audits in `crates/ferridriver/src/audits.rs` —
+Ported and gated: `crates/ferridriver-heap`, which is what
+`page.takeHeapSnapshot()` hands back and covers all thirteen of
+`chrome-devtools-mcp`'s heap tools; all 67 axe wrappers (by running the
+engine, not the wrappers); and eight audits in
+`crates/ferridriver/src/audits.rs` —
 `doctype`, `meta-description`, `canonical`, `crawlable-anchors`,
 `link-text`, `image-aspect-ratio`, `image-size-responsive`,
 `paste-preventing-inputs`.
@@ -75,174 +77,7 @@ page shape that is not rare.
 `element_handle_remote()` in `backend/mod.rs` already hands you the
 per-backend object id if you do take it on. Do not do half of it.
 
-## 3. Heap snapshots — 13 tools, the largest single gap
-
-`chrome-devtools-mcp` 1.8.0 exposes 13 (verify:
-`node --input-type=module -e "import {createTools} from
-'./build/src/tools/tools.js'; console.log(createTools({slim:false})
-.map(t=>t.name).filter(n=>/heapsnapshot/.test(n)).length)"` in an
-unpacked copy of that package):
-
-`take_heapsnapshot`, `close_heapsnapshot`, `compare_heapsnapshots`,
-`query_heapsnapshot_objects`, and `get_heapsnapshot_` ×
-{`summary`, `details`, `edges`, `class_nodes`, `dominators`,
-`duplicate_strings`, `object_details`, `retainers`, `retaining_paths`}.
-
-The capture is `HeapProfiler.takeHeapSnapshot` over CDP, which is
-Chromium-only — WebKit and Firefox have their own heap formats and
-Playwright exposes neither, so `Unsupported` on the other three is the
-honest shape here and does not violate the no-divergence rule, because
-the feature is absent rather than approximated.
-
-### What has landed
-
-The harness and the format layer, in `crates/ferridriver-heap`. The
-engine this is a port of turned out to be drivable: the real
-`devtools-heap-snapshot-worker.js` ships inside `chrome-devtools-mcp`
-and takes the same `HeapSnapshotWorkerProxy` its own tools use, so
-`just heap-diff` runs it over a checked-in snapshot and records what it
-concluded, and `cargo test -p ferridriver-heap --test differential`
-replays that offline in `just test`.
-
-It earned its place on the first run. 198 of 200 sampled nodes agreed
-immediately; the two that did not disagreed on DETACHEDNESS, because
-what DevTools reports is not the field V8 wrote — `propagateDOMState`
-walks attachment through the graph, stops at the first non-native node,
-and renames what it finds to `Detached <name>`. A port written against
-a reading of the format would have shipped the raw field and been wrong
-about exactly the objects a leak hunt is looking for.
-
-The snapshot rather than the page is checked in
-(`tests/fixtures/leaky.heapsnapshot.gz`, 550KB), because object ids and
-how much of V8 is alive differ run to run; `just heap-diff --capture`
-re-takes it deliberately.
-
-### What is left
-
-Everything downstream of the format, in the order `HeapSnapshot.ts`
-does it — the order is load-bearing, since shallow sizes move from
-owned nodes onto their owners BEFORE retained sizes propagate:
-
-1. `calculateFlags` — detached DOM, queriable, page-owned.
-2. `calculateShallowSizes` — moves an owned array or hidden node's size
-   onto its owner, which changes every size downstream.
-3. `initEssentialEdges` — which edges count for dominance. Weak edges
-   never retain; a WeakMap value is retained by key and table together
-   and only the key's edge counts; shortcuts at the root are markers.
-4. Lengauer-Tarjan dominators, then retained sizes propagated up in
-   reverse DFS order, then `buildDominatedNodes`.
-5. `calculateDistances` — a two-phase breadth-first walk, user roots
-   first and then everything else.
-6. Node naming — cons strings are assembled by walking their parts, and
-   a plain `Object` is named from its constructor.
-7. `getStatistics`, which needs all of the above.
-
-All seven have landed and agree with the engine on both fixtures. Every
-field the engine reports is compared: ids, types, detachedness, names,
-self and retained sizes, distances, and all eight statistics.
-
-### The fixture that a browser will not give you
-
-A snapshot taken over CDP has NO USER ROOTS. The synthetic root's only
-child is `(GC roots)` and every child of that is synthetic too.
-Measured over http and file, with and without `exposeInternals`,
-`captureNumericValue` and `treatGlobalObjectsAsRoots`, and through
-Puppeteer's own `captureHeapSnapshot`, which is what
-`chrome-devtools-mcp` calls.
-
-Upstream reads that as "internals were exposed" and skips
-`calculateShallowSizes`, so over a captured snapshot three passes never
-run on either side: the shallow-size transfer, the page-object marking
-that feeds the essential-edge filter, and the first half of the
-distance walk. Agreement there is agreement about a branch neither side
-takes, which is not evidence.
-
-So there is a second fixture,
-`tests/fixtures/handmade.heapsnapshot`, built by
-`scripts/perf-diff/make-heapsnapshot.mjs` the way upstream's own
-`HeapSnapshot.test.ts` builds snapshots. Twenty nodes, each there to
-make one branch tell itself apart from its absence: a backing store
-with one retainer and another with two, a hidden node the JS-array
-branch would otherwise claim, an ephemeron pair, a weak-only retainer,
-a detached subtree. It is still a differential -- the real engine
-analyses it too.
-
-It has found two bugs so far. The ephemeron name parser matched
-nothing, so both edges of a `WeakMap` pair counted and the value came
-out dominated by the window rather than by its key. And a plain
-object's label carried an ellipsis for properties that had all fitted,
-because the cursor walking in from the end was clamped where upstream
-lets it cross the start.
-
-Nine branches are confirmed live by deleting each and watching the gate
-go red: the shallow-size transfer, the statistics early exit for hidden
-nodes, the single-retainer test in the JS-array measurement, the
-`WeakMap` table-edge exclusion, both naming rules, the `__proto__`
-skip, the property-name escaping, and the label budget. Do the same for
-anything added here; three of those passed with the code removed until
-this fixture existed.
-
-### The query layer
-
-The node-addressed reads the tools are built from have landed and are
-compared whole against the engine's own providers: `object_info`
-(`get_heapsnapshot_object_details`), `dominator_chain`
-(`get_heapsnapshot_dominators`), `edges_of` (`get_heapsnapshot_edges`)
-and `retainers_of` (`get_heapsnapshot_retainers`), plus
-`ordinal_for_id`, over 25 nodes per fixture.
-
-Three more bugs came out of that comparison, all of them the kind that
-looks right until something else answers the same question:
-
-- A retaining edge is read from the other end. Its result embeds the
-  node doing the RETAINING, not the one retained, and we had the target.
-- `retainingEdgesFilter` drops three kinds -- invisible edges, the root
-  as a retainer, and weak edges -- so a node held only by those reports
-  no retainers. We reported them.
-- `markQueriableHeapObjects` seeds from the NODE's `isUserRoot` (only
-  "not synthetic"), not the snapshot's (which also admits
-  `(Document DOM trees)`). Seeding from the wrong one marks the whole
-  DOM queriable.
-
-`getDuplicateStrings` has landed too. It needed three exclusions a
-straight group-by-text would miss. A cons string V8 has already
-flattened has an empty half, and is not a duplicate of its own content.
-A string node of zero size is V8 encoding a NUMBER. And a truncated
-string is only a prefix, so two that read alike may differ past the
-cut; those group on length and hash as well.
-
-`aggregatesWithFilter` has landed, which needed four more passes and
-agrees on all 190 classes of the captured fixture and all 17 of the
-hand-built one. The four are worth knowing about, because each is a
-place where the obvious implementation is wrong:
-
-- Objects are grouped by a CLASS name, not their own.
-  `calculateObjectNames` files `<div id="a">` under `<div>`, everything
-  hidden under `(system)`, and a function under `Function`. Objects and
-  natives reuse their existing name index rather than interning a
-  fresh one, because two nodes group together only when that index is
-  the same number.
-- A plain `Object` is renamed after the shape it shares with others.
-  `inferInterfaceDefinitions` reads each one's properties in order,
-  counts recurring sequences and keeps those shared by at least two
-  objects and a thousandth of them; `applyInterfaceDefinitions` files
-  each object under the longest definition it matches. Without it a
-  page's whole object graph collapses onto one line called `Object`.
-- The class key carries the constructor's LOCATION for object nodes
-  (`script,line,column,name`), so two constructors of the same name
-  from different scripts stay apart.
-- `maxRet` is not the sum of its members' retained sizes. One member
-  usually dominates another, so upstream walks down the dominator tree
-  and stops crediting a class again while already inside one of its
-  own members.
-
-Still to write: the class-node provider itself
-(`get_heapsnapshot_class_nodes`), `getRetainingPaths`, `queryObjects`,
-and `calculateSnapshotDiff` for `compare_heapsnapshots`. Then the 13
-tools themselves, the CDP capture with `Unsupported` on the other three
-backends, and the three binding layers.
-
-## 4. Extensions, PWA, WebMCP, third-party devtools — 12 tools
+## 3. Extensions, PWA, WebMCP, third-party devtools — 12 tools
 
 `install_extension`, `list_extensions`, `reload_extension`,
 `trigger_extension_action`, `uninstall_extension` (5);
@@ -260,11 +95,57 @@ Note the naming collision before you start: `ferridriver_extensions` is
 already an MCP tool, and it means ferridriver's OWN extension packages,
 not Chrome's.
 
-## 5. Smaller, already-stated gaps
+### What the browser actually offers, measured
+
+Two of the four are not reachable the way the suite runs. Measured on
+`HeadlessChrome/151.0.7922.34`, over a browser CDP session:
+
+| Domain | Headless | Headful |
+|---|---|---|
+| `Extensions.*` | absent | present, once `--disable-extensions` is dropped and `--enable-unsafe-extension-debugging` added |
+| `PWA.*` | absent | present (`getOsAppState` answers "Unknown web-app manifest id", which is the domain replying) |
+| `WebMCP.enable` | present | present |
+| third-party developer tools | n/a, it is a page-side `devtoolstooldiscovery` event | same |
+
+So `Extensions` and `PWA` are headful-only, and the e2e projects run
+headless. That is not a backend-dependent verdict to route around; it is
+a browser mode the suite does not currently have, and closing it means
+deciding how a headful-only spec runs at all. It also needs
+`ignoreDefaultArgs` on the launch surface, which the Rust core has
+(`LaunchOptions::ignore_default_args`) and neither binding layer
+exposes -- a parity gap of its own, and the smallest first step here.
+
+`WebMCP` and the third-party tools have no such problem, and are the two
+worth doing first.
+
+### Two of them are addressed by TAB target, not page target
+
+`Extensions.triggerAction` takes the tab's target id (Puppeteer reads
+`page._tabId`, which is its page session's PARENT session's target), and
+`PWA.launch` answers with one. Our CDP backend attaches page sessions
+flat and tracks no tab layer, so neither id is to hand. `Target.getTargets`
+lists tab targets but nothing links one to its page: the exact route is
+to attach to the tab and read the child it auto-attaches. Matching a tab
+to a page by url or by set difference around the call is the shortcut,
+and it is wrong the moment two pages share a url.
+
+## 4. Smaller, already-stated gaps
 
 Each is recorded in the module doc where it applies; this is the index,
 not the detail.
 
+- **The heap snapshot's named node filters.** `aggregatesWithFilter`
+  takes a `NodeFilter`, and `get_heapsnapshot_details` /
+  `get_heapsnapshot_class_nodes` expose seven names for it:
+  `objectsRetainedByDetachedDomNodes`, `objectsRetainedByConsole`,
+  `objectsRetainedByEventHandlers`, `objectsRetainedByContexts`,
+  `sharedNativeContext`, `noNativeContext` and
+  `attributedToSpecificNativeContext`. Ours is the unfiltered call,
+  which is what a default `NodeFilter` produces. The same pass would
+  bring `getNativeContextSizes` and `getRetainedByContextSummary`, which
+  are the other half of `get_heapsnapshot_summary`. All of it is in
+  `HeapSnapshot.ts::createNamedFilter`, and all of it is comparable
+  through `just heap-diff` the way everything else there is.
 - **Source-mapped console stack traces.** `chrome-devtools-mcp` resolves
   frames through source maps; we report raw positions.
 - **`DuplicatedJavaScript`** detects byte-identical bodies at several
@@ -279,7 +160,7 @@ not the detail.
   `STATE_DIVERGENCES` in `crates/ferridriver-perf/tests/differential.rs`
   records why. Do not "fix" it to reach nineteen out of nineteen.
 
-## 6. `@playwright/mcp` parity is probably not the goal
+## 5. `@playwright/mcp` parity is probably not the goal
 
 It ships 69 tools to our 11. Before treating that as a gap, read the
 argument already made in `site/docs/comparison/index.md`: Microsoft's own

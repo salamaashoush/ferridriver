@@ -1449,6 +1449,18 @@ impl Page {
     Ok(report.into())
   }
 
+  /// Capture a V8 heap snapshot of this page, garbage collected first,
+  /// and hand back a handle with the queries on it.
+  ///
+  /// Chromium-only: the format is V8's, and neither `JavaScriptCore` nor
+  /// `SpiderMonkey` writes anything a reader of it could open, so this
+  /// throws `Unsupported` on the `webkit` and `bidi` backends.
+  #[napi]
+  pub async fn take_heap_snapshot(&self) -> Result<crate::heap::HeapSnapshot> {
+    let snapshot = self.inner.take_heap_snapshot().await.into_napi()?;
+    Ok(crate::heap::HeapSnapshot::new(snapshot))
+  }
+
   /// Audit the page against the ten Lighthouse checks that score a
   /// live page: `doctype`, `meta-description`, `canonical`,
   /// `crawlable-anchors`, `link-text`, `image-aspect-ratio`,
