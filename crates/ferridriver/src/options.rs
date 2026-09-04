@@ -1890,8 +1890,10 @@ pub struct LaunchOptions {
   /// [`BrowserContextOptions`] / persistent-context launch).
   pub downloads_path: Option<std::path::PathBuf>,
   /// If `true`, do not pass the bundled "default args"; if a list of
-  /// strings, filter out the named default args. Currently surface-only
-  /// — wired through to [`LaunchPlan`] for future filtering work.
+  /// strings, drop the named ones. Chromium-only: it is the only launch
+  /// path that injects a switch list, and the others answer
+  /// `Unsupported` rather than pretend to filter nothing.
+  ///
   pub ignore_default_args: Option<IgnoreDefaultArgs>,
   /// Per-process signal handling — defaults all three to
   /// `true` (close the browser on SIGHUP / SIGINT / SIGTERM).

@@ -261,6 +261,10 @@ pub struct BrowserState {
   backend_kind: BackendKind,
   /// Base Chrome flags applied to ALL instances.
   pub extra_args: Vec<String>,
+  /// The switch list `launch({ ignoreDefaultArgs })` asked to drop. A
+  /// per-instance override replaces it rather than adding to it, the
+  /// way every other launch knob here layers.
+  pub base_ignore_default_args: Option<crate::options::IgnoreDefaultArgs>,
   /// Proxy every instance this state launches is pointed at
   /// (`browserType.launch({ proxy })`). A context's own `proxy` overrides it,
   /// exactly as it does in Playwright.
@@ -460,6 +464,7 @@ impl BrowserState {
       connect_mode,
       backend_kind: plan.backend,
       extra_args: plan.args,
+      base_ignore_default_args: plan.ignore_default_args,
       proxy: plan.proxy,
       instance_overrides_fn: None,
       instance_resolver_fn: None,
@@ -790,6 +795,7 @@ impl BrowserState {
       user_data_dir: self.user_data_dir.clone(),
       connect_mode: self.connect_mode.clone(),
       base_args: self.extra_args.clone(),
+      base_ignore_default_args: self.base_ignore_default_args.clone(),
       proxy: self.proxy.clone(),
       default_viewport: self.default_viewport.clone(),
       overrides_fn: self.instance_overrides_fn.clone(),
@@ -938,6 +944,7 @@ struct LaunchSpec {
   user_data_dir: Option<String>,
   connect_mode: ConnectMode,
   base_args: Vec<String>,
+  base_ignore_default_args: Option<crate::options::IgnoreDefaultArgs>,
   proxy: Option<crate::options::ProxyConfig>,
   default_viewport: Option<crate::options::ViewportConfig>,
   overrides_fn: Option<InstanceOverridesFn>,
@@ -1043,7 +1050,9 @@ impl LaunchSpec {
       user_data_dir: overrides.user_data_dir.or_else(|| self.user_data_dir.clone()),
       args,
       env: overrides.env,
-      ignore_default_args: overrides.ignore_default_args,
+      ignore_default_args: overrides
+        .ignore_default_args
+        .or_else(|| self.base_ignore_default_args.clone()),
       proxy: self.proxy.clone(),
     };
     Ok((mode.unwrap_or_else(|| self.connect_mode.clone()), effective))

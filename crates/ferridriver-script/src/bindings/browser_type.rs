@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use ferridriver::options::{
-  self as core_opts, BrowserTypeOptions, ChromiumTransport, ConnectOptions, ConnectOverCdpOptions, LaunchOptions,
-  LaunchPersistentContextOptions,
+  self as core_opts, BrowserTypeOptions, ChromiumTransport, ConnectOptions, ConnectOverCdpOptions, IgnoreDefaultArgs,
+  LaunchOptions, LaunchPersistentContextOptions,
 };
 use ferridriver::{Browser, BrowserType};
 use rquickjs::function::Opt;
@@ -158,7 +158,29 @@ struct JsLaunchOptions {
   timeout: Option<u64>,
   downloads_path: Option<String>,
   traces_dir: Option<String>,
+  /// `true` drops every bundled switch; a list drops the named ones.
+  /// Chromium-only: it is the only launch path with a switch list.
+  ignore_default_args: Option<JsIgnoreDefaultArgs>,
   proxy: Option<JsProxyConfig>,
+}
+
+/// Playwright's `boolean | string[]`.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum JsIgnoreDefaultArgs {
+  All(bool),
+  Named(Vec<String>),
+}
+
+impl From<JsIgnoreDefaultArgs> for IgnoreDefaultArgs {
+  fn from(which: JsIgnoreDefaultArgs) -> Self {
+    match which {
+      JsIgnoreDefaultArgs::All(true) => Self::All,
+      // `false` is "keep them", which is the absence of the option.
+      JsIgnoreDefaultArgs::All(false) => Self::Some(Vec::new()),
+      JsIgnoreDefaultArgs::Named(names) => Self::Some(names),
+    }
+  }
 }
 
 /// `{ server, bypass?, username?, password? }` -- Playwright's proxy shape.
@@ -199,7 +221,7 @@ fn parse_launch_options<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Res
     slow_mo: parsed.slow_mo,
     timeout: parsed.timeout,
     downloads_path: parsed.downloads_path.map(std::path::PathBuf::from),
-    ignore_default_args: None,
+    ignore_default_args: parsed.ignore_default_args.map(Into::into),
     handle_sighup: None,
     handle_sigint: None,
     handle_sigterm: None,

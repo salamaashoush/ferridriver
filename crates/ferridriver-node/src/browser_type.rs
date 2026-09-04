@@ -96,6 +96,7 @@ impl BrowserType {
     timeout?: number;
     downloadsPath?: string;
     tracesDir?: string;
+    ignoreDefaultArgs?: boolean | string[];
     proxy?: { server: string; bypass?: string; username?: string; password?: string };
     acceptDownloads?: boolean;
     baseURL?: string;
@@ -179,7 +180,12 @@ fn lower_launch_options(opts: LaunchOptions) -> core_opts::LaunchOptions {
     slow_mo: opts.slow_mo.map(u64::from),
     timeout: opts.timeout.map(u64::from),
     downloads_path: opts.downloads_path.map(std::path::PathBuf::from),
-    ignore_default_args: None,
+    ignore_default_args: opts.ignore_default_args.map(|which| match which {
+      napi::Either::A(true) => core_opts::IgnoreDefaultArgs::All,
+      // `false` is "keep them", which is the absence of the option.
+      napi::Either::A(false) => core_opts::IgnoreDefaultArgs::Some(Vec::new()),
+      napi::Either::B(names) => core_opts::IgnoreDefaultArgs::Some(names),
+    }),
     handle_sighup: None,
     handle_sigint: None,
     handle_sigterm: None,

@@ -1521,6 +1521,14 @@ pub struct LaunchOptions {
   pub downloads_path: Option<String>,
   /// Tracing artifact directory.
   pub traces_dir: Option<String>,
+  /// `true` drops every bundled switch; a list drops the named ones.
+  /// Chromium-only, because it is the only launch path that injects a
+  /// switch list.
+  ///
+  /// `--enable-automation` is one of them, so dropping the lot also
+  /// stops Chrome reporting its own command line over CDP.
+  #[napi(ts_type = "boolean | Array<string>")]
+  pub ignore_default_args: Option<napi::Either<bool, Vec<String>>>,
   /// Proxy every context of this browser uses unless it names its own.
   ///
   /// Lowered per engine: Chromium takes `--proxy-server`, WebKit takes
