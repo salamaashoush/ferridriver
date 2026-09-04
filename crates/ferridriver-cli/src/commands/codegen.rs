@@ -12,15 +12,29 @@ use crate::ui;
 /// and replays on a live session via the MCP `run_script` tool.
 pub async fn run(args: cli::CodegenArgs) -> anyhow::Result<()> {
   let url = args.url.unwrap_or_else(|| "about:blank".to_string());
-  ui::note(&format!("recording from {}", ui::url(&url)));
-  ui::note("interact with the page, then close the browser to finish");
-  let output = args.output.clone();
   let options = RecorderOptions {
-    url,
+    url: url.clone(),
     language: OutputLanguage::parse_cli(&args.language),
     output_file: args.output.as_deref().map(|p| p.to_string_lossy().into_owned()),
     viewport: None,
   };
+
+  if args.pick_locator {
+    ui::note(&format!("picking from {}", ui::url(&url)));
+    ui::note("click the element you want a selector for");
+    let selector = Recorder::new(options)
+      .pick()
+      .await
+      .map_err(|e| anyhow::anyhow!("codegen: {e}"))?;
+    // The selector alone on stdout, so it pipes; everything a reader
+    // needs to see is on stderr already.
+    println!("{selector}");
+    return Ok(());
+  }
+
+  ui::note(&format!("recording from {}", ui::url(&url)));
+  ui::note("interact with the page, then close the browser to finish");
+  let output = args.output.clone();
   Recorder::new(options)
     .start()
     .await

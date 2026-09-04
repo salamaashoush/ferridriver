@@ -66,6 +66,13 @@ pub struct CodegenArgs {
   #[arg(long, default_value = "ts", value_parser = ["ts", "rust", "gherkin"])]
   pub language: String,
 
+  /// Pick one element instead of recording: open the page, wait for a
+  /// click, and print that element's selector. Answers "what do I call
+  /// this" rather than "what did I just do", so nothing is recorded and
+  /// `--language` and `--output` do not apply.
+  #[arg(long)]
+  pub pick_locator: bool,
+
   #[command(flatten)]
   pub browser: BrowserArgs,
 }

@@ -36,6 +36,48 @@ impl Recorder {
     Self { options }
   }
 
+  /// Open the page and hand back the selector for whatever the reader
+  /// clicks.
+  ///
+  /// The recorder answers "what did I just do"; this answers "what do I
+  /// call that", which is the question left over when a selector has to
+  /// go into code someone already wrote. Playwright puts it on the
+  /// recorder's toolbar, which needs a toolbar; here it is a mode of
+  /// its own until there is one.
+  ///
+  /// Waits as long as the reader takes, and ends when the page closes.
+  ///
+  /// # Errors
+  ///
+  /// The launch or navigation error, or a cancellation where the page
+  /// went away before anything was picked.
+  pub async fn pick(&self) -> Result<String> {
+    let browser = chromium()
+      .launch(LaunchOptions {
+        headless: Some(false),
+        ..Default::default()
+      })
+      .await?;
+
+    let ctx_opts = self.options.viewport.map(|(w, h)| BrowserContextOptions {
+      viewport: ViewportOption::Size {
+        width: i64::from(w),
+        height: i64::from(h),
+      },
+      ..Default::default()
+    });
+    let ctx = browser.new_context_impl(ctx_opts, true);
+    let page = Box::pin(ctx.new_page()).await?;
+    page.goto(&self.options.url).await?;
+
+    let picked = page.pick_locator().await?;
+    let selector = picked.selector().to_string();
+    // The reader is done the moment they click, and leaving the window
+    // open would make them close it by hand to get their prompt back.
+    let _ = browser.close().await;
+    Ok(selector)
+  }
+
   /// Run the recorder: launch browser, record, emit code until browser closes or Ctrl+C.
   ///
   /// # Errors
