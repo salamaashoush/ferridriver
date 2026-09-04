@@ -156,6 +156,44 @@ for (const backend of BACKENDS) {
       expect(() => heap.query({ className: "(" })).toThrow(/regular expression/);
     });
 
+    it("narrows the heap to what one thing is holding", async () => {
+      const heap = await page.takeHeapSnapshot();
+      const all = heap.classes();
+
+      // A fraction of the heap, not the heap: a filter that quietly
+      // kept everything would pass any assertion about one class.
+      const detached = heap.classes({ filterName: "objectsRetainedByDetachedDomNodes" });
+      expect(detached.length).toBeGreaterThan(0);
+      expect(detached.length).toBeLessThan(all.length);
+      expect(detached.every((c) => c.name.startsWith("Detached "))).toBe(true);
+
+      const paragraphs = detached.find((c) => c.name === "Detached <p>")!;
+      expect(paragraphs).toBeDefined();
+      const members = heap.classObjects(paragraphs.classKey, {
+        filterName: "objectsRetainedByDetachedDomNodes",
+      });
+      expect(members.length).toBe(paragraphs.count);
+      expect(members.every((m) => m.detachedDOMTreeNode)).toBe(true);
+
+      const realms = heap.nativeContexts();
+      expect(realms.nativeContexts.length).toBeGreaterThan(0);
+      expect(realms.nativeContexts.every((c) => c.nodeName.includes("NativeContext"))).toBe(true);
+      const owner = realms.nativeContexts.find((c) => c.attributedSize > 0)!;
+      expect(owner).toBeDefined();
+      const owned = heap.classes({ filterName: "attributedToNativeContext", objectId: owner.nodeId });
+      expect(owned.length).toBeGreaterThan(0);
+      expect(owned.length).toBeLessThan(all.length);
+
+      const summary = heap.contextSummary();
+      expect(summary.totalSize).toBe(summary.retainedByContextSize + summary.notRetainedByContextSize);
+      expect(summary.contextCount).toBeGreaterThan(0);
+
+      // An unknown name is refused rather than quietly meaning "all",
+      // and the one filter that needs an id says so without one.
+      expect(() => heap.classes({ filterName: "noSuchFilter" as never })).toThrow(/noSuchFilter/);
+      expect(() => heap.classes({ filterName: "attributedToNativeContext" })).toThrow(/objectId/);
+    });
+
     it("names what the page allocated between two snapshots", async () => {
       const before = await page.takeHeapSnapshot();
       await page.evaluate("globalThis.__grow()");

@@ -170,6 +170,89 @@ describe('page.takeHeapSnapshot', () => {
     expect(heap.query({ minSelfSize: 1024, maxSelfSize: 1023 }).length).toBe(0);
   });
 
+  test('narrows the heap to what one thing is holding', async ({ page, browserName }) => {
+    // An iframe, so the page has a second realm, and a detached subtree
+    // whose only route in is the detached node itself.
+    await page.setContent(`<html><body><iframe srcdoc="<p>inner</p>"></iframe><script>
+      const detached = document.createElement('div');
+      for (let i = 0; i < 150; i++) {
+        const row = document.createElement('section');
+        row.textContent = 'row ' + i;
+        detached.append(row);
+      }
+      globalThis.__kept = { detached };
+    </script></body></html>`);
+
+    if (browserName !== 'chromium') {
+      let message = '';
+      try {
+        await page.takeHeapSnapshot();
+      } catch (e) {
+        message = String(e);
+      }
+      expect(message.includes('Chromium')).toBe(true);
+      return;
+    }
+
+    const heap = await page.takeHeapSnapshot();
+    const all = heap.classes();
+
+    // What the detached subtree is holding, which is a fraction of the
+    // heap and not the heap: a filter that quietly kept everything
+    // would pass any assertion about one class.
+    const detached = heap.classes({ filterName: 'objectsRetainedByDetachedDomNodes' });
+    expect(detached.length).toBeGreaterThan(0);
+    expect(detached.length).toBeLessThan(all.length);
+    // Every class it names is a detached one, because the walk avoided
+    // detached nodes and kept only what it therefore could not reach.
+    expect(detached.every((c) => c.name.startsWith('Detached '))).toBe(true);
+    const sections = detached.find((c) => c.name === 'Detached <section>');
+    expect(sections !== undefined).toBe(true);
+    expect(sections!.count).toBe(150);
+
+    // And the members of one of them, under the same filter.
+    const members = heap.classObjects(sections!.classKey, {
+      filterName: 'objectsRetainedByDetachedDomNodes',
+    });
+    expect(members.length).toBe(150);
+    expect(members.every((m) => m.detachedDOMTreeNode)).toBe(true);
+
+    // The iframe is a second realm, and the page's own objects belong
+    // to one of them rather than to both.
+    const realms = heap.nativeContexts();
+    expect(realms.nativeContexts.length).toBeGreaterThan(1);
+    expect(realms.nativeContexts.every((c) => c.nodeName.includes('NativeContext'))).toBe(true);
+    expect(realms.sharedSize).toBeGreaterThan(0);
+    const owner = realms.nativeContexts.find((c) => c.attributedSize > 0);
+    expect(owner !== undefined).toBe(true);
+    const owned = heap.classes({ filterName: 'attributedToNativeContext', objectId: owner!.nodeId });
+    expect(owned.length).toBeGreaterThan(0);
+    expect(owned.length).toBeLessThan(all.length);
+
+    // Closure scopes hold part of the heap and not all of it.
+    const summary = heap.contextSummary();
+    expect(summary.totalSize).toBe(summary.retainedByContextSize + summary.notRetainedByContextSize);
+    expect(summary.contextCount).toBeGreaterThan(0);
+    expect(summary.notRetainedByContextSize).toBeGreaterThan(0);
+
+    // An unknown name is refused rather than quietly meaning "all".
+    let refused = '';
+    try {
+      heap.classes({ filterName: 'noSuchFilter' as never });
+    } catch (e) {
+      refused = String(e);
+    }
+    expect(refused.includes('noSuchFilter')).toBe(true);
+    // And the one filter that needs an id says so when it does not get one.
+    let missing = '';
+    try {
+      heap.classes({ filterName: 'attributedToNativeContext' });
+    } catch (e) {
+      missing = String(e);
+    }
+    expect(missing.includes('objectId')).toBe(true);
+  });
+
   test('a diff names what the page allocated in between', async ({ page, browserName }) => {
     await page.setContent(RETAINING);
     if (browserName !== 'chromium') {

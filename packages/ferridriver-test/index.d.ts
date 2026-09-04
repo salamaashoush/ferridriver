@@ -1013,6 +1013,62 @@ export interface HeapStatistics {
   v8heap: HeapV8Statistics;
 }
 
+/**
+ * Which objects a question is about.
+ *
+ * Four of these answer "what is X holding" by walking the graph
+ * AVOIDING X and keeping whatever the walk could not reach, so what
+ * comes back is what would be freed if X let go. The other three read a
+ * node's realm.
+ */
+export type HeapNodeFilterName =
+  | 'allObjects'
+  | 'objectsRetainedByContexts'
+  | 'objectsRetainedByDetachedDomNodes'
+  | 'objectsRetainedByConsole'
+  | 'objectsRetainedByEventHandlers'
+  | 'sharedNativeContext'
+  | 'noNativeContext'
+  | 'attributedToNativeContext';
+
+export interface HeapClassOptions {
+  filterName?: HeapNodeFilterName;
+  /** The realm `attributedToNativeContext` attributes to. Required for it. */
+  objectId?: number;
+}
+
+/** One JavaScript realm, and how much of the heap it owns. */
+export interface HeapNativeContext {
+  nodeId: number;
+  nodeIndex: number;
+  nodeName: string;
+  /**
+   * Every byte whose owner is this realm, which is not what it retains:
+   * a realm dominates far less than it owns.
+   */
+  attributedSize: number;
+  retainedSize: number;
+  selfSize: number;
+}
+
+/** Every realm, and what belongs to none of them. */
+export interface HeapNativeContexts {
+  nativeContexts: HeapNativeContext[];
+  /** What more than one realm can reach, so no single one is to blame. */
+  sharedSize: number;
+  noAttributionSize: number;
+}
+
+/** How much of the heap only a closure's captured scope is holding. */
+export interface HeapContextSummary {
+  contextCount: number;
+  retainedByContextSize: number;
+  retainedByContextCount: number;
+  notRetainedByContextSize: number;
+  notRetainedByContextCount: number;
+  totalSize: number;
+}
+
 /** What to look for. Every field left out is a filter not applied. */
 export interface HeapQueryOptions {
   /**
@@ -1048,10 +1104,18 @@ export interface HeapSnapshot {
   statistics(): HeapStatistics;
   totalSize(): number;
   nodeCount(): number;
-  /** Every class, heaviest first. */
-  classes(): HeapClass[];
-  /** Every object of one class, by the `classKey` from `classes()`. */
-  classObjects(classKey: string): HeapNode[];
+  /** Every class, heaviest first, or only what one filter keeps. */
+  classes(options?: HeapClassOptions): HeapClass[];
+  /**
+   * Every object of one class, by the `classKey` from `classes()`. The
+   * key has to have come from `classes()` under the SAME filter: a
+   * filter changes which classes there are.
+   */
+  classObjects(classKey: string, options?: HeapClassOptions): HeapNode[];
+  /** Every JavaScript realm, and how much of the heap each one owns. */
+  nativeContexts(): HeapNativeContexts;
+  /** How much of the heap only a closure's captured scope is holding. */
+  contextSummary(): HeapContextSummary;
   object(nodeId: number): HeapObject;
   /** What this object points at. */
   edges(nodeId: number): HeapEdge[];
@@ -1648,6 +1712,15 @@ export interface Page {
   developerTools(): Promise<PageToolGroup[]>;
   executeDeveloperTool(name: string, params?: Record<string, unknown>): Promise<unknown>;
 
+  // Highlight elements under the cursor and resolve with a Locator for
+  // whichever one is clicked. Waits as long as the reader takes;
+  // `cancelPickLocator` ends it without a selection and rejects the
+  // pending call. `ferridriver codegen --pick-locator` is this from a
+  // terminal.
+  pickLocator(): Promise<Locator>;
+  cancelPickLocator(): Promise<void>;
+  hideHighlight(): Promise<void>;
+
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   viewportSize(): { width: number; height: number } | null;
   setExtraHTTPHeaders(headers: Record<string, string>): Promise<void>;
@@ -1797,13 +1870,32 @@ export interface Video {
   delete(): Promise<void>;
 }
 
+/** Every knob `chromium().launch()` reads. */
+export interface LaunchOptions {
+  headless?: boolean;
+  executablePath?: string;
+  args?: string[];
+  channel?: string;
+  slowMo?: number;
+  timeout?: number;
+  downloadsPath?: string;
+  tracesDir?: string;
+  /**
+   * `true` drops every bundled switch; a list drops the named ones.
+   * Chromium-only: it is the only launch path with a switch list, and
+   * the others reject the option rather than filter nothing.
+   */
+  ignoreDefaultArgs?: boolean | string[];
+  proxy?: { server: string; bypass?: string; username?: string; password?: string };
+}
+
 export interface BrowserType {
   name(): string;
   executablePath(): string | null;
-  launch(options?: { headless?: boolean; args?: string[] }): Promise<Browser>;
+  launch(options?: LaunchOptions): Promise<Browser>;
   connect(wsEndpoint: string): Promise<Browser>;
   connectOverCDP(endpoint: string): Promise<Browser>;
-  launchPersistentContext(userDataDir: string, options?: BrowserContextOptions & { headless?: boolean; args?: string[] }): Promise<BrowserContext>;
+  launchPersistentContext(userDataDir: string, options?: BrowserContextOptions & LaunchOptions): Promise<BrowserContext>;
 }
 
 export interface BrowserContextOptions {

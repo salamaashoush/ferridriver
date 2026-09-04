@@ -65,16 +65,51 @@ impl HeapSnapshotJs {
   }
 
   /// Every class, heaviest first.
+  ///
+  /// Options narrow it to what one filter keeps:
+  /// `{ filterName?, objectId? }`, where `filterName` is one of
+  /// `objectsRetainedByContexts`, `objectsRetainedByDetachedDomNodes`,
+  /// `objectsRetainedByConsole`, `objectsRetainedByEventHandlers`,
+  /// `sharedNativeContext`, `noNativeContext` or
+  /// `attributedToNativeContext`, and `objectId` names the realm the
+  /// last of those attributes to.
   #[qjs(rename = "classes")]
-  pub fn classes<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    serde_to_js(&ctx, &self.inner.classes())
+  pub fn classes<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+    let filter = parse_filter(&ctx, options)?;
+    let classes = self.inner.classes_with_filter(filter).into_js_with(&ctx)?;
+    serde_to_js(&ctx, &classes)
   }
 
   /// Every object of one class, by the `classKey` from `classes()`.
+  ///
+  /// Takes the same options, and the key has to have come from
+  /// `classes()` under the SAME filter: a filter changes which classes
+  /// there are.
   #[qjs(rename = "classObjects")]
-  pub fn class_objects<'js>(&self, ctx: Ctx<'js>, class_key: String) -> rquickjs::Result<Value<'js>> {
-    let objects = self.inner.class_objects(&class_key).into_js_with(&ctx)?;
+  pub fn class_objects<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    class_key: String,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<Value<'js>> {
+    let filter = parse_filter(&ctx, options)?;
+    let objects = self
+      .inner
+      .class_objects_with_filter(&class_key, filter)
+      .into_js_with(&ctx)?;
     serde_to_js(&ctx, &objects)
+  }
+
+  /// Every JavaScript realm, and how much of the heap each one owns.
+  #[qjs(rename = "nativeContexts")]
+  pub fn native_contexts<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    serde_to_js(&ctx, &self.inner.native_contexts())
+  }
+
+  /// How much of the heap only a closure's captured scope is holding.
+  #[qjs(rename = "contextSummary")]
+  pub fn context_summary<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    serde_to_js(&ctx, &self.inner.context_summary())
   }
 
   /// What one object is.
@@ -158,6 +193,26 @@ impl HeapSnapshotJs {
     let base = base.borrow().inner.clone();
     serde_to_js(&ctx, &self.inner.diff_since(&base))
   }
+}
+
+/// `{ filterName?, objectId? }` into the typed filter, through the
+/// core's own parser so this and the NAPI binding cannot disagree about
+/// an unknown name.
+fn parse_filter<'js>(ctx: &Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<ferridriver::heap::NodeFilter> {
+  let parsed: JsNodeFilter = match options.into_inner() {
+    Some(value) if !value.is_undefined() && !value.is_null() => serde_from_js(ctx, value)?,
+    _ => JsNodeFilter::default(),
+  };
+  ferridriver::heap::NodeFilter::parse(parsed.filter_name.as_deref(), parsed.object_id.map(node_id_of)).map_err(|e| {
+    crate::bindings::convert::to_rq_error(&ferridriver::FerriError::invalid_argument("filter", e.to_string()))
+  })
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct JsNodeFilter {
+  filter_name: Option<String>,
+  object_id: Option<f64>,
 }
 
 /// JS hands numbers as `f64`; an object id is a positive integer well

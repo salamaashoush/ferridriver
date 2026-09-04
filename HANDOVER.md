@@ -20,7 +20,7 @@ Gates that exist, and what each one actually proves:
 | `just a11y-diff` | `page.checkAccessibility()` still agrees with Lighthouse's axe verdicts on three fixture pages |
 | `just quality-diff` | The ten ported live-page audits still agree with Lighthouse |
 | `just robots-diff` | Our `robots.txt` parser still agrees with `robots-parser` 3.0.1, which is what `is-crawlable` really has to agree with |
-| `just heap-diff` | Our reading of a `.heapsnapshot` still agrees with DevTools' own heap engine, over four snapshots in two pairs: 200 nodes apiece, every node-addressed query, the searches, and what a diff of each pair reports |
+| `just heap-diff` | Our reading of a `.heapsnapshot` still agrees with DevTools' own heap engine, over four snapshots in two pairs: 200 nodes apiece, every node-addressed query, the searches, all seven named node filters, the realm attribution, and what a diff of each pair reports |
 | `just lh-record` | Re-derives the recordings the two above compare against |
 | `just lh-audit <url>` | What Lighthouse concludes about any live page, for exploring |
 | `just test` | All of the offline halves, plus 2163 e2e across four backends, 598 BDD, 1111 NAPI, and the e2e typecheck |
@@ -101,18 +101,22 @@ not read anywhere:
 
 | Domain | Headless | Headful |
 |---|---|---|
-| `Extensions.*` | absent | present, once `--disable-extensions` is dropped and `--enable-unsafe-extension-debugging` added |
+| `Extensions.*` | absent | present, and headful is the whole of it: neither `--enable-unsafe-extension-debugging` nor dropping `--disable-extensions` changes the answer either way |
 | `PWA.*` | absent | present (`getOsAppState` answers "Unknown web-app manifest id", which is the domain replying) |
 | `WebMCP.*` | present | present |
 
 **`Extensions` and `PWA` are headful-only**, and every e2e project runs
 headless. That is not a backend-dependent verdict to route around; it is
 a browser mode the suite does not have, and closing the row means
-deciding how a headful-only spec runs at all. It also needs
-`ignoreDefaultArgs` on the launch surface, which the Rust core has
-(`LaunchOptions::ignore_default_args`) and NEITHER binding layer
-exposes. That is a parity gap of its own and the smallest first step
-here.
+deciding how a headful-only spec runs at all.
+
+Do not go looking for a switch that turns them on headless. An earlier
+pass here recorded that `Extensions` needed `--disable-extensions`
+dropped and `--enable-unsafe-extension-debugging` added, on the strength
+of one measurement that had two variables in it. Measured one at a time,
+neither matters: headful answers with or without them, headless answers
+with neither. The flag is what Puppeteer sends and what upstream's own
+docs name, and on this build it changes nothing.
 
 **`WebMCP` has the domain and not the API.** `WebMCP.enable` succeeds,
 but nothing on the page can register a tool for it to report:
@@ -152,18 +156,6 @@ snapshot ref surface rather than about these two methods.
 Each is recorded in the module doc where it applies; this is the index,
 not the detail.
 
-- **The heap snapshot's named node filters.** `aggregatesWithFilter`
-  takes a `NodeFilter`, and `get_heapsnapshot_details` /
-  `get_heapsnapshot_class_nodes` expose seven names for it:
-  `objectsRetainedByDetachedDomNodes`, `objectsRetainedByConsole`,
-  `objectsRetainedByEventHandlers`, `objectsRetainedByContexts`,
-  `sharedNativeContext`, `noNativeContext` and
-  `attributedToSpecificNativeContext`. Ours is the unfiltered call,
-  which is what a default `NodeFilter` produces. The same pass would
-  bring `getNativeContextSizes` and `getRetainedByContextSummary`, which
-  are the other half of `get_heapsnapshot_summary`. All of it is in
-  `HeapSnapshot.ts::createNamedFilter`, and all of it is comparable
-  through `just heap-diff` the way everything else there is.
 - **Source-mapped console stack traces.** `chrome-devtools-mcp` resolves
   frames through source maps; we report raw positions.
 - **`DuplicatedJavaScript`** detects byte-identical bodies at several
@@ -172,8 +164,14 @@ not the detail.
 - **`LegacyJavaScript`** has no source-map pass, so a heavily minified
   bundle may under-report.
 - **`CLSCulprits`** does not attribute non-composited animations.
-- **Codegen has no picker window.** `page.pickLocator()` exists as an
-  API and is not wired into `ferridriver codegen`.
+- **Codegen has no picker TOOLBAR.** `ferridriver codegen
+  --pick-locator` now opens the page, waits for a click and prints the
+  selector, and `page.pickLocator()` is declared in the types package so
+  a spec can call it. What is still missing is Playwright's affordance:
+  its picker is a button on the recorder's own toolbar, so a recording
+  can be paused to ask what something is called and then resumed. Ours
+  is a separate mode because there is no toolbar to put a button on, and
+  building one is a bigger question than this bullet.
 - **`SlowCSSSelector`** disagrees with upstream on purpose.
   `STATE_DIVERGENCES` in `crates/ferridriver-perf/tests/differential.rs`
   records why. Do not "fix" it to reach nineteen out of nineteen.
@@ -224,6 +222,15 @@ skipping it produced a wrong answer that survived review.
    settled it in an hour.
 
 ## Known flake
+
+`context_options_accept_downloads_denies` on `bidi`
+(`tests/e2e/context-options.test.ts:618`) failed once in a full run and
+passed three consecutive isolated runs of the file afterwards. What
+failed is `dl.failure()` answering `null` rather than the refusal
+message, so the download's failure state had not settled by the time the
+event resolved. If it recurs, the question is whether Firefox reports a
+refused download's failure in the same event that announces it, or in a
+later one the wait does not cover.
 
 `route_from_har` on `cdp-pipe` (`tests/e2e/network.test.ts:141`) failed
 once in four full-suite runs, then passed three consecutive full runs

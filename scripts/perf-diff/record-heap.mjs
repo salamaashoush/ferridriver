@@ -108,6 +108,21 @@ const QUERIES = [
 ];
 
 /**
+ * The named node filters `get_heapsnapshot_details` and
+ * `get_heapsnapshot_class_nodes` expose, minus the one that names a
+ * specific native context: that takes an object id, which differs
+ * between fixtures, so it is picked per snapshot below.
+ */
+const NAMED_FILTERS = [
+  'objectsRetainedByContexts',
+  'objectsRetainedByDetachedDomNodes',
+  'objectsRetainedByConsole',
+  'objectsRetainedByEventHandlers',
+  'sharedNativeContext',
+  'noNativeContext',
+];
+
+/**
  * The retaining-path limits. The first is what the tool sends; the rest
  * are tight enough that each of the three bounds bites on its own, so
  * `limitsReached` is something other than empty in the recording.
@@ -272,7 +287,7 @@ async function analyse(snapshot, nodeFieldCount) {
   // Every eligible node where there are few enough to afford it: a
   // hand-built snapshot holds one node per branch, and a stride over
   // twenty of them would walk past most of what it was built for.
-  const pathStride = reachable.length <= 24 ? 1 : Math.max(1, Math.floor(reachable.length / PATH_SAMPLE_SIZE));
+  const pathStride = reachable.length <= 48 ? 1 : Math.max(1, Math.floor(reachable.length / PATH_SAMPLE_SIZE));
   const mostPaths = pathStride === 1 ? reachable.length : PATH_SAMPLE_SIZE;
   const sampledPaths = [];
   for (let at = 0; at < reachable.length && sampledPaths.length < mostPaths; at += pathStride) {
@@ -334,6 +349,34 @@ async function analyse(snapshot, nodeFieldCount) {
     queries.push({ query, ...(await head(snapshot.queryObjects(query))) });
   }
 
+  // Each named filter, and one more naming a native context this
+  // snapshot actually holds -- an id, so it has to be read off the
+  // snapshot rather than written down.
+  const nativeContextSizes = await snapshot.getNativeContextSizes();
+  const filterNames = [...NAMED_FILTERS];
+  const firstContext = nativeContextSizes.nativeContexts[0];
+  if (firstContext) {
+    filterNames.push(`nativeContext_${firstContext.nodeIndex}`);
+  }
+  const namedFilters = [];
+  for (const filterName of filterNames) {
+    const filter = new DevTools.HeapSnapshotModel.HeapSnapshotModel.NodeFilter();
+    filter.filterName = filterName;
+    const filtered = await snapshot.aggregatesWithFilter(filter);
+    const keys = Object.keys(filtered).sort();
+    namedFilters.push({
+      filterName,
+      // The whole class map: a filter that quietly kept everything and
+      // one that kept the right thing agree on any single class.
+      aggregates: filtered,
+      // Plus the provider over one of them, which is the other half of
+      // what the filter is for.
+      classNodes: keys.length
+        ? { classKey: keys[0], ...(await head(snapshot.createNodesProviderForClass(keys[0], filter))) }
+        : null,
+    });
+  }
+
   return {
     statistics,
     staticData,
@@ -342,6 +385,9 @@ async function analyse(snapshot, nodeFieldCount) {
     retainingPaths,
     classNodes,
     queries,
+    namedFilters,
+    nativeContextSizes,
+    retainedByContextSummary: await snapshot.getRetainedByContextSummary(),
     duplicateStrings: await snapshot.getDuplicateStrings(),
     aggregates,
   };

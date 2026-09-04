@@ -37,8 +37,9 @@ use crate::error::{FerriError, Result};
 // re-exported here rather than making every binding layer depend on
 // `ferridriver-heap` directly.
 pub use ferridriver_heap::{
-  DominatorStep, DuplicateStringGroup, DuplicateStringNode, EdgeSummary, LimitsReached, NativeStatistics, NodeSummary,
-  ObjectInfo, ObjectQuery, PathLimits, QuerySort, RetainingEdge, RetainingPaths, Statistics, V8Statistics,
+  DominatorStep, DuplicateStringGroup, DuplicateStringNode, EdgeSummary, LimitsReached, NativeContextSize,
+  NativeContextSizes, NativeStatistics, NodeFilter, NodeSummary, ObjectInfo, ObjectQuery, PathLimits, QuerySort,
+  RetainedByContextSummary, RetainingEdge, RetainingPaths, Statistics, V8Statistics,
 };
 
 /// One class of objects, counted and measured.
@@ -146,9 +147,11 @@ impl HeapSnapshot {
   /// class at the top is where the memory went.
   #[must_use]
   pub fn classes(&self) -> Vec<HeapClass> {
-    let mut classes: Vec<HeapClass> = self
-      .analysis
-      .aggregates()
+    Self::sorted_classes(self.analysis.aggregates())
+  }
+
+  fn sorted_classes(aggregates: std::collections::BTreeMap<String, ferridriver_heap::Aggregate>) -> Vec<HeapClass> {
+    let mut classes: Vec<HeapClass> = aggregates
       .into_iter()
       .map(|(class_key, aggregate)| HeapClass {
         class_key,
@@ -167,6 +170,26 @@ impl HeapSnapshot {
     classes
   }
 
+  /// Every class, over only the objects a filter keeps.
+  ///
+  /// Four of the filters answer "what is X holding" by walking the
+  /// graph AVOIDING X and keeping what the walk missed, so what comes
+  /// back is what would be freed if X let go. The other three read a
+  /// node's realm.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`FerriError::InvalidArgument`] where
+  /// [`NodeFilter::AttributedToNativeContext`] names an id that is not
+  /// a native context in this snapshot.
+  pub fn classes_with_filter(&self, filter: NodeFilter) -> Result<Vec<HeapClass>> {
+    let aggregates = self
+      .analysis
+      .aggregates_with_filter(filter)
+      .map_err(|e| FerriError::invalid_argument("filter", e.to_string()))?;
+    Ok(Self::sorted_classes(aggregates))
+  }
+
   /// Every object of one class, in the order the heap holds them.
   ///
   /// # Errors
@@ -178,6 +201,37 @@ impl HeapSnapshot {
       .analysis
       .nodes_for_class(class_key)
       .ok_or_else(|| FerriError::invalid_argument("classKey", format!("no class {class_key:?} in this snapshot")))
+  }
+
+  /// The same, over only the objects a filter keeps. The key has to
+  /// come from [`HeapSnapshot::classes_with_filter`] under the SAME
+  /// filter: a filter changes which classes exist.
+  ///
+  /// # Errors
+  ///
+  /// As [`HeapSnapshot::class_objects`] and
+  /// [`HeapSnapshot::classes_with_filter`].
+  pub fn class_objects_with_filter(&self, class_key: &str, filter: NodeFilter) -> Result<Vec<NodeSummary>> {
+    self
+      .analysis
+      .nodes_for_class_with_filter(class_key, filter)
+      .map_err(|e| FerriError::invalid_argument("filter", e.to_string()))?
+      .ok_or_else(|| FerriError::invalid_argument("classKey", format!("no class {class_key:?} under this filter")))
+  }
+
+  /// Every JavaScript realm, and how much of the heap each one owns.
+  ///
+  /// A page with an iframe has more than one, and an object's realm is
+  /// three hops away through its Map: nothing on the object says which.
+  #[must_use]
+  pub fn native_contexts(&self) -> NativeContextSizes {
+    self.analysis.native_context_sizes()
+  }
+
+  /// How much of the heap only a closure's captured scope is holding.
+  #[must_use]
+  pub fn context_summary(&self) -> RetainedByContextSummary {
+    self.analysis.retained_by_context_summary()
   }
 
   /// What one object is: its name, type, sizes, distance from a root

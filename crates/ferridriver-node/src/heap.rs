@@ -219,6 +219,102 @@ impl From<HeapRetainingPathOptions> for ferridriver::heap::PathLimits {
   }
 }
 
+/// Which objects a question is about.
+///
+/// `filterName` narrows the heap; `objectId` names the realm that
+/// `attributedToNativeContext` attributes to and is required only for
+/// that one.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct HeapClassOptions {
+  #[napi(
+    ts_type = "'allObjects' | 'objectsRetainedByContexts' | 'objectsRetainedByDetachedDomNodes' | 'objectsRetainedByConsole' | 'objectsRetainedByEventHandlers' | 'sharedNativeContext' | 'noNativeContext' | 'attributedToNativeContext'"
+  )]
+  pub filter_name: Option<String>,
+  pub object_id: Option<i64>,
+}
+
+/// Through the core's own parser, so this and the QuickJS binding
+/// cannot disagree about what an unknown name means.
+fn node_filter(options: Option<HeapClassOptions>) -> Result<ferridriver::heap::NodeFilter> {
+  let options = options.unwrap_or_default();
+  ferridriver::heap::NodeFilter::parse(
+    options.filter_name.as_deref(),
+    options.object_id.map(|id| id.unsigned_abs()),
+  )
+  .map_err(|e| napi::Error::from_reason(e.to_string()))
+}
+
+/// One JavaScript realm, and how much of the heap it owns.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct HeapNativeContext {
+  pub node_id: i64,
+  pub node_index: i64,
+  pub node_name: String,
+  /// Every byte whose owner is this realm, which is not what it
+  /// retains: a realm dominates far less than it owns.
+  pub attributed_size: i64,
+  pub retained_size: i64,
+  pub self_size: i64,
+}
+
+/// Every realm, and what belongs to none of them.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct HeapNativeContexts {
+  pub native_contexts: Vec<HeapNativeContext>,
+  /// What more than one realm can reach, so no single one is to blame.
+  pub shared_size: i64,
+  pub no_attribution_size: i64,
+}
+
+impl From<ferridriver::heap::NativeContextSizes> for HeapNativeContexts {
+  fn from(sizes: ferridriver::heap::NativeContextSizes) -> Self {
+    Self {
+      native_contexts: sizes
+        .native_contexts
+        .into_iter()
+        .map(|context| HeapNativeContext {
+          node_id: context.node_id as i64,
+          node_index: context.node_index as i64,
+          node_name: context.node_name,
+          attributed_size: context.attributed_size as i64,
+          retained_size: context.retained_size as i64,
+          self_size: context.self_size as i64,
+        })
+        .collect(),
+      shared_size: sizes.shared_size as i64,
+      no_attribution_size: sizes.no_attribution_size as i64,
+    }
+  }
+}
+
+/// How much of the heap only a closure's captured scope is holding.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct HeapContextSummary {
+  pub context_count: i64,
+  pub retained_by_context_size: i64,
+  pub retained_by_context_count: i64,
+  pub not_retained_by_context_size: i64,
+  pub not_retained_by_context_count: i64,
+  pub total_size: i64,
+}
+
+impl From<ferridriver::heap::RetainedByContextSummary> for HeapContextSummary {
+  fn from(summary: ferridriver::heap::RetainedByContextSummary) -> Self {
+    Self {
+      context_count: summary.context_count as i64,
+      retained_by_context_size: summary.retained_by_context_size as i64,
+      retained_by_context_count: summary.retained_by_context_count as i64,
+      not_retained_by_context_size: summary.not_retained_by_context_size as i64,
+      not_retained_by_context_count: summary.not_retained_by_context_count as i64,
+      total_size: summary.total_size as i64,
+    }
+  }
+}
+
 /// One class of objects, counted and measured.
 #[napi(object)]
 #[derive(Debug, Clone)]
@@ -475,24 +571,53 @@ impl HeapSnapshot {
     self.inner.node_count() as i64
   }
 
-  /// Every class, heaviest first.
+  /// Every class, heaviest first, or only what one filter keeps.
+  ///
+  /// Four of the filters answer "what is X holding" by walking the
+  /// graph AVOIDING X and keeping what the walk missed, so what comes
+  /// back is what would be freed if X let go.
   #[napi]
-  pub fn classes(&self) -> Vec<HeapClass> {
-    self.inner.classes().into_iter().map(Into::into).collect()
-  }
-
-  /// Every object of one class, by the `classKey` from `classes()`.
-  #[napi]
-  pub fn class_objects(&self, class_key: String) -> Result<Vec<HeapNode>> {
+  pub fn classes(&self, options: Option<HeapClassOptions>) -> Result<Vec<HeapClass>> {
+    let filter = node_filter(options)?;
     Ok(
       self
         .inner
-        .class_objects(&class_key)
+        .classes_with_filter(filter)
         .into_napi()?
         .into_iter()
         .map(Into::into)
         .collect(),
     )
+  }
+
+  /// Every object of one class, by the `classKey` from `classes()`.
+  ///
+  /// The key has to have come from `classes()` under the SAME filter: a
+  /// filter changes which classes there are.
+  #[napi]
+  pub fn class_objects(&self, class_key: String, options: Option<HeapClassOptions>) -> Result<Vec<HeapNode>> {
+    let filter = node_filter(options)?;
+    Ok(
+      self
+        .inner
+        .class_objects_with_filter(&class_key, filter)
+        .into_napi()?
+        .into_iter()
+        .map(Into::into)
+        .collect(),
+    )
+  }
+
+  /// Every JavaScript realm, and how much of the heap each one owns.
+  #[napi]
+  pub fn native_contexts(&self) -> HeapNativeContexts {
+    self.inner.native_contexts().into()
+  }
+
+  /// How much of the heap only a closure's captured scope is holding.
+  #[napi]
+  pub fn context_summary(&self) -> HeapContextSummary {
+    self.inner.context_summary().into()
   }
 
   /// What one object is.

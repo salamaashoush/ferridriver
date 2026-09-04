@@ -506,7 +506,25 @@ impl Analysis {
   /// would merge them.
   #[must_use]
   pub fn aggregates(&self) -> std::collections::BTreeMap<String, Aggregate> {
-    self.aggregates_under(&self.class_index, &[], false)
+    self.aggregates_under(&self.class_index, &[], false, None)
+  }
+
+  /// The same grouping over only the objects a filter keeps.
+  ///
+  /// The filter applies to BOTH halves: what each class holds is walked
+  /// down the dominator tree crediting only kept nodes, so a class's
+  /// retained total is what it holds of the filtered set rather than of
+  /// the heap.
+  ///
+  /// # Errors
+  ///
+  /// As [`Analysis::node_filter`].
+  pub fn aggregates_with_filter(
+    &self,
+    filter: crate::NodeFilter,
+  ) -> crate::Result<std::collections::BTreeMap<String, Aggregate>> {
+    let mask = self.node_filter(filter)?;
+    Ok(self.aggregates_under(&self.class_index, &[], false, Some(&mask)))
   }
 
   /// The same grouping under another snapshot's shape names, with each
@@ -523,7 +541,7 @@ impl Analysis {
     definitions: &[InterfaceDefinition],
   ) -> std::collections::BTreeMap<String, Aggregate> {
     let classification = self.classify_under(definitions);
-    self.aggregates_under(&classification.class_index, &classification.extra, true)
+    self.aggregates_under(&classification.class_index, &classification.extra, true, None)
   }
 
   fn aggregates_under(
@@ -531,11 +549,15 @@ impl Analysis {
     class_index: &[usize],
     extra: &[String],
     by_id: bool,
+    mask: Option<&[bool]>,
   ) -> std::collections::BTreeMap<String, Aggregate> {
     let snapshot = &self.snapshot;
     let mut by_key: rustc_hash::FxHashMap<ClassKey, Aggregate> = rustc_hash::FxHashMap::default();
 
     for ordinal in 0..snapshot.node_count {
+      if mask.is_some_and(|mask| !mask[ordinal]) {
+        continue;
+      }
       // A node with no size of its own adds nothing to a total, and
       // upstream leaves it out rather than reporting a class of zeroes.
       let self_size = snapshot.node_self_size(ordinal);
@@ -561,7 +583,7 @@ impl Analysis {
         });
     }
 
-    self.add_retained_sizes_per_class(&mut by_key, class_index, extra);
+    self.add_retained_sizes_per_class(&mut by_key, class_index, extra, mask);
 
     let mut out = std::collections::BTreeMap::new();
     for (key, mut aggregate) in by_key {
@@ -588,6 +610,7 @@ impl Analysis {
     aggregates: &mut rustc_hash::FxHashMap<ClassKey, Aggregate>,
     class_index: &[usize],
     extra: &[String],
+    mask: Option<&[bool]>,
   ) {
     let mut stack = vec![0usize];
     // Where in the walk each currently-open class was entered.
@@ -601,6 +624,7 @@ impl Analysis {
       let dominated = self.first_dominated[ordinal]..self.first_dominated[ordinal + 1];
 
       if !already_inside
+        && mask.is_none_or(|mask| mask[ordinal])
         && self.snapshot.node_self_size(ordinal) > 0
         && let Some(aggregate) = aggregates.get_mut(&key)
       {
@@ -653,12 +677,33 @@ impl Analysis {
   /// unsorted ones, and serialises them without a comparator.
   #[must_use]
   pub fn nodes_for_class(&self, class_key: &str) -> Option<Vec<NodeSummary>> {
-    let aggregate = self.aggregates().remove(class_key)?;
+    self.members(&self.aggregates(), class_key)
+  }
+
+  /// The same, over only the objects a filter keeps.
+  ///
+  /// # Errors
+  ///
+  /// As [`Analysis::node_filter`].
+  pub fn nodes_for_class_with_filter(
+    &self,
+    class_key: &str,
+    filter: crate::NodeFilter,
+  ) -> crate::Result<Option<Vec<NodeSummary>>> {
+    Ok(self.members(&self.aggregates_with_filter(filter)?, class_key))
+  }
+
+  fn members(
+    &self,
+    aggregates: &std::collections::BTreeMap<String, Aggregate>,
+    class_key: &str,
+  ) -> Option<Vec<NodeSummary>> {
     Some(
-      aggregate
+      aggregates
+        .get(class_key)?
         .idxs
-        .into_iter()
-        .map(|at| self.node_summary(at / self.snapshot.node_layout.field_count))
+        .iter()
+        .map(|&at| self.node_summary(at / self.snapshot.node_layout.field_count))
         .collect(),
     )
   }

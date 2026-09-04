@@ -69,8 +69,8 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use ferridriver_heap::{
-  Aggregate, Analysis, ClassDiff, DominatorStep, DuplicateStringGroup, EdgeSummary, NodeSummary, ObjectInfo,
-  PathLimits, RetainingPaths, Snapshot, search::ObjectQuery,
+  Aggregate, Analysis, ClassDiff, DominatorStep, DuplicateStringGroup, EdgeSummary, NativeContextSizes, NodeFilter,
+  NodeSummary, ObjectInfo, PathLimits, RetainedByContextSummary, RetainingPaths, Snapshot, search::ObjectQuery,
 };
 use serde::Deserialize;
 
@@ -95,6 +95,13 @@ struct Recording {
   class_nodes: Vec<RecordedClass>,
   /// The head of what the object query answered, per query.
   queries: Vec<RecordedQuery>,
+  /// What each named node filter kept.
+  #[serde(rename = "namedFilters")]
+  named_filters: Vec<RecordedFilter>,
+  #[serde(rename = "nativeContextSizes")]
+  native_context_sizes: NativeContextSizes,
+  #[serde(rename = "retainedByContextSummary")]
+  retained_by_context_summary: RetainedByContextSummary,
   /// Which snapshot this one is a diff against, and what changed.
   #[serde(rename = "diffFrom")]
   diff_from: Option<String>,
@@ -133,6 +140,15 @@ impl From<&RecordedLimits> for PathLimits {
       siblings: limits.siblings,
     }
   }
+}
+
+#[derive(Deserialize)]
+struct RecordedFilter {
+  #[serde(rename = "filterName")]
+  filter_name: String,
+  aggregates: BTreeMap<String, Aggregate>,
+  #[serde(rename = "classNodes")]
+  class_nodes: Option<RecordedClass>,
 }
 
 #[derive(Deserialize)]
@@ -539,6 +555,120 @@ fn the_searches_answer_what_the_engine_answers() {
   }
 }
 
+/// The named node filters, and the two summaries built on the same
+/// attribution.
+///
+/// Compared as WHOLE class maps rather than class by class. Each of
+/// these filters walks the graph avoiding something and keeps what the
+/// walk missed, so the failure they invite is keeping too much: a
+/// comparison that checked only the classes it expected would pass
+/// against a filter that kept the entire heap.
+#[test]
+fn the_named_filters_answer_what_the_engine_answers() {
+  for (name, recording) in recordings() {
+    let analysis = analysed(&name);
+    let mut differences = Vec::new();
+
+    for recorded in &recording.named_filters {
+      let filter = parse_filter(&analysis, &recorded.filter_name);
+      let ours = analysis
+        .aggregates_with_filter(filter)
+        .unwrap_or_else(|e| panic!("{name}: filter {}: {e}", recorded.filter_name));
+
+      for (key, engine) in &recorded.aggregates {
+        match ours.get(key) {
+          None => differences.push(format!(
+            "{}: class {key} is the engine's and not ours",
+            recorded.filter_name
+          )),
+          Some(ours) if ours != engine => {
+            differences.push(format!(
+              "{}: class {key}:\n    engine {engine:?}\n    ours   {ours:?}",
+              recorded.filter_name
+            ));
+          },
+          Some(_) => {},
+        }
+      }
+      for key in ours.keys() {
+        if !recorded.aggregates.contains_key(key) {
+          differences.push(format!(
+            "{}: class {key} is ours and not the engine's",
+            recorded.filter_name
+          ));
+        }
+      }
+
+      // And the provider over one of those classes, which is the other
+      // half of what a filter is for.
+      if let Some(class) = &recorded.class_nodes {
+        match analysis
+          .nodes_for_class_with_filter(&class.class_key, filter)
+          .unwrap_or_else(|e| panic!("{name}: filter {}: {e}", recorded.filter_name))
+        {
+          None => differences.push(format!(
+            "{}: class {} has members for the engine and none for us",
+            recorded.filter_name, class.class_key
+          )),
+          Some(ours) => compare_items(
+            &mut differences,
+            &format!("{} class {}", recorded.filter_name, class.class_key),
+            &ours,
+            class.total,
+            &class.items,
+          ),
+        }
+      }
+    }
+
+    let ours = analysis.native_context_sizes();
+    if ours != recording.native_context_sizes {
+      differences.push(format!(
+        "native context sizes:\n    engine {:?}\n    ours   {ours:?}",
+        recording.native_context_sizes
+      ));
+    }
+
+    let ours = analysis.retained_by_context_summary();
+    if ours != recording.retained_by_context_summary {
+      differences.push(format!(
+        "retained-by-context summary:\n    engine {:?}\n    ours   {ours:?}",
+        recording.retained_by_context_summary
+      ));
+    }
+
+    assert!(
+      differences.is_empty(),
+      "our filters over {name} disagree with the `DevTools` heap engine in {} place(s):\n  {}",
+      differences.len(),
+      differences.join("\n  ")
+    );
+  }
+}
+
+/// The engine names its filters with strings; the one that picks a
+/// single native context carries a node INDEX, which this turns back
+/// into the object id our surface takes.
+fn parse_filter(analysis: &Analysis, name: &str) -> NodeFilter {
+  match name {
+    "objectsRetainedByContexts" => NodeFilter::ObjectsRetainedByContexts,
+    "objectsRetainedByDetachedDomNodes" => NodeFilter::ObjectsRetainedByDetachedDomNodes,
+    "objectsRetainedByConsole" => NodeFilter::ObjectsRetainedByConsole,
+    "objectsRetainedByEventHandlers" => NodeFilter::ObjectsRetainedByEventHandlers,
+    "sharedNativeContext" => NodeFilter::SharedNativeContext,
+    "noNativeContext" => NodeFilter::NoNativeContext,
+    other => {
+      let index: usize = other
+        .strip_prefix("nativeContext_")
+        .unwrap_or_else(|| panic!("unknown filter {other}"))
+        .parse()
+        .unwrap_or_else(|e| panic!("filter {other}: {e}"));
+      let ordinal = index / analysis.snapshot.node_layout.field_count;
+      NodeFilter::AttributedToNativeContext(analysis.snapshot.node_id(ordinal))
+    },
+  }
+}
+
 /// What one snapshot holds that the earlier one did not.
 #[test]
 fn the_diff_agrees_with_the_engine() {
@@ -773,11 +903,90 @@ fn the_fixtures_still_carry_something_worth_comparing() {
 
     if handmade {
       the_handmade_shapes_are_all_still_there(name, recording);
+      the_filters_still_discriminate(name, recording);
     }
     the_search_answers_are_worth_comparing(name, recording);
   }
 
   the_recording_covers_both_halves_of_a_pair(&recordings);
+}
+
+/// The one object each named filter was built to find, and nothing else.
+///
+/// A filter that quietly kept the whole heap would agree with the
+/// engine about every class it was asked about, so what is asserted
+/// here is the EXACT set: one class reachable only through the thing
+/// that filter avoids, and no others.
+///
+/// Each of these was confirmed by deleting the code that handles it and
+/// watching the comparison go red. `objectsRetainedByConsole` and
+/// `objectsRetainedByEventHandlers` find nothing at all on the captured
+/// page -- a headless run opens no console and the fixture installs no
+/// listener -- so this fixture is the only thing testing them.
+fn the_filters_still_discriminate(name: &str, recording: &Recording) {
+  let all = recording.aggregates.len();
+  let kept = |filter: &str| -> Vec<&str> {
+    let recorded = recording
+      .named_filters
+      .iter()
+      .find(|recorded| recorded.filter_name == filter)
+      .unwrap_or_else(|| panic!("{name}: the {filter} filter is not in the recording"));
+    assert!(
+      recorded.aggregates.len() < all,
+      "{name}: {filter} kept all {all} classes, so it is not filtering"
+    );
+    let mut keys: Vec<&str> = recorded.aggregates.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    keys
+  };
+
+  assert_eq!(
+    kept("objectsRetainedByContexts"),
+    [",(system)", ",CapturedOnly"],
+    "{name}: the object behind a closure scope is gone"
+  );
+  assert_eq!(
+    kept("objectsRetainedByDetachedDomNodes"),
+    [",Detached HTMLDivElement", ",Detached HTMLParagraphElement"],
+    "{name}: the detached subtree is gone"
+  );
+  assert_eq!(
+    kept("objectsRetainedByConsole"),
+    [",ConsolePinned"],
+    "{name}: nothing is pinned by a console-named edge from a synthetic node"
+  );
+  // The handler closure, its code, and the object only it holds. Both
+  // listener shapes contribute: one whose callback carries the code and
+  // one whose callback is a wrapper with the code a level down.
+  assert_eq!(
+    kept("objectsRetainedByEventHandlers"),
+    [",(compiled code)", ",Function", ",HandlerOnly"],
+    "{name}: the event-handler shapes are gone"
+  );
+  assert_eq!(
+    kept("sharedNativeContext"),
+    [",SharedAcrossRealms"],
+    "{name}: nothing is reached from two realms, so shared cannot tell itself from owned"
+  );
+
+  let sizes = &recording.native_context_sizes;
+  assert!(
+    sizes.native_contexts.len() >= 2,
+    "{name}: {} realm(s), so ownership cannot tell itself from sharing",
+    sizes.native_contexts.len()
+  );
+  assert!(
+    sizes.shared_size > 0 && sizes.no_attribution_size > 0,
+    "{name}: nothing is shared or unattributed, so two thirds of the attribution is untested"
+  );
+  assert!(
+    sizes.native_contexts.iter().any(|context| context.attributed_size > 0),
+    "{name}: no realm owns anything, so the Map -> meta-Map -> native_context walk is untested"
+  );
+  assert!(
+    recording.retained_by_context_summary.context_count > 0,
+    "{name}: no closure scope survives the shallow-size pass, so the count is nought either way"
+  );
 }
 
 /// A search that matches nothing agrees with the engine by both sides

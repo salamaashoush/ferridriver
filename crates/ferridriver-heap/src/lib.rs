@@ -35,6 +35,7 @@
 pub mod analysis;
 pub mod diff;
 pub mod error;
+pub mod filters;
 pub mod format;
 pub mod paths;
 pub mod query;
@@ -43,6 +44,7 @@ pub mod search;
 pub use analysis::{Analysis, Classification, InterfaceDefinition, NativeStatistics, Statistics, V8Statistics};
 pub use diff::ClassDiff;
 pub use error::{HeapError, Result};
+pub use filters::{NativeContextSize, NativeContextSizes, NodeFilter, RetainedByContextSummary};
 pub use format::Snapshot;
 pub use paths::{LimitsReached, PathLimits, RetainingEdge, RetainingPaths};
 pub use query::{

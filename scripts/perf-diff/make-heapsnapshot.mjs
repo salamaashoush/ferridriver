@@ -197,6 +197,58 @@ for (const [property, ids] of [
   }
 }
 
+// ── The shapes the named node filters exist to find ────────────────────
+//
+// Each filter walks the graph AVOIDING something and keeps what the
+// walk could not reach, so every one of them needs an object that is
+// reachable ONLY through the thing it avoids. An object reachable two
+// ways proves nothing: the walk finds it anyway.
+//
+// Added identically to both snapshots of the pair, so they contribute
+// nothing to the diff.
+
+// Two realms, because one cannot tell "owned" from "shared".
+const realmA = node({ type: 'hidden', name: 'system / NativeContext', id: 141, selfSize: 128 });
+const realmB = node({ type: 'hidden', name: 'system / NativeContext / two', id: 143, selfSize: 128 });
+// Object -> Map -> meta-Map -> NativeContext. Nothing on the object
+// says which realm it belongs to; only the third hop does, and a pass
+// that read the object's own edges would find nothing at all.
+const metaMap = node({ type: 'hidden', name: 'system / Map', id: 145, selfSize: 24 });
+const shapeMap = node({ type: 'hidden', name: 'system / Map', id: 147, selfSize: 24 });
+const ownedByRealm = node({ type: 'object', name: 'RealmOwned', id: 149, selfSize: 64 });
+// Reached from both realms, so neither owns it.
+const sharedByRealms = node({ type: 'object', name: 'SharedAcrossRealms', id: 151, selfSize: 56 });
+
+// A closure scope and the one object behind it.
+const scope = node({ type: 'hidden', name: 'system / Context', id: 153, selfSize: 32 });
+const behindScope = node({ type: 'object', name: 'CapturedOnly', id: 155, selfSize: 88 });
+
+// A listener whose callback IS the handler, and what only it holds.
+const listener = node({ type: 'object', name: 'V8EventListener', id: 157, selfSize: 32 });
+const handler = node({ type: 'closure', name: 'onClick', id: 159, selfSize: 40 });
+const handlerCode = node({ type: 'code', name: 'onClick code', id: 161, selfSize: 48 });
+const behindHandler = node({ type: 'object', name: 'HandlerOnly', id: 163, selfSize: 72 });
+// And one whose callback is a framework wrapper, so the handler is a
+// level down: without that fallback this listener marks nothing.
+const wrappedListener = node({ type: 'object', name: 'V8EventListener', id: 165, selfSize: 32 });
+const wrapper = node({ type: 'object', name: 'Wrapper', id: 167, selfSize: 24 });
+const wrapped = node({ type: 'closure', name: 'wrapped', id: 169, selfSize: 40 });
+const wrappedCode = node({ type: 'code', name: 'wrapped code', id: 171, selfSize: 48 });
+
+// A global the DevTools console pinned. The edge NAME is what records
+// that, and it is a string-named edge from a synthetic node.
+const consolePinned = node({ type: 'object', name: 'ConsolePinned', id: 173, selfSize: 96 });
+// And the same edge name from an ordinary object, which is NOT the
+// console and must still be followed. Without the synthetic check this
+// one reads as console-pinned too.
+const notConsolePinned = node({ type: 'object', name: 'NotConsolePinned', id: 175, selfSize: 96 });
+
+// A realm whose frame has gone. It still owns what it allocated, and
+// that is the realm a leak hunt is looking for -- but only if the
+// detached spelling counts as a native context at all.
+const detachedRealm = node({ type: 'hidden', name: 'Detached system / NativeContext', id: 177, selfSize: 128 });
+const ownedByDetachedRealm = node({ type: 'object', name: 'DetachedRealmOwned', id: 179, selfSize: 48 });
+
 const ephemeron = `1 / part of key (Key @${27}) -> value (Value @${29}) pair in WeakMap (table @${25})`;
 
 edge(root, { type: 'element', name: 1, to: gcRoots });
@@ -282,6 +334,37 @@ for (const [at, { property, at: ordinal }] of pairwise.entries()) {
   edge(ordinal, { type: 'property', name: str(property), to: propertyTarget });
   edge(ordinal, { type: 'property', name: str(property === 'p' ? 'q' : 's'), to: propertyTarget });
 }
+
+edge(gcRoots, { type: 'element', name: 4, to: realmA });
+edge(gcRoots, { type: 'element', name: 5, to: realmB });
+edge(gcRoots, { type: 'shortcut', name: str('inspected / DevTools console'), to: consolePinned });
+edge(gcRoots, { type: 'element', name: 6, to: detachedRealm });
+edge(otherHolder, { type: 'property', name: str('decoy / DevTools console'), to: notConsolePinned });
+edge(detachedRealm, { type: 'property', name: str('owned'), to: ownedByDetachedRealm });
+
+edge(ownedByRealm, { type: 'internal', name: str('map'), to: shapeMap });
+edge(shapeMap, { type: 'internal', name: str('map'), to: metaMap });
+edge(metaMap, { type: 'internal', name: str('native_context'), to: realmA });
+edge(window, { type: 'property', name: str('realmOwned'), to: ownedByRealm });
+edge(realmA, { type: 'property', name: str('shared'), to: sharedByRealms });
+edge(realmB, { type: 'property', name: str('shared'), to: sharedByRealms });
+
+// Two retainers on the scope, so the shallow-size pass leaves its own
+// size where it is: a context whose bytes moved to its owner is not
+// counted as a context at all, and the count would be nought.
+edge(window, { type: 'property', name: str('scope'), to: scope });
+edge(otherHolder, { type: 'property', name: str('alsoScope'), to: scope });
+edge(scope, { type: 'context', name: str('captured'), to: behindScope });
+
+edge(window, { type: 'property', name: str('listener'), to: listener });
+edge(listener, { type: 'element', name: 1, to: handler });
+edge(handler, { type: 'internal', name: str('code'), to: handlerCode });
+edge(handler, { type: 'property', name: str('kept'), to: behindHandler });
+
+edge(window, { type: 'property', name: str('wrappedListener'), to: wrappedListener });
+edge(wrappedListener, { type: 'element', name: 1, to: wrapper });
+edge(wrapper, { type: 'property', name: str('inner'), to: wrapped });
+edge(wrapped, { type: 'internal', name: str('code'), to: wrappedCode });
 
 // The pair the dominator pass has to break: the table's edge is
 // dropped so the value is dominated by the key.
