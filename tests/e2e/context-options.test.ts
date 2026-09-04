@@ -289,20 +289,32 @@ describe('context options', () => {
   test('context_set_default_timeout', async ({ browser }) => {
     const ctx = await browser.newContext({});
     try {
-      ctx.setDefaultTimeout(50);
       const p = await ctx.newPage();
       await p.goto('data:text/html,<body>timeout-probe</body>');
-      // Set AFTER the navigation: what this asserts is the selector
-      // timeout, and a 50ms budget over a real navigation is a race the
-      // test loses under load rather than a behaviour worth pinning.
+      // Both set AFTER the navigation. A 50ms budget over a real one is
+      // a race rather than a behaviour worth pinning: a first goto on a
+      // fresh Firefox context measures 27ms, so the margin is under 2x
+      // and the test loses it whenever anything else is running.
+      ctx.setDefaultTimeout(50);
       ctx.setDefaultNavigationTimeout(50);
+
+      // No explicit timeout, so the context default is what has to
+      // apply. Passing one asserted the argument instead, which is the
+      // one thing this test is not named after, and it hid a wait that
+      // read a hardcoded 30s.
+      const started = Date.now();
       let err = '';
       try {
-        await p.waitForSelector('#never-ever', { timeout: 50 });
+        await p.waitForSelector('#never-ever');
       } catch (e) {
         err = String((e as Error).message ?? e);
       }
+      const elapsed = Date.now() - started;
       expect(err.toLowerCase().includes('timeout') || err.toLowerCase().includes('timed out')).toBe(true);
+      // Timing out is not enough: the built-in default times out too,
+      // six hundred times later. Generous against a slow machine and
+      // still two orders below the 30s it used to take.
+      expect(elapsed).toBeLessThan(5000);
     } finally {
       await ctx.close();
     }

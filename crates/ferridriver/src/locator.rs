@@ -1700,7 +1700,12 @@ impl Locator {
   }
 
   pub(crate) async fn wait_for_impl(&self, opts: WaitOptions) -> Result<()> {
-    let timeout = opts.timeout.unwrap_or(30000);
+    // The page's default, not a constant: it is what carries
+    // `page.setDefaultTimeout` and, through it, the context's. Every
+    // other wait in this file resolves it the same way, and this one
+    // did not, so a context default reached everything except the two
+    // calls named after waiting.
+    let timeout = opts.timeout.unwrap_or_else(|| self.frame.page_arc().default_timeout());
     let state = opts.state.unwrap_or_default();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
 
