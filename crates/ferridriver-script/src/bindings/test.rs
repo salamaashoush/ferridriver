@@ -912,7 +912,7 @@ fn define_fixtures<'js>(ctx: Ctx<'js>, fixtures: Object<'js>) -> rquickjs::Resul
   if !permitted {
     return Err(throw_script_error(
       &ctx,
-      &ScriptError::policy(
+      &crate::error::policy_error(
         "defineFixtures() is refused by the operator policy (`[extensions.policy] fixtures = false`), \
          which forbids packages from contributing fixtures onto the base `test` chain",
       ),
@@ -1865,7 +1865,7 @@ fn parse_attach_args<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> rquickjs::Resu
     let body = args
       .get(2)
       .ok_or_else(|| rq(&ScriptError::internal("testInfo.attach: missing body".to_string())))?;
-    let bytes = ferridriver_jsstd::node::bytes::value_to_bytes(ctx, body, None)?;
+    let bytes = ferrijs::std::node::bytes::value_to_bytes(ctx, body, None)?;
     return Ok((name, content_type, AttachSource::Bytes(bytes)));
   }
   // Option bag: (name, { body?, contentType?, path? }).
@@ -1892,7 +1892,7 @@ fn parse_attach_args<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> rquickjs::Resu
   } else {
     "application/octet-stream"
   };
-  let bytes = ferridriver_jsstd::node::bytes::value_to_bytes(ctx, &body, None)?;
+  let bytes = ferrijs::std::node::bytes::value_to_bytes(ctx, &body, None)?;
   Ok((
     name,
     content_type.unwrap_or_else(|| default_ct.to_string()),
@@ -1905,7 +1905,7 @@ fn parse_attach_args<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> rquickjs::Resu
 /// custom }`) and register it as the VM's current test.
 pub(crate) fn set_current_test(
   ctx: &Ctx<'_>,
-  vm: &crate::vm::VmHandle,
+  vm: &ferrijs::VmHandle,
   world: &TestWorldData,
   bridge: Arc<dyn TestHostBridge>,
 ) -> Result<(), ScriptError> {
@@ -2383,7 +2383,7 @@ pub(crate) async fn teardown_test_fixtures(ctx: &Ctx<'_>) -> Result<(), ScriptEr
 
 /// Resume every suspended worker-scoped fixture factory — the glue
 /// calls this once per worker session after the run completes.
-pub async fn teardown_worker_fixtures(vm: &crate::vm::VmHandle) -> Result<(), ScriptError> {
+pub async fn teardown_worker_fixtures(vm: &ferrijs::VmHandle) -> Result<(), ScriptError> {
   crate::vm_with!(vm => |ctx| {
     let mut first_err: Option<ScriptError> = None;
     loop {
@@ -2474,7 +2474,7 @@ fn requested_names(reg: &TestRegistry, spec: &RunTestSpec) -> Vec<String> {
 /// and the body, tear down, and clear the current-test slot. The
 /// returned error carries the raw (bundled) stack — the glue remaps it.
 pub async fn run_test(
-  vm: &crate::vm::VmHandle,
+  vm: &ferrijs::VmHandle,
   spec: RunTestSpec,
   world: TestWorldData,
   bridge: Arc<dyn TestHostBridge>,
@@ -2662,7 +2662,7 @@ async fn invoke_hook_fn<'js>(
 /// Execute one `beforeAll`/`afterAll` hook with its own fixtures
 /// object and current-test slot (so `test.info()`/steps work inside).
 pub async fn run_standalone_hook(
-  vm: &crate::vm::VmHandle,
+  vm: &ferrijs::VmHandle,
   hook_idx: usize,
   world: TestWorldData,
   bridge: Arc<dyn TestHostBridge>,
@@ -2858,7 +2858,7 @@ fn mode_str(mode: Option<CollectedSuiteMode>) -> Option<String> {
 }
 
 /// Snapshot the registry after the bundled test module evaluated.
-pub async fn collect_tests(vm: &crate::vm::VmHandle) -> Result<CollectedTests, ScriptError> {
+pub async fn collect_tests(vm: &ferrijs::VmHandle) -> Result<CollectedTests, ScriptError> {
   crate::vm_with!(vm => |ctx| {
     with_test_registry(&ctx, |r| CollectedTests {
       tests: r

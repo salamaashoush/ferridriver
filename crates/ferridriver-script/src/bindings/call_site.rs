@@ -25,15 +25,11 @@
 //! sees them: `--debug`'s `pauseAt` matches what the user typed, and the
 //! trace viewer's Source tab needs a file that exists on disk.
 
-use std::cell::RefCell;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use ferridriver::trace::{CallOrigin, StackFrame};
 use rquickjs::function::{FromParam, ParamRequirement, ParamsAccessor};
 use rquickjs::{Ctx, JsLifetime};
-
-use crate::bundle::SourceMapper;
 
 /// The position an API call was written at, captured when the call
 /// crossed from JS into Rust.
@@ -123,20 +119,12 @@ pub fn capture(ctx: &Ctx<'_>) -> CallOrigin {
 }
 
 // ── Bundles registered for remapping ───────────────────────────────────
+//
+// The registry is the runtime's (`ferrijs::source_map`); one per realm,
+// read by the runtime's own error remap and by the call sites here.
 
-/// Source maps for the bundles loaded into this VM. Single-threaded VM ⇒
-/// `RefCell`, never `Arc`/`Mutex`.
-struct SourceMapsUd(RefCell<Vec<SourceMapper>>);
-
-// SAFETY: holds only `'static` data (owned `Arc`s), so re-stating the
-// unused `'js` lifetime is sound — same rationale as `TestRegistryUserData`.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for SourceMapsUd {
-  type Changed<'to> = SourceMapsUd;
-}
-
-/// Identity of the script running in this VM, for [`CallOrigin::script`].
-pub(crate) struct ScriptIdUd(pub(crate) Arc<str>);
+/// The script identity a gate uses to recognise its own calls.
+struct ScriptIdUd(Arc<str>);
 
 // SAFETY: holds only `'static` data.
 #[allow(unsafe_code)]
@@ -144,179 +132,29 @@ unsafe impl JsLifetime<'_> for ScriptIdUd {
   type Changed<'to> = ScriptIdUd;
 }
 
-/// Record a bundle's source map so call sites taken while it runs report
-/// the file the user wrote.
-///
-/// Called wherever a bundle is loaded into a VM. Loading the same bundle
-/// twice is not an error — a session re-running a module keeps one entry.
-pub fn register_bundle(ctx: &Ctx<'_>, mapper: SourceMapper) {
-  if ctx.userdata::<SourceMapsUd>().is_none() {
-    let _ = ctx.store_userdata(SourceMapsUd(RefCell::new(Vec::new())));
-  }
-  let Some(ud) = ctx.userdata::<SourceMapsUd>() else {
-    return;
-  };
-  let mut maps = ud.0.borrow_mut();
-  if maps.iter().any(|m| m.module_name == mapper.module_name) {
-    return;
-  }
-  maps.push(mapper);
-}
+pub use ferrijs::source_map::{caller_source_file, register_bundle, remap_stack};
 
 /// Install the script identity a gate uses to recognise its own calls.
 pub fn set_script_id(ctx: &Ctx<'_>, id: &str) {
   let _ = ctx.store_userdata(ScriptIdUd(Arc::from(id)));
 }
 
-/// Rewrite every `<module>:LINE:COL` frame in a JS stack through the map
-/// registered for THAT module.
-///
-/// `CompiledBundle::remap_stack` answers for one bundle; a session VM
-/// holds several — the spec or step bundle plus every extension
-/// installed beside it — and a frame belongs to whichever module it
-/// names. Frames whose module has no registered map are left exactly as
-/// QuickJS wrote them.
-#[must_use]
-pub fn remap_stack(ctx: &Ctx<'_>, stack: &str) -> String {
-  use std::sync::OnceLock;
-
-  use regex::Regex;
-  static RE: OnceLock<Option<Regex>> = OnceLock::new();
-  let Some(re) = RE.get_or_init(|| Regex::new(r"([^\s()]+):(\d+):(\d+)").ok()) else {
-    return stack.to_string();
-  };
-  let Some(maps) = ctx.userdata::<SourceMapsUd>() else {
-    return stack.to_string();
-  };
-  let maps = maps.0.borrow();
-  re.replace_all(stack, |caps: &regex::Captures<'_>| {
-    let (Ok(line), Ok(col)) = (caps[2].parse::<u32>(), caps[3].parse::<u32>()) else {
-      return caps[0].to_string();
-    };
-    let Some(mapper) = maps.iter().find(|m| m.module_name == caps[1]) else {
-      return caps[0].to_string();
-    };
-    match mapper.remap(line, col) {
-      Some((src, sl, sc)) => format!("{}:{sl}:{sc}", absolute(&src)),
-      None => caps[0].to_string(),
-    }
-  })
-  .into_owned()
-}
-
-/// Translate a bundled `line:col` back to the original source through the
-/// map of the bundle the frame names.
+/// Translate a bundled `line:col` back to the original source through
+/// the map of the bundle the frame names.
 fn remap(ctx: &Ctx<'_>, file: &str, line: u32, column: u32) -> Option<StackFrame> {
-  let maps = ctx.userdata::<SourceMapsUd>()?;
-  let maps = maps.0.borrow();
-  // The frame names the module QuickJS ran, which is the bundle's own
-  // module name. A VM with exactly one bundle skips the match: a `run`
-  // labels its module after the entry file, and matching the label
-  // against itself buys nothing.
-  // With one bundle in the VM the frame's label is that bundle's by
-  // construction, and a `run` labels its module after the entry file —
-  // matching the label against itself buys nothing. With more than one
-  // (a spec bundle plus the extensions installed beside it) the label
-  // is the only thing that says which map a frame belongs to, and
-  // guessing maps one bundle's line numbers through another's.
-  let mapper = match maps.as_slice() {
-    [only] if only.module_name == file || file.is_empty() => Some(only),
-    many => many.iter().find(|m| m.module_name == file),
-  }?;
-  let (src, src_line, src_col) = mapper.remap(line, column)?;
+  let position = ferrijs::source_map::remap(ctx, file, line, column)?;
   Some(StackFrame {
-    file: absolute(&src),
-    line: src_line,
-    column: src_col,
+    file: position.file,
+    line: position.line,
+    column: position.column,
   })
 }
 
-/// Source-map sources are relative to the bundle's virtual location; the
-/// trace viewer's Source tab reads the file off disk and `pauseAt` is
-/// matched against it, so both want the real path.
-fn absolute(source: &str) -> String {
-  static CWD: OnceLock<Option<PathBuf>> = OnceLock::new();
-  match CWD.get_or_init(|| std::env::current_dir().ok()) {
-    Some(cwd) => crate::bundle::resolve_source(cwd, source)
-      .to_string_lossy()
-      .into_owned(),
-    None => source.to_string(),
-  }
-}
-
-/// The ORIGINAL source file the calling JS frame was written in.
-///
-/// `require.resolve('./x')` has to answer relative to the file that wrote
-/// it, the way Node does. Bundling erases that: QuickJS only knows the
-/// bundle it ran. The source map puts it back, and it is the same lookup
-/// call sites already use — so a per-module `__dirname` never has to be
-/// injected into anyone's source.
-///
-/// `None` when there is no JS frame or no map covers it: an inline
-/// `--eval`, or a plain script that was never bundled. The caller decides
-/// what to anchor on then (the working directory).
-///
-/// Unlike [`capture`] this is NOT gated on `call_origins_wanted`: a
-/// resolution has to answer whether or not anything is tracing.
-#[must_use]
-pub fn caller_source_file(ctx: &Ctx<'_>) -> Option<PathBuf> {
-  let (file, line, column) = capture_frame(ctx)?;
-  let frame = remap(ctx, &file, line, column)?;
-  Some(PathBuf::from(frame.file))
-}
-
-// ── Stack capture ──────────────────────────────────────────────────────
-
-/// `file`, `line`, `col` of the innermost JS frame in a fresh stack
-/// trace — the caller's own position, in bundled coordinates.
-///
-/// Synthetic frames (`<eval>`, `native`) are skipped: the capture itself
-/// runs through `ctx.eval`, whose frame sits below the native binding
-/// frame, and the caller's frame is the first that names a module.
-pub(crate) fn capture_frame(ctx: &Ctx<'_>) -> Option<(String, u32, u32)> {
-  capture_frames(ctx).into_iter().next()
-}
-
-/// Every JS frame of a fresh stack trace, innermost first.
-///
-/// More than the innermost because `test.step(…, { box: true })` names
-/// the frame ABOVE the call site: the line that called the function the
-/// step is written in.
-pub(crate) fn capture_frames(ctx: &Ctx<'_>) -> Vec<(String, u32, u32)> {
-  let Ok(stack) = ctx.eval::<String, _>("new Error().stack") else {
-    return Vec::new();
-  };
-  parse_js_frames(&stack)
-}
-
-pub(crate) fn parse_js_frames(stack: &str) -> Vec<(String, u32, u32)> {
-  use std::sync::OnceLock;
-
-  use regex::Regex;
-  static RE: OnceLock<Option<Regex>> = OnceLock::new();
-  let Some(re) = RE.get_or_init(|| Regex::new(r"([^\s()]+):(\d+):(\d+)").ok()).as_ref() else {
-    return Vec::new();
-  };
-  let mut frames = Vec::new();
-  for line in stack.lines() {
-    let Some(caps) = re.captures(line) else { continue };
-    let file = &caps[1];
-    let is_module = Path::new(file)
-      .extension()
-      .is_some_and(|e| ["js", "mjs", "cjs", "ts"].iter().any(|x| e.eq_ignore_ascii_case(x)));
-    if !is_module {
-      continue;
-    }
-    if let (Ok(l), Ok(c)) = (caps[2].parse::<u32>(), caps[3].parse::<u32>()) {
-      frames.push((file.to_string(), l, c));
-    }
-  }
-  frames
-}
+pub(crate) use ferrijs::source_map::{capture_frame, capture_frames};
 
 #[cfg(test)]
 mod tests {
-  use super::parse_js_frames;
+  use ferrijs::source_map::parse_js_frames;
 
   #[test]
   fn skips_the_capture_frame_and_reads_the_caller() {

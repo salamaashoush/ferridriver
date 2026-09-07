@@ -2173,7 +2173,7 @@ impl crate::http_client::ContextBridge for ContextRef {
         let state = self.state.read().await;
         state.get_context_options(&self.key.to_composite()).unwrap_or_default()
       };
-      Ok(crate::http_client::ContextDefaults {
+      Ok::<_, crate::http_client::FetchError>(crate::http_client::ContextDefaults {
         base_url: opts.base_url,
         extra_http_headers: opts
           .extra_http_headers
@@ -2193,13 +2193,17 @@ impl crate::http_client::ContextBridge for ContextRef {
         // until then (`browser.newContext()` + immediate `context.request`)
         // its cookie jar is simply empty.
         Err(crate::error::FerriError::InvalidArgument { .. }) => Ok(Vec::new()),
-        Err(e) => Err(e),
+        Err(e) => Err(crate::http_client::FetchError::Bridge(e.to_string())),
       }
     })
   }
 
   fn add_cookies(&self, cookies: Vec<CookieData>) -> crate::http_client::BridgeFuture<'_, ()> {
-    Box::pin(ContextRef::add_cookies(self, cookies))
+    Box::pin(async move {
+      ContextRef::add_cookies(self, cookies)
+        .await
+        .map_err(|e| crate::http_client::FetchError::Bridge(e.to_string()))
+    })
   }
 }
 

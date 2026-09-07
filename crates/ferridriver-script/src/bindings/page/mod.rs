@@ -48,7 +48,7 @@ pub struct PageJs {
   /// tests); the engine always installs PageJs via
   /// `install_page` which sets this field.
   #[qjs(skip_trace)]
-  vm: Option<crate::vm::VmHandle>,
+  vm: Option<ferrijs::VmHandle>,
   /// Maps a handler locator's selector to the persisted-callback ids so
   /// `removeLocatorHandler` can drop them. (QuickJS `addLocatorHandler`
   /// itself is Unsupported -- see its binding -- so this normally stays empty.)
@@ -67,7 +67,7 @@ impl PageJs {
   }
 
   #[must_use]
-  pub fn new_with_vm(inner: Arc<Page>, vm: crate::vm::VmHandle) -> Self {
+  pub fn new_with_vm(inner: Arc<Page>, vm: ferrijs::VmHandle) -> Self {
     Self {
       inner,
       vm: Some(vm),
@@ -204,8 +204,8 @@ impl PageJs {
 /// `page.exposeFunction` cross-task dispatch works on script-launched
 /// browsers — not just the MCP-prebound page.
 pub(crate) fn pagejs_for_ctx(ctx: &rquickjs::Ctx<'_>, page: Arc<Page>) -> PageJs {
-  match ctx.userdata::<crate::engine::SessionVm>() {
-    Some(ud) => PageJs::new_with_vm(page, ud.0.clone()),
+  match ferrijs::vm_handle(ctx) {
+    Some(vm) => PageJs::new_with_vm(page, vm),
     None => PageJs::new(page),
   }
 }
@@ -2060,8 +2060,7 @@ impl PageJs {
     // Snapshot the registrar's grant NOW (sync prologue, on the tool's
     // stack) — see `SavedCallback::save`. The handler AND predicate keep
     // this tool's `allow.net` when they later fire cross-task.
-    let net = crate::bindings::fetch::active_net(&ctx);
-    let saved_handler = SavedCallback::save_with_net(&ctx, handler, net.clone());
+    let saved_handler = SavedCallback::save(&ctx, handler);
 
     // A JS predicate is `!Send` and core matches on the CDP recv task,
     // so it can't ride `UrlMatcher::Predicate`. Register an always-true
@@ -2070,7 +2069,7 @@ impl PageJs {
     // dispatch bridge and continue the request unmodified on falsy.
     let has_predicate = url.as_function().is_some();
     let (matcher, saved_pred, registry_matcher) = if let Some(pred) = url.as_function() {
-      let saved_pred = SavedCallback::save_with_net(&ctx, pred.clone(), net);
+      let saved_pred = SavedCallback::save(&ctx, pred.clone());
       let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
       (m.clone(), Some(saved_pred), Some(m))
     } else {
@@ -2104,11 +2103,7 @@ impl PageJs {
             let pred = saved_pred.restore(&ctx)?;
             let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
             let url_obj: rquickjs::Value<'_> = url_ctor.construct((route.request().url.clone(),))?;
-            let truthy = crate::bindings::fetch::bracket_net(
-              crate::bindings::fetch::policy_cell(&ctx),
-              saved_pred.net().cloned(),
-              call_predicate_truthy(&pred, url_obj, &ctx),
-            )
+            let truthy = call_predicate_truthy(&pred, url_obj, &ctx)
             .await?;
             if !truthy {
               route.reject_as_unmatched();
@@ -2176,8 +2171,7 @@ impl PageJs {
     let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
     let owner = RouteOwner::Page(self.inner.backend_page_id());
     // Sync prologue: snapshot the registrar's grant (see `SavedCallback::save`).
-    let net = crate::bindings::fetch::active_net(&ctx);
-    let saved = SavedCallback::save_with_net(&ctx, handler, net);
+    let saved = SavedCallback::save(&ctx, handler);
     with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, owner.clone(), saved))?;
 
     let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id, owner);
@@ -2337,8 +2331,7 @@ impl PageJs {
       )
     })?;
     let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
-    let net = crate::bindings::fetch::active_net(&ctx);
-    let saved = SavedCallback::save_with_net(&ctx, handler, net);
+    let saved = SavedCallback::save(&ctx, handler);
     with_page_callbacks(&ctx, |r| r.insert_locator_handler(id, saved))?;
 
     let core_locator = locator.borrow().inner_ref().clone();
@@ -2919,12 +2912,11 @@ impl PageJs {
     // async-fn body first-polls off the tool's `bracket_net` swap, so an
     // in-body `active_net` reads the resting `None`. Sync prologue of a
     // `fn -> Promised` runs on the caller's stack, where the grant is live.
-    let net = crate::bindings::fetch::active_net(&ctx);
     // Stash the JS callback in the native page-callbacks registry keyed
     // by binding name — cross-task dispatch (the Rust `ExposedFn` runs
     // outside the QuickJS context) restores it by name inside a VM-loop
     // job.
-    let saved = SavedCallback::save_with_net(&ctx, callback, net);
+    let saved = SavedCallback::save(&ctx, callback);
     let page_key = self.inner.backend_page_id();
     with_page_callbacks(&ctx, |r| {
       r.exposed.insert(name.clone(), saved);
@@ -2971,14 +2963,10 @@ impl PageJs {
                 // walker keeps numbers as JS numbers.
                 call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;
               }
-              let res = crate::bindings::fetch::bracket_net(
-                crate::bindings::fetch::policy_cell(&ctx),
-                saved.net().cloned(),
-                async {
+              let res = async {
                   let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
                   mp.into_future::<rquickjs::Value<'_>>().await
-                },
-              )
+                }
               .await?;
               // Round-trip through QuickJS `JSON.stringify` + serde_json's
               // own parser — AP-safe both ways (a non-serde_json
@@ -3022,8 +3010,7 @@ impl PageJs {
         "page.exposeBinding requires the script engine's VM handle (install_page)".to_string(),
       )
     })?;
-    let net = crate::bindings::fetch::active_net(&ctx);
-    let saved = SavedCallback::save_with_net(&ctx, callback, net);
+    let saved = SavedCallback::save(&ctx, callback);
     let page_key = self.inner.backend_page_id();
     with_page_callbacks(&ctx, |r| {
       r.exposed.insert(name.clone(), saved);
@@ -3054,14 +3041,10 @@ impl PageJs {
               for v in args {
                 call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;
               }
-              let res = crate::bindings::fetch::bracket_net(
-                crate::bindings::fetch::policy_cell(&ctx),
-                saved.net().cloned(),
-                async {
+              let res = async {
                   let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
                   mp.into_future::<rquickjs::Value<'_>>().await
-                },
-              )
+                }
               .await?;
               let json = match ctx.json_stringify(res)? {
                 Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),
@@ -3106,8 +3089,7 @@ impl PageJs {
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
     // Sync prologue: snapshot the registrar's grant so the frame
     // callback keeps this tool's `allow.net` (see `SavedCallback::save`).
-    let net = crate::bindings::fetch::active_net(&ctx);
-    let saved = SavedCallback::save_with_net(&ctx, callback, net);
+    let saved = SavedCallback::save(&ctx, callback);
     with_page_callbacks(&ctx, |r| r.screencast = Some(saved))?;
     let inner = self.inner.clone();
     Ok(rquickjs::promise::Promised::from(async move {
@@ -3136,8 +3118,7 @@ impl PageJs {
             let buf = rquickjs::TypedArray::<u8>::new(pump_ctx.clone(), bytes)?;
             payload.set("frame", buf)?;
             payload.set("timestamp", ts)?;
-            let _: rquickjs::Value<'_> =
-              crate::bindings::fetch::call_with_net(&pump_ctx, saved.net(), || f.call((payload,)))?;
+            let _: rquickjs::Value<'_> = f.call((payload,))?;
             Ok(())
           };
           // A throwing callback is swallowed so one bad frame handler

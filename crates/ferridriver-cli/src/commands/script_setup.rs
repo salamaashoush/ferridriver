@@ -77,12 +77,9 @@ pub async fn resolve(
     },
   };
 
-  let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
-    &config.scripting.allow_env,
-    config.scripting.allow.commands.clone(),
-  )
-  .with_extension_policy(config.extensions.policy())
-  .with_extension_settings(config.extensions.settings());
+  let caps = ferridriver_script::ScriptCaps::from_scripting(&config.scripting)
+    .with_extension_policy(config.extensions.policy())
+    .with_extension_settings(config.extensions.settings());
 
   let mut roots = config.extension_specs();
   roots.extend(extra_extensions.iter().map(|spec| ferridriver_script::ExtensionSpec {

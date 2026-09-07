@@ -26,9 +26,10 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use ferridriver_script::{
-  CompiledBundle, HookArg, InMemoryVars, JsArg, RunContext, ScenarioSpec, ScriptAttachment, ScriptEngineConfig,
-  Session, StepOutcome, VmHandle, begin_scenario, bundle_and_compile, collect_registry, drain_attachments,
-  end_scenario, eval_bundle, invoke_hook, invoke_step, is_source_file, set_hook_world, walk_source_files,
+  CompiledBundle, CompiledBundleExt as _, HookArg, InMemoryVars, JsArg, RunContext, ScenarioSpec, ScriptAttachment,
+  ScriptEngineConfig, Session, StepOutcome, VmHandle, begin_scenario, bundle_and_compile, collect_registry,
+  drain_attachments, end_scenario, eval_bundle, invoke_hook, invoke_step, is_source_file, set_hook_world,
+  walk_source_files,
 };
 use ferridriver_test::FixturePool;
 use ferridriver_test::fixture_graph::dominant_fixture_set;

@@ -379,7 +379,7 @@ fn register_attachment(args: &[Value<'_>], is_log: bool) -> rquickjs::Result<()>
 /// Drain the scenario's queued attachments (and clear the queue). The
 /// BDD layer calls this after each scenario and forwards them into the
 /// test result so the reporters surface them.
-pub async fn drain_attachments(vm: &crate::vm::VmHandle) -> Result<Vec<ScriptAttachment>, ScriptError> {
+pub async fn drain_attachments(vm: &ferrijs::VmHandle) -> Result<Vec<ScriptAttachment>, ScriptError> {
   crate::vm_with!(vm => |ctx| {
     with_registry(&ctx, |reg| std::mem::take(&mut reg.attachments))
   })
@@ -608,7 +608,7 @@ impl CollectedRegistry {
 }
 
 /// Snapshot the registry after the step `.js` files evaluated.
-pub async fn collect_registry(vm: &crate::vm::VmHandle) -> Result<CollectedRegistry, ScriptError> {
+pub async fn collect_registry(vm: &ferrijs::VmHandle) -> Result<CollectedRegistry, ScriptError> {
   crate::vm_with!(vm => |ctx| {
     let (fixture_sets, fixtures) = crate::bindings::test::with_test_registry(&ctx, |r| {
       (crate::bindings::test::fixture_set_table(r), crate::bindings::test::fixture_table(r))
@@ -744,7 +744,7 @@ fn install_world_surface<'js>(
 /// and hook in the scenario, so `({ signingRequest, page }, table) => …`
 /// destructures and `function (world) { world.page }` still reads.
 pub async fn begin_scenario(
-  vm: &crate::vm::VmHandle,
+  vm: &ferrijs::VmHandle,
   spec: ScenarioSpec,
   bridge: Arc<dyn ferridriver_test::host::TestHostBridge>,
 ) -> Result<(), ScriptError> {
@@ -780,7 +780,7 @@ pub async fn begin_scenario(
 /// order (the teardown half of every `use()`) and drop the per-scenario
 /// object. Attachments stay queued for the host to drain into the test
 /// result; the next [`begin_scenario`] clears them.
-pub async fn end_scenario(vm: &crate::vm::VmHandle) -> Result<(), ScriptError> {
+pub async fn end_scenario(vm: &ferrijs::VmHandle) -> Result<(), ScriptError> {
   crate::vm_with!(vm => |ctx| {
     let teardown = crate::bindings::test::teardown_test_fixtures(&ctx).await;
     crate::bindings::test::clear_current_test(&ctx)?;
@@ -794,7 +794,7 @@ pub async fn end_scenario(vm: &crate::vm::VmHandle) -> Result<(), ScriptError> {
 /// Those hooks run with no scenario — no page, no fixture bag — so they
 /// get the World surface alone (`parameters`, `attach`, `log`, `skip`,
 /// and the `setWorldConstructor` instance as prototype).
-pub async fn set_hook_world(vm: &crate::vm::VmHandle, parameters: &serde_json::Value) -> Result<(), ScriptError> {
+pub async fn set_hook_world(vm: &ferrijs::VmHandle, parameters: &serde_json::Value) -> Result<(), ScriptError> {
   let parameters = parameters.clone();
   crate::vm_with!(vm => |ctx| {
     let obj = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
@@ -837,7 +837,7 @@ pub enum StepOutcome {
 /// table and doc string, against the current World. A thrown JS error
 /// becomes a [`ScriptError`] carrying the `.js` location.
 pub async fn invoke_step(
-  vm: &crate::vm::VmHandle,
+  vm: &ferrijs::VmHandle,
   idx: usize,
   params: &[JsArg],
   data_table: Option<&[Vec<String>]>,
@@ -972,7 +972,7 @@ pub async fn invoke_step(
 
 /// Invoke hook `idx`. Same bridge as [`invoke_step`].
 pub async fn invoke_hook(
-  vm: &crate::vm::VmHandle,
+  vm: &ferrijs::VmHandle,
   idx: usize,
   arg: Option<&HookArg>,
   source: &str,

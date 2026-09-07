@@ -22,12 +22,12 @@ use ferridriver_session::{ActionDetail, ActionPhase, EventSink, ScriptHost, Scri
 use tokio::sync::RwLock;
 
 use crate::bindings::ExtensionBinding;
-use crate::console::{ConsoleSink, strip_ansi};
 use crate::engine::{ExtensionHost, RunContext, RunOptions, ScriptCaps, ScriptEngineConfig};
 use crate::output_dir::OutputDir;
 use crate::result::{ConsoleEntry, ScriptResult};
 use crate::session_table::SessionTable;
 use crate::vars::InMemoryVars;
+use ferrijs::console::{ConsoleSink, strip_ansi};
 
 /// Everything a [`SessionScriptHost`] needs that it cannot derive from the
 /// browser: where relative imports and outputs go, the capability grants,
@@ -141,8 +141,8 @@ impl ScriptHost for SessionScriptHost {
 
     let options = RunOptions {
       timeout: request.timeout_ms.map(std::time::Duration::from_millis),
-      memory_limit: None,
-      stack_size: None,
+      memory: None,
+      stack: None,
       gc_threshold: None,
     };
 

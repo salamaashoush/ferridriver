@@ -101,7 +101,7 @@ async fn net_ceiling_applies_default_deny_to_undeclared_tools() {
     .await,
   );
   assert!(
-    blocked.contains("not in allow.net") && blocked.contains("blocked.test"),
+    blocked.contains("permission denied") && blocked.contains("blocked.test"),
     "undeclared tool must inherit the ceiling as default-deny, got: {blocked}"
   );
 
@@ -113,7 +113,7 @@ async fn net_ceiling_applies_default_deny_to_undeclared_tools() {
   .await;
   if let Outcome::Error { error } = allowed {
     assert!(
-      !error.message.contains("allow.net"),
+      !error.message.contains("permission denied"),
       "ceiling host must pass the guard; got: {}",
       error.message
     );
@@ -146,7 +146,7 @@ async fn net_ceiling_clamps_declared_entries() {
     .await,
   );
   assert!(
-    dropped.contains("not in allow.net") && dropped.contains("evil.example"),
+    dropped.contains("permission denied") && dropped.contains("evil.example"),
     "a declared entry outside the ceiling must be dropped, got: {dropped}"
   );
 
@@ -158,18 +158,18 @@ async fn net_ceiling_clamps_declared_entries() {
   .await;
   if let Outcome::Error { error } = kept {
     assert!(
-      !error.message.contains("allow.net"),
+      !error.message.contains("permission denied"),
       "a declared entry inside the ceiling must survive; got: {}",
       error.message
     );
   }
 }
 
-/// An explicit empty ceiling denies every extension HTTP request.
+/// An explicit empty ceiling denies every host to the HTTP capabilities
+/// a handler is handed: `ctx.fetch` here, `ctx.request` above.
 #[tokio::test(flavor = "multi_thread")]
 async fn empty_net_ceiling_denies_all_hosts() {
-  const SRC: &str =
-    "defineTool({ name: 'noop', handler: async ({ args }) => { const r = await fetch(args.url); return r.status; } });";
+  const SRC: &str = "defineTool({ name: 'noop', handler: async ({ args, fetch }) => { const r = await fetch(args.url); return r.status; } });";
   let (_ext_tmp, binding) = binding_from("noop.js", SRC).await;
   let policy = ExtensionPolicyConfig {
     net: Some(Vec::new()),
@@ -190,7 +190,7 @@ async fn empty_net_ceiling_denies_all_hosts() {
     .await,
   );
   assert!(
-    denied.contains("not in allow.net"),
+    denied.contains("permission denied"),
     "empty ceiling must deny every host, got: {denied}"
   );
 }
@@ -313,13 +313,16 @@ async fn timeout_fires_the_handler_abort_signal() {
   );
 }
 
-/// Capability follows the registrar through `queueMicrotask` too: the
-/// job queue drains outside the handler's policy bracket, so a
-/// microtask queued by a net-restricted handler must keep that grant.
+/// The attenuated capability keeps its attenuation wherever it
+/// travels: a handler that hands its `fetch` to a microtask, which runs
+/// after the dispatch returned, is still refused the host outside its
+/// list. The global `fetch` the microtask could also reach answers to
+/// the session's policy, which is the point of the design: authority is
+/// an object the handler was given, not a scope around its stack.
 #[tokio::test(flavor = "multi_thread")]
-async fn queue_microtask_keeps_registrar_net_policy() {
+async fn queue_microtask_keeps_the_attenuated_capability() {
   const SRC: &str = "defineTool({ name: 'micro', allow: { net: ['127.0.0.1'] }, \
-    handler: () => new Promise((resolve) => { queueMicrotask(async () => { \
+    handler: ({ fetch }) => new Promise((resolve) => { queueMicrotask(async () => { \
       try { await fetch('http://blocked.test/'); resolve('unexpectedly allowed'); } \
       catch (e) { resolve(String((e && e.message) || e)); } }); }) });";
   let (_ext_tmp, binding) = binding_from("micro.js", SRC).await;
@@ -331,8 +334,8 @@ async fn queue_microtask_keeps_registrar_net_policy() {
   let message = ok_value(run(&session, &ctx, "return await tools['micro']();").await);
   let message = message.as_str().unwrap_or_default().to_string();
   assert!(
-    message.contains("not in allow.net") && message.contains("blocked.test"),
-    "microtask must run under the registrar's allow.net, got: {message}"
+    message.contains("permission denied") && message.contains("blocked.test"),
+    "the attenuated fetch must refuse the host from a microtask too, got: {message}"
   );
 }
 

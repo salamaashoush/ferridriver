@@ -1,65 +1,52 @@
-//! `ScriptEngine` + `Session`: a sandboxed `QuickJS` runtime/context.
+//! `ScriptEngine` + `Session`: ferridriver's realm over the `ferrijs`
+//! runtime.
 //!
 //! [`ScriptEngine::run`] is the one-shot path (fresh VM, library/test
-//! convenience). [`Session`] is the persistent path: one `QuickJS`
-//! runtime + context reused across many [`Session::execute`] calls so
-//! user `globalThis` state survives between executions REPL-style while
-//! framework bindings refresh each call. The production MCP server keeps
-//! a set of [`Session`]s with a retention policy in
+//! convenience). [`Session`] is the persistent path: one runtime reused
+//! across many [`Session::execute`] calls so user `globalThis` state
+//! survives between executions REPL-style while framework bindings
+//! refresh each call. The production MCP server keeps a set of
+//! [`Session`]s with a retention policy in
 //! [`crate::session_table::SessionTable`].
+//!
+//! Everything generic about running JavaScript -- the event loop, the
+//! limits, the deadline and its backstop, poisoning, the console, the
+//! module loader, the standard library, `fetch`, the sandbox -- is the
+//! runtime's. What lives here is ferridriver's: the `page` / `context` /
+//! `browser` / `request` bindings, the extension registry, the BDD and
+//! test surfaces, `vars`, `artifacts`, `commands`, `sidecars`, and the
+//! policy the operator's config resolves to.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use ferrijs::rquickjs;
+use ferrijs::{ModulePolicy, Permissions, Runtime};
 use rquickjs::function::Func;
-use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx, Module, Object, Value};
+use rquickjs::{Ctx, Object};
 
-use crate::vm_with;
-
-use crate::console::ConsoleCapture;
-use crate::console_fmt::install_console;
-use crate::error::{ScriptError, ScriptErrorKind};
+use crate::error::ScriptError;
+use crate::result::ScriptResult;
+use crate::vars::VarsStore;
 use std::path::PathBuf;
 
 use crate::output_dir::OutputDir;
-use crate::result::ScriptResult;
-use crate::vars::VarsStore;
 
-/// Default console-capture limits.
-pub const DEFAULT_MAX_CONSOLE_ENTRIES: usize = 1_000;
-pub const DEFAULT_MAX_CONSOLE_BYTES: usize = 1_048_576;
-pub const DEFAULT_MAX_CONSOLE_ENTRY_BYTES: usize = 8_192;
+pub use ferrijs::RunOptions;
+pub use ferrijs::runtime::{DEFAULT_MAX_CONSOLE_BYTES, DEFAULT_MAX_CONSOLE_ENTRIES, DEFAULT_MAX_CONSOLE_ENTRY_BYTES};
 
 /// Default per-script wall-clock timeout (5 minutes).
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
-
-/// Extra slack past the script deadline before the tokio-level backstop
-/// fires. The interrupt handler is the preferred kill (it halts the
-/// interpreter cleanly with the script's console output intact), but it
-/// only runs while bytecode executes — a script parked on a native
-/// `await` (e.g. `await new Promise(() => {})`) never re-enters the
-/// interpreter, so the backstop is the only thing that frees the
-/// session slot. The grace keeps the two mechanisms from racing.
-const TIMEOUT_BACKSTOP_GRACE: Duration = Duration::from_secs(1);
+pub const DEFAULT_TIMEOUT: Duration = ferrijs::limits::DEFAULT_TIMEOUT;
 
 /// Default per-script memory quota (256 MiB).
-pub const DEFAULT_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
+pub const DEFAULT_MEMORY_LIMIT: usize = ferrijs::limits::DEFAULT_MEMORY_LIMIT;
 
 /// Default per-script JS stack size (1 MiB).
-pub const DEFAULT_STACK_SIZE: usize = 1024 * 1024;
+pub const DEFAULT_STACK_SIZE: usize = ferrijs::limits::DEFAULT_STACK_SIZE;
 
-/// Default GC trigger threshold (64 MiB). QuickJS is reference-counted;
-/// the cycle GC otherwise fires adaptively at ~1.5x live size, so an
-/// object-churny automation script (big `evaluate` results, repeated
-/// `ariaSnapshot`/snapshot trees, locator chains) pays recurring
-/// mark-sweep stalls mid-run. Raising the floor lets a typical
-/// short-lived script finish with few/zero cycle-GC passes — the same
-/// lever Amazon LLRT exposes (`LLRT_GC_THRESHOLD_MB`, 20 MiB default).
-/// `default_memory_limit` (256 MiB) remains the hard backstop, and
-/// acyclic garbage is still freed immediately by refcounting, so this
-/// only defers *cycle* collection, not normal frees.
-pub const DEFAULT_GC_THRESHOLD: usize = 64 * 1024 * 1024;
+/// Default GC trigger threshold (64 MiB). See
+/// [`ferrijs::limits::DEFAULT_GC_THRESHOLD`].
+pub const DEFAULT_GC_THRESHOLD: usize = ferrijs::limits::DEFAULT_GC_THRESHOLD;
 
 /// Default cap on concurrently-retained persistent session VMs. When a
 /// new session would exceed this, the least-recently-used idle VM is
@@ -94,10 +81,10 @@ pub struct ScriptEngineConfig {
   /// When set, `console.*` calls stream to this sink as they happen and
   /// `ScriptResult.console` stays empty. `None` (the default) keeps the
   /// buffered form every machine consumer reads.
-  pub console_sink: Option<Arc<dyn crate::console::ConsoleSink>>,
+  pub console_sink: Option<Arc<dyn ferrijs::ConsoleSink>>,
   /// Values redacted from everything a run hands back: console entries,
-  /// the returned value, and the failure. Redacting at the engine means a
-  /// host cannot forget to do it on one of the three paths.
+  /// the returned value, and the failure. Redacting at the runtime means
+  /// a host cannot forget to do it on one of the three paths.
   pub secrets: ferridriver::response::Secrets,
   /// Ceiling on the artifacts root, enforced by whichever host owns the
   /// output directory. Carried here so a session published by
@@ -109,7 +96,7 @@ pub struct ScriptEngineConfig {
   /// Identity this VM's actions are attributed with
   /// ([`ferridriver::trace::CallOrigin::script`]). An action gate reads it
   /// to tell a paused test's own calls from those of the client inspecting
-  /// it — pausing the inspector would leave nobody to resume.
+  /// it -- pausing the inspector would leave nobody to resume.
   pub script_id: Option<String>,
 }
 
@@ -135,27 +122,63 @@ impl Default for ScriptEngineConfig {
   }
 }
 
-/// Per-call overrides for a single `run` invocation.
-#[derive(Debug, Clone, Default)]
-pub struct RunOptions {
-  pub timeout: Option<Duration>,
-  pub memory_limit: Option<usize>,
-  pub stack_size: Option<usize>,
-  pub gc_threshold: Option<usize>,
+impl ScriptEngineConfig {
+  fn limits(&self) -> ferrijs::Limits {
+    ferrijs::Limits {
+      memory: self.default_memory_limit,
+      stack: self.default_stack_size,
+      gc_threshold: self.default_gc_threshold,
+      timeout: self.default_timeout,
+      ..ferrijs::Limits::default()
+    }
+  }
+
+  fn console(&self) -> ferrijs::ConsoleOptions {
+    ferrijs::ConsoleOptions {
+      max_entries: self.max_console_entries,
+      max_bytes: self.max_console_bytes,
+      max_entry_bytes: self.max_console_entry_bytes,
+      sink: self.console_sink.clone(),
+    }
+  }
+}
+
+/// The operator's declared secrets as the runtime's redactor.
+#[derive(Debug)]
+struct SecretsRedactor(ferridriver::response::Secrets);
+
+impl ferrijs::Redactor for SecretsRedactor {
+  fn redact<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+    self.0.redact(text)
+  }
+
+  fn is_empty(&self) -> bool {
+    self.0.is_empty()
+  }
+}
+
+/// The debugger's parked time, so a run held at a breakpoint is not a
+/// run that timed out.
+struct PauseClock;
+
+impl ferrijs::PauseClock for PauseClock {
+  fn parked_now(&self) -> Duration {
+    ferridriver::pause::pause_clock().parked_now()
+  }
 }
 
 /// Which host is running the extension/registry. Exposed to JS as the
 /// native global `ferridriver.host` ("mcp" | "bdd" | "test" | "script") so one
-/// extension file can branch its contributions — e.g. only `tool`
-/// under MCP, only `Given/When/Then` under the test runner — without any
+/// extension file can branch its contributions -- e.g. only `tool`
+/// under MCP, only `Given/When/Then` under the test runner -- without any
 /// runtime cost (a single string set once per session).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExtensionHost {
-  /// MCP server (`ferridriver mcp`) — consumes `tool` registrations.
+  /// MCP server (`ferridriver mcp`) -- consumes `tool` registrations.
   Mcp,
-  /// BDD test runner (`ferridriver bdd`) — consumes step/hook defs.
+  /// BDD test runner (`ferridriver bdd`) -- consumes step/hook defs.
   Bdd,
-  /// Playwright-shaped test runner (`ferridriver test`) — consumes
+  /// Playwright-shaped test runner (`ferridriver test`) -- consumes
   /// `test`/`describe` registrations from `@ferridriver/test`.
   Test,
   /// Ad-hoc script (`ferridriver run` / `run_script`).
@@ -166,7 +189,7 @@ pub enum ExtensionHost {
 impl ExtensionHost {
   /// Every host, in the order a report lists them. Pinned against
   /// `ferridriver_config::extension_manifest::EXTENSION_HOSTS`, which a
-  /// manifest's `hosts` filter is validated against — the two spellings
+  /// manifest's `hosts` filter is validated against -- the two spellings
   /// of the same set must not drift.
   pub const ALL: &'static [Self] = &[Self::Mcp, Self::Bdd, Self::Test, Self::Script];
 
@@ -190,12 +213,11 @@ impl ExtensionHost {
 /// # Filesystem posture
 ///
 /// A script reaches the filesystem the way Node does: `fs` is the
-/// vendored `node:fs`, and a relative path resolves against the process
+/// runtime's `node:fs`, and a relative path resolves against the process
 /// cwd. `script_root` is where a relative ES module import resolves from,
-/// and `artifacts` is where outputs are written by default — anchors,
-/// not boundaries. There is no path jail; a script already reaches the
-/// network, the browser and `commands`, so a prefix check on one module
-/// was never the boundary it read as.
+/// and `artifacts` is where outputs are written by default -- anchors,
+/// not boundaries. What confines a script is the realm's permissions
+/// ([`ScriptCaps::permissions`]), which the operator's config resolves.
 #[derive(Clone)]
 pub struct RunContext {
   pub vars: Arc<dyn VarsStore>,
@@ -208,17 +230,14 @@ pub struct RunContext {
   pub browser_context: Option<Arc<ferridriver::context::ContextRef>>,
   pub request: Option<Arc<ferridriver::http_client::HttpClient>>,
   /// Optional root `Browser` handle exposed as the `browser` global.
-  /// Scripts use it for
-  /// `browser.newContext(BrowserContextOptions)` — the natural
-  /// Playwright entry point that §4.1's options bag attaches to.
   pub browser: Option<Arc<ferridriver::Browser>>,
   /// Extension bindings to install on the `tools` global.
   pub extensions: Vec<crate::bindings::ExtensionBinding>,
-  /// Which host is driving this session — surfaced to JS as
+  /// Which host is driving this session -- surfaced to JS as
   /// `ferridriver.host`. Defaults to [`ExtensionHost::Script`].
   pub host: ExtensionHost,
-  /// Opt-in sandbox relaxations resolved from config (the env
-  /// allow-list). Default = fully locked down.
+  /// The realm's policy and the operator's extension ceiling, resolved
+  /// from config.
   pub caps: ScriptCaps,
   /// The session key this VM serves (`"<instance>:<context>"`), when the
   /// host has one. Surfaced to scripts and to extension handlers as
@@ -228,12 +247,14 @@ pub struct RunContext {
   pub session: Option<String>,
 }
 
-/// Resolved, ready-to-install sandbox relaxations. Built by the host
+/// What the operator's config resolves to: the realm's permissions, the
+/// command grants, and the extension ceiling. Built by the host
 /// (MCP/CLI/BDD) from `ferridriver_config::ScriptingConfig`; the engine
-/// only consumes it. Default is the locked-down posture: no env.
-#[derive(Debug, Clone, Default)]
+/// only consumes it. Default is a script trusted as much as the host,
+/// with an empty `process.env`.
+#[derive(Debug, Clone)]
 pub struct ScriptCaps {
-  /// `process.env` contents — already filtered to the operator's
+  /// `process.env` contents -- already filtered to the operator's
   /// allow-list intersected with the real environment. Empty ⇒
   /// `process.env` is an empty object.
   pub env: std::collections::BTreeMap<String, String>,
@@ -243,6 +264,11 @@ pub struct ScriptCaps {
   /// unset" are different diagnoses for an extension that declares an
   /// environment requirement, and `env` alone cannot tell them apart.
   pub allow_env: Vec<String>,
+  /// The realm's grants for everything but `env`. Defaults to
+  /// everything: a ferridriver script drives a browser it was handed,
+  /// which is authority enough that a filesystem jail on top would be
+  /// theatre. An operator narrows it through config.
+  pub permissions: Permissions,
   /// First-party command grants exposed as `commands` /
   /// `ferridriver.commands` outside extension handlers.
   pub commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
@@ -256,6 +282,19 @@ pub struct ScriptCaps {
   pub extension_settings: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+impl Default for ScriptCaps {
+  fn default() -> Self {
+    Self {
+      env: std::collections::BTreeMap::new(),
+      allow_env: Vec::new(),
+      permissions: Permissions::all(),
+      commands: std::collections::BTreeMap::new(),
+      extension_policy: ferridriver_config::ExtensionPolicyConfig::default(),
+      extension_settings: std::collections::BTreeMap::new(),
+    }
+  }
+}
+
 impl ScriptCaps {
   /// Attach the operator's per-extension settings.
   #[must_use]
@@ -267,7 +306,7 @@ impl ScriptCaps {
   /// Resolve from an operator allow-list: only the named variables, and
   /// only those actually present in the process environment, are
   /// captured. A name not in the environment is silently absent (same
-  /// as Node) — it is never invented.
+  /// as Node) -- it is never invented.
   #[must_use]
   pub fn resolve(allow_env: &[String]) -> Self {
     let env = allow_env
@@ -277,10 +316,20 @@ impl ScriptCaps {
     Self {
       env,
       allow_env: allow_env.to_vec(),
-      commands: std::collections::BTreeMap::new(),
-      extension_policy: ferridriver_config::ExtensionPolicyConfig::default(),
-      extension_settings: std::collections::BTreeMap::new(),
+      ..Self::default()
     }
+  }
+
+  /// Resolve from the operator's `[scripting]` section: the env
+  /// allow-list, the command grants, and the realm permissions (or
+  /// everything, when the section names none).
+  #[must_use]
+  pub fn from_scripting(cfg: &ferridriver_config::ScriptingConfig) -> Self {
+    let mut caps = Self::resolve_with_commands(&cfg.allow_env, cfg.allow.commands.clone());
+    if let Some(permissions) = &cfg.permissions {
+      caps.permissions = permissions.clone();
+    }
+    caps
   }
 
   /// Resolve from env names and a pre-parsed command allow-list.
@@ -300,21 +349,22 @@ impl ScriptCaps {
     self.extension_policy = policy;
     self
   }
-}
 
-/// The session's VM-loop handle, stashed as rquickjs userdata at
-/// [`Session::create`] so bindings that mint a `Page` from script
-/// (`browser.newContext().newPage()`, `locator.page()`, `frame.page()`)
-/// can thread it into `PageJs` — without it, `page.route` /
-/// `page.exposeFunction` cross-task dispatch has no way back into the
-/// VM event loop.
-pub(crate) struct SessionVm(pub(crate) crate::vm::VmHandle);
+  /// Narrow the realm's grants.
+  #[must_use]
+  pub fn with_permissions(mut self, permissions: Permissions) -> Self {
+    self.permissions = permissions;
+    self
+  }
 
-// SAFETY: holds only an owned channel handle (`'static`; no borrowed
-// JS values), so re-stating the unused `'js` lifetime is sound.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for SessionVm {
-  type Changed<'to> = SessionVm;
+  /// The realm's policy: the grants, with `env` reduced to the
+  /// allow-list.
+  #[must_use]
+  pub fn realm_permissions(&self) -> Permissions {
+    let mut p = self.permissions.clone();
+    p.env = ferrijs::permissions::Allow::Only(self.allow_env.clone());
+    p
+  }
 }
 
 /// The session's durable persistent-process registry, stashed as
@@ -346,6 +396,16 @@ unsafe impl rquickjs::JsLifetime<'_> for ExtensionEnvUd {
   type Changed<'to> = ExtensionEnvUd;
 }
 
+/// The session's `fetch` backend, stashed as userdata so a tool
+/// dispatch can hand its handler an attenuated copy.
+pub(crate) struct SessionFetchUd(pub(crate) Arc<crate::bindings::net_policy::SessionFetch>);
+
+// SAFETY: owned `Arc` only.
+#[allow(unsafe_code)]
+unsafe impl rquickjs::JsLifetime<'_> for SessionFetchUd {
+  type Changed<'to> = SessionFetchUd;
+}
+
 /// Sandboxed `QuickJS` scripting engine.
 pub struct ScriptEngine {
   config: ScriptEngineConfig,
@@ -368,26 +428,32 @@ impl ScriptEngine {
   /// [`crate::session_table::SessionTable`] instead.
   ///
   /// `args` is bound as the `args` global (positional) and never
-  /// interpolated into `source` — preventing prompt injection. No state
+  /// interpolated into `source` -- preventing prompt injection. No state
   /// survives the call.
-  pub async fn run(
-    &self,
-    source: &str,
-    args: &[serde_json::Value],
+  ///
+  /// Boxed at the definition for the same reason as [`Session::create`],
+  /// which it awaits: the future carries the engine config, and every
+  /// caller would otherwise carry it too (`clippy::large_futures`).
+  pub fn run<'a>(
+    &'a self,
+    source: &'a str,
+    args: &'a [serde_json::Value],
     options: RunOptions,
     context: RunContext,
-  ) -> ScriptResult {
-    match Session::create(self.config.clone(), &context).await {
-      Ok(session) => session.execute(source, args, options, &context).await.result,
-      Err(e) => ScriptResult::err(e, 0, Vec::new()),
-    }
+  ) -> impl std::future::Future<Output = ScriptResult> + Send + 'a {
+    Box::pin(async move {
+      match Session::create(self.config.clone(), &context).await {
+        Ok(session) => session.execute(source, args, options, &context).await.result,
+        Err(e) => ScriptResult::err(e, 0, Vec::new()),
+      }
+    })
   }
 }
 
 /// Outcome of one [`Session::execute`]: the script result plus whether
 /// the VM was left in a state the caller must discard before the next
 /// execution. Poisoning means the interpreter was force-halted mid-run
-/// (timeout interrupt) or hit an allocation fault — a plain JS `throw`
+/// (timeout interrupt) or hit an allocation fault -- a plain JS `throw`
 /// is NOT poisoning and leaves session state intact.
 #[derive(Debug)]
 pub struct SessionRun {
@@ -395,114 +461,13 @@ pub struct SessionRun {
   pub poisoned: bool,
 }
 
-/// A persistent `QuickJS` runtime + context reused across many script
-/// executions for one logical session.
-///
-/// User state on `globalThis` (and `var` / `function` declarations,
-/// which hoist to the global object) survives across [`execute`] calls
-/// REPL-style. Top-level `let` / `const` inside a script are scoped to
-/// the async wrapper of that single call and do NOT persist — assign to
-/// `globalThis` for continuity. Framework bindings (`page`, `context`,
-/// `request`, `browser`, `vars`, `fs`, `artifacts`, `console`, `args`)
-/// are reinstalled every call so they always reflect current session
-/// state. Extension bindings are installed once at creation.
-///
-/// [`execute`]: Session::execute
-pub struct Session {
-  runtime: AsyncRuntime,
-  /// Submission handle to the session's single VM event loop (see
-  /// `crate::vm`): one persistent `async_with` owns the runtime's
-  /// schedular for the VM's whole life; every execute and every
-  /// cross-task dispatch runs as a job `ctx.spawn`ed by that loop.
-  /// Nothing else may create an `async_with` against this runtime — a
-  /// transient one steals the schedular's single wake-queue slot and
-  /// dies with it, silently losing every later external wake.
-  vm: crate::vm::VmHandle,
-  /// Dropping this with the session ends the VM event loop, which
-  /// releases the runtime on the loop's own task.
-  _vm_shutdown: crate::vm::VmShutdown,
-  config: ScriptEngineConfig,
-  default_request: Arc<ferridriver::http_client::HttpClient>,
-  caps: ScriptCaps,
-  /// Last resource limits pushed to `runtime`. `set_memory_limit` /
-  /// `set_max_stack_size` / `set_gc_threshold` each take the runtime's
-  /// async lock; re-pushing identical values every `execute` is pure
-  /// overhead on a warm persistent session that runs many small
-  /// scripts (the MCP path). Skip the setter when the value is
-  /// unchanged.
-  applied: AppliedLimits,
-  timeout: Arc<TimeoutState>,
-}
-
-/// Currently-applied runtime limits, so `execute` can skip redundant
-/// `AsyncRuntime` setter calls.
-struct AppliedLimits {
-  memory: AtomicUsize,
-  stack: AtomicUsize,
-  gc: AtomicUsize,
-}
-
-/// Deadline state consulted by the session's single interrupt handler,
-/// installed once at [`Session::create`]. Between calls the deadline
-/// rests at [`TimeoutState::DISARMED`], so a late VM entry (route /
-/// `exposeFunction` / screencast dispatch arriving after a call
-/// finished) is never force-halted by a stale deadline from the
-/// previous call. [`Session::execute`] / [`Session::execute_module`]
-/// arm it per call; [`Session::finish`] disarms it.
-struct TimeoutState {
-  epoch: Instant,
-  /// Deadline as milliseconds since `epoch`; `DISARMED` between calls.
-  deadline_ms: AtomicU64,
-  /// Time the process had spent parked at the debugger when the current
-  /// deadline was armed. Whatever it gains after that is time this call
-  /// was held rather than running, and is added back in [`Self::expired`].
-  parked_at_arm_ms: AtomicU64,
-  /// Set by the interrupt handler when it force-halted the interpreter.
-  timed_out: AtomicBool,
-}
-
-impl TimeoutState {
-  const DISARMED: u64 = u64::MAX;
-
-  fn new() -> Self {
+impl From<ferrijs::Run<serde_json::Value>> for SessionRun {
+  fn from(run: ferrijs::Run<serde_json::Value>) -> Self {
+    let poisoned = run.poisoned;
     Self {
-      epoch: Instant::now(),
-      deadline_ms: AtomicU64::new(Self::DISARMED),
-      parked_at_arm_ms: AtomicU64::new(0),
-      timed_out: AtomicBool::new(false),
+      result: run.into_result(),
+      poisoned,
     }
-  }
-
-  fn arm(&self, deadline: Instant) {
-    let ms = deadline
-      .saturating_duration_since(self.epoch)
-      .as_millis()
-      .min(u128::from(Self::DISARMED - 1)) as u64;
-    self.timed_out.store(false, Ordering::Relaxed);
-    self.parked_at_arm_ms.store(Self::parked_ms(), Ordering::Relaxed);
-    self.deadline_ms.store(ms, Ordering::Relaxed);
-  }
-
-  fn disarm(&self) {
-    self.deadline_ms.store(Self::DISARMED, Ordering::Relaxed);
-  }
-
-  /// Parked time including a park still open, so the deadline stands still
-  /// for as long as the debugger holds the call rather than only catching
-  /// up once it is released.
-  fn parked_ms() -> u64 {
-    u64::try_from(ferridriver::pause::pause_clock().parked_now().as_millis()).unwrap_or(u64::MAX)
-  }
-
-  fn expired(&self) -> bool {
-    let deadline = self.deadline_ms.load(Ordering::Relaxed);
-    if deadline == Self::DISARMED {
-      return false;
-    }
-    // A call held at the debugger is not a call that is running away: give
-    // back every millisecond spent parked since this deadline was armed.
-    let parked = Self::parked_ms().saturating_sub(self.parked_at_arm_ms.load(Ordering::Relaxed));
-    (self.epoch.elapsed().as_millis() as u64) >= deadline.saturating_add(parked)
   }
 }
 
@@ -510,25 +475,20 @@ impl TimeoutState {
 /// that re-arm it from outside the session (the test-runner bridge, for
 /// `test.slow()` / `testInfo.setTimeout()`).
 #[derive(Clone)]
-pub struct Deadline(Arc<TimeoutState>);
+pub struct Deadline(ferrijs::Deadline);
 
 impl Deadline {
   /// Whether the interrupt handler force-halted the interpreter for this
-  /// deadline.
-  ///
-  /// A force-halt stops the VM wherever it happened to be — mid-await,
-  /// mid-property-write — so the session is not trustworthy afterwards
-  /// even though its registrations still LOOK intact. A plain JS throw is
-  /// not a force-halt and leaves the session usable.
+  /// deadline. See [`ferrijs::Deadline::force_halted`].
   #[must_use]
   pub fn force_halted(&self) -> bool {
-    self.0.timed_out.load(Ordering::Relaxed)
+    self.0.force_halted()
   }
 }
 
 impl ferridriver_test::host::DeadlineControl for Deadline {
   fn arm(&self, timeout: Duration) {
-    self.0.arm(Instant::now() + timeout);
+    self.0.arm(timeout);
   }
 
   fn disarm(&self) {
@@ -536,124 +496,60 @@ impl ferridriver_test::host::DeadlineControl for Deadline {
   }
 }
 
-impl Session {
-  /// Build the persistent VM: runtime, resource limits, sandbox-rooted
-  /// module loader, context, and one-time extension install. The module
-  /// loader is bound to `context.script_root` for the VM's lifetime, so a
-  /// session must always be driven with the same `script_root`.
-  pub async fn create(config: ScriptEngineConfig, context: &RunContext) -> Result<Self, ScriptError> {
-    let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("rquickjs runtime init: {e}")))?;
+/// Everything ferridriver installs once per realm, as the runtime's
+/// extension: userdata the bindings read, the class prototypes, the
+/// session-stable globals, the extension registry and every loaded
+/// extension's contributions.
+struct FerridriverExtension {
+  vars: Arc<dyn VarsStore>,
+  artifacts: Option<Arc<OutputDir>>,
+  host: ExtensionHost,
+  caps: ScriptCaps,
+  session: Option<String>,
+  extensions: Vec<crate::bindings::ExtensionBinding>,
+  sidecars: Vec<crate::sidecar::SidecarSpec>,
+  test_debug: Option<Arc<dyn crate::bindings::TestDebugControl>>,
+  script_id: Option<String>,
+  fetch: Arc<crate::bindings::net_policy::SessionFetch>,
+  env: Arc<crate::session_host::SessionScriptConfig>,
+}
 
-    runtime.set_memory_limit(config.default_memory_limit).await;
-    runtime.set_max_stack_size(config.default_stack_size).await;
-    // Defer cycle-GC so short automation scripts don't mark-sweep
-    // mid-run (LLRT-style). Refcounting still frees acyclic garbage
-    // immediately; memory_limit is the hard cap.
-    runtime.set_gc_threshold(config.default_gc_threshold).await;
+impl ferrijs::Extension for FerridriverExtension {
+  fn name(&self) -> &'static str {
+    "ferridriver"
+  }
 
-    // One interrupt handler for the VM's lifetime, reading the shared
-    // deadline cell. Installing per call and never disarming would let a
-    // stale deadline force-halt route/exposeFunction/screencast dispatch
-    // entering the interpreter between calls.
-    let timeout = Arc::new(TimeoutState::new());
-    {
-      let state = Arc::clone(&timeout);
-      runtime
-        .set_interrupt_handler(Some(Box::new(move || {
-          if state.expired() {
-            state.timed_out.store(true, Ordering::Relaxed);
-            true
-          } else {
-            false
-          }
-        })))
-        .await;
-    }
+  fn modules(&self, registry: &mut ferrijs::ModuleRegistry) -> Result<(), String> {
+    crate::bindings::native_modules::register(registry)
+  }
 
-    // Module loader rooted at the sandbox — lets scripts `import './x.js'`.
-    // Resolver and loader both check containment; rquickjs's built-in
-    // ScriptLoader is replaced with our sandboxed pair so a rogue import
-    // can't escape `script_root`. Bound once: the sandbox is stable for
-    // the session's lifetime.
-    // Native modules (`ferridriver`, `@cucumber/cucumber`, node-compat
-    // `fs`/`path`/`buffer`) resolve first; file resolution follows.
-    // Bundles mark these specifiers external, so the bytecode links
-    // against THIS runtime's ModuleDefs at eval.
-    runtime
-      .set_loader(
-        (
-          crate::bindings::native_modules::resolver(),
-          crate::modules::RelativeModuleResolver::new(context.script_root.clone()),
-        ),
-        (
-          crate::bindings::native_modules::loader(),
-          crate::modules::RelativeModuleLoader::new(),
-        ),
-      )
-      .await;
+  fn loaders(&self) -> Vec<(ferrijs::modules::BoxResolver, ferrijs::modules::BoxLoader)> {
+    crate::bindings::native_modules::provided_loaders()
+  }
 
-    let ctx = AsyncContext::full(&runtime)
-      .await
-      .map_err(|e| ScriptError::internal(format!("rquickjs context init: {e}")))?;
+  fn require_hook(&self) -> Option<Arc<dyn ferrijs::RequireHook>> {
+    Some(Arc::new(crate::bindings::native_modules::FerridriverRequire))
+  }
 
-    let (vm, vm_shutdown) = crate::vm::spawn_vm_loop(&ctx);
-
-    // Extension bindings are server-global and immutable post-load, so they
-    // install exactly once. The per-tool wrappers dereference
-    // `globalThis.page` / `context` / `request` lazily at invocation,
-    // by which point `execute` has refreshed those bindings.
-    let extensions = context.extensions.clone();
-    // Cloned out of `context` (a `&RunContext`) so the async_with future
-    // owns them rather than borrowing across the await.
-    let vars = context.vars.clone();
-    let script_root = context.script_root.clone();
-    let script_root_str = script_root.to_string_lossy().into_owned();
-    let artifacts = context.artifacts.clone();
-    let host = context.host;
-    let caps = context.caps.clone();
-    let caps_for_session = caps.clone();
-    let session = context.session.clone();
-    let sidecars = config.sidecars.clone();
-    let test_debug = config.test_debug.clone();
-    let script_id = config.script_id.clone();
-    let ud_vm = vm.clone();
-    // Snapshot for the `browser.bind()` script host (see the userdata store
-    // below). The engine config goes without its console sink: that sink
-    // belongs to THIS process's stdout, and a session host routes each run's
-    // output to whichever client asked for it.
-    let (env_script_root, env_artifacts, env_extensions) = (script_root.clone(), artifacts.clone(), extensions.clone());
-    let env_engine = ScriptEngineConfig {
-      console_sink: None,
-      ..config.clone()
-    };
-    let session_console = Arc::new({
-      let capture = ConsoleCapture::new(
-        config.max_console_entries,
-        config.max_console_bytes,
-        config.max_console_entry_bytes,
-      )
-      .with_secrets(config.secrets.clone());
-      match &config.console_sink {
-        Some(sink) => capture.with_sink(sink.clone()),
-        None => capture,
-      }
-    });
-    let install: Result<Result<(), ScriptError>, ScriptError> = vm_with!(vm => |ctx| {
-      // Stash the session's VM-loop handle so script-minted pages can
-      // thread it into PageJs (route/exposeFunction cross-task
-      // dispatch). A failure here only degrades those to "no VM
-      // handle" — never a correctness break.
-      let _ = ctx.store_userdata(SessionVm(ud_vm));
+  fn install_async<'js>(
+    &self,
+    ctx: Ctx<'js>,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
+    let vars = self.vars.clone();
+    let artifacts = self.artifacts.clone();
+    let host = self.host;
+    let caps = self.caps.clone();
+    let session = self.session.clone();
+    let extensions = self.extensions.clone();
+    let sidecars = self.sidecars.clone();
+    let test_debug = self.test_debug.clone();
+    let script_id = self.script_id.clone();
+    let fetch = Arc::clone(&self.fetch);
+    let env = Arc::clone(&self.env);
+    Box::pin(async move {
       if let Some(id) = &script_id {
         crate::bindings::call_site::set_script_id(&ctx, id);
       }
-      // The active-tool net allow-list cell `fetch` reads (resting state
-      // = unrestricted). Stored once per VM so it survives rebuilds and
-      // is present even when no tool runs; `extensions::dispatch_tool`
-      // swaps it around each net-restricted handler's poll.
-      let _ = ctx.store_userdata(crate::bindings::fetch::NetPolicyUd(
-        crate::bindings::fetch::NetPolicy::default(),
-      ));
       // The operator extension-policy ceiling. Must precede
       // `install_extensions`: `defineTool` reads it to clamp each
       // manifest's `allow` down to the effective grants.
@@ -665,145 +561,168 @@ impl Session {
         session: session.clone(),
         settings: caps.extension_settings.clone(),
       });
+      let _ = ctx.store_userdata(SessionFetchUd(fetch));
       // The scripting environment itself, so `browser.bind()` can publish a
       // session that runs scripts with the SAME sandboxes, caps and
-      // extensions this VM has — a bound browser nobody can script is not a
+      // extensions this VM has -- a bound browser nobody can script is not a
       // session, it is a registry entry.
-      let _ = ctx.store_userdata(crate::session_host::ScriptEnvUd(std::sync::Arc::new(
-        crate::session_host::SessionScriptConfig {
-          script_root: env_script_root,
-          artifacts: env_artifacts,
-          caps: caps.clone(),
-          extensions: env_extensions,
-          engine: env_engine,
-        },
-      )));
+      let _ = ctx.store_userdata(crate::session_host::ScriptEnvUd(env));
       // Native route-handler registry (context userdata): session-once
       // so `page.route` works on ANY page (script-launched
       // `context.newPage()`, not just the MCP-prebound one whose
       // `install_page` also creates it).
       crate::bindings::page::ensure_page_callbacks(&ctx);
-      install_runtime_shims(&ctx).map_err(|e| ScriptError::internal(format!("failed to install runtime shims: {e}")))?;
 
       // `testDebug`, only for a session a paused test published. Absent
       // otherwise, so a script can feature-detect the pause rather than
       // calling into a control that would have nothing to release.
       if let Some(control) = test_debug {
-        crate::bindings::test_debug::install(&ctx, control)
-          .map_err(|e| ScriptError::internal(format!("failed to install testDebug: {e}")))?;
+        crate::bindings::test_debug::install(&ctx, control)?;
       }
 
       // Session-stable bindings: install ONCE, not per `execute`. Class
-      // prototypes are idempotent; `vars`/`fs`/`artifacts`/`browser_type`
-      // back onto Arcs that never change for a session's lifetime (the
-      // `SessionTable` slot owns the durable `vars`; the sandbox is
-      // fixed per session). Only per-call-variant handles
-      // (page/context/request/browser/console/args) refresh in `execute`.
-      crate::bindings::define_classes(&ctx)
-        .map_err(|e| ScriptError::internal(format!("failed to define classes: {e}")))?;
-      install_vars(&ctx, vars).map_err(|e| ScriptError::internal(format!("failed to install vars: {e}")))?;
-      crate::bindings::runtime::mirror_global(&ctx, "fs")
-        .map_err(|e| ScriptError::internal(format!("failed to mirror fs: {e}")))?;
-      // `process.env` is the operator's allow-list already intersected
-      // with the real environment, and `cwd()` answers the sandbox root
-      // rather than the real process cwd — the two host-supplied values
-      // the standard-library `process` takes.
-      ferridriver_jsstd::node::process::install(&ctx, &caps.env, &script_root_str)
-        .and_then(|()| crate::bindings::runtime::mirror_global(&ctx, "process"))
-        .map_err(|e| ScriptError::internal(format!("failed to install process: {e}")))?;
-      install_commands(&ctx, &caps, None)
-        .map_err(|e| ScriptError::internal(format!("failed to install commands: {e}")))?;
+      // prototypes are idempotent; `vars`/`artifacts`/`browser_type`
+      // back onto Arcs that never change for a session's lifetime. Only
+      // per-call-variant handles (page/context/request/browser/args)
+      // refresh in `execute`.
+      crate::bindings::define_classes(&ctx)?;
+      install_vars(&ctx, vars)?;
+      crate::bindings::runtime::mirror_global(&ctx, "fs")?;
+      crate::bindings::runtime::mirror_global(&ctx, "process")?;
+      install_commands(&ctx, &caps, None)?;
       if let Some(artifacts) = artifacts {
-        crate::bindings::install_artifacts(&ctx, artifacts)
-          .map_err(|e| ScriptError::internal(format!("failed to install artifacts: {e}")))?;
+        crate::bindings::install_artifacts(&ctx, artifacts)?;
       }
-      crate::bindings::install_browser_type(&ctx)
-        .map_err(|e| ScriptError::internal(format!("failed to install browser_type: {e}")))?;
+      crate::bindings::install_browser_type(&ctx)?;
 
       // expect() global (Jest value matchers, Playwright web-first
-      // matchers, asymmetric matchers, expect.poll). Session-stable —
-      // class prototypes + factory function are installed once and
-      // survive across `execute` calls.
-      crate::bindings::expect::install_expect(&ctx)
-        .map_err(|e| ScriptError::internal(format!("failed to install expect: {e}")))?;
+      // matchers, asymmetric matchers, expect.poll).
+      crate::bindings::expect::install_expect(&ctx)?;
 
       // The unified extension registry (userdata) + native contribution
       // points (`Given`/`When`/`Then`/`defineTool`/...). Must precede
       // `install_extensions`: evaluating an extension's bytecode registers
-      // its tools/steps through this native surface (`defineTool` /
-      // `Given`...), so the registry must already exist.
-      crate::bindings::install_bdd(&ctx)
-        .map_err(|e| ScriptError::internal(format!("failed to install extension registry: {e}")))?;
+      // its tools/steps through this native surface.
+      crate::bindings::install_bdd(&ctx)?;
 
       // Playwright-shaped `test`/`describe` registration surface. Every
       // host gets it: an extension or a step file that builds a fixture
       // chain with `test.extend` / `mergeTests` must be able to do so
       // wherever it is loaded. Only `ferridriver test` CONSUMES what
-      // registering leaves behind — the runner glue snapshots the
-      // registry userdata — and a `test()` call under any other host is
-      // reported as a diagnostic rather than silently collected.
-      crate::bindings::test::install_test(&ctx)
-        .map_err(|e| ScriptError::internal(format!("failed to install test surface: {e}")))?;
+      // registering leaves behind.
+      crate::bindings::test::install_test(&ctx)?;
 
-      // `sidecars.connect(name)` — declared external processes driven over
+      // `sidecars.connect(name)` -- declared external processes driven over
       // fd 3/4. Connect is by declared name only; no arbitrary spawn.
-      crate::bindings::install_sidecars(&ctx, &sidecars)
-        .map_err(|e| ScriptError::internal(format!("failed to install sidecars: {e}")))?;
+      crate::bindings::install_sidecars(&ctx, &sidecars)?;
 
-      crate::bindings::runtime::install_host(&ctx, host.as_str())
-        .map_err(|e| ScriptError::internal(format!("install ferridriver.host: {e}")))?;
+      crate::bindings::runtime::install_host(&ctx, host.as_str())?;
 
-      // Extension top-level code runs during `install_extensions`, before any
-      // `execute` installs its per-call capture — give it a console that
-      // forwards to tracing so `console.log` at module scope works (the
-      // extraction pass provides the same; see `compile_extract_one`).
-      let install_console_capture = Arc::new(ConsoleCapture::new(
-        DEFAULT_MAX_CONSOLE_ENTRIES,
-        DEFAULT_MAX_CONSOLE_BYTES,
-        DEFAULT_MAX_CONSOLE_ENTRY_BYTES,
-      ));
-      install_console(&ctx, install_console_capture.clone())
-        .map_err(|e| ScriptError::internal(format!("failed to install console: {e}")))?;
-
-      let installed = crate::bindings::install_extensions(&ctx, &extensions)
-        .await
-        .map_err(|e| ScriptError::internal(format!("failed to install extensions: {e}")));
+      crate::bindings::install_extensions(&ctx, &extensions).await?;
       // Every extension has now contributed. `defineFixtures` appends to
       // the base fixture chain in place, and every `test.extend` from
-      // here on COPIES that chain — so the base has to stop moving
+      // here on COPIES that chain -- so the base has to stop moving
       // before the first bundle links against it.
-      crate::bindings::test::seal_base_fixtures(&ctx)?;
-      for entry in install_console_capture.drain() {
-        tracing::info!(target: "ferridriver::extensions", "{}", entry.message);
-      }
-      // The console the session runs with from here on. `execute` swaps in
-      // a per-call capture of its own, but code driven straight through the
-      // VM — a test body above all — has only this one, and its output has
-      // to reach the sink the host configured instead of a buffer nobody
-      // drains.
-      install_console(&ctx, session_console)
-        .map_err(|e| ScriptError::internal(format!("failed to install console: {e}")))?;
-      installed
+      crate::bindings::test::seal_base_fixtures(&ctx)
+        .map_err(|e| rquickjs::Error::new_from_js_message("test", "seal", e.message))?;
+      Ok(())
     })
-    .await;
-    install??;
+  }
+}
 
-    let applied = AppliedLimits {
-      memory: AtomicUsize::new(config.default_memory_limit),
-      stack: AtomicUsize::new(config.default_stack_size),
-      gc: AtomicUsize::new(config.default_gc_threshold),
-    };
-    Ok(Self {
-      runtime,
-      vm,
-      _vm_shutdown: vm_shutdown,
-      config,
-      default_request: Arc::new(ferridriver::http_client::HttpClient::new(
+/// A persistent runtime reused across many script executions for one
+/// logical session.
+///
+/// User state on `globalThis` survives across [`execute`] calls
+/// REPL-style; a script's own top-level declarations are scoped to that
+/// run. Framework bindings (`page`, `context`, `request`, `browser`,
+/// `console`, `args`) are reinstalled every call so they always reflect
+/// current session state. Extension bindings are installed once at
+/// creation.
+///
+/// [`execute`]: Session::execute
+pub struct Session {
+  rt: Runtime,
+  config: ScriptEngineConfig,
+  default_request: Arc<ferridriver::http_client::HttpClient>,
+  fetch: Arc<crate::bindings::net_policy::SessionFetch>,
+  caps: ScriptCaps,
+}
+
+impl Session {
+  /// Build the persistent VM: runtime, resource limits, sandbox-rooted
+  /// module loader, context, and one-time extension install. The module
+  /// loader is bound to `context.script_root` for the VM's lifetime, so a
+  /// session must always be driven with the same `script_root`.
+  ///
+  /// Boxed at the definition: the future carries the whole engine
+  /// config, and every caller that awaits it would otherwise carry it
+  /// too (`clippy::large_futures`). One allocation next to building a
+  /// QuickJS runtime is noise.
+  pub fn create(
+    config: ScriptEngineConfig,
+    context: &RunContext,
+  ) -> impl std::future::Future<Output = Result<Self, ScriptError>> + Send + '_ {
+    Box::pin(async move {
+      let default_request = Arc::new(ferridriver::http_client::HttpClient::new(
         ferridriver::http_client::HttpClientOptions::default(),
-      )),
-      caps: caps_for_session,
-      applied,
-      timeout,
+      ));
+      let fetch = Arc::new(crate::bindings::net_policy::SessionFetch::new(
+        context.request.clone().unwrap_or_else(|| Arc::clone(&default_request)),
+      ));
+      // Snapshot for the `browser.bind()` script host. The engine config
+      // goes without its console sink: that sink belongs to THIS process's
+      // stdout, and a session host routes each run's output to whichever
+      // client asked for it.
+      let env = Arc::new(crate::session_host::SessionScriptConfig {
+        script_root: context.script_root.clone(),
+        artifacts: context.artifacts.clone(),
+        caps: context.caps.clone(),
+        extensions: context.extensions.clone(),
+        engine: ScriptEngineConfig {
+          console_sink: None,
+          ..config.clone()
+        },
+      });
+      let extension = FerridriverExtension {
+        vars: context.vars.clone(),
+        artifacts: context.artifacts.clone(),
+        host: context.host,
+        caps: context.caps.clone(),
+        session: context.session.clone(),
+        extensions: context.extensions.clone(),
+        sidecars: config.sidecars.clone(),
+        test_debug: config.test_debug.clone(),
+        script_id: config.script_id.clone(),
+        fetch: Arc::clone(&fetch),
+        env,
+      };
+      let script_root = context.script_root.clone();
+      let mut builder = Runtime::builder()
+        .limits(config.limits())
+        .console(config.console())
+        .modules(ModulePolicy::new(&script_root))
+        .process(ferrijs::ProcessOptions {
+          cwd: Some(script_root.to_string_lossy().into_owned()),
+          argv: vec!["script".to_string()],
+        })
+        .identity(ferrijs::Identity::new("ferridriver", env!("CARGO_PKG_VERSION")))
+        .permissions(context.caps.realm_permissions())
+        .pause_clock(Arc::new(PauseClock))
+        .fs_global(true)
+        .fetch(Arc::clone(&fetch) as Arc<dyn ferrijs::fetch::FetchBackend>)
+        .extension(extension);
+      if !config.secrets.is_empty() {
+        builder = builder.redactor(Arc::new(SecretsRedactor(config.secrets.clone())));
+      }
+      let rt = builder.build().await?;
+      Ok(Self {
+        rt,
+        config,
+        default_request,
+        fetch,
+        caps: context.caps.clone(),
+      })
     })
   }
 
@@ -812,12 +731,12 @@ impl Session {
   /// glue arms this around each `run_test`; [`Self::disarm_deadline`]
   /// must follow, or the stale deadline would halt later VM entries.
   pub fn arm_deadline(&self, timeout: Duration) {
-    self.timeout.arm(Instant::now() + timeout);
+    self.rt.deadline().arm(timeout);
   }
 
   /// Clear a deadline armed with [`Self::arm_deadline`].
   pub fn disarm_deadline(&self) {
-    self.timeout.disarm();
+    self.rt.deadline().disarm();
   }
 
   /// A cloneable handle to the same deadline [`Self::arm_deadline`]
@@ -826,15 +745,28 @@ impl Session {
   /// the runner owns).
   #[must_use]
   pub fn deadline(&self) -> Deadline {
-    Deadline(Arc::clone(&self.timeout))
+    Deadline(self.rt.deadline())
   }
 
   /// The session's VM-loop handle. The BDD core clones this to drive
   /// registered JS step functions back over the async bridge (same
   /// mechanism as `page.route` cross-task dispatch).
   #[must_use]
-  pub fn vm_handle(&self) -> crate::vm::VmHandle {
-    self.vm.clone()
+  pub fn vm_handle(&self) -> ferrijs::VmHandle {
+    self.rt.handle()
+  }
+
+  /// The runtime underneath, for a host that needs the realm's own
+  /// surface (its container, its registry).
+  #[must_use]
+  pub fn runtime(&self) -> &Runtime {
+    &self.rt
+  }
+
+  /// Whether a run left the heap untrustworthy.
+  #[must_use]
+  pub fn poisoned(&self) -> bool {
+    self.rt.poisoned()
   }
 
   /// Stash the session's persistent-process registry into VM userdata
@@ -843,7 +775,7 @@ impl Session {
   /// durable session state, the VM is not).
   pub async fn install_session_procs(&self, procs: std::sync::Arc<crate::session_procs::SessionProcs>) {
     let caps = self.caps.clone();
-    let _ = vm_with!(self.vm => |ctx| {
+    let _ = ferrijs::vm_with!(self.rt.handle() => |ctx| {
       let _ = ctx.store_userdata(SessionProcsUd(procs));
       let procs = ctx.userdata::<SessionProcsUd>().map(|u| u.0.clone());
       let _ = install_commands(&ctx, &caps, procs);
@@ -851,117 +783,17 @@ impl Session {
     .await;
   }
 
-  /// Push resource limits to the runtime, skipping any setter whose
-  /// value is unchanged since the last call (avoids the runtime's async
-  /// lock on the warm-session hot path).
-  async fn apply_limits(&self, memory: usize, stack: usize, gc: usize) {
-    if self.applied.memory.swap(memory, Ordering::Relaxed) != memory {
-      self.runtime.set_memory_limit(memory).await;
-    }
-    if self.applied.stack.swap(stack, Ordering::Relaxed) != stack {
-      self.runtime.set_max_stack_size(stack).await;
-    }
-    if self.applied.gc.swap(gc, Ordering::Relaxed) != gc {
-      self.runtime.set_gc_threshold(gc).await;
-    }
-  }
-
-  /// Fresh console capture sized by the session config, streaming to the
-  /// configured sink when the host asked for live output.
-  fn new_console(&self) -> Arc<ConsoleCapture> {
-    let capture = ConsoleCapture::new(
-      self.config.max_console_entries,
-      self.config.max_console_bytes,
-      self.config.max_console_entry_bytes,
-    )
-    .with_secrets(self.config.secrets.clone());
-    Arc::new(match &self.config.console_sink {
-      Some(sink) => capture.with_sink(sink.clone()),
-      None => capture,
-    })
-  }
-
-  /// Per-call framework globals (`console`, `page`, `context`, ...).
-  fn globals_install(&self, context: &RunContext, console: &Arc<ConsoleCapture>) -> GlobalsInstall {
+  /// Per-call framework globals (`page`, `context`, ...).
+  fn globals_install(&self, context: &RunContext) -> GlobalsInstall {
     GlobalsInstall {
-      console: console.clone(),
       page: context.page.clone(),
       browser_context: context.browser_context.clone(),
       request: context.request.clone(),
       default_request: self.default_request.clone(),
       browser: context.browser.clone(),
-      vm: self.vm.clone(),
+      vm: self.rt.handle(),
+      fetch: Arc::clone(&self.fetch),
     }
-  }
-
-  /// Build the `SessionRun` from an eval result, applying the poison rule:
-  /// a timeout force-halt or an OOM leaves the heap untrustworthy and must
-  /// rebuild the VM; a plain throw / recoverable stack overflow does not.
-  fn finish(
-    &self,
-    eval_result: Result<serde_json::Value, ScriptError>,
-    started: Instant,
-    console: &Arc<ConsoleCapture>,
-    timeout: Duration,
-  ) -> SessionRun {
-    self.timeout.disarm();
-    let duration = elapsed_ms(started);
-    let drained = console.drain();
-    match eval_result {
-      Ok(mut value) => {
-        // Console entries were redacted as they were pushed; the returned
-        // value has never been through a chokepoint until now.
-        self.config.secrets.redact_json(&mut value);
-        SessionRun {
-          result: ScriptResult::ok(value, duration, drained),
-          poisoned: false,
-        }
-      },
-      Err(mut err) => {
-        let timed_out = self.timeout.timed_out.load(Ordering::Relaxed);
-        let oom = is_oom(&err);
-        let poisoned = timed_out || oom;
-        if timed_out {
-          err = ScriptError::timeout(duration, timeout.as_millis() as u64);
-        }
-        err.redact(&self.config.secrets);
-        SessionRun {
-          result: ScriptResult::err(err, duration, drained),
-          poisoned,
-        }
-      },
-    }
-  }
-
-  /// Build the `SessionRun` for a tokio-level backstop fire: the script
-  /// was parked on a native `await` past the deadline, so the interrupt
-  /// handler never got a chance to halt it. The eval future was dropped
-  /// mid-flight — half-driven promises may still reference VM state, so
-  /// the run is always poisoned.
-  fn finish_backstop(&self, started: Instant, console: &Arc<ConsoleCapture>, timeout: Duration) -> SessionRun {
-    self.timeout.disarm();
-    let duration = elapsed_ms(started);
-    SessionRun {
-      result: ScriptResult::err(
-        ScriptError::timeout(duration, timeout.as_millis() as u64),
-        duration,
-        console.drain(),
-      ),
-      poisoned: true,
-    }
-  }
-
-  /// Apply this call's resource overrides (falling back to session
-  /// defaults), and return the resolved wall-clock timeout.
-  async fn apply_call_limits(&self, options: &RunOptions) -> Duration {
-    self
-      .apply_limits(
-        options.memory_limit.unwrap_or(self.config.default_memory_limit),
-        options.stack_size.unwrap_or(self.config.default_stack_size),
-        options.gc_threshold.unwrap_or(self.config.default_gc_threshold),
-      )
-      .await;
-    options.timeout.unwrap_or(self.config.default_timeout)
   }
 
   /// Execute one script against the persistent VM. Framework globals are
@@ -978,45 +810,25 @@ impl Session {
     options: RunOptions,
     context: &RunContext,
   ) -> SessionRun {
-    let started = Instant::now();
-    let console = self.new_console();
-    let timeout = self.apply_call_limits(&options).await;
-    self.timeout.arm(started + timeout);
-    let install = self.globals_install(context, &console);
-    let source_owned = source.to_string();
+    let install = self.globals_install(context);
+    let source = source.to_string();
     let args = args.to_vec();
-
-    let eval_fut = vm_with!(self.vm => |ctx| {
-      if let Err(e) = install_call_globals(&ctx, &args, install) {
-        return Err(ScriptError::internal(format!("failed to install globals: {e}")));
-      }
-
-      let wrapped = wrap_source(&source_owned);
-
-      let promise: rquickjs::Promise<'_> = match ctx.eval(wrapped.as_bytes()) {
-        Ok(v) => v,
-        Err(e) => return Err(caught_to_script_error_in(&ctx, rquickjs::CaughtError::from_error(&ctx, e), &source_owned)),
-      };
-
-      let result: Value<'_> = match promise.into_future::<Value<'_>>().await {
-        Ok(v) => v,
-        Err(e) => return Err(caught_to_script_error_in(&ctx, rquickjs::CaughtError::from_error(&ctx, e), &source_owned)),
-      };
-
-      Ok(value_to_json(&ctx, result).unwrap_or(serde_json::Value::Null))
-    });
-
-    let backstop = timeout.saturating_add(TIMEOUT_BACKSTOP_GRACE);
-    let eval_result: Result<serde_json::Value, ScriptError> =
-      match ferridriver::pause::run_within(backstop, eval_fut).await {
-        Ok(r) => r.and_then(|inner| inner),
-        Err(_) => return self.finish_backstop(started, &console, timeout),
-      };
-
-    self.finish(eval_result, started, &console, timeout)
+    let run = self
+      .rt
+      .run(
+        options,
+        Box::new(move |ctx| {
+          Box::pin(async move {
+            install_call_globals(&ctx, install)?;
+            ferrijs::script_body(&ctx, &source, &args).await
+          })
+        }),
+      )
+      .await;
+    self.finish(run)
   }
 
-  /// Execute a precompiled bundled ES module against the persistent VM —
+  /// Execute a precompiled bundled ES module against the persistent VM --
   /// the TypeScript / `import` / `export` path. Framework globals
   /// (`args`, `page`, `console`, ...) are installed exactly as for
   /// [`Self::execute`]; top-level `await` is native to the module.
@@ -1032,81 +844,49 @@ impl Session {
     options: RunOptions,
     context: &RunContext,
   ) -> SessionRun {
-    let started = Instant::now();
-    let console = self.new_console();
-    let timeout = self.apply_call_limits(&options).await;
-    self.timeout.arm(started + timeout);
-    let install = self.globals_install(context, &console);
+    let install = self.globals_install(context);
     let bytecode = Arc::clone(&bundle.bytecode);
-    let label = bundle.module_name.clone();
     let mapper = bundle.mapper();
     let args = args.to_vec();
-
-    let eval_fut = vm_with!(self.vm => |ctx| {
-      crate::bindings::call_site::register_bundle(&ctx, mapper);
-      if let Err(e) = install_call_globals(&ctx, &args, install) {
-        return Err(ScriptError::internal(format!("failed to install globals: {e}")));
-      }
-
-      // SAFETY: `bytecode` was produced by `Module::write` by this exact
-      // rquickjs/QuickJS build with native endianness — either in this
-      // process or restored from the bytecode disk cache, whose ABI tag +
-      // transitive input hashes guarantee an ABI-identical toolchain
-      // wrote it. Same contract as `eval_bundle` / `install_extensions`.
-      #[allow(unsafe_code)]
-      let module = match (unsafe { Module::load(ctx.clone(), &bytecode) }).catch(&ctx) {
-        Ok(m) => m,
-        Err(e) => return Err(caught_to_script_error_in(&ctx, e, &label)),
-      };
-      let (evaluated, promise) = match module.eval().catch(&ctx) {
-        Ok(v) => v,
-        Err(e) => return Err(caught_to_script_error_in(&ctx, e, &label)),
-      };
-      if let Err(e) = promise.into_future::<()>().await.catch(&ctx) {
-        return Err(caught_to_script_error_in(&ctx, e, &label));
-      }
-      // Same reason as `eval_bundle`: a module that registered a tool at
-      // its top level has no callable until the bindings are rebuilt.
-      if let Err(e) = crate::bindings::rebuild_tool_bindings(&ctx) {
-        return Err(ScriptError::internal(format!("rebuild tool bindings: {e}")));
-      }
-
-      // Result = the module's `default` export, if any.
-      let default = evaluated
-        .namespace()
-        .and_then(|ns| ns.get::<_, Value<'_>>("default"))
-        .unwrap_or_else(|_| Value::new_undefined(ctx.clone()));
-      Ok(value_to_json(&ctx, default).unwrap_or(serde_json::Value::Null))
-    });
-
-    let backstop = timeout.saturating_add(TIMEOUT_BACKSTOP_GRACE);
-    let eval_result: Result<serde_json::Value, ScriptError> =
-      match ferridriver::pause::run_within(backstop, eval_fut).await {
-        Ok(r) => r.and_then(|inner| inner),
-        Err(_) => return self.finish_backstop(started, &console, timeout),
-      };
-
-    // Remap the failure location back to the original source.
-    let eval_result = eval_result.map_err(|mut e| {
-      if let Some(line) = e.line
-        && let Some((src, sl, sc)) = bundle.remap(line, e.column.unwrap_or(1))
-      {
-        e.message = format!("{} (at {src}:{sl}:{sc})", e.message);
-      }
-      e
-    });
-
-    self.finish(eval_result, started, &console, timeout)
+    let run = self
+      .rt
+      .run(
+        options,
+        Box::new(move |ctx| {
+          Box::pin(async move {
+            install_call_globals(&ctx, install)?;
+            let value = ferrijs::module_body(&ctx, &bytecode, mapper, &args).await?;
+            // A module that registered a tool at its top level has no
+            // callable until the bindings are rebuilt.
+            crate::bindings::rebuild_tool_bindings(&ctx)
+              .map_err(|e| ScriptError::internal(format!("rebuild tool bindings: {e}")))?;
+            Ok(value)
+          })
+        }),
+      )
+      .await;
+    let run = match run.result {
+      Err(mut e) => {
+        if let Some(line) = e.line
+          && let Some((src, sl, sc)) = bundle.remap(line, e.column.unwrap_or(1))
+        {
+          e.message = format!("{} (at {src}:{sl}:{sc})", e.message);
+        }
+        ferrijs::Run { result: Err(e), ..run }
+      },
+      ok => ferrijs::Run { result: ok, ..run },
+    };
+    self.finish(run)
   }
 
   /// Invoke a registered extension tool by manifest name against the
-  /// persistent VM — the native path behind the MCP `invoke_extension_tool` /
+  /// persistent VM -- the native path behind the MCP `invoke_extension_tool` /
   /// promoted-tool routes. Framework globals are refreshed exactly as
   /// for [`Self::execute`], but nothing is compiled: dispatch goes
   /// straight through the same body the `tools.<name>` binding uses, so
-  /// capability wrappers, `timeoutMs`, and the net-policy bracket apply
-  /// identically. `tool_args` becomes the handler's `args` value; the
-  /// run's result is the handler's resolved return value.
+  /// capability wrappers and `timeoutMs` apply identically. `tool_args`
+  /// becomes the handler's `args` value; the run's result is the
+  /// handler's resolved return value.
   pub async fn execute_tool(
     &self,
     name: &str,
@@ -1114,49 +894,40 @@ impl Session {
     options: RunOptions,
     context: &RunContext,
   ) -> SessionRun {
-    let started = Instant::now();
-    let console = self.new_console();
-    let timeout = self.apply_call_limits(&options).await;
-    self.timeout.arm(started + timeout);
-    let install = self.globals_install(context, &console);
+    let install = self.globals_install(context);
     let name = name.to_string();
+    let run = self
+      .rt
+      .run(
+        options,
+        Box::new(move |ctx| {
+          Box::pin(async move {
+            install_call_globals(&ctx, install)?;
+            crate::bindings::invoke_tool_by_name(&ctx, &name, &tool_args).await
+          })
+        }),
+      )
+      .await;
+    self.finish(run)
+  }
 
-    let eval_fut = vm_with!(self.vm => |ctx| {
-      if let Err(e) = install_call_globals(&ctx, &[], install) {
-        return Err(ScriptError::internal(format!("failed to install globals: {e}")));
-      }
-      crate::bindings::invoke_tool_by_name(&ctx, &name, &tool_args).await
-    });
-
-    let backstop = timeout.saturating_add(TIMEOUT_BACKSTOP_GRACE);
-    let eval_result: Result<serde_json::Value, ScriptError> =
-      match ferridriver::pause::run_within(backstop, eval_fut).await {
-        Ok(r) => r.and_then(|inner| inner),
-        Err(_) => return self.finish_backstop(started, &console, timeout),
-      };
-
-    self.finish(eval_result, started, &console, timeout)
+  fn finish(&self, mut run: ferrijs::Run<serde_json::Value>) -> SessionRun {
+    if let Ok(value) = &mut run.result {
+      self.rt.redact_value(value);
+    }
+    let _ = &self.config;
+    run.into()
   }
 }
 
-/// Wrap user source in an async IIFE so `await` works at the top level and
-/// the expression evaluates to a `Promise<value>` the engine can await.
-/// Install the session-lifetime runtime shims: timers, URL, and a few
-/// hand-rolled web globals. Called once at [`Session::create`]; these
-/// PERSIST across executions (browser/REPL-like) and are cancelled only
-/// when the session VM is dropped (poison / eviction / session end) —
-/// dropping the `AsyncRuntime` aborts every `setInterval`/`setTimeout`
-/// task `ctx.spawn`ed by the timers module, so no per-call teardown is
-/// needed.
-pub(crate) fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-  // Native timers (setTimeout/Interval, ctx.spawn-backed) plus
-  // queueMicrotask, which shares their net-policy carry-over.
-  crate::bindings::timers::install(ctx)?;
-  // `require` for the native specifiers only — what a CommonJS source
-  // bundles down to for an external module.
-  crate::bindings::native_modules::install_require(ctx)?;
-  Ok(())
+/// A caught JS failure as a [`ScriptError`], with a snippet of `source`
+/// when the failure carries a line.
+#[must_use]
+pub(crate) fn caught_to_script_error(caught: rquickjs::CaughtError<'_>, source: &str) -> ScriptError {
+  ScriptError::from_caught_unmapped(caught, source, 0)
 }
+
+pub(crate) use ferrijs::value::value_to_json;
 
 fn install_vars(ctx: &Ctx<'_>, vars: Arc<dyn VarsStore>) -> rquickjs::Result<()> {
   let obj = Object::new(ctx.clone())?;
@@ -1211,246 +982,46 @@ fn install_commands(
   Ok(())
 }
 
-fn wrap_source(source: &str) -> String {
-  format!("(async () => {{\n{source}\n}})()")
-}
-
-/// QuickJS raises an `out of memory` error when an allocation fails
-/// after the runtime memory limit is hit. The allocation site is
-/// arbitrary, so the heap cannot be trusted afterwards — treat it as
-/// poisoning (rebuild the VM), exactly like a timeout force-halt.
-fn is_oom(err: &ScriptError) -> bool {
-  err.message.to_ascii_lowercase().contains("out of memory")
-}
-
-/// Everything `install_globals` needs beyond `ctx` + args JSON. Bundled into
-/// a struct so the helper stays under the clippy arity limit as the binding
-/// surface grows.
+/// Everything `install_call_globals` needs. Bundled into a struct so the
+/// helper stays under the clippy arity limit as the binding surface grows.
 struct GlobalsInstall {
-  console: Arc<ConsoleCapture>,
   page: Option<Arc<ferridriver::Page>>,
   browser_context: Option<Arc<ferridriver::context::ContextRef>>,
   request: Option<Arc<ferridriver::http_client::HttpClient>>,
   default_request: Arc<ferridriver::http_client::HttpClient>,
   browser: Option<Arc<ferridriver::Browser>>,
-  /// VM-loop handle — passed to `install_page` so `page.route`
+  /// VM-loop handle -- passed to `install_page` so `page.route`
   /// callbacks can dispatch back into JS from a separate tokio task.
-  /// Always present (cloned from the session's handle).
-  vm: crate::vm::VmHandle,
+  vm: ferrijs::VmHandle,
+  fetch: Arc<crate::bindings::net_policy::SessionFetch>,
 }
 
-/// Reinstall ONLY the per-call-variant globals: `args`, `console`, and
-/// whichever of `page` / `context` / `request` / `browser` the run
-/// context carries (their backend handles are re-resolved every call).
-/// `vars` / `fs` / `artifacts` / `browser_type` / class prototypes are
-/// session-stable and installed once at [`Session::create`]; extension
-/// bindings likewise.
-fn install_call_globals(ctx: &Ctx<'_>, args: &[serde_json::Value], inst: GlobalsInstall) -> rquickjs::Result<()> {
-  let globals = ctx.globals();
-
-  // args: build the JS array directly from the serde values — no JSON
-  // string, no JS-side `JSON.parse`, and immune to a script reassigning
-  // `globalThis.JSON` in a persistent VM.
-  let args_arr = rquickjs::Array::new(ctx.clone())?;
-  for (i, a) in args.iter().enumerate() {
-    args_arr.set(i, crate::bindings::convert::json_to_js(ctx, a)?)?;
-  }
-  globals.set("args", args_arr)?;
-
-  install_console(ctx, inst.console)?;
-
+/// Reinstall ONLY the per-call-variant globals: whichever of `page` /
+/// `context` / `request` / `browser` the run context carries (their
+/// backend handles are re-resolved every call), and the client `fetch`
+/// sends through. `vars` / `fs` / `artifacts` / `browser_type` / class
+/// prototypes are session-stable and installed once at creation;
+/// `args` and `console` are the runtime's, refreshed by the run bracket.
+fn install_call_globals(ctx: &Ctx<'_>, inst: GlobalsInstall) -> Result<(), ScriptError> {
+  let fail = |e: rquickjs::Error| ScriptError::internal(format!("failed to install globals: {e}"));
   if let Some(page) = inst.page {
-    crate::bindings::install_page(ctx, page, inst.vm.clone())?;
+    crate::bindings::install_page(ctx, page, inst.vm.clone()).map_err(fail)?;
   }
   if let Some(bcx) = inst.browser_context {
-    crate::bindings::install_browser_context(ctx, bcx)?;
+    crate::bindings::install_browser_context(ctx, bcx).map_err(fail)?;
   }
   if let Some(browser) = inst.browser {
-    crate::bindings::install_browser(ctx, browser)?;
+    crate::bindings::install_browser(ctx, browser).map_err(fail)?;
   }
-  if let Some(req) = inst.request {
-    crate::bindings::fetch::install(ctx, req.clone())?;
-    crate::bindings::install_request(ctx, req)?;
-  } else {
-    // `fetch` is always present; with no session HTTP context it uses
-    // a session-stable default one (no shared cookies). Same net posture as the
-    // `request` binding when absent.
-    crate::bindings::fetch::install(ctx, inst.default_request)?;
-  }
-
-  Ok(())
-}
-
-/// Convert the script's return value to `serde_json::Value`.
-///
-/// `rquickjs-serde` (`from_value`) drives the deserializer: it invokes
-/// `toJSON()` / `valueOf()` (a returned `Date` still serialises as its
-/// ISO string), coerces whole f64 in the safe-integer range to `i64`,
-/// drops `undefined` / function / symbol, and renders non-finite as
-/// null. We deserialize into a small AP-immune intermediate rather than
-/// straight into `serde_json::Value`: a transitive dep force-enables
-/// `serde_json/arbitrary_precision` workspace-wide, and under that
-/// feature `serde_json::Value`'s own `Deserialize` demands a private
-/// number representation that a non-`serde_json` deserializer (here,
-/// `rquickjs-serde`) cannot provide — every numeric/array result would
-/// otherwise fail to convert and collapse to `null`. The intermediate's
-/// `Deserialize` is plain serde; the `serde_json::Value` is then built
-/// with explicit constructors, which are AP-correct.
-pub(crate) fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
-  rquickjs_serde::from_value::<JsonInter>(value)
-    .ok()
-    .map(JsonInter::into_json)
-}
-
-/// AP-immune mirror of a JSON value. Its `Deserialize` is plain serde
-/// (no `serde_json` number coupling); `into_json` rebuilds a
-/// `serde_json::Value` via explicit constructors.
-enum JsonInter {
-  Null,
-  Bool(bool),
-  I64(i64),
-  U64(u64),
-  F64(f64),
-  Str(String),
-  Arr(Vec<JsonInter>),
-  Obj(Vec<(String, JsonInter)>),
-}
-
-impl JsonInter {
-  fn into_json(self) -> serde_json::Value {
-    use serde_json::Value;
-    match self {
-      Self::Null => Value::Null,
-      Self::Bool(b) => Value::Bool(b),
-      Self::I64(n) => Value::Number(n.into()),
-      Self::U64(n) => Value::Number(n.into()),
-      Self::F64(f) => serde_json::Number::from_f64(f).map_or(Value::Null, Value::Number),
-      Self::Str(s) => Value::String(s),
-      Self::Arr(a) => Value::Array(a.into_iter().map(Self::into_json).collect()),
-      Self::Obj(o) => Value::Object(o.into_iter().map(|(k, v)| (k, v.into_json())).collect()),
-    }
-  }
-}
-
-impl<'de> serde::Deserialize<'de> for JsonInter {
-  fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-    struct V;
-    impl<'de> serde::de::Visitor<'de> for V {
-      type Value = JsonInter;
-      fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("any JSON value")
-      }
-      fn visit_unit<E>(self) -> Result<JsonInter, E> {
-        Ok(JsonInter::Null)
-      }
-      fn visit_none<E>(self) -> Result<JsonInter, E> {
-        Ok(JsonInter::Null)
-      }
-      fn visit_bool<E>(self, v: bool) -> Result<JsonInter, E> {
-        Ok(JsonInter::Bool(v))
-      }
-      fn visit_i64<E>(self, v: i64) -> Result<JsonInter, E> {
-        Ok(JsonInter::I64(v))
-      }
-      fn visit_u64<E>(self, v: u64) -> Result<JsonInter, E> {
-        Ok(JsonInter::U64(v))
-      }
-      fn visit_f64<E>(self, v: f64) -> Result<JsonInter, E> {
-        Ok(JsonInter::F64(v))
-      }
-      fn visit_str<E>(self, v: &str) -> Result<JsonInter, E> {
-        Ok(JsonInter::Str(v.to_owned()))
-      }
-      fn visit_string<E>(self, v: String) -> Result<JsonInter, E> {
-        Ok(JsonInter::Str(v))
-      }
-      fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut a: A) -> Result<JsonInter, A::Error> {
-        let mut out = Vec::new();
-        while let Some(e) = a.next_element()? {
-          out.push(e);
-        }
-        Ok(JsonInter::Arr(out))
-      }
-      fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<JsonInter, A::Error> {
-        let mut out = Vec::new();
-        while let Some((k, v)) = m.next_entry()? {
-          out.push((k, v));
-        }
-        Ok(JsonInter::Obj(out))
-      }
-    }
-    d.deserialize_any(V)
-  }
-}
-
-/// [`caught_to_script_error`], with every frame of the stack mapped
-/// through whichever bundle registered it in THIS VM.
-///
-/// A session holds more than one: the module the caller executed plus
-/// every extension installed beside it. Without this a throw from an
-/// extension's handler reports `ferri_extension_<id>.js:12:5`, which
-/// names nothing the author wrote.
-pub(crate) fn caught_to_script_error_in(
-  ctx: &rquickjs::Ctx<'_>,
-  caught: rquickjs::CaughtError<'_>,
-  source: &str,
-) -> ScriptError {
-  let mut err = caught_to_script_error(caught, source);
-  if let Some(stack) = err.stack.take() {
-    err.stack = Some(crate::bindings::call_site::remap_stack(ctx, &stack));
-  }
-  err
-}
-
-pub(crate) fn caught_to_script_error(caught: rquickjs::CaughtError<'_>, source: &str) -> ScriptError {
-  let (name, message, stack, line, column) = match caught {
-    rquickjs::CaughtError::Exception(ex) => {
-      let message = ex.message().unwrap_or_else(|| "exception".to_string());
-      let stack = ex.stack();
-      // Playwright-style: lineNumber/columnNumber are present on most QuickJS
-      // exceptions; read them directly off the exception object. `name` is
-      // what every JS runtime prints ahead of the message.
-      let obj = ex.as_object();
-      let name = obj.get::<_, String>("name").ok().filter(|n| !n.is_empty());
-      let line = obj.get::<_, u32>("lineNumber").ok();
-      let column = obj.get::<_, u32>("columnNumber").ok();
-      (name, message, stack, line, column)
+  match inst.request {
+    Some(req) => {
+      inst.fetch.set_client(Arc::clone(&req));
+      crate::bindings::install_request(ctx, req).map_err(fail)?;
     },
-    rquickjs::CaughtError::Value(v) => (None, format!("{v:?}"), None, None, None),
-    rquickjs::CaughtError::Error(e) => (None, format!("{e}"), None, None, None),
-  };
-
-  ScriptError {
-    kind: ScriptErrorKind::Runtime,
-    name,
-    message,
-    stack,
-    line,
-    column,
-    source_snippet: line.and_then(|l| snippet_around_line(source, l, 2)),
+    // `fetch` is always present; with no session HTTP context it uses a
+    // session-stable default one (no shared cookies). Same net posture
+    // as the `request` binding when absent.
+    None => inst.fetch.set_client(inst.default_request),
   }
-}
-
-/// Build a 1-indexed source snippet with `context_lines` around the target
-/// line, used in error reporting so the LLM can see where the script failed.
-fn snippet_around_line(source: &str, line_1based: u32, context_lines: u32) -> Option<String> {
-  use std::fmt::Write as _;
-  let lines: Vec<&str> = source.lines().collect();
-  if lines.is_empty() {
-    return None;
-  }
-  let target = line_1based.saturating_sub(1) as usize;
-  let start = target.saturating_sub(context_lines as usize);
-  let end = (target + context_lines as usize + 1).min(lines.len());
-  let mut out = String::new();
-  for (i, text) in lines[start..end].iter().enumerate() {
-    let ln = start + i + 1;
-    let marker = if ln == line_1based as usize { ">>>" } else { "   " };
-    let _ = writeln!(out, "{marker} {ln:>4}: {text}");
-  }
-  Some(out)
-}
-
-fn elapsed_ms(started: Instant) -> u64 {
-  started.elapsed().as_millis() as u64
+  Ok(())
 }

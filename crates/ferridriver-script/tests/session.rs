@@ -41,53 +41,57 @@ async fn demo_binding() -> (tempfile::TempDir, ExtensionBinding) {
   )
 }
 
-async fn run_demo_plugin_twice() {
-  let (_plugin_tmp, binding) = demo_binding().await;
-  let tmp = tempfile::tempdir().expect("tempdir");
-  let ctx = RunContext {
-    vars: Arc::new(InMemoryVars::new()),
-    script_root: tmp.path().into(),
-    artifacts: None,
-    page: None,
-    browser_context: None,
-    request: None,
-    browser: None,
-    extensions: vec![binding],
-    host: ferridriver_script::ExtensionHost::Script,
-    caps: ferridriver_script::ScriptCaps::default(),
-    session: None,
-  };
-  let session = Session::create(ScriptEngineConfig::default(), &ctx)
-    .await
-    .expect("session create");
+/// Boxed: it awaits `Session::create`, so a caller awaiting it would
+/// otherwise carry the engine config in its own future.
+fn run_demo_plugin_twice() -> impl std::future::Future<Output = ()> + Send {
+  Box::pin(async move {
+    let (_plugin_tmp, binding) = demo_binding().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ctx = RunContext {
+      vars: Arc::new(InMemoryVars::new()),
+      script_root: tmp.path().into(),
+      artifacts: None,
+      page: None,
+      browser_context: None,
+      request: None,
+      browser: None,
+      extensions: vec![binding],
+      host: ferridriver_script::ExtensionHost::Script,
+      caps: ferridriver_script::ScriptCaps::default(),
+      session: None,
+    };
+    let session = Session::create(ScriptEngineConfig::default(), &ctx)
+      .await
+      .expect("session create");
 
-  let r1 = session
-    .execute(
-      "return await tools['demo']({ x: 1 });",
-      &[],
-      RunOptions::default(),
-      &ctx,
-    )
-    .await;
-  match r1.result.outcome {
-    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "n": 1, "got": { "x": 1 } })),
-    Outcome::Error { error } => panic!("plugin call 1 failed: {error:?}"),
-  }
+    let r1 = session
+      .execute(
+        "return await tools['demo']({ x: 1 });",
+        &[],
+        RunOptions::default(),
+        &ctx,
+      )
+      .await;
+    match r1.result.outcome {
+      Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "n": 1, "got": { "x": 1 } })),
+      Outcome::Error { error } => panic!("plugin call 1 failed: {error:?}"),
+    }
 
-  // Second invocation in the SAME session sees the handler's prior
-  // `globalThis` state — proves plugin install-once + persistent VM.
-  let r2 = session
-    .execute(
-      "return await tools['demo']({ x: 2 });",
-      &[],
-      RunOptions::default(),
-      &ctx,
-    )
-    .await;
-  match r2.result.outcome {
-    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "n": 2, "got": { "x": 2 } })),
-    Outcome::Error { error } => panic!("plugin call 2 failed: {error:?}"),
-  }
+    // Second invocation in the SAME session sees the handler's prior
+    // `globalThis` state — proves plugin install-once + persistent VM.
+    let r2 = session
+      .execute(
+        "return await tools['demo']({ x: 2 });",
+        &[],
+        RunOptions::default(),
+        &ctx,
+      )
+      .await;
+    match r2.result.outcome {
+      Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "n": 2, "got": { "x": 2 } })),
+      Outcome::Error { error } => panic!("plugin call 2 failed: {error:?}"),
+    }
+  })
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -265,8 +269,8 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
   match blocked.result.outcome {
     Outcome::Error { error } => {
       assert!(
-        error.message.contains("not in allow.net") && error.message.contains("blocked.test"),
-        "expected an allow.net denial naming the host, got: {}",
+        error.message.contains("permission denied") && error.message.contains("blocked.test"),
+        "expected a denial naming the host, got: {}",
         error.message
       );
     },
@@ -285,25 +289,24 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
     .await;
   match allowed.result.outcome {
     Outcome::Error { error } => assert!(
-      !error.message.contains("allow.net"),
-      "allowed host must pass the guard; got an allow.net error instead: {}",
+      !error.message.contains("permission denied"),
+      "allowed host must pass the guard; got a denial instead: {}",
       error.message
     ),
     Outcome::Ok { .. } => {},
   }
 }
 
-/// Rule 9: the `allow.net` allow-list must bind the global `fetch` too,
-/// not only the plugin's `request` arg. Before this fix a net-restricted
-/// tool could reach any host via `fetch` (the global was wired straight
-/// to the raw session context). Proven page-visible: a disallowed host
-/// is rejected with the allow.net denial BEFORE any I/O; an allowed host
-/// passes the guard and fails only for an unrelated connection reason.
+/// Rule 9: the `allow.net` allow-list binds the `fetch` capability a
+/// handler is handed the same way it binds its `request`: one engine,
+/// one policy. Proven page-visible: a disallowed host is refused before
+/// any I/O; an allowed host passes the guard and fails only for an
+/// unrelated connection reason.
 #[tokio::test(flavor = "multi_thread")]
-async fn allow_net_capability_is_enforced_on_the_global_fetch() {
+async fn allow_net_capability_is_enforced_on_the_handler_fetch() {
   const NET_PLUGIN: &str = "defineTool({ name: 'netf', \
     allow: { net: ['127.0.0.1'] }, \
-    handler: async ({ args }) => { const r = await fetch(args.url); return r.status; } });";
+    handler: async ({ args, fetch }) => { const r = await fetch(args.url); return r.status; } });";
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("netf.js");
   std::fs::write(&path, NET_PLUGIN).expect("write plugin");
@@ -349,8 +352,8 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
     .await;
   match blocked.result.outcome {
     Outcome::Error { error } => assert!(
-      error.message.contains("not in allow.net") && error.message.contains("blocked.test"),
-      "fetch to a disallowed host must be rejected by allow.net, got: {}",
+      error.message.contains("permission denied") && error.message.contains("blocked.test"),
+      "fetch to a disallowed host must be refused, got: {}",
       error.message
     ),
     Outcome::Ok { .. } => panic!("disallowed fetch host must be rejected by the net capability"),
@@ -368,7 +371,7 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
     .await;
   match allowed.result.outcome {
     Outcome::Error { error } => assert!(
-      !error.message.contains("allow.net"),
+      !error.message.contains("permission denied"),
       "allowed fetch host must pass the guard; got an allow.net error: {}",
       error.message
     ),
@@ -376,20 +379,19 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
   }
 }
 
-/// The per-poll policy bracket must not leak across tools. Two tools in
-/// one VM: `restricted` (allow.net = [127.0.0.1]) and `open` (no net
-/// capability). Run concurrently via `Promise.all` so their handler
-/// futures interleave at awaits. `restricted`'s fetch to a disallowed
-/// host must still be denied, while `open`'s fetch is unrestricted —
-/// proving the active policy follows whichever continuation is running,
-/// not whichever ran last.
+/// Each tool's `fetch` capability carries its own attenuation, so two
+/// tools in one VM cannot see each other's. `restricted` (allow.net =
+/// [127.0.0.1]) and `open` (no net capability) run concurrently via
+/// `Promise.all` so their handler futures interleave at awaits:
+/// `restricted`'s fetch to a disallowed host is refused, while `open`'s
+/// answers to the session's policy alone.
 #[tokio::test(flavor = "multi_thread")]
 async fn fetch_net_policy_does_not_leak_between_concurrent_tools() {
   const PLUGIN: &str = "defineTool({ name: 'restricted', allow: { net: ['127.0.0.1'] }, \
-      handler: async ({ args }) => { try { await fetch(args.url); return 'reached'; } \
+      handler: async ({ args, fetch }) => { try { await fetch(args.url); return 'reached'; } \
         catch (e) { return 'denied:' + String(e.message || e); } } }); \
     defineTool({ name: 'open', \
-      handler: async ({ args }) => { try { await fetch(args.url); return 'reached'; } \
+      handler: async ({ args, fetch }) => { try { await fetch(args.url); return 'reached'; } \
         catch (e) { return 'err:' + String(e.message || e); } } });";
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("leak.js");
@@ -440,11 +442,11 @@ async fn fetch_net_policy_does_not_leak_between_concurrent_tools() {
       let restricted = success.value["restricted"].as_str().unwrap_or_default();
       let open = success.value["open"].as_str().unwrap_or_default();
       assert!(
-        restricted.contains("denied:") && restricted.contains("not in allow.net"),
-        "restricted tool's fetch must be denied by allow.net even under concurrency, got: {restricted}"
+        restricted.contains("denied:") && restricted.contains("permission denied"),
+        "restricted tool's fetch must be refused even under concurrency, got: {restricted}"
       );
       assert!(
-        !open.contains("not in allow.net"),
+        !open.contains("permission denied"),
         "the unrestricted tool's fetch must not inherit another tool's allow.net, got: {open}"
       );
     },
@@ -1376,48 +1378,62 @@ async fn console_printf_and_inspect_rendering() {
   assert_eq!(console[4].message, "/ab+c/gi", "{:?}", console[4]);
 }
 
-/// The `allow.net` capability must bind the GLOBAL `request` binding
-/// during a restricted handler, not only the guarded `request` arg —
-/// otherwise a tool could widen its grant by reaching for
-/// `globalThis.request`. Denied before I/O for a disallowed host;
-/// allowed host passes the guard (fails only on connection refused).
-#[tokio::test(flavor = "multi_thread")]
-async fn allow_net_capability_binds_the_global_request_binding() {
-  const NET_PLUGIN: &str = "defineTool({ name: 'netg', \
-    allow: { net: ['127.0.0.1'] }, \
-    handler: async ({ args }) => { await globalThis.request.get(args.url); return 'ok'; } });";
-  let tmp = tempfile::tempdir().expect("tempdir");
-  let path = tmp.path().join("netg.js");
-  std::fs::write(&path, NET_PLUGIN).expect("write plugin");
-  let (compiled, failures) =
-    compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
-  assert!(failures.is_empty(), "compile failures: {failures:?}");
-  let cp = compiled.into_iter().next().expect("one compiled plugin");
+/// A session carrying one tool whose manifest declares `127.0.0.1` and
+/// nothing else, over an unrestricted session policy. Boxed for the same
+/// reason as [`Session::create`], which it awaits.
+fn net_tool_session()
+-> impl std::future::Future<Output = (tempfile::TempDir, tempfile::TempDir, RunContext, Session)> + Send {
+  Box::pin(async move {
+    const NET_PLUGIN: &str = "defineTool({ name: 'netg', \
+      allow: { net: ['127.0.0.1'] }, \
+      handler: async ({ args, request }) => { \
+        if (args.via === 'global') { await globalThis.request.get(args.url); return 'ok'; } \
+        await request.get(args.url); return 'ok'; } });";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("netg.js");
+    std::fs::write(&path, NET_PLUGIN).expect("write plugin");
+    let (compiled, failures) =
+      compile_and_extract_extensions(&[vec![path]], &ferridriver_config::ExtensionPolicyConfig::default()).await;
+    assert!(failures.is_empty(), "compile failures: {failures:?}");
+    let cp = compiled.into_iter().next().expect("one compiled plugin");
 
-  let sb_tmp = tempfile::tempdir().expect("tempdir");
-  let ctx = RunContext {
-    vars: Arc::new(InMemoryVars::new()),
-    script_root: sb_tmp.path().into(),
-    artifacts: None,
-    page: None,
-    browser_context: None,
-    request: Some(Arc::new(ferridriver::http_client::HttpClient::new(
-      ferridriver::http_client::HttpClientOptions::default(),
-    ))),
-    browser: None,
-    extensions: vec![ExtensionBinding {
-      bytecode: cp.bytecode,
-      name: cp.path.display().to_string(),
-      source_map: None,
-      provides: None,
-    }],
-    host: ferridriver_script::ExtensionHost::Script,
-    caps: ferridriver_script::ScriptCaps::default(),
-    session: None,
-  };
-  let session = Session::create(ScriptEngineConfig::default(), &ctx)
-    .await
-    .expect("session create");
+    let sb_tmp = tempfile::tempdir().expect("tempdir");
+    let ctx = RunContext {
+      vars: Arc::new(InMemoryVars::new()),
+      script_root: sb_tmp.path().into(),
+      artifacts: None,
+      page: None,
+      browser_context: None,
+      request: Some(Arc::new(ferridriver::http_client::HttpClient::new(
+        ferridriver::http_client::HttpClientOptions::default(),
+      ))),
+      browser: None,
+      extensions: vec![ExtensionBinding {
+        bytecode: cp.bytecode,
+        name: cp.path.display().to_string(),
+        source_map: None,
+        provides: None,
+      }],
+      host: ferridriver_script::ExtensionHost::Script,
+      caps: ferridriver_script::ScriptCaps::default(),
+      session: None,
+    };
+    let session = Session::create(ScriptEngineConfig::default(), &ctx)
+      .await
+      .expect("session create");
+    (tmp, sb_tmp, ctx, session)
+  })
+}
+
+/// Authority is the object a handler was handed, not a scope around
+/// its stack: the `request` capability a restricted tool receives
+/// refuses a host outside its list, and the global `request` the tool
+/// can also reach answers to the session's policy, which here is
+/// everything. That is the model (privilege is per realm); an extension
+/// that must be confined below the session gets a session of its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn allow_net_capability_attenuates_the_handler_request_not_the_global() {
+  let (_tmp, _sb_tmp, ctx, session) = net_tool_session().await;
 
   let blocked = session
     .execute(
@@ -1429,11 +1445,29 @@ async fn allow_net_capability_binds_the_global_request_binding() {
     .await;
   match blocked.result.outcome {
     Outcome::Error { error } => assert!(
-      error.message.contains("not in allow.net") && error.message.contains("blocked.test"),
-      "global request must be denied by the active allow.net, got: {}",
+      error.message.contains("permission denied") && error.message.contains("blocked.test"),
+      "the handler's request must refuse a host outside its list, got: {}",
       error.message
     ),
-    Outcome::Ok { .. } => panic!("global request to a disallowed host must be rejected"),
+    Outcome::Ok { .. } => panic!("the handler's request to a disallowed host must be rejected"),
+  }
+
+  // The global answers to the session's policy: no denial, only the
+  // connection failure a host that does not resolve produces.
+  let via_global = session
+    .execute(
+      "return await tools['netg']({ url: 'http://blocked.test/', via: 'global' });",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  if let Outcome::Error { error } = via_global.result.outcome {
+    assert!(
+      !error.message.contains("permission denied"),
+      "the global request answers to the session, not the tool's list: {}",
+      error.message
+    );
   }
 
   let allowed = session
@@ -1446,7 +1480,7 @@ async fn allow_net_capability_binds_the_global_request_binding() {
     .await;
   match allowed.result.outcome {
     Outcome::Error { error } => assert!(
-      !error.message.contains("allow.net"),
+      !error.message.contains("permission denied"),
       "allowed host must pass the guard: {}",
       error.message
     ),
@@ -1476,15 +1510,16 @@ async fn allow_net_capability_binds_the_global_request_binding() {
   }
 }
 
-/// Capability follows the registrar: a `setTimeout` callback armed
-/// inside a net-restricted handler keeps that tool's `allow.net` when
-/// it fires (previously it fell back to the unrestricted resting
-/// policy), while a timer armed at top level stays unrestricted.
+/// The attenuated capability keeps its attenuation wherever it
+/// travels: a `setTimeout` callback armed inside a restricted handler
+/// that closes over the handler's `fetch` is still refused when it
+/// fires, after the dispatch returned; a timer armed at top level uses
+/// the global, which answers to the session.
 #[tokio::test(flavor = "multi_thread")]
-async fn allow_net_follows_timer_callbacks_registered_by_a_restricted_tool() {
+async fn allow_net_follows_the_capability_into_a_timer_callback() {
   const NET_PLUGIN: &str = "defineTool({ name: 'nett', \
     allow: { net: ['127.0.0.1'] }, \
-    handler: ({ args }) => new Promise((resolve) => { \
+    handler: ({ args, fetch }) => new Promise((resolve) => { \
       setTimeout(async () => { \
         try { await fetch(args.url); resolve('reached'); } \
         catch (e) { resolve('denied:' + String(e.message || e)); } \
@@ -1534,8 +1569,8 @@ async fn allow_net_follows_timer_callbacks_registered_by_a_restricted_tool() {
     Outcome::Ok { success } => {
       let s = success.value.as_str().unwrap_or_default();
       assert!(
-        s.contains("denied:") && s.contains("not in allow.net"),
-        "a timer armed inside a restricted handler must keep its allow.net, got: {s}"
+        s.contains("denied:") && s.contains("permission denied"),
+        "the handler's fetch must refuse the host from a timer too, got: {s}"
       );
     },
     Outcome::Error { error } => panic!("timer tool run failed: {error:?}"),

@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use ferridriver_script::CompiledBundleExt as _;
 use ferridriver_script::bundle::{BundlerEnv, set_bundler_env};
 use ferridriver_script::{
   InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, Session, bundle_and_compile,

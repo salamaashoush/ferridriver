@@ -97,28 +97,36 @@ struct Harness {
 /// A session carrying `extensions`, with `spec` bundled and evaluated in
 /// it. The spec never imports the extensions — it imports
 /// `@ferridriver/test` and nothing else, which is the point.
-async fn harness(extensions: &[&str], spec: &str, policy: &ExtensionPolicyConfig) -> Harness {
-  let dir = tempfile::tempdir().expect("tempdir");
-  let bindings = extensions_from(dir.path(), extensions, policy).await;
-  let entry = dir.path().join("contributed.test.ts");
-  std::fs::write(&entry, spec).expect("write spec");
-  let bundle = bundle_and_compile_named(&[entry], dir.path(), "ferridriver-tests.js")
-    .await
-    .expect("bundle");
-  let context = run_context(dir.path(), bindings, policy.clone());
-  let session = Session::create(ScriptEngineConfig::default(), &context)
-    .await
-    .expect("session create");
-  eval_bundle(&session.vm_handle(), &bundle).await.expect("eval bundle");
-  let collected = collect_tests(&session.vm_handle()).await.expect("collect");
-  // The tempdir must outlive bundling only; leak it so the files behind
-  // the disk cache stay valid for the session's life.
-  std::mem::forget(dir);
-  Harness {
-    session,
-    collected,
-    _bundle: bundle,
-  }
+/// Boxed: it awaits `Session::create` through the runner, so every
+/// caller would otherwise carry the engine config in its own future.
+fn harness<'a>(
+  extensions: &'a [&'a str],
+  spec: &'a str,
+  policy: &'a ExtensionPolicyConfig,
+) -> impl std::future::Future<Output = Harness> + Send + 'a {
+  Box::pin(async move {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bindings = extensions_from(dir.path(), extensions, policy).await;
+    let entry = dir.path().join("contributed.test.ts");
+    std::fs::write(&entry, spec).expect("write spec");
+    let bundle = bundle_and_compile_named(&[entry], dir.path(), "ferridriver-tests.js")
+      .await
+      .expect("bundle");
+    let context = run_context(dir.path(), bindings, policy.clone());
+    let session = Session::create(ScriptEngineConfig::default(), &context)
+      .await
+      .expect("session create");
+    eval_bundle(&session.vm_handle(), &bundle).await.expect("eval bundle");
+    let collected = collect_tests(&session.vm_handle()).await.expect("collect");
+    // The tempdir must outlive bundling only; leak it so the files behind
+    // the disk cache stay valid for the session's life.
+    std::mem::forget(dir);
+    Harness {
+      session,
+      collected,
+      _bundle: bundle,
+    }
+  })
 }
 
 fn world(title: &str) -> TestWorldData {

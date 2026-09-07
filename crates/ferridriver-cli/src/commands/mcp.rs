@@ -26,10 +26,9 @@ pub async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> anyhow::R
   let (backend, headless) = (effective.backend, effective.headless);
   let connect_mode = args.browser.connect_mode();
 
-  let caps =
-    ferridriver_script::ScriptCaps::resolve_with_commands(&scripting.allow_env, scripting.allow.commands.clone())
-      .with_extension_policy(extension_policy)
-      .with_extension_settings(extension_settings);
+  let caps = ferridriver_script::ScriptCaps::from_scripting(&scripting)
+    .with_extension_policy(extension_policy)
+    .with_extension_settings(extension_settings);
   let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(config))
     .with_script_caps(caps)
     .with_sidecars(sidecars)

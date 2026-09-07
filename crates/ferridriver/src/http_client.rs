@@ -1,5 +1,5 @@
 //! The runner-side HTTP client — the Playwright `request` adapter over
-//! the [`crate::fetch`] engine, separate from the browser/page network.
+//! the `ferrijs_fetch` engine, separate from the browser/page network.
 //! Backs both the `fetch` global and the Playwright-style `request`
 //! binding, which lower into the same [`fetch::Request`] and go through
 //! the same [`fetch::send`] path.
@@ -24,11 +24,11 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 
-use crate::fetch;
+use ferrijs_fetch as fetch;
 
-pub use crate::fetch::{
-  BridgeFuture, ContextBridge, ContextDefaults, Credentials, MultipartField, MultipartValue, NetGuard, RedirectMode,
-  RemoteAddr, ResponseType, host_allowed, host_of, multipart_boundary, multipart_boundary_of, parse_multipart,
+pub use ferrijs_fetch::{
+  BridgeFuture, ContextBridge, ContextDefaults, Credentials, FetchError, MultipartField, MultipartValue, NetGuard,
+  NetPolicy, RedirectMode, RemoteAddr, ResponseType, multipart_boundary, multipart_boundary_of, parse_multipart,
   serialize_multipart,
 };
 
@@ -563,19 +563,34 @@ impl HttpClient {
   /// Returns an error if the URL cannot be resolved, the method is
   /// invalid, or the request fails.
   pub async fn fetch_whatwg(&self, request: WhatwgRequest) -> crate::error::Result<HttpStreamResponse> {
-    let defaults = self.resolved_defaults().await?;
-    let url = resolve_url(defaults.base_url.as_deref(), &request.url)?;
+    Ok(HttpStreamResponse::from_response(self.send_whatwg(request).await?))
+  }
+
+  /// [`Self::fetch_whatwg`] answering the engine's own
+  /// [`fetch::Response`], for a caller that streams the body itself
+  /// (the runtime's `fetch` global over this client).
+  ///
+  /// # Errors
+  ///
+  /// The engine's typed failure, so a permission refusal stays one.
+  pub async fn send_whatwg(&self, request: WhatwgRequest) -> Result<fetch::Response, fetch::FetchError> {
+    let defaults = self
+      .resolved_defaults()
+      .await
+      .map_err(|e| fetch::FetchError::Bridge(e.to_string()))?;
+    let url = resolve_url(defaults.base_url.as_deref(), &request.url)
+      .map_err(|e| fetch::FetchError::InvalidUrl(e.to_string()))?;
     let method: reqwest::Method = request
       .method
       .parse()
-      .map_err(|_| crate::error::FerriError::Backend(format!("invalid HTTP method: {}", request.method)))?;
+      .map_err(|_| fetch::FetchError::InvalidUrl(format!("invalid HTTP method: {}", request.method)))?;
 
     let mut headers = Self::base_headers(&defaults);
     for (name, value) in request.headers {
       headers.set(&name, value);
     }
 
-    let response = fetch::send(
+    fetch::send(
       &self.pool,
       self.bridge.as_ref(),
       fetch::Request {
@@ -592,8 +607,7 @@ impl HttpClient {
         net_guard: request.net_guard,
       },
     )
-    .await?;
-    Ok(HttpStreamResponse::from_response(response))
+    .await
   }
 
   /// Lower the Playwright option bag into a [`fetch::Request`], resolving

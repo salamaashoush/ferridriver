@@ -511,9 +511,12 @@ pub struct Sidecar {
   pub cwd: Option<String>,
 }
 
-/// Opt-in relaxations of the scripting sandbox. Every field defaults to
-/// the locked-down value; an operator who widens it is stating they
-/// understand the exposure — same posture as `allow.net`.
+/// What a session's realm may reach.
+///
+/// `allow_env` is the one grant that defaults closed: `process.env` is
+/// `{}` unless names are listed. `permissions` covers the rest (read,
+/// write, net, sys) and defaults to everything, a script that drives a
+/// browser being trusted as much as the host; an operator narrows it.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ScriptingConfig {
@@ -523,6 +526,10 @@ pub struct ScriptingConfig {
   /// exposed — a script never sees an ambient secret the operator did
   /// not name.
   pub allow_env: Vec<String>,
+  /// The realm's `read` / `write` / `net` / `sys` grants and their
+  /// `deny` carve-outs, in the runtime's own shape: each `true`, a
+  /// list, or absent. Absent as a whole ⇒ everything granted.
+  pub permissions: Option<ferrijs_permissions::Permissions>,
   /// Capability grants for first-party scripts and BDD step files.
   /// Plugins/tools do not inherit these automatically; they must opt in
   /// through their own `allow.commands` manifest.

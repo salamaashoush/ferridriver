@@ -19,7 +19,7 @@ use crate::commands::{bootstrap, script_setup};
 /// a script are the same engine.
 #[must_use]
 pub fn caps(config: &FerridriverConfig) -> ScriptCaps {
-  ScriptCaps::resolve_with_commands(&config.scripting.allow_env, config.scripting.allow.commands.clone())
+  ScriptCaps::from_scripting(&config.scripting)
     .with_extension_policy(config.extensions.policy())
     .with_extension_settings(config.extensions.settings())
 }

@@ -143,63 +143,11 @@ pub struct AxProperty {
   pub value: Option<serde_json::Value>,
 }
 
-/// Cookie `SameSite` attribute (matches Playwright's `Strict | Lax | None`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SameSite {
-  Strict,
-  Lax,
-  None,
-}
-
-impl SameSite {
-  /// Convert to a CDP/`WebKit` string.
-  #[must_use]
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Self::Strict => "Strict",
-      Self::Lax => "Lax",
-      Self::None => "None",
-    }
-  }
-}
-
-impl std::str::FromStr for SameSite {
-  type Err = ();
-
-  fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-    match s {
-      "Strict" => Ok(Self::Strict),
-      "Lax" => Ok(Self::Lax),
-      "None" => Ok(Self::None),
-      _ => Err(()),
-    }
-  }
-}
-
-/// Cookie data (backend-agnostic, matches Playwright's `NetworkCookie`).
-///
-/// Wire format is camelCase (`httpOnly`, `sameSite`) to match Playwright /
-/// CDP / Web Cookies RFC; Rust field names stay `snake_case` per convention.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CookieData {
-  pub name: String,
-  pub value: String,
-  pub domain: String,
-  pub path: String,
-  pub secure: bool,
-  pub http_only: bool,
-  pub expires: Option<f64>,
-  /// `SameSite` attribute (`Strict`, `Lax`, or `None`).
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub same_site: Option<SameSite>,
-  /// Playwright `SetNetworkCookieParam.url`: when set, the backend
-  /// derives domain/path from it (CDP `Network.setCookie` accepts
-  /// `url`; `BiDi`/`WebKit` have no `url`, so the host/path is parsed
-  /// from it). Never populated on cookies READ back from the browser.
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub url: Option<String>,
-}
+/// One cookie as the browser stores it: the engine's record, which is
+/// Playwright's `Cookie` / `SetNetworkCookieParam` shape.
+pub type CookieData = ferrijs_fetch::Cookie;
+/// Cookie `SameSite` attribute (`Strict | Lax | None`).
+pub use ferrijs_fetch::SameSite;
 
 /// Options for setting a cookie (matches Playwright's `SetNetworkCookieParam`).
 /// Use `url` to derive domain/path automatically, or set `domain`/`path` directly.

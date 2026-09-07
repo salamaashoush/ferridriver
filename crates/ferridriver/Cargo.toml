@@ -29,6 +29,7 @@ tokio-tungstenite = "0.30"
 rustc-hash = "2"
 arc-swap = { workspace = true }
 sha2 = { workspace = true }
+ferrijs-fetch = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "cookies", "rustls", "stream", "query", "form", "gzip", "brotli", "deflate", "zstd"] }
 httpdate = "1"
 serde_urlencoded = "0.7"
@@ -55,6 +56,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+ferrijs-permissions = { workspace = true }
 criterion = { version = "0.8", features = ["html_reports"] }
 tracing-subscriber = { workspace = true }
 

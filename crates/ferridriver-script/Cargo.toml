@@ -29,7 +29,11 @@ jsonschema = { workspace = true }
 which = { workspace = true }
 ferridriver-expect = { workspace = true }
 ferridriver-test = { workspace = true }
-ferridriver-jsstd = { workspace = true }
+ferrijs = { workspace = true, features = ["schema"] }
+ferrijs-std = { workspace = true }
+ferrijs-fetch = { workspace = true }
+ferrijs-bundle = { workspace = true }
+ferrijs-permissions = { workspace = true }
 ferridriver-session = { workspace = true }
 
 tokio = { workspace = true }

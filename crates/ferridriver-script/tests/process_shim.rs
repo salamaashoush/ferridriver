@@ -46,7 +46,8 @@ async fn env_is_empty_by_default_and_inert_identity_is_present() {
   assert_eq!(v["keys"], serde_json::json!([]), "env default-deny");
   assert_eq!(v["os"], serde_json::json!("string"));
   assert_eq!(v["arch"], serde_json::json!("string"));
-  assert!(v["ver"].as_str().unwrap_or("").starts_with("ferridriver-"), "{v}");
+  // Node's `v<semver>` shape; the runtime's name is where Node keeps it.
+  assert!(v["ver"].as_str().unwrap_or("").starts_with('v'), "{v}");
   assert_eq!(
     v["hasNode"],
     serde_json::json!(false),
@@ -89,7 +90,7 @@ async fn exit_is_neutered() {
     val(&o)
       .as_str()
       .unwrap_or("")
-      .contains("not allowed in the ferridriver sandbox"),
+      .contains("process.exit(2) is not available"),
     "{:?}",
     val(&o)
   );

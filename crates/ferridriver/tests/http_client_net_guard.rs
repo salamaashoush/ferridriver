@@ -62,7 +62,13 @@ fn handle(mut stream: TcpStream, port: u16) {
 
 fn guard(allowlist: Option<&[&str]>, block_metadata: bool, block_private: bool) -> NetGuard {
   NetGuard {
-    allowlist: allowlist.map(|l| Arc::from(l.iter().map(|s| (*s).to_string()).collect::<Vec<_>>())),
+    policy: allowlist.map(|l| {
+      Arc::new(
+        ferrijs_permissions::Permissions::none()
+          .allow_net(l.iter().copied())
+          .expect("host rules"),
+      ) as Arc<dyn ferridriver::http_client::NetPolicy>
+    }),
     block_metadata,
     block_private,
   }

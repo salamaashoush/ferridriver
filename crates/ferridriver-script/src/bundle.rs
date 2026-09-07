@@ -1,93 +1,29 @@
-//! Step-file front-end: rolldown bundle + tree-shake + TypeScript ->
-//! one ESM module -> compiled to `QuickJS` bytecode once.
-//!
-//! rolldown (built on oxc) resolves the whole import graph including
-//! `node_modules`, transpiles `.ts`/`.tsx`, tree-shakes, and emits a
-//! single ESM chunk. That chunk is compiled to bytecode a single time;
-//! every per-worker session links the bytecode (one `Module::load`, no
-//! parse, no resolver). A hidden source map is kept so a JS error in
-//! the bundled output is reported at the original `.ts`/`.js` location.
+//! ferridriver's bundle front-end over `ferrijs-bundle`: the operator's
+//! `[bundler]` options as the bundler's, the session module table as
+//! the externals, the disk cache where the operator said, and the
+//! extension extraction that runs an extension's bytecode once to learn
+//! what it contributes.
 
-use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
-use rolldown::{Bundler, BundlerOptions, InputItem, OutputFormat, Platform, SourceMapType};
-use rolldown_common::{CodeSplittingMode, ModuleType, Output, ResolveOptions, TsConfig};
-use rolldown_plugin::{
-  HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookUsage,
-  Plugin, PluginContext, SharedLoadPluginContext,
-};
-use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Module, WriteOptions, WriteOptionsEndianness};
+use ferrijs::rquickjs;
+use ferrijs_bundle::{BundlerOptions, BytecodeCache};
+use rquickjs::CatchResultExt;
 
-use crate::engine::{caught_to_script_error, caught_to_script_error_in};
 use crate::error::ScriptError;
 
-/// Id prefix for operator-declared virtual modules (`[bundler.virtualModules]`).
-const VIRTUAL_USER_PREFIX: &str = "\0fd-virtual:";
+pub use ferrijs::source_map::{LazyMap, SourceMapper, resolve_source};
+pub use ferrijs_bundle::{BundledSource, is_typescript_path, source_is_es_module};
 
-/// A bundle failure, rendered with the file and line it points at.
-///
-/// `BatchedBuildDiagnostic`'s `Debug` prints `BuildDiagnostic { kind:
-/// "PARSE_ERROR", message: "Unexpected token", .. }` — and the `..` is
-/// the label span, which is the only place the offending file appears.
-/// Reporting that verbatim leaves the reader bisecting an import graph
-/// by hand to find which of several hundred modules rolldown could not
-/// parse. `to_diagnostic()` resolves the labels against the source it
-/// read, so the file and line come back.
-fn render_bundle_diagnostics(err: &rolldown_error::BatchedBuildDiagnostic) -> String {
-  let rendered: Vec<String> = err
-    .iter()
-    .map(|d| {
-      let diagnostic = d.to_diagnostic();
-      let kind = diagnostic.kind();
-      match diagnostic.get_primary_location() {
-        Some((file, line, column, _)) => format!("{kind} at {file}:{line}:{column}: {d}"),
-        None => format!("{kind}: {d}"),
-      }
-    })
-    .collect();
-  if rendered.is_empty() {
-    return format!("rolldown bundle: {err}");
-  }
-  format!("rolldown bundle: {}", rendered.join("; "))
-}
-
-/// Extensions a JS parser must not be pointed at, mapped to the module
-/// type that makes importing one a no-op.
-///
-/// A stylesheet import is a side effect of the bundler that built the
-/// package, not something the importing module reads. An analytics
-/// package shipping `require("./styles/guides.scss")` inside its dist
-/// is enough: with no rule for the extension rolldown hands the SCSS to
-/// oxc and reports `PARSE_ERROR: Unexpected token` against a file that
-/// is not JavaScript and was never going to be. There is no CSS in a
-/// headless QuickJS runtime for the import to mean anything, so `Empty`
-/// is the honest answer rather than a stub with a default export.
-///
-/// Images and fonts get `Empty` for the same reason; JSON and the text
-/// formats keep a real value, because code that imports one reads it.
-fn asset_module_types() -> rustc_hash::FxHashMap<String, ModuleType> {
-  let mut m = rustc_hash::FxHashMap::default();
-  for ext in ["css", "scss", "sass", "less", "styl", "stylus"] {
-    m.insert(ext.to_string(), ModuleType::Empty);
-  }
-  for ext in [
-    "png", "jpg", "jpeg", "gif", "webp", "avif", "ico", "woff", "woff2", "ttf", "eot", "mp4", "webm",
-  ] {
-    m.insert(ext.to_string(), ModuleType::Empty);
-  }
-  for ext in ["svg", "txt", "md", "graphql", "gql", "html"] {
-    m.insert(ext.to_string(), ModuleType::Text);
-  }
-  m
-}
+/// One bundled+tree-shaken graph compiled to `QuickJS` bytecode, plus the
+/// source map to translate bundled positions back to source.
+pub type CompiledBundle = ferrijs::CompiledModule;
 
 /// Operator-facing bundler options: the `[bundler]` section of the
 /// unified config (shim aliases, inline virtual modules, and the module
 /// resolution controls) plus the `[test].tsconfig` selection. Applied to
-/// EVERY bundle ferridriver produces — BDD step files, extensions,
+/// EVERY bundle ferridriver produces -- BDD step files, extensions,
 /// `ferridriver run` scripts.
 #[derive(Debug, Default, Clone)]
 pub struct BundlerEnv {
@@ -97,21 +33,14 @@ pub struct BundlerEnv {
   pub alias: Vec<(String, PathBuf)>,
   /// `specifier -> inline ES-module source` (never touches the fs).
   pub virtual_modules: Vec<(String, String)>,
-  /// Extra `exports`/`imports` condition names. The resolver appends
-  /// these to its own base set, so an empty list resolves exactly as it
-  /// did before any were configured.
+  /// Extra `exports`/`imports` condition names.
   pub conditions: Vec<String>,
   /// `package.json` fields consulted when no `exports` entry matches.
-  /// rolldown's own default for a neutral platform is EMPTY, which
-  /// leaves a plain `"main": "index.js"` package unresolvable; the
-  /// config's default (`["module", "main"]`) is what ships.
   pub main_fields: Vec<String>,
   /// `package.json` field paths holding a legacy path-remapping object.
   pub alias_fields: Vec<Vec<String>>,
   /// The tsconfig whose `paths` / `baseUrl` govern resolution. `None`
-  /// leaves rolldown's per-module upward discovery in place; a value
-  /// pins one file for the whole graph, which is the only way to select
-  /// a config discovery would not find (`tsconfig.test.json`).
+  /// leaves rolldown's per-module upward discovery in place.
   pub tsconfig: Option<PathBuf>,
 }
 
@@ -155,30 +84,26 @@ impl BundlerEnv {
     self
   }
 
-  /// Stable content fingerprint, folded into every bundle cache key so
-  /// editing an alias mapping, a virtual module's source or a resolution
-  /// control invalidates cached bytecode. (Alias *target file* content is
-  /// already covered by the transitive source-map input hashes; this
-  /// covers the mapping itself, the inline sources, and every knob that
-  /// changes output without changing a source byte. The tsconfig's
-  /// CONTENT is covered separately, through the bundle's input set.)
+  /// Stable content fingerprint of everything here, folded into every
+  /// bundle cache key so editing a mapping, a virtual module or a
+  /// resolution control invalidates cached bytecode.
   #[must_use]
   pub fn fingerprint(&self) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    for (spec, path) in &self.alias {
-      spec.hash(&mut h);
-      path.hash(&mut h);
+    self.options().fingerprint()
+  }
+
+  /// The bundler's own options, with the package-provided specifiers as
+  /// externals.
+  fn options(&self) -> BundlerOptions {
+    BundlerOptions {
+      alias: self.alias.clone(),
+      virtual_modules: self.virtual_modules.clone(),
+      conditions: self.conditions.clone(),
+      main_fields: self.main_fields.clone(),
+      alias_fields: self.alias_fields.clone(),
+      tsconfig: self.tsconfig.clone(),
+      externals: crate::bindings::native_modules::provided_externals(),
     }
-    for (spec, src) in &self.virtual_modules {
-      spec.hash(&mut h);
-      src.hash(&mut h);
-    }
-    self.conditions.hash(&mut h);
-    self.main_fields.hash(&mut h);
-    self.alias_fields.hash(&mut h);
-    self.tsconfig.hash(&mut h);
-    h.finish()
   }
 }
 
@@ -186,8 +111,7 @@ impl BundlerEnv {
 /// MCP server) from the loaded config before any bundling happens. A
 /// global (rather than a parameter threaded through every bundle entry
 /// point) because the config is process-wide and the bundle paths are
-/// reached from five call sites across three crates — same pattern as
-/// `set_bdd_script_caps`.
+/// reached from five call sites across three crates.
 static BUNDLER_ENV: std::sync::RwLock<Option<Arc<BundlerEnv>>> = std::sync::RwLock::new(None);
 
 pub fn set_bundler_env(env: BundlerEnv) {
@@ -202,404 +126,58 @@ pub(crate) fn bundler_env() -> Arc<BundlerEnv> {
     .unwrap_or_default()
 }
 
+/// Where compiled bytecode is kept between processes:
+/// `$FERRIDRIVER_CACHE_DIR/ferridriver`, else the platform user cache
+/// under `ferridriver`; nowhere when `FERRIDRIVER_NO_BYTECODE_CACHE` is
+/// set.
+#[must_use]
+pub fn bytecode_cache() -> BytecodeCache {
+  static CACHE: std::sync::OnceLock<BytecodeCache> = std::sync::OnceLock::new();
+  CACHE
+    .get_or_init(|| {
+      if std::env::var_os("FERRIDRIVER_NO_BYTECODE_CACHE").is_some() {
+        return BytecodeCache::disabled();
+      }
+      match std::env::var_os("FERRIDRIVER_CACHE_DIR") {
+        Some(dir) => BytecodeCache::at(PathBuf::from(dir).join("ferridriver")),
+        None => BytecodeCache::for_app("ferridriver"),
+      }
+    })
+    .clone()
+}
+
+/// The bundler for this process: the operator's options over the
+/// session module table, with the disk cache.
+///
+/// # Errors
+///
+/// When the module table cannot be built (an alias naming nothing).
+pub fn bundler() -> Result<ferrijs_bundle::Bundler, ScriptError> {
+  let registry = crate::bindings::native_modules::registry().map_err(ScriptError::internal)?;
+  Ok(ferrijs_bundle::Bundler::new(
+    bundler_env().options(),
+    registry,
+    bytecode_cache(),
+  ))
+}
+
 /// Everything outside the entry files that can change a bundle's output
 /// for byte-identical sources: the `[bundler]` shims and resolution
-/// controls, the pinned tsconfig, and the native module aliases. Every
-/// cache key folds this in.
-fn bundle_env_fingerprint() -> u64 {
+/// controls, the pinned tsconfig, the native module aliases and the
+/// package-provided specifiers. Every extension cache key folds this in.
+fn bundle_env_fingerprint() -> Result<u64, ScriptError> {
   use std::hash::{Hash, Hasher};
   let mut h = std::collections::hash_map::DefaultHasher::new();
-  bundler_env().fingerprint().hash(&mut h);
-  crate::bindings::native_modules::alias_fingerprint().hash(&mut h);
+  bundler()?.env_fingerprint().hash(&mut h);
   crate::provided_modules::provided_fingerprint().hash(&mut h);
-  h.finish()
+  Ok(h.finish())
 }
 
-/// Virtual id of the synthetic entry that fans out to every requested
-/// entry file. rolldown emits ONE entry chunk per input; feeding it N
-/// step/extension files as N inputs produces N entry chunks, of which
-/// [`bundle_source`] can only return one — every other file's
-/// registrations would be silently dropped. The synthetic entry
-/// side-effect-imports each file instead, so one chunk carries them all.
-const MULTI_ENTRY_ID: &str = "\0ferridriver-multi-entry.js";
-
-#[derive(Debug)]
-struct FerridriverRuntimePlugin {
-  env: Arc<BundlerEnv>,
-  /// Source of the synthetic multi-entry module, when the bundle has
-  /// more than one entry file.
-  multi_entry: Option<String>,
-}
-
-impl Plugin for FerridriverRuntimePlugin {
-  fn name(&self) -> Cow<'static, str> {
-    "ferridriver-runtime".into()
-  }
-
-  async fn resolve_id(&self, _ctx: &PluginContext, args: &HookResolveIdArgs<'_>) -> HookResolveIdReturn {
-    if args.specifier == MULTI_ENTRY_ID && self.multi_entry.is_some() {
-      return Ok(Some(HookResolveIdOutput::from_id(MULTI_ENTRY_ID)));
-    }
-    // Native modules stay EXTERNAL: the emitted chunk keeps the bare
-    // import and the bytecode re-links by name against the loading
-    // runtime's ModuleDefs (`bindings::native_modules`). Checked first
-    // so an operator alias can never hijack the framework surface.
-    // A specifier a package serves stays external too: the emitted
-    // chunk keeps the bare import and links, at load, against the one
-    // module the provider's bytecode already is. Inlining it would give
-    // every consumer its own copy of the provider's state.
-    if crate::bindings::native_modules::is_native_specifier(args.specifier)
-      || crate::provided_modules::is_provided_specifier(args.specifier)
-    {
-      return Ok(Some(HookResolveIdOutput {
-        id: args.specifier.into(),
-        external: Some(rolldown_common::ResolvedExternal::Bool(true)),
-        ..Default::default()
-      }));
-    }
-    if self.env.virtual_modules.iter().any(|(spec, _)| spec == args.specifier) {
-      return Ok(Some(HookResolveIdOutput::from_id(format!(
-        "{VIRTUAL_USER_PREFIX}{}",
-        args.specifier
-      ))));
-    }
-    if let Some((_, target)) = self.env.alias.iter().find(|(spec, _)| spec == args.specifier) {
-      // Resolved to a concrete file: rolldown's default fs loader reads
-      // it and transpiles by extension, so `.ts` shims work.
-      return Ok(Some(HookResolveIdOutput::from_id(
-        target.to_string_lossy().into_owned(),
-      )));
-    }
-    Ok(None)
-  }
-
-  async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
-    if args.id == MULTI_ENTRY_ID
-      && let Some(src) = &self.multi_entry
-    {
-      return Ok(Some(HookLoadOutput {
-        code: src.clone().into(),
-        module_type: Some(ModuleType::Js),
-        ..Default::default()
-      }));
-    }
-    let code: Option<Cow<'_, str>> = args.id.strip_prefix(VIRTUAL_USER_PREFIX).and_then(|spec| {
-      self
-        .env
-        .virtual_modules
-        .iter()
-        .find(|(s, _)| s == spec)
-        .map(|(_, src)| Cow::Owned(src.clone()))
-    });
-    Ok(code.map(|code| HookLoadOutput {
-      code: code.into_owned().into(),
-      module_type: Some(ModuleType::Js),
-      ..Default::default()
-    }))
-  }
-
-  fn register_hook_usage(&self) -> HookUsage {
-    HookUsage::ResolveId | HookUsage::Load
-  }
-}
-
-/// One bundled+tree-shaken step graph compiled to `QuickJS` bytecode,
-/// plus the source map to translate bundled positions back to source.
-pub struct CompiledBundle {
-  pub module_name: String,
-  pub bytecode: Arc<[u8]>,
-  source_map: LazyMap,
-}
-
-/// A bundle's source map, parsed the first time something asks to remap.
-///
-/// Parsing it costs more than reading the whole cache record, and a run that
-/// never reports a position -- anything that simply executes and succeeds --
-/// would otherwise pay it on every start.
-#[derive(Clone, Default)]
-pub struct LazyMap(Option<Arc<LazyMapInner>>);
-
-struct LazyMapInner {
-  json: Box<str>,
-  parsed: std::sync::OnceLock<Option<Arc<sourcemap::SourceMap>>>,
-}
-
-impl LazyMap {
-  #[must_use]
-  pub fn from_json(json: Option<&str>) -> Self {
-    Self(json.map(|j| {
-      Arc::new(LazyMapInner {
-        json: j.into(),
-        parsed: std::sync::OnceLock::new(),
-      })
-    }))
-  }
-
-  fn get(&self) -> Option<&Arc<sourcemap::SourceMap>> {
-    let inner = self.0.as_ref()?;
-    inner
-      .parsed
-      .get_or_init(|| {
-        sourcemap::SourceMap::from_slice(inner.json.as_bytes())
-          .ok()
-          .map(Arc::new)
-      })
-      .as_ref()
-  }
-}
-
-/// A bundle's position mapping on its own.
-///
-/// A VM has to keep translating positions for as long as the module it
-/// loaded can run — long after the [`CompiledBundle`] that produced the
-/// bytecode has been dropped by whoever compiled it.
-#[derive(Clone)]
-pub struct SourceMapper {
-  /// Module name QuickJS knows the bundle by, which is what its stack
-  /// frames are labelled with.
-  pub module_name: String,
-  map: LazyMap,
-}
-
-impl std::fmt::Debug for SourceMapper {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("SourceMapper")
-      .field("module_name", &self.module_name)
-      .field("mapped", &self.map.0.is_some())
-      .finish()
-  }
-}
-
-/// Resolve a source-map `sources` entry to a real file.
-///
-/// The entries are relative to the bundle chunk's virtual location (a
-/// level below the bundling cwd), so a literal join produces paths like
-/// `<cwd>/../tests/a.test.ts` — peel leading `../` segments until the
-/// candidate exists under `cwd`.
-#[must_use]
-pub fn resolve_source(cwd: &Path, src: &str) -> PathBuf {
-  let p = Path::new(src);
-  if p.is_absolute() {
-    return p.to_path_buf();
-  }
-  // Normalized, because the joined form keeps every `../` verbatim: a
-  // spec outside the working directory would then be reported as
-  // `<cwd>/../../../tmp/specs/a.ts`, which names the right file but is
-  // not under `cwd` and is not under `testDir` either.
-  let mut rest = src;
-  loop {
-    let candidate = ferridriver_config::layer::normalize_path(&cwd.join(rest));
-    if candidate.exists() {
-      return candidate;
-    }
-    match rest.strip_prefix("../") {
-      Some(stripped) => rest = stripped,
-      None => return ferridriver_config::layer::normalize_path(&cwd.join(src)),
-    }
-  }
-}
-
-impl SourceMapper {
-  /// Map a bundled-output `line:col` (1-based, as QuickJS reports) back
-  /// to the original `.ts`/`.js` source location.
-  #[must_use]
-  pub fn remap(&self, line: u32, col: u32) -> Option<(String, u32, u32)> {
-    let sm = self.map.get()?;
-    let token = sm.lookup_token(line.saturating_sub(1), col.saturating_sub(1))?;
-    let src = token.get_source().unwrap_or("<unknown>").to_string();
-    Some((src, token.get_src_line() + 1, token.get_src_col() + 1))
-  }
-}
-
-/// A compiled bundle as the runner's [`ferridriver_test::host::SourceMap`]:
-/// a position in the code QuickJS executed, answered as the file the
-/// author wrote, resolved against the directory the bundle was built
-/// from.
-pub struct BundleSourceMap {
-  bundle: std::sync::Arc<CompiledBundle>,
-  cwd: std::sync::Arc<std::path::PathBuf>,
-}
-
-impl BundleSourceMap {
-  #[must_use]
-  pub fn new(bundle: std::sync::Arc<CompiledBundle>, cwd: std::sync::Arc<std::path::PathBuf>) -> Self {
-    Self { bundle, cwd }
-  }
-}
-
-impl ferridriver_test::host::SourceMap for BundleSourceMap {
-  fn remap(&self, line: u32, column: u32) -> Option<(String, u32, u32)> {
-    let (src, src_line, src_col) = self.bundle.remap(line, column)?;
-    Some((resolve_source(&self.cwd, &src).display().to_string(), src_line, src_col))
-  }
-}
-
-/// The result of one rolldown bundle.
-pub struct BundledSource {
-  pub code: String,
-  /// Hidden source map JSON, for translating bundled positions back to
-  /// source in stack traces.
-  pub source_map_json: Option<String>,
-  /// Every module the entry chunk was built from, straight out of
-  /// rolldown's module graph.
-  ///
-  /// NOT derived from the source map: a module whose every binding is
-  /// inlined leaves no mapping tokens and vanishes from the map's
-  /// `sources`, so a source-map-derived input set silently omitted
-  /// exactly the small helper modules extensions are made of — and the
-  /// bytecode caches then treated an edited helper as unchanged.
-  pub modules: Vec<PathBuf>,
-  /// Non-module files the resolver read that can change the output —
-  /// the tsconfigs rolldown discovered or was pointed at. They are not
-  /// in `modules` (nothing imports them) but editing a `paths` mapping
-  /// changes what the same sources resolve to, so they belong in the
-  /// cache's input set.
-  pub config_inputs: Vec<PathBuf>,
-}
-
-/// rolldown-bundle + tree-shake + transpile the step entry files (and
-/// their `node_modules`/shared imports) into a single ESM module.
-/// Exposed for diagnostics/tests; production uses [`bundle_and_compile`].
+/// rolldown-bundle + tree-shake + transpile the entry files (and their
+/// `node_modules`/shared imports) into a single ESM module. Exposed for
+/// diagnostics/tests; production uses [`bundle_and_compile`].
 pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<BundledSource, ScriptError> {
-  if entry_paths.is_empty() {
-    return Err(ScriptError::internal("no step entry files".to_string()));
-  }
-
-  let env = bundler_env();
-  if let Some(ts) = &env.tsconfig
-    && !ts.is_file()
-  {
-    return Err(ScriptError::internal(format!(
-      "[test].tsconfig points at {}, which is not a file",
-      ts.display()
-    )));
-  }
-
-  // ONE rolldown input, always. Each input produces its own entry
-  // chunk and only one chunk's code can be returned, so multiple entry
-  // files must be fanned out from a single synthetic entry module that
-  // side-effect-imports each of them (top-level `Given`/`defineTool`
-  // registrations are side effects, so nothing tree-shakes away).
-  let multi_entry = (entry_paths.len() > 1).then(|| {
-    use std::fmt::Write as _;
-    entry_paths.iter().fold(String::new(), |mut acc, p| {
-      let _ = writeln!(
-        acc,
-        "import {};",
-        serde_json::to_string(&p.to_string_lossy()).unwrap_or_else(|_| String::from("\"\""))
-      );
-      acc
-    })
-  });
-  let input: Vec<InputItem> = vec![InputItem {
-    name: None,
-    import: if multi_entry.is_some() {
-      MULTI_ENTRY_ID.to_string()
-    } else {
-      entry_paths[0].to_string_lossy().into_owned()
-    },
-  }];
-
-  let options = BundlerOptions {
-    input: Some(input),
-    cwd: Some(cwd.to_path_buf()),
-    // Neutral: no Node builtins are injected (QuickJS has none); pure
-    // ESM/CJS node_modules still resolve and bundle.
-    platform: Some(Platform::Neutral),
-    format: Some(OutputFormat::Esm),
-    // Hidden: emit the map but no `//# sourceMappingURL` trailer in the
-    // code we feed to QuickJS.
-    sourcemap: Some(SourceMapType::Hidden),
-    // Only `sources` paths and mappings are ever read back (`remap`);
-    // `sourcesContent` would inline every spec's full text, tripling the
-    // map and the cache blob it is stored in.
-    sourcemap_exclude_sources: Some(true),
-    // One chunk, always. Only the entry chunk is returned and compiled,
-    // so a split chunk would be a reference to code nobody wrote — and
-    // its modules would be missing from the cache's input set, making an
-    // edit to them invalidate nothing. Legal because there is exactly
-    // one input (MULTI_ENTRY fans the rest out).
-    code_splitting: Some(CodeSplittingMode::Bool(false)),
-    resolve: Some(ResolveOptions {
-      // `None` and an empty list are NOT the same to rolldown for main
-      // fields: `None` means "platform default", which is empty for
-      // Platform::Neutral. Always pass ours.
-      main_fields: Some(env.main_fields.clone()),
-      condition_names: (!env.conditions.is_empty()).then(|| env.conditions.clone()),
-      alias_fields: (!env.alias_fields.is_empty()).then(|| env.alias_fields.clone()),
-      ..Default::default()
-    }),
-    // Unset leaves rolldown's per-module upward discovery (its default).
-    tsconfig: env.tsconfig.clone().map(TsConfig::Manual),
-    module_types: Some(asset_module_types()),
-    ..Default::default()
-  };
-
-  let build_started = Instant::now();
-  let mut bundler = Bundler::with_plugins(
-    options,
-    vec![Arc::new(FerridriverRuntimePlugin {
-      env: Arc::clone(&env),
-      multi_entry,
-    })],
-  )
-  .map_err(|e| ScriptError::internal(format!("rolldown init: {e:?}")))?;
-  // rolldown's generate future is large; box it so it doesn't bloat the
-  // enclosing future.
-  let ctor_ms = build_started.elapsed().as_secs_f64() * 1000.0;
-  let gen_started = Instant::now();
-  let out = Box::pin(bundler.generate())
-    .await
-    .map_err(|e| ScriptError::internal(render_bundle_diagnostics(&e)))?;
-  tracing::debug!(
-    target: "ferridriver::bundle",
-    entries = entry_paths.len(),
-    ctor_ms,
-    generate_ms = gen_started.elapsed().as_secs_f64() * 1000.0,
-    "rolldown build"
-  );
-
-  // Every tsconfig the resolver consulted, whether pinned or discovered
-  // per module. rolldown reports them alongside the modules it read.
-  let config_inputs: Vec<PathBuf> = bundler
-    .watch_files()
-    .iter()
-    .map(|f| PathBuf::from(f.as_str()))
-    .filter(|p| {
-      let named_tsconfig = p
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with("tsconfig"));
-      named_tsconfig && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"))
-    })
-    .collect();
-
-  for asset in &out.assets {
-    if let Output::Chunk(chunk) = asset
-      && chunk.is_entry
-    {
-      let modules = chunk
-        .module_ids
-        .iter()
-        .map(|id| PathBuf::from(id.to_string()))
-        .filter(|p| p.is_file())
-        .collect();
-      // Assigned imperatively rather than through `Option::map`: the
-      // map's type lives in a transitive crate this one does not depend on
-      // directly, so it cannot be named for a method-path closure.
-      let mut source_map_json = None;
-      if let Some(m) = chunk.map.as_ref() {
-        source_map_json = Some(m.to_json_string());
-      }
-      return Ok(BundledSource {
-        code: chunk.code.clone(),
-        source_map_json,
-        modules,
-        config_inputs,
-      });
-    }
-  }
-  Err(ScriptError::internal("rolldown produced no entry chunk".to_string()))
+  bundler()?.bundle(entry_paths, cwd).await
 }
 
 /// Bundle the step entry files (TypeScript ok; `node_modules` and
@@ -617,79 +195,7 @@ pub async fn bundle_and_compile_named(
   cwd: &Path,
   module_name: &str,
 ) -> Result<CompiledBundle, ScriptError> {
-  let module_name = module_name.to_string();
-
-  // Disk cache: an unchanged source tree skips rolldown AND the QuickJS
-  // compile. Validated against every transitive input's content hash.
-  // The module name participates in the key: it is baked into the
-  // written bytecode (QuickJS stores the module name), so two hosts
-  // bundling the same files under different labels must not share an
-  // entry.
-  let cache_key = crate::bytecode_cache::entry_key(
-    &format!("bundle:{module_name}"),
-    entry_paths,
-    cwd,
-    bundle_env_fingerprint(),
-  );
-  let probe_started = Instant::now();
-  let hit = crate::bytecode_cache::load(cache_key);
-  let probe_elapsed = probe_started.elapsed();
-  if let Some(hit) = hit {
-    let map_bytes = hit.source_map_json.as_ref().map_or(0, String::len);
-    let source_map = LazyMap::from_json(hit.source_map_json.as_deref());
-    tracing::debug!(
-      target: "ferridriver::bundle",
-      module = %module_name,
-      entries = entry_paths.len(),
-      map_bytes,
-      probe_ms = probe_elapsed.as_secs_f64() * 1000.0,
-      "bundle warm path"
-    );
-    return Ok(CompiledBundle {
-      module_name,
-      bytecode: Arc::from(hit.bytecode.into_boxed_slice()),
-      source_map,
-    });
-  }
-
-  let bundle_started = Instant::now();
-  let bundled = Box::pin(bundle_source(entry_paths, cwd)).await?;
-  let bundle_elapsed = bundle_started.elapsed();
-  let (code, map_json, mut modules) = (bundled.code, bundled.source_map_json, bundled.modules);
-  modules.extend(bundled.config_inputs);
-
-  let compile_started = Instant::now();
-  let compiled = compile_bundled_source(&code, &module_name, map_json.as_deref()).await?;
-  let compile_elapsed = compile_started.elapsed();
-
-  let store_started = Instant::now();
-  let inputs = crate::bytecode_cache::input_set(entry_paths, &modules);
-  crate::bytecode_cache::store(
-    cache_key,
-    &compiled.bytecode,
-    &module_name,
-    map_json.as_deref(),
-    None,
-    &inputs,
-  );
-  let store_elapsed = store_started.elapsed();
-
-  tracing::debug!(
-    target: "ferridriver::bundle",
-    module = %module_name,
-    entries = entry_paths.len(),
-    modules = modules.len(),
-    code_bytes = code.len(),
-    map_bytes = map_json.as_ref().map_or(0, String::len),
-    bytecode_bytes = compiled.bytecode.len(),
-    probe_ms = probe_elapsed.as_secs_f64() * 1000.0,
-    bundle_ms = bundle_elapsed.as_secs_f64() * 1000.0,
-    compile_ms = compile_elapsed.as_secs_f64() * 1000.0,
-    store_ms = store_elapsed.as_secs_f64() * 1000.0,
-    "bundle cold path"
-  );
-
-  Ok(compiled)
+  bundler()?.compile(entry_paths, cwd, module_name).await
 }
 
 /// Compile already-bundled ESM `code` to `QuickJS` bytecode.
@@ -700,9 +206,6 @@ pub async fn bundle_and_compile_named(
 /// compiles (its `QuickJS` build is the one that will load the bytecode), so
 /// bytecode never crosses the wire between differently-built binaries.
 ///
-/// Does not touch the disk cache — the caller owns the key, because only it
-/// knows which inputs the code was built from.
-///
 /// # Errors
 ///
 /// Returns [`ScriptError`] if the module fails to declare (a syntax error, or
@@ -712,141 +215,64 @@ pub async fn compile_bundled_source(
   module_name: &str,
   source_map_json: Option<&str>,
 ) -> Result<CompiledBundle, ScriptError> {
-  let name = module_name.to_string();
-  let code = code.to_string();
-  let rt_started = Instant::now();
-  let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("bytecode runtime: {e}")))?;
-  // QuickJS resolves the module graph EAGERLY at declare, and the
-  // bundle keeps native specifiers external — so even this throwaway
-  // compile runtime needs the native resolver/loader. The written
-  // bytecode stores the dependency by NAME and re-links against the
-  // loading runtime's own ModuleDefs (covered by
-  // tests/node_compat_modules.rs end-to-end).
-  runtime
-    .set_loader(
-      crate::bindings::native_modules::resolver(),
-      crate::bindings::native_modules::loader(),
-    )
-    .await;
-  let ctx = AsyncContext::full(&runtime)
-    .await
-    .map_err(|e| ScriptError::internal(format!("bytecode context: {e}")))?;
-  let rt_elapsed = rt_started.elapsed();
-  let bytecode: Vec<u8> = ctx
-    .async_with(async |ctx| {
-      // The bundle's only remaining imports are the external native
-      // specifiers, resolved by the loader installed above.
-      let declare_started = Instant::now();
-      let module = Module::declare(ctx.clone(), name.into_bytes(), code.into_bytes())
-        .catch(&ctx)
-        .map_err(|e| caught_to_script_error(e, ""))?;
-      let declare_elapsed = declare_started.elapsed();
-      let write_started = Instant::now();
-      let out = module
-        .write(WriteOptions {
-          endianness: WriteOptionsEndianness::Native,
-          ..Default::default()
-        })
-        .map_err(|e| ScriptError::internal(format!("module write: {e}")));
-      tracing::debug!(
-        target: "ferridriver::bundle",
-        runtime_ms = rt_elapsed.as_secs_f64() * 1000.0,
-        declare_ms = declare_elapsed.as_secs_f64() * 1000.0,
-        write_ms = write_started.elapsed().as_secs_f64() * 1000.0,
-        "bundle compile split"
-      );
-      out
-    })
-    .await?;
-
-  Ok(CompiledBundle {
-    module_name: module_name.to_string(),
-    bytecode: Arc::from(bytecode.into_boxed_slice()),
-    source_map: LazyMap::from_json(source_map_json),
-  })
+  bundler()?.compile_source(code, module_name, source_map_json).await
 }
 
 /// Link + evaluate the bundled step module from precompiled bytecode in
 /// the given session. Top-level `Given`/`When`/`Then` run here.
-pub async fn eval_bundle(vm: &crate::vm::VmHandle, bundle: &CompiledBundle) -> Result<(), ScriptError> {
+pub async fn eval_bundle(vm: &ferrijs::VmHandle, bundle: &CompiledBundle) -> Result<(), ScriptError> {
   eval_bundle_with(vm, bundle, |_, _| Ok(())).await
 }
 
 /// [`eval_bundle`], plus a look at the evaluated module's namespace.
 ///
 /// A host that consumes a module's EXPORTS rather than its
-/// registrations — a reporter module, whose default export is the
-/// class to instantiate — needs the namespace, which `eval_bundle`
+/// registrations -- a reporter module, whose default export is the
+/// class to instantiate -- needs the namespace, which `eval_bundle`
 /// drops. `after` runs on the VM loop with the namespace object, right
 /// after the module's top level has settled.
-pub async fn eval_bundle_with<F>(vm: &crate::vm::VmHandle, bundle: &CompiledBundle, after: F) -> Result<(), ScriptError>
+pub async fn eval_bundle_with<F>(vm: &ferrijs::VmHandle, bundle: &CompiledBundle, after: F) -> Result<(), ScriptError>
 where
   F: for<'js> FnOnce(&rquickjs::Ctx<'js>, rquickjs::Object<'js>) -> Result<(), ScriptError> + Send + 'static,
 {
   let bytecode = Arc::clone(&bundle.bytecode);
   let label = bundle.module_name.clone();
   let mapper = bundle.mapper();
-  crate::vm_with!(vm => |ctx| {
-    crate::bindings::call_site::register_bundle(&ctx, mapper);
-    // SAFETY: produced by `Module::write` by this exact rquickjs/QuickJS
-    // build with native endianness — either in this process or restored
-    // from the bytecode disk cache, whose ABI tag (QuickJS version, arch,
-    // endianness, pointer width) + transitive input hashes guarantee an
-    // ABI-identical toolchain wrote it. That satisfies the precondition
-    // `Module::load` documents.
-    #[allow(unsafe_code)]
-    let module = match (unsafe { Module::load(ctx.clone(), &bytecode) }).catch(&ctx) {
-      Ok(m) => m,
-      Err(e) => return Err(caught_to_script_error(e, &label)),
+  ferrijs::vm_with!(vm => |ctx| {
+    ferrijs::source_map::register_bundle(&ctx, mapper);
+    let evaluated = ferrijs::eval_bytecode(&ctx, &bytecode, &label).await?;
+    // A bundle's top level may register tools of its own; the callables
+    // are built from the registry, so they only exist after a rebuild.
+    crate::bindings::rebuild_tool_bindings(&ctx)
+      .map_err(|e| ScriptError::internal(format!("rebuild tool bindings: {e}")))?;
+    let namespace = match evaluated.namespace().catch(&ctx) {
+      Ok(ns) => ns,
+      Err(e) => return Err(ScriptError::from_caught(&ctx, e, &label)),
     };
-    let (evaluated, promise) = match module.eval().catch(&ctx) {
-      Ok(pair) => pair,
-      Err(e) => return Err(caught_to_script_error(e, &label)),
-    };
-    match promise.into_future::<()>().await.catch(&ctx) {
-      // A bundle's top level may register tools of its own; the
-      // callables are built from the registry, so they only exist after
-      // a rebuild.
-      Ok(()) => {
-        crate::bindings::rebuild_tool_bindings(&ctx)
-          .map_err(|e| ScriptError::internal(format!("rebuild tool bindings: {e}")))?;
-        let namespace = match evaluated.namespace().catch(&ctx) {
-          Ok(ns) => ns,
-          Err(e) => return Err(caught_to_script_error(e, &label)),
-        };
-        after(&ctx, namespace)
-      },
-      Err(e) => Err(caught_to_script_error_in(&ctx, e, &label)),
-    }
+    after(&ctx, namespace)
   })
   .await?
 }
 
-impl CompiledBundle {
-  /// This bundle's position mapping, detached so a VM can keep it.
-  #[must_use]
-  pub fn mapper(&self) -> SourceMapper {
-    SourceMapper {
-      module_name: self.module_name.clone(),
-      map: self.source_map.clone(),
-    }
-  }
-
-  /// Map a bundled-output `line:col` (1-based, as QuickJS reports) back
-  /// to the original `.ts`/`.js` source location.
-  #[must_use]
-  pub fn remap(&self, line: u32, col: u32) -> Option<(String, u32, u32)> {
-    let sm = self.source_map.get()?;
-    let token = sm.lookup_token(line.saturating_sub(1), col.saturating_sub(1))?;
-    let src = token.get_source().unwrap_or("<unknown>").to_string();
-    Some((src, token.get_src_line() + 1, token.get_src_col() + 1))
-  }
-
+/// What a compiled bundle can say about a failure and about its inputs.
+pub trait CompiledBundleExt {
   /// Render a [`ScriptError`] with every bundled-output position
   /// translated back to the original `.ts`/`.js` source: the primary
   /// `line:col`, the source snippet, and each stack frame.
-  #[must_use]
-  pub fn format_error(&self, e: &ScriptError) -> String {
+  fn format_error(&self, e: &ScriptError) -> String;
+
+  /// Rewrite `<bundle module>:LINE:COL` occurrences in a JS stack to the
+  /// original source location via the source map.
+  fn remap_stack(&self, stack: &str) -> String;
+
+  /// Every source file that went into this bundle (entry + transitive
+  /// imports), resolved to absolute paths against `cwd`. Read from the
+  /// source map's `sources`; synthetic (non-file) sources are skipped.
+  fn source_files(&self, cwd: &Path) -> Vec<PathBuf>;
+}
+
+impl CompiledBundleExt for CompiledBundle {
+  fn format_error(&self, e: &ScriptError) -> String {
     use std::fmt::Write as _;
 
     let mut m = e.message.clone();
@@ -863,8 +289,7 @@ impl CompiledBundle {
       m.push_str(snippet);
     }
     // QuickJS does not expose `lineNumber` as an own property on a plain
-    // `throw new Error(...)`; the location lives in the stack. Remap each
-    // `<bundle>:line:col` frame back to the original .ts/.js source.
+    // `throw new Error(...)`; the location lives in the stack.
     if let Some(stack) = &e.stack {
       let stack = stack.trim_end();
       if !stack.is_empty() {
@@ -875,41 +300,30 @@ impl CompiledBundle {
     m
   }
 
-  /// Rewrite `<bundle module>:LINE:COL` occurrences in a JS stack to the
-  /// original source location via the rolldown source map.
-  #[must_use]
-  pub fn remap_stack(&self, stack: &str) -> String {
-    use std::sync::OnceLock;
-
-    use regex::Regex;
-    static RE: OnceLock<Option<Regex>> = OnceLock::new();
-    let Some(re) = RE.get_or_init(|| Regex::new(r"([^\s()]+):(\d+):(\d+)").ok()) else {
-      return stack.to_string();
-    };
-    re.replace_all(stack, |caps: &regex::Captures<'_>| {
-      let (Ok(line), Ok(col)) = (caps[2].parse::<u32>(), caps[3].parse::<u32>()) else {
-        return caps[0].to_string();
-      };
-      match self.remap(line, col) {
-        Some((src, sl, sc)) => format!("{src}:{sl}:{sc}"),
-        None => caps[0].to_string(),
-      }
-    })
-    .into_owned()
+  fn remap_stack(&self, stack: &str) -> String {
+    stack
+      .split('\n')
+      .map(|line| {
+        let Some((file, l, c)) = ferrijs::source_map::innermost_frame(line) else {
+          return line.to_string();
+        };
+        if file != self.module_name {
+          return line.to_string();
+        }
+        match self.remap(l, c) {
+          Some((src, sl, sc)) => line.replace(&format!("{file}:{l}:{c}"), &format!("{src}:{sl}:{sc}")),
+          None => line.to_string(),
+        }
+      })
+      .collect::<Vec<_>>()
+      .join("\n")
   }
 
-  /// Every source file that went into this bundle (entry + transitive
-  /// imports), resolved to absolute paths against `cwd`. Read from the
-  /// source map's `sources`; synthetic (non-file) sources are skipped.
-  ///
-  /// Callers running untrusted bundles use this to enforce a
-  /// jail (every input must live under an allowed root).
-  #[must_use]
-  pub fn source_files(&self, cwd: &Path) -> Vec<PathBuf> {
-    let Some(sm) = self.source_map.get() else {
-      return Vec::new();
-    };
-    sm.sources()
+  fn source_files(&self, cwd: &Path) -> Vec<PathBuf> {
+    self
+      .source_map
+      .sources()
+      .iter()
       .map(|src| {
         let p = Path::new(src);
         if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) }
@@ -918,34 +332,27 @@ impl CompiledBundle {
   }
 }
 
-/// True when a path's extension marks it as TypeScript (`.ts`/`.tsx`/
-/// `.mts`/`.cts`) and so must be transpiled through the bundler.
-#[must_use]
-pub fn is_typescript_path(path: &Path) -> bool {
-  matches!(
-    path.extension().and_then(|e| e.to_str()),
-    Some("ts" | "tsx" | "mts" | "cts")
-  )
+/// A compiled bundle as the runner's [`ferridriver_test::host::SourceMap`]:
+/// a position in the code QuickJS executed, answered as the file the
+/// author wrote, resolved against the directory the bundle was built
+/// from.
+pub struct BundleSourceMap {
+  bundle: Arc<CompiledBundle>,
+  cwd: Arc<PathBuf>,
 }
 
-/// Heuristic: the source begins a line with a static `import`/`export`
-/// and so must run as an ES module (bundled). Dynamic `import(...)` is
-/// intentionally NOT matched — it is valid in a plain script, so such a
-/// script keeps top-level `return`. A false positive only costs an
-/// unnecessary bundle, never wrong output.
-#[must_use]
-pub fn source_is_es_module(source: &str) -> bool {
-  source.lines().any(|line| {
-    let t = line.trim_start();
-    let static_import = t
-      .strip_prefix("import")
-      .is_some_and(|rest| matches!(rest.as_bytes().first(), Some(b' ' | b'\t' | b'{' | b'\'' | b'"')));
-    static_import
-      || t.starts_with("export ")
-      || t.starts_with("export\t")
-      || t.starts_with("export{")
-      || t.starts_with("export*")
-  })
+impl BundleSourceMap {
+  #[must_use]
+  pub fn new(bundle: Arc<CompiledBundle>, cwd: Arc<PathBuf>) -> Self {
+    Self { bundle, cwd }
+  }
+}
+
+impl ferridriver_test::host::SourceMap for BundleSourceMap {
+  fn remap(&self, line: u32, column: u32) -> Option<(String, u32, u32)> {
+    let (src, src_line, src_col) = self.bundle.remap(line, column)?;
+    Some((resolve_source(&self.cwd, &src).display().to_string(), src_line, src_col))
+  }
 }
 
 /// One extension file: rolldown-bundled (TypeScript, extension-local imports,
@@ -1129,10 +536,10 @@ impl CompiledExtension {
   /// because the JSON is what both cache tiers store.
   #[must_use]
   pub fn mapper(&self) -> SourceMapper {
-    SourceMapper {
-      module_name: self.module_name.clone(),
-      map: LazyMap::from_json(self.source_map_json.as_deref()),
-    }
+    SourceMapper::new(
+      self.module_name.clone(),
+      LazyMap::from_json(self.source_map_json.as_deref()),
+    )
   }
 }
 
@@ -1163,7 +570,7 @@ struct CachedExtension {
 /// is needed.
 ///
 /// This is the hot in-process tier; `compile_and_extract_extensions` also
-/// consults the cross-process disk tier ([`crate::bytecode_cache`]),
+/// consults the cross-process disk tier (the disk cache),
 /// whose ABI tag (QuickJS version, arch, endianness, pointer width) +
 /// transitive input hashes are what keep the `unsafe Module::load`
 /// paths sound for bytecode another process wrote.
@@ -1185,7 +592,7 @@ fn remember_extension(
   source_map_json: Option<&str>,
   inputs: Vec<PathBuf>,
 ) {
-  let Some(fingerprint) = crate::bytecode_cache::inputs_fingerprint(&inputs) else {
+  let Some(fingerprint) = ferrijs_bundle::cache::inputs_fingerprint(&inputs) else {
     return;
   };
   if let Ok(mut cache) = extension_cache().lock() {
@@ -1301,7 +708,18 @@ pub async fn compile_and_extract_extensions(
   // the in-memory content key and the disk-cache key so the compile step
   // can populate both tiers.
 
-  let shims_fp = bundle_env_fingerprint();
+  let shims_fp = match bundle_env_fingerprint() {
+    Ok(fp) => fp,
+    Err(e) => {
+      return (
+        Vec::new(),
+        groups
+          .iter()
+          .map(|g| (g.first().cloned().unwrap_or_default(), e.clone()))
+          .collect(),
+      );
+    },
+  };
   let mut slots: Vec<Slot> = Vec::with_capacity(groups.len());
   for group in groups {
     match group_bytes(group) {
@@ -1310,7 +728,7 @@ pub async fn compile_and_extract_extensions(
         let cached = extension_cache().lock().ok().and_then(|c| {
           let hit = c.get(&inmem_key)?;
           // Same question the disk tier asks: did ANY input change?
-          if crate::bytecode_cache::inputs_fingerprint(&hit.inputs) != Some(hit.inputs_fingerprint) {
+          if ferrijs_bundle::cache::inputs_fingerprint(&hit.inputs) != Some(hit.inputs_fingerprint) {
             return None;
           }
           Some(Loaded {
@@ -1324,7 +742,7 @@ pub async fn compile_and_extract_extensions(
         // package's entries live together, and a loose file is its own
         // group.
         let ext_cwd = group_cwd(group);
-        let disk_key = crate::bytecode_cache::entry_key(&extension_cache_kind(group), group, &ext_cwd, shims_fp);
+        let disk_key = ferrijs_bundle::cache::entry_key(&extension_cache_kind(group), group, &ext_cwd, shims_fp);
         match cached {
           // 1. In-memory (same process).
           Some(hit) => slots.push(Slot::Hit(hit)),
@@ -1332,7 +750,7 @@ pub async fn compile_and_extract_extensions(
           //    the in-memory tier so later same-process loads stay hot.
           // An entry whose payload this build cannot read is a MISS,
           // not an empty snapshot.
-          None => match crate::bytecode_cache::load(disk_key).and_then(|e| {
+          None => match bytecode_cache().load(disk_key).and_then(|e| {
             let snapshot = decode_aux(e.aux.as_deref())?;
             Some((e.bytecode, e.module_name, e.source_map_json, e.inputs, snapshot))
           }) {
@@ -1427,7 +845,7 @@ pub async fn compile_and_extract_extensions(
         // in a host context would leave the stub registered under the
         // specifier's name, and the entries would link to it instead of
         // to the provider that evaluates in the pass below.
-        let Ok(compile) = compile_context(policy).await else {
+        let Ok(compiler) = bundler() else {
           for s in &mut slots {
             if matches!(s, Slot::Miss { .. }) {
               *s = Slot::Failed(ScriptError::internal("extension compile context".to_string()));
@@ -1435,14 +853,13 @@ pub async fn compile_and_extract_extensions(
           }
           return finish(slots, groups);
         };
-        let compile_ctx = &compile.1;
-        let mut compiled: rustc_hash::FxHashMap<usize, Arc<[u8]>> = rustc_hash::FxHashMap::default();
+        let mut emitted: rustc_hash::FxHashMap<usize, Arc<[u8]>> = rustc_hash::FxHashMap::default();
         for &i in &miss_idx {
           let Some(code) = bundled_code.get(&i) else { continue };
           let module_name = extension_module_name(&groups[i]);
-          match compile_one(compile_ctx, &module_name, code).await {
-            Ok(bc) => {
-              compiled.insert(i, Arc::from(bc.into_boxed_slice()));
+          match compiler.compile_source(code, &module_name, None).await {
+            Ok(module) => {
+              emitted.insert(i, module.bytecode);
             },
             Err(e) => slots[i] = Slot::Failed(e),
           }
@@ -1461,17 +878,17 @@ pub async fn compile_and_extract_extensions(
         // behind.
         let last_miss = miss_idx.last().copied().unwrap_or(0);
         let mut snapshots: rustc_hash::FxHashMap<usize, ExtensionSnapshot> = rustc_hash::FxHashMap::default();
-        for (host, _runtime, actx) in &contexts {
+        for (host, rt) in &contexts {
           for i in 0..=last_miss {
             let (bytecode, label, is_miss) = match &slots[i] {
               Slot::Hit(hit) => (Arc::clone(&hit.bytecode), hit.module_name.clone(), false),
-              Slot::Miss { .. } => match compiled.get(&i) {
+              Slot::Miss { .. } => match emitted.get(&i) {
                 Some(bc) => (Arc::clone(bc), extension_module_name(&groups[i]), true),
                 None => continue,
               },
               Slot::Failed(_) => continue,
             };
-            match eval_and_slice(actx, &bytecode, &label).await {
+            match eval_and_slice(rt, &bytecode, &label).await {
               Ok(registrations) => {
                 if is_miss {
                   snapshots
@@ -1513,7 +930,7 @@ pub async fn compile_and_extract_extensions(
           let Slot::Miss { inmem_key, disk_key } = slots[i] else {
             continue;
           };
-          let Some(bytecode) = compiled.get(&i) else { continue };
+          let Some(bytecode) = emitted.get(&i) else { continue };
           let snapshot = snapshots.remove(&i).unwrap_or_default();
           // Throwing under one host is the file's business; throwing
           // under EVERY host is a file that cannot work anywhere — a
@@ -1530,7 +947,7 @@ pub async fn compile_and_extract_extensions(
             // an `[extensions.policy]` refusal used to reach the loader
             // as a skippable compile failure.
             slots[i] = Slot::Failed(if name.as_deref() == Some(crate::error::EXTENSION_POLICY_ERROR) {
-              ScriptError::policy(first)
+              crate::error::policy_error(first)
             } else {
               ScriptError::internal(first)
             });
@@ -1542,9 +959,9 @@ pub async fn compile_and_extract_extensions(
           // entry in BOTH tiers.
           let map = bundled_map.get(&i).cloned().flatten();
           let modules = bundled_modules.get(&i).cloned().unwrap_or_default();
-          let inputs = crate::bytecode_cache::input_set(&groups[i], &modules);
+          let inputs = ferrijs_bundle::cache::input_set(&groups[i], &modules);
           let aux = encode_aux(&snapshot);
-          crate::bytecode_cache::store(disk_key, bytecode, &module_name, map.as_deref(), Some(&aux), &inputs);
+          bytecode_cache().store(disk_key, bytecode, &module_name, map.as_deref(), Some(&aux), &inputs);
           remember_extension(inmem_key, bytecode, &snapshot, &module_name, map.as_deref(), inputs);
           slots[i] = Slot::Hit(Loaded {
             bytecode: Arc::clone(bytecode),
@@ -1625,209 +1042,122 @@ fn finish(slots: Vec<Slot>, groups: &[Vec<PathBuf>]) -> (Vec<CompiledExtension>,
   (survivors, failures)
 }
 
-/// Install everything the extraction context shares with a session VM,
-/// once for the whole batch.
-///
-/// A session installs all of this before `install_extensions`, so an
-/// extension whose top level uses a standard global (`TextEncoder`,
-/// `setTimeout`, `crypto`, `console`, `expect`) or the Playwright test
-/// surface must find it here too — otherwise the file throws during
-/// extraction and is skipped with a warning, never reaching the session
-/// that would have run it fine. Only session-scoped bindings
-/// (fs/vars/artifacts/commands/page/request) are absent: those are
-/// per-session by definition and top-level extension code must not
-/// depend on them.
+/// What an extraction realm installs beyond the runtime's own surface:
+/// the registry and every contribution point, the class prototypes,
+/// the `expect` and `test` surfaces, `ferridriver.host`, and the
+/// operator ceiling. The per-session bindings (vars, artifacts,
+/// commands, page, request) are absent: those are per-session by
+/// definition and top-level extension code must not depend on them.
 ///
 /// The operator ceiling is installed for the same reason: `defineTool`
 /// clamps `allow.*` at REGISTRATION time, so an extraction that carries
 /// no ceiling accepts a package the session then refuses.
-async fn install_extraction_env(
-  actx: &AsyncContext,
-  policy: &ferridriver_config::ExtensionPolicyConfig,
+///
+/// `fetch` is present but refusing: a module-scope request would put a
+/// network call inside `ferridriver ext check` and make the pass depend
+/// on a live host. The function still has to be THERE, because
+/// `typeof fetch === 'function'` is how a library picks between the
+/// native client and a bundled polyfill.
+struct ExtractionExtension {
+  policy: ferridriver_config::ExtensionPolicyConfig,
   host: crate::ExtensionHost,
-) -> Result<(), ScriptError> {
-  let policy = policy.clone();
-  actx
-    .async_with(async |ctx| {
-      crate::bindings::install_bdd(&ctx)
-        .map_err(|e| ScriptError::internal(format!("install extension registry: {e}")))?;
-      crate::bindings::define_classes(&ctx).map_err(|e| ScriptError::internal(format!("install classes: {e}")))?;
-      crate::engine::install_runtime_shims(&ctx)
-        .map_err(|e| ScriptError::internal(format!("install runtime shims: {e}")))?;
-      install_extraction_process(&ctx).map_err(|e| ScriptError::internal(format!("install process: {e}")))?;
-      install_extraction_fetch(&ctx).map_err(|e| ScriptError::internal(format!("install fetch: {e}")))?;
-      crate::bindings::expect::install_expect(&ctx)
-        .map_err(|e| ScriptError::internal(format!("install expect: {e}")))?;
-      crate::bindings::test::install_test(&ctx)
-        .map_err(|e| ScriptError::internal(format!("install test surface: {e}")))?;
-      // The host this context extracts for: an extension branches on
-      // `ferridriver.host`, so each host needs its own context to
-      // register what that host would have seen.
-      crate::bindings::runtime::install_host(&ctx, host.as_str())
-        .map_err(|e| ScriptError::internal(format!("install ferridriver.host: {e}")))?;
-      let _ = ctx.store_userdata(crate::bindings::registry::ExtensionPolicyUd(policy));
-      Ok(())
-    })
-    .await
 }
 
-/// `process`, with the two host-supplied values extraction cannot know.
-///
-/// `env` is empty and `cwd()` answers the directory the pass runs in:
-/// extraction sees neither the operator's `[scripting].allowEnv` nor a
-/// session sandbox root. What matters is that the global EXISTS. A
-/// library that reads `process.versions` or `process.env.NODE_ENV` at
-/// module scope is asking which runtime it is on, and an absent
-/// `process` answers that question wrong rather than not at all — the
-/// module takes its browser branch and then demands a browser global,
-/// so the file throws under every host and never reaches the session
-/// that would have run it.
-fn install_extraction_process(ctx: &rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-  let cwd = std::env::current_dir().unwrap_or_default();
-  ferridriver_jsstd::node::process::install(ctx, std::iter::empty::<(&str, &str)>(), &cwd.to_string_lossy())?;
-  crate::bindings::runtime::mirror_global(ctx, "process")
+impl ferrijs::Extension for ExtractionExtension {
+  fn name(&self) -> &'static str {
+    "ferridriver-extraction"
+  }
+
+  fn modules(&self, registry: &mut ferrijs::ModuleRegistry) -> Result<(), String> {
+    crate::bindings::native_modules::register(registry)
+  }
+
+  fn loaders(&self) -> Vec<(ferrijs::modules::BoxResolver, ferrijs::modules::BoxLoader)> {
+    crate::bindings::native_modules::provided_loaders()
+  }
+
+  fn require_hook(&self) -> Option<Arc<dyn ferrijs::RequireHook>> {
+    Some(Arc::new(crate::bindings::native_modules::FerridriverRequire))
+  }
+
+  fn install(&self, ctx: &rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+    crate::bindings::install_bdd(ctx)?;
+    crate::bindings::define_classes(ctx)?;
+    crate::bindings::runtime::mirror_global(ctx, "process")?;
+    let refusing = rquickjs::Function::new(ctx.clone(), || -> rquickjs::Result<()> {
+      Err(rquickjs::Error::new_from_js_message(
+        "fetch",
+        "extraction",
+        "no HTTP during extension extraction: move the call into a handler or a hook, \
+         where the session's client and its `allow.net` grant exist",
+      ))
+    })?;
+    ctx.globals().set("fetch", refusing)?;
+    crate::bindings::expect::install_expect(ctx)?;
+    crate::bindings::test::install_test(ctx)?;
+    // The host this realm extracts for: an extension branches on
+    // `ferridriver.host`, so each host needs its own realm to register
+    // what that host would have seen.
+    crate::bindings::runtime::install_host(ctx, self.host.as_str())?;
+    let _ = ctx.store_userdata(crate::bindings::registry::ExtensionPolicyUd(self.policy.clone()));
+    Ok(())
+  }
 }
 
-/// `fetch`, present but refusing.
+/// One extraction realm per host.
 ///
-/// Extraction reads a manifest off a throwaway context; a module-scope
-/// request would put a network call inside `ferridriver ext check` and
-/// make the pass depend on a live host. The function still has to be
-/// THERE, because `typeof fetch === 'function'` is how a library picks
-/// between the native client and a bundled polyfill, and picking the
-/// polyfill drags in the transport stack that has no business here.
-fn install_extraction_fetch(ctx: &rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-  let f = rquickjs::Function::new(ctx.clone(), || -> rquickjs::Result<()> {
-    Err(rquickjs::Error::new_from_js_message(
-      "fetch",
-      "extraction",
-      "no HTTP during extension extraction: move the call into a handler or a hook, \
-       where the session's client and its `allow.net` grant exist",
-    ))
-  })?;
-  ctx.globals().set("fetch", f)
-}
-
-/// One extraction runtime + context per host.
-///
-/// A runtime, not just a context: `store_userdata` is keyed on the
-/// RUNTIME (`Ctx::get_opaque` reads `JS_GetRuntime`), and the registries
-/// every contribution point writes into are userdata. Four contexts on
-/// one runtime would share one registry — the second context would not
-/// even get its `defineTool` global, because `registry::install` returns
-/// early when the userdata is already there — so the per-host slices
-/// would be each other's.
+/// A realm, not just a context: `store_userdata` is keyed on the
+/// RUNTIME, and the registries every contribution point writes into are
+/// userdata. Four contexts on one runtime would share one registry, so
+/// the per-host slices would be each other's.
 async fn extraction_hosts(
   policy: &ferridriver_config::ExtensionPolicyConfig,
-) -> Result<Vec<(crate::ExtensionHost, AsyncRuntime, AsyncContext)>, ScriptError> {
+) -> Result<Vec<(crate::ExtensionHost, ferrijs::Runtime)>, ScriptError> {
   use crate::ExtensionHost as H;
   let mut out = Vec::new();
   for host in [H::Mcp, H::Bdd, H::Test, H::Script] {
-    let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("extension bytecode runtime: {e}")))?;
-    runtime
-      .set_loader(
-        crate::bindings::native_modules::resolver(),
-        crate::bindings::native_modules::loader(),
-      )
-      .await;
-    let ctx = AsyncContext::full(&runtime)
-      .await
-      .map_err(|e| ScriptError::internal(format!("extension bytecode context: {e}")))?;
-    install_extraction_env(&ctx, policy, host).await?;
-    out.push((host, runtime, ctx));
+    let rt = ferrijs::Runtime::builder()
+      .permissions(ferrijs::Permissions::none())
+      .without_fetch()
+      .extension(ExtractionExtension {
+        policy: policy.clone(),
+        host,
+      })
+      .build()
+      .await?;
+    out.push((host, rt));
   }
   Ok(out)
 }
 
-/// A runtime + context used ONLY to parse and serialise, never to
-/// evaluate — kept apart from the host passes so what `Module::declare`
-/// resolves here cannot become what an entry links to there.
-async fn compile_context(
-  policy: &ferridriver_config::ExtensionPolicyConfig,
-) -> Result<(AsyncRuntime, AsyncContext), ScriptError> {
-  let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("extension bytecode runtime: {e}")))?;
-  runtime
-    .set_loader(
-      crate::bindings::native_modules::resolver(),
-      crate::bindings::native_modules::loader(),
-    )
-    .await;
-  let ctx = AsyncContext::full(&runtime)
-    .await
-    .map_err(|e| ScriptError::internal(format!("extension bytecode context: {e}")))?;
-  install_extraction_env(&ctx, policy, crate::ExtensionHost::Script).await?;
-  Ok((runtime, ctx))
-}
-
-/// Parse the bundled module and serialise it to bytecode. Parsing only
-/// — nothing evaluates, so every per-host pass starts from the same
-/// bytes and from registries this call did not touch.
-async fn compile_one(actx: &AsyncContext, module_name: &str, code: &str) -> Result<Vec<u8>, ScriptError> {
-  let name = module_name.to_string();
-  let code = code.to_string();
-  let label = module_name.to_string();
-  actx
-    .async_with(async |ctx| {
-      // Bundled module has no remaining imports — `declare` (parse only)
-      // needs no resolver; mirrors `bundle_and_compile`.
-      let module = Module::declare(ctx.clone(), name.into_bytes(), code.into_bytes())
-        .catch(&ctx)
-        .map_err(|e| caught_to_script_error(e, &label))?;
-      module
-        .write(WriteOptions {
-          // Same process + interpreter that will `load` it.
-          endianness: WriteOptionsEndianness::Native,
-          ..Default::default()
-        })
-        .map_err(|e| ScriptError::internal(format!("extension module write: {e}")))
-    })
-    .await
-}
-
-/// Load + evaluate one extension's bytecode in a host context and slice
+/// Load + evaluate one extension's bytecode in a host realm and slice
 /// off everything it registered.
 ///
 /// The evaluation matters even for a file whose registrations are
 /// already cached: the files after it must see the world a session
 /// would have given them.
-async fn eval_and_slice(actx: &AsyncContext, bytecode: &[u8], label: &str) -> Result<HostRegistrations, ScriptError> {
+async fn eval_and_slice(rt: &ferrijs::Runtime, bytecode: &[u8], label: &str) -> Result<HostRegistrations, ScriptError> {
   let bytecode = bytecode.to_vec();
   let label = label.to_string();
   let cfg_default = crate::engine::ScriptEngineConfig::default();
-  actx
-    .async_with(async |ctx| {
-      // Fresh capture per file: whatever the extension's top level logs
-      // is forwarded to tracing under the module label after eval.
-      let console = std::sync::Arc::new(crate::console::ConsoleCapture::new(
-        cfg_default.max_console_entries,
-        cfg_default.max_console_bytes,
-        cfg_default.max_console_entry_bytes,
-      ));
-      crate::console_fmt::install_console(&ctx, console.clone())
-        .map_err(|e| ScriptError::internal(format!("install console: {e}")))?;
+  ferrijs::vm_with!(rt.handle() => |ctx| {
+    // Fresh capture per file: whatever the extension's top level logs
+    // is forwarded to tracing under the module label after eval.
+    let console = std::sync::Arc::new(ferrijs::ConsoleCapture::new(
+      cfg_default.max_console_entries,
+      cfg_default.max_console_bytes,
+      cfg_default.max_console_entry_bytes,
+    ));
+    ferrijs::console_fmt::install_console(&ctx, console.clone())
+      .map_err(|e| ScriptError::internal(format!("install console: {e}")))?;
 
-      let marks = crate::bindings::registry::registry_marks(&ctx)?;
-
-      // SAFETY: same-interpreter precondition as `install_one_extension`
-      // — the bytes came from `Module::write` in this process or from the
-      // disk cache, whose ABI tag and input hashes guarantee an
-      // ABI-identical toolchain wrote them.
-      #[allow(unsafe_code)]
-      let module = (unsafe { Module::load(ctx.clone(), &bytecode) })
-        .catch(&ctx)
-        .map_err(|e| caught_to_script_error(e, &label))?;
-      let promise = module
-        .eval()
-        .catch(&ctx)
-        .map_err(|e| caught_to_script_error(e, &label))?
-        .1;
-      let evaled = promise.into_future::<()>().await.catch(&ctx);
-      for entry in console.drain() {
-        tracing::info!(target: "ferridriver::extensions", extension = %label, "{}", entry.message);
-      }
-      evaled.map_err(|e| caught_to_script_error(e, &label))?;
-
-      crate::bindings::registry::registrations_since(&ctx, marks)
-    })
-    .await
+    let marks = crate::bindings::registry::registry_marks(&ctx)?;
+    let evaled = ferrijs::eval_bytecode(&ctx, &bytecode, &label).await;
+    for entry in console.drain() {
+      tracing::info!(target: "ferridriver::extensions", extension = %label, "{}", entry.message);
+    }
+    evaled?;
+    crate::bindings::registry::registrations_since(&ctx, marks)
+  })
+  .await?
 }

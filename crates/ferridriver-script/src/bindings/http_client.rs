@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use either::Either;
-use ferridriver::http_client::{HttpClient, HttpResponse, NetGuard, RequestOptions};
+use ferridriver::http_client::{HttpClient, HttpResponse, NetGuard, NetPolicy, RequestOptions};
 use rquickjs::function::Opt;
 use rquickjs::promise::Promised;
 use rquickjs::{Class, Ctx, JsLifetime, Value, class::Trace};
@@ -126,13 +126,12 @@ fn parse_options<'js>(ctx: &Ctx<'js>, value: Opt<Value<'js>>) -> rquickjs::Resul
 pub struct HttpClientJs {
   #[qjs(skip_trace)]
   inner: Arc<HttpClient>,
-  /// Host allow-list (extension `allow.net` capability). Empty =
-  /// unrestricted. Non-empty = default-deny: every request URL's host
-  /// must match an entry (exact, or `*.suffix` which also matches the
-  /// bare apex) or the call throws before any network I/O. Enforced
-  /// natively in Rust here — there is no JS proxy/shim.
+  /// An attenuation (extension `allow.net`): every request answers to
+  /// the realm's policy and then to this list. `None` is the plain
+  /// binding, which answers to the realm's policy alone. Enforced by the
+  /// engine on every hop -- there is no JS proxy/shim.
   #[qjs(skip_trace)]
-  net: Arc<[String]>,
+  attenuation: Option<Arc<ferrijs::Permissions>>,
 }
 
 impl HttpClientJs {
@@ -140,16 +139,22 @@ impl HttpClientJs {
   pub fn new(inner: Arc<HttpClient>) -> Self {
     Self {
       inner,
-      net: Arc::from([]),
+      attenuation: None,
     }
   }
 
-  /// Same underlying context, restricted to `net` hosts. Used to build
-  /// the per-tool `request` a extension handler receives when its manifest
-  /// declares `allow.net`.
-  #[must_use]
-  pub fn with_net(inner: Arc<HttpClient>, net: Arc<[String]>) -> Self {
-    Self { inner, net }
+  /// Same underlying context, refusing every host outside `net`. Used to
+  /// build the per-tool `request` an extension handler receives when its
+  /// manifest declares `allow.net`.
+  ///
+  /// # Errors
+  ///
+  /// An entry that is not a host rule.
+  pub fn with_net(inner: Arc<HttpClient>, net: &[String]) -> Result<Self, String> {
+    Ok(Self {
+      inner,
+      attenuation: Some(Arc::new(ferrijs::Permissions::none().allow_net(net)?)),
+    })
   }
 
   /// The shared underlying context — lets the extension dispatch wrap the
@@ -159,28 +164,21 @@ impl HttpClientJs {
     self.inner.clone()
   }
 
-  /// The allow-list this binding enforces right now: an instance list
-  /// (a net-restricted tool's `request` arg carries its grant wherever
-  /// the object travels), else the session's *active* tool policy — so
-  /// the ungoverned global `request` is bound by `allow.net` exactly
-  /// like `fetch` is, and a restricted handler cannot widen its grant by
-  /// reaching for `globalThis.request` instead of its guarded arg.
-  fn effective_net(&self, ctx: &Ctx<'_>) -> Option<Arc<[String]>> {
-    if !self.net.is_empty() {
-      return Some(self.net.clone());
+  /// The policy this binding's requests answer to: the realm's, then the
+  /// attenuation if the binding carries one. Built synchronously, inside
+  /// the call, so an `async fn` body's first poll (which happens later,
+  /// on the VM executor) reads nothing.
+  fn policy(&self, ctx: &Ctx<'_>) -> Option<Arc<dyn NetPolicy>> {
+    match &self.attenuation {
+      Some(declared) => Some(crate::bindings::net_policy::attenuated(ctx, Arc::clone(declared))),
+      None => crate::bindings::net_policy::realm_policy(ctx),
     }
-    crate::bindings::fetch::active_net(ctx)
   }
 
-  /// Shared body of every HTTP method. Snapshots the effective policy
-  /// NOW — synchronously, while this call is still on the caller's
-  /// stack — because an `async fn` method body first polls on the VM
-  /// executor, outside the dispatch bracket, where the resting policy
-  /// (unrestricted) would be read instead of the calling tool's. The
-  /// allow-list check itself runs inside the returned promise so a
-  /// violation is a rejection (not a synchronous throw), and core
-  /// re-enforces it on every redirect hop and resolved address via
-  /// [`NetGuard`]; the metadata endpoints are blocked unconditionally.
+  /// Shared body of every HTTP method. The engine enforces the policy on
+  /// the initial URL, every redirect hop and every resolved address via
+  /// [`NetGuard`]; the metadata endpoints are blocked unconditionally. A
+  /// refusal is a rejection with the permission error.
   fn dispatch<'js>(
     &self,
     ctx: Ctx<'js>,
@@ -201,18 +199,10 @@ impl HttpClientJs {
     options: Opt<Value<'js>>,
     base: Option<RequestOptions>,
   ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
-    let net = self.effective_net(&ctx);
+    let guard = crate::bindings::net_policy::guard(self.policy(&ctx));
     let opts = merge_over(base, parse_options(&ctx, options)?);
     let inner = self.inner.clone();
     Ok(Promised::from(async move {
-      if let Some(list) = net.as_deref() {
-        net_check(list, &url).map_err(|m| rquickjs::Error::new_from_js_message("request", "Error", m))?;
-      }
-      let guard = NetGuard {
-        allowlist: net,
-        block_metadata: true,
-        block_private: false,
-      };
       let opts = Some(with_guard(opts, guard));
       let resp = match verb {
         Verb::Get => inner.get(&url, opts).await,
@@ -246,25 +236,6 @@ fn with_guard(opts: Option<RequestOptions>, g: NetGuard) -> RequestOptions {
   let mut o = opts.unwrap_or_default();
   o.net_guard = Some(g);
   o
-}
-
-/// Default-deny host check shared by the `request` binding and the
-/// global `fetch` facade, delegating to the core allow-list semantics
-/// (one implementation, in Rust core). `Ok(())` when `net` is empty
-/// (unrestricted) or the URL's host matches an entry; otherwise an
-/// `Err(message)`. Synchronous, before any network I/O. Metadata /
-/// redirect-hop enforcement lives in core's [`NetGuard`].
-pub(crate) fn net_check(net: &[String], url: &str) -> Result<(), String> {
-  if net.is_empty() {
-    return Ok(());
-  }
-  let host = ferridriver::http_client::host_of(url)
-    .ok_or_else(|| format!("request to invalid/relative URL \"{url}\" is not permitted by allow.net"))?;
-  if ferridriver::http_client::host_allowed(&host, net) {
-    Ok(())
-  } else {
-    Err(format!("request host \"{host}\" is not in allow.net {net:?}"))
-  }
 }
 
 #[rquickjs::methods]

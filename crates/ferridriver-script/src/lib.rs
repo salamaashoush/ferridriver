@@ -32,27 +32,25 @@
 //! - Bound args (never interpolated into source) to prevent prompt injection.
 //! - Wall-clock and memory quotas enforced by the `QuickJS` runtime.
 //! - Host globals: Node `fs`, captured `console`, session `vars`.
-//! - Module loader rooted at a configured `scripts/` directory with path
-//!   sanitization (rejects `..`, absolute paths, symlinks escaping root).
+//! - Module loader rooted at the session's script directory.
 //! - A poisoning timeout/OOM discards the session VM so the next
 //!   execution transparently gets a fresh one.
+//!
+//! The runtime underneath is `ferrijs`; this crate is ferridriver's
+//! realm over it.
 //!
 //! Scripting is independent of the BDD step registry — scripts drive the
 //! browser through the `page` / `context` / `request` bindings directly.
 
 pub mod bindings;
 pub mod bundle;
-pub mod bytecode_cache;
 pub mod command_spec;
 pub mod config_module;
-pub mod console;
-pub mod console_fmt;
 pub mod debug_session;
 pub mod discover;
 pub mod engine;
 pub mod error;
 pub mod extension_load;
-pub mod modules;
 pub mod output_dir;
 pub mod provided_modules;
 pub mod reporter;
@@ -63,7 +61,12 @@ pub mod session_procs;
 pub mod session_table;
 pub mod sidecar;
 pub mod vars;
-pub mod vm;
+
+/// The runtime underneath, for a host reaching past this crate's surface.
+pub use ferrijs;
+pub use ferrijs::rquickjs;
+/// The realm's event-loop handle and the macro that submits work to it.
+pub use ferrijs::vm_with;
 
 pub use bindings::native_modules::{is_reserved_specifier, module_aliases, native_module_names, set_module_aliases};
 pub use bindings::registry::net_entry_subsumed;
@@ -77,12 +80,12 @@ pub use bindings::{
   teardown_worker_fixtures,
 };
 pub use bundle::{
-  BundleSourceMap, BundledSource, CompiledBundle, CompiledExtension, ExtensionSnapshot, HostRegistrations,
-  SourceMapper, bundle_and_compile, bundle_and_compile_named, bundle_source, compile_and_extract_extensions,
-  compile_bundled_source, eval_bundle, is_typescript_path, resolve_source, source_is_es_module,
+  BundleSourceMap, BundledSource, CompiledBundle, CompiledBundleExt, CompiledExtension, ExtensionSnapshot,
+  HostRegistrations, SourceMapper, bundle_and_compile, bundle_and_compile_named, bundle_source,
+  compile_and_extract_extensions, compile_bundled_source, eval_bundle, is_typescript_path, resolve_source,
+  source_is_es_module,
 };
 pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
-pub use console::{ConsoleCapture, ConsoleSink};
 pub use discover::{ResolvedExtension, SOURCE_EXTENSIONS, is_source_file, walk_source_files};
 pub use engine::{
   Deadline, ExtensionHost, RunContext, RunOptions, ScriptCaps, ScriptEngine, ScriptEngineConfig, Session, SessionRun,
@@ -90,6 +93,7 @@ pub use engine::{
 pub use error::{ScriptError, ScriptErrorKind};
 pub use extension_load::{GatedExtensions, extension_defaults, gate, load_bindings};
 pub use ferridriver_config::ExtensionSpec;
+pub use ferrijs::{ConsoleCapture, ConsoleSink, VmHandle};
 pub use output_dir::OutputDir;
 pub use provided_modules::{PackageClaims, ProvidedModule, ProvidedModuleTable};
 pub use reporter::{JsReporter, JsReporterFactory, ReporterModule};
@@ -99,4 +103,3 @@ pub use session_host::{SessionScriptConfig, SessionScriptHost};
 pub use session_procs::SessionProcs;
 pub use session_table::{BrowserSession, SessionTable};
 pub use vars::{InMemoryVars, VarsStore};
-pub use vm::VmHandle;

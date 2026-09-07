@@ -253,13 +253,13 @@ pub async fn extension_defaults(
   // extracting was a warning and a dropped package: the operator said
   // no and the run carried on as if the package had simply been absent.
   for (path, e) in &failures {
-    if e.is_policy_refusal() {
-      return Err(ScriptError::policy(format!("{}: {}", path.display(), e.message)));
+    if crate::error::is_policy_refusal(e) {
+      return Err(crate::error::policy_error(format!("{}: {}", path.display(), e.message)));
     }
   }
   for cp in &compiled {
     if let Some((host_name, message)) = cp.snapshot.policy_refusal() {
-      return Err(ScriptError::policy(format!(
+      return Err(crate::error::policy_error(format!(
         "{} (host {host_name}): {message}",
         cp.path.display()
       )));

@@ -618,7 +618,7 @@ fn fulfill_body_bytes<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Resul
   if let Some(text) = value.as_string() {
     return Ok(text.to_string()?.into_bytes());
   }
-  ferridriver_jsstd::node::bytes::buffer_source_bytes(ctx, &value).map_err(|e| {
+  ferrijs::std::node::bytes::buffer_source_bytes(ctx, &value).map_err(|e| {
     rquickjs::Error::new_from_js_message(
       "route.fulfill",
       "TypeError",

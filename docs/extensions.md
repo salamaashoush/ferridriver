@@ -135,7 +135,8 @@ The handler receives one object:
 | `page`      | `Page`                | The live browser page for the session. |
 | `context`   | `BrowserContext`      | The session's browser context. |
 | `browser`   | `Browser`             | The browser the session runs on. |
-| `request`   | `APIRequestContext`   | HTTP client. Net-restricted per the effective `allow.net`. |
+| `request`   | `APIRequestContext`   | HTTP client, attenuated to the effective `allow.net`. |
+| `fetch`     | `fetch`               | The WHATWG `fetch`, attenuated to the effective `allow.net`. |
 | `commands`  | `Commands`            | `.run(name, vars?)` — runs a declared command template. |
 | `vars`      | `Vars`                | Session-scoped string store; survives VM rebuilds. |
 | `fs`        | `Fs`                  | Sandboxed filesystem, confined to `scriptRoot`. |
@@ -286,46 +287,37 @@ await commands.stop("dev");           // SIGKILLs the process group
 
 ### `allow.net`
 
-A host allow-list scoping the handler's HTTP — the `request` client
-(both the handler's `request` arg and the global `request`) and the
-global `fetch` share one core, so the list binds all of them.
+A host allow-list attenuating the HTTP capabilities the handler is
+handed: `ctx.request` and `ctx.fetch` are the session's own client,
+refusing every host outside the list on the first URL and every
+redirect hop.
 
-- Empty / absent: HTTP is unrestricted (back-compat default).
-- Non-empty: the tool's HTTP entry points all flip to **default-deny**.
-  Each entry is an exact host (`api.acme.com`) or a leading-wildcard
-  suffix (`*.acme.com`, which also matches the bare apex `acme.com`). Any
-  other host is rejected before the request is made. The policy follows
-  the running handler: a tool calling another tool, or two tools running
-  concurrently, each see only their own declared list.
-- Capability follows the registrar: a callback the handler schedules —
-  `setTimeout`/`setInterval`/`setImmediate`, `queueMicrotask` (and
-  `process.nextTick`, which rides it), `page.on` listeners,
-  `page.route`/`context.route` handlers, `exposeFunction`/
-  `exposeBinding` callbacks, WebSocket route handlers, screencast
-  frames — is captured at the point of **registration** and keeps the
-  scheduling tool's `allow.net` when it later fires cross-task, instead
-  of falling back to the unrestricted resting policy. Callbacks
-  registered at top level (outside any tool) stay unrestricted. An async
-  callback's grant covers its whole continuation, not just the
-  synchronous call — a `page.route(url, async r => { await fetch(...) })`
-  handler stays restricted where its `fetch` actually runs.
+- Empty / absent: the two capabilities answer to the session's policy
+  alone.
+- Non-empty: they flip to **default-deny**. Each entry is an exact host
+  (`api.acme.com`), a leading-wildcard suffix (`*.acme.com`, which also
+  matches the bare apex `acme.com`), optionally with a port
+  (`api.acme.com:8443`). Any other host is refused with a
+  `PermissionDeniedError` (`code: 'ERR_ACCESS_DENIED'`,
+  `permission: 'net'`, `resource: 'host:port'`), the same error the
+  session's own policy raises.
 
-The handler's `request` **arg** has the grant baked in at dispatch, so
-it is enforced unconditionally, anywhere in the handler. The global
-`fetch` and global `request` read the grant that is active on the
-running handler's stack; that is reliable on the handler's synchronous
-prefix and inside any registered callback, but a global `fetch` invoked
-from a continuation *after* awaiting an unrelated host operation can
-observe the resting (unrestricted) policy. For guaranteed enforcement of
-the handler's own HTTP, prefer the `request` arg over the global.
+What `allow.net` does not do is confine the handler below the session
+it runs in. The globals a handler can also reach (`fetch`, `request`,
+the timers, `page`) answer to the session's policy, which is the
+operator's `[scripting].permissions`; a callback the handler registers
+fires under that same policy, because a realm has exactly one. That is
+the model every runtime still standing uses (Deno, Node, workerd:
+privilege is per realm or per process, and code loaded into a realm
+runs at the realm's level), and the one the runtime underneath,
+ferrijs, implements. An extension that must be confined below the
+session it would otherwise share is given a session of its own, with
+`[scripting].permissions` set to what it may reach.
 
-`allow.net` scopes HTTP (`request` + `fetch`) **only**. `page`/`context`
-browser navigation is a separate, deliberately ungated authority — an
-automation tool must be able to navigate. There is no `fs` capability:
-the only filesystem a handler can reach is the session's `fs` and
-`artifacts` globals, both already confined to their `PathSandbox` roots,
-so an extension-level `fs` scope would have no ungated authority left to
-gate.
+`allow.net` scopes HTTP only. `page`/`context` browser navigation is a
+separate, deliberately ungated authority: an automation tool must be
+able to navigate. The filesystem a handler can reach is what the
+session's `read` / `write` grants cover.
 
 ### Operator policy: `[extensions.policy]`
 
@@ -627,11 +619,19 @@ extensions = ["./extensions", "./tools/acme-login.ts"]
 #   commands = "argvOnly"
 
 [scripting]
-# Sandbox relaxations — default-deny, like allow.net.
 # Names a script may read via process.env (intersected with the real
 # environment; absent names stay absent — never invented). Empty ⇒
 # process.env is {}.
 allowEnv = ["HOME", "TZ"]
+# The session's other grants: what a script may read and write on disk,
+# reach on the network, and learn about the host. Each is `true`, a
+# list, or absent (nothing). Default: everything, a script that drives a
+# browser being trusted as much as the host. A `deny` block carves out.
+[scripting.permissions]
+read = true
+write = [".ferridriver/artifacts"]
+net = ["*.example.com", "127.0.0.1"]
+sys = ["hostname"]
 
 [test]
 # JS/TS step-definition globs. Defaults to steps/**/*.{js,ts} and

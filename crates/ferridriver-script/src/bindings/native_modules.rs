@@ -1,31 +1,31 @@
 //! Native ES modules: the `ferridriver` / `@cucumber/cucumber` runtime
-//! surface (and the node-compat modules) as Rust [`ModuleDef`]s, served
-//! by the QuickJS module loader — no generated JS glue, no bundled
-//! source. Bundles (rolldown) mark these specifiers EXTERNAL, so the
-//! emitted chunk keeps the bare `import ... from 'ferridriver'` and the
-//! written bytecode re-links by NAME against whatever runtime loads it
-//! (covered end-to-end by `tests/node_compat_modules.rs`). QuickJS
-//! resolves the module graph EAGERLY at declare time, so the throwaway
-//! compile runtimes must register the same names.
+//! surface as Rust [`ModuleDef`]s, registered into the runtime's module
+//! table beside the Node modules the standard library serves. Bundles
+//! mark these specifiers EXTERNAL, so the emitted chunk keeps the bare
+//! `import ... from 'ferridriver'` and the written bytecode re-links by
+//! NAME against whatever realm loads it. QuickJS resolves the module
+//! graph EAGERLY at declare time, so the compile realms read the same
+//! table.
 //!
 //! Export semantics intentionally mirror the deleted JS glue: values
 //! are read from the installed globals ONCE at module evaluation
 //! (per-session), so `import { page } from 'ferridriver'` observes the
 //! session-initial binding exactly as before.
+//!
+//! The alias table (`[test].moduleAliases`) stays process-global: the
+//! bundler, the config validation and every session read it, and a
+//! session created before an alias arrived could never honour it, so
+//! the table seals on first read.
 
 use std::sync::{Arc, RwLock};
 
-use rquickjs::loader::{BuiltinResolver, ImportAttributes, Loader, Resolver};
+use ferrijs::modules::{ModuleRegistry, NativeModule};
+use rquickjs::loader::{ImportAttributes, Loader, Resolver};
 use rquickjs::module::{Declarations, Exports, ModuleDef};
 use rquickjs::{Ctx, Module, Object, Value};
 
-/// Every specifier served natively. One list so the engine loaders, the
-/// throwaway compile runtimes, and the rolldown externals can never
-/// drift apart.
 /// The specifiers ferridriver itself serves. Everything else native comes
-/// from [`ferridriver_jsstd::modules`], which owns the Node / web module
-/// surface — one list, so the ES loader, the `require` table and the
-/// rolldown externals cannot drift apart.
+/// from the standard library's own table.
 const FERRIDRIVER_MODULE_NAMES: &[&str] = &[
   "ferridriver",
   "@ferridriver/test",
@@ -39,7 +39,7 @@ const FERRIDRIVER_MODULE_NAMES: &[&str] = &[
 ];
 
 /// Specifiers ferridriver serves that are ONE module under several
-/// names. jsstd's own table carries the same information for the Node
+/// names. The standard library's own table carries the same information for the Node
 /// modules (`url` / `node:url`, ...).
 const FERRIDRIVER_SPECIFIER_GROUPS: &[&[&str]] = &[&["@ferridriver/test", "@playwright/test", "playwright/test"]];
 
@@ -78,16 +78,17 @@ fn namespace_group(specifier: &str) -> String {
   {
     return group[0].to_string();
   }
-  ferridriver_jsstd::modules::modules()
+  ferrijs::std::modules::modules()
     .into_iter()
     .find(|module| module.specifiers.contains(&specifier))
     .map_or_else(|| specifier.to_string(), |module| module.specifiers[0].to_string())
 }
 
-/// Every specifier served natively, ferridriver's own plus jsstd's.
+/// Every specifier served natively, ferridriver's own plus the standard
+/// library's.
 pub fn native_module_names() -> Vec<&'static str> {
   let mut names: Vec<&'static str> = FERRIDRIVER_MODULE_NAMES.to_vec();
-  for module in ferridriver_jsstd::modules::modules() {
+  for module in ferrijs::std::modules::modules() {
     names.extend_from_slice(module.specifiers);
   }
   names
@@ -256,126 +257,128 @@ pub fn alias_fingerprint() -> u64 {
   h.finish()
 }
 
-/// Resolver accepting exactly the native specifiers plus the configured
-/// aliases (non-consuming).
-#[must_use]
-pub fn resolver() -> NativeResolver {
-  // A resolver is a SNAPSHOT: the session it serves keeps it for life,
-  // so an alias added after this point could never reach that session.
-  seal_aliases();
-  let mut r = BuiltinResolver::default();
-  for name in native_module_names() {
-    r.add_module(name);
-  }
-  for (from, _) in module_aliases().iter() {
-    r.add_module(from.as_str());
-  }
-  // Specifiers packages serve. The provider's own bytecode is loaded
-  // under the specifier's name, so accepting it here is all that stands
-  // between an importer and the one module instance QuickJS already
-  // holds — no facade, no re-export.
-  for specifier in crate::provided_modules::provided_modules().specifiers() {
-    r.add_module(specifier);
-  }
-  NativeResolver { builtin: r }
-}
-
-/// The specifiers this runtime accepts, plus the normalisation a
-/// package-provided ALIAS needs.
+/// Register ferridriver's modules and the configured aliases into the
+/// runtime's table. Reading the alias table seals it: a realm built now
+/// must not see a table that changes afterwards.
 ///
-/// QuickJS looks a module up by the name the resolver returns, so an
-/// alias answering with its target's name lands on the module instance
-/// the target already is — which is what keeps `x` and `x/sub` one
-/// module rather than two copies of the provider's state.
-pub struct NativeResolver {
-  builtin: BuiltinResolver,
+/// # Errors
+///
+/// A specifier already served, which cannot happen for the fixed names
+/// here and is reported rather than ignored for an alias.
+pub fn register(registry: &mut ModuleRegistry) -> Result<(), String> {
+  seal_aliases();
+  registry.register(NativeModule::new::<FerridriverModule, _>(
+    ["ferridriver"],
+    ferridriver_namespace,
+  ))?;
+  registry.register(NativeModule::new::<FerridriverTestModule, _>(
+    ["@ferridriver/test", "@playwright/test", "playwright/test"],
+    test_namespace,
+  ))?;
+  registry.register(NativeModule::new::<CucumberModule, _>(
+    ["@cucumber/cucumber"],
+    cucumber_namespace,
+  ))?;
+  for prefix in RESERVED_PREFIXES {
+    registry.reserve_prefix(*prefix);
+  }
+  for name in RESERVED_NAMES {
+    registry.reserve_name(*name);
+  }
+  for (from, to) in module_aliases().iter() {
+    // An alias that re-states a native name is redundant rather than
+    // wrong (see `set_module_aliases`), and the table already refused
+    // anything else.
+    if registry.serves(from) {
+      continue;
+    }
+    registry.alias(from.clone(), to.clone())?;
+  }
+  Ok(())
 }
 
-impl Resolver for NativeResolver {
+/// The module table a compile realm needs: the standard library plus
+/// ferridriver's modules and aliases, exactly what a session realm is
+/// built over.
+///
+/// # Errors
+///
+/// See [`register`].
+pub fn registry() -> Result<Arc<ModuleRegistry>, String> {
+  let mut registry = ModuleRegistry::with_std();
+  register(&mut registry)?;
+  Ok(Arc::new(registry))
+}
+
+/// The specifiers packages serve, as the bundler's externals.
+#[must_use]
+pub fn provided_externals() -> Vec<String> {
+  crate::provided_modules::provided_modules()
+    .specifiers()
+    .into_iter()
+    .map(ToString::to_string)
+    .collect()
+}
+
+/// The loader pair for package-provided specifiers, chained after the
+/// runtime's native table.
+///
+/// The provider's own bytecode is loaded under the specifier's name, so
+/// accepting it here is all that stands between an importer and the one
+/// module instance QuickJS already holds -- no facade, no re-export. An
+/// alias answers with its target's name, which is what keeps `x` and
+/// `x/sub` one module rather than two copies of the provider's state.
+/// The loader IS reached in the throwaway compile realms, which only
+/// ever `declare` -- linking happens at eval -- so an empty module is
+/// enough to let a consumer's import resolve while it is being compiled.
+#[must_use]
+pub fn provided_loaders() -> Vec<(ferrijs::modules::BoxResolver, ferrijs::modules::BoxLoader)> {
+  vec![(Box::new(ProvidedResolver), Box::new(ProvidedLoader))]
+}
+
+struct ProvidedResolver;
+
+impl Resolver for ProvidedResolver {
   fn resolve<'js>(
     &mut self,
-    ctx: &Ctx<'js>,
+    _ctx: &Ctx<'js>,
     base: &str,
     name: &str,
-    attributes: Option<ImportAttributes<'js>>,
+    _attributes: Option<ImportAttributes<'js>>,
   ) -> rquickjs::Result<String> {
-    if let Some(target) = crate::provided_modules::canonical_provided_name(name) {
-      return Ok(target);
-    }
-    self.builtin.resolve(ctx, base, name, attributes)
+    crate::provided_modules::canonical_provided_name(name).ok_or_else(|| rquickjs::Error::new_resolving(base, name))
   }
 }
 
-type DeclareFn = for<'js> fn(Ctx<'js>, Vec<u8>) -> rquickjs::Result<Module<'js>>;
+struct ProvidedLoader;
 
-/// Non-consuming native module loader. `rquickjs::loader::ModuleLoader`
-/// REMOVES an entry on first load, which breaks the second context on a
-/// shared runtime (and any future re-link); QuickJS only calls the
-/// loader once per name per context, but the loader itself should not
-/// be single-shot.
-pub struct NativeModuleLoader {
-  modules: Vec<(&'static str, DeclareFn)>,
-}
-
-impl NativeModuleLoader {
-  fn declare_fn<D: ModuleDef>() -> DeclareFn {
-    |ctx, name| Module::declare_def::<D, _>(ctx, name)
-  }
-}
-
-#[must_use]
-pub fn loader() -> NativeModuleLoader {
-  let mut modules: Vec<(&'static str, DeclareFn)> = vec![
-    ("ferridriver", NativeModuleLoader::declare_fn::<FerridriverModule>()),
-    (
-      "@ferridriver/test",
-      NativeModuleLoader::declare_fn::<FerridriverTestModule>(),
-    ),
-    (
-      "@playwright/test",
-      NativeModuleLoader::declare_fn::<FerridriverTestModule>(),
-    ),
-    (
-      "playwright/test",
-      NativeModuleLoader::declare_fn::<FerridriverTestModule>(),
-    ),
-    ("@cucumber/cucumber", NativeModuleLoader::declare_fn::<CucumberModule>()),
-  ];
-  for module in ferridriver_jsstd::modules::modules() {
-    for specifier in module.specifiers {
-      modules.push((specifier, module.declare));
-    }
-  }
-  NativeModuleLoader { modules }
-}
-
-impl Loader for NativeModuleLoader {
+impl Loader for ProvidedLoader {
   fn load<'js>(
     &mut self,
     ctx: &Ctx<'js>,
     path: &str,
-    _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
+    _attributes: Option<ImportAttributes<'js>>,
   ) -> rquickjs::Result<Module<'js>> {
-    // An aliased specifier declares the SAME `ModuleDef` under its own
-    // name, so `import ... from '@playwright/test'` links to exactly the
-    // module `import ... from '@ferridriver/test'` would.
-    // A specifier a package serves: in a session the provider's own
-    // bytecode is already loaded under this name, so the loader is never
-    // reached. It IS reached in the throwaway compile runtimes, which
-    // only ever `declare` — linking happens at eval — so an empty module
-    // is enough to let a consumer's import resolve while it is being
-    // compiled.
     if crate::provided_modules::is_provided_specifier(path) {
       return Module::declare(ctx.clone(), path, "export {};\n");
     }
-    let canonical = canonical_native_name(path).ok_or_else(|| rquickjs::Error::new_loading(path))?;
-    let declare = self
-      .modules
-      .iter()
-      .find(|(name, _)| *name == canonical)
-      .map(|(_, f)| *f)
-      .ok_or_else(|| rquickjs::Error::new_loading(path))?;
-    declare(ctx.clone(), Vec::from(path))
+    Err(rquickjs::Error::new_loading(path))
+  }
+}
+
+/// What `require()` answers ahead of the runtime's table: a
+/// package-provided specifier answers with the very module `import`
+/// links to, so `require` and `import` cannot see different objects;
+/// an alias resolves as a builtin.
+pub struct FerridriverRequire;
+
+impl ferrijs::RequireHook for FerridriverRequire {
+  fn namespace<'js>(&self, ctx: &Ctx<'js>, specifier: &str) -> rquickjs::Result<Option<Object<'js>>> {
+    Ok(provided_namespace(ctx, specifier))
+  }
+
+  fn is_builtin(&self, specifier: &str) -> bool {
+    module_aliases().iter().any(|(from, _)| from == specifier)
   }
 }
 
@@ -476,34 +479,6 @@ fn provided_namespace<'js>(ctx: &Ctx<'js>, specifier: &str) -> Option<Object<'js
   saved.restore(ctx).ok()
 }
 
-pub fn namespace<'js>(ctx: &Ctx<'js>, specifier: &str) -> rquickjs::Result<Option<Object<'js>>> {
-  // A package-provided specifier answers with the very module `import`
-  // links to, so `require` and `import` cannot see different objects.
-  if let Some(ns) = provided_namespace(ctx, specifier) {
-    return Ok(Some(ns));
-  }
-  let Some(canonical) = canonical_native_name(specifier) else {
-    return Ok(None);
-  };
-  let ns = match canonical.as_str() {
-    "ferridriver" => ferridriver_namespace(ctx)?,
-    "@ferridriver/test" | "@playwright/test" | "playwright/test" => test_namespace(ctx)?,
-    "@cucumber/cucumber" => cucumber_namespace(ctx)?,
-    // Everything else native is jsstd's, and its own table says how each
-    // one builds the object `require` hands back.
-    other => {
-      let Some(module) = ferridriver_jsstd::modules::modules()
-        .into_iter()
-        .find(|module| module.specifiers.contains(&other))
-      else {
-        return Ok(None);
-      };
-      (module.namespace)(ctx)?
-    },
-  };
-  Ok(Some(ns))
-}
-
 /// Copy `names` from a namespace object into the module's ES exports.
 fn export_from<'js>(exports: &Exports<'js>, ns: &Object<'js>, names: &[&str]) -> rquickjs::Result<()> {
   for name in names {
@@ -518,63 +493,6 @@ fn declare_all(decl: &Declarations<'_>, names: &[&str]) -> rquickjs::Result<()> 
     decl.declare(*name)?;
   }
   Ok(())
-}
-
-/// Install `globalThis.require` for the native specifiers only.
-///
-/// A `.spec.js` written as CommonJS (`const { test } = require('…')`)
-/// is bundled by rolldown into an `__require("…")` call for any EXTERNAL
-/// specifier, and rolldown's helper defers to a global `require` when
-/// one exists (`rolldown/src/runtime/runtime-tail.js`). Without this the
-/// spec dies at load with "in an environment that doesn't expose the
-/// `require` function". Anything the runtime does not serve natively
-/// throws — this is a bridge for the framework surface, not a general
-/// CommonJS loader.
-///
-/// # Errors
-///
-/// When the global cannot be installed.
-pub fn install_require<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
-  let require = rquickjs::Function::new(
-    ctx.clone(),
-    |ctx: Ctx<'js>, specifier: String| -> rquickjs::Result<Object<'js>> {
-      match namespace(&ctx, &specifier)? {
-        Some(ns) => Ok(ns),
-        None => Err(rquickjs::Exception::throw_type(
-          &ctx,
-          &format!(
-            "require('{specifier}') is not available: only the runtime's native modules ({}) can be require()d",
-            native_module_names().join(", ")
-          ),
-        )),
-      }
-    },
-  )?;
-  // `require.resolve(spec)` — Node's, answered relative to the file that
-  // WROTE the call. The algorithm is jsstd's (`node::require_resolve`);
-  // the two host-shaped questions are answered here, because only the
-  // host knows them: which specifiers are served natively, and which
-  // original source a bundled frame came from.
-  let resolve = rquickjs::Function::new(
-    ctx.clone(),
-    |ctx: Ctx<'js>, specifier: String| -> rquickjs::Result<String> {
-      // Node answers a builtin with the specifier itself.
-      if native_module_names().contains(&specifier.as_str())
-        || module_aliases().iter().any(|(from, _)| *from == specifier)
-      {
-        return Ok(specifier);
-      }
-      let base = crate::bindings::call_site::caller_source_file(&ctx)
-        .and_then(|file| file.parent().map(std::path::Path::to_path_buf))
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-      ferridriver_jsstd::node::require_resolve::resolve(&base, &specifier)
-        .map(|path| path.to_string_lossy().into_owned())
-        .map_err(|message| rquickjs::Exception::throw_message(&ctx, &message))
-    },
-  )?;
-  require.set("resolve", resolve)?;
-  ctx.globals().set("require", require)
 }
 
 /// `import ... from 'ferridriver'` — the framework surface.

@@ -418,25 +418,21 @@ impl BrowserContextJs {
     options: rquickjs::function::Opt<Value<'js>>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
     let times = crate::bindings::page::parse_route_times(&options)?;
-    let vm = match ctx.userdata::<crate::engine::SessionVm>() {
-      Some(ud) => ud.0.clone(),
-      None => {
-        return Err(rquickjs::Error::new_from_js_message(
-          "context.route",
-          "Error",
-          "context.route requires the script engine's VM handle".to_string(),
-        ));
-      },
+    let Some(vm) = ferrijs::vm_handle(&ctx) else {
+      return Err(rquickjs::Error::new_from_js_message(
+        "context.route",
+        "Error",
+        "context.route requires the script engine's VM handle".to_string(),
+      ));
     };
     let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
     // Sync prologue: snapshot the registrar's grant (see
     // `SavedCallback::save` — an async-fn body first-polls off-bracket).
-    let net = crate::bindings::fetch::active_net(&ctx);
-    let saved_handler = crate::bindings::page::SavedCallback::save_with_net(&ctx, handler, net.clone());
+    let saved_handler = crate::bindings::page::SavedCallback::save(&ctx, handler);
 
     let has_predicate = url.as_function().is_some();
     let (matcher, saved_pred, registry_matcher) = if let Some(pred) = url.as_function() {
-      let saved_pred = crate::bindings::page::SavedCallback::save_with_net(&ctx, pred.clone(), net);
+      let saved_pred = crate::bindings::page::SavedCallback::save(&ctx, pred.clone());
       let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
       (m.clone(), Some(saved_pred), Some(m))
     } else {
@@ -454,11 +450,7 @@ impl BrowserContextJs {
             let pred = saved_pred.restore(&ctx)?;
             let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
             let url_obj: rquickjs::Value<'_> = url_ctor.construct((route.request().url.clone(),))?;
-            let truthy = crate::bindings::fetch::bracket_net(
-              crate::bindings::fetch::policy_cell(&ctx),
-              saved_pred.net().cloned(),
-              call_predicate_truthy(&pred, url_obj, &ctx),
-            )
+            let truthy = call_predicate_truthy(&pred, url_obj, &ctx)
             .await?;
             if !truthy {
               route.reject_as_unmatched();
@@ -512,22 +504,18 @@ impl BrowserContextJs {
     url: Value<'js>,
     handler: rquickjs::Function<'js>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
-    let vm = match ctx.userdata::<crate::engine::SessionVm>() {
-      Some(ud) => ud.0.clone(),
-      None => {
-        return Err(rquickjs::Error::new_from_js_message(
-          "context.routeWebSocket",
-          "Error",
-          "context.routeWebSocket requires the script engine's VM handle".to_string(),
-        ));
-      },
+    let Some(vm) = ferrijs::vm_handle(&ctx) else {
+      return Err(rquickjs::Error::new_from_js_message(
+        "context.routeWebSocket",
+        "Error",
+        "context.routeWebSocket requires the script engine's VM handle".to_string(),
+      ));
     };
     let matcher = url_value_to_matcher(&ctx, url)?;
     let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
     let owner = RouteOwner::Context(self.inner.name().to_string());
     // Sync prologue: snapshot the registrar's grant (see `SavedCallback::save`).
-    let net = crate::bindings::fetch::active_net(&ctx);
-    let saved = crate::bindings::page::SavedCallback::save_with_net(&ctx, handler, net);
+    let saved = crate::bindings::page::SavedCallback::save(&ctx, handler);
     with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, owner.clone(), saved))?;
     let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id, owner);
     let inner = self.inner.clone();
@@ -1121,15 +1109,12 @@ impl BrowserContextJs {
     callback: rquickjs::Function<'js>,
     with_source: bool,
   ) -> rquickjs::Result<ferridriver::ExposedBinding> {
-    let vm = match ctx.userdata::<crate::engine::SessionVm>() {
-      Some(ud) => ud.0.clone(),
-      None => {
-        return Err(rquickjs::Error::new_from_js_message(
-          "BrowserContext.exposeBinding",
-          "Error",
-          "exposeBinding requires the script engine's VM handle".to_string(),
-        ));
-      },
+    let Some(vm) = ferrijs::vm_handle(ctx) else {
+      return Err(rquickjs::Error::new_from_js_message(
+        "BrowserContext.exposeBinding",
+        "Error",
+        "exposeBinding requires the script engine's VM handle".to_string(),
+      ));
     };
     let saved = crate::bindings::page::SavedCallback::save(ctx, callback);
     crate::bindings::page::insert_exposed_callback(ctx, name.to_string(), saved)?;
@@ -1166,14 +1151,10 @@ impl BrowserContextJs {
             // path turns numbers into wrapper objects.
             call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, v)?)?;
           }
-          let res = crate::bindings::fetch::bracket_net(
-            crate::bindings::fetch::policy_cell(&ctx),
-            saved.net().cloned(),
-            async {
+          let res = async {
               let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
               mp.into_future::<rquickjs::Value<'_>>().await
-            },
-          )
+            }
           .await?;
           let json = match ctx.json_stringify(res)? {
             Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),

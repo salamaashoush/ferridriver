@@ -44,10 +44,21 @@ ferridriver-test         E2E test runner: parallel workers, fixtures, reporters,
 ferridriver-test-macros  Proc macros: #[ferritest], #[ferritest_each]
 ferridriver-bdd          BDD/Cucumber framework: step registry, Gherkin parser, translators
 ferridriver-bdd-macros   Proc macros: #[given], #[when], #[then], #[step]
-ferridriver-script       QuickJS engine: JS/TS step bodies + `ferridriver run` scripts
+ferridriver-script       ferridriver's realm over the ferrijs runtime: the page/browser bindings, extensions, BDD and test surfaces
 ferridriver-expect       Auto-retrying assertions (Playwright poll schedule); thin shims in bindings
 ferridriver-perf         Chrome trace analysis: Core Web Vitals, 19 DevTools insights, Lantern simulator
 ```
+
+The JavaScript runtime itself (QuickJS event loop, the Node and web
+standard library, the sandbox, `fetch`, the rolldown-to-bytecode
+front-end) is the sibling repository `../ferrijs`, depended on by path
+while the two move together. `ferridriver-script` installs
+ferridriver's bindings as a ferrijs extension; nothing about running
+JavaScript lives here any more. Read `../ferrijs/docs/SANDBOX.md` before
+touching anything that grants or checks authority: a session has one
+permission container, narrowing only, and a tool's `allow.net` is an
+attenuation of the capabilities handed to its handler, not a second
+policy.
 
 There is no TypeScript CLI. JavaScript/TypeScript test files
 (`tests/e2e/*.test.ts` via `ferridriver test`) and BDD step files (via
@@ -139,7 +150,6 @@ backend/
 ## Code Style & Linting
 
 - **Stable Rust** toolchain (pinned in `rust-toolchain.toml`), edition 2024. `clippy.toml`'s `msrv` tracks that pinned stable — the repo pins a channel rather than promising an older compiler, so lowering it only hides newer std APIs from clippy.
-- `cargo fmt` must never touch `crates/ferridriver-jsstd` (vendored llrt). The workspace `ignore` key is nightly-only; the guard that works on stable is that crate's own `rustfmt.toml` with `disable_all_formatting`.
 - **2-space indentation**, 120 char line width (see `rustfmt.toml`)
 - Clippy: `correctness`/`perf`/`suspicious` = **deny**, `style`/`complexity`/`pedantic` = warn
 - `unwrap_used`, `expect_used`, `todo`, `dbg_macro` = warn (relaxed in tests via `clippy.toml`)

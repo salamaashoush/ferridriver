@@ -261,8 +261,7 @@ async fn syntax_error_reports_structured_error() {
   match result.outcome {
     Outcome::Ok { .. } => panic!("expected syntax error"),
     Outcome::Error { error } => {
-      // QuickJS reports this as a runtime exception during parse.
-      assert_eq!(error.kind, ScriptErrorKind::Runtime);
+      assert_eq!(error.kind, ScriptErrorKind::Syntax);
       assert!(!error.message.is_empty());
     },
   }

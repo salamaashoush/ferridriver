@@ -60,12 +60,7 @@ fn ensure_cdp_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<CdpPumpMsg> {
           let _ = promise.clone().into_future::<Value<'_>>().await;
         }
       };
-      crate::bindings::fetch::bracket_net(
-        crate::bindings::fetch::policy_cell(&pump_ctx),
-        saved.net().cloned(),
-        fut,
-      )
-      .await;
+      fut.await;
     }
   });
   let _ = ctx.store_userdata(CdpEventPumpUd(tx.clone()));
@@ -163,8 +158,7 @@ impl CdpSessionJs {
     once: bool,
   ) -> rquickjs::Result<()> {
     let id = with_page_callbacks(ctx, PageCallbacks::next_route_id)?;
-    let net = crate::bindings::fetch::active_net(ctx);
-    let saved = crate::bindings::page::SavedCallback::save_with_net(ctx, handler, net);
+    let saved = crate::bindings::page::SavedCallback::save(ctx, handler);
     with_page_callbacks(ctx, |r| r.insert_cdp_listener(id, event.clone(), saved))?;
     let pump = ensure_cdp_pump(ctx);
     let callback: ferridriver::cdp_session::CdpEventCallback = std::sync::Arc::new(move |payload| {

@@ -20,10 +20,10 @@ use ferridriver_script::bindings::convert::{quickjs_arg_to_serialized, serialize
 use rquickjs::{AsyncContext, AsyncRuntime};
 
 /// Install the native `URL` class the way the engine does so the rich-type
-/// probe sees the same global it would at runtime (`jsstd::url::init`
+/// probe sees the same global it would at runtime (`ferrijs_std::url::init`
 /// registers the `URL` / `URLSearchParams` classes a bare context lacks).
 fn install_url(ctx: &rquickjs::Ctx<'_>) {
-  ferridriver_jsstd::url::init(ctx).expect("install URL globals");
+  ferrijs::std::url::init(ctx).expect("install URL globals");
 }
 
 fn arr(items: Vec<SerializedValue>) -> SerializedValue {

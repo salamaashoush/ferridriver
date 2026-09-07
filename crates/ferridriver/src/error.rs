@@ -297,6 +297,13 @@ impl From<&str> for FerriError {
   }
 }
 
+/// Every engine failure maps to `Backend`, preserving the message text.
+impl From<ferrijs_fetch::FetchError> for FerriError {
+  fn from(e: ferrijs_fetch::FetchError) -> Self {
+    FerriError::Backend(e.to_string())
+  }
+}
+
 /// Convenience alias. Every new public API function should return this.
 pub type Result<T> = std::result::Result<T, FerriError>;
 

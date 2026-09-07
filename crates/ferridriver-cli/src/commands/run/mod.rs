@@ -192,8 +192,8 @@ pub async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::
 
   let opts = ferridriver_script::RunOptions {
     timeout: args.timeout_ms.map(std::time::Duration::from_millis),
-    memory_limit: None,
-    stack_size: None,
+    memory: None,
+    stack: None,
     gc_threshold: None,
   };
 

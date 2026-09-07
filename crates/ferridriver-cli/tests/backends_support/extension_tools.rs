@@ -9,22 +9,21 @@
 //!   rejection, output-schema violation as a tool error, the reserved
 //!   `session` routing key coexisting with `additionalProperties:
 //!   false`, and the `ferridriver_extensions` introspection payload.
-//! - `capability_follows_registrar`: the page-callback half of the
-//!   "capability follows the registrar" invariant — a net-restricted
-//!   tool registers a `page.on` listener (sync dispatch), a `page.route`
+//! - `attenuation_travels_with_the_capability`: the page-callback half
+//!   of the object-capability invariant — a net-restricted tool
+//!   registers a `page.on` listener (sync dispatch), a `page.route`
 //!   handler (async dispatch, off the synchronous call), and a
 //!   `page.exposeFunction` binding, each triggered after the tool
-//!   returned; each must still be denied the un-declared host, while a
-//!   top-level-registered callback stays unrestricted. Every page
-//!   callback funnels through the same `SavedCallback::save_with_net` +
-//!   `bracket_net` path (`routeWebSocket`/`startScreencast` included);
-//!   these three cover the sync-listener, async-continuation, and
-//!   binding dispatch shapes deterministically. The timer/microtask
-//!   rows live browser-free in
+//!   returned. The `fetch` the handler was handed still refuses the
+//!   un-declared host from every one of them, because the attenuation
+//!   is on the object rather than on the stack that called it. The
+//!   realm's own `fetch`, reachable from the same callbacks and from a
+//!   top-level registration, answers to the session's policy instead.
+//!   The timer/microtask rows live browser-free in
 //!   `ferridriver-script/tests/extension_policy.rs`.
 //!
-//! Chromium-only (`cdp-pipe`): the invariant under test is VM-side
-//! policy bracketing, not backend protocol behaviour.
+//! Chromium-only (`cdp-pipe`): what is under test is the capability the
+//! handler holds, not backend protocol behaviour.
 
 use serde_json::json;
 
@@ -62,29 +61,30 @@ defineTool({
 defineTool({
   name: 'cap_register',
   allow: { net: ['127.0.0.1'] },
-  // Every registration CALL is made on the handler's synchronous prefix
-  // (before the returned promise is awaited), so each one's sync net
-  // snapshot runs on this tool's grant. The returned promises are then
-  // awaited SEQUENTIALLY — the calls captured the grant already, and
-  // sequential awaits avoid racing the per-document binding-channel
-  // bootstrap that backs exposeFunction. The callbacks fire later,
-  // cross-task — they must keep the captured grant.
-  handler: ({ page }) => {
+  // The registrations are awaited SEQUENTIALLY so exposeFunction does
+  // not race the per-document binding-channel bootstrap it needs. Each
+  // callback fires later, cross-task, and probes twice: through the
+  // `fetch` the handler was handed, and through the realm's global.
+  handler: ({ page, fetch }) => {
     globalThis.__cap = {};
-    const probe = async (k) => {
+    const probe = async (k, f) => {
       try {
-        await fetch('http://blocked.test/');
+        await f('http://blocked.test/');
         globalThis.__cap[k] = 'ALLOWED';
       } catch (e) {
         globalThis.__cap[k] = String((e && e.message) || e);
       }
     };
-    page.on('console', (m) => { if (m.text() === 'cap-console') probe('pageOn'); });
+    page.on('console', (m) => { if (m.text() === 'cap-console') probe('pageOn', fetch); });
     const pRoute = page.route('**/cap-route**', async (r) => {
-      await probe('route');
+      await probe('route', fetch);
       await r.fulfill({ status: 200, body: 'ok' });
     });
-    const pExpose = page.exposeFunction('__capProbe', async () => { await probe('exposeFn'); return 1; });
+    const pExpose = page.exposeFunction('__capProbe', async () => {
+      await probe('exposeFn', fetch);
+      await probe('globalFetch', globalThis.fetch);
+      return 1;
+    });
     return (async () => {
       await pRoute;
       await pExpose;
@@ -116,7 +116,7 @@ pub fn run() {
   let (_dir, config) = fixture();
   let mut c = McpClient::with_config("cdp-pipe", &config);
   mcp_surface(&mut c);
-  capability_follows_registrar(&mut c);
+  attenuation_travels_with_the_capability(&mut c);
 }
 
 fn mcp_surface(c: &mut McpClient) {
@@ -180,7 +180,7 @@ fn mcp_surface(c: &mut McpClient) {
   assert_eq!(payload["warnings"], json!([]));
 }
 
-fn capability_follows_registrar(c: &mut McpClient) {
+fn attenuation_travels_with_the_capability(c: &mut McpClient) {
   // A stable, already-loaded document: the binding channel that backs
   // `exposeFunction` bootstraps per-document, so registering onto a
   // freshly-navigating page races it. `data:` is enough — the probes
@@ -196,9 +196,9 @@ fn capability_follows_registrar(c: &mut McpClient) {
   );
   assert_eq!(reg_payload["value"].as_str(), Some("registered"));
 
-  // Control: the same probe registered OUTSIDE any tool must stay
-  // unrestricted — proves the denials below come from the captured
-  // grant, not a VM-wide policy.
+  // Control: the same probe registered OUTSIDE any tool, over the
+  // realm's own fetch — proves the refusals below come from the
+  // capability the handler holds, not from a policy on the session.
   c.script_value(
     r"
     await page.exposeFunction('__ctlProbe', async () => {
@@ -216,7 +216,7 @@ fn capability_follows_registrar(c: &mut McpClient) {
     await page.evaluate(`fetch('http://ferri.invalid/cap-route').catch(() => {})`);
     await page.evaluate('window.__capProbe()');
     await page.evaluate('window.__ctlProbe()');
-    const want = ['pageOn', 'route', 'exposeFn', 'control'];
+    const want = ['pageOn', 'route', 'exposeFn', 'globalFetch', 'control'];
     const deadline = Date.now() + 20000;
     while (Date.now() < deadline && want.some((k) => !(k in globalThis.__cap))) {
       await new Promise((r) => setTimeout(r, 100));
@@ -233,13 +233,21 @@ fn capability_follows_registrar(c: &mut McpClient) {
       .as_str()
       .unwrap_or_else(|| panic!("`{key}` never fired: {cap}"));
     assert!(
-      msg.contains("not in allow.net") && msg.contains("blocked.test"),
-      "`{key}` callback must keep the registrar's allow.net, got: {msg}"
+      msg.contains("permission denied") && msg.contains("blocked.test"),
+      "the handler's `fetch` must refuse the un-declared host from `{key}` too, got: {msg}"
     );
   }
+  // The same callback, over the realm's fetch: the session grants every
+  // host, so this is a plain network failure. A refusal here would mean
+  // the tool's list had become a policy on the session.
+  let global = cap["globalFetch"].as_str().expect("globalFetch probe fired");
+  assert!(
+    !global.contains("permission denied"),
+    "the realm's fetch answers to the session, not to the tool's allow.net, got: {global}"
+  );
   let control = cap["control"].as_str().expect("control probe fired");
   assert!(
-    !control.contains("allow.net"),
-    "a top-level callback must stay unrestricted (expected a plain network error), got: {control}"
+    !control.contains("permission denied"),
+    "a top-level callback answers to the session too (expected a plain network error), got: {control}"
   );
 }

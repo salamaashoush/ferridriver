@@ -226,8 +226,8 @@ impl McpServer {
 
     let options = RunOptions {
       timeout: p.timeout_ms.map(Duration::from_millis),
-      memory_limit: p.memory_limit_mb.and_then(|mb| usize::try_from(mb * 1024 * 1024).ok()),
-      stack_size: None,
+      memory: p.memory_limit_mb.and_then(|mb| usize::try_from(mb * 1024 * 1024).ok()),
+      stack: None,
       gc_threshold: None,
     };
 

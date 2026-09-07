@@ -81,12 +81,7 @@ fn ensure_ws_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<WsPumpMsg> {
           let _ = promise.clone().into_future::<Value<'_>>().await;
         }
       };
-      crate::bindings::fetch::bracket_net(
-        crate::bindings::fetch::policy_cell(&pump_ctx),
-        saved.net().cloned(),
-        fut,
-      )
-      .await;
+      fut.await;
     }
   });
   let _ = ctx.store_userdata(WsEventPumpUd(tx.clone()));
@@ -104,7 +99,7 @@ fn ensure_ws_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<WsPumpMsg> {
 /// `onMessage` are wired) has run, so the driver observes that state before
 /// `after_handle`.
 pub(crate) fn build_ws_route_handler(
-  vm: crate::vm::VmHandle,
+  vm: ferrijs::VmHandle,
   handler_id: u64,
   owner: RouteOwner,
 ) -> ferridriver::web_socket_route::WsHandler {
@@ -117,10 +112,7 @@ pub(crate) fn build_ws_route_handler(
         if let Some(saved) = with_page_callbacks(&ctx, |r| r.get_ws_callback(handler_id))? {
           let f = saved.restore(&ctx)?;
           let route_class = Class::instance(ctx.clone(), WebSocketRouteJs::new(route, owner))?;
-          crate::bindings::fetch::bracket_net(
-            crate::bindings::fetch::policy_cell(&ctx),
-            saved.net().cloned(),
-            async {
+          async {
               let ret: Value<'_> = f.call((route_class,))?;
               // Await an async route handler so `connectToServer()` /
               // `onMessage` set up inside it are observed before
@@ -129,8 +121,7 @@ pub(crate) fn build_ws_route_handler(
                 promise.clone().into_future::<Value<'_>>().await?;
               }
               rquickjs::Result::Ok(())
-            },
-          )
+            }
           .await?;
         }
         Ok(())

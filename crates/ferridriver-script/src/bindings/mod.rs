@@ -18,10 +18,8 @@
 //! carries the error message and, where applicable, a `name` matching
 //! Playwright's convention (`TimeoutError`, `TargetClosedError`).
 
-pub mod abort;
 pub mod artifacts;
 pub mod bdd;
-pub mod body_init;
 pub mod browser;
 pub mod browser_type;
 pub mod call_site;
@@ -37,7 +35,6 @@ pub mod download;
 pub mod element_handle;
 pub mod expect;
 pub mod extensions;
-pub mod fetch;
 pub mod file_chooser;
 pub mod frame;
 pub mod frame_locator;
@@ -47,17 +44,15 @@ pub mod js_handle;
 pub mod keyboard;
 pub mod locator;
 pub mod mouse;
-pub mod multipart;
 pub mod native_modules;
+pub mod net_policy;
 pub mod network;
 pub mod page;
 pub mod registry;
 pub mod runtime;
 pub mod sidecars;
-pub mod streams;
 pub mod test;
 pub mod test_debug;
-pub mod timers;
 pub mod tracing;
 pub mod video;
 pub mod web_error;
@@ -113,7 +108,7 @@ use std::sync::Arc;
 /// Prototype registration is idempotent and session-stable: callers
 /// invoke this ONCE at `Session::create`, not per `execute`. The
 /// per-call `install_*` helpers below only build the live instance.
-pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
+pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let g = ctx.globals();
   Class::<PageJs>::define(&g)?;
   Class::<FrameJs>::define(&g)?;
@@ -145,18 +140,10 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   Class::<BrowserTypeJs>::define(&g)?;
   Class::<FrameLocatorJs>::define(&g)?;
   Class::<crate::bindings::page::TouchscreenJs>::define(&g)?;
-  Class::<crate::bindings::fetch::HeadersJs>::define(&g)?;
-  Class::<crate::bindings::fetch::FetchResponseJs<'js>>::define(&g)?;
-  Class::<crate::bindings::fetch::FetchRequestJs<'_>>::define(&g)?;
-  // `DOMException`, `Event`/`EventTarget`, `AbortController`/
-  // `AbortSignal` and the whole Streams surface (readable + writable +
-  // transform, BYOB, queuing strategies) come from the vendored
-  // implementation in `ferridriver-jsstd`.
-  // Also installs `Buffer` (a real `Uint8Array` subclass), `Blob` and
-  // `File`. Exactly once per context: a second `init` re-runs
-  // `define_subclass` and strands the first constructor, which aborts
-  // `JS_FreeRuntime` at teardown.
-  ferridriver_jsstd::init(ctx)?;
+  // `Headers` / `Request` / `Response`, `DOMException`, `Event` /
+  // `EventTarget`, `AbortController` / `AbortSignal`, the Streams
+  // surface, `Buffer`, `Blob` and `File` are the runtime's, installed
+  // when the realm is built.
   Ok(())
 }
 
@@ -169,7 +156,7 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
 ///
 /// Scripts that do not need browser interaction can run with
 /// `RunContext.page = None` and simply have no `page` binding.
-pub fn install_page(ctx: &Ctx<'_>, page: Arc<ferridriver::Page>, vm: crate::vm::VmHandle) -> rquickjs::Result<()> {
+pub fn install_page(ctx: &Ctx<'_>, page: Arc<ferridriver::Page>, vm: ferrijs::VmHandle) -> rquickjs::Result<()> {
   install_page_on(ctx, &ctx.globals(), page, vm)?;
   crate::bindings::runtime::mirror_global(ctx, "page")
 }
@@ -185,7 +172,7 @@ pub fn install_page_on<'js>(
   ctx: &Ctx<'js>,
   target: &rquickjs::Object<'js>,
   page: Arc<ferridriver::Page>,
-  vm: crate::vm::VmHandle,
+  vm: ferrijs::VmHandle,
 ) -> rquickjs::Result<()> {
   let js_page = Class::instance(ctx.clone(), PageJs::new_with_vm(page, vm))?;
   target.set("page", js_page)?;

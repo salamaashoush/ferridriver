@@ -394,7 +394,7 @@ async fn binding_surface_sweep() {
      return { url: u.port === '8443' && u.hash === '#h', \
        enc: enc.length === 2, dec: dec === 'hi', \
        b64: atob(btoa('xy')) === 'xy', \
-       proc: typeof process.platform === 'string' && process.versions.quickjs.includes('rquickjs'), \
+       proc: typeof process.platform === 'string' && typeof process.versions.quickjs === 'string' && process.versions.ferridriver.length > 0, \
        fsRead: fsRead === 'hello-fs', fsWrite: back === 'written', \
        vars: vars.get('k') === 'v1', \
        replState: globalThis.runs === 1 };",

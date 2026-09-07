@@ -24,6 +24,7 @@ use std::time::SystemTime;
 
 use ferridriver_bdd::js::{self, JsBddSession, discover_extension_files, discover_step_files};
 use ferridriver_script::CompiledBundle;
+use ferridriver_script::CompiledBundleExt as _;
 
 /// Stable hash of the resolved step-set (sorted globs + sorted extensions +
 /// world parameters). A change means a different engine must be loaded.
@@ -132,75 +133,81 @@ impl BddEngine {
   ///
   /// Returns an error if bundling the step/extension files fails (e.g. a
   /// syntax error or unresolved import) or the step module fails to load.
-  pub async fn ensure(
-    &mut self,
+  ///
+  /// Boxed at the definition: it awaits the session build, whose
+  /// future carries the whole engine config, and the caller would
+  /// otherwise carry it too (`clippy::large_futures`).
+  pub fn ensure<'a>(
+    &'a mut self,
     key: u64,
-    globs: &[String],
-    extensions: &[ferridriver_config::ExtensionSpec],
+    globs: &'a [String],
+    extensions: &'a [ferridriver_config::ExtensionSpec],
     world_params: serde_json::Value,
-    cwd: &Path,
-  ) -> anyhow::Result<Arc<JsBddSession>> {
-    // Fast path: same step-set, warm engine, unchanged sources -> no bundle.
-    if let Some(engine) = &self.engine
-      && self.key == key
-      && !self.sources_changed(globs, extensions, cwd)
-    {
-      return Ok(Arc::clone(engine));
-    }
+    cwd: &'a Path,
+  ) -> impl std::future::Future<Output = anyhow::Result<Arc<JsBddSession>>> + Send + 'a {
+    Box::pin(async move {
+      // Fast path: same step-set, warm engine, unchanged sources -> no bundle.
+      if let Some(engine) = &self.engine
+        && self.key == key
+        && !self.sources_changed(globs, extensions, cwd)
+      {
+        return Ok(Arc::clone(engine));
+      }
 
-    // Bundle (disk-cached) and decide reuse-vs-rebuild by content hash.
-    let bundle = js::bundle_steps_with(globs, extensions, cwd).await?;
-    let ch = content_hash(&bundle.bytecode);
-    if let Some(engine) = &self.engine
-      && self.key == key
-      && self.content_hash == ch
-    {
-      // Same step-set + identical compiled output (e.g. a `touch`):
-      // refresh recorded mtimes so the fast path holds next time.
-      let engine = Arc::clone(engine);
-      self.record_inputs(&bundle, globs, extensions, cwd);
-      return Ok(engine);
-    }
+      // Bundle (disk-cached) and decide reuse-vs-rebuild by content hash.
+      let bundle = js::bundle_steps_with(globs, extensions, cwd).await?;
+      let ch = content_hash(&bundle.bytecode);
+      if let Some(engine) = &self.engine
+        && self.key == key
+        && self.content_hash == ch
+      {
+        // Same step-set + identical compiled output (e.g. a `touch`):
+        // refresh recorded mtimes so the fast path holds next time.
+        let engine = Arc::clone(engine);
+        self.record_inputs(&bundle, globs, extensions, cwd);
+        return Ok(engine);
+      }
 
-    // Rebuild. Tear down the old engine's suite (AfterAll) first.
-    if let Some(old) = self.engine.take()
-      && let Err(e) = old.after_all().await
-    {
-      tracing::warn!(error = %e, "run_bdd: AfterAll on reload failed");
-    }
-    // Extensions are installed as compiled bytecode, gated by the loader
-    // every host shares — never bundled into the step module. The caps
-    // are the ones the tool call just threaded in, so a package's
-    // `requires` is answered by the environment its tools will run in.
-    let caps = js::bdd_script_caps();
-    let sidecar_names: Vec<String> = js::bdd_sidecars().iter().map(|s| s.name.clone()).collect();
-    let env = ferridriver_script::RequirementEnv::from_caps(&caps, &sidecar_names);
-    let bindings = ferridriver_script::load_bindings(
-      extensions,
-      &env,
-      &caps.extension_policy,
-      ferridriver_script::ExtensionHost::Bdd,
-    )
-    .await;
-    // The MCP host runs scenarios against a live browser session, not a
-    // `[test]` config layer, so there is no `use` block to decide.
-    let session = Arc::new(
-      JsBddSession::load(
-        Arc::clone(&bundle),
-        cwd,
-        &ferridriver_bdd::js::BddSessionSetup {
-          world_parameters: world_params,
-          extensions: Arc::new(bindings),
-          ..Default::default()
-        },
+      // Rebuild. Tear down the old engine's suite (AfterAll) first.
+      if let Some(old) = self.engine.take()
+        && let Err(e) = old.after_all().await
+      {
+        tracing::warn!(error = %e, "run_bdd: AfterAll on reload failed");
+      }
+      // Extensions are installed as compiled bytecode, gated by the loader
+      // every host shares — never bundled into the step module. The caps
+      // are the ones the tool call just threaded in, so a package's
+      // `requires` is answered by the environment its tools will run in.
+      let caps = js::bdd_script_caps();
+      let sidecar_names: Vec<String> = js::bdd_sidecars().iter().map(|s| s.name.clone()).collect();
+      let env = ferridriver_script::RequirementEnv::from_caps(&caps, &sidecar_names);
+      let bindings = ferridriver_script::load_bindings(
+        extensions,
+        &env,
+        &caps.extension_policy,
+        ferridriver_script::ExtensionHost::Bdd,
       )
-      .await?,
-    );
-    self.key = key;
-    self.content_hash = ch;
-    self.record_inputs(&bundle, globs, extensions, cwd);
-    self.engine = Some(Arc::clone(&session));
-    Ok(session)
+      .await;
+      // The MCP host runs scenarios against a live browser session, not a
+      // `[test]` config layer, so there is no `use` block to decide.
+      let session = Arc::new(
+        JsBddSession::load(
+          Arc::clone(&bundle),
+          cwd,
+          &ferridriver_bdd::js::BddSessionSetup {
+            world_parameters: world_params,
+            extensions: Arc::new(bindings),
+            ..Default::default()
+          },
+        )
+        .await?,
+      );
+      self.key = key;
+      self.content_hash = ch;
+      self.record_inputs(&bundle, globs, extensions, cwd);
+      self.engine = Some(Arc::clone(&session));
+      Ok(session)
+    })
   }
 }
 

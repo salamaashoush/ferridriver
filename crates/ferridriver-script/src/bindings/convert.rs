@@ -36,7 +36,7 @@ pub fn ferri_throw(ctx: &Ctx<'_>, e: &FerriError) -> rquickjs::Error {
 /// `Error::new_from_js_message` cannot do this: it surfaces in scripts
 /// as a `TypeError` with a mangled "Error converting from js ..."
 /// message and a fixed name.
-pub use ferridriver_jsstd::node::throw_named;
+pub use ferrijs::std::node::throw_named;
 
 /// [`throw_named`] with the `stack` the thrower decided on, rather than
 /// the one the engine captured at the `Error` construction site.
@@ -685,7 +685,7 @@ pub fn parse_input_files<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Re
 }
 
 /// Parse one `FilePayload`. Playwright's `buffer` is a Node `Buffer`,
-/// which here is [`ferridriver_jsstd::node::buffer::BufferJs`]
+/// which here is [`ferrijs::std::node::buffer::BufferJs`]
 /// class — and it is neither a `Uint8Array` subclass nor serde-visible
 /// as a sequence, so `Buffer.from(...)` has to go through the shared
 /// byte extractor rather than serde.
@@ -696,7 +696,7 @@ fn parse_file_payload<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Resul
       return Ok(ferridriver::options::FilePayload {
         name: obj.get("name")?,
         mime_type: obj.get("mimeType")?,
-        buffer: ferridriver_jsstd::node::bytes::value_to_bytes(ctx, &buffer, None)?,
+        buffer: ferrijs::std::node::bytes::value_to_bytes(ctx, &buffer, None)?,
       });
     }
   }

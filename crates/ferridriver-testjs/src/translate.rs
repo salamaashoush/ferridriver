@@ -3,6 +3,7 @@
 //! (mode, annotations, `use` bags, hook lists), and wrap each body in
 //! a `TestFn` that dispatches into the per-worker `QuickJS` session.
 
+use ferridriver_script::CompiledBundleExt as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;

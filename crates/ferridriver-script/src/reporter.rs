@@ -29,7 +29,7 @@ use ferridriver_test::reporter::{Reporter, ReporterEvent, RunStatus, api};
 use crate::bundle::{CompiledBundle, bundle_and_compile_named, eval_bundle_with};
 use crate::engine::{ExtensionHost, RunContext, ScriptCaps, ScriptEngineConfig, Session};
 use crate::error::ScriptError;
-use crate::vm::VmHandle;
+use ferrijs::VmHandle;
 
 /// Which reporter interface a module's default export implements.
 ///
@@ -173,41 +173,47 @@ fn resolve(name: &str, config: &TestConfig, cwd: &Path) -> Option<PathBuf> {
 ///
 /// Fails when the name resolves to no file, the module does not bundle,
 /// its top level throws, or its default export is not a constructor.
-pub async fn load(
-  entry: &ReporterConfig,
-  config: &TestConfig,
-  cwd: &Path,
+///
+/// Boxed at the definition: it awaits `Session::create` through
+/// `ReporterModule::start`, so every caller would otherwise carry the
+/// engine config in its own future (`clippy::large_futures`).
+pub fn load<'a>(
+  entry: &'a ReporterConfig,
+  config: &'a TestConfig,
+  cwd: &'a Path,
   caps: ScriptCaps,
-) -> Result<ReporterModule, ScriptError> {
-  let path = resolve(&entry.name, config, cwd).ok_or_else(|| {
-    ScriptError::internal(format!(
-      "reporter '{}' is neither a known reporter name nor a file that exists",
-      entry.name
-    ))
-  })?;
-  let bundle = bundle_and_compile_named(
-    std::slice::from_ref(&path),
-    cwd,
-    &format!("reporter:{}", path.display()),
-  )
-  .await?;
+) -> impl std::future::Future<Output = Result<ReporterModule, ScriptError>> + Send + 'a {
+  Box::pin(async move {
+    let path = resolve(&entry.name, config, cwd).ok_or_else(|| {
+      ScriptError::internal(format!(
+        "reporter '{}' is neither a known reporter name nor a file that exists",
+        entry.name
+      ))
+    })?;
+    let bundle = bundle_and_compile_named(
+      std::slice::from_ref(&path),
+      cwd,
+      &format!("reporter:{}", path.display()),
+    )
+    .await?;
 
-  let options = options_value(entry, config, cwd);
-  let mut module = ReporterModule {
-    label: entry.name.clone(),
-    options,
-    bundle: Arc::new(bundle),
-    cwd: cwd.to_path_buf(),
-    caps,
-    prints_to_stdio: true,
-    probe: std::sync::Mutex::new(None),
-  };
-  // The probe instance is the one the first reporter of this module
-  // uses, so loading costs one VM, not two.
-  let live = module.start().await?;
-  module.prints_to_stdio = live.prints_to_stdio;
-  *module.probe.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(live);
-  Ok(module)
+    let options = options_value(entry, config, cwd);
+    let mut module = ReporterModule {
+      label: entry.name.clone(),
+      options,
+      bundle: Arc::new(bundle),
+      cwd: cwd.to_path_buf(),
+      caps,
+      prints_to_stdio: true,
+      probe: std::sync::Mutex::new(None),
+    };
+    // The probe instance is the one the first reporter of this module
+    // uses, so loading costs one VM, not two.
+    let live = module.start().await?;
+    module.prints_to_stdio = live.prints_to_stdio;
+    *module.probe.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(live);
+    Ok(module)
+  })
 }
 
 /// The options bag the reporter class is constructed with: the entry's

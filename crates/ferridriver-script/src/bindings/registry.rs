@@ -176,7 +176,7 @@ pub fn net_entry_subsumed(entry: &str, ceiling: &[String]) -> bool {
         .is_some_and(|cs| suffix == cs || suffix.ends_with(&format!(".{cs}")))
     })
   } else {
-    ferridriver::http_client::host_allowed(entry, ceiling)
+    crate::bindings::net_policy::host_allowed(entry, ceiling)
   }
 }
 
@@ -195,7 +195,7 @@ fn check_commands_ceiling(
     Ceiling::ArgvOnly => {
       for (name, spec) in commands {
         if matches!(spec.run, crate::command_spec::CommandRun::Shell(_)) {
-          return Err(ScriptError::policy(format!(
+          return Err(crate::error::policy_error(format!(
             "tool `{tool}`: command `{name}` is a shell-string spec, but the operator policy \
              (`[extensions.policy] commands = \"argvOnly\"`) permits only argv-array specs"
           )));
@@ -207,7 +207,7 @@ fn check_commands_ceiling(
       if commands.is_empty() {
         Ok(())
       } else {
-        Err(ScriptError::policy(format!(
+        Err(crate::error::policy_error(format!(
           "tool `{tool}` declares `allow.commands`, but the operator policy \
            (`[extensions.policy] commands = \"none\"`) forbids command declarations"
         )))
@@ -612,7 +612,7 @@ fn define_defaults<'js>(ctx: Ctx<'js>, defaults: Value<'js>) -> rquickjs::Result
   if !permitted {
     return Err(throw_script_error(
       &ctx,
-      &ScriptError::policy(
+      &crate::error::policy_error(
         "defineDefaults() is refused by the operator policy (`[extensions.policy] configDefaults = \
          false`), which forbids packages from contributing configuration defaults",
       ),

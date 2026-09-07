@@ -33,11 +33,8 @@ pub(crate) async fn read_extension_defaults(
   if specs.is_empty() {
     return Ok(Vec::new());
   }
-  let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
-    &config.scripting.allow_env,
-    config.scripting.allow.commands.clone(),
-  )
-  .with_extension_policy(config.extensions.policy());
+  let caps =
+    ferridriver_script::ScriptCaps::from_scripting(&config.scripting).with_extension_policy(config.extensions.policy());
   let sidecars: Vec<String> = config.sidecars.iter().map(|s| s.name.clone()).collect();
   let env = ferridriver_script::RequirementEnv::from_caps(&caps, &sidecars);
   // A refusal by `[extensions.policy]` is never skippable, so it fails
@@ -63,11 +60,8 @@ pub(crate) fn install_module_loader(config: &FerridriverConfig, startup: &mut fe
   if !startup.has_module_layer() {
     return;
   }
-  let caps = ferridriver_script::ScriptCaps::resolve_with_commands(
-    &config.scripting.allow_env,
-    config.scripting.allow.commands.clone(),
-  )
-  .with_extension_policy(config.extensions.policy());
+  let caps =
+    ferridriver_script::ScriptCaps::from_scripting(&config.scripting).with_extension_policy(config.extensions.policy());
   startup.set_module_loader(std::sync::Arc::new(move |path: &Path| {
     let path = path.to_path_buf();
     let caps = caps.clone();

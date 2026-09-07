@@ -673,28 +673,42 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
   arg.set("log", extension_logger(&ctx, &d.name)?)?;
 
   // The tool's EFFECTIVE `allow.net` (declared manifest intersected
-  // with the operator ceiling at registration; `None` ⇒ unrestricted,
-  // `Some` ⇒ default-deny, an empty list denies every host). Used for
-  // BOTH the net-guarded `request` wrapper AND the `fetch` policy
-  // bracket below — one allow-list, both HTTP entry points.
+  // with the operator ceiling at registration; `None` ⇒ the realm's
+  // policy alone, `Some` ⇒ default-deny against the list on top of it,
+  // an empty list denies every host). It attenuates the two HTTP
+  // capabilities handed to the handler, `ctx.request` and `ctx.fetch`:
+  // both are the session's own client, refusing every host outside the
+  // list on every hop. The globals the handler can also reach answer
+  // to the realm's policy, which is the session's; a tool that must be
+  // confined below the session runs in a session of its own.
   let net_policy: Option<Arc<[String]>> = d.allowed_net.clone();
 
-  // `request`: pass through unless the tool declared `allow.net`, in
-  // which case hand it a net-restricted wrapper over the SAME underlying
-  // context (host check enforced natively in `HttpClientJs`).
   let req_val: Value<'js> = g.get("request").unwrap_or_else(|_| undef.clone());
-  let request_out: Value<'js> = match net_policy.clone() {
+  let request_out: Value<'js> = match net_policy.as_deref() {
     Some(net) => match Class::<HttpClientJs>::from_value(&req_val) {
       Ok(cls) => {
         let inner = cls.borrow().inner_arc();
-        let guarded = Class::instance(ctx.clone(), HttpClientJs::with_net(inner, net))?;
-        guarded.into_js(&ctx)?
+        let guarded = HttpClientJs::with_net(inner, net)
+          .map_err(|m| rquickjs::Error::new_from_js_message("extensions", "allow.net", m))?;
+        Class::instance(ctx.clone(), guarded)?.into_js(&ctx)?
       },
       Err(_) => req_val,
     },
     None => req_val,
   };
   arg.set("request", request_out)?;
+
+  let fetch_out: Value<'js> = match (net_policy.as_deref(), ctx.userdata::<crate::engine::SessionFetchUd>()) {
+    (Some(net), Some(session_fetch)) => {
+      let declared = ferrijs::Permissions::none()
+        .allow_net(net)
+        .map_err(|m| rquickjs::Error::new_from_js_message("extensions", "allow.net", m))?;
+      let backend: Arc<dyn ferrijs::fetch::FetchBackend> = Arc::new(session_fetch.0.attenuated(Arc::new(declared)));
+      ferrijs::fetch::function(&ctx, backend)?.into_value()
+    },
+    _ => g.get("fetch").unwrap_or_else(|_| undef.clone()),
+  };
+  arg.set("fetch", fetch_out)?;
 
   let procs = ctx.userdata::<SessionProcsUd>().map(|u| u.0.clone());
   let commands = Class::instance(ctx.clone(), ExtensionCommandsJs::new(d.allowed_commands, procs))?;
@@ -706,7 +720,7 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
   // continuation keeps running on the VM — without the signal it would
   // be zombie work with no way to notice. Handlers pass it to
   // `fetch`/listeners exactly like any web `AbortSignal`.
-  let signal = crate::bindings::abort::fresh_instance(&ctx)?;
+  let signal = ferrijs::fetch::abort::fresh_instance(&ctx)?;
   arg.set("signal", signal.clone())?;
 
   // The same `allow.net` must also bind the global `fetch` and the
@@ -716,7 +730,6 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
   // is whichever tool's continuation is running — correct under
   // nesting (a tool calling `tools.other`) and concurrent
   // interleaving (`Promise.all([tools.a(), tools.b()])`).
-  let policy_cell = crate::bindings::fetch::policy_cell(&ctx);
 
   let handler = d.handler;
   let timeout_ms = d.timeout_ms;
@@ -733,10 +746,10 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
           // Fire the handler's `ctx.signal` so its still-running JS
           // continuation (and any in-flight `fetch` holding the signal)
           // can stop instead of running on as zombie work.
-          let _ = crate::bindings::abort::abort_native(
+          let _ = ferrijs::fetch::abort::abort_native(
             &signal,
             &abort_ctx,
-            ferridriver_jsstd::exceptions::DOMExceptionName::TimeoutError,
+            ferrijs::std::exceptions::DOMExceptionName::TimeoutError,
             &msg,
           );
           Err(rquickjs::Error::new_from_js_message("extensions", "Error", msg))
@@ -745,7 +758,7 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
       None => fut.await,
     }
   };
-  crate::bindings::fetch::bracket_net(policy_cell, net_policy, inner).await
+  inner.await
 }
 
 /// Host-side native invocation of a registered tool by manifest name —

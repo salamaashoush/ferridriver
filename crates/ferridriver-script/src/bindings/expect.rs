@@ -209,7 +209,7 @@ impl<'js> LiveValue for JsLive<'js> {
 
   fn describe(&self) -> String {
     let mut out = String::new();
-    if ferridriver_jsstd::node::inspect::Inspector::new(false)
+    if ferrijs::std::node::inspect::Inspector::new(false)
       .quoted()
       .value(&mut out, &self.0, 0)
       .is_err()
