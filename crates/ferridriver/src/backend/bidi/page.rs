@@ -1104,6 +1104,15 @@ impl BidiPage {
     // own BiDi backend (which accepts `scale` and ignores it). At the default
     // DPR=1 css and device are identical; we do not refuse it.
 
+    // A full-page capture measures the document's scrolling box, and
+    // Firefox reports that box before the reflow that adds a vertical
+    // scrollbar has run: the same page comes back 400px or 385px wide
+    // depending on which side of the flush the capture lands. Wait for
+    // a paint first, as the WebKit backend does for wheel events.
+    if opts.full_page {
+      self.wait_for_layout_flush().await?;
+    }
+
     // Pre-capture DOM setup (caret, style, mask, CSS-animation pause) —
     // shared helpers, BiDi-specific execution via `script.callFunction`.
     let style_installed = self.screenshot_install_style(&opts).await?;
@@ -1141,6 +1150,25 @@ impl BidiPage {
   /// Run a JS function-declaration expression via
   /// `script.callFunction` in this page's browsing context. Used by
   /// `screenshot()` to install and tear down DOM overrides.
+  /// Settle layout: two animation frames, awaited, so a reflow the last
+  /// DOM write scheduled has run and been painted before anything
+  /// measures the page.
+  async fn wait_for_layout_flush(&self) -> Result<()> {
+    self
+      .cmd(
+        "script.callFunction",
+        json!({
+          "functionDeclaration":
+            "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))",
+          "target": {"context": &*self.context_id},
+          "awaitPromise": true,
+          "resultOwnership": "none",
+        }),
+      )
+      .await?;
+    Ok(())
+  }
+
   async fn eval_bidi_function(&self, function_declaration: &str) -> Result<()> {
     self
       .cmd(
