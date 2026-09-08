@@ -2173,6 +2173,8 @@ dependencies = [
 [[package]]
 name = "ferrijs"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad1fa1181b723f7157f632772a358390b59af025343c230f564624812db5be43"
 dependencies = [
  "bytes",
  "ferrijs-fetch",
@@ -2193,6 +2195,8 @@ dependencies = [
 [[package]]
 name = "ferrijs-bundle"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b396049eb9afbccfd1a0a83d8c4724c1f1511d6fa148c12c248b61296669d26"
 dependencies = [
  "ferrijs",
  "rolldown",
@@ -2210,6 +2214,8 @@ dependencies = [
 [[package]]
 name = "ferrijs-fetch"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "780a5aa5d5891a95b04768e6f03fb0f8e552cba79b6cba50ad5cd878bafe90f1"
 dependencies = [
  "bytes",
  "ferrijs-permissions",
@@ -2226,6 +2232,8 @@ dependencies = [
 [[package]]
 name = "ferrijs-permissions"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb8c889e484d7ea2e401a0fcd545cb91f50661bf4c0d2b3cae5450ef90ce2561"
 dependencies = [
  "serde",
 ]
@@ -2233,6 +2241,8 @@ dependencies = [
 [[package]]
 name = "ferrijs-std"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8b65f225afb9b83f611c4d0d329cfe77f273bf546ae662b9d4fca2fd957b71a"
 dependencies = [
  "aes",
  "aes-gcm",

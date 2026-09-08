@@ -64,14 +64,14 @@ ferridriver-config = { path = "crates/ferridriver-config", version = "0.5.0" }
 ferridriver-expect = { path = "crates/ferridriver-expect", version = "0.5.0" }
 ferridriver-session = { path = "crates/ferridriver-session", version = "0.5.0" }
 ferridriver-viewer = { path = "crates/ferridriver-viewer", version = "0.5.0" }
-# The JavaScript runtime this project's scripting is built on. A path
-# dependency on the sibling checkout while the two move together; a
-# published version once ferrijs is on crates.io.
-ferrijs = { path = "../ferrijs/crates/ferrijs", version = "0.1.0" }
-ferrijs-std = { path = "../ferrijs/crates/ferrijs-std", version = "0.1.0" }
-ferrijs-fetch = { path = "../ferrijs/crates/ferrijs-fetch", version = "0.1.0" }
-ferrijs-bundle = { path = "../ferrijs/crates/ferrijs-bundle", version = "0.1.0" }
-ferrijs-permissions = { path = "../ferrijs/crates/ferrijs-permissions", version = "0.1.0" }
+# The JavaScript runtime this project's scripting is built on. To develop
+# the two together, point these back at `../ferrijs/crates/*` with a
+# `[patch.crates-io]` section rather than editing the versions here.
+ferrijs = "0.1.0"
+ferrijs-std = "0.1.0"
+ferrijs-fetch = "0.1.0"
+ferrijs-bundle = "0.1.0"
+ferrijs-permissions = "0.1.0"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
