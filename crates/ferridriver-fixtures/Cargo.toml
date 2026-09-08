@@ -20,8 +20,8 @@ serde_json = { workspace = true }
 base64 = { workspace = true }
 futures = { workspace = true }
 flate2 = "1"
-brotli = "8"
-zstd = "0.13"
+brotli = "9"
+zstd = "0.14"
 rcgen = "0.14"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustc-hash = "2"

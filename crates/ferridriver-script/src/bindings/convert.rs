@@ -130,16 +130,16 @@ impl<T> FerriResultExt<T> for Result<T, FerriError> {
 }
 
 /// Convert any `serde::Serialize` value into a JS value via
-/// `rquickjs-serde` — direct `T` -> `rquickjs::Value`, no JSON string
+/// `ferrijs-serde` — direct `T` -> `rquickjs::Value`, no JSON string
 /// and no `serde_json::Value` middle allocation. Used for binding
 /// returns (cookies, storage state, parsed JSON bodies).
 pub fn serde_to_js<'js, T: Serialize>(ctx: &Ctx<'js>, value: &T) -> rquickjs::Result<Value<'js>> {
-  rquickjs_serde::to_value(ctx.clone(), value)
+  ferrijs_serde::to_value(ctx.clone(), value)
     .map_err(|e| rquickjs::Error::new_from_js_message("serde", "serialize", e.to_string()))
 }
 
 /// Build a JS `Array<{ name, value }>` straight from name/value pairs
-/// via `rquickjs-serde` — no `serde_json::json!` / `serde_json::Value`
+/// via `ferrijs-serde` — no `serde_json::json!` / `serde_json::Value`
 /// middle allocation. Used by `request`/`response`/`apiResponse`
 /// `headersArray()`.
 pub fn name_value_array_to_js<'js, S: AsRef<str>>(ctx: &Ctx<'js>, pairs: &[(S, S)]) -> rquickjs::Result<Value<'js>> {
@@ -159,13 +159,13 @@ pub fn name_value_array_to_js<'js, S: AsRef<str>>(ctx: &Ctx<'js>, pairs: &[(S, S
 }
 
 /// Inverse of [`serde_to_js`] — deserialize a JS value into a Rust type
-/// via `rquickjs-serde` (direct `Value` -> `T`). Integral-float ->
+/// via `ferrijs-serde` (direct `Value` -> `T`). Integral-float ->
 /// integer coercion, `undefined`/function-property drop, Proxy and
-/// cycle handling all hold (covered by the rquickjs-serde test suite),
+/// cycle handling all hold (covered by the ferrijs-serde test suite),
 /// so the option-bag call sites keep their prior semantics without our
 /// own hand-rolled walker.
 pub fn serde_from_js<'js, T: DeserializeOwned>(_ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<T> {
-  rquickjs_serde::from_value(value)
+  ferrijs_serde::from_value(value)
     .map_err(|e| rquickjs::Error::new_from_js_message("serde", "deserialize", e.to_string()))
 }
 
@@ -224,7 +224,7 @@ pub(crate) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs
   // A transitive dep force-enables `serde_json/arbitrary_precision`
   // workspace-wide. Under that feature `serde_json::Value::Number`'s
   // `Serialize` emits a private one-key map, so routing through
-  // `serde_to_js` (rquickjs-serde) would inject numbers into JS as
+  // `serde_to_js` (ferrijs-serde) would inject numbers into JS as
   // `{"$serde_json::private::Number": "..."}` objects. Walk the value
   // explicitly with the AP-safe `as_*` accessors instead.
   match v {
@@ -765,7 +765,7 @@ pub fn parse_select_option_values<'js>(
         let s: String = el.get()?;
         out.push(ferridriver::options::SelectOptionValue::by_value(s));
       } else if el.is_object() {
-        // Direct rquickjs-serde (no serde_json::Value middle-hop).
+        // Direct ferrijs-serde (no serde_json::Value middle-hop).
         let desc: ferridriver::options::SelectOptionValue = serde_from_js(ctx, el)?;
         out.push(desc);
       } else {

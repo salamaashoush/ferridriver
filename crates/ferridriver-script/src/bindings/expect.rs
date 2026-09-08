@@ -362,12 +362,17 @@ impl<'js> JsLive<'js> {
 
   /// An `ArrayBuffer` or a typed array as its bytes, so two views with
   /// the same contents compare equal.
+  // Reading a JS buffer's bytes is `unsafe` from rquickjs 0.13: the slice
+  // aliases engine memory and no JavaScript may run while it is alive.
+  // Every read here copies immediately, so the borrow never spans a call
+  // back into script.
+  #[allow(unsafe_code)]
   fn bytes(&self) -> rquickjs::Result<Option<Vec<u8>>> {
     let Some(obj) = self.0.as_object() else {
       return Ok(None);
     };
     if let Some(buffer) = rquickjs::ArrayBuffer::from_object(obj.clone()) {
-      return Ok(buffer.as_bytes().map(<[u8]>::to_vec));
+      return Ok(unsafe { buffer.as_bytes() }.map(<[u8]>::to_vec));
     }
     let brand = self.brand()?;
     if !brand.ends_with("Array") || brand == "Array" {
@@ -381,11 +386,7 @@ impl<'js> JsLive<'js> {
     };
     let offset: usize = obj.get::<_, Option<f64>>("byteOffset")?.unwrap_or(0.0) as usize;
     let length: usize = obj.get::<_, Option<f64>>("byteLength")?.unwrap_or(0.0) as usize;
-    Ok(
-      buffer
-        .as_bytes()
-        .map(|all| all[offset.min(all.len())..(offset + length).min(all.len())].to_vec()),
-    )
+    Ok(unsafe { buffer.as_bytes() }.map(|all| all[offset.min(all.len())..(offset + length).min(all.len())].to_vec()))
   }
 }
 

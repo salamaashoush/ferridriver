@@ -2958,7 +2958,7 @@ impl PageJs {
               for v in args {
                 // `json_to_js` (NOT `serde_to_js`): a transitive dep
                 // force-enables `serde_json/arbitrary_precision`, under
-                // which rquickjs-serde turns every number into a
+                // which ferrijs-serde turns every number into a
                 // `{$serde_json::private::Number}` object. The AP-safe
                 // walker keeps numbers as JS numbers.
                 call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;

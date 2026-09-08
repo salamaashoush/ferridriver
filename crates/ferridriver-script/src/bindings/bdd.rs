@@ -309,15 +309,20 @@ fn register_hook_in(kind: &str, args: &[Value<'_>], fixture_set: Option<usize>) 
   .map_err(|e| rq(&e))
 }
 
+// Reading a JS buffer's bytes is `unsafe` from rquickjs 0.13: the slice
+// aliases engine memory and no JavaScript may run while it is alive.
+// Every read here copies immediately, so the borrow never spans a call
+// back into script.
+#[allow(unsafe_code)]
 fn value_bytes(v: &Value<'_>) -> Option<Vec<u8>> {
   if let Ok(ta) = TypedArray::<u8>::from_value(v.clone())
-    && let Some(b) = ta.as_bytes()
+    && let Some(b) = unsafe { ta.as_bytes() }
   {
     return Some(b.to_vec());
   }
   if let Some(obj) = v.as_object()
     && let Some(buf) = ArrayBuffer::from_object(obj.clone())
-    && let Some(b) = buf.as_bytes()
+    && let Some(b) = unsafe { buf.as_bytes() }
   {
     return Some(b.to_vec());
   }

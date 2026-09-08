@@ -64,7 +64,7 @@ flate2 = "1"
 # Direct serde <-> rquickjs::Value (no serde_json::Value middle-hop).
 # Correct number coercion (integral float -> int via serde visitors),
 # undefined/function drop parity, Proxy + cycle handling.
-rquickjs-serde = "0.6"
+ferrijs-serde = { workspace = true }
 
 # `full-async` does NOT imply `parallel`; without it the AsyncRuntime is
 # !Send/!Sync and the cross-task route/exposeFunction closures (which
@@ -72,7 +72,7 @@ rquickjs-serde = "0.6"
 # Timers / URLSearchParams / the console renderer are native modules in
 # `bindings/` (formerly the rquickjs-extra crates, which capped rquickjs
 # at <0.12).
-rquickjs = { version = "0.12", features = [
+rquickjs = { version = "0.13", features = [
   "full-async",
   "parallel",
   "macro",
@@ -112,7 +112,7 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 # Convert round-trip test drives rquickjs directly; it is a runtime dep
 # but integration tests are separate crates and cannot name a lib-only
 # dependency, so it is mirrored here.
-rquickjs = { version = "0.12", features = [
+rquickjs = { version = "0.13", features = [
   "full-async",
   "parallel",
   "macro",

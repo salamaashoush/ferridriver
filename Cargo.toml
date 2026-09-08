@@ -67,11 +67,12 @@ ferridriver-viewer = { path = "crates/ferridriver-viewer", version = "0.5.0" }
 # The JavaScript runtime this project's scripting is built on. To develop
 # the two together, point these back at `../ferrijs/crates/*` with a
 # `[patch.crates-io]` section rather than editing the versions here.
-ferrijs = "0.1.0"
-ferrijs-std = "0.1.0"
-ferrijs-fetch = "0.1.0"
-ferrijs-bundle = "0.1.0"
-ferrijs-permissions = "0.1.0"
+ferrijs = "0.2.0"
+ferrijs-std = "0.2.0"
+ferrijs-fetch = "0.2.0"
+ferrijs-bundle = "0.2.0"
+ferrijs-permissions = "0.2.0"
+ferrijs-serde = "0.2.0"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -91,9 +92,9 @@ clap_complete = "4"
 flate2 = "1"
 sha2 = "0.11"
 semver = "1"
-rmcp = { version = "3.1", features = ["server", "transport-io", "transport-streamable-http-server", "tower"] }
+rmcp = { version = "3.2", features = ["server", "transport-io", "transport-streamable-http-server", "tower"] }
 schemars = "1"
-jsonschema = { version = "0.52", default-features = false }
+jsonschema = { version = "0.55", default-features = false }
 axum = "0.8"
 tokio-util = "0.7"
 dashmap = "6"
@@ -101,7 +102,7 @@ arc-swap = "1"
 mimalloc = { version = "0.1", default-features = false }
 config = { version = "0.15", default-features = false, features = ["toml", "json", "yaml"] }
 shellexpand = "3"
-dirs = "6"
+dirs = "7"
 which = "8"
 
 [profile.release]
@@ -125,3 +126,13 @@ debug = false
 # crates stay at opt-level 0 so incremental rebuilds are unaffected.
 [profile.dev.package."*"]
 opt-level = 1
+
+# ferrijs 0.2.0 is not published yet; resolve it from the sibling checkout
+# while the two move together. Remove once it is on crates.io.
+[patch.crates-io]
+ferrijs = { path = "../ferrijs/crates/ferrijs" }
+ferrijs-std = { path = "../ferrijs/crates/ferrijs-std" }
+ferrijs-fetch = { path = "../ferrijs/crates/ferrijs-fetch" }
+ferrijs-bundle = { path = "../ferrijs/crates/ferrijs-bundle" }
+ferrijs-permissions = { path = "../ferrijs/crates/ferrijs-permissions" }
+ferrijs-serde = { path = "../ferrijs/crates/ferrijs-serde" }

@@ -9,7 +9,7 @@
 //!
 //! Deserializer-agnostic by hand (no `#[serde(untagged)]`): the same
 //! types are read from `serde_json` (the MCP manifest round-trip) and
-//! from `rquickjs-serde` (a `tool` call), so the impls only use
+//! from `ferrijs-serde` (a `tool` call), so the impls only use
 //! `deserialize_any` + visitors, which both back-ends support.
 
 use std::collections::BTreeMap;
