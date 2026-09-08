@@ -362,10 +362,8 @@ impl<'js> JsLive<'js> {
 
   /// An `ArrayBuffer` or a typed array as its bytes, so two views with
   /// the same contents compare equal.
-  // Reading a JS buffer's bytes is `unsafe` from rquickjs 0.13: the slice
-  // aliases engine memory and no JavaScript may run while it is alive.
-  // Every read here copies immediately, so the borrow never spans a call
-  // back into script.
+  // 0.13 forbids running JS while a buffer borrow is alive; these copy out
+  // immediately.
   #[allow(unsafe_code)]
   fn bytes(&self) -> rquickjs::Result<Option<Vec<u8>>> {
     let Some(obj) = self.0.as_object() else {

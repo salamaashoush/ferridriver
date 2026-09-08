@@ -131,10 +131,8 @@ pub(crate) fn build_ws_route_handler(
   })
 }
 
-// Reading a JS buffer's bytes is `unsafe` from rquickjs 0.13: the slice
-// aliases engine memory and no JavaScript may run while it is alive.
-// Every read here copies immediately, so the borrow never spans a call
-// back into script.
+// 0.13 forbids running JS while a buffer borrow is alive; these copy out
+// immediately.
 #[allow(unsafe_code)]
 fn ws_message_from_js(value: &Value<'_>) -> WsMessage {
   if let Some(s) = value.as_string() {

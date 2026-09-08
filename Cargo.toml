@@ -126,13 +126,3 @@ debug = false
 # crates stay at opt-level 0 so incremental rebuilds are unaffected.
 [profile.dev.package."*"]
 opt-level = 1
-
-# ferrijs 0.2.0 is not published yet; resolve it from the sibling checkout
-# while the two move together. Remove once it is on crates.io.
-[patch.crates-io]
-ferrijs = { path = "../ferrijs/crates/ferrijs" }
-ferrijs-std = { path = "../ferrijs/crates/ferrijs-std" }
-ferrijs-fetch = { path = "../ferrijs/crates/ferrijs-fetch" }
-ferrijs-bundle = { path = "../ferrijs/crates/ferrijs-bundle" }
-ferrijs-permissions = { path = "../ferrijs/crates/ferrijs-permissions" }
-ferrijs-serde = { path = "../ferrijs/crates/ferrijs-serde" }
