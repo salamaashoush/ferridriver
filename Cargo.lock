@@ -1345,6 +1345,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cty"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b365fabc795046672053e29c954733ec3b05e4be654ab130fe8f1f94d7051f35"
+
+[[package]]
 name = "cucumber-expressions"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2225,9 +2231,9 @@ dependencies = [
 
 [[package]]
 name = "ferrijs"
-version = "0.2.0"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef522c16e4d321ae2e44d3cf469e2fcc20f4e13eb6b9915301a1740fb1125268"
+checksum = "fbe4414652c3bab25ee440c5a1a764162a98d58eb40915aaadf868f0c42f88d0"
 dependencies = [
  "bytes",
  "ferrijs-fetch",
@@ -2235,6 +2241,7 @@ dependencies = [
  "ferrijs-serde",
  "ferrijs-std",
  "futures",
+ "libmimalloc-sys",
  "rquickjs",
  "rustc-hash",
  "schemars",
@@ -2247,9 +2254,9 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-bundle"
-version = "0.2.0"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "062cb70cf17a0440b0ae9e761e910fbfa765ed127473d34cefba19ee5fb9c701"
+checksum = "329e24d1bc3f51a40f18e298338f83071af0b78f4750b4019d9679b8fb036a8c"
 dependencies = [
  "ferrijs",
  "rolldown",
@@ -2266,9 +2273,9 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-fetch"
-version = "0.2.0"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fda637246efa3c2b5283bece6fb7afe766a2e6c605ae45c7505ccd2d8500f20c"
+checksum = "95ef8eff3d07a83ba74bed51d137aac3e67779a093e7c78c7b3f36de27403acd"
 dependencies = [
  "bytes",
  "ferrijs-permissions",
@@ -2284,18 +2291,18 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-permissions"
-version = "0.2.0"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b3c1c93fe0285732af2fa745546f1694cf8c03c308137d18483d949838918af"
+checksum = "6f556ee050f68a215ab33026e107baabbc15f66ad46f4be7cfe4a16302315cce"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ferrijs-serde"
-version = "0.2.0"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a42f3a402432a8680a5c5c62fa9af60184eb2f7c9766f3e72ecbe2ecb5abb0f"
+checksum = "d501dbb3c181db83d20223761e8d57ecc0fc8c7c4ba6dca564b589b79496e449"
 dependencies = [
  "rquickjs",
  "serde",
@@ -2303,9 +2310,9 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-std"
-version = "0.2.0"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce0b049f23b2d6fd61f1b2c199ab782edaf731c83155acf5a565801c91143abd"
+checksum = "6004e613a0db7065e9d188480b99fe654a5ffd3e1b3fac42e02c8eaa526bdc40"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2334,6 +2341,7 @@ dependencies = [
  "hmac",
  "home",
  "itoa",
+ "junction",
  "keccak",
  "libc",
  "md-5",
@@ -2365,6 +2373,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "windows-sys 0.61.2",
  "x25519-dalek",
  "zstd 0.14.0",
 ]
@@ -3391,6 +3400,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "junction"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "160f2eade097f30263b548aae5deb12ad349c909baa710fa24b92c9090b2e006"
+dependencies = [
+ "scopeguard",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "kasuari"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3505,6 +3524,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
 dependencies = [
  "cc",
+ "cty",
 ]
 
 [[package]]
