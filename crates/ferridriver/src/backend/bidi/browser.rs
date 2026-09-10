@@ -128,6 +128,74 @@ impl BidiBrowser {
   /// Connect to an existing `BiDi` endpoint via WebSocket.
   pub async fn connect(ws_url: &str) -> Result<Self> {
     let session = Arc::new(Box::pin(BidiSession::connect(ws_url)).await?);
+    Self::from_session(session).await
+  }
+
+  /// Create a BiDi browser from a WebDriver Classic HTTP endpoint.
+  ///
+  /// The endpoint creates a W3C session with `webSocketUrl: true`, then the
+  /// returned BiDi connection carries all browser operations. This is the
+  /// low-latency path for WebDriver servers that implement BiDi, including
+  /// compatible Appium and Safari Technology Preview sessions.
+  pub async fn connect_webdriver(
+    endpoint: &str,
+    browser_name: &str,
+    extra_capabilities: Option<&serde_json::Value>,
+  ) -> Result<Self> {
+    let session_url = webdriver_session_url(endpoint)?;
+    let mut always_match = serde_json::json!({
+      "browserName": browser_name,
+      "acceptInsecureCerts": true,
+      "webSocketUrl": true,
+      "unhandledPromptBehavior": "ignore"
+    });
+    if let Some(extra) = extra_capabilities.and_then(serde_json::Value::as_object) {
+      if let Some(target) = always_match.as_object_mut() {
+        target.extend(extra.iter().map(|(key, value)| (key.clone(), value.clone())));
+      }
+    }
+    let body = serde_json::json!({
+      "capabilities": {
+        "alwaysMatch": always_match
+      }
+    });
+    let response = reqwest::Client::new()
+      .post(session_url.as_str())
+      .json(&body)
+      .send()
+      .await
+      .map_err(|e| FerriError::Backend(format!("WebDriver session request failed: {e}")))?;
+    let status = response.status();
+    let payload = response
+      .json::<serde_json::Value>()
+      .await
+      .map_err(|e| FerriError::Backend(format!("WebDriver session response was not JSON: {e}")))?;
+    if !status.is_success() {
+      return Err(FerriError::Backend(format!(
+        "WebDriver session request returned {status}: {}",
+        payload
+      )));
+    }
+    let value = payload.get("value").unwrap_or(&payload);
+    let session_id = value
+      .get("sessionId")
+      .or_else(|| payload.get("sessionId"))
+      .and_then(serde_json::Value::as_str)
+      .ok_or_else(|| FerriError::protocol("WebDriver /session", "response omitted sessionId"))?
+      .to_string();
+    let capabilities = value.get("capabilities").cloned().unwrap_or_else(|| value.clone());
+    let ws_url = capabilities
+      .get("webSocketUrl")
+      .and_then(serde_json::Value::as_str)
+      .ok_or_else(|| {
+        FerriError::unsupported("WebDriver server created a Classic session without a BiDi webSocketUrl capability")
+      })?
+      .to_string();
+    let session = Arc::new(BidiSession::connect_existing(&ws_url, session_id, capabilities).await?);
+    Self::from_session(session).await
+  }
+
+  async fn from_session(session: Arc<BidiSession>) -> Result<Self> {
     let downloads_dir = new_downloads_dir()?;
     let popup_taps = Self::spawn_popup_listener(&session, &downloads_dir);
     Ok(Self {
@@ -380,6 +448,17 @@ impl BidiBrowser {
   }
 }
 
+fn webdriver_session_url(endpoint: &str) -> Result<reqwest::Url> {
+  let mut url = reqwest::Url::parse(endpoint)
+    .map_err(|e| FerriError::invalid_argument("endpoint", format!("invalid WebDriver endpoint: {e}")))?;
+  if !url.path().ends_with("/session") {
+    let mut path = url.path().trim_end_matches('/').to_string();
+    path.push_str("/session");
+    url.set_path(&path);
+  }
+  Ok(url)
+}
+
 /// A Playwright-shaped proxy as the `BiDi`/`WebDriver` `proxy` capability.
 ///
 /// The same shape serves `session.new` (browser-wide, from
@@ -467,5 +546,33 @@ mod proxy_capability_tests {
       capability.get("httpProxy").is_none(),
       "a socks proxy is not an http one"
     );
+  }
+}
+
+#[cfg(test)]
+mod webdriver_url_tests {
+  use super::webdriver_session_url;
+
+  #[test]
+  fn appends_session_to_server_root() {
+    assert_eq!(
+      webdriver_session_url("http://127.0.0.1:4444/").unwrap().as_str(),
+      "http://127.0.0.1:4444/session"
+    );
+  }
+
+  #[test]
+  fn preserves_existing_session_path() {
+    assert_eq!(
+      webdriver_session_url("http://127.0.0.1:4444/wd/hub/session")
+        .unwrap()
+        .as_str(),
+      "http://127.0.0.1:4444/wd/hub/session"
+    );
+  }
+
+  #[test]
+  fn rejects_invalid_endpoint() {
+    assert!(webdriver_session_url("not a url").is_err());
   }
 }

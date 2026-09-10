@@ -207,6 +207,7 @@ fn lower_connect_options(opts: ConnectOptions) -> core_opts::ConnectOptions {
     slow_mo: opts.slow_mo.map(u64::from),
     timeout: opts.timeout.map(u64::from),
     expose_network: opts.expose_network,
+    capabilities: opts.capabilities,
   }
 }
 

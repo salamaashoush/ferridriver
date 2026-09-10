@@ -1555,6 +1555,7 @@ pub struct ConnectOptions {
   pub slow_mo: Option<u32>,
   pub timeout: Option<u32>,
   pub expose_network: Option<String>,
+  pub capabilities: Option<serde_json::Value>,
 }
 
 /// Options for `BrowserType.connectOverCDP(endpointURL, options?)`.

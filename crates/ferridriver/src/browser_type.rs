@@ -168,7 +168,16 @@ impl BrowserType {
         ws_endpoint: Some(ws_endpoint.to_string()),
         ..LaunchPlan::default()
       };
-      let mut state = BrowserState::with_plan(ConnectMode::ConnectUrl(ws_endpoint.to_string()), plan);
+      let mode = if ws_endpoint.starts_with("http://") || ws_endpoint.starts_with("https://") {
+        ConnectMode::WebDriver {
+          endpoint: ws_endpoint.to_string(),
+          browser_name: self.kind.name().to_string(),
+          capabilities: options.capabilities,
+        }
+      } else {
+        ConnectMode::ConnectUrl(ws_endpoint.to_string())
+      };
+      let mut state = BrowserState::with_plan(mode, plan);
       Box::pin(state.ensure_browser()).await?;
       return Ok(Browser::from_state(state));
     }

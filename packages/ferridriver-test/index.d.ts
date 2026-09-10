@@ -1907,9 +1907,18 @@ export interface BrowserType {
   name(): string;
   executablePath(): string | null;
   launch(options?: LaunchOptions): Promise<Browser>;
-  connect(wsEndpoint: string): Promise<Browser>;
+  connect(wsEndpoint: string, options?: ConnectOptions): Promise<Browser>;
   connectOverCDP(endpoint: string): Promise<Browser>;
   launchPersistentContext(userDataDir: string, options?: BrowserContextOptions & LaunchOptions): Promise<BrowserContext>;
+}
+
+/** Connection options, including W3C capabilities for WebDriver HTTP endpoints. */
+export interface ConnectOptions {
+  headers?: Record<string, string>;
+  slowMo?: number;
+  timeout?: number;
+  exposeNetwork?: string;
+  capabilities?: Record<string, unknown>;
 }
 
 export interface BrowserContextOptions {

@@ -1360,3 +1360,10 @@ completion requires observable behavior through the public scripting API.
   browser capacity was available; the full makespan varied by roughly two
   seconds from the prior checkpoint. Log directory:
   target/gate/1789047427-228787.
+- Added WebDriver Classic HTTP negotiation to the existing BiDi scripting
+  surface. Firefox `connect()` now requests a W3C session with `webSocketUrl`,
+  attaches to the returned socket without issuing a second `session.new`, and
+  accepts optional W3C capabilities through the JS and NAPI connect options.
+  Invalid endpoints, URL joining, and session-path preservation are covered by
+  three focused unit tests. Classic-only servers still return a typed
+  unsupported error because they cannot carry the BiDi command surface.

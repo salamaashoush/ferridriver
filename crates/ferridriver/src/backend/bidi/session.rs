@@ -88,6 +88,19 @@ impl BidiSession {
       .unwrap_or("unknown")
       .to_string();
     let capabilities = result.get("capabilities").cloned().unwrap_or(json!({}));
+    Self::finish(transport, session_id, capabilities).await
+  }
+
+  /// Attach to a BiDi WebSocket returned by a pre-existing WebDriver Classic
+  /// session. The HTTP session already ran `session.new`, so sending a second
+  /// `session.new` would create a different session or fail on Appium/Safari.
+  pub async fn connect_existing(ws_url: &str, session_id: String, capabilities: serde_json::Value) -> Result<Self> {
+    info!("Connecting to existing BiDi session {session_id} at {ws_url}");
+    let transport = Arc::new(BidiTransport::connect(ws_url).await?);
+    Self::finish(transport, session_id, capabilities).await
+  }
+
+  async fn finish(transport: Arc<BidiTransport>, session_id: String, capabilities: serde_json::Value) -> Result<Self> {
     let browser_name = capabilities
       .get("browserName")
       .and_then(|v| v.as_str())

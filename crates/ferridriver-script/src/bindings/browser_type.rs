@@ -200,6 +200,7 @@ struct JsConnectOptions {
   slow_mo: Option<u64>,
   timeout: Option<u64>,
   expose_network: Option<String>,
+  capabilities: Option<serde_json::Value>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -244,6 +245,7 @@ fn parse_connect_options<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Re
     slow_mo: parsed.slow_mo,
     timeout: parsed.timeout,
     expose_network: parsed.expose_network,
+    capabilities: parsed.capabilities,
   })
 }
 

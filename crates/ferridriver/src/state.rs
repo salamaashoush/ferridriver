@@ -417,6 +417,12 @@ pub enum ConnectMode {
   Launch,
   /// Connect to browser at explicit ws:// or http:// URL
   ConnectUrl(String),
+  /// Create a W3C WebDriver session and attach to its negotiated BiDi socket.
+  WebDriver {
+    endpoint: String,
+    browser_name: String,
+    capabilities: Option<serde_json::Value>,
+  },
   /// Auto-connect to running Chrome by reading `DevToolsActivePort` file
   AutoConnect {
     channel: String,
@@ -1162,23 +1168,47 @@ fn resolve_with_prefix(resolver: &InstanceResolverFn, instance_name: &str) -> Op
 }
 
 /// Attach to a browser someone else is running. CDP uses discovery for HTTP
-/// endpoints; the `WebDriver` `BiDi` backend requires its WebSocket endpoint
-/// directly because it has no CDP-style discovery document.
+/// endpoints; BiDi accepts either its direct WebSocket endpoint or a W3C
+/// WebDriver endpoint that negotiates `webSocketUrl` during session creation.
 async fn connect_browser(mode: &ConnectMode, backend_kind: BackendKind) -> Result<AnyBrowser> {
   use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
 
   if backend_kind == BackendKind::Bidi {
-    let ConnectMode::ConnectUrl(ws_url) = mode else {
-      return Err(FerriError::unsupported("WebDriver BiDi requires a WebSocket endpoint"));
+    let (endpoint, browser_name, capabilities) = match mode {
+      ConnectMode::WebDriver {
+        endpoint,
+        browser_name,
+        capabilities,
+      } => (endpoint, browser_name.as_str(), capabilities.as_ref()),
+      ConnectMode::ConnectUrl(endpoint) if endpoint.starts_with("http://") || endpoint.starts_with("https://") => {
+        (endpoint, "firefox", None)
+      },
+      ConnectMode::ConnectUrl(endpoint) => (endpoint, "", None),
+      _ => return Err(FerriError::unsupported("WebDriver BiDi requires a WebSocket endpoint")),
     };
+    if !browser_name.is_empty() {
+      return Ok(AnyBrowser::Bidi(
+        Box::pin(crate::backend::bidi::BidiBrowser::connect_webdriver(
+          endpoint,
+          browser_name,
+          capabilities,
+        ))
+        .await?,
+      ));
+    }
     return Ok(AnyBrowser::Bidi(
-      Box::pin(crate::backend::bidi::BidiBrowser::connect(ws_url)).await?,
+      Box::pin(crate::backend::bidi::BidiBrowser::connect(endpoint)).await?,
     ));
   }
   let ws_url = match mode {
     ConnectMode::ConnectUrl(url) if url.starts_with("ws://") || url.starts_with("wss://") => url.clone(),
     ConnectMode::ConnectUrl(url) => discover_ws_from_http(url).await?,
     ConnectMode::AutoConnect { channel, user_data_dir } => discover_chrome_ws(channel, user_data_dir.as_deref())?,
+    ConnectMode::WebDriver { .. } => {
+      return Err(FerriError::unsupported(
+        "WebDriver HTTP sessions require the BiDi backend",
+      ));
+    },
     ConnectMode::Launch => return Err(FerriError::backend("connect_browser called with Launch mode")),
   };
   Ok(AnyBrowser::CdpRaw(
@@ -1323,6 +1353,9 @@ impl BrowserState {
   async fn connect_with_resolved_mode(&mut self, instance_name: &str, mode: ConnectMode) -> Result<usize> {
     match mode {
       ConnectMode::ConnectUrl(url) => Box::pin(self.connect_to_url(instance_name, &url)).await,
+      ConnectMode::WebDriver { .. } => Err(FerriError::unsupported(
+        "connect_to_url cannot be used with a WebDriver session mode",
+      )),
       ConnectMode::AutoConnect { channel, user_data_dir } => {
         let ws_url = discover_chrome_ws(&channel, user_data_dir.as_deref())?;
         Box::pin(self.connect_to_url(instance_name, &ws_url)).await
