@@ -1312,3 +1312,10 @@ completion requires observable behavior through the public scripting API.
   no-server focused run confirmed one skip and no browser launch. The
   unchanged Rust file was backed up at
   /tmp/ferridriver-ct-react-live-backup-EBjtSU/ct_react_live.rs.
+- Audited remote protocol selection and fixed Firefox `BrowserType.connect()`
+  and instance-resolver connections to use the existing WebDriver BiDi
+  transport instead of incorrectly forcing CDP. BiDi connections now accept a
+  direct `ws://`/`wss://` endpoint, keep page adoption and lifecycle handling
+  in the shared `BrowserState`, and pass targeted format and clippy checks.
+  Safari/WebDriver HTTP and Appium classic sessions still need a separate
+  adapter because they are not BiDi WebSocket endpoints.

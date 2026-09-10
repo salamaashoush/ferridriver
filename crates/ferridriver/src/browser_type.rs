@@ -161,6 +161,17 @@ impl BrowserType {
   ///
   /// Returns an error if the WebSocket handshake fails.
   pub async fn connect(self, ws_endpoint: &str, options: ConnectOptions) -> Result<Browser> {
+    if self.kind == BrowserKind::Firefox {
+      let plan = LaunchPlan {
+        backend: BackendKind::Bidi,
+        kind: BrowserKind::Firefox,
+        ws_endpoint: Some(ws_endpoint.to_string()),
+        ..LaunchPlan::default()
+      };
+      let mut state = BrowserState::with_plan(ConnectMode::ConnectUrl(ws_endpoint.to_string()), plan);
+      Box::pin(state.ensure_browser()).await?;
+      return Ok(Browser::from_state(state));
+    }
     let cdp_opts = ConnectOverCdpOptions {
       headers: options.headers,
       slow_mo: options.slow_mo,

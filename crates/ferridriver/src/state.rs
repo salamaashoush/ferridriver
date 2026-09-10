@@ -857,11 +857,14 @@ impl BrowserState {
       }
     }
 
-    let spec = state.read().await.launch_spec();
+    let (spec, backend_kind) = {
+      let guard = state.read().await;
+      (guard.launch_spec(), guard.backend_kind)
+    };
     let (mode, effective) = spec.resolve_off_lock(instance).await?;
     let browser = match &mode {
       ConnectMode::Launch => spec.launch_browser(&effective).await?,
-      other => connect_browser(other).await?,
+      other => connect_browser(other, backend_kind).await?,
     };
     let adopt_pages = !matches!(mode, ConnectMode::Launch);
 
@@ -1158,10 +1161,20 @@ fn resolve_with_prefix(resolver: &InstanceResolverFn, instance_name: &str) -> Op
   resolver(prefix)
 }
 
-/// Attach to a browser someone else is running. `ConnectUrl` and
-/// `AutoConnect` both speak CDP over a WebSocket.
-async fn connect_browser(mode: &ConnectMode) -> Result<AnyBrowser> {
+/// Attach to a browser someone else is running. CDP uses discovery for HTTP
+/// endpoints; the WebDriver BiDi backend requires its WebSocket endpoint
+/// directly because it has no CDP-style discovery document.
+async fn connect_browser(mode: &ConnectMode, backend_kind: BackendKind) -> Result<AnyBrowser> {
   use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
+
+  if backend_kind == BackendKind::Bidi {
+    let ConnectMode::ConnectUrl(ws_url) = mode else {
+      return Err(FerriError::unsupported("WebDriver BiDi requires a WebSocket endpoint"));
+    };
+    return Ok(AnyBrowser::Bidi(
+      Box::pin(crate::backend::bidi::BidiBrowser::connect(ws_url)).await?,
+    ));
+  }
   let ws_url = match mode {
     ConnectMode::ConnectUrl(url) if url.starts_with("ws://") || url.starts_with("wss://") => url.clone(),
     ConnectMode::ConnectUrl(url) => discover_ws_from_http(url).await?,
@@ -1203,7 +1216,7 @@ impl BrowserState {
     let (mode, effective) = spec.resolve_off_lock(instance_name).await?;
     let browser = match &mode {
       ConnectMode::Launch => spec.launch_browser(&effective).await?,
-      other => connect_browser(other).await?,
+      other => connect_browser(other, self.backend_kind).await?,
     };
     let adopt_pages = !matches!(mode, ConnectMode::Launch);
     Box::pin(self.install_instance(instance_name, browser, adopt_pages)).await
