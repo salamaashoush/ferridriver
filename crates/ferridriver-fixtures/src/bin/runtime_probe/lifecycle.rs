@@ -17,7 +17,34 @@ pub enum Action {
   PageState,
   SelfClose,
   Evaluate { expression: String },
+  Navigate { url: String },
+  StorageState,
+  SetStorageState { state: Value },
+  ExposeFunction { name: String, callback: Callback },
+  RemoveExposedFunction { name: String },
   CloseContext,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Callback {
+  Double,
+  Greet,
+  Add,
+}
+
+impl Callback {
+  fn call(self, args: &[Value]) -> Value {
+    let first = args.first().and_then(Value::as_f64).unwrap_or(0.0);
+    match self {
+      Self::Double => json!(first * 2.0),
+      Self::Greet => json!(format!(
+        "Hello, {}!",
+        args.first().and_then(Value::as_str).unwrap_or("world")
+      )),
+      Self::Add => json!(first + args.get(1).and_then(Value::as_f64).unwrap_or(0.0)),
+    }
+  }
 }
 
 struct Lifecycle {
@@ -37,6 +64,29 @@ impl Lifecycle {
 
   async fn run(&mut self, action: Action) -> Result<Value> {
     match action {
+      Action::Navigate { url } => {
+        self.page()?.goto(&url).await?;
+        Ok(Value::Null)
+      },
+      Action::StorageState => Ok(self.page()?.storage_state().await?),
+      Action::SetStorageState { state } => {
+        self.page()?.set_storage_state(&state).await?;
+        Ok(Value::Null)
+      },
+      Action::ExposeFunction { name, callback } => {
+        self
+          .page()?
+          .expose_function(
+            &name,
+            Arc::new(move |args| Box::pin(async move { callback.call(&args) })),
+          )
+          .await?;
+        Ok(Value::Null)
+      },
+      Action::RemoveExposedFunction { name } => {
+        self.page()?.remove_exposed_function(&name).await?;
+        Ok(Value::Null)
+      },
       Action::Registries => registries(&self.browser).await,
       Action::NewContext { user_agent } => {
         self.context = Some(

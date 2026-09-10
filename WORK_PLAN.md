@@ -686,3 +686,59 @@ completion requires observable behavior through the public scripting API.
   passed on all four backend projects. Warm runtime is similar to 108.590s
   before this change; the demonstrated improvement is retry responsiveness
   under synchronous JS contention, not an overall throughput speedup.
+
+- Migrated the fifteen Rust page_api.rs groups into eighteen native integration
+  cases, splitting the large basic-API group across selectors/actions, state
+  accessors, waiters, and screenshots/focus/filters/viewport. Other groups retain
+  AI snapshot metadata/depth/incremental/ref-map checks, init-script disposal,
+  dialog defaults/listeners, injection, lifecycle states, element evaluation,
+  checkbox/selection/tap, storage, close idempotence, locator set operations,
+  routing/disposal/abort, browser state, and the 3000-message console storm.
+  Rust callback and page-level storage APIs use the existing private lifecycle
+  probe so the exact core paths stay exercised; assertions live in native JS.
+  All eighteen cases pass in 969ms with eight native workers.
+- Native waitForLoadState accepted omission but tried converting an explicit
+  undefined argument into String. The migrated lifecycle test caught this.
+  Read rquickjs FromParam<Opt<T>> and Playwright page.ts: Opt handles missing
+  arguments only. The binding now uses Opt<Option<String>> and forwards the
+  flattened optional state. The Rust core and NAPI already accept None.
+  A native E2E regression verifies omission, undefined, and undefined plus
+  timeout options on all four backend projects.
+- Corrected Page.addInitScript's native TypeScript declaration from void to
+  Disposable, matching its existing native/NAPI result and Playwright's source.
+  A typed E2E case verifies injection, repeated disposal, and absence after
+  navigation on all four backends. The existing multi-page E2E now navigates
+  three data URLs concurrently, retaining the original input/button/list and
+  screenshot size/difference checks. Twelve focused backend cases passed.
+- Removed clean page_api.rs (42046 bytes) and parallel.rs (2604 bytes) after
+  copying and byte-verifying them against HEAD in
+  /tmp/ferridriver-core-page-backup-0e9v7tw4. Remaining Rust targets: 48.
+  The native console storm additionally verifies message order and a working
+  browser command afterward. Full-gate verification is in progress.
+- Page-contract rebuild gate passed: 136 checks, zero failures or blocks,
+  124.937s wall time (124.85s gate); logs target/gate/1789029491-379030.
+  Native integrations: 608 passed. Retained the console storm's original
+  20-second limit as a native test timeout before final verification, so the
+  event-driven waiter cannot silently broaden the allowed delivery time.
+- The warm follow-up failed context_options_proxy on cdp-raw: page content
+  proved proxy traversal, but the expected HTTP request line was absent.
+  Every backend called DELETE on the same shared proxy log, so concurrent
+  tests could erase one another's observations. A native 21ms reproduction
+  recorded two scopes, deleted one, and observed both disappear.
+- Added exact query-key cleanup to the fixture log while preserving unscoped
+  DELETE for callers with a private server. The E2E test uses a fresh UUID in
+  its requested URL, asserts that exact URL was observed, and only clears its
+  own records afterward. The native regression includes prefix-overlapping
+  keys to prevent substring deletion of another observer. It passes in 20ms;
+  forty repeated E2E executions across all four backends passed in 3.6s.
+  The runner reports four unique tests for those forty executions; review
+  repeat-index reporting separately before claiming full runner parity.
+  Lint required extracting the fixture-log handler after it crossed 100 lines;
+  no suppression or assertion weakening. Final full gate is running.
+- Final page-contract/proxy gate passed: 136 checks, zero failures or blocks,
+  107.972s wall time (107.88s gate); logs target/gate/1789030015-765676 and
+  /tmp/ferridriver-core-page-proxy-final.log. Both proxy isolation and original
+  retry timing assertions passed across all four backends. Native integration
+  count is 609; E2E count is 2235. Warm gate time remains about 108s, so this
+  checkpoint improves coverage and removes shared-observer flakiness without
+  claiming a material whole-gate speedup. Remaining Rust targets: 48.
