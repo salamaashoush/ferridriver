@@ -183,11 +183,18 @@ impl TestHostBridge for InfoBridge {
     // Playwright triples the budget; keep the VM interrupt deadline in
     // step with the worker's extended timeout.
     self.deadline.arm(self.base_timeout * 3);
+    self.modifiers.timeout_updates.send_replace(self.base_timeout * 3);
   }
 
   fn set_timeout_override(&self, ms: u64) {
     *Self::lock(&self.modifiers.timeout_override) = Some(ms);
-    self.deadline.arm(Duration::from_millis(ms));
+    let timeout = Duration::from_millis(ms);
+    if timeout.is_zero() {
+      self.deadline.disarm();
+    } else {
+      self.deadline.arm(timeout);
+    }
+    self.modifiers.timeout_updates.send_replace(timeout);
   }
 
   fn output_path(&self, parts: &[String]) -> String {

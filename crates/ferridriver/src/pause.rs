@@ -158,6 +158,45 @@ pub async fn run_within<F: Future>(limit: Duration, fut: F) -> Result<F::Output,
   }
 }
 
+/// Updates replace the total budget, including time already spent. Zero
+/// disables the deadline; debugger parks never consume the budget.
+///
+/// # Errors
+/// Returns [`Timedout`] when the current budget expires outside a debugger park.
+pub async fn run_within_updates<F: Future>(
+  mut updates: tokio::sync::watch::Receiver<Duration>,
+  fut: F,
+) -> Result<F::Output, Timedout> {
+  let clock = pause_clock();
+  let started = Instant::now();
+  let parked_before = clock.parked_now();
+  let mut fut = std::pin::pin!(fut);
+  let mut updates_open = true;
+  loop {
+    let limit = *updates.borrow_and_update();
+    let elapsed = started
+      .elapsed()
+      .saturating_sub(clock.parked_now().saturating_sub(parked_before));
+    let remaining = limit.saturating_sub(elapsed);
+    if !limit.is_zero() && remaining.is_zero() {
+      return Err(Timedout);
+    }
+    tokio::select! {
+      biased;
+      changed = updates.changed(), if updates_open => {
+        updates_open = changed.is_ok();
+      },
+      result = async {
+        if limit.is_zero() {
+          Ok(fut.as_mut().await)
+        } else {
+          run_within(remaining, fut.as_mut()).await
+        }
+      } => return result,
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use std::time::Duration;

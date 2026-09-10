@@ -163,8 +163,10 @@ async fn build_world_from_pool(
     .await
     .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", e))?;
 
-  let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
-  pool.inject("__test_modifiers", Arc::clone(&modifiers));
+  let modifiers = pool
+    .get("__test_modifiers")
+    .await
+    .map_err(|e| TestFailure::wrap("fixture \'__test_modifiers\' failed", e))?;
 
   Ok(BrowserWorld::new(ferridriver_test::model::TestFixtures {
     browser,
@@ -376,9 +378,10 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
         .await
         .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
 
-      // Create shared modifiers — worker reads these after callback returns.
-      let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
-      pool.inject("__test_modifiers", Arc::clone(&modifiers));
+      let modifiers = pool
+        .get("__test_modifiers")
+        .await
+        .map_err(|e| TestFailure::wrap("fixture \'__test_modifiers\' failed", e))?;
 
       // Build unified TestFixtures and construct BrowserWorld from it.
       let fixtures = ferridriver_test::model::TestFixtures {

@@ -456,8 +456,10 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
         .await
         .map_err(|e| TestFailure::from(format!("test session load failed: {e}")))?;
 
-      let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
-      pool.inject("__test_modifiers", Arc::clone(&modifiers));
+      let modifiers = pool
+        .get("__test_modifiers")
+        .await
+        .map_err(|e| TestFailure::wrap("fixture \'__test_modifiers\' failed", e))?;
 
       let world = build_world_data(&pool, &test_info, &p).await?;
 

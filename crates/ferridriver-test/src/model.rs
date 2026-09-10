@@ -1399,11 +1399,8 @@ pub enum ExpectedStatus {
 // ── Runtime Modifiers (shared between JS test body and Rust worker) ──
 
 /// Runtime test modifiers set by `test.skip()`, `test.fail()`, `test.slow()` inside
-/// a test body. Shared via `Arc` between the NAPI layer (JS thread writes) and the
-/// Rust worker (reads after callback returns).
-///
-/// Uses atomics and `std::sync::Mutex` for cross-thread safety. No actual race —
-/// the worker reads strictly after the TSFN callback completes.
+/// a test body. The worker observes deadline updates while the body runs and
+/// reads outcome modifiers after it finishes.
 pub struct TestModifiers {
   /// Set by `test.skip()` / `test.fixme()` inside test body.
   pub skipped: AtomicBool,
@@ -1415,6 +1412,7 @@ pub struct TestModifiers {
   pub slow: AtomicBool,
   /// Set by `testInfo.setTimeout()` inside test body.
   pub timeout_override: std::sync::Mutex<Option<u64>>,
+  pub timeout_updates: tokio::sync::watch::Sender<Duration>,
 }
 
 impl Default for TestModifiers {
@@ -1425,6 +1423,7 @@ impl Default for TestModifiers {
       expected_failure: AtomicBool::new(false),
       slow: AtomicBool::new(false),
       timeout_override: std::sync::Mutex::new(None),
+      timeout_updates: tokio::sync::watch::channel(Duration::ZERO).0,
     }
   }
 }

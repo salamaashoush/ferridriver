@@ -1528,6 +1528,9 @@ impl Worker {
     ));
     let test_pool = custom_pool.child_with_defs(build_test_fixture_defs(Arc::clone(&resources)), FixtureScope::Test);
     test_pool.inject("test_info", Arc::clone(&test_info));
+    let modifiers = Arc::new(crate::TestModifiers::default());
+    modifiers.timeout_updates.send_replace(timeout_dur);
+    test_pool.inject("__test_modifiers", Arc::clone(&modifiers));
 
     // Playwright `auto: true` fixtures resolve regardless of whether
     // the test body destructured them. Walk the full def graph for
@@ -1669,8 +1672,8 @@ impl Worker {
     } else {
       // Soft assertions raised anywhere in the body land on this test's
       // own collector and fail it at the end, instead of stopping here.
-      ferridriver::pause::run_within(
-        timeout_dur,
+      ferridriver::pause::run_within_updates(
+        modifiers.timeout_updates.subscribe(),
         ferridriver_expect::with_sink(
           Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
           run_caught((test.test_fn)(test_pool.clone())),
@@ -1678,6 +1681,7 @@ impl Worker {
       )
       .await
     };
+    timeout_dur = *modifiers.timeout_updates.borrow();
 
     // Hold here, before `afterEach` and before the context closes, so
     // whoever attaches sees the page the failure left rather than its
