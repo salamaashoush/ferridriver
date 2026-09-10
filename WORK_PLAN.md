@@ -1469,3 +1469,7 @@ completion requires observable behavior through the public scripting API.
   failures or blocks in 122.35s. Integration took 88.45s, E2E 111.09s, and
   BDD 101.14s under concurrent build and lint load. Log:
   `target/gate/1789055254-4032890`.
+- Documented the supported BiDi-capable Safari and Appium connection shape for
+  iOS and Android capabilities, including headers, timeout, and namespaced
+  `appium:options`; the protocol audit now states the Classic-only boundary
+  beside the usable scripting example.

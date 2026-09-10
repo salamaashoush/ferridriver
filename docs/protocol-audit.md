@@ -23,3 +23,25 @@ capability merge: a Safari or Appium driver must expose the negotiated BiDi
 socket. A live Safari, XCUITest, or UiAutomator2 session is not available in
 the current gate environment, so those paths still need device-backed tests
 before they can be called complete.
+
+The scripting connection shape for a BiDi-capable driver is:
+
+```ts
+const browser = await webkit().connect('http://127.0.0.1:4444', {
+  headers: { authorization: `Bearer ${process.env.APPIUM_TOKEN}` },
+  timeout: 30_000,
+  capabilities: {
+    platformName: 'iOS',
+    'appium:options': {
+      automationName: 'Safari',
+      deviceName: 'example-device',
+    },
+  },
+});
+```
+
+Android uses the same connection shape with `platformName: 'Android'` and
+driver-specific `appium:options` values. Ferridriver preserves those
+namespaced capabilities and forces `webSocketUrl: true` because its page API
+is implemented over the returned BiDi socket. A Classic-only driver must use a
+BiDi-enabled configuration or remains unsupported by design.
