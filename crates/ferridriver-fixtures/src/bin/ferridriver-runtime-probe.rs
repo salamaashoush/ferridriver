@@ -32,6 +32,8 @@ mod session_table;
 mod sidecar;
 #[path = "runtime_probe/test_registry.rs"]
 mod test_registry;
+#[path = "runtime_probe/web_server.rs"]
+mod web_server;
 #[path = "runtime_probe/webkit.rs"]
 mod webkit;
 
@@ -78,6 +80,11 @@ enum Operation {
     name: String,
     expression: Option<String>,
   },
+  WebServerShutdown {
+    #[serde(flatten)]
+    request: web_server::Request,
+  },
+  WebServerProbes,
   Webkit {
     request: webkit::Request,
   },
@@ -457,6 +464,8 @@ impl Probe {
       Operation::ScreenshotSnapshot { name, expression } => {
         screenshot::run(&self.root, &name, expression.as_deref()).await
       },
+      Operation::WebServerShutdown { request } => web_server::shutdown(&self.root, request).await,
+      Operation::WebServerProbes => web_server::probes().await,
       Operation::Webkit { request } => webkit::run(request).await,
       Operation::PersistentProfile { scenario } => persistent_profile::run(&self.root, scenario).await,
       Operation::ProcessRecordPublication => process_records::run().await,
@@ -679,6 +688,9 @@ async fn run_engine(context: &RunContext, source: &str, args: &[Value], timeout_
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+  if std::env::args().nth(1).as_deref() == Some("--web-server-fixture") {
+    return web_server::child().await;
+  }
   let mut input = String::new();
   std::io::stdin().read_to_string(&mut input)?;
   let operations: Vec<Operation> = serde_json::from_str(&input)?;

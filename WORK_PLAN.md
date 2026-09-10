@@ -1196,3 +1196,32 @@ completion requires observable behavior through the public scripting API.
   in 65.7s; the focused sixteen cases took 252ms. Logs:
   target/gate/1789042282-1744195 and
   /tmp/ferridriver-session-extensions-ready.log.
+
+- Migrated web-server lifecycle integration assertions to native JS and
+  replaced the Node trap process with a native HTTP fixture. SIGTERM/SIGINT
+  markers and hard-kill absence are checked immediately after manager.stop,
+  including actual HTTP response and server unreachability after shutdown.
+  Removed the original marker polling and 200ms hard-kill sleep.
+- Added real self-signed HTTPS readiness checks alongside both original
+  plain HTTP modes: strict rejects the certificate and lenient accepts it.
+- Found and reproduced unread stdout/stderr pipe blockage in spawn_command.
+  A fixture writes 1 MiB to each pipe before serving; the native regression
+  timed out under the old implementation. Both streams now drain throughout
+  the child's life without accumulating output. The regression passed in
+  118ms; all six focused matches passed in 148ms. Primary reference:
+  /tmp/playwright/packages/playwright/src/plugins/webServerPlugin.ts, which
+  attaches consumers to both process streams.
+- Removed unchanged web_server.rs (6400 bytes) after verified backup at
+  /tmp/ferridriver-web-server-backup-cxl7cff4/web_server.rs. Remaining top-level
+  Rust test files: 28. Full-gate verification is pending.
+- Additional server audit findings remain open: readiness builds an HTTP
+  client on every poll, its backoff can exceed the configured deadline,
+  failed startup does not explicitly stop the launched child, and reuse
+  unnecessarily spawns a true placeholder. These need separate regressions.
+- Web-server migration and pipe-drain fix final headless gate exited zero:
+  117 checks, zero failures or blocks, 112.30s. All 795 native integration
+  cases passed in 89.9s. Rust test artifacts rebuilt in 26.50s and docs
+  took 53.49s; this is not a comparable warm-run speedup measurement.
+  Logs: target/gate/1789042684-1950507 and
+  /tmp/ferridriver-web-server-ready-final.log. The initial gate stopped at
+  an explicit-default clippy error in the fixture; the final run fixes it.

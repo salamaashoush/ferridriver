@@ -293,9 +293,22 @@ fn spawn_command(
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped());
-  cmd
+  let mut child = cmd
     .spawn()
-    .map_err(|e| ferridriver::FerriError::backend(format!("spawn '{command}': {e}")))
+    .map_err(|e| ferridriver::FerriError::backend(format!("spawn '{command}': {e}")))?;
+  if let Some(stdout) = child.stdout.take() {
+    drain_output(stdout);
+  }
+  if let Some(stderr) = child.stderr.take() {
+    drain_output(stderr);
+  }
+  Ok(child)
+}
+
+fn drain_output(mut output: impl tokio::io::AsyncRead + Unpin + Send + 'static) {
+  tokio::spawn(async move {
+    let _ = tokio::io::copy(&mut output, &mut tokio::io::sink()).await;
+  });
 }
 
 /// Build the readiness-probe HTTP client, optionally accepting
