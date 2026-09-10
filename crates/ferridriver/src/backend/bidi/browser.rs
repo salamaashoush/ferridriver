@@ -644,17 +644,16 @@ mod webdriver_url_tests {
 
     let mut headers = rustc_hash::FxHashMap::default();
     headers.insert("authorization".to_string(), "Bearer test-token".to_string());
-    let result = BidiBrowser::connect_webdriver(
+    let result = Box::pin(BidiBrowser::connect_webdriver(
       &format!("http://{address}"),
       "safari",
       Some(&serde_json::json!({"platformName": "ios"})),
       Some(&headers),
       Some(1_000),
-    )
+    ))
     .await;
-    let error = match result {
-      Ok(_) => panic!("the mock endpoint rejects the session"),
-      Err(error) => error,
+    let Err(error) = result else {
+      panic!("the mock endpoint rejects the session");
     };
     assert!(error.to_string().contains("500 Internal Server Error"));
     let request = server.await.expect("mock server task");
