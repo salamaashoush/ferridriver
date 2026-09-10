@@ -1457,3 +1457,7 @@ completion requires observable behavior through the public scripting API.
   domain, returns live metadata when tools exist, and returns an empty list for
   a page with no registrations after a 100ms collection window. The focused
   headless contract passes in 265ms.
+- Post-fix full ready verification passed all 111 checks with zero failures or
+  blocks in 113.88s after rebuilding the scripting and NAPI artifacts. E2E took
+  112.55s, BDD 106.14s, and integration 72.67s. Log:
+  `target/gate/1789055003-3830997`.
