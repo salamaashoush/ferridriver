@@ -1354,3 +1354,9 @@ completion requires observable behavior through the public scripting API.
   It only exercises the standalone HTTP client, so it now consumes zero browser
   slots and can run immediately beside browser tests. The targeted gate passed
   four checks in 7.32s.
+- Browserless-slot correction final headless gate exited zero: 112 checks,
+  zero failures or blocks, 109.48s total. Integration completed in 64.90s,
+  E2E in 103.77s, and BDD in 97.66s. The browserless NAPI case started before
+  browser capacity was available; the full makespan varied by roughly two
+  seconds from the prior checkpoint. Log directory:
+  target/gate/1789047427-228787.
