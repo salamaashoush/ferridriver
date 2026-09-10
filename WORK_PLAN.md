@@ -1478,3 +1478,6 @@ completion requires observable behavior through the public scripting API.
   verifies authorization and iOS/Appium capabilities, confirms
   `webSocketUrl` is forced back to true, and asserts the typed Classic-session
   error. The test passes in 36ms without launching a browser.
+- Full post-migration verification passed 111 checks with zero failures or
+  blocks in 106.62s. Integration completed in 64.33s, E2E in 103.39s, and BDD
+  in 97.07s. Log: `target/gate/1789055750-60577`.
