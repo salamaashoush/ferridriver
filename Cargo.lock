@@ -1988,6 +1988,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "brotli 9.0.0",
+ "dirs 7.0.0",
  "ferridriver",
  "ferridriver-bdd",
  "ferridriver-config",

@@ -295,6 +295,20 @@ struct BrowserRecord {
   start_time: Option<String>,
 }
 
+// Concurrent sweepers delete malformed JSON, so never expose a partial update.
+fn write_record_file(path: &std::path::Path, record: &BrowserRecord) -> std::io::Result<()> {
+  use std::io::Write;
+
+  let parent = path
+    .parent()
+    .ok_or_else(|| std::io::Error::other("process record has no parent directory"))?;
+  let bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
+  let mut file = tempfile::NamedTempFile::new_in(parent)?;
+  file.write_all(&bytes)?;
+  file.persist(path).map_err(|error| error.error)?;
+  Ok(())
+}
+
 /// A launch-record file, deleted when the browser it describes is
 /// killed through [`ChildGroup`].
 ///
@@ -366,7 +380,7 @@ impl ProcRecord {
       start_time: process_start_time(browser_pid),
     };
     let path = dir.join(format!("{owner_pid}-{browser_pid}.json"));
-    std::fs::write(&path, serde_json::to_vec(&record).ok()?).ok()?;
+    write_record_file(&path, &record).ok()?;
     Some((path, owned_dirs))
   }
 
@@ -393,9 +407,7 @@ impl ProcRecord {
   fn own_dir(&mut self, dir: &std::path::Path) {
     self.owned_dirs.push(dir.to_path_buf());
     self.record.owned_dirs.push(dir.to_string_lossy().into_owned());
-    if let Ok(bytes) = serde_json::to_vec(&self.record) {
-      let _ = std::fs::write(&self.path, bytes);
-    }
+    let _ = write_record_file(&self.path, &self.record);
   }
 }
 
@@ -723,7 +735,7 @@ mod tests {
       start_time: process_start_time(browser_pid),
     };
     let path = dir.join(format!("{owner_pid}-{browser_pid}.json"));
-    std::fs::write(&path, serde_json::to_vec(&record).expect("encode")).expect("write record");
+    write_record_file(&path, &record).expect("write record");
     path
   }
 
@@ -845,7 +857,7 @@ mod tests {
       // pid has since been recycled onto someone else's browser.
       start_time: Some("Thu Jan  1 00:00:00 1970".to_string()),
     };
-    std::fs::write(&record_path, serde_json::to_vec(&record).expect("encode")).expect("write record");
+    write_record_file(&record_path, &record).expect("write record");
 
     sweep_stale_browsers();
     settle();
@@ -871,7 +883,7 @@ mod tests {
       start_time: process_start_time(victim),
     };
     assert!(record.start_time.is_some(), "ps reports a start time");
-    std::fs::write(&record_path, serde_json::to_vec(&record).expect("encode")).expect("write record");
+    write_record_file(&record_path, &record).expect("write record");
 
     sweep_stale_browsers();
     settle();

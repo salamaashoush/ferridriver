@@ -91,30 +91,35 @@ describe('events', () => {
     // instance with error() returning a native JS Error — exercises the
     // per-page -> per-context bridge.
     await page.goto(dataUrl('<!doctype html><html><body><h1>wait-weberror</h1></body></html>'));
-    await page.evaluate(() => {
-      setTimeout(() => {
-        const e = new Error('ctx-forwarded');
-        window.dispatchEvent(new ErrorEvent('error', { error: e, message: e.message }));
-        throw e;
-      }, 10);
-    });
-    const deadline = Date.now() + 5000;
-    let match: { hasErrorMethod: boolean; isError: boolean; name: string; message: string } | null = null;
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) break;
-      const webErr = (await context.waitForEvent('weberror', { timeout: remaining })) as WebError;
-      const err = webErr && typeof webErr.error === 'function' ? webErr.error() : null;
-      if (err && err.message && err.message.includes('ctx-forwarded')) {
-        match = {
-          hasErrorMethod: typeof webErr.error === 'function',
-          isError: err instanceof Error,
-          name: err.name,
-          message: err.message,
-        };
-        break;
-      }
-    }
+    const [match] = await Promise.all([
+      (async () => {
+        const deadline = Date.now() + 5000;
+        let match: { hasErrorMethod: boolean; isError: boolean; name: string; message: string } | null = null;
+        while (Date.now() < deadline) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          const webErr = (await context.waitForEvent('weberror', { timeout: remaining })) as WebError;
+          const err = webErr && typeof webErr.error === 'function' ? webErr.error() : null;
+          if (err && err.message && err.message.includes('ctx-forwarded')) {
+            match = {
+              hasErrorMethod: typeof webErr.error === 'function',
+              isError: err instanceof Error,
+              name: err.name,
+              message: err.message,
+            };
+            break;
+          }
+        }
+        return match;
+      })(),
+      page.evaluate(() => {
+        setTimeout(() => {
+          const e = new Error('ctx-forwarded');
+          window.dispatchEvent(new ErrorEvent('error', { error: e, message: e.message }));
+          throw e;
+        }, 0);
+      }),
+    ]);
     expect(match).not.toBeNull();
     expect(match!.hasErrorMethod).toBe(true);
     expect(match!.isError).toBe(true);

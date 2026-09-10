@@ -13,6 +13,7 @@ homepage.workspace = true
 workspace = true
 
 [dependencies]
+dirs = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

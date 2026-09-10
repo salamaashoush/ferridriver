@@ -1,11 +1,15 @@
 #[path = "runtime_probe/bdd.rs"]
 mod bdd;
+#[path = "runtime_probe/cdp_connection.rs"]
+mod cdp_connection;
 #[path = "runtime_probe/extensions.rs"]
 mod extensions;
 #[path = "runtime_probe/http.rs"]
 mod http;
 #[path = "runtime_probe/lifecycle.rs"]
 mod lifecycle;
+#[path = "runtime_probe/process_records.rs"]
+mod process_records;
 #[path = "runtime_probe/reporter_api.rs"]
 mod reporter_api;
 #[path = "runtime_probe/reporter_output.rs"]
@@ -31,6 +35,10 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  ProcessRecordPublication,
+  CdpConnection {
+    urls: Vec<String>,
+  },
   BrowserLifecycle {
     actions: Vec<lifecycle::Action>,
   },
@@ -327,6 +335,8 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::ProcessRecordPublication => process_records::run().await,
+      Operation::CdpConnection { urls } => cdp_connection::run(&self.root, urls).await,
       Operation::BrowserLifecycle { actions } => lifecycle::run(actions).await,
       Operation::ReporterOutput { request } => reporter_output::run(request).await,
       Operation::ReporterApi { request } => reporter_api::run(request),
@@ -371,12 +381,7 @@ impl Probe {
         timeout_ms,
       } => run_engine(&self.context, &source, &args, timeout_ms).await,
       Operation::ReadVar { name } => Ok(json!(self.context.vars.get(&name))),
-      Operation::SetBundler { config, tsconfig } => {
-        let env = BundlerEnv::from_config(&config, &self.root).with_tsconfig(tsconfig.as_deref(), &self.root);
-        let fingerprint = env.fingerprint().to_string();
-        set_bundler_env(env);
-        Ok(json!({ "fingerprint": fingerprint }))
-      },
+      Operation::SetBundler { config, tsconfig } => Ok(configure_bundler(&self.root, &config, tsconfig.as_deref())),
       Operation::Bundle { entries } => {
         let bundle = bundle_and_compile(&paths(&self.root, entries), &self.root).await?;
         Ok(json!({ "inputs": bundle.source_files(&self.root), "moduleName": bundle.module_name }))
@@ -424,6 +429,13 @@ impl Probe {
       },
     }
   }
+}
+
+fn configure_bundler(root: &Path, config: &ferridriver_config::BundlerConfig, tsconfig: Option<&str>) -> Value {
+  let env = BundlerEnv::from_config(config, root).with_tsconfig(tsconfig, root);
+  let fingerprint = env.fingerprint().to_string();
+  set_bundler_env(env);
+  json!({ "fingerprint": fingerprint })
 }
 
 fn runtime_contract() -> Value {

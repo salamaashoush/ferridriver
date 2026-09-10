@@ -793,3 +793,53 @@ completion requires observable behavior through the public scripting API.
   reused workers and browsers across repetitions; resetting their state costs
   additional launches. These single observations do not establish a stable
   performance delta. Ordinary repeatEach=1 runs keep reusing each worker.
+- Migrated connect_select.rs to a native CDP reconnect contract. The fixture
+  still calls CdpBrowser<WsTransport>::connect, new_page, pages, url and title,
+  then drops the connection and reconnects. Assertions live in native JS and
+  now require both tabs' exact URLs/titles before and after reconnect, plus
+  a browser process that survives disconnect. The original silently accepted
+  URL/title errors and three-second timeouts; those now fail the observation.
+- The private fixture uses the existing headless WebSocket launcher and owned
+  process-group cleanup, including continuous stderr draining. The original
+  manual launcher stopped reading stderr as soon as it found the endpoint.
+  No readiness sleeps or new test suppressions were added. Native check passed
+  in 446ms: /tmp/ferridriver-cdp-migration-native.log.
+- Removed clean connect_select.rs (4193 bytes) after copying and verifying it
+  against HEAD at /tmp/ferridriver-cdp-migration-backup-8_jj2mgg/connect_select.rs.
+  Remaining top-level Rust test targets: 47. Lint identified two large backend
+  futures in the fixture; boxing those calls fixed the containing future sizes
+  without suppressions. Full headless gate verification is in progress.
+- The first complete migration gate failed the existing core assertion that
+  launching a process writes its record: 135 checks, one failure, 108.390s
+  wall; logs target/gate/1789032267-1383947. Record files were truncated and
+  rewritten while concurrent sweepers deleted anything they could not parse.
+  A native regression observed 9964 malformed snapshots during 64 updates,
+  with zero read errors and a live child: /tmp/ferridriver-process-records-red.log.
+- Process records now publish a complete temporary file through atomic
+  replacement in the same directory. Initial registration and owned-directory
+  updates share that writer. Existing process-test setup uses it too, with
+  every assertion retained. The native observer uses a private child waiting
+  on stdin, a thread barrier, and concurrent reads; it adds no readiness sleep.
+  Fixed observation: 6433 complete reads, zero malformed records or I/O errors.
+  Both native cases passed in 443ms: /tmp/ferridriver-record-publication-native.log.
+- Adding the fixture operations crossed the dispatcher function's line limit;
+  extracted its existing bundler configuration operation without suppressions.
+  The final full gate is running. Its core unit-test job, including the launch
+  record assertion that previously failed, has passed.
+- The next gate exposed a context weberror subscription race: the test triggered
+  the error before registering its waiter. It now arms the existing filtered
+  waiter first, preserving every assertion. Twenty executions across four
+  backends and 16 slots passed in 2.6s; log:
+  /tmp/ferridriver-context-weberror-stress.log.
+- The same run exposed an intermittent retry-timer gap: timestamps
+  [0,52,102,628] for a 400ms budget. Temporary instrumentation in a subsequent
+  passing gate measured callback bodies below 1ms, waits of 28–64ms, and 16
+  executor threads. This did not reproduce or explain the 526ms gap; the
+  investigation remains open and the original timing assertions are unchanged.
+  Diagnostic log: /tmp/ferridriver-poll-diagnostic-ready.log. Probes were removed
+  before final verification, and the assertion builder matches HEAD exactly.
+- Final uninstrumented headless gate passed: 135 checks, zero failures or blocks,
+  143.65s gate time. Logs: target/gate/1789033742-1989082 and
+  /tmp/ferridriver-cdp-records-events-ready.log. This is a single full-gate
+  observation, not a comparative speedup claim. Remaining migrations and
+  broader scripting capabilities are still open.
