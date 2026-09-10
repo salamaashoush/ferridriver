@@ -35,7 +35,7 @@ impl WebMcpJs {
     }
   }
 
-  async fn send(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+  async fn session(&self) -> Result<ferridriver::CdpSession> {
     let context = self
       .page
       .context()
@@ -47,7 +47,11 @@ impl WebMcpJs {
     let Some(session) = session.as_ref() else {
       return Err(FerriError::Backend("WebMCP session initialization failed".to_string()));
     };
-    session.send(method, params).await
+    Ok(session.clone())
+  }
+
+  async fn send(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    self.session().await?.send(method, params).await
   }
 
   fn frame_id(&self) -> String {
@@ -57,6 +61,44 @@ impl WebMcpJs {
 
 #[rquickjs::methods]
 impl WebMcpJs {
+  #[qjs(rename = "listTools")]
+  pub async fn list_tools<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
+    call_site
+      .scope(async move {
+        let session = self.session().await.into_js_with(&ctx)?;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let sender = std::sync::Mutex::new(Some(sender));
+        let listener = session.once(
+          "WebMCP.toolsAdded",
+          std::sync::Arc::new(move |payload| {
+            if let Ok(mut sender) = sender.lock()
+              && let Some(sender) = sender.take()
+            {
+              let _ = sender.send(payload);
+            }
+          }),
+        );
+        session
+          .send("WebMCP.enable", serde_json::json!({}))
+          .await
+          .into_js_with(&ctx)?;
+        let payload = match tokio::time::timeout(std::time::Duration::from_millis(100), receiver).await {
+          Ok(Ok(payload)) => payload,
+          _ => {
+            session.off(listener);
+            return json_to_js(&ctx, &serde_json::json!([]));
+          },
+        };
+        let tools = payload.get("tools").cloned().unwrap_or_else(|| serde_json::json!([]));
+        json_to_js(&ctx, &tools)
+      })
+      .await
+  }
+
   #[qjs(rename = "enable")]
   pub async fn enable<'js>(&self, call_site: crate::bindings::CallSite, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     call_site

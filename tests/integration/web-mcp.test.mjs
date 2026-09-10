@@ -7,14 +7,16 @@ test('headless WebMCP facade uses one target session across commands', async () 
     op: 'browser-engine',
     scripts: [{ source: `
       await page.goto('data:text/html,<title>WebMCP</title>');
+      const tools = await page.webMcp.listTools();
       const enabled = await page.webMcp.enable();
       let missingTool = '';
       try { await page.webMcp.invokeTool('missing-tool', { value: 1 }); }
       catch (error) { missingTool = String(error); }
       const disabled = await page.webMcp.disable();
       return {
-        methods: ['enable', 'disable', 'invokeTool', 'cancelInvocation']
+        methods: ['listTools', 'enable', 'disable', 'invokeTool', 'cancelInvocation']
           .every(name => typeof page.webMcp[name] === 'function'),
+        tools: Array.isArray(tools),
         enabled: enabled && typeof enabled === 'object',
         missingTool: missingTool.includes('Tool not found'),
         disabled: disabled && typeof disabled === 'object',
@@ -22,5 +24,5 @@ test('headless WebMCP facade uses one target session across commands', async () 
     ` }],
   }]);
   const value = observation(results[0])[0].value;
-  assert.deepEqual(value, { methods: true, enabled: true, missingTool: true, disabled: true });
+  assert.deepEqual(value, { methods: true, tools: true, enabled: true, missingTool: true, disabled: true });
 });

@@ -1452,3 +1452,8 @@ completion requires observable behavior through the public scripting API.
 - Final post-change ready verification passed 111 checks with zero failures or
   blocks in 105.35s. Integration took 63.69s, E2E 101.87s, and BDD 95.83s.
   Log: `target/gate/1789054471-3511311`.
+- Extended the WebMCP scripting facade with `page.webMcp.listTools()`. It
+  listens for the protocol's `WebMCP.toolsAdded` event before enabling the
+  domain, returns live metadata when tools exist, and returns an empty list for
+  a page with no registrations after a 100ms collection window. The focused
+  headless contract passes in 265ms.
