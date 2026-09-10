@@ -912,3 +912,28 @@ completion requires observable behavior through the public scripting API.
   blocks, 110.84s gate time. Logs: target/gate/1789035408-2791238 and
   /tmp/ferridriver-fixture-routes-ready-fixed.log. Boxed the combined fixture
   observer after lint identified its large future, without suppressions.
+- Configuration migration is in progress. A private observation operation
+  drives the actual layer resolver with explicit cwd, config directories,
+  environment, module contributions, and extension defaults. It returns typed
+  configuration, effective runner/project settings, warnings and provenance.
+  Twenty-nine native cases passed in 80ms without browsers:
+  /tmp/ferridriver-config-layers-expanded.log. The original layering.rs remains
+  intact until device/use options, schema contract, cache, and recording-policy
+  assertions also have native counterparts. No full-gate completion claimed
+  for this unfinished migration; current changes are not committed.
+- Completed the configuration-layer assertion migration with 45 native cases,
+  including device expansion/overrides, project engine and headless inheritance,
+  runner use options, every recording-policy row and deprecated spelling,
+  schema/type key sets, and startup-cache consistency. The observation records
+  viewport presence separately because absent and Disabled serialize to the
+  same JSON null; native assertions retain that typed distinction.
+- All 45 cases passed in 119ms without browsers:
+  /tmp/ferridriver-config-complete-native.log. Removed unchanged layering.rs
+  (42388 bytes) after verifying its backup at
+  /tmp/ferridriver-config-layering-backup-bj243vl7/layering.rs. Remaining
+  top-level Rust test targets: 41. Full-gate verification is pending.
+- Configuration migration final headless gate exited zero: 129 checks, zero
+  failures or blocks, 111.17s gate time. Logs: target/gate/1789036061-2987269
+  and /tmp/ferridriver-config-migration-ready-fixed.log. The initial lint pass
+  required an explicit LayerCache type at initialization; corrected without
+  suppressions. All migration assertions now run through the native JS suite.
