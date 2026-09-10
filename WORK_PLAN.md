@@ -1485,3 +1485,10 @@ completion requires observable behavior through the public scripting API.
   `WebMCPTool` and `WebMCPAnnotation` types, so discovered schemas, frame IDs,
   node IDs, and safety annotations are typed for callers. The type gate passes
   in 70ms and the focused WebMCP contract passes in 274ms.
+- Tuned the gate from measured runs: the native E2E suite passes all 2,235
+  tests in 58.1s with 16 workers, while two workers took 249.6s and exposed an
+  existing VM-poison ordering failure. The gate now defaults to 32 browser
+  slots, caps E2E at the measured 16-worker knee, caps shared suites at four
+  workers, and keeps four scheduler jobs available. The complete headless
+  gate passes all 111 checks in 115.28s; E2E took 85.19s, integration 94.75s,
+  and BDD 112.10s under overlap.

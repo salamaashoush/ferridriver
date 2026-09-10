@@ -196,8 +196,11 @@ fn ready_jobs() -> Vec<Job> {
 
 fn suite_jobs(workers: usize) -> Vec<Job> {
   let mut jobs = Vec::new();
-  let e2e_workers = workers.div_ceil(2);
-  let shared_workers = (workers / 4).max(1);
+  // Browser work is mostly waiting on independent renderer processes. The
+  // one-CPU CI quota otherwise collapses the E2E suite to a serial run; 16
+  // workers is the measured throughput knee for this suite.
+  let e2e_workers = workers.clamp(1, 16);
+  let shared_workers = (workers / 8).max(1);
   let worker_count = shared_workers.to_string();
   let mut e2e = Job::new(
     "e2e",
@@ -342,13 +345,15 @@ fn rust_jobs(log: &Path, root: &Path, workers: usize) -> Result<Vec<Job>> {
 #[tokio::main]
 async fn main() -> Result<()> {
   let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize()?;
-  let cpus = std::thread::available_parallelism()?.get();
   let mut workers = std::env::var("FERRIDRIVER_GATE_WORKERS")
     .ok()
     .map(|s| positive(&s))
     .transpose()?
-    .unwrap_or(cpus);
-  let mut parallel = cpus;
+    .unwrap_or(32);
+  // Keep independent browser suites in flight even when the container is
+  // CPU-quota limited; their browser processes spend most of their time in
+  // renderer/IO waits.
+  let mut parallel = 4;
   let mut mode = "ready".to_string();
   let mut selected = Vec::new();
   let mut args = std::env::args().skip(1);
