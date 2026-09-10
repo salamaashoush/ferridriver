@@ -1416,3 +1416,8 @@ completion requires observable behavior through the public scripting API.
   browser slots and therefore cannot overlap the integration and BDD suites.
   The shared 16/8/8 allocation remains the faster full-gate shape; increasing
   one suite in isolation would lengthen the complete critical path.
+- Fixed WebDriver HTTP connection options being discarded before session
+  negotiation. Custom headers now reach `/session`, and `timeout` bounds the
+  negotiation request, including typed errors for malformed header input.
+  Workspace check and ferridriver Clippy pass; the focused URL/capability
+  tests remain green.

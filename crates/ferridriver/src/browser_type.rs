@@ -176,6 +176,8 @@ impl BrowserType {
         endpoint: ws_endpoint.to_string(),
         browser_name: browser_name.to_string(),
         capabilities: options.capabilities,
+        headers: options.headers,
+        timeout: options.timeout,
       };
       let mut state = BrowserState::with_plan(mode, plan);
       Box::pin(state.ensure_browser()).await?;

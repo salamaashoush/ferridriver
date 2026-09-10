@@ -141,6 +141,8 @@ impl BidiBrowser {
     endpoint: &str,
     browser_name: &str,
     extra_capabilities: Option<&serde_json::Value>,
+    headers: Option<&rustc_hash::FxHashMap<String, String>>,
+    timeout_ms: Option<u64>,
   ) -> Result<Self> {
     let session_url = webdriver_session_url(endpoint)?;
     let always_match = webdriver_capabilities(browser_name, extra_capabilities);
@@ -149,7 +151,24 @@ impl BidiBrowser {
         "alwaysMatch": always_match
       }
     });
-    let response = reqwest::Client::new()
+    let mut client = reqwest::Client::builder();
+    if let Some(timeout_ms) = timeout_ms {
+      client = client.timeout(std::time::Duration::from_millis(timeout_ms));
+    }
+    if let Some(headers) = headers {
+      let mut request_headers = reqwest::header::HeaderMap::new();
+      for (name, value) in headers {
+        let name = reqwest::header::HeaderName::try_from(name)
+          .map_err(|e| FerriError::invalid_argument("headers", format!("invalid header name '{name}': {e}")))?;
+        let value = reqwest::header::HeaderValue::try_from(value)
+          .map_err(|e| FerriError::invalid_argument("headers", format!("invalid value for '{name}': {e}")))?;
+        request_headers.insert(name, value);
+      }
+      client = client.default_headers(request_headers);
+    }
+    let response = client
+      .build()
+      .map_err(|e| FerriError::Backend(format!("WebDriver HTTP client setup failed: {e}")))?
       .post(session_url.as_str())
       .json(&body)
       .send()

@@ -422,6 +422,8 @@ pub enum ConnectMode {
     endpoint: String,
     browser_name: String,
     capabilities: Option<serde_json::Value>,
+    headers: Option<rustc_hash::FxHashMap<String, String>>,
+    timeout: Option<u64>,
   },
   /// Auto-connect to running Chrome by reading `DevToolsActivePort` file
   AutoConnect {
@@ -1174,28 +1176,31 @@ async fn connect_browser(mode: &ConnectMode, backend_kind: BackendKind) -> Resul
   use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
 
   if backend_kind == BackendKind::Bidi {
-    let (endpoint, browser_name, capabilities) = match mode {
+    let endpoint = match mode {
       ConnectMode::WebDriver {
         endpoint,
         browser_name,
         capabilities,
-      } => (endpoint, browser_name.as_str(), capabilities.as_ref()),
-      ConnectMode::ConnectUrl(endpoint) if endpoint.starts_with("http://") || endpoint.starts_with("https://") => {
-        (endpoint, "firefox", None)
+        headers,
+        timeout,
+      } => {
+        return Ok(AnyBrowser::Bidi(
+          Box::pin(crate::backend::bidi::BidiBrowser::connect_webdriver(
+            endpoint,
+            browser_name,
+            capabilities.as_ref(),
+            headers.as_ref(),
+            *timeout,
+          ))
+          .await?,
+        ));
       },
-      ConnectMode::ConnectUrl(endpoint) => (endpoint, "", None),
+      ConnectMode::ConnectUrl(endpoint) if endpoint.starts_with("http://") || endpoint.starts_with("https://") => {
+        endpoint
+      },
+      ConnectMode::ConnectUrl(endpoint) => endpoint,
       _ => return Err(FerriError::unsupported("WebDriver BiDi requires a WebSocket endpoint")),
     };
-    if !browser_name.is_empty() {
-      return Ok(AnyBrowser::Bidi(
-        Box::pin(crate::backend::bidi::BidiBrowser::connect_webdriver(
-          endpoint,
-          browser_name,
-          capabilities,
-        ))
-        .await?,
-      ));
-    }
     return Ok(AnyBrowser::Bidi(
       Box::pin(crate::backend::bidi::BidiBrowser::connect(endpoint)).await?,
     ));
