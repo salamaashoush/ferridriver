@@ -460,3 +460,33 @@ completion requires observable behavior through the public scripting API.
   105.253 wall seconds (105.17 gate), 32 jobs/browser slots. All 538 native
   integrations passed. Logs: `target/gate/1789023115-2041327`,
   `/tmp/ferridriver-launch-proxy-ready.log`. No retry timing failure this run.
+
+- Pushed `4627b20a`, verified launch-proxy migration. Inspecting remaining
+  HTTP tests found missing JS/NAPI redirect modes and response redirect flags.
+  Added four native regression cases; all failed on the prior binary. The
+  Request overload uses a page-network Request, not WHATWG Request, so the
+  initial speculative Request-constructor case was corrected to the actual
+  per-call options contract after reading both binding implementations.
+  Shared core parsing now validates follow/manual/error before I/O; native
+  and NAPI bindings expose modes and redirected/unfollowedRedirect methods.
+  Native declaration source updated, no generated declarations edited.
+  All four native cases now pass. The original HTTP Rust targets remain
+  until their complete assertion set is migrated.
+
+- HTTP redirect binding full verification is live in session 33983,
+  `/tmp/ferridriver-http-redirect-ready.log`, logs
+  `target/gate/1789023545-2233498`. Lint/types/strict docs passed. Rust test
+  graph is rebuilding after core/binding changes, alongside browser suites.
+  Poll the same handle; do not start another full gate while it is live.
+  Need runtime verification of the NAPI additions after addon build, plus
+  final leak/style checks and commit/push. No HTTP originals removed yet.
+
+- HTTP redirect binding gate passed all 145 checks in 135.332 wall
+  seconds (135.25 gate) at default 32 slots, including rebuilds. All four
+  retry timing cases passed. The built NAPI addon was additionally exercised
+  through the native runner (22ms): /tmp/ferridriver-napi-redirect-verification.test.mjs
+  and /tmp/ferridriver-napi-redirect-verification.log. Bun only loaded the
+  .node application fixture and returned observations; assertions ran in
+  ferridriver. Generated NAPI declarations include the new option and methods.
+  The addon check should join a permanent native-addon gate group when
+  migrating that suite; it currently remains a focused verification artifact.

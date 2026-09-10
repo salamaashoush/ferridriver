@@ -785,6 +785,17 @@ impl HttpClient {
 }
 
 impl RequestOptions {
+  /// # Errors
+  /// Rejects modes outside `follow`, `manual`, and `error` before any request is sent.
+  pub fn parse_redirect(value: &str) -> Result<RedirectMode, String> {
+    match value {
+      "follow" => Ok(RedirectMode::Follow),
+      "manual" => Ok(RedirectMode::Manual),
+      "error" => Ok(RedirectMode::Error),
+      _ => Err(format!("invalid redirect mode: {value}")),
+    }
+  }
+
   /// Lower a Playwright `params` / `form` option map, whose values the
   /// types admit as `string | number | boolean`, into ordered pairs.
   ///

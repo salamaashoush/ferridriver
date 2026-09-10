@@ -51,6 +51,8 @@ pub struct FetchOptions {
   pub fail_on_status_code: Option<bool>,
   /// Max redirects.
   pub max_redirects: Option<i32>,
+  #[napi(ts_type = "'follow' | 'manual' | 'error'")]
+  pub redirect: Option<String>,
   /// Retry on a connection reset up to this many times.
   pub max_retries: Option<i32>,
   /// Per-request override of the client-level TLS posture.
@@ -95,6 +97,13 @@ impl FetchOptions {
       timeout: self.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
       fail_on_status_code: self.fail_on_status_code,
       max_redirects: self.max_redirects.map(|m| m as u32),
+      redirect: self
+        .redirect
+        .as_deref()
+        .map(ferridriver::http_client::RequestOptions::parse_redirect)
+        .transpose()
+        .map_err(napi::Error::from_reason)?
+        .unwrap_or_default(),
       max_retries: self.max_retries.map(|m| m as u32),
       ignore_https_errors: self.ignore_https_errors,
       multipart: self
@@ -169,6 +178,16 @@ pub struct HttpResponse {
 
 #[napi]
 impl HttpResponse {
+  #[napi]
+  pub fn redirected(&self) -> bool {
+    self.inner.redirected()
+  }
+
+  #[napi]
+  pub fn unfollowed_redirect(&self) -> bool {
+    self.inner.unfollowed_redirect()
+  }
+
   /// HTTP status code.
   #[napi(getter)]
   pub fn status(&self) -> i32 {

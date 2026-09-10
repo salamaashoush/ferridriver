@@ -34,6 +34,7 @@ struct JsRequestOptions {
   timeout: Option<u64>,
   fail_on_status_code: Option<bool>,
   max_redirects: Option<u32>,
+  redirect: Option<String>,
   max_retries: Option<u32>,
   // serde's camelCase would spell this `ignoreHttpsErrors`; Playwright's
   // option keeps the acronym upper-case, so it must be named explicitly
@@ -62,6 +63,12 @@ impl JsRequestOptions {
       timeout: self.timeout.map(Duration::from_millis),
       fail_on_status_code: self.fail_on_status_code,
       max_redirects: self.max_redirects,
+      redirect: self
+        .redirect
+        .as_deref()
+        .map(RequestOptions::parse_redirect)
+        .transpose()?
+        .unwrap_or_default(),
       max_retries: self.max_retries,
       ignore_https_errors: self.ignore_https_errors,
       multipart: self
@@ -389,6 +396,16 @@ impl HttpResponseJs {
 
 #[rquickjs::methods]
 impl HttpResponseJs {
+  #[qjs(rename = "redirected")]
+  pub fn redirected(&self) -> bool {
+    self.inner.redirected()
+  }
+
+  #[qjs(rename = "unfollowedRedirect")]
+  pub fn unfollowed_redirect(&self) -> bool {
+    self.inner.unfollowed_redirect()
+  }
+
   #[qjs(rename = "status")]
   pub fn status(&self) -> i32 {
     i32::from(self.inner.status())

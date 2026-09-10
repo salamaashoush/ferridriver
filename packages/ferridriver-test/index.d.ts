@@ -1981,6 +1981,8 @@ export interface WebStorage {
 }
 
 export interface APIResponse {
+  redirected(): boolean;
+  unfollowedRedirect(): boolean;
   url(): string;
   status(): number;
   statusText(): string;
@@ -1996,6 +1998,7 @@ export interface APIResponse {
 }
 
 export interface APIRequestOptions {
+  redirect?: 'follow' | 'manual' | 'error';
   headers?: Record<string, string>;
   data?: string | Uint8Array | Buffer | object;
   // ferridriver extension: explicit JSON body (Playwright routes
