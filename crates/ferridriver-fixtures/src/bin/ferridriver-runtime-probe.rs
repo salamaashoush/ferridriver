@@ -4,6 +4,8 @@ mod bdd;
 mod extensions;
 #[path = "runtime_probe/http.rs"]
 mod http;
+#[path = "runtime_probe/lifecycle.rs"]
+mod lifecycle;
 #[path = "runtime_probe/reporter_api.rs"]
 mod reporter_api;
 #[path = "runtime_probe/reporter_output.rs"]
@@ -29,6 +31,9 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  BrowserLifecycle {
+    actions: Vec<lifecycle::Action>,
+  },
   ReporterOutput {
     #[serde(flatten)]
     request: reporter_output::Request,
@@ -322,6 +327,7 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::BrowserLifecycle { actions } => lifecycle::run(actions).await,
       Operation::ReporterOutput { request } => reporter_output::run(request).await,
       Operation::ReporterApi { request } => reporter_api::run(request),
       Operation::ReporterBus { subscribers, actions } => reporters::bus(subscribers, actions).await,
