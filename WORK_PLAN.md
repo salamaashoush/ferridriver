@@ -1421,3 +1421,8 @@ completion requires observable behavior through the public scripting API.
   negotiation request, including typed errors for malformed header input.
   Workspace check and ferridriver Clippy pass; the focused URL/capability
   tests remain green.
+- Repeated the full headless gate after the connection-path fix: 108 checks,
+  zero failures or blocks, in 146.99s. Integration took 86.91s, E2E 143.03s,
+  and BDD 135.76s. A cold run reached 468.70s because compiler work and
+  browser suites contended for CPU; the warm result confirms correctness but
+  does not establish a speed improvement.
