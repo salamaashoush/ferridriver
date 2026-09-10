@@ -178,7 +178,15 @@ pub fn attach_listeners(
   let emitter_frame = emitter.clone();
   let _ = dialog_manager.register_emitter_bridge(emitter.clone());
 
+  let (binding_tx, mut binding_rx) = tokio::sync::mpsc::unbounded_channel::<futures::future::BoxFuture<'static, ()>>();
+  let mut binding_worker = tokio::task::JoinSet::new();
+  binding_worker.spawn(async move {
+    while let Some(call) = binding_rx.recv().await {
+      call.await;
+    }
+  });
   let ctx = TargetListenerCtx {
+    binding_tx,
     target_swap: page.target_swap(),
     emitter,
     emitter_frame,
@@ -206,6 +214,7 @@ pub fn attach_listeners(
   let provisional: ProvisionalSlot = Arc::new(tokio::sync::Mutex::new(None));
   let page = page.clone();
   tokio::spawn(async move {
+    let _binding_worker = binding_worker;
     loop {
       tokio::select! {
         ev = target_rx.recv() => match ev {
@@ -416,6 +425,7 @@ async fn handle_committed_provisional_target(
 /// dispatch so handlers always send on the current session, even after
 /// a provisional-target commit swap (cross-process navigation).
 struct TargetListenerCtx {
+  binding_tx: tokio::sync::mpsc::UnboundedSender<futures::future::BoxFuture<'static, ()>>,
   target_swap: Arc<arc_swap::ArcSwap<super::connection::Session>>,
   emitter: crate::events::EventEmitter,
   emitter_frame: crate::events::EventEmitter,
@@ -506,24 +516,30 @@ async fn handle_binding_called(ctx: &TargetListenerCtx, params: &Value) {
   };
 
   let maybe_fn = ctx.exposed_fns.read().await.get(&fn_name).cloned();
-  let deliver_js = if let Some(callback) = maybe_fn {
-    let result = callback(source, args).await;
-    format!(
-      "globalThis.__fd_bc.resolve({}, {})",
-      seq,
-      serde_json::to_string(&result).unwrap_or_else(|_| "null".into())
-    )
-  } else {
-    format!("globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')")
-  };
-  // Resolve in the calling context — each frame has its own `__fd_bc`
-  // controller, so a default-context evaluate would strand an iframe
-  // caller's promise.
-  let mut eval_params = json!({ "expression": deliver_js });
-  if let Some(id) = ctx_id {
-    eval_params["contextId"] = json!(id);
-  }
-  let _ = ctx.target().send(super::protocol::RUNTIME_EVALUATE, eval_params).await;
+  let target_swap = ctx.target_swap.clone();
+  let _ = ctx.binding_tx.send(Box::pin(async move {
+    let deliver_js = if let Some(callback) = maybe_fn {
+      let result = callback(source, args).await;
+      format!(
+        "globalThis.__fd_bc.resolve({}, {})",
+        seq,
+        serde_json::to_string(&result).unwrap_or_else(|_| "null".into())
+      )
+    } else {
+      format!("globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')")
+    };
+    // Resolve in the calling context — each frame has its own `__fd_bc`
+    // controller, so a default-context evaluate would strand an iframe
+    // caller's promise.
+    let mut eval_params = json!({ "expression": deliver_js });
+    if let Some(id) = ctx_id {
+      eval_params["contextId"] = json!(id);
+    }
+    let _ = target_swap
+      .load()
+      .send(super::protocol::RUNTIME_EVALUATE, eval_params)
+      .await;
+  }));
 }
 
 /// Main-document commit bookkeeping for `Page.frameNavigated`. Only

@@ -40,6 +40,60 @@ pub(crate) struct BidiEvent {
   pub params: serde_json::Value,
 }
 
+enum TapMessage {
+  Event(BidiEvent),
+  Barrier(oneshot::Sender<()>),
+}
+
+#[derive(Clone)]
+pub(crate) struct EventBarrier {
+  sender: mpsc::WeakUnboundedSender<TapMessage>,
+}
+
+impl EventBarrier {
+  pub async fn wait(&self) -> Result<()> {
+    let (tx, rx) = oneshot::channel();
+    self
+      .sender
+      .upgrade()
+      .ok_or_else(|| FerriError::backend("BiDi event consumer closed"))?
+      .send(TapMessage::Barrier(tx))
+      .map_err(|_| FerriError::backend("BiDi event consumer closed"))?;
+    rx.await.map_err(|_| FerriError::backend("BiDi event consumer closed"))
+  }
+}
+
+pub(crate) struct EventTap {
+  receiver: mpsc::UnboundedReceiver<TapMessage>,
+  barrier: EventBarrier,
+}
+
+impl EventTap {
+  fn new() -> (mpsc::UnboundedSender<TapMessage>, Self) {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let barrier = EventBarrier {
+      sender: sender.downgrade(),
+    };
+    (sender, Self { receiver, barrier })
+  }
+
+  pub fn barrier(&self) -> EventBarrier {
+    self.barrier.clone()
+  }
+
+  pub async fn recv(&mut self) -> Option<BidiEvent> {
+    while let Some(message) = self.receiver.recv().await {
+      match message {
+        TapMessage::Event(event) => return Some(event),
+        TapMessage::Barrier(done) => {
+          let _ = done.send(());
+        },
+      }
+    }
+    None
+  }
+}
+
 /// Pending command map: command ID -> oneshot sender for the response.
 type PendingMap = DashMap<u64, oneshot::Sender<BidiResult>>;
 
@@ -61,7 +115,7 @@ pub(crate) struct BidiTransport {
   /// fanout. State-mutating consumers (frame cache, network tracker,
   /// route interception) use these; a broadcast `Lagged` drop there
   /// corrupts tracker state, see the CDP dispatcher's tap rationale.
-  event_taps: Arc<std::sync::Mutex<Vec<mpsc::UnboundedSender<BidiEvent>>>>,
+  event_taps: Arc<std::sync::Mutex<Vec<mpsc::UnboundedSender<TapMessage>>>>,
   /// Set by [`Self::start_close`] before the browser process is killed.
   /// Firefox dies without sending a WebSocket close frame, so the
   /// reader sees a TCP reset (`ResetWithoutClosingHandshake`) — during
@@ -111,7 +165,7 @@ impl BidiTransport {
     // rationale.
     let (event_tx, _) = broadcast::channel::<BidiEvent>(4096);
     let event_tx2 = event_tx.clone();
-    let event_taps: Arc<std::sync::Mutex<Vec<mpsc::UnboundedSender<BidiEvent>>>> =
+    let event_taps: Arc<std::sync::Mutex<Vec<mpsc::UnboundedSender<TapMessage>>>> =
       Arc::new(std::sync::Mutex::new(Vec::new()));
     let event_taps2 = Arc::clone(&event_taps);
 
@@ -167,7 +221,7 @@ impl BidiTransport {
               // event before best-effort broadcast consumers.
               {
                 let mut taps = event_taps2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                taps.retain(|tap| tap.send(event.clone()).is_ok());
+                taps.retain(|tap| tap.send(TapMessage::Event(event.clone())).is_ok());
               }
               let _ = event_tx2.send(event);
             },
@@ -255,8 +309,8 @@ impl BidiTransport {
   /// Lossless, wire-ordered event tap. Never drops; consumers filter by
   /// method at the receive site. State-mutating consumers MUST use this
   /// instead of [`Self::subscribe_events`].
-  pub fn tap_events(&self) -> mpsc::UnboundedReceiver<BidiEvent> {
-    let (tx, rx) = mpsc::unbounded_channel();
+  pub fn tap_events(&self) -> EventTap {
+    let (tx, rx) = EventTap::new();
     self
       .event_taps
       .lock()
@@ -303,5 +357,50 @@ fn handle_command_response(bytes: &[u8], type_field: &[u8], pending: &PendingMap
         }));
       },
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn event_barrier_waits_for_the_consumer_to_process_queued_responses() {
+    let (sender, mut tap) = EventTap::new();
+    for status in [401, 200] {
+      assert!(
+        sender
+          .send(TapMessage::Event(BidiEvent {
+            method: "network.responseStarted".into(),
+            params: serde_json::json!({ "response": { "status": status } }),
+          }))
+          .is_ok()
+      );
+    }
+    let Some(challenge) = tap.recv().await else {
+      panic!("missing challenge")
+    };
+    assert_eq!(challenge.params["response"]["status"], 401);
+    let barrier = tap.barrier();
+    let waiting = barrier.wait();
+    tokio::pin!(waiting);
+    assert!(futures::poll!(&mut waiting).is_pending());
+    let Some(authenticated) = tap.recv().await else {
+      panic!("missing authenticated response")
+    };
+    assert_eq!(authenticated.params["response"]["status"], 200);
+    assert!(futures::poll!(&mut waiting).is_pending());
+    let next = tap.recv();
+    tokio::pin!(next);
+    assert!(futures::poll!(&mut next).is_pending());
+    assert!(waiting.await.is_ok());
+  }
+
+  #[tokio::test]
+  async fn event_barrier_reports_a_stopped_consumer() {
+    let (_sender, tap) = EventTap::new();
+    let barrier = tap.barrier();
+    drop(tap);
+    assert!(barrier.wait().await.is_err());
   }
 }

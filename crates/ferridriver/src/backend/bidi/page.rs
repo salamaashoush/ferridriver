@@ -242,6 +242,7 @@ pub struct BidiPage {
   /// `navigation` set. Consumed by `goto` / `reload` / history
   /// traversals to resolve the final main-document `Response`.
   nav_request_slot: crate::network::NavRequestSlot,
+  event_barrier: Arc<std::sync::Mutex<Option<super::transport::EventBarrier>>>,
   /// Per-page dialog handler registry. See
   /// `crates/ferridriver/src/dialog.rs::DialogManager`.
   pub dialog_manager: crate::dialog::DialogManager,
@@ -447,6 +448,7 @@ impl BidiPage {
       exposed_fns: Arc::new(RwLock::new(FxHashMap::default())),
       injected_script: Arc::new(InjectedScriptManager::new()),
       nav_request_slot: crate::network::NavRequestSlot::new(),
+      event_barrier: Arc::new(std::sync::Mutex::new(None)),
       dialog_manager: crate::dialog::DialogManager::new(),
       file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
       download_manager: crate::download::DownloadManager::new(),
@@ -696,6 +698,7 @@ impl BidiPage {
     timeout_ms: u64,
     referer: Option<&str>,
   ) -> Result<Option<Response>> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     self.injected_script.reset();
     self.clear_handle_realms();
     self.nav_request_slot.clear();
@@ -753,7 +756,7 @@ impl BidiPage {
         } else {
           std::time::Duration::ZERO
         };
-        Ok(self.await_nav_response(grace).await)
+        self.await_nav_response(grace, deadline, timeout_ms).await
       },
       Ok(Err(e)) => Err(e),
       Err(_) => Err(FerriError::timeout(format!("navigating to {url}"), timeout_ms)),
@@ -769,8 +772,25 @@ impl BidiPage {
   /// the navigation result reach us on separate consumers and the
   /// request can be processed second. A same-document navigation issues
   /// no request, so waiting there would only slow it down.
-  async fn await_nav_response(&self, grace: std::time::Duration) -> Option<Response> {
-    self.nav_request_slot.final_response(grace).await
+  async fn await_nav_response(
+    &self,
+    grace: std::time::Duration,
+    deadline: tokio::time::Instant,
+    timeout_ms: u64,
+  ) -> Result<Option<Response>> {
+    let barrier = self
+      .event_barrier
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone();
+    tokio::time::timeout_at(deadline, async {
+      if let Some(barrier) = barrier {
+        barrier.wait().await?;
+      }
+      Ok(self.nav_request_slot.final_response(grace).await)
+    })
+    .await
+    .map_err(|_| FerriError::timeout("processing navigation events", timeout_ms))?
   }
 
   pub async fn wait_for_navigation(&self) -> Result<()> {
@@ -819,6 +839,7 @@ impl BidiPage {
   }
 
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     self.injected_script.reset();
     self.clear_handle_realms();
     self.nav_request_slot.clear();
@@ -836,13 +857,18 @@ impl BidiPage {
     .await;
 
     match result {
-      Ok(Ok(_)) => Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await),
+      Ok(Ok(_)) => {
+        self
+          .await_nav_response(crate::network::NAV_REQUEST_GRACE, deadline, timeout_ms)
+          .await
+      },
       Ok(Err(e)) => Err(e),
       Err(_) => Err(FerriError::timeout("reloading", timeout_ms)),
     }
   }
 
   pub async fn go_back(&self, _lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     self.nav_request_slot.clear();
     let result = tokio::time::timeout(
       std::time::Duration::from_millis(timeout_ms),
@@ -857,13 +883,18 @@ impl BidiPage {
     .await;
 
     match result {
-      Ok(Ok(_)) => Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await),
+      Ok(Ok(_)) => {
+        self
+          .await_nav_response(crate::network::NAV_REQUEST_GRACE, deadline, timeout_ms)
+          .await
+      },
       Ok(Err(e)) => Err(e),
       Err(_) => Err(FerriError::timeout("go_back", timeout_ms)),
     }
   }
 
   pub async fn go_forward(&self, _lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     self.nav_request_slot.clear();
     let result = tokio::time::timeout(
       std::time::Duration::from_millis(timeout_ms),
@@ -878,7 +909,11 @@ impl BidiPage {
     .await;
 
     match result {
-      Ok(Ok(_)) => Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await),
+      Ok(Ok(_)) => {
+        self
+          .await_nav_response(crate::network::NAV_REQUEST_GRACE, deadline, timeout_ms)
+          .await
+      },
       Ok(Err(e)) => Err(e),
       Err(_) => Err(FerriError::timeout("go_forward", timeout_ms)),
     }
@@ -2192,6 +2227,10 @@ impl BidiPage {
     }
 
     let mut rx = self.session.transport.tap_events();
+    *self
+      .event_barrier
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rx.barrier());
     let ctx = self.context_id.clone();
     let session = self.session.clone();
     let dialog_manager = self.dialog_manager.clone();
@@ -2212,6 +2251,14 @@ impl BidiPage {
       self.http_credentials.clone(),
     ));
     let page_for_grants = self.clone();
+    let (binding_tx, mut binding_rx) =
+      tokio::sync::mpsc::unbounded_channel::<futures::future::BoxFuture<'static, ()>>();
+    let binding_worker = tokio::spawn(async move {
+      while let Some(call) = binding_rx.recv().await {
+        call.await;
+      }
+    });
+    self.track_listener(binding_worker.abort_handle());
 
     let main_listener = tokio::spawn(async move {
       // Child browsing contexts (iframes) of this page, tracked from
@@ -2461,24 +2508,27 @@ impl BidiPage {
             };
             let maybe_fn = exposed_fns.read().await.get(&fn_name).cloned();
             if let Some(callback) = maybe_fn {
-              let result = callback(source, args).await;
-              let result_js = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
-              let escaped_id = id.replace('\\', r"\\").replace('\'', r"\'");
-              let resolve_js = format!(
-                "(() => {{ const f = window.__ferri_exposed && window.__ferri_exposed['{escaped_id}']; if (f) {{ delete window.__ferri_exposed['{escaped_id}']; f({result_js}); }} }})()"
-              );
-              let _ = exposed_session
-                .transport
-                .send_command(
-                  "script.callFunction",
-                  json!({
-                    "functionDeclaration": format!("() => {{ {resolve_js} }}"),
-                    "target": {"context": call_ctx},
-                    "awaitPromise": false,
-                    "resultOwnership": "none"
-                  }),
-                )
-                .await;
+              let exposed_session = exposed_session.clone();
+              let _ = binding_tx.send(Box::pin(async move {
+                let result = callback(source, args).await;
+                let result_js = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
+                let escaped_id = id.replace('\\', r"\\").replace('\'', r"\'");
+                let resolve_js = format!(
+                  "(() => {{ const f = window.__ferri_exposed && window.__ferri_exposed['{escaped_id}']; if (f) {{ delete window.__ferri_exposed['{escaped_id}']; f({result_js}); }} }})()"
+                );
+                let _ = exposed_session
+                  .transport
+                  .send_command(
+                    "script.callFunction",
+                    json!({
+                      "functionDeclaration": format!("() => {{ {resolve_js} }}"),
+                      "target": {"context": call_ctx},
+                      "awaitPromise": false,
+                      "resultOwnership": "none"
+                    }),
+                  )
+                  .await;
+              }));
             }
           },
           "log.entryAdded" => {

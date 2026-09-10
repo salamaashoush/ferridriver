@@ -219,3 +219,74 @@ completion requires observable behavior through the public scripting API.
   reply, so it can observe the first response before the consumer processes
   the retry. A navigation-specific consumer barrier is the next correction
   to investigate and verify, rather than sleeps or status-based retries.
+
+- BiDi navigation now waits for an acknowledgement on its existing ordered
+  event tap before reading the navigation response. `goto`, reload and history
+  traversal use the original navigation deadline for the wait. The marker is
+  acknowledged when the consumer asks for its next event, after processing
+  earlier events; it does not retry HTTP statuses or use a readiness sleep.
+- New transport unit cases pin response ordering (401 then 200) and consumer
+  closure. Exposed bindings now run in tracked tasks instead of blocking the
+  event consumer, preventing reentrant navigation from waiting on itself.
+  Finished task handles are pruned when tracking another callback.
+- A new four-backend native case navigates from an exposed binding and checks
+  URL and rendered content. Its old-binary diagnostic passed in 1.4 seconds
+  (`/tmp/ferridriver-binding-navigation-before.log`), before the new binary
+  build. It protects against a deadlock introduced by queue synchronization;
+  it is not evidence reproducing the original authentication failure.
+- The first verification run was intentionally interrupted during lint after
+  identifying the binding deadlock risk (94.260 wall seconds, not a benchmark).
+  Current full verification: exec session 64649, logs
+  `target/gate/1789018885-3865455`, `/tmp/ferridriver-bidi-barrier-ready2.log`.
+  Format, type checks and lint passed; strict documentation is running.
+  These changes are not committed yet.
+
+- The first barrier build passed lint/docs but the full suite caught reordered
+  binding invocations after callbacks were independently spawned. Its E2E run
+  also reproduced the pre-existing `toPass` attempt-count failure under load.
+  That gate was intentionally interrupted after confirmed failures, at 355.895
+  wall seconds, while an addon rebuild was running. It is not a benchmark.
+- Binding callbacks now run on one ordered queue per page, separate from the
+  protocol event consumer. This preserves existing invocation order while
+  allowing callbacks to navigate and await the event acknowledgement. The
+  worker is tracked for page teardown; no per-call task handles accumulate.
+- Before that correction, authentication and navigation-from-binding passed on
+  BiDi in the full suite (301 ms and 315 ms). This is partial evidence only.
+  A standalone data-document navigation with a 200 ms deadline also passed,
+  so no speculative protocol-scheme special case was added.
+- Current full gate: exec session 20851, logs
+  `target/gate/1789019241-4023547`, console
+  `/tmp/ferridriver-bidi-ordered-barrier-ready.log`. Format, types, lint, docs
+  and the workspace build passed; E2E, BDD and integration are running.
+  The barrier and ordered binding changes remain uncommitted.
+
+- The ordered BiDi queue passed the existing call-order case, authentication,
+  and navigation-from-binding. The cross-backend test exposed WebKit awaiting
+  its user callback inline, which deadlocks when that callback awaits navigation
+  lifecycle events. The same run also repeated the unchanged `toPass` count
+  failure. It was interrupted after known failures at 288.976 wall seconds.
+- WebKit binding calls now enter a separate ordered future queue after their
+  source frame and callback are resolved. A JoinSet aborts the worker when the
+  owning event loop exits, retaining teardown ownership. Invocation order and
+  the target-session swap behavior are preserved.
+- Another 256-case native retry scheduling run, this time with attempt-timing
+  diagnostics on failure, passed in 3.2 seconds with 32 workers:
+  `/tmp/ferridriver-to-pass-timing.log`. No retry timing semantics or existing
+  assertions have changed.
+- Combined verification is running at 16 browser slots in exec session 31374,
+  logs `target/gate/1789019554-3204`, console
+  `/tmp/ferridriver-binding-queues-ready16.log`. Format, types and lint passed.
+  The default worker budget remains unchanged. None of the queue fixes are
+  committed yet.
+
+- Combined binding-queue and BiDi acknowledgement verification passed all 155
+  gate checks: 424.853 wall / 424.75 gate seconds at 16 browser slots. This
+  was a rebuild run: Rust test compilation took 198.59 seconds and the Rust UI
+  test rebuilt its package-specific graph in 164.96 seconds. It is not a warm
+  benchmark. E2E: 2227 passed, 33 existing skips; BDD: 637 passed, 19 existing
+  skips; integrations: 485 passed. Both transport barrier unit tests passed.
+- Next migration is prepared in `test-registry.test.mjs` and a private registry
+  observation probe. Seven native cases passed in 42 ms, preserving fixture
+  inference, modifier/annotation metadata, suite membership, source-map
+  locations, custom fixture chains, off-host availability and named diagnostics.
+  Its original Rust target remains until backup and parity verification finish.
