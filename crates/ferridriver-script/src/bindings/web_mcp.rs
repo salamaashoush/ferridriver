@@ -86,12 +86,9 @@ impl WebMcpJs {
           .send("WebMCP.enable", serde_json::json!({}))
           .await
           .into_js_with(&ctx)?;
-        let payload = match tokio::time::timeout(std::time::Duration::from_millis(100), receiver).await {
-          Ok(Ok(payload)) => payload,
-          _ => {
-            session.off(listener);
-            return json_to_js(&ctx, &serde_json::json!([]));
-          },
+        let Ok(Ok(payload)) = tokio::time::timeout(std::time::Duration::from_millis(100), receiver).await else {
+          session.off(listener);
+          return json_to_js(&ctx, &serde_json::json!([]));
         };
         let tools = payload.get("tools").cloned().unwrap_or_else(|| serde_json::json!([]));
         json_to_js(&ctx, &tools)
