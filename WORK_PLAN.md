@@ -617,3 +617,25 @@ completion requires observable behavior through the public scripting API.
   should run); preserve that behavior when eliminating duplicate builds.
   Next priority: measured Cargo graph/artifact reuse, retaining real addon
   loading, generated declarations, and Rust UI execution/stop/trace checks.
+
+- Debug addon builds now invoke the NAPI builder's shipped TypeScript source
+  with a pinned Bun source patch that supports Cargo's implicit host target.
+  Workspace library selection unifies dependency features with the gate build;
+  NAPI still runs Cargo and generates declarations and the platform loader.
+  Release builds retain the upstream CLI path. The first focused build compiled
+  only ferridriver-node and exited 0 in 3.819s; its full-gate build took 8.72s
+  under concurrent browser load. These are reuse measurements, not cold-build
+  comparisons. Frozen-lockfile installation accepts the source patch.
+- Cargo 1.98 still gates workspace feature-unification behind nightly.
+  Read cargo-hakari's design and publishing constraints from a source
+  checkout at /tmp/ferridriver-guppy-Gl50Ke. No workspace dependency expansion
+  adopted yet; the Rust UI package graph still needs a rebuild after shared
+  dependency updates. All 52 remaining Rust targets and the addon-test
+  migrations remain in scope, followed by the protocol capability work.
+- Host addon build full gate exited 0: 140 checks, zero failures or blocks,
+  108.590s wall time. Logs: target/gate/1789027711-3605308 and
+  /tmp/ferridriver-addon-host-ready.log. E2E took 98.24s, BDD 92.20s,
+  native integration 50.02s. This warm result is similar to the prior 106.877s;
+  the optimization removes the duplicate addon dependency graph, without
+  demonstrating a warm full-gate speedup. Rust UI passed in 1.52s with its
+  existing cached package graph.

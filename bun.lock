@@ -12,7 +12,7 @@
       "name": "@ferridriver/node",
       "version": "0.5.0",
       "devDependencies": {
-        "@napi-rs/cli": "^3.2.0",
+        "@napi-rs/cli": "3.6.0",
         "@types/ws": "^8.5.10",
         "playwright": "^1.60.0",
         "ws": "^8.18.0",
@@ -44,6 +44,9 @@
         "rspress-plugin-mermaid": "^1.0.1",
       },
     },
+  },
+  "patchedDependencies": {
+    "@napi-rs/cli@3.6.0": "patches/@napi-rs%2Fcli@3.6.0.patch",
   },
   "packages": {
     "@biomejs/biome": ["@biomejs/biome@2.4.9", "", { "optionalDependencies": { "@biomejs/cli-darwin-arm64": "2.4.9", "@biomejs/cli-darwin-x64": "2.4.9", "@biomejs/cli-linux-arm64": "2.4.9", "@biomejs/cli-linux-arm64-musl": "2.4.9", "@biomejs/cli-linux-x64": "2.4.9", "@biomejs/cli-linux-x64-musl": "2.4.9", "@biomejs/cli-win32-arm64": "2.4.9", "@biomejs/cli-win32-x64": "2.4.9" }, "bin": { "biome": "bin/biome" } }, "sha512-wvZW92FrwitTcacvCBT8xdAbfbxWfDLwjYMmU3djjqQTh7Ni4ZdiWIT/x5VcZ+RQuxiKzIOzi5D+dcyJDFZMsA=="],

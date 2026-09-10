@@ -54,13 +54,13 @@
   },
   "scripts": {
     "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
+    "build:debug": "bun build-debug.mjs",
     "artifacts": "napi artifacts",
     "version": "napi version",
     "postinstall": "node postinstall.js"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.2.0",
+    "@napi-rs/cli": "3.6.0",
     "@types/ws": "^8.5.10",
     "playwright": "^1.60.0",
     "ws": "^8.18.0"

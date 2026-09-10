@@ -1,0 +1,35 @@
+diff --git a/src/api/build.ts b/src/api/build.ts
+index 5d4dd02c7bb606e1c6a91d6d5757ee53888d42d9..1e60b7e085b1c62cdc060cf18196ee63f56aa4b9 100644
+--- a/src/api/build.ts
++++ b/src/api/build.ts
+@@ -50,7 +50,7 @@ const require = createRequire(import.meta.url)
+ type OutputKind = 'js' | 'dts' | 'node' | 'exe' | 'wasm'
+ type Output = { kind: OutputKind; path: string }
+ 
+-type BuildOptions = RawBuildOptions & { cargoOptions?: string[] }
++type BuildOptions = RawBuildOptions & { cargoOptions?: string[]; hostTarget?: boolean }
+ type ParsedBuildOptions = Omit<BuildOptions, 'cwd'> & { cwd: string }
+ 
+ export async function buildProject(rawOptions: BuildOptions) {
+@@ -440,6 +440,12 @@ class Builder {
+   }
+ 
+   private setTarget() {
++    if (this.options.hostTarget) {
++      if (this.options.target || process.env.CARGO_BUILD_TARGET || this.options.crossCompile || this.options.useCross || this.options.useNapiCross) {
++        throw new Error('hostTarget cannot be combined with an explicit target or cross compilation')
++      }
++      return this
++    }
+     debug('Set compiling target to: ')
+     debug('  %i', this.target.triple)
+ 
+@@ -783,7 +789,7 @@ class Builder {
+ 
+     const profile =
+       this.options.profile ?? (this.options.release ? 'release' : 'debug')
+-    const src = join(this.targetDir, this.target.triple, profile, srcName)
++    const src = join(this.targetDir, this.options.hostTarget ? '' : this.target.triple, profile, srcName)
+     debug(`Copy artifact from: [${src}]`)
+     const dest = join(this.outputDir, destName)
+     const isWasm = dest.endsWith('.wasm')

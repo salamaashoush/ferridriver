@@ -8,5 +8,8 @@
   ],
   "devDependencies": {
     "yaml": "^2.9.0"
+  },
+  "patchedDependencies": {
+    "@napi-rs/cli@3.6.0": "patches/@napi-rs%2Fcli@3.6.0.patch"
   }
 }
