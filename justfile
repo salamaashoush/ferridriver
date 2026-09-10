@@ -46,6 +46,11 @@ test-integration *args:
   cargo build --locked --workspace --bins --lib
   ./target/debug/ferridriver test --no-inherit --headless --config tests/integration/ferridriver.toml {{args}}
 
+# Run the integration suite through the dependency-aware gate. This keeps
+# build and type checks parallel for the no-filter workflow.
+test-integration-gated:
+  cargo gate test --only integration --only types
+
 # Run one backend: the native e2e project and MCP tests.
 # Accepts either naming (cdp-pipe/cdp_pipe, cdp-raw/cdp_raw, bidi, webkit).
 test-backend backend:
