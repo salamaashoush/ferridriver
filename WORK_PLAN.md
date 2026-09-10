@@ -366,3 +366,19 @@ completion requires observable behavior through the public scripting API.
   (111.59 gate) at 16 browser slots. Full logs:
   `target/gate/1789021330-757483`, `/tmp/ferridriver-host-maps-ready2.log`.
   All 501 native integration cases passed.
+
+- Pushed `3c2cb6ab`, verified host/source-map migration. Migrated all
+  12 extension fixture cases to native JS, including actual runner fixture
+  composition, reversed order, automatic fixtures, missing-package failure,
+  imported APIs, and independent extraction/session policy enforcement.
+  Native cases pass in 121 ms. Probe workspace rebuild took 1.38s.
+  Read ferrijs SANDBOX.md before exposing separate policy observations;
+  production permission behavior is unchanged. Original Rust target
+  (17515 bytes, matched HEAD) backed up at /tmp/ferridriver-extension-fixtures-backup-mq_r1y39/extension_fixtures.rs
+  before removal. Remaining top-level Rust integration targets: 62.
+
+- Extension fixture migration full gate passed all 150 checks in
+  111.035 wall seconds (110.95 gate) at 16 browser slots, with all 513 native
+  integrations passing. Logs: `target/gate/1789021652-938692`,
+  `/tmp/ferridriver-extension-fixtures-ready.log`. Remote CI for the previous
+  commit remains in progress; local verification does not establish CI success.

@@ -8,10 +8,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Request {
   entries: Vec<String>,
   host: String,
   sources: Vec<String>,
+  load_policy: Option<ferridriver_config::ExtensionPolicyConfig>,
+  session_policy: Option<ferridriver_config::ExtensionPolicyConfig>,
 }
 
 pub async fn run(root: &Path, context: &RunContext, request: Request) -> Result<Value> {
@@ -25,11 +28,14 @@ pub async fn run(root: &Path, context: &RunContext, request: Request) -> Result<
     .collect::<Vec<_>>();
   let sidecars = Vec::new();
   let env = RequirementEnv::from_caps(&context.caps, &sidecars);
-  let bindings =
-    ferridriver_script::load_bindings(&specs, &env, &context.caps.extension_policy, ExtensionHost::Script).await;
+  let policy = request
+    .load_policy
+    .unwrap_or_else(|| context.caps.extension_policy.clone());
+  let bindings = ferridriver_script::load_bindings(&specs, &env, &policy, ExtensionHost::Script).await;
   let (gated, compiled, failures) =
-    ferridriver_script::extension_load::load(&specs, &env, &context.caps.extension_policy, ExtensionHost::Script).await;
+    ferridriver_script::extension_load::load(&specs, &env, &policy, ExtensionHost::Script).await;
   let mut result = json!({
+    "loadPolicy": policy,
     "blocked": gated.blocked,
     "failures": failures,
     "compiled": compiled.iter().map(|extension| json!({
@@ -41,6 +47,7 @@ pub async fn run(root: &Path, context: &RunContext, request: Request) -> Result<
     })).collect::<Vec<_>>(),
   });
   let mut context = context.clone();
+  context.caps.extension_policy = request.session_policy.unwrap_or(policy);
   context.host = super::extension_host(&request.host)?;
   context.extensions = bindings;
   let session = Session::create(ScriptEngineConfig::default(), &context).await?;
