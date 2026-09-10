@@ -32,4 +32,5 @@ serde_ignored = "0.1"
 serde_path_to_error = "0.1"
 
 [dev-dependencies]
+socket2 = "0.6"
 tempfile = "3"

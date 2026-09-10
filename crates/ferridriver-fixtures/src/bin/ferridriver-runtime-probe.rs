@@ -1,3 +1,6 @@
+#[path = "runtime_probe/bdd.rs"]
+mod bdd;
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,6 +17,10 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  BddSession {
+    entries: Vec<PathBuf>,
+    actions: Vec<bdd::Action>,
+  },
   GateExtensions {
     entries: Vec<PathBuf>,
     host: String,
@@ -223,6 +230,9 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::BddSession { entries, actions } => {
+        Box::pin(bdd::run(&self.root, &self.context, paths(&self.root, entries), actions)).await
+      },
       Operation::GateExtensions { entries, host } => gate_extensions(&self.root, entries, &host),
       Operation::LoadExtensions { entries } => self.load_extensions(entries).await,
       Operation::RunSession { source } => self.run_session(&source).await,

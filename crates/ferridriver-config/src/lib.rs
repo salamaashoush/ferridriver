@@ -32,6 +32,9 @@
 //! environment overrides. See [`layer`] for the full stack, the merge
 //! rules, and how relative paths are anchored to their own file.
 
+#[cfg(test)]
+mod test_support;
+
 pub mod browser;
 pub mod command_spec;
 pub mod extension_manifest;

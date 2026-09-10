@@ -610,10 +610,7 @@ mod tests {
   #[test]
   fn discover_command_rejects_a_dead_endpoint() {
     let _net = port_guard();
-    let port = {
-      let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-      l.local_addr().expect("addr").port()
-    };
+    let (_reservation, port) = crate::test_support::dead_endpoint().expect("reserve dead endpoint");
     let mut config = McpConfig::default();
     config.browser.instance_discover_command = Some(spec(&format!(r#""echo ws://127.0.0.1:{port}/x""#)));
     assert!(config.resolve_instance("any").is_none());

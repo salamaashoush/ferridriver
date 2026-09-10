@@ -1501,10 +1501,7 @@ mod tests {
     let _net = port_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     // A port nothing is listening on: the profile is stale.
-    let dead = {
-      let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-      l.local_addr().expect("addr").port()
-    };
+    let (_reservation, dead) = crate::test_support::dead_endpoint().expect("reserve dead endpoint");
     std::fs::write(
       dir.path().join("DevToolsActivePort"),
       format!("{dead}\n/devtools/browser/gone"),
@@ -1537,10 +1534,7 @@ mod tests {
   #[test]
   fn dead_discovered_endpoint_is_rejected_and_evicted() {
     let _net = port_guard();
-    let dead = {
-      let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-      l.local_addr().expect("addr").port()
-    };
+    let (_reservation, dead) = crate::test_support::dead_endpoint().expect("reserve dead endpoint");
     let instances = std::collections::HashMap::new();
     let cache = CommandCache::default();
     let discover = spec(&format!(r#""echo ws://127.0.0.1:{dead}/x""#));
