@@ -1,17 +1,6 @@
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
 import { test } from '@ferridriver/test';
-import { repo } from './support.mjs';
-
-async function server(body) {
-  await commands.start('fixtures', { binary: join(repo, 'target/debug/ferridriver-fixtures') });
-  try {
-    const ready = await commands.waitForOutput('fixtures', '\n');
-    const match = ready.match(/serving (http:\/\/127\.0\.0\.1:\d+)/);
-    assert.ok(match, ready);
-    await body(match[1]);
-  } finally { await commands.stop('fixtures'); }
-}
+import { fixtureServer as server } from './support.mjs';
 
 test('manual request redirects return the original response and report no followed hop', async ({ request }) => {
   await server(async base => {

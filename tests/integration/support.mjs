@@ -6,6 +6,16 @@ import { dirname, join, resolve } from 'node:path';
 export const repo = process.cwd();
 export const binary = resolve(process.env.FERRIDRIVER_BIN ?? join(repo, 'target/debug/ferridriver'));
 
+export async function fixtureServer(body) {
+  await commands.start('fixtures', { binary: join(repo, 'target/debug/ferridriver-fixtures') });
+  try {
+    const ready = await commands.waitForOutput('fixtures', '\n');
+    const match = ready.match(/serving (http:\/\/127\.0\.0\.1:\d+)/);
+    assert.ok(match, ready);
+    await body(match[1]);
+  } finally { await commands.stop('fixtures'); }
+}
+
 export async function workspace(files) {
   const root = await mkdtemp(join(tmpdir(), 'ferridriver-integration-'));
   for (const [name, body] of Object.entries(files)) {

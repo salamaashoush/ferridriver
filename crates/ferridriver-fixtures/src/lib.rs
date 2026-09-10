@@ -485,6 +485,39 @@ async fn fx_slow(query: Option<&str>) -> Response<Body> {
   fx_text("slow")
 }
 
+fn fx_http_client(path: &str, headers: &HeaderMap, body: &axum::body::Bytes) -> Response<Body> {
+  if let Some(count) = path.strip_prefix("redirect/") {
+    let count = count.parse::<u32>().unwrap_or(0);
+    return if count == 0 {
+      fx_text("done")
+    } else {
+      fx_redirect(&format!("/fx/http-client/redirect/{}", count - 1))
+    };
+  }
+  match path {
+    "set" => fx_build(
+      200,
+      "text/plain",
+      b"set".to_vec(),
+      &[("set-cookie", "sid=abc; Path=/".into())],
+    ),
+    "echo" => fx_text(
+      headers
+        .get("cookie")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("none"),
+    ),
+    "body-echo" => fx_build(200, "text/plain", body.to_vec(), &[]),
+    "ct-echo" => fx_text(
+      headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("none"),
+    ),
+    _ => fx_text("ok"),
+  }
+}
+
 async fn handle_fx(
   State(state): State<Arc<ServerState>>,
   Path(path): Path<String>,
@@ -494,6 +527,7 @@ async fn handle_fx(
   body: axum::body::Bytes,
 ) -> Response<Body> {
   match path.as_str() {
+    _ if path.starts_with("http-client/") => fx_http_client(&path[12..], &headers, &body),
     "redirect" => fx_redirect("/fx/landed"),
     _ if path.starts_with("redirect/") => {
       let n: u32 = path
