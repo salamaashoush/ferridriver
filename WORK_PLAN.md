@@ -21,12 +21,12 @@
 
 ## Current evidence
 
-- Latest session-reliability migration headless gate passed: 120 checks, zero
-  failures or blocks, 109.81s gate time. All 744 native integration cases
-  passed in 59.5s. Logs: target/gate/1789040278-778573 and
-  /tmp/ferridriver-session-reliability-ready.log. This is an incremental-build
+- Latest JS-reporter migration headless gate passed: 119 checks, zero failures
+  or blocks, 109.18s gate time. All 752 native integration cases passed in
+  59.2s. Logs: target/gate/1789040715-972109 and
+  /tmp/ferridriver-js-reporter-ready.log. This is an incremental-build
   observation, not a controlled before/after benchmark. Remaining top-level
-  Rust test files: 31, including benchmark targets; addon migration and
+  Rust test files: 30, including benchmark targets; addon migration and
   capability implementation remain open.
 - Verified headless gate at committed checkpoint `63641057`: 157 checks, zero failed
   or blocked, 107.68 seconds in the gate and 107.813 seconds wall time. This is
@@ -1110,3 +1110,21 @@ completion requires observable behavior through the public scripting API.
   zero failures or blocks, 109.81s gate time; 744 native integration cases
   passed in 59.5s. Logs: target/gate/1789040278-778573 and
   /tmp/ferridriver-session-reliability-ready.log.
+- Migrated all eight JS-reporter Rust integration tests to native JS.
+  Extended the existing event-replay fixture to load actual JS reporters,
+  expose stdio/status answers and return preprocess edits. Native data builds
+  the same event sequence and suite tree, using production-derived stable IDs.
+- Assertions preserve all V1 hook counts and object shapes, V2 configuration,
+  parent/project traversal, outcomes, step paths, stdout, attachment bytes,
+  Date/number types, throwing-reporter isolation, stdio defaults, preprocessing
+  exclusions/skip reasons/sharding, status override and missing-module errors.
+  No browser is launched, and scratch roots are unique rather than reused.
+- All eight native cases passed in 98ms with four workers:
+  /tmp/ferridriver-js-reporter-native.log. Removed unchanged js_reporter.rs
+  (16205 bytes) after verified backup at
+  /tmp/ferridriver-js-reporter-backup-xjc2guhe/js_reporter.rs. Remaining top-level
+  Rust test files: 30. Full-gate verification is pending.
+- JS-reporter migration final headless gate exited zero: 119 checks, zero
+  failures or blocks, 109.18s gate time; 752 native integration cases passed
+  in 59.2s. Logs: target/gate/1789040715-972109 and
+  /tmp/ferridriver-js-reporter-ready.log.

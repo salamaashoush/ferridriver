@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use ferridriver_test::config::TestConfig;
-use ferridriver_test::reporter::{Reporter, ReporterSet, base::Out, blob, create_reporters_pub, dot, empty, github};
+use ferridriver_test::reporter::{
+  Reporter, ReporterSet, RunStatus, base::Out, blob, create_reporters_pub, dot, empty, github,
+};
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -19,6 +21,7 @@ enum Mode {
   Empty,
   Github,
   Blob,
+  Js,
 }
 
 #[derive(Deserialize)]
@@ -30,6 +33,19 @@ pub struct Request {
   #[serde(default)]
   mode: Mode,
   shard: Option<(u32, u32)>,
+  preprocess: Option<ferridriver_test::reporter::api::RunPreamble>,
+}
+
+async fn js_reporter(config: &TestConfig) -> Result<Box<dyn Reporter>> {
+  let entry = config.reporter.first().context("missing JS reporter")?;
+  let module = ferridriver_script::reporter::load(
+    entry,
+    config,
+    &std::env::current_dir()?,
+    ferridriver_script::ScriptCaps::default(),
+  )
+  .await?;
+  Ok(Box::new(Arc::new(module).reporter()))
 }
 
 pub async fn run(request: Request) -> Result<Value> {
@@ -37,6 +53,7 @@ pub async fn run(request: Request) -> Result<Value> {
   let collected = Arc::new(Mutex::new(Vec::new()));
   let mut direct: Option<Box<dyn Reporter>> = match request.mode {
     Mode::Factory => None,
+    Mode::Js => Some(js_reporter(&request.config).await?),
     Mode::Dot => Some(Box::new(dot::DotReporter::new().with_plain_screen().with_output(out))),
     Mode::Empty => Some(Box::new(empty::EmptyReporter)),
     Mode::Github => Some(Box::new(
@@ -52,6 +69,16 @@ pub async fn run(request: Request) -> Result<Value> {
       Some(Box::new(reporter))
     },
   };
+  let mut edits = ferridriver_test::reporter::TestRunEdits::default();
+  if let Some(preamble) = &request.preprocess {
+    direct
+      .as_mut()
+      .context("preprocess requires a direct reporter")?
+      .preprocess(preamble, &mut edits)
+      .await
+      .map_err(anyhow::Error::msg)?;
+  }
+  let prints_to_stdio = direct.as_ref().map(|reporter| reporter.prints_to_stdio());
   let mut reporters = if direct.is_some() {
     ReporterSet::default()
   } else {
@@ -82,8 +109,13 @@ pub async fn run(request: Request) -> Result<Value> {
     .lock()
     .map_err(|_| anyhow!("reporter output lock poisoned"))?
     .clone();
+  let status = direct
+    .as_ref()
+    .and_then(|reporter| reporter.status_override())
+    .map(RunStatus::as_str);
   Ok(
     json!({ "text": text, "delegated": *collected.lock().await, "events": events,
-    "defaultWorkers": TestConfig::default().workers }),
+    "defaultWorkers": TestConfig::default().workers, "printsToStdio": prints_to_stdio, "status": status,
+    "edits": { "excluded": edits.excluded, "annotations": edits.annotations, "skipSharding": edits.skip_sharding } }),
   )
 }
