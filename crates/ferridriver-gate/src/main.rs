@@ -67,12 +67,16 @@ fn select_jobs(jobs: Vec<Job>, selected: &[String]) -> Result<Vec<Job>> {
   Ok(jobs.into_iter().filter(|job| required.contains(&job.name)).collect())
 }
 
-fn jobs(root: &Path, workers: usize, ready: bool) -> Result<Vec<Job>> {
+fn jobs(root: &Path, workers: usize, ready: bool, overlap_ready_prerequisites: bool) -> Result<Vec<Job>> {
   let mut jobs = vec![
     Job::new(
       "build",
       &["cargo", "build", "--locked", "--workspace", "--bins", "--lib"],
-      if ready { &["lint"] } else { &[] },
+      if ready && !overlap_ready_prerequisites {
+        &["lint"]
+      } else {
+        &[]
+      },
     ),
     Job::new(
       "rust-build",
@@ -126,6 +130,12 @@ fn jobs(root: &Path, workers: usize, ready: bool) -> Result<Vec<Job>> {
         &["napi-build", "types"],
       ));
     }
+  }
+  if ready && overlap_ready_prerequisites {
+    // The executable build is the prerequisite for browser suites, while
+    // clippy is an independent verdict. Let them overlap in the full gate
+    // so a slow lint cannot keep the native gate idle before E2E starts.
+    jobs[0].cargo = false;
   }
   if ready {
     jobs.extend(ready_jobs());
@@ -351,7 +361,7 @@ async fn main() -> Result<()> {
       _ => bail!("unknown argument {arg}; usage: cargo gate [ready|test] [--workers N] [--jobs N] [--only NAME]"),
     }
   }
-  let jobs = select_jobs(jobs(&root, workers, mode == "ready")?, &selected)?;
+  let jobs = select_jobs(jobs(&root, workers, mode == "ready", selected.is_empty())?, &selected)?;
   run_gate(&root, workers, parallel, jobs).await
 }
 

@@ -1435,3 +1435,9 @@ completion requires observable behavior through the public scripting API.
   111 checks with zero failures in 206.44s. This includes format, lint, docs,
   doc tests, native JS integration, NAPI, E2E, BDD, acceptance, and Rust
   targets; the plain `just` shim was unavailable in the shell and did not run.
+- The full ready scheduler now overlaps the independent executable build and
+  clippy verdict while keeping lint as a prerequisite for focused `--only`
+  builds. The headless gate passed all 111 checks with zero failures or blocks
+  in 105.03s, down from 206.44s (49% faster). Integration took 63.06s, E2E
+  101.78s, and BDD 95.59s. The focused gate contract suite passes all 13
+  tests. Log: `target/gate/1789054175-3315487`.
