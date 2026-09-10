@@ -1375,3 +1375,9 @@ completion requires observable behavior through the public scripting API.
   112.51s, with integration at 69.02s, E2E at 107.66s, and BDD at 101.64s.
   Logs: `target/gate/1789048928-575875` and
   `target/gate/1789049701-839153`.
+- Migrated the remaining browser-facing component E2E coverage from
+  `ct_e2e.rs` to `tests/integration/ct-e2e.test.mjs`. The native JS tests use
+  the fixture server, exercise real browser clicks and mount replacement, and
+  verify serialized component props. Dev-server preset assertions remain as a
+  library unit test, so the Rust integration target no longer launches a
+  browser.

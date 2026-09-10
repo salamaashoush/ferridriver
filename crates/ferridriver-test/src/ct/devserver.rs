@@ -225,3 +225,39 @@ fn which(cmd: &str) -> bool {
     .status()
     .is_ok_and(|s| s.success())
 }
+
+#[cfg(test)]
+mod tests {
+  use super::DevServerConfig;
+  use std::path::Path;
+
+  #[test]
+  fn presets_keep_framework_commands_and_timeouts() {
+    let cwd = Path::new("/tmp/project");
+    let vite = DevServerConfig::vite(cwd);
+    assert!(vite.cmd == "bunx" || vite.cmd == "npx");
+    assert!(vite.args.contains(&"vite".to_string()));
+    assert_eq!(vite.cwd, cwd);
+    assert_eq!(vite.timeout_secs, 30);
+
+    let trunk = DevServerConfig::trunk(cwd);
+    assert_eq!(
+      (trunk.cmd.as_str(), trunk.args.as_slice(), trunk.timeout_secs),
+      ("trunk", &["serve".to_string()][..], 60)
+    );
+    assert_eq!(trunk.cwd, cwd);
+
+    let dx = DevServerConfig::dioxus(cwd);
+    assert_eq!(
+      (dx.cmd.as_str(), dx.args.as_slice(), dx.timeout_secs),
+      ("dx", &["serve".to_string()][..], 60)
+    );
+    assert_eq!(dx.cwd, cwd);
+
+    let leptos = DevServerConfig::cargo_leptos(cwd);
+    assert_eq!(leptos.cmd, "cargo");
+    assert_eq!(leptos.args, vec!["leptos", "watch"]);
+    assert_eq!(leptos.cwd, cwd);
+    assert_eq!(leptos.timeout_secs, 120);
+  }
+}
