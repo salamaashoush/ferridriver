@@ -1291,3 +1291,7 @@ completion requires observable behavior through the public scripting API.
   operations. A real headless test invokes a missing tool and checks the
   protocol error, proving command framing and session lifetime; the focused
   test passed in 157ms.
+- WebMCP capability final headless gate exited zero: 116 checks, zero failures
+  or blocks, 139.70s total. Integration completed in 96.28s, E2E in 104.22s,
+  BDD in 95.85s, and all NAPI checks passed. Log directory:
+  target/gate/1789045086-2811586.
