@@ -26,6 +26,8 @@ mod reporter_output;
 mod reporters;
 #[path = "runtime_probe/screenshot.rs"]
 mod screenshot;
+#[path = "runtime_probe/session_table.rs"]
+mod session_table;
 #[path = "runtime_probe/sidecar.rs"]
 mod sidecar;
 #[path = "runtime_probe/test_registry.rs"]
@@ -49,6 +51,9 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  SessionTable {
+    request: session_table::Request,
+  },
   SidecarTransport {
     binary: String,
     actions: Vec<sidecar::Action>,
@@ -384,6 +389,7 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::SessionTable { request } => session_table::run(&self.context, request).await,
       Operation::SidecarTransport { binary, actions } => sidecar::run(binary, actions).await,
       Operation::BrowserEngine { scripts } => browser_engine::run(&self.context, scripts).await,
       Operation::ConfigContracts { modes } => Ok(config_layers::contracts(modes)),

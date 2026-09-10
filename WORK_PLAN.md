@@ -21,14 +21,13 @@
 
 ## Current evidence
 
-- Latest sidecar/deadline/command-read headless gate passed: 121 checks, zero
-  failures or blocks, 135.43s gate time. Native integration coverage passed
-  742 cases in 64.8s. Logs: target/gate/1789039826-582955 and
-  /tmp/ferridriver-sidecar-deadline-command-ready.log. This run rebuilt docs
-  (20.47s) and Rust test artifacts (32.57s); it is not directly comparable to
-  the previous warm 109.54s run. Remaining top-level Rust test files: 32,
-  including benchmark targets; addon migration and capability implementation
-  remain open.
+- Latest session-reliability migration headless gate passed: 120 checks, zero
+  failures or blocks, 109.81s gate time. All 744 native integration cases
+  passed in 59.5s. Logs: target/gate/1789040278-778573 and
+  /tmp/ferridriver-session-reliability-ready.log. This is an incremental-build
+  observation, not a controlled before/after benchmark. Remaining top-level
+  Rust test files: 31, including benchmark targets; addon migration and
+  capability implementation remain open.
 - Verified headless gate at committed checkpoint `63641057`: 157 checks, zero failed
   or blocked, 107.68 seconds in the gate and 107.813 seconds wall time. This is
   a warm build with 32 browser slots on the 32-CPU Linux host. Logs:
@@ -1094,3 +1093,20 @@ completion requires observable behavior through the public scripting API.
   Documentation rebuilt in 20.47s and Rust test artifacts in 32.57s. Logs:
   target/gate/1789039826-582955 and
   /tmp/ferridriver-sidecar-deadline-command-ready.log.
+- Migrated both long-session reliability tests to native JS, retaining the
+  actual SessionTable/BrowserSession path. Coverage preserves forty live-page
+  calls, 250 allocation-heavy executes, durable vars, timeout-triggered VM
+  replacement, browser-epoch replacement, warm-VM capacity and idle record reap.
+- Each churn return is now checked, and the epoch case seeds an existing
+  global before changing the epoch, so it proves replacement rather than
+  merely initializing a previously absent variable. The 250ms TTL wait retains
+  the original 150ms expiry contract; it is not a readiness poll.
+- Both native cases passed in 799ms with two workers:
+  /tmp/ferridriver-session-reliability-native.log. Removed unchanged
+  long_session_reliability.rs (11882 bytes) after verified backup at
+  /tmp/ferridriver-session-reliability-backup-y8isgy2v/long_session_reliability.rs.
+  Remaining top-level Rust test files: 31. Full-gate verification is pending.
+- Session reliability migration final headless gate exited zero: 120 checks,
+  zero failures or blocks, 109.81s gate time; 744 native integration cases
+  passed in 59.5s. Logs: target/gate/1789040278-778573 and
+  /tmp/ferridriver-session-reliability-ready.log.
