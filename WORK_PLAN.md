@@ -1295,3 +1295,9 @@ completion requires observable behavior through the public scripting API.
   or blocks, 139.70s total. Integration completed in 96.28s, E2E in 104.22s,
   BDD in 95.85s, and all NAPI checks passed. Log directory:
   target/gate/1789045086-2811586.
+- Replaced `features_e2e.rs` with a native JS runner workspace that executes
+  the same browser contracts: flaky retry classification, the full locator
+  matcher surface, `expect.poll`, `toPass` against a delayed DOM update, and
+  page title/URL assertions. The focused headless run passed in 314ms. The
+  unchanged Rust harness was backed up at
+  /tmp/ferridriver-features-e2e-backup-olcRcT/features_e2e.rs before removal.
