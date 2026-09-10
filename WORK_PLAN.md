@@ -1367,3 +1367,11 @@ completion requires observable behavior through the public scripting API.
   Invalid endpoints, URL joining, and session-path preservation are covered by
   three focused unit tests. Classic-only servers still return a typed
   unsupported error because they cannot carry the BiDi command surface.
+- The first post-change gate exposed stale target artifacts built by rustc
+  1.98.0 after the toolchain moved to 1.98.1. Clearing generated `target`
+  output and rerunning produced a clean gate with 112 checks, zero failures or
+  blocks, in 767.50s; the 219.67s clean build accounts for most of that cold
+  time. The immediately repeated warm gate passed the same 112 checks in
+  112.51s, with integration at 69.02s, E2E at 107.66s, and BDD at 101.64s.
+  Logs: `target/gate/1789048928-575875` and
+  `target/gate/1789049701-839153`.
