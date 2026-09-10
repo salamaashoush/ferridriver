@@ -26,6 +26,8 @@ mod reporter_output;
 mod reporters;
 #[path = "runtime_probe/screenshot.rs"]
 mod screenshot;
+#[path = "runtime_probe/sidecar.rs"]
+mod sidecar;
 #[path = "runtime_probe/test_registry.rs"]
 mod test_registry;
 #[path = "runtime_probe/webkit.rs"]
@@ -47,6 +49,10 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  SidecarTransport {
+    binary: String,
+    actions: Vec<sidecar::Action>,
+  },
   BrowserEngine {
     scripts: Vec<browser_engine::Script>,
   },
@@ -236,6 +242,11 @@ fn cached_entry(key: u64) -> Value {
   })
 }
 
+fn cache_info() -> Value {
+  let cache = bytecode_cache();
+  json!({ "enabled": cache.is_enabled(), "directory": cache.dir() })
+}
+
 fn extension_host(name: &str) -> Result<ExtensionHost> {
   ExtensionHost::ALL
     .iter()
@@ -373,6 +384,7 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::SidecarTransport { binary, actions } => sidecar::run(binary, actions).await,
       Operation::BrowserEngine { scripts } => browser_engine::run(&self.context, scripts).await,
       Operation::ConfigContracts { modes } => Ok(config_layers::contracts(modes)),
       Operation::ConfigCached { path, updated } => config_layers::cached(&self.root, &path, &updated),
@@ -439,10 +451,7 @@ impl Probe {
         Ok(json!(ferridriver_script::module_aliases()))
       },
       Operation::Aliases => Ok(json!(ferridriver_script::module_aliases())),
-      Operation::CacheInfo => {
-        let cache = bytecode_cache();
-        Ok(json!({ "enabled": cache.is_enabled(), "directory": cache.dir() }))
-      },
+      Operation::CacheInfo => Ok(cache_info()),
       Operation::CacheStore {
         key,
         bytecode,

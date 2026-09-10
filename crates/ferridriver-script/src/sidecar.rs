@@ -18,13 +18,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio::sync::{Mutex, broadcast, oneshot, watch};
 
 /// Max bytes a single inbound frame may reach before the connection is
 /// failed — guards against a runaway child writing an unterminated frame.
@@ -71,7 +71,7 @@ pub struct Sidecar {
   /// read loop exiting (child died / EOF / oversize frame). Lets a
   /// connection cache detect a corpse and respawn instead of handing
   /// out a transport whose every `send` fails `Closed`.
-  closed: Arc<AtomicBool>,
+  closed: watch::Sender<bool>,
 }
 
 impl Sidecar {
@@ -83,7 +83,11 @@ impl Sidecar {
   /// explicitly, or the child died and the read loop exited).
   #[must_use]
   pub fn is_closed(&self) -> bool {
-    self.closed.load(Ordering::Relaxed)
+    *self.closed.borrow()
+  }
+
+  pub async fn wait_closed(&self) {
+    let _ = self.closed.subscribe().wait_for(|closed| *closed).await;
   }
 
   /// Subscribe to events the child pushes (frames with no `id`). Each
@@ -115,7 +119,7 @@ impl Sidecar {
     // stream rather than `io::split` (whose half-drops can shut the socket).
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let (events, _) = broadcast::channel(1024);
-    let closed = Arc::new(AtomicBool::new(false));
+    let closed = watch::channel(false).0;
 
     let sidecar = Arc::new(Self {
       name: spec.name.clone(),
@@ -258,7 +262,7 @@ impl Sidecar {
   /// Close the request socket and reap the child (and, via the child's
   /// process group, anything it spawned). Idempotent.
   pub async fn close(&self) -> Result<(), SidecarError> {
-    self.closed.store(true, Ordering::Relaxed);
+    self.closed.send_replace(true);
     // Dropping the writer's stream closes fd 3 for the child -> it sees EOF
     // and should exit. Then reap.
     {
@@ -357,7 +361,7 @@ async fn read_loop(
   mut reader: UnixStream,
   pending: Pending,
   events: broadcast::Sender<(String, Value)>,
-  closed: Arc<AtomicBool>,
+  closed: watch::Sender<bool>,
 ) {
   let mut buf: Vec<u8> = Vec::with_capacity(8192);
   let mut chunk = [0u8; 8192];
@@ -389,7 +393,7 @@ async fn read_loop(
   }
   // Connection gone: mark the transport dead so a connection cache can
   // respawn, then fail every outstanding request.
-  closed.store(true, Ordering::Relaxed);
+  closed.send_replace(true);
   let mut p = pending.lock().await;
   for (_, tx) in p.drain() {
     let _ = tx.send(Err(SidecarError::Closed));
