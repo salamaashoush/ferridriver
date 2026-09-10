@@ -1346,3 +1346,7 @@ completion requires observable behavior through the public scripting API.
   values, and disposal. The focused headless case passed in 529ms. The
   unchanged Rust source was backed up at
   /tmp/ferridriver-binding-surface-backup-dwCUzT/binding_surface_e2e.rs.
+- Binding-surface migration final headless gate exited zero: 112 checks, zero
+  failures or blocks, 107.21s total. Integration completed in 65.31s, E2E in
+  103.82s, and BDD in 97.83s. Log directory:
+  target/gate/1789047132-32897.
