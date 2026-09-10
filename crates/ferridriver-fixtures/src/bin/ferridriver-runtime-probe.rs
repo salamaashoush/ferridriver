@@ -1,5 +1,7 @@
 #[path = "runtime_probe/bdd.rs"]
 mod bdd;
+#[path = "runtime_probe/test_registry.rs"]
+mod test_registry;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -17,6 +19,10 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  TestRegistry {
+    entries: Vec<PathBuf>,
+    host: String,
+  },
   BddSession {
     entries: Vec<PathBuf>,
     actions: Vec<bdd::Action>,
@@ -228,8 +234,19 @@ impl Probe {
     Ok(serde_json::to_value(execution.result)?)
   }
 
+  async fn collect_test_registry(&self, entries: Vec<PathBuf>, host: &str) -> Result<Value> {
+    test_registry::collect(
+      &self.root,
+      &self.context,
+      paths(&self.root, entries),
+      extension_host(host)?,
+    )
+    .await
+  }
+
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::TestRegistry { entries, host } => self.collect_test_registry(entries, &host).await,
       Operation::BddSession { entries, actions } => {
         Box::pin(bdd::run(&self.root, &self.context, paths(&self.root, entries), actions)).await
       },

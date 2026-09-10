@@ -290,3 +290,25 @@ completion requires observable behavior through the public scripting API.
   inference, modifier/annotation metadata, suite membership, source-map
   locations, custom fixture chains, off-host availability and named diagnostics.
   Its original Rust target remains until backup and parity verification finish.
+
+- Pushed `1e704840`, the verified BiDi event acknowledgement and ordered
+  BiDi/WebKit binding queues. The broad protocol/mobile capability audit is
+  still open; this checkpoint does not claim parity or benchmark superiority.
+- The original `test_registry.rs` target (14384 bytes, unchanged from HEAD)
+  was copied and byte-verified at
+  `/tmp/ferridriver-test-registry-backup-a5i_b22x/test_registry.rs` before
+  removal. Seven native cases replace its five Rust cases, splitting the
+  original three-host loop into separate native cases. Remaining top-level
+  Rust integration targets: 66.
+- Registry migration's first gate rejected a 105-line operation dispatcher in
+  1.672 seconds before building binaries. The collection operation is now a
+  separate helper. Current full verification runs at 16 browser slots in exec
+  session 12026, console `/tmp/ferridriver-registry-migration-ready2.log`.
+  The private probe exposes observations; assertions live in native JS.
+  Migration files are not committed yet.
+
+- Registry migration full gate passed all 154 checks in 111.916 wall seconds
+  (111.79 gate), at 16 browser slots. Logs:
+  `target/gate/1789020131-209777`, `/tmp/ferridriver-registry-migration-ready2.log`.
+  All 492 native integrations passed. This validates removal of the original
+  Rust registry target while retaining its assertions.
