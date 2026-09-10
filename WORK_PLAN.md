@@ -1431,3 +1431,7 @@ completion requires observable behavior through the public scripting API.
   and `webSocketUrl: true`, then exercises the real error response path. The
   following warm full gate passed 108 checks with zero failures in 122.19s:
   integration 73.77s, E2E 110.98s, and BDD 104.76s.
+- The pinned repository gate (`mise exec just@1.58.0 -- just ready`) passed
+  111 checks with zero failures in 206.44s. This includes format, lint, docs,
+  doc tests, native JS integration, NAPI, E2E, BDD, acceptance, and Rust
+  targets; the plain `just` shim was unavailable in the shell and did not run.
