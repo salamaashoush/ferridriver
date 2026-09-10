@@ -1301,3 +1301,7 @@ completion requires observable behavior through the public scripting API.
   page title/URL assertions. The focused headless run passed in 314ms. The
   unchanged Rust harness was backed up at
   /tmp/ferridriver-features-e2e-backup-olcRcT/features_e2e.rs before removal.
+- Feature E2E migration final headless gate exited zero: 115 checks, zero
+  failures or blocks, 107.94s total. Integration completed in 64.82s, E2E in
+  102.41s, and BDD in 96.82s. Log directory:
+  target/gate/1789045354-3011398.
