@@ -621,7 +621,7 @@ pub struct PopupInfo {
   /// `event.userContext`, `WebKit` `pageProxyInfo.browserContextId`.
   pub browser_context_id: Option<String>,
   /// Backend id of the page that opened this popup, when the protocol
-  /// reports one — matched against [`AnyPage::backend_target_id`] to
+  /// reports one — matched against `AnyPage::backend_target_id` to
   /// resolve `page.opener()`.
   pub opener_target_id: Option<String>,
 }
@@ -1192,7 +1192,7 @@ impl AnyPage {
 
   /// Mark a child frame's `<iframe>` element in its parent frame with
   /// the child's frame id via the trace snapshot streamer's
-  /// `markIframe` (see [`crate::snapshotter::annotate_iframe`]).
+  /// `markIframe` (see `crate::snapshotter::annotate_iframe`).
   /// Protocol-level on every backend: CDP `DOM.getFrameOwner`,
   /// `WebKit` `DOM.resolveNode {frameId}`, `BiDi`
   /// `browsingContext.locateNodes` with a context locator.

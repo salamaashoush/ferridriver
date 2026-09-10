@@ -70,6 +70,16 @@ pub(crate) struct BidiTransport {
   closing: Arc<AtomicBool>,
 }
 
+fn trace_event(event: &BidiEvent) {
+  trace!(
+    method = event.method,
+    context = ?event.params.get("context"),
+    request = ?event.params.get("request").and_then(|request| request.get("request")),
+    status = ?event.params.get("response").and_then(|response| response.get("status")),
+    "BiDi event"
+  );
+}
+
 impl BidiTransport {
   /// Connect to a `BiDi` WebSocket endpoint.
   pub async fn connect(ws_url: &str) -> Result<Self> {
@@ -151,8 +161,8 @@ impl BidiTransport {
           match serde_json::from_slice::<serde_json::Value>(bytes) {
             Ok(parsed) => {
               let params = parsed.get("params").cloned().unwrap_or(serde_json::Value::Null);
-              trace!("BiDi event: {method}");
               let event = BidiEvent { method, params };
+              trace_event(&event);
               // Taps first: lossless state trackers must observe the
               // event before best-effort broadcast consumers.
               {

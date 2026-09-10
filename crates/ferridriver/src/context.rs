@@ -81,7 +81,7 @@ impl BrowserContext {
   /// reports `None` once nothing is open so callers can rebuild.
   ///
   /// Read-only, so it cannot drop the dead entries it skips;
-  /// [`Self::prune_closed_pages`] does that at the `&mut` entry points
+  /// `Self::prune_closed_pages` does that at the `&mut` entry points
   /// (opening a page, refreshing the list).
   #[must_use]
   pub fn active_page(&self) -> Option<&AnyPage> {

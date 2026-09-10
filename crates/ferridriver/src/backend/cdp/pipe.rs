@@ -210,8 +210,11 @@ impl super::transport::CdpTransport for PipeTransport {
     session_id: &str,
     state: Arc<std::sync::Mutex<super::LifecycleState>>,
     notify: Arc<tokio::sync::Notify>,
+    frame_observer: super::transport::FrameStateObserver,
   ) {
-    self.dispatcher.register_lifecycle_tracker(session_id, state, notify);
+    self
+      .dispatcher
+      .register_lifecycle_tracker(session_id, state, notify, frame_observer);
   }
 
   fn unregister_session(&self, session_id: &str) {

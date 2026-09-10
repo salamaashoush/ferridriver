@@ -116,7 +116,7 @@ pub struct WebKitPage {
   context_id: Option<Arc<str>>,
   closed: Arc<AtomicBool>,
   /// Set when `attach(defer_resume: true)` observed a paused popup
-  /// target; cleared (and `Target.resume` sent) by [`Self::resume_popup`].
+  /// target; cleared (and `Target.resume` sent) by `Self::resume_popup`.
   popup_paused: Arc<AtomicBool>,
   /// Latch: the `window.__fd` selector engine has been injected.
   engine_injected: Arc<AtomicBool>,
@@ -361,7 +361,7 @@ impl WebKitPage {
   /// `Target.targetCreated`, open the target session, run the standard
   /// `*.enable` initialisation (mirrors `WKPage._initializeSessionMayThrow`).
   /// `defer_resume`: when the target arrived paused, leave it paused
-  /// and let [`Self::resume_popup`] release it — the popup pump needs
+  /// and let `Self::resume_popup` release it — the popup pump needs
   /// the pause window to register listeners before the popup's first
   /// navigation fires. `new_page` passes `false` (resume immediately).
   pub async fn attach(
@@ -508,7 +508,7 @@ impl WebKitPage {
     // session init above so the popup's first document already sees
     // the bootstrap script and overrides (mirrors `WKPage`'s
     // initialize-then-`Target.resume` order). With `defer_resume` the
-    // pause is held for [`Self::resume_popup`] instead.
+    // pause is held for `Self::resume_popup` instead.
     if is_paused {
       if defer_resume {
         page.popup_paused.store(true, Ordering::SeqCst);
@@ -948,6 +948,7 @@ impl WebKitPage {
     let nav_slot = self.nav_request_slot.clone();
     let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async move {
       loop {
+        let notified = signals.notify.notified();
         if signals.seen(lifecycle) {
           return Ok(());
         }
@@ -960,7 +961,7 @@ impl WebKitPage {
         {
           return Err(FerriError::backend(format!("webkit navigate: {err}")));
         }
-        signals.notify.notified().await;
+        notified.await;
       }
     })
     .await;

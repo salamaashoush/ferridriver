@@ -250,7 +250,7 @@ fn now_epoch_ms() -> f64 {
 /// # Errors
 ///
 /// Playwright's exact messages: "Clock only understands numbers, 'mm:ss'
-/// and 'hh:mm:ss'" and "Invalid time <str>".
+/// and 'hh:mm:ss'" and `Invalid time <str>`.
 pub fn parse_ticks(ticks: &ClockTicks) -> Result<f64> {
   match ticks {
     ClockTicks::Millis(ms) => Ok(*ms),
@@ -306,7 +306,7 @@ pub fn parse_ticks(ticks: &ClockTicks) -> Result<f64> {
 ///
 /// # Errors
 ///
-/// "Invalid date: <str>" on anything unparsable, like Playwright.
+/// `Invalid date: <str>` on anything unparsable, like Playwright.
 pub fn parse_time(time: &ClockTime) -> Result<f64> {
   match time {
     ClockTime::Millis(ms) => Ok(*ms),

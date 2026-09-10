@@ -761,6 +761,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       page.session_id.as_deref().unwrap_or(""),
       page.lifecycle.clone(),
       page.lifecycle_notify.clone(),
+      transport::frame_state_observer(page.frame_cache.clone(), page.events.clone()),
     );
     let _ = page.main_frame_id.set(page.target_id.to_string());
     Ok(page)
@@ -1070,6 +1071,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       page.session_id.as_deref().unwrap_or(""),
       page.lifecycle.clone(),
       page.lifecycle_notify.clone(),
+      transport::frame_state_observer(page.frame_cache.clone(), page.events.clone()),
     );
 
     // Seed `main_frame_id` from `target_id`. For regular page targets
@@ -5413,7 +5415,6 @@ impl<T: CdpWrap> CdpPage<T> {
       self.session_id.clone(),
       self.frame_contexts.clone(),
       self.frame_contexts_notify.clone(),
-      self.events.clone(),
       self.exposed_fns.clone(),
       self.target_id.clone(),
     ));
@@ -6034,7 +6035,6 @@ impl<T: CdpWrap> CdpPage<T> {
     session_id: Option<Arc<str>>,
     frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
     contexts_notify: Arc<tokio::sync::Notify>,
-    emitter: crate::events::EventEmitter,
     exposed_fns: Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
     target_id: Arc<str>,
   ) -> tokio::task::AbortHandle {
@@ -6071,15 +6071,7 @@ impl<T: CdpWrap> CdpPage<T> {
           }
         }
 
-        Self::handle_tracker_event(
-          &event,
-          &frame_contexts,
-          &contexts_notify,
-          &emitter,
-          &target_id,
-          &binding_tx,
-        )
-        .await;
+        Self::handle_tracker_event(&event, &frame_contexts, &contexts_notify, &target_id, &binding_tx).await;
       }
     })
     .abort_handle()
@@ -6091,7 +6083,6 @@ impl<T: CdpWrap> CdpPage<T> {
     event: &serde_json::Value,
     frame_contexts: &Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
     contexts_notify: &Arc<tokio::sync::Notify>,
-    emitter: &crate::events::EventEmitter,
     target_id: &Arc<str>,
     binding_tx: &tokio::sync::mpsc::UnboundedSender<BindingCall>,
   ) {
@@ -6139,19 +6130,6 @@ impl<T: CdpWrap> CdpPage<T> {
           }
         }
       },
-      "Page.frameAttached" => {
-        if let Some(params) = event.get("params") {
-          emitter.emit(crate::events::PageEvent::FrameAttached(super::FrameInfo {
-            frame_id: params.get("frameId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            parent_frame_id: params
-              .get("parentFrameId")
-              .and_then(|v| v.as_str())
-              .map(std::string::ToString::to_string),
-            name: String::new(),
-            url: String::new(),
-          }));
-        }
-      },
       "Page.frameDetached" => {
         if let Some(fid) = event
           .get("params")
@@ -6159,54 +6137,9 @@ impl<T: CdpWrap> CdpPage<T> {
           .and_then(|v| v.as_str())
         {
           frame_contexts.write().await.remove(fid);
-          emitter.emit(crate::events::PageEvent::FrameDetached {
-            frame_id: fid.to_string(),
-          });
-        }
-      },
-      "Page.frameNavigated" => Self::emit_frame_navigated(event, emitter),
-      "Page.navigatedWithinDocument" => {
-        // Same-document navigation (history.pushState / replaceState /
-        // fragment). Chromium sends only { frameId, url } — without
-        // this, `page.url()` / `waitForURL` never see SPA route
-        // changes. Mirrors Playwright's
-        // `crPage.ts::_onFrameNavigatedWithinDocument`.
-        if let Some(params) = event.get("params") {
-          emitter.emit(crate::events::PageEvent::FrameNavigatedWithinDocument(
-            super::FrameInfo {
-              frame_id: params.get("frameId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-              parent_frame_id: None,
-              name: String::new(),
-              url: params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            },
-          ));
         }
       },
       _ => {},
-    }
-  }
-
-  /// Emit [`crate::events::PageEvent::FrameNavigated`] for a
-  /// `Page.frameNavigated` event.
-  ///
-  /// Note: we previously called `injected_script.reset()` on main-frame
-  /// navigation. That was wrong: `Page.addScriptToEvaluateOnNewDocument`
-  /// registers the source for ALL future documents on this target, so
-  /// every post-navigation document already runs the self-guarded
-  /// `window.__fd` IIFE on its own. Resetting forced a redundant
-  /// `addScriptToEvaluateOnNewDocument` RTT on every navigation — the
-  /// bench's 100×nav workload was paying ~5ms per test for nothing.
-  fn emit_frame_navigated(event: &serde_json::Value, emitter: &crate::events::EventEmitter) {
-    if let Some(frame) = event.get("params").and_then(|p| p.get("frame")) {
-      emitter.emit(crate::events::PageEvent::FrameNavigated(super::FrameInfo {
-        frame_id: frame.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        parent_frame_id: frame
-          .get("parentId")
-          .and_then(|v| v.as_str())
-          .map(std::string::ToString::to_string),
-        name: frame.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        url: frame.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-      }));
     }
   }
 

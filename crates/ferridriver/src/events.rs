@@ -286,6 +286,7 @@ impl EmitterEvent for PageEvent {
 
 struct ListenerSlot<E> {
   id: u64,
+  registered: u64,
   name: String,
   once: bool,
   callback: Arc<dyn Fn(E) + Send + Sync>,
@@ -293,7 +294,8 @@ struct ListenerSlot<E> {
 
 struct SubscriberSlot<E> {
   id: u64,
-  tx: mpsc::UnboundedSender<E>,
+  registered: u64,
+  tx: mpsc::UnboundedSender<StampedEvent<E>>,
 }
 
 /// Listener + subscription registries shared with the dispatcher task.
@@ -305,11 +307,19 @@ struct EmitterShared<E> {
   subscribers: std::sync::Mutex<Vec<SubscriberSlot<E>>>,
 }
 
+#[derive(Clone)]
+struct StampedEvent<E> {
+  event: E,
+  sequence: u64,
+}
+
+static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
 struct EmitterInner<E> {
-  queue_tx: mpsc::UnboundedSender<E>,
+  queue_tx: mpsc::UnboundedSender<StampedEvent<E>>,
   shared: Arc<EmitterShared<E>>,
   /// `Some(rx)` until the dispatcher task is spawned; taken exactly once.
-  pending_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<E>>>,
+  pending_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<StampedEvent<E>>>>,
   dispatcher_running: AtomicBool,
   /// Runtime handle captured at construction so listener registration
   /// works from non-async contexts (NAPI).
@@ -332,9 +342,12 @@ fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
   m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-async fn dispatch_loop<E: EmitterEvent>(shared: Arc<EmitterShared<E>>, mut rx: mpsc::UnboundedReceiver<E>) {
+async fn dispatch_loop<E: EmitterEvent>(
+  shared: Arc<EmitterShared<E>>,
+  mut rx: mpsc::UnboundedReceiver<StampedEvent<E>>,
+) {
   let mut fired: Vec<Arc<dyn Fn(E) + Send + Sync>> = Vec::new();
-  let mut batch: Vec<E> = Vec::new();
+  let mut batch: Vec<StampedEvent<E>> = Vec::new();
   // Batch drain: one task wakeup services everything queued, instead of
   // one wakeup per event — the dominant dispatcher cost under storm.
   while rx.recv_many(&mut batch, 128).await > 0 {
@@ -344,7 +357,13 @@ async fn dispatch_loop<E: EmitterEvent>(shared: Arc<EmitterShared<E>>, mut rx: m
   }
 }
 
-fn dispatch_event<E: EmitterEvent>(shared: &EmitterShared<E>, event: E, fired: &mut Vec<Arc<dyn Fn(E) + Send + Sync>>) {
+fn dispatch_event<E: EmitterEvent>(
+  shared: &EmitterShared<E>,
+  stamped: StampedEvent<E>,
+  fired: &mut Vec<Arc<dyn Fn(E) + Send + Sync>>,
+) {
+  let event = stamped.event;
+  let sequence = stamped.sequence;
   if let Some(observer) = shared.state_observer.get() {
     observer(&event);
   }
@@ -354,7 +373,7 @@ fn dispatch_event<E: EmitterEvent>(shared: &EmitterShared<E>, event: E, fired: &
     // `once` slots before invoking, so a recursive emit from inside
     // a callback can never re-fire them.
     listeners.retain(|slot| {
-      if E::matches_name(&slot.name, &event) {
+      if slot.registered < sequence && E::matches_name(&slot.name, &event) {
         fired.push(Arc::clone(&slot.callback));
         !slot.once
       } else {
@@ -380,11 +399,20 @@ fn dispatch_event<E: EmitterEvent>(shared: &EmitterShared<E>, event: E, fired: &
   }
   let mut subscribers = lock_or_recover(&shared.subscribers);
   if subscribers.len() == 1 {
-    if subscribers[0].tx.send(event).is_err() {
+    if subscribers[0].registered < sequence && subscribers[0].tx.send(StampedEvent { event, sequence }).is_err() {
       subscribers.clear();
     }
   } else {
-    subscribers.retain(|slot| slot.tx.send(event.clone()).is_ok());
+    subscribers.retain(|slot| {
+      slot.registered >= sequence
+        || slot
+          .tx
+          .send(StampedEvent {
+            event: event.clone(),
+            sequence,
+          })
+          .is_ok()
+    });
   }
 }
 
@@ -468,8 +496,12 @@ impl<E: EmitterEvent> Emitter<E> {
   /// Emit an event. Never blocks and never drops: the event is queued
   /// for the dispatcher task.
   pub fn emit(&self, event: E) {
+    self.emit_stamped(event, EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+  }
+
+  pub(crate) fn emit_stamped(&self, event: E, sequence: u64) {
     self.ensure_dispatcher();
-    let _ = self.inner.queue_tx.send(event);
+    let _ = self.inner.queue_tx.send(StampedEvent { event, sequence });
   }
 
   pub(crate) fn set_state_observer(&self, observer: StateObserver<E>) -> bool {
@@ -505,7 +537,11 @@ impl<E: EmitterEvent> Emitter<E> {
     self.ensure_dispatcher();
     let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::unbounded_channel();
-    lock_or_recover(&self.inner.shared.subscribers).push(SubscriberSlot { id, tx });
+    lock_or_recover(&self.inner.shared.subscribers).push(SubscriberSlot {
+      id,
+      registered: EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+      tx,
+    });
     EventSubscription {
       rx,
       id,
@@ -584,6 +620,7 @@ impl<E: EmitterEvent> Emitter<E> {
     let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
     let slot = ListenerSlot {
       id,
+      registered: EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed),
       name: event_name.to_string(),
       once,
       callback,
@@ -692,7 +729,7 @@ impl<E: EmitterEvent> Emitter<E> {
 /// waiters that need a synchronous subscription point. Unregisters
 /// itself from the emitter on drop.
 pub struct EventSubscription<E> {
-  rx: mpsc::UnboundedReceiver<E>,
+  rx: mpsc::UnboundedReceiver<StampedEvent<E>>,
   id: u64,
   shared: std::sync::Weak<EmitterShared<E>>,
 }
@@ -709,7 +746,11 @@ impl<E: EmitterEvent> EventSubscription<E> {
   /// Receive the next event. Returns `None` once the emitter is
   /// dropped. Cancel-safe.
   pub async fn recv(&mut self) -> Option<E> {
-    self.rx.recv().await
+    self.rx.recv().await.map(|stamped| stamped.event)
+  }
+
+  pub(crate) async fn recv_stamped(&mut self) -> Option<(E, u64)> {
+    self.rx.recv().await.map(|stamped| (stamped.event, stamped.sequence))
   }
 
   /// Drain this subscription until `predicate` matches an event, the
@@ -728,7 +769,7 @@ impl<E: EmitterEvent> EventSubscription<E> {
       if remaining.is_zero() {
         return Err(crate::error::FerriError::timeout("waiting for event", timeout_ms));
       }
-      match tokio::time::timeout(remaining, self.rx.recv()).await {
+      match tokio::time::timeout(remaining, self.recv()).await {
         Ok(Some(event)) if predicate(&event) => return Ok(event),
         Ok(Some(_)) => {},
         Ok(None) => {
@@ -870,6 +911,69 @@ pub type BrowserEventEmitter = Emitter<BrowserEvent>;
 mod tests {
   use super::*;
   use std::sync::atomic::AtomicUsize;
+
+  #[tokio::test]
+  async fn late_listeners_and_subscribers_do_not_receive_queued_history() {
+    let emitter = EventEmitter::new();
+    emitter.emit(PageEvent::Load);
+    let mut subscription = emitter.subscribe();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    emitter.once(
+      "load",
+      Arc::new(move |_| {
+        observed.fetch_add(1, Ordering::Relaxed);
+      }),
+    );
+    emitter.emit(PageEvent::Close);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.recv())
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(matches!(event, PageEvent::Close));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    emitter.emit(PageEvent::Load);
+    subscription
+      .drain_until(|event| matches!(event, PageEvent::Load), 1000)
+      .await
+      .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+  }
+
+  #[tokio::test]
+  async fn forwarding_keeps_the_original_event_registration_boundary() {
+    let source = EventEmitter::new();
+    let destination = EventEmitter::new();
+    let mut bridge = source.subscribe();
+    source.emit(PageEvent::Load);
+    let mut subscription = destination.subscribe();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    destination.once(
+      "load",
+      Arc::new(move |_| {
+        observed.fetch_add(1, Ordering::Relaxed);
+      }),
+    );
+    let (event, sequence) = tokio::time::timeout(std::time::Duration::from_secs(1), bridge.recv_stamped())
+      .await
+      .unwrap()
+      .unwrap();
+    destination.emit_stamped(event, sequence);
+    destination.emit(PageEvent::Close);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.recv())
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(matches!(event, PageEvent::Close));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    destination.emit(PageEvent::Load);
+    subscription
+      .drain_until(|event| matches!(event, PageEvent::Load), 1000)
+      .await
+      .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+  }
 
   #[tokio::test(flavor = "current_thread")]
   async fn state_updates_precede_listeners_and_raw_subscribers() -> Result<(), Box<dyn std::error::Error>> {

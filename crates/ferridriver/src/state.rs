@@ -1430,18 +1430,19 @@ impl BrowserState {
     let backref = page.page_backref_handle();
     tokio::spawn(async move {
       use crate::events::{ContextEvent, PageEvent};
-      while let Some(event) = rx.recv().await {
+      while let Some((event, sequence)) = rx.recv_stamped().await {
+        let emit = |event| context_events.emit_stamped(event, sequence);
         // Frame- and page-lifecycle mirror events need the public
         // wrapper `Arc<Page>` so the binding can mint a `Frame` /
         // deliver a `Page`. Upgrade lazily; skip if every wrapper has
         // been dropped (page is going away).
         let upgrade = || backref.upgrade();
         match event {
-          PageEvent::PageError(err) => context_events.emit(ContextEvent::WebError(err)),
-          PageEvent::Download(d) => context_events.emit(ContextEvent::Download(d)),
+          PageEvent::PageError(err) => emit(ContextEvent::WebError(err)),
+          PageEvent::Download(d) => emit(ContextEvent::Download(d)),
           PageEvent::FrameAttached(info) => {
             if let Some(page) = upgrade() {
-              context_events.emit(ContextEvent::FrameAttached {
+              emit(ContextEvent::FrameAttached {
                 page,
                 frame_id: info.frame_id,
               });
@@ -1449,12 +1450,12 @@ impl BrowserState {
           },
           PageEvent::FrameDetached { frame_id } => {
             if let Some(page) = upgrade() {
-              context_events.emit(ContextEvent::FrameDetached { page, frame_id });
+              emit(ContextEvent::FrameDetached { page, frame_id });
             }
           },
           PageEvent::FrameNavigated(info) => {
             if let Some(page) = upgrade() {
-              context_events.emit(ContextEvent::FrameNavigated {
+              emit(ContextEvent::FrameNavigated {
                 page,
                 frame_id: info.frame_id,
               });
@@ -1462,7 +1463,7 @@ impl BrowserState {
           },
           PageEvent::Close => {
             if let Some(page) = upgrade() {
-              context_events.emit(ContextEvent::PageClose(page));
+              emit(ContextEvent::PageClose(page));
             }
             // The page is gone — exit instead of waiting on a channel
             // whose senders (backend listener tasks) may outlive it.
@@ -1470,7 +1471,7 @@ impl BrowserState {
           },
           PageEvent::Load => {
             if let Some(page) = upgrade() {
-              context_events.emit(ContextEvent::PageLoad(page));
+              emit(ContextEvent::PageLoad(page));
             }
           },
           _ => {},

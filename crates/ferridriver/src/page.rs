@@ -179,18 +179,22 @@ impl Page {
       return;
     }
     let cache = Arc::clone(&self.frame_cache);
+    let wire_tracks_frames = matches!(
+      self.inner.kind(),
+      crate::backend::BackendKind::CdpPipe | crate::backend::BackendKind::CdpRaw
+    );
     let observed = Arc::clone(self.inner.observed());
     // Frame and observation state must be current before public listeners
     // or the page-to-context bridge receive the event.
     let installed = self.inner.events().set_state_observer(Arc::new(move |event| {
       match event {
         PageEvent::FrameAttached(info) => {
-          if let Ok(mut g) = cache.lock() {
+          if !wire_tracks_frames && let Ok(mut g) = cache.lock() {
             g.attach(info.clone());
           }
         },
         PageEvent::FrameDetached { frame_id } => {
-          if let Ok(mut g) = cache.lock() {
+          if !wire_tracks_frames && let Ok(mut g) = cache.lock() {
             g.detach(frame_id);
           }
         },
@@ -202,7 +206,7 @@ impl Page {
           {
             o.mark_navigation();
           }
-          if let Ok(mut g) = cache.lock() {
+          if !wire_tracks_frames && let Ok(mut g) = cache.lock() {
             g.navigated(info.clone());
           }
         },
@@ -210,7 +214,7 @@ impl Page {
           // Same document, new URL: no `since-navigation` reset, no
           // subtree detach — just keep the tracked URL fresh so
           // `page.url()` / `waitForURL` observe SPA route changes.
-          if let Ok(mut g) = cache.lock() {
+          if !wire_tracks_frames && let Ok(mut g) = cache.lock() {
             g.navigated_within(&info.frame_id, &info.url);
           }
         },
@@ -2223,7 +2227,7 @@ impl Page {
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280`.
   ///
   /// Lowers the Playwright-shaped [`ScreenshotOptions`] bag into the
-  /// backend-level [`ScreenshotOpts`] wire struct. Handles Rust-side
+  /// backend-level [`crate::backend::ScreenshotOpts`] wire struct. Handles Rust-side
   /// concerns (writing `path` to disk, applying `timeout` via a
   /// `tokio::time::timeout` race) that don't belong in the per-backend
   /// dispatch path.

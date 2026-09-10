@@ -5,7 +5,7 @@
 //! decided. Porting the wrappers would port nothing; running the engine
 //! they wrap covers all 67 at once and stays current with it, provided
 //! it is asked for the rules it hides by default
-//! ([`LIGHTHOUSE_ENABLED_RULES`]).
+//! (`LIGHTHOUSE_ENABLED_RULES`).
 //!
 //! axe-core is not vendored here. It is a third-party artifact under a
 //! different licence, fetched to the same cache as the browsers by

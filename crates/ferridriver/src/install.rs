@@ -355,7 +355,7 @@ impl BrowserInstaller {
   /// # Errors
   ///
   /// Returns an error if the download fails after all retries, or if
-  /// what arrived does not match [`AXE_CORE_SHA256`].
+  /// what arrived does not match `AXE_CORE_SHA256`.
   pub async fn install_axe_core<F>(&self, progress: F) -> Result<String>
   where
     F: Fn(InstallProgress),

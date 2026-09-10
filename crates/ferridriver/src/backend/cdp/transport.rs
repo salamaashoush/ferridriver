@@ -268,6 +268,7 @@ pub trait CdpTransport: Send + Sync + 'static {
     session_id: &str,
     state: Arc<std::sync::Mutex<super::LifecycleState>>,
     notify: Arc<tokio::sync::Notify>,
+    frame_observer: super::transport::FrameStateObserver,
   );
 
   /// Release everything the dispatcher holds for a page session that is
@@ -280,9 +281,35 @@ pub trait CdpTransport: Send + Sync + 'static {
 
 // ── Shared dispatch state ──────────────────────────────────────────────────
 
+pub type FrameStateObserver = Arc<dyn Fn(&[u8], &str) + Send + Sync>;
+
+pub(crate) fn frame_state_observer(
+  cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  events: crate::events::EventEmitter,
+) -> FrameStateObserver {
+  Arc::new(move |raw, method| {
+    if let Some(event) = frame_event(raw, method) {
+      {
+        let mut cache = lock_or_recover(&cache);
+        match &event {
+          crate::events::PageEvent::FrameAttached(info) => cache.attach(info.clone()),
+          crate::events::PageEvent::FrameDetached { frame_id } => cache.detach(frame_id),
+          crate::events::PageEvent::FrameNavigated(info) => cache.navigated(info.clone()),
+          crate::events::PageEvent::FrameNavigatedWithinDocument(info) => {
+            cache.navigated_within(&info.frame_id, &info.url);
+          },
+          _ => {},
+        }
+      }
+      events.emit(event);
+    }
+  })
+}
+
 pub(crate) struct LifecycleTracker {
   pub state: Arc<std::sync::Mutex<super::LifecycleState>>,
   pub notify: Arc<tokio::sync::Notify>,
+  pub frame_observer: super::transport::FrameStateObserver,
 }
 
 /// Shared CDP message dispatch state. Embedded by both `PipeTransport` and `WsTransport`.
@@ -456,10 +483,16 @@ impl CdpDispatcher {
     session_id: &str,
     state: Arc<std::sync::Mutex<super::LifecycleState>>,
     notify: Arc<tokio::sync::Notify>,
+    frame_observer: super::transport::FrameStateObserver,
   ) {
-    self
-      .lifecycle_trackers
-      .insert(session_id.to_string(), LifecycleTracker { state, notify });
+    self.lifecycle_trackers.insert(
+      session_id.to_string(),
+      LifecycleTracker {
+        state,
+        notify,
+        frame_observer,
+      },
+    );
   }
 
   /// Drop the lifecycle tracker and every tap belonging to
@@ -707,6 +740,7 @@ impl CdpDispatcher {
   /// goto/reload return immediately instead of stalling until timeout.
   fn dispatch_lifecycle(&self, raw: &[u8], method_str: &str, key: &str) {
     if let Some(tracker) = self.lifecycle_trackers.get(key) {
+      (tracker.frame_observer)(raw, method_str);
       match method_str {
         "Page.frameNavigated" => {
           let params = json_scan::json_field(raw, b"params");
@@ -789,6 +823,59 @@ impl CdpDispatcher {
         _ => {},
       }
     }
+  }
+}
+
+pub(super) fn navigated_frame(frame: &serde_json::Value) -> super::super::FrameInfo {
+  let text = |key: &str| frame.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
+  super::super::FrameInfo {
+    frame_id: text("id").to_string(),
+    parent_frame_id: frame
+      .get("parentId")
+      .and_then(serde_json::Value::as_str)
+      .map(str::to_owned),
+    name: text("name").to_string(),
+    url: format!("{}{}", text("url"), text("urlFragment")),
+  }
+}
+
+fn frame_event(raw: &[u8], method: &str) -> Option<crate::events::PageEvent> {
+  use crate::events::PageEvent;
+  if !matches!(
+    method,
+    "Page.frameAttached" | "Page.frameDetached" | "Page.frameNavigated" | "Page.navigatedWithinDocument"
+  ) {
+    return None;
+  }
+  let params: serde_json::Value = serde_json::from_slice(json_scan::json_field(raw, b"params")).ok()?;
+  let text = |key: &str| {
+    params
+      .get(key)
+      .and_then(serde_json::Value::as_str)
+      .unwrap_or("")
+      .to_string()
+  };
+  match method {
+    "Page.frameAttached" => Some(PageEvent::FrameAttached(super::super::FrameInfo {
+      frame_id: text("frameId"),
+      parent_frame_id: params
+        .get("parentFrameId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned),
+      name: String::new(),
+      url: String::new(),
+    })),
+    "Page.frameDetached" => Some(PageEvent::FrameDetached {
+      frame_id: text("frameId"),
+    }),
+    "Page.frameNavigated" => Some(PageEvent::FrameNavigated(navigated_frame(params.get("frame")?))),
+    "Page.navigatedWithinDocument" => Some(PageEvent::FrameNavigatedWithinDocument(super::super::FrameInfo {
+      frame_id: text("frameId"),
+      parent_frame_id: None,
+      name: String::new(),
+      url: text("url"),
+    })),
+    _ => None,
   }
 }
 
@@ -952,8 +1039,57 @@ mod tests {
       crashed: false,
     }));
     let notify = Arc::new(tokio::sync::Notify::new());
-    dispatcher.register_lifecycle_tracker(session_id, state.clone(), notify);
+    dispatcher.register_lifecycle_tracker(
+      session_id,
+      state.clone(),
+      notify,
+      frame_state_observer(Arc::default(), crate::events::EventEmitter::new()),
+    );
     state
+  }
+
+  #[test]
+  fn frame_cache_is_current_when_lifecycle_waiters_are_released() {
+    let dispatcher = CdpDispatcher::new();
+    let state = register_test_tracker(&dispatcher, "s1");
+    let cache = Arc::default();
+    dispatcher.register_lifecycle_tracker(
+      "s1",
+      state.clone(),
+      Arc::default(),
+      frame_state_observer(Arc::clone(&cache), crate::events::EventEmitter::new()),
+    );
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.frameNavigated","sessionId":"s1","params":{"frame":{"id":"f1","loaderId":"L1","url":"https://example.test/"}}}"#,
+    );
+    assert_eq!(lock_or_recover(&state).fired, super::super::LC_COMMIT);
+    assert_eq!(
+      lock_or_recover(&cache).record("f1").unwrap().info.url,
+      "https://example.test/"
+    );
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.frameNavigated","sessionId":"other","params":{"frame":{"id":"f1","url":"https://wrong.test/"}}}"#,
+    );
+    assert_eq!(
+      lock_or_recover(&cache).record("f1").unwrap().info.url,
+      "https://example.test/"
+    );
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.frameAttached","sessionId":"s1","params":{"frameId":"child","parentFrameId":"f1"}}"#,
+    );
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.frameNavigated","sessionId":"s1","params":{"frame":{"id":"child","parentId":"f1","name":"child","url":"https://example.test/frame"}}}"#,
+    );
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.navigatedWithinDocument","sessionId":"s1","params":{"frameId":"child","url":"https://example.test/frame#\u0061"}}"#,
+    );
+    assert_eq!(
+      lock_or_recover(&cache).record("child").unwrap().info.url,
+      "https://example.test/frame#a"
+    );
+    assert_eq!(lock_or_recover(&state).current_loader_id, "L1");
+    dispatcher.dispatch_message(br#"{"method":"Page.frameDetached","sessionId":"s1","params":{"frameId":"child"}}"#);
+    assert!(lock_or_recover(&cache).record("child").unwrap().detached);
   }
 
   #[test]

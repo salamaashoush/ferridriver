@@ -20,7 +20,7 @@
 //! still appears in the trace (the loader synthesizes the missing
 //! `after`, `traceLoader.ts`). DOM snapshots (`frame-snapshot` events,
 //! `beforeSnapshot`/`afterSnapshot` names) are captured around actions
-//! by [`crate::snapshotter`]; console messages and page lifecycle
+//! by `crate::snapshotter`; console messages and page lifecycle
 //! events are fed from the per-page bookkeeping listener
 //! (`crate::page::Page::seed_frame_cache`).
 
@@ -488,7 +488,7 @@ pub struct TraceRecorder {
   spool_version: AtomicU64,
   /// Snapshot-history epoch for this chunk: page documents compare it
   /// against their stored value at capture time and self-reset on
-  /// mismatch ([`crate::snapshotter`]). Process-unique so a document
+  /// mismatch (`crate::snapshotter`). Process-unique so a document
   /// that outlived a previous recording (or chunk) can never reuse its
   /// node-dedup cache against the new file.
   snapshot_epoch: AtomicU64,
@@ -954,7 +954,7 @@ fn write_trace_zip<W: std::io::Write + std::io::Seek>(
 /// Remove trace spool directories left behind by dead processes. Spool
 /// dirs are named `ferridriver-trace-<pid>-<n>`; a run killed with
 /// SIGKILL (UI
-/// Stop kills the cycle's process group) never runs [`TraceSpool`]'s
+/// Stop kills the cycle's process group) never runs `TraceSpool`'s
 /// `Drop`, so long-lived UI servers sweep on startup. Live processes'
 /// spools (including this one's) are left alone.
 pub fn sweep_stale_spools() {
@@ -1523,7 +1523,7 @@ tokio::task_local! {
   ///
   /// The host scopes this at the language boundary, where the caller's
   /// stack is still live; core reads it several awaits later, inside
-  /// [`begin_action`]. A task-local and not a slot because
+  /// `begin_action`. A task-local and not a slot because
   /// `Promise.all([a.click(), b.click()])` puts two call sites in flight
   /// at once, and each future has to keep its own.
   static CALL_ORIGIN: CallOrigin;
@@ -1741,7 +1741,7 @@ struct ObservedAction {
   started: Instant,
 }
 
-/// An in-flight traced action. [`begin_action`] /
+/// An in-flight traced action. `begin_action` /
 /// [`begin_custom_action`] write the `before` event immediately (live
 /// exports show the action while it runs); [`ActionSpan::finish`]
 /// writes the `after` event. Snapshot names are decided up front —
@@ -2047,7 +2047,7 @@ pub(crate) fn begin_action(
 /// Hold the action at the gate, if one is installed, before it runs.
 ///
 /// Threaded through the three places a span is opened rather than folded
-/// into [`begin_action`] so the pause lands after the before-snapshot is
+/// into `begin_action` so the pause lands after the before-snapshot is
 /// captured: a client that attaches while the action is held should see
 /// the same page the trace recorded, not one frame earlier.
 pub(crate) async fn open_action(span: Option<ActionSpan>) -> Option<ActionSpan> {

@@ -552,7 +552,7 @@ impl HttpClient {
   ///
   /// The caller has already run the spec's "extract a body" step, so the
   /// body and its `content-type` arrive decided. That is the whole point
-  /// of this entry point: [`Self::build_request`] applies Playwright's
+  /// of this entry point: `Self::build_request` applies Playwright's
   /// `data` defaults (notably `content-type: application/octet-stream`),
   /// which are right for `request.post(url, { data })` and wrong for
   /// `fetch(url, { body: someArrayBuffer })` — where the spec sends no
