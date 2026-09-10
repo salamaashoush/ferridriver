@@ -1392,3 +1392,7 @@ completion requires observable behavior through the public scripting API.
   caller's W3C capabilities. Direct WebSocket connections retain their native
   backend behavior; Classic-only servers still fail clearly when no BiDi
   socket is returned. All-target Clippy passes for the expanded path.
+- Final protocol-expansion gate passed headlessly with 111 checks, zero
+  failures or blocks, in 140.21s. Integration completed in 84.66s, E2E in
+  119.20s, and BDD in 113.02s. Log:
+  `target/gate/1789050462-1314504`.
