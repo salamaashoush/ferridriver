@@ -17,6 +17,8 @@ pub struct Request {
   modules: Vec<PathBuf>,
   #[serde(default)]
   resolve: Vec<String>,
+  #[serde(default)]
+  http_client: bool,
   load_policy: Option<ferridriver_config::ExtensionPolicyConfig>,
   session_policy: Option<ferridriver_config::ExtensionPolicyConfig>,
 }
@@ -99,6 +101,11 @@ pub async fn run(root: &Path, context: &RunContext, request: Request) -> Result<
   context.caps.extension_policy = request.session_policy.unwrap_or(policy);
   context.host = super::extension_host(&request.host)?;
   context.extensions = bindings;
+  if request.http_client {
+    context.request = Some(std::sync::Arc::new(ferridriver::http_client::HttpClient::new(
+      ferridriver::http_client::HttpClientOptions::default(),
+    )));
+  }
   let session = Session::create(ScriptEngineConfig::default(), &context).await?;
   let mut outcomes = Vec::new();
   for source in request.sources {

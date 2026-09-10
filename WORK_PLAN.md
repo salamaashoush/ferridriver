@@ -431,3 +431,18 @@ completion requires observable behavior through the public scripting API.
   The intermittent retry-count failure remains unresolved; timestamps are
   retained in its assertion message for the next reproduction. The focused
   justfile command fix is verified independently and by the full gate.
+
+- Pushed `e96c46ee`, verified focused recipe repair and retry timing
+  diagnostics. Migrated all ten extension policy contracts to native JS.
+  The private probe optionally installs the production HttpClient just as
+  the original harness did. Network ceilings, command refusals/admission,
+  timeout AbortSignal, microtask restrictions, and metadata assertions remain.
+  Native cases pass in 275 ms. Original Rust target (14405 bytes, matched
+  HEAD) backed up at /tmp/ferridriver-extension-policy-backup-sraevrb8/extension_policy.rs before removal.
+  Remaining top-level Rust integration targets: 59.
+
+- Extension policy migration full default gate passed all 147 checks
+  in 104.742 wall seconds (104.66 gate), 32 jobs/browser slots, with all
+  534 native integrations passing. Logs: `target/gate/1789022824-1854314`,
+  `/tmp/ferridriver-extension-policy-ready.log`. All four retry timing cases
+  passed this run; the previously observed intermittent failure remains open.
