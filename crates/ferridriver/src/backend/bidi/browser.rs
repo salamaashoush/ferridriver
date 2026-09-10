@@ -574,7 +574,7 @@ mod proxy_capability_tests {
 
 #[cfg(test)]
 mod webdriver_url_tests {
-  use super::{webdriver_capabilities, webdriver_session_url};
+  use super::{BidiBrowser, webdriver_capabilities, webdriver_session_url};
 
   #[test]
   fn appends_session_to_server_root() {
@@ -612,5 +612,58 @@ mod webdriver_url_tests {
     assert_eq!(caps["platformName"], "ios");
     assert_eq!(caps["appium:options"]["automationName"], "Safari");
     assert_eq!(caps["webSocketUrl"], true);
+  }
+
+  #[tokio::test]
+  async fn webdriver_headers_reach_the_session_endpoint() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock WebDriver");
+    let address = listener.local_addr().expect("mock address");
+    let server = tokio::spawn(async move {
+      let (mut socket, _) = listener.accept().await.expect("accept session request");
+      let mut request = Vec::new();
+      let mut chunk = [0; 1024];
+      loop {
+        let read = socket.read(&mut chunk).await.expect("read session request");
+        request.extend_from_slice(&chunk[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") || read == 0 {
+          break;
+        }
+      }
+      let body = br#"{"value":{"error":"session not created","message":"test response"}}"#;
+      let response = format!(
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+      );
+      socket.write_all(response.as_bytes()).await.expect("write status");
+      socket.write_all(body).await.expect("write body");
+      String::from_utf8_lossy(&request).into_owned()
+    });
+
+    let mut headers = rustc_hash::FxHashMap::default();
+    headers.insert("authorization".to_string(), "Bearer test-token".to_string());
+    let result = BidiBrowser::connect_webdriver(
+      &format!("http://{address}"),
+      "safari",
+      Some(&serde_json::json!({"platformName": "ios"})),
+      Some(&headers),
+      Some(1_000),
+    )
+    .await;
+    let error = match result {
+      Ok(_) => panic!("the mock endpoint rejects the session"),
+      Err(error) => error,
+    };
+    assert!(error.to_string().contains("500 Internal Server Error"));
+    let request = server.await.expect("mock server task");
+    assert!(
+      request
+        .to_ascii_lowercase()
+        .contains("authorization: bearer test-token")
+    );
+    assert!(request.contains("\"platformName\":\"ios\""));
+    assert!(request.contains("\"webSocketUrl\":true"));
   }
 }
