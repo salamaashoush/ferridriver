@@ -1319,3 +1319,8 @@ completion requires observable behavior through the public scripting API.
   in the shared `BrowserState`, and pass targeted format and clippy checks.
   Safari/WebDriver HTTP and Appium classic sessions still need a separate
   adapter because they are not BiDi WebSocket endpoints.
+- Remote BiDi plus component-test migration final headless gate exited zero:
+  114 checks, zero failures or blocks, 106.72s total. Integration completed in
+  63.14s, E2E in 101.46s, and BDD in 95.42s. The earlier isolated NAPI
+  WebError failure did not reproduce in the clean rerun. Log directory:
+  target/gate/1789045967-3417672.
