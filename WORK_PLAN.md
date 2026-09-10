@@ -1329,4 +1329,8 @@ completion requires observable behavior through the public scripting API.
   assertions, and HTML reporter output. The focused headless run passed four
   tests in 119ms. The unchanged Rust source was backed up at
   /tmp/ferridriver-new-features-backup-s2K7GW/new_features_e2e.rs before
-  removal; the full gate is pending.
+  removal.
+- New-features migration final headless gate exited zero: 113 checks, zero
+  failures or blocks, 109.30s total. Integration completed in 64.73s, E2E in
+  103.75s, and BDD in 98.07s. Log directory:
+  target/gate/1789046340-3611900.
