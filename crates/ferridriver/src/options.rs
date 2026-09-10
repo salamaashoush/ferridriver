@@ -1954,8 +1954,8 @@ pub struct ConnectOptions {
   pub slow_mo: Option<u64>,
   pub timeout: Option<u64>,
   pub expose_network: Option<String>,
-  /// Extra W3C capabilities used when `connect()` targets a WebDriver HTTP
-  /// endpoint. `browserName` defaults to the BrowserType product name.
+  /// Extra W3C capabilities used when `connect()` targets a `WebDriver` HTTP
+  /// endpoint. `browserName` defaults to the `BrowserType` product name.
   pub capabilities: Option<serde_json::Value>,
 }
 

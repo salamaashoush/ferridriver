@@ -91,7 +91,7 @@ impl BidiSession {
     Self::finish(transport, session_id, capabilities).await
   }
 
-  /// Attach to a BiDi WebSocket returned by a pre-existing WebDriver Classic
+  /// Attach to a `BiDi` WebSocket returned by a pre-existing `WebDriver` Classic
   /// session. The HTTP session already ran `session.new`, so sending a second
   /// `session.new` would create a different session or fail on Appium/Safari.
   pub async fn connect_existing(ws_url: &str, session_id: String, capabilities: serde_json::Value) -> Result<Self> {

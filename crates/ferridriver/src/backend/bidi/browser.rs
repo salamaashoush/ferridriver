@@ -128,14 +128,14 @@ impl BidiBrowser {
   /// Connect to an existing `BiDi` endpoint via WebSocket.
   pub async fn connect(ws_url: &str) -> Result<Self> {
     let session = Arc::new(Box::pin(BidiSession::connect(ws_url)).await?);
-    Self::from_session(session).await
+    Self::from_session(session)
   }
 
-  /// Create a BiDi browser from a WebDriver Classic HTTP endpoint.
+  /// Create a `BiDi` browser from a `WebDriver` Classic HTTP endpoint.
   ///
   /// The endpoint creates a W3C session with `webSocketUrl: true`, then the
-  /// returned BiDi connection carries all browser operations. This is the
-  /// low-latency path for WebDriver servers that implement BiDi, including
+  /// returned `BiDi` connection carries all browser operations. This is the
+  /// low-latency path for `WebDriver` servers that implement `BiDi`, including
   /// compatible Appium and Safari Technology Preview sessions.
   pub async fn connect_webdriver(
     endpoint: &str,
@@ -149,10 +149,10 @@ impl BidiBrowser {
       "webSocketUrl": true,
       "unhandledPromptBehavior": "ignore"
     });
-    if let Some(extra) = extra_capabilities.and_then(serde_json::Value::as_object) {
-      if let Some(target) = always_match.as_object_mut() {
-        target.extend(extra.iter().map(|(key, value)| (key.clone(), value.clone())));
-      }
+    if let Some(extra) = extra_capabilities.and_then(serde_json::Value::as_object)
+      && let Some(target) = always_match.as_object_mut()
+    {
+      target.extend(extra.iter().map(|(key, value)| (key.clone(), value.clone())));
     }
     let body = serde_json::json!({
       "capabilities": {
@@ -172,8 +172,7 @@ impl BidiBrowser {
       .map_err(|e| FerriError::Backend(format!("WebDriver session response was not JSON: {e}")))?;
     if !status.is_success() {
       return Err(FerriError::Backend(format!(
-        "WebDriver session request returned {status}: {}",
-        payload
+        "WebDriver session request returned {status}: {payload}"
       )));
     }
     let value = payload.get("value").unwrap_or(&payload);
@@ -192,10 +191,10 @@ impl BidiBrowser {
       })?
       .to_string();
     let session = Arc::new(BidiSession::connect_existing(&ws_url, session_id, capabilities).await?);
-    Self::from_session(session).await
+    Self::from_session(session)
   }
 
-  async fn from_session(session: Arc<BidiSession>) -> Result<Self> {
+  fn from_session(session: Arc<BidiSession>) -> Result<Self> {
     let downloads_dir = new_downloads_dir()?;
     let popup_taps = Self::spawn_popup_listener(&session, &downloads_dir);
     Ok(Self {

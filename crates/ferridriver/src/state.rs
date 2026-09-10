@@ -417,7 +417,7 @@ pub enum ConnectMode {
   Launch,
   /// Connect to browser at explicit ws:// or http:// URL
   ConnectUrl(String),
-  /// Create a W3C WebDriver session and attach to its negotiated BiDi socket.
+  /// Create a W3C `WebDriver` session and attach to its negotiated `BiDi` socket.
   WebDriver {
     endpoint: String,
     browser_name: String,
@@ -1168,8 +1168,8 @@ fn resolve_with_prefix(resolver: &InstanceResolverFn, instance_name: &str) -> Op
 }
 
 /// Attach to a browser someone else is running. CDP uses discovery for HTTP
-/// endpoints; BiDi accepts either its direct WebSocket endpoint or a W3C
-/// WebDriver endpoint that negotiates `webSocketUrl` during session creation.
+/// endpoints; `BiDi` accepts either its direct WebSocket endpoint or a W3C
+/// `WebDriver` endpoint that negotiates `webSocketUrl` during session creation.
 async fn connect_browser(mode: &ConnectMode, backend_kind: BackendKind) -> Result<AnyBrowser> {
   use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
 
