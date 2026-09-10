@@ -1339,3 +1339,10 @@ completion requires observable behavior through the public scripting API.
   62.69s at thirty-two. Running E2E with all 32 browser slots nevertheless
   increased the full gate to 114.23s by starving NAPI and shared suites, so the
   existing split allocation remains the faster end-to-end schedule.
+- Replaced the 952-line `ferridriver-script` binding-surface Rust E2E sweep
+  with a native JS browser-engine test. It keeps a persistent script session
+  and asserts navigation, locators, input, keyboard, handles, frames, routes,
+  exposed functions, media and screenshots, host variables, waits, special
+  values, and disposal. The focused headless case passed in 529ms. The
+  unchanged Rust source was backed up at
+  /tmp/ferridriver-binding-surface-backup-dwCUzT/binding_surface_e2e.rs.
