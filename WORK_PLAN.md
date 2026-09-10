@@ -1492,3 +1492,10 @@ completion requires observable behavior through the public scripting API.
   workers, and keeps four scheduler jobs available. The complete headless
   gate passes all 111 checks in 115.28s; E2E took 85.19s, integration 94.75s,
   and BDD 112.10s under overlap.
+- Added precise Chromium JavaScript coverage to the native page scripting
+  surface: `startJSCoverage`, `takeJSCoverage`, and `stopJSCoverage` keep one
+  CDP Profiler session per page, validate lifecycle misuse, and expose the
+  protocol's timestamped script ranges. The focused performance integration
+  suite passes all three cases in 281ms. This follows the canonical
+  `Profiler.startPreciseCoverage` and `Profiler.takePreciseCoverage` contract:
+  https://chromedevtools.github.io/devtools-protocol/tot/Profiler/.

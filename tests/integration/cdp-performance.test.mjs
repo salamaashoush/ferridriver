@@ -39,3 +39,28 @@ test('native tracing reports an explicit error when stopped before it starts', a
   assert.equal(result.status, 'error', JSON.stringify(result));
   assert.match(result.error.message, /Tracing is not started|Tracing has not been started|Must start tracing/);
 });
+
+test('native scripting exposes precise Chromium JavaScript coverage', async () => {
+  const { results } = await runtimeProbe([{
+    op: 'browser-engine',
+    scripts: [{
+      source: `
+        await page.startJSCoverage({ callCount: true, detailed: true });
+        await page.goto('data:text/html,<title>coverage</title>');
+        await page.evaluate('window.__coverageProbe = 6 * 7');
+        const snapshot = await page.takeJSCoverage();
+        await page.stopJSCoverage();
+        return {
+          hasResult: Array.isArray(snapshot.result),
+          scriptCount: snapshot.result.length,
+          hasTimestamp: typeof snapshot.timestamp === 'number',
+        };
+      `,
+    }],
+  }]);
+  const result = observation(results[0])[0];
+  assert.equal(result.status, 'ok', JSON.stringify(result));
+  assert.equal(result.value.hasResult, true, JSON.stringify(result.value));
+  assert.ok(result.value.scriptCount > 0, JSON.stringify(result.value));
+  assert.equal(result.value.hasTimestamp, true, JSON.stringify(result.value));
+});

@@ -1721,6 +1721,10 @@ export interface Page {
   startTracing(categories?: string[]): Promise<void>;
   stopTracing(): Promise<Array<Record<string, unknown>>>;
   metrics(): Promise<Array<{ name: string; value: number }>>;
+  /** Chromium precise JavaScript coverage from the DevTools Profiler domain. */
+  startJSCoverage(options?: { callCount?: boolean; detailed?: boolean; allowTriggeredUpdates?: boolean }): Promise<Record<string, unknown>>;
+  takeJSCoverage(): Promise<{ result: Array<Record<string, unknown>>; timestamp: number }>;
+  stopJSCoverage(): Promise<Record<string, unknown>>;
 
   // A ferridriver extension, not a Playwright method: Playwright's
   // `page.accessibility` is the accessibility TREE, a different

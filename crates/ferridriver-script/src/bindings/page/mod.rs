@@ -57,6 +57,8 @@ pub struct PageJs {
   locator_handler_ids: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, Vec<u64>>>>,
   #[qjs(skip_trace)]
   web_mcp: crate::bindings::web_mcp::WebMcpJs,
+  #[qjs(skip_trace)]
+  coverage_session: Arc<tokio::sync::Mutex<Option<ferridriver::CdpSession>>>,
 }
 
 impl PageJs {
@@ -67,6 +69,7 @@ impl PageJs {
       vm: None,
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       web_mcp: crate::bindings::web_mcp::WebMcpJs::new(inner.clone()),
+      coverage_session: Arc::new(tokio::sync::Mutex::new(None)),
     }
   }
 
@@ -77,6 +80,7 @@ impl PageJs {
       vm: Some(vm),
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       web_mcp: crate::bindings::web_mcp::WebMcpJs::new(inner.clone()),
+      coverage_session: Arc::new(tokio::sync::Mutex::new(None)),
     }
   }
 
@@ -2022,6 +2026,114 @@ impl PageJs {
       .scope(async move {
         let metrics = self.inner.metrics().await.into_js_with(&ctx)?;
         serde_to_js(&ctx, &metrics)
+      })
+      .await
+  }
+
+  /// Start Chromium's precise JavaScript coverage counters.
+  #[qjs(rename = "startJSCoverage")]
+  pub async fn start_js_coverage<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let options = match options.into_inner() {
+          Some(value) if !value.is_undefined() && !value.is_null() => serde_from_js(&ctx, value)?,
+          _ => serde_json::json!({}),
+        };
+        let context = self
+          .inner
+          .context()
+          .ok_or_else(|| ferridriver::FerriError::unsupported("JavaScript coverage requires a browser context"))
+          .into_js_with(&ctx)?;
+        let mut coverage = self.coverage_session.lock().await;
+        if coverage.is_some() {
+          return Err(rquickjs::Error::new_from_js_message(
+            "page.startJSCoverage",
+            "Error",
+            "JavaScript coverage is already started".to_string(),
+          ));
+        }
+        let session = context.new_cdp_session(&self.inner).await.into_js_with(&ctx)?;
+        session
+          .send("Profiler.enable", serde_json::json!({}))
+          .await
+          .into_js_with(&ctx)?;
+        let result = session
+          .send(
+            "Profiler.startPreciseCoverage",
+            serde_json::json!({
+              "callCount": options.get("callCount").and_then(serde_json::Value::as_bool).unwrap_or(false),
+              "detailed": options.get("detailed").and_then(serde_json::Value::as_bool).unwrap_or(true),
+              "allowTriggeredUpdates": options
+                .get("allowTriggeredUpdates")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            }),
+          )
+          .await
+          .into_js_with(&ctx)?;
+        *coverage = Some(session);
+        crate::bindings::convert::json_to_js(&ctx, &result)
+      })
+      .await
+  }
+
+  /// Collect and reset Chromium's precise JavaScript coverage counters.
+  #[qjs(rename = "takeJSCoverage")]
+  pub async fn take_js_coverage<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let coverage = self.coverage_session.lock().await;
+        let Some(session) = coverage.as_ref() else {
+          return Err(rquickjs::Error::new_from_js_message(
+            "page.takeJSCoverage",
+            "Error",
+            "JavaScript coverage has not been started".to_string(),
+          ));
+        };
+        let result = session
+          .send("Profiler.takePreciseCoverage", serde_json::json!({}))
+          .await
+          .into_js_with(&ctx)?;
+        crate::bindings::convert::json_to_js(&ctx, &result)
+      })
+      .await
+  }
+
+  /// Stop Chromium's precise JavaScript coverage counters.
+  #[qjs(rename = "stopJSCoverage")]
+  pub async fn stop_js_coverage<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let mut coverage = self.coverage_session.lock().await;
+        let Some(session) = coverage.take() else {
+          return Err(rquickjs::Error::new_from_js_message(
+            "page.stopJSCoverage",
+            "Error",
+            "JavaScript coverage has not been started".to_string(),
+          ));
+        };
+        let result = session
+          .send("Profiler.stopPreciseCoverage", serde_json::json!({}))
+          .await
+          .into_js_with(&ctx)?;
+        session
+          .send("Profiler.disable", serde_json::json!({}))
+          .await
+          .into_js_with(&ctx)?;
+        crate::bindings::convert::json_to_js(&ctx, &result)
       })
       .await
   }
