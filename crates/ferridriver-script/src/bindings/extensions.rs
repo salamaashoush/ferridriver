@@ -178,13 +178,14 @@ impl ExtensionCommandsJs {
   }
 
   #[qjs(rename = "read")]
-  pub async fn read<'js>(&self, ctx: Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
+  pub async fn read<'js>(&self, ctx: Ctx<'js>, name: String, timeout_ms: Opt<u64>) -> rquickjs::Result<Value<'js>> {
+    let ms = timeout_ms.0.unwrap_or(30_000);
     let line = tokio::time::timeout(
-      std::time::Duration::from_secs(30),
+      std::time::Duration::from_millis(ms),
       self.registry("commands.read")?.read(&name),
     )
     .await
-    .map_err(|_| Self::cmd_err("commands.read", "stdout timed out after 30s"))?
+    .map_err(|_| Self::cmd_err("commands.read", format!("stdout timed out after {ms}ms")))?
     .map_err(|m| Self::cmd_err("commands.read", m))?;
     json_to_js(&ctx, &serde_json::json!(line))
   }

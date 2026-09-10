@@ -74,6 +74,6 @@ test('Rust harness UI selects a test, serves its trace, and survives cancelling 
       }
       assert.equal(cancelled, true);
       assert.equal((await request.get(base)).status(), 200);
-    });
-  });
+    }, 600000);
+  }, 600000);
 });

@@ -21,12 +21,14 @@
 
 ## Current evidence
 
-- Latest scripting/plan migration headless gate passed: 122 checks, zero failures
-  or blocks, 109.54s gate time. Native integration coverage passed 717 cases
-  in 59.8s. Logs: target/gate/1789038641-4164735 and
-  /tmp/ferridriver-script-plan-ready-fixed.log. This is a warm observation, not a controlled
-  before/after benchmark. Remaining top-level Rust test files: 33, including
-  benchmark targets; addon migration and capability implementation remain open.
+- Latest sidecar/deadline/command-read headless gate passed: 121 checks, zero
+  failures or blocks, 135.43s gate time. Native integration coverage passed
+  742 cases in 64.8s. Logs: target/gate/1789039826-582955 and
+  /tmp/ferridriver-sidecar-deadline-command-ready.log. This run rebuilt docs
+  (20.47s) and Rust test artifacts (32.57s); it is not directly comparable to
+  the previous warm 109.54s run. Remaining top-level Rust test files: 32,
+  including benchmark targets; addon migration and capability implementation
+  remain open.
 - Verified headless gate at committed checkpoint `63641057`: 157 checks, zero failed
   or blocked, 107.68 seconds in the gate and 107.813 seconds wall time. This is
   a warm build with 32 browser slots on the 32-CPU Linux host. Logs:
@@ -1049,3 +1051,46 @@ completion requires observable behavior through the public scripting API.
   failures or blocks, 109.54s; 717 native integration cases passed in 59.8s.
   Logs: target/gate/1789038641-4164735 and
   /tmp/ferridriver-script-plan-ready-fixed.log.
+- Migrated all seventeen sidecar Rust transport/binding tests to native JS.
+  Transport observations retain direct send/send_many, concurrent ID routing,
+  per-call errors, empty batches and pushed events; scripting cases retain
+  on/once/off behavior, unknown names, batch rejection and respawn after close.
+- Sidecar closure now publishes retained watch state. wait_closed supports
+  concurrent and late waiters without the old ten-millisecond child-death
+  polling. Added explicit-close and repeated-wait assertions. The 22-case
+  sidecar selection passed in 98ms with four workers and no browser:
+  /tmp/ferridriver-sidecar-native.log.
+- Removed unchanged sidecar.rs (13137 bytes), byte-verified against its
+  committed source and /tmp/ferridriver-sidecar-backup-mzdxr8ay/sidecar.rs.
+  Remaining top-level Rust test files: 32. Full-gate verification is pending.
+- Sidecar migration gate exposed a real runtime-deadline bug: the Rust UI
+  test requested 600000ms but the outer worker killed it at the configured
+  30000ms. The short native reproducer failed all four timeout-extension,
+  slow and zero-timeout cases at the original 100ms budget:
+  /tmp/ferridriver-runtime-deadline-red.log.
+- The worker now owns the shared modifiers used by JS/BDD bridges, and watches
+  their deadline updates. Budget changes retain elapsed time and debugger
+  pause accounting; zero disables the active deadline. Timeout reports use
+  the updated budget. Primary comparison: local Playwright timeoutManager.ts
+  setTimeout/_updateTimeout, which replace the total slot budget.
+- Six native deadline regressions cover both setters, slow, disabled timeout,
+  shortening after elapsed work and an extended unresolved body still timing
+  out. Combined deadline/debugger/sidecar/Rust-UI selection passed 34 cases
+  in 12.5s: /tmp/ferridriver-deadline-sidecar-native.log. The UI case included
+  a fresh harness build and passed in 12.5s. Final gate is pending.
+- After the worker-deadline fix, the full gate exposed the independent
+  commands.read fixed 30-second limit during the Rust UI harness rebuild.
+  Added its optional timeoutMs argument, consistent with command waits; the
+  UI helper passes the existing 600000ms test budget through both streams.
+- A native read-cancellation regression then proved partial output was lost:
+  after reading head and timing out, the next call returned tail instead of
+  headtail. Partial lines now live with the process reader across cancelled
+  futures. Red: /tmp/ferridriver-command-read-red.log. Fixed command/deadline/
+  Rust-UI selection: 13 cases passed in 11.1s at
+  /tmp/ferridriver-command-read-fixed.log. Final gate remains pending.
+- Final combined headless gate exited zero: 121 checks, no failures or
+  blocks, 135.43s. All 742 native integration cases passed in 64.8s, including
+  runtime deadline updates, partial command reads and the Rust UI harness.
+  Documentation rebuilt in 20.47s and Rust test artifacts in 32.57s. Logs:
+  target/gate/1789039826-582955 and
+  /tmp/ferridriver-sidecar-deadline-command-ready.log.

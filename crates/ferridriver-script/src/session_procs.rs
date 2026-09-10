@@ -213,10 +213,15 @@ impl Ring {
   }
 }
 
+struct InteractiveOutput {
+  reader: tokio::io::BufReader<tokio::process::ChildStdout>,
+  pending: Vec<u8>,
+}
+
 struct Proc {
   pid: i32,
   input: Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
-  output: Option<Arc<tokio::sync::Mutex<tokio::io::BufReader<tokio::process::ChildStdout>>>>,
+  output: Option<Arc<tokio::sync::Mutex<InteractiveOutput>>>,
   started: Instant,
   stdout: Arc<Mutex<Ring>>,
   output_changed: tokio::sync::watch::Receiver<()>,
@@ -288,7 +293,10 @@ impl SessionProcs {
     let pipe = child.stdout.take().ok_or("no stdout pipe")?;
     let mut pumps = Vec::new();
     let output = if interactive {
-      Some(Arc::new(tokio::sync::Mutex::new(tokio::io::BufReader::new(pipe))))
+      Some(Arc::new(tokio::sync::Mutex::new(InteractiveOutput {
+        reader: tokio::io::BufReader::new(pipe),
+        pending: Vec::new(),
+      })))
     } else {
       pumps.push(pump(pipe, stdout.clone(), Some(output_w)));
       None
@@ -376,27 +384,29 @@ impl SessionProcs {
         .ok_or("use commands.open for interactive stdout")?
     };
     let mut output = output.lock().await;
-    let mut bytes = Vec::new();
+    let InteractiveOutput { reader, pending } = &mut *output;
     loop {
-      let chunk = output.fill_buf().await.map_err(|e| e.to_string())?;
+      let chunk = reader.fill_buf().await.map_err(|e| e.to_string())?;
       if chunk.is_empty() {
-        if bytes.is_empty() {
+        if pending.is_empty() {
           return Ok(None);
         }
         break;
       }
       let newline = chunk.iter().position(|&byte| byte == b'\n');
       let count = newline.unwrap_or(chunk.len());
-      if bytes.len() + count > OUTPUT_CAP {
+      if pending.len() + count > OUTPUT_CAP {
         return Err(format!("command line exceeded {OUTPUT_CAP} bytes"));
       }
-      bytes.extend_from_slice(&chunk[..count]);
-      output.consume(count + usize::from(newline.is_some()));
+      pending.extend_from_slice(&chunk[..count]);
+      reader.consume(count + usize::from(newline.is_some()));
       if newline.is_some() {
         break;
       }
     }
-    String::from_utf8(bytes).map(Some).map_err(|e| e.to_string())
+    String::from_utf8(std::mem::take(pending))
+      .map(Some)
+      .map_err(|e| e.to_string())
   }
 
   pub async fn wait(&self, name: &str) -> Result<i32, String> {

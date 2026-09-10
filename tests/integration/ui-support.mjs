@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { binary, quote, repo } from './support.mjs';
 
-export async function uiServer(cwd, args, body) {
+export async function uiServer(cwd, args, body, timeoutMs = 30000) {
   await commands.open('ui', { command: `cd ${quote(cwd)} && exec ${[binary, ...args].map(quote).join(' ')}` });
   let drained;
   let closing = false;
@@ -10,12 +10,12 @@ export async function uiServer(cwd, args, body) {
   try {
     let url;
     while (!url) {
-      const line = await commands.read('ui');
+      const line = await commands.read('ui', timeoutMs);
       assert.notEqual(line, null, 'UI server exited before announcing its URL');
       url = line.match(/http:\/\/127\.0\.0\.1:\d+[^\s]*/)?.[0];
     }
     drained = (async () => {
-      while (await commands.read('ui') !== null) {}
+      while (await commands.read('ui', timeoutMs) !== null) {}
     })().catch(error => { if (!closing) drainError = error; });
     await body(url);
   } finally {
@@ -26,14 +26,14 @@ export async function uiServer(cwd, args, body) {
   if (drainError) throw drainError;
 }
 
-export async function websocket(url, body) {
+export async function websocket(url, body, timeoutMs = 30000) {
   await commands.open('websocket', { binary: join(repo, 'target/debug/ferridriver-websocket-probe'), url });
   try {
-    assert.deepEqual(JSON.parse(await commands.read('websocket')), { connected: true });
+    assert.deepEqual(JSON.parse(await commands.read('websocket', timeoutMs)), { connected: true });
     const socket = {
       send: value => commands.write('websocket', JSON.stringify(value) + '\n'),
       async next() {
-        const line = await commands.read('websocket');
+        const line = await commands.read('websocket', timeoutMs);
         assert.notEqual(line, null, 'WebSocket closed before the expected event');
         return JSON.parse(line);
       },

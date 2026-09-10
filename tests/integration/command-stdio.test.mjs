@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from '@ferridriver/test';
 
+test('interactive read timeout preserves partial output for the next read', async () => {
+  await commands.open('stdio', { command: "printf head; read signal; printf 'tail\\n'" });
+  try {
+    await assert.rejects(() => commands.read('stdio', 50), /stdout timed out after 50ms/);
+    assert.equal(commands.status('stdio').running, true);
+    await commands.write('stdio', 'release\n');
+    assert.equal(await commands.read('stdio', 1000), 'headtail');
+    assert.equal(await commands.read('stdio', 1000), null);
+  } finally { await commands.stop('stdio'); }
+});
+
 test('interactive commands preserve long Unicode lines, trailing output and EOF', async () => {
   await commands.open('stdio', { command: 'cat' });
   try {

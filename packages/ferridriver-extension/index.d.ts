@@ -134,7 +134,7 @@ export interface Commands {
   start(name: string, vars?: Record<string, string | number | boolean>): { name: string; pid: number };
   open(name: string, vars?: Record<string, string | number | boolean>): { name: string; pid: number };
   write(name: string, data: string | null): Promise<void>;
-  read(name: string): Promise<string | null>;
+  read(name: string, timeoutMs?: number): Promise<string | null>;
   wait(name: string, timeoutMs?: number): Promise<number>;
   waitForOutput(name: string, text: string, timeoutMs?: number): Promise<string>;
   status(name: string): {
