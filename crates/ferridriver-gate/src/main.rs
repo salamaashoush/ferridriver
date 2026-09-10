@@ -305,9 +305,9 @@ fn rust_jobs(log: &Path, root: &Path, workers: usize) -> Result<Vec<Job>> {
       job.command.push(format!("--test-threads={workers}"));
     }
     job.cwd = crate_root.strip_prefix(root)?.into();
-    job.browsers = if !integration {
+    job.browsers = if !integration || (package == "ferridriver-test" && target == "parallel_projects") {
       0
-    } else if package == "ferridriver-test" {
+    } else if package == "ferridriver-test" && target != "screenshot_diff" {
       workers
     } else {
       1

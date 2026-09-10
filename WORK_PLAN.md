@@ -171,3 +171,16 @@ completion requires observable behavior through the public scripting API.
 - Revalidated inventory: 68 top-level Rust integration targets and 50 addon
   suites still require migration. Protocol and scripting capability work remains
   open. Fetch confirmed `origin/main` had not advanced beyond `63641057`.
+
+- Pushed verified checkpoint commits `699d0165`, `12894ad1`, and `a1a75ea2`
+  to `origin/main`. The last includes early lint/docs checks and their native
+  gate regressions. Security advisory remediation and remaining migration work
+  are still open.
+- Browser accounting now reserves zero slots for `parallel_projects` and one
+  for the serialized `screenshot_diff` target. All other reservations retain
+  their previous bounds. These are scheduling changes, with no test/assertion
+  changes. Full default 32-slot verification passed all 156 checks in 103.58
+  gate seconds; logs `target/gate/1789018015-3312688`, console
+  `/tmp/ferridriver-budget-ready32.log`. The scheduler target passed
+  concurrently in 1.88 seconds. This improves the passing 16-slot warm run
+  by approximately 11.6%; both runs executed the same test coverage.
