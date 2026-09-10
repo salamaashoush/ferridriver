@@ -21,6 +21,12 @@
 
 ## Current evidence
 
+- Latest debugger-migration headless gate passed: 124 checks, zero failures
+  or blocks, 110.20s gate time. Native integration coverage passed 711 cases
+  in 58.8s. Logs: target/gate/1789038218-3962275 and
+  /tmp/ferridriver-debug-ready.log. This is a warm observation, not a controlled
+  before/after benchmark. Remaining top-level Rust test files: 35, including
+  benchmark targets; addon migration and capability implementation remain open.
 - Verified headless gate at committed checkpoint `63641057`: 157 checks, zero failed
   or blocked, 107.68 seconds in the gate and 107.813 seconds wall time. This is
   a warm build with 32 browser slots on the 32-CPU Linux host. Logs:
@@ -28,15 +34,15 @@
 - That run passed 2,219 native E2E tests, 637 BDD scenarios and 464 native
   integration tests, plus Rust and addon checks. The 33 E2E and 19 BDD skips
   predate this work and remain to be audited.
-- Last fully passing gate: 159 checks in 129.41 seconds, before subsequent
+- Earlier passing gate: 159 checks in 129.41 seconds, before subsequent
   concurrency changes. This is historical evidence, not final verification.
 - Historical diagnostic gate: 159 checks in 113.45 seconds with one failure,
   CDP screenshot capture under parallel load. Logs remain under
   `target/gate/1788966313-3016625`.
 - That run passed 452 native integration tests, 2,211 E2E tests and 637 BDD
   scenarios. Existing skips still require an audit.
-- 68 Rust integration test files and the Bun addon suites remain; migration is
-  incomplete. BDD lifecycle coverage now runs 15 native JS cases in 97 ms with
+- The initial inventory had 68 Rust integration test files plus Bun addon
+  suites. BDD lifecycle coverage runs 15 native JS cases in 97 ms with
   eight workers, preserving fixture, attachment, timeout and skip assertions.
   The probe uses the production runner bridge; no browser is requested.
 - Ferrijs passed its full workspace gate and was pushed as
@@ -52,8 +58,8 @@
 
 ## Remaining gate bottlenecks
 
-- The addon build uses a separate Cargo target directory and repeats shared
-  compilation.
+- The addon build now reuses host-target workspace artifacts through the
+  pinned NAPI CLI source patch; the latest gate's addon build took 8.55s.
 - The Rust UI integration invokes Cargo with a narrower package selection,
   recompiling dependencies already built by the workspace gate.
 - Compare warm runs with different worker budgets after rendering fixes pass.
@@ -1006,3 +1012,17 @@ completion requires observable behavior through the public scripting API.
 - Rust-harness UI migration final headless gate exited zero: 125 checks, zero
   failures or blocks, 110.12s gate time. Logs: target/gate/1789037606-3767329
   and /tmp/ferridriver-rust-ui-ready.log.
+- Migrated all five CLI debugger cases to native JS: stop-before-call,
+  stepOver and source breakpoints, BDD step/scenario locations, suspended
+  test/step deadlines, resumed hangs timing out, failure-page inspection,
+  preserved failure verdicts, and passing runs without published sessions.
+  Existing command output and exit notifications replace CLI readiness and
+  child-exit polling. Deliberate four/seven-second deadline holds remain.
+- Native debugger cases passed in 7.2s with four workers:
+  /tmp/ferridriver-debug-native-fixed.log. Removed unchanged test_debug.rs
+  (17983 bytes), byte-verified against its committed source and backup at
+  /tmp/ferridriver-debug-backup-_i5c6sv9/test_debug.rs. Remaining top-level
+  Rust test targets: 35. Full-gate verification is pending.
+- Debugger migration final headless gate exited zero: 124 checks, zero
+  failures or blocks, 110.20s gate time. Logs: target/gate/1789038218-3962275
+  and /tmp/ferridriver-debug-ready.log.
