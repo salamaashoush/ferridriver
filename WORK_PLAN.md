@@ -1249,3 +1249,20 @@ completion requires observable behavior through the public scripting API.
   and docs 36.62s. This includes rebuild work and does not establish a
   warm-gate regression or speedup. Logs: target/gate/1789043121-2161277
   and /tmp/ferridriver-web-server-startup-ready.log.
+- Audited the Chrome performance path against Playwright's
+  `crBrowser.ts::startTracing/stopTracing`: CDP now uses `ReturnAsStream`,
+  waits for `Tracing.tracingComplete`, consumes the handle with `IO.read`,
+  closes it, and errors on missing completion or malformed trace data.
+  The old `ReportEvents` implementation silently returned partial events
+  after a 30-second timeout.
+- Added `page.startTracing(categories?)` and `page.stopTracing()` to the
+  native QuickJS scripting surface and its TypeScript declaration. Native
+  Chromium coverage records a real navigation and script execution, checks
+  hundreds of returned events, and checks the precondition error. Focused
+  cases passed in 269ms and 163ms. Full-gate verification is pending.
+- Performance tracing final headless gate exited zero: 117 checks, zero
+  failures or blocks, 148.31s. All 803 native integration cases passed in
+  122.02s. Rust artifacts rebuilt in 59.94s, documentation took 52.12s and
+  E2E took 101.36s, so this is a correctness checkpoint rather than a warm
+  performance comparison. Logs: target/gate/1789043723-2371471 and
+  /tmp/ferridriver-cdp-performance-ready.log.

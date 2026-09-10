@@ -1691,6 +1691,9 @@ export interface Page {
 
   screenshot(options?: ScreenshotOptions): Promise<Uint8Array>;
   pdf(options?: Record<string, unknown>): Promise<Uint8Array>;
+  /** Chromium DevTools performance trace events. Chromium only. */
+  startTracing(categories?: string[]): Promise<void>;
+  stopTracing(): Promise<Array<Record<string, unknown>>>;
 
   // A ferridriver extension, not a Playwright method: Playwright's
   // `page.accessibility` is the accessibility TREE, a different

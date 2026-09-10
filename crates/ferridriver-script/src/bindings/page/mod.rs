@@ -24,7 +24,8 @@ use rquickjs::function::Opt;
 
 use crate::bindings::convert::FerriResultCtxExt;
 use crate::bindings::convert::{
-  extract_page_function, init_script_from_js, quickjs_arg_to_serialized, serde_from_js, serialized_value_to_quickjs,
+  extract_page_function, init_script_from_js, quickjs_arg_to_serialized, serde_from_js, serde_to_js,
+  serialized_value_to_quickjs,
 };
 use crate::bindings::keyboard::KeyboardJs;
 use crate::bindings::locator::LocatorJs;
@@ -1959,6 +1960,41 @@ impl PageJs {
       .scope(async move {
         let opts = parse_pdf_options(&ctx, options)?;
         self.inner.pdf().options(opts).await.into_js_with(&ctx)
+      })
+      .await
+  }
+
+  /// Start the Chromium DevTools performance trace. Chromium only; the
+  /// returned events are consumed by `stopTracing`.
+  #[qjs(rename = "startTracing")]
+  pub async fn start_tracing<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    categories: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let categories = match categories.into_inner() {
+          Some(value) if !value.is_undefined() && !value.is_null() => Some(serde_from_js::<Vec<String>>(&ctx, value)?),
+          _ => None,
+        };
+        self.inner.start_tracing(categories.as_deref()).await.into_js_with(&ctx)
+      })
+      .await
+  }
+
+  /// End the Chromium DevTools performance trace and return its events.
+  #[qjs(rename = "stopTracing")]
+  pub async fn stop_tracing<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let events = self.inner.stop_tracing().await.into_js_with(&ctx)?;
+        serde_to_js(&ctx, &events)
       })
       .await
   }

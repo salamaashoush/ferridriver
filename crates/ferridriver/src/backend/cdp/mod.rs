@@ -5226,6 +5226,18 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Tracing ----
 
+  fn parse_trace_events(bytes: &[u8]) -> Result<Vec<serde_json::Value>> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+      .map_err(|error| FerriError::protocol("Tracing", format!("invalid trace stream: {error}")))?;
+    if let Some(events) = value.get("traceEvents").and_then(serde_json::Value::as_array) {
+      return Ok(events.clone());
+    }
+    if let Some(events) = value.as_array() {
+      return Ok(events.clone());
+    }
+    Err(FerriError::protocol("Tracing", "trace stream has no traceEvents array"))
+  }
+
   pub async fn start_tracing(&self, categories: Option<&[String]>) -> Result<()> {
     let categories = match categories {
       Some(c) if !c.is_empty() => c.join(","),
@@ -5235,10 +5247,9 @@ impl<T: CdpWrap> CdpPage<T> {
       .cmd(
         "Tracing.start",
         serde_json::json!({
-          // Chrome streams the events back as `Tracing.dataCollected`
-          // rather than writing a stream handle we would then have to
-          // read back over `IO.read`.
-          "transferMode": "ReportEvents",
+          // Keep the trace lossless. Chrome writes the complete trace to
+          // an IO stream and announces its handle after Tracing.end.
+          "transferMode": "ReturnAsStream",
           "traceConfig": { "includedCategories": categories.split(',').collect::<Vec<_>>() },
         }),
       )
@@ -5248,40 +5259,48 @@ impl<T: CdpWrap> CdpPage<T> {
 
   /// End the trace and return every event Chrome recorded.
   ///
-  /// The tap is installed BEFORE `Tracing.end` because Chrome starts
-  /// flushing `dataCollected` as soon as the command lands; subscribing
-  /// afterwards races the first batches. It is a wire-ordered tap rather
-  /// than a broadcast subscription because a dropped batch silently
-  /// truncates the trace, and every insight computed from it would then
-  /// be wrong without anything looking wrong.
+  /// The tap is installed BEFORE `Tracing.end` because Chrome announces the
+  /// stream handle on the event channel while the command response is in
+  /// flight. The stream is then consumed with IO.read, matching the
+  /// `ReturnAsStream` path used by Playwright.
   pub async fn stop_tracing(&self) -> Result<Vec<serde_json::Value>> {
-    let mut rx = self.transport.tap_event_methods(
-      &["Tracing.dataCollected", "Tracing.tracingComplete"],
-      self.session_id.as_deref(),
-    );
+    let mut rx = self
+      .transport
+      .tap_event_methods(&["Tracing.tracingComplete"], self.session_id.as_deref());
 
     self.cmd("Tracing.end", super::empty_params()).await?;
 
-    let mut events = Vec::new();
-    let drain = async {
-      while let Some(event) = rx.recv().await {
-        match event.get("method").and_then(|m| m.as_str()) {
-          Some("Tracing.dataCollected") => {
-            if let Some(batch) = event.pointer("/params/value").and_then(|v| v.as_array()) {
-              events.extend(batch.iter().cloned());
-            }
-          },
-          // `tracingComplete` is the only signal that every batch has
-          // arrived; there is no count to reconcile against.
-          Some("Tracing.tracingComplete") => return,
-          _ => {},
-        }
+    let event = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+      .await
+      .map_err(|_| FerriError::timeout("Tracing.tracingComplete", 30_000))?
+      .ok_or_else(|| FerriError::backend("CDP event stream closed before Tracing.tracingComplete"))?;
+    let stream = event
+      .pointer("/params/stream")
+      .and_then(serde_json::Value::as_str)
+      .ok_or_else(|| FerriError::protocol("Tracing.tracingComplete", "missing stream handle"))?;
+
+    let mut trace = Vec::new();
+    let mut eof = false;
+    while !eof {
+      let chunk = self.cmd("IO.read", serde_json::json!({ "handle": stream })).await?;
+      let data = chunk.get("data").and_then(serde_json::Value::as_str).unwrap_or("");
+      if chunk
+        .get("base64Encoded")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+      {
+        trace.extend(
+          base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|error| FerriError::protocol("IO.read", format!("invalid base64 trace chunk: {error}")))?,
+        );
+      } else {
+        trace.extend_from_slice(data.as_bytes());
       }
-    };
-    // A trace that never completes must not hang the caller forever;
-    // the events already drained are still worth returning.
-    let _ = tokio::time::timeout(Duration::from_secs(30), drain).await;
-    Ok(events)
+      eof = chunk.get("eof").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    }
+    let _ = self.cmd("IO.close", serde_json::json!({ "handle": stream })).await;
+    Self::parse_trace_events(&trace)
   }
 
   pub async fn metrics(&self) -> Result<Vec<MetricData>> {
