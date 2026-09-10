@@ -639,3 +639,50 @@ completion requires observable behavior through the public scripting API.
   the optimization removes the duplicate addon dependency graph, without
   demonstrating a warm full-gate speedup. Rust UI passed in 1.52s with its
   existing cached package graph.
+
+- Migrated context teardown and out-of-band target recovery to three native
+  JS cases. The private lifecycle probe delegates browser actions and returns
+  all twelve registry sizes plus page/active-page state; JS owns assertions.
+  Each of five context cycles now proves options were registered and every
+  registry returns to baseline. Recovery still destroys the target through
+  window.close(), checks closed-state pruning, then evaluates on a replacement.
+  A synchronously armed close-event waiter replaces the original 25ms polling
+  sleeps. The isolated native run passed all three cases in 315ms.
+  Clean Rust originals (2990 and 3823 bytes) were backed up and verified in
+  /tmp/ferridriver-lifecycle-backup-itt794jc before removal. Remaining Rust
+  integration targets: 50. Initial full-gate lint found two ambiguous default
+  argument constructions; both now name SerializedArgument explicitly.
+- Lifecycle full gate reached 589 passing native integrations, then failed the
+  existing real-time retry assertion: attempts at 1, 357, and 401ms, expected
+  at least five. No assertion was changed. The migration commit was held.
+- A minimal three-realm reproduction isolates executor starvation: two realms
+  execute synchronous JS for 350ms after the retry callback signals readiness.
+  With the gate's forced two Tokio threads, the callback attempts land at
+  0/352/401ms and 1/351/402ms. Four threads pass twice with nine attempts.
+  Temporary callback/error-conversion timing probes measured microseconds and
+  have been removed. Diagnostic logs: /tmp/ferridriver-runtime-starvation-red.log
+  and /tmp/ferridriver-retry-contention-4-jdan7qyl.log.
+- Gate runtime thread defaults now follow each job's concurrency reservation
+  with a floor of four; an explicit TOKIO_WORKER_THREADS still takes precedence.
+  This gives E2E sixteen executor threads and shared native suites eight at
+  the default 32-slot gate. A native regression runs the three-realm workload
+  through the child CLI, inheriting the gate's actual executor setting.
+  It fails with the old setting; full-gate verification is in progress.
+  The four-thread job minimum retains executor capacity for nested concurrent
+  runner tests on small CI hosts. The shared HTTP fixture server keeps two.
+- The instrumented diagnostic test run passed all 2227 E2E cases but failed
+  two proc-macro executables because the diagnostic invoked the gate binary
+  directly without Cargo's shared-library environment. Use cargo gate or just
+  ready for subsequent measurements; this diagnostic is not a green full gate.
+- First capacity-adjusted full gate passed: 138 checks, zero failures or
+  blocks, 130.521s wall time, including 590 native integration cases and all
+  original real-time retry assertions. Logs: target/gate/1789028555-4175390.
+  This run rebuilt script consumers after diagnostic cleanup. A final run
+  also verifies the four-thread minimum for smaller jobs.
+- Final full gate passed: 138 checks, zero failures or blocks, 108.213s wall
+  time (107.96s gate). Logs: target/gate/1789028691-178722 and
+  /tmp/ferridriver-runtime-capacity-final.log. The contention regression passed
+  under the gate's inherited executor setting; the original 400ms retry test
+  passed on all four backend projects. Warm runtime is similar to 108.590s
+  before this change; the demonstrated improvement is retry responsiveness
+  under synchronous JS contention, not an overall throughput speedup.

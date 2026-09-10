@@ -27,7 +27,7 @@ impl FixtureServer {
     command
       .args(["--port", "47831", "--static", "tests/assets"])
       .current_dir(root)
-      .env("TOKIO_WORKER_THREADS", runtime_workers())
+      .env("TOKIO_WORKER_THREADS", runtime_workers(2))
       .stdin(Stdio::null())
       .stdout(Stdio::piped())
       .stderr(File::create(logs.join("fixtures.log"))?)
@@ -62,8 +62,9 @@ impl FixtureServer {
 
 struct ProcessGroup(u32);
 
-fn runtime_workers() -> std::ffi::OsString {
-  std::env::var_os("TOKIO_WORKER_THREADS").unwrap_or_else(|| "2".into())
+fn runtime_workers(parallelism: usize) -> std::ffi::OsString {
+  // Synchronous JS in one realm must not occupy every executor thread and stall other realms' timers.
+  std::env::var_os("TOKIO_WORKER_THREADS").unwrap_or_else(|| parallelism.max(2).to_string().into())
 }
 
 impl ProcessGroup {
@@ -130,7 +131,7 @@ pub async fn run(
     .args(&job.command[1..])
     .current_dir(root.join(&job.cwd))
     .envs(&job.env)
-    .env("TOKIO_WORKER_THREADS", runtime_workers())
+    .env("TOKIO_WORKER_THREADS", runtime_workers(job.browsers.max(4)))
     .env("FERRITEST_HEADLESS", "true")
     .env_remove("DISPLAY")
     .env_remove("WAYLAND_DISPLAY")
