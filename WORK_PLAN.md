@@ -1276,3 +1276,10 @@ completion requires observable behavior through the public scripting API.
   126.44s. Rust artifacts rebuilt in 37.76s, addon build took 32.52s and
   docs 55.39s. Logs: target/gate/1789044003-2588176 and
   /tmp/ferridriver-cdp-metrics-ready-final.log.
+- Replaced the manually assembled Rust runner E2E harness with a native JS
+  CLI invocation. The migration preserves browser fixture discovery, two
+  configured workers, click/fill interactions, retrying expectations and
+  skipped-test accounting. The focused headless run passed one test containing
+  four executed cases and one skip in about 400ms. The unchanged Rust harness
+  was backed up at /tmp/ferridriver-runner-e2e-backup-3vjllI/runner_e2e.rs
+  before removal; commit ea3f4549 is pushed.
