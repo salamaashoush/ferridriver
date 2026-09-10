@@ -446,3 +446,17 @@ completion requires observable behavior through the public scripting API.
   534 native integrations passing. Logs: `target/gate/1789022824-1854314`,
   `/tmp/ferridriver-extension-policy-ready.log`. All four retry timing cases
   passed this run; the previously observed intermittent failure remains open.
+
+- Pushed `f08edbcc`, verified policy migration. Migrated both launch
+  proxy targets to four native cases using the existing observable fixture
+  proxy. Chromium pipe/WebSocket, Firefox, and standalone-script routing
+  retain destination assertions; standalone VM health remains explicit.
+  Fixture readiness is output-driven and owned servers stop in finally.
+  All four cases pass in 1.0s. Unchanged originals backed up at /tmp/ferridriver-launch-proxy-backup-yefikh5_
+  (core 4357 bytes; script 3222 bytes) before removal.
+  Remaining top-level Rust integration targets: 57.
+
+- Launch proxy migration full default gate passed all 145 checks in
+  105.253 wall seconds (105.17 gate), 32 jobs/browser slots. All 538 native
+  integrations passed. Logs: `target/gate/1789023115-2041327`,
+  `/tmp/ferridriver-launch-proxy-ready.log`. No retry timing failure this run.
