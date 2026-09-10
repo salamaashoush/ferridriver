@@ -1396,3 +1396,7 @@ completion requires observable behavior through the public scripting API.
   failures or blocks, in 140.21s. Integration completed in 84.66s, E2E in
   119.20s, and BDD in 113.02s. Log:
   `target/gate/1789050462-1314504`.
+- Added focused capability-construction coverage for mobile WebDriver
+  sessions. The unit test verifies `platformName` and nested `appium:options`
+  survive merging while `webSocketUrl` negotiation remains enabled; four URL
+  and capability tests pass, and all-target Clippy remains clean.

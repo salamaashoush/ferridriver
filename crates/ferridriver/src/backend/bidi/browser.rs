@@ -143,17 +143,7 @@ impl BidiBrowser {
     extra_capabilities: Option<&serde_json::Value>,
   ) -> Result<Self> {
     let session_url = webdriver_session_url(endpoint)?;
-    let mut always_match = serde_json::json!({
-      "browserName": browser_name,
-      "acceptInsecureCerts": true,
-      "webSocketUrl": true,
-      "unhandledPromptBehavior": "ignore"
-    });
-    if let Some(extra) = extra_capabilities.and_then(serde_json::Value::as_object)
-      && let Some(target) = always_match.as_object_mut()
-    {
-      target.extend(extra.iter().map(|(key, value)| (key.clone(), value.clone())));
-    }
+    let always_match = webdriver_capabilities(browser_name, extra_capabilities);
     let body = serde_json::json!({
       "capabilities": {
         "alwaysMatch": always_match
@@ -458,6 +448,21 @@ fn webdriver_session_url(endpoint: &str) -> Result<reqwest::Url> {
   Ok(url)
 }
 
+fn webdriver_capabilities(browser_name: &str, extra: Option<&serde_json::Value>) -> serde_json::Value {
+  let mut always_match = serde_json::json!({
+    "browserName": browser_name,
+    "acceptInsecureCerts": true,
+    "webSocketUrl": true,
+    "unhandledPromptBehavior": "ignore"
+  });
+  if let Some(extra) = extra.and_then(serde_json::Value::as_object)
+    && let Some(target) = always_match.as_object_mut()
+  {
+    target.extend(extra.iter().map(|(key, value)| (key.clone(), value.clone())));
+  }
+  always_match
+}
+
 /// A Playwright-shaped proxy as the `BiDi`/`WebDriver` `proxy` capability.
 ///
 /// The same shape serves `session.new` (browser-wide, from
@@ -550,7 +555,7 @@ mod proxy_capability_tests {
 
 #[cfg(test)]
 mod webdriver_url_tests {
-  use super::webdriver_session_url;
+  use super::{webdriver_capabilities, webdriver_session_url};
 
   #[test]
   fn appends_session_to_server_root() {
@@ -573,5 +578,20 @@ mod webdriver_url_tests {
   #[test]
   fn rejects_invalid_endpoint() {
     assert!(webdriver_session_url("not a url").is_err());
+  }
+
+  #[test]
+  fn merges_vendor_capabilities_without_dropping_bidi_negotiation() {
+    let caps = webdriver_capabilities(
+      "safari",
+      Some(&serde_json::json!({
+        "platformName": "ios",
+        "appium:options": { "automationName": "Safari" }
+      })),
+    );
+    assert_eq!(caps["browserName"], "safari");
+    assert_eq!(caps["platformName"], "ios");
+    assert_eq!(caps["appium:options"]["automationName"], "Safari");
+    assert_eq!(caps["webSocketUrl"], true);
   }
 }
