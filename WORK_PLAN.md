@@ -1176,3 +1176,23 @@ completion requires observable behavior through the public scripting API.
   target/gate/1789041870-1548625 and
   /tmp/ferridriver-gate-scheduling-after-final.log. The initial attempt stopped
   at formatting; the final run includes the formatter correction.
+
+- Migrated the sixteen remaining Session extension integration cases to the
+  native JS runner. Tests use the existing compiler/session probe, extended
+  with native execute_tool, bytecode length and optional real HTTP client
+  observations. Original script bodies remain in a JS fixture.
+- Coverage retains namespace aliases, TypeScript local imports, compile-time
+  name validation, persistent bytecode state, host branches, top-level await,
+  broken-plugin isolation, ambient globals, JS/native deadlines, missing
+  tools, handler errors/poison state and network attenuation across concurrent
+  calls, global access and timer callbacks. Added successful local HTTP
+  request/fetch checks and verified the broken tool is absent.
+- All sixteen native cases passed without launching a browser. Removed
+  unchanged session.rs (42984 bytes), after HEAD comparison and verified
+  backup at /tmp/ferridriver-session-extensions-backup-zsreml3p/session.rs.
+  Remaining top-level Rust test files: 29. Full-gate verification is pending.
+- Session extension migration final headless gate exited zero: 118 checks,
+  zero failures or blocks, 104.59s. All 790 native integration cases passed
+  in 65.7s; the focused sixteen cases took 252ms. Logs:
+  target/gate/1789042282-1744195 and
+  /tmp/ferridriver-session-extensions-ready.log.

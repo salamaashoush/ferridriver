@@ -199,6 +199,10 @@ enum Operation {
     args: Vec<Value>,
     timeout_ms: Option<u64>,
   },
+  ExecuteTool {
+    name: String,
+    args: Value,
+  },
   EnterVm {
     source: String,
     idle_ms: u64,
@@ -397,6 +401,17 @@ impl Probe {
     Ok(serde_json::to_value(execution.result)?)
   }
 
+  async fn execute_tool(&mut self, name: &str, args: Value) -> Result<Value> {
+    if self.session.is_none() {
+      self.session = Some(Session::create(ScriptEngineConfig::default(), &self.context).await?);
+    }
+    let session = self.session.as_ref().context("session was not initialized")?;
+    let execution = session
+      .execute_tool(name, args, RunOptions::default(), &self.context)
+      .await;
+    Ok(serde_json::to_value(execution.result)?)
+  }
+
   async fn execute_virtual_script(&mut self, source: &str) -> Result<Value> {
     if self.session.is_none() {
       self.session = Some(Session::create(ScriptEngineConfig::default(), &self.context).await?);
@@ -499,6 +514,7 @@ impl Probe {
         args,
         timeout_ms,
       } => self.execute_script(&source, &args, timeout_ms).await,
+      Operation::ExecuteTool { name, args } => self.execute_tool(&name, args).await,
       Operation::EnterVm { source, idle_ms } => self.enter_vm(source, idle_ms).await,
       Operation::SetAliases { aliases } => {
         ferridriver_script::set_module_aliases(aliases).map_err(anyhow::Error::msg)?;

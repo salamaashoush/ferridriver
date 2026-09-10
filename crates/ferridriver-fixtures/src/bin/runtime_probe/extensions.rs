@@ -26,6 +26,8 @@ pub struct Request {
 #[derive(Deserialize)]
 pub struct CompileRequest {
   groups: Vec<Vec<PathBuf>>,
+  #[serde(default, rename = "httpClient")]
+  http_client: bool,
   #[serde(default)]
   append: bool,
   #[serde(default)]
@@ -42,10 +44,16 @@ pub async fn compile(root: &Path, context: &mut RunContext, request: CompileRequ
   let result = json!({
     "failures": failures,
     "compiled": compiled.iter().map(|extension| json!({
+      "bytecodeLength": extension.bytecode.len(),
       "snapshot": extension.snapshot,
       "manifests": extension.manifests_json(),
     })).collect::<Vec<_>>(),
   });
+  if request.http_client {
+    context.request = Some(std::sync::Arc::new(ferridriver::http_client::HttpClient::new(
+      ferridriver::http_client::HttpClientOptions::default(),
+    )));
+  }
   if !request.append {
     context.extensions.clear();
   }
