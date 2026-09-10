@@ -49,9 +49,9 @@ for (const backend of BACKENDS) {
         expect(first.type).toBe("context-options");
         expect(first.version).toBe(8);
         // Actions arrive as Playwright's split before/input/after triplet.
-        const befores = lines.map((l) => JSON.parse(l)).filter((e) => e.type === "before");
-        expect(befores.some((a) => a.method === "goto")).toBe(true);
-        const click = befores.find((a) => a.method === "click");
+        const beforeEvents = lines.map((l) => JSON.parse(l)).filter((e) => e.type === "before");
+        expect(beforeEvents.some((a) => a.method === "goto")).toBe(true);
+        const click = beforeEvents.find((a) => a.method === "click");
         expect(click === undefined).toBe(false);
         const afters = lines.map((l) => JSON.parse(l)).filter((e) => e.type === "after");
         expect(afters.some((a) => a.callId === click.callId)).toBe(true);

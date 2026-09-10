@@ -575,7 +575,7 @@ pub struct CollectedRegistry {
   pub param_types: Vec<CollectedParamType>,
   /// The `test.extend` chains this VM registered, indexed by fixture
   /// set — the table
-  /// [`dominant_fixture_set`](crate::bindings::test::dominant_fixture_set)
+  /// [`dominant_fixture_set`](ferridriver_test::fixture_graph::dominant_fixture_set)
   /// picks a scenario's chain from. Fixed once the step bundle has
   /// evaluated, so the host snapshots it here instead of asking the VM
   /// per scenario.

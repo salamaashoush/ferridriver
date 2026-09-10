@@ -381,11 +381,11 @@ fn validate_trace(body: Vec<u8>) {
   assert_eq!(first["type"], "context-options", "first line: {first}");
   assert_eq!(first["version"], 8, "first line: {first}");
 
-  let befores: Vec<&Value> = lines.iter().filter(|line| line["type"] == "before").collect();
-  let step = befores
+  let before_events: Vec<&Value> = lines.iter().filter(|line| line["type"] == "before").collect();
+  let step = before_events
     .iter()
     .find(|action| action["title"] == "Given a blank ui page")
-    .unwrap_or_else(|| panic!("step before event: {befores:?}"));
+    .unwrap_or_else(|| panic!("step before event: {before_events:?}"));
   let step_call_id = step["callId"].as_str().expect("step callId");
   assert_eq!(
     step["stepId"].as_str(),
@@ -401,10 +401,10 @@ fn validate_trace(body: Vec<u8>) {
     "step span times ordered: {step} {step_after}"
   );
 
-  let goto = befores
+  let goto = before_events
     .iter()
     .find(|action| action["method"] == "goto")
-    .unwrap_or_else(|| panic!("protocol goto: {befores:?}"));
+    .unwrap_or_else(|| panic!("protocol goto: {before_events:?}"));
   assert_eq!(
     goto["parentId"].as_str(),
     Some(step_call_id),

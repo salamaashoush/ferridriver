@@ -132,3 +132,37 @@ test('interrupting the gate lets its running check clean up before exiting', asy
   passed(result);
   assert.match(result.text, /gate interrupted; child processes stopped/);
 });
+
+for (const [command, check] of [['clippy', 'lint'], ['doc', 'docs']]) {
+  test(`ready stops before binary builds when ${check} fails`, async () => {
+    const cwd = await workspace({ cargo: `#!/bin/sh
+      if [ "$1" = ${command} ]; then echo rejected-${check}; exit 42; fi
+      if [ "$1" = build ]; then echo unexpected-build; exit 73; fi
+      exit 0
+    ` });
+    await chmod(join(cwd, 'cargo'), 0o700);
+    const result = await run(['ready', '--only', 'build'], {
+      executable, env: { PATH: cwd, FERRIDRIVER_GATE_CACHE_DIR: join(cwd, 'gate-cache') },
+    });
+    assert.notEqual(result.code, 0, result.text);
+    assert.match(result.text, new RegExp(`FAIL ${check}`));
+    assert.match(result.text, /BLOCKED build/);
+    assert.doesNotMatch(result.text, /START build|unexpected-build/);
+  });
+}
+
+test('ready treats documentation warnings as errors', async () => {
+  const cwd = await workspace({ cargo: `#!/bin/sh
+    if [ "$1" = doc ]; then
+      case "$RUSTDOCFLAGS" in *-Dwarnings*) exit 0;; *) exit 42;; esac
+    fi
+    exit 0
+  ` });
+  await chmod(join(cwd, 'cargo'), 0o700);
+  const result = await run(['ready', '--only', 'docs'], {
+    executable, env: { PATH: cwd, FERRIDRIVER_GATE_CACHE_DIR: join(cwd, 'gate-cache') },
+  });
+  passed(result);
+  assert.match(result.text, /PASS docs/);
+  assert.doesNotMatch(result.text, /START build/);
+});

@@ -2421,7 +2421,7 @@ pub async fn teardown_worker_fixtures(vm: &ferrijs::VmHandle) -> Result<(), Scri
 
 /// Names of custom fixtures a test + its each-hooks request (their
 /// requested lists intersected with the fixture set happens in
-/// [`resolve_custom_fixtures`]).
+/// `resolve_custom_fixtures`).
 /// What each function of this test asks for, labelled the way
 /// Playwright labels it in the unknown-parameter message
 /// (`common/poolBuilder.ts:66-71`: `'Test'` for the body,
@@ -2821,7 +2821,7 @@ pub struct CollectedTests {
 
 impl CollectedTests {
   /// The `test.extend` chain behind a fixture set, in extend order —
-  /// the same input [`resolve_custom_fixtures`] builds from the live
+  /// the same input `resolve_custom_fixtures` builds from the live
   /// registry, so the glue's pool-request computation and the VM-side
   /// resolver can never disagree about which registration a name means.
   #[must_use]

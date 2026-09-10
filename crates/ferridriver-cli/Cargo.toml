@@ -13,6 +13,8 @@ categories.workspace = true
 [[bin]]
 name = "ferridriver"
 path = "src/main.rs"
+# The binary shares the core library's rustdoc output path.
+doc = false
 
 [lints]
 workspace = true

@@ -443,7 +443,7 @@ impl ReporterDriver {
 /// Registered before the run, so loading — resolving, bundling,
 /// compiling, instantiating — happens where it can fail loudly, and
 /// [`ReporterFactory::create`] itself is the synchronous hand-off
-/// [`create_reporters`] needs.
+/// `create_reporters` needs.
 pub trait ReporterFactory: Send + Sync {
   /// The reporter `entry` names, or `None` when this factory does not
   /// own the name.

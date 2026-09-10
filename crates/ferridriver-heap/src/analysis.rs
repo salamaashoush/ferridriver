@@ -522,7 +522,7 @@ fn parse_weak_map_edge_name(name: &str) -> Option<(&str, &str)> {
 fn calculate_flags(snapshot: &Snapshot) -> Vec<u8> {
   let mut flags = vec![0u8; snapshot.node_count];
   mark_detached_dom_tree_nodes(snapshot, &mut flags);
-  mark_queriable_heap_objects(snapshot, &mut flags);
+  mark_queryable_heap_objects(snapshot, &mut flags);
   mark_page_owned_nodes(snapshot, &mut flags);
   flags
 }
@@ -541,13 +541,13 @@ fn mark_detached_dom_tree_nodes(snapshot: &Snapshot, flags: &mut [u8]) {
 /// Objects reachable from a user root by ordinary references. Asking
 /// V8 about anything else can crash it, because a wrapper's internal
 /// state may be inconsistent.
-fn mark_queriable_heap_objects(snapshot: &Snapshot, flags: &mut [u8]) {
+fn mark_queryable_heap_objects(snapshot: &Snapshot, flags: &mut [u8]) {
   let mut list: Vec<usize> = Vec::new();
   for edge in snapshot.first_edge_index[0]..snapshot.first_edge_index[1] {
     // The NODE's own `isUserRoot`, which is only "not synthetic".
     // `(Document DOM trees)` passes the snapshot-level test and fails
     // this one, and seeding from the wrong one marks the whole DOM as
-    // queriable when `DevTools` says it is not.
+    // queryable when `DevTools` says it is not.
     if let Ok(child) = snapshot.edge_target(edge)
       && !is_synthetic(snapshot, child)
     {

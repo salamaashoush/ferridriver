@@ -13,7 +13,7 @@
 //! and `ferridriver-test`; it contains no rquickjs code — every VM
 //! interaction goes through the typed surface `ferridriver-script`
 //! exports (`collect_tests`, `run_test`, `run_standalone_hook`,
-//! [`ferridriver_script::TestHostBridge`]).
+//! [`ferridriver_test::host::TestHostBridge`]).
 
 mod translate;
 

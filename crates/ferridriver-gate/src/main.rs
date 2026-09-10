@@ -72,7 +72,7 @@ fn jobs(root: &Path, workers: usize, ready: bool) -> Result<Vec<Job>> {
     Job::new(
       "build",
       &["cargo", "build", "--locked", "--workspace", "--bins", "--lib"],
-      &[],
+      if ready { &["docs"] } else { &[] },
     ),
     Job::new(
       "rust-build",
@@ -128,21 +128,7 @@ fn jobs(root: &Path, workers: usize, ready: bool) -> Result<Vec<Job>> {
     }
   }
   if ready {
-    jobs.push(Job::new("format", &["cargo", "fmt", "--all", "--", "--check"], &[]));
-    jobs.push(Job::new(
-      "lint",
-      &[
-        "cargo",
-        "clippy",
-        "--locked",
-        "--workspace",
-        "--all-targets",
-        "--",
-        "-D",
-        "warnings",
-      ],
-      &["rust-build"],
-    ));
+    jobs.extend(ready_jobs());
   }
   jobs.extend(suite_jobs(workers));
   for job in &mut jobs {
@@ -159,6 +145,36 @@ fn jobs(root: &Path, workers: usize, ready: bool) -> Result<Vec<Job>> {
     }
   }
   Ok(jobs)
+}
+
+fn ready_jobs() -> Vec<Job> {
+  let mut jobs = Vec::new();
+  jobs.push(Job::new("format", &["cargo", "fmt", "--all", "--", "--check"], &[]));
+  jobs.push(Job::new(
+    "lint",
+    &[
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings",
+    ],
+    &["format"],
+  ));
+  let mut docs = Job::new(
+    "docs",
+    &["cargo", "doc", "--locked", "--workspace", "--no-deps", "--keep-going"],
+    &["lint"],
+  );
+  docs.env.insert(
+    "RUSTDOCFLAGS".into(),
+    format!("{} -Dwarnings", std::env::var("RUSTDOCFLAGS").unwrap_or_default()),
+  );
+  jobs.push(docs);
+  jobs
 }
 
 fn suite_jobs(workers: usize) -> Vec<Job> {
@@ -367,15 +383,10 @@ async fn run_gate(root: &Path, workers: usize, parallel: usize, mut pending: Vec
         .unwrap_or(&f64::MAX)
         .total_cmp(timings.get(&a.name).unwrap_or(&f64::MAX))
     });
+    block_failed_jobs(&mut pending, &mut completed);
     let mut index = 0;
     while index < pending.len() {
       let job = &pending[index];
-      if job.dependencies.iter().any(|dep| completed.get(dep) == Some(&false)) {
-        let job = pending.remove(index);
-        eprintln!("BLOCKED {} (dependency failed)", job.name);
-        completed.insert(job.name, false);
-        continue;
-      }
       if running.len() >= parallel
         || (job.cargo && cargo_busy)
         || used_browsers + job.browsers > workers
@@ -441,6 +452,24 @@ async fn run_gate(root: &Path, workers: usize, parallel: usize, mut pending: Vec
     bail!("gate failed; full logs: {}", logs.display());
   }
   Ok(())
+}
+
+fn block_failed_jobs(pending: &mut Vec<Job>, completed: &mut BTreeMap<String, bool>) {
+  loop {
+    let before = pending.len();
+    pending.retain(|job| {
+      if job.dependencies.iter().any(|dep| completed.get(dep) == Some(&false)) {
+        eprintln!("BLOCKED {} (dependency failed)", job.name);
+        completed.insert(job.name.clone(), false);
+        false
+      } else {
+        true
+      }
+    });
+    if pending.len() == before {
+      break;
+    }
+  }
 }
 
 fn record_result(

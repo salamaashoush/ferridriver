@@ -4,6 +4,7 @@ extend-exclude = [
   "crates/ferridriver/src/injected/dist/",
   # Playwright-ported injected scripts (contain intentional non-standard identifiers)
   "crates/ferridriver/src/injected/injectedScript.ts",
+  "crates/ferridriver/src/injected/webSocketMock.ts",
   "crates/ferridriver/src/injected/isomorphic/",
 ]
 
@@ -45,3 +46,7 @@ deperecated = "deperecated"
 # `IIFEs` plural — JS term "Immediately Invoked Function Expression(s)"; typos
 # splits this and flags `IIF` as a typo for `IF`. Whitelist the identifier.
 IIFEs = "IIFEs"
+
+[default]
+# Deliberately invalid keys and values exercise schema error messages.
+extend-ignore-re = ['''["'](?:entrys|testIdAttribut|netwrok)["']''', '"(?:más|mas) informacion"']

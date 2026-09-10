@@ -138,7 +138,7 @@ pub struct Snapshot {
   pub locations: rustc_hash::FxHashMap<usize, Location>,
   /// Attachment state after propagation, NOT the raw field: an object
   /// reachable from an attached one is attached, and one reachable only
-  /// from a detached one is detached. See [`Snapshot::propagate_dom_state`].
+  /// from a detached one is detached. See `Snapshot::propagate_dom_state`.
   pub detachedness: Vec<u8>,
 }
 

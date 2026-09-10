@@ -5,7 +5,7 @@
 //! nothing to serve — the file opens from disk.
 //!
 //! Artifacts travel with the report when they are small enough (images and
-//! anything else under [`INLINE_LIMIT`] become `data:` URLs); larger ones —
+//! anything else under `INLINE_LIMIT` become `data:` URLs); larger ones —
 //! videos, trace zips — are referenced by path, with the command that opens
 //! them.
 

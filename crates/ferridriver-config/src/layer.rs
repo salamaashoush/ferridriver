@@ -993,7 +993,7 @@ fn normalize(value: &mut Value) {
 }
 
 /// Keys a document may write outside the schema, folded into the schema
-/// by [`normalize`] before anything deserializes.
+/// by `normalize` before anything deserializes.
 ///
 /// `use` at the top of `[test]` is where Playwright puts it, and it is
 /// the same bag as `[test.browser].use`; a config module writing one

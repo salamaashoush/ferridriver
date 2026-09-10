@@ -15,7 +15,7 @@ pub struct ScenarioExecution {
   /// Feature file path.
   pub feature_path: PathBuf,
   /// The scenario's own title: its name, or — for one row of a Scenario
-  /// Outline — the row's built title (see [`ExamplesTitle`]).
+  /// Outline — the row's built title (see `ExamplesTitle`).
   pub name: String,
   /// The suites this scenario sits under, between the feature and its
   /// own title: a `Rule`'s name, and a Scenario Outline's name (which

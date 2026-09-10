@@ -216,7 +216,7 @@ fn assign_slots(expression: &str, regex: &Regex, declared: Vec<(ParamType, usize
 
 /// Extract typed parameters from regex captures using the expected param types.
 ///
-/// Each parameter reads the capture groups [`assign_slots`] mapped onto it at
+/// Each parameter reads the capture groups `assign_slots` mapped onto it at
 /// compile time.
 pub fn extract_params(
   captures: &regex::Captures<'_>,

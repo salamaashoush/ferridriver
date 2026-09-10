@@ -4,7 +4,7 @@
 //!
 //! Source text only reaches the trace when the
 //! `disabled-by-default-devtools.v8-source-rundown-sources` category is
-//! recorded, which [`crate::trace_categories`] does. A large script is
+//! recorded, which `ferridriver::trace_categories::DEFAULT` does. A large script is
 //! split across several `LargeScriptCatchup` events that have to be
 //! concatenated in order, so the pieces are appended rather than
 //! replacing one another.
