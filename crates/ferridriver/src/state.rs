@@ -1196,7 +1196,12 @@ async fn connect_browser(mode: &ConnectMode, backend_kind: BackendKind) -> Resul
         ));
       },
       ConnectMode::ConnectUrl(endpoint) if endpoint.starts_with("http://") || endpoint.starts_with("https://") => {
-        endpoint
+        return Ok(AnyBrowser::Bidi(
+          Box::pin(crate::backend::bidi::BidiBrowser::connect_webdriver(
+            endpoint, "firefox", None, None, None,
+          ))
+          .await?,
+        ));
       },
       ConnectMode::ConnectUrl(endpoint) => endpoint,
       _ => return Err(FerriError::unsupported("WebDriver BiDi requires a WebSocket endpoint")),
