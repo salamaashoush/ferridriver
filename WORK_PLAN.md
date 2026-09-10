@@ -1408,3 +1408,6 @@ completion requires observable behavior through the public scripting API.
   `--load-extension` switch and removes only the conflicting default
   `--disable-extensions`, retaining headless, automation, and sandbox policy.
   The flag unit test passes, and Firefox/WebKit behavior remains unchanged.
+- Extension-launch gate passed headlessly with 111 checks, zero failures or
+  blocks, in 135.58s. Integration completed in 77.48s, E2E in 110.76s, and
+  BDD in 104.31s. Log: `target/gate/1789051254-1770196`.
