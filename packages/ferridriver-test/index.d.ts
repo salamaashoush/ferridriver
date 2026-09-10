@@ -839,9 +839,25 @@ export interface PageToolGroup {
 }
 
 /** Chromium WebMCP control surface backed by the page's CDP target. */
+export interface WebMCPAnnotation {
+  readOnly?: boolean;
+  untrustedContent?: boolean;
+  consequential?: boolean;
+  autosubmit?: boolean;
+}
+
+export interface WebMCPTool {
+  name: string;
+  description: string;
+  inputSchema?: Record<string, unknown>;
+  annotations?: WebMCPAnnotation;
+  frameId: string;
+  backendNodeId?: number;
+}
+
 export interface WebMCP {
   /** Discover the tools currently registered in the page's WebMCP domain. */
-  listTools(): Promise<Array<Record<string, unknown>>>;
+  listTools(): Promise<WebMCPTool[]>;
   enable(): Promise<Record<string, unknown>>;
   disable(): Promise<Record<string, unknown>>;
   invokeTool(toolName: string, input?: Record<string, unknown>): Promise<{ invocationId: string }>;

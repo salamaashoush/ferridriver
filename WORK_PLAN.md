@@ -1481,3 +1481,7 @@ completion requires observable behavior through the public scripting API.
 - Full post-migration verification passed 111 checks with zero failures or
   blocks in 106.62s. Integration completed in 64.33s, E2E in 103.39s, and BDD
   in 97.07s. Log: `target/gate/1789055750-60577`.
+- Tightened the WebMCP TypeScript surface with protocol-shaped
+  `WebMCPTool` and `WebMCPAnnotation` types, so discovered schemas, frame IDs,
+  node IDs, and safety annotations are typed for callers. The type gate passes
+  in 70ms and the focused WebMCP contract passes in 274ms.
