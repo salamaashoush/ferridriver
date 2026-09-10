@@ -72,7 +72,7 @@ fn jobs(root: &Path, workers: usize, ready: bool) -> Result<Vec<Job>> {
     Job::new(
       "build",
       &["cargo", "build", "--locked", "--workspace", "--bins", "--lib"],
-      if ready { &["docs"] } else { &[] },
+      if ready { &["lint"] } else { &[] },
     ),
     Job::new(
       "rust-build",
@@ -359,6 +359,24 @@ fn log_paths(root: &Path) -> Result<(PathBuf, PathBuf)> {
   Ok((logs, cache.join("timings.json")))
 }
 
+fn sort_jobs(pending: &mut [Job], timings: &BTreeMap<String, f64>) {
+  let prerequisites: BTreeSet<_> = pending
+    .iter()
+    .flat_map(|job| job.dependencies.iter().cloned())
+    .collect();
+  pending.sort_by(|a, b| {
+    prerequisites
+      .contains(&b.name)
+      .cmp(&prerequisites.contains(&a.name))
+      .then_with(|| {
+        timings
+          .get(&b.name)
+          .unwrap_or(&f64::MAX)
+          .total_cmp(timings.get(&a.name).unwrap_or(&f64::MAX))
+      })
+  });
+}
+
 async fn run_gate(root: &Path, workers: usize, parallel: usize, mut pending: Vec<Job>) -> Result<()> {
   let (logs, timings_path) = log_paths(root)?;
   let mut timings: BTreeMap<String, f64> = std::fs::read(&timings_path)
@@ -377,12 +395,7 @@ async fn run_gate(root: &Path, workers: usize, parallel: usize, mut pending: Vec
     logs.display()
   );
   loop {
-    pending.sort_by(|a, b| {
-      timings
-        .get(&b.name)
-        .unwrap_or(&f64::MAX)
-        .total_cmp(timings.get(&a.name).unwrap_or(&f64::MAX))
-    });
+    sort_jobs(&mut pending, &timings);
     block_failed_jobs(&mut pending, &mut completed);
     let mut index = 0;
     while index < pending.len() {

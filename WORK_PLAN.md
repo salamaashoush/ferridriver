@@ -1153,3 +1153,26 @@ completion requires observable behavior through the public scripting API.
   requiring lint rather than docs for build may move documentation off the
   critical path while retaining it as a required gate check. Measure before
   making a speedup claim; no scheduler change has been applied yet.
+
+- Measured the unchanged headless gate before changing scheduling: 119 checks,
+  zero failures, 107.57s; 772 native integration cases in 59.3s. Documentation
+  took 3.43s and build 3.42s before suites started. Logs:
+  target/gate/1789041673-1356037 and /tmp/ferridriver-gate-scheduling-before.log.
+- Build now requires lint instead of documentation. Pending prerequisites
+  take priority over leaf checks, then retain longest-duration-first ordering.
+  This lets builds release test work before documentation takes the Cargo
+  slot; documentation remains required and its failure still fails the gate.
+- Native gate regressions seeded slow documentation timing and failed on the
+  old ordering for both successful and failed documentation. They now prove
+  build/addon completion, documentation verdict preservation, and actual
+  test/documentation overlap using a two-way FIFO handshake without sleeps.
+  Existing lint fail-fast and documentation warning checks remain covered.
+  Focused checks passed; full-gate timing on the changed scheduler is pending.
+- Final headless gate passed: 119 checks, zero failures, 104.26s, versus
+  the unchanged 107.57s baseline (3.31s, 3.1% lower in this paired run).
+  Documentation rebuilt in 12.94s while tests ran, rather than blocking
+  their startup. This is one paired measurement, not a stable speedup claim.
+  All 774 native integration cases passed. Logs:
+  target/gate/1789041870-1548625 and
+  /tmp/ferridriver-gate-scheduling-after-final.log. The initial attempt stopped
+  at formatting; the final run includes the formatter correction.

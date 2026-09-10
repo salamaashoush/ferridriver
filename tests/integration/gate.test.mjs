@@ -133,7 +133,7 @@ test('interrupting the gate lets its running check clean up before exiting', asy
   assert.match(result.text, /gate interrupted; child processes stopped/);
 });
 
-for (const [command, check] of [['clippy', 'lint'], ['doc', 'docs']]) {
+for (const [command, check] of [['clippy', 'lint']]) {
   test(`ready stops before binary builds when ${check} fails`, async () => {
     const cwd = await workspace({ cargo: `#!/bin/sh
       if [ "$1" = ${command} ]; then echo rejected-${check}; exit 42; fi
@@ -165,4 +165,60 @@ test('ready treats documentation warnings as errors', async () => {
   passed(result);
   assert.match(result.text, /PASS docs/);
   assert.doesNotMatch(result.text, /START build/);
+});
+
+for (const code of [0, 42]) {
+  test(`ready releases builds before documentation and preserves its exit status ${code}`, async () => {
+    const cwd = await workspace({
+      cargo: `#!/bin/sh
+        if [ "$1" = doc ]; then exit ${code}; fi
+        exit 0
+      `,
+      bun: '#!/bin/sh\nexit 0\n',
+      'gate-cache/timings.json': JSON.stringify({ docs: 100, build: 1, 'napi-build': 1 }),
+    });
+    await chmod(join(cwd, 'cargo'), 0o700);
+    await chmod(join(cwd, 'bun'), 0o700);
+    const result = await run(['ready', '--only', 'napi/browser.test.ts', '--only', 'docs', '--jobs', '1'], {
+      executable, env: { PATH: cwd, FERRIDRIVER_GATE_CACHE_DIR: join(cwd, 'gate-cache') },
+    });
+    if (code === 0) passed(result);
+    else assert.notEqual(result.code, 0, result.text);
+    assert.match(result.text, /PASS build/);
+    assert.match(result.text, /PASS napi-build/);
+    assert.match(result.text, /PASS napi\/browser.test.ts/);
+    assert.match(result.text, new RegExp(`${code === 0 ? 'PASS' : 'FAIL'} docs`));
+    assert.ok(result.text.indexOf('PASS napi-build') < result.text.indexOf('START docs'), result.text);
+  });
+}
+
+test('ready runs tests while documentation is still in progress', async () => {
+  const cwd = await workspace({
+    cargo: `#!/bin/sh
+      if [ "$1" = doc ]; then
+        echo documenting > "$PROBE_ROOT/docs-started"
+        read finished < "$PROBE_ROOT/test-finished"
+        [ "$finished" = tested ] || exit 81
+      fi
+    `,
+    bun: `#!/bin/sh
+      if [ "$1" = test ]; then
+        read started < "$PROBE_ROOT/docs-started"
+        [ "$started" = documenting ] || exit 82
+        echo tested > "$PROBE_ROOT/test-finished"
+      fi
+    `,
+    'gate-cache/timings.json': JSON.stringify({ docs: 100, build: 1, 'napi-build': 1 }),
+  });
+  await chmod(join(cwd, 'cargo'), 0o700);
+  await chmod(join(cwd, 'bun'), 0o700);
+  passed(await run([join(cwd, 'docs-started'), join(cwd, 'test-finished')], { executable: '/bin/mkfifo' }));
+  const result = await run(['ready', '--only', 'napi/browser.test.ts', '--only', 'docs', '--jobs', '2'], {
+    executable, env: { PATH: cwd, PROBE_ROOT: cwd, FERRIDRIVER_GATE_CACHE_DIR: join(cwd, 'gate-cache') },
+  });
+  passed(result);
+  assert.match(result.text, /PASS docs/);
+  assert.match(result.text, /PASS napi\/browser.test.ts/);
+  assert.ok(result.text.indexOf('START docs') < result.text.indexOf('PASS napi/browser.test.ts'), result.text);
+  assert.ok(result.text.indexOf('START napi/browser.test.ts') < result.text.indexOf('PASS docs'), result.text);
 });
