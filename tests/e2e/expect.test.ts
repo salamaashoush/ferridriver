@@ -116,18 +116,20 @@ describe('expect', () => {
     // keep the last error message, and honor the custom 50ms interval
     // schedule (~8 attempts in 400ms, far more than the default's 3).
     const t = Date.now();
+    const attemptTimes: number[] = [];
     let attempts = 0;
     let msg = '';
     try {
       await expect(async () => {
         attempts += 1;
+        attemptTimes.push(Date.now() - t);
         throw new Error('always fails');
       }).toPass({ intervals: [50], timeout: 400 });
     } catch (e) {
       msg = String((e as Error).message);
     }
     expect(msg).toContain('always fails');
-    expect(attempts).toBeGreaterThanOrEqual(5);
+    expect(attempts, `attempt timestamps (ms): ${JSON.stringify(attemptTimes)}`).toBeGreaterThanOrEqual(5);
     expect(Date.now() - t).toBeLessThan(3000);
   });
 

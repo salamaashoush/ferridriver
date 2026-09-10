@@ -398,3 +398,36 @@ completion requires observable behavior through the public scripting API.
   integrations passed. Logs: `target/gate/1789022089-1121400`,
   `/tmp/ferridriver-extraction-provided-ready.log`. This individual timing
   does not establish a repeatable performance improvement.
+
+- Pushed `697f2c59`, verified extraction/provider migration. Found that
+  `just test-integration` failed before testing: ferridriver-gate is absent
+  from Cargo default members, so its explicit bin selector was rejected.
+  Both focused integration and backend recipes now use the gate's workspace
+  build command. The repaired integration recipe passed 11 native cases in
+  1.453s wall time (112ms tests), `/tmp/ferridriver-focused-recipe-fixed.log`.
+  Full default-parallelism gate running in session 60302, console
+  `/tmp/ferridriver-justfile-ready-default.log`.
+
+- Default 32-slot gate exited 1 after 102.353s (102.27 gate), solely
+  on the unresolved WebKit toPass custom-interval test: fewer than five
+  attempts in 400ms. No assertion changed. Added per-attempt timestamps
+  to the assertion message to distinguish callback delay from timer drift
+  during the actual full workload. Justfile fix remains uncommitted until
+  the gate is verified.
+
+- Diagnostic default gate is running in session 30853,
+  `/tmp/ferridriver-retry-timing-ready.log`. The toPass failure message now
+  includes attempt timestamps; its minimum-attempt and deadline assertions
+  remain unchanged. Poll this handle before launching another gate.
+
+- Diagnostic default gate passed all 148 checks in 101.527 wall
+  seconds (101.42 gate), 32 jobs/browser slots and default two Tokio
+  threads per child. Logs: `target/gate/1789022441-1486434`. All four
+  toPass cases passed, so this run did not capture a failing timestamp.
+- Compared TOKIO_WORKER_THREADS=4 on the same final worktree and 32-slot
+  budget: gate passed in 101.544 wall seconds. Logs:
+  `target/gate/1789022549-1668397`, `/tmp/ferridriver-runtime4-ready.log`.
+  No speed improvement was demonstrated, so the default remains two.
+  The intermittent retry-count failure remains unresolved; timestamps are
+  retained in its assertion message for the next reproduction. The focused
+  justfile command fix is verified independently and by the full gate.

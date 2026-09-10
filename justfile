@@ -43,7 +43,7 @@ test-fast *args:
   cargo gate test {{args}}
 
 test-integration *args:
-  cargo build --locked --bin ferridriver --bin ferridriver-fixtures --bin ferridriver-runtime-probe --bin ferridriver-gate --bin sidecar_echo
+  cargo build --locked --workspace --bins --lib
   ./target/debug/ferridriver test --no-inherit --headless --config tests/integration/ferridriver.toml {{args}}
 
 # Run one backend: the native e2e project and MCP tests.
@@ -51,7 +51,7 @@ test-integration *args:
 test-backend backend:
   #!/usr/bin/env bash
   set -euo pipefail
-  cargo build --locked --bin ferridriver --bin ferridriver-fixtures
+  cargo build --locked --workspace --bins --lib
   project="$(echo "{{backend}}" | tr '_' '-')"
   ./target/debug/ferridriver test --headless --project "$project"
   ./target/debug/ferridriver test 'tests/integration/mcp-*.test.mjs' --no-inherit --headless --config tests/integration/ferridriver.toml --grep "${project}:"
