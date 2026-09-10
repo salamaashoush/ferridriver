@@ -1324,3 +1324,9 @@ completion requires observable behavior through the public scripting API.
   63.14s, E2E in 101.46s, and BDD in 95.42s. The earlier isolated NAPI
   WebError failure did not reproduce in the clean rerun. Log directory:
   target/gate/1789045967-3417672.
+- Replaced `new_features_e2e.rs` with native JS coverage for worker fixtures,
+  lifecycle hooks, serial failure propagation, expected failures, soft
+  assertions, and HTML reporter output. The focused headless run passed four
+  tests in 119ms. The unchanged Rust source was backed up at
+  /tmp/ferridriver-new-features-backup-s2K7GW/new_features_e2e.rs before
+  removal; the full gate is pending.
