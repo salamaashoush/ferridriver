@@ -21,13 +21,13 @@
 
 ## Current evidence
 
-- Latest JS-reporter migration headless gate passed: 119 checks, zero failures
-  or blocks, 109.18s gate time. All 752 native integration cases passed in
-  59.2s. Logs: target/gate/1789040715-972109 and
-  /tmp/ferridriver-js-reporter-ready.log. This is an incremental-build
+- Latest direct-session migration headless gate passed: 119 checks, zero
+  failures or blocks, 115.06s gate time. All 772 native integration cases
+  passed in 59.6s. Logs: target/gate/1789041208-1164580 and
+  /tmp/ferridriver-session-semantics-ready-final.log. This is an incremental
   observation, not a controlled before/after benchmark. Remaining top-level
-  Rust test files: 30, including benchmark targets; addon migration and
-  capability implementation remain open.
+  Rust test files: 30; session.rs retains sixteen extension cases. Addon
+  migration and capability implementation remain open.
 - Verified headless gate at committed checkpoint `63641057`: 157 checks, zero failed
   or blocked, 107.68 seconds in the gate and 107.813 seconds wall time. This is
   a warm build with 32 browser slots on the 32-CPU Linux host. Logs:
@@ -1128,3 +1128,28 @@ completion requires observable behavior through the public scripting API.
   failures or blocks, 109.18s gate time; 752 native integration cases passed
   in 59.2s. Logs: target/gate/1789040715-972109 and
   /tmp/ferridriver-js-reporter-ready.log.
+- Migrated twenty direct Session.execute cases from session.rs to native
+  JS assertions: persistent globals, lexical scope, ordinary exceptions,
+  timeout/native-await poison state, stale-deadline VM reentry, durable vars,
+  timers, URL/query semantics, codecs/streams, assertion errors and console
+  formatting. Script fixtures retain the original programs, with the console
+  example using sashoush. The original extension cases remain in Rust pending
+  their own equivalent migration; the top-level file count is still 30.
+- Extended the existing execution probe with optional per-call timeout and
+  owned VM-loop evaluation after an idle interval. All twenty cases passed
+  in 1.2s: /tmp/ferridriver-session-semantics-native.log. Before removing their
+  Rust counterparts, verified the complete original session.rs (65021 bytes)
+  at /tmp/ferridriver-session-semantics-backup-q_gpbi94/session.rs.
+  Full-gate verification is pending.
+- Direct-session migration final headless gate exited zero: 119 checks,
+  zero failures or blocks, 115.06s; 772 native integration cases passed in
+  59.6s. Removed the unused Rust context helper/imports and extracted the
+  existing cache-write handler after lint identified the migration leftovers.
+  Logs: target/gate/1789041208-1164580 and
+  /tmp/ferridriver-session-semantics-ready-final.log.
+- Next gate scheduling investigation: jobs() makes build depend on docs,
+  which depends on lint. Documentation took 13.02s before browser tests could
+  start in this run. Cargo jobs are already serialized by cargo_busy, so
+  requiring lint rather than docs for build may move documentation off the
+  critical path while retaining it as a required gate check. Measure before
+  making a speedup claim; no scheduler change has been applied yet.

@@ -197,6 +197,11 @@ enum Operation {
     source: String,
     #[serde(default)]
     args: Vec<Value>,
+    timeout_ms: Option<u64>,
+  },
+  EnterVm {
+    source: String,
+    idle_ms: u64,
   },
   SetAliases {
     aliases: Vec<(String, String)>,
@@ -204,12 +209,8 @@ enum Operation {
   Aliases,
   CacheInfo,
   CacheStore {
-    key: u64,
-    bytecode: Vec<u8>,
-    module_name: String,
-    source_map: Option<String>,
-    aux: Option<String>,
-    inputs: Vec<PathBuf>,
+    #[serde(flatten)]
+    request: CacheStore,
   },
   CacheLoad {
     key: u64,
@@ -221,6 +222,29 @@ enum Operation {
     path: PathBuf,
     content: String,
   },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheStore {
+  key: u64,
+  bytecode: Vec<u8>,
+  module_name: String,
+  source_map: Option<String>,
+  aux: Option<String>,
+  inputs: Vec<PathBuf>,
+}
+
+fn store_cache(root: &Path, request: CacheStore) -> Value {
+  bytecode_cache().store(
+    request.key,
+    &request.bytecode,
+    &request.module_name,
+    request.source_map.as_deref(),
+    request.aux.as_deref(),
+    &paths(root, request.inputs),
+  );
+  Value::Null
 }
 
 struct Probe {
@@ -354,13 +378,21 @@ impl Probe {
     Ok(serde_json::to_value(result)?)
   }
 
-  async fn execute_script(&mut self, source: &str, args: &[Value]) -> Result<Value> {
+  async fn execute_script(&mut self, source: &str, args: &[Value], timeout_ms: Option<u64>) -> Result<Value> {
     if self.session.is_none() {
       self.session = Some(Session::create(ScriptEngineConfig::default(), &self.context).await?);
     }
     let session = self.session.as_ref().context("session was not initialized")?;
     let execution = session
-      .execute(source, args, RunOptions::default(), &self.context)
+      .execute(
+        source,
+        args,
+        RunOptions {
+          timeout: timeout_ms.map(std::time::Duration::from_millis),
+          ..Default::default()
+        },
+        &self.context,
+      )
       .await;
     Ok(serde_json::to_value(execution.result)?)
   }
@@ -371,7 +403,7 @@ impl Probe {
     }
     tokio::time::pause();
     let started = tokio::time::Instant::now();
-    let result = self.execute_script(source, &[]).await;
+    let result = self.execute_script(source, &[], None).await;
     let elapsed = started.elapsed();
     tokio::time::resume();
     Ok(json!({ "result": result?, "elapsedMs": elapsed.as_millis() }))
@@ -385,6 +417,17 @@ impl Probe {
       extension_host(host)?,
     )
     .await
+  }
+
+  async fn enter_vm(&self, source: String, idle_ms: u64) -> Result<Value> {
+    let session = self.session.as_ref().context("session was not initialized")?;
+    tokio::time::sleep(std::time::Duration::from_millis(idle_ms)).await;
+    let vm = session.vm_handle();
+    let value = ferridriver_script::vm_with!(vm => |ctx| { ctx.eval::<f64, _>(source) })
+      .await
+      .map_err(anyhow::Error::msg)?
+      .map_err(anyhow::Error::msg)?;
+    Ok(json!(value))
   }
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
@@ -451,31 +494,19 @@ impl Probe {
       Operation::Bundle { entries } => compile_bundle(&self.root, entries).await,
       Operation::BundleSource { entries } => source_bundle(&self.root, entries).await,
       Operation::ExecuteModule { entries } => self.execute_module(entries).await,
-      Operation::ExecuteScript { source, args } => self.execute_script(&source, &args).await,
+      Operation::ExecuteScript {
+        source,
+        args,
+        timeout_ms,
+      } => self.execute_script(&source, &args, timeout_ms).await,
+      Operation::EnterVm { source, idle_ms } => self.enter_vm(source, idle_ms).await,
       Operation::SetAliases { aliases } => {
         ferridriver_script::set_module_aliases(aliases).map_err(anyhow::Error::msg)?;
         Ok(json!(ferridriver_script::module_aliases()))
       },
       Operation::Aliases => Ok(json!(ferridriver_script::module_aliases())),
       Operation::CacheInfo => Ok(cache_info()),
-      Operation::CacheStore {
-        key,
-        bytecode,
-        module_name,
-        source_map,
-        aux,
-        inputs,
-      } => {
-        bytecode_cache().store(
-          key,
-          &bytecode,
-          &module_name,
-          source_map.as_deref(),
-          aux.as_deref(),
-          &paths(&self.root, inputs),
-        );
-        Ok(Value::Null)
-      },
+      Operation::CacheStore { request } => Ok(store_cache(&self.root, request)),
       Operation::CacheLoad { key } => Ok(cached_entry(key)),
       Operation::InputsFingerprint { inputs } => Ok(json!(
         ferrijs_bundle::cache::inputs_fingerprint(&paths(&self.root, inputs)).map(|value| value.to_string())
