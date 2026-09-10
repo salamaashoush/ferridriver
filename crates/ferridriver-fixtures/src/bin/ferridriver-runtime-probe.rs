@@ -1,5 +1,7 @@
 #[path = "runtime_probe/bdd.rs"]
 mod bdd;
+#[path = "runtime_probe/extensions.rs"]
+mod extensions;
 #[path = "runtime_probe/test_registry.rs"]
 mod test_registry;
 
@@ -19,6 +21,10 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  ExtensionSession {
+    #[serde(flatten)]
+    request: extensions::Request,
+  },
   TestRegistry {
     entries: Vec<PathBuf>,
     host: String,
@@ -129,6 +135,19 @@ struct Probe {
 
 fn paths(root: &Path, entries: Vec<PathBuf>) -> Vec<PathBuf> {
   entries.into_iter().map(|path| root.join(path)).collect()
+}
+
+fn cached_entry(key: u64) -> Value {
+  bytecode_cache().load(key).map_or(Value::Null, |entry| {
+    json!({
+      "bytecode": entry.bytecode,
+      "moduleName": entry.module_name,
+      "sourceMap": entry.source_map_json,
+      "aux": entry.aux,
+      "inputFingerprint": ferrijs_bundle::cache::inputs_fingerprint(&entry.inputs).map(|value| value.to_string()),
+      "inputs": entry.inputs,
+    })
+  })
 }
 
 fn extension_host(name: &str) -> Result<ExtensionHost> {
@@ -256,6 +275,7 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::ExtensionSession { request } => Box::pin(extensions::run(&self.root, &self.context, request)).await,
       Operation::TestRegistry { entries, host } => self.collect_test_registry(entries, &host).await,
       Operation::BddSession { entries, actions } => {
         Box::pin(bdd::run(&self.root, &self.context, paths(&self.root, entries), actions)).await
@@ -335,16 +355,7 @@ impl Probe {
         );
         Ok(Value::Null)
       },
-      Operation::CacheLoad { key } => Ok(bytecode_cache().load(key).map_or(Value::Null, |entry| {
-        json!({
-          "bytecode": entry.bytecode,
-          "moduleName": entry.module_name,
-          "sourceMap": entry.source_map_json,
-          "aux": entry.aux,
-          "inputFingerprint": ferrijs_bundle::cache::inputs_fingerprint(&entry.inputs).map(|value| value.to_string()),
-          "inputs": entry.inputs,
-        })
-      })),
+      Operation::CacheLoad { key } => Ok(cached_entry(key)),
       Operation::InputsFingerprint { inputs } => Ok(json!(
         ferrijs_bundle::cache::inputs_fingerprint(&paths(&self.root, inputs)).map(|value| value.to_string())
       )),

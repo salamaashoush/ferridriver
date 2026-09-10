@@ -345,3 +345,24 @@ completion requires observable behavior through the public scripting API.
   Logs: `target/gate/1789020949-574666` and
   `/tmp/ferridriver-extension-reload-ready2.log`. No assertions were weakened.
   Remaining migration and capability milestones are still open.
+
+- Pushed `60ef0b32`, the verified reload migration. Migrated six more
+  extension host/source-map cases to native JS. Existing host tests remain
+  intact; all 18 combined cases pass in 2.1s. The new probe uses production
+  load_bindings and Session APIs, exposing observations without Rust assertions.
+  Cold and warm source-map cases load in one process with separate sessions.
+  Backed-up, unchanged Rust originals removed from the gate: /tmp/ferridriver-host-maps-backup-30154jmf
+  (extension_host_matrix.rs 8191 bytes; extension_source_maps.rs 6659 bytes).
+  The workspace probe build took 1.42s versus the prior narrower graph 2m43s.
+
+- Host/source-map migration first gate stopped at lint in 1.670s: the
+  dispatcher reached 101 lines and the extension operation future needed
+  boxing. Extracted cache observation serialization without behavior changes
+  and boxed the new operation. Full verification now runs in session 55842,
+  `/tmp/ferridriver-host-maps-ready2.log`, at 16 browser slots.
+  Remaining top-level Rust integration targets: 63.
+
+- Host/source-map migration full gate passed in 111.690 wall seconds
+  (111.59 gate) at 16 browser slots. Full logs:
+  `target/gate/1789021330-757483`, `/tmp/ferridriver-host-maps-ready2.log`.
+  All 501 native integration cases passed.

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from '@ferridriver/test';
-import { passed, run, workspace } from './support.mjs';
+import { observation, passed, run, runtimeProbe, workspace } from './support.mjs';
 
 const backends = [['cdp-pipe', 'chromium'], ['cdp-raw', 'chromium'], ['bidi', 'firefox'], ['webkit', 'webkit']];
 const projects = backends.map(([backend, browser]) => `
@@ -89,3 +89,72 @@ test('contributed fixture', async ({ page, deployment }) => {
     });
   }
 }
+
+const hosts = ['mcp', 'bdd', 'test', 'script'];
+const snapshot = 'return { tools: Object.keys(tools).sort(), host: ferridriver.host };';
+
+function value(result) {
+  assert.equal(result.status, 'ok', JSON.stringify(result));
+  return result.value;
+}
+
+test('one extension exposes the same tool registrations under all four hosts', async () => {
+  const { results } = await runtimeProbe(hosts.map(host => ({
+    op: 'extension-session', entries: ['./plug.ts'], host, sources: [snapshot],
+  })), {
+    'plug.ts': "defineTool({ name: 'alpha', handler: async () => 'a' });\ndefineTool({ name: 'beta.nested', handler: async () => 'b' });\nGiven('a step from an extension', function () {});\n",
+  });
+  const seen = results.map((item, index) => {
+    const result = observation(item);
+    assert.deepEqual(result.failures, []);
+    assert.deepEqual(result.blocked, []);
+    assert.equal(result.bindings.length, 1);
+    const actual = value(result.outcomes[0]);
+    assert.deepEqual(actual.tools, ['alpha', 'beta', 'beta.nested']);
+    assert.equal(actual.host, hosts[index]);
+    return actual.tools;
+  });
+  for (const tools of seen.slice(1)) assert.deepEqual(tools, seen[0]);
+});
+
+test('an unmet package requirement prevents registrations under all four hosts', async () => {
+  const { results } = await runtimeProbe(hosts.map(host => ({
+    op: 'extension-session', entries: ['./pkg'], host, sources: [snapshot],
+  })), {
+    'pkg/package.json': JSON.stringify({ name: 'needs-binary', ferridriver: {
+      entries: ['index.ts'], requires: { commands: ['ferri-not-a-real-binary'] },
+    } }),
+    'pkg/index.ts': "defineTool({ name: 'gated', handler: async () => 'g' });\n",
+  });
+  for (const item of results) {
+    const result = observation(item);
+    assert.equal(result.blocked.length, 1);
+    assert.deepEqual(result.bindings, []);
+    assert.deepEqual(value(result.outcomes[0]).tools, []);
+  }
+});
+
+test('extraction records host-specific tools steps hooks and fixtures separately', async () => {
+  const { results } = await runtimeProbe([{
+    op: 'extension-session', entries: ['./branching.ts'], host: 'script', sources: [],
+  }], {
+    'branching.ts': `import { test } from '@ferridriver/test';
+      if (ferridriver.host === 'mcp') defineTool({ name: 'only.mcp', handler: async () => 1 });
+      if (ferridriver.host === 'bdd') { Given('a step only bdd sees', function () {}); Before(function () {}); }
+      if (ferridriver.host === 'test') test.extend({ onlyTest: ['x', { option: true }] });
+      if (ferridriver.host === 'script') defineTool({ name: 'only.script', handler: async () => 2 });`,
+  });
+  const result = observation(results[0]);
+  assert.deepEqual(result.failures, []);
+  assert.equal(result.compiled.length, 1);
+  const { mcp, bdd, test: testHost, script } = result.compiled[0].snapshot.hosts;
+  assert.equal(mcp.tools.length, 1);
+  assert.deepEqual(mcp.steps, []);
+  assert.deepEqual(bdd.steps, ['Given a step only bdd sees']);
+  assert.deepEqual(bdd.hooks, ['Before']);
+  assert.deepEqual(bdd.tools, []);
+  assert.deepEqual(testHost.fixtures, ['onlyTest']);
+  assert.equal(script.tools.length, 1);
+  assert.ok(result.compiled[0].manifests.includes('only.mcp'));
+  assert.ok(!result.compiled[0].manifests.includes('only.script'));
+});
