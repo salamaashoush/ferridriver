@@ -1441,3 +1441,7 @@ completion requires observable behavior through the public scripting API.
   in 105.03s, down from 206.44s (49% faster). Integration took 63.06s, E2E
   101.78s, and BDD 95.59s. The focused gate contract suite passes all 13
   tests. Log: `target/gate/1789054175-3315487`.
+- Added `just test-integration-gated` for unfiltered integration work. It uses
+  the dependency-aware gate so the workspace build and type check overlap,
+  while the existing argument-preserving `test-integration` recipe remains
+  available for filtered exploratory runs.
