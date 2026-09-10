@@ -1225,3 +1225,27 @@ completion requires observable behavior through the public scripting API.
   Logs: target/gate/1789042684-1950507 and
   /tmp/ferridriver-web-server-ready-final.log. The initial gate stopped at
   an explicit-default clippy error in the fixture; the final run fixes it.
+
+- Added six native regressions for the remaining web-server startup audit:
+  stalled response, unavailable status, later invalid configuration, later
+  spawn failure, early process exit and HTTPS reuse with an empty PATH.
+  All failed before the fix: the 400ms stalled probe took 5105ms; unavailable
+  took 864ms; failed startup left servers reachable without shutdown markers;
+  early exit became a timeout; reuse failed while trying to spawn true.
+- Startup now reuses one HTTP client for its probes and bounds requests and
+  backoff by one deadline. It races readiness against child exit, retaining
+  the exit status. Failed startup stops the current child and previously
+  started servers before returning. Child drop also requests termination.
+  Reused servers have an explicit non-owning entry, with no placeholder
+  process and no termination of the external service.
+- All twelve focused matches passed in 541ms. The stalled/unavailable cases
+  completed in 410/409ms including cleanup, early exit in 12ms, and HTTPS
+  reuse in 22ms. No sleeps were added to the tests; the stalled response
+  releases on shutdown through a watch channel. Primary startup/teardown
+  reference remains Playwright's webServerPlugin.ts. Full gate is pending.
+- Web-server startup fixes final headless gate exited zero: 117 checks,
+  zero failures or blocks, 123.62s; all 801 native integration cases passed
+  in 86.5s. Rust test artifacts rebuilt in 22.55s, addon build took 26.81s
+  and docs 36.62s. This includes rebuild work and does not establish a
+  warm-gate regression or speedup. Logs: target/gate/1789043121-2161277
+  and /tmp/ferridriver-web-server-startup-ready.log.

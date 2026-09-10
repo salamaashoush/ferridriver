@@ -86,6 +86,7 @@ pub struct WebServerManager {
 enum RunningServer {
   Static(Box<StaticEntry>),
   Command(Box<CommandEntry>),
+  Reused { url: String },
 }
 
 struct StaticEntry {
@@ -108,60 +109,19 @@ impl WebServerManager {
   ///
   /// Returns an error if any server fails to start or become ready.
   pub async fn start(configs: &[crate::config::WebServerConfig]) -> ferridriver::error::Result<Self> {
-    let mut servers = Vec::with_capacity(configs.len());
+    let mut manager = Self {
+      servers: Vec::with_capacity(configs.len()),
+    };
     for config in configs {
-      let display_name = config.name.clone().unwrap_or_else(|| "WebServer".to_string());
-      if let Some(ref dir) = config.static_dir {
-        let server = TestServer::start_with_options(PathBuf::from(dir), config.port, config.spa).await?;
-        tracing::info!(name = %display_name, "[{display_name}] Static server ready at {} (serving {})", server.url(), dir);
-        servers.push(RunningServer::Static(Box::new(StaticEntry {
-          server,
-          name: display_name,
-        })));
-      } else if let Some(ref command) = config.command {
-        let url = config.url.as_deref().ok_or_else(|| {
-          ferridriver::FerriError::invalid_argument(
-            "webServer.url",
-            format!("webServer command requires 'url' to wait for: {command}"),
-          )
-        })?;
-
-        // Check if server is already running (reuse). The reuse probe
-        // honours `ignore_https_errors` so that a self-signed dev
-        // server registers as up.
-        if config.reuse_existing_server && http_probe(url, config.ignore_https_errors).await {
-          tracing::info!(name = %display_name, "[{display_name}] Reusing existing server at {url}");
-          // Spawn a no-op placeholder so that stop()'s child handle
-          // path can run uniformly across reuse/launch — this matches
-          // the prior behaviour but tags the entry with the name and
-          // configured graceful-shutdown so logs stay informative.
-          servers.push(RunningServer::Command(Box::new(CommandEntry {
-            child: tokio::process::Command::new("true").spawn()?,
-            url: url.to_string(),
-            name: display_name,
-            graceful: config.graceful_shutdown.clone(),
-          })));
-          continue;
-        }
-
-        let cwd = config.cwd.as_deref().unwrap_or(".");
-        let child = spawn_command(command, cwd, &config.env)?;
-        wait_for_url(url, config.timeout, config.ignore_https_errors, &display_name).await?;
-        tracing::info!(name = %display_name, "[{display_name}] Dev server ready at {url} (command: {command})");
-        servers.push(RunningServer::Command(Box::new(CommandEntry {
-          child,
-          url: url.to_string(),
-          name: display_name,
-          graceful: config.graceful_shutdown.clone(),
-        })));
-      } else {
-        return Err(ferridriver::FerriError::invalid_argument(
-          "webServer",
-          "webServer config must have either 'command' or 'staticDir'",
-        ));
+      match start_server(config).await {
+        Ok(server) => manager.servers.push(server),
+        Err(error) => {
+          manager.stop().await;
+          return Err(error);
+        },
       }
     }
-    Ok(Self { servers })
+    Ok(manager)
   }
 
   /// URL of the first server, or None if no servers.
@@ -170,6 +130,7 @@ impl WebServerManager {
     self.servers.first().map(|s| match s {
       RunningServer::Static(entry) => entry.server.url(),
       RunningServer::Command(entry) => entry.url.clone(),
+      RunningServer::Reused { url } => url.clone(),
     })
   }
 
@@ -181,6 +142,7 @@ impl WebServerManager {
   pub async fn stop(self) {
     for server in self.servers {
       match server {
+        RunningServer::Reused { .. } => {},
         RunningServer::Static(entry) => {
           let StaticEntry { server, name } = *entry;
           tracing::info!(name = %name, "[{name}] Stopping static server");
@@ -198,6 +160,56 @@ impl WebServerManager {
       }
     }
   }
+}
+
+async fn start_server(config: &crate::config::WebServerConfig) -> ferridriver::error::Result<RunningServer> {
+  let name = config.name.clone().unwrap_or_else(|| "WebServer".to_string());
+  if let Some(dir) = &config.static_dir {
+    let server = TestServer::start_with_options(PathBuf::from(dir), config.port, config.spa).await?;
+    tracing::info!(name = %name, "[{name}] Static server ready at {} (serving {})", server.url(), dir);
+    return Ok(RunningServer::Static(Box::new(StaticEntry { server, name })));
+  }
+  let command = config.command.as_deref().ok_or_else(|| {
+    ferridriver::FerriError::invalid_argument(
+      "webServer",
+      "webServer config must have either 'command' or 'staticDir'",
+    )
+  })?;
+  let url = config.url.as_deref().ok_or_else(|| {
+    ferridriver::FerriError::invalid_argument(
+      "webServer.url",
+      format!("webServer command requires 'url' to wait for: {command}"),
+    )
+  })?;
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(config.timeout);
+  let client = build_probe_client(config.ignore_https_errors);
+  if config.reuse_existing_server
+    && tokio::time::timeout_at(deadline, http_probe_with_client(&client, url))
+      .await
+      .map_err(|_| readiness_timeout(url, config.timeout, &name))?
+  {
+    tracing::info!(name = %name, "[{name}] Reusing existing server at {url}");
+    return Ok(RunningServer::Reused { url: url.to_string() });
+  }
+  let mut child = spawn_command(command, config.cwd.as_deref().unwrap_or("."), &config.env)?;
+  let ready = tokio::select! {
+    biased;
+    status = child.wait() => {
+      Err(ferridriver::FerriError::backend(format!("[{name}] webServer process exited: {}", status?)))
+    },
+    result = wait_for_url(&client, url, deadline, config.timeout, &name) => result,
+  };
+  if let Err(error) = ready {
+    stop_child(&mut child, &name, config.graceful_shutdown.as_ref()).await;
+    return Err(error);
+  }
+  tracing::info!(name = %name, "[{name}] Dev server ready at {url} (command: {command})");
+  Ok(RunningServer::Command(Box::new(CommandEntry {
+    child,
+    url: url.to_string(),
+    name,
+    graceful: config.graceful_shutdown.clone(),
+  })))
 }
 
 async fn stop_child(child: &mut tokio::process::Child, name: &str, graceful: Option<&crate::config::GracefulShutdown>) {
@@ -290,6 +302,7 @@ fn spawn_command(
     cmd.env(k, v);
   }
   cmd
+    .kill_on_drop(true)
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped());
@@ -328,8 +341,11 @@ pub fn build_probe_client(ignore_https_errors: bool) -> reqwest::Client {
 /// `isURLAvailable`: any 2xx/3xx status counts as up; 404 falls back
 /// to `/index.html` (consistent with serving a static SPA).
 pub async fn http_probe(url: &str, ignore_https_errors: bool) -> bool {
-  let client = build_probe_client(ignore_https_errors);
-  match probe_status(&client, url).await {
+  http_probe_with_client(&build_probe_client(ignore_https_errors), url).await
+}
+
+async fn http_probe_with_client(client: &reqwest::Client, url: &str) -> bool {
+  match probe_status(client, url).await {
     Some(s) if (200..404).contains(&s) => true,
     Some(404) => {
       // Retry against /index.html if the URL is a bare host root.
@@ -338,7 +354,7 @@ pub async fn http_probe(url: &str, ignore_https_errors: bool) -> bool {
       } else {
         format!("{url}/index.html")
       };
-      matches!(probe_status(&client, &index_url).await, Some(s) if (200..404).contains(&s))
+      matches!(probe_status(client, &index_url).await, Some(s) if (200..404).contains(&s))
     },
     _ => false,
   }
@@ -353,27 +369,27 @@ async fn probe_status(client: &reqwest::Client, url: &str) -> Option<u16> {
 
 /// Wait for a URL to become reachable with logarithmic backoff (matching Playwright).
 async fn wait_for_url(
+  client: &reqwest::Client,
   url: &str,
+  deadline: tokio::time::Instant,
   timeout_ms: u64,
-  ignore_https_errors: bool,
   name: &str,
 ) -> ferridriver::error::Result<()> {
-  let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-
-  // Logarithmic backoff: 100ms, 250ms, 500ms, then 1000ms thereafter.
-  let mut delays = [100u64, 250, 500].iter().copied();
-
-  loop {
-    if tokio::time::Instant::now() >= deadline {
-      return Err(ferridriver::FerriError::timeout(
-        format!("[{name}] webServer {url}"),
-        timeout_ms,
-      ));
+  tokio::time::timeout_at(deadline, async {
+    // Logarithmic backoff: 100ms, 250ms, 500ms, then 1000ms thereafter.
+    let mut delays = [100u64, 250, 500].iter().copied();
+    loop {
+      if http_probe_with_client(client, url).await {
+        return;
+      }
+      let delay = delays.next().unwrap_or(1000);
+      tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
     }
-    if http_probe(url, ignore_https_errors).await {
-      return Ok(());
-    }
-    let delay = delays.next().unwrap_or(1000);
-    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-  }
+  })
+  .await
+  .map_err(|_| readiness_timeout(url, timeout_ms, name))
+}
+
+fn readiness_timeout(url: &str, timeout_ms: u64, name: &str) -> ferridriver::FerriError {
+  ferridriver::FerriError::timeout(format!("[{name}] webServer {url}"), timeout_ms)
 }
