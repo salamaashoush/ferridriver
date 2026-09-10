@@ -1305,3 +1305,10 @@ completion requires observable behavior through the public scripting API.
   failures or blocks, 107.94s total. Integration completed in 64.82s, E2E in
   102.41s, and BDD in 96.82s. Log directory:
   target/gate/1789045354-3011398.
+- Migrated the opt-in React component E2E from Rust to native JS. With no
+  `VITE_URL`, registration skips before requesting a browser fixture; when a
+  URL is supplied, the test waits for the counter through `expect.poll` and
+  verifies increment/decrement interactions without a fixed sleep. The
+  no-server focused run confirmed one skip and no browser launch. The
+  unchanged Rust file was backed up at
+  /tmp/ferridriver-ct-react-live-backup-EBjtSU/ct_react_live.rs.
