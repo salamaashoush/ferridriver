@@ -1461,3 +1461,7 @@ completion requires observable behavior through the public scripting API.
   blocks in 113.88s after rebuilding the scripting and NAPI artifacts. E2E took
   112.55s, BDD 106.14s, and integration 72.67s. Log:
   `target/gate/1789055003-3830997`.
+- WebDriver capability construction now enforces `webSocketUrl: true` after
+  merging vendor and Appium options, so caller input cannot silently disable
+  the BiDi transport ferridriver needs. Five focused URL, capability, and HTTP
+  contract tests pass, including an explicit `webSocketUrl: false` override.

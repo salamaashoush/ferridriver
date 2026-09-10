@@ -478,6 +478,9 @@ fn webdriver_capabilities(browser_name: &str, extra: Option<&serde_json::Value>)
     && let Some(target) = always_match.as_object_mut()
   {
     target.extend(extra.iter().map(|(key, value)| (key.clone(), value.clone())));
+    // Ferridriver drives the returned BiDi socket; a caller cannot disable
+    // the capability without making the negotiated session unusable.
+    target.insert("webSocketUrl".into(), serde_json::Value::Bool(true));
   }
   always_match
 }
@@ -605,7 +608,8 @@ mod webdriver_url_tests {
       "safari",
       Some(&serde_json::json!({
         "platformName": "ios",
-        "appium:options": { "automationName": "Safari" }
+        "appium:options": { "automationName": "Safari" },
+        "webSocketUrl": false
       })),
     );
     assert_eq!(caps["browserName"], "safari");
