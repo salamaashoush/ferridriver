@@ -1411,3 +1411,8 @@ completion requires observable behavior through the public scripting API.
 - Extension-launch gate passed headlessly with 111 checks, zero failures or
   blocks, in 135.58s. Integration completed in 77.48s, E2E in 110.76s, and
   BDD in 104.31s. Log: `target/gate/1789051254-1770196`.
+- Measured the scheduler's E2E ceiling after the extension change. An isolated
+  E2E run with 32 workers completed in 64.49s, but consumed all 64 requested
+  browser slots and therefore cannot overlap the integration and BDD suites.
+  The shared 16/8/8 allocation remains the faster full-gate shape; increasing
+  one suite in isolation would lengthen the complete critical path.
