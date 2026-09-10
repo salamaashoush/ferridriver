@@ -8,6 +8,8 @@ mod extensions;
 mod http;
 #[path = "runtime_probe/lifecycle.rs"]
 mod lifecycle;
+#[path = "runtime_probe/persistent_profile.rs"]
+mod persistent_profile;
 #[path = "runtime_probe/process_records.rs"]
 mod process_records;
 #[path = "runtime_probe/reporter_api.rs"]
@@ -35,6 +37,9 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  PersistentProfile {
+    scenario: persistent_profile::Scenario,
+  },
   ProcessRecordPublication,
   CdpConnection {
     urls: Vec<String>,
@@ -335,6 +340,7 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::PersistentProfile { scenario } => persistent_profile::run(&self.root, scenario).await,
       Operation::ProcessRecordPublication => process_records::run().await,
       Operation::CdpConnection { urls } => cdp_connection::run(&self.root, urls).await,
       Operation::BrowserLifecycle { actions } => lifecycle::run(actions).await,

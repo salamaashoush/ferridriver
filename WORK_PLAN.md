@@ -843,3 +843,19 @@ completion requires observable behavior through the public scripting API.
   /tmp/ferridriver-cdp-records-events-ready.log. This is a single full-gate
   observation, not a comparative speedup claim. Remaining migrations and
   broader scripting capabilities are still open.
+- Migrated all seven persistent-profile cases to native JS assertions over
+  the actual BrowserState instance override and resolver paths. Coverage keeps
+  Chromium/Firefox/WebKit profile retention, saved and adopted viewport sizes,
+  and the maximized-window precondition before resizing. The temporary-profile
+  case originally proved launch/shutdown only; its new name says that rather
+  than claiming directory deletion was observed. Seven native cases passed in
+  1.3s: /tmp/ferridriver-persistent-native.log. External Chromium uses the existing
+  headless launcher with continuous stderr draining and owned process cleanup.
+- Removed the unchanged persistent_profile.rs (10860 bytes) after a verified
+  backup at /tmp/ferridriver-persistent-profile-backup-_zwjubwu/persistent_profile.rs.
+  The full gate for this migration is pending; remaining top-level Rust test
+  targets: 46. Broader migration and capability milestones remain open.
+- Persistent-profile final headless gate exited zero: 134 checks, zero failures
+  or blocks, 109.52s gate time. Logs: target/gate/1789034379-2194241 and
+  /tmp/ferridriver-persistent-ready.log. This warm run is not a controlled
+  comparison against the prior 143.65s run.
