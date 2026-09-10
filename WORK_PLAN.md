@@ -382,3 +382,19 @@ completion requires observable behavior through the public scripting API.
   integrations passing. Logs: `target/gate/1789021652-938692`,
   `/tmp/ferridriver-extension-fixtures-ready.log`. Remote CI for the previous
   commit remains in progress; local verification does not establish CI success.
+
+- Pushed `c0b382e9`, verified fixture migration. Migrated six extraction
+  context contracts and five provided-module contracts to native JS.
+  Direct compile observations preserve separate batches and append their
+  bytecode into one session; cache-hit/cold-consumer ordering remains tested.
+  Loader observations cover identity, aliases, plain-script imports, shared
+  helpers, and refusal plus non-resolution of late claims. All 11 cases
+  pass in 111 ms. Unchanged Rust originals backed up at /tmp/ferridriver-extraction-provided-backup-_3sh83go
+  (extraction_context.rs 13802 bytes; provided_modules.rs 11202 bytes).
+  Remaining top-level Rust integration targets: 60.
+
+- Extraction/provider migration full gate passed all 148 checks in
+  108.574 wall seconds (108.49 gate) at 16 browser slots; all 524 native
+  integrations passed. Logs: `target/gate/1789022089-1121400`,
+  `/tmp/ferridriver-extraction-provided-ready.log`. This individual timing
+  does not establish a repeatable performance improvement.

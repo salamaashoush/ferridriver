@@ -21,6 +21,10 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  CompileExtensions {
+    #[serde(flatten)]
+    request: extensions::CompileRequest,
+  },
   ExtensionSession {
     #[serde(flatten)]
     request: extensions::Request,
@@ -275,6 +279,9 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::CompileExtensions { request } => {
+        Box::pin(extensions::compile(&self.root, &mut self.context, request)).await
+      },
       Operation::ExtensionSession { request } => Box::pin(extensions::run(&self.root, &self.context, request)).await,
       Operation::TestRegistry { entries, host } => self.collect_test_registry(entries, &host).await,
       Operation::BddSession { entries, actions } => {

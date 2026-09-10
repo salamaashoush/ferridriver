@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use ferridriver_script::{
@@ -13,8 +13,51 @@ pub struct Request {
   entries: Vec<String>,
   host: String,
   sources: Vec<String>,
+  #[serde(default)]
+  modules: Vec<PathBuf>,
+  #[serde(default)]
+  resolve: Vec<String>,
   load_policy: Option<ferridriver_config::ExtensionPolicyConfig>,
   session_policy: Option<ferridriver_config::ExtensionPolicyConfig>,
+}
+
+#[derive(Deserialize)]
+pub struct CompileRequest {
+  groups: Vec<Vec<PathBuf>>,
+  #[serde(default)]
+  append: bool,
+  #[serde(default)]
+  policy: ferridriver_config::ExtensionPolicyConfig,
+}
+
+pub async fn compile(root: &Path, context: &mut RunContext, request: CompileRequest) -> Result<Value> {
+  let groups = request
+    .groups
+    .into_iter()
+    .map(|group| super::paths(root, group))
+    .collect::<Vec<_>>();
+  let (compiled, failures) = ferridriver_script::compile_and_extract_extensions(&groups, &request.policy).await;
+  let result = json!({
+    "failures": failures,
+    "compiled": compiled.iter().map(|extension| json!({
+      "snapshot": extension.snapshot,
+      "manifests": extension.manifests_json(),
+    })).collect::<Vec<_>>(),
+  });
+  if !request.append {
+    context.extensions.clear();
+  }
+  context.extensions.extend(
+    compiled
+      .into_iter()
+      .map(|compiled| ferridriver_script::ExtensionBinding {
+        bytecode: compiled.bytecode,
+        name: compiled.path.display().to_string(),
+        source_map: None,
+        provides: None,
+      }),
+  );
+  Ok(result)
 }
 
 pub async fn run(root: &Path, context: &RunContext, request: Request) -> Result<Value> {
@@ -37,6 +80,12 @@ pub async fn run(root: &Path, context: &RunContext, request: Request) -> Result<
   let mut result = json!({
     "loadPolicy": policy,
     "blocked": gated.blocked,
+    "issues": gated.issues.iter().map(|issue| json!({
+      "message": issue.message, "source": issue.source, "blocking": issue.blocking,
+    })).collect::<Vec<_>>(),
+    "resolved": request.resolve.iter().map(|name| {
+      (name.clone(), ferridriver_script::provided_modules::canonical_provided_name(name))
+    }).collect::<std::collections::BTreeMap<_, _>>(),
     "failures": failures,
     "compiled": compiled.iter().map(|extension| json!({
       "snapshot": extension.snapshot,
@@ -54,6 +103,13 @@ pub async fn run(root: &Path, context: &RunContext, request: Request) -> Result<
   let mut outcomes = Vec::new();
   for source in request.sources {
     let execution = session.execute(&source, &[], RunOptions::default(), &context).await;
+    outcomes.push(serde_json::to_value(execution.result)?);
+  }
+  for entry in request.modules {
+    let bundle = ferridriver_script::bundle_and_compile(&[root.join(entry)], root).await?;
+    let execution = session
+      .execute_module(&bundle, &[], RunOptions::default(), &context)
+      .await;
     outcomes.push(serde_json::to_value(execution.result)?);
   }
   result["outcomes"] = json!(outcomes);
