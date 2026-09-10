@@ -879,3 +879,19 @@ completion requires observable behavior through the public scripting API.
   /tmp/ferridriver-webkit-migration-ready-fixed.log. The initial lint run caught
   a large locale-application future; boxing that call reduced its containing
   futures without suppressions. No temporary diagnostic instrumentation added.
+- Migrated all three screenshot-diff integration cases to native JS assertions
+  over the same Rust LocatorSnapshotMatchers::to_have_screenshot path. Coverage
+  retains baseline creation and byte size, identical-content matching, changed
+  pixel errors and attached screenshots, actual/diff files, and size mismatch.
+  Snapshot environment settings are supplied at child startup; separate probe
+  processes avoid unsafe runtime environment mutation and the old global mutex.
+- Three cases passed concurrently in 4.7s, retaining the matcher retry budget:
+  /tmp/ferridriver-screenshot-native.log. Removed unchanged screenshot_diff.rs
+  (6748 bytes) after verifying its backup at
+  /tmp/ferridriver-screenshot-backup-bsfzknvr/screenshot_diff.rs. Remaining
+  top-level Rust test targets: 44. Full-gate verification is pending.
+- Screenshot migration final headless gate exited zero: 132 checks, zero
+  failures or blocks, 110.28s gate time. Logs: target/gate/1789035078-2597867
+  and /tmp/ferridriver-screenshot-migration-ready-final.log. Extracted the
+  existing bundle handlers after the new operation exceeded the dispatcher's
+  line limit; corrected their PathBuf signature before this successful gate.

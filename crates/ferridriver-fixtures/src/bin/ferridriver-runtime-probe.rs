@@ -18,6 +18,8 @@ mod reporter_api;
 mod reporter_output;
 #[path = "runtime_probe/reporters.rs"]
 mod reporters;
+#[path = "runtime_probe/screenshot.rs"]
+mod screenshot;
 #[path = "runtime_probe/test_registry.rs"]
 mod test_registry;
 #[path = "runtime_probe/webkit.rs"]
@@ -39,6 +41,10 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  ScreenshotSnapshot {
+    name: String,
+    expression: Option<String>,
+  },
   Webkit {
     request: webkit::Request,
   },
@@ -345,6 +351,9 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::ScreenshotSnapshot { name, expression } => {
+        screenshot::run(&self.root, &name, expression.as_deref()).await
+      },
       Operation::Webkit { request } => webkit::run(request).await,
       Operation::PersistentProfile { scenario } => persistent_profile::run(&self.root, scenario).await,
       Operation::ProcessRecordPublication => process_records::run().await,
@@ -394,14 +403,8 @@ impl Probe {
       } => run_engine(&self.context, &source, &args, timeout_ms).await,
       Operation::ReadVar { name } => Ok(json!(self.context.vars.get(&name))),
       Operation::SetBundler { config, tsconfig } => Ok(configure_bundler(&self.root, &config, tsconfig.as_deref())),
-      Operation::Bundle { entries } => {
-        let bundle = bundle_and_compile(&paths(&self.root, entries), &self.root).await?;
-        Ok(json!({ "inputs": bundle.source_files(&self.root), "moduleName": bundle.module_name }))
-      },
-      Operation::BundleSource { entries } => {
-        let bundle = ferridriver_script::bundle::bundle_source(&paths(&self.root, entries), &self.root).await?;
-        Ok(json!({ "configInputs": bundle.config_inputs, "modules": bundle.modules, "code": bundle.code }))
-      },
+      Operation::Bundle { entries } => compile_bundle(&self.root, entries).await,
+      Operation::BundleSource { entries } => source_bundle(&self.root, entries).await,
       Operation::ExecuteModule { entries } => self.execute_module(entries).await,
       Operation::ExecuteScript { source, args } => self.execute_script(&source, &args).await,
       Operation::SetAliases { aliases } => {
@@ -441,6 +444,16 @@ impl Probe {
       },
     }
   }
+}
+
+async fn compile_bundle(root: &Path, entries: Vec<PathBuf>) -> Result<Value> {
+  let bundle = bundle_and_compile(&paths(root, entries), root).await?;
+  Ok(json!({ "inputs": bundle.source_files(root), "moduleName": bundle.module_name }))
+}
+
+async fn source_bundle(root: &Path, entries: Vec<PathBuf>) -> Result<Value> {
+  let bundle = ferridriver_script::bundle::bundle_source(&paths(root, entries), root).await?;
+  Ok(json!({ "configInputs": bundle.config_inputs, "modules": bundle.modules, "code": bundle.code }))
 }
 
 fn configure_bundler(root: &Path, config: &ferridriver_config::BundlerConfig, tsconfig: Option<&str>) -> Value {
