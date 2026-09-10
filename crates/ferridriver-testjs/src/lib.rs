@@ -305,7 +305,14 @@ impl SessionPool {
     }
   }
 
-  pub(crate) async fn get(&self, worker_index: u32) -> Result<Arc<JsTestSession>, String> {
+  pub(crate) async fn get(
+    self: &Arc<Self>,
+    worker_index: u32,
+    fixtures: &ferridriver_test::FixturePool,
+  ) -> Result<Arc<JsTestSession>, String> {
+    let owner = fixtures
+      .scope_root(ferridriver_test::FixtureScope::Worker)
+      .ok_or_else(|| "test session requires a worker fixture scope".to_string())?;
     let cell = Arc::clone(
       &self
         .slots
@@ -317,10 +324,24 @@ impl SessionPool {
     let expected = self.expected;
     cell
       .get_or_try_init(|| async move {
-        JsTestSession::load(bundle, &cwd, expected)
-          .await
-          .map(Arc::new)
-          .map_err(|e| e.to_string())
+        let session = Arc::new(
+          JsTestSession::load(bundle, &cwd, expected)
+            .await
+            .map_err(|e| e.to_string())?,
+        );
+        let key = format!("__js_session_{:p}", Arc::as_ptr(self));
+        owner.inject(&key, Arc::clone(&session));
+        let sessions = Arc::clone(self);
+        owner.register_teardown(
+          &key,
+          Arc::new(move |_| {
+            let sessions = Arc::clone(&sessions);
+            Box::pin(async move {
+              sessions.teardown_worker(worker_index).await;
+            })
+          }),
+        );
+        Ok::<_, String>(session)
       })
       .await
       .cloned()
@@ -352,20 +373,20 @@ impl SessionPool {
   /// Resume every suspended worker-scoped fixture and drop the cached
   /// sessions. Call once after `TestRunner::run` returns.
   pub async fn teardown(&self) {
-    let entries: Vec<(u32, Arc<OnceCell<Arc<JsTestSession>>>)> = {
-      let mut out = Vec::new();
-      for r in &self.slots {
-        out.push((*r.key(), Arc::clone(r.value())));
-      }
-      self.slots.clear();
-      out
+    let workers: Vec<u32> = self.slots.iter().map(|entry| *entry.key()).collect();
+    for worker in workers {
+      self.teardown_worker(worker).await;
+    }
+  }
+
+  async fn teardown_worker(&self, worker: u32) {
+    let Some((_, cell)) = self.slots.remove(&worker) else {
+      return;
     };
-    for (worker, cell) in entries {
-      if let Some(session) = cell.get()
-        && let Err(e) = ferridriver_script::teardown_worker_fixtures(&session.vm_handle()).await
-      {
-        tracing::warn!(target: "ferridriver::testjs", worker, error = %e.message, "worker fixture teardown failed");
-      }
+    if let Some(session) = cell.get()
+      && let Err(e) = ferridriver_script::teardown_worker_fixtures(&session.vm_handle()).await
+    {
+      tracing::warn!(target: "ferridriver::testjs", worker, error = %e.message, "worker fixture teardown failed");
     }
   }
 }

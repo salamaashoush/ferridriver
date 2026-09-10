@@ -245,6 +245,19 @@ impl FixturePool {
     }
   }
 
+  #[must_use]
+  pub fn scope_root(&self, scope: FixtureScope) -> Option<Self> {
+    let mut current = Some(self);
+    let mut owner = None;
+    while let Some(pool) = current {
+      if pool.inner.scope == scope {
+        owner = Some(pool.clone());
+      }
+      current = pool.inner.parent.as_ref();
+    }
+    owner
+  }
+
   /// Get or lazily create a fixture by name.
   ///
   /// Returns `Arc<T>` since fixture values are shared and not cloneable.

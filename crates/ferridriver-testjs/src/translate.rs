@@ -452,7 +452,7 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
 
       let session = p
         .sessions
-        .get(test_info.worker_index)
+        .get(test_info.worker_index, &pool)
         .await
         .map_err(|e| TestFailure::from(format!("test session load failed: {e}")))?;
 
@@ -795,7 +795,7 @@ fn suite_hook_fn(p: SuiteHookParams) -> ferridriver_test::model::SuiteHookFn {
       // worker's VM — module state a `beforeAll` seeds is invisible to
       // the tests of any other one.
       let session = sessions
-        .get(cached_info.as_ref().map_or(0, |ti| ti.worker_index))
+        .get(cached_info.as_ref().map_or(0, |ti| ti.worker_index), &pool)
         .await
         .map_err(|e| TestFailure::from(format!("test session load failed: {e}")))?;
       let test_info = cached_info

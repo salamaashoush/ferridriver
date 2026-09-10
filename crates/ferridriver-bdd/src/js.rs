@@ -994,23 +994,26 @@ pub fn bdd_sidecars() -> Vec<ferridriver_script::sidecar::SidecarSpec> {
   BDD_SIDECARS.get().cloned().unwrap_or_default()
 }
 
-/// End every worker session this run created: `AfterAll` hooks, then
-/// the teardown half of every worker-scoped fixture, then the sessions
-/// themselves. Call once after `TestRunner::run` returns — a worker VM
-/// outlives the individual scenarios, so nothing earlier can do it.
+/// Finish sessions left after an interrupted run. Normal workers register
+/// cleanup with their fixture scope, before their browser closes.
 pub async fn teardown_worker_sessions() {
   let Some(map) = WORKER_SESSIONS.get() else { return };
-  let cells: Vec<((u32, u64), Arc<WorkerSessionCell>)> =
-    map.iter().map(|r| (*r.key(), Arc::clone(r.value()))).collect();
-  map.clear();
-  for ((worker, _), cell) in cells {
-    let Some(session) = cell.get() else { continue };
-    if let Err(e) = session.after_all().await {
-      tracing::warn!(target: "ferridriver::bdd", worker, error = %e, "AfterAll hook failed");
-    }
-    if let Err(e) = session.teardown_worker_fixtures().await {
-      tracing::warn!(target: "ferridriver::bdd", worker, error = %e, "worker fixture teardown failed");
-    }
+  let keys: Vec<(u32, u64)> = map.iter().map(|entry| *entry.key()).collect();
+  for key in keys {
+    teardown_worker_session(key).await;
+  }
+}
+
+async fn teardown_worker_session(key: (u32, u64)) {
+  let Some(map) = WORKER_SESSIONS.get() else { return };
+  let Some((_, cell)) = map.remove(&key) else { return };
+  let Some(session) = cell.get() else { return };
+  let worker = key.0;
+  if let Err(e) = session.after_all().await {
+    tracing::warn!(target: "ferridriver::bdd", worker, error = %e, "AfterAll hook failed");
+  }
+  if let Err(e) = session.teardown_worker_fixtures().await {
+    tracing::warn!(target: "ferridriver::bdd", worker, error = %e, "worker fixture teardown failed");
   }
 }
 
@@ -1020,7 +1023,11 @@ async fn worker_session(
   bundle_key: u64,
   cwd: Arc<PathBuf>,
   setup: BddSessionSetup,
+  fixtures: &FixturePool,
 ) -> Result<Arc<JsBddSession>, String> {
+  let owner = fixtures
+    .scope_root(ferridriver_test::FixtureScope::Worker)
+    .ok_or_else(|| "BDD session requires a worker fixture scope".to_string())?;
   let map = WORKER_SESSIONS.get_or_init(DashMap::new);
   let cell = map
     .entry((worker_index, bundle_key))
@@ -1028,10 +1035,18 @@ async fn worker_session(
     .clone();
   cell
     .get_or_try_init(|| async move {
-      JsBddSession::load(bundle, &cwd, &setup)
-        .await
-        .map(Arc::new)
-        .map_err(|e| e.to_string())
+      let session = Arc::new(
+        JsBddSession::load(bundle, &cwd, &setup)
+          .await
+          .map_err(|e| e.to_string())?,
+      );
+      let name = format!("__bdd_session_{bundle_key}");
+      owner.inject(&name, Arc::clone(&session));
+      owner.register_teardown(
+        &name,
+        Arc::new(move |_| Box::pin(teardown_worker_session((worker_index, bundle_key)))),
+      );
+      Ok::<_, String>(session)
     })
     .await
     .cloned()
@@ -1122,7 +1137,7 @@ pub fn translate_features_js(
             .await
             .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
 
-          let session = worker_session(test_info.worker_index, bundle, step_graph, cwd, setup)
+          let session = worker_session(test_info.worker_index, bundle, step_graph, cwd, setup, &pool)
             .await
             .map_err(|e| TestFailure::from(format!("JS step load failed: {e}")))?;
 

@@ -998,7 +998,8 @@ impl Worker {
     rx: async_channel::Receiver<WorkItem>,
     result_tx: mpsc::Sender<WorkerTestResult>,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
-  ) {
+    mut pending: Option<WorkItem>,
+  ) -> Option<WorkItem> {
     if let Some(event_bus) = &self.event_bus {
       event_bus.emit(ReporterEvent::WorkerStarted { worker_id: self.id });
     }
@@ -1012,16 +1013,27 @@ impl Worker {
     let mut worker_defs: FxHashMap<String, FixtureDef> = FxHashMap::default();
     worker_defs.insert("browser".into(), build_worker_browser_def(Arc::clone(&browser_handle)));
     worker_defs.insert("request".into(), build_worker_request_def(self.config.base_url.clone()));
-    let custom_fixture_pool = custom_fixture_pool.child_with_defs(worker_defs, FixtureScope::Worker);
+    let root_fixture_pool = custom_fixture_pool;
+    let custom_fixture_pool = root_fixture_pool.child_with_defs(worker_defs, FixtureScope::Worker);
 
     let mut active_suites: FxHashMap<String, SuiteState> = FxHashMap::default();
 
-    while let Ok(item) = rx.recv().await {
+    let mut repetition = None;
+    while let Some(item) = match pending.take() {
+      Some(item) => Some(item),
+      None => rx.recv().await.ok(),
+    } {
       // `--max-failures` / `-x` flips this flag; drop any items that were
       // already buffered in the channel rather than processing them.
       if stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
         break;
       }
+      let index = item.repeat_each_index();
+      if repetition.is_some_and(|previous| previous != index) {
+        pending = Some(item);
+        break;
+      }
+      repetition = Some(index);
       match item {
         WorkItem::Single(assignment) => {
           let result = ferridriver_expect::with_expect_config(
@@ -1112,6 +1124,7 @@ impl Worker {
       state.fixture_pool.teardown_all().await;
     }
     custom_fixture_pool.teardown_all().await;
+    root_fixture_pool.teardown_all().await;
 
     // Close contexts pre-created for tests that never arrived, before
     // the browser shuts down under them.
@@ -1126,6 +1139,7 @@ impl Worker {
     if let Some(event_bus) = &self.event_bus {
       event_bus.emit(ReporterEvent::WorkerFinished { worker_id: self.id });
     }
+    pending
   }
 
   /// Run a serial batch: all tests in order, skip rest on failure.

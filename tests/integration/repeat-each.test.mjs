@@ -103,3 +103,120 @@ test('repetitions run concurrently and reporters receive distinct planned cases'
     assert.deepEqual(actual, { id: planned.id, repeat: planned.repeat, status: 'passed' });
   }
 });
+
+test('each repetition starts with fresh JavaScript module state', async () => {
+  const cwd = await workspace({
+    'ferridriver.toml': '[test]\ntestMatch = ["*.test.mjs"]\nworkers = 1\nretries = 0\n',
+    'module.test.mjs': `import { test, expect } from '@ferridriver/test';
+      let executions = 0;
+      test('module starts fresh', async () => {
+        executions++;
+        expect(executions).toBe(1);
+      });`,
+  });
+  const result = await run(['test', '--no-inherit', '--headless', '--repeat-each', '2'], { cwd });
+  assert.equal(result.code, 0, result.text);
+  assert.match(result.text, /2 passed/);
+});
+
+test('repetitions release worker fixtures before initializing the next one', async () => {
+  const cwd = await workspace({
+    'ferridriver.toml': '[test]\ntestMatch = ["*.test.mjs"]\nworkers = 1\nretries = 0\n',
+    'fixture.test.mjs': `import { test as base, expect } from '@ferridriver/test';
+      import { readFile, writeFile } from 'node:fs/promises';
+      async function record(event, index) {
+        let events = [];
+        try { events = JSON.parse(await readFile('lifecycle.json', 'utf8')); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        events.push({ event, index });
+        await writeFile('lifecycle.json', JSON.stringify(events));
+      }
+      const test = base.extend({
+        state: [async ({}, use) => {
+          const index = test.info().repeatEachIndex;
+          await record('setup', index);
+          await use({ used: false });
+          await record('teardown', index);
+        }, { scope: 'worker' }],
+      });
+      test('worker state starts fresh', async ({ state }) => {
+        expect(state.used).toBe(false);
+        state.used = true;
+      });`,
+  });
+  const result = await run(['test', '--no-inherit', '--headless', '--repeat-each', '2'], { cwd });
+  assert.equal(result.code, 0, result.text);
+  assert.match(result.text, /2 passed/);
+  const events = JSON.parse(await readFile(join(cwd, 'lifecycle.json'), 'utf8'));
+  assert.deepEqual(events, [
+    { event: 'setup', index: 0 }, { event: 'teardown', index: 0 },
+    { event: 'setup', index: 1 }, { event: 'teardown', index: 1 },
+  ]);
+});
+
+test('BDD repetitions finish hooks and worker fixtures before the next scenario', async () => {
+  const cwd = await workspace({
+    'ferridriver.toml': '[test]\nworkers = 1\nrepeatEach = 2\nsteps = ["steps.mjs"]\n',
+    'repeat.feature': 'Feature: Repetition isolation\n  Scenario: Fresh worker state\n    Given a fresh worker fixture\n',
+    'steps.mjs': `import { readFile, writeFile } from 'node:fs/promises';
+      async function record(event) {
+        let events = [];
+        try { events = JSON.parse(await readFile('events.json', 'utf8')); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        events.push(event);
+        await writeFile('events.json', JSON.stringify(events));
+      }
+      const test = ferridriver.test.extend({
+        state: [async ({}, use) => {
+          await record('setup');
+          await use({ used: false });
+          await record('teardown');
+        }, { scope: 'worker' }],
+      });
+      bindSteps(test).Given('a fresh worker fixture', async function ({ state }) {
+        if (state.used) throw new Error('worker fixture was reused');
+        state.used = true;
+        await record('step');
+      });
+      AfterAll(async () => { await record('afterAll'); });`,
+  });
+  const result = await run(['bdd', '--no-inherit', '--headless', 'repeat.feature'], { cwd });
+  assert.equal(result.code, 0, result.text);
+  assert.match(result.text, /2 passed/);
+  const events = JSON.parse(await readFile(join(cwd, 'events.json'), 'utf8'));
+  assert.deepEqual(events, ['setup', 'step', 'afterAll', 'teardown', 'setup', 'step', 'afterAll', 'teardown']);
+});
+
+test('worker fixture cleanup can use its browser before repetition shutdown', async () => {
+  const cwd = await workspace({
+    'ferridriver.toml': '[test]\ntestMatch = ["*.test.mjs"]\nworkers = 1\nretries = 0\n',
+    'browser.test.mjs': `import { test as base, expect } from '@ferridriver/test';
+      import { writeFile } from 'node:fs/promises';
+      const test = base.extend({
+        tab: [async ({ browser }, use) => {
+          const index = test.info().repeatEachIndex;
+          const worker = test.info().workerIndex;
+          const context = await browser.newContext();
+          const page = await context.newPage();
+          await use(page);
+          const title = await page.title();
+          await context.close();
+          await writeFile('closed-' + index + '.json', JSON.stringify({ title, worker }));
+        }, { scope: 'worker' }],
+      });
+      test('leaves its page available for fixture cleanup', async ({ tab }) => {
+        await tab.setContent('<title>Repetition ' + test.info().repeatEachIndex + '</title>');
+        expect(await tab.title()).toBe('Repetition ' + test.info().repeatEachIndex);
+      });`,
+  });
+  const result = await run(['test', '--no-inherit', '--headless', '--repeat-each', '2'], { cwd });
+  assert.equal(result.code, 0, result.text);
+  assert.match(result.text, /2 passed/);
+  const observations = [];
+  for (const index of [0, 1]) {
+    const observed = JSON.parse(await readFile(join(cwd, 'closed-' + index + '.json'), 'utf8'));
+    assert.equal(observed.title, 'Repetition ' + index);
+    observations.push(observed);
+  }
+  assert.notEqual(observations[0].worker, observations[1].worker);
+});

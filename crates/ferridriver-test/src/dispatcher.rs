@@ -34,6 +34,18 @@ pub enum WorkItem {
   Serial(SerialBatch),
 }
 
+impl WorkItem {
+  pub(crate) fn repeat_each_index(&self) -> u32 {
+    match self {
+      Self::Single(assignment) => assignment.test.id.repeat_each_index,
+      Self::Serial(batch) => batch
+        .assignments
+        .first()
+        .map_or(0, |assignment| assignment.test.id.repeat_each_index),
+    }
+  }
+}
+
 /// Dispatch strategy: parallel tests via shared MPMC channel,
 /// serial suites as batches on the same channel.
 pub struct Dispatcher {

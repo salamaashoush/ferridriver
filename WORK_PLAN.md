@@ -767,3 +767,29 @@ completion requires observable behavior through the public scripting API.
   and worker-fixture isolation between repetitions. Remaining migrations and
   protocol/capability milestones are unchanged; this checkpoint does not claim
   complete repeatEach parity or completion of the broader goal.
+- Repetition isolation audit reproduced module and worker-fixture leakage with
+  one worker: the second repetition saw executions=2 and state.used=true.
+  BDD also delayed both AfterAll hooks and worker-fixture teardown until both
+  repetitions had run. Reproductions: /tmp/ferridriver-repeat-isolation-red2.log
+  and /tmp/ferridriver-repeat-bdd-red.log.
+- Worker slots now finish the previous logical worker before switching repeat
+  indices: suite hooks, fixture scopes, queued contexts, and browser shutdown.
+  The replacement receives a fresh worker ID while retaining its parallel slot.
+  Native JS and BDD sessions register cleanup with the existing worker fixture
+  scope, removing their cached VM when that scope ends. This avoids retaining
+  one VM per completed repetition and keeps cleanup ahead of browser shutdown.
+- Eight native repetition regressions passed in 371ms, including a real browser
+  fixture whose cleanup reads the page title and closes its context. BDD pins
+  setup/step/AfterAll/teardown ordering before the next repetition starts.
+  Full headless gate verification is in progress; migration and broader
+  protocol/capability milestones remain open.
+- Full lifecycle gate passed: 136 checks, zero failures or blocks, 136.090s
+  wall (136.01s gate), including changed-source lint/docs/test rebuilds.
+  Logs: target/gate/1789031793-1177186 and
+  /tmp/ferridriver-repeat-lifecycle-ready.log. Native integrations: 617 passed;
+  E2E: 2235 passed with 33 existing skips; BDD: 637 passed with 19 existing skips.
+- Repeated proxy stress passed all 40 executions on 16 worker slots in 4.3s:
+  /tmp/ferridriver-repeat-lifecycle-stress.log. The earlier 2.9s observation
+  reused workers and browsers across repetitions; resetting their state costs
+  additional launches. These single observations do not establish a stable
+  performance delta. Ordinary repeatEach=1 runs keep reusing each worker.

@@ -1475,27 +1475,42 @@ impl TestRunner {
       .fetch_add(num_workers, std::sync::atomic::Ordering::SeqCst);
 
     for slot in 0..num_workers {
-      let worker = Worker::new(
-        worker_base + slot,
-        slot,
-        Arc::clone(&self.config),
-        worker_event_bus.clone(),
-        self.live_traces,
-      );
+      let config = Arc::clone(&self.config);
+      let event_bus = worker_event_bus.clone();
+      let live_traces = self.live_traces;
+      let worker_ids = Arc::clone(&self.worker_ids);
       let rx = dispatcher.receiver();
       let tx = result_tx.clone();
-      let custom_pool = FixturePool::new(custom_fixtures.clone(), FixtureScope::Worker);
+      let custom_fixtures = custom_fixtures.clone();
       let shared = shared_browser.clone();
       let plan = launch_plan.clone();
       let stop_flag = dispatcher.stop_flag();
 
       let handle = tokio::spawn(async move {
-        let browser_handle = if let Some(b) = shared {
-          Arc::new(BrowserHandle::from_shared(b))
-        } else {
-          Arc::new(BrowserHandle::new(plan))
-        };
-        Box::pin(worker.run(browser_handle, custom_pool, rx, tx, stop_flag)).await;
+        let mut id = worker_base + slot;
+        let mut pending = None;
+        loop {
+          let worker = Worker::new(id, slot, Arc::clone(&config), event_bus.clone(), live_traces);
+          let custom_pool = FixturePool::new(custom_fixtures.clone(), FixtureScope::Worker);
+          let browser_handle = if let Some(b) = &shared {
+            Arc::new(BrowserHandle::from_shared(Arc::clone(b)))
+          } else {
+            Arc::new(BrowserHandle::new(plan.clone()))
+          };
+          pending = Box::pin(worker.run(
+            browser_handle,
+            custom_pool,
+            rx.clone(),
+            tx.clone(),
+            Arc::clone(&stop_flag),
+            pending,
+          ))
+          .await;
+          if pending.is_none() || stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+          }
+          id = worker_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
       });
       worker_handles.push(handle);
     }
