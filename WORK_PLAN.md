@@ -1283,3 +1283,11 @@ completion requires observable behavior through the public scripting API.
   four executed cases and one skip in about 400ms. The unchanged Rust harness
   was backed up at /tmp/ferridriver-runner-e2e-backup-3vjllI/runner_e2e.rs
   before removal; commit ea3f4549 is pushed.
+- Audited Chromium's WebMCP protocol from Playwright's generated CDP schema
+  and confirmed `WebMCP.enable` is available in the headless browser. Added a
+  typed `page.webMcp` facade over the existing CDP session, keeping one target
+  session per page so domain enablement survives separate property accesses.
+  It exposes frame-aware enable, disable, invokeTool and cancelInvocation
+  operations. A real headless test invokes a missing tool and checks the
+  protocol error, proving command framing and session lifetime; the focused
+  test passed in 157ms.

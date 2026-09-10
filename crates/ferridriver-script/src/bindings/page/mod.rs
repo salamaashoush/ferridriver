@@ -55,24 +55,28 @@ pub struct PageJs {
   /// itself is Unsupported -- see its binding -- so this normally stays empty.)
   #[qjs(skip_trace)]
   locator_handler_ids: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, Vec<u64>>>>,
+  #[qjs(skip_trace)]
+  web_mcp: crate::bindings::web_mcp::WebMcpJs,
 }
 
 impl PageJs {
   #[must_use]
   pub fn new(inner: Arc<Page>) -> Self {
     Self {
-      inner,
+      inner: inner.clone(),
       vm: None,
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+      web_mcp: crate::bindings::web_mcp::WebMcpJs::new(inner.clone()),
     }
   }
 
   #[must_use]
   pub fn new_with_vm(inner: Arc<Page>, vm: ferrijs::VmHandle) -> Self {
     Self {
-      inner,
+      inner: inner.clone(),
       vm: Some(vm),
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+      web_mcp: crate::bindings::web_mcp::WebMcpJs::new(inner.clone()),
     }
   }
 
@@ -1864,6 +1868,14 @@ impl PageJs {
         crate::bindings::convert::json_to_js(&ctx, &result)
       })
       .await
+  }
+
+  /// Chromium WebMCP commands backed by the page's existing CDP session.
+  #[qjs(get, rename = "webMcp")]
+  pub fn web_mcp<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let wrapper = self.web_mcp.clone();
+    let instance = rquickjs::class::Class::instance(ctx.clone(), wrapper)?;
+    rquickjs::IntoJs::into_js(instance, &ctx)
   }
 
   /// ferridriver extension: `page.takeHeapSnapshot()`.

@@ -56,6 +56,7 @@ pub mod test_debug;
 pub mod tracing;
 pub mod video;
 pub mod web_error;
+pub mod web_mcp;
 pub mod web_socket_route;
 pub mod web_storage;
 

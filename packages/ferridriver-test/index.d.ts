@@ -838,6 +838,14 @@ export interface PageToolGroup {
   tools: PageTool[];
 }
 
+/** Chromium WebMCP control surface backed by the page's CDP target. */
+export interface WebMCP {
+  enable(): Promise<Record<string, unknown>>;
+  disable(): Promise<Record<string, unknown>>;
+  invokeTool(toolName: string, input?: Record<string, unknown>): Promise<{ invocationId: string }>;
+  cancelInvocation(invocationId: string): Promise<Record<string, unknown>>;
+}
+
 /**
  * One object as every heap-snapshot list reports it.
  */
@@ -1716,6 +1724,7 @@ export interface Page {
   // so it answers the same on every backend.
   developerTools(): Promise<PageToolGroup[]>;
   executeDeveloperTool(name: string, params?: Record<string, unknown>): Promise<unknown>;
+  readonly webMcp: WebMCP;
 
   // Highlight elements under the cursor and resolve with a Locator for
   // whichever one is clicked. Waits as long as the reader takes;
