@@ -50,16 +50,32 @@ export async function testServer(url, body) {
     let nextId = 0;
     const ui = {
       events: [],
-      async call(method, params = {}) {
+      async send(method, params = {}) {
         const id = ++nextId;
         await socket.send({ id, method, params });
+        return id;
+      },
+      async next() {
+        const message = await socket.next();
+        if (message.method) ui.events.push(message);
+        return message;
+      },
+      async waitReport(method) {
+        const existing = ui.reports(method)[0];
+        if (existing) return existing;
         for (;;) {
-          const message = await socket.next();
+          const message = await ui.next();
+          if (message.method === 'report' && message.params.method === method) return message.params;
+        }
+      },
+      async call(method, params = {}) {
+        const id = await ui.send(method, params);
+        for (;;) {
+          const message = await ui.next();
           if (message.id === id) {
             assert.ok(!Object.hasOwn(message, 'error'), `${method}: ${JSON.stringify(message)}`);
             return message.result ?? null;
           }
-          if (message.method) ui.events.push(message);
         }
       },
       reports(method) {

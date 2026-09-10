@@ -974,3 +974,20 @@ completion requires observable behavior through the public scripting API.
   and /tmp/ferridriver-test-server-migration-ready.log. One Rust test target
   was removed and the transport fixture adds a binary target, so the gate's
   job count stayed unchanged despite moving six cases to the native runner.
+- Migrated BDD UI end-to-end coverage to native JS over the existing private
+  WebSocket transport. Assertions retain scenario discovery, embedded UI/assets,
+  trace attachment type and file-route restrictions, v8 headers, ordered step
+  spans, nested protocol calls, before/after DOM snapshot references, JS/feature
+  source stacks, and the source entry named by the SHA-1 of its path.
+- Cancellation now holds a real navigation at the fixture barrier, waits for
+  the Stop acknowledgement, releases the navigation, checks the test end and
+  run reply, and runs another scenario successfully. This replaces the old
+  six-second delay without weakening lifecycle assertions. The BDD case passed
+  in 945ms; all seven BDD/test-server cases passed in 2.1s:
+  /tmp/ferridriver-bdd-ui-native.log.
+- Removed unchanged ui_mode.rs (17334 bytes) after verifying its backup at
+  /tmp/ferridriver-bdd-ui-backup-nyh8l36b/ui_mode.rs. Remaining top-level Rust
+  test targets: 37. Full-gate verification is pending.
+- BDD UI migration final headless gate exited zero: 126 checks, zero failures
+  or blocks, 110.92s gate time. Logs: target/gate/1789037342-3575943 and
+  /tmp/ferridriver-bdd-ui-ready.log.
