@@ -1334,3 +1334,8 @@ completion requires observable behavior through the public scripting API.
   failures or blocks, 109.30s total. Integration completed in 64.73s, E2E in
   103.75s, and BDD in 98.07s. Log directory:
   target/gate/1789046340-3611900.
+- Measured higher concurrency before changing the scheduler: isolated BDD fell
+  from 98.07s at eight workers to 21.96s at sixteen, and isolated E2E fell to
+  62.69s at thirty-two. Running E2E with all 32 browser slots nevertheless
+  increased the full gate to 114.23s by starving NAPI and shared suites, so the
+  existing split allocation remains the faster end-to-end schedule.
