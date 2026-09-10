@@ -1381,3 +1381,8 @@ completion requires observable behavior through the public scripting API.
   verify serialized component props. Dev-server preset assertions remain as a
   library unit test, so the Rust integration target no longer launches a
   browser.
+- Component E2E migration gate passed headlessly with 111 checks, zero failures
+  or blocks, in 127.16s. Integration completed in 70.74s, E2E in 111.58s,
+  and BDD in 102.48s. The count is one lower because the Rust `ct_e2e` target
+  was removed; its two browser cases now run inside the JS integration job.
+  Log: `target/gate/1789050176-1070775`.
