@@ -1999,6 +1999,21 @@ impl PageJs {
       .await
   }
 
+  /// Read the Chromium DevTools performance counters for this page.
+  #[qjs(rename = "metrics")]
+  pub async fn metrics<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let metrics = self.inner.metrics().await.into_js_with(&ctx)?;
+        serde_to_js(&ctx, &metrics)
+      })
+      .await
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   /// Close the page. Accepts `{ runBeforeUnload?, reason? }` to mirror

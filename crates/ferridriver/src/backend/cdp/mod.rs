@@ -5304,6 +5304,10 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn metrics(&self) -> Result<Vec<MetricData>> {
+    // Chrome only populates Performance.getMetrics after the domain is
+    // enabled. The command is idempotent, so keeping this at the read
+    // boundary also makes a first metrics call useful on a fresh page.
+    self.cmd("Performance.enable", super::empty_params()).await?;
     let result = self.cmd("Performance.getMetrics", super::empty_params()).await?;
     let metrics = result
       .get("metrics")

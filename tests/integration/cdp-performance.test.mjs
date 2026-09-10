@@ -10,9 +10,11 @@ test('native page scripting exposes a lossless Chrome performance trace', async 
         await page.startTracing(['devtools.timeline', 'v8.execute']);
         await page.goto('data:text/html,<title>trace</title><button id="go">go</button>');
         await page.locator('#go').click();
+        const metrics = await page.metrics();
         const events = await page.stopTracing();
         return {
           count: events.length,
+          metricNames: metrics.map(metric => metric.name),
           names: [...new Set(events.map(event => event.name).filter(Boolean))].slice(0, 80),
           hasNavigation: events.some(event => event.name === 'CommitLoad' || event.name === 'MarkLoad'),
           hasScript: events.some(event => event.name === 'FunctionCall' || event.name === 'RunMicrotasks'),
@@ -23,6 +25,7 @@ test('native page scripting exposes a lossless Chrome performance trace', async 
   const result = observation(results[0])[0];
   assert.equal(result.status, 'ok', JSON.stringify(result));
   assert.ok(result.value.count > 0, JSON.stringify(result.value));
+  assert.ok(result.value.metricNames.includes('Timestamp'), JSON.stringify(result.value));
   assert.equal(result.value.hasNavigation, true, JSON.stringify(result.value));
   assert.equal(result.value.hasScript, true, JSON.stringify(result.value));
 });

@@ -1694,6 +1694,7 @@ export interface Page {
   /** Chromium DevTools performance trace events. Chromium only. */
   startTracing(categories?: string[]): Promise<void>;
   stopTracing(): Promise<Array<Record<string, unknown>>>;
+  metrics(): Promise<Array<{ name: string; value: number }>>;
 
   // A ferridriver extension, not a Playwright method: Playwright's
   // `page.accessibility` is the accessibility TREE, a different

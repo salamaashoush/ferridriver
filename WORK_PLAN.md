@@ -1260,9 +1260,19 @@ completion requires observable behavior through the public scripting API.
   Chromium coverage records a real navigation and script execution, checks
   hundreds of returned events, and checks the precondition error. Focused
   cases passed in 269ms and 163ms. Full-gate verification is pending.
+- The first native metrics assertion exposed a real CDP defect: Chrome
+  returned no counters until `Performance.enable` ran. `page.metrics()` now
+  enables that idempotent domain at the read boundary, and the focused trace
+  case verifies the `Timestamp` counter in 305ms. Full-gate verification of
+  this follow-up is pending.
 - Performance tracing final headless gate exited zero: 117 checks, zero
   failures or blocks, 148.31s. All 803 native integration cases passed in
   122.02s. Rust artifacts rebuilt in 59.94s, documentation took 52.12s and
   E2E took 101.36s, so this is a correctness checkpoint rather than a warm
   performance comparison. Logs: target/gate/1789043723-2371471 and
   /tmp/ferridriver-cdp-performance-ready.log.
+- Metrics follow-up final headless gate exited zero: 117 checks, zero
+  failures or blocks, 154.18s; all 803 native integration cases passed in
+  126.44s. Rust artifacts rebuilt in 37.76s, addon build took 32.52s and
+  docs 55.39s. Logs: target/gate/1789044003-2588176 and
+  /tmp/ferridriver-cdp-metrics-ready-final.log.
