@@ -1465,3 +1465,7 @@ completion requires observable behavior through the public scripting API.
   merging vendor and Appium options, so caller input cannot silently disable
   the BiDi transport ferridriver needs. Five focused URL, capability, and HTTP
   contract tests pass, including an explicit `webSocketUrl: false` override.
+- The post-negotiation-fix headless ready gate passed all 111 checks with zero
+  failures or blocks in 122.35s. Integration took 88.45s, E2E 111.09s, and
+  BDD 101.14s under concurrent build and lint load. Log:
+  `target/gate/1789055254-4032890`.
