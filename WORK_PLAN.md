@@ -1499,3 +1499,7 @@ completion requires observable behavior through the public scripting API.
   suite passes all three cases in 281ms. This follows the canonical
   `Profiler.startPreciseCoverage` and `Profiler.takePreciseCoverage` contract:
   https://chromedevtools.github.io/devtools-protocol/tot/Profiler/.
+- Added persistent native `startCPUProfile` and `stopCPUProfile` page methods
+  over the CDP Profiler domain, returning the sampled profile tree and samples
+  with explicit lifecycle errors. The focused performance suite now passes all
+  four cases in 323ms, including a real sampled profile assertion.

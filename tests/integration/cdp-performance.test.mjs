@@ -64,3 +64,26 @@ test('native scripting exposes precise Chromium JavaScript coverage', async () =
   assert.ok(result.value.scriptCount > 0, JSON.stringify(result.value));
   assert.equal(result.value.hasTimestamp, true, JSON.stringify(result.value));
 });
+
+test('native scripting exposes a sampled Chromium CPU profile', async () => {
+  const { results } = await runtimeProbe([{
+    op: 'browser-engine',
+    scripts: [{
+      source: `
+        await page.startCPUProfile();
+        await page.evaluate('for (let i = 0; i < 100000; i++) Math.sqrt(i)');
+        const profile = await page.stopCPUProfile();
+        return {
+          hasNodes: Array.isArray(profile.profile.nodes),
+          nodeCount: profile.profile.nodes.length,
+          hasSamples: Array.isArray(profile.profile.samples),
+        };
+      `,
+    }],
+  }]);
+  const result = observation(results[0])[0];
+  assert.equal(result.status, 'ok', JSON.stringify(result));
+  assert.equal(result.value.hasNodes, true, JSON.stringify(result.value));
+  assert.ok(result.value.nodeCount > 0, JSON.stringify(result.value));
+  assert.equal(result.value.hasSamples, true, JSON.stringify(result.value));
+});

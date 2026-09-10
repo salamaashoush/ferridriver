@@ -1725,6 +1725,9 @@ export interface Page {
   startJSCoverage(options?: { callCount?: boolean; detailed?: boolean; allowTriggeredUpdates?: boolean }): Promise<Record<string, unknown>>;
   takeJSCoverage(): Promise<{ result: Array<Record<string, unknown>>; timestamp: number }>;
   stopJSCoverage(): Promise<Record<string, unknown>>;
+  /** Chromium sampled JavaScript CPU profile from the DevTools Profiler domain. */
+  startCPUProfile(): Promise<Record<string, unknown>>;
+  stopCPUProfile(): Promise<{ profile: Record<string, unknown> }>;
 
   // A ferridriver extension, not a Playwright method: Playwright's
   // `page.accessibility` is the accessibility TREE, a different

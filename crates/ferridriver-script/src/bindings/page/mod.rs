@@ -59,6 +59,8 @@ pub struct PageJs {
   web_mcp: crate::bindings::web_mcp::WebMcpJs,
   #[qjs(skip_trace)]
   coverage_session: Arc<tokio::sync::Mutex<Option<ferridriver::CdpSession>>>,
+  #[qjs(skip_trace)]
+  cpu_profile_session: Arc<tokio::sync::Mutex<Option<ferridriver::CdpSession>>>,
 }
 
 impl PageJs {
@@ -70,6 +72,7 @@ impl PageJs {
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       web_mcp: crate::bindings::web_mcp::WebMcpJs::new(inner.clone()),
       coverage_session: Arc::new(tokio::sync::Mutex::new(None)),
+      cpu_profile_session: Arc::new(tokio::sync::Mutex::new(None)),
     }
   }
 
@@ -81,6 +84,7 @@ impl PageJs {
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       web_mcp: crate::bindings::web_mcp::WebMcpJs::new(inner.clone()),
       coverage_session: Arc::new(tokio::sync::Mutex::new(None)),
+      cpu_profile_session: Arc::new(tokio::sync::Mutex::new(None)),
     }
   }
 
@@ -2127,6 +2131,73 @@ impl PageJs {
         };
         let result = session
           .send("Profiler.stopPreciseCoverage", serde_json::json!({}))
+          .await
+          .into_js_with(&ctx)?;
+        session
+          .send("Profiler.disable", serde_json::json!({}))
+          .await
+          .into_js_with(&ctx)?;
+        crate::bindings::convert::json_to_js(&ctx, &result)
+      })
+      .await
+  }
+
+  /// Start Chromium's sampled JavaScript CPU profiler.
+  #[qjs(rename = "startCPUProfile")]
+  pub async fn start_cpu_profile<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let context = self
+          .inner
+          .context()
+          .ok_or_else(|| ferridriver::FerriError::unsupported("CPU profiling requires a browser context"))
+          .into_js_with(&ctx)?;
+        let mut profiler = self.cpu_profile_session.lock().await;
+        if profiler.is_some() {
+          return Err(rquickjs::Error::new_from_js_message(
+            "page.startCPUProfile",
+            "Error",
+            "CPU profiling is already started".to_string(),
+          ));
+        }
+        let session = context.new_cdp_session(&self.inner).await.into_js_with(&ctx)?;
+        session
+          .send("Profiler.enable", serde_json::json!({}))
+          .await
+          .into_js_with(&ctx)?;
+        let result = session
+          .send("Profiler.start", serde_json::json!({}))
+          .await
+          .into_js_with(&ctx)?;
+        *profiler = Some(session);
+        crate::bindings::convert::json_to_js(&ctx, &result)
+      })
+      .await
+  }
+
+  /// Stop Chromium's sampled JavaScript CPU profiler and return its profile.
+  #[qjs(rename = "stopCPUProfile")]
+  pub async fn stop_cpu_profile<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let mut profiler = self.cpu_profile_session.lock().await;
+        let Some(session) = profiler.take() else {
+          return Err(rquickjs::Error::new_from_js_message(
+            "page.stopCPUProfile",
+            "Error",
+            "CPU profiling has not been started".to_string(),
+          ));
+        };
+        let result = session
+          .send("Profiler.stop", serde_json::json!({}))
           .await
           .into_js_with(&ctx)?;
         session
