@@ -21,6 +21,7 @@ ferridriver-script = { workspace = true }
 ferridriver-bdd = { workspace = true }
 ferridriver-test = { workspace = true }
 ferrijs-bundle = { workspace = true }
+ferrijs-permissions = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 axum = { workspace = true, features = ["ws"] }
 tower-http = { version = "0.7", features = ["fs", "cors"] }

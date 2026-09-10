@@ -1993,6 +1993,7 @@ dependencies = [
  "ferridriver-script",
  "ferridriver-test",
  "ferrijs-bundle",
+ "ferrijs-permissions",
  "flate2",
  "futures",
  "rcgen",

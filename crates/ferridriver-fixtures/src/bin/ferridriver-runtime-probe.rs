@@ -2,6 +2,8 @@
 mod bdd;
 #[path = "runtime_probe/extensions.rs"]
 mod extensions;
+#[path = "runtime_probe/http.rs"]
+mod http;
 #[path = "runtime_probe/test_registry.rs"]
 mod test_registry;
 
@@ -21,6 +23,10 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  HttpRequest {
+    #[serde(flatten)]
+    request: http::Request,
+  },
   ExecuteVirtualScript {
     source: String,
   },
@@ -295,6 +301,7 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::HttpRequest { request } => http::run(request).await,
       Operation::ExecuteVirtualScript { source } => self.execute_virtual_script(&source).await,
       Operation::SessionState => Ok(json!({ "poisoned": self.session.as_ref().map(Session::poisoned) })),
       Operation::CompileExtensions { request } => {

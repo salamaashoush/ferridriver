@@ -495,6 +495,19 @@ fn fx_http_client(path: &str, headers: &HeaderMap, body: &axum::body::Bytes) -> 
     };
   }
   match path {
+    "landed" => fx_text("LANDED"),
+    "hop-offhost" => {
+      let port = headers
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|host| host.rsplit(':').next())
+        .and_then(|port| port.parse::<u16>().ok());
+      match port {
+        Some(port) => fx_redirect(&format!("http://localhost:{port}/fx/http-client/landed")),
+        None => fx_build(400, "text/plain", b"missing port".to_vec(), &[]),
+      }
+    },
+    "hop-metadata" => fx_redirect("http://169.254.169.254/latest"),
     "set" => fx_build(
       200,
       "text/plain",

@@ -532,3 +532,27 @@ completion requires observable behavior through the public scripting API.
   E2E took 98.15s, BDD 91.90s, integration 49.34s. This is a rebuild
   measurement, not a warm-run speedup. Real-time retry coverage passed
   this run; the earlier intermittent 434ms gap remains unexplained.
+
+- Pushed HTTP migration 3d279a92 and controlled-clock coverage 5e42bf88.
+  Migrated all five core HTTP network-guard cases to native JS, preserving
+  the no-guard fast path, numeric-host allowlist, and metadata preflight
+  and redirect enforcement. The private probe constructs the original
+  production client and Permissions policy; assertions live in JS. Added
+  a specific blocked-address assertion for metadata redirects. Five cases
+  pass in 26ms without a browser. Original backed up at /tmp/ferridriver-net-guard-backup-dh_2421v/http_client_net_guard.rs
+  (5371 bytes, verified against HEAD). Remaining Rust targets: 55.
+
+- Protocol audit note from source: core Page.start_tracing/stop_tracing
+  and NAPI wrappers exist, but native ScriptPage lacks both methods.
+  CDP stop_tracing installs a lossless tap before Tracing.end, then ignores
+  a 30-second drain timeout and returns collected events as success.
+  An interrupted trace can therefore look complete. Address this with
+  observable native JS coverage when extending performance capabilities.
+  Read Playwright crBrowser.ts tracing implementation for comparison: it
+  waits for tracingComplete and consumes ReturnAsStream. No speed claim.
+
+- Network-guard final gate exited 0: 143 checks, zero failures or blocks,
+  107.347s wall time (107.26s gate), 32 jobs and 32 browser slots.
+  Logs: target/gate/1789025159-3000698 and /tmp/ferridriver-net-guard-ready.log.
+  Native integration: 557 passed in 49.2s; BDD: 91.95s. No benchmark
+  claim of a speedup over the prior 101.543s warm run.
