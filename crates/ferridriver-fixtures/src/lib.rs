@@ -622,19 +622,27 @@ async fn handle_fx(
       "tls": format!("https://{}", state.tls_addr),
     })),
     "reset-arm" => fx_reset_arm(&state.reset, query.as_deref()),
-    "proxy-log" => {
-      let mut lines = state
-        .proxy
-        .lines
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-      if method == axum::http::Method::DELETE {
-        lines.clear();
-      }
-      fx_json(&serde_json::json!({"hits": lines.len(), "lines": *lines}))
-    },
+    "proxy-log" => fx_proxy_log(&state.proxy, &method, query.as_deref()),
     _ => fx_page_quality(&path, query.as_deref()).unwrap_or_else(fx_unknown_route),
   }
+}
+
+fn fx_proxy_log(state: &ProxyState, method: &axum::http::Method, query: Option<&str>) -> Response<Body> {
+  let mut lines = state.lines.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+  if method == axum::http::Method::DELETE {
+    if let Some(key) = query_values(query, "key").first() {
+      lines.retain(|line| {
+        line
+          .split_whitespace()
+          .nth(1)
+          .and_then(|url| url.split_once('?'))
+          .is_none_or(|(_, query)| !query_values(Some(query), "key").contains(key))
+      });
+    } else {
+      lines.clear();
+    }
+  }
+  fx_json(&serde_json::json!({"hits": lines.len(), "lines": *lines}))
 }
 
 fn fx_unknown_route() -> Response<Body> {

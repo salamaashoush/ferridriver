@@ -33,6 +33,6 @@ export async function fxProxyLog(request: APIRequestContext, baseURL: string | u
   return (await resp.json()) as FxProxyLog;
 }
 
-export async function fxProxyLogReset(request: APIRequestContext, baseURL: string | undefined): Promise<void> {
-  await request.delete(fxUrl(baseURL, '/proxy-log'));
+export async function fxProxyLogReset(request: APIRequestContext, baseURL: string | undefined, key: string): Promise<void> {
+  await request.delete(`${fxUrl(baseURL, '/proxy-log')}?key=${encodeURIComponent(key)}`);
 }

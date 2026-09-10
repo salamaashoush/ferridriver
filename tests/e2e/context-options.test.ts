@@ -779,19 +779,21 @@ describe('context options', () => {
     // 127.0.0.1; Chromium needs <-loopback>); with an HTTP proxy set
     // the browser sends the absolute-form request without resolving
     // DNS.
-    await fxProxyLogReset(request, baseURL);
+    const key = crypto.randomUUID();
+    const target = `http://ferri-proxy.test/behind-proxy?key=${key}`;
     const proxyServer = await fxProxyUrl(request, baseURL);
     const ctx = await browser.newContext({ proxy: { server: proxyServer } });
     try {
       const p = await ctx.newPage();
-      await p.goto('http://ferri-proxy.test/behind-proxy');
+      await p.goto(target);
       const body = (await p.evaluate(() => document.body.textContent)) as string;
       expect(body.includes('PROXY:ok')).toBe(true);
       const log = await fxProxyLog(request, baseURL);
       expect(log.hits).toBeGreaterThanOrEqual(1);
-      expect(log.lines.some((l) => l.includes('ferri-proxy.test') && l.includes('behind-proxy'))).toBe(true);
+      expect(log.lines.some((line) => line.includes(target))).toBe(true);
     } finally {
       await ctx.close();
+      await fxProxyLogReset(request, baseURL, key);
     }
   });
 });
