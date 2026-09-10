@@ -32,6 +32,28 @@ async function settle(page: Page): Promise<void> {
 }
 
 describe('page api', () => {
+  test('page_init_script_disposable_reverses_injection', async ({ page }) => {
+    const script = await page.addInitScript('window.__initDisposable = "installed"');
+    await page.goto(H1);
+    expect(await page.evaluate('window.__initDisposable')).toBe('installed');
+    await script.dispose();
+    await script.dispose();
+    await page.goto(H1);
+    expect(await page.evaluate('typeof window.__initDisposable')).toBe('undefined');
+  });
+
+  test('wait_for_load_state_defaults_with_omitted_or_undefined_state', async ({ page }) => {
+    await page.goto(H1);
+    await page.waitForLoadState();
+    expect(await page.evaluate('document.readyState')).toBe('complete');
+    await page.goto(H1);
+    await page.waitForLoadState(undefined);
+    expect(await page.evaluate('document.readyState')).toBe('complete');
+    await page.goto(H1);
+    await page.waitForLoadState(undefined, { timeout: 3000 });
+    expect(await page.evaluate('document.readyState')).toBe('complete');
+  });
+
   test('script_eval_on_selector', async ({ page }) => {
     // Playwright: `page.$eval(sel, fn, arg?)` runs the function on the
     // FIRST match; `page.$$eval(sel, fn, arg?)` on ALL matches as an

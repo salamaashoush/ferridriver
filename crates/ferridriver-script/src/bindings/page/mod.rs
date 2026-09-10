@@ -2533,7 +2533,7 @@ impl PageJs {
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
-    state: Opt<String>,
+    state: Opt<Option<String>>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     call_site
@@ -2542,7 +2542,7 @@ impl PageJs {
           crate::bindings::convert::parse_opt_bag(&ctx, options)?;
         self
           .inner
-          .wait_for_load_state(state.0.as_deref())
+          .wait_for_load_state(state.0.flatten().as_deref())
           .maybe_options(opts)
           .await
           .into_js_with(&ctx)

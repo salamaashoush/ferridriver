@@ -1665,7 +1665,7 @@ export interface Page {
   querySelectorAll(selector: string): Promise<ElementHandle[]>;
   $eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
   $$eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
-  addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown): Promise<void>;
+  addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown): Promise<Disposable>;
   addScriptTag(options?: { url?: string; path?: string; content?: string; type?: string }): Promise<ElementHandle>;
   addStyleTag(options?: { url?: string; path?: string; content?: string }): Promise<ElementHandle>;
   exposeFunction(name: string, callback: Function): Promise<void>;
