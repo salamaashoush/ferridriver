@@ -1162,7 +1162,7 @@ fn resolve_with_prefix(resolver: &InstanceResolverFn, instance_name: &str) -> Op
 }
 
 /// Attach to a browser someone else is running. CDP uses discovery for HTTP
-/// endpoints; the WebDriver BiDi backend requires its WebSocket endpoint
+/// endpoints; the `WebDriver` `BiDi` backend requires its WebSocket endpoint
 /// directly because it has no CDP-style discovery document.
 async fn connect_browser(mode: &ConnectMode, backend_kind: BackendKind) -> Result<AnyBrowser> {
   use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
