@@ -1473,3 +1473,8 @@ completion requires observable behavior through the public scripting API.
   iOS and Android capabilities, including headers, timeout, and namespaced
   `appium:options`; the protocol audit now states the Classic-only boundary
   beside the usable scripting example.
+- Added a native JS integration contract for WebDriver negotiation. A local
+  mock driver captures the real `/session` request from `webkit().connect`,
+  verifies authorization and iOS/Appium capabilities, confirms
+  `webSocketUrl` is forced back to true, and asserts the typed Classic-session
+  error. The test passes in 36ms without launching a browser.
