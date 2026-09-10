@@ -129,9 +129,9 @@ debug = false
 opt-level = 1
 
 [patch.crates-io]
-ferrijs = { git = "https://github.com/salamaashoush/ferrijs", rev = "144f8ef04dbfe9ca83f0e669c5eb033c05133945" }
-ferrijs-std = { git = "https://github.com/salamaashoush/ferrijs", rev = "144f8ef04dbfe9ca83f0e669c5eb033c05133945" }
-ferrijs-fetch = { git = "https://github.com/salamaashoush/ferrijs", rev = "144f8ef04dbfe9ca83f0e669c5eb033c05133945" }
-ferrijs-bundle = { git = "https://github.com/salamaashoush/ferrijs", rev = "144f8ef04dbfe9ca83f0e669c5eb033c05133945" }
-ferrijs-permissions = { git = "https://github.com/salamaashoush/ferrijs", rev = "144f8ef04dbfe9ca83f0e669c5eb033c05133945" }
-ferrijs-serde = { git = "https://github.com/salamaashoush/ferrijs", rev = "144f8ef04dbfe9ca83f0e669c5eb033c05133945" }
+ferrijs = { git = "https://github.com/salamaashoush/ferrijs", rev = "a9904851f3d86c096c87451665f420883949ba5b" }
+ferrijs-std = { git = "https://github.com/salamaashoush/ferrijs", rev = "a9904851f3d86c096c87451665f420883949ba5b" }
+ferrijs-fetch = { git = "https://github.com/salamaashoush/ferrijs", rev = "a9904851f3d86c096c87451665f420883949ba5b" }
+ferrijs-bundle = { git = "https://github.com/salamaashoush/ferrijs", rev = "a9904851f3d86c096c87451665f420883949ba5b" }
+ferrijs-permissions = { git = "https://github.com/salamaashoush/ferrijs", rev = "a9904851f3d86c096c87451665f420883949ba5b" }
+ferrijs-serde = { git = "https://github.com/salamaashoush/ferrijs", rev = "a9904851f3d86c096c87451665f420883949ba5b" }
