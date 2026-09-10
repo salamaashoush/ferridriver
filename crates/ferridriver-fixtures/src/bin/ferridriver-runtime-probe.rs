@@ -6,6 +6,8 @@ mod extensions;
 mod http;
 #[path = "runtime_probe/reporter_api.rs"]
 mod reporter_api;
+#[path = "runtime_probe/reporter_output.rs"]
+mod reporter_output;
 #[path = "runtime_probe/reporters.rs"]
 mod reporters;
 #[path = "runtime_probe/test_registry.rs"]
@@ -27,6 +29,10 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  ReporterOutput {
+    #[serde(flatten)]
+    request: reporter_output::Request,
+  },
   ReporterApi {
     #[serde(flatten)]
     request: reporter_api::Request,
@@ -316,6 +322,7 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::ReporterOutput { request } => reporter_output::run(request).await,
       Operation::ReporterApi { request } => reporter_api::run(request),
       Operation::ReporterBus { subscribers, actions } => reporters::bus(subscribers, actions).await,
       Operation::ReporterDriver { events } => reporters::driver(events).await,

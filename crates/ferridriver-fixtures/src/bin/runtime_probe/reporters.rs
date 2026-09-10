@@ -66,7 +66,7 @@ impl From<Event> for ReporterEvent {
   }
 }
 
-fn observation(event: &ReporterEvent) -> Value {
+pub(super) fn observation(event: &ReporterEvent) -> Value {
   match event {
     ReporterEvent::RunStarted {
       total_tests,
@@ -84,6 +84,8 @@ fn observation(event: &ReporterEvent) -> Value {
         "skipped": skipped, "durationMs": duration.as_millis() }),
     ReporterEvent::WorkerStarted { worker_id } => json!({ "kind": "WorkerStarted", "workerId": worker_id }),
     ReporterEvent::WorkerFinished { worker_id } => json!({ "kind": "WorkerFinished", "workerId": worker_id }),
+    ReporterEvent::TestStarted { test_id, .. } => json!({ "kind": "TestStarted", "name": test_id.name }),
+    ReporterEvent::TestFinished { outcome } => json!({ "kind": "TestFinished", "name": outcome.test_id.name }),
     other => json!({ "unexpected": format!("{other:?}") }),
   }
 }
@@ -197,7 +199,7 @@ pub async fn bus(subscribers: usize, actions: Vec<Action>) -> Result<Value> {
   Ok(json!(observations))
 }
 
-struct Collector(Arc<Mutex<Vec<Value>>>);
+pub(super) struct Collector(pub(super) Arc<Mutex<Vec<Value>>>);
 
 #[async_trait::async_trait]
 impl Reporter for Collector {

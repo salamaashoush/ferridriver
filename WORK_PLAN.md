@@ -576,3 +576,44 @@ completion requires observable behavior through the public scripting API.
   Initial lint caught an inline 4KB ProjectConfig variant and a 101-line
   dispatcher: boxed the configuration and extracted runtime-contract
   observation. No lint allowances or assertion weakening.
+
+- Built-in reporter migration covers eleven cases through production
+  reporters and the blob reader. Native JS reads generated JSON, JUnit,
+  CTRF, and Markdown, retaining all original content checks. Dot/GitHub
+  smoke cases now inspect captured glyphs, escaped annotations, and
+  delegation. First focused run: ten pass, outputFile absence check fails
+  because native fs.stat exceptions lack code=ENOENT.
+- Four native fs-stat regressions reproduce missing error metadata in
+  stat/lstat and their synchronous forms. Fixed upstream ferrijs using
+  existing node::system_error for metadata calls; permissions unchanged.
+  Ferrijs full gate exited 0 (/tmp/ferrijs-stat-errors-ready-fixed.log);
+  eight direct runtime observations verify ENOENT and ENOTDIR metadata.
+  Pushed ferrijs a9904851f3d86c096c87451665f420883949ba5b. Ferridriver
+  now pins all six patches to that revision; consumer rebuild pending.
+
+- Consumer build with pinned ferrijs fix completed in 3m03s. All fifteen
+  focused reporter-output and fs-stat cases now pass in 24ms, including
+  the original output-path absence assertion. Removed Rust reporters.rs
+  after backup to /tmp/ferridriver-reporter-output-backup-grvq3tdu/reporters.rs
+  (20491 bytes, matched HEAD). Remaining Rust targets: 52.
+
+- Measured a cold dependency-update gate bottleneck: lint 95.61s,
+  docs 95.77s, rust-build 125.95s. Native suites finished while Rust
+  tests compiled (integration 61.34s, BDD 95.77s, E2E 101.88s).
+  NAPI build subsequently recompiles ferridriver and ferrijs-fetch.
+  Read installed @napi-rs/cli src/api/build.ts: setTarget always adds
+  --target with the host triple; copyArtifact always reads the target
+  subdirectory. This duplicates the workspace host build. Next build
+  optimization should preserve native addon/type generation while sharing
+  the workspace Cargo graph, with actual ABI tests and timing evidence.
+
+- Final reporter-output/runtime-update gate exited 0: 140 checks,
+  zero failures or blocks, 660.574s wall time (660.46s gate). Logs:
+  target/gate/1789026521-3396958 and /tmp/ferridriver-reporter-output-ready.log.
+  This is a dependency-rebuild measurement, not comparable to the prior
+  106.877s warm run. NAPI build duplicated core compilation for 163.38s;
+  Rust UI test then compiled the rust-e2e-example package graph and took
+  174.93s. Its package selection is intentional (only selected harnesses
+  should run); preserve that behavior when eliminating duplicate builds.
+  Next priority: measured Cargo graph/artifact reuse, retaining real addon
+  loading, generated declarations, and Rust UI execution/stop/trace checks.
