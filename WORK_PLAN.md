@@ -895,3 +895,20 @@ completion requires observable behavior through the public scripting API.
   and /tmp/ferridriver-screenshot-migration-ready-final.log. Extracted the
   existing bundle handlers after the new operation exceeded the dispatcher's
   line limit; corrected their PathBuf signature before this successful gate.
+- Migrated fixture routes and TLS coverage into ten native JS cases. All
+  redirect locations, landing status/body, API/header echoes, duplicate cookie
+  headers, auth challenges, CSP/download/iframe content, WebSocket text/binary
+  frames, proxy observations/reset, and static-file assertions remain covered.
+  TLS still uses strict and explicitly lax reqwest clients to independently
+  validate the self-signed fixture. Static precedence now supplies a conflicting
+  static file so it cannot pass merely because no fallback file exists.
+- Ten native cases passed without browsers in 41ms:
+  /tmp/ferridriver-fixture-routes-native.log. Removed unchanged routes.rs
+  (9653 bytes) and tls_probe.rs (1120 bytes) after verified backups under
+  /tmp/ferridriver-fixture-routes-backup-jovlwbqk/. Their client dependencies
+  moved from dev dependencies to the private runtime fixture. Remaining
+  top-level Rust test targets: 42. Full-gate verification is pending.
+- Fixture-route final headless gate exited zero: 130 checks, zero failures or
+  blocks, 110.84s gate time. Logs: target/gate/1789035408-2791238 and
+  /tmp/ferridriver-fixture-routes-ready-fixed.log. Boxed the combined fixture
+  observer after lint identified its large future, without suppressions.

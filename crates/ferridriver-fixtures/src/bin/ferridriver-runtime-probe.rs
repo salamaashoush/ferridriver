@@ -4,6 +4,8 @@ mod bdd;
 mod cdp_connection;
 #[path = "runtime_probe/extensions.rs"]
 mod extensions;
+#[path = "runtime_probe/fixture_routes.rs"]
+mod fixture_routes;
 #[path = "runtime_probe/http.rs"]
 mod http;
 #[path = "runtime_probe/lifecycle.rs"]
@@ -41,6 +43,9 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  FixtureRoute {
+    scenario: fixture_routes::Scenario,
+  },
   ScreenshotSnapshot {
     name: String,
     expression: Option<String>,
@@ -351,6 +356,7 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::FixtureRoute { scenario } => fixture_routes::run(&self.root, scenario).await,
       Operation::ScreenshotSnapshot { name, expression } => {
         screenshot::run(&self.root, &name, expression.as_deref()).await
       },
