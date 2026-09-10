@@ -2008,6 +2008,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.30.0",
  "tower-http 0.7.0",
+ "zip",
  "zstd 0.14.0",
 ]
 

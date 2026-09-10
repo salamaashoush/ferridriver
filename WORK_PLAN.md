@@ -937,3 +937,20 @@ completion requires observable behavior through the public scripting API.
   and /tmp/ferridriver-config-migration-ready-fixed.log. The initial lint pass
   required an explicit LayerCache type at initialization; corrected without
   suppressions. All migration assertions now run through the native JS suite.
+- Migrated CLI source-location and trace-command coverage to nine native
+  cases. The real test/merge commands preserve step coordinates, skip status
+  and annotations, blob schema, and merged HTML. Legacy wire coordinates still
+  pass through WireStepLocation::into_runtime. Trace show/ls preserve text and
+  JSON assertions; trace view serves assets/archives and rejects outside paths
+  under --no-open, with bounded readiness and owned child teardown.
+- Nine native cases passed in 168ms:
+  /tmp/ferridriver-cli-report-trace-native.log. The viewer waits for a complete
+  output line before parsing its URL, avoiding a partial-write readiness race.
+  Trace fixture entries are supplied by JS to a private create-new ZIP writer.
+- Removed unchanged test_step_location.rs (7268 bytes) and trace_command.rs
+  (10743 bytes) after verified backups under
+  /tmp/ferridriver-cli-report-trace-backup-keouyoo3/. Remaining top-level Rust
+  test targets: 39. Full-gate verification is pending.
+- CLI reporting/trace migration final headless gate exited zero: 127 checks,
+  zero failures or blocks, 110.92s gate time. Logs:
+  target/gate/1789036454-3183825 and /tmp/ferridriver-cli-report-trace-ready.log.

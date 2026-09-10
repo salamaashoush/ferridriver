@@ -10,6 +10,13 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Request {
+  Archive {
+    path: std::path::PathBuf,
+    entries: std::collections::BTreeMap<String, String>,
+  },
+  StepLocations {
+    locations: Vec<ferridriver_test::reporter::blob::WireStepLocation>,
+  },
   Preamble {
     config: Box<TestConfig>,
     project: Option<Box<ProjectConfig>>,
@@ -113,6 +120,13 @@ fn preamble(config: &TestConfig, project: Option<&ProjectConfig>, name: &str, gr
 
 pub fn run(request: Request) -> Result<Value> {
   match request {
+    Request::Archive { path, entries } => archive(&path, entries),
+    Request::StepLocations { locations } => Ok(json!(
+      locations
+        .into_iter()
+        .map(ferridriver_test::reporter::blob::WireStepLocation::into_runtime)
+        .collect::<Vec<_>>()
+    )),
     Request::Preamble {
       config,
       project,
@@ -129,4 +143,19 @@ pub fn run(request: Request) -> Result<Value> {
       Ok(json!({ "printsToStdio": reporters.prints_to_stdio() }))
     },
   }
+}
+
+fn archive(path: &std::path::Path, entries: std::collections::BTreeMap<String, String>) -> Result<Value> {
+  use std::io::Write;
+  if let Some(parent) = path.parent() {
+    std::fs::create_dir_all(parent)?;
+  }
+  let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+  let mut zip = zip::ZipWriter::new(file);
+  for (name, content) in entries {
+    zip.start_file(name, zip::write::SimpleFileOptions::default())?;
+    zip.write_all(content.as_bytes())?;
+  }
+  zip.finish()?;
+  Ok(Value::Null)
 }

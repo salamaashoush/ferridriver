@@ -40,3 +40,5 @@ socket2 = "0.6"
 
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 tokio-tungstenite = "0.30"
+
+zip = { version = "8", default-features = false, features = ["deflate"] }
