@@ -393,3 +393,84 @@ fn spawn_with_pipes(
     Ok((child, Box::new(reader) as BoxReader, Box::new(writer) as BoxWriter))
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn fetch_listener_captures_requests_before_its_task_is_polled()
+  -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dispatcher = Arc::new(CdpDispatcher::new());
+    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel(1);
+    let transport = Arc::new(PipeTransport {
+      write_tx,
+      dispatcher: dispatcher.clone(),
+    });
+    let listener = super::super::CdpPage::spawn_fetch_listener(
+      transport,
+      Some(Arc::from("session")),
+      Arc::new(tokio::sync::RwLock::new(Vec::new())),
+      Arc::new(tokio::sync::RwLock::new(None)),
+    );
+    dispatcher.dispatch_message(&serde_json::to_vec(&serde_json::json!({
+      "sessionId": "session", "method": "Fetch.requestPaused",
+      "params": { "requestId": "first-request", "request": { "url": "http://example.com/" } }
+    }))?);
+    let command = tokio::time::timeout(std::time::Duration::from_secs(1), write_rx.recv()).await;
+    listener.abort();
+    let command = command?.ok_or("paused request was lost before the listener task started")?;
+    let command: serde_json::Value = serde_json::from_slice(command.strip_suffix(&[0]).unwrap_or(&command))?;
+    assert_eq!(command["method"], "Fetch.continueRequest");
+    assert_eq!(command["params"]["requestId"], "first-request");
+    dispatcher.dispatch_message(&serde_json::to_vec(
+      &serde_json::json!({ "id": command["id"], "result": {} }),
+    )?);
+    Ok(())
+  }
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn network_listener_captures_events_before_its_task_is_polled()
+  -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dispatcher = Arc::new(CdpDispatcher::new());
+    let (write_tx, _write_rx) = tokio::sync::mpsc::channel(1);
+    let transport = Arc::new(PipeTransport {
+      write_tx,
+      dispatcher: dispatcher.clone(),
+    });
+    let log = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+    let navigation = crate::network::NavRequestSlot::new();
+    let listener = super::super::CdpPage::spawn_network_listener(
+      transport,
+      Some(Arc::from("session")),
+      Arc::from("page"),
+      log.clone(),
+      crate::events::EventEmitter::new(),
+      navigation.clone(),
+    );
+    for event in [
+      serde_json::json!({
+        "sessionId": "session", "method": "Network.requestWillBeSent",
+        "params": {"requestId": "document", "loaderId": "document", "type": "Document",
+          "request": {"url": "http://example.com/", "method": "GET", "headers": {}}}
+      }),
+      serde_json::json!({
+        "sessionId": "session", "method": "Network.responseReceived",
+        "params": {"requestId": "document", "response": {
+          "url": "http://example.com/", "status": 200, "statusText": "OK", "headers": {}}}
+      }),
+    ] {
+      dispatcher.dispatch_message(&serde_json::to_vec(&event)?);
+    }
+    let response = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+      let request = navigation.wait(std::time::Duration::from_secs(1)).await?;
+      request.response().await.ok().flatten()
+    })
+    .await;
+    listener.abort();
+    let response = response?.ok_or("initial navigation was lost before the listener task started")?;
+    assert_eq!(response.status(), 200);
+    assert_eq!(log.read().await.len(), 1);
+    Ok(())
+  }
+}

@@ -111,6 +111,20 @@ impl ExtensionCommandsJs {
 
 #[rquickjs::methods]
 impl ExtensionCommandsJs {
+  #[qjs(rename = "exec")]
+  pub async fn exec<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+    let spec = self.spec("commands.exec", &name)?;
+    let vars_map = Self::vars_of(&ctx, vars)?;
+    let resolved = spec
+      .resolve(&vars_map)
+      .map_err(|m| Self::cmd_err("commands.exec", format!("{name}: {m}")))?;
+    let result = Box::pin(session_procs::exec_oneshot(&resolved))
+      .await
+      .map_err(|m| Self::cmd_err("commands.exec", format!("{name}: {m}")))?;
+    let value = serde_json::to_value(result).map_err(|m| Self::cmd_err("commands.exec", m))?;
+    json_to_js(&ctx, &value)
+  }
+
   /// One-shot: run to completion and return shaped stdout.
   #[qjs(rename = "run")]
   pub async fn run<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
@@ -139,6 +153,69 @@ impl ExtensionCommandsJs {
       .start(&name, &resolved)
       .map_err(|m| Self::cmd_err("commands.start", format!("{name}: {m}")))?;
     json_to_js(&ctx, &serde_json::json!({ "name": name, "pid": pid }))
+  }
+
+  #[qjs(rename = "open")]
+  pub fn open<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+    let resolved = self
+      .spec("commands.open", &name)?
+      .resolve(&Self::vars_of(&ctx, vars)?)
+      .map_err(|m| Self::cmd_err("commands.open", m))?;
+    let pid = self
+      .registry("commands.open")?
+      .open(&name, &resolved)
+      .map_err(|m| Self::cmd_err("commands.open", m))?;
+    json_to_js(&ctx, &serde_json::json!({ "name": name, "pid": pid }))
+  }
+
+  #[qjs(rename = "write")]
+  pub async fn write(&self, name: String, data: Option<String>) -> rquickjs::Result<()> {
+    self
+      .registry("commands.write")?
+      .write(&name, data)
+      .await
+      .map_err(|m| Self::cmd_err("commands.write", m))
+  }
+
+  #[qjs(rename = "read")]
+  pub async fn read<'js>(&self, ctx: Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
+    let line = tokio::time::timeout(
+      std::time::Duration::from_secs(30),
+      self.registry("commands.read")?.read(&name),
+    )
+    .await
+    .map_err(|_| Self::cmd_err("commands.read", "stdout timed out after 30s"))?
+    .map_err(|m| Self::cmd_err("commands.read", m))?;
+    json_to_js(&ctx, &serde_json::json!(line))
+  }
+
+  #[qjs(rename = "waitForOutput")]
+  pub async fn wait_for_output(&self, name: String, text: String, timeout_ms: Opt<u64>) -> rquickjs::Result<String> {
+    let ms = timeout_ms.0.unwrap_or(30_000);
+    tokio::time::timeout(
+      std::time::Duration::from_millis(ms),
+      self.registry("commands.waitForOutput")?.wait_for_output(&name, &text),
+    )
+    .await
+    .map_err(|_| {
+      Self::cmd_err(
+        "commands.waitForOutput",
+        format!("process `{name}` did not emit {text:?} within {ms}ms"),
+      )
+    })?
+    .map_err(|m| Self::cmd_err("commands.waitForOutput", m))
+  }
+
+  #[qjs(rename = "wait")]
+  pub async fn wait(&self, name: String, timeout_ms: Opt<u64>) -> rquickjs::Result<i32> {
+    let ms = timeout_ms.0.unwrap_or(30_000);
+    tokio::time::timeout(
+      std::time::Duration::from_millis(ms),
+      self.registry("commands.wait")?.wait(&name),
+    )
+    .await
+    .map_err(|_| Self::cmd_err("commands.wait", format!("process `{name}` did not exit within {ms}ms")))?
+    .map_err(|m| Self::cmd_err("commands.wait", m))
   }
 
   /// Persistent: running?/exit code + the buffered stdout/stderr tail.
@@ -176,6 +253,7 @@ pub const TOOL_CONTEXT_KEYS: &[&str] = &[
   "page",
   "context",
   "request",
+  "fetch",
   "commands",
   "session",
   "settings",

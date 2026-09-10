@@ -248,8 +248,11 @@ impl ScenarioExecutor {
     }
 
     // Screenshot on failure.
-    let failure_screenshot = if had_failure && self.screenshot_on_failure {
-      world.page().screenshot().await.ok()
+    let failure_screenshot = if had_failure
+      && self.screenshot_on_failure
+      && let Ok(page) = world.page()
+    {
+      page.screenshot().await.ok()
     } else {
       None
     };

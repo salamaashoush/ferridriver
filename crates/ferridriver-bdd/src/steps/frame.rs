@@ -25,28 +25,24 @@ struct ActiveFrame(Frame);
 async fn switch_to_frame(world: &mut BrowserWorld, name_or_url: String) {
   // Frames arrive via FrameAttached/Navigated events — give the listener
   // a beat to catch up when a step immediately follows an iframe insert.
-  world.page().sync_frames().await.ok();
-  let frame = world
-    .page()
+  world.page()?.sync_frames().await.ok();
+  let page = world.page()?;
+  let frame = page
     .frame(name_or_url.as_str())
-    .or_else(|| {
-      world
-        .page()
-        .frame(ferridriver::options::FrameSelector::by_url(name_or_url.clone()))
-    })
+    .or_else(|| page.frame(ferridriver::options::FrameSelector::by_url(name_or_url.clone())))
     .ok_or_else(|| StepError::from(format!("frame \"{name_or_url}\" not found")))?;
   world.set_state(ActiveFrame(frame));
 }
 
 #[when("I switch to main frame")]
 async fn switch_to_main_frame(world: &mut BrowserWorld) {
-  let frame = world.page().main_frame();
+  let frame = world.page()?.main_frame();
   world.set_state(ActiveFrame(frame));
 }
 
 #[then("I should see {int} frame(s)")]
 async fn should_see_frame_count(world: &mut BrowserWorld, expected: i64) {
-  let page = world.page().clone();
+  let page = world.page()?.clone();
   let expected_count = expected as usize;
   expect_poll(
     || {
@@ -65,7 +61,7 @@ async fn should_see_frame_count(world: &mut BrowserWorld, expected: i64) {
 
 #[then("the frame {string} should exist")]
 async fn frame_should_exist(world: &mut BrowserWorld, name_or_url: String) {
-  let page = world.page().clone();
+  let page = world.page()?.clone();
   let name = name_or_url.clone();
   expect_poll(
     || {

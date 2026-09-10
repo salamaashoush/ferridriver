@@ -13,6 +13,13 @@ homepage.workspace = true
 workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+ferridriver = { workspace = true }
+ferridriver-config = { workspace = true }
+ferridriver-script = { workspace = true }
+ferridriver-bdd = { workspace = true }
+ferrijs-bundle = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 tower-http = { version = "0.7", features = ["fs", "cors"] }

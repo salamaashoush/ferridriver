@@ -2043,6 +2043,12 @@ async fn register_popup(
   }
   popup.page.resume_popup().await?;
 
+  // BiDi popups are never paused; their first navigation can commit before
+  // the context pump installs the frame-cache listener.
+  if matches!(&popup.page, crate::backend::AnyPage::Bidi(_)) {
+    page.sync_frames().await?;
+  }
+
   // WebSocket-route install still evaluates into the live document, so
   // it runs post-resume (first-document sockets on paused backends stay
   // a documented residual).

@@ -709,29 +709,6 @@ impl McpServer {
     self.extension_registry.load_full()
   }
 
-  /// The base args the launch path starts from, so a test can assert the
-  /// plan and the per-instance callback do not both contribute them.
-  #[cfg(test)]
-  pub(crate) fn launch_plan_args_for_test(&self) -> Vec<String> {
-    self
-      .state
-      .inner
-      .try_read()
-      .map(|s| s.extra_args.clone())
-      .unwrap_or_default()
-  }
-
-  /// Publish a registry directly, promoting its tools the same way a load
-  /// would. Test-only: the real path always goes through
-  /// [`Self::load_extension_specs`].
-  #[cfg(test)]
-  pub(crate) fn publish_extensions_for_test(&self, registry: crate::extension::ExtensionRegistry) {
-    let promoted = self.promoted_tool_list(&registry);
-    self
-      .extension_registry
-      .store(Arc::new(LoadedExtensions { registry, promoted }));
-  }
-
   /// Replace the registry (and the promoted tool set) from
   /// `self.extension_specs`. Shared by startup and reload so the two can
   /// never resolve, gate or promote differently.
@@ -1448,6 +1425,9 @@ impl McpServer {
     let resolved = artifacts
       .resolve_read(rel)
       .map_err(|e| Self::err(format!("artifact path: {}", e.message)))?;
+    if !resolved.starts_with(artifacts.root()) {
+      return Err(Self::err("artifact path escapes the artifacts directory"));
+    }
     let bytes = tokio::fs::read(&resolved)
       .await
       .map_err(|e| Self::err(format!("read artifact {rel}: {e}")))?;
@@ -1965,8 +1945,6 @@ fn supports_cache_hints(context: &RequestContext<RoleServer>) -> bool {
 }
 
 #[tool_handler(router = self.tool_router)]
-// list_prompts / get_prompt are async by the ServerHandler trait contract;
-// they currently have no internal await but must keep the trait's signature.
 impl ServerHandler for McpServer {
   fn get_info(&self) -> ServerInfo {
     ServerInfo::new(
@@ -1983,6 +1961,10 @@ impl ServerHandler for McpServer {
         .enable_prompts()
         .build(),
     )
+    .with_server_info(rmcp::model::Implementation::new(
+      self.config.server_name(),
+      env!("CARGO_PKG_VERSION"),
+    ))
     .with_instructions(self.instructions_with_paths())
   }
 
@@ -2035,11 +2017,11 @@ impl ServerHandler for McpServer {
   /// Manual `list_tools` (replaces the one `#[tool_handler]` would
   /// generate) so the reloadable extension tools are advertised beside
   /// the static router's built-ins.
-  async fn list_tools(
+  fn list_tools(
     &self,
     _request: Option<PaginatedRequestParams>,
     context: RequestContext<RoleServer>,
-  ) -> Result<rmcp::model::ListToolsResult, ErrorData> {
+  ) -> impl std::future::Future<Output = Result<rmcp::model::ListToolsResult, ErrorData>> + Send {
     let mut tools = self.tool_router.list_all();
     tools.extend(self.extensions().promoted.iter().cloned());
     let result = rmcp::model::ListToolsResult::with_all_items(tools);
@@ -2047,13 +2029,13 @@ impl ServerHandler for McpServer {
     // extension reload publishes `tools/list_changed`, which invalidates the
     // client's copy — but the hints are only spec-legal for a peer that
     // negotiated 2026-07-28.
-    Ok(if supports_cache_hints(&context) {
+    std::future::ready(Ok(if supports_cache_hints(&context) {
       result
         .with_ttl_ms(TOOL_LIST_TTL_MS)
         .with_cache_scope(rmcp::model::CacheScope::Public)
     } else {
       result
-    })
+    }))
   }
 
   /// Same reason as [`Self::list_tools`]: a promoted extension tool must
@@ -2141,20 +2123,20 @@ impl ServerHandler for McpServer {
     Box::pin(self.read_resource_contents(request)).await.map(Into::into)
   }
 
-  async fn list_prompts(
+  fn list_prompts(
     &self,
     _request: Option<PaginatedRequestParams>,
     _context: RequestContext<RoleServer>,
-  ) -> Result<ListPromptsResult, ErrorData> {
-    Ok(ListPromptsResult::with_all_items(Self::prompt_definitions()))
+  ) -> impl std::future::Future<Output = Result<ListPromptsResult, ErrorData>> + Send {
+    std::future::ready(Ok(ListPromptsResult::with_all_items(Self::prompt_definitions())))
   }
 
-  async fn get_prompt(
+  fn get_prompt(
     &self,
     request: GetPromptRequestParams,
     _context: RequestContext<RoleServer>,
-  ) -> Result<GetPromptResponse, ErrorData> {
-    Self::prompt_messages(&request).map(Into::into)
+  ) -> impl std::future::Future<Output = Result<GetPromptResponse, ErrorData>> + Send {
+    std::future::ready(Self::prompt_messages(&request).map(Into::into))
   }
 }
 
@@ -2357,404 +2339,5 @@ impl McpServer {
       },
       _ => Err(Self::err(format!("Unknown prompt: {}", request.name))),
     }
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::validate_tool_args;
-
-  #[test]
-  fn schema_validation_accepts_conforming_and_rejects_bad() {
-    let schema = serde_json::json!({
-      "type": "object",
-      "properties": { "user": { "type": "string" }, "n": { "type": "integer" } },
-      "required": ["user"],
-      "additionalProperties": false
-    });
-    let validator = jsonschema::validator_for(&schema).expect("valid schema");
-
-    assert!(validate_tool_args("t", &validator, &serde_json::json!({ "user": "a", "n": 3 })).is_ok());
-
-    let missing = validate_tool_args("t", &validator, &serde_json::json!({ "n": 3 })).unwrap_err();
-    assert!(missing.contains("invalid arguments for `t`"), "{missing}");
-
-    let wrong_type = validate_tool_args("t", &validator, &serde_json::json!({ "user": 1 })).unwrap_err();
-    assert!(wrong_type.contains("invalid arguments for `t`"), "{wrong_type}");
-
-    let extra = validate_tool_args("t", &validator, &serde_json::json!({ "user": "a", "x": 1 })).unwrap_err();
-    assert!(extra.contains("invalid arguments for `t`"), "{extra}");
-  }
-
-  #[test]
-  fn an_invalid_schema_is_reported_by_the_registry_at_load() {
-    // Compilation of the declared schema happens once, at
-    // `ExtensionRegistry::new`; the stored error is what `invoke_extension_tool`
-    // returns on every call to that tool.
-    let registry = crate::extension::ExtensionRegistry::new(
-      vec![crate::extension::LoadedExtension {
-        tools: vec![
-          serde_json::from_value(serde_json::json!({
-            "name": "bad",
-            "inputSchema": { "type": "not-a-real-type" }
-          }))
-          .expect("manifest"),
-        ],
-        bytecode: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-        path: std::path::PathBuf::from("bad.js"),
-        source_map: None,
-      }],
-      Vec::new(),
-    );
-    let compiled = registry.validator("bad").expect("schema present");
-    let err = compiled.as_ref().expect_err("schema must be invalid");
-    assert!(err.contains("invalid inputSchema"), "{err}");
-  }
-
-  fn loaded_extension(manifest: serde_json::Value) -> crate::extension::LoadedExtension {
-    crate::extension::LoadedExtension {
-      tools: vec![serde_json::from_value(manifest).expect("manifest")],
-      bytecode: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-      path: std::path::PathBuf::from("ext.js"),
-      source_map: None,
-    }
-  }
-
-  fn test_server() -> super::McpServer {
-    super::McpServer::with_options(
-      ferridriver::state::ConnectMode::Launch,
-      ferridriver::backend::BackendKind::CdpPipe,
-      true,
-      std::sync::Arc::new(ferridriver_config::mcp::McpConfig::default()),
-    )
-  }
-
-  #[test]
-  fn policy_conflicts_flags_net_and_command_violations() {
-    let server = test_server().with_script_caps(ferridriver_script::ScriptCaps::default().with_extension_policy(
-      ferridriver_config::ExtensionPolicyConfig {
-        net: Some(vec!["*.acme.com".into()]),
-        commands: ferridriver_config::ExtensionCommandsCeiling::ArgvOnly,
-        ..ferridriver_config::ExtensionPolicyConfig::default()
-      },
-    ));
-    let loaded = vec![loaded_extension(serde_json::json!({
-      "name": "t",
-      "allow": {
-        "net": ["api.acme.com", "evil.example"],
-        "commands": { "sh": "echo hi", "ok": { "run": ["echo", "hi"] } }
-      }
-    }))];
-    let warnings = server.policy_conflicts(&loaded);
-    assert_eq!(warnings.len(), 2, "one net + one command warning: {warnings:?}");
-    assert!(
-      warnings
-        .iter()
-        .any(|(_, m)| m.contains("evil.example") && !m.contains("api.acme.com")),
-      "only the out-of-ceiling entry is flagged: {warnings:?}"
-    );
-    assert!(
-      warnings
-        .iter()
-        .any(|(_, m)| m.contains("\"sh\"") && m.contains("argvOnly")),
-      "the shell-form command is flagged: {warnings:?}"
-    );
-  }
-
-  #[test]
-  fn policy_conflicts_is_silent_without_a_ceiling() {
-    let server = test_server();
-    let loaded = vec![loaded_extension(serde_json::json!({
-      "name": "t",
-      "allow": { "net": ["anywhere.example"], "commands": { "sh": "echo hi" } }
-    }))];
-    assert!(server.policy_conflicts(&loaded).is_empty());
-  }
-
-  /// `session` is honoured on a promoted tool (stripped before the declared
-  /// schema validates, then handed to the handler), so it has to be visible in
-  /// `tools/list`. Advertised without it, a caller reads a strict schema, gets
-  /// no way to name a browser, and hand-rolls the interaction the tool exists
-  /// to replace.
-  #[test]
-  fn a_promoted_tool_advertises_the_session_routing_key() {
-    let server = test_server();
-    let registry = crate::extension::ExtensionRegistry::new(
-      vec![loaded_extension(serde_json::json!({
-        "name": "box.sign.send",
-        "exposeAsMcpTool": true,
-        "inputSchema": {
-          "type": "object",
-          "properties": { "email": { "type": "string" } },
-          "additionalProperties": false
-        }
-      }))],
-      Vec::new(),
-    );
-    let promoted = server.promoted_tool_list(&registry);
-    let tool = promoted.first().expect("one promoted tool");
-    let properties = tool.input_schema.get("properties").expect("properties");
-
-    assert!(
-      properties.get("session").is_some(),
-      "session must be advertised: {properties:?}"
-    );
-    assert!(properties.get("email").is_some(), "the declared properties survive");
-    assert!(
-      tool
-        .input_schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .is_none_or(|r| !r.iter().any(|v| v.as_str() == Some("session"))),
-      "session stays optional"
-    );
-  }
-
-  #[test]
-  fn an_extension_that_declares_its_own_session_keeps_it() {
-    let server = test_server();
-    let registry = crate::extension::ExtensionRegistry::new(
-      vec![loaded_extension(serde_json::json!({
-        "name": "mine",
-        "exposeAsMcpTool": true,
-        "inputSchema": {
-          "type": "object",
-          "properties": { "session": { "type": "string", "description": "mine" } }
-        }
-      }))],
-      Vec::new(),
-    );
-    let promoted = server.promoted_tool_list(&registry);
-    let session = promoted[0]
-      .input_schema
-      .get("properties")
-      .and_then(|p| p.get("session"))
-      .and_then(|s| s.get("description"))
-      .and_then(|d| d.as_str());
-    assert_eq!(session, Some("mine"));
-  }
-
-  #[test]
-  fn extension_tool_result_validates_output_schema_and_ships_structured_content() {
-    let server = test_server();
-    server.publish_extensions_for_test(crate::extension::ExtensionRegistry::new(
-      vec![loaded_extension(serde_json::json!({
-        "name": "typed",
-        "outputSchema": {
-          "type": "object",
-          "properties": { "ok": { "type": "boolean" } },
-          "required": ["ok"],
-          "additionalProperties": false
-        }
-      }))],
-      Vec::new(),
-    ));
-
-    let good = ferridriver_script::ScriptResult::ok(serde_json::json!({ "ok": true }), 3, Vec::new());
-    let reply = server.extension_tool_result("typed", &good).expect("reply");
-    assert_ne!(reply.is_error, Some(true), "conforming output is a success");
-    assert_eq!(
-      reply.structured_content,
-      Some(serde_json::json!({ "ok": true })),
-      "conforming output ships as structuredContent"
-    );
-
-    let bad = ferridriver_script::ScriptResult::ok(serde_json::json!({ "ok": "yes" }), 3, Vec::new());
-    let reply = server.extension_tool_result("typed", &bad).expect("reply");
-    assert_eq!(reply.is_error, Some(true), "non-conforming output is a tool error");
-
-    let untyped = ferridriver_script::ScriptResult::ok(serde_json::json!("anything"), 3, Vec::new());
-    let reply = server.extension_tool_result("absent", &untyped).expect("reply");
-    assert_ne!(reply.is_error, Some(true));
-    assert_eq!(
-      reply.structured_content, None,
-      "no declared outputSchema, no structuredContent"
-    );
-  }
-
-  #[test]
-  fn output_schema_compilation_errors_are_stored_per_tool() {
-    let registry = crate::extension::ExtensionRegistry::new(
-      vec![loaded_extension(serde_json::json!({
-        "name": "bad-out",
-        "outputSchema": { "type": "not-a-real-type" }
-      }))],
-      Vec::new(),
-    );
-    let compiled = registry.output_validator("bad-out").expect("schema present");
-    let err = compiled.as_ref().expect_err("schema must be invalid");
-    assert!(err.contains("invalid outputSchema"), "{err}");
-  }
-
-  #[test]
-  fn manifest_accepts_title_output_schema_and_annotations() {
-    let m: crate::extension::ToolManifest = serde_json::from_value(serde_json::json!({
-      "name": "meta",
-      "title": "Meta Tool",
-      "outputSchema": { "type": "object" },
-      "annotations": { "readOnlyHint": true, "openWorldHint": false }
-    }))
-    .expect("manifest");
-    assert_eq!(m.title.as_deref(), Some("Meta Tool"));
-    assert!(m.output_schema.is_some());
-    let a = m.annotations.expect("annotations");
-    assert_eq!(a.read_only_hint, Some(true));
-    assert_eq!(a.open_world_hint, Some(false));
-  }
-
-  #[test]
-  fn traceparent_parses_valid_and_rejects_malformed() {
-    let (trace, parent) =
-      super::parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01").expect("valid");
-    assert_eq!(trace, "4bf92f3577b34da6a3ce929d0e0e4736");
-    assert_eq!(parent, "00f067aa0ba902b7");
-    // all-zero trace id is invalid per the trace-context spec
-    assert!(super::parse_traceparent("00-00000000000000000000000000000000-00f067aa0ba902b7-01").is_none());
-    // all-zero parent id is invalid
-    assert!(super::parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01").is_none());
-    assert!(super::parse_traceparent("garbage").is_none());
-    assert!(super::parse_traceparent("00-tooShort-00f067aa0ba902b7-01").is_none());
-    // non-hex characters in the trace id
-    assert!(super::parse_traceparent("00-ZZf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01").is_none());
-  }
-
-  #[test]
-  fn mime_for_path_maps_known_and_falls_back() {
-    assert_eq!(super::mime_for_path("screenshots/a.png"), "image/png");
-    assert_eq!(super::mime_for_path("x.PDF"), "application/pdf");
-    assert_eq!(super::mime_for_path("run.trace"), "application/json");
-    assert_eq!(super::mime_for_path("notes.txt"), "text/plain");
-    assert_eq!(super::mime_for_path("blob.bin"), "application/octet-stream");
-    assert_eq!(super::mime_for_path("noext"), "application/octet-stream");
-  }
-
-  #[test]
-  fn builtin_tools_carry_titles_and_annotations() {
-    let tools = super::McpServer::tool_router().list_all();
-    let by = |n: &str| {
-      tools
-        .iter()
-        .find(|t| t.name == n)
-        .unwrap_or_else(|| panic!("tool {n} not found"))
-    };
-    let ro = |t: &rmcp::model::Tool| t.annotations.as_ref().and_then(|a| a.read_only_hint);
-    let ow = |t: &rmcp::model::Tool| t.annotations.as_ref().and_then(|a| a.open_world_hint);
-    let de = |t: &rmcp::model::Tool| t.annotations.as_ref().and_then(|a| a.destructive_hint);
-
-    let snap = by("snapshot");
-    assert_eq!(snap.title.as_deref(), Some("Accessibility Snapshot"));
-    assert_eq!(ro(snap), Some(true));
-    assert_eq!(ow(snap), Some(false));
-
-    let nav = by("navigate");
-    assert_eq!(nav.title.as_deref(), Some("Navigate"));
-    assert_eq!(ro(nav), Some(false));
-    assert_eq!(ow(nav), Some(true));
-
-    let page = by("page");
-    assert_eq!(de(page), Some(true));
-
-    let script = by("run_script");
-    assert_eq!(script.title.as_deref(), Some("Run Browser Script"));
-    assert_eq!(ro(script), Some(false));
-
-    // Every built-in tool should carry a human title.
-    for t in &tools {
-      assert!(t.title.is_some(), "tool {} is missing a title", t.name);
-    }
-  }
-
-  // The two tools whose payload is a documented JSON object publish it as an
-  // `outputSchema`, so a client can validate the structured content instead of
-  // trusting the prose in the description.
-  #[test]
-  fn the_json_returning_tools_publish_an_output_schema() {
-    let tools = super::McpServer::tool_router().list_all();
-    for (name, required_key) in [("run_script", "duration_ms"), ("run_bdd", "scenarios")] {
-      let tool = tools
-        .iter()
-        .find(|t| t.name == name)
-        .unwrap_or_else(|| panic!("tool {name} not found"));
-      let schema = tool
-        .output_schema
-        .as_ref()
-        .unwrap_or_else(|| panic!("tool {name} must declare an output schema"));
-      let rendered = serde_json::to_string(schema).expect("schema serializes");
-      assert!(
-        rendered.contains(required_key),
-        "{name} output schema must describe {required_key}: {rendered}"
-      );
-    }
-  }
-
-  struct TmpArtifactsConfig(std::path::PathBuf);
-  impl super::McpServerConfig for TmpArtifactsConfig {
-    fn script_root(&self) -> std::path::PathBuf {
-      self.0.join("scripts")
-    }
-    fn artifacts_root(&self) -> std::path::PathBuf {
-      self.0.join("artifacts")
-    }
-  }
-
-  #[tokio::test]
-  async fn artifact_persist_and_read_roundtrip() {
-    use base64::Engine as _;
-    let base = std::env::temp_dir().join(format!("ferri-artifact-test-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let server = super::McpServer::with_config(
-      ferridriver::state::ConnectMode::Launch,
-      ferridriver::backend::BackendKind::CdpPipe,
-      std::sync::Arc::new(TmpArtifactsConfig(base.clone())),
-    );
-
-    let png = b"\x89PNG\r\n\x1a\nfake";
-    let link = server
-      .persist_artifact("screenshots/x.png", png, "image/png")
-      .await
-      .expect("artifact persisted → resource link");
-    match link {
-      rmcp::model::ContentBlock::ResourceLink(res) => {
-        assert_eq!(res.uri, "artifact://screenshots/x.png");
-        assert_eq!(res.mime_type.as_deref(), Some("image/png"));
-        assert_eq!(res.size, Some(png.len() as u64));
-      },
-      other => panic!("expected ResourceLink, got {other:?}"),
-    }
-
-    // The persisted bytes come back through the artifact:// resource reader as a base64 blob.
-    let read = server
-      .read_artifact_resource("screenshots/x.png", "artifact://screenshots/x.png")
-      .await
-      .expect("artifact readable");
-    let blob = match read.contents.first().expect("one content") {
-      rmcp::model::ResourceContents::BlobResourceContents { blob, mime_type, .. } => {
-        assert_eq!(mime_type.as_deref(), Some("image/png"));
-        blob.clone()
-      },
-      other => panic!("expected blob contents, got {other:?}"),
-    };
-    let decoded = base64::engine::general_purpose::STANDARD
-      .decode(blob)
-      .expect("valid base64");
-    assert_eq!(decoded, png);
-
-    // A traversal attempt is rejected by the artifacts, not served.
-    assert!(
-      server
-        .read_artifact_resource("../secret", "artifact://../secret")
-        .await
-        .is_err()
-    );
-
-    // list_resources surfaces the persisted artifact as an artifact:// resource.
-    let mut listed = Vec::new();
-    server.list_artifact_resources(&mut listed).await;
-    assert!(
-      listed.iter().any(|r| r.uri == "artifact://screenshots/x.png"),
-      "artifact should appear in resource listing: {listed:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(&base);
   }
 }

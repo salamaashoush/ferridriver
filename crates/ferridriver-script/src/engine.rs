@@ -589,7 +589,9 @@ impl ferrijs::Extension for FerridriverExtension {
       install_vars(&ctx, vars)?;
       crate::bindings::runtime::mirror_global(&ctx, "fs")?;
       crate::bindings::runtime::mirror_global(&ctx, "process")?;
-      install_commands(&ctx, &caps, None)?;
+      let procs = Arc::new(crate::session_procs::SessionProcs::default());
+      let _ = ctx.store_userdata(SessionProcsUd(procs.clone()));
+      install_commands(&ctx, &caps, Some(procs))?;
       if let Some(artifacts) = artifacts {
         crate::bindings::install_artifacts(&ctx, artifacts)?;
       }

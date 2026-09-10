@@ -7,7 +7,7 @@ use ferridriver_bdd_macros::when;
 #[when("I click at position {int},{int}")]
 async fn click_at_position(world: &mut BrowserWorld, x: i64, y: i64) {
   world
-    .page()
+    .page()?
     .mouse()
     .click(x as f64, y as f64)
     .await
@@ -17,7 +17,7 @@ async fn click_at_position(world: &mut BrowserWorld, x: i64, y: i64) {
 #[when("I move mouse to {int},{int}")]
 async fn move_mouse(world: &mut BrowserWorld, x: i64, y: i64) {
   world
-    .page()
+    .page()?
     .mouse()
     .r#move(x as f64, y as f64)
     .await
@@ -27,7 +27,7 @@ async fn move_mouse(world: &mut BrowserWorld, x: i64, y: i64) {
 #[when("I scroll mouse wheel down {int}")]
 async fn scroll_wheel_down(world: &mut BrowserWorld, delta: i64) {
   world
-    .page()
+    .page()?
     .mouse()
     .wheel(0.0, delta as f64)
     .await
@@ -37,7 +37,7 @@ async fn scroll_wheel_down(world: &mut BrowserWorld, delta: i64) {
 #[when("I scroll mouse wheel up {int}")]
 async fn scroll_wheel_up(world: &mut BrowserWorld, delta: i64) {
   world
-    .page()
+    .page()?
     .mouse()
     .wheel(0.0, -(delta as f64))
     .await
@@ -46,7 +46,7 @@ async fn scroll_wheel_up(world: &mut BrowserWorld, delta: i64) {
 
 #[when("I drag from {int},{int} to {int},{int}")]
 async fn drag_coordinates(world: &mut BrowserWorld, x1: i64, y1: i64, x2: i64, y2: i64) {
-  let mouse = world.page().mouse();
+  let mouse = world.page()?.mouse();
   mouse
     .r#move(x1 as f64, y1 as f64)
     .await

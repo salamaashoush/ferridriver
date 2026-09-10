@@ -17,7 +17,7 @@ fn to_step_err(e: AssertionFailure) -> StepError {
 async fn navigate(world: &mut BrowserWorld, url: String) {
   let resolved = super::resolve_url(&url);
   world
-    .page()
+    .page()?
     .goto(&resolved)
     .await
     .map_err(|e| StepError::wrap(format!("navigate to \"{resolved}\""), e))?;
@@ -26,7 +26,7 @@ async fn navigate(world: &mut BrowserWorld, url: String) {
 #[given("I go back")]
 async fn go_back(world: &mut BrowserWorld) {
   world
-    .page()
+    .page()?
     .go_back()
     .await
     .map_err(|e| StepError::wrap("go back", e))?;
@@ -35,7 +35,7 @@ async fn go_back(world: &mut BrowserWorld) {
 #[given("I go forward")]
 async fn go_forward(world: &mut BrowserWorld) {
   world
-    .page()
+    .page()?
     .go_forward()
     .await
     .map_err(|e| StepError::wrap("go forward", e))?;
@@ -43,12 +43,12 @@ async fn go_forward(world: &mut BrowserWorld) {
 
 #[step("I reload the page")]
 async fn reload(world: &mut BrowserWorld) {
-  world.page().reload().await.map_err(|e| StepError::wrap("reload", e))?;
+  world.page()?.reload().await.map_err(|e| StepError::wrap("reload", e))?;
 }
 
 #[then("the URL should contain {string}")]
 async fn url_contains(world: &mut BrowserWorld, expected: String) {
-  expect(world.page())
+  expect(world.page()?)
     .to_contain_url(&expected)
     .await
     .map_err(to_step_err)?;
@@ -56,7 +56,7 @@ async fn url_contains(world: &mut BrowserWorld, expected: String) {
 
 #[then("the URL should be {string}")]
 async fn url_equals(world: &mut BrowserWorld, expected: String) {
-  expect(world.page())
+  expect(world.page()?)
     .to_have_url(expected.as_str())
     .await
     .map_err(to_step_err)?;

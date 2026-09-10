@@ -24,7 +24,7 @@ default-members = [
 [workspace.package]
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.91.0"
+rust-version = "1.97.0"
 license = "MIT OR Apache-2.0"
 authors = ["Salama Ashoush <salamaashoush@gmail.com>"]
 repository = "https://github.com/salamaashoush/ferridriver"
@@ -73,6 +73,7 @@ ferrijs-fetch = "0.2.4"
 ferrijs-bundle = "0.2.4"
 ferrijs-permissions = "0.2.4"
 ferrijs-serde = "0.2.4"
+
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -126,3 +127,11 @@ debug = false
 # crates stay at opt-level 0 so incremental rebuilds are unaffected.
 [profile.dev.package."*"]
 opt-level = 1
+
+[patch.crates-io]
+ferrijs = { git = "https://github.com/salamaashoush/ferrijs", rev = "144f8ef04dbfe9ca83f0e669c5eb033c05133945" }
+ferrijs-std = { git = "https://github.com/salamaashoush/ferrijs", rev = "144f8ef04dbfe9ca83f0e669c5eb033c05133945" }
+ferrijs-fetch = { git = "https://github.com/salamaashoush/ferrijs", rev = "144f8ef04dbfe9ca83f0e669c5eb033c05133945" }
+ferrijs-bundle = { git = "https://github.com/salamaashoush/ferrijs", rev = "144f8ef04dbfe9ca83f0e669c5eb033c05133945" }
+ferrijs-permissions = { git = "https://github.com/salamaashoush/ferrijs", rev = "144f8ef04dbfe9ca83f0e669c5eb033c05133945" }
+ferrijs-serde = { git = "https://github.com/salamaashoush/ferrijs", rev = "144f8ef04dbfe9ca83f0e669c5eb033c05133945" }

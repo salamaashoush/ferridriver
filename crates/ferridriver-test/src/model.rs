@@ -690,34 +690,34 @@ impl TestInfo {
   /// `.feature` file line, a `test.step` call site). The location flows
   /// into the step's trace span as its stack frame — the viewer's
   /// Source tab — and into the recorded [`TestStep::location`].
-  pub async fn begin_step_at(
+  pub fn begin_step_at(
     &self,
     title: impl Into<String>,
     category: StepCategory,
     location: Option<StepLocation>,
-  ) -> StepHandle {
-    self.open_step(title, category, None, location)
+  ) -> impl std::future::Future<Output = StepHandle> {
+    std::future::ready(self.open_step(title, category, None, location))
   }
 
   /// Begin a nested step (child of a parent step).
-  pub async fn begin_child_step(
+  pub fn begin_child_step(
     &self,
     title: impl Into<String>,
     category: StepCategory,
     parent_step_id: &str,
-  ) -> StepHandle {
-    self.open_step(title, category, Some(parent_step_id), None)
+  ) -> impl std::future::Future<Output = StepHandle> {
+    std::future::ready(self.open_step(title, category, Some(parent_step_id), None))
   }
 
   /// [`Self::begin_child_step`] with the child's own source location.
-  pub async fn begin_child_step_at(
+  pub fn begin_child_step_at(
     &self,
     title: impl Into<String>,
     category: StepCategory,
     parent_step_id: &str,
     location: Option<StepLocation>,
-  ) -> StepHandle {
-    self.open_step(title, category, Some(parent_step_id), location)
+  ) -> impl std::future::Future<Output = StepHandle> {
+    std::future::ready(self.open_step(title, category, Some(parent_step_id), location))
   }
 
   /// The one place a live step is opened: allocates the id, streams

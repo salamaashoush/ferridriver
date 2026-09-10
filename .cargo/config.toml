@@ -1,4 +1,5 @@
 [alias]
+gate = "run -p ferridriver-gate --"
 ck = "check --workspace --all-features --all-targets"
 lint = "clippy --workspace --all-targets --all-features"
 lintfix = "clippy --workspace --all-targets --all-features --fix --allow-dirty"

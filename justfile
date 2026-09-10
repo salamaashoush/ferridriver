@@ -8,7 +8,8 @@ setup:
   @echo "Git hooks configured"
 
 # Full CI check
-ready: fmt lint test acceptance
+ready *args:
+  cargo gate ready {{args}}
   @echo "Ready to commit"
 
 alias r := ready
@@ -17,79 +18,43 @@ alias c := check
 alias t := test
 alias tf := test-fast
 
-# Two acceptance runs, each hermetic: `--no-inherit` so neither picks up
-# the repository layer, whose `testIgnore` excludes these very
-# directories from the repo's own run and would otherwise leave the
-# parity suite with nothing to collect.
-# The parity gate — mergeTests, expect.extend,
-# defineConfig, devices, snapshotPathTemplate — with NO extensions
-# loaded, because every one of those is core. Then the driving case: a
-# BDD suite that reaches its framework through an extension package,
-# importing `playwright-bdd` with no edit to its own source.
-acceptance:
-  cargo build --bin ferridriver
-  ./target/debug/ferridriver test --no-inherit --config tests/acceptance/parity/playwright.config.ts
-  cd tests/acceptance/driving && ../../../target/debug/ferridriver bdd --no-inherit
+# Run both acceptance suites with the gate's build and worker budget.
+acceptance *args:
+  cargo gate test --only acceptance --only acceptance-bdd {{args}}
 
-# Check compilation (default-members; ferridriver-node excluded)
 check:
-  cargo check --all-targets
+  cargo check --locked --workspace --all-targets
 
-# Run all tests: Rust workspace, CLI infra + MCP smoke (serial), the
-# TS e2e suite (4 projects), the BDD feature suite, the NAPI binding
-# suite, and the e2e typecheck.
-#
-# CLI integration tests run serially: under bare `cargo test`
-# parallelism, dozens of concurrent browsers starve each other and
-# Firefox dies mid-startup with cascade failures at any commit.
-#
-# The last two used to be neither here nor in CI, so a NAPI regression
-# or a binding shipped without its type declaration failed nothing.
-# `bun test` needs the addon rebuilt, which is the slowest step in this
-# recipe; `just test-fast` and `just test-backend` are the quick loops.
-test: test-rust test-node
-  @echo "All suites green"
+test *args:
+  cargo gate test {{args}}
 
 # The Rust, e2e and BDD half of `just test`.
 test-rust:
-  cargo build --bin ferridriver --bin ferridriver-fixtures
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --workspace --exclude ferridriver-cli
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli -- --test-threads=1
-  ./target/debug/ferridriver test
-  ./target/debug/ferridriver bdd tests/features/
+  cargo gate test --only rust-build --only doc-tests --only e2e --only bdd
 
-# The JS half: the NAPI binding suite, and the typecheck that proves the
-# hand-written `packages/ferridriver-test` declares what the bindings
-# actually expose.
-#
-# `bun x` fetches typescript, and a bun pointed at a private mirror
-# fails that with a 403 — the same trap `perf-diff` passes `--registry`
-# for. The public registry is named explicitly for the same reason.
-test-node:
-  cd crates/ferridriver-node && bun run build:debug && bun test
-  cd tests && BUN_CONFIG_REGISTRY=https://registry.npmjs.org bun x tsc --noEmit -p tsconfig.json
+# The Node addon has its own build dependency in the gate.
+test-node *args:
+  cargo gate test --only napi --only types {{args}}
 
-# Run all tests with maximum parallelism (browser-heavy suites race;
-# see the serial `test` recipe for the trustworthy gate)
-test-fast:
-  cargo build --bin ferridriver --bin ferridriver-fixtures
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --exclude ferridriver-cli & \
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test mcp_smoke -- "cdp_pipe::" & \
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test mcp_smoke -- "cdp_raw::" & \
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test mcp_smoke -- "bidi::" & \
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test mcp_smoke -- "webkit::" & \
-  wait
+test-types:
+  cargo gate test --only types
 
-# Run one backend: the TS e2e project plus its MCP smoke module.
+test-fast *args:
+  cargo gate test {{args}}
+
+test-integration *args:
+  cargo build --locked --bin ferridriver --bin ferridriver-fixtures --bin ferridriver-runtime-probe --bin ferridriver-gate --bin sidecar_echo
+  ./target/debug/ferridriver test --no-inherit --headless --config tests/integration/ferridriver.toml {{args}}
+
+# Run one backend: the native e2e project and MCP tests.
 # Accepts either naming (cdp-pipe/cdp_pipe, cdp-raw/cdp_raw, bidi, webkit).
 test-backend backend:
   #!/usr/bin/env bash
   set -euo pipefail
-  cargo build --bin ferridriver --bin ferridriver-fixtures
+  cargo build --locked --bin ferridriver --bin ferridriver-fixtures
   project="$(echo "{{backend}}" | tr '_' '-')"
-  module="$(echo "{{backend}}" | tr '-' '_')"
-  ./target/debug/ferridriver test --project "$project"
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test mcp_smoke -- "${module}::" --test-threads=1
+  ./target/debug/ferridriver test --headless --project "$project"
+  ./target/debug/ferridriver test 'tests/integration/mcp-*.test.mjs' --no-inherit --headless --config tests/integration/ferridriver.toml --grep "${project}:"
 
 # Run a script/test target with the QuickJS leak dump on.
 #
@@ -138,8 +103,8 @@ run-http port="8080":
 
 # Run the TS e2e suite through the native runner (all projects; pass --project <p> to narrow)
 test-e2e *args:
-  cargo build --bin ferridriver --bin ferridriver-fixtures
-  ./target/debug/ferridriver test {{args}}
+  cargo build --locked --bin ferridriver --bin ferridriver-fixtures
+  ./target/debug/ferridriver test --headless {{args}}
 
 # Check ferridriver-perf against the engine it is a port of.
 #
@@ -431,15 +396,12 @@ bench-vs-playwright spec_dir runs="5" workers="4":
   cargo build --profile release-fast --bin ferridriver
   ./scripts/bench-vs-playwright.sh {{spec_dir}} {{runs}} {{workers}}
 
-# Run BDD feature tests via the Rust CLI
-bdd *args:
-  cargo build -p ferridriver-fixtures
-  cargo run --bin ferridriver -- bdd {{args}} tests/features/
+alias bdd := test-bdd
 
 # Build CLI then run BDD feature tests
 test-bdd *args:
-  cargo build --bin ferridriver --bin ferridriver-fixtures
-  ./target/debug/ferridriver bdd {{args}} tests/features/
+  cargo build --locked --bin ferridriver --bin ferridriver-fixtures
+  ./target/debug/ferridriver bdd --headless {{args}} tests/features/
 
 # Bump version everywhere, commit, tag, and push to trigger release CI.
 # Usage: just release 0.3.0

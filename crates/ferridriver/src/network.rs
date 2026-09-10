@@ -668,6 +668,26 @@ impl NavRequestSlot {
       *guard = None;
     }
   }
+
+  pub async fn final_response(&self, grace: std::time::Duration) -> Option<Response> {
+    let mut request = self.wait(grace).await?;
+    loop {
+      let changed = self.filled.notified();
+      tokio::pin!(changed);
+      changed.as_mut().enable();
+      while let Some(next) = request.redirected_to() {
+        request = next;
+      }
+      let response = request.response().await.ok().flatten()?;
+      if !matches!(response.status(), 301 | 302 | 303 | 307 | 308) || !response.headers().contains_key("location") {
+        return Some(response);
+      }
+      // Navigation results and network events have separate consumers; the
+      // final redirect hop can still be queued when the lifecycle resolves.
+      tokio::time::timeout(grace, changed).await.ok()?;
+      request = self.get()?;
+    }
+  }
 }
 
 // ── Response ────────────────────────────────────────────────────────────────
@@ -1188,6 +1208,57 @@ fn hex_digit(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn navigation_waits_for_redirect_hops_queued_after_the_lifecycle_result() {
+    let slot = NavRequestSlot::new();
+    let request = |previous: Option<Request>| {
+      Request::new(RequestInit {
+        id: "reused-bidi-id".into(),
+        url: "http://example.test/".into(),
+        method: "GET".into(),
+        resource_type: "Document".into(),
+        is_navigation_request: true,
+        post_data: None,
+        headers: Headers::default(),
+        frame_id: None,
+        page_guid: None,
+        redirected_from: previous,
+        timing: None,
+        raw_headers_fn: None,
+      })
+    };
+    let response = |request: Request, status| {
+      Response::new(ResponseInit {
+        url: request.url().into(),
+        request,
+        status,
+        status_text: String::new(),
+        from_service_worker: false,
+        http_version: None,
+        headers: [("location".into(), "/next".into())].into_iter().collect(),
+        remote_addr: None,
+        security_details: None,
+        body_fn: None,
+        raw_headers_fn: None,
+      })
+    };
+    let first = request(None);
+    first.set_response(&response(first.clone(), 302)).await;
+    slot.set(first.clone());
+    let mut waiting = Box::pin(slot.final_response(std::time::Duration::from_secs(1)));
+    assert!(futures::poll!(&mut waiting).is_pending());
+
+    let second = request(Some(first));
+    second.set_response(&response(second.clone(), 307)).await;
+    slot.set(second.clone());
+    assert!(futures::poll!(&mut waiting).is_pending());
+
+    let final_request = request(Some(second));
+    final_request.set_response(&response(final_request.clone(), 200)).await;
+    slot.set(final_request);
+    assert_eq!(waiting.await.expect("final response").status(), 200);
+  }
 
   #[tokio::test]
   async fn redirect_chain_links_in_both_directions() {

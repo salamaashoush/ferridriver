@@ -12,6 +12,39 @@ import { test, describe, expect } from '@ferridriver/test';
 import { setBody } from './helpers/html';
 
 describe('locator.ariaSnapshot', () => {
+  test('replacing a snapshotted document preserves nested iframe snapshots', async ({ page }) => {
+    for (let iteration = 0; iteration < 10; iteration++) {
+      await page.setContent('<button>Previous</button>');
+      const previous = await page.snapshotForAI();
+      expect(typeof previous.full).toBe('string');
+      expect(previous.full.length).toBeGreaterThan(0);
+      expect(typeof previous.refMap).toBe('object');
+      await page.setContent('<main><h1>Heading</h1><p>FindThisText</p><button>PressMe</button></main>');
+      const heading = await page.locator('h1').ariaSnapshot();
+      expect(heading).toContain('Heading');
+      expect(heading).not.toContain('FindThisText');
+      expect(heading).not.toContain('PressMe');
+      const paragraph = await page.locator('p').ariaSnapshot();
+      expect(paragraph).toContain('FindThisText');
+      expect(paragraph).not.toContain('Heading');
+      const button = await page.locator('button').ariaSnapshot({ mode: 'ai' });
+      expect(button).toContain('PressMe');
+      expect(button).toMatch(/\[ref=/);
+      await page.setContent(`<main><h1>Top</h1>
+        <iframe srcdoc="<button>InnerBtn</button><iframe src='data:text/html,<b>DeepText</b>'></iframe>"></iframe>
+        </main>`);
+      const snapshot = await page.locator('main').ariaSnapshot({ mode: 'ai' });
+      expect(snapshot).toMatch(/\[ref=/);
+      expect(snapshot).toContain('Top');
+      expect(snapshot).toContain('InnerBtn');
+      expect(snapshot).toContain('DeepText');
+      const plain = await page.locator('main').ariaSnapshot();
+      expect(plain).not.toContain('InnerBtn');
+      expect(plain).not.toContain('DeepText');
+      expect(plain).not.toMatch(/\[ref=/);
+    }
+  });
+
   test('renders roles, names and text', async ({ page }) => {
     await setBody(
       page,

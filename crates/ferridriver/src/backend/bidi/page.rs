@@ -770,8 +770,7 @@ impl BidiPage {
   /// request can be processed second. A same-document navigation issues
   /// no request, so waiting there would only slow it down.
   async fn await_nav_response(&self, grace: std::time::Duration) -> Option<Response> {
-    let req = self.nav_request_slot.wait(grace).await?;
-    req.response().await.ok().flatten()
+    self.nav_request_slot.final_response(grace).await
   }
 
   pub async fn wait_for_navigation(&self) -> Result<()> {
@@ -2339,7 +2338,10 @@ impl BidiPage {
               }));
             }
           },
-          "browsingContext.navigationStarted" | "browsingContext.domContentLoaded" | "browsingContext.load" => {
+          "browsingContext.navigationStarted"
+          | "browsingContext.navigationCommitted"
+          | "browsingContext.domContentLoaded"
+          | "browsingContext.load" => {
             // Materialise context-wide permission grants for the newly
             // navigated origin (mirrors Playwright's
             // `doGrantGlobalPermissionsForURL` on navigation commit).
@@ -2358,10 +2360,10 @@ impl BidiPage {
             // BiDi has no direct analogue). Keeps the frame cache's
             // main-frame URL fresh and starts a new `since-navigation`
             // window for `consoleMessages()` / `pageErrors()`. Only the
-            // `navigationStarted` arm fires — marking again at
+            // `navigationCommitted` arm fires — marking again at
             // `domContentLoaded` / `load` would wrongly evict console
             // output from inline scripts that ran during parse.
-            if event.method == "browsingContext.navigationStarted" && event_ctx == &*ctx {
+            if event.method == "browsingContext.navigationCommitted" && event_ctx == &*ctx {
               let url = event
                 .params
                 .get("url")
@@ -2374,7 +2376,7 @@ impl BidiPage {
                 name: String::new(),
                 url,
               }));
-            } else if event.method == "browsingContext.navigationStarted" && child_frames.contains(event_ctx) {
+            } else if event.method == "browsingContext.navigationCommitted" && child_frames.contains(event_ctx) {
               // Child-iframe cross-document navigation — surface it like
               // CDP's per-frame `Page.frameNavigated` so frame-scoped
               // consumers (e.g. WebSocket-route teardown) observe it.
@@ -3896,6 +3898,13 @@ impl BidiNetworkTracker {
       _ => json!({"request": request_id, "action": "cancel"}),
     };
     let session = self.session.clone();
+    tracing::debug!(
+      context = %self.context_id,
+      request = request_id,
+      event_context = ?params.get("context"),
+      action = ?answer.get("action"),
+      "answering HTTP authentication challenge"
+    );
     tokio::spawn(async move {
       if let Err(e) = session.transport.send_command("network.continueWithAuth", answer).await {
         tracing::debug!("network.continueWithAuth failed: {e}");

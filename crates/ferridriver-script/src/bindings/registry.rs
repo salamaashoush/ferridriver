@@ -39,6 +39,7 @@ pub(crate) struct ToolReg {
   /// unrestricted, `Some(list)` ⇒ default-deny allow-list (an empty
   /// list denies every host).
   pub(crate) allowed_net: Option<std::sync::Arc<[String]>>,
+  pub(crate) declared_net: Vec<String>,
   /// Per-tool handler timeout (ms) from the manifest `timeoutMs`. `None`
   /// ⇒ no independent bound (the session wall-clock still applies).
   /// Enforced natively in `extensions::dispatch_tool`.
@@ -128,10 +129,8 @@ pub(crate) struct ParamTypeReg {
 /// Operator extension-policy ceiling for this VM, stored as context
 /// userdata at `Session::create`. [`register_tool`] intersects every
 /// declared manifest with it, so the `ToolReg` a session dispatches
-/// from already carries the EFFECTIVE grants. Absent (the manifest
-/// extraction runtime, plain engine tests) ⇒ manifests register
-/// unclamped — extraction reports declared intent; enforcement is
-/// session-scoped.
+/// from already carries the effective grants. Declared hosts are retained
+/// separately so extraction can report permissions removed by the ceiling.
 pub(crate) struct ExtensionPolicyUd(pub(crate) ferridriver_config::ExtensionPolicyConfig);
 
 // SAFETY: holds only owned config data (no JS values), so re-stating
@@ -302,8 +301,7 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
     Err(_) => (std::collections::BTreeMap::new(), Vec::new()),
   };
 
-  // Operator ceiling (session VMs only; the extraction runtime carries
-  // none so manifests keep their DECLARED capabilities for reporting).
+  let declared_net = allowed_net.clone();
   let policy = ctx.userdata::<ExtensionPolicyUd>().map(|u| u.0.clone());
   let allowed_net = match &policy {
     Some(p) => effective_net(allowed_net, p.net.as_deref()),
@@ -330,6 +328,7 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
       expose_as_mcp_tool,
       allowed_commands: std::sync::Arc::new(allowed_commands),
       allowed_net,
+      declared_net,
       timeout_ms,
       handler: saved,
     });
@@ -419,7 +418,7 @@ pub fn tools_snapshot(ctx: &Ctx<'_>) -> Result<Vec<CollectedTool>, ScriptError> 
         annotations: t.annotations.clone(),
         allow: CollectedAllow {
           commands: (*t.allowed_commands).clone(),
-          net: t.allowed_net.as_ref().map(|n| n.to_vec()).unwrap_or_default(),
+          net: t.declared_net.clone(),
         },
         expose_as_mcp_tool: t.expose_as_mcp_tool,
         timeout_ms: t.timeout_ms,

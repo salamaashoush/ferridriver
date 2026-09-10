@@ -48,7 +48,7 @@ impl VarsStore for InMemoryVars {
   }
 
   fn has(&self, name: &str) -> bool {
-    self.inner.read().ok().is_some_and(|guard| guard.contains_key(name))
+    self.inner.read().is_ok_and(|guard| guard.contains_key(name))
   }
 
   fn delete(&self, name: &str) {

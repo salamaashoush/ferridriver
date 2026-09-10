@@ -69,13 +69,13 @@ fn ensure_dialog_log(world: &mut BrowserWorld) -> DialogLog {
 /// `dismiss`. Each registered listener also pushes a [`DialogRecord`]
 /// into the per-world [`DialogLog`] so the `then` steps can make
 /// assertions.
-fn install_dialog_listener<F>(world: &mut BrowserWorld, respond: F)
+fn install_dialog_listener<F>(world: &mut BrowserWorld, respond: F) -> Result<(), StepError>
 where
   F: Fn(Dialog) + Send + Sync + 'static,
 {
   let log = ensure_dialog_log(world);
   let respond = Arc::new(respond);
-  world.page().events().on(
+  world.page()?.events().on(
     "dialog",
     Arc::new(move |event: PageEvent| {
       if let PageEvent::Dialog(dialog) = event {
@@ -91,6 +91,7 @@ where
       }
     }),
   );
+  Ok(())
 }
 
 #[given("I accept the dialog")]
@@ -99,7 +100,7 @@ async fn accept_dialog(world: &mut BrowserWorld) {
     tokio::spawn(async move {
       let _ = dialog.accept(None).await;
     });
-  });
+  })?;
 }
 
 #[given("I dismiss the dialog")]
@@ -108,7 +109,7 @@ async fn dismiss_dialog(world: &mut BrowserWorld) {
     tokio::spawn(async move {
       let _ = dialog.dismiss().await;
     });
-  });
+  })?;
 }
 
 #[given("I type {string} in the dialog")]
@@ -119,7 +120,7 @@ async fn type_in_dialog(world: &mut BrowserWorld, text: String) {
     tokio::spawn(async move {
       let _ = dialog.accept(Some((*text).clone())).await;
     });
-  });
+  })?;
 }
 
 #[then("I should see dialog with text {string}")]

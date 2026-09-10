@@ -21,7 +21,7 @@ fn check_png(what: &str, bytes: &[u8]) -> Result<(), StepError> {
 #[step("I take a screenshot")]
 async fn take_screenshot(world: &mut BrowserWorld) {
   let bytes = world
-    .page()
+    .page()?
     .screenshot()
     .await
     .map_err(|e| StepError::wrap("screenshot", e))?;
@@ -31,7 +31,7 @@ async fn take_screenshot(world: &mut BrowserWorld) {
 #[step("I take a full page screenshot")]
 async fn take_full_page_screenshot(world: &mut BrowserWorld) {
   let bytes = world
-    .page()
+    .page()?
     .screenshot()
     .full_page(true)
     .await
@@ -42,7 +42,7 @@ async fn take_full_page_screenshot(world: &mut BrowserWorld) {
 #[step("I take a screenshot of {string}")]
 async fn take_screenshot_of(world: &mut BrowserWorld, selector: String) {
   let bytes = world
-    .page()
+    .page()?
     .locator(&selector)
     .screenshot()
     .await
@@ -53,7 +53,7 @@ async fn take_screenshot_of(world: &mut BrowserWorld, selector: String) {
 #[step("I take a snapshot")]
 async fn take_snapshot(world: &mut BrowserWorld) {
   let snapshot = world
-    .page()
+    .page()?
     .snapshot_for_ai()
     .await
     .map_err(|e| StepError::wrap("snapshot", e))?;

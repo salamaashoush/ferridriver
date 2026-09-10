@@ -15,7 +15,7 @@ async fn apply(
   opts: ferridriver::options::BrowserContextOptions,
 ) -> Result<(), StepError> {
   world
-    .page()
+    .page()?
     .apply_context_options(&opts)
     .await
     .map_err(|e| StepError::wrap(label, e))
@@ -54,7 +54,7 @@ async fn emulate_color_scheme(world: &mut BrowserWorld, scheme: String) {
     ..Default::default()
   };
   world
-    .page()
+    .page()?
     .emulate_media()
     .options(opts)
     .await
@@ -77,7 +77,7 @@ async fn set_user_agent(world: &mut BrowserWorld, ua: String) {
 #[step("I set viewport to {int}x{int}")]
 async fn set_viewport(world: &mut BrowserWorld, width: i64, height: i64) {
   world
-    .page()
+    .page()?
     .set_viewport_size(width, height)
     .await
     .map_err(|e| StepError::wrap("set viewport", e))?;

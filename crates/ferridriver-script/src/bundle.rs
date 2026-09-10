@@ -324,10 +324,7 @@ impl CompiledBundleExt for CompiledBundle {
       .source_map
       .sources()
       .iter()
-      .map(|src| {
-        let p = Path::new(src);
-        if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) }
-      })
+      .map(|src| resolve_source(cwd, src))
       .collect()
   }
 }
@@ -485,7 +482,7 @@ struct AuxEnvelope {
 
 /// Bump on any change to [`ExtensionSnapshot`] that a reader cannot
 /// absorb; an entry at another version is a miss.
-const AUX_VERSION: u32 = 2;
+const AUX_VERSION: u32 = 3;
 
 fn encode_aux(snapshot: &ExtensionSnapshot) -> String {
   serde_json::to_string(&AuxEnvelope {

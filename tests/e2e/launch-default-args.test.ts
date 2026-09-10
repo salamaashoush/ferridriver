@@ -13,7 +13,7 @@ import { test, describe, expect } from '@ferridriver/test';
 
 /** What Chrome says it was started with. */
 async function argv(options: Record<string, unknown>): Promise<string[] | 'refused'> {
-  const browser = await chromium().launch(options);
+  const browser = await chromium().launch({ headless: true, ...options });
   try {
     const session = await browser.newBrowserCDPSession();
     try {
@@ -63,9 +63,11 @@ describe('ignoreDefaultArgs', () => {
     // `--enable-automation` is one of the defaults, so a browser
     // launched without them will not report its command line at all.
     // The refusal IS the evidence that they went.
-    expect(await argv({ ignoreDefaultArgs: true })).toBe('refused');
+    // ignoreDefaultArgs also removes the flag from headless: true.
+    const options = { headless: true, ignoreDefaultArgs: true, args: ['--headless', '--no-first-run'] };
+    expect(await argv(options)).toBe('refused');
 
-    const bare = await chromium().launch({ ignoreDefaultArgs: true });
+    const bare = await chromium().launch(options);
     try {
       const page = await bare.newPage();
       await page.setContent('<html><body><main id="bare">up</main></body></html>');

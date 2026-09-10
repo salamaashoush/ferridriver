@@ -14,7 +14,11 @@ use ferridriver::context::ContextRef;
 /// state (variables, typed extensions, registry). Built-in steps access page/context
 /// via delegate methods; NAPI step handlers access the full `TestFixtures` directly.
 pub struct BrowserWorld {
-  fixtures: ferridriver_test::model::TestFixtures,
+  fixtures: Option<ferridriver_test::model::TestFixtures>,
+  test_info: Arc<ferridriver_test::model::TestInfo>,
+  modifiers: Arc<ferridriver_test::model::TestModifiers>,
+  browser_config: ferridriver_test::config::BrowserConfig,
+  request: Arc<ferridriver::http_client::HttpClient>,
   vars: FxHashMap<String, String>,
   state: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
   registry: Option<Arc<crate::registry::StepRegistry>>,
@@ -25,7 +29,11 @@ impl BrowserWorld {
   /// Create a new world from the unified test fixtures.
   pub fn new(fixtures: ferridriver_test::model::TestFixtures) -> Self {
     Self {
-      fixtures,
+      test_info: Arc::clone(&fixtures.test_info),
+      modifiers: Arc::clone(&fixtures.modifiers),
+      browser_config: fixtures.browser_config.clone(),
+      request: Arc::clone(&fixtures.request),
+      fixtures: Some(fixtures),
       vars: FxHashMap::default(),
       state: FxHashMap::default(),
       registry: None,
@@ -33,45 +41,74 @@ impl BrowserWorld {
     }
   }
 
+  pub fn without_browser(
+    test_info: Arc<ferridriver_test::model::TestInfo>,
+    request: Arc<ferridriver::http_client::HttpClient>,
+    browser_config: ferridriver_test::config::BrowserConfig,
+  ) -> Self {
+    Self {
+      fixtures: None,
+      test_info,
+      request,
+      browser_config,
+      modifiers: Arc::new(ferridriver_test::model::TestModifiers::default()),
+      vars: FxHashMap::default(),
+      state: FxHashMap::default(),
+      registry: None,
+      feature_dir: None,
+    }
+  }
+
+  pub fn modifiers(&self) -> &Arc<ferridriver_test::model::TestModifiers> {
+    &self.modifiers
+  }
+
   /// Access the unified test fixtures.
-  pub fn fixtures(&self) -> &ferridriver_test::model::TestFixtures {
-    &self.fixtures
+  pub fn fixtures(&self) -> Result<&ferridriver_test::model::TestFixtures, crate::step::StepError> {
+    self
+      .fixtures
+      .as_ref()
+      .ok_or_else(|| crate::step::StepError::from("scenario did not request browser fixtures".to_string()))
   }
 
   /// Mutable access to the unified test fixtures.
-  pub fn fixtures_mut(&mut self) -> &mut ferridriver_test::model::TestFixtures {
-    &mut self.fixtures
+  pub fn fixtures_mut(&mut self) -> Result<&mut ferridriver_test::model::TestFixtures, crate::step::StepError> {
+    self
+      .fixtures
+      .as_mut()
+      .ok_or_else(|| crate::step::StepError::from("scenario did not request browser fixtures".to_string()))
   }
 
   // ── Delegate accessors (used by built-in steps) ──
 
-  pub fn page(&self) -> &Arc<Page> {
-    &self.fixtures.page
+  pub fn page(&self) -> Result<&Arc<Page>, crate::step::StepError> {
+    Ok(&self.fixtures()?.page)
   }
 
   /// Replace the active page Arc entirely (used for tab switching).
-  pub fn set_page(&mut self, page: Arc<Page>) {
-    self.fixtures.page = page;
+  pub fn set_page(&mut self, page: Arc<Page>) -> Result<(), crate::step::StepError> {
+    self.fixtures_mut()?.page = page;
+    Ok(())
   }
 
-  pub fn context(&self) -> &ContextRef {
-    &self.fixtures.context
+  pub fn context(&self) -> Result<&ContextRef, crate::step::StepError> {
+    Ok(&self.fixtures()?.context)
   }
 
-  pub fn browser(&self) -> &ferridriver::Browser {
-    &self.fixtures.browser
+  pub fn browser(&self) -> Result<&ferridriver::Browser, crate::step::StepError> {
+    Ok(&self.fixtures()?.browser)
   }
 
   pub fn request(&self) -> &ferridriver::http_client::HttpClient {
-    &self.fixtures.request
+    &self.request
   }
 
   pub fn test_info(&self) -> &Arc<ferridriver_test::model::TestInfo> {
-    &self.fixtures.test_info
+    &self.test_info
   }
 
   pub fn browser_config(&self) -> &ferridriver_test::config::BrowserConfig {
-    &self.fixtures.browser_config
+    &self.browser_config
   }
 
   // ── Scenario variables ──
@@ -149,7 +186,7 @@ impl BrowserWorld {
   /// output dir first (round-trips within a scenario) and falls back
   /// to the feature dir (committed fixtures).
   pub fn resolve_output_path(&self, relative: &str) -> std::path::PathBuf {
-    self.fixtures.test_info.output_dir.join(relative)
+    self.test_info.output_dir.join(relative)
   }
 
   /// Resolve a relative path for read+write round-trips: try the test
@@ -170,7 +207,6 @@ impl BrowserWorld {
 
   pub async fn attach(&self, name: &str, content_type: &str, data: Vec<u8>) {
     self
-      .fixtures
       .test_info
       .attach(
         name.to_string(),

@@ -855,6 +855,15 @@ impl TestRunner {
       plans.insert(idx, p);
     }
 
+    let output_dirs: std::collections::BTreeSet<_> = merged
+      .values()
+      .filter(|config| config.preserve_output == "never")
+      .map(|config| &config.output_dir)
+      .collect();
+    for output_dir in output_dirs {
+      let _ = std::fs::remove_dir_all(output_dir);
+    }
+
     // ── Single aggregate run boundary ──
     let reporting_enabled = bus.has_subscribers();
 
@@ -900,6 +909,7 @@ impl TestRunner {
     let mut remaining: Vec<usize> = scheduled.clone();
     let mut join_set: tokio::task::JoinSet<(usize, Option<ExecuteSummary>)> = tokio::task::JoinSet::new();
     let mut in_flight = 0usize;
+    let worker_slots = Arc::new(tokio::sync::Semaphore::new(num_workers as usize));
 
     let mut exit_code = 0i32;
     let mut agg = ExecuteSummary::default();
@@ -908,7 +918,7 @@ impl TestRunner {
       // Launch every ready project up to the parallelism cap. Skips (no tests
       // or dependency failed) resolve immediately and may unblock others, so
       // keep scanning until no further progress is possible this round.
-      while in_flight < cap {
+      while in_flight < cap && worker_slots.available_permits() > 0 {
         // Find a not-yet-started project whose prerequisites are all terminal.
         let next = remaining.iter().copied().find(|&idx| {
           prereqs
@@ -962,10 +972,31 @@ impl TestRunner {
           "running project",
         );
 
-        let mut sub_runner = self.with_run_options(
-          merged.get(&idx).cloned().unwrap_or_else(|| Arc::clone(&self.config)),
-          self.overrides.clone(),
-        );
+        let ready_projects = remaining
+          .iter()
+          .filter(|&&pending| {
+            plans.get(&pending).is_some_and(|plan| plan.total_tests > 0)
+              && prereqs
+                .get(&pending)
+                .is_none_or(|deps| deps.iter().all(|(dep, _)| terminal.contains(dep)))
+          })
+          .count()
+          + 1;
+        let mut project_config = merged
+          .get(&idx)
+          .map_or_else(|| (*self.config).clone(), |c| (**c).clone());
+        let allocation = worker_slots
+          .available_permits()
+          .div_ceil(ready_projects.min(cap - in_flight))
+          .min(project_plan.total_tests)
+          .min(project_config.workers.max(1) as usize) as u32;
+        project_config.workers = allocation;
+        // The lease covers browser teardown too; releasing it at the last test
+        // would overlap the next project's launches with live old browsers.
+        let Ok(worker_lease) = Arc::clone(&worker_slots).try_acquire_many_owned(allocation) else {
+          unreachable!("only the project scheduler acquires worker slots");
+        };
+        let mut sub_runner = self.with_run_options(Arc::new(project_config), self.overrides.clone());
         sub_runner.suppress_run_boundary = true;
         let (project_bus, drains) = match hooks.stream {
           Some(stream) => {
@@ -976,6 +1007,7 @@ impl TestRunner {
         };
         let owns_bus = hooks.stream.is_some();
         join_set.spawn(async move {
+          let _worker_lease = worker_lease;
           let summary = sub_runner.execute_with_summary(project_plan, project_bus.clone()).await;
           // A bus of this project's own is this project's to close: its
           // drains must finish before the caller calls the run over.
@@ -1150,7 +1182,7 @@ impl TestRunner {
     }
 
     // ── preserve_output: "never" — wipe output_dir at run start ──
-    if self.config.preserve_output == "never" {
+    if self.config.preserve_output == "never" && !self.suppress_run_boundary {
       let _ = std::fs::remove_dir_all(&self.config.output_dir);
     }
 
@@ -1586,7 +1618,10 @@ impl TestRunner {
     if self.config.preserve_output == "failures-only" {
       for (test_key, (attempts, expected)) in &attempt_history {
         if crate::model::outcome_kind(attempts, *expected) != crate::model::TestOutcomeKind::Unexpected {
-          let test_output_dir = self.config.output_dir.join(test_key);
+          let test_output_dir = self.config.output_dir.join(crate::worker::artifact_dir_name(
+            test_key,
+            self.config.name.as_deref().unwrap_or_default(),
+          ));
           if test_output_dir.exists() {
             let _ = std::fs::remove_dir_all(&test_output_dir);
           }

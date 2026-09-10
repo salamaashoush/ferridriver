@@ -21,16 +21,22 @@ pub const TEST_DTS: &str = include_str!("../../../../../packages/ferridriver-tes
 pub struct TypesPackage {
   pub name: &'static str,
   pub declaration: &'static str,
+  pub additional: &'static [(&'static str, &'static str)],
 }
 
 pub const PACKAGES: &[TypesPackage] = &[
   TypesPackage {
     name: "@ferridriver/extension",
     declaration: EXTENSION_DTS,
+    additional: &[],
   },
   TypesPackage {
     name: "@ferridriver/test",
     declaration: TEST_DTS,
+    additional: &[(
+      "node.d.ts",
+      include_str!("../../../../../packages/ferridriver-test/node.d.ts"),
+    )],
   },
 ];
 
@@ -47,6 +53,9 @@ pub fn materialize(root: &Path) -> std::io::Result<Vec<(&'static str, PathBuf)>>
     std::fs::create_dir_all(&dir)?;
     let dts = dir.join("index.d.ts");
     std::fs::write(&dts, pkg.declaration)?;
+    for (name, contents) in pkg.additional {
+      std::fs::write(dir.join(name), contents)?;
+    }
     std::fs::write(
       dir.join("package.json"),
       format!(

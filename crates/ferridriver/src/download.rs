@@ -221,13 +221,13 @@ impl Download {
 
   /// Backend hook: called by the listener when the protocol reports a
   /// progress `completed` / `canceled` state. `error` is `None` for a
-  /// clean completion. Subsequent calls are no-ops (watch coalesces).
+  /// clean completion. The first terminal state wins.
   ///
   /// `final_path` overrides the default `<downloads_dir>/<guid>` path
   /// when the backend knows the actual landing path (`BiDi` reports it on
   /// `downloadEnd.filepath`).
   ///
-  /// Uses [`tokio::sync::watch::Sender::send_replace`] rather than
+  /// Uses [`tokio::sync::watch::Sender::send_if_modified`] rather than
   /// `send` so the state update lands even when no receiver is
   /// currently subscribed — `send` silently discards the value when
   /// `receiver_count() == 0`, which would cause any later `path()` /
@@ -237,24 +237,29 @@ impl Download {
   /// anything calls `path()` on a download dispatched via
   /// `page.on("download", ...)`.
   pub fn report_finished(&self, final_path: Option<PathBuf>, error: Option<String>) {
-    if let Some(p) = final_path
-      && let Ok(mut g) = self.inner.local_path.lock()
-    {
-      *g = p;
-    }
-    let path = self
-      .inner
-      .local_path
-      .lock()
-      .map_or_else(|_| self.inner.downloads_dir.clone(), |g| g.clone());
-    let new_state = match error {
-      None => {
-        register_downloaded_file(&path);
-        DownloadStatus::Finished { path }
-      },
-      Some(e) => DownloadStatus::Failed { error: e },
-    };
-    self.inner.state_tx.send_replace(new_state);
+    self.inner.state_tx.send_if_modified(|state| {
+      if !matches!(state, DownloadStatus::Pending) {
+        return false;
+      }
+      if let Some(p) = final_path
+        && let Ok(mut g) = self.inner.local_path.lock()
+      {
+        *g = p;
+      }
+      let path = self
+        .inner
+        .local_path
+        .lock()
+        .map_or_else(|_| self.inner.downloads_dir.clone(), |g| g.clone());
+      *state = match error {
+        None => {
+          register_downloaded_file(&path);
+          DownloadStatus::Finished { path }
+        },
+        Some(e) => DownloadStatus::Failed { error: e },
+      };
+      true
+    });
   }
 
   /// Block until the download reaches a terminal state.
@@ -513,9 +518,7 @@ impl DownloadManager {
   /// download?". Unlike `FileChooserManager`, the unclaimed branch is a
   /// no-op (Playwright does not auto-cancel).
   pub fn did_open(&self, download: &Download) {
-    if let Ok(mut by_guid) = self.inner.by_guid.lock() {
-      by_guid.push(download.clone());
-    }
+    self.register_pending(download);
     self.fire_download_event(download);
   }
 
@@ -527,6 +530,11 @@ impl DownloadManager {
   /// Mirrors Playwright's `server/download.ts` which only fires the
   /// `Page.Events.Download` event once the suggested filename is known.
   pub fn register_pending(&self, download: &Download) {
+    // A denied WebKit download can omit its terminal protocol event. The
+    // context policy determines accessibility before any progress arrives.
+    if !self.inner.accept_downloads.load(std::sync::atomic::Ordering::Relaxed) {
+      download.report_finished(None, Some(DOWNLOADS_DENIED.to_string()));
+    }
     if let Ok(mut by_guid) = self.inner.by_guid.lock() {
       by_guid.push(download.clone());
     }

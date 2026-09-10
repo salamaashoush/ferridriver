@@ -130,14 +130,14 @@ impl Events {
   }
 
   /// Register a client, receiving everything sent from now on.
-  fn subscribe(&self) -> mpsc::UnboundedReceiver<String> {
+  fn subscribe(&self) -> (mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>) {
     let (tx, rx) = mpsc::unbounded_channel();
     self
       .clients
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .push(tx);
-    rx
+      .push(tx.clone());
+    (tx, rx)
   }
 
   /// Send one protocol event (`report`, `stdio`, `testFilesChanged`, …).
@@ -304,30 +304,13 @@ async fn session(socket: WebSocket, state: Arc<ServerState>) {
   use futures::{SinkExt, StreamExt};
 
   let (mut sink, mut stream) = socket.split();
-  let mut events = state.events.subscribe();
-  let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+  let (out_tx, mut out_rx) = state.events.subscribe();
 
-  // One writer task owns the sink: replies and events both go through it,
-  // so a slow client cannot interleave a half-written frame.
+  // A shared FIFO keeps reporter events ahead of the reply completing their run.
   let writer = tokio::spawn(async move {
-    loop {
-      tokio::select! {
-        message = out_rx.recv() => match message {
-          Some(message) => {
-            if sink.send(Message::Text(message.into())).await.is_err() {
-              break;
-            }
-          },
-          None => break,
-        },
-        event = events.recv() => match event {
-          Some(event) => {
-            if sink.send(Message::Text(event.into())).await.is_err() {
-              break;
-            }
-          },
-          None => break,
-        },
+    while let Some(message) = out_rx.recv().await {
+      if sink.send(Message::Text(message.into())).await.is_err() {
+        break;
       }
     }
   });
@@ -366,6 +349,7 @@ async fn session(socket: WebSocket, state: Arc<ServerState>) {
   }
 
   drop(out_tx);
+  writer.abort();
   let _ = writer.await;
 }
 
@@ -404,8 +388,8 @@ mod tests {
   #[tokio::test]
   async fn every_client_gets_every_event() {
     let events = Events::new();
-    let mut first = events.subscribe();
-    let mut second = events.subscribe();
+    let (_, mut first) = events.subscribe();
+    let (_, mut second) = events.subscribe();
     events.report(json!({ "method": "onBegin" }));
     events.send("stdio", json!({ "type": "stdout", "text": "hi" }));
 
@@ -421,8 +405,8 @@ mod tests {
   #[tokio::test]
   async fn a_disconnected_client_is_forgotten_without_stalling_the_rest() {
     let events = Events::new();
-    let gone = events.subscribe();
-    let mut alive = events.subscribe();
+    let (_, gone) = events.subscribe();
+    let (_, mut alive) = events.subscribe();
     drop(gone);
 
     events.report(json!({ "method": "onEnd" }));

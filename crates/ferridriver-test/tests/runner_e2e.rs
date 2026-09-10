@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferridriver_test::config::{CliOverrides, TestConfig};
+use ferridriver_test::config::{BrowserConfig, CliOverrides, TestConfig};
 use ferridriver_test::model::*;
 use ferridriver_test::runner::TestRunner;
 
@@ -327,6 +327,10 @@ async fn test_runner_e2e() {
   };
 
   let config = TestConfig {
+    browser: BrowserConfig {
+      headless: true,
+      ..Default::default()
+    },
     workers: 2,
     timeout: 15_000,
     expect_timeout: 5_000,

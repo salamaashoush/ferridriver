@@ -106,6 +106,7 @@ pub struct JsBddSession {
   /// The `test.extend` chains the step bundle registered, indexed by
   /// fixture set — what a scenario's chain is picked out of.
   fixture_sets: Vec<Vec<usize>>,
+  fixture_slots: Vec<Vec<ferridriver_test::fixture_graph::FixtureSlot>>,
   /// Cucumber `--world-parameters` exposed to every scenario as
   /// `this.parameters`.
   world_parameters: serde_json::Value,
@@ -397,6 +398,9 @@ impl JsBddSession {
       })
       .collect();
 
+    let fixture_slots = (0..snapshot.fixture_sets.len())
+      .map(|set| snapshot.fixture_slots(set))
+      .collect();
     let session = Self {
       session,
       registry: Arc::new(registry),
@@ -404,6 +408,7 @@ impl JsBddSession {
       bundle,
       cwd: Arc::new(cwd.to_path_buf()),
       fixture_sets: snapshot.fixture_sets,
+      fixture_slots,
       world_parameters,
     };
     // `BeforeAll` runs before any scenario exists, so it gets the
@@ -500,12 +505,56 @@ impl JsBddSession {
     Ok((set, names))
   }
 
+  fn needs_browser(&self, scenario: &ScenarioExecution) -> Result<bool, String> {
+    use ferridriver_test::fixture_graph::{resolution_order, resolve_dep};
+    let matches: Vec<_> = scenario
+      .steps
+      .iter()
+      .map(|step| self.registry.find_match(&step.text))
+      .collect();
+    if matches
+      .iter()
+      .flatten()
+      .any(|matched| matched.def.fixtures.as_ref().is_none_or(|f| f.names.is_none()))
+    {
+      return Ok(true);
+    }
+    for kind in ["Before", "After", "BeforeStep", "AfterStep"] {
+      if self
+        .applicable_hooks(kind, Some(&scenario.tags))
+        .iter()
+        .any(|hook| hook.requested.is_none())
+      {
+        return Ok(true);
+      }
+    }
+    let (set, requested) = self.scenario_fixtures(&matches, &scenario.tags)?;
+    let slots = self.fixture_slots.get(set).map_or(&[][..], Vec::as_slice);
+    let browser_fixture = |name: &str| matches!(name, "page" | "context" | "browser");
+    if requested
+      .iter()
+      .any(|name| browser_fixture(name) && resolve_dep(slots, name, None).is_none())
+    {
+      return Ok(true);
+    }
+    for pos in resolution_order(slots, &requested, &|_| true)? {
+      if slots[pos]
+        .deps
+        .iter()
+        .any(|name| browser_fixture(name) && resolve_dep(slots, name, Some(pos)).is_none())
+      {
+        return Ok(true);
+      }
+    }
+    Ok(false)
+  }
+
   /// The fixtures + `testInfo` a scenario runs against — lowered by the
   /// same core helper the Playwright-spec host uses, so a step body
   /// sees exactly what a test body sees. The `use` bag is the project's
   /// `use` block overlaid with the scenario's own `@use(...)` tags.
-  fn world_data(scenario: &ScenarioExecution, fixtures: &TestFixtures) -> TestWorldData {
-    let test_info = &fixtures.test_info;
+  fn world_data(scenario: &ScenarioExecution, scenario_world: &BrowserWorld) -> TestWorldData {
+    let test_info = scenario_world.test_info();
     let config_use = test_info
       .config_snapshot
       .as_ref()
@@ -525,14 +574,16 @@ impl JsBddSession {
       // A scenario expected to fail is expressed as an annotation the
       // runner acts on, not as an inverted step outcome.
       expected_status: ferridriver_test::model::ExpectedStatus::Pass,
-      browser_config: &fixtures.browser_config,
+      browser_config: scenario_world.browser_config(),
       base_url: test_info.config_snapshot.as_ref().and_then(|c| c.base_url.as_deref()),
       use_options,
     });
-    world.page = Some(Arc::clone(&fixtures.page));
-    world.context = Some(Arc::clone(&fixtures.context));
-    world.request = Some(Arc::clone(&fixtures.request));
-    world.browser = Some(Arc::clone(&fixtures.browser));
+    if let Ok(fixtures) = scenario_world.fixtures() {
+      world.page = Some(Arc::clone(&fixtures.page));
+      world.context = Some(Arc::clone(&fixtures.context));
+      world.browser = Some(Arc::clone(&fixtures.browser));
+    }
+    world.request = Some(Arc::new(scenario_world.request().clone()));
     world
   }
 
@@ -561,28 +612,27 @@ impl JsBddSession {
       .map(|step| self.registry.find_match(&step.text))
       .collect();
 
-    let fixtures = world.fixtures();
     let (fixture_set, requested) = match self.scenario_fixtures(&matches, &scenario.tags) {
       Ok(v) => v,
       Err(msg) => return Self::world_failure(scenario, msg),
     };
     let spec = ScenarioSpec {
-      world: Self::world_data(scenario, fixtures),
+      world: Self::world_data(scenario, world),
       parameters: self.world_parameters.clone(),
       fixture_set,
       requested,
       source_label: self.bundle.module_name.clone(),
     };
     let bridge = Arc::new(InfoBridge::new(
-      Arc::clone(&fixtures.test_info),
-      Arc::clone(&fixtures.modifiers),
+      Arc::clone(world.test_info()),
+      Arc::clone(world.modifiers()),
       Arc::new(self.session.deadline()),
       Arc::new(ferridriver_script::BundleSourceMap::new(
         Arc::clone(&self.bundle),
         Arc::clone(&self.cwd),
       )),
       Arc::clone(&self.cwd),
-      fixtures.test_info.timeout,
+      world.test_info().timeout,
       static_annotation_pairs(&crate::translate::scenario_annotations(scenario)),
     ));
 
@@ -622,7 +672,7 @@ impl JsBddSession {
     }
 
     if !failed {
-      let test_info = std::sync::Arc::clone(&world.fixtures().test_info);
+      let test_info = std::sync::Arc::clone(world.test_info());
       let feature_path = scenario.feature_path.display().to_string();
       for (step, matched) in scenario.steps.iter().zip(matches) {
         let step_meta = serde_json::json!({
@@ -773,8 +823,7 @@ impl JsBddSession {
     };
     if let Err(msg) = self.run_hooks("After", Some(&scenario.tags), Some(&after_arg)).await {
       world
-        .fixtures()
-        .test_info
+        .test_info()
         .record_step(ferridriver_test::model::RecordedStep {
           title: "After hook".to_string(),
           category: ferridriver_test::model::StepCategory::Hook,
@@ -1063,18 +1112,6 @@ pub fn translate_features_js(
         let step_graph = step_graph;
         let setup = setup.clone();
         Box::pin(async move {
-          let browser = pool
-            .get("browser")
-            .await
-            .map_err(|e| TestFailure::wrap("fixture 'browser' failed", e))?;
-          let page = pool
-            .get("page")
-            .await
-            .map_err(|e| TestFailure::wrap("fixture 'page' failed", e))?;
-          let context = pool
-            .get("context")
-            .await
-            .map_err(|e| TestFailure::wrap("fixture 'context' failed", e))?;
           let test_info: Arc<TestInfo> = pool
             .get("test_info")
             .await
@@ -1088,19 +1125,34 @@ pub fn translate_features_js(
             .await
             .map_err(|e| TestFailure::from(format!("JS step load failed: {e}")))?;
 
-          let fixtures = ferridriver_test::model::TestFixtures {
-            browser,
-            page,
-            context,
-            request,
-            test_info: Arc::clone(&test_info),
-            modifiers: Arc::new(ferridriver_test::model::TestModifiers::default()),
-            browser_config,
-            bdd_args: None,
-            bdd_data_table: None,
-            bdd_doc_string: None,
+          let mut world = if session.needs_browser(&scenario).map_err(TestFailure::from)? {
+            let browser = pool
+              .get("browser")
+              .await
+              .map_err(|e| TestFailure::wrap("fixture 'browser' failed", e))?;
+            let context = pool
+              .get("context")
+              .await
+              .map_err(|e| TestFailure::wrap("fixture 'context' failed", e))?;
+            let page = pool
+              .get("page")
+              .await
+              .map_err(|e| TestFailure::wrap("fixture 'page' failed", e))?;
+            BrowserWorld::new(TestFixtures {
+              browser,
+              page,
+              context,
+              request,
+              test_info: Arc::clone(&test_info),
+              modifiers: Arc::new(ferridriver_test::model::TestModifiers::default()),
+              browser_config,
+              bdd_args: None,
+              bdd_data_table: None,
+              bdd_doc_string: None,
+            })
+          } else {
+            BrowserWorld::without_browser(Arc::clone(&test_info), request, browser_config)
           };
-          let mut world = BrowserWorld::new(fixtures);
 
           let result = session.run_scenario(&scenario, &mut world).await;
           forward_attachments(&test_info, session.drain_attachments().await).await;
@@ -1139,13 +1191,7 @@ pub fn translate_features_js(
         metadata,
         id,
         test_fn,
-        fixture_requests: vec![
-          "browser".to_string(),
-          "context".to_string(),
-          "page".to_string(),
-          "test_info".to_string(),
-          "request".to_string(),
-        ],
+        fixture_requests: vec!["test_info".to_string(), "request".to_string()],
         annotations,
         timeout: None,
         retries: None,

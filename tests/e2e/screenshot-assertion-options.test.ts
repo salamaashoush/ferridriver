@@ -169,7 +169,7 @@ describe('toHaveScreenshot capture options', () => {
   });
 
   test('stylePath is applied to a page subject', async ({ page }, testInfo) => {
-    const sheet = `${testInfo.outputDir}/mask.css`;
+    const sheet = testInfo.outputPath('mask.css');
     await fs.promises.writeFile(sheet, '#box { visibility: hidden !important; }');
     await page.setContent(
       '<style>body{margin:0;background:#ffffff}#box{width:80px;height:80px;background:#123456}</style>' +

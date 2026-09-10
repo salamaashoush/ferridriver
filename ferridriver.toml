@@ -7,10 +7,8 @@ testMatch = ["tests/**/*.spec.ts", "tests/**/*.test.ts"]
 testIgnore = ["tests/acceptance/**"]
 steps = ["tests/steps/**/*.ts"]
 baseUrl = "http://127.0.0.1:47831"
-# Workers auto-detect (cpus/2), one browser per worker. Projects run one
-# at a time so at most one browser engine's worker pool is live at once;
-# raise maxParallelProjects once the ported e2e suite proves stable.
-maxParallelProjects = 1
+# Projects share the worker budget, including browser teardown.
+maxParallelProjects = 0
 
 [test.browser]
 headless = true

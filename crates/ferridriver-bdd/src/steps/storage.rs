@@ -7,7 +7,7 @@ use ferridriver_bdd_macros::{step, when};
 #[when("I set local storage {string} to {string}")]
 async fn set_local_storage(world: &mut BrowserWorld, key: String, value: String) {
   world
-    .page()
+    .page()?
     .evaluate(
       &format!(
         "localStorage.setItem('{}', '{}')",
@@ -24,7 +24,7 @@ async fn set_local_storage(world: &mut BrowserWorld, key: String, value: String)
 #[when("I remove local storage {string}")]
 async fn remove_local_storage(world: &mut BrowserWorld, key: String) {
   world
-    .page()
+    .page()?
     .evaluate(
       &format!("localStorage.removeItem('{}')", key.replace('\'', "\\'")),
       ferridriver::protocol::SerializedArgument::default(),
@@ -37,7 +37,7 @@ async fn remove_local_storage(world: &mut BrowserWorld, key: String) {
 #[step("I clear local storage")]
 async fn clear_local_storage(world: &mut BrowserWorld) {
   world
-    .page()
+    .page()?
     .evaluate(
       "localStorage.clear()",
       ferridriver::protocol::SerializedArgument::default(),
@@ -50,7 +50,7 @@ async fn clear_local_storage(world: &mut BrowserWorld) {
 #[when("I set session storage {string} to {string}")]
 async fn set_session_storage(world: &mut BrowserWorld, key: String, value: String) {
   world
-    .page()
+    .page()?
     .evaluate(
       &format!(
         "sessionStorage.setItem('{}', '{}')",
@@ -67,7 +67,7 @@ async fn set_session_storage(world: &mut BrowserWorld, key: String, value: Strin
 #[when("I remove session storage {string}")]
 async fn remove_session_storage(world: &mut BrowserWorld, key: String) {
   world
-    .page()
+    .page()?
     .evaluate(
       &format!("sessionStorage.removeItem('{}')", key.replace('\'', "\\'")),
       ferridriver::protocol::SerializedArgument::default(),
@@ -80,7 +80,7 @@ async fn remove_session_storage(world: &mut BrowserWorld, key: String) {
 #[step("I clear session storage")]
 async fn clear_session_storage(world: &mut BrowserWorld) {
   world
-    .page()
+    .page()?
     .evaluate(
       "sessionStorage.clear()",
       ferridriver::protocol::SerializedArgument::default(),
@@ -100,7 +100,7 @@ async fn save_storage_state(world: &mut BrowserWorld, file_path: String) {
   // overwrote checked-in fixtures during a normal run.
   let path = world.resolve_output_path(&file_path);
   let state = world
-    .page()
+    .page()?
     .storage_state()
     .await
     .map_err(|e| StepError::wrap("save storage state", e))?;
@@ -128,7 +128,7 @@ async fn load_storage_state(world: &mut BrowserWorld, file_path: String) {
     serde_json::from_str(&json).map_err(|e| StepError::from(format!("parse storage state: {e}")))?;
 
   world
-    .page()
+    .page()?
     .set_storage_state(&state)
     .await
     .map_err(|e| StepError::wrap("load storage state", e))?;

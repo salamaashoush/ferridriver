@@ -1,3 +1,4 @@
+/// <reference path="./node.d.ts" />
 // Type declarations for ferridriver's native TypeScript test runner.
 //
 // `import { test, describe, expect } from '@ferridriver/test'` resolves

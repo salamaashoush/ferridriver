@@ -7,7 +7,7 @@ use ferridriver_bdd_macros::{step, when};
 #[when("I click {string}")]
 async fn click(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .click()
     .await
@@ -17,7 +17,7 @@ async fn click(world: &mut BrowserWorld, selector: String) {
 #[when("I double click {string}")]
 async fn double_click(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .dblclick()
     .await
@@ -27,7 +27,7 @@ async fn double_click(world: &mut BrowserWorld, selector: String) {
 #[when("I right click {string}")]
 async fn right_click(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .right_click()
     .await
@@ -37,7 +37,7 @@ async fn right_click(world: &mut BrowserWorld, selector: String) {
 #[when("I fill {string} with {string}")]
 async fn fill(world: &mut BrowserWorld, selector: String, value: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .fill(&value)
     .await
@@ -47,7 +47,7 @@ async fn fill(world: &mut BrowserWorld, selector: String, value: String) {
 #[when("I clear {string}")]
 async fn clear(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .clear()
     .await
@@ -57,7 +57,7 @@ async fn clear(world: &mut BrowserWorld, selector: String) {
 #[when("I type {string} into {string}")]
 async fn type_into(world: &mut BrowserWorld, text: String, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .r#type(&text)
     .await
@@ -67,7 +67,7 @@ async fn type_into(world: &mut BrowserWorld, text: String, selector: String) {
 #[when("I hover over {string}")]
 async fn hover(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .hover()
     .await
@@ -77,7 +77,7 @@ async fn hover(world: &mut BrowserWorld, selector: String) {
 #[when("I focus on {string}")]
 async fn focus(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .focus()
     .await
@@ -91,7 +91,7 @@ async fn select_option(world: &mut BrowserWorld, value: String, selector: String
   // across descriptors, so passing both descriptors selects whichever option
   // matches either field.
   world
-    .page()
+    .page()?
     .locator(&selector)
     .select_option(vec![
       ferridriver::options::SelectOptionValue::by_value(value.clone()),
@@ -104,7 +104,7 @@ async fn select_option(world: &mut BrowserWorld, value: String, selector: String
 #[when("I check {string}")]
 async fn check(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .check()
     .await
@@ -114,7 +114,7 @@ async fn check(world: &mut BrowserWorld, selector: String) {
 #[when("I uncheck {string}")]
 async fn uncheck(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .uncheck()
     .await
@@ -124,7 +124,7 @@ async fn uncheck(world: &mut BrowserWorld, selector: String) {
 #[when("I scroll down")]
 async fn scroll_down(world: &mut BrowserWorld) {
   world
-    .page()
+    .page()?
     .evaluate(
       "window.scrollBy(0, 500)",
       ferridriver::protocol::SerializedArgument::default(),
@@ -137,7 +137,7 @@ async fn scroll_down(world: &mut BrowserWorld) {
 #[when("I scroll up")]
 async fn scroll_up(world: &mut BrowserWorld) {
   world
-    .page()
+    .page()?
     .evaluate(
       "window.scrollBy(0, -500)",
       ferridriver::protocol::SerializedArgument::default(),
@@ -150,7 +150,7 @@ async fn scroll_up(world: &mut BrowserWorld) {
 #[when("I scroll to {string}")]
 async fn scroll_to(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .scroll_into_view_if_needed()
     .await
@@ -159,9 +159,9 @@ async fn scroll_to(world: &mut BrowserWorld, selector: String) {
 
 #[when("I drag {string} to {string}")]
 async fn drag(world: &mut BrowserWorld, source: String, target: String) {
-  let target_locator = crate::steps::selector_locator(world.page(), &target);
+  let target_locator = crate::steps::selector_locator(world.page()?, &target);
   world
-    .page()
+    .page()?
     .locator(&source)
     .drag_to(&target_locator)
     .await
@@ -171,7 +171,7 @@ async fn drag(world: &mut BrowserWorld, source: String, target: String) {
 #[when("I click the first {string}")]
 async fn click_first(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .first()
     .click()
@@ -182,7 +182,7 @@ async fn click_first(world: &mut BrowserWorld, selector: String) {
 #[when("I click the last {string}")]
 async fn click_last(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .last()
     .click()
@@ -193,7 +193,7 @@ async fn click_last(world: &mut BrowserWorld, selector: String) {
 #[when("I click the {int}th {string}")]
 async fn click_nth(world: &mut BrowserWorld, n: i64, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .nth(n as i32)
     .click()
@@ -204,7 +204,7 @@ async fn click_nth(world: &mut BrowserWorld, n: i64, selector: String) {
 #[when("I tap {string}")]
 async fn tap_element(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .tap()
     .await
@@ -214,7 +214,7 @@ async fn tap_element(world: &mut BrowserWorld, selector: String) {
 #[when("I blur {string}")]
 async fn blur(world: &mut BrowserWorld, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .blur()
     .await

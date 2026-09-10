@@ -88,12 +88,9 @@ pub struct WebKitBrowser {
   /// Context every page lands in when the caller passes no explicit
   /// `browserContextId`.
   ///
-  /// This build has no implicit default context — it opens no startup
-  /// window (the launcher always passes `--no-startup-window`) and
-  /// `Playwright.createPage` without a `browserContextId` is refused
-  /// with "Browser started with no default context" — so one is minted
-  /// at launch, for a persistent profile as much as a throwaway one.
-  default_context: Arc<str>,
+  /// A persistent profile uses the implicit context (no protocol ID).
+  /// An ephemeral launch creates an isolated default context explicitly.
+  default_context: Option<Arc<str>>,
   /// PW `WebKit` build revision (e.g. `"webkit-playwright/2272"`),
   /// derived from the binary path — a real build identifier, not a
   /// placeholder.
@@ -146,38 +143,35 @@ impl WebKitBrowser {
     let transport = Transport::new(parent_read.try_clone()?, parent_write.try_clone()?);
     let conn = Connection::spawn(transport);
     let root = conn.browser_session();
+    let startup_events = config.user_data_dir.as_ref().map(|_| root.events());
     root.send(protocol::PLAYWRIGHT_ENABLE, json!({})).await?;
 
-    // Mint the default context. This build starts with none whether or
-    // not a profile was configured — it never opens a startup window
-    // (see the launcher) and `Playwright.createPage` without a
-    // `browserContextId` is refused with "Browser started with no
-    // default context".
-    let ctx_resp = root
-      .send(
-        protocol::PLAYWRIGHT_CREATE_CONTEXT,
-        serde_json::to_value(CreateContextParams::default())?,
+    let default_context = if config.user_data_dir.is_some() {
+      None
+    } else {
+      let ctx_resp = root
+        .send(
+          protocol::PLAYWRIGHT_CREATE_CONTEXT,
+          serde_json::to_value(CreateContextParams::default())?,
+        )
+        .await?;
+      Some(
+        serde_json::from_value::<CreateContextResult>(ctx_resp)
+          .map(|r| Arc::<str>::from(r.browser_context_id))
+          .map_err(|e| BrowserError::Protocol(format!("default context: {e}")))?,
       )
-      .await?;
-    let default_context: Arc<str> = serde_json::from_value::<CreateContextResult>(ctx_resp)
-      .map(|r| Arc::from(r.browser_context_id))
-      .map_err(|e| BrowserError::Protocol(format!("default context: {e}")))?;
+    };
 
     let version: Arc<str> = Arc::from(format!("webkit-playwright/{}", super::launcher::binary_revision()));
 
     let downloads_dir = std::env::temp_dir().join(format!("ferridriver-webkit-downloads-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&downloads_dir);
     let downloads_dir = Arc::new(downloads_dir);
-    let _ = root
-      .send(
-        "Playwright.setDownloadBehavior",
-        json!({
-          "behavior": "allow",
-          "downloadPath": downloads_dir.to_string_lossy(),
-          "browserContextId": default_context.to_string(),
-        }),
-      )
-      .await;
+    let mut download_params = json!({ "behavior": "allow", "downloadPath": downloads_dir.to_string_lossy() });
+    if let Some(id) = &default_context {
+      download_params["browserContextId"] = json!(id.to_string());
+    }
+    let _ = root.send("Playwright.setDownloadBehavior", download_params).await;
 
     let pages: Arc<Mutex<Vec<WebKitPage>>> = Arc::new(Mutex::new(Vec::new()));
     spawn_download_listener(&root, pages.clone(), downloads_dir.clone());
@@ -198,6 +192,30 @@ impl WebKitBrowser {
       popup_taps: Arc::new(Mutex::new(Vec::new())),
       create_ledger: Arc::new(crate::backend::CreateLedger::default()),
     };
+    if let Some(mut events) = startup_events {
+      let proxy_id = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(event) = events.recv().await {
+          if event.method.as_deref() == Some("Playwright.pageProxyCreated") {
+            return event
+              .params
+              .get("pageProxyId")
+              .and_then(serde_json::Value::as_str)
+              .map(String::from);
+          }
+        }
+        None
+      })
+      .await
+      .ok()
+      .flatten()
+      .ok_or_else(|| BrowserError::Protocol("persistent context did not open a startup page".into()))?;
+      let page = WebKitPage::attach(&browser, browser.conn.page_proxy_session(proxy_id), None, false).await?;
+      browser
+        .pages
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(page);
+    }
     browser.spawn_popup_listener();
     Ok(browser)
   }
@@ -273,7 +291,7 @@ impl WebKitBrowser {
           }
           // The launch-minted default context is "default" at the
           // state layer; popups in it carry no context id upward.
-          let browser_context_id = context_id.filter(|id| *id != *b.default_context);
+          let browser_context_id = context_id.filter(|id| Some(id.as_str()) != b.default_context.as_deref());
           let delivered = crate::backend::push_popup(
             &b.popup_taps,
             crate::backend::PopupInfo {
@@ -427,7 +445,7 @@ impl WebKitBrowser {
   /// Falls back to the default context when no explicit one is given.
   pub async fn create_page(&self, browser_context_id: Option<&str>) -> Result<Session> {
     let params = CreatePageParams {
-      browser_context_id: Some(browser_context_id.unwrap_or(&self.default_context).to_string()),
+      browser_context_id: browser_context_id.or(self.default_context.as_deref()).map(String::from),
     };
     // Ledger bracket: `pageProxyCreated` for this proxy can arrive
     // before the response; while the create is in flight the popup
@@ -477,11 +495,8 @@ impl WebKitBrowser {
     viewport: Option<&crate::options::ViewportConfig>,
   ) -> Result<AnyPage> {
     let proxy = self.create_page(browser_context_id).await?;
-    // Resolve to a concrete browserContextId (the minted default context when
-    // the caller didn't name one) so the page can drive context-wide
-    // browser-session commands like `Playwright.getAllCookies`.
-    let resolved_ctx = browser_context_id.unwrap_or(&self.default_context).to_string();
-    let page = WebKitPage::attach(self, proxy, Some(resolved_ctx), false).await?;
+    let resolved_ctx = browser_context_id.or(self.default_context.as_deref()).map(String::from);
+    let page = WebKitPage::attach(self, proxy, resolved_ctx, false).await?;
     if let Some(vp) = viewport {
       page.emulate_viewport(vp).await?;
     }

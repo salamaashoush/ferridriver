@@ -457,7 +457,7 @@ impl Browser {
   }",
     ts_return_type = "Promise<{ endpoint: string }>"
   )]
-  #[allow(clippy::unused_async)] // NAPI requires async to surface a JS Promise (Playwright parity)
+  #[allow(clippy::unused_async_trait_impl)] // NAPI requires async to surface a JS Promise (Playwright parity)
   pub async fn bind(&self, title: String, options: Option<NapiBindOptions>) -> Result<BindResult> {
     let _ = (title, options);
     Err(napi::Error::from_reason(
@@ -472,7 +472,7 @@ impl Browser {
   /// A no-op — [`Self::bind`] never binds from this addon — kept so code
   /// written against the Playwright shape still runs.
   #[napi]
-  #[allow(clippy::unused_async)] // NAPI requires async to surface a JS Promise (Playwright parity)
+  #[allow(clippy::unused_async_trait_impl)] // NAPI requires async to surface a JS Promise (Playwright parity)
   pub async fn unbind(&self) -> Result<()> {
     ferridriver_session::unbind_browser(&self.inner).map_err(|e| napi::Error::from_reason(e.to_string()))
   }

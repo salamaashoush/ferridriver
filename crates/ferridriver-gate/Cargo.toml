@@ -1,0 +1,14 @@
+[package]
+name = "ferridriver-gate"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true

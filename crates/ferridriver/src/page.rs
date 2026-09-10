@@ -168,15 +168,8 @@ impl Page {
     }
   }
 
-  /// Internal: spawn the `FrameAttached` / `FrameDetached` /
-  /// `FrameNavigated` listener that keeps the backend's frame cache
-  /// fresh. Idempotent — only the first wrapper for a given backend
-  /// spawns the listener; subsequent wrappers see the latch set and
-  /// skip the spawn so we don't end up with N listeners all writing
-  /// the same cache. The listener task holds `Arc` clones of the
-  /// cache + event emitter, so it lives until the backend page is
-  /// dropped (emitter drops → the lossless subscription closes → task
-  /// exits).
+  /// Update frame state before public event delivery. The backend latch
+  /// keeps wrappers of the same page from installing duplicate observers.
   fn seed_frame_cache(self: &Arc<Self>) {
     if self
       .inner
@@ -187,6 +180,54 @@ impl Page {
     }
     let cache = Arc::clone(&self.frame_cache);
     let observed = Arc::clone(self.inner.observed());
+    // Frame and observation state must be current before public listeners
+    // or the page-to-context bridge receive the event.
+    let installed = self.inner.events().set_state_observer(Arc::new(move |event| {
+      match event {
+        PageEvent::FrameAttached(info) => {
+          if let Ok(mut g) = cache.lock() {
+            g.attach(info.clone());
+          }
+        },
+        PageEvent::FrameDetached { frame_id } => {
+          if let Ok(mut g) = cache.lock() {
+            g.detach(frame_id);
+          }
+        },
+        PageEvent::FrameNavigated(info) => {
+          // A main-frame navigation starts a new `since-navigation`
+          // window for `consoleMessages()` / `pageErrors()`.
+          if info.parent_frame_id.is_none()
+            && let Ok(mut o) = observed.lock()
+          {
+            o.mark_navigation();
+          }
+          if let Ok(mut g) = cache.lock() {
+            g.navigated(info.clone());
+          }
+        },
+        PageEvent::FrameNavigatedWithinDocument(info) => {
+          // Same document, new URL: no `since-navigation` reset, no
+          // subtree detach — just keep the tracked URL fresh so
+          // `page.url()` / `waitForURL` observe SPA route changes.
+          if let Ok(mut g) = cache.lock() {
+            g.navigated_within(&info.frame_id, &info.url);
+          }
+        },
+        PageEvent::Console(msg) => {
+          if let Ok(mut o) = observed.lock() {
+            o.push_console(msg.clone());
+          }
+        },
+        PageEvent::PageError(err) => {
+          if let Ok(mut o) = observed.lock() {
+            o.push_error(err.clone());
+          }
+        },
+        _ => {},
+      }
+    }));
+    debug_assert!(installed, "a backend page installs its state observer once");
     let mut rx = self.inner.events().subscribe();
     // Trace identity captured at spawn: console / page-lifecycle events
     // mirror into the context's live trace (when one is recording).
@@ -213,51 +254,8 @@ impl Page {
             });
           }
         }
-        match event {
-          PageEvent::FrameAttached(info) => {
-            if let Ok(mut g) = cache.lock() {
-              g.attach(info);
-            }
-          },
-          PageEvent::FrameDetached { frame_id } => {
-            if let Ok(mut g) = cache.lock() {
-              g.detach(&frame_id);
-            }
-          },
-          PageEvent::FrameNavigated(info) => {
-            // A main-frame navigation starts a new `since-navigation`
-            // window for `consoleMessages()` / `pageErrors()`.
-            if info.parent_frame_id.is_none()
-              && let Ok(mut o) = observed.lock()
-            {
-              o.mark_navigation();
-            }
-            if let Ok(mut g) = cache.lock() {
-              g.navigated(info);
-            }
-          },
-          PageEvent::FrameNavigatedWithinDocument(info) => {
-            // Same document, new URL: no `since-navigation` reset, no
-            // subtree detach — just keep the tracked URL fresh so
-            // `page.url()` / `waitForURL` observe SPA route changes.
-            if let Ok(mut g) = cache.lock() {
-              g.navigated_within(&info.frame_id, &info.url);
-            }
-          },
-          PageEvent::Console(msg) => {
-            if let Ok(mut o) = observed.lock() {
-              o.push_console(msg);
-            }
-          },
-          PageEvent::PageError(err) => {
-            if let Ok(mut o) = observed.lock() {
-              o.push_error(err);
-            }
-          },
-          // The page is gone — exit rather than waiting for every
-          // emitter sender (backend listener tasks) to drop.
-          PageEvent::Close => break,
-          _ => {},
+        if matches!(event, PageEvent::Close) {
+          break;
         }
       }
     });
@@ -2875,8 +2873,8 @@ impl Page {
       for origin_entry in origins {
         let origin = origin_entry.get("origin").and_then(|v| v.as_str()).unwrap_or("");
         if let Some(items) = origin_entry.get("localStorage").and_then(|v| v.as_array()) {
-          // Navigate to the origin so localStorage.setItem works in the right scope.
-          // Only navigate if the current page isn't already on this origin.
+          // A network error page has an opaque origin. Restore storage without
+          // depending on the origin's server serving a successful root document.
           let current_origin = self
             .inner
             .evaluate("location.origin")
@@ -2886,10 +2884,30 @@ impl Page {
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_default();
           if !origin.is_empty() && current_origin != origin {
-            let _ = self
+            let matcher = crate::url_matcher::UrlMatcher::glob(format!("{origin}/**"))?;
+            let handler: crate::route::RouteHandler = Arc::new(|route| {
+              route.fulfill(crate::route::FulfillResponse {
+                status: 200,
+                content_type: Some("text/html".into()),
+                body: b"<!doctype html><html></html>".to_vec(),
+                ..Default::default()
+              });
+            });
+            let handler_id = crate::route::route_handler_id(&handler);
+            self
+              .inner
+              .route(crate::route::RegisteredRoute::new(matcher.clone(), handler, Some(1)))
+              .await?;
+            let navigation = self
               .inner
               .goto(origin, crate::backend::NavLifecycle::Load, 10_000, None)
               .await;
+            let cleanup = self
+              .inner
+              .unroute(&matcher, crate::route::RouteScope::Page, Some(handler_id))
+              .await;
+            navigation?;
+            cleanup?;
           }
           for item in items {
             let key = item.get("name").and_then(|v| v.as_str()).unwrap_or("");

@@ -7,7 +7,7 @@ use ferridriver_bdd_macros::{step, then, when};
 #[when("I evaluate {string}")]
 async fn evaluate(world: &mut BrowserWorld, expression: String) {
   world
-    .page()
+    .page()?
     .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
     .map_err(|e| StepError::wrap("evaluate JS", e))?;
@@ -16,7 +16,7 @@ async fn evaluate(world: &mut BrowserWorld, expression: String) {
 #[step("I store the result of {string} as {string}")]
 async fn store_result(world: &mut BrowserWorld, expression: String, var_name: String) {
   let result = world
-    .page()
+    .page()?
     .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
     .map_err(|e| StepError::wrap("evaluate JS for variable", e))?;
@@ -27,7 +27,7 @@ async fn store_result(world: &mut BrowserWorld, expression: String, var_name: St
 #[then("I evaluate {string} and expect {string}")]
 async fn evaluate_and_expect(world: &mut BrowserWorld, expression: String, expected: String) {
   let result = world
-    .page()
+    .page()?
     .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
     .map_err(|e| StepError::wrap("evaluate JS", e))?;

@@ -7,7 +7,7 @@ use ferridriver_bdd_macros::when;
 #[when("I press {string}")]
 async fn press_key(world: &mut BrowserWorld, key: String) {
   world
-    .page()
+    .page()?
     .keyboard()
     .press(&key)
     .await
@@ -17,7 +17,7 @@ async fn press_key(world: &mut BrowserWorld, key: String) {
 #[when("I press {string} on {string}")]
 async fn press_key_on(world: &mut BrowserWorld, key: String, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .press(&key)
     .await
@@ -27,7 +27,7 @@ async fn press_key_on(world: &mut BrowserWorld, key: String, selector: String) {
 #[when("I type {string}")]
 async fn type_text(world: &mut BrowserWorld, text: String) {
   world
-    .page()
+    .page()?
     .keyboard()
     .r#type(&text)
     .await
@@ -38,7 +38,7 @@ async fn type_text(world: &mut BrowserWorld, text: String) {
 async fn press_with_modifier(world: &mut BrowserWorld, key: String, modifier: String) {
   let combo = format!("{modifier}+{key}");
   world
-    .page()
+    .page()?
     .keyboard()
     .press(&combo)
     .await

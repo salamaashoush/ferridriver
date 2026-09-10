@@ -343,13 +343,16 @@ impl BidiBrowser {
 
   /// Close the browser.
   ///
-  /// SIGKILLs firefox directly via the held `ChildGroup`. The
-  /// graceful `browser.close` `BiDi` command is intentionally skipped —
-  /// for test runs the user-data-dir tempdir is removed regardless,
-  /// and waiting for the `BiDi` response is wasted wall-clock. Mirrors
-  /// the `CdpBrowser::close` fast-path.
+  /// Caller-owned profiles flush through `browser.close`; throwaway
+  /// profiles can be killed directly because they are discarded.
   pub async fn close(&mut self) -> Result<()> {
     if let Some(mut group) = self.child.lock().await.take() {
+      let mut flushed = true;
+      if self.profile_dir.is_none() {
+        let timeout = std::time::Duration::from_secs(5);
+        let _ = tokio::time::timeout(timeout, self.session.transport.send_command("browser.close", json!({}))).await;
+        flushed = group.wait_for_exit(timeout).await;
+      }
       // Flag the transport first: the SIGKILLed Firefox never sends a
       // WebSocket close frame, and without the flag the reader logs the
       // resulting TCP reset as a spurious WARN on every teardown.
@@ -357,6 +360,11 @@ impl BidiBrowser {
       // Group kill first (helpers die with the parent), then reap so
       // the enclosing runtime carries no zombie.
       group.shutdown().await;
+      if !flushed {
+        return Err(FerriError::Backend(
+          "Firefox did not close cleanly while flushing its persistent profile".into(),
+        ));
+      }
     }
     if let Some(dir) = self.profile_dir.as_ref() {
       dir.remove_now().await;

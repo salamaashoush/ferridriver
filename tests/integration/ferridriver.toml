@@ -1,0 +1,30 @@
+[test]
+testMatch = ["tests/integration/*.test.mjs"]
+workers = 4
+timeout = 30000
+retries = 0
+outputDir = "test-results/integration"
+reporter = [{ name = "list" }]
+
+[scripting]
+allowEnv = ["FERRIDRIVER_BIN"]
+
+[scripting.allow.commands.probe]
+run = ["sh", "-c", "${command}"]
+timeoutMs = 25000
+env = ["HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY", "LD_LIBRARY_PATH", "CHROMIUM_PATH", "CHROMIUM_HEADLESS_SHELL_PATH", "TOKIO_WORKER_THREADS"]
+
+[scripting.allow.commands.mcp]
+run = ["env", "FERRIDRIVER_NO_INHERIT=1", "FERRIDRIVER_SESSION_DIR=${registry}", "RUST_LOG=${log}", "${binary}", "mcp", "--backend", "${backend}", "--headless", "--config", "${config}"]
+persistent = true
+env = ["HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "LD_LIBRARY_PATH", "CHROMIUM_PATH", "CHROMIUM_HEADLESS_SHELL_PATH", "TOKIO_WORKER_THREADS"]
+
+[scripting.allow.commands.stdio]
+run = ["sh", "-c", "${command}"]
+persistent = true
+env = ["TOKIO_WORKER_THREADS"]
+
+[scripting.allow.commands.fixtures]
+run = ["${binary}", "--port", "0"]
+persistent = true
+env = ["TOKIO_WORKER_THREADS"]

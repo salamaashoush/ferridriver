@@ -935,8 +935,7 @@ impl WebKitPage {
   /// the lifecycle reach us on separate consumers and the request can be
   /// processed second. A same-document navigation issues none.
   async fn await_nav_response(&self, grace: std::time::Duration) -> Option<Response> {
-    let req = self.nav_request_slot.wait(grace).await?;
-    req.response().await.ok().flatten()
+    self.nav_request_slot.final_response(grace).await
   }
 
   /// Wait for the target-session lifecycle event matching `lifecycle`,
@@ -1655,17 +1654,21 @@ impl WebKitPage {
 
   /// Backs [`crate::Page::set_http_credentials`]. Mirrors Playwright's
   /// `wkPage.updateHttpCredentials` — `Emulation.setAuthCredentials` on
-  /// the page-proxy session; clearing sends empty strings (the wire has
-  /// no removal form, empty credentials disable the auto-answer).
+  /// the page-proxy session; clearing sends an empty credentials list.
   pub async fn set_http_credentials(&self, creds: Option<crate::options::HttpCredentials>) -> Result<()> {
-    let creds = creds.unwrap_or_default();
-    let mut params = json!({ "username": creds.username, "password": creds.password });
-    if let Some(origin) = creds.origin.as_deref() {
-      params["origin"] = json!(origin);
-    }
+    let credentials: Vec<Value> = creds
+      .into_iter()
+      .map(|creds| {
+        let mut value = json!({ "username": creds.username, "password": creds.password });
+        if let Some(origin) = creds.origin {
+          value["origin"] = json!(origin);
+        }
+        value
+      })
+      .collect();
     self
       .proxy_session()
-      .send("Emulation.setAuthCredentials", params)
+      .send("Emulation.setAuthCredentials", json!({ "credentials": credentials }))
       .await
       .map_err(conn_err)?;
     Ok(())

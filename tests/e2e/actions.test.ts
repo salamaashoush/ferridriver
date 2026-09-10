@@ -325,16 +325,8 @@ describe('actions', () => {
     }))) as { print: boolean; screen: boolean; dark: boolean; reduced: boolean; forced: boolean; contrast: boolean };
     expect(result.print).toBe(true);
     expect(result.screen).toBe(false);
-    // WebKit's print rendering FORCES `prefers-color-scheme: light`
-    // while a print media override is active — it does not fall back to
-    // the host appearance, which is what this assertion used to claim
-    // and why it only ever passed on a light host. Measured on a dark
-    // host: `{colorScheme:'dark'}` alone reports dark,
-    // `{media:'print', colorScheme:'dark'}` reports light, and switching
-    // back to `screen` reports dark again. Chromium honours the override
-    // outright. Engine semantics, not a driver gap — Playwright's own
-    // page-emulate-media spec never asserts the print+dark combination.
-    expect(result.dark).toBe(browserName !== 'webkit');
+    // Linux WebKit honors dark mode in print; macOS WebKit forces light.
+    expect(result.dark).toBe(browserName !== 'webkit' || process.platform === 'linux');
     expect(result.reduced).toBe(true);
     expect(result.forced).toBe(true);
     expect(result.contrast).toBe(true);

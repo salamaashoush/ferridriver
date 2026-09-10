@@ -47,7 +47,7 @@ async fn mock_with_status_and_body(world: &mut BrowserWorld, pattern: String, st
   let matcher =
     UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
   world
-    .page()
+    .page()?
     .route(
       matcher,
       Arc::new(move |route| {
@@ -69,7 +69,7 @@ async fn mock_with_json(world: &mut BrowserWorld, pattern: String, json_body: St
   let matcher =
     UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
   world
-    .page()
+    .page()?
     .route(
       matcher,
       Arc::new(move |route| {
@@ -106,7 +106,7 @@ async fn mock_with_fixture(world: &mut BrowserWorld, pattern: String, fixture_pa
   let matcher =
     UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
   world
-    .page()
+    .page()?
     .route(
       matcher,
       Arc::new(move |route| {
@@ -143,7 +143,7 @@ async fn mock_with_fixture_and_status(world: &mut BrowserWorld, pattern: String,
   let matcher =
     UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
   world
-    .page()
+    .page()?
     .route(
       matcher,
       Arc::new(move |route| {
@@ -165,7 +165,7 @@ async fn block_requests(world: &mut BrowserWorld, pattern: String) {
   let matcher =
     UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
   world
-    .page()
+    .page()?
     .route(
       matcher,
       Arc::new(|route| {
@@ -183,7 +183,7 @@ async fn intercept_requests(world: &mut BrowserWorld, pattern: String) {
   let matcher =
     UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
   world
-    .page()
+    .page()?
     .route(
       matcher,
       Arc::new(move |route| {
@@ -201,7 +201,7 @@ async fn remove_route(world: &mut BrowserWorld, pattern: String) {
   let matcher =
     UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
   world
-    .page()
+    .page()?
     .unroute(&matcher, None)
     .await
     .map_err(|e| StepError::wrap(format!("remove route for \"{pattern}\""), e))?;
@@ -261,7 +261,7 @@ async fn fetch_url(world: &mut BrowserWorld, url: String) {
     url = serde_json::to_string(&url).unwrap_or_else(|_| format!("\"{url}\""))
   );
   let result = world
-    .page()
+    .page()?
     .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None)
     .await
     .map_err(|e| StepError::wrap(format!("fetch \"{url}\""), e))?;

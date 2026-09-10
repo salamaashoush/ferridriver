@@ -298,10 +298,7 @@ pub fn quickjs_arg_to_serialized<'js>(
   // Direct JS -> SerializedValue. The old path went
   // JS -> serde_json::Value -> SerializedValue, allocating the whole
   // argument tree twice on every `page.evaluate(fn, arg)` /
-  // `locator.evaluate`. Walk once. Semantics match the prior
-  // JSON-expressible contract (`JSON.stringify` rules: drop
-  // undefined/function/symbol properties, array holes -> null,
-  // non-finite -> null) — `toJSON()` was not honoured before either.
+  // `locator.evaluate`. Walk once, retaining numeric wire sentinels.
   let mut alloc = SerializationContext::default();
   let mut handles = Vec::new();
   Ok(SerializedArgument {
@@ -315,8 +312,7 @@ pub fn quickjs_arg_to_serialized<'js>(
 /// that behaviour with an explicit bound instead of overflowing.
 const MAX_ARG_DEPTH: u32 = 512;
 
-/// Walk a JS value into a wire [`SerializedValue`] following
-/// `JSON.stringify` rules (the documented JSON-expressible subset).
+/// Walk a JS value into a wire [`SerializedValue`].
 fn js_value_to_serialized(
   v: &Value<'_>,
   alloc: &mut ferridriver::protocol::SerializationContext,
@@ -346,12 +342,7 @@ fn js_value_to_serialized(
     return Ok(SerializedValue::from_f64(f64::from(i)));
   }
   if let Some(f) = v.as_float() {
-    // JSON.stringify renders non-finite as null.
-    return Ok(if f.is_finite() {
-      SerializedValue::from_f64(f)
-    } else {
-      SerializedValue::Special(SpecialValue::Null)
-    });
+    return Ok(SerializedValue::from_f64(f));
   }
   if let Some(s) = v.as_string() {
     return Ok(SerializedValue::Str(s.to_string()?));
@@ -481,7 +472,7 @@ fn rehydrate<'js>(
     SerializedValue::Special(SpecialValue::NaN) => Ok(Value::new_number(ctx.clone(), f64::NAN)),
     SerializedValue::Special(SpecialValue::Infinity) => Ok(Value::new_number(ctx.clone(), f64::INFINITY)),
     SerializedValue::Special(SpecialValue::NegInfinity) => Ok(Value::new_number(ctx.clone(), f64::NEG_INFINITY)),
-    SerializedValue::Special(SpecialValue::NegZero) => Ok(Value::new_number(ctx.clone(), -0.0)),
+    SerializedValue::Special(SpecialValue::NegZero) => Ok(Value::new_float(ctx.clone(), -0.0)),
     SerializedValue::Date(iso) => construct_global(ctx, "Date", (iso.clone(),)),
     SerializedValue::Url(url) => construct_global(ctx, "URL", (url.clone(),)),
     SerializedValue::BigInt(s) => {

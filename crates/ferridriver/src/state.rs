@@ -1037,7 +1037,8 @@ impl LaunchSpec {
 
     // Match the browser window to the viewport unless the caller
     // already pinned a size.
-    if !args.iter().any(|a| a.starts_with("--window-size"))
+    if overrides.backend.unwrap_or(self.backend_kind) != BackendKind::WebKit
+      && !args.iter().any(|a| a.starts_with("--window-size"))
       && let Some(ref vp) = self.default_viewport
     {
       args.push(format!("--window-size={},{}", vp.width, vp.height));

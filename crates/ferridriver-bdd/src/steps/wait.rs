@@ -27,13 +27,13 @@ async fn wait_seconds(world: &mut BrowserWorld, seconds: i64) {
 
 #[step("I wait for {string}")]
 async fn wait_for_selector(world: &mut BrowserWorld, selector: String) {
-  let locator = crate::steps::selector_locator(world.page(), &selector);
+  let locator = crate::steps::selector_locator(world.page()?, &selector);
   expect(&locator).to_be_attached().await.map_err(to_step_err)?;
 }
 
 #[step("I wait for {string} to contain {string}")]
 async fn wait_for_text(world: &mut BrowserWorld, selector: String, expected: String) {
-  let locator = crate::steps::selector_locator(world.page(), &selector);
+  let locator = crate::steps::selector_locator(world.page()?, &selector);
   expect(&locator)
     .to_contain_text(expected.as_str())
     .await
@@ -42,13 +42,13 @@ async fn wait_for_text(world: &mut BrowserWorld, selector: String, expected: Str
 
 #[step("I wait for {string} to be visible")]
 async fn wait_for_visible(world: &mut BrowserWorld, selector: String) {
-  let locator = crate::steps::selector_locator(world.page(), &selector);
+  let locator = crate::steps::selector_locator(world.page()?, &selector);
   expect(&locator).to_be_visible().await.map_err(to_step_err)?;
 }
 
 #[step("I wait for {string} to be hidden")]
 async fn wait_for_hidden(world: &mut BrowserWorld, selector: String) {
-  let locator = crate::steps::selector_locator(world.page(), &selector);
+  let locator = crate::steps::selector_locator(world.page()?, &selector);
   expect(&locator).to_be_hidden().await.map_err(to_step_err)?;
 }
 
@@ -66,7 +66,7 @@ async fn within_seconds(world: &mut BrowserWorld, timeout_secs: String, inner_st
   })?;
 
   let timeout = Duration::from_secs(timeout_secs);
-  let base_fixtures = world.fixtures().clone();
+  let base_fixtures = world.fixtures()?.clone();
   let registry = world.registry_arc();
 
   // Pre-match the inner step once to validate it exists.

@@ -19,7 +19,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::command_spec::{CommandOutput, ResolvedCommand, ResolvedExec};
@@ -145,6 +145,24 @@ fn shape(stdout: &[u8], mode: CommandOutput) -> Result<serde_json::Value, String
 /// Run a one-shot command to completion. Errors on non-zero exit
 /// (message carries stderr), timeout, or output past the cap.
 pub async fn run_oneshot(rc: &ResolvedCommand) -> Result<serde_json::Value, String> {
+  let result = exec_oneshot(rc).await?;
+  if !result.success {
+    let code = result.exit_code.map_or_else(|| "signal".to_string(), |c| c.to_string());
+    return Err(format!("command failed (exit {code}): {}", result.stderr.trim()));
+  }
+  shape(result.stdout.as_bytes(), rc.output)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandResult {
+  pub exit_code: Option<i32>,
+  pub success: bool,
+  pub stdout: String,
+  pub stderr: String,
+}
+
+pub async fn exec_oneshot(rc: &ResolvedCommand) -> Result<CommandResult, String> {
   if rc.persistent {
     return Err("this command is declared `persistent`: use commands.start/status/stop, not run".to_string());
   }
@@ -171,12 +189,12 @@ pub async fn run_oneshot(rc: &ResolvedCommand) -> Result<serde_json::Value, Stri
     r.inspect_err(|_| kill_group(pid))?
   };
 
-  if !status.success() {
-    let code = status.code().map_or_else(|| "signal".to_string(), |c| c.to_string());
-    let msg = String::from_utf8_lossy(&stderr);
-    return Err(format!("command failed (exit {code}): {}", msg.trim()));
-  }
-  shape(&stdout, rc.output)
+  Ok(CommandResult {
+    exit_code: status.code(),
+    success: status.success(),
+    stdout: String::from_utf8_lossy(&stdout).into_owned(),
+    stderr: String::from_utf8_lossy(&stderr).into_owned(),
+  })
 }
 
 /// A bounded tail of a stream — only the last [`RING_CAP`] bytes.
@@ -197,11 +215,14 @@ impl Ring {
 
 struct Proc {
   pid: i32,
+  input: Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
+  output: Option<Arc<tokio::sync::Mutex<tokio::io::BufReader<tokio::process::ChildStdout>>>>,
   started: Instant,
   stdout: Arc<Mutex<Ring>>,
+  output_changed: tokio::sync::watch::Receiver<()>,
   stderr: Arc<Mutex<Ring>>,
   /// Set by the reaper task once the child exits.
-  exit: Arc<Mutex<Option<i32>>>,
+  exit: tokio::sync::watch::Receiver<Option<i32>>,
 }
 
 /// Per-session persistent-process registry. Owned by the durable
@@ -222,25 +243,25 @@ impl SessionProcs {
   /// Start (or no-op if already running) a persistent command. Returns
   /// the pid.
   pub fn start(&self, name: &str, rc: &ResolvedCommand) -> Result<i32, String> {
+    self.spawn(name, rc, false)
+  }
+
+  pub fn open(&self, name: &str, rc: &ResolvedCommand) -> Result<i32, String> {
+    self.spawn(name, rc, true)
+  }
+
+  fn spawn(&self, name: &str, rc: &ResolvedCommand, interactive: bool) -> Result<i32, String> {
     if !rc.persistent {
       return Err("this command is not declared `persistent`: use commands.run".to_string());
     }
     let mut map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(p) = map.get(name)
-      && p
-        .exit
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_none()
+      && p.exit.borrow().is_none()
     {
       return Ok(p.pid); // already running — idempotent
     }
     map.retain(|_, p| {
-      let alive = p
-        .exit
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_none();
+      let alive = p.exit.borrow().is_none();
       if !alive {
         kill_group(p.pid);
       }
@@ -252,30 +273,46 @@ impl SessionProcs {
       ));
     }
 
-    let mut child = build(rc).spawn().map_err(|e| format!("spawn command: {e}"))?;
+    let mut cmd = build(rc);
+    if interactive {
+      cmd.stdin(Stdio::piped());
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("spawn command: {e}"))?;
     let pid = pid_of(child.id());
     let stdout = Arc::new(Mutex::new(Ring::default()));
     let stderr = Arc::new(Mutex::new(Ring::default()));
-    let exit = Arc::new(Mutex::new(None));
+    let (exit_w, exit) = tokio::sync::watch::channel(None);
+    let (output_w, output_changed) = tokio::sync::watch::channel(());
 
-    if let Some(o) = child.stdout.take() {
-      pump(o, stdout.clone());
-    }
+    let input = Arc::new(tokio::sync::Mutex::new(child.stdin.take()));
+    let pipe = child.stdout.take().ok_or("no stdout pipe")?;
+    let mut pumps = Vec::new();
+    let output = if interactive {
+      Some(Arc::new(tokio::sync::Mutex::new(tokio::io::BufReader::new(pipe))))
+    } else {
+      pumps.push(pump(pipe, stdout.clone(), Some(output_w)));
+      None
+    };
     if let Some(e) = child.stderr.take() {
-      pump(e, stderr.clone());
+      pumps.push(pump(e, stderr.clone(), None));
     }
-    let exit_w = exit.clone();
     tokio::spawn(async move {
       let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
-      *exit_w.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(code);
+      for pump in pumps {
+        let _ = pump.await;
+      }
+      exit_w.send_replace(Some(code));
     });
 
     map.insert(
       name.to_string(),
       Proc {
         pid,
+        input,
+        output,
         started: Instant::now(),
         stdout,
+        output_changed,
         stderr,
         exit,
       },
@@ -283,12 +320,108 @@ impl SessionProcs {
     Ok(pid)
   }
 
+  pub async fn wait_for_output(&self, name: &str, text: &str) -> Result<String, String> {
+    let (stdout, mut changed) = {
+      let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      let process = map.get(name).ok_or_else(|| format!("no persistent process `{name}`"))?;
+      if process.output.is_some() {
+        return Err("use commands.read for interactive stdout".into());
+      }
+      (process.stdout.clone(), process.output_changed.clone())
+    };
+    loop {
+      changed.borrow_and_update();
+      let output = stdout.lock().unwrap_or_else(std::sync::PoisonError::into_inner).text();
+      if output.contains(text) {
+        return Ok(output);
+      }
+      changed
+        .changed()
+        .await
+        .map_err(|_| format!("process `{name}` closed stdout before emitting {text:?}"))?;
+    }
+  }
+
+  pub async fn write(&self, name: &str, data: Option<String>) -> Result<(), String> {
+    let input = {
+      let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      map
+        .get(name)
+        .ok_or_else(|| format!("no process `{name}`"))?
+        .input
+        .clone()
+    };
+    let mut input = input.lock().await;
+    if let Some(data) = data {
+      input
+        .as_mut()
+        .ok_or("stdin is closed")?
+        .write_all(data.as_bytes())
+        .await
+        .map_err(|e| e.to_string())
+    } else {
+      input.take();
+      Ok(())
+    }
+  }
+
+  pub async fn read(&self, name: &str) -> Result<Option<String>, String> {
+    let output = {
+      let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      map
+        .get(name)
+        .ok_or_else(|| format!("no process `{name}`"))?
+        .output
+        .clone()
+        .ok_or("use commands.open for interactive stdout")?
+    };
+    let mut output = output.lock().await;
+    let mut bytes = Vec::new();
+    loop {
+      let chunk = output.fill_buf().await.map_err(|e| e.to_string())?;
+      if chunk.is_empty() {
+        if bytes.is_empty() {
+          return Ok(None);
+        }
+        break;
+      }
+      let newline = chunk.iter().position(|&byte| byte == b'\n');
+      let count = newline.unwrap_or(chunk.len());
+      if bytes.len() + count > OUTPUT_CAP {
+        return Err(format!("command line exceeded {OUTPUT_CAP} bytes"));
+      }
+      bytes.extend_from_slice(&chunk[..count]);
+      output.consume(count + usize::from(newline.is_some()));
+      if newline.is_some() {
+        break;
+      }
+    }
+    String::from_utf8(bytes).map(Some).map_err(|e| e.to_string())
+  }
+
+  pub async fn wait(&self, name: &str) -> Result<i32, String> {
+    let mut exit = {
+      let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      map
+        .get(name)
+        .ok_or_else(|| format!("no process `{name}`"))?
+        .exit
+        .clone()
+    };
+    loop {
+      if let Some(code) = *exit.borrow_and_update() {
+        return Ok(code);
+      }
+      exit.changed().await.map_err(|e| e.to_string())?;
+    }
+  }
+
   pub fn status(&self, name: &str) -> Result<serde_json::Value, String> {
     let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let p = map
       .get(name)
       .ok_or_else(|| format!("no persistent process `{name}` started in this session"))?;
-    let exit = *p.exit.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let exit = *p.exit.borrow();
     Ok(serde_json::json!({
       "name": name,
       "pid": p.pid,
@@ -322,17 +455,26 @@ impl Drop for SessionProcs {
   }
 }
 
-fn pump<R: tokio::io::AsyncRead + Unpin + Send + 'static>(mut r: R, ring: Arc<Mutex<Ring>>) {
+fn pump<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+  mut r: R,
+  ring: Arc<Mutex<Ring>>,
+  changed: Option<tokio::sync::watch::Sender<()>>,
+) -> tokio::task::JoinHandle<()> {
   tokio::spawn(async move {
     let mut chunk = [0u8; 8192];
     loop {
       match r.read(&mut chunk).await {
         Ok(0) | Err(_) => break,
-        Ok(n) => ring
-          .lock()
-          .unwrap_or_else(std::sync::PoisonError::into_inner)
-          .push(&chunk[..n]),
+        Ok(n) => {
+          ring
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(&chunk[..n]);
+          if let Some(changed) = &changed {
+            changed.send_replace(());
+          }
+        },
       }
     }
-  });
+  })
 }

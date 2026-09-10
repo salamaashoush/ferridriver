@@ -45,6 +45,7 @@ struct ServerState {
   reset: Arc<ResetState>,
   reset_addr: SocketAddr,
   tls_addr: SocketAddr,
+  held: Mutex<rustc_hash::FxHashMap<String, tokio::sync::watch::Sender<(bool, bool)>>>,
 }
 
 /// Per-key budget of connections the reset listener still has to abort.
@@ -105,11 +106,13 @@ impl FixtureServer {
       reset,
       reset_addr,
       tls_addr,
+      held: Mutex::default(),
     });
     let mut app = Router::new()
       // Literal route wins over the wildcard, so the WS upgrade
       // extractor only runs for the echo endpoint.
       .route("/fx/ws", any(ws_upgrade))
+      .route("/fx/control/{action}/{key}", any(handle_control))
       .route("/fx/{*path}", any(handle_fx))
       .route("/_api/{*path}", any(handle_api_echo));
     app = match &options.static_dir {
@@ -442,6 +445,46 @@ fn fx_set_cookie_redirect(query: Option<&str>) -> Response<Body> {
   fx_build(302, "text/plain", Vec::new(), &extra)
 }
 
+async fn handle_control(
+  State(state): State<Arc<ServerState>>,
+  Path((action, key)): Path<(String, String)>,
+) -> Response<Body> {
+  if action == "page" {
+    return fx_html(&format!("<h1>Loading</h1><img src=\"/fx/control/hold/{key}\">"));
+  }
+  let signal = {
+    let mut held = state.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    held
+      .entry(key)
+      .or_insert_with(|| tokio::sync::watch::channel((false, false)).0)
+      .clone()
+  };
+  let mut receiver = signal.subscribe();
+  match action.as_str() {
+    "hold" => {
+      signal.send_modify(|s| s.0 = true);
+      let _ = receiver.wait_for(|s| s.1).await;
+    },
+    "held" => {
+      let _ = receiver.wait_for(|s| s.0).await;
+    },
+    "release" => signal.send_modify(|s| s.1 = true),
+    _ => return fx_build(404, "text/plain", b"unknown control".to_vec(), &[]),
+  }
+  fx_text(&action)
+}
+
+async fn fx_slow(query: Option<&str>) -> Response<Body> {
+  let ms: u64 = query
+    .and_then(|q| {
+      q.split('&')
+        .find_map(|pair| pair.strip_prefix("ms=").and_then(|v| v.parse().ok()))
+    })
+    .unwrap_or(1000);
+  tokio::time::sleep(std::time::Duration::from_millis(ms.min(30_000))).await;
+  fx_text("slow")
+}
+
 async fn handle_fx(
   State(state): State<Arc<ServerState>>,
   Path(path): Path<String>,
@@ -464,19 +507,7 @@ async fn handle_fx(
       }
     },
     "landed" => fx_text("landed"),
-    // Holds the response open for `?ms=` milliseconds, so a navigation
-    // timeout has something to time out against.
-    "slow" => {
-      let ms: u64 = query
-        .as_deref()
-        .and_then(|q| {
-          q.split('&')
-            .find_map(|pair| pair.strip_prefix("ms=").and_then(|v| v.parse().ok()))
-        })
-        .unwrap_or(1000);
-      tokio::time::sleep(std::time::Duration::from_millis(ms.min(30_000))).await;
-      fx_text("slow")
-    },
+    "slow" => fx_slow(query.as_deref()).await,
     "api/users" => fx_json(&serde_json::json!({"users": ["alice", "bob"]})),
     "api/posts" => fx_json(&serde_json::json!({"posts": ["first"]})),
     "echo" => fx_build(200, "text/plain", body.to_vec(), &[]),
@@ -491,6 +522,12 @@ async fn handle_fx(
         ("set-cookie", "a=1; Path=/".to_string()),
         ("set-cookie", "b=2; Path=/".to_string()),
       ],
+    ),
+    "har" => fx_build(
+      200,
+      "text/html",
+      b"<!doctype html><title>HAR Fixture Title</title><body>backend-test</body>".to_vec(),
+      &[("set-cookie", "harcookie=harvalue; Path=/".to_string())],
     ),
     "set-cookie" => fx_set_cookie(query.as_deref()),
     "set-cookie-redirect" => fx_set_cookie_redirect(query.as_deref()),

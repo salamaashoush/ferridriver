@@ -297,7 +297,10 @@ struct SubscriberSlot<E> {
 }
 
 /// Listener + subscription registries shared with the dispatcher task.
+type StateObserver<E> = Arc<dyn Fn(&E) + Send + Sync>;
+
 struct EmitterShared<E> {
+  state_observer: std::sync::OnceLock<StateObserver<E>>,
   listeners: std::sync::Mutex<Vec<ListenerSlot<E>>>,
   subscribers: std::sync::Mutex<Vec<SubscriberSlot<E>>>,
 }
@@ -342,6 +345,9 @@ async fn dispatch_loop<E: EmitterEvent>(shared: Arc<EmitterShared<E>>, mut rx: m
 }
 
 fn dispatch_event<E: EmitterEvent>(shared: &EmitterShared<E>, event: E, fired: &mut Vec<Arc<dyn Fn(E) + Send + Sync>>) {
+  if let Some(observer) = shared.state_observer.get() {
+    observer(&event);
+  }
   {
     let mut listeners = lock_or_recover(&shared.listeners);
     // Collect matching callbacks in registration order and drop
@@ -413,6 +419,7 @@ impl<E: EmitterEvent> Emitter<E> {
     let inner = Arc::new(EmitterInner {
       queue_tx,
       shared: Arc::new(EmitterShared {
+        state_observer: std::sync::OnceLock::new(),
         listeners: std::sync::Mutex::new(Vec::new()),
         subscribers: std::sync::Mutex::new(Vec::new()),
       }),
@@ -463,6 +470,10 @@ impl<E: EmitterEvent> Emitter<E> {
   pub fn emit(&self, event: E) {
     self.ensure_dispatcher();
     let _ = self.inner.queue_tx.send(event);
+  }
+
+  pub(crate) fn set_state_observer(&self, observer: StateObserver<E>) -> bool {
+    self.inner.shared.state_observer.set(observer).is_ok()
   }
 
   /// Whether any named listener registered via [`Self::on`] or
@@ -859,6 +870,33 @@ pub type BrowserEventEmitter = Emitter<BrowserEvent>;
 mod tests {
   use super::*;
   use std::sync::atomic::AtomicUsize;
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn state_updates_precede_listeners_and_raw_subscribers() -> Result<(), Box<dyn std::error::Error>> {
+    let emitter = EventEmitter::new();
+    let state = Arc::new(AtomicUsize::new(0));
+    let observed = state.clone();
+    assert!(emitter.set_state_observer(Arc::new(move |_| {
+      observed.fetch_add(1, Ordering::SeqCst);
+    })));
+    assert!(!emitter.set_state_observer(Arc::new(|_| {})));
+    emitter.remove_all_listeners();
+    let (tx, mut delivered) = mpsc::unbounded_channel();
+    let observed = state.clone();
+    emitter.prepend_once(
+      "load",
+      Arc::new(move |_| {
+        let _ = tx.send(observed.load(Ordering::SeqCst));
+      }),
+    );
+    let mut subscription = emitter.subscribe();
+    emitter.emit(PageEvent::Load);
+    let value = tokio::time::timeout(std::time::Duration::from_secs(1), delivered.recv()).await?;
+    assert_eq!(value, Some(1));
+    assert!(matches!(subscription.recv().await, Some(PageEvent::Load)));
+    assert_eq!(state.load(Ordering::SeqCst), 1);
+    Ok(())
+  }
 
   fn counting(counter: &Arc<AtomicUsize>) -> EventCallback {
     let counter = Arc::clone(counter);

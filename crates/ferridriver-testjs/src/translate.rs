@@ -33,8 +33,9 @@ struct SuiteChain {
 fn remap_file(bundle: &CompiledBundle, cwd: &Path, line: u32, col: u32) -> Option<(String, u32)> {
   let (src, src_line, _src_col) = bundle.remap(line, col)?;
   let abs = resolve_source(cwd, &src);
+  let process_dir = std::env::current_dir().ok();
   let rel = abs
-    .strip_prefix(cwd)
+    .strip_prefix(process_dir.as_deref().unwrap_or(cwd))
     .map_or_else(|_| abs.display().to_string(), |r| r.display().to_string());
   Some((rel, src_line))
 }

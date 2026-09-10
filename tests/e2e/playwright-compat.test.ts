@@ -163,8 +163,7 @@ describe('playwright compat: bindings and files', () => {
       .toBe('file.svg|image/svg+xml|<svg/>');
   });
 
-  test('fs exposes synchronous reads', async ({ page }) => {
-    void page;
+  test('fs exposes synchronous reads', async () => {
     const path = test.info().outputPath('sync-read.txt');
     await fs.promises.writeFile(path, 'sync-payload');
     expect(fs.existsSync(path)).toBe(true);

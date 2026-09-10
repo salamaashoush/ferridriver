@@ -9,7 +9,7 @@ use ferridriver_bdd_macros::{step, when};
 #[when("I set cookie {string} to {string}")]
 async fn set_cookie(world: &mut BrowserWorld, name: String, value: String) {
   // Extract domain from current page URL so CDP accepts the cookie.
-  let url = world.page().url();
+  let url = world.page()?.url();
   let domain = url
     .split("://")
     .nth(1)
@@ -19,7 +19,7 @@ async fn set_cookie(world: &mut BrowserWorld, name: String, value: String) {
     .to_string();
 
   world
-    .context()
+    .context()?
     .add_cookies(vec![CookieData {
       name,
       value,
@@ -38,7 +38,7 @@ async fn set_cookie(world: &mut BrowserWorld, name: String, value: String) {
 #[when("I delete cookie {string}")]
 async fn delete_cookie(world: &mut BrowserWorld, name: String) {
   world
-    .context()
+    .context()?
     .delete_cookie(&name, None)
     .await
     .map_err(|e| StepError::wrap(format!("delete cookie \"{name}\""), e))?;
@@ -47,7 +47,7 @@ async fn delete_cookie(world: &mut BrowserWorld, name: String) {
 #[step("I clear all cookies")]
 async fn clear_cookies(world: &mut BrowserWorld) {
   world
-    .context()
+    .context()?
     .clear_cookies()
     .await
     .map_err(|e| StepError::wrap("clear cookies", e))?;

@@ -24,7 +24,7 @@ use ferridriver_bdd::prelude::*;
 #[given("I am on the example page")]
 async fn navigate_example(world: &mut BrowserWorld) {
   world
-    .page()
+    .page()?
     .goto("https://example.com")
     .await
     .map_err(|e| step_err!("{e}"))?;
@@ -32,7 +32,7 @@ async fn navigate_example(world: &mut BrowserWorld) {
 
 #[then("I should see the example heading")]
 async fn check_heading(world: &mut BrowserWorld) {
-  let locator = world.page().locator("h1");
+  let locator = world.page()?.locator("h1");
   ferridriver_test::expect::expect(&locator)
     .to_have_text("Example Domain")
     .await
@@ -41,10 +41,10 @@ async fn check_heading(world: &mut BrowserWorld) {
 
 #[when("I store the page info")]
 async fn store_info(world: &mut BrowserWorld) {
-  let title = world.page().title().await.map_err(|e| step_err!("{e}"))?;
+  let title = world.page()?.title().await.map_err(|e| step_err!("{e}"))?;
   world.set_var("page_title", title);
 
-  let url = world.page().url();
+  let url = world.page()?.url();
   world.set_var("page_url", url);
 }
 

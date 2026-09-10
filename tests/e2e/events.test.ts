@@ -60,34 +60,25 @@ describe('events', () => {
   });
 
   test('page_error_is_native_error', async ({ page }) => {
-    // page.waitForEvent('pageerror') resolves to a NATIVE JS Error, not
-    // a wrapper class. Polls for the specific error identifier — Firefox
-    // BiDi emits a spurious cross-origin "Permission denied" error at
-    // page init that would otherwise land first.
     await page.goto(dataUrl('<!doctype html><html><body><h1>wait-pageerror</h1></body></html>'));
+    const waiter = page.waitForEvent('pageerror', {
+      timeout: 5000,
+      predicate: error => (error as Error).message.includes('boom'),
+    });
     await page.evaluate(() => {
       setTimeout(() => {
         const e = new Error('boom');
         window.dispatchEvent(new ErrorEvent('error', { error: e, message: e.message }));
         throw e;
-      }, 10);
+      }, 0);
     });
-    const deadline = Date.now() + 5000;
-    let match: { isError: boolean; name: string; message: string; stackIsString: boolean } | null = null;
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) break;
-      const err = (await page.waitForEvent('pageerror', { timeout: remaining })) as Error;
-      if (err && err.message && err.message.includes('boom')) {
-        match = {
-          isError: err instanceof Error,
-          name: err.name,
-          message: err.message,
-          stackIsString: typeof err.stack === 'string',
-        };
-        break;
-      }
-    }
+    const err = (await waiter) as Error;
+    const match = {
+      isError: err instanceof Error,
+      name: err.name,
+      message: err.message,
+      stackIsString: typeof err.stack === 'string',
+    };
     expect(match).not.toBeNull();
     expect(match!.isError).toBe(true);
     expect(match!.name).toBe('Error');
@@ -176,6 +167,26 @@ describe('events', () => {
       }),
     ]);
     expect(typeof frame.url).toBe('function');
+  });
+
+  test('navigation listeners read the current frame URL immediately', async ({ page, context }) => {
+    await page.goto('data:text/html,<title>previous</title>');
+    for (let index = 0; index < 16; index++) {
+      const marker = `current-navigation-${index}`;
+      const pageURL = new Promise<string>(resolve => {
+        page.once('framenavigated', frame => resolve((frame as Frame).url()));
+      });
+      const contextURL = new Promise<string>(resolve => {
+        context.once('framenavigated', frame => resolve((frame as Frame).url()));
+      });
+      const [fromPage, fromContext] = await Promise.all([
+        pageURL,
+        contextURL,
+        page.goto(`data:text/html,<title>${marker}</title>`),
+      ]);
+      expect(fromPage).toContain(marker);
+      expect(fromContext).toContain(marker);
+    }
   });
 
   test('context_pageload', async ({ page, context }) => {

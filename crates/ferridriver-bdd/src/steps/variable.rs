@@ -12,7 +12,7 @@ async fn set_variable(world: &mut BrowserWorld, name: String, value: String) {
 #[when("I store the text of {string} as {string}")]
 async fn store_text(world: &mut BrowserWorld, selector: String, var_name: String) {
   let text = world
-    .page()
+    .page()?
     .locator(&selector)
     .text_content()
     .await
@@ -25,7 +25,7 @@ async fn store_text(world: &mut BrowserWorld, selector: String, var_name: String
 #[when("I store the value of {string} as {string}")]
 async fn store_value(world: &mut BrowserWorld, selector: String, var_name: String) {
   let value = world
-    .page()
+    .page()?
     .locator(&selector)
     .input_value()
     .await

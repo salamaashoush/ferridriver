@@ -10,6 +10,7 @@
 //! when the reader task sees Page.loadEventFired for that session.
 
 pub mod pipe;
+mod screenshot;
 pub mod transport;
 pub mod ws;
 
@@ -1090,19 +1091,31 @@ impl<T: CdpWrap> CdpBrowser<T> {
 
   /// Close the browser process and release resources.
   ///
-  /// SIGKILLs the chrome process directly via the held `ChildGroup`.
-  /// The graceful CDP `Browser.close` is intentionally skipped — for
-  /// test runs the user-data-dir tempdir is removed regardless, and
-  /// the CDP roundtrip cost (~5-10ms RTT) outweighs the value of
-  /// letting chrome flush its `IndexedDB` / profile state on exit.
+  /// Caller-owned profiles must flush before exit. Throwaway profiles
+  /// can be killed directly because their contents are being discarded.
   pub async fn close(&mut self) -> Result<()> {
     for handle in self.attach_tasks.iter() {
       handle.abort();
     }
     if let Some(mut group) = self.child.lock().await.take() {
+      let mut flushed = true;
+      if self.user_data_dir.is_none() {
+        let timeout = std::time::Duration::from_secs(5);
+        let _ = tokio::time::timeout(
+          timeout,
+          self.transport.send_command(None, "Browser.close", &super::EMPTY_PARAMS),
+        )
+        .await;
+        flushed = group.wait_for_exit(timeout).await;
+      }
       // Group kill first (helpers die with the parent), then reap so
       // the enclosing runtime doesn't carry a zombie.
       group.shutdown().await;
+      if !flushed {
+        return Err(FerriError::Backend(
+          "Chromium did not close cleanly while flushing its persistent profile".into(),
+        ));
+      }
     }
     // Reclaim the profile directory here rather than leaving it to the
     // last `Arc` drop: at process teardown the runtime may never run
@@ -2302,8 +2315,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// processed second. A same-document navigation never issues one, so
   /// waiting there would only slow it down.
   async fn await_nav_response(&self, grace: std::time::Duration) -> Option<Response> {
-    let req = self.nav_request_slot.wait(grace).await?;
-    req.response().await.ok().flatten()
+    self.nav_request_slot.final_response(grace).await
   }
 
   /// The grace a navigation that committed `expected_loader_id` gets;
@@ -2853,11 +2865,7 @@ impl<T: CdpWrap> CdpPage<T> {
     return_by_value: bool,
   ) -> Result<crate::js_handle::EvaluateResult> {
     if let Some(exception) = response.get("exceptionDetails") {
-      let text = exception
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Evaluation error");
-      return Err(FerriError::Backend(text.to_string()));
+      return Err(FerriError::Backend(cdp_get_exception_message(exception)));
     }
 
     let result_obj = response
@@ -3262,9 +3270,11 @@ impl<T: CdpWrap> CdpPage<T> {
     // Pre-capture: set up per-field state and collect teardown tokens.
     let (style_installed, mask_installed) = self.screenshot_install_dom(&opts).await?;
     let bg_installed = self.screenshot_install_transparent_bg(&opts).await?;
-    let params = self.screenshot_build_params(&opts).await?;
-
-    let result = self.cmd("Page.captureScreenshot", params).await;
+    let result = async {
+      let params = self.screenshot_build_params(&opts).await?;
+      screenshot::capture(&*self.transport, self.session_id.as_deref(), params).await
+    }
+    .await;
 
     // Teardown — always runs so user interaction after a failure sees
     // a pristine page state.
@@ -3283,12 +3293,7 @@ impl<T: CdpWrap> CdpPage<T> {
         .await;
     }
 
-    let data = result?
-      .get("data")
-      .and_then(|v| v.as_str().map(String::from))
-      .ok_or_else(|| FerriError::backend("No screenshot data"))?;
-    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
-      .map_err(|e| FerriError::Backend(format!("Decode screenshot: {e}")))
+    result
   }
 
   /// Install the DOM-side screenshot overrides (caret hide, user style,
@@ -3440,25 +3445,19 @@ impl<T: CdpWrap> CdpPage<T> {
       ImageFormat::Webp => "webp",
     };
 
-    let result = self
-      .cmd(
-        "Page.captureScreenshot",
-        serde_json::json!({
-            "format": format_str,
-            "clip": {
-                "x": rect["x"], "y": rect["y"],
-                "width": rect["width"], "height": rect["height"],
-                "scale": 1
-            }
-        }),
-      )
-      .await?;
-    let data = result
-      .get("data")
-      .and_then(|v| v.as_str())
-      .ok_or_else(|| FerriError::backend("No screenshot data"))?;
-    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
-      .map_err(|e| FerriError::Backend(format!("Decode: {e}")))
+    screenshot::capture(
+      &*self.transport,
+      self.session_id.as_deref(),
+      serde_json::json!({
+          "format": format_str,
+          "clip": {
+              "x": rect["x"], "y": rect["y"],
+              "width": rect["width"], "height": rect["height"],
+              "scale": 1
+          }
+      }),
+    )
+    .await
   }
 
   // ---- Screencast (video recording) ----
@@ -5615,14 +5614,14 @@ impl<T: CdpWrap> CdpPage<T> {
     emitter: crate::events::EventEmitter,
     nav_request_slot: crate::network::NavRequestSlot,
   ) -> tokio::task::AbortHandle {
+    let mut rx = transport.tap_event_domains(&["Network"], session_id.as_deref());
     let tracker: Arc<NetworkTracker<T>> = Arc::new(NetworkTracker::new(
-      transport.clone(),
+      transport,
       session_id.clone(),
       target_id,
       nav_request_slot,
     ));
     tokio::spawn(async move {
-      let mut rx = transport.tap_event_domains(&["Network"], session_id.as_deref());
       while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
@@ -6551,24 +6550,13 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       }
       return Ok(());
     }
-    self
-      .cmd(
-        "Fetch.enable",
-        serde_json::json!({
-            "patterns": [{"urlPattern": "*", "requestStage": "Request"}],
-            "handleAuthRequests": has_creds,
-        }),
-      )
-      .await?;
 
-    let t = self.transport.clone();
-    let sid = self.session_id.clone();
-    let routes = self.routes.clone();
-    let creds = self.http_credentials.clone();
-    let handle = tokio::spawn(async move {
-      Self::handle_fetch_events(t, sid, routes, creds).await;
-    })
-    .abort_handle();
+    let handle = Self::spawn_fetch_listener(
+      self.transport.clone(),
+      self.session_id.clone(),
+      self.routes.clone(),
+      self.http_credentials.clone(),
+    );
     // Dedicated slot so the disable path can abort exactly this loop;
     // also on `listener_tasks` for page-close cleanup (abort is
     // idempotent). A stale handle in the slot is already-aborted.
@@ -6576,9 +6564,38 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       *slot = Some(handle.clone());
     }
     if let Ok(mut guard) = self.listener_tasks.lock() {
-      guard.push(handle);
+      guard.push(handle.clone());
     }
+    if let Err(error) = self
+      .cmd(
+        "Fetch.enable",
+        serde_json::json!({
+            "patterns": [{"urlPattern": "*", "requestStage": "Request"}],
+            "handleAuthRequests": has_creds,
+        }),
+      )
+      .await
+    {
+      self.fetch_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+      handle.abort();
+      return Err(error);
+    }
+
     Ok(())
+  }
+
+  fn spawn_fetch_listener(
+    transport: Arc<T>,
+    session_id: Option<Arc<str>>,
+    routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
+    http_credentials: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
+  ) -> tokio::task::AbortHandle {
+    // Subscribe before enabling Fetch: Chrome can pause a request before its enable reply.
+    let rx = transport.tap_event_domains(&["Fetch"], session_id.as_deref());
+    tokio::spawn(async move {
+      Self::handle_fetch_events(transport, session_id, routes, http_credentials, rx).await;
+    })
+    .abort_handle()
   }
 
   /// `Fetch.disable` + tear down the interceptor loop. Both `unroute`
@@ -6601,6 +6618,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     session_id: Option<Arc<str>>,
     routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
     http_credentials: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>>,
   ) {
     // Extract `scheme://host[:port]` from a request URL for
     // origin-scoped credential matching. Handles `http(s)://host[:port]/path`;
@@ -6614,10 +6632,6 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       }
       Some(format!("{scheme}://{host_and_port}"))
     }
-    // Lossless tap: a dropped `Fetch.requestPaused` is a request Chrome
-    // holds paused forever (page hang), so the interceptor must never
-    // miss one.
-    let mut rx = transport.tap_event_domains(&["Fetch"], session_id.as_deref());
     while let Some(event) = rx.recv().await {
       if let Some(ref expected_sid) = session_id {
         let event_sid = event.get("sessionId").and_then(|v| v.as_str());
@@ -7289,21 +7303,15 @@ impl<T: CdpTransport> CdpElement<T> {
       ImageFormat::Webp => "webp",
     };
 
-    let result = self
-      .cmd(
-        "Page.captureScreenshot",
-        serde_json::json!({
-            "format": fmt,
-            "clip": {"x": x, "y": y, "width": w, "height": h, "scale": 1}
-        }),
-      )
-      .await?;
-    let data = result
-      .get("data")
-      .and_then(|v| v.as_str())
-      .ok_or_else(|| FerriError::backend("No screenshot data"))?;
-    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
-      .map_err(|e| FerriError::Backend(format!("Decode: {e}")))
+    screenshot::capture(
+      &*self.transport,
+      self.session_id.as_deref(),
+      serde_json::json!({
+          "format": fmt,
+          "clip": {"x": x, "y": y, "width": w, "height": h, "scale": 1}
+      }),
+    )
+    .await
   }
 }
 

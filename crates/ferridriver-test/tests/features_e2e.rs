@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use ferridriver_test::config::{CliOverrides, TestConfig};
+use ferridriver_test::config::{BrowserConfig, CliOverrides, TestConfig};
 use ferridriver_test::model::*;
 use ferridriver_test::runner::TestRunner;
 
@@ -87,6 +87,10 @@ async fn test_retry_with_flaky_detection() {
   };
 
   let config = TestConfig {
+    browser: BrowserConfig {
+      headless: true,
+      ..Default::default()
+    },
     workers: 1,
     timeout: 10_000,
     ..Default::default()
@@ -254,6 +258,10 @@ async fn test_all_locator_matchers() {
   };
 
   let config = TestConfig {
+    browser: BrowserConfig {
+      headless: true,
+      ..Default::default()
+    },
     workers: 1,
     timeout: 30_000,
     ..Default::default()
@@ -329,6 +337,10 @@ async fn test_expect_poll() {
   };
 
   let config = TestConfig {
+    browser: BrowserConfig {
+      headless: true,
+      ..Default::default()
+    },
     workers: 1,
     timeout: 15_000,
     ..Default::default()
@@ -413,6 +425,10 @@ async fn test_to_pass() {
   };
 
   let config = TestConfig {
+    browser: BrowserConfig {
+      headless: true,
+      ..Default::default()
+    },
     workers: 1,
     timeout: 15_000,
     ..Default::default()
@@ -477,6 +493,10 @@ async fn test_page_assertions() {
   };
 
   let config = TestConfig {
+    browser: BrowserConfig {
+      headless: true,
+      ..Default::default()
+    },
     workers: 1,
     timeout: 15_000,
     ..Default::default()

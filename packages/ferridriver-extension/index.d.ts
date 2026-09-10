@@ -123,18 +123,29 @@ export interface Sidecars {
  * placeholder must be supplied.
  */
 export interface Commands {
+  exec(name: string, vars?: Record<string, string | number | boolean | null>): Promise<{
+    exitCode: number | null;
+    success: boolean;
+    stdout: string;
+    stderr: string;
+  }>;
   run<T = unknown>(name: string, vars?: Record<string, string | number | boolean>): Promise<T>;
   /** Start a persistent process (idempotent while it is running). */
-  start(name: string, vars?: Record<string, string | number | boolean>): Promise<{ name: string; pid: number }>;
-  status(name: string): Promise<{
+  start(name: string, vars?: Record<string, string | number | boolean>): { name: string; pid: number };
+  open(name: string, vars?: Record<string, string | number | boolean>): { name: string; pid: number };
+  write(name: string, data: string | null): Promise<void>;
+  read(name: string): Promise<string | null>;
+  wait(name: string, timeoutMs?: number): Promise<number>;
+  waitForOutput(name: string, text: string, timeoutMs?: number): Promise<string>;
+  status(name: string): {
     name: string;
     running: boolean;
     pid?: number;
     exitCode?: number | null;
     stdout?: string;
     stderr?: string;
-  }>;
-  stop(name: string): Promise<void>;
+  };
+  stop(name: string): void;
 }
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace';
@@ -167,6 +178,7 @@ export interface ToolContext<Args = Record<string, unknown>, Settings = Record<s
   page: Page;
   context: BrowserContext;
   request: APIRequestContext;
+  fetch: typeof globalThis.fetch;
   browser: Browser;
   commands: Commands;
   vars: Vars;

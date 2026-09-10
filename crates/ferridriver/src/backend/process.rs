@@ -219,6 +219,10 @@ impl ChildGroup {
     self.pid != 0 && matches!(self.child.try_wait(), Ok(None))
   }
 
+  pub(crate) async fn wait_for_exit(&mut self, timeout: std::time::Duration) -> bool {
+    matches!(tokio::time::timeout(timeout, self.child.wait()).await, Ok(Ok(status)) if status.success())
+  }
+
   /// Kill the whole process group, then reap the parent. The group
   /// kill happens BEFORE reaping: an unreaped child's pid cannot be
   /// recycled by the kernel, so the `killpg` target is guaranteed to
@@ -752,7 +756,7 @@ mod tests {
     // plain child, so `pgid(child) == leader != child`.
     cmd
       .arg("-c")
-      .arg("sh -c 'sleep 300' --remote-debugging-port=59999 & echo $!; sleep 300")
+      .arg("sh -c 'sleep 300; wait' --remote-debugging-port=59999 & echo $!; sleep 300; wait")
       .stdout(std::process::Stdio::piped())
       .stderr(std::process::Stdio::null());
     #[allow(unsafe_code)]

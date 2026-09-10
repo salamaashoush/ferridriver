@@ -725,7 +725,7 @@ fn build_browser_fixture_defs(
     FixtureDef {
       name: "context".into(),
       scope,
-      dependencies: vec![],
+      dependencies: vec!["browser".into()],
       setup: Arc::new({
         let resources = Arc::clone(&resources);
         move |_pool| {
@@ -747,7 +747,7 @@ fn build_browser_fixture_defs(
     FixtureDef {
       name: "page".into(),
       scope,
-      dependencies: vec![],
+      dependencies: vec!["browser".into()],
       setup: Arc::new({
         let resources = Arc::clone(&resources);
         move |_pool| {
@@ -854,8 +854,8 @@ pub struct Worker {
 /// Titles and file paths are user-controlled and may contain path
 /// separators or `..` — folding each path-hostile component keeps every
 /// artifact inside `outputDir` (Playwright sanitizes the same way).
-fn artifact_dir_name(full_name: &str) -> String {
-  full_name
+pub(crate) fn artifact_dir_name(full_name: &str, project: &str) -> String {
+  let name = full_name
     .chars()
     .map(|c| match c {
       '/' | '\\' | ':' => '-',
@@ -863,7 +863,12 @@ fn artifact_dir_name(full_name: &str) -> String {
       c => c,
     })
     .collect::<String>()
-    .replace("..", "-")
+    .replace("..", "-");
+  if project.is_empty() {
+    name
+  } else {
+    format!("{name}-{}", &ferridriver::tracing::sha1_hex(project.as_bytes())[..12])
+  }
 }
 
 /// `TestInfo.outputDir` / `snapshotDir` are user-facing and absolute in
@@ -929,13 +934,10 @@ impl Worker {
       worker_index: self.id,
       parallel_index: self.slot,
       repeat_each_index: 0,
-      output_dir: absolutize(
-        self
-          .config
-          .output_dir
-          .join("__suite_hooks__")
-          .join(sanitize_filename(suite_key)),
-      ),
+      output_dir: absolutize(self.config.output_dir.join("__suite_hooks__").join(artifact_dir_name(
+        suite_key,
+        self.config.name.as_deref().unwrap_or_default(),
+      ))),
       snapshot_dir: absolutize(
         self
           .config
@@ -1427,7 +1429,10 @@ impl Worker {
       worker_index: self.id,
       parallel_index: self.slot,
       repeat_each_index: 0,
-      output_dir: absolutize(self.config.output_dir.join(artifact_dir_name(&test_id.full_name()))),
+      output_dir: absolutize(self.config.output_dir.join(artifact_dir_name(
+        &test_id.full_name(),
+        self.config.name.as_deref().unwrap_or_default(),
+      ))),
       snapshot_dir: absolutize(
         self
           .config

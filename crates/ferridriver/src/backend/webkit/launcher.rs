@@ -90,19 +90,12 @@ pub fn spawn(config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<Child
   if config.headless {
     cmd.arg("--headless");
   }
-  // `--no-startup-window` unconditionally, including for a persistent
-  // profile. Playwright omits it there because it adopts the startup
-  // window as the context's first page; ferridriver creates every page
-  // through `Playwright.createPage`, so the window would be an orphan —
-  // and opening it is what kills this WebKit build outright, with a
-  // `Trace/BPT trap: 5` and no protocol error to report. Measured on
-  // webkit-2051: `--user-data-dir` alone dies, headless or not, while
-  // `--user-data-dir --no-startup-window` runs.
-  cmd.arg("--no-startup-window");
   if let Some(ref dir) = config.user_data_dir {
     crate::backend::ensure_user_data_dir(Some(&dir.to_string_lossy()))
       .map_err(|e| LaunchError::Io(std::io::Error::other(e.to_string())))?;
     cmd.arg(format!("--user-data-dir={}", dir.display()));
+  } else {
+    cmd.arg("--no-startup-window");
   }
   if let Some(ref proxy) = config.proxy_server {
     cmd.arg(format!("--proxy={proxy}"));

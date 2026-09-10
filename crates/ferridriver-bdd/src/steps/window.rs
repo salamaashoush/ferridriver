@@ -22,19 +22,19 @@ fn to_step_err(e: AssertionFailure) -> StepError {
 #[when("I open a new tab")]
 async fn open_new_tab(world: &mut BrowserWorld) {
   let page = world
-    .context()
+    .context()?
     .new_page()
     .await
     .map_err(|e| StepError::wrap("open new tab", e))?;
 
   // Replace the active page with the newly opened tab.
-  world.set_page(page);
+  world.set_page(page)?;
 }
 
 #[when("I switch to tab {int}")]
 async fn switch_to_tab(world: &mut BrowserWorld, index: i64) {
   let pages = world
-    .context()
+    .context()?
     .pages()
     .await
     .map_err(|e| StepError::wrap("list tabs", e))?;
@@ -50,32 +50,32 @@ async fn switch_to_tab(world: &mut BrowserWorld, index: i64) {
     .await
     .map_err(|e| StepError::wrap(format!("bring tab {idx} to front"), e))?;
 
-  world.set_page(page);
+  world.set_page(page)?;
 }
 
 #[when("I close the current tab")]
 async fn close_current_tab(world: &mut BrowserWorld) {
   world
-    .page()
+    .page()?
     .close()
     .await
     .map_err(|e| StepError::wrap("close tab", e))?;
 
   // After closing, switch to the first remaining page if available.
   let pages = world
-    .context()
+    .context()?
     .pages()
     .await
     .map_err(|e| StepError::wrap("list tabs after close", e))?;
 
   if let Some(page) = pages.into_iter().next() {
-    world.set_page(page);
+    world.set_page(page)?;
   }
 }
 
 #[then("I should see {int} tab(s)")]
 async fn should_see_tab_count(world: &mut BrowserWorld, expected: i64) {
-  let ctx = world.context().clone();
+  let ctx = world.context()?.clone();
   let expected_count = expected as usize;
   expect_poll(
     move || {
@@ -92,7 +92,7 @@ async fn should_see_tab_count(world: &mut BrowserWorld, expected: i64) {
 #[step("I bring tab to front")]
 async fn bring_to_front(world: &mut BrowserWorld) {
   world
-    .page()
+    .page()?
     .bring_to_front()
     .await
     .map_err(|e| StepError::wrap("bring tab to front", e))?;

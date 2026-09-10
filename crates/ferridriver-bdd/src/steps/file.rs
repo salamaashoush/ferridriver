@@ -9,7 +9,7 @@ use ferridriver_bdd_macros::when;
 #[when("I attach file {string} to {string}")]
 async fn attach_file(world: &mut BrowserWorld, file_path: String, selector: String) {
   world
-    .page()
+    .page()?
     .locator(&selector)
     .set_input_files(ferridriver::options::InputFiles::Paths(vec![std::path::PathBuf::from(
       &file_path,
@@ -34,7 +34,7 @@ async fn attach_files(world: &mut BrowserWorld, selector: String, table: Option<
   }
 
   world
-    .page()
+    .page()?
     .locator(&selector)
     .set_input_files(ferridriver::options::InputFiles::Paths(paths))
     .await

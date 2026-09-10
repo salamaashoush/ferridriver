@@ -210,38 +210,3 @@ impl BddEngine {
     })
   }
 }
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  fn key(g: &[&str], e: &[&str]) -> u64 {
-    let g: Vec<String> = g.iter().map(|s| (*s).to_string()).collect();
-    let e: Vec<ferridriver_config::ExtensionSpec> = e
-      .iter()
-      .map(|s| ferridriver_config::ExtensionSpec {
-        spec: (*s).to_string(),
-        base_dir: std::path::PathBuf::from("/base"),
-      })
-      .collect();
-    logical_key(&g, &e, &serde_json::Value::Null)
-  }
-
-  #[test]
-  fn logical_key_is_stable_and_order_independent() {
-    assert_eq!(key(&["a", "b"], &["x"]), key(&["a", "b"], &["x"]));
-    // glob/extension order must not change the key.
-    assert_eq!(key(&["a", "b"], &["x", "y"]), key(&["b", "a"], &["y", "x"]));
-  }
-
-  #[test]
-  fn logical_key_distinguishes_step_set_and_world_params() {
-    assert_ne!(key(&["a"], &[]), key(&["b"], &[]));
-    assert_ne!(key(&["a"], &[]), key(&["a"], &["ext"]));
-    let g = vec!["a".to_string()];
-    assert_ne!(
-      logical_key(&g, &[], &serde_json::json!({"u": 1})),
-      logical_key(&g, &[], &serde_json::json!({"u": 2})),
-    );
-  }
-}

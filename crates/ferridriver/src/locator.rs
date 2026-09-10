@@ -3251,7 +3251,19 @@ async fn aria_child_snapshot(
   let n = seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
   let prefix = format!("f{n}");
   let copts = aria_opts_json(mode, child_depth, boxes);
-  let body_js = format!("() => JSON.stringify(window.__fd.ariaSnapshotFrame(document.body, {copts}))");
+  let body_js = format!(
+    "async () => {{
+      if (!document.body) {{
+        await new Promise(resolve => {{
+          const observer = new MutationObserver(() => {{
+            if (document.body) {{ observer.disconnect(); resolve(); }}
+          }});
+          observer.observe(document, {{ childList: true, subtree: true }});
+        }});
+      }}
+      return JSON.stringify(window.__fd.ariaSnapshotFrame(document.body, {copts}));
+    }}"
+  );
   let raw_s = child_frame
     .evaluate(&body_js, crate::protocol::SerializedArgument::default(), Some(true))
     .await?
