@@ -556,3 +556,23 @@ completion requires observable behavior through the public scripting API.
   Logs: target/gate/1789025159-3000698 and /tmp/ferridriver-net-guard-ready.log.
   Native integration: 557 passed in 49.2s; BDD: 91.95s. No benchmark
   claim of a speedup over the prior 101.543s warm run.
+
+- Migrated event_bus.rs (nine cases) and reporter_api.rs (five cases)
+  to native JS using private observations from production EventBus,
+  ReporterDriver, RunPreamble, and reporter factory implementations.
+  Coverage retains fan-out, clone lifetime, channel closure, immediate
+  availability, concurrent drain ordering, finalization, suite nesting,
+  stable IDs, shard deduplication, terminal fallback, JSON round trips,
+  and the no-float wire contract. JS inspects raw number tokens so an
+  integral float such as 30000.0 cannot disappear during JSON.parse.
+  Added a direct nonempty returned-reporter-set assertion.
+  Fourteen cases pass in 27ms; Rust originals backed up in /tmp/ferridriver-reporter-tests-backup-9bxa18wm
+  (10968 and 8492 bytes, matched HEAD). Remaining Rust targets: 53.
+
+- Reporter migration final gate passed: 141 checks, zero failures or
+  blocks, 106.78s gate time; logs target/gate/1789025740-3191887.
+  571 native integration tests passed in 49.67s, 2227 E2E cases in
+  97.7s, and 637 BDD scenarios in 91.8s. Existing skips unchanged.
+  Initial lint caught an inline 4KB ProjectConfig variant and a 101-line
+  dispatcher: boxed the configuration and extracted runtime-contract
+  observation. No lint allowances or assertion weakening.

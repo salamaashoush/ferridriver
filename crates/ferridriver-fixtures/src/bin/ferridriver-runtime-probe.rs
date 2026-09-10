@@ -4,6 +4,10 @@ mod bdd;
 mod extensions;
 #[path = "runtime_probe/http.rs"]
 mod http;
+#[path = "runtime_probe/reporter_api.rs"]
+mod reporter_api;
+#[path = "runtime_probe/reporters.rs"]
+mod reporters;
 #[path = "runtime_probe/test_registry.rs"]
 mod test_registry;
 
@@ -23,6 +27,17 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  ReporterApi {
+    #[serde(flatten)]
+    request: reporter_api::Request,
+  },
+  ReporterBus {
+    subscribers: usize,
+    actions: Vec<reporters::Action>,
+  },
+  ReporterDriver {
+    events: Vec<reporters::Event>,
+  },
   HttpRequest {
     #[serde(flatten)]
     request: http::Request,
@@ -301,6 +316,9 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::ReporterApi { request } => reporter_api::run(request),
+      Operation::ReporterBus { subscribers, actions } => reporters::bus(subscribers, actions).await,
+      Operation::ReporterDriver { events } => reporters::driver(events).await,
       Operation::HttpRequest { request } => http::run(request).await,
       Operation::ExecuteVirtualScript { source } => self.execute_virtual_script(&source).await,
       Operation::SessionState => Ok(json!({ "poisoned": self.session.as_ref().map(Session::poisoned) })),
@@ -327,11 +345,7 @@ impl Probe {
       } => Box::pin(bdd_registry(&self.root, &globs, extensions, &queries)).await,
       Operation::ExpandFeature { source, title_format } => expand_feature(&source, title_format),
       Operation::BddPlan { config } => bdd_plan(&config).await,
-      Operation::RuntimeContract => Ok(json!({
-        "contributionPoints": ferridriver_script::CONTRIBUTION_POINTS,
-        "hosts": ExtensionHost::ALL.iter().map(|host| host.as_str()).collect::<Vec<_>>(),
-        "manifestHosts": ferridriver_config::extension_manifest::EXTENSION_HOSTS,
-      })),
+      Operation::RuntimeContract => Ok(runtime_contract()),
       Operation::ConfigureContext {
         host,
         script_root,
@@ -397,6 +411,14 @@ impl Probe {
       },
     }
   }
+}
+
+fn runtime_contract() -> Value {
+  json!({
+    "contributionPoints": ferridriver_script::CONTRIBUTION_POINTS,
+    "hosts": ExtensionHost::ALL.iter().map(|host| host.as_str()).collect::<Vec<_>>(),
+    "manifestHosts": ferridriver_config::extension_manifest::EXTENSION_HOSTS,
+  })
 }
 
 async fn convert_value(value: ferridriver::protocol::SerializedValue, expression: Option<String>) -> Result<Value> {
