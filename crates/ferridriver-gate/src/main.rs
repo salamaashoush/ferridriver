@@ -137,7 +137,14 @@ fn jobs(root: &Path, workers: usize, ready: bool) -> Result<Vec<Job>> {
       if job.name == "napi-build" {
         job.cargo = true;
       } else {
-        job.browsers = workers.min(2);
+        // This target exercises the standalone HTTP client and never creates
+        // a browser context. Charging it browser slots delays unrelated work
+        // behind the NAPI fanout without protecting any shared resource.
+        job.browsers = if job.name == "napi/api-response.test.ts" {
+          0
+        } else {
+          workers.min(2)
+        };
       }
     }
     if job.name == "format" {

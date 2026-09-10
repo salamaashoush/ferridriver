@@ -1350,3 +1350,7 @@ completion requires observable behavior through the public scripting API.
   failures or blocks, 107.21s total. Integration completed in 65.31s, E2E in
   103.82s, and BDD in 97.83s. Log directory:
   target/gate/1789047132-32897.
+- Classified `napi/api-response.test.ts` as browserless in the gate scheduler.
+  It only exercises the standalone HTTP client, so it now consumes zero browser
+  slots and can run immediately beside browser tests. The targeted gate passed
+  four checks in 7.32s.
