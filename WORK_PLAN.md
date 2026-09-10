@@ -1449,3 +1449,6 @@ completion requires observable behavior through the public scripting API.
   `waitForEvent('console', { predicate, timeout })` path. All eight trace
   scenarios pass across CDP, BiDi, and WebKit; the test no longer sleeps while
   waiting for a protocol event.
+- Final post-change ready verification passed 111 checks with zero failures or
+  blocks in 105.35s. Integration took 63.69s, E2E 101.87s, and BDD 95.83s.
+  Log: `target/gate/1789054471-3511311`.
