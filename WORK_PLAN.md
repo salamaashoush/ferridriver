@@ -490,3 +490,45 @@ completion requires observable behavior through the public scripting API.
   ferridriver. Generated NAPI declarations include the new option and methods.
   The addon check should join a permanent native-addon gate group when
   migrating that suite; it currently remains a focused verification artifact.
+
+- Pushed `18fa82ea`, verified redirect bindings. Migrated all eight
+  HTTP redirect/cookie/multipart contracts to native JS. The fixture server
+  retains original response bodies and headers under /fx/http-client routes;
+  per-request limits, redirect flags, cookie persistence, multipart headers,
+  bytes, and boundaries retain their assertions. Shared output-driven server
+  lifecycle helper now serves both native HTTP suites. All 12 combined cases
+  pass in 26 ms. Rust original (9801 bytes, matched HEAD) backed up at
+  /tmp/ferridriver-http-redirects-backup-5pd90cml/http_client_redirects.rs before removal.
+  Remaining top-level Rust integration targets: 56.
+
+- HTTP migration gate failed only on the known WebKit retry-count
+  case: attempts at 0, 61, and 495ms, proving a 434ms interruption.
+  Gate exited 1 after 106.002s; logs target/gate/1789023926-2440013.
+  Added absolute start time to the existing failure diagnostics so Linux
+  scheduler samples can distinguish runnable-thread starvation from VM
+  wake delays. Sampler /tmp/ferridriver-sample-gate.py records only E2E
+  thread scheduler counters, not command arguments or environment.
+
+- Sampled default gate passed all checks in 101.543s; no failing
+  retry window was captured. Logs target/gate/1789024161-2626874 and
+  /tmp/ferridriver-sampled-ready.log; scheduler counters retained in
+  /tmp/ferridriver-e2e-scheduling.jsonl. Original failed window remains
+  0/61/495ms. Exploring a controlled Tokio clock for the interval-selection
+  contract while retaining its assertions and real-time timeout coverage.
+  HTTP migration and absolute retry-start diagnostic remain uncommitted.
+
+- Added controlled Tokio clock execution to the private current-thread
+  runtime probe using test-util, after reading Tokio clock implementation.
+  Session initialization precedes clock pause; clock resumes before errors
+  are returned. Native retry-clock cases preserve >=5 attempts, last error,
+  and <3000ms real-time bounds, and distinguish default intervals. Observed
+  custom schedule: 9 attempts; default: 4; both 401ms virtual elapsed.
+  Two tests pass in 32ms. Existing real-time E2E assertion remains intact.
+  This confirms interval selection but does not explain the 434ms stall.
+
+- Final HTTP migration and controlled-clock gate passed all 144 checks with
+  32 jobs and 32 browser slots in 197.804s wall time (197.72s gate).
+  Logs: target/gate/1789024512-2810834. Documentation rebuilt in 95.04s;
+  E2E took 98.15s, BDD 91.90s, integration 49.34s. This is a rebuild
+  measurement, not a warm-run speedup. Real-time retry coverage passed
+  this run; the earlier intermittent 434ms gap remains unexplained.

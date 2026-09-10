@@ -21,6 +21,9 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  ExecuteVirtualScript {
+    source: String,
+  },
   SessionState,
   CompileExtensions {
     #[serde(flatten)]
@@ -268,6 +271,18 @@ impl Probe {
     Ok(serde_json::to_value(execution.result)?)
   }
 
+  async fn execute_virtual_script(&mut self, source: &str) -> Result<Value> {
+    if self.session.is_none() {
+      self.session = Some(Session::create(ScriptEngineConfig::default(), &self.context).await?);
+    }
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let result = self.execute_script(source, &[]).await;
+    let elapsed = started.elapsed();
+    tokio::time::resume();
+    Ok(json!({ "result": result?, "elapsedMs": elapsed.as_millis() }))
+  }
+
   async fn collect_test_registry(&self, entries: Vec<PathBuf>, host: &str) -> Result<Value> {
     test_registry::collect(
       &self.root,
@@ -280,6 +295,7 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::ExecuteVirtualScript { source } => self.execute_virtual_script(&source).await,
       Operation::SessionState => Ok(json!({ "poisoned": self.session.as_ref().map(Session::poisoned) })),
       Operation::CompileExtensions { request } => {
         Box::pin(extensions::compile(&self.root, &mut self.context, request)).await

@@ -129,7 +129,7 @@ describe('expect', () => {
       msg = String((e as Error).message);
     }
     expect(msg).toContain('always fails');
-    expect(attempts, `attempt timestamps (ms): ${JSON.stringify(attemptTimes)}`).toBeGreaterThanOrEqual(5);
+    expect(attempts, `started at ${t}; attempt timestamps (ms): ${JSON.stringify(attemptTimes)}`).toBeGreaterThanOrEqual(5);
     expect(Date.now() - t).toBeLessThan(3000);
   });
 
