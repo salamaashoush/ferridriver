@@ -1386,3 +1386,9 @@ completion requires observable behavior through the public scripting API.
   and BDD in 102.48s. The count is one lower because the Rust `ct_e2e` target
   was removed; its two browser cases now run inside the JS integration job.
   Log: `target/gate/1789050176-1070775`.
+- Extended `BrowserType.connect()` HTTP handling across Chromium, Firefox, and
+  WebKit. Each product now negotiates a W3C `WebDriver` session onto the
+  existing BiDi transport (`chrome`, `firefox`, or `safari`) and forwards the
+  caller's W3C capabilities. Direct WebSocket connections retain their native
+  backend behavior; Classic-only servers still fail clearly when no BiDi
+  socket is returned. All-target Clippy passes for the expanded path.

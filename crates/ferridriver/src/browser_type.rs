@@ -152,15 +152,35 @@ impl BrowserType {
 
   /// Playwright: `browserType.connect(wsEndpoint, options?) -> Browser`.
   ///
-  /// ferridriver currently has no Playwright-server protocol of its
-  /// own; this accepts a CDP WebSocket endpoint and behaves like
-  /// [`Self::connect_over_cdp`] under the hood. Kept as a separate
-  /// method for surface parity with Playwright.
+  /// A `ws://` endpoint uses the product's native protocol. An HTTP endpoint
+  /// is treated as a W3C `WebDriver` server and negotiated onto its `BiDi`
+  /// WebSocket, using `ConnectOptions::capabilities` for vendor options.
   ///
   /// # Errors
   ///
   /// Returns an error if the WebSocket handshake fails.
   pub async fn connect(self, ws_endpoint: &str, options: ConnectOptions) -> Result<Browser> {
+    if ws_endpoint.starts_with("http://") || ws_endpoint.starts_with("https://") {
+      let plan = LaunchPlan {
+        backend: BackendKind::Bidi,
+        kind: self.kind,
+        ws_endpoint: Some(ws_endpoint.to_string()),
+        ..LaunchPlan::default()
+      };
+      let browser_name = match self.kind {
+        BrowserKind::Chromium => "chrome",
+        BrowserKind::Firefox => "firefox",
+        BrowserKind::WebKit => "safari",
+      };
+      let mode = ConnectMode::WebDriver {
+        endpoint: ws_endpoint.to_string(),
+        browser_name: browser_name.to_string(),
+        capabilities: options.capabilities,
+      };
+      let mut state = BrowserState::with_plan(mode, plan);
+      Box::pin(state.ensure_browser()).await?;
+      return Ok(Browser::from_state(state));
+    }
     if self.kind == BrowserKind::Firefox {
       let plan = LaunchPlan {
         backend: BackendKind::Bidi,
@@ -168,16 +188,7 @@ impl BrowserType {
         ws_endpoint: Some(ws_endpoint.to_string()),
         ..LaunchPlan::default()
       };
-      let mode = if ws_endpoint.starts_with("http://") || ws_endpoint.starts_with("https://") {
-        ConnectMode::WebDriver {
-          endpoint: ws_endpoint.to_string(),
-          browser_name: self.kind.name().to_string(),
-          capabilities: options.capabilities,
-        }
-      } else {
-        ConnectMode::ConnectUrl(ws_endpoint.to_string())
-      };
-      let mut state = BrowserState::with_plan(mode, plan);
+      let mut state = BrowserState::with_plan(ConnectMode::ConnectUrl(ws_endpoint.to_string()), plan);
       Box::pin(state.ensure_browser()).await?;
       return Ok(Browser::from_state(state));
     }
