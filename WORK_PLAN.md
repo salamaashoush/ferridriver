@@ -1403,3 +1403,8 @@ completion requires observable behavior through the public scripting API.
 - Capability-test final gate passed headlessly with 111 checks, zero failures
   or blocks, in 140.75s. Integration completed in 83.47s, E2E in 110.91s,
   and BDD in 100.01s. Log: `target/gate/1789050816-1555898`.
+- Added a Chromium-only `launch({ extensions: [path] })` option to the native
+  scripting and NAPI surfaces. Launch-plan lowering emits one
+  `--load-extension` switch and removes only the conflicting default
+  `--disable-extensions`, retaining headless, automation, and sandbox policy.
+  The flag unit test passes, and Firefox/WebKit behavior remains unchanged.

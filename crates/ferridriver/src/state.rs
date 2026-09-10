@@ -2203,10 +2203,14 @@ pub fn chrome_flags_with(
   };
 
   let mut flags: Vec<String> = Vec::with_capacity(40 + extra_args.len());
+  let loads_extension = extra_args.iter().any(|arg| arg.starts_with("--load-extension="));
 
   // 1. Base chromiumSwitches (from Playwright's chromiumSwitches.ts)
   if !drop_all {
     for f in CHROMIUM_SWITCHES {
+      if loads_extension && *f == "--disable-extensions" {
+        continue;
+      }
       if !is_dropped(f) {
         flags.push((*f).into());
       }
@@ -3084,6 +3088,19 @@ mod tests {
       Some(&crate::options::IgnoreDefaultArgs::All),
     );
     assert_eq!(flags, vec!["--keep-me"]);
+  }
+
+  #[test]
+  fn loading_an_extension_keeps_headless_defaults_and_removes_only_extension_blocker() {
+    let flags = chrome_flags_with(true, &["--load-extension=/tmp/example-extension".to_string()], None);
+    assert!(
+      flags
+        .iter()
+        .any(|flag| flag == "--load-extension=/tmp/example-extension")
+    );
+    assert!(!flags.iter().any(|flag| flag == "--disable-extensions"));
+    assert!(flags.iter().any(|flag| flag == "--headless"));
+    assert!(flags.iter().any(|flag| flag == "--enable-automation"));
   }
 
   /// The headless switches are part of Playwright's `defaultArgs()`, so

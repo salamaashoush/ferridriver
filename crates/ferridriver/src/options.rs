@@ -1874,6 +1874,9 @@ pub struct LaunchOptions {
   pub executable_path: Option<String>,
   /// Extra command-line arguments to pass to the browser.
   pub args: Vec<String>,
+  /// Chromium unpacked extension directories to load at launch.
+  /// Chromium-only; other browser products ignore this list.
+  pub extensions: Vec<std::path::PathBuf>,
   /// Browser distribution channel (e.g. `"chrome"`, `"chrome-beta"`,
   /// `"msedge"`). Currently surface-only — the bundled-browser resolver
   /// reads this when selecting between the headless shell and a
@@ -2079,12 +2082,22 @@ impl LaunchPlan {
       (BrowserKind::Chromium, Some(ChromiumTransport::Ws)) => crate::backend::BackendKind::CdpRaw,
       _ => kind.default_backend(),
     };
+    let mut args = opts.args;
+    if kind == BrowserKind::Chromium && !opts.extensions.is_empty() {
+      let paths = opts
+        .extensions
+        .iter()
+        .map(|path| path.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(",");
+      args.push(format!("--load-extension={paths}"));
+    }
     Self {
       backend,
       kind,
       headless: opts.headless.unwrap_or(true),
       executable_path: opts.executable_path,
-      args: opts.args,
+      args,
       channel: opts.channel,
       env: opts.env,
       user_data_dir: None,

@@ -1511,6 +1511,8 @@ pub struct LaunchOptions {
   pub executable_path: Option<String>,
   /// Additional browser arguments.
   pub args: Option<Vec<String>>,
+  /// Chromium unpacked extension directories to load at launch.
+  pub extensions: Option<Vec<String>>,
   /// Browser distribution channel ("chrome", "chrome-beta", "msedge", ...).
   pub channel: Option<String>,
   /// Slow down operations by this many ms (debugging).

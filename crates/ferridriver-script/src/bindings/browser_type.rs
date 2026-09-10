@@ -153,6 +153,7 @@ struct JsLaunchOptions {
   headless: Option<bool>,
   executable_path: Option<String>,
   args: Option<Vec<String>>,
+  extensions: Option<Vec<String>>,
   channel: Option<String>,
   slow_mo: Option<u64>,
   timeout: Option<u64>,
@@ -217,6 +218,12 @@ fn parse_launch_options<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Res
     headless: parsed.headless,
     executable_path: parsed.executable_path,
     args: parsed.args.unwrap_or_default(),
+    extensions: parsed
+      .extensions
+      .unwrap_or_default()
+      .into_iter()
+      .map(std::path::PathBuf::from)
+      .collect(),
     channel: parsed.channel,
     env: None,
     slow_mo: parsed.slow_mo,

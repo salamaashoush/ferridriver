@@ -1889,6 +1889,8 @@ export interface LaunchOptions {
   headless?: boolean;
   executablePath?: string;
   args?: string[];
+  /** Chromium unpacked extension directories loaded at startup. */
+  extensions?: string[];
   channel?: string;
   slowMo?: number;
   timeout?: number;

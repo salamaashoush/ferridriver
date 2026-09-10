@@ -175,6 +175,12 @@ fn lower_launch_options(opts: LaunchOptions) -> core_opts::LaunchOptions {
     headless: opts.headless,
     executable_path: opts.executable_path,
     args: opts.args.unwrap_or_default(),
+    extensions: opts
+      .extensions
+      .unwrap_or_default()
+      .into_iter()
+      .map(std::path::PathBuf::from)
+      .collect(),
     channel: opts.channel,
     env: None,
     slow_mo: opts.slow_mo.map(u64::from),
