@@ -2259,6 +2259,31 @@ export interface ReporterV2 {
   printsToStdio?(): boolean;
 }
 
+/**
+ * Managed host-process controls. Use these for a local Appium/WebDriver
+ * service or a simulator/emulator command; the session-owned process group is
+ * stopped automatically when the script session ends.
+ */
+export interface Commands {
+  exec(name: string, vars?: Record<string, unknown>): Promise<CommandOutput>;
+  run(name: string, vars?: Record<string, unknown>): Promise<CommandOutput>;
+  start(name: string, vars?: Record<string, unknown>): { name: string; pid: number };
+  open(name: string, vars?: Record<string, unknown>): { name: string; pid: number };
+  write(name: string, data?: string): Promise<void>;
+  read(name: string, timeoutMs?: number): Promise<string>;
+  waitForOutput(name: string, text: string, timeoutMs?: number): Promise<string>;
+  wait(name: string, timeoutMs?: number): Promise<number>;
+  status(name: string): Record<string, unknown>;
+  stop(name: string): void;
+}
+
+export interface CommandOutput {
+  code?: number;
+  stdout?: string;
+  stderr?: string;
+  [key: string]: unknown;
+}
+
 declare global {
   // BrowserType factories: secondary browsers independent of the
   // project's own backend. chromium accepts a transport override
@@ -2266,6 +2291,7 @@ declare global {
   function chromium(options?: { transport?: 'pipe' | 'ws' }): BrowserType;
   function firefox(): BrowserType;
   function webkit(): BrowserType;
+  const commands: Commands;
 
   // `require` serves the native specifiers; `require.resolve` answers a
   // path the way Node does, relative to the file that wrote the call.

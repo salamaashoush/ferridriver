@@ -1503,3 +1503,11 @@ completion requires observable behavior through the public scripting API.
   over the CDP Profiler domain, returning the sampled profile tree and samples
   with explicit lifecycle errors. The focused performance suite now passes all
   four cases in 323ms, including a real sampled profile assertion.
+- Typed the existing managed `commands` process lifecycle for scripts and
+  documented its Appium, simulator, and emulator use with `waitForOutput`, so
+  mobile driver startup does not need fixed sleeps. The integration and type
+  gate passes three checks in 75.57s, including integration in 72.04s; live
+  device sessions still require an installed native driver.
+- Final headless `just ready` verification passes all 111 checks with zero
+  failures or blocks in 118.63s. E2E took 90.79s, integration 102.74s, and
+  BDD 118.20s under the four-job scheduler and 32 browser-slot budget.

@@ -45,3 +45,24 @@ driver-specific `appium:options` values. Ferridriver preserves those
 namespaced capabilities and forces `webSocketUrl: true` because its page API
 is implemented over the returned BiDi socket. A Classic-only driver must use a
 BiDi-enabled configuration or remains unsupported by design.
+
+The native scripting `commands` surface owns local driver and device processes,
+so a test can start Appium, `xcrun simctl`, or an Android emulator from the
+same session that connects the browser. The process group is reaped with the
+session, and `waitForOutput` replaces fixed readiness sleeps:
+
+```ts
+const driver = commands.start('appium', { device: 'example-device' });
+await commands.waitForOutput('appium', 'listener started', 30_000);
+const browser = await webkit().connect('http://127.0.0.1:4723', {
+  capabilities: {
+    platformName: 'iOS',
+    'appium:options': { automationName: 'Safari', deviceName: 'example-device' },
+  },
+});
+```
+
+The driver command must be declared in the script's command allow-list. The
+gate verifies process ownership and WebDriver capability construction with a
+local mock; physical simulator and device sessions still require their native
+drivers and are not claimed by the headless gate.
