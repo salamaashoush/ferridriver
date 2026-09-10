@@ -991,3 +991,18 @@ completion requires observable behavior through the public scripting API.
 - BDD UI migration final headless gate exited zero: 126 checks, zero failures
   or blocks, 110.92s gate time. Logs: target/gate/1789037342-3575943 and
   /tmp/ferridriver-bdd-ui-ready.log.
+- Migrated the Rust-harness UI end-to-end test to native JS assertions while
+  retaining the actual rust-test --ui command and rust-e2e-example harness.
+  Coverage keeps sidebar/idle readiness, single-test selection, run boundaries
+  and totals, absolute cross-process live-trace URLs, served v8 trace artifacts,
+  action events, cancellation without runFinished, and server survival.
+- Native case passed in 1.2s: /tmp/ferridriver-rust-ui-native.log. Readiness and
+  cancellation use stream events, with existing owned command teardown instead
+  of the old fifty-millisecond child-exit polling. The generous test budget
+  permits a cold Cargo list cycle without changing any result assertions.
+- Removed unchanged test_ui_mode.rs (11370 bytes) after verified backup at
+  /tmp/ferridriver-rust-ui-backup-g898xs9x/test_ui_mode.rs. Remaining top-level
+  Rust test targets: 36. Full-gate verification is pending.
+- Rust-harness UI migration final headless gate exited zero: 125 checks, zero
+  failures or blocks, 110.12s gate time. Logs: target/gate/1789037606-3767329
+  and /tmp/ferridriver-rust-ui-ready.log.
