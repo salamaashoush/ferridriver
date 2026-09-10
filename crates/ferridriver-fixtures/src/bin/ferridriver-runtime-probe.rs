@@ -1,5 +1,7 @@
 #[path = "runtime_probe/bdd.rs"]
 mod bdd;
+#[path = "runtime_probe/browser_engine.rs"]
+mod browser_engine;
 #[path = "runtime_probe/cdp_connection.rs"]
 mod cdp_connection;
 #[path = "runtime_probe/config_layers.rs"]
@@ -45,6 +47,9 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  BrowserEngine {
+    scripts: Vec<browser_engine::Script>,
+  },
   ConfigContracts {
     modes: Vec<(String, u32)>,
   },
@@ -368,6 +373,7 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::BrowserEngine { scripts } => browser_engine::run(&self.context, scripts).await,
       Operation::ConfigContracts { modes } => Ok(config_layers::contracts(modes)),
       Operation::ConfigCached { path, updated } => config_layers::cached(&self.root, &path, &updated),
       Operation::ConfigLayers { request } => config_layers::run(&self.root, request),

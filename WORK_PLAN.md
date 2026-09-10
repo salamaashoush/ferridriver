@@ -21,11 +21,11 @@
 
 ## Current evidence
 
-- Latest debugger-migration headless gate passed: 124 checks, zero failures
-  or blocks, 110.20s gate time. Native integration coverage passed 711 cases
-  in 58.8s. Logs: target/gate/1789038218-3962275 and
-  /tmp/ferridriver-debug-ready.log. This is a warm observation, not a controlled
-  before/after benchmark. Remaining top-level Rust test files: 35, including
+- Latest scripting/plan migration headless gate passed: 122 checks, zero failures
+  or blocks, 109.54s gate time. Native integration coverage passed 717 cases
+  in 59.8s. Logs: target/gate/1789038641-4164735 and
+  /tmp/ferridriver-script-plan-ready-fixed.log. This is a warm observation, not a controlled
+  before/after benchmark. Remaining top-level Rust test files: 33, including
   benchmark targets; addon migration and capability implementation remain open.
 - Verified headless gate at committed checkpoint `63641057`: 157 checks, zero failed
   or blocked, 107.68 seconds in the gate and 107.813 seconds wall time. This is
@@ -1026,3 +1026,26 @@ completion requires observable behavior through the public scripting API.
 - Debugger migration final headless gate exited zero: 124 checks, zero
   failures or blocks, 110.20s gate time. Logs: target/gate/1789038218-3962275
   and /tmp/ferridriver-debug-ready.log.
+- Migrated scripting browser integration to two native JS cases, preserving
+  ScriptEngine execution, bound arguments, cross-execution host variables,
+  navigation, selectors, input and visibility assertions. A private observation
+  fixture supplies a real headless Chromium page and explicitly closes its
+  browser. Added the actual page.close assertion missing from the old test.
+- Migrated four TypeScript plan cases through the real CLI/core runner, using
+  original embedded TypeScript fixtures with added type declarations. Coverage retains
+  hooks, custom fixtures, steps, attachments, runtime modifiers, snapshot path
+  layout, baseline writes/matches and mismatch failures. The failure-location
+  case now also verifies the original TypeScript line instead of only exit code.
+- Focused native results: browser-engine cases 352ms, plan cases 646ms, with
+  two/four workers respectively. Logs: /tmp/ferridriver-script-browser-native.log
+  and /tmp/ferridriver-native-plan.log. Removed unchanged integration.rs (9976
+  bytes) and e2e_plan.rs (7919 bytes) after verified backups in
+  /tmp/ferridriver-script-plan-backup-_4y5t8ov/. Remaining top-level Rust files:
+  33. Full-gate verification is pending.
+- The first gate caught implicit global and custom-fixture types in the
+  extracted TypeScript suite, which was previously invisible to typechecking.
+  Added the global state declaration and fixture generic without changing
+  runtime assertions. Final headless gate exited zero: 122 checks, zero
+  failures or blocks, 109.54s; 717 native integration cases passed in 59.8s.
+  Logs: target/gate/1789038641-4164735 and
+  /tmp/ferridriver-script-plan-ready-fixed.log.
