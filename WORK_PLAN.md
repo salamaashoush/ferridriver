@@ -1445,3 +1445,7 @@ completion requires observable behavior through the public scripting API.
   the dependency-aware gate so the workspace build and type check overlap,
   while the existing argument-preserving `test-integration` recipe remains
   available for filtered exploratory runs.
+- Replaced the MCP trace test's 5-second polling loop with the native
+  `waitForEvent('console', { predicate, timeout })` path. All eight trace
+  scenarios pass across CDP, BiDi, and WebKit; the test no longer sleeps while
+  waiting for a protocol event.

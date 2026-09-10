@@ -26,12 +26,12 @@ for (const backend of ['cdp-pipe', 'cdp-raw', 'bidi', 'webkit']) {
       const result = await client.script(`
         await context.tracing.start({ title: 'MCP trace', screenshots: true, snapshots: true });
         await page.goto('data:text/html,<body><style>button{color:red}</style><button id=b>Go</button></body>');
+        const consoleReceived = page.waitForEvent('console', {
+          predicate: message => message.text().includes('trace-console-probe'),
+          timeout: 5000,
+        });
         await page.evaluate("console.log('trace-console-probe', 42)");
-        let consoleSeen = false;
-        for (let i = 0; i < 200 && !consoleSeen; i++) {
-          consoleSeen = page.consoleMessages({ filter: 'all' }).some(message => message.text().includes('trace-console-probe'));
-          if (!consoleSeen) await page.waitForTimeout(25);
-        }
+        await consoleReceived;
         const second = await context.newPage();
         await second.close();
         await page.evaluate("document.styleSheets[0].insertRule('body{margin:0}')");
@@ -44,7 +44,7 @@ for (const backend of ['cdp-pipe', 'cdp-raw', 'bidi', 'webkit']) {
         await context.tracing.stop({ path: args[0] });
         let doubleStop = '';
         try { await context.tracing.stop(); } catch (error) { doubleStop = String(error); }
-        return { missingError, doubleStop, consoleSeen };
+        return { missingError, doubleStop, consoleSeen: true };
       `, [path]);
       assert.equal(result.consoleSeen, true);
       assert.ok(result.missingError.length > 0);
