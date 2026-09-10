@@ -312,3 +312,36 @@ completion requires observable behavior through the public scripting API.
   `target/gate/1789020131-209777`, `/tmp/ferridriver-registry-migration-ready2.log`.
   All 492 native integrations passed. This validates removal of the original
   Rust registry target while retaining its assertions.
+
+- Pushed `712bd48b`, the verified native registry migration.
+- Three native extension reload cases passed in 46 ms. They compile each
+  extension twice in the same process, verifying standalone/package helper
+  edits invalidate cached manifests and an unchanged tree retains its manifest.
+  The existing probe now returns extracted manifests as observations.
+- Removed `extension_reload.rs` only after confirming its 3773 bytes matched
+  HEAD and its backup at
+  `/tmp/ferridriver-extension-reload-backup-i80ckfdd/extension_reload.rs`.
+  Remaining top-level Rust integration targets: 65.
+- Full reload migration verification is running at 16 browser slots in exec
+  session 70931, console `/tmp/ferridriver-extension-reload-ready.log`.
+  Migration files are not committed yet.
+
+- Reload migration gate exited 1 after 110.975 wall seconds (110.87 gate).
+  Six existing command cases rejected the added manifest response field;
+  browser suites passed. The probe now exposes manifests only when requested
+  through `includeManifests`, preserving the existing exact response contract
+  and every command assertion. Rebuilding the probe in exec session 40949
+  before checking both native suites together.
+
+- The corrected probe passed all nine native reload/command cases together
+  in 193 ms, with existing exact command assertions unchanged. Full gate
+  session 15489 is running at 16 slots, console
+  `/tmp/ferridriver-extension-reload-ready2.log`. The focused package rebuild
+  took 2m43s because Cargo rebuilt the narrower dependency graph; future
+  probe builds should use the workspace graph already used by the gate.
+
+- Reload migration full gate passed all 153 checks in 111.691 wall seconds
+  (111.61 gate), with 495 native integrations passing at 16 browser slots.
+  Logs: `target/gate/1789020949-574666` and
+  `/tmp/ferridriver-extension-reload-ready2.log`. No assertions were weakened.
+  Remaining migration and capability milestones are still open.

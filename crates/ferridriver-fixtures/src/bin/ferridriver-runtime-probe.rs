@@ -33,6 +33,8 @@ enum Operation {
   },
   LoadExtensions {
     entries: Vec<PathBuf>,
+    #[serde(default)]
+    include_manifests: bool,
   },
   RunSession {
     source: String,
@@ -187,12 +189,16 @@ impl Probe {
     Ok(serde_json::to_value(execution.result)?)
   }
 
-  async fn load_extensions(&mut self, entries: Vec<PathBuf>) -> Result<Value> {
+  async fn load_extensions(&mut self, entries: Vec<PathBuf>, include_manifests: bool) -> Result<Value> {
     let (compiled, failures) = ferridriver_script::compile_and_extract_extensions(
       &[paths(&self.root, entries)],
       &ferridriver_config::ExtensionPolicyConfig::default(),
     )
     .await;
+    let manifests = compiled
+      .iter()
+      .map(|extension| serde_json::from_str::<Value>(&extension.manifests_json()))
+      .collect::<serde_json::Result<Vec<_>>>()?;
     self.context.extensions = compiled
       .into_iter()
       .map(|compiled| ferridriver_script::ExtensionBinding {
@@ -203,7 +209,11 @@ impl Probe {
       })
       .collect();
     self.context.host = ExtensionHost::Mcp;
-    Ok(json!({ "failures": failures, "count": self.context.extensions.len() }))
+    let mut result = json!({ "failures": failures, "count": self.context.extensions.len() });
+    if include_manifests {
+      result["manifests"] = serde_json::to_value(manifests)?;
+    }
+    Ok(result)
   }
 
   async fn run_session(&self, source: &str) -> Result<Value> {
@@ -251,7 +261,10 @@ impl Probe {
         Box::pin(bdd::run(&self.root, &self.context, paths(&self.root, entries), actions)).await
       },
       Operation::GateExtensions { entries, host } => gate_extensions(&self.root, entries, &host),
-      Operation::LoadExtensions { entries } => self.load_extensions(entries).await,
+      Operation::LoadExtensions {
+        entries,
+        include_manifests,
+      } => self.load_extensions(entries, include_manifests).await,
       Operation::RunSession { source } => self.run_session(&source).await,
       Operation::ConvertValue { value, expression } => convert_value(value, expression).await,
       Operation::LoadBdd { globs, allow_env } => load_bdd(&self.root, &globs, allow_env.as_deref()).await,
