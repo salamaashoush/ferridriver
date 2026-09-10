@@ -1400,3 +1400,6 @@ completion requires observable behavior through the public scripting API.
   sessions. The unit test verifies `platformName` and nested `appium:options`
   survive merging while `webSocketUrl` negotiation remains enabled; four URL
   and capability tests pass, and all-target Clippy remains clean.
+- Capability-test final gate passed headlessly with 111 checks, zero failures
+  or blocks, in 140.75s. Integration completed in 83.47s, E2E in 110.91s,
+  and BDD in 100.01s. Log: `target/gate/1789050816-1555898`.
