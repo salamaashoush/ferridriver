@@ -954,3 +954,23 @@ completion requires observable behavior through the public scripting API.
 - CLI reporting/trace migration final headless gate exited zero: 127 checks,
   zero failures or blocks, 110.92s gate time. Logs:
   target/gate/1789036454-3183825 and /tmp/ferridriver-cli-report-trace-ready.log.
+- Migrated all six test-server UI integration cases into native JS protocol
+  clients: listing/selection, result IDs, failures, live traces, project IDs and
+  filters, unsupported-option errors, per-run worker/failure/timeout/recording/
+  snapshot/reporter options, and discovery diagnostics. A private subprocess
+  forwards WebSocket text frames unchanged; protocol decisions and assertions
+  remain in JS. The runtime still lacks a public WebSocket binding.
+- Replaced the live trace's timed sleeps and filesystem polling with the
+  existing fixture held/release barrier. The test reads the actual live trace
+  before releasing navigation. Timeout coverage uses an unresolved promise.
+  UI readiness reads complete lines until a URL and then continues draining;
+  the first attempt exposed a banner-before-URL race, fixed in this helper.
+- Six native cases passed in 2.1s: /tmp/ferridriver-ui-native-fixed.log.
+  Removed unchanged test_server_ui.rs (24887 bytes) after verified backup at
+  /tmp/ferridriver-test-server-backup-gbqjokyq/test_server_ui.rs. Remaining
+  top-level Rust test targets: 38. Full-gate verification is pending.
+- Test-server migration final headless gate exited zero: 127 checks, zero
+  failures or blocks, 112.08s gate time. Logs: target/gate/1789037008-3382228
+  and /tmp/ferridriver-test-server-migration-ready.log. One Rust test target
+  was removed and the transport fixture adds a binary target, so the gate's
+  job count stayed unchanged despite moving six cases to the native runner.

@@ -28,3 +28,13 @@ env = ["TOKIO_WORKER_THREADS"]
 run = ["${binary}", "--port", "0"]
 persistent = true
 env = ["TOKIO_WORKER_THREADS"]
+
+[scripting.allow.commands.ui]
+run = ["sh", "-c", "${command}"]
+persistent = true
+env = ["HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "LD_LIBRARY_PATH", "CHROMIUM_PATH", "CHROMIUM_HEADLESS_SHELL_PATH", "TOKIO_WORKER_THREADS"]
+
+[scripting.allow.commands.websocket]
+run = ["${binary}", "${url}"]
+persistent = true
+env = ["TOKIO_WORKER_THREADS"]
