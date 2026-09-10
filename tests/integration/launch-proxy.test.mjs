@@ -25,6 +25,7 @@ for (const [backend, browserType] of [
   ['cdp-pipe', () => chromium()],
   ['cdp-raw', () => chromium({ transport: 'ws' })],
   ['bidi', () => firefox()],
+  ['webkit', () => webkit()],
 ]) {
   test(`${backend}: browser launch routes HTTPS requests through its proxy`, async ({ request }) => {
     await recordingProxy(async ({ baseURL, proxy }) => {

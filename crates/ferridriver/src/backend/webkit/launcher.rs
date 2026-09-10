@@ -101,7 +101,11 @@ pub fn spawn(config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<Child
     cmd.arg(format!("--proxy={proxy}"));
   }
   if let Some(ref bypass) = config.proxy_bypass_list {
-    cmd.arg(format!("--proxy-bypass-list={bypass}"));
+    if cfg!(target_os = "linux") {
+      cmd.args(bypass.split(',').map(|host| format!("--ignore-host={host}")));
+    } else {
+      cmd.arg(format!("--proxy-bypass-list={bypass}"));
+    }
   }
   for arg in &config.extra_args {
     cmd.arg(arg);

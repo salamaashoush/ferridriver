@@ -20,6 +20,8 @@ mod reporter_output;
 mod reporters;
 #[path = "runtime_probe/test_registry.rs"]
 mod test_registry;
+#[path = "runtime_probe/webkit.rs"]
+mod webkit;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -37,6 +39,9 @@ use serde_json::{Value, json};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum Operation {
+  Webkit {
+    request: webkit::Request,
+  },
   PersistentProfile {
     scenario: persistent_profile::Scenario,
   },
@@ -340,6 +345,7 @@ impl Probe {
 
   async fn run(&mut self, operation: Operation) -> Result<Value> {
     match operation {
+      Operation::Webkit { request } => webkit::run(request).await,
       Operation::PersistentProfile { scenario } => persistent_profile::run(&self.root, scenario).await,
       Operation::ProcessRecordPublication => process_records::run().await,
       Operation::CdpConnection { urls } => cdp_connection::run(&self.root, urls).await,

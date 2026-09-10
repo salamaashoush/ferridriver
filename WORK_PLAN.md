@@ -859,3 +859,23 @@ completion requires observable behavior through the public scripting API.
   or blocks, 109.52s gate time. Logs: target/gate/1789034379-2194241 and
   /tmp/ferridriver-persistent-ready.log. This warm run is not a controlled
   comparison against the prior 143.65s run.
+- Migrated the five WebKit smoke cases to native integration coverage, keeping
+  backend navigation/evaluation, dynamic locale on cross-site navigation and
+  fresh pages, mobile feature detection/layout, desktop orientation, and public
+  launch proxy routing. Browser launch and navigation errors now fail instead
+  of returning success. The private backend fixture always closes its browser.
+- The migrated proxy case failed with unknown --proxy-bypass-list on Linux.
+  Primary Playwright source (server/webkit/webkit.ts) uses separate --ignore-host
+  arguments on Linux and --proxy-bypass-list on macOS. The launcher now follows
+  that mapping. The same five native cases passed in 1.0s after the correction:
+  /tmp/ferridriver-webkit-native-fixed.log; red log:
+  /tmp/ferridriver-webkit-native.log. No assertions were weakened.
+- Removed unchanged webkit_smoke.rs (12625 bytes) after byte-verifying its backup
+  at /tmp/ferridriver-webkit-smoke-backup-p7s3a8n7/webkit_smoke.rs. Remaining
+  top-level Rust test targets: 45. Full-gate verification is pending.
+- WebKit migration gate passed with exit zero: 133 checks, zero failures or
+  blocks, 140.80s gate time, including the changed core rebuild. Logs:
+  target/gate/1789034718-2392068 and
+  /tmp/ferridriver-webkit-migration-ready-fixed.log. The initial lint run caught
+  a large locale-application future; boxing that call reduced its containing
+  futures without suppressions. No temporary diagnostic instrumentation added.
