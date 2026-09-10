@@ -90,6 +90,7 @@ pub fn translate_features(
 
   let total_tests = suites.iter().map(|s| s.tests.len()).sum();
   TestPlan {
+    repetitions_expanded: false,
     suites,
     total_tests,
     shard: None,
@@ -329,6 +330,7 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
   // reads. Carried as opaque metadata, so the core stays domain-free.
   let metadata = serde_json::to_value(&scenario.source).ok();
   let id = TestId {
+    repeat_each_index: 0,
     file: scenario.feature_path.display().to_string(),
     // A `Rule` and a Scenario Outline are each a describe around what
     // they hold, the way `playwright-bdd` renders them — so a row's

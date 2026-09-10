@@ -263,6 +263,7 @@ pub fn failure_location(failure: &TestFailure, test_id: &TestId) -> ErrorLocatio
 /// the test's own identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TestKey {
+  pub repeat_each_index: u32,
   pub project: String,
   pub file: String,
   pub suite: Option<String>,
@@ -273,6 +274,7 @@ impl TestKey {
   #[must_use]
   pub fn of(outcome: &TestOutcome) -> Self {
     Self {
+      repeat_each_index: outcome.test_id.repeat_each_index,
       project: outcome.project_name.clone(),
       file: outcome.test_id.file.clone(),
       suite: outcome.test_id.suite.clone(),
@@ -1076,6 +1078,7 @@ mod tests {
   fn outcome(name: &str, attempt: u32, status: TestStatus) -> Arc<TestOutcome> {
     Arc::new(TestOutcome {
       test_id: TestId {
+        repeat_each_index: 0,
         file: "spec.ts".into(),
         suite: None,
         name: name.into(),
@@ -1158,6 +1161,7 @@ mod tests {
       ..Default::default()
     };
     o.test_id = TestId {
+      repeat_each_index: 0,
       file: "a.spec.ts".into(),
       suite: Some("a.spec.ts::group".into()),
       name: "works".into(),

@@ -80,6 +80,7 @@ struct TestBrowserResources {
 /// page/context fixtures) and publishes the composite key so
 /// `TestInfo` step spans and the worker's stop path find the recorder.
 struct TraceSpec {
+  key: String,
   title: String,
   /// Trace stream name — the test's stable id, so a viewer can find the
   /// recording on disk while it is still being written.
@@ -211,8 +212,8 @@ impl TestBrowserResources {
         *spec.composite.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(composite.clone());
         // Publish for the UI server's live-trace snapshot endpoint (the
         // `bdd --ui` viewer polls it while the test runs). Keyed by the
-        // test's full name — the same id the client sees on testStarted.
-        crate::ui_server::register_live_trace(&spec.title, &composite);
+        // test's execution key — the same id the client sees on testStarted.
+        crate::ui_server::register_live_trace(&spec.key, &composite);
       },
       Err(e) => tracing::warn!(target: "ferridriver::worker", "trace start failed: {e}"),
     }
@@ -229,7 +230,7 @@ impl TestBrowserResources {
       .take()
       .is_some();
     if started {
-      crate::ui_server::unregister_live_trace(&spec.title);
+      crate::ui_server::unregister_live_trace(&spec.key);
       let _ = ctx
         .tracing()
         .stop(ferridriver::trace::TracingStopOptions::default())
@@ -824,6 +825,7 @@ pub struct WorkerTestResult {
 
 /// Per-suite state tracked on this worker.
 struct SuiteState {
+  repeat_each_index: u32,
   before_all_ran: bool,
   before_all_failed: bool,
   hooks: Arc<Hooks>,
@@ -848,6 +850,15 @@ pub struct Worker {
   /// Contexts pre-created for this worker's upcoming tests. Shared by
   /// every test the worker runs; drained when the worker exits.
   pool: Arc<crate::context_pool::ContextPool>,
+}
+
+pub(crate) fn test_artifact_dir_name(id: &crate::model::TestId, project: &str) -> String {
+  let name = artifact_dir_name(&id.full_name(), project);
+  if id.repeat_each_index == 0 {
+    name
+  } else {
+    format!("{name}-repeat{}", id.repeat_each_index)
+  }
 }
 
 /// Directory-safe name for a test's artifact folder under `outputDir`.
@@ -920,9 +931,10 @@ impl Worker {
     Arc::new(self.config.resolved_expect(None))
   }
 
-  fn create_suite_test_info(&self, suite_key: &str) -> Arc<TestInfo> {
+  fn create_suite_test_info(&self, suite_key: &str, repeat_each_index: u32) -> Arc<TestInfo> {
     Arc::new(TestInfo {
       test_id: crate::model::TestId {
+        repeat_each_index,
         file: suite_key.to_string(),
         suite: None,
         name: "suite hooks".to_string(),
@@ -933,7 +945,7 @@ impl Worker {
       retry: 0,
       worker_index: self.id,
       parallel_index: self.slot,
-      repeat_each_index: 0,
+      repeat_each_index,
       output_dir: absolutize(self.config.output_dir.join("__suite_hooks__").join(artifact_dir_name(
         suite_key,
         self.config.name.as_deref().unwrap_or_default(),
@@ -1050,6 +1062,7 @@ impl Worker {
           let step_id = format!("hook:afterAll:{suite_key}:{i}");
           // Use a synthetic TestId for the suite.
           let synthetic_id = crate::model::TestId {
+            repeat_each_index: state.repeat_each_index,
             file: suite_key.clone(),
             suite: None,
             name: step_title.clone(),
@@ -1230,7 +1243,7 @@ impl Worker {
 
     // ── beforeAll (once per suite on this worker) ──
     let suite_state = active_suites.entry(suite_key.clone()).or_insert_with(|| {
-      let suite_test_info = self.create_suite_test_info(&suite_key);
+      let suite_test_info = self.create_suite_test_info(&suite_key, test_id.repeat_each_index);
       // Suite-hook contexts are not traced: per-test traces belong to
       // tests, and beforeAll/afterAll containers have no outcome to
       // attach one to.
@@ -1246,6 +1259,7 @@ impl Worker {
       suite_pool.inject("test_info", suite_test_info);
 
       SuiteState {
+        repeat_each_index: test_id.repeat_each_index,
         before_all_ran: false,
         before_all_failed: false,
         hooks: Arc::clone(&hooks),
@@ -1428,9 +1442,9 @@ impl Worker {
       retry: attempt.saturating_sub(1),
       worker_index: self.id,
       parallel_index: self.slot,
-      repeat_each_index: 0,
-      output_dir: absolutize(self.config.output_dir.join(artifact_dir_name(
-        &test_id.full_name(),
+      repeat_each_index: test_id.repeat_each_index,
+      output_dir: absolutize(self.config.output_dir.join(test_artifact_dir_name(
+        &test_id,
         self.config.name.as_deref().unwrap_or_default(),
       ))),
       snapshot_dir: absolutize(
@@ -1479,6 +1493,7 @@ impl Worker {
       output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
     });
     let trace_spec = self.config.trace.should_record(attempt, false).then(|| TraceSpec {
+      key: test_id.execution_key(),
       title: test_id.full_name(),
       // The stream is named after the test, in this worker's artifacts
       // directory: that is the whole contract a viewer following a
@@ -1804,7 +1819,7 @@ impl Worker {
       // Stop the UI live-trace poller from exporting a recorder that is
       // about to be torn down (the finished zip takes over at finish).
       if started {
-        crate::ui_server::unregister_live_trace(&test_id.full_name());
+        crate::ui_server::unregister_live_trace(&test_id.execution_key());
       }
       match (started, resources.current_context().await) {
         (true, Some(ctx)) => {

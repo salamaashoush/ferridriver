@@ -250,6 +250,7 @@ mod tests {
     };
     Arc::new(TestOutcome {
       test_id: TestId {
+        repeat_each_index: 0,
         file: "tests/pay.spec.ts".into(),
         suite: None,
         name: "charges the card".into(),
@@ -303,6 +304,7 @@ mod tests {
     let mut reporter = GithubReporter::new(Box::new(EmptyReporter)).with_enabled(true);
     let outcome = Arc::new(TestOutcome {
       test_id: TestId {
+        repeat_each_index: 0,
         file: "tests/pay.spec.ts".into(),
         name: "works".into(),
         ..Default::default()

@@ -180,6 +180,7 @@ mod tests {
   #[test]
   fn hello_carries_binary_and_suites() {
     let plan = TestPlan {
+      repetitions_expanded: false,
       suites: Vec::new(),
       total_tests: 0,
       shard: None,

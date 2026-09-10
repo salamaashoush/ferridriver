@@ -163,8 +163,8 @@ impl Reporter for AllureReporter {
         self.env.insert("Arch".into(), std::env::consts::ARCH.into());
         self.env.insert("ferridriver".into(), env!("CARGO_PKG_VERSION").into());
       },
-      ReporterEvent::TestStarted { test_id, .. } => {
-        self.test_starts.insert(test_id.full_name(), epoch_ms());
+      ReporterEvent::TestStarted { test_id, project, .. } => {
+        self.test_starts.insert(test_id.stable_id(project), epoch_ms());
       },
       ReporterEvent::TestFinished { outcome, .. } => {
         self.collect_result(outcome);
@@ -256,7 +256,7 @@ impl AllureReporter {
       Ok(ms) if ms > 0 => ms,
       _ => self
         .test_starts
-        .remove(&outcome.test_id.full_name())
+        .remove(&outcome.test_id.stable_id(&outcome.project_name))
         .unwrap_or(self.run_start),
     };
     let stop_ms = start_ms + outcome.duration.as_millis() as u64;
@@ -559,6 +559,7 @@ mod tests {
   fn outcome(name: &str, status: TestStatus) -> Arc<TestOutcome> {
     Arc::new(TestOutcome {
       test_id: TestId {
+        repeat_each_index: 0,
         file: "tests/checkout.spec.ts".into(),
         suite: Some("Checkout".into()),
         name: name.into(),

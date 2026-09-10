@@ -742,3 +742,28 @@ completion requires observable behavior through the public scripting API.
   count is 609; E2E count is 2235. Warm gate time remains about 108s, so this
   checkpoint improves coverage and removes shared-observer flakiness without
   claiming a material whole-gate speedup. Remaining Rust targets: 48.
+- Repetition audit reproduced a false green: one failed execution followed by a
+  pass was reported as one flaky test with exit zero. Both executions exposed
+  repeatEachIndex zero and shared an artifact directory. Native regressions
+  now preserve independent failure accounting, retry histories, artifact paths,
+  reporter IDs and planned cases. A barrier regression requires both repetitions
+  to be active on different workers and checks their suite-hook metadata.
+- Repetitions expand in the execution plan before worker allocation and reporter
+  boundaries, with a marker preventing cloned/filtered plans from expanding
+  twice. Core IDs carry the repeat index; index zero retains existing stable
+  IDs. Blob deserialization defaults older records to index zero. Suite hooks
+  use the worker's actual TestInfo rather than anonymous metadata. Live UI and
+  trace keys distinguish repetitions without changing their displayed titles.
+- Focused native regressions: four passed in 142ms. Full headless gate passed:
+  136 checks, zero failures or blocks, 159.439s wall (159.32s gate), including
+  runner/dependent test rebuilds. Logs: target/gate/1789031020-964394 and
+  /tmp/ferridriver-repeat-ready.log. Integrations: 613 passed; E2E: 2235 passed,
+  33 existing skips; BDD: 637 passed, 19 existing skips. The previous warm
+  107.972s result is not a comparable rebuild measurement.
+- Original proxy stress now reports all 40 executions, using 16 workers,
+  and passes in 2.9s across four backends. This is one observation, not a
+  comparative performance benchmark. Log: /tmp/ferridriver-repeat-proxy-stress.log.
+  Remaining repeat audit: JS sessions are keyed by worker index; verify module
+  and worker-fixture isolation between repetitions. Remaining migrations and
+  protocol/capability milestones are unchanged; this checkpoint does not claim
+  complete repeatEach parity or completion of the broader goal.

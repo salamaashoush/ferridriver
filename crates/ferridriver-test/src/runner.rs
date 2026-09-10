@@ -119,6 +119,7 @@ impl ProjectRun {
     if let Some(project) = &self.project {
       filter_plan_for_project(&mut narrowed, &self.config, project);
     }
+    narrowed.expand_repetitions(self.config.repeat_each);
     narrowed
   }
 }
@@ -531,6 +532,7 @@ impl TestRunner {
 
       // ── Single-project path ──
       let mut plan = plan;
+      plan.expand_repetitions(self.config.repeat_each);
       match self.preprocess_corpus(&plan).await {
         Ok(edits) => {
           let project = self.config.name.clone().unwrap_or_default();
@@ -847,6 +849,7 @@ impl TestRunner {
         .map_or_else(|| plan.clone(), |own| (*own).clone());
       filter_plan_for_project(&mut p, &mc, &projects[idx]);
       self.apply_run_filters(&mut p);
+      p.expand_repetitions(mc.repeat_each);
       if let Some(narrow) = hooks.narrow {
         narrow(&projects[idx].name, &mut p);
       }
@@ -1160,6 +1163,7 @@ impl TestRunner {
   #[tracing::instrument(skip_all, fields(workers = self.config.workers, tests = plan.total_tests))]
   pub async fn execute_with_summary(&self, mut plan: TestPlan, event_bus: EventBus) -> ExecuteSummary {
     self.apply_run_filters(&mut plan);
+    plan.expand_repetitions(self.config.repeat_each);
 
     // ── Forbid-only check ──
     if (self.config.forbid_only || self.overrides.forbid_only)
@@ -1358,74 +1362,69 @@ impl TestRunner {
       }
     }
 
-    // ── Collect tests, apply repeatEach ──
-    let repeat_each = self.config.repeat_each.max(1);
-    let total_executions = total_tests * repeat_each as usize;
-
     // ── Dispatcher — enqueue suites with hooks + mode context ──
     let dispatcher = Arc::new(Dispatcher::new());
-    for _rep in 0..repeat_each {
-      for suite in &plan.suites {
-        let suite_key = format!("{}::{}", suite.file, suite.name);
-        let hooks = Arc::new(Hooks {
-          before_all: suite.hooks.before_all.clone(),
-          after_all: suite.hooks.after_all.clone(),
-          before_each: suite.hooks.before_each.clone(),
-          after_each: suite.hooks.after_each.clone(),
-        });
+    for suite in &plan.suites {
+      let repeat_each_index = suite.tests.first().map_or(0, |test| test.id.repeat_each_index);
+      let suite_key = format!("{}::{}::repeat:{repeat_each_index}", suite.file, suite.name);
+      let hooks = Arc::new(Hooks {
+        before_all: suite.hooks.before_all.clone(),
+        after_all: suite.hooks.after_all.clone(),
+        before_each: suite.hooks.before_each.clone(),
+        after_each: suite.hooks.after_each.clone(),
+      });
 
-        match suite.mode {
-          crate::model::SuiteMode::Parallel => {
-            for test in &suite.tests {
-              let assignment = crate::dispatcher::TestAssignment {
-                test: crate::model::TestCase {
-                  metadata: test.metadata.clone(),
-                  id: test.id.clone(),
-                  test_fn: Arc::clone(&test.test_fn),
-                  fixture_requests: test.fixture_requests.clone(),
-                  annotations: test.annotations.clone(),
-                  timeout: test.timeout,
-                  retries: test.retries,
-                  expected_status: test.expected_status,
-                  use_options: test.use_options.clone(),
-                },
-                attempt: 1,
-                suite_key: suite_key.clone(),
-                hooks: Arc::clone(&hooks),
-                suite_mode: crate::model::SuiteMode::Parallel,
-              };
-              dispatcher.enqueue_single(assignment);
-            }
-          },
-          crate::model::SuiteMode::Serial => {
-            let assignments: Vec<_> = suite
-              .tests
-              .iter()
-              .map(|test| crate::dispatcher::TestAssignment {
-                test: crate::model::TestCase {
-                  metadata: test.metadata.clone(),
-                  id: test.id.clone(),
-                  test_fn: Arc::clone(&test.test_fn),
-                  fixture_requests: test.fixture_requests.clone(),
-                  annotations: test.annotations.clone(),
-                  timeout: test.timeout,
-                  retries: test.retries,
-                  expected_status: test.expected_status,
-                  use_options: test.use_options.clone(),
-                },
-                attempt: 1,
-                suite_key: suite_key.clone(),
-                hooks: Arc::clone(&hooks),
-                suite_mode: crate::model::SuiteMode::Serial,
-              })
-              .collect();
-            dispatcher.enqueue_serial(crate::dispatcher::SerialBatch {
+      match suite.mode {
+        crate::model::SuiteMode::Parallel => {
+          for test in &suite.tests {
+            let assignment = crate::dispatcher::TestAssignment {
+              test: crate::model::TestCase {
+                metadata: test.metadata.clone(),
+                id: test.id.clone(),
+                test_fn: Arc::clone(&test.test_fn),
+                fixture_requests: test.fixture_requests.clone(),
+                annotations: test.annotations.clone(),
+                timeout: test.timeout,
+                retries: test.retries,
+                expected_status: test.expected_status,
+                use_options: test.use_options.clone(),
+              },
+              attempt: 1,
               suite_key: suite_key.clone(),
-              assignments,
               hooks: Arc::clone(&hooks),
-            });
-          },
-        }
+              suite_mode: crate::model::SuiteMode::Parallel,
+            };
+            dispatcher.enqueue_single(assignment);
+          }
+        },
+        crate::model::SuiteMode::Serial => {
+          let assignments: Vec<_> = suite
+            .tests
+            .iter()
+            .map(|test| crate::dispatcher::TestAssignment {
+              test: crate::model::TestCase {
+                metadata: test.metadata.clone(),
+                id: test.id.clone(),
+                test_fn: Arc::clone(&test.test_fn),
+                fixture_requests: test.fixture_requests.clone(),
+                annotations: test.annotations.clone(),
+                timeout: test.timeout,
+                retries: test.retries,
+                expected_status: test.expected_status,
+                use_options: test.use_options.clone(),
+              },
+              attempt: 1,
+              suite_key: suite_key.clone(),
+              hooks: Arc::clone(&hooks),
+              suite_mode: crate::model::SuiteMode::Serial,
+            })
+            .collect();
+          dispatcher.enqueue_serial(crate::dispatcher::SerialBatch {
+            suite_key: suite_key.clone(),
+            assignments,
+            hooks: Arc::clone(&hooks),
+          });
+        },
       }
     }
 
@@ -1505,7 +1504,8 @@ impl TestRunner {
     // ── Collect results with retry re-dispatch ──
     // Statuses plus what the test was declared to end in: a `test.fail()`
     // test that fails is a pass, and only the pair says so.
-    let mut attempt_history: FxHashMap<String, (Vec<TestStatus>, crate::model::ExpectedStatus)> = FxHashMap::default();
+    let mut attempt_history: FxHashMap<crate::model::TestId, (Vec<TestStatus>, crate::model::ExpectedStatus)> =
+      FxHashMap::default();
     let mut final_count = 0usize;
     let mut failure_count = 0usize;
     let max_failures = if self.config.fail_fast {
@@ -1529,7 +1529,7 @@ impl TestRunner {
         },
       };
       let Some(result) = result else { break };
-      let test_key = result.outcome.test_id.full_name();
+      let test_key = result.outcome.test_id.clone();
       let entry = attempt_history
         .entry(test_key)
         .or_insert_with(|| (Vec::new(), result.outcome.expected_status));
@@ -1575,7 +1575,7 @@ impl TestRunner {
         dispatcher.stop();
       }
 
-      if final_count >= total_executions {
+      if final_count >= total_tests {
         dispatcher.close();
       }
     }
@@ -1618,7 +1618,7 @@ impl TestRunner {
     if self.config.preserve_output == "failures-only" {
       for (test_key, (attempts, expected)) in &attempt_history {
         if crate::model::outcome_kind(attempts, *expected) != crate::model::TestOutcomeKind::Unexpected {
-          let test_output_dir = self.config.output_dir.join(crate::worker::artifact_dir_name(
+          let test_output_dir = self.config.output_dir.join(crate::worker::test_artifact_dir_name(
             test_key,
             self.config.name.as_deref().unwrap_or_default(),
           ));
@@ -2673,12 +2673,14 @@ mod project_plan_tests {
 
   fn plan_named(suite: &str) -> TestPlan {
     TestPlan {
+      repetitions_expanded: false,
       suites: vec![TestSuite {
         name: suite.to_string(),
         file: format!("{suite}.feature"),
         tests: vec![TestCase {
           metadata: None,
           id: TestId {
+            repeat_each_index: 0,
             file: format!("{suite}.feature"),
             suite: Some(suite.to_string()),
             name: "a scenario".to_string(),

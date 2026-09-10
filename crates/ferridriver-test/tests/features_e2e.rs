@@ -41,6 +41,7 @@ fn make_flaky_test() -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "features_e2e.rs".into(),
       suite: Some("retry".into()),
       name: "flaky_test_passes_on_retry".into(),
@@ -74,6 +75,7 @@ fn make_flaky_test() -> TestCase {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_retry_with_flaky_detection() {
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "retry".into(),
       file: "features_e2e.rs".into(),
@@ -221,6 +223,7 @@ fn make_matchers_test() -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "features_e2e.rs".into(),
       suite: Some("matchers".into()),
       name: "all_locator_matchers".into(),
@@ -245,6 +248,7 @@ fn make_matchers_test() -> TestCase {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_all_locator_matchers() {
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "matchers".into(),
       file: "features_e2e.rs".into(),
@@ -277,6 +281,7 @@ fn make_poll_test() -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "features_e2e.rs".into(),
       suite: Some("expect_poll".into()),
       name: "poll_until_value_matches".into(),
@@ -324,6 +329,7 @@ fn make_poll_test() -> TestCase {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_expect_poll() {
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "expect_poll".into(),
       file: "features_e2e.rs".into(),
@@ -356,6 +362,7 @@ fn make_to_pass_test() -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "features_e2e.rs".into(),
       suite: Some("to_pass".into()),
       name: "retries_block_until_success".into(),
@@ -412,6 +419,7 @@ fn make_to_pass_test() -> TestCase {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_to_pass() {
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "to_pass".into(),
       file: "features_e2e.rs".into(),
@@ -444,6 +452,7 @@ fn make_page_assertions_test() -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "features_e2e.rs".into(),
       suite: Some("page".into()),
       name: "page_title_and_url".into(),
@@ -480,6 +489,7 @@ fn make_page_assertions_test() -> TestCase {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_page_assertions() {
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "page".into(),
       file: "features_e2e.rs".into(),

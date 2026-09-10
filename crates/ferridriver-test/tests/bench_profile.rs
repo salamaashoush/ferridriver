@@ -219,6 +219,7 @@ async fn deep_profile() {
   let noop_test = TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "bench".into(),
       suite: None,
       name: "noop".into(),
@@ -234,6 +235,7 @@ async fn deep_profile() {
     use_options: None,
   };
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "noop".into(),
       file: "bench".into(),

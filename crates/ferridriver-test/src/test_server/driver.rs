@@ -856,6 +856,7 @@ mod tests {
   #[test]
   fn retain_drops_emptied_suites_and_recounts() {
     let mut plan = TestPlan {
+      repetitions_expanded: false,
       suites: vec![crate::model::TestSuite {
         name: "s".into(),
         file: "a.spec.ts".into(),
@@ -954,6 +955,7 @@ mod tests {
   #[test]
   fn test_ids_are_resolved_against_the_project_asked_about() {
     let plan = || TestPlan {
+      repetitions_expanded: false,
       suites: vec![crate::model::TestSuite {
         name: "s".into(),
         file: "a.spec.ts".into(),
@@ -992,6 +994,7 @@ mod tests {
     crate::model::TestCase {
       metadata: None,
       id: crate::model::TestId {
+        repeat_each_index: 0,
         file: "a.spec.ts".into(),
         suite: None,
         name: name.into(),

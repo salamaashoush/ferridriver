@@ -675,7 +675,7 @@ pub(crate) fn test_list_json(plan: &TestPlan, statuses: &rustc_hash::FxHashMap<S
         .tests
         .iter()
         .map(|test| {
-          let id = test.id.full_name();
+          let id = test.id.execution_key();
           let status = statuses.get(&id).map_or("idle", String::as_str);
           serde_json::json!({
             "id": id,
@@ -751,16 +751,16 @@ pub fn reporter_event_to_json(event: &ReporterEvent, artifacts_root: &Path) -> s
     }),
     ReporterEvent::TestStarted { test_id, attempt, .. } => serde_json::json!({
       "type": "testStarted",
-      "id": test_id.full_name(),
+      "id": test_id.execution_key(),
       "attempt": attempt,
       // Live-trace snapshot endpoint the viewer polls while the test
       // runs (404 until the test's trace actually starts). The key is
-      // the test's full name, percent-encoded as a query value.
-      "liveTraceUrl": format!("/live-trace?key={}", encode_query_value(&test_id.full_name())),
+      // the test's execution key, percent-encoded as a query value.
+      "liveTraceUrl": format!("/live-trace?key={}", encode_query_value(&test_id.execution_key())),
     }),
     ReporterEvent::StepStarted(step) => serde_json::json!({
       "type": "stepStarted",
-      "id": step.test_id.full_name(),
+      "id": step.test_id.execution_key(),
       "stepId": step.step_id,
       "parentStepId": step.parent_step_id,
       "title": step.title,
@@ -771,7 +771,7 @@ pub fn reporter_event_to_json(event: &ReporterEvent, artifacts_root: &Path) -> s
     }),
     ReporterEvent::StepFinished(step) => serde_json::json!({
       "type": "stepFinished",
-      "id": step.test_id.full_name(),
+      "id": step.test_id.execution_key(),
       "stepId": step.step_id,
       "title": step.title,
       "category": step.category.to_string(),
@@ -780,7 +780,7 @@ pub fn reporter_event_to_json(event: &ReporterEvent, artifacts_root: &Path) -> s
     }),
     ReporterEvent::TestFinished { outcome } => serde_json::json!({
       "type": "testFinished",
-      "id": outcome.test_id.full_name(),
+      "id": outcome.test_id.execution_key(),
       "outcome": outcome_json(outcome, artifacts_root),
     }),
     ReporterEvent::WorkerFinished { worker_id } => serde_json::json!({
@@ -809,7 +809,7 @@ pub fn reporter_event_to_json(event: &ReporterEvent, artifacts_root: &Path) -> s
     }),
     ReporterEvent::TestOutput(output) => serde_json::json!({
       "type": "testOutput",
-      "id": output.test_id.full_name(),
+      "id": output.test_id.execution_key(),
       "stream": if output.stderr { "stderr" } else { "stdout" },
       "text": output.text,
     }),
@@ -865,6 +865,7 @@ mod tests {
 
   fn test_id() -> TestId {
     TestId {
+      repeat_each_index: 0,
       file: "features/smoke.feature".into(),
       suite: Some("UI smoke".into()),
       name: "blank page".into(),

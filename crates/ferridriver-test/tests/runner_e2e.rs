@@ -32,6 +32,7 @@ fn make_navigation_test() -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "runner_e2e.rs".into(),
       suite: Some("navigation".into()),
       name: "basic_navigation".into(),
@@ -79,6 +80,7 @@ fn make_click_test() -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "runner_e2e.rs".into(),
       suite: Some("interaction".into()),
       name: "click_button".into(),
@@ -137,6 +139,7 @@ fn make_fill_test() -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "runner_e2e.rs".into(),
       suite: Some("interaction".into()),
       name: "fill_input".into(),
@@ -194,6 +197,7 @@ fn make_expect_test() -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "runner_e2e.rs".into(),
       suite: Some("expect".into()),
       name: "auto_retry_assertions".into(),
@@ -256,6 +260,7 @@ fn make_skip_test() -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "runner_e2e.rs".into(),
       suite: None,
       name: "skipped_test".into(),
@@ -288,6 +293,7 @@ fn make_skip_test() -> TestCase {
 async fn test_runner_e2e() {
   // Build the test plan manually (normally done by #[ferritest] + discovery).
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![
       TestSuite {
         name: "navigation".into(),

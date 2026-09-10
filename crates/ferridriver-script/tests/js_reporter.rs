@@ -66,6 +66,7 @@ async fn reporter_for(
 
 fn test_id(name: &str) -> TestId {
   TestId {
+    repeat_each_index: 0,
     file: "tests/pay.spec.ts".to_string(),
     suite: Some("tests/pay.spec.ts::Checkout".to_string()),
     name: name.to_string(),

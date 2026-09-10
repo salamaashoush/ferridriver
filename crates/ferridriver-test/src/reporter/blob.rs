@@ -133,6 +133,8 @@ pub enum WireEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireTestId {
+  #[serde(default)]
+  pub repeat_each_index: u32,
   pub file: String,
   pub suite: Option<String>,
   pub name: String,
@@ -271,6 +273,7 @@ impl From<&TestId> for WireTestId {
       name: id.name.clone(),
       line: id.line,
       column: id.column,
+      repeat_each_index: id.repeat_each_index,
     }
   }
 }
@@ -283,6 +286,7 @@ impl From<WireTestId> for TestId {
       name: w.name,
       line: w.line,
       column: w.column,
+      repeat_each_index: w.repeat_each_index,
     }
   }
 }
@@ -977,6 +981,7 @@ mod tests {
 
     let outcome = TestOutcome {
       test_id: TestId {
+        repeat_each_index: 0,
         file: "a.spec.ts".into(),
         suite: Some("a.spec.ts::group".into()),
         name: "works".into(),

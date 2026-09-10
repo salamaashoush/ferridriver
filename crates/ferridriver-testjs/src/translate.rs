@@ -17,7 +17,7 @@ use ferridriver_test::model::{
 
 use crate::TsTestSource;
 use ferridriver_test::host::{InfoBridge, static_annotation_pairs};
-use ferridriver_test::host::{RunTestSpec, TestInfoData, TestWorldData};
+use ferridriver_test::host::{RunTestSpec, TestWorldData};
 
 /// Resolved-per-suite chain data (ancestors included).
 struct SuiteChain {
@@ -645,6 +645,7 @@ fn lower_test(
   );
 
   let id = TestId {
+    repeat_each_index: 0,
     file: file.clone(),
     suite: Some(suite_id),
     name: test.title.clone(),
@@ -797,7 +798,9 @@ fn suite_hook_fn(p: SuiteHookParams) -> ferridriver_test::model::SuiteHookFn {
         .get(cached_info.as_ref().map_or(0, |ti| ti.worker_index))
         .await
         .map_err(|e| TestFailure::from(format!("test session load failed: {e}")))?;
-      let test_info = Arc::new(TestInfo::new_anonymous());
+      let test_info = cached_info
+        .clone()
+        .unwrap_or_else(|| Arc::new(TestInfo::new_anonymous()));
       let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
       let browser = pool.get("browser").await.ok();
       let effective_browser = cached_info
@@ -831,12 +834,19 @@ fn suite_hook_fn(p: SuiteHookParams) -> ferridriver_test::model::SuiteHookFn {
           Some(&spec_use),
         ),
         expect: expect_config,
-        info: TestInfoData {
-          title: "beforeAll/afterAll hook".to_string(),
-          timeout_ms: 30_000,
-          expected_status: "passed".to_string(),
-          ..TestInfoData::default()
-        },
+        info: ferridriver_test::host::world_data(ferridriver_test::host::WorldMeta {
+          test_info: &test_info,
+          title: "beforeAll/afterAll hook",
+          title_path: &test_info.title_path,
+          file: &test_info.test_id.file,
+          line: 0,
+          tags: &[],
+          expected_status: ExpectedStatus::Pass,
+          browser_config: &effective_browser,
+          base_url: None,
+          use_options: serde_json::Value::Null,
+        })
+        .info,
       };
       let bridge = Arc::new(InfoBridge::new(
         test_info,

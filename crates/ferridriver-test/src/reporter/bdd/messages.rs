@@ -26,8 +26,8 @@ impl Reporter for CucumberMessagesReporter {
       ReporterEvent::TestStarted { test_id, attempt, .. } => {
         self.messages.push(serde_json::json!({
           "testCaseStarted": {
-            "id": test_id.full_name(),
-            "testCaseId": test_id.full_name(),
+            "id": test_id.execution_key(),
+            "testCaseId": test_id.execution_key(),
             "attempt": attempt,
             "timestamp": timestamp_now(),
           }
@@ -41,7 +41,7 @@ impl Reporter for CucumberMessagesReporter {
         self.messages.push(serde_json::json!({
           "testStepFinished": {
             "testStepId": event.step_id,
-            "testCaseStartedId": event.test_id.full_name(),
+            "testCaseStartedId": event.test_id.execution_key(),
             "testStepResult": {
               "status": status,
               "duration": { "seconds": event.duration.as_secs(), "nanos": event.duration.subsec_nanos() },
@@ -59,7 +59,7 @@ impl Reporter for CucumberMessagesReporter {
         let will_be_retried = outcome.status.is_failure() && outcome.attempt < outcome.max_attempts;
         self.messages.push(serde_json::json!({
           "testCaseFinished": {
-            "testCaseStartedId": test_id.full_name(),
+            "testCaseStartedId": test_id.execution_key(),
             "timestamp": timestamp_now(),
             "willBeRetried": will_be_retried,
           }
@@ -129,6 +129,7 @@ mod tests {
   fn scenario(name: &str, status: TestStatus, steps: Vec<TestStep>) -> Arc<TestOutcome> {
     Arc::new(TestOutcome {
       test_id: TestId {
+        repeat_each_index: 0,
         file: "features/login.feature".into(),
         suite: Some("Login".into()),
         name: name.into(),
@@ -242,6 +243,7 @@ mod tests {
         crate::reporter::StepFinishedEvent {
           project: String::new(),
           test_id: TestId {
+            repeat_each_index: 0,
             file: "features/login.feature".into(),
             suite: Some("Login".into()),
             name: "signs in".into(),

@@ -508,7 +508,7 @@ pub fn case(root: &Path, project_name: &str, test: &crate::model::TestCase) -> C
     expected_status: base::expected_status_str(test.expected_status).to_string(),
     timeout: test.timeout.map(ms).unwrap_or_default(),
     retries: test.retries.unwrap_or_default(),
-    repeat_each_index: 0,
+    repeat_each_index: test.id.repeat_each_index,
     tags: tags(&test.annotations),
     annotations: annotations(&test.annotations),
     project_name: project_name.to_string(),

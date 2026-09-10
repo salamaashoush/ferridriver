@@ -296,6 +296,7 @@ mod tests {
 
   fn id(name: &str) -> TestId {
     TestId {
+      repeat_each_index: 0,
       file: "tests/cart.spec.ts".into(),
       suite: None,
       name: name.into(),

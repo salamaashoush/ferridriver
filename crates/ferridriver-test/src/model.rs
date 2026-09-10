@@ -19,6 +19,7 @@ use crate::reporter::EventBus;
 /// Globally unique test identifier.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct TestId {
+  pub repeat_each_index: u32,
   pub file: String,
   pub suite: Option<String>,
   pub name: String,
@@ -30,7 +31,7 @@ pub struct TestId {
 }
 
 impl TestId {
-  /// Stable full name for display and hashing.
+  /// Stable full name for display.
   ///
   /// Rendered from [`Self::title_path`], so what a reporter prints and
   /// what a step's title path continues can never disagree: one nested
@@ -38,6 +39,16 @@ impl TestId {
   #[must_use]
   pub fn full_name(&self) -> String {
     self.title_path().join(" > ")
+  }
+
+  #[must_use]
+  pub fn execution_key(&self) -> String {
+    let name = self.full_name();
+    if self.repeat_each_index == 0 {
+      name
+    } else {
+      format!("{name} (repeat:{})", self.repeat_each_index)
+    }
   }
 
   /// File path with optional line number (e.g., `features/login.feature:15`).
@@ -82,7 +93,11 @@ impl TestId {
   pub fn stable_id(&self, project: &str) -> String {
     let file_id = ferridriver::tracing::sha1_hex(self.file.as_bytes());
     let titles = self.title_path();
-    let expression = format!("[project={project}]{}\u{1e}{}", self.file, titles[1..].join("\u{1e}"));
+    let mut expression = format!("[project={project}]{}\u{1e}{}", self.file, titles[1..].join("\u{1e}"));
+    if self.repeat_each_index > 0 {
+      use std::fmt::Write;
+      let _ = write!(expression, " (repeat:{})", self.repeat_each_index);
+    }
     let test_id = ferridriver::tracing::sha1_hex(expression.as_bytes());
     format!("{}-{}", &file_id[..20], &test_id[..20])
   }
@@ -219,11 +234,34 @@ impl std::fmt::Debug for TestHooks {
 /// The full test plan after discovery + filtering + sharding.
 #[derive(Clone, Default)]
 pub struct TestPlan {
+  /// Cloned and filtered execution plans must not expand repetitions again.
+  pub repetitions_expanded: bool,
   pub suites: Vec<TestSuite>,
   /// Total test count (after filtering, before retry expansion).
   pub total_tests: usize,
   /// Shard info if sharding is active.
   pub shard: Option<ShardInfo>,
+}
+
+impl TestPlan {
+  pub(crate) fn expand_repetitions(&mut self, count: u32) {
+    if self.repetitions_expanded {
+      return;
+    }
+    self.repetitions_expanded = true;
+    let count = count.max(1);
+    let original_suites = self.suites.len();
+    for repeat_each_index in 1..count {
+      for index in 0..original_suites {
+        let mut suite = self.suites[index].clone();
+        for test in &mut suite.tests {
+          test.id.repeat_each_index = repeat_each_index;
+        }
+        self.suites.push(suite);
+      }
+    }
+    self.total_tests = self.suites.iter().map(|suite| suite.tests.len()).sum();
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -389,6 +427,7 @@ impl TestPlanBuilder {
     }
 
     TestPlan {
+      repetitions_expanded: false,
       suites: plan_suites,
       total_tests: total,
       shard: None,
@@ -534,6 +573,7 @@ impl TestInfo {
   pub fn new_anonymous() -> Self {
     Self {
       test_id: TestId {
+        repeat_each_index: 0,
         file: String::new(),
         suite: None,
         name: "anonymous".into(),

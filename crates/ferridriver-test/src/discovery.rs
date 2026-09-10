@@ -115,6 +115,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
     let test_case: TestCase = TestCase {
       metadata: None,
       id: TestId {
+        repeat_each_index: 0,
         file: file.clone(),
         suite: Some(suite_name.to_string()),
         name: reg.name.to_string(),
@@ -189,6 +190,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
 
   apply_filters(
     TestPlan {
+      repetitions_expanded: false,
       suites,
       total_tests,
       shard: None,
@@ -388,6 +390,7 @@ mod tests {
     TestCase {
       metadata: None,
       id: TestId {
+        repeat_each_index: 0,
         file: "test.rs".into(),
         suite: Some("suite".into()),
         name: name.into(),
@@ -407,6 +410,7 @@ mod tests {
   fn make_plan(tests: Vec<TestCase>, suite_annotations: Vec<TestAnnotation>) -> TestPlan {
     let total = tests.len();
     TestPlan {
+      repetitions_expanded: false,
       suites: vec![TestSuite {
         name: "suite".into(),
         file: "test.rs".into(),

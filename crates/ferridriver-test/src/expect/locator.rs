@@ -73,6 +73,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
     let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
     let info = crate::model::TestInfo {
       test_id: crate::model::TestId {
+        repeat_each_index: 0,
         file: String::new(),
         suite: None,
         name: name.to_string(),

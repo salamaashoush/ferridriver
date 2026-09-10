@@ -1081,6 +1081,7 @@ pub fn translate_features_js(
       // refcount bump instead of deep-cloning the step Vec twice (mirrors
       // the Rust-step path in `translate::translate_scenario`).
       let id = TestId {
+        repeat_each_index: 0,
         file: scenario.feature_path.display().to_string(),
         suite: Some(
           std::iter::once(scenario.feature_name.clone())
@@ -1216,6 +1217,7 @@ pub fn translate_features_js(
 
   let total_tests = suites.iter().map(|s| s.tests.len()).sum();
   ferridriver_test::model::TestPlan {
+    repetitions_expanded: false,
     suites,
     total_tests,
     shard: None,

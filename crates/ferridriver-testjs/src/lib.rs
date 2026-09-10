@@ -458,6 +458,7 @@ const DEFAULT_TEST_MATCH: &[&str] = &["**/*.spec.ts", "**/*.test.ts"];
 
 fn empty_plan() -> TestPlan {
   TestPlan {
+    repetitions_expanded: false,
     suites: Vec::new(),
     total_tests: 0,
     shard: None,

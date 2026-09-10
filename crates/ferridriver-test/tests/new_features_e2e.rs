@@ -51,6 +51,7 @@ fn noop_test(name: &str) -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "new_features.rs".into(),
       suite: None,
       name,
@@ -110,6 +111,7 @@ async fn test_before_all_runs_once_per_suite() {
   };
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "hooks_suite".into(),
       file: "new_features.rs".into(),
@@ -148,6 +150,7 @@ async fn test_before_each_runs_per_test() {
   };
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "each_suite".into(),
       file: "new_features.rs".into(),
@@ -187,6 +190,7 @@ async fn test_after_each_runs_even_on_failure() {
   let failing_test = TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "new_features.rs".into(),
       suite: None,
       name: "failing".into(),
@@ -203,6 +207,7 @@ async fn test_after_each_runs_even_on_failure() {
   };
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "after_each_suite".into(),
       file: "new_features.rs".into(),
@@ -232,6 +237,7 @@ async fn test_before_all_failure_skips_suite() {
   };
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "broken_suite".into(),
       file: "new_features.rs".into(),
@@ -269,6 +275,7 @@ async fn test_serial_mode_runs_in_order() {
     TestCase {
       metadata: None,
       id: TestId {
+        repeat_each_index: 0,
         file: "new_features.rs".into(),
         suite: Some("serial".into()),
         name,
@@ -294,6 +301,7 @@ async fn test_serial_mode_runs_in_order() {
   }
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "serial".into(),
       file: "new_features.rs".into(),
@@ -323,6 +331,7 @@ async fn test_serial_mode_skips_after_failure() {
   let failing = TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "new_features.rs".into(),
       suite: Some("serial_fail".into()),
       name: "fails".into(),
@@ -346,6 +355,7 @@ async fn test_serial_mode_skips_after_failure() {
   let should_skip = TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "new_features.rs".into(),
       suite: Some("serial_fail".into()),
       name: "skipped".into(),
@@ -367,6 +377,7 @@ async fn test_serial_mode_skips_after_failure() {
   };
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "serial_fail".into(),
       file: "new_features.rs".into(),
@@ -397,6 +408,7 @@ async fn test_expected_failure_passes_when_test_fails() {
   let test = TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "new_features.rs".into(),
       suite: None,
       name: "expected_fail".into(),
@@ -413,6 +425,7 @@ async fn test_expected_failure_passes_when_test_fails() {
   };
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "xfail".into(),
       file: "new_features.rs".into(),
@@ -434,6 +447,7 @@ async fn test_expected_failure_fails_when_test_passes() {
   let test = TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "new_features.rs".into(),
       suite: None,
       name: "unexpected_pass".into(),
@@ -450,6 +464,7 @@ async fn test_expected_failure_fails_when_test_passes() {
   };
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "xfail".into(),
       file: "new_features.rs".into(),
@@ -480,6 +495,7 @@ async fn test_global_setup_runs_before_tests() {
   let test = TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "new_features.rs".into(),
       suite: None,
       name: "checks_setup".into(),
@@ -503,6 +519,7 @@ async fn test_global_setup_runs_before_tests() {
   };
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "global".into(),
       file: "new_features.rs".into(),
@@ -541,6 +558,7 @@ async fn test_global_setup_failure_aborts_run() {
   let test = noop_test("should_never_run");
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "aborted".into(),
       file: "new_features.rs".into(),
@@ -572,6 +590,7 @@ async fn test_testinfo_injected_into_pool() {
   let test = TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "new_features.rs".into(),
       suite: None,
       name: "info_check".into(),
@@ -596,6 +615,7 @@ async fn test_testinfo_injected_into_pool() {
   };
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "info".into(),
       file: "new_features.rs".into(),
@@ -617,6 +637,7 @@ async fn test_soft_assertions_collected() {
   let test = TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       file: "new_features.rs".into(),
       suite: None,
       name: "soft_test".into(),
@@ -641,6 +662,7 @@ async fn test_soft_assertions_collected() {
   };
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "soft".into(),
       file: "new_features.rs".into(),
@@ -668,6 +690,7 @@ fn test_snapshot_create_and_match() {
 
   let info = TestInfo {
     test_id: TestId {
+      repeat_each_index: 0,
       file: "snap.rs".into(),
       suite: None,
       name: "my_test".into(),
@@ -853,6 +876,7 @@ async fn test_html_reporter_generates_file() {
   let test = noop_test("html_test");
 
   let plan = TestPlan {
+    repetitions_expanded: false,
     suites: vec![TestSuite {
       name: "html".into(),
       file: "new_features.rs".into(),

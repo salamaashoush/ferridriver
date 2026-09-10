@@ -36,6 +36,7 @@ fn case(spec: Case) -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      repeat_each_index: 0,
       suite: spec.describe.map(|describe| format!("{}::{describe}", spec.file)),
       file: spec.file,
       name: spec.name,
@@ -69,6 +70,7 @@ fn plan(specs: Vec<Case>) -> TestPlan {
     })
     .collect();
   TestPlan {
+    repetitions_expanded: false,
     suites,
     total_tests,
     shard: None,

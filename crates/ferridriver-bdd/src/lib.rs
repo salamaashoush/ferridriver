@@ -431,6 +431,7 @@ pub async fn build_bdd_plan(
     // change.
     eprintln!("no feature files found matching: {patterns:?}");
     return Ok(ferridriver_test::model::TestPlan {
+      repetitions_expanded: false,
       suites: Vec::new(),
       total_tests: 0,
       shard: None,

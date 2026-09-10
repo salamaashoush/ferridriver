@@ -175,7 +175,7 @@ fn test_case(root_dir: &Path, project_name: &str, id: &TestId, annotations: &[Te
     },
     "retries": 0,
     "tags": tags(annotations),
-    "repeatEachIndex": 0,
+    "repeatEachIndex": id.repeat_each_index,
     "annotations": annotation_values(annotations),
   })
 }
@@ -467,6 +467,7 @@ mod tests {
 
   fn test_id() -> TestId {
     TestId {
+      repeat_each_index: 0,
       file: "/repo/tests/checkout.spec.ts".into(),
       suite: Some("/repo/tests/checkout.spec.ts::checkout".into()),
       name: "pays".into(),
@@ -551,6 +552,7 @@ mod tests {
   #[test]
   fn project_groups_tests_under_one_suite_per_file() {
     let mut plan = TestPlan {
+      repetitions_expanded: false,
       suites: Vec::new(),
       total_tests: 0,
       shard: None,
