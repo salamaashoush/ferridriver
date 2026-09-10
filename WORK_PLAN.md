@@ -1426,3 +1426,8 @@ completion requires observable behavior through the public scripting API.
   and BDD 135.76s. A cold run reached 468.70s because compiler work and
   browser suites contended for CPU; the warm result confirms correctness but
   does not establish a speed improvement.
+- Added a local HTTP contract test for WebDriver negotiation. It captures the
+  `/session` request, verifies authorization headers, Appium platform options,
+  and `webSocketUrl: true`, then exercises the real error response path. The
+  following warm full gate passed 108 checks with zero failures in 122.19s:
+  integration 73.77s, E2E 110.98s, and BDD 104.76s.
