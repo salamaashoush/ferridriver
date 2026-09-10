@@ -184,3 +184,38 @@ completion requires observable behavior through the public scripting API.
   `/tmp/ferridriver-budget-ready32.log`. The scheduler target passed
   concurrently in 1.88 seconds. This improves the passing 16-slot warm run
   by approximately 11.6%; both runs executed the same test coverage.
+
+- Pushed `059f59d1` with the verified browser reservation correction. The
+  passing 32-slot run used 103.820 wall seconds (103.58 gate seconds).
+- The three Rust `parallel_projects` tests are now native JS cases in the
+  existing worker-budget suite. Original timing bounds are preserved; new
+  interval assertions also prove all independent projects overlap, capped
+  projects serialize, and dependencies finish before dependents start.
+  Seven native cases passed in 1.9 seconds with four workers.
+- The removed Rust file was unchanged from HEAD (5702 bytes); a byte-verified
+  backup remains at `/tmp/ferridriver-project-scheduler-backup-77x37vql`.
+  Its now-unused gate reservation exception was removed. Remaining top-level
+  Rust integration targets: 67; addon migration remains open.
+- Full default gate for this migration finished with one E2E failure in
+  103.913 wall seconds (103.66 gate): the recurring Firefox authentication
+  case returned 401 instead of 200. All 485 native integrations passed,
+  including the three scheduler migrations. Logs:
+  `target/gate/1789018215-3497369`, `/tmp/ferridriver-native-scheduler-ready.log`.
+  The migration is not committed yet. No assertion was weakened.
+- Authentication event-order capture is running in exec session 80824,
+  logs `target/gate/1789018375-3681782`, console
+  `/tmp/ferridriver-auth-order-ready.log`. It enables BiDi transport metadata
+  tracing and auth-action diagnostics to distinguish response ordering from
+  credential dispatch; no credentials are logged.
+
+- The protocol-traced gate passed all 155 checks in 100.627 wall seconds
+  (100.53 gate). All 485 native integrations passed, including scheduler
+  migration. Logs: `target/gate/1789018375-3681782`.
+- Trace evidence: Firefox emits responseStarted 401, authRequired, a second
+  beforeRequestSent with the same request ID, responseStarted 200, completed
+  200, then navigationCommitted/DOMContentLoaded/load. The transport dispatches
+  command replies independently from the page's queued event consumer.
+  `BidiPage::goto` currently reads NavRequestSlot immediately after the command
+  reply, so it can observe the first response before the consumer processes
+  the retry. A navigation-specific consumer barrier is the next correction
+  to investigate and verify, rather than sleeps or status-based retries.
