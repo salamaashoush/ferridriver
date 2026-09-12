@@ -1,0 +1,108 @@
+{
+  "platform": "Linux-7.2.3-arch1-3-x86_64-with-glibc2.44",
+  "chromium": "/usr/bin/chromium",
+  "samples": 100,
+  "warmup": 5,
+  "workload": "Read and sum the same 100 DOM list items through persistent MCP",
+  "tools": {
+    "ferridriver": {
+      "server": {
+        "name": "ferridriver",
+        "version": "0.5.0"
+      },
+      "command": [
+        "/home/sashoush/Workspace/ferridriver/target/debug/ferridriver",
+        "mcp",
+        "--no-inherit",
+        "--headless",
+        "--executable-path",
+        "/usr/bin/chromium"
+      ],
+      "cold_start_navigation_evaluation_ms": 645.2260400001251,
+      "warm": {
+        "1": {
+          "samples": 100,
+          "p50_ms": 0.5521879993466428,
+          "p95_ms": 0.6616579994442873,
+          "p99_ms": 0.7707980003033299,
+          "throughput_per_second": 1630.6633856337637
+        },
+        "4": {
+          "samples": 100,
+          "p50_ms": 1.0817120000865543,
+          "p95_ms": 1.7616849982005078,
+          "p99_ms": 2.0715739992738236,
+          "throughput_per_second": 2401.524237862396
+        }
+      },
+      "mcp_frontend_rss_kib_excludes_browser_and_daemon": 123460,
+      "stderr": "/tmp/ferridriver-bench-ferridriver-cfsz9yx_/stderr.log"
+    },
+    "agent-browser": {
+      "server": {
+        "name": "agent-browser",
+        "title": "agent-browser",
+        "version": "0.37.1"
+      },
+      "command": [
+        "/tmp/ferridriver-comparison-tools-LGEvot/node_modules/agent-browser/bin/agent-browser-linux-x64",
+        "mcp"
+      ],
+      "cold_start_navigation_evaluation_ms": 545.5203240016999,
+      "warm": {
+        "1": {
+          "samples": 100,
+          "p50_ms": 21.545013498325716,
+          "p95_ms": 21.861176999664167,
+          "p99_ms": 22.084307001932757,
+          "throughput_per_second": 46.37679651699319
+        },
+        "4": {
+          "samples": 100,
+          "p50_ms": 53.614866999851074,
+          "p95_ms": 86.03743400090025,
+          "p99_ms": 86.409523999464,
+          "throughput_per_second": 46.57097214875483
+        }
+      },
+      "mcp_frontend_rss_kib_excludes_browser_and_daemon": 9332,
+      "stderr": "/tmp/ferridriver-bench-agent-browser-2b7n8vsx/stderr.log"
+    },
+    "chrome-devtools-mcp": {
+      "server": {
+        "name": "chrome_devtools",
+        "title": "Chrome DevTools MCP server",
+        "version": "1.9.0"
+      },
+      "command": [
+        "/tmp/ferridriver-comparison-tools-LGEvot/node_modules/.bin/chrome-devtools-mcp",
+        "--headless",
+        "--isolated",
+        "--executable-path",
+        "/usr/bin/chromium",
+        "--no-page-id-routing",
+        "--no-usage-statistics",
+        "--no-performance-crux"
+      ],
+      "cold_start_navigation_evaluation_ms": 562.366367001232,
+      "warm": {
+        "1": {
+          "samples": 100,
+          "p50_ms": 101.91199949986185,
+          "p95_ms": 102.33205799886491,
+          "p99_ms": 102.66308700010995,
+          "throughput_per_second": 9.815945670942053
+        },
+        "4": {
+          "samples": 100,
+          "p50_ms": 253.52647750150936,
+          "p95_ms": 406.5249609993771,
+          "p99_ms": 407.14242899775854,
+          "throughput_per_second": 9.858983436309215
+        }
+      },
+      "mcp_frontend_rss_kib_excludes_browser_and_daemon": 182800,
+      "stderr": "/tmp/ferridriver-bench-chrome-devtools-mcp-0ryqry3_/stderr.log"
+    }
+  }
+}
