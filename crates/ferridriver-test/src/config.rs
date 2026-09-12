@@ -361,15 +361,20 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
   if let Some(ref url) = overrides.base_url {
     config.base_url = Some(url.clone());
   }
-  if let Some(w) = overrides.viewport_width
-    && let Some(ref mut vp) = config.browser.viewport
-  {
-    vp.width = w;
-  }
-  if let Some(h) = overrides.viewport_height
-    && let Some(ref mut vp) = config.browser.viewport
-  {
-    vp.height = h;
+  if overrides.viewport_width.is_some() || overrides.viewport_height.is_some() {
+    let mut viewport = config
+      .browser
+      .viewport
+      .as_ref()
+      .and_then(ferridriver_config::browser::ViewportOverride::size)
+      .unwrap_or_default();
+    if let Some(width) = overrides.viewport_width {
+      viewport.width = width;
+    }
+    if let Some(height) = overrides.viewport_height {
+      viewport.height = height;
+    }
+    config.browser.viewport = Some(ferridriver_config::browser::ViewportOverride::Size(viewport));
   }
   if let Some(m) = overrides.is_mobile {
     config.browser.use_options.is_mobile = m;

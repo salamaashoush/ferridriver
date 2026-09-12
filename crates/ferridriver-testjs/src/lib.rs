@@ -560,7 +560,7 @@ pub async fn run_ts_tests_with(mut config: TestConfig, overrides: CliOverrides) 
     return if ui_mode {
       Box::pin(runner.run_test_server(factory, cwd, None, ui_port)).await
     } else {
-      runner.run_watch(factory, cwd).await
+      Box::pin(runner.run_watch(factory, cwd)).await
     };
   }
 

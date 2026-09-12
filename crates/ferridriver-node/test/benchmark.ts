@@ -5,9 +5,15 @@
  * Each backend gets its own browser instance to avoid interference.
  */
 
-import { type Browser as FdBrowser } from "../index.js";
+import { type Browser as FdBrowser, chromium as fdChromium } from "../index.js";
 import { launchForBackend as fdLaunchForBackend } from "./_helpers.js";
 import { chromium } from "playwright";
+
+// Same Chromium binary on both sides, like scripts/bench-vs-playwright.sh:
+// PW_CHROMIUM names the executable each launcher is pointed at. Unset,
+// each side launches whatever it would launch on its own, which can be
+// two different Chrome versions and is then recorded as such.
+const CHROMIUM = process.env.PW_CHROMIUM;
 
 const WARMUP = 3;
 const RUNS = 15;
@@ -97,20 +103,22 @@ const ops: { name: string; reset?: boolean; fd: (p: any) => Promise<void>; pw: (
   { name: "screenshot()", fd: p => p.screenshot(), pw: p => p.screenshot() },
   { name: "screenshot(fullPage)", fd: p => p.screenshot({ fullPage: true }), pw: p => p.screenshot({ fullPage: true }) },
   // Viewport
-  { name: "setViewportSize()", fd: p => p.setViewportSize(1024, 768), pw: p => p.setViewportSize({ width: 1024, height: 768 }) },
+  { name: "setViewportSize()", fd: p => p.setViewportSize({ width: 1024, height: 768 }), pw: p => p.setViewportSize({ width: 1024, height: 768 }) },
 ];
 
 async function main() {
   // ── Launch all browsers ───────────────────────────────────────────────
   console.log("Launching browsers...");
 
-  const pwBrowser = await chromium.launch();
+  const pwBrowser = await chromium.launch(CHROMIUM ? { executablePath: CHROMIUM } : {});
   const pwPage = await pwBrowser.newPage();
   await pwPage.setContent(HTML);
 
   const fdBrowsers: { backend: string; browser: FdBrowser; page: any }[] = [];
   for (const backend of FD_BACKENDS) {
-    const browser = await fdLaunchForBackend(backend);
+    const browser = CHROMIUM
+      ? await fdChromium(backend === "cdp-raw" ? { transport: "ws" } : {}).launch({ executablePath: CHROMIUM })
+      : await fdLaunchForBackend(backend);
     const page = await browser.newPage();
     await page.goto("https://example.com"); // initial load
     await page.setContent(HTML);
@@ -118,6 +126,8 @@ async function main() {
     console.log(`  ${backend} ready`);
   }
   console.log(`  playwright ready`);
+  console.log(`  chromium: ${CHROMIUM ?? "(each side's own default)"}`);
+  console.log(`  ferridriver: ${fdBrowsers[0].browser.version()}  playwright: ${pwBrowser.version()}`);
 
   // ── Run benchmarks ────────────────────────────────────────────────────
   const rows: Row[] = [];

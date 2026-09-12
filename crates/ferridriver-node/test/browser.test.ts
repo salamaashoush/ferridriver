@@ -1203,7 +1203,7 @@ for (const backend of BACKENDS) {
     // ── Browser methods ──────────────────────────────────────────────
 
     it("browser.version returns engine name", () => {
-      expect(browser.version.length).toBeGreaterThan(0);
+      expect(browser.version().length).toBeGreaterThan(0);
     });
 
     it("browser.isConnected returns true while connected", async () => {

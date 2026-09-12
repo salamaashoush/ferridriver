@@ -492,6 +492,10 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
   let viewport = browser_config
     .viewport
     .as_ref()
+    .map_or_else(
+      || Some(crate::config::ViewportConfig::default()),
+      ferridriver_config::browser::ViewportOverride::size,
+    )
     .map(|v| ferridriver::options::ViewportConfig {
       width: v.width,
       height: v.height,

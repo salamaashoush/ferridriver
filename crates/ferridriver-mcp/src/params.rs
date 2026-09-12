@@ -658,6 +658,8 @@ pub enum ChromeChannel {
   Beta,
   /// Google Chrome Canary.
   Canary,
+  /// Chromium.
+  Chromium,
 }
 
 impl ChromeChannel {
@@ -668,6 +670,7 @@ impl ChromeChannel {
       Self::Stable => "stable",
       Self::Beta => "beta",
       Self::Canary => "canary",
+      Self::Chromium => "chromium",
     }
   }
 }
@@ -682,7 +685,9 @@ pub struct ConnectParams {
     description = "Auto-discover a running Chrome instance by reading DevToolsActivePort file. Ignored if url is provided."
   )]
   pub auto_discover: Option<bool>,
-  #[schemars(description = "Chrome channel for auto-discovery: 'stable' (default), 'beta', 'canary'.")]
+  #[schemars(
+    description = "Chrome channel for auto-discovery: 'stable' (default), 'beta', 'canary', 'chromium'. 'stable' also falls back to a Chromium profile when Chrome is not the running browser."
+  )]
   pub channel: Option<ChromeChannel>,
   #[schemars(description = "Custom Chrome user data directory for auto-discovery.")]
   pub user_data_dir: Option<String>,

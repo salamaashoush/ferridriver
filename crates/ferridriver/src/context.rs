@@ -636,8 +636,18 @@ impl ContextRef {
   pub async fn pages(&self) -> Result<Vec<Arc<Page>>> {
     let inner_pages = {
       let state = self.state.read().await;
-      let ctx = state.context(&self.name)?;
-      ctx.pages.clone()
+      match state.context(&self.name) {
+        Ok(ctx) => ctx.pages.clone(),
+        Err(_)
+          if self
+            .browser
+            .as_ref()
+            .is_some_and(|browser| browser.owns_context(&self.name)) =>
+        {
+          Vec::new()
+        },
+        Err(error) => return Err(error),
+      }
     };
     let mut pages = Vec::with_capacity(inner_pages.len());
     for inner in inner_pages {

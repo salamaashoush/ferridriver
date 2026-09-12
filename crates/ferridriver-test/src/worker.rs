@@ -27,8 +27,8 @@ use crate::reporter::{EventBus, ReporterEvent};
 #[derive(Clone)]
 struct EffectiveContextConfig {
   context: ContextConfig,
-  default_viewport: Option<ViewportConfig>,
-  viewport_override: Option<ViewportConfig>,
+  default_viewport: Option<ferridriver_config::browser::ViewportOverride>,
+  viewport_override: Option<ferridriver_config::browser::ViewportOverride>,
   request_base_url: Option<String>,
 }
 
@@ -43,7 +43,11 @@ impl EffectiveContextConfig {
     let parts = serde_json::json!({
       "backend": format!("{backend:?}"),
       "context": &self.context,
-      "viewport": self.viewport_override.as_ref().or(self.default_viewport.as_ref()),
+      "viewport": match self.viewport_override.as_ref().or(self.default_viewport.as_ref()) {
+        None => serde_json::json!("default"),
+        Some(ferridriver_config::browser::ViewportOverride::Disabled) => serde_json::Value::Null,
+        Some(ferridriver_config::browser::ViewportOverride::Size(size)) => serde_json::json!(size),
+      },
       "baseUrl": &self.request_base_url,
     });
     parts.to_string()
@@ -367,9 +371,8 @@ impl TestBrowserResources {
 
 /// Open a per-test browsing container. Backends that support
 /// isolated contexts get a fresh `Browser::new_context(None)`. All
-/// current backends — CDP pipe, CDP raw, BiDi/Firefox, and Playwright
-/// WebKit — create real isolated contexts; the shared-default fallback
-/// remains for any future backend that reports otherwise.
+/// desktop backends create isolated contexts. Android Chrome uses its
+/// device context and retains the device viewport unless explicitly set.
 async fn new_test_context(
   browser: &Arc<ferridriver::Browser>,
   opts: ferridriver::options::BrowserContextOptions,
@@ -377,19 +380,21 @@ async fn new_test_context(
   if browser.supports_isolated_contexts() {
     browser.new_context().options(opts).await
   } else {
-    tracing::warn!(
-      target: "ferridriver::worker",
-      "backend shares a default context — per-test context options are not applied",
-    );
-    Ok(browser.default_context())
+    let context = browser.default_context();
+    let mut opts = opts;
+    if opts.viewport == ferridriver::options::ViewportOption::Default {
+      opts.viewport = ferridriver::options::ViewportOption::Null;
+    }
+    let state = browser.state().read().await;
+    state.set_context_options(&state.session_key(context.name()).to_composite(), opts);
+    Ok(context)
   }
 }
 
 /// Drop a per-test context. Skips `ctx.close()` when the context is
 /// the shared default container — closing it would tear down the
 /// only browsing context available on a backend that shares the
-/// persistent default. All current backends use isolated contexts, so
-/// this guard only fires for a shared-default fallback.
+/// persistent default, including Android Chrome.
 async fn close_test_context(ctx: &ferridriver::ContextRef) {
   if ctx.name() == "default" {
     return;
@@ -519,10 +524,16 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
 
   let viewport_override = spec_use.as_ref().and_then(|opts| {
     opts.get("viewport").and_then(|v| {
+      if v.is_null() {
+        return Some(ferridriver_config::browser::ViewportOverride::Disabled);
+      }
       let w = v.get("width").and_then(|w| w.as_i64());
       let h = v.get("height").and_then(|h| h.as_i64());
       match (w, h) {
-        (Some(w), Some(h)) => Some(ViewportConfig { width: w, height: h }),
+        (Some(w), Some(h)) => Some(ferridriver_config::browser::ViewportOverride::Size(ViewportConfig {
+          width: w,
+          height: h,
+        })),
         _ => None,
       }
     })
@@ -552,11 +563,12 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
 /// `null` included, which is how a suite says "no fixed viewport".
 /// `[test.browser].viewport` is the spelling that predates the `use`
 /// bag and answers when `use` is silent.
-fn config_viewport(browser: &crate::config::BrowserConfig) -> Option<ViewportConfig> {
-  match browser.use_options.viewport {
-    Some(ref written) => written.size(),
-    None => browser.viewport.clone(),
-  }
+fn config_viewport(browser: &crate::config::BrowserConfig) -> Option<ferridriver_config::browser::ViewportOverride> {
+  browser
+    .use_options
+    .viewport
+    .clone()
+    .or_else(|| browser.viewport.clone())
 }
 
 fn build_suite_effective_context_config(config: &TestConfig) -> EffectiveContextConfig {
@@ -596,12 +608,14 @@ fn build_context_options(
     .viewport_override
     .as_ref()
     .or(effective.default_viewport.as_ref());
-  if let Some(vp) = viewport {
-    opts.viewport = ferridriver::options::ViewportOption::Size {
+  opts.viewport = match viewport {
+    Some(ferridriver_config::browser::ViewportOverride::Disabled) => ferridriver::options::ViewportOption::Null,
+    Some(ferridriver_config::browser::ViewportOverride::Size(vp)) => ferridriver::options::ViewportOption::Size {
       width: vp.width,
       height: vp.height,
-    };
-  }
+    },
+    None => ferridriver::options::ViewportOption::Default,
+  };
   opts.device_scale_factor = ctx_config.device_scale_factor;
   opts.screen = ctx_config.screen.as_ref().map(|s| ferridriver::options::ScreenSize {
     width: s.width,
@@ -999,7 +1013,7 @@ impl Worker {
     result_tx: mpsc::Sender<WorkerTestResult>,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
     mut pending: Option<WorkItem>,
-  ) -> Option<WorkItem> {
+  ) -> ferridriver::Result<Option<WorkItem>> {
     if let Some(event_bus) = &self.event_bus {
       event_bus.emit(ReporterEvent::WorkerStarted { worker_id: self.id });
     }
@@ -1134,12 +1148,13 @@ impl Worker {
     // launched a browser via `BrowserHandle::get`. Tests that never
     // touched a browser-dependent fixture skip the close handshake
     // because no browser was launched in the first place.
-    browser_handle.close().await;
+    let cleanup = browser_handle.close().await;
 
     if let Some(event_bus) = &self.event_bus {
       event_bus.emit(ReporterEvent::WorkerFinished { worker_id: self.id });
     }
-    pending
+    cleanup?;
+    Ok(pending)
   }
 
   /// Run a serial batch: all tests in order, skip rest on failure.
@@ -2289,7 +2304,7 @@ mod tests {
 
   fn effective(context: ContextConfig, fallback: Option<ViewportConfig>) -> EffectiveContextConfig {
     let mut browser = crate::config::BrowserConfig::default();
-    browser.viewport = fallback;
+    browser.viewport = fallback.map(ferridriver_config::browser::ViewportOverride::Size);
     browser.use_options = context.clone();
     EffectiveContextConfig {
       context,
@@ -2359,8 +2374,32 @@ mod tests {
       }),
     );
     assert!(
-      effective.default_viewport.is_none(),
-      "`viewport: null` is not the same as leaving it out",
+      matches!(
+        effective.default_viewport,
+        Some(ferridriver_config::browser::ViewportOverride::Disabled)
+      ),
+      "`viewport: null` is not the same as leaving it out"
+    );
+    assert_eq!(
+      build_context_options(
+        &effective,
+        std::path::Path::new("."),
+        ferridriver::backend::BackendKind::CdpPipe
+      )
+      .viewport,
+      ferridriver::options::ViewportOption::Null
+    );
+  }
+
+  #[test]
+  fn default_and_disabled_viewports_do_not_share_pooled_contexts() {
+    let default = effective(ContextConfig::default(), None);
+    let disabled = effective(used(serde_json::json!({"viewport":null})), None);
+    let backend = ferridriver::backend::BackendKind::CdpPipe;
+    assert_ne!(default.pool_key(backend), disabled.pool_key(backend));
+    assert_eq!(
+      build_context_options(&default, std::path::Path::new("."), backend).viewport,
+      ferridriver::options::ViewportOption::Default
     );
   }
 }

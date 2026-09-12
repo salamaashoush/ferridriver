@@ -157,6 +157,7 @@ pub struct InstanceConfig {
   /// Explicit WebSocket URL to connect to (skips launch entirely).
   #[serde(alias = "connect_url")]
   pub connect_url: Option<String>,
+  pub connect_options: Option<ferridriver::options::ConnectOptions>,
   /// Profile directory to read `DevToolsActivePort` from when
   /// discovering an already-running browser. `${INSTANCE}` and `~` are
   /// expanded.
@@ -436,6 +437,7 @@ impl RoutingView<'_> {
     // set that does not contain this name means the caller asked for a browser
     // nothing describes, and the configured set is the answer they need.
     self.reject_unknown_instance(instance)?;
+    self.validate_connection(instance)?;
 
     let mut out = match self.config_for(instance) {
       Some(cfg) => instance_overrides_from(cfg, instance, self.backend)?,
@@ -476,6 +478,7 @@ impl RoutingView<'_> {
     // an args command: launching would produce a browser with none of the
     // configuration the caller asked for.
     self.reject_unknown_instance(instance)?;
+    self.validate_connection(instance)?;
     let Some(spec) = self.section_args_command() else {
       return Ok(());
     };
@@ -494,6 +497,16 @@ impl RoutingView<'_> {
       })
   }
 
+  fn validate_connection(&self, instance: &str) -> Result<(), String> {
+    if let Some(cfg) = self.config_for(instance)
+      && cfg.connect_options.is_some()
+      && cfg.connect_url.is_none()
+    {
+      return Err(format!("instance '{instance}': connectOptions requires connectUrl"));
+    }
+    Ok(())
+  }
+
   /// Resolve how to reach `instance`: an explicit URL, a discovered
   /// profile, or a discover command. `None` means "launch a new one".
   #[must_use]
@@ -507,6 +520,26 @@ impl RoutingView<'_> {
     if let Some(cfg) = cfg
       && let Some(url) = &cfg.connect_url
     {
+      if let Some(options) = &cfg.connect_options {
+        let browser_name = options
+          .capabilities
+          .as_ref()
+          .and_then(|caps| caps.get("browserName"))
+          .and_then(serde_json::Value::as_str)
+          .unwrap_or_else(|| match cfg.backend.map_or(self.backend, BackendChoice::kind) {
+            BackendKind::WebKit => "safari",
+            BackendKind::Bidi => "firefox",
+            _ => "chrome",
+          })
+          .to_owned();
+        return Some(ConnectMode::WebDriver {
+          endpoint: url.clone(),
+          browser_name,
+          capabilities: options.capabilities.clone(),
+          headers: options.headers.clone(),
+          timeout: options.timeout,
+        });
+      }
       return Some(ConnectMode::ConnectUrl(url.clone()));
     }
 
@@ -1475,6 +1508,58 @@ mod tests {
     let v = view(&instances, None, None, &cache);
     let err = v.overrides_for("p").expect_err("must fail");
     assert!(err.contains("credentials"), "{err}");
+  }
+
+  #[test]
+  fn instance_connection_options_select_a_managed_remote_session() {
+    let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
+      "connectUrl": "http://127.0.0.1:4725/wd/hub",
+      "connectOptions": {
+        "timeout": 120_000,
+        "headers": {"authorization": "Bearer contract-token"},
+        "capabilities": {
+          "browserName": "Chrome",
+          "platformName": "Android",
+          "appium:options": {"automationName": "UiAutomator2", "deviceName": "example-device"}
+        }
+      }
+    }))
+    .unwrap();
+    let instances = std::collections::HashMap::from([("remote".into(), cfg)]);
+    let cache = CommandCache::default();
+    let routing = view(&instances, None, None, &cache);
+    routing.health("remote").unwrap();
+    let Some(ConnectMode::WebDriver {
+      endpoint,
+      browser_name,
+      capabilities,
+      headers,
+      timeout,
+    }) = routing.resolve_connect("remote")
+    else {
+      panic!("expected a managed WebDriver session");
+    };
+    assert_eq!(endpoint, "http://127.0.0.1:4725/wd/hub");
+    assert_eq!(browser_name, "Chrome");
+    assert_eq!(timeout, Some(120_000));
+    assert_eq!(headers.unwrap()["authorization"], "Bearer contract-token");
+    assert_eq!(capabilities.unwrap()["appium:options"]["deviceName"], "example-device");
+  }
+
+  #[test]
+  fn connection_options_without_an_endpoint_do_not_launch_a_local_browser() {
+    let cfg = InstanceConfig {
+      connect_options: Some(ferridriver::options::ConnectOptions::default()),
+      ..Default::default()
+    };
+    let instances = std::collections::HashMap::from([("remote".into(), cfg)]);
+    let cache = CommandCache::default();
+    assert!(
+      view(&instances, None, None, &cache)
+        .health("remote")
+        .unwrap_err()
+        .contains("connectUrl")
+    );
   }
 
   #[test]

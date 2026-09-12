@@ -655,7 +655,38 @@ impl WebKitPage {
 
   /// Evaluate `expression` and return the inlined JSON value.
   async fn eval_value(&self, expression: &str) -> Result<Value> {
-    let resp = self.runtime_evaluate(expression, true).await?;
+    self.eval_value_in_context(expression, None).await
+  }
+
+  async fn eval_value_in_context(&self, expression: &str, context_id: Option<i64>) -> Result<Value> {
+    let anchor = match context_id {
+      Some(id) => self.frame_context_anchor(id).await?,
+      None => self.global_anchor().await?,
+    };
+    // Runtime.evaluate cannot await promises, including clock advancement.
+    let resp = self
+      .target_session()
+      .send(
+        protocol::RUNTIME_CALL_FUNCTION_ON,
+        json!({
+          "objectId": anchor,
+          "functionDeclaration": "function(expression) { return (0, eval)(expression); }",
+          "arguments": [{ "value": expression }],
+          "returnByValue": true,
+          "awaitPromise": true,
+        }),
+      )
+      .await
+      .map_err(conn_err)?;
+    if resp.get("wasThrown").and_then(Value::as_bool).unwrap_or(false) {
+      let text = resp
+        .get("result")
+        .and_then(|r| r.get("description").or_else(|| r.get("value")))
+        .and_then(Value::as_str)
+        .unwrap_or("evaluation threw")
+        .to_string();
+      return Err(FerriError::evaluation(text));
+    }
     Ok(
       resp
         .get("result")
@@ -856,28 +887,7 @@ impl WebKitPage {
     if expression.contains("window.__fd") {
       self.ensure_engine_in_context(ctx_id).await?;
     }
-    let params = json!({ "expression": expression, "returnByValue": true, "contextId": ctx_id });
-    let resp = self
-      .target_session()
-      .send(protocol::RUNTIME_EVALUATE, params)
-      .await
-      .map_err(conn_err)?;
-    if resp.get("wasThrown").and_then(Value::as_bool).unwrap_or(false) {
-      let text = resp
-        .get("result")
-        .and_then(|r| r.get("description").or_else(|| r.get("value")))
-        .and_then(Value::as_str)
-        .unwrap_or("evaluation threw")
-        .to_string();
-      return Err(FerriError::evaluation(text));
-    }
-    Ok(Some(
-      resp
-        .get("result")
-        .and_then(|r| r.get("value"))
-        .cloned()
-        .unwrap_or(Value::Null),
-    ))
+    self.eval_value_in_context(expression, Some(ctx_id)).await.map(Some)
   }
 
   // ── Navigation ────────────────────────────────────────────────────────

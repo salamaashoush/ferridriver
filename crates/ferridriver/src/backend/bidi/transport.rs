@@ -97,6 +97,30 @@ impl EventTap {
 /// Pending command map: command ID -> oneshot sender for the response.
 type PendingMap = DashMap<u64, oneshot::Sender<BidiResult>>;
 
+struct PendingCommand<'a> {
+  pending: &'a PendingMap,
+  id: u64,
+}
+
+impl Drop for PendingCommand<'_> {
+  fn drop(&mut self) {
+    self.pending.remove(&self.id);
+  }
+}
+
+fn fail_pending(pending: &PendingMap) {
+  let ids: Vec<u64> = pending.iter().map(|entry| *entry.key()).collect();
+  for id in ids {
+    let Some((_, tx)) = pending.remove(&id) else {
+      continue;
+    };
+    let _ = tx.send(Err(BidiError {
+      error: "target closed".into(),
+      message: "BiDi transport closed".into(),
+    }));
+  }
+}
+
 // ── Transport ──────────────────────────────────────────────────────────────
 
 /// High-performance WebSocket transport for the `BiDi` protocol.
@@ -124,6 +148,12 @@ pub(crate) struct BidiTransport {
   closing: Arc<AtomicBool>,
 }
 
+impl Drop for BidiTransport {
+  fn drop(&mut self) {
+    self.start_close();
+  }
+}
+
 fn trace_event(event: &BidiEvent) {
   trace!(
     method = event.method,
@@ -134,14 +164,41 @@ fn trace_event(event: &BidiEvent) {
   );
 }
 
+fn websocket_request(
+  ws_url: &str,
+  headers: Option<&rustc_hash::FxHashMap<String, String>>,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+  use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+  let mut request = ws_url
+    .into_client_request()
+    .map_err(|e| FerriError::backend(format!("BiDi WebSocket request failed: {e}")))?;
+  if let Some(headers) = headers {
+    for (name, value) in headers {
+      let name = reqwest::header::HeaderName::try_from(name)
+        .map_err(|e| FerriError::invalid_argument("headers", format!("invalid header name: {e}")))?;
+      let value = reqwest::header::HeaderValue::try_from(value)
+        .map_err(|e| FerriError::invalid_argument("headers", format!("invalid header value: {e}")))?;
+      request.headers_mut().insert(name, value);
+    }
+  }
+  Ok(request)
+}
+
 impl BidiTransport {
   /// Connect to a `BiDi` WebSocket endpoint.
   pub async fn connect(ws_url: &str) -> Result<Self> {
-    debug!("BiDi connecting to {ws_url}");
+    Self::connect_with_headers(ws_url, None).await
+  }
 
-    let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
+  pub async fn connect_with_headers(
+    ws_url: &str,
+    headers: Option<&rustc_hash::FxHashMap<String, String>>,
+  ) -> Result<Self> {
+    debug!("BiDi connecting");
+    let request = websocket_request(ws_url, headers)?;
+    let (ws_stream, _) = Box::pin(tokio_tungstenite::connect_async(request))
       .await
-      .map_err(|e| FerriError::Backend(format!("BiDi WebSocket connect to {ws_url}: {e}")))?;
+      .map_err(|e| FerriError::Backend(format!("BiDi WebSocket connection failed: {e}")))?;
 
     let (write, read) = ws_stream.split();
     let pending: Arc<PendingMap> = Arc::new(DashMap::default());
@@ -236,16 +293,12 @@ impl BidiTransport {
       // `send_command` awaits return immediately with a `target_closed`
       // error instead of waiting the full 60s response timeout.
       // Mirrors the CDP pipe/ws reader fix.
-      let pending_ids: Vec<u64> = pending2.iter().map(|entry| *entry.key()).collect();
-      for id in pending_ids {
-        let Some((_, tx)) = pending2.remove(&id) else {
-          continue;
-        };
-        let _ = tx.send(Err(BidiError {
-          error: "target closed".into(),
-          message: "BiDi transport closed (browser exited)".into(),
-        }));
-      }
+      closing2.store(true, Ordering::Relaxed);
+      event_taps2
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+      fail_pending(&pending2);
       debug!("BiDi reader task ended");
     });
 
@@ -268,6 +321,7 @@ impl BidiTransport {
   /// is the load-bearing part.
   pub fn start_close(&self) {
     self.closing.store(true, Ordering::Relaxed);
+    fail_pending(&self.pending);
     let _ = self.write_tx.try_send(Message::Close(None));
   }
 
@@ -278,6 +332,15 @@ impl BidiTransport {
 
     // Register pending before sending (avoid race)
     self.pending.insert(id, tx);
+    let _pending = PendingCommand {
+      pending: &self.pending,
+      id,
+    };
+    if self.closing.load(Ordering::Relaxed) {
+      return Err(FerriError::target_closed(Some(
+        "BiDi WebSocket connection closed".into(),
+      )));
+    }
 
     // Build command JSON directly as string (no Value intermediary for envelope)
     let params_str = serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string());
@@ -285,7 +348,6 @@ impl BidiTransport {
     trace!("BiDi send id={id}: {method}");
 
     if self.write_tx.send(Message::Text(cmd.into())).await.is_err() {
-      self.pending.remove(&id);
       return Err(FerriError::backend("BiDi WebSocket connection closed"));
     }
 
@@ -293,10 +355,7 @@ impl BidiTransport {
     match tokio::time::timeout(std::time::Duration::from_mins(1), rx).await {
       Ok(Ok(result)) => result.map_err(|e| FerriError::protocol(method, e.to_string())),
       Ok(Err(_)) => Err(FerriError::backend("BiDi command response channel dropped")),
-      Err(_) => {
-        self.pending.remove(&id);
-        Err(FerriError::timeout(format!("BiDi command '{method}'"), 60_000))
-      },
+      Err(_) => Err(FerriError::timeout(format!("BiDi command '{method}'"), 60_000)),
     }
   }
 
@@ -363,6 +422,28 @@ fn handle_command_response(bytes: &[u8], type_field: &[u8], pending: &PendingMap
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn cancelled_command_releases_its_pending_response_slot() {
+    let (write_tx, mut write_rx) = mpsc::channel(1);
+    let transport = BidiTransport {
+      next_id: AtomicU64::new(0),
+      pending: Arc::new(DashMap::default()),
+      write_tx,
+      event_tx: broadcast::channel(1).0,
+      event_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
+      closing: Arc::new(AtomicBool::new(false)),
+    };
+    let mut command = Box::pin(transport.send_command("session.status", serde_json::json!({})));
+    assert!(futures::poll!(&mut command).is_pending());
+    assert!(write_rx.recv().await.unwrap().is_text());
+    assert_eq!(transport.pending.len(), 1);
+    drop(command);
+    assert!(
+      transport.pending.is_empty(),
+      "cancelled commands accumulate response slots"
+    );
+  }
 
   #[tokio::test]
   async fn event_barrier_waits_for_the_consumer_to_process_queued_responses() {

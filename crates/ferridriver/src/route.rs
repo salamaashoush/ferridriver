@@ -87,6 +87,82 @@ impl Default for FulfillResponse {
   }
 }
 
+#[derive(Default)]
+pub struct FulfillOptions {
+  pub status: Option<i32>,
+  pub headers: Option<Vec<(String, String)>>,
+  pub body: Option<Vec<u8>>,
+  pub json: Option<serde_json::Value>,
+  pub content_type: Option<String>,
+  pub path: Option<std::path::PathBuf>,
+  pub response: Option<crate::http_client::HttpResponse>,
+}
+
+impl FulfillOptions {
+  /// # Errors
+  /// Rejects conflicting bodies, unreadable files, and disposed responses.
+  pub async fn resolve(self) -> crate::error::Result<FulfillResponse> {
+    use crate::error::FerriError;
+    if self.body.is_some() && self.json.is_some() {
+      return Err(FerriError::invalid_argument(
+        "fulfill",
+        "Can specify either body or json parameters",
+      ));
+    }
+    let json_content_type = self.json.as_ref().is_some_and(|value| match value {
+      serde_json::Value::Null | serde_json::Value::Bool(false) => false,
+      serde_json::Value::Number(number) => number.as_f64() != Some(0.0),
+      serde_json::Value::String(text) => !text.is_empty(),
+      _ => true,
+    });
+    let mut body = match self.json {
+      Some(value) => Some(serde_json::to_vec(&value).map_err(|error| FerriError::backend(error.to_string()))?),
+      None => self.body,
+    };
+    let mut status = self.status;
+    let mut headers = self.headers;
+    if let Some(response) = self.response {
+      status = status.or(Some(i32::from(response.status())));
+      headers = headers.or_else(|| Some(response.headers_object()));
+      if body.is_none() && self.path.is_none() {
+        body = Some(response.body_shared()?.to_vec());
+      }
+    }
+    let mut content_type = self.content_type;
+    if content_type.is_none() && json_content_type {
+      content_type = Some("application/json".into());
+    }
+    if let Some(path) = self.path.filter(|path| !path.as_os_str().is_empty()) {
+      body =
+        Some(tokio::fs::read(&path).await.map_err(|error| {
+          FerriError::backend(format!("reading route fulfillment body {}: {error}", path.display()))
+        })?);
+      if content_type.is_none() {
+        content_type = Some(crate::locator::guess_mime_type(&path.to_string_lossy()).to_owned());
+      }
+    }
+    let body = body.unwrap_or_default();
+    let mut headers: Vec<_> = headers
+      .unwrap_or_default()
+      .into_iter()
+      .map(|(name, value)| (name.to_ascii_lowercase(), value))
+      .collect();
+    if let Some(value) = &content_type {
+      headers.retain(|(name, _)| name != "content-type");
+      headers.push(("content-type".into(), value.clone()));
+    }
+    if !body.is_empty() && !headers.iter().any(|(name, _)| name == "content-length") {
+      headers.push(("content-length".into(), body.len().to_string()));
+    }
+    Ok(FulfillResponse {
+      status: status.filter(|value| *value != 0).unwrap_or(200),
+      headers,
+      body,
+      content_type,
+    })
+  }
+}
+
 /// An intercepted request with metadata.
 #[derive(Debug, Clone)]
 pub struct InterceptedRequest {
@@ -548,6 +624,68 @@ pub fn status_text(code: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn fulfillment_preserves_null_and_rejects_conflicting_bodies() {
+    let response = FulfillOptions {
+      json: Some(serde_json::Value::Null),
+      ..Default::default()
+    }
+    .resolve()
+    .await
+    .unwrap();
+    assert_eq!(response.body, b"null");
+    assert_eq!(response.headers, vec![("content-length".into(), "4".into())]);
+    let error = FulfillOptions {
+      json: Some(serde_json::Value::Null),
+      body: Some(vec![]),
+      ..Default::default()
+    }
+    .resolve()
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("Can specify either body or json"));
+  }
+
+  #[tokio::test]
+  async fn fulfillment_normalizes_headers_and_overrides_content_type() {
+    let response = FulfillOptions {
+      status: Some(201),
+      body: Some(vec![0, 128, 255]),
+      content_type: Some("application/octet-stream".into()),
+      headers: Some(vec![
+        ("Content-Type".into(), "wrong".into()),
+        ("X-Example".into(), "yes".into()),
+      ]),
+      ..Default::default()
+    }
+    .resolve()
+    .await
+    .unwrap();
+    assert_eq!(response.status, 201);
+    assert_eq!(response.body, [0, 128, 255]);
+    assert_eq!(
+      response.headers,
+      vec![
+        ("x-example".into(), "yes".into()),
+        ("content-type".into(), "application/octet-stream".into()),
+        ("content-length".into(), "3".into())
+      ]
+    );
+  }
+
+  #[tokio::test]
+  async fn fulfillment_reports_unreadable_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let error = FulfillOptions {
+      path: Some(directory.path().join("missing.css")),
+      ..Default::default()
+    }
+    .resolve()
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("missing.css"));
+  }
 
   #[test]
   fn sniff_html_bodies() {

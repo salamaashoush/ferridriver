@@ -16,7 +16,9 @@ const BLANK = dataUrl('<p>emitter</p>');
 
 /// A console round-trip is the cheapest observable page event.
 async function log(page: Page, text: string) {
+  const delivered = new Promise<void>(resolve => { page.once('console', () => resolve()); });
   await page.evaluate(`console.log(${JSON.stringify(text)})`);
+  await delivered;
 }
 
 async function settle(page: Page) {

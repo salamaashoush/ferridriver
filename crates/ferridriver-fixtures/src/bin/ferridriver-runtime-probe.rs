@@ -664,7 +664,7 @@ async fn load_bdd(root: &Path, globs: &[String], allow_env: Option<&[String]>) -
   if let Some(names) = allow_env {
     ferridriver_bdd::js::set_bdd_script_caps(ScriptCaps::resolve(names));
   }
-  let session = ferridriver_bdd::js::JsBddSession::from_globs(globs, root).await?;
+  let session = Box::pin(ferridriver_bdd::js::JsBddSession::from_globs(globs, root)).await?;
   Ok(json!(
     session
       .registry()

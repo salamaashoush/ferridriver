@@ -1,8 +1,11 @@
 # Mobile emulation
 
-ferridriver does not ship a device descriptor catalog. Configure the
-emulation primitives directly: viewport, user agent, device scale
-factor, mobile flag, touch flag, locale, timezone, geolocation.
+ferridriver ships Playwright's device descriptor catalog as `devices` in
+the scripting and Node APIs. Spread a descriptor into `browser.newContext`,
+or configure viewport, user agent, device scale factor, mobile flag,
+touch flag, locale, timezone, and geolocation directly. These settings
+emulate a browser; they do not start a native mobile device or automate
+native application views.
 
 ## Per-test
 
@@ -115,6 +118,13 @@ page.emulate_media()
 ```
 
 ## TypeScript
+
+```ts
+const context = await browser.newContext({ ...devices['iPhone 15'] });
+```
+
+The native scripting environment exposes `devices` as a global. In the Node
+binding, import it from `ferridriver`. To choose the values explicitly:
 
 ```ts
 const context = await browser.newContext({

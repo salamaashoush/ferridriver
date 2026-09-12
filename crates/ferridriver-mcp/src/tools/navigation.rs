@@ -50,7 +50,7 @@ impl McpServer {
       let page = Box::pin(self.page(s)).await?;
       let snap = self.snap(&page, s).await;
       Ok(self.ok_text(format!(
-        "Auto-connected to {channel} Chrome. Found {page_count} existing page(s) in session '{s}'.\n\n{snap}"
+        "Auto-connected to the {channel} browser. Found {page_count} existing page(s) in session '{s}'.\n\n{snap}"
       )))
     } else {
       Err(Self::err(

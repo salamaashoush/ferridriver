@@ -162,9 +162,16 @@ impl BrowserType {
   pub async fn connect(self, ws_endpoint: &str, options: ConnectOptions) -> Result<Browser> {
     if ws_endpoint.starts_with("http://") || ws_endpoint.starts_with("https://") {
       let plan = LaunchPlan {
-        backend: BackendKind::Bidi,
+        backend: if self.kind == BrowserKind::Chromium
+          && crate::backend::webdriver::uses_android_chrome(options.capabilities.as_ref())
+        {
+          BackendKind::CdpRaw
+        } else {
+          BackendKind::Bidi
+        },
         kind: self.kind,
         ws_endpoint: Some(ws_endpoint.to_string()),
+        default_viewport: None,
         ..LaunchPlan::default()
       };
       let browser_name = match self.kind {
@@ -220,6 +227,7 @@ impl BrowserType {
       backend: BackendKind::CdpRaw,
       kind: BrowserKind::Chromium,
       ws_endpoint: Some(endpoint_url.to_string()),
+      default_viewport: None,
       ..LaunchPlan::default()
     };
     let mut state = BrowserState::with_plan(ConnectMode::ConnectUrl(endpoint_url.to_string()), plan);

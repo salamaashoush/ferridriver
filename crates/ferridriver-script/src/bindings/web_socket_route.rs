@@ -47,7 +47,8 @@ unsafe impl rquickjs::JsLifetime<'_> for WsEventPumpUd {
 
 /// Get (or lazily start) this context's WS-callback pump. The pump future
 /// lives on the QuickJS runtime executor, polled only by the session's VM
-/// event loop — it cannot interleave with the script's own execute.
+/// event loop. Callback invocations retain arrival order; their async
+/// continuations may interleave with later callbacks and script runs.
 fn ensure_ws_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<WsPumpMsg> {
   if let Some(ud) = ctx.userdata::<WsEventPumpUd>() {
     return ud.0.clone();
@@ -60,28 +61,23 @@ fn ensure_ws_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<WsPumpMsg> {
         continue;
       };
       let Ok(f) = saved.restore(&pump_ctx) else { continue };
-      // A throwing callback is swallowed so one bad handler can't kill the
-      // pump (same policy as the page-event pump / NAPI tsfn listeners).
-      // The handler body is typically `(m) => ws.send(...)`, whose `send`
-      // is an async method returning a promise; the pump awaits that
-      // promise so sends dispatch in order and never linger as orphaned
-      // futures. The whole call + await runs under the callback's
-      // registration-time net policy.
-      let fut = async {
-        let ret: rquickjs::Result<Value<'_>> = match ev {
-          WsPumpEvent::Message(msg) => match ws_message_to_js(&pump_ctx, msg) {
-            Ok(arg) => f.call((arg,)),
-            Err(_) => return,
-          },
-          WsPumpEvent::Close(code, reason) => f.call((code, reason)),
-        };
-        if let Ok(v) = ret
-          && let Some(promise) = v.as_promise()
-        {
-          let _ = promise.clone().into_future::<Value<'_>>().await;
-        }
+      let ret: rquickjs::Result<Value<'_>> = match ev {
+        WsPumpEvent::Message(msg) => match ws_message_to_js(&pump_ctx, msg) {
+          Ok(arg) => f.call((arg,)),
+          Err(_) => continue,
+        },
+        WsPumpEvent::Close(code, reason) => f.call((code, reason)),
       };
-      fut.await;
+      if let Ok(v) = ret
+        && let Some(promise) = v.as_promise()
+      {
+        // Playwright does not await message handlers: a handler may
+        // depend on the next message or another socket's callback.
+        let promise = promise.clone();
+        pump_ctx.spawn(async move {
+          let _ = promise.into_future::<Value<'_>>().await;
+        });
+      }
     }
   });
   let _ = ctx.store_userdata(WsEventPumpUd(tx.clone()));

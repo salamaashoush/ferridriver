@@ -40,7 +40,7 @@ for (const backend of BACKENDS) {
     // ── 3.19 Browser.version ─────────────────────────────────────────────
 
     it("browser.version returns a real product string, not the engine name", async () => {
-      const v = browser.version;
+      const v = browser.version();
       expect(typeof v).toBe("string");
       expect(v.length).toBeGreaterThan(0);
       // NOT a hardcoded placeholder — must look like a real product version.
@@ -89,7 +89,7 @@ for (const backend of BACKENDS) {
 
     it("browser.close({ reason }) is accepted and closes the browser", async () => {
       const short = await launchForBackend(backend);
-      const v = short.version;
+      const v = short.version();
       expect(v).toContain("/");
       await short.close({ reason: "test cleanup" });
     });

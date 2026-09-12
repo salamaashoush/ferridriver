@@ -12,6 +12,10 @@ declare module 'node:fs/promises' {
   export = promises;
 }
 
+declare module 'node:path' {
+  export function join(...paths: string[]): string;
+}
+
 declare module 'node:zlib' {
   export function inflateSync(input: Uint8Array | ArrayBuffer | string, options?: { maxOutputLength?: number }): Buffer;
   export function inflateRawSync(input: Uint8Array | ArrayBuffer | string, options?: { maxOutputLength?: number }): Buffer;

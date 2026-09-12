@@ -22,6 +22,17 @@ async function fetchText(page: Page, url: string): Promise<string> {
 }
 
 describe('route.fulfill options', () => {
+  test('null is a JSON body and explicit content type replaces header defaults', async ({ page }) => {
+    await page.goto(PAGE);
+    await page.route('**/api/null', route => route.fulfill({
+      json: null, status: 201, headers: { 'Content-Type': 'wrong', 'X-Example': 'yes' },
+      contentType: 'application/json',
+    }));
+    const result = String(await page.evaluate(`fetch('/fx/api/null').then(async r =>
+      [r.status, r.headers.get('content-type'), r.headers.get('x-example'), await r.text()].join('|'))`));
+    expect(result).toBe('201|application/json|yes|null');
+  });
+
   test('json sets the body and implies application/json', async ({ page }) => {
     await page.goto(PAGE);
     await page.route('**/api/json', (route: Route) => route.fulfill({ json: { ok: true, n: 3 } }));
@@ -91,12 +102,12 @@ describe('route.fulfill options', () => {
   test('json and body together are refused', async ({ page }) => {
     await page.goto(PAGE);
     let message = '';
-    await page.route('**/api/both', (route: Route) => {
+    await page.route('**/api/both', async (route: Route) => {
       try {
-        (route.fulfill as (o: unknown) => void)({ json: { a: 1 }, body: 'x' });
+        await route.fulfill({ json: { a: 1 }, body: 'x' });
       } catch (e) {
         message = String((e as Error).message);
-        void route.fulfill({ status: 500, body: 'refused' });
+        await route.fulfill({ status: 500, body: 'refused' });
       }
     });
     await fetchText(page, '/fx/api/both');

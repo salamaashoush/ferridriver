@@ -18,6 +18,7 @@ pub mod page;
 pub(crate) mod session;
 pub(crate) mod transport;
 pub mod types;
+mod webdriver;
 
 pub use browser::BidiBrowser;
 pub use element::BidiElement;

@@ -272,8 +272,8 @@ for (const backend of BACKENDS) {
       expect(await ctx.isClosed()).toBe(false);
       const b = ctx.browser();
       expect(b).not.toBeNull();
-      expect(typeof b!.version).toBe("string");
-      expect((b!.version as unknown as string).length).toBeGreaterThan(0);
+      expect(typeof b!.version()).toBe("string");
+      expect(b!.version().length).toBeGreaterThan(0);
       await ctx.close();
       expect(await ctx.isClosed()).toBe(true);
     });

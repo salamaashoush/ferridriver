@@ -15,6 +15,7 @@ pub mod cdp;
 pub(crate) mod json_scan;
 pub mod process;
 pub mod reaper;
+pub mod webdriver;
 pub mod webkit;
 
 pub mod bidi;
@@ -748,6 +749,23 @@ impl<P> CreateLedger<P> {
 }
 
 impl AnyBrowser {
+  pub(crate) fn kind(&self) -> BackendKind {
+    match self {
+      Self::CdpPipe(_) => BackendKind::CdpPipe,
+      Self::CdpRaw(_) => BackendKind::CdpRaw,
+      Self::WebKit(_) => BackendKind::WebKit,
+      Self::Bidi(_) => BackendKind::Bidi,
+    }
+  }
+
+  pub(crate) fn supports_isolated_contexts(&self) -> bool {
+    match self {
+      Self::CdpPipe(browser) => browser.isolated_contexts,
+      Self::CdpRaw(browser) => browser.isolated_contexts,
+      Self::WebKit(_) | Self::Bidi(_) => true,
+    }
+  }
+
   /// Subscribe to browser-created pages (popups). Lossless unbounded
   /// tap — the popup pump must never miss one (a missed CDP popup is a
   /// target parked on `waitForDebuggerOnStart` forever).

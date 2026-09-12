@@ -601,7 +601,12 @@ pub struct BrowserConfig {
   pub headless: bool,
   pub executable_path: Option<String>,
   pub args: Vec<String>,
-  pub viewport: Option<ViewportConfig>,
+  #[serde(
+    default,
+    deserialize_with = "written_viewport",
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub viewport: Option<ViewportOverride>,
   pub slow_mo: Option<u64>,
   /// Playwright `use` block: per-project context defaults.
   #[serde(default, rename = "use")]
@@ -979,7 +984,7 @@ impl Default for BrowserConfig {
       headless: false,
       executable_path: None,
       args: Vec::new(),
-      viewport: Some(ViewportConfig::default()),
+      viewport: None,
       slow_mo: None,
       use_options: ContextConfig::default(),
       instance: None,
@@ -1942,6 +1947,25 @@ mod expect_config_tests {
 
 #[cfg(test)]
 mod use_options_tests {
+  #[test]
+  fn browser_viewport_preserves_absence_null_and_size() {
+    let absent: super::BrowserConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(absent.viewport.is_none());
+    let round_trip: super::BrowserConfig = serde_json::from_value(serde_json::to_value(absent).unwrap()).unwrap();
+    assert!(round_trip.viewport.is_none());
+    let disabled: super::BrowserConfig = serde_json::from_value(serde_json::json!({"viewport":null})).unwrap();
+    assert!(matches!(
+      disabled.viewport,
+      Some(crate::browser::ViewportOverride::Disabled)
+    ));
+    let sized: super::BrowserConfig =
+      serde_json::from_value(serde_json::json!({"viewport":{"width":412,"height":823}})).unwrap();
+    let Some(crate::browser::ViewportOverride::Size(size)) = sized.viewport else {
+      panic!("expected explicit viewport")
+    };
+    assert_eq!((size.width, size.height), (412, 823));
+  }
+
   use super::{ProjectConfig, TestConfig};
 
   fn config(toml_src: &str) -> TestConfig {

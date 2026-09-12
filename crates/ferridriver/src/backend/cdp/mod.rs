@@ -73,6 +73,7 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// (its initializer stores the same value and returns it synchronously).
   /// Example: `"HeadlessChrome/120.0.6099.109"`.
   version: Arc<str>,
+  pub(crate) isolated_contexts: bool,
   /// Whether this browser draws real window chrome, so a viewport has
   /// to account for the title bar and borders when it sizes the window
   /// (Playwright's `browser.options.headful`).
@@ -110,6 +111,7 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// to cut that cycle, or the transport, its reader/writer tasks and its
   /// connection fd survive every closed browser.
   attach_tasks: Arc<Vec<tokio::task::AbortHandle>>,
+  webdriver: Option<Arc<super::webdriver::session::WebDriverSession>>,
 }
 
 impl<T: CdpTransport> CdpBrowser<T> {
@@ -142,12 +144,14 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
       child: Arc::clone(&self.child),
       attached_targets: Arc::clone(&self.attached_targets),
       version: Arc::clone(&self.version),
+      isolated_contexts: self.isolated_contexts,
       headful: self.headful,
       popup_taps: Arc::clone(&self.popup_taps),
       create_ledger: Arc::clone(&self.create_ledger),
       user_data_dir: self.user_data_dir.as_ref().map(Arc::clone),
       downloads_dir: Arc::clone(&self.downloads_dir),
       attach_tasks: Arc::clone(&self.attach_tasks),
+      webdriver: self.webdriver.clone(),
     }
   }
 }
@@ -407,6 +411,10 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .map_or_else(|| Arc::from("Unknown"), Arc::from);
     // Chrome reports "HeadlessChrome/<v>" only when it has no UI window.
     let headful = !version.starts_with("HeadlessChrome");
+    let isolated_contexts = !version_resp
+      .get("userAgent")
+      .and_then(serde_json::Value::as_str)
+      .is_some_and(|agent| agent.contains("Android"));
 
     transport
       .send_command(
@@ -434,12 +442,14 @@ impl<T: CdpWrap> CdpBrowser<T> {
       child: Arc::new(tokio::sync::Mutex::new(child)),
       attached_targets,
       version,
+      isolated_contexts,
       headful,
       user_data_dir: user_data_dir.map(|td| Arc::new(super::async_tempdir::AsyncTempDir::new(td))),
       downloads_dir,
       popup_taps,
       create_ledger,
       attach_tasks: Arc::new(attach_tasks),
+      webdriver: None,
     })
   }
 
@@ -837,7 +847,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
 
       let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
       let lc_notify = Arc::new(tokio::sync::Notify::new());
-      pages.push(T::wrap_page(CdpPage {
+      let page = CdpPage {
         transport: self.transport.clone(),
         session_id: sid.map(Arc::from),
         target_id: Arc::from(target_id),
@@ -876,7 +886,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
         listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
         fetch_interceptor: Arc::new(std::sync::Mutex::new(None)),
         drag_manager: DragManagerState::new(),
-      }));
+      };
+      page.initialize_adopted_frame().await?;
+      pages.push(T::wrap_page(page));
     }
     Ok(pages)
   }
@@ -887,6 +899,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// mirroring `crBrowser.ts::doCreateNewContext` at
   /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts:121`.
   pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
+    if !self.isolated_contexts {
+      return Err(FerriError::unsupported(
+        "Android Chrome does not support isolated browser contexts",
+      ));
+    }
     let mut params = serde_json::json!({"disposeOnDetach": true});
     if let Some(p) = proxy {
       params["proxyServer"] = serde_json::json!(p.server);
@@ -1126,6 +1143,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
     if let Some(dir) = self.user_data_dir.as_ref() {
       dir.remove_now().await;
     }
+    if let Some(session) = &self.webdriver {
+      session.close().await?;
+    }
     Ok(())
   }
 
@@ -1285,7 +1305,21 @@ impl CdpBrowser<ws::WsTransport> {
 
   /// Connect to a running Chrome instance via WebSocket URL.
   pub async fn connect(ws_url: &str) -> Result<Self> {
-    let transport = Arc::new(Box::pin(ws::WsTransport::connect(ws_url)).await?);
+    Self::connect_with_headers(ws_url, &std::collections::HashMap::new()).await
+  }
+
+  pub(crate) async fn connect_owned_webdriver(
+    ws_url: &str,
+    headers: &std::collections::HashMap<String, String>,
+    session: Arc<super::webdriver::session::WebDriverSession>,
+  ) -> Result<Self> {
+    let mut browser = Self::connect_with_headers(ws_url, headers).await?;
+    browser.webdriver = Some(session);
+    Ok(browser)
+  }
+
+  async fn connect_with_headers(ws_url: &str, headers: &std::collections::HashMap<String, String>) -> Result<Self> {
+    let transport = Arc::new(Box::pin(ws::WsTransport::connect_with_headers(ws_url, headers)).await?);
 
     // Capture product version for `browser.version()` — same handshake
     // Playwright's CRBrowser.connect does.
@@ -1297,6 +1331,10 @@ impl CdpBrowser<ws::WsTransport> {
       .and_then(|v| v.as_str())
       .map_or_else(|| Arc::from("Unknown"), Arc::from);
     let headful = !version.starts_with("HeadlessChrome");
+    let isolated_contexts = !version_resp
+      .get("userAgent")
+      .and_then(serde_json::Value::as_str)
+      .is_some_and(|agent| agent.contains("Android"));
 
     transport
       .send_command(
@@ -1382,11 +1420,13 @@ impl CdpBrowser<ws::WsTransport> {
       child: Arc::new(tokio::sync::Mutex::new(None)),
       attached_targets,
       version,
+      isolated_contexts,
       headful,
       attach_tasks: Arc::new(attach_tasks),
       popup_taps,
       create_ledger,
       user_data_dir: None,
+      webdriver: None,
     })
   }
 }
@@ -2155,6 +2195,28 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
 }
 
 impl<T: CdpWrap> CdpPage<T> {
+  async fn initialize_adopted_frame(&self) -> Result<()> {
+    self.transport.register_lifecycle_tracker(
+      self.session_id.as_deref().unwrap_or(""),
+      self.lifecycle.clone(),
+      self.lifecycle_notify.clone(),
+      transport::frame_state_observer(self.frame_cache.clone(), self.events.clone()),
+    );
+    let tree = self.cmd("Page.getFrameTree", super::empty_params()).await?;
+    if let Some(frame) = tree.pointer("/frameTree/frame") {
+      if let Some(id) = frame.get("id").and_then(serde_json::Value::as_str) {
+        let _ = self.main_frame_id.set(id.to_owned());
+      }
+      if let Some(loader) = frame.get("loaderId").and_then(serde_json::Value::as_str) {
+        let mut lifecycle = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if lifecycle.current_loader_id.is_empty() {
+          loader.clone_into(&mut lifecycle.current_loader_id);
+        }
+      }
+    }
+    Ok(())
+  }
+
   /// Send a CDP command to this page's session.
   async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     self

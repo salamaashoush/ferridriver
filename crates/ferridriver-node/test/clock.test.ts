@@ -6,7 +6,7 @@ import { launchForBackend } from "./_helpers.js";
 
 const BACKENDS: string[] = process.env.FERRIDRIVER_BACKEND
   ? [process.env.FERRIDRIVER_BACKEND]
-  : ["cdp-pipe"];
+  : ["cdp-pipe", "cdp-raw", "bidi", "webkit"];
 
 for (const backend of BACKENDS) {
   describe(`Clock [${backend}]`, () => {
@@ -48,6 +48,25 @@ for (const backend of BACKENDS) {
       await clock.fastForward("01:00");
       await expect(clock.runFor("1:00")).rejects.toThrow(/mm:ss/);
       await expect(clock.pauseAt("not a date")).rejects.toThrow(/Invalid date/);
+    });
+
+    it("runFor waits for timer processing to finish", async () => {
+      const context = await browser.newContext();
+      try {
+        const target = await context.newPage();
+        await target.goto("data:text/html,<body>clock</body>");
+        await target.evaluate(`(() => {
+          const original = window.setTimeout.bind(window);
+          window.setTimeout = (handler, timeout, ...args) => original(handler, timeout ?? 100, ...args);
+        })()`);
+        await context.clock.install({ time: 1000000000000 });
+        await context.clock.pauseAt(1000000000000);
+        await target.evaluate("setTimeout(() => {}, 1000)");
+        await context.clock.runFor(2000);
+        expect(Number(await target.evaluate("Date.now()"))).toBe(1000000002000);
+      } finally {
+        await context.close();
+      }
     });
   });
 }

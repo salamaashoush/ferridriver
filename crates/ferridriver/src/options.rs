@@ -1951,7 +1951,8 @@ pub struct InstanceOverrides {
 }
 
 /// Connect-to-server options bag for `browserType.connect(wsEndpoint, options)`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct ConnectOptions {
   pub headers: Option<rustc_hash::FxHashMap<String, String>>,
   pub slow_mo: Option<u64>,

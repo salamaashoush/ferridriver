@@ -1,0 +1,141 @@
+{
+  "workflow": "scripts/fixtures/browser-workflow.js",
+  "purpose": "Correctness checks; concurrent builds invalidate performance comparisons",
+  "runs": [
+    {
+      "runtime": "napi",
+      "target": "android-appium",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 4987.164,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-tye6t8ng"
+    },
+    {
+      "runtime": "napi",
+      "target": "bidi",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 1303.013,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-w8dsprvp"
+    },
+    {
+      "runtime": "napi",
+      "target": "cdp-pipe",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 243.01,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-j73enusg"
+    },
+    {
+      "runtime": "napi",
+      "target": "cdp-raw",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 279.777,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-caemx0jm"
+    },
+    {
+      "runtime": "napi",
+      "target": "webkit",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 439.313,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-3_t2l_ep"
+    },
+    {
+      "runtime": "script",
+      "target": "android-appium",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 11579.638,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-mzh6pgy8"
+    },
+    {
+      "runtime": "script",
+      "target": "bidi",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 4487.998,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-eh0_v1e1"
+    },
+    {
+      "runtime": "script",
+      "target": "cdp-pipe",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 1058.13,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-e7k21iwn"
+    },
+    {
+      "runtime": "script",
+      "target": "cdp-raw",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 752.493,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-1khc9ch_"
+    },
+    {
+      "runtime": "script",
+      "target": "webkit",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 1146.442,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-rtdoliqs"
+    },
+    {
+      "runtime": "test",
+      "target": "android-appium",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 15183.806,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-81zk0a0f"
+    },
+    {
+      "runtime": "test",
+      "target": "bidi",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 1472.123,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-8i9r2543"
+    },
+    {
+      "runtime": "test",
+      "target": "cdp-pipe",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 804.648,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-jkd8uhnv"
+    },
+    {
+      "runtime": "test",
+      "target": "cdp-raw",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 853.5,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-esijzf5h"
+    },
+    {
+      "runtime": "test",
+      "target": "webkit",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 459.307,
+      "workflowExitCode": 0,
+      "validationStatus": "passed",
+      "localArtifacts": "/tmp/ferridriver-android-appium-2vth9dml"
+    }
+  ]
+}

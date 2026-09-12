@@ -426,7 +426,7 @@ impl Browser {
   }
 
   /// Real product version string (e.g. `"HeadlessChrome/120.0.6099.109"`).
-  #[napi(getter)]
+  #[napi]
   pub fn version(&self) -> String {
     self.inner.version().to_string()
   }

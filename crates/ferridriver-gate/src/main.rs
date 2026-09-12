@@ -286,6 +286,13 @@ fn suite_jobs(workers: usize) -> Vec<Job> {
 fn rust_jobs(log: &Path, root: &Path, workers: usize) -> Result<Vec<Job>> {
   let mut jobs = Vec::new();
   let mut seen = BTreeSet::new();
+  let rust_libdir = std::process::Command::new("rustc")
+    .args(["--print", "target-libdir"])
+    .output()
+    .ok()
+    .filter(|output| output.status.success())
+    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    .filter(|path| !path.is_empty());
   for line in std::fs::read_to_string(log)?.lines() {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
       continue;
@@ -334,6 +341,9 @@ fn rust_jobs(log: &Path, root: &Path, workers: usize) -> Result<Vec<Job>> {
     };
     job.env.insert("FERRITEST_WORKERS".into(), "1".into());
     job.env.insert("FERRITEST_HEADLESS".into(), "true".into());
+    if let Some(libdir) = &rust_libdir {
+      job.env.insert("LD_LIBRARY_PATH".into(), libdir.clone());
+    }
     jobs.push(job);
   }
   if jobs.is_empty() {

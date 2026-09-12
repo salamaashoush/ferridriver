@@ -22,6 +22,7 @@ pub struct Provisioned {
   /// Whether this process started the browser. Closing one it merely attached
   /// to would take down something another host is holding open.
   pub launched: bool,
+  pub created_session: bool,
 }
 
 pub async fn provision_instance(
@@ -49,6 +50,7 @@ pub async fn provision_instance(
     .unwrap_or(ferridriver::state::ConnectMode::Launch);
   // Read before `mode` is handed to the state builder.
   let launched = matches!(mode, ferridriver::state::ConnectMode::Launch);
+  let created_session = matches!(mode, ferridriver::state::ConnectMode::WebDriver { .. });
 
   let mut state = ferridriver_mcp::server::browser_state_for(mode, backend, headless, &mcp_config);
   if headed {
@@ -62,8 +64,8 @@ pub async fn provision_instance(
       Ok(resolved)
     }));
   }
-  let browser = ferridriver::Browser::from_state(state);
-  let state_arc = Arc::clone(browser.state());
+  state.ensure_instance(instance).await?;
+  let browser = ferridriver::Browser::from_instance_state(state, instance)?;
 
   // The full `instance:context` key, not the bare name: `ContextRef` does not
   // run the async bare-name resolution the MCP server does, so a bare label
@@ -73,16 +75,30 @@ pub async fn provision_instance(
   // `userDataDir` is the profile on disk and everything the last run left in
   // it. Any other name is created through `Target.createBrowserContext`, so it
   // starts empty and leaves the profile alone.
-  let context = if fresh { "fresh" } else { "default" };
-  let ctx_ref = ferridriver::context::ContextRef::new(state_arc, format!("{instance}:{context}"));
-  let page = ctx_ref
-    .new_page()
-    .await
-    .map_err(|e| anyhow::anyhow!("opening a page on instance `{instance}`: {e}"))?;
+  let ctx_ref = if fresh && !created_session {
+    browser.new_context().await?
+  } else {
+    browser.default_context()
+  };
+  let existing = if created_session {
+    ctx_ref.pages().await?
+  } else {
+    Vec::new()
+  };
+  let page = if let Some(page) = existing.into_iter().next() {
+    page
+  } else {
+    ctx_ref
+      .new_page()
+      .await
+      .map_err(|e| anyhow::anyhow!("opening a page on instance `{instance}`: {e}"))?
+  };
+  browser.publish_context(&ctx_ref);
   Ok(Provisioned {
     page,
     context: Arc::new(ctx_ref),
     browser: Arc::new(browser),
     launched,
+    created_session,
   })
 }

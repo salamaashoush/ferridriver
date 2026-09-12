@@ -7,6 +7,28 @@
 import { test, describe, expect } from '@ferridriver/test';
 
 describe('clock', () => {
+  test('runFor waits for timer processing to finish', async ({ page, context }) => {
+    await page.goto('data:text/html,<iframe srcdoc="clock"></iframe>');
+    const frames = page.frames();
+    expect(frames.length).toBe(2);
+    for (const frame of frames) {
+      await frame.evaluate(() => {
+        const original = window.setTimeout.bind(window);
+        window.setTimeout = (handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
+          original(handler, timeout ?? 100, ...args);
+      });
+    }
+    await context.clock.install({ time: 1000000000000 });
+    await context.clock.pauseAt(1000000000000);
+    for (const frame of frames) {
+      await frame.evaluate(() => { setTimeout(() => {}, 1000); });
+    }
+    await context.clock.runFor(2000);
+    for (const frame of frames) {
+      expect(Number(await frame.evaluate(() => Date.now()))).toBe(1000000002000);
+    }
+  });
+
   test('clock_controls_time', async ({ page, context }) => {
     // install -> pauseAt -> runFor fire timers at fake time; the paused
     // clock survives a cross-document navigation (init-script log

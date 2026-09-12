@@ -11,6 +11,12 @@ use tokio_tungstenite::tungstenite::Message;
 use super::transport::CdpDispatcher;
 use crate::error::{FerriError, Result};
 
+/// Upper bound on the WebSocket upgrade handshake.
+///
+/// A browser that accepts the TCP connection but never completes the upgrade
+/// would otherwise wedge the caller, and `connect` holds the global state lock.
+const WS_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct WsTransport {
   write_tx: tokio::sync::mpsc::Sender<Message>,
   dispatcher: Arc<CdpDispatcher>,
@@ -40,8 +46,14 @@ impl WsTransport {
         .map_err(|e| FerriError::Backend(format!("invalid header value for '{key}': {e}")))?;
       request.headers_mut().insert(header_name, header_value);
     }
-    let (ws_stream, _) = Box::pin(tokio_tungstenite::connect_async(request))
+    let (ws_stream, _) = tokio::time::timeout(WS_CONNECT_TIMEOUT, Box::pin(tokio_tungstenite::connect_async(request)))
       .await
+      .map_err(|_| {
+        FerriError::Backend(format!(
+          "WebSocket connect to {ws_url} timed out after {}s",
+          WS_CONNECT_TIMEOUT.as_secs()
+        ))
+      })?
       .map_err(|e| FerriError::Backend(format!("WebSocket connect to {ws_url}: {e}")))?;
 
     let (write, read) = ws_stream.split();

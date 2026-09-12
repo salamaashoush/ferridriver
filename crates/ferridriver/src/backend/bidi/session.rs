@@ -1,6 +1,7 @@
 //! `BiDi` session management: WebSocket connection, session creation, browser launch.
 //!
-//! The `BiDi` protocol connects directly via WebSocket -- no HTTP session endpoint.
+//! Native `BiDi` creates a session directly via WebSocket. HTTP-created sessions
+//! attach to their negotiated socket without issuing another `session.new`.
 //! Firefox exposes native `BiDi` at `ws://host:port/session`.
 //! Chrome can also be used via chromedriver's `BiDi` endpoint.
 
@@ -57,7 +58,7 @@ impl BidiSession {
   /// here: the `WebDriver` `proxy` capability is the browser-wide equivalent, and
   /// a user context created later with its own proxy still overrides it.
   pub async fn connect_with_proxy(ws_url: &str, proxy: Option<&crate::options::ProxyConfig>) -> Result<Self> {
-    info!("Connecting BiDi session to {ws_url}");
+    info!("Connecting BiDi session");
 
     let transport = Arc::new(BidiTransport::connect(ws_url).await?);
 
@@ -94,9 +95,14 @@ impl BidiSession {
   /// Attach to a `BiDi` WebSocket returned by a pre-existing `WebDriver` Classic
   /// session. The HTTP session already ran `session.new`, so sending a second
   /// `session.new` would create a different session or fail on Appium/Safari.
-  pub async fn connect_existing(ws_url: &str, session_id: String, capabilities: serde_json::Value) -> Result<Self> {
-    info!("Connecting to existing BiDi session {session_id} at {ws_url}");
-    let transport = Arc::new(BidiTransport::connect(ws_url).await?);
+  pub async fn connect_existing(
+    ws_url: &str,
+    session_id: String,
+    capabilities: serde_json::Value,
+    headers: Option<&rustc_hash::FxHashMap<String, String>>,
+  ) -> Result<Self> {
+    info!("Connecting to existing BiDi session");
+    let transport = Arc::new(BidiTransport::connect_with_headers(ws_url, headers).await?);
     Self::finish(transport, session_id, capabilities).await
   }
 

@@ -173,7 +173,7 @@ fn merge_over(
 /// API response from an HTTP request.
 #[napi]
 pub struct HttpResponse {
-  inner: ferridriver::http_client::HttpResponse,
+  pub(crate) inner: ferridriver::http_client::HttpResponse,
 }
 
 #[napi]

@@ -36,6 +36,7 @@ pub struct RunBus {
 struct SharedBrowser {
   browser: Arc<Browser>,
   plan: LaunchPlan,
+  connection: ConnectMode,
 }
 
 /// Whether two plans would launch the same browser process.
@@ -1446,6 +1447,7 @@ impl TestRunner {
         };
       },
     };
+    let connection = self.config.browser.resolve_instance().unwrap_or(ConnectMode::Launch);
     let worker_event_bus = reporting_enabled.then(|| event_bus.clone());
 
     // A session's browser is only this run's browser when this run would
@@ -1455,7 +1457,7 @@ impl TestRunner {
     let shared_browser = self
       .shared_browser
       .as_ref()
-      .filter(|shared| same_launch(&shared.plan, &launch_plan))
+      .filter(|shared| shared.connection == connection && same_launch(&shared.plan, &launch_plan))
       .map(|shared| Arc::clone(&shared.browser));
     if shared_browser.is_none() && self.shared_browser.is_some() {
       tracing::debug!(
@@ -1484,6 +1486,7 @@ impl TestRunner {
       let custom_fixtures = custom_fixtures.clone();
       let shared = shared_browser.clone();
       let plan = launch_plan.clone();
+      let connection = connection.clone();
       let stop_flag = dispatcher.stop_flag();
 
       let handle = tokio::spawn(async move {
@@ -1495,7 +1498,7 @@ impl TestRunner {
           let browser_handle = if let Some(b) = &shared {
             Arc::new(BrowserHandle::from_shared(Arc::clone(b)))
           } else {
-            Arc::new(BrowserHandle::new(plan.clone()))
+            Arc::new(BrowserHandle::with_connection(plan.clone(), connection.clone()))
           };
           pending = Box::pin(worker.run(
             browser_handle,
@@ -1505,12 +1508,13 @@ impl TestRunner {
             Arc::clone(&stop_flag),
             pending,
           ))
-          .await;
+          .await?;
           if pending.is_none() || stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
             break;
           }
           id = worker_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+        Ok::<(), ferridriver::FerriError>(())
       });
       worker_handles.push(handle);
     }
@@ -1595,8 +1599,20 @@ impl TestRunner {
       }
     }
 
+    let mut infrastructure_failed = false;
     for handle in worker_handles {
-      let _ = handle.await;
+      let outcome = handle
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result.map_err(|error| error.to_string()));
+      if let Err(error) = outcome {
+        infrastructure_failed = true;
+        event_bus.emit(ReporterEvent::RunError {
+          error: Box::new(crate::model::TestFailure::from(format!(
+            "worker cleanup failed: {error}"
+          ))),
+        });
+      }
     }
 
     // ── Global teardown (always runs, even if tests failed) ──
@@ -1665,7 +1681,7 @@ impl TestRunner {
         skipped,
         flaky,
         duration,
-        status: if failed > 0 {
+        status: if failed > 0 || infrastructure_failed {
           crate::reporter::RunStatus::Failed
         } else if self.run_stop.is_requested() {
           crate::reporter::RunStatus::Interrupted
@@ -1675,12 +1691,12 @@ impl TestRunner {
       });
     }
 
-    let exit_code = if failed > 0 || (self.config.fail_on_flaky_tests && flaky > 0) {
+    let exit_code = if failed > 0 || infrastructure_failed || (self.config.fail_on_flaky_tests && flaky > 0) {
       1
     } else {
       0
     };
-    if exit_code != 0 && failed == 0 && flaky > 0 && self.config.fail_on_flaky_tests {
+    if exit_code != 0 && failed == 0 && !infrastructure_failed && flaky > 0 && self.config.fail_on_flaky_tests {
       tracing::warn!(
         target: "ferridriver::runner",
         flaky,
@@ -1721,7 +1737,8 @@ impl TestRunner {
         return 1;
       },
     };
-    let browser = match launch_with_plan(launch_plan.clone()).await {
+    let connection = self.config.browser.resolve_instance().unwrap_or(ConnectMode::Launch);
+    let browser = match Box::pin(launch_with_plan(launch_plan.clone(), connection.clone())).await {
       Ok(b) => Arc::new(b),
       Err(e) => {
         eprintln!("Failed to launch browser: {e}");
@@ -1731,6 +1748,7 @@ impl TestRunner {
     self.shared_browser = Some(SharedBrowser {
       browser: Arc::clone(&browser),
       plan: launch_plan,
+      connection,
     });
 
     // Start file watcher — uses test_match globs for classification, test_ignore for filtering.
@@ -1761,9 +1779,7 @@ impl TestRunner {
 
     // Cleanup.
     self.shared_browser = None;
-    let _ = browser.close().await;
-
-    0
+    close_session_browser(&browser).await
   }
 
   /// Execute a plan while draining TUI messages in real-time.
@@ -1989,7 +2005,8 @@ impl TestRunner {
         return 1;
       },
     };
-    let browser = match launch_with_plan(launch_plan.clone()).await {
+    let connection = self.config.browser.resolve_instance().unwrap_or(ConnectMode::Launch);
+    let browser = match Box::pin(launch_with_plan(launch_plan.clone(), connection.clone())).await {
       Ok(b) => Arc::new(b),
       Err(e) => {
         eprintln!("Failed to launch browser: {e}");
@@ -1999,6 +2016,7 @@ impl TestRunner {
     self.shared_browser = Some(SharedBrowser {
       browser: Arc::clone(&browser),
       plan: launch_plan,
+      connection,
     });
 
     let watcher = match FileWatcher::new(&watch_root, &self.config.test_match, &self.config.test_ignore) {
@@ -2071,9 +2089,7 @@ impl TestRunner {
     }
 
     self.shared_browser = None;
-    let _ = browser.close().await;
-
-    0
+    close_session_browser(&browser).await
   }
 
   /// Serve the run through Playwright's UI-mode app.
@@ -2128,7 +2144,8 @@ impl TestRunner {
         return 1;
       },
     };
-    let browser = match launch_with_plan(launch_plan.clone()).await {
+    let connection = self.config.browser.resolve_instance().unwrap_or(ConnectMode::Launch);
+    let browser = match Box::pin(launch_with_plan(launch_plan.clone(), connection.clone())).await {
       Ok(browser) => Arc::new(browser),
       Err(e) => {
         eprintln!("Failed to launch browser: {e}");
@@ -2138,6 +2155,7 @@ impl TestRunner {
     self.shared_browser = Some(SharedBrowser {
       browser: Arc::clone(&browser),
       plan: launch_plan,
+      connection,
     });
 
     println!("\n  ferridriver UI mode\n\n  {}\n", server.url);
@@ -2166,8 +2184,7 @@ impl TestRunner {
     .await;
 
     self.shared_browser = None;
-    let _ = browser.close().await;
-    0
+    close_session_browser(&browser).await
   }
 
   /// Build the (filtered) plan a UI command asks for. Publishes the
@@ -2538,6 +2555,16 @@ fn absolute_path(path: &str) -> std::path::PathBuf {
   ferridriver_config::layer::normalize_path(&absolute)
 }
 
+async fn close_session_browser(browser: &Browser) -> i32 {
+  match browser.close().await {
+    Ok(()) => 0,
+    Err(error) => {
+      eprintln!("browser cleanup failed: {error}");
+      1
+    },
+  }
+}
+
 /// Build the launch plan for a run.
 ///
 /// # Errors
@@ -2549,6 +2576,17 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> Result<La
   // and validated at load, so the mapping cannot silently downgrade an
   // unrecognised backend here.
   let (backend, kind) = browser_config.resolve_kinds();
+  let overrides = browser_config.instance_overrides()?;
+  let (backend, kind) = overrides.backend.map_or((backend, kind), |backend| {
+    let kind = match backend {
+      ferridriver::backend::BackendKind::CdpPipe | ferridriver::backend::BackendKind::CdpRaw => {
+        ferridriver::options::BrowserKind::Chromium
+      },
+      ferridriver::backend::BackendKind::Bidi => ferridriver::options::BrowserKind::Firefox,
+      ferridriver::backend::BackendKind::WebKit => ferridriver::options::BrowserKind::WebKit,
+    };
+    (backend, kind)
+  });
 
   let mut args = browser_config.args.clone();
   // Proxy launch args, spelled the way this backend's binary takes them.
@@ -2572,15 +2610,10 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> Result<La
   // defaults to `!process.env.PWDEBUG`).
   let headless = browser_config.headless || std::env::var("CI").is_ok();
 
-  // Instance overrides, when the config (or the project) selected a
-  // named instance. This is what lets a suite run against the same
-  // environment an MCP session drives, instead of hard-coding that
-  // environment's flags into `args`.
-  let overrides = browser_config.instance_overrides()?;
   args.extend(overrides.args);
 
   Ok(LaunchPlan {
-    backend: overrides.backend.unwrap_or(backend),
+    backend,
     kind,
     headless: overrides.headless.unwrap_or(headless),
     executable_path: overrides
@@ -2593,6 +2626,10 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> Result<La
     default_viewport: browser_config
       .viewport
       .as_ref()
+      .map_or_else(
+        || Some(crate::config::ViewportConfig::default()),
+        ferridriver_config::browser::ViewportOverride::size,
+      )
       .map(|v| ferridriver::options::ViewportConfig {
         width: v.width,
         height: v.height,
@@ -2605,8 +2642,8 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> Result<La
 /// Launch a browser using the runner's internal `LaunchPlan`. Wraps
 /// `BrowserState::with_plan` + `Browser::from_state` so callers don't
 /// need to repeat the handshake-await dance.
-pub(crate) async fn launch_with_plan(plan: LaunchPlan) -> ferridriver::error::Result<Browser> {
-  let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
+pub(crate) async fn launch_with_plan(plan: LaunchPlan, connection: ConnectMode) -> ferridriver::error::Result<Browser> {
+  let mut state = BrowserState::with_plan(connection, plan);
   Box::pin(state.ensure_browser()).await?;
   Ok(Browser::from_state(state))
 }
@@ -2618,14 +2655,20 @@ pub(crate) async fn launch_with_plan(plan: LaunchPlan) -> ferridriver::error::Re
 /// keeps non-browser tests inside the per-test deadline.
 pub struct BrowserHandle {
   plan: LaunchPlan,
+  connection: ConnectMode,
   cell: tokio::sync::OnceCell<Arc<Browser>>,
   shared: bool,
 }
 
 impl BrowserHandle {
   pub fn new(plan: LaunchPlan) -> Self {
+    Self::with_connection(plan, ConnectMode::Launch)
+  }
+
+  fn with_connection(plan: LaunchPlan, connection: ConnectMode) -> Self {
     Self {
       plan,
+      connection,
       cell: tokio::sync::OnceCell::new(),
       shared: false,
     }
@@ -2638,6 +2681,7 @@ impl BrowserHandle {
     let _ = cell.set(browser);
     Self {
       plan: LaunchPlan::default(),
+      connection: ConnectMode::Launch,
       cell,
       shared: true,
     }
@@ -2655,9 +2699,10 @@ impl BrowserHandle {
 
   pub async fn get(&self) -> ferridriver::error::Result<Arc<Browser>> {
     let plan = self.plan.clone();
+    let connection = self.connection.clone();
     self
       .cell
-      .get_or_try_init(|| async move { launch_with_plan(plan).await.map(Arc::new) })
+      .get_or_try_init(|| async move { launch_with_plan(plan, connection).await.map(Arc::new) })
       .await
       .cloned()
   }
@@ -2666,13 +2711,13 @@ impl BrowserHandle {
     self.cell.get().cloned()
   }
 
-  pub async fn close(&self) {
-    if self.shared {
-      return;
+  pub async fn close(&self) -> ferridriver::Result<()> {
+    if !self.shared
+      && let Some(browser) = self.cell.get()
+    {
+      browser.close().await?;
     }
-    if let Some(b) = self.cell.get() {
-      let _ = b.close().await;
-    }
+    Ok(())
   }
 }
 

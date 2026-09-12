@@ -411,7 +411,7 @@ pub struct BrowserState {
   pub persistent_context: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectMode {
   /// Launch a new browser (default)
   Launch,
@@ -877,12 +877,24 @@ impl BrowserState {
     let adopt_pages = !matches!(mode, ConnectMode::Launch);
 
     let mut guard = state.write().await;
-    Box::pin(guard.install_instance(instance, browser, adopt_pages)).await
+    Box::pin(guard.install_instance(
+      instance,
+      browser,
+      adopt_pages,
+      matches!(mode, ConnectMode::WebDriver { .. }),
+    ))
+    .await
   }
 
   /// Evict a dead entry, adopt existing pages when connecting, and
   /// register `browser` as `instance_name`.
-  async fn install_instance(&mut self, instance_name: &str, browser: AnyBrowser, adopt_pages: bool) -> Result<()> {
+  async fn install_instance(
+    &mut self,
+    instance_name: &str,
+    browser: AnyBrowser,
+    adopt_pages: bool,
+    preserve_viewport: bool,
+  ) -> Result<()> {
     self.evict_instance(instance_name).await;
     let mut inst = BrowserInstance {
       browser,
@@ -904,8 +916,12 @@ impl BrowserState {
     // explicit `connect` tool ([`Self::connect_to_url`]) never touches
     // it, matching Playwright's `connectOverCDP`.
     if adopt_pages {
-      let existing_pages = Box::pin(inst.browser.pages()).await.unwrap_or_default();
-      let viewport = self.default_viewport.clone();
+      let existing_pages = Box::pin(inst.browser.pages()).await?;
+      let viewport = if preserve_viewport {
+        None
+      } else {
+        self.default_viewport.clone()
+      };
       let ctx = inst.context_mut("default");
       for page in existing_pages {
         page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
@@ -1175,7 +1191,28 @@ fn resolve_with_prefix(resolver: &InstanceResolverFn, instance_name: &str) -> Op
 async fn connect_browser(mode: &ConnectMode, backend_kind: BackendKind) -> Result<AnyBrowser> {
   use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
 
-  if backend_kind == BackendKind::Bidi {
+  if let ConnectMode::WebDriver {
+    endpoint,
+    browser_name,
+    capabilities,
+    headers,
+    timeout,
+  } = mode
+    && browser_name.eq_ignore_ascii_case("chrome")
+    && crate::backend::webdriver::uses_android_chrome(capabilities.as_ref())
+  {
+    return Box::pin(crate::backend::webdriver::connect_android_chrome(
+      endpoint,
+      capabilities
+        .as_ref()
+        .ok_or_else(|| FerriError::invalid_argument("capabilities", "Appium capabilities are required"))?,
+      headers.as_ref(),
+      *timeout,
+    ))
+    .await;
+  }
+
+  if backend_kind == BackendKind::Bidi || matches!(mode, ConnectMode::WebDriver { .. }) {
     let endpoint = match mode {
       ConnectMode::WebDriver {
         endpoint,
@@ -1259,7 +1296,13 @@ impl BrowserState {
       other => connect_browser(other, self.backend_kind).await?,
     };
     let adopt_pages = !matches!(mode, ConnectMode::Launch);
-    Box::pin(self.install_instance(instance_name, browser, adopt_pages)).await
+    Box::pin(self.install_instance(
+      instance_name,
+      browser,
+      adopt_pages,
+      matches!(mode, ConnectMode::WebDriver { .. }),
+    ))
+    .await
   }
 
   /// Backwards-compat: ensure the "default" instance.
@@ -1280,8 +1323,9 @@ impl BrowserState {
   pub async fn connect_to_url(&mut self, instance_name: &str, url: &str) -> Result<usize> {
     use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
 
-    // Drop existing instance if any
-    self.instances.remove(instance_name);
+    // Drop existing instance if any. A bare `remove` would orphan a browser this
+    // server launched, leaving the process alive with no handle to close it.
+    self.evict_instance(instance_name).await;
 
     let ws_url = if url.starts_with("ws://") || url.starts_with("wss://") {
       url.to_string()
@@ -1392,7 +1436,11 @@ impl BrowserState {
   /// Access the default instance's backend browser handle. Used by
   /// `Browser::version()` to read the cached CDP `Browser.getVersion().product`.
   pub(crate) fn default_browser(&self) -> Option<&AnyBrowser> {
-    self.instances.get("default").map(|i| &i.browser)
+    self.instance_browser("default")
+  }
+
+  pub(crate) fn instance_browser(&self, instance: &str) -> Option<&AnyBrowser> {
+    self.instances.get(instance).map(|i| &i.browser)
   }
 
   fn instance_mut(&mut self, name: &str) -> Result<&mut BrowserInstance> {
@@ -1918,8 +1966,15 @@ impl BrowserState {
   }
 
   pub async fn shutdown(&mut self) {
+    if let Err(error) = self.shutdown_result().await {
+      tracing::warn!(%error, "browser shutdown failed");
+    }
+  }
+
+  pub(crate) async fn shutdown_result(&mut self) -> Result<()> {
     self.connected.store(false, std::sync::atomic::Ordering::Relaxed);
     let mut composites = Vec::new();
+    let mut errors = Vec::new();
     for (name, mut inst) in self.instances.drain() {
       for (ctx_name, ctx) in &inst.contexts {
         composites.push(format!("{name}:{ctx_name}"));
@@ -1928,7 +1983,9 @@ impl BrowserState {
         }
       }
       inst.contexts.clear();
-      let _ = inst.browser.close().await;
+      if let Err(error) = inst.browser.close().await {
+        errors.push(format!("{name}: {error}"));
+      }
     }
     // Every per-context registry is keyed by composite session key and
     // nothing else drops those entries on a browser-wide shutdown; a
@@ -1938,6 +1995,11 @@ impl BrowserState {
       self.purge_context_registries(&composite).await;
     }
     self.popup_pumps.clear();
+    if errors.is_empty() {
+      Ok(())
+    } else {
+      Err(FerriError::backend(errors.join("; ")))
+    }
   }
 
   /// Close one browser instance, leaving the others running. Returns
@@ -2001,14 +2063,32 @@ pub struct PageInfo {
   pub active: bool,
 }
 
+/// How long the whole `/json/version` exchange may take before we give up.
+const HTTP_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Discover the WebSocket URL from an HTTP debug endpoint.
 async fn discover_ws_from_http(http_url: &str) -> Result<String> {
-  use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-
   let url = http_url.trim_end_matches('/');
   let host_port = url
     .strip_prefix("http://")
     .ok_or_else(|| FerriError::invalid_argument("url", format!("Expected http:// URL, got {http_url}")))?;
+
+  tokio::time::timeout(HTTP_DISCOVERY_TIMEOUT, http_discovery_exchange(host_port))
+    .await
+    .map_err(|_| {
+      FerriError::backend(format!(
+        "Timed out after {}s reading /json/version from {host_port}. If this is Chrome 136+ with \
+         'Allow remote debugging for this browser instance' enabled, that endpoint is not served: pass the \
+         browser WebSocket URL directly (the second line of the profile's DevToolsActivePort file), or use \
+         auto_discover with user_data_dir pointing at that profile.",
+        HTTP_DISCOVERY_TIMEOUT.as_secs()
+      ))
+    })?
+}
+
+/// One `GET /json/version` over a raw socket. Split out so the caller can bound it.
+async fn http_discovery_exchange(host_port: &str) -> Result<String> {
+  use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
   let stream = tokio::net::TcpStream::connect(host_port)
     .await
@@ -2029,31 +2109,73 @@ async fn discover_ws_from_http(http_url: &str) -> Result<String> {
     .map_err(|e| FerriError::backend(format!("Write: {e}")))?;
 
   let mut buf_reader = BufReader::new(reader);
-  let mut content_length: usize = 0;
+
+  let mut status_line = String::new();
+  buf_reader
+    .read_line(&mut status_line)
+    .await
+    .map_err(|e| FerriError::backend(format!("Read status line: {e}")))?;
+  let status: u16 = status_line
+    .split_whitespace()
+    .nth(1)
+    .and_then(|c| c.parse().ok())
+    .ok_or_else(|| FerriError::backend(format!("Malformed HTTP status line from {host_port}: {status_line:?}")))?;
+
+  // `Content-Length` is absent on an HTTP/1.0-style close-delimited body, which is
+  // why `None` means "read to EOF" and `Some(0)` means "there is no body at all".
+  let mut content_length: Option<usize> = None;
   loop {
     let mut line = String::new();
-    buf_reader
+    let read = buf_reader
       .read_line(&mut line)
       .await
       .map_err(|e| FerriError::backend(format!("Read header: {e}")))?;
+    if read == 0 {
+      break;
+    }
     let trimmed = line.trim();
     if trimmed.is_empty() {
       break;
     }
-    if let Some(val) = trimmed.strip_prefix("Content-Length:") {
-      content_length = val.trim().parse().unwrap_or(0);
-    }
-    if let Some(val) = trimmed.strip_prefix("content-length:") {
-      content_length = val.trim().parse().unwrap_or(0);
+    if let Some((name, val)) = trimmed.split_once(':')
+      && name.eq_ignore_ascii_case("content-length")
+    {
+      content_length = val.trim().parse().ok();
     }
   }
 
-  let mut body = vec![0u8; content_length.max(4096)];
-  let n = buf_reader
-    .read(&mut body)
-    .await
-    .map_err(|e| FerriError::backend(format!("Read body: {e}")))?;
-  let body_str = String::from_utf8_lossy(&body[..n]);
+  if status != 200 {
+    return Err(FerriError::backend(format!(
+      "{host_port} answered HTTP {status} for /json/version. Chrome 136+ with 'Allow remote debugging for this \
+       browser instance' serves only the browser WebSocket, not the HTTP JSON endpoints: pass that ws:// URL \
+       directly (the second line of the profile's DevToolsActivePort file), or use auto_discover with \
+       user_data_dir pointing at that profile."
+    )));
+  }
+
+  let body_str = match content_length {
+    Some(0) => {
+      return Err(FerriError::backend(format!(
+        "{host_port} returned an empty /json/version body"
+      )));
+    },
+    Some(len) => {
+      let mut body = vec![0u8; len];
+      buf_reader
+        .read_exact(&mut body)
+        .await
+        .map_err(|e| FerriError::backend(format!("Read body: {e}")))?;
+      String::from_utf8_lossy(&body).into_owned()
+    },
+    None => {
+      let mut body = Vec::new();
+      buf_reader
+        .read_to_end(&mut body)
+        .await
+        .map_err(|e| FerriError::backend(format!("Read body: {e}")))?;
+      String::from_utf8_lossy(&body).into_owned()
+    },
+  };
 
   let json: serde_json::Value =
     serde_json::from_str(&body_str).map_err(|e| FerriError::Backend(format!("Parse /json/version: {e}")))?;
@@ -2081,37 +2203,53 @@ fn pin_ws_authority(ws_url: &str, addr: std::net::SocketAddr) -> String {
 
 /// Discover a running Chrome instance by reading its `DevToolsActivePort` file.
 fn discover_chrome_ws(channel: &str, explicit_user_data_dir: Option<&str>) -> Result<String> {
-  let user_data_dir = if let Some(dir) = explicit_user_data_dir {
-    std::path::PathBuf::from(dir)
+  let candidates: Vec<std::path::PathBuf> = if let Some(dir) = explicit_user_data_dir {
+    vec![std::path::PathBuf::from(dir)]
   } else {
-    chrome_default_user_data_dir(channel)?
+    chrome_default_user_data_dirs(channel)?
   };
 
-  let port_file = user_data_dir.join("DevToolsActivePort");
-  let content = std::fs::read_to_string(&port_file).map_err(|e| {
-    format!(
-      "Cannot read {}: {e}. Ensure Chrome ({channel}) is running and \
-             remote debugging is enabled at chrome://inspect/#remote-debugging",
-      port_file.display()
-    )
-  })?;
+  // A profile directory existing proves only that the browser is installed. Only
+  // DevToolsActivePort proves one is running with debugging on, so keep walking
+  // the candidates until a readable port file turns up.
+  let mut last_err = None;
+  for user_data_dir in &candidates {
+    let port_file = user_data_dir.join("DevToolsActivePort");
+    match std::fs::read_to_string(&port_file) {
+      Ok(content) => return parse_devtools_active_port(&content),
+      Err(e) => last_err = Some(format!("{}: {e}", port_file.display())),
+    }
+  }
 
+  let browser = if channel == "chromium" { "Chromium" } else { "Chrome" };
+  Err(FerriError::Backend(format!(
+    "Cannot read DevToolsActivePort ({}). Ensure {browser} ({channel}) is running with remote debugging \
+     enabled at chrome://inspect/#remote-debugging, or pass user_data_dir explicitly.",
+    last_err.unwrap_or_else(|| "no candidate profile directories".to_string())
+  )))
+}
+
+fn parse_devtools_active_port(content: &str) -> Result<String> {
   let lines: Vec<&str> = content.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-  if lines.len() < 2 {
+  let (Some(port_line), Some(path)) = (lines.first(), lines.get(1)) else {
     return Err(FerriError::Backend(format!(
       "Invalid DevToolsActivePort content: {content:?}"
     )));
-  }
+  };
 
-  let port: u16 = lines[0]
+  let port: u16 = port_line
     .parse()
-    .map_err(|_| FerriError::Backend(format!("Invalid port '{}' in DevToolsActivePort", lines[0])))?;
-  let path = lines[1];
+    .map_err(|_| FerriError::Backend(format!("Invalid port '{port_line}' in DevToolsActivePort")))?;
 
   Ok(format!("ws://127.0.0.1:{port}{path}"))
 }
 
-fn chrome_default_user_data_dir(channel: &str) -> Result<std::path::PathBuf> {
+/// Profile directories to search for a running browser, best match first.
+///
+/// Returns every directory that exists rather than the first, because an
+/// installed-but-idle Chrome must not shadow a Chromium that is actually
+/// running with debugging enabled.
+fn chrome_default_user_data_dirs(channel: &str) -> Result<Vec<std::path::PathBuf>> {
   let home = std::env::var("HOME")
     .or_else(|_| std::env::var("USERPROFILE"))
     .map_err(|_| FerriError::backend("Cannot determine home directory"))?;
@@ -2122,6 +2260,18 @@ fn chrome_default_user_data_dir(channel: &str) -> Result<std::path::PathBuf> {
     "beta" => " Beta",
     "dev" => " Dev",
     "canary" => " Canary",
+    "chromium" => {
+      let path = match os {
+        "linux" => std::path::PathBuf::from(&home).join(".config/chromium"),
+        "macos" => std::path::PathBuf::from(&home).join("Library/Application Support/Chromium"),
+        "windows" => {
+          let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| format!("{home}/AppData/Local"));
+          std::path::PathBuf::from(local_app_data).join("Chromium/User Data")
+        },
+        _ => return Err(FerriError::unsupported(format!("OS: {os}"))),
+      };
+      return Ok(vec![path]);
+    },
     other => {
       return Err(FerriError::invalid_argument(
         "channel",
@@ -2130,7 +2280,7 @@ fn chrome_default_user_data_dir(channel: &str) -> Result<std::path::PathBuf> {
     },
   };
 
-  let path = match os {
+  let chrome_path = match os {
     "linux" => {
       let dir_name = if suffix.is_empty() {
         "google-chrome".to_string()
@@ -2151,28 +2301,33 @@ fn chrome_default_user_data_dir(channel: &str) -> Result<std::path::PathBuf> {
     },
   };
 
-  if !path.exists() {
-    let chromium_path = match os {
-      "linux" => std::path::PathBuf::from(&home).join(".config/chromium"),
-      "macos" => std::path::PathBuf::from(&home).join("Library/Application Support/Chromium"),
-      _ => {
-        return Err(FerriError::Backend(format!(
-          "Chrome user data dir not found: {}",
-          path.display()
-        )));
-      },
-    };
-    if chromium_path.exists() {
-      return Ok(chromium_path);
-    }
-    return Err(FerriError::Backend(format!(
-      "Chrome user data dir not found at {} or {}",
-      path.display(),
-      chromium_path.display()
-    )));
+  let chromium_path = match os {
+    "linux" => Some(std::path::PathBuf::from(&home).join(".config/chromium")),
+    "macos" => Some(std::path::PathBuf::from(&home).join("Library/Application Support/Chromium")),
+    "windows" => {
+      let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| format!("{home}/AppData/Local"));
+      Some(std::path::PathBuf::from(local_app_data).join("Chromium/User Data"))
+    },
+    _ => None,
+  };
+
+  let found: Vec<_> = std::iter::once(chrome_path.clone())
+    .chain(chromium_path.clone())
+    .filter(|p| p.exists())
+    .collect();
+
+  if found.is_empty() {
+    return Err(FerriError::Backend(match chromium_path {
+      Some(c) => format!(
+        "Chrome user data dir not found at {} or {}",
+        chrome_path.display(),
+        c.display()
+      ),
+      None => format!("Chrome user data dir not found: {}", chrome_path.display()),
+    }));
   }
 
-  Ok(path)
+  Ok(found)
 }
 
 /// Common Chrome/Chromium launch flags used by cdp-pipe and cdp-raw backends.
@@ -2834,6 +2989,86 @@ fn find_playwright_chrome() -> Option<String> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn find_playwright_chrome() -> Option<String> {
   None
+}
+
+#[cfg(test)]
+mod discovery_tests {
+  use super::{discover_ws_from_http, parse_devtools_active_port};
+  use tokio::io::AsyncWriteExt;
+
+  /// Serve one hand-rolled HTTP response, then hold the socket open.
+  ///
+  /// Keeping the connection alive is the whole point: Chrome 136+ ignores our
+  /// `Connection: close`, so a reader that waits for EOF waits forever.
+  async fn serve_once(response: &'static str) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+      let Ok((mut sock, _)) = listener.accept().await else {
+        return;
+      };
+      let _ = sock.write_all(response.as_bytes()).await;
+      let _ = sock.flush().await;
+      // Never shut down the write half, and never drop `sock`.
+      std::future::pending::<()>().await;
+    });
+    addr
+  }
+
+  /// Chrome 136+ with "Allow remote debugging for this browser instance" binds
+  /// the port but serves no HTTP JSON endpoints. It answers a bodyless 404 and
+  /// leaves the connection intact, which used to park the read forever and
+  /// wedge the global state lock behind it.
+  #[tokio::test]
+  async fn bodyless_keepalive_404_errors_instead_of_hanging() {
+    let addr = serve_once("HTTP/1.1 404 Not Found\r\nContent-Length:0\r\nContent-Type:text/html\r\n\r\n").await;
+
+    let result = tokio::time::timeout(
+      std::time::Duration::from_secs(5),
+      discover_ws_from_http(&format!("http://{addr}")),
+    )
+    .await
+    .expect("discovery must not hang on a keep-alive 404");
+
+    let err = result.expect_err("404 is not a successful discovery").to_string();
+    assert!(err.contains("404"), "error should name the status: {err}");
+    assert!(
+      err.contains("DevToolsActivePort"),
+      "error should point at the workaround: {err}"
+    );
+  }
+
+  /// A 200 whose `Content-Length` is honoured exactly, on a connection that
+  /// never closes. Reading to EOF here would hang just as badly as the 404.
+  #[tokio::test]
+  async fn keepalive_200_is_read_by_content_length() {
+    let body = r#"{"webSocketDebuggerUrl":"ws://localhost:9222/devtools/browser/abc"}"#;
+    let response: &'static str =
+      Box::leak(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).into_boxed_str());
+    let addr = serve_once(response).await;
+
+    let ws = tokio::time::timeout(
+      std::time::Duration::from_secs(5),
+      discover_ws_from_http(&format!("http://{addr}")),
+    )
+    .await
+    .expect("discovery must not hang")
+    .expect("valid /json/version");
+
+    // The advertised `localhost` authority is replaced by the address actually reached.
+    assert_eq!(ws, format!("ws://{addr}/devtools/browser/abc"));
+  }
+
+  #[test]
+  fn devtools_active_port_needs_both_lines() {
+    assert_eq!(
+      parse_devtools_active_port("9222\n/devtools/browser/abc\n").expect("two lines"),
+      "ws://127.0.0.1:9222/devtools/browser/abc"
+    );
+    assert!(parse_devtools_active_port("9222\n").is_err());
+    assert!(parse_devtools_active_port("").is_err());
+    assert!(parse_devtools_active_port("notaport\n/devtools/browser/abc").is_err());
+  }
 }
 
 #[cfg(test)]

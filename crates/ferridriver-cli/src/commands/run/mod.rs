@@ -88,7 +88,7 @@ async fn provision_for_run(mcp: ferridriver_config::mcp::McpConfig, args: &cli::
   // Boxed: the future holds the whole `[mcp]` config plus the launch state it
   // builds, which is several kilobytes to carry inline on the stack.
   let p = Box::pin(instance::provision_instance(mcp, name, args.headed, args.fresh)).await?;
-  let owned = (p.launched && args.fresh).then(|| Arc::clone(&p.browser));
+  let owned = (p.created_session || (p.launched && args.fresh)).then(|| Arc::clone(&p.browser));
   Ok(RunBrowser {
     page: Some(p.page),
     context: Some(p.context),
@@ -206,7 +206,7 @@ pub async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::
   };
   // The browser has to be closed whichever way the rest of this ends, including
   // the bundle and session-create failures that would otherwise return past it.
-  let outcome: anyhow::Result<()> = async {
+  let outcome: anyhow::Result<_> = async {
     let session = ferridriver_script::Session::create(engine_config, &ctx)
       .await
       .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
@@ -233,14 +233,25 @@ pub async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::
     let report = args
       .report
       .then(|| RunReport::collect(code_language, &collected_code, None, setup_secrets));
-    report_code_result(&result, &collected_code, report.as_ref())
+    Ok((result, report))
   }
   .await;
 
-  if let Some(browser) = owned_browser {
-    // Best effort: the script's verdict is what the caller is waiting for, and a
-    // browser that has already gone leaves nothing to close.
-    let _ = browser.close().await;
+  let (result, report) = close_owned_browser(owned_browser, outcome).await?;
+  report_code_result(&result, &collected_code, report.as_ref())
+}
+
+async fn close_owned_browser<T>(
+  owned_browser: Option<Arc<ferridriver::Browser>>,
+  outcome: anyhow::Result<T>,
+) -> anyhow::Result<T> {
+  if let Some(browser) = owned_browser
+    && let Err(cleanup) = browser.close().await
+  {
+    return Err(match outcome {
+      Err(error) => error.context(format!("browser cleanup also failed: {cleanup}")),
+      Ok(_) => anyhow::anyhow!("browser cleanup failed: {cleanup}"),
+    });
   }
 
   outcome

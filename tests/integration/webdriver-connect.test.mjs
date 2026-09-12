@@ -7,6 +7,7 @@ import { observation, quote, runtimeProbe, workspace } from './support.mjs';
 test('native scripting sends mobile WebDriver capabilities and preserves headers', async () => {
   const root = await workspace({});
   const recorded = join(root, 'webdriver-request.bin');
+  const deleted = join(root, 'webdriver-delete.bin');
   const server = `
 import socket
 server = socket.socket()
@@ -28,6 +29,16 @@ while len(body) < length:
     body += client.recv(4096)
 open(${JSON.stringify(recorded)}, 'wb').write(head + b'\\r\\n\\r\\n' + body)
 response = b'{\"value\":{\"sessionId\":\"mobile-contract\",\"capabilities\":{\"browserName\":\"safari\"}}}'
+client.sendall(b'HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: ' + str(len(response)).encode() + b'\\r\\nConnection: close\\r\\n\\r\\n' + response)
+client.close()
+client, _ = server.accept()
+data = b''
+while b'\\r\\n\\r\\n' not in data:
+    chunk = client.recv(4096)
+    if not chunk: break
+    data += chunk
+open(${JSON.stringify(deleted)}, 'wb').write(data)
+response = b'{"value":null}'
 client.sendall(b'HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: ' + str(len(response)).encode() + b'\\r\\nConnection: close\\r\\n\\r\\n' + response)
 client.close()
 server.close()
@@ -67,6 +78,9 @@ server.close()
     assert.equal(capabilities.webSocketUrl, true);
     assert.deepEqual(capabilities['appium:options'], { automationName: 'Safari', deviceName: 'example-device' });
     assert.match(request, /authorization: Bearer contract-token/i);
+    const cleanup = await readFile(deleted, 'utf8');
+    assert.match(cleanup, /^DELETE \/session\/mobile-contract HTTP\/1.1/);
+    assert.match(cleanup, /authorization: Bearer contract-token/i);
   } finally {
     await commands.stop('stdio');
   }

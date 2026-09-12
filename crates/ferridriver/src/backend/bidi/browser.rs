@@ -27,6 +27,7 @@ pub struct BidiBrowser {
   /// page it cost a mkdir on each open and leaked a directory whenever
   /// teardown was skipped.
   downloads_dir: Arc<tempfile::TempDir>,
+  webdriver: Option<Arc<super::webdriver::WebDriverSession>>,
 }
 
 impl BidiBrowser {
@@ -122,6 +123,7 @@ impl BidiBrowser {
         .owned
         .map(|dir| Arc::new(crate::backend::async_tempdir::AsyncTempDir::new(dir))),
       downloads_dir,
+      webdriver: None,
     })
   }
 
@@ -144,63 +146,56 @@ impl BidiBrowser {
     headers: Option<&rustc_hash::FxHashMap<String, String>>,
     timeout_ms: Option<u64>,
   ) -> Result<Self> {
+    let started = tokio::time::Instant::now();
+    let timeout_ms = timeout_ms.unwrap_or(30_000);
+    if extra_capabilities.is_some_and(|value| !value.is_object()) {
+      return Err(FerriError::invalid_argument("capabilities", "expected an object"));
+    }
     let session_url = webdriver_session_url(endpoint)?;
     let always_match = webdriver_capabilities(browser_name, extra_capabilities);
-    let body = serde_json::json!({
-      "capabilities": {
-        "alwaysMatch": always_match
-      }
+    let client = super::webdriver::http_client(headers, timeout_ms)?;
+    let created = crate::backend::webdriver::session::WebDriverSession::create(
+      client,
+      session_url,
+      always_match,
+      timeout_ms,
+      headers,
+    )
+    .await?;
+    let owner = created.session;
+    let session_id = created.id;
+    let capabilities = created.capabilities;
+    let attach = Box::pin(async {
+      let ws_url = capabilities
+        .get("webSocketUrl")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+          FerriError::unsupported("WebDriver server created a Classic session without a BiDi webSocketUrl capability")
+        })?
+        .to_string();
+      let socket_headers = headers.filter(|_| super::webdriver::same_origin(endpoint, &ws_url));
+      let session = Arc::new(BidiSession::connect_existing(&ws_url, session_id, capabilities, socket_headers).await?);
+      Self::from_session(session)
     });
-    let mut client = reqwest::Client::builder();
-    if let Some(timeout_ms) = timeout_ms {
-      client = client.timeout(std::time::Duration::from_millis(timeout_ms));
+    let result = if timeout_ms == 0 {
+      attach.await
+    } else {
+      tokio::time::timeout_at(started + std::time::Duration::from_millis(timeout_ms), attach)
+        .await
+        .unwrap_or_else(|_| Err(FerriError::timeout("connecting WebDriver BiDi session", timeout_ms)))
+    };
+    match result {
+      Ok(mut browser) => {
+        browser.webdriver = Some(owner);
+        Ok(browser)
+      },
+      Err(error) => {
+        if let Err(cleanup) = owner.close().await {
+          return Err(FerriError::backend(format!("{error}; cleanup failed: {cleanup}")));
+        }
+        Err(error)
+      },
     }
-    if let Some(headers) = headers {
-      let mut request_headers = reqwest::header::HeaderMap::new();
-      for (name, value) in headers {
-        let name = reqwest::header::HeaderName::try_from(name)
-          .map_err(|e| FerriError::invalid_argument("headers", format!("invalid header name '{name}': {e}")))?;
-        let value = reqwest::header::HeaderValue::try_from(value)
-          .map_err(|e| FerriError::invalid_argument("headers", format!("invalid value for '{name}': {e}")))?;
-        request_headers.insert(name, value);
-      }
-      client = client.default_headers(request_headers);
-    }
-    let response = client
-      .build()
-      .map_err(|e| FerriError::Backend(format!("WebDriver HTTP client setup failed: {e}")))?
-      .post(session_url.as_str())
-      .json(&body)
-      .send()
-      .await
-      .map_err(|e| FerriError::Backend(format!("WebDriver session request failed: {e}")))?;
-    let status = response.status();
-    let payload = response
-      .json::<serde_json::Value>()
-      .await
-      .map_err(|e| FerriError::Backend(format!("WebDriver session response was not JSON: {e}")))?;
-    if !status.is_success() {
-      return Err(FerriError::Backend(format!(
-        "WebDriver session request returned {status}: {payload}"
-      )));
-    }
-    let value = payload.get("value").unwrap_or(&payload);
-    let session_id = value
-      .get("sessionId")
-      .or_else(|| payload.get("sessionId"))
-      .and_then(serde_json::Value::as_str)
-      .ok_or_else(|| FerriError::protocol("WebDriver /session", "response omitted sessionId"))?
-      .to_string();
-    let capabilities = value.get("capabilities").cloned().unwrap_or_else(|| value.clone());
-    let ws_url = capabilities
-      .get("webSocketUrl")
-      .and_then(serde_json::Value::as_str)
-      .ok_or_else(|| {
-        FerriError::unsupported("WebDriver server created a Classic session without a BiDi webSocketUrl capability")
-      })?
-      .to_string();
-    let session = Arc::new(BidiSession::connect_existing(&ws_url, session_id, capabilities).await?);
-    Self::from_session(session)
   }
 
   fn from_session(session: Arc<BidiSession>) -> Result<Self> {
@@ -212,6 +207,7 @@ impl BidiBrowser {
       popup_taps,
       profile_dir: None,
       downloads_dir,
+      webdriver: None,
     })
   }
 
@@ -422,6 +418,10 @@ impl BidiBrowser {
   /// Caller-owned profiles flush through `browser.close`; throwaway
   /// profiles can be killed directly because they are discarded.
   pub async fn close(&mut self) -> Result<()> {
+    if let Some(owner) = &self.webdriver {
+      owner.close().await?;
+      self.session.transport.start_close();
+    }
     if let Some(mut group) = self.child.lock().await.take() {
       let mut flushed = true;
       if self.profile_dir.is_none() {
@@ -456,14 +456,21 @@ impl BidiBrowser {
   }
 }
 
-fn webdriver_session_url(endpoint: &str) -> Result<reqwest::Url> {
+pub(crate) fn webdriver_session_url(endpoint: &str) -> Result<reqwest::Url> {
   let mut url = reqwest::Url::parse(endpoint)
     .map_err(|e| FerriError::invalid_argument("endpoint", format!("invalid WebDriver endpoint: {e}")))?;
-  if !url.path().ends_with("/session") {
-    let mut path = url.path().trim_end_matches('/').to_string();
-    path.push_str("/session");
-    url.set_path(&path);
+  if !matches!(url.scheme(), "http" | "https") {
+    return Err(FerriError::invalid_argument(
+      "endpoint",
+      "WebDriver requires an HTTP or HTTPS endpoint",
+    ));
   }
+  let mut path = url.path().trim_end_matches('/').to_string();
+  if !path.ends_with("/session") {
+    path.push_str("/session");
+  }
+  url.set_path(&path);
+  url.set_fragment(None);
   Ok(url)
 }
 
@@ -579,6 +586,53 @@ mod proxy_capability_tests {
 mod webdriver_url_tests {
   use super::{BidiBrowser, webdriver_capabilities, webdriver_session_url};
 
+  #[tokio::test]
+  async fn classic_only_session_is_deleted_before_connect_returns() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+      let mut requests = Vec::new();
+      for body in [
+        r#"{"value":{"sessionId":"mobile-contract","capabilities":{"browserName":"safari"}}}"#,
+        r#"{"value":null}"#,
+      ] {
+        let Ok(Ok((mut socket, _))) = tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept()).await
+        else {
+          break;
+        };
+        let mut request = vec![0; 8192];
+        let length = socket.read(&mut request).await.unwrap();
+        requests.push(String::from_utf8(request[..length].to_vec()).unwrap());
+        let response = format!(
+          "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+          body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+      }
+      requests
+    });
+    let mut headers = rustc_hash::FxHashMap::default();
+    headers.insert("authorization".into(), "Bearer contract-token".into());
+    let result = BidiBrowser::connect_webdriver(
+      &format!("http://{address}/wd/hub"),
+      "safari",
+      None,
+      Some(&headers),
+      Some(1000),
+    )
+    .await;
+    assert!(matches!(result, Err(crate::error::FerriError::Unsupported(_))));
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2, "created remote session was abandoned");
+    assert!(requests[1].starts_with("DELETE /wd/hub/session/mobile-contract HTTP/1.1\r\n"));
+    assert!(
+      requests[1]
+        .to_ascii_lowercase()
+        .contains("authorization: bearer contract-token")
+    );
+  }
+
   #[test]
   fn appends_session_to_server_root() {
     assert_eq!(
@@ -600,6 +654,17 @@ mod webdriver_url_tests {
   #[test]
   fn rejects_invalid_endpoint() {
     assert!(webdriver_session_url("not a url").is_err());
+    assert!(webdriver_session_url("file:///tmp/driver").is_err());
+  }
+
+  #[test]
+  fn trailing_session_slash_does_not_create_a_second_session_segment() {
+    assert_eq!(
+      webdriver_session_url("https://example.com/wd/hub/session/?region=eu#ignored")
+        .unwrap()
+        .as_str(),
+      "https://example.com/wd/hub/session?region=eu"
+    );
   }
 
   #[test]
