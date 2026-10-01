@@ -87,6 +87,7 @@ pub struct Connection {
   next_id: AtomicI64,
   callbacks: Mutex<FxHashMap<i64, (RouteKey, ResponseSlot)>>,
   routes: Mutex<FxHashMap<RouteKey, Route>>,
+  timeout_ms: Arc<Mutex<u64>>,
 }
 
 impl Connection {
@@ -99,9 +100,15 @@ impl Connection {
       next_id: AtomicI64::new(1),
       callbacks: Mutex::new(FxHashMap::default()),
       routes: Mutex::new(FxHashMap::default()),
+      timeout_ms: Arc::new(Mutex::new(30_000)),
     });
     tokio::spawn(reader_loop(Arc::clone(&conn), reader));
     conn
+  }
+
+  /// Set the command timeout in milliseconds.
+  pub fn set_command_timeout_ms(&self, timeout_ms: u64) {
+    *self.timeout_ms.lock().unwrap() = timeout_ms;
   }
 
   /// Handle on the root browser session.
@@ -474,8 +481,8 @@ impl Session {
 /// transport's 30s cap — without it a wedged (alive but unresponsive)
 /// child hangs the caller forever, since `drain_all` only fires on
 /// pipe EOF.
-const REPLY_TIMEOUT_MS: u64 = 30_000;
-const REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(REPLY_TIMEOUT_MS);
+/// Note: This default is overridden by the Connection's configurable timeout.
+const DEFAULT_REPLY_TIMEOUT_MS: u64 = 30_000;
 
 async fn wait_for(
   conn: &Connection,
@@ -483,7 +490,9 @@ async fn wait_for(
   rx: oneshot::Receiver<Result<Value, ErrorPayload>>,
   method: &str,
 ) -> Result<Value, ConnectionError> {
-  match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
+  let timeout_ms = *conn.timeout_ms.lock().unwrap();
+  let timeout = std::time::Duration::from_millis(timeout_ms);
+  match tokio::time::timeout(timeout, rx).await {
     Ok(Ok(Ok(v))) => Ok(v),
     Ok(Ok(Err(err))) => Err(ConnectionError::Protocol(err.message)),
     Ok(Err(_)) => Err(ConnectionError::Closed { method: method.into() }),
@@ -491,7 +500,7 @@ async fn wait_for(
       conn.forget_callback(id);
       Err(ConnectionError::Timeout {
         method: method.into(),
-        ms: REPLY_TIMEOUT_MS,
+        ms: timeout_ms,
       })
     },
   }

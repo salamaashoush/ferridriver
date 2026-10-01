@@ -7,6 +7,7 @@
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 use super::transport::CdpDispatcher;
 use crate::error::{FerriError, Result};
@@ -17,6 +18,7 @@ type BoxWriter = Box<dyn AsyncWrite + Send + Unpin>;
 pub struct PipeTransport {
   write_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
   dispatcher: Arc<CdpDispatcher>,
+  command_timeout_ms: Arc<Mutex<u64>>,
 }
 
 impl PipeTransport {
@@ -132,8 +134,13 @@ impl PipeTransport {
       }
     });
 
-    let transport = Self { write_tx, dispatcher };
+    let transport = Self { write_tx, dispatcher, command_timeout_ms: Arc::new(Mutex::new(30_000)) };
     Ok((transport, child))
+  }
+
+  /// Set the command timeout in milliseconds for CDP requests.
+  pub fn set_command_timeout_ms(&self, timeout_ms: u64) {
+    *self.command_timeout_ms.lock().unwrap() = timeout_ms;
   }
 }
 
@@ -154,12 +161,13 @@ impl super::transport::CdpTransport for PipeTransport {
       self.dispatcher.forget_pending(id);
       return Err(FerriError::target_closed(Some("Pipe writer closed".into())));
     }
-    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+    let timeout_ms = *self.command_timeout_ms.lock().unwrap();
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) => Err(FerriError::Backend(format!("Response channel dropped for {method}"))),
       Err(_) => {
         self.dispatcher.forget_pending(id);
-        Err(FerriError::timeout(format!("waiting for {method} response"), 30_000))
+        Err(FerriError::timeout(format!("waiting for {method} response"), timeout_ms))
       },
     }
   }

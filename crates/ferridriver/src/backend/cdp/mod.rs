@@ -1189,6 +1189,12 @@ impl CdpBrowser<pipe::PipeTransport> {
     let group = super::process::ChildGroup::recorded(child, Some(user_data_dir), false);
     Self::init(Arc::new(transport), Some(group), None).await
   }
+
+  /// Set the CDP command timeout in milliseconds for all CDP requests.
+  /// This affects operations like page navigation that wait for browser responses.
+  pub fn set_command_timeout_ms(&self, timeout_ms: u64) {
+    self.transport.set_command_timeout_ms(timeout_ms);
+  }
 }
 
 // ── WS-specific launch + connect ─────────────────────────────────────────────
@@ -1388,6 +1394,12 @@ impl CdpBrowser<ws::WsTransport> {
       create_ledger,
       user_data_dir: None,
     })
+  }
+
+  /// Set the CDP command timeout in milliseconds for all CDP requests.
+  /// This affects operations like page navigation that wait for browser responses.
+  pub fn set_command_timeout_ms(&self, timeout_ms: u64) {
+    self.transport.set_command_timeout_ms(timeout_ms);
   }
 }
 

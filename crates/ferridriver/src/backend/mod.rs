@@ -901,6 +901,22 @@ impl AnyBrowser {
       Self::Bidi(b) => b.version(),
     }
   }
+
+  /// Set the command timeout in milliseconds.
+  ///
+  /// This affects transport-level operations that wait for browser responses,
+  /// such as `page.goto()`. The default is 30,000ms (30 seconds).
+  ///
+  /// Note: This only affects CDP-based browsers (cdp-pipe, cdp-raw) and WebKit.
+  /// BiDi ignores this setting.
+  pub fn set_command_timeout_ms(&self, timeout_ms: u64) {
+    match self {
+      Self::CdpPipe(b) => b.set_command_timeout_ms(timeout_ms),
+      Self::CdpRaw(b) => b.set_command_timeout_ms(timeout_ms),
+      Self::WebKit(b) => b.set_command_timeout_ms(timeout_ms),
+      Self::Bidi(_) => {}
+    }
+  }
 }
 
 // ─── AnyPage ────────────────────────────────────────────────────────────────

@@ -327,6 +327,11 @@ impl WebKitBrowser {
     &self.conn
   }
 
+  /// Set the command timeout in milliseconds for WebKit protocol requests.
+  pub fn set_command_timeout_ms(&self, timeout_ms: u64) {
+    self.conn.set_command_timeout_ms(timeout_ms);
+  }
+
   /// Create an ephemeral browser context with proxy-only options.
   /// Equivalent to [`Self::new_context_with_options`] with the full
   /// options bag stripped to just the proxy field — kept for state.rs's

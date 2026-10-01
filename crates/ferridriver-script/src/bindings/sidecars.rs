@@ -232,6 +232,12 @@ impl SidecarJs {
 
 #[rquickjs::methods]
 impl SidecarJs {
+  /// Set the default timeout in milliseconds for this sidecar handle.
+  #[qjs(rename = "setDefaultTimeoutMs")]
+  pub fn set_default_timeout_ms(&mut self, timeout_ms: u64) {
+    self.default_timeout_ms = timeout_ms;
+  }
+
   /// `send(method, params?)` → `Promise<result>`. Rejects on a child
   /// `{error}` reply, timeout, or a closed transport.
   #[qjs(rename = "send")]
