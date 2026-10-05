@@ -7,7 +7,7 @@ outputDir = "test-results/integration"
 reporter = [{ name = "list" }]
 
 [scripting]
-allowEnv = ["FERRIDRIVER_BIN"]
+allowEnv = ["FERRIDRIVER_BIN", "FERRIDRIVER_CHROMEDRIVER", "FERRIDRIVER_WEBDRIVER_CHROME"]
 
 [scripting.allow.commands.probe]
 run = ["sh", "-c", "${command}"]
