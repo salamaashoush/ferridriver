@@ -72,7 +72,7 @@ ferrijs-serde = { workspace = true }
 # Timers / URLSearchParams / the console renderer are native modules in
 # `bindings/` (formerly the rquickjs-extra crates, which capped rquickjs
 # at <0.12).
-rquickjs = { version = "0.13", features = [
+rquickjs = { version = "0.14", features = [
   "full-async",
   "parallel",
   "macro",
@@ -112,7 +112,7 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 # Convert round-trip test drives rquickjs directly; it is a runtime dep
 # but integration tests are separate crates and cannot name a lib-only
 # dependency, so it is mirrored here.
-rquickjs = { version = "0.13", features = [
+rquickjs = { version = "0.14", features = [
   "full-async",
   "parallel",
   "macro",

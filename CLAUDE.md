@@ -51,8 +51,9 @@ ferridriver-perf         Chrome trace analysis: Core Web Vitals, 19 DevTools ins
 
 The JavaScript runtime itself (QuickJS event loop, the Node and web
 standard library, the sandbox, `fetch`, the rolldown-to-bytecode
-front-end) is the sibling repository `../ferrijs`, depended on by path
-while the two move together. `ferridriver-script` installs
+front-end) is the sibling repository `../ferrijs`, depended on by its
+published version (see the `[patch.crates-io]` note in `Cargo.toml` for
+developing the two together). `ferridriver-script` installs
 ferridriver's bindings as a ferrijs extension; nothing about running
 JavaScript lives here any more. Read `../ferrijs/docs/SANDBOX.md` before
 touching anything that grants or checks authority: a session has one
