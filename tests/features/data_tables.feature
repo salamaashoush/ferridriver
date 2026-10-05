@@ -2,7 +2,7 @@ Feature: Data Tables
   Inline data tables can be passed to steps.
 
   Scenario: Set multiple cookies from a table
-    Given I navigate to "https://example.com"
+    Given I navigate to "http://127.0.0.1:47831/example-domain.html"
     When I set cookie "key1" to "val1"
     And I set cookie "key2" to "val2"
     And I evaluate "document.title = document.cookie"
@@ -10,7 +10,7 @@ Feature: Data Tables
     And the page title should contain "key2=val2"
 
   Scenario: Set and clear local storage entries
-    Given I navigate to "https://example.com"
+    Given I navigate to "http://127.0.0.1:47831/example-domain.html"
     When I set local storage "color" to "red"
     And I set local storage "size" to "large"
     And I evaluate "document.title = localStorage.getItem('color') + '-' + localStorage.getItem('size')"

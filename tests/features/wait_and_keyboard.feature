@@ -16,6 +16,6 @@ Feature: Wait and Keyboard
     Then ".new-todo" should be visible
 
   Scenario: Wait with timeout
-    Given I navigate to "https://example.com"
+    Given I navigate to "http://127.0.0.1:47831/example-domain.html"
     When I wait 500 milliseconds
     Then "h1" should be visible

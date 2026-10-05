@@ -6,16 +6,16 @@ Feature: Scenario Outline
     Then the page title should contain "<expected_title>"
 
     Examples:
-      | url                     | expected_title |
-      | https://example.com     | Example        |
-      | https://www.google.com  | Google         |
+      | url                                        | expected_title |
+      | http://127.0.0.1:47831/example-domain.html | Example        |
+      | https://www.google.com                     | Google         |
 
   Scenario Outline: Check element visibility on different pages
     Given I navigate to "<url>"
     Then "<selector>" should be visible
 
     Examples:
-      | url                 | selector |
-      | https://example.com | h1       |
-      | https://example.com | p        |
-      | https://example.com | body     |
+      | url                                        | selector |
+      | http://127.0.0.1:47831/example-domain.html | h1       |
+      | http://127.0.0.1:47831/example-domain.html | p        |
+      | http://127.0.0.1:47831/example-domain.html | body     |

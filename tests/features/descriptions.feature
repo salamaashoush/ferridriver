@@ -7,7 +7,7 @@ Feature: Feature and Scenario Descriptions
     This is a multi-line description for the scenario.
     It should be ignored by the step matcher.
 
-    Given I navigate to "https://example.com"
+    Given I navigate to "http://127.0.0.1:47831/example-domain.html"
     Then the page title should be "Example Domain"
 
   Rule: Rules can have descriptions too
@@ -17,5 +17,5 @@ Feature: Feature and Scenario Descriptions
     Scenario: Rule scenario with description
       This scenario validates the heading element.
 
-      Given I navigate to "https://example.com"
+      Given I navigate to "http://127.0.0.1:47831/example-domain.html"
       Then "h1" should be visible

@@ -5,10 +5,10 @@ Feature: Named Examples
     Then the page title should contain "<title>"
 
     Examples: Popular sites
-      | url                    | title   |
-      | https://example.com    | Example |
-      | https://www.google.com | Google  |
+      | url                                        | title   |
+      | http://127.0.0.1:47831/example-domain.html | Example |
+      | https://www.google.com                     | Google  |
 
     Examples: Example domain
-      | url                 | title   |
-      | https://example.com | Example |
+      | url                                        | title   |
+      | http://127.0.0.1:47831/example-domain.html | Example |

@@ -1,7 +1,7 @@
 Feature: Background Steps
 
   Background:
-    Given I navigate to "https://example.com"
+    Given I navigate to "http://127.0.0.1:47831/example-domain.html"
 
   Scenario: Background provides page for title check
     Then the page title should be "Example Domain"
@@ -11,4 +11,4 @@ Feature: Background Steps
     And "h1" should be visible
 
   Scenario: Background provides page for URL check
-    Then the URL should contain "example.com"
+    Then the URL should contain "example-domain.html"
