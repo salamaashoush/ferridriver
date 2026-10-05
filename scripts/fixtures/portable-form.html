@@ -1,0 +1,8 @@
+<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{background:#bfdfff;font:20px sans-serif}input,button{display:block;margin:24px;width:180px;height:45px}</style>
+<h1>Safari form</h1><label>Name<input id="name"></label><button>Save</button><p id="result"></p>
+<script>document.querySelector('button').addEventListener('click',event=>{
+const rect=event.currentTarget.getBoundingClientRect();
+window.lastClick={trusted:event.isTrusted,x:event.clientX-rect.left-event.currentTarget.clientLeft,y:event.clientY-rect.top-event.currentTarget.clientTop};
+document.querySelector('#result').textContent=document.querySelector('#name').value;
+});</script>

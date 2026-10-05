@@ -11,3 +11,28 @@ index d87833a..ad50bac 100644
    this.chromedriver = chromedriver;
    chromedriver.on(Chromedriver.EVENT_CHANGED, async (msg) => {
      if (msg.state === Chromedriver.STATE_STOPPED) {
+diff --git i/test/unit/commands/context.spec.ts w/test/unit/commands/context.spec.ts
+index 444faac..ab831f5 100644
+--- i/test/unit/commands/context.spec.ts
++++ w/test/unit/commands/context.spec.ts
+@@ -51,6 +51,20 @@ describe('Context', function () {
+   afterEach(function () {
+     sandbox.restore();
+   });
++  describe('Chrome capability discovery', function () {
++    it('returns the capabilities cached when the Chrome session starts', async function () {
++      const capabilities = {
++        browserName: 'chrome',
++        browserVersion: '124.0.6367.219',
++        'goog:chromeOptions': {debuggerAddress: '127.0.0.1:9222'},
++      };
++      driver.adb.curDeviceId = 'sashoush-device';
++      driver.opts.chromedriverPort = 9515;
++      (Chromedriver.prototype.start as sinon.SinonStub).resolves(capabilities);
++      await driver.startChromeSession();
++      assert.deepEqual(await driver.mobileGetChromeCapabilities(), capabilities);
++    });
++  });
+   describe('getCurrentContext', function () {
+     it('should return current context', async function () {
+       driver.curContext = 'current_context';

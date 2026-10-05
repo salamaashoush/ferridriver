@@ -22,13 +22,16 @@ async def run(options):
                 raise RuntimeError("ChromeDriver exited before announcing its port")
         endpoint = f"http://127.0.0.1:{match[1]}"
         chrome = {"binary": options.chromium, "args": ["--headless=new", "--no-sandbox"]}
+        capabilities = {"goog:chromeOptions": chrome}
+        if options.classic:
+            capabilities["webSocketUrl"] = False
         if options.mobile:
             chrome["mobileEmulation"] = {
                 "deviceMetrics": {"width": 390, "height": 844, "pixelRatio": 3, "touch": True, "mobile": True},
                 "userAgent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/149.0.0.0 Mobile Safari/537.36",
             }
         html = """<meta name="viewport" content="width=device-width"><input id="name">
-<button onclick="document.querySelector('#result').textContent=document.querySelector('#name').value">Save</button>
+<button onclick="const result=document.querySelector('#result');result.textContent=document.querySelector('#name').value;result.dataset.trusted=String(event.isTrusted)">Save</button>
 <p id="result"></p>"""
         url = "data:text/html," + urllib.parse.quote(html)
         source = """
@@ -41,13 +44,26 @@ try {
   await page.locator('button').click();
   const value = await page.locator('#result').textContent();
   if (value !== 'sashoush') throw new Error(JSON.stringify(value));
+  const trusted = await page.locator('#result').getAttribute('data-trusted');
+  if (trusted !== 'true') throw new Error('click was not trusted');
   const metrics = await page.evaluate(() => ({width:innerWidth, ratio:devicePixelRatio, touch:navigator.maxTouchPoints}));
-  return {version:browser.version(), value, metrics};
+  return {version:browser.version(), value, trusted, metrics};
 } finally {await browser.close();}
-""".replace("ENDPOINT", json.dumps(endpoint)).replace("CAPABILITIES", json.dumps({"goog:chromeOptions": chrome})).replace("URL", json.dumps(url)).replace("USE_DEVICE_PAGE", json.dumps(options.mobile))
+""".replace("ENDPOINT", json.dumps(endpoint)).replace("CAPABILITIES", json.dumps(capabilities)).replace("URL", json.dumps(url)).replace("USE_DEVICE_PAGE", json.dumps(options.mobile or options.classic))
         root = tempfile.mkdtemp(prefix="ferridriver-webdriver-probe-")
+        if options.runtime == "napi":
+            binding = pathlib.Path(__file__).resolve().parents[1] / "crates/ferridriver-node/index.js"
+            script = pathlib.Path(root) / "probe.mjs"
+            script.write_text(
+                f"import {{chromium}} from {json.dumps(str(binding))};\n"
+                f"const value = await (async () => {{{source}}})();\n"
+                "console.log(JSON.stringify({status:'ok', value}));\n"
+            )
+            command = ["bun", str(script)]
+        else:
+            command = [str(pathlib.Path(options.binary).resolve()), "run", "--no-inherit", "--json", "-e", source]
         process = await asyncio.create_subprocess_exec(
-            str(pathlib.Path(options.binary).resolve()), "run", "--no-inherit", "--json", "-e", source,
+            *command,
             cwd=root, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
@@ -82,4 +98,6 @@ if __name__ == "__main__":
     parser.add_argument("--driver", default="/usr/bin/chromedriver")
     parser.add_argument("--chromium", default="/usr/bin/chromium")
     parser.add_argument("--mobile", action="store_true")
+    parser.add_argument("--classic", action="store_true")
+    parser.add_argument("--runtime", choices=["script", "napi"], default="script")
     asyncio.run(run(parser.parse_args()))

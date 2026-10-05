@@ -1,0 +1,339 @@
+diff --git i/lib/rpc/rpc-client-real-device.ts w/lib/rpc/rpc-client-real-device.ts
+index a0c0e90..a7b3490 100644
+--- i/lib/rpc/rpc-client-real-device.ts
++++ w/lib/rpc/rpc-client-real-device.ts
+@@ -42,9 +42,12 @@ export class RpcClientRealDevice extends RpcClient {
+     }
+ 
+     log.debug('Disconnecting from remote debugger');
+-    await super.disconnect();
+-    this.service?.close();
+-    this.isConnected = false;
++    try {
++      await super.disconnect();
++    } finally {
++      this.service?.close();
++      this.isConnected = false;
++    }
+   }
+ 
+   /**
+diff --git i/lib/rpc/rpc-client-simulator.ts w/lib/rpc/rpc-client-simulator.ts
+index 5bd71d0..eb1a59d 100644
+--- i/lib/rpc/rpc-client-simulator.ts
++++ w/lib/rpc/rpc-client-simulator.ts
+@@ -139,9 +139,12 @@ export class RpcClientSimulator extends RpcClient {
+     }
+ 
+     log.debug('Disconnecting from remote debugger');
+-    await super.disconnect();
+-    this.service?.close();
+-    this.isConnected = false;
++    try {
++      await super.disconnect();
++    } finally {
++      this.service?.close();
++      this.isConnected = false;
++    }
+   }
+ 
+   /**
+diff --git i/lib/rpc/rpc-client.ts w/lib/rpc/rpc-client.ts
+index e235445..53fdbc2 100644
+--- i/lib/rpc/rpc-client.ts
++++ w/lib/rpc/rpc-client.ts
+@@ -89,9 +89,10 @@ export class RpcClient {
+   protected readonly _contexts: number[];
+   protected readonly _targets: AppToTargetsMap;
+   protected readonly _targetSubscriptions: EventEmitter;
+-  protected _pendingTargetNotification?: PendingPageTargetDetails;
++  protected readonly _pageSenderIds: Map<string, string>;
++  protected readonly _pageTargetsBySenderId: Map<string, PendingPageTargetDetails>;
+   protected readonly _targetCreationTimeoutMs: number;
+-  protected readonly _provisionedPages: Set<PageIdKey>;
++  protected readonly _provisionedPages: Set<string>;
+   protected readonly _pageSelectionLock: AsyncLock;
+   protected readonly _pageSelectionMonitor: EventEmitter;
+ 
+@@ -136,6 +137,8 @@ export class RpcClient {
+     this._contexts = [];
+     this._targets = {};
+     this._targetSubscriptions = new EventEmitter();
++    this._pageSenderIds = new Map();
++    this._pageTargetsBySenderId = new Map();
+     this._provisionedPages = new Set();
+     this._pageSelectionLock = new AsyncLock();
+     this._pageSelectionMonitor = new EventEmitter();
+@@ -391,6 +394,10 @@ export class RpcClient {
+         const appIdKey = opts.appIdKey;
+         const pageIdKey = opts.pageIdKey;
+         const targetId = opts.targetId ?? this.getTarget(appIdKey, pageIdKey);
++        const senderId =
++          appIdKey != null && pageIdKey != null
++            ? (this._pageSenderIds.get(toPageSelectionKey(appIdKey, pageIdKey)) ?? this.senderId)
++            : this.senderId;
+ 
+         // retrieve the correct command to send
+         // connId is always pinned to the current connection, but senderId may be
+@@ -401,7 +408,7 @@ export class RpcClient {
+             targetId,
+             id: msgId.toString(),
+           },
+-          {senderId: this.senderId, ...opts},
++          {senderId, ...opts},
+         );
+         let cmd: RawRemoteCommand;
+         try {
+@@ -507,7 +514,22 @@ export class RpcClient {
+    * Disconnects from the remote debugger and cleans up event listeners.
+    */
+   async disconnect(): Promise<void> {
++    const failures: unknown[] = [];
++    // WebKit's connection-died handler removes only one target per connection.
++    for (const [senderId, {appIdKey, pageIdKey}] of this._pageTargetsBySenderId) {
++      try {
++        await this.send('forwardDidClose', {appIdKey, pageIdKey, senderId}, false);
++      } catch (error) {
++        failures.push(error);
++      }
++    }
++    this._pageTargetsBySenderId.clear();
++    this._pageSenderIds.clear();
++    this._provisionedPages.clear();
+     this.messageHandler.removeAllListeners();
++    if (failures.length) {
++      throw new AggregateError(failures, 'Could not detach every Web Inspector page');
++    }
+   }
+ 
+   /**
+@@ -540,17 +562,18 @@ export class RpcClient {
+    * @param app - The application identifier key.
+    * @param targetInfo - Information about the created target.
+    */
+-  async addTarget(err: Error | undefined, app: AppIdKey, targetInfo: TargetInfo): Promise<void> {
++  async addTarget(err: Error | undefined, app: AppIdKey, targetInfo: TargetInfo, destination?: string): Promise<void> {
+     if (targetInfo?.targetId == null) {
+       log.info(`Received 'Target.targetCreated' event for app '${app}' with no target. Skipping`);
+       return;
+     }
+ 
+-    const pendingPageTargetDetails = this._getPendingPageTargetDetails(app, targetInfo);
++    const pendingPageTargetDetails = this._getPendingPageTargetDetails(app, targetInfo, destination);
+     if (!pendingPageTargetDetails) {
+       return;
+     }
+     const {appIdKey, pageIdKey, pageReadinessDetector} = pendingPageTargetDetails;
++    const pageKey = toPageSelectionKey(appIdKey, pageIdKey);
+ 
+     if (!util.isPlainObject(this.targets[appIdKey])) {
+       this.targets[appIdKey] = {
+@@ -580,7 +603,7 @@ export class RpcClient {
+         `Provisional target created for app '${appIdKey}' and page '${pageIdKey}': '${JSON.stringify(targetInfo)}'`,
+       );
+ 
+-      this._provisionedPages.add(pageIdKey);
++      this._provisionedPages.add(pageKey);
+       try {
+         await this.targets[appIdKey].lock.acquire(String(pageIdKey), async () => {
+           let wasInitialized: boolean;
+@@ -631,9 +654,9 @@ export class RpcClient {
+       await this.targets[appIdKey].lock.acquire(String(pageIdKey), async () => {
+         let wasInitialized = false;
+         try {
+-          if (this._provisionedPages.has(pageIdKey)) {
++          if (this._provisionedPages.has(pageKey)) {
+             log.debug(`Page '${pageIdKey}' has been already provisioned`);
+-            this._provisionedPages.delete(pageIdKey);
++            this._provisionedPages.delete(pageKey);
+           } else {
+             wasInitialized = await this._initializePage(appIdKey, pageIdKey);
+           }
+@@ -761,13 +784,20 @@ export class RpcClient {
+     pageReadinessDetector?: PageReadinessDetector,
+   ): Promise<void> {
+     await this._pageSelectionLock.acquire(toPageSelectionKey(appIdKey, pageIdKey), async () => {
+-      this._pendingTargetNotification = {appIdKey, pageIdKey, pageReadinessDetector};
+-      this._provisionedPages.clear();
++      const pageKey = toPageSelectionKey(appIdKey, pageIdKey);
++      let senderId = this._pageSenderIds.get(pageKey);
++      if (!senderId) {
++        senderId = util.uuidV4();
++        this._pageSenderIds.set(pageKey, senderId);
++      }
++      // Web Inspector replies carry this destination, not the page identifier.
++      this._pageTargetsBySenderId.set(senderId, {appIdKey, pageIdKey, pageReadinessDetector});
+ 
+       if (this.getTarget(appIdKey, pageIdKey)) {
+         log.debug(`Page '${pageIdKey}' is already selected for app '${appIdKey}'`);
+         return;
+       }
++      this._provisionedPages.delete(pageKey);
+ 
+       // go through the steps that the Desktop Safari system
+       // goes through to initialize the Web Inspector session
+@@ -775,6 +805,7 @@ export class RpcClient {
+       const sendOpts = {
+         appIdKey,
+         pageIdKey,
++        senderId,
+       };
+ 
+       const timeoutMs = Math.trunc(this._targetCreationTimeoutMs * 1.2);
+@@ -1182,13 +1213,18 @@ export class RpcClient {
+    * @param targetInfo - Information about the target.
+    * @returns The pending page target details if there's a match, undefined otherwise.
+    */
+-  private _getPendingPageTargetDetails(appId: AppIdKey, targetInfo: TargetInfo): PendingPageTargetDetails | undefined {
++  private _getPendingPageTargetDetails(
++    appId: AppIdKey,
++    targetInfo: TargetInfo,
++    destination?: string,
++  ): PendingPageTargetDetails | undefined {
+     const logInfo = (message: string): undefined =>
+       void log.info(
+         `Skipping 'Target.targetCreated' event ${message} for app '${appId}': ${JSON.stringify(targetInfo)}`,
+       );
+-    if (!this._pendingTargetNotification) {
+-      return logInfo('with no pending request');
++    const selected = destination ? this._pageTargetsBySenderId.get(destination) : undefined;
++    if (!selected) {
++      return logInfo('with no matching destination');
+     }
+     if (targetInfo.type !== 'page') {
+       // TODO: We'll need to handle 'frame' type for several domains.
+@@ -1198,9 +1234,7 @@ export class RpcClient {
+       return logInfo(`with type '${targetInfo.type}'`);
+     }
+ 
+-    return this._pendingTargetNotification.appIdKey === appId
+-      ? {...this._pendingTargetNotification}
+-      : logInfo('with different app id');
++    return selected.appIdKey === appId ? {...selected} : logInfo('with different app id');
+   }
+ }
+ 
+diff --git i/lib/rpc/rpc-message-handler.ts w/lib/rpc/rpc-message-handler.ts
+index f11aeae..bfc2503 100644
+--- i/lib/rpc/rpc-message-handler.ts
++++ w/lib/rpc/rpc-message-handler.ts
+@@ -223,7 +223,7 @@ export default class RpcMessageHandler extends EventEmitter {
+         const app = plist.__argument.WIRApplicationIdentifierKey;
+         const args =
+           method === 'Target.didCommitProvisionalTarget' ? params : (params.targetInfo ?? {targetId: params.targetId});
+-        this.emit(method, null, app, args);
++        this.emit(method, null, app, args, plist.__argument.WIRDestinationKey);
+         return;
+       }
+       case 'Target.dispatchMessageFromTarget': {
+diff --git i/test/unit/rpc/rpc-client.spec.ts w/test/unit/rpc/rpc-client.spec.ts
+index 1087583..669e1c7 100644
+--- i/test/unit/rpc/rpc-client.spec.ts
++++ w/test/unit/rpc/rpc-client.spec.ts
+@@ -8,6 +8,86 @@ import sinon from 'sinon';
+ import {RpcClient} from '../../../lib/rpc/rpc-client.js';
+ 
+ describe('rpc-client', function () {
++  for (const failFirst of [false, true]) {
++    it(`detaches every selected page before disconnect, failure=${failFirst}`, async function () {
++      const client = new RpcClient();
++      const rpc = client as any;
++      rpc._pageTargetsBySenderId.set('first', {appIdKey: 'PID:123', pageIdKey: 1});
++      rpc._pageTargetsBySenderId.set('second', {appIdKey: 'PID:123', pageIdKey: 2});
++      const sent: any[] = [];
++      rpc.send = async (...args: any[]) => {
++        sent.push(args);
++        if (failFirst && sent.length === 1) {
++          throw new Error('Socket write failed');
++        }
++      };
++      if (failFirst) {
++        await assert.rejects(client.disconnect(), AggregateError);
++      } else {
++        await client.disconnect();
++      }
++      assert.deepEqual(sent, [
++        ['forwardDidClose', {appIdKey: 'PID:123', pageIdKey: 1, senderId: 'first'}, false],
++        ['forwardDidClose', {appIdKey: 'PID:123', pageIdKey: 2, senderId: 'second'}, false],
++      ]);
++      assert.equal(rpc.messageHandler.eventNames().length, 0);
++      await client.disconnect();
++      assert.equal(sent.length, 2);
++    });
++  }
++
++  it('routes overlapping page selections by their wire destination', async function () {
++    const client = new RpcClient({targetCreationTimeoutMs: 200, platformVersion: '26.2'});
++    const rpc = client as any;
++    const setups: any[] = [];
++    rpc.send = async (command: string, opts: any) => {
++      if (command === 'setSenderKey') {
++        setups.push(opts);
++      }
++    };
++    rpc._initializePage = async () => false;
++    const selected = () =>
++      new Promise<void>((resolve) => {
++        rpc._pageSelectionMonitor.once('newListener', (name: string) => {
++          if (name === 'onPageInitialized') {
++            resolve();
++          }
++        });
++      });
++    let ready = selected();
++    const first = client.selectPage('PID:123', 1);
++    await ready;
++    ready = selected();
++    const second = client.selectPage('PID:123', 2);
++    await ready;
++    const receive = async (destination: string, targetId: string, app = 'PID:123') => {
++      await rpc.messageHandler.handleMessage({
++        __selector: '_rpc_applicationSentData:',
++        __argument: {
++          WIRApplicationIdentifierKey: app,
++          WIRDestinationKey: destination,
++          WIRMessageDataKey: JSON.stringify({
++            method: 'Target.targetCreated',
++            params: {targetInfo: {type: 'page', targetId}},
++          }),
++        },
++      });
++    };
++    try {
++      assert.ok(setups[0].senderId);
++      assert.notEqual(setups[0].senderId, setups[1].senderId);
++      await receive('unknown-destination', 'ignored-target');
++      await receive(setups[0].senderId, 'wrong-app-target', 'PID:456');
++      assert.equal(client.getTarget('PID:123', 1), undefined);
++      await receive(setups[0].senderId, 'target-for-first-page');
++      await receive(setups[1].senderId, 'target-for-second-page');
++      assert.equal(client.getTarget('PID:123', 1), 'target-for-first-page');
++      assert.equal(client.getTarget('PID:123', 2), 'target-for-second-page');
++    } finally {
++      await Promise.all([first, second]);
++    }
++  });
++
+   describe('.send', function () {
+     it('should send RPC message to device', async function () {});
+     it('should send RPC message to device and retry if target id not found', async function () {
+@@ -105,7 +185,8 @@ describe('rpc-client', function () {
+         _pageSelectionLock: new AsyncLock(),
+         _pageSelectionMonitor: new EventEmitter(),
+         _provisionedPages: new Set(),
+-        _pendingTargetNotification: null,
++        _pageSenderIds: new Map(),
++        _pageTargetsBySenderId: new Map(),
+         _targetCreationTimeoutMs: 50,
+         getTarget: sinon.stub().returns(undefined),
+         send: sinon.stub().resolves(),
+@@ -121,7 +202,8 @@ describe('rpc-client', function () {
+         _pageSelectionLock: new AsyncLock(),
+         _pageSelectionMonitor: new EventEmitter(),
+         _provisionedPages: new Set(),
+-        _pendingTargetNotification: null,
++        _pageSenderIds: new Map(),
++        _pageTargetsBySenderId: new Map(),
+         _targetCreationTimeoutMs: 10 * 60 * 1000,
+         getTarget: sinon.stub().returns(undefined),
+         send: sinon.stub().resolves(),
