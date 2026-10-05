@@ -1,0 +1,145 @@
+{
+  "date": "2026-09-13",
+  "status": "startup and page-discovery routing fixed; native data navigation and session restart verified; click completion and tab closure remain open",
+  "scope": "experimental XCUITest Automation session startup and teardown, not enabled for automatic ferridriver launch",
+  "source": {
+    "xcuitestRevision": "65585c013009dd3f3dd4e85cb89f7dca185d017c",
+    "patchSha256": "23d646019fd13e9de67cb55b74d147c207d34ff663d316210e9ff85ae0da5d7c"
+  },
+  "upstreamTests": {
+    "redLog": "/tmp/ferridriver-automation-routing-red.log",
+    "redExitCode": 1,
+    "log": "/tmp/ferridriver-automation-events-tests.log",
+    "passed": 512,
+    "exitCode": 0,
+    "lintExitCode": 0,
+    "eventsRedLog": "/tmp/ferridriver-automation-events-red.log",
+    "eventsRedExitCode": 1
+  },
+  "failedProbe": {
+    "remoteArtifacts": "/var/folders/hl/32pxj6215g9grfx7kmt6v50r0000gn/T/ferridriver-automation-lifecycle-dfIAlr",
+    "log": "/tmp/ferridriver-ios-automation-lifecycle.log",
+    "exitCode": 1,
+    "reason": "Xcode could not find the destination UUID in the custom CoreSimulator device set; lifecycle was not exercised",
+    "cleanup": {
+      "remaining": 0,
+      "originalDevicesUnchanged": true
+    }
+  },
+  "binary": {
+    "path": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v13",
+    "sha256": "6167e07882beedb6e0672cf601933243d5bafd8ecf9c2ead269c3fb531785e9d"
+  },
+  "limitations": [
+    "No physical-device or cloud verification",
+    "Automation session is not enabled automatically",
+    "Stopping without closeAllWindows deliberately leaves automated tabs until the owned device is deleted; it is not a remote-session cleanup solution"
+  ],
+  "verifiedLifecycle": {
+    "remoteArtifacts": "/var/folders/hl/32pxj6215g9grfx7kmt6v50r0000gn/T/ferridriver-automation-lifecycle-5kqBRp",
+    "exitCode": 0,
+    "sessions": 2,
+    "assertions": [
+      "startup context preserved without manual switch",
+      "data-URL document title and evaluation",
+      "screenshot capture",
+      "stop without closing all windows",
+      "second session on the same device and server",
+      "owned simulator removed and original device inventory unchanged"
+    ],
+    "commandFile": "/tmp/ferridriver-automation-probe-v13-command.json"
+  },
+  "pendingPatchSha256": "26f5df33057c121e68119dd7ba8926d6065ba60850871971c53749244cf5fd1f",
+  "currentBinary": {
+    "path": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v14",
+    "sha256": "6c518095bad104787b653b16d4c3a84b2a520f27c85e52bdd4b982a1cdd3d2e0"
+  },
+  "currentInstall": {
+    "exitCode": 0,
+    "log": "/tmp/ferridriver-ios-automation-install-v14.log",
+    "displayedDuration": "1m59s"
+  },
+  "additionalTabProbe": {
+    "status": "failed before tab creation",
+    "log": "/tmp/ferridriver-ios-automation-lifecycle-v14.log",
+    "commandFile": "/tmp/ferridriver-automation-probe-v14-command.json",
+    "exitCode": 1,
+    "remoteArtifacts": "/var/folders/hl/32pxj6215g9grfx7kmt6v50r0000gn/T/ferridriver-automation-lifecycle-HUQ6mB",
+    "reason": "Element click returned HTTP 200 but window.clicked remained null",
+    "cleanup": {
+      "remaining": 0,
+      "originalDevicesUnchanged": true
+    }
+  },
+  "inputDiagnostic": {
+    "exitCode": 1,
+    "remoteArtifacts": "/var/folders/hl/32pxj6215g9grfx7kmt6v50r0000gn/T/ferridriver-automation-lifecycle-Y6yjPm",
+    "localScreenshot": "/tmp/ferridriver-automation-input-0_olewn0.png",
+    "observation": "Native screenshot shows Safari toolbar tutorial; document remains visible with clicked null and visual viewport scale 0.401. Probe lacked the onboarding preference already set by Rust managed launch."
+  },
+  "configuredProbe": {
+    "status": "failed",
+    "log": "/tmp/ferridriver-ios-automation-configured.log",
+    "commandFile": "/tmp/ferridriver-automation-probe-v14-configured-command.json",
+    "exitCode": 1,
+    "remoteArtifacts": "/var/folders/hl/32pxj6215g9grfx7kmt6v50r0000gn/T/ferridriver-automation-lifecycle-sD6TXY",
+    "immediateClicked": null,
+    "diagnosticClicked": true,
+    "cleanup": {
+      "remaining": 0,
+      "originalDevicesUnchanged": true
+    }
+  },
+  "gate": {
+    "exitCode": 0,
+    "checks": 110,
+    "failedOrBlocked": 0,
+    "wallSeconds": 156.74,
+    "artifacts": "target/gate/1789290628-1306197",
+    "command": "just ready --only rust-build --only napi --only integration --only e2e --only bdd --only format"
+  },
+  "nextInvestigation": {
+    "evidence": [
+      "W3C element click requires processing the generated DOM events before returning",
+      "Rust currently converts XCUITest pointer coordinates to native screen coordinates, then sends actions with the original web target selected",
+      "AtomsBackend delegates actions to WDA, while AutomationSessionBackend uses Automation interaction sequences",
+      "WebDriverBrowser.page currently derives the Appium web context from the window handle; Automation window handles instead need the saved inspection-context anchor"
+    ],
+    "sourceFiles": [
+      "crates/ferridriver/src/backend/webdriver/page.rs",
+      "crates/ferridriver/src/backend/webdriver/session/native_input.rs",
+      "crates/ferridriver/src/backend/webdriver/browser.rs"
+    ],
+    "constraint": "Keep input routing and future managed Automation startup inside Rust core; preserve context restoration and cancellation. Do not enable Automation before the shared workflows pass."
+  },
+  "nativeAutomationInputProbe": {
+    "exitCode": 1,
+    "commandFile": "/tmp/ferridriver-automation-native-command.json",
+    "log": "/tmp/ferridriver-automation-native.log",
+    "remoteArtifacts": "/var/folders/hl/32pxj6215g9grfx7kmt6v50r0000gn/T/ferridriver-automation-lifecycle-ERmTPm",
+    "screenshot": "/tmp/ferridriver-native-automation-gdu1fvhu.png",
+    "finding": "WDA native actions interrupt a WebKit Automation session and display Safari Running an Automated Test overlay. Both immediate and later window.clicked are null. The native-input route proven on the atoms path must not be used for WebKit Automation.",
+    "cleanup": {
+      "remaining": 0,
+      "originalDevicesUnchanged": true
+    }
+  },
+  "tabFirstProbe": {
+    "exitCode": 1,
+    "commandFile": "/tmp/ferridriver-automation-tabs-command.json",
+    "log": "/tmp/ferridriver-automation-tabs.log",
+    "remoteArtifacts": "/var/folders/hl/32pxj6215g9grfx7kmt6v50r0000gn/T/ferridriver-automation-lifecycle-jOoO63",
+    "verified": [
+      "create a second Automation tab",
+      "preserve Appium context after creation",
+      "navigate the new tab to a data URL",
+      "close the new tab and verify remaining handles",
+      "switch back to the original Automation window and verify its title"
+    ],
+    "failure": "WebKit touch sequence returned before the DOM click: immediate clicked null, later diagnostic clicked true. Input assertion was retained; session-restart assertions were not reached.",
+    "cleanup": {
+      "remaining": 0,
+      "originalDevicesUnchanged": true
+    }
+  }
+}

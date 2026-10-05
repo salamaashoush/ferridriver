@@ -1,0 +1,137 @@
+{
+  "date": "2026-09-12",
+  "host": "Linux x86_64",
+  "androidApiLevel": 35,
+  "chromeVersion": "124.0.6367.219",
+  "sdkAlreadyInstalled": true,
+  "scriptCommand": "python3 scripts/probe-android-appium.py --managed-android --sdk \"$ANDROID_HOME\"",
+  "testCommand": "python3 scripts/probe-android-appium.py --managed-android --sdk \"$ANDROID_HOME\" --runtime test",
+  "deadlineCommand": "python3 scripts/probe-android-appium.py --managed-android --sdk \"$ANDROID_HOME\" --launch-timeout 5000",
+  "notes": [
+    "Every run creates a fresh emulator.",
+    "The deadline run must fail with Timeout 5000ms and preserve the before/after device and forwarding state.",
+    "These runs precede the notification-explainer suppression change."
+  ],
+  "runs": [
+    {
+      "runtime": "script",
+      "target": "android-managed",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 27329.456,
+      "workflowExitCode": 0,
+      "androidBefore": {
+        "devices": [],
+        "forwards": []
+      },
+      "androidAfter": {
+        "devices": [],
+        "forwards": []
+      },
+      "validationStatus": "passed",
+      "expectedTimeout": false
+    },
+    {
+      "runtime": "test",
+      "target": "android-managed",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 27732.383,
+      "workflowExitCode": 0,
+      "androidBefore": {
+        "devices": [],
+        "forwards": []
+      },
+      "androidAfter": {
+        "devices": [],
+        "forwards": []
+      },
+      "validationStatus": "passed",
+      "expectedTimeout": false
+    },
+    {
+      "runtime": "script",
+      "target": "android-managed",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 27758.447,
+      "workflowExitCode": 0,
+      "androidBefore": {
+        "devices": [],
+        "forwards": []
+      },
+      "androidAfter": {
+        "devices": [],
+        "forwards": []
+      },
+      "validationStatus": "passed",
+      "expectedTimeout": false
+    },
+    {
+      "runtime": "script",
+      "target": "android-managed",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 33181.198,
+      "workflowExitCode": 0,
+      "androidBefore": {
+        "devices": [],
+        "forwards": []
+      },
+      "androidAfter": {
+        "devices": [],
+        "forwards": []
+      },
+      "validationStatus": "passed",
+      "expectedTimeout": false
+    },
+    {
+      "runtime": "script",
+      "target": "android-managed",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 32596.808,
+      "workflowExitCode": 0,
+      "androidBefore": {
+        "devices": [],
+        "forwards": []
+      },
+      "androidAfter": {
+        "devices": [],
+        "forwards": []
+      },
+      "validationStatus": "passed",
+      "expectedTimeout": false
+    },
+    {
+      "runtime": "script",
+      "target": "android-managed",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 28708.971,
+      "workflowExitCode": 0,
+      "androidBefore": {
+        "devices": [],
+        "forwards": []
+      },
+      "androidAfter": {
+        "devices": [],
+        "forwards": []
+      },
+      "validationStatus": "passed",
+      "expectedTimeout": false
+    },
+    {
+      "runtime": "script",
+      "target": "android-managed",
+      "workflowSha256": "3ecf95158be8df8f787d418666887e8ea406f5a4e7d46e72476e9cfc54af7d4f",
+      "processWallMs": 5369.753,
+      "workflowExitCode": 1,
+      "androidBefore": {
+        "devices": [],
+        "forwards": []
+      },
+      "androidAfter": {
+        "devices": [],
+        "forwards": []
+      },
+      "validationStatus": "failed",
+      "validationError": "ferridriver exited 1",
+      "expectedTimeout": true
+    }
+  ]
+}

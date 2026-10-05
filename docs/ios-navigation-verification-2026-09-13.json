@@ -1,0 +1,250 @@
+{
+  "date": "2026-09-13",
+  "status": "navigation error propagation verified; HTTP form passes on patched iOS; data URL gap remains open",
+  "sources": {
+    "remoteDebuggerRevision": "64e4914bb763be134ec577176118ecda242b04d6",
+    "patchSha256": "6b5be657a95f9909520db1b1dff7b47d93c956dfb538413dc4b2df3812aa3e61",
+    "issue": "https://github.com/appium/appium/issues/21976",
+    "webkitInspectorRevision": "08ba4dce0a3020c30c39f035fa1abdd8e0f5af18",
+    "webkitInspectorPath": "Source/WebCore/inspector/agents/InspectorPageAgent.cpp"
+  },
+  "upstream": {
+    "passed": 397,
+    "exitCode": 0,
+    "log": "/tmp/ferridriver-navigation-tests.log",
+    "lintExitCode": 0
+  },
+  "regressionRed": {
+    "exitCode": 1,
+    "log": "/tmp/ferridriver-navigation-red.log"
+  },
+  "desktop": {
+    "workflow": "scripts/fixtures/portable-data-url-workflow.js",
+    "artifacts": "/tmp/ferridriver-data-url-desktop-1uu77ims",
+    "exitCodes": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "backends": [
+      "cdp-pipe",
+      "cdp-ws",
+      "bidi",
+      "webkit"
+    ]
+  },
+  "managedHistory": {
+    "artifacts": "/tmp/ferridriver-ios-safari-3a54nnl7",
+    "runtime": "test",
+    "scenario": "history",
+    "protocolLogging": false,
+    "managed": true,
+    "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-history-workflow.js",
+    "executionHost": "ssh",
+    "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v11",
+    "exitCode": 0,
+    "wallMs": 136393.9,
+    "cleanupVerified": true,
+    "cleanupScope": [
+      "device UUID/name/state",
+      "Simulator UI processes",
+      "xcodebuild processes"
+    ]
+  },
+  "limitations": [
+    "iOS 26.4 fallback is protocol-tested, not tested on that runtime",
+    "No physical-device or paid-cloud verification",
+    "Full API parity remains unproven"
+  ],
+  "iosBefore": {
+    "artifacts": "/tmp/ferridriver-ios-safari-r83twno2",
+    "runtime": "test",
+    "scenario": "form",
+    "protocolLogging": false,
+    "managed": true,
+    "workflow": "scripts/fixtures/portable-data-url-workflow.js",
+    "executionHost": "ssh",
+    "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v11",
+    "exitCode": 1,
+    "wallMs": 141073.76,
+    "cleanupVerified": true,
+    "cleanupScope": [
+      "device UUID/name/state",
+      "Simulator UI processes",
+      "xcodebuild processes"
+    ],
+    "reason": "Data URL navigation timed out after 10000 ms"
+  },
+  "binary": {
+    "path": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v12",
+    "sha256": "5d60ea26f9bc6850704c114b647b77d46d4590c227a7c5714489802ae75e4252"
+  },
+  "install": {
+    "exitCode": 0,
+    "log": "/tmp/ferridriver-ios-navigation-install-v12.log",
+    "displayedDuration": "1m26s",
+    "cache": "default macOS private browser cache"
+  },
+  "repeatCommand": [
+    "python3",
+    "scripts/probe-ios-safari.py",
+    "--managed",
+    "--model",
+    "iPhone 16",
+    "--runtime",
+    "test",
+    "--workflow",
+    "scripts/fixtures/portable-data-url-workflow.js",
+    "--ssh-command",
+    "/home/sashoush/Workspace/apple-vms/scripts/macos-ssh",
+    "--remote-binary",
+    "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v12",
+    "--diagnostics"
+  ],
+  "gate": {
+    "status": "passed",
+    "log": "/tmp/ferridriver-ios-navigation-ready.log",
+    "command": "just ready --only rust-build --only napi --only integration --only e2e --only bdd --only format",
+    "exitCode": 0,
+    "checks": 110,
+    "failedOrBlocked": 0,
+    "wallSeconds": 168.49,
+    "artifacts": "target/gate/1789288964-871045"
+  },
+  "iosAfter": {
+    "artifacts": "/tmp/ferridriver-ios-safari-4wytzvaz",
+    "runtime": "test",
+    "scenario": "form",
+    "protocolLogging": false,
+    "managed": true,
+    "workflow": "scripts/fixtures/portable-data-url-workflow.js",
+    "executionHost": "ssh",
+    "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v12",
+    "exitCode": 1,
+    "wallMs": 171638.68,
+    "cleanupVerified": true,
+    "cleanupScope": [
+      "device UUID/name/state",
+      "Simulator UI processes",
+      "xcodebuild processes"
+    ],
+    "reason": "Data URL navigation still exceeded its 10000 ms deadline"
+  },
+  "iosHttpAfter": {
+    "artifacts": "/tmp/ferridriver-ios-safari-9eufa2l_",
+    "runtime": "test",
+    "scenario": "form",
+    "protocolLogging": false,
+    "managed": true,
+    "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+    "executionHost": "ssh",
+    "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v12",
+    "exitCode": 0,
+    "wallMs": 132634.52,
+    "cleanupVerified": true,
+    "cleanupScope": [
+      "device UUID/name/state",
+      "Simulator UI processes",
+      "xcodebuild processes"
+    ],
+    "result": {
+      "status": "ok",
+      "value": {
+        "version": "safari/26.2",
+        "result": "sashoush",
+        "click": {
+          "trusted": true,
+          "x": 20,
+          "y": 20.40625
+        },
+        "promised": {
+          "answer": 42
+        },
+        "rejected": true
+      }
+    }
+  },
+  "iosDiagnostic": {
+    "artifacts": "/tmp/ferridriver-ios-safari-facqdhie",
+    "runtime": "test",
+    "scenario": "form",
+    "protocolLogging": false,
+    "managed": true,
+    "workflow": "scripts/fixtures/portable-data-url-workflow.js",
+    "executionHost": "ssh",
+    "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v12",
+    "exitCode": 1,
+    "wallMs": 139800.44,
+    "cleanupVerified": true,
+    "cleanupScope": [
+      "device UUID/name/state",
+      "Simulator UI processes",
+      "xcodebuild processes"
+    ],
+    "observation": "Inspector Page.navigate received an empty success reply in 5 ms; no load event followed and page listings stayed unchanged before the 10-second client timeout"
+  },
+  "sourceObservation": "InspectorPageAgent::navigate establishes a user gesture and calls the frame loader changeLocation using the current document origin; the Automation navigation implementation calls WebPageProxy::loadRequest. This difference is evidence for further diagnosis, not proof of the data-URL failure cause.",
+  "nativeDeepLinkProbes": [
+    {
+      "commandFile": "/tmp/ferridriver-deeplink-command.json",
+      "source": "/tmp/ferridriver-deeplink-probe.mjs",
+      "exitCode": 1,
+      "remoteArtifacts": "/var/folders/hl/32pxj6215g9grfx7kmt6v50r0000gn/T/ferridriver-automation-lifecycle-LaLuf3",
+      "verified": "Data URL navigation, unchanged window handle, document title and text on the original tab",
+      "failure": "Second tab remained about:blank and hidden; requested data URL did not load within 10 seconds",
+      "cleanup": {
+        "remaining": 0,
+        "originalDevicesUnchanged": true
+      }
+    },
+    {
+      "commandFile": "/tmp/ferridriver-deeplink-focused-command.json",
+      "source": "/tmp/ferridriver-deeplink-focused-probe.mjs",
+      "exitCode": 1,
+      "remoteArtifacts": "/var/folders/hl/32pxj6215g9grfx7kmt6v50r0000gn/T/ferridriver-automation-lifecycle-bQYp5G",
+      "verified": "New tab was explicitly activated and document.visibilityState was visible before deepLink",
+      "failure": "After deepLink the requested tab was hidden and still about:blank; the operation did not preserve navigation in that tab",
+      "inference": "Safari appears to reuse the other tab already displaying the same URL. deepLink is unsuitable as a transparent page.goto implementation without stronger tab control.",
+      "cleanup": {
+        "remaining": 0,
+        "originalDevicesUnchanged": true
+      }
+    }
+  ],
+  "nativeAddressNavigationProbe": {
+    "commandFile": "/tmp/ferridriver-address-navigation-command.json",
+    "source": "/tmp/ferridriver-address-navigation-probe.mjs",
+    "sourceSha256": "85039c0deb5ef99c71b2c840c8b5bb8beb7dfa7ff1e2bf49137cdc817b638e3d",
+    "exitCode": 1,
+    "remoteArtifacts": "/var/folders/hl/32pxj6215g9grfx7kmt6v50r0000gn/T/ferridriver-automation-lifecycle-IQCYhT",
+    "verified": [
+      "activate the intended tab",
+      "select native TabBarItemTitle address control",
+      "read the focused native element, clear and type the data URL plus newline",
+      "restore original Appium context and window",
+      "original and second tabs both load the same data URL without changing their handles",
+      "document title and text match",
+      "close the second tab and restore the original title"
+    ],
+    "failure": "Subsequent WDA pointer actions returned before DOM click. Immediate clicked null; later diagnostic clicked true. Session-restart assertions were not reached.",
+    "cleanup": {
+      "remaining": 0,
+      "originalDevicesUnchanged": true
+    },
+    "nextImplementation": "Add data-URL navigation to the existing Rust native_operation path, reuse tab activation and restoration, and await the requested document within the caller deadline. Verify portable-data-url-workflow.js and history on the managed target. Do not use mobile deepLink as page.goto because it reuses another tab. Investigate click completion on pages lacking a mobile viewport separately.",
+    "protocolSequence": [
+      "GET /window and /context",
+      "activate_safari_tab equivalent",
+      "POST /context NATIVE_APP",
+      "POST /element accessibility id TabBarItemTitle",
+      "POST /element/{id}/click",
+      "GET /element/active",
+      "POST /element/{id}/clear",
+      "POST /element/{id}/value text=url+newline",
+      "POST /context original",
+      "POST /window original",
+      "poll GET /url within deadline and assert unchanged handle"
+    ]
+  }
+}

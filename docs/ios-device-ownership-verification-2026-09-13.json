@@ -1,0 +1,163 @@
+{
+  "date": "2026-09-13",
+  "source": {
+    "repository": "https://github.com/appium/appium-ios-simulator",
+    "revision": "75a05126445ad079d9b33fed4cd4a736f3ab3ee5",
+    "version": "9.1.3"
+  },
+  "installer": {
+    "binarySha256": "5cf8022af15aa4ffdc08f4a9e53dc3a10cd612ff34c26f1b069bd126416d5afb",
+    "exitCode": 0,
+    "wallMs": 62120.7
+  },
+  "privateSetIsolation": {
+    "execution": {
+      "exitCode": 0,
+      "wallMs": 59488.29,
+      "guestRoot": "/tmp/ferridriver-private-device.rz7o7Q"
+    },
+    "result": {
+      "before": {
+        "state": "Booted",
+        "ui": "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator -CurrentDeviceUDID 938B5F8C-C87D-4120-A17D-61163AC1C024"
+      },
+      "after": {
+        "state": "Booted",
+        "ui": "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator -CurrentDeviceUDID 938B5F8C-C87D-4120-A17D-61163AC1C024"
+      },
+      "udid": "425ED3F4-58B7-429F-8A1C-91374AA471AF",
+      "ownState": "Booted"
+    },
+    "cleanup": {
+      "remaining": 0,
+      "originalState": "Booted",
+      "ui": "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator -CurrentDeviceUDID 938B5F8C-C87D-4120-A17D-61163AC1C024"
+    }
+  },
+  "privateSetSafari": {
+    "execution": {
+      "exitCode": 1,
+      "wallMs": 127285.07,
+      "guestRoot": "/tmp/ferridriver-private-safari.L3FFhp"
+    },
+    "error": "xcodebuild exit 70: unable to find the device matching the destination specifier",
+    "cleanup": {
+      "remaining": 0,
+      "originalState": "Booted",
+      "ui": "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator -CurrentDeviceUDID 938B5F8C-C87D-4120-A17D-61163AC1C024"
+    }
+  },
+  "gate": {
+    "command": "just ready --only rust-build --only integration --only format",
+    "exitCode": 0,
+    "checks": 54,
+    "failures": 0,
+    "wallSeconds": 116.77,
+    "logs": "target/gate/1789275921-3388206"
+  },
+  "upstreamTests": {
+    "total": 41,
+    "failed": 0,
+    "skipped": 0,
+    "exitCode": 0
+  },
+  "limitations": [
+    "Automatic iOS target launch is not implemented.",
+    "Private-set boot success does not establish Xcode/WebDriverAgent compatibility.",
+    "The Appium helper still writes global Simulator preferences. The isolation check covers existing device state and UI process, not preference-file immutability."
+  ],
+  "standardSetSafari": {
+    "execution": {
+      "exitCode": 0,
+      "wallMs": 142585.3,
+      "guestRoot": "/tmp/ferridriver-owned-safari.kapS5p"
+    },
+    "evaluation": {
+      "value": {
+        "title": "Health Check",
+        "agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.2 Mobile/15E148 Safari/604.1"
+      }
+    },
+    "cleanup": {
+      "remaining": 0,
+      "originalState": "Booted",
+      "ui": "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator -CurrentDeviceUDID 938B5F8C-C87D-4120-A17D-61163AC1C024"
+    },
+    "sessionCleanup": {
+      "status": 200,
+      "body": {
+        "value": null
+      }
+    },
+    "wdaBuild": "Fresh derived-data directory; actual Xcode build and XCTest launch succeeded",
+    "ownership": "Only the UUID returned by this probe was shut down and deleted"
+  },
+  "sharedScriptOnFreshDevice": {
+    "execution": {
+      "exitCode": 0,
+      "wallMs": 137349.07,
+      "guestRoot": "/tmp/ferridriver-owned-workflow.xGK2Az"
+    },
+    "cli": {
+      "exitCode": 0,
+      "wallMs": 10888.05702800001
+    },
+    "result": {
+      "status": "ok",
+      "value": {
+        "version": "safari/26.2",
+        "result": "sashoush",
+        "click": {
+          "trusted": true,
+          "x": 20,
+          "y": 20.40625
+        },
+        "promised": {
+          "answer": 42
+        },
+        "rejected": true
+      },
+      "duration_ms": 4294,
+      "console": []
+    },
+    "cleanup": {
+      "remaining": 0,
+      "originalState": "Booted",
+      "ui": "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator -CurrentDeviceUDID 938B5F8C-C87D-4120-A17D-61163AC1C024"
+    },
+    "workflow": "scripts/fixtures/portable-form-workflow.js",
+    "workflowSha256": "05769d194e04fe9c52bacaffa0f4eb30d5ed43a3e28f3a921988e543a576430a",
+    "screenshot": "/tmp/ferridriver-ios-private-set-tx_1kvin/workflow-safari.png",
+    "screenshotInspected": true
+  },
+  "repeatableIsolationScript": {
+    "script": "scripts/probe-ios-device-isolation.mjs",
+    "execution": {
+      "exitCode": 0,
+      "wallMs": 53000.24
+    },
+    "result": {
+      "before": {
+        "device": "Booted",
+        "ui": "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator -CurrentDeviceUDID 938B5F8C-C87D-4120-A17D-61163AC1C024"
+      },
+      "after": {
+        "device": "Booted",
+        "ui": "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator -CurrentDeviceUDID 938B5F8C-C87D-4120-A17D-61163AC1C024"
+      },
+      "udid": "6B0A126D-CCB8-4926-9926-FF5F8217F22D",
+      "coldMs": 36180.151092,
+      "warmMs": 242.7793479999964
+    },
+    "cleanup": {
+      "remaining": 0,
+      "original": {
+        "device": "Booted",
+        "ui": "/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator -CurrentDeviceUDID 938B5F8C-C87D-4120-A17D-61163AC1C024"
+      }
+    }
+  },
+  "ownedProcessCleanup": {
+    "remainingProcessesForDeletedDevices": []
+  }
+}

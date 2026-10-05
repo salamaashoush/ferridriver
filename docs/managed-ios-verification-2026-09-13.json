@@ -1,0 +1,387 @@
+{
+  "date": "2026-09-13",
+  "status": "dependency installation verified; automatic device launch incomplete",
+  "host": "macOS 15.7.9 x86_64 VM with Xcode 26.3 and an existing iOS 26.2 runtime",
+  "versions": {
+    "node": "24.21.0",
+    "appium": "3.7.0",
+    "xcuitest": "12.12.3",
+    "remoteDebugger": "17.4.2"
+  },
+  "patch": {
+    "path": "crates/ferridriver/src/install/appium-remote-debugger.patch",
+    "sha256": "3ae169ac5fa87782d8f1da311bc360433d3fb58d1c35be6879e0322a814cb6bc",
+    "sourceCommit": "64e4914bb763be134ec577176118ecda242b04d6"
+  },
+  "installation": {
+    "cold": {
+      "binarySha256": "9a42ef640d6929ca227500caefa5d96ec620096d7d2ab13f819c5fa488e47ec6",
+      "exitCode": 0,
+      "wallMs": 50851.9,
+      "vmRoot": "/Users/sashoush/ferridriver-managed-ios.YcoQl7"
+    },
+    "warm": {
+      "exitCode": 0,
+      "wallMs": 569.08
+    },
+    "result": [
+      {
+        "browser": "ios",
+        "path": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers/ios/appium-3.7.0-xcuitest-12.12.3-x86_64-3ae169ac5fa87782d8f1da311bc360433d3fb58d1c35be6879e0322a814cb6bc-NqJX3d"
+      }
+    ],
+    "artifacts": "/tmp/ferridriver-managed-ios-verification-5dovnelj",
+    "command": "FERRIDRIVER_BROWSERS_PATH=/Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers /Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2 install ios --json",
+    "failureBeforeFix": {
+      "exitCode": 1,
+      "reason": "XCUITest bundled dependency ignored root npm override; installation rejected before ready marker",
+      "preservedDirectorySuffix": "0ExAgv"
+    },
+    "notes": [
+      "Cold timing includes building the source patch and installing private dependencies, with Xcode and an iOS runtime already installed.",
+      "Warm timing includes SSH overhead and verifies reuse of the identical directory.",
+      "Both timings are single samples, not latency distributions."
+    ]
+  },
+  "runs": [
+    {
+      "runtime": "script",
+      "scenario": "reconnect",
+      "protocolLogging": false,
+      "executionHost": "ssh",
+      "binary": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2",
+      "exitCode": 0,
+      "wallMs": 45734.31,
+      "artifacts": "/tmp/ferridriver-ios-safari-jpjehbru",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "preservedDocuments": 2,
+          "trustedClicks": 2,
+          "remainingTabs": 1
+        },
+        "duration_ms": 14071,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "executionHost": "ssh",
+      "binary": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2",
+      "exitCode": 0,
+      "wallMs": 5553.76,
+      "artifacts": "/tmp/ferridriver-ios-safari-8zmm7rix",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "result": "sashoush",
+          "click": {
+            "trusted": true,
+            "x": 20,
+            "y": 20.40625
+          },
+          "promised": {
+            "answer": 42
+          },
+          "rejected": true
+        },
+        "duration_ms": 3049,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "frames",
+      "protocolLogging": false,
+      "executionHost": "ssh",
+      "binary": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2",
+      "exitCode": 0,
+      "wallMs": 3318.46,
+      "artifacts": "/tmp/ferridriver-ios-safari-sewht315",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "frames": 2,
+          "after": 1,
+          "detached": true
+        },
+        "duration_ms": 678,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "history",
+      "protocolLogging": false,
+      "executionHost": "ssh",
+      "binary": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2",
+      "exitCode": 0,
+      "wallMs": 4016.93,
+      "artifacts": "/tmp/ferridriver-ios-safari-_5982p4y",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "backFrames": 2,
+          "reloadFrames": 2,
+          "forwardFrames": 1
+        },
+        "duration_ms": 1526,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "tabs",
+      "protocolLogging": false,
+      "executionHost": "ssh",
+      "binary": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2",
+      "exitCode": 0,
+      "wallMs": 15015.34,
+      "artifacts": "/tmp/ferridriver-ios-safari-wz9gj24q",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "tabs": 2,
+          "trustedClicks": 2,
+          "remainingTabs": 1
+        },
+        "duration_ms": 12500,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "reconnect",
+      "protocolLogging": false,
+      "executionHost": "ssh",
+      "binary": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2",
+      "exitCode": 0,
+      "wallMs": 16389.38,
+      "artifacts": "/tmp/ferridriver-ios-safari-9v5xcj9c",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "preservedDocuments": 2,
+          "trustedClicks": 2,
+          "remainingTabs": 1
+        },
+        "duration_ms": 13609,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "executionHost": "ssh",
+      "binary": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2",
+      "exitCode": 0,
+      "wallMs": 5511.28,
+      "artifacts": "/tmp/ferridriver-ios-safari-bu7q2baz",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "result": "sashoush",
+          "click": {
+            "trusted": true,
+            "x": 20,
+            "y": 20.40625
+          },
+          "promised": {
+            "answer": 42
+          },
+          "rejected": true
+        },
+        "duration_ms": 3063,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "frames",
+      "protocolLogging": false,
+      "executionHost": "ssh",
+      "binary": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2",
+      "exitCode": 0,
+      "wallMs": 3276.19,
+      "artifacts": "/tmp/ferridriver-ios-safari-l7gw6boo",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "frames": 2,
+          "after": 1,
+          "detached": true
+        },
+        "duration_ms": 675,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "history",
+      "protocolLogging": false,
+      "executionHost": "ssh",
+      "binary": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2",
+      "exitCode": 0,
+      "wallMs": 4105.88,
+      "artifacts": "/tmp/ferridriver-ios-safari-ium5i9hp",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "backFrames": 2,
+          "reloadFrames": 2,
+          "forwardFrames": 1
+        },
+        "duration_ms": 1643,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "tabs",
+      "protocolLogging": false,
+      "executionHost": "ssh",
+      "binary": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2",
+      "exitCode": 0,
+      "wallMs": 14381.46,
+      "artifacts": "/tmp/ferridriver-ios-safari-af4m0tpx",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "tabs": 2,
+          "trustedClicks": 2,
+          "remainingTabs": 1
+        },
+        "duration_ms": 11877,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "reconnect",
+      "protocolLogging": false,
+      "executionHost": "ssh",
+      "binary": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2",
+      "exitCode": 0,
+      "wallMs": 15883.75,
+      "artifacts": "/tmp/ferridriver-ios-safari-ab0dph1b",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "preservedDocuments": 2,
+          "trustedClicks": 2,
+          "remainingTabs": 1
+        },
+        "duration_ms": 13447,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "executionHost": "ssh",
+      "binary": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v3",
+      "exitCode": 0,
+      "wallMs": 5787.02,
+      "artifacts": "/tmp/ferridriver-ios-safari-c2tt2bil",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "result": "sashoush",
+          "click": {
+            "trusted": true,
+            "x": 20,
+            "y": 20.40625
+          },
+          "promised": {
+            "answer": 42
+          },
+          "rejected": true
+        },
+        "duration_ms": 3279,
+        "console": []
+      }
+    }
+  ],
+  "workflowCommand": [
+    "python3",
+    "scripts/probe-ios-safari.py",
+    "--endpoint",
+    "http://127.0.0.1:4729",
+    "--device",
+    "938B5F8C-C87D-4120-A17D-61163AC1C024",
+    "--ssh-command",
+    "/home/sashoush/Workspace/apple-vms/scripts/macos-ssh",
+    "--scenario",
+    "reconnect",
+    "--runtime",
+    "script",
+    "--remote-binary",
+    "/Users/sashoush/ferridriver-managed-ios.YcoQl7/ferridriver-v2"
+  ],
+  "limitations": [
+    "Appium server was started explicitly. Managed simulator selection, ownership, and automatic server launch are not wired yet.",
+    "Existing iOS runtime and WebDriverAgent were available. Missing runtime download and physical-device provisioning are not proven.",
+    "Apple Silicon host installation has not been run.",
+    "This is not full Safari API coverage or a comparison with other automation tools."
+  ],
+  "finalBinary": {
+    "binarySha256": "b2881f6768fbbfc9bb95230d97dc328452556d517dc148d2d204a8f1da07bbce",
+    "exitCode": 0,
+    "wallMs": 2153.35,
+    "result": [
+      {
+        "browser": "ios",
+        "path": "/Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers/ios/appium-3.7.0-xcuitest-12.12.3-x86_64-3ae169ac5fa87782d8f1da311bc360433d3fb58d1c35be6879e0322a814cb6bc-NqJX3d"
+      }
+    ]
+  },
+  "finalGate": {
+    "command": "just ready --only rust-build --only integration --only format",
+    "logRoot": "target/gate/1789274187-3295644",
+    "exitCode": 0,
+    "checks": 54,
+    "failures": 0,
+    "wallSeconds": 115.38
+  },
+  "broaderGateBeforeBundledDependencyCorrection": {
+    "command": "just ready --only rust-build --only integration --only napi --only e2e --only bdd --only format",
+    "logRoot": "target/gate/1789273536-3078479",
+    "exitCode": 0,
+    "checks": 110,
+    "failures": 0,
+    "wallSeconds": 183.45
+  },
+  "serverCleanup": {
+    "exitCode": 0,
+    "lastSessionDeleteHttpStatus": 200,
+    "activeSessionsAtShutdown": 0,
+    "guestPort": 4729,
+    "serverStopped": true
+  },
+  "preservedWork": {
+    "crates/ferridriver-node/test/benchmark-results.csv": {
+      "bytes": 1014,
+      "sha256": "9e4c41ca77a65bc897bad2d37b4c8265d34f414741a3094fd131ad96e166e9df"
+    },
+    "tests/e2e/vm_websocket.test.ts": {
+      "bytes": 2133,
+      "sha256": "834e87b3b7706893077070d4f85561266983647cea86cad13a6c240376e36326"
+    }
+  }
+}

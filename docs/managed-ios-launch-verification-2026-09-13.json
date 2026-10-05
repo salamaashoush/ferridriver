@@ -1,0 +1,1644 @@
+{
+  "date": "2026-09-13",
+  "status": "managed iOS launch, first-click handling and interrupted driver-build cleanup verified",
+  "target": {
+    "device": {
+      "platform": "ios",
+      "model": "iPhone 16"
+    },
+    "headless": true
+  },
+  "host": "macOS 15.7.9 x86_64, Xcode 26.3, iOS 26.2",
+  "runs": [
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver",
+      "exitCode": 1,
+      "wallMs": 123885.73,
+      "artifacts": "/tmp/ferridriver-ios-safari-nydr7s5l",
+      "scriptDurationMs": 3444,
+      "error": "Form returned "
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver",
+      "exitCode": 1,
+      "wallMs": 133621.33,
+      "artifacts": "/tmp/ferridriver-ios-safari-kovqe3xw",
+      "scriptDurationMs": 6375,
+      "error": "Form returned "
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v2",
+      "exitCode": 1,
+      "wallMs": 141767.9,
+      "artifacts": "/tmp/ferridriver-ios-safari-hi0sz3qx",
+      "scriptDurationMs": null,
+      "error": "protocol error (WebDriver /session): server returned 500 Internal Server Error, error unknown error: The remote debugger did not return any connected web applications after 5095ms. Make sure your web application is debuggable and could be inspected in Safari Web Inspector. You may try to change the 'webviewConnectTimeout' capability value to customize the retrieval timeout."
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v3",
+      "exitCode": 1,
+      "wallMs": 134411.18,
+      "artifacts": "/tmp/ferridriver-ios-safari-yex6efl3",
+      "scriptDurationMs": 3182,
+      "error": "Form returned "
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v3",
+      "exitCode": 1,
+      "wallMs": 129651.94,
+      "artifacts": "/tmp/ferridriver-ios-safari-t2g_5ujo",
+      "scriptDurationMs": 4826,
+      "error": "Form returned "
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "workflow": "/tmp/ferridriver-ios-delayed-click-sp4y7rwv.js",
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v3",
+      "exitCode": 1,
+      "wallMs": 130951.56,
+      "artifacts": "/tmp/ferridriver-ios-safari-_jzf_ftd",
+      "scriptDurationMs": 6379,
+      "error": "Form returned "
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "workflow": "/tmp/ferridriver-ios-event-probe-ds7z7up1.js",
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v3",
+      "exitCode": 1,
+      "wallMs": 132783.77,
+      "artifacts": "/tmp/ferridriver-ios-safari-9e3cb42u",
+      "scriptDurationMs": 7877,
+      "error": "First default click did not submit",
+      "events": [
+        {
+          "variant": "default",
+          "state": {
+            "input": "sashoush",
+            "result": "",
+            "events": [
+              {
+                "type": "pointerdown",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchstart",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "pointerup",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchend",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              }
+            ],
+            "button": "{\"x\":32,\"y\":225.59375,\"width\":180,\"height\":45,\"top\":225.59375,\"right\":212,\"bottom\":270.59375,\"left\":32}"
+          }
+        },
+        {
+          "variant": "forced",
+          "state": {
+            "input": "sashoush",
+            "result": "sashoush",
+            "events": [
+              {
+                "type": "pointerdown",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchstart",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "pointerup",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchend",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mousedown",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mouseup",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "click",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              }
+            ],
+            "button": "{\"x\":32,\"y\":225.59375,\"width\":180,\"height\":45,\"top\":225.59375,\"right\":212,\"bottom\":270.59375,\"left\":32}"
+          }
+        },
+        {
+          "variant": "tap",
+          "state": {
+            "input": "sashoush",
+            "result": "sashoush",
+            "events": [
+              {
+                "type": "pointerdown",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchstart",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "pointerup",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchend",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mousedown",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mouseup",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "click",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              }
+            ],
+            "button": "{\"x\":32,\"y\":225.59375,\"width\":180,\"height\":45,\"top\":225.59375,\"right\":212,\"bottom\":270.59375,\"left\":32}"
+          }
+        },
+        {
+          "variant": "mouse",
+          "state": {
+            "input": "sashoush",
+            "result": "sashoush",
+            "events": [
+              {
+                "type": "pointerdown",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchstart",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "pointerup",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchend",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mousedown",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mouseup",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "click",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              }
+            ],
+            "button": "{\"x\":32,\"y\":225.59375,\"width\":180,\"height\":45,\"top\":225.59375,\"right\":212,\"bottom\":270.59375,\"left\":32}"
+          }
+        }
+      ]
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "workflow": "/tmp/ferridriver-ios-forced-first-pyjcg3p2.js",
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v3",
+      "exitCode": 1,
+      "wallMs": 130678.36,
+      "artifacts": "/tmp/ferridriver-ios-safari-_k0f1nh1",
+      "scriptDurationMs": 6110,
+      "error": "First forced click did not submit",
+      "events": [
+        {
+          "variant": "forced",
+          "state": {
+            "input": "sashoush",
+            "result": "",
+            "events": [
+              {
+                "type": "pointerdown",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchstart",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "pointerup",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchend",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              }
+            ],
+            "button": "{\"x\":32,\"y\":225.59375,\"width\":180,\"height\":45,\"top\":225.59375,\"right\":212,\"bottom\":270.59375,\"left\":32}"
+          }
+        },
+        {
+          "variant": "default",
+          "state": {
+            "input": "sashoush",
+            "result": "sashoush",
+            "events": [
+              {
+                "type": "pointerdown",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchstart",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "pointerup",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchend",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mousedown",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mouseup",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "click",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              }
+            ],
+            "button": "{\"x\":32,\"y\":225.59375,\"width\":180,\"height\":45,\"top\":225.59375,\"right\":212,\"bottom\":270.59375,\"left\":32}"
+          }
+        },
+        {
+          "variant": "tap",
+          "state": {
+            "input": "sashoush",
+            "result": "sashoush",
+            "events": [
+              {
+                "type": "pointerdown",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchstart",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "pointerup",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchend",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mousedown",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mouseup",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "click",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              }
+            ],
+            "button": "{\"x\":32,\"y\":225.59375,\"width\":180,\"height\":45,\"top\":225.59375,\"right\":212,\"bottom\":270.59375,\"left\":32}"
+          }
+        },
+        {
+          "variant": "mouse",
+          "state": {
+            "input": "sashoush",
+            "result": "sashoush",
+            "events": [
+              {
+                "type": "pointerdown",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchstart",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "pointerup",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchend",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mousedown",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mouseup",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "click",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              }
+            ],
+            "button": "{\"x\":32,\"y\":225.59375,\"width\":180,\"height\":45,\"top\":225.59375,\"right\":212,\"bottom\":270.59375,\"left\":32}"
+          }
+        }
+      ]
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "workflow": "/tmp/ferridriver-ios-no-focus-s8l8y3qb.js",
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v3",
+      "exitCode": 1,
+      "wallMs": 129420.72,
+      "artifacts": "/tmp/ferridriver-ios-safari-13zsfdt7",
+      "scriptDurationMs": 5690,
+      "error": "First default click did not submit",
+      "events": [
+        {
+          "variant": "default",
+          "state": {
+            "input": "sashoush",
+            "result": "",
+            "events": [
+              {
+                "type": "pointerdown",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchstart",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "pointerup",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchend",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              }
+            ],
+            "button": "{\"x\":32,\"y\":225.59375,\"width\":180,\"height\":45,\"top\":225.59375,\"right\":212,\"bottom\":270.59375,\"left\":32}"
+          }
+        },
+        {
+          "variant": "forced",
+          "state": {
+            "input": "sashoush",
+            "result": "sashoush",
+            "events": [
+              {
+                "type": "pointerdown",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchstart",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "pointerup",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchend",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mousedown",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mouseup",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "click",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              }
+            ],
+            "button": "{\"x\":32,\"y\":225.59375,\"width\":180,\"height\":45,\"top\":225.59375,\"right\":212,\"bottom\":270.59375,\"left\":32}"
+          }
+        },
+        {
+          "variant": "tap",
+          "state": {
+            "input": "sashoush",
+            "result": "sashoush",
+            "events": [
+              {
+                "type": "pointerdown",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchstart",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "pointerup",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchend",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mousedown",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mouseup",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "click",
+                "x": 52,
+                "y": 246,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              }
+            ],
+            "button": "{\"x\":32,\"y\":225.59375,\"width\":180,\"height\":45,\"top\":225.59375,\"right\":212,\"bottom\":270.59375,\"left\":32}"
+          }
+        },
+        {
+          "variant": "mouse",
+          "state": {
+            "input": "sashoush",
+            "result": "sashoush",
+            "events": [
+              {
+                "type": "pointerdown",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchstart",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "pointerup",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "touchend",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mousedown",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "mouseup",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              },
+              {
+                "type": "click",
+                "x": 53,
+                "y": 247,
+                "target": "<button>Save</button>",
+                "trusted": true,
+                "prevented": false
+              }
+            ],
+            "button": "{\"x\":32,\"y\":225.59375,\"width\":180,\"height\":45,\"top\":225.59375,\"right\":212,\"bottom\":270.59375,\"left\":32}"
+          }
+        }
+      ]
+    }
+  ],
+  "findings": [
+    "The first tap delivers trusted pointerdown, touchstart, pointerup and touchend to the button at the requested coordinates, without mouse or click events.",
+    "Putting a forced click first still fails; the following normal click succeeds. Hit-target interception is not the cause.",
+    "Replacing fill with an unfocused value assignment still fails on the first click.",
+    "No test assertion was relaxed. Later successful clicks do not make the workflow pass."
+  ],
+  "historicalGate": {
+    "path": "target/gate/1789277837-3481235",
+    "exitCode": 0,
+    "checks": 110,
+    "wallSeconds": 885.05,
+    "finalState": false
+  },
+  "rootCause": {
+    "symptom": "Safari 26 toolbar tutorial consumes the first tap, although the page receives trusted touch events.",
+    "nativeScreenshot": "/tmp/ferridriver-ios-before-tap-xdxubs5b/before-tap.png",
+    "preference": "WBSOnboardingStatesDefaultsKeyV0.2",
+    "value": {
+      "TipForMoreButton": 3
+    },
+    "mechanism": "Set the existing Appium safariGlobalPreferences capability before Safari first launches on a ferridriver-owned simulator.",
+    "scope": "Owned simulator startup only; existing or remote provider devices are not modified."
+  },
+  "fixedRuns": [
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+      "exitCode": 0,
+      "wallMs": 130413.16,
+      "artifacts": "/tmp/ferridriver-ios-safari-b2sipxph",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "result": "sashoush",
+          "click": {
+            "trusted": true,
+            "x": 20,
+            "y": 20.40625
+          },
+          "promised": {
+            "answer": 42
+          },
+          "rejected": true
+        },
+        "duration_ms": 3817,
+        "console": []
+      },
+      "binarySha256": "4976d286d746ef71bd4ee170ee6df070f8a824820d97f7b5a7760b9c6ba75e25"
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+      "exitCode": 0,
+      "wallMs": 163682.06,
+      "cleanupVerified": true,
+      "case": "headless-1",
+      "artifacts": "/tmp/ferridriver-ios-safari-k8cwx8b0",
+      "command": [
+        "python3",
+        "scripts/probe-ios-safari.py",
+        "--managed",
+        "--ssh-command",
+        "/home/sashoush/Workspace/apple-vms/scripts/macos-ssh",
+        "--remote-binary",
+        "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+        "--remote-cache",
+        "/Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers",
+        "--diagnostics",
+        "--model",
+        "iPhone 16",
+        "--headless"
+      ],
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "result": "sashoush",
+          "click": {
+            "trusted": true,
+            "x": 20,
+            "y": 20.40625
+          },
+          "promised": {
+            "answer": 42
+          },
+          "rejected": true
+        },
+        "duration_ms": 5638,
+        "console": []
+      },
+      "cleanupScope": [
+        "device UUID/name/state",
+        "Simulator UI process inventory"
+      ]
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+      "exitCode": 0,
+      "wallMs": 132735.15,
+      "cleanupVerified": true,
+      "case": "headless-2",
+      "artifacts": "/tmp/ferridriver-ios-safari-lolnvs9x",
+      "command": [
+        "python3",
+        "scripts/probe-ios-safari.py",
+        "--managed",
+        "--ssh-command",
+        "/home/sashoush/Workspace/apple-vms/scripts/macos-ssh",
+        "--remote-binary",
+        "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+        "--remote-cache",
+        "/Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers",
+        "--diagnostics",
+        "--model",
+        "iPhone 16",
+        "--headless"
+      ],
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "result": "sashoush",
+          "click": {
+            "trusted": true,
+            "x": 20,
+            "y": 20.40625
+          },
+          "promised": {
+            "answer": 42
+          },
+          "rejected": true
+        },
+        "duration_ms": 3174,
+        "console": []
+      },
+      "cleanupScope": [
+        "device UUID/name/state",
+        "Simulator UI process inventory"
+      ]
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+      "exitCode": 0,
+      "wallMs": 127238.83,
+      "cleanupVerified": true,
+      "case": "headed",
+      "artifacts": "/tmp/ferridriver-ios-safari-mxjrv_hz",
+      "command": [
+        "python3",
+        "scripts/probe-ios-safari.py",
+        "--managed",
+        "--ssh-command",
+        "/home/sashoush/Workspace/apple-vms/scripts/macos-ssh",
+        "--remote-binary",
+        "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+        "--remote-cache",
+        "/Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers",
+        "--diagnostics",
+        "--model",
+        "iPhone 16"
+      ],
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "result": "sashoush",
+          "click": {
+            "trusted": true,
+            "x": 20,
+            "y": 20.40625
+          },
+          "promised": {
+            "answer": 42
+          },
+          "rejected": true
+        },
+        "duration_ms": 4795,
+        "console": []
+      },
+      "cleanupScope": [
+        "device UUID/name/state",
+        "Simulator UI process inventory"
+      ]
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+      "exitCode": 0,
+      "wallMs": 128186.42,
+      "cleanupVerified": true,
+      "case": "default",
+      "artifacts": "/tmp/ferridriver-ios-safari-ucwsrt02",
+      "command": [
+        "python3",
+        "scripts/probe-ios-safari.py",
+        "--managed",
+        "--ssh-command",
+        "/home/sashoush/Workspace/apple-vms/scripts/macos-ssh",
+        "--remote-binary",
+        "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+        "--remote-cache",
+        "/Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers",
+        "--diagnostics",
+        "--headless"
+      ],
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "result": "sashoush",
+          "click": {
+            "trusted": true,
+            "x": 20,
+            "y": 20.40625
+          },
+          "promised": {
+            "answer": 42
+          },
+          "rejected": true
+        },
+        "duration_ms": 4370,
+        "console": []
+      },
+      "cleanupScope": [
+        "device UUID/name/state",
+        "Simulator UI process inventory"
+      ]
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+      "exitCode": 0,
+      "wallMs": 124138.3,
+      "cleanupVerified": true,
+      "case": "ipad",
+      "artifacts": "/tmp/ferridriver-ios-safari-j9pnuhw_",
+      "command": [
+        "python3",
+        "scripts/probe-ios-safari.py",
+        "--managed",
+        "--ssh-command",
+        "/home/sashoush/Workspace/apple-vms/scripts/macos-ssh",
+        "--remote-binary",
+        "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+        "--remote-cache",
+        "/Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers",
+        "--diagnostics",
+        "--model",
+        "iPad mini (6th generation)",
+        "--headless"
+      ],
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "result": "sashoush",
+          "click": {
+            "trusted": true,
+            "x": 20,
+            "y": 20.40625
+          },
+          "promised": {
+            "answer": 42
+          },
+          "rejected": true
+        },
+        "duration_ms": 5045,
+        "console": []
+      },
+      "cleanupScope": [
+        "device UUID/name/state",
+        "Simulator UI process inventory"
+      ]
+    },
+    {
+      "runtime": "script",
+      "scenario": "form",
+      "protocolLogging": false,
+      "managed": true,
+      "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+      "executionHost": "ssh",
+      "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v6",
+      "exitCode": 0,
+      "wallMs": 167775.57,
+      "cleanupVerified": true,
+      "cleanupScope": [
+        "device UUID/name/state",
+        "Simulator UI processes",
+        "xcodebuild processes"
+      ],
+      "case": "final-build-headless-form",
+      "artifacts": "/tmp/ferridriver-ios-safari-nal8x5hp",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "result": "sashoush",
+          "click": {
+            "trusted": true,
+            "x": 20,
+            "y": 20.40625
+          },
+          "promised": {
+            "answer": 42
+          },
+          "rejected": true
+        },
+        "duration_ms": 5269,
+        "console": []
+      },
+      "binarySha256": "f61a63acb71a92f81e7cc84e9f24f3dec46b914492784779a7017e279d971944"
+    }
+  ],
+  "scopedGate": {
+    "path": "target/gate/1789283444-3965457",
+    "command": "just ready --only rust-build --only napi --only integration --only e2e --only bdd --only format",
+    "exitCode": 0,
+    "checks": 110,
+    "failedOrBlocked": 0,
+    "wallSeconds": 215.86,
+    "finalState": true
+  },
+  "limitations": [
+    "Verified on macOS 15.7.9 x86_64 with Xcode 26.3 and an already installed iOS 26.2 runtime; no arm64 or physical-device proof.",
+    "Existing Apple Simulator UI may automatically display owned standard-set devices even when headless suppresses an explicit UI launch. Appium still writes shared Simulator preferences.",
+    "The first repeated headless run overlapped the Linux gate; these mixed-mode cold timings are not a controlled latency distribution.",
+    "These form workflows do not establish complete Playwright API parity."
+  ],
+  "startupTimeouts": [
+    {
+      "exitCode": 1,
+      "artifact": "/tmp/ferridriver-ios-safari-60n7u4ij",
+      "measurement": {
+        "runtime": "script",
+        "scenario": "form",
+        "protocolLogging": false,
+        "managed": true,
+        "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+        "executionHost": "ssh",
+        "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+        "exitCode": 1,
+        "wallMs": 1634.06,
+        "cleanupVerified": true
+      },
+      "result": {
+        "error": "Timeout 1000ms exceeded while launching iOS Safari",
+        "causes": [],
+        "hints": []
+      },
+      "buildsBefore": [
+        "29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+      ],
+      "buildsAfter": [
+        "29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+      ]
+    },
+    {
+      "exitCode": 1,
+      "artifact": "/tmp/ferridriver-ios-safari-3s726we1",
+      "measurement": {
+        "runtime": "script",
+        "scenario": "form",
+        "protocolLogging": false,
+        "managed": true,
+        "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+        "executionHost": "ssh",
+        "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+        "exitCode": 1,
+        "wallMs": 8805.24,
+        "cleanupVerified": true
+      },
+      "result": {
+        "error": "Timeout 5000ms exceeded while launching iOS Safari",
+        "causes": [],
+        "hints": []
+      },
+      "buildsBefore": [
+        "29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+      ],
+      "buildsAfter": [
+        "29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+      ]
+    },
+    {
+      "exitCode": 1,
+      "artifact": "/tmp/ferridriver-ios-safari-ni5pyvmg",
+      "measurement": {
+        "runtime": "script",
+        "scenario": "form",
+        "protocolLogging": false,
+        "managed": true,
+        "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+        "executionHost": "ssh",
+        "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v4",
+        "exitCode": 1,
+        "wallMs": 53725.08,
+        "cleanupVerified": true
+      },
+      "result": {
+        "error": "Timeout 50000ms exceeded while launching iOS Safari",
+        "causes": [],
+        "hints": []
+      },
+      "buildsBefore": [
+        "29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+      ],
+      "buildsAfter": [
+        "29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+        "59818 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+      ]
+    }
+  ],
+  "ownedBuildVerification": {
+    "sourceRevision": "3e8aa7de81f254dbb0876baa9e9173c16b55b3a0",
+    "patch": "crates/ferridriver/src/install/appium-webdriveragent.patch",
+    "patchSha256": "d251cdad51711d1bbd5ae80575f79aaaebc080037901ab739ccebf7243753506",
+    "upstreamTests": {
+      "count": 66,
+      "exitCode": 0,
+      "lintExitCode": 0,
+      "log": "/tmp/ferridriver-managed-ios-launch-jsv10jyq/wda-unit-tests.log"
+    },
+    "runs": [
+      {
+        "passed": true,
+        "artifact": "/tmp/ferridriver-ios-safari-wksk1o5a",
+        "exitCode": 0,
+        "measurement": {
+          "runtime": "script",
+          "scenario": "form",
+          "protocolLogging": false,
+          "managed": true,
+          "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+          "executionHost": "ssh",
+          "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v5",
+          "exitCode": 0,
+          "wallMs": 133516.05,
+          "cleanupVerified": true,
+          "cleanupScope": [
+            "device UUID/name/state",
+            "Simulator UI processes",
+            "xcodebuild processes"
+          ]
+        },
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "result": "sashoush",
+            "click": {
+              "trusted": true,
+              "x": 20,
+              "y": 20.40625
+            },
+            "promised": {
+              "answer": 42
+            },
+            "rejected": true
+          },
+          "duration_ms": 5533,
+          "console": []
+        }
+      },
+      {
+        "passed": true,
+        "artifact": "/tmp/ferridriver-ios-safari-yev4r9yf",
+        "exitCode": 1,
+        "measurement": {
+          "runtime": "script",
+          "scenario": "form",
+          "protocolLogging": false,
+          "managed": true,
+          "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+          "executionHost": "ssh",
+          "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v5",
+          "exitCode": 1,
+          "wallMs": 53660.53,
+          "cleanupVerified": true,
+          "cleanupScope": [
+            "device UUID/name/state",
+            "Simulator UI processes",
+            "xcodebuild processes"
+          ]
+        },
+        "result": {
+          "error": "Timeout 50000ms exceeded while launching iOS Safari",
+          "causes": [],
+          "hints": []
+        }
+      },
+      {
+        "passed": true,
+        "artifact": "/tmp/ferridriver-ios-safari-few9kceh",
+        "exitCode": 1,
+        "measurement": {
+          "runtime": "script",
+          "scenario": "form",
+          "protocolLogging": false,
+          "managed": true,
+          "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+          "executionHost": "ssh",
+          "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v5",
+          "exitCode": 1,
+          "wallMs": 53620.18,
+          "cleanupVerified": true,
+          "cleanupScope": [
+            "device UUID/name/state",
+            "Simulator UI processes",
+            "xcodebuild processes"
+          ]
+        },
+        "result": {
+          "error": "Timeout 50000ms exceeded while launching iOS Safari",
+          "causes": [],
+          "hints": []
+        }
+      }
+    ],
+    "processGroupObservations": [
+      {
+        "elapsedSeconds": 0.31,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+          "61965 61630 61965 /Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers/ios/appium-3.7.0-xcuitest-12.12.3-x86_64-da82a2ea7b7cb186dc8f9bb504a520ff8c0f812313fe9f46509c3dc5389af262-fXpoUV/node/bin/node"
+        ]
+      },
+      {
+        "elapsedSeconds": 3.49,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 6.68,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 10.12,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 13.33,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 16.54,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 19.74,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 22.95,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 26.15,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 29.95,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 33.37,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 36.61,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 40.23,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 43.48,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+          "62463 62117 62463 /Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers/ios/appium-3.7.0-xcuitest-12.12.3-x86_64-da82a2ea7b7cb186dc8f9bb504a520ff8c0f812313fe9f46509c3dc5389af262-fXpoUV/node/bin/node"
+        ]
+      },
+      {
+        "elapsedSeconds": 46.79,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+          "62463 62117 62463 /Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers/ios/appium-3.7.0-xcuitest-12.12.3-x86_64-da82a2ea7b7cb186dc8f9bb504a520ff8c0f812313fe9f46509c3dc5389af262-fXpoUV/node/bin/node"
+        ]
+      },
+      {
+        "elapsedSeconds": 50.05,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+          "62463 62117 62463 /Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers/ios/appium-3.7.0-xcuitest-12.12.3-x86_64-da82a2ea7b7cb186dc8f9bb504a520ff8c0f812313fe9f46509c3dc5389af262-fXpoUV/node/bin/node",
+          "62527 62463 62463 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 53.27,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+          "62463 62117 62463 /Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers/ios/appium-3.7.0-xcuitest-12.12.3-x86_64-da82a2ea7b7cb186dc8f9bb504a520ff8c0f812313fe9f46509c3dc5389af262-fXpoUV/node/bin/node",
+          "62527 62463 62463 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 56.5,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 59.69,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 63.06,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 66.37,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 69.57,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 72.78,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 75.98,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 79.18,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 82.38,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 85.91,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 89.12,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 92.34,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 95.92,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 99.32,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+          "62985 62673 62985 /Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers/ios/appium-3.7.0-xcuitest-12.12.3-x86_64-da82a2ea7b7cb186dc8f9bb504a520ff8c0f812313fe9f46509c3dc5389af262-fXpoUV/node/bin/node"
+        ]
+      },
+      {
+        "elapsedSeconds": 102.64,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+          "62985 62673 62985 /Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers/ios/appium-3.7.0-xcuitest-12.12.3-x86_64-da82a2ea7b7cb186dc8f9bb504a520ff8c0f812313fe9f46509c3dc5389af262-fXpoUV/node/bin/node"
+        ]
+      },
+      {
+        "elapsedSeconds": 105.87,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+          "62985 62673 62985 /Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers/ios/appium-3.7.0-xcuitest-12.12.3-x86_64-da82a2ea7b7cb186dc8f9bb504a520ff8c0f812313fe9f46509c3dc5389af262-fXpoUV/node/bin/node",
+          "63056 62985 62985 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      },
+      {
+        "elapsedSeconds": 109.09,
+        "processes": [
+          "29974     1 29974 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild",
+          "62985 62673 62985 /Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers/ios/appium-3.7.0-xcuitest-12.12.3-x86_64-da82a2ea7b7cb186dc8f9bb504a520ff8c0f812313fe9f46509c3dc5389af262-fXpoUV/node/bin/node",
+          "63056 62985 62985 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
+        ]
+      }
+    ]
+  },
+  "installationAfterOwnershipFix": {
+    "coldExitCode": 0,
+    "coldWallSeconds": 69.16347888699966,
+    "coldLog": "/tmp/ferridriver-managed-ios-launch-jsv10jyq/v5-install.log",
+    "warm": {
+      "exitCode": 0,
+      "wallMs": 2141.63,
+      "stdout": "[\n  {\n    \"browser\": \"ios\",\n    \"path\": \"/Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers/ios/appium-3.7.0-xcuitest-12.12.3-x86_64-da82a2ea7b7cb186dc8f9bb504a520ff8c0f812313fe9f46509c3dc5389af262-fXpoUV\"\n  }\n]\n",
+      "stderr": "",
+      "binarySha256": "f61a63acb71a92f81e7cc84e9f24f3dec46b914492784779a7017e279d971944"
+    }
+  }
+}

@@ -1,0 +1,290 @@
+{
+  "date": "2026-09-13",
+  "scope": "XCUITest native input routing and cancellation through the existing Rust session path",
+  "mechanism": "Acquire the session selection lock, activate the Safari tab, send actions in NATIVE_APP, restore the original web target and document markers. Drop cancelled queued operations before selection; finish restoration for in-flight operations.",
+  "binary": {
+    "path": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v15",
+    "sha256": "868d0e0898508067512e5db42f115e45b8723588357ee937ad5575d4fa8eb951",
+    "buildExitCode": 0,
+    "transferExitCode": 0
+  },
+  "regression": {
+    "command": "cargo test -p ferridriver --lib backend::webdriver::session::native_input::tests",
+    "redCommand": "cargo test -p ferridriver --lib cancelled_queued_input_never_reaches_the_device",
+    "redExitCode": 101,
+    "redLog": "/tmp/ferridriver-native-queued-red.log",
+    "exitCode": 0,
+    "passed": 11,
+    "log": "/tmp/ferridriver-native-queued-green.log"
+  },
+  "live": [
+    {
+      "artifacts": "/tmp/ferridriver-ios-safari-_y4_ri_m",
+      "measurement": {
+        "runtime": "test",
+        "scenario": "form",
+        "protocolLogging": false,
+        "managed": true,
+        "workflow": "/tmp/ferridriver-native-keyboard-workflow.js",
+        "executionHost": "ssh",
+        "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v15",
+        "exitCode": 0,
+        "wallMs": 131378.84,
+        "cleanupVerified": true,
+        "cleanupScope": [
+          "device UUID/name/state",
+          "Simulator UI processes",
+          "xcodebuild processes"
+        ]
+      },
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "result": "sashoush",
+          "click": {
+            "trusted": true,
+            "x": 20,
+            "y": 20.40625
+          },
+          "promised": {
+            "answer": 42
+          },
+          "rejected": true
+        }
+      },
+      "replayCommand": "python3 scripts/probe-ios-safari.py --managed --model 'iPhone 16' --runtime test --scenario form --workflow scripts/fixtures/portable-keyboard-workflow.js --ssh-command /home/sashoush/Workspace/apple-vms/scripts/macos-ssh --remote-binary /tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v15 --diagnostics",
+      "workflowSha256": "ae64cdb39971ad11ac94de0cbd55723020f151e10b0cb565f145b14268b68588"
+    },
+    {
+      "artifacts": "/tmp/ferridriver-ios-safari-exz4tg11",
+      "measurement": {
+        "runtime": "test",
+        "scenario": "form",
+        "protocolLogging": false,
+        "managed": true,
+        "workflow": "scripts/fixtures/portable-new-page-workflow.js",
+        "executionHost": "ssh",
+        "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v15",
+        "exitCode": 0,
+        "wallMs": 130087.26,
+        "cleanupVerified": true,
+        "cleanupScope": [
+          "device UUID/name/state",
+          "Simulator UI processes",
+          "xcodebuild processes"
+        ]
+      },
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "created": 2,
+          "trustedClicks": 2,
+          "remainingPages": 2
+        }
+      },
+      "replayCommand": "python3 scripts/probe-ios-safari.py --managed --model 'iPhone 16' --runtime test --scenario form --workflow scripts/fixtures/portable-new-page-workflow.js --ssh-command /home/sashoush/Workspace/apple-vms/scripts/macos-ssh --remote-binary /tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v15 --diagnostics",
+      "workflowSha256": "5dc0b06c6b78dc5b67cad79e3dd6d4f389d2d1dc17125d87a3677e369948d709"
+    }
+  ],
+  "limitations": [
+    "No physical-device or cloud verification",
+    "Experimental WebKit Automation remains disabled for automatic launch; click completion and tab lifecycle are unresolved",
+    "These workflows are not proof of the complete Playwright API",
+    "Native WDA input interrupts experimental WebKit Automation sessions; the tested native route applies to the default atoms-based Appium path, not Automation mode."
+  ],
+  "desktop": {
+    "exitCode": 0,
+    "artifacts": "/tmp/ferridriver-keyboard-desktop-icnlntpr",
+    "results": [
+      {
+        "backend": "cdp-pipe",
+        "exitCode": 0,
+        "wallMs": 393.95,
+        "command": [
+          "/home/sashoush/Workspace/ferridriver/target/debug/ferridriver",
+          "run",
+          "--no-inherit",
+          "--config",
+          "/tmp/ferridriver-keyboard-desktop-icnlntpr/cdp-pipe.json",
+          "--instance",
+          "target",
+          "--fresh",
+          "--json",
+          "-e",
+          "await page.goto(args[0]);\nawait page.getByLabel('Name').fill('sashoush');\nawait page.keyboard.press('Backspace');\nawait page.keyboard.press('h');\nif (await page.getByLabel('Name').inputValue() !== 'sashoush') throw new Error('Native keyboard input did not edit the focused field');\nawait page.getByRole('button', {name: 'Save'}).click({position: {x: 20, y: 20}});\nconst result = await page.locator('#result').textContent();\nif (result !== 'sashoush') throw new Error(`Form returned ${result}`);\nconst click = await page.evaluate(() => window.lastClick);\nif (!click?.trusted || Math.abs(click.x - 20) > 1 || Math.abs(click.y - 20) > 1) {\n  throw new Error(`Positioned native click failed: ${JSON.stringify(click)}`);\n}\nif (await page.getByRole('button', {name: 'Save'}).getAttribute('aria-label') != null) {\n  throw new Error('Pointer lookup left an accessibility label behind');\n}\nawait page.evaluate(() => document.querySelector('button').setAttribute('aria-label', 'Save'));\nawait page.getByRole('button', {name: 'Save'}).click({position: {x: 20, y: 20}});\nif (await page.getByRole('button', {name: 'Save'}).getAttribute('aria-label') !== 'Save') {\n  throw new Error('Pointer lookup changed the original accessibility label');\n}\nconst promised = await page.evaluate(async () => ({answer: await Promise.resolve(42)}));\nif (promised.answer !== 42) throw new Error('Promise result was not awaited');\nlet rejected = false;\ntry { await page.evaluate(() => Promise.reject(new Error('probe rejection'))); }\ncatch (error) { rejected = String(error).includes('probe rejection'); }\nif (!rejected) throw new Error('Promise rejection was lost');\nconst handle = await page.evaluateHandle(async () => ({date: new Date(0), answer: 42}));\ntry {\n  const value = await handle.jsonValue();\n  if (value.date.toISOString() !== '1970-01-01T00:00:00.000Z' || value.answer !== 42) {\n    throw new Error('Rich handle result was corrupted');\n  }\n} finally { await handle.dispose(); }\nawait page.screenshot({path: args[1]});\nreturn {version: browser.version(), result, click, promised, rejected};\n",
+          "--",
+          "http://127.0.0.1:46299/",
+          "/tmp/ferridriver-keyboard-desktop-icnlntpr/cdp-pipe.png"
+        ]
+      },
+      {
+        "backend": "cdp-ws",
+        "exitCode": 0,
+        "wallMs": 389.72,
+        "command": [
+          "/home/sashoush/Workspace/ferridriver/target/debug/ferridriver",
+          "run",
+          "--no-inherit",
+          "--config",
+          "/tmp/ferridriver-keyboard-desktop-icnlntpr/cdp-ws.json",
+          "--instance",
+          "target",
+          "--fresh",
+          "--json",
+          "-e",
+          "await page.goto(args[0]);\nawait page.getByLabel('Name').fill('sashoush');\nawait page.keyboard.press('Backspace');\nawait page.keyboard.press('h');\nif (await page.getByLabel('Name').inputValue() !== 'sashoush') throw new Error('Native keyboard input did not edit the focused field');\nawait page.getByRole('button', {name: 'Save'}).click({position: {x: 20, y: 20}});\nconst result = await page.locator('#result').textContent();\nif (result !== 'sashoush') throw new Error(`Form returned ${result}`);\nconst click = await page.evaluate(() => window.lastClick);\nif (!click?.trusted || Math.abs(click.x - 20) > 1 || Math.abs(click.y - 20) > 1) {\n  throw new Error(`Positioned native click failed: ${JSON.stringify(click)}`);\n}\nif (await page.getByRole('button', {name: 'Save'}).getAttribute('aria-label') != null) {\n  throw new Error('Pointer lookup left an accessibility label behind');\n}\nawait page.evaluate(() => document.querySelector('button').setAttribute('aria-label', 'Save'));\nawait page.getByRole('button', {name: 'Save'}).click({position: {x: 20, y: 20}});\nif (await page.getByRole('button', {name: 'Save'}).getAttribute('aria-label') !== 'Save') {\n  throw new Error('Pointer lookup changed the original accessibility label');\n}\nconst promised = await page.evaluate(async () => ({answer: await Promise.resolve(42)}));\nif (promised.answer !== 42) throw new Error('Promise result was not awaited');\nlet rejected = false;\ntry { await page.evaluate(() => Promise.reject(new Error('probe rejection'))); }\ncatch (error) { rejected = String(error).includes('probe rejection'); }\nif (!rejected) throw new Error('Promise rejection was lost');\nconst handle = await page.evaluateHandle(async () => ({date: new Date(0), answer: 42}));\ntry {\n  const value = await handle.jsonValue();\n  if (value.date.toISOString() !== '1970-01-01T00:00:00.000Z' || value.answer !== 42) {\n    throw new Error('Rich handle result was corrupted');\n  }\n} finally { await handle.dispose(); }\nawait page.screenshot({path: args[1]});\nreturn {version: browser.version(), result, click, promised, rejected};\n",
+          "--",
+          "http://127.0.0.1:46299/",
+          "/tmp/ferridriver-keyboard-desktop-icnlntpr/cdp-ws.png"
+        ]
+      },
+      {
+        "backend": "bidi",
+        "exitCode": 0,
+        "wallMs": 1802.24,
+        "command": [
+          "/home/sashoush/Workspace/ferridriver/target/debug/ferridriver",
+          "run",
+          "--no-inherit",
+          "--config",
+          "/tmp/ferridriver-keyboard-desktop-icnlntpr/bidi.json",
+          "--instance",
+          "target",
+          "--fresh",
+          "--json",
+          "-e",
+          "await page.goto(args[0]);\nawait page.getByLabel('Name').fill('sashoush');\nawait page.keyboard.press('Backspace');\nawait page.keyboard.press('h');\nif (await page.getByLabel('Name').inputValue() !== 'sashoush') throw new Error('Native keyboard input did not edit the focused field');\nawait page.getByRole('button', {name: 'Save'}).click({position: {x: 20, y: 20}});\nconst result = await page.locator('#result').textContent();\nif (result !== 'sashoush') throw new Error(`Form returned ${result}`);\nconst click = await page.evaluate(() => window.lastClick);\nif (!click?.trusted || Math.abs(click.x - 20) > 1 || Math.abs(click.y - 20) > 1) {\n  throw new Error(`Positioned native click failed: ${JSON.stringify(click)}`);\n}\nif (await page.getByRole('button', {name: 'Save'}).getAttribute('aria-label') != null) {\n  throw new Error('Pointer lookup left an accessibility label behind');\n}\nawait page.evaluate(() => document.querySelector('button').setAttribute('aria-label', 'Save'));\nawait page.getByRole('button', {name: 'Save'}).click({position: {x: 20, y: 20}});\nif (await page.getByRole('button', {name: 'Save'}).getAttribute('aria-label') !== 'Save') {\n  throw new Error('Pointer lookup changed the original accessibility label');\n}\nconst promised = await page.evaluate(async () => ({answer: await Promise.resolve(42)}));\nif (promised.answer !== 42) throw new Error('Promise result was not awaited');\nlet rejected = false;\ntry { await page.evaluate(() => Promise.reject(new Error('probe rejection'))); }\ncatch (error) { rejected = String(error).includes('probe rejection'); }\nif (!rejected) throw new Error('Promise rejection was lost');\nconst handle = await page.evaluateHandle(async () => ({date: new Date(0), answer: 42}));\ntry {\n  const value = await handle.jsonValue();\n  if (value.date.toISOString() !== '1970-01-01T00:00:00.000Z' || value.answer !== 42) {\n    throw new Error('Rich handle result was corrupted');\n  }\n} finally { await handle.dispose(); }\nawait page.screenshot({path: args[1]});\nreturn {version: browser.version(), result, click, promised, rejected};\n",
+          "--",
+          "http://127.0.0.1:46299/",
+          "/tmp/ferridriver-keyboard-desktop-icnlntpr/bidi.png"
+        ]
+      },
+      {
+        "backend": "webkit",
+        "exitCode": 0,
+        "wallMs": 1460.85,
+        "command": [
+          "/home/sashoush/Workspace/ferridriver/target/debug/ferridriver",
+          "run",
+          "--no-inherit",
+          "--config",
+          "/tmp/ferridriver-keyboard-desktop-icnlntpr/webkit.json",
+          "--instance",
+          "target",
+          "--fresh",
+          "--json",
+          "-e",
+          "await page.goto(args[0]);\nawait page.getByLabel('Name').fill('sashoush');\nawait page.keyboard.press('Backspace');\nawait page.keyboard.press('h');\nif (await page.getByLabel('Name').inputValue() !== 'sashoush') throw new Error('Native keyboard input did not edit the focused field');\nawait page.getByRole('button', {name: 'Save'}).click({position: {x: 20, y: 20}});\nconst result = await page.locator('#result').textContent();\nif (result !== 'sashoush') throw new Error(`Form returned ${result}`);\nconst click = await page.evaluate(() => window.lastClick);\nif (!click?.trusted || Math.abs(click.x - 20) > 1 || Math.abs(click.y - 20) > 1) {\n  throw new Error(`Positioned native click failed: ${JSON.stringify(click)}`);\n}\nif (await page.getByRole('button', {name: 'Save'}).getAttribute('aria-label') != null) {\n  throw new Error('Pointer lookup left an accessibility label behind');\n}\nawait page.evaluate(() => document.querySelector('button').setAttribute('aria-label', 'Save'));\nawait page.getByRole('button', {name: 'Save'}).click({position: {x: 20, y: 20}});\nif (await page.getByRole('button', {name: 'Save'}).getAttribute('aria-label') !== 'Save') {\n  throw new Error('Pointer lookup changed the original accessibility label');\n}\nconst promised = await page.evaluate(async () => ({answer: await Promise.resolve(42)}));\nif (promised.answer !== 42) throw new Error('Promise result was not awaited');\nlet rejected = false;\ntry { await page.evaluate(() => Promise.reject(new Error('probe rejection'))); }\ncatch (error) { rejected = String(error).includes('probe rejection'); }\nif (!rejected) throw new Error('Promise rejection was lost');\nconst handle = await page.evaluateHandle(async () => ({date: new Date(0), answer: 42}));\ntry {\n  const value = await handle.jsonValue();\n  if (value.date.toISOString() !== '1970-01-01T00:00:00.000Z' || value.answer !== 42) {\n    throw new Error('Rich handle result was corrupted');\n  }\n} finally { await handle.dispose(); }\nawait page.screenshot({path: args[1]});\nreturn {version: browser.version(), result, click, promised, rejected};\n",
+          "--",
+          "http://127.0.0.1:46299/",
+          "/tmp/ferridriver-keyboard-desktop-icnlntpr/webkit.png"
+        ]
+      }
+    ],
+    "workflow": "scripts/fixtures/portable-keyboard-workflow.js"
+  },
+  "gate": {
+    "command": "just ready --only format --only rust-build --only doc-tests --only e2e --only bdd --only integration --only napi --only types",
+    "exitCode": 0,
+    "checks": 111,
+    "failedOrBlocked": 0,
+    "reportedSeconds": 781.96,
+    "logs": "target/gate/1789293020-1534346",
+    "e2ePassed": 2287,
+    "bddPassed": 637,
+    "integrationPassed": 827,
+    "napiFiles": 53,
+    "scopeNote": "Includes format, workspace lint, Rust tests, e2e, BDD, integration, NAPI and types. Excludes the separately unresolved protected acceptance snapshot."
+  },
+  "sharedSelection": {
+    "mechanism": "Classic execute_sequence and native_operation now acquire the same cancellation-aware session lock. Queued cancelled commands never select a target or reach the driver. In-flight operations keep their existing completion and restoration behavior.",
+    "red": {
+      "command": "cargo test -p ferridriver --lib cancelled_queued_webdriver_input_never_reaches_the_device",
+      "exitCode": 101,
+      "log": "/tmp/ferridriver-webdriver-queued-red.log",
+      "observed": "Cancelled queued Classic command still sent POST /session/native/actions"
+    },
+    "regression": {
+      "command": "cargo test -p ferridriver --lib backend::webdriver::session",
+      "exitCode": 0,
+      "passed": 20,
+      "log": "/tmp/ferridriver-webdriver-queued-green.log"
+    },
+    "binary": {
+      "path": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v16",
+      "sha256": "40c3e3e0d045447c34bb90ea3962f7ba94997377c3f8b1e7dd1da549183bee2a",
+      "buildExitCode": 0,
+      "transferExitCode": 0
+    },
+    "live": {
+      "artifacts": "/tmp/ferridriver-ios-safari-pjc54494",
+      "measurement": {
+        "runtime": "test",
+        "scenario": "form",
+        "protocolLogging": false,
+        "managed": true,
+        "workflow": "scripts/fixtures/portable-keyboard-workflow.js",
+        "executionHost": "ssh",
+        "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v16",
+        "exitCode": 0,
+        "wallMs": 144410.9,
+        "cleanupVerified": true,
+        "cleanupScope": [
+          "device UUID/name/state",
+          "Simulator UI processes",
+          "xcodebuild processes"
+        ]
+      },
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "result": "sashoush",
+          "click": {
+            "trusted": true,
+            "x": 20,
+            "y": 20.40625
+          },
+          "promised": {
+            "answer": 42
+          },
+          "rejected": true
+        }
+      },
+      "replayCommand": "python3 scripts/probe-ios-safari.py --managed --model 'iPhone 16' --runtime test --scenario form --workflow scripts/fixtures/portable-keyboard-workflow.js --ssh-command /home/sashoush/Workspace/apple-vms/scripts/macos-ssh --remote-binary /tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v16 --diagnostics"
+    },
+    "gate": {
+      "command": "just ready --only format --only rust-build --only doc-tests --only e2e --only bdd --only integration --only napi --only types",
+      "exitCode": 0,
+      "checks": 111,
+      "failedOrBlocked": 0,
+      "reportedSeconds": 820.51,
+      "logs": "target/gate/1789294740-1766374",
+      "scopeNote": "Excludes the separately unresolved protected acceptance snapshot."
+    },
+    "repeatedCancellation": {
+      "executable": "target/debug/deps/ferridriver-7894011fc4a8ce31",
+      "args": [
+        "cancelled_queued",
+        "--test-threads=1"
+      ],
+      "runs": 10,
+      "testsPerRun": 2,
+      "exitCodes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "log": "/tmp/ferridriver-shared-selection-repeat.log"
+    }
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "date": "2026-09-13",
+  "scope": "native runner worker browser setup and cancellation ownership",
+  "status": "runner regressions pass; real iOS test fixture blocked by Appium newWindow",
+  "before": {
+    "artifacts": "/tmp/ferridriver-ios-safari-7gjkjl1v",
+    "exitCode": 1,
+    "wallMs": 30160.75,
+    "failure": "test timed out after 30s during device startup",
+    "cleanupVerified": false,
+    "manualCleanup": "Deleted only the owned ferridriver-ios-ZXyp6p simulator ABFC65F8-B570-4EBD-BDC4-5E4BD67D64C0 after confirming it was shut down"
+  },
+  "after": {
+    "runtime": "test",
+    "scenario": "form",
+    "protocolLogging": false,
+    "managed": true,
+    "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+    "executionHost": "ssh",
+    "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v7",
+    "exitCode": 1,
+    "wallMs": 130193.29,
+    "cleanupVerified": true,
+    "cleanupScope": [
+      "device UUID/name/state",
+      "Simulator UI processes",
+      "xcodebuild processes"
+    ]
+  },
+  "afterArtifacts": "/tmp/ferridriver-ios-safari-hkp7y9_v",
+  "macBinarySha256": "30e469f1e0b3704e832bfe300569f982e547a440a69c85bd2da06dfba798f4a2",
+  "command": "python3 scripts/probe-ios-safari.py --managed --model 'iPhone 16' --headless --runtime test --ssh-command /path/to/macos-ssh --remote-binary /path/on/mac/ferridriver --remote-cache /path/on/mac/browser-cache --diagnostics",
+  "failureAfter": "fixture 'page' setup failed: unsupported operation: WebDriver POST /window/new: unknown method: Method has not yet been implemented",
+  "mechanisms": [
+    "BrowserHandle retains a spawned launch task after its caller is cancelled; close awaits it and deletes the resulting session",
+    "Required worker fixtures resolve through the existing dependency graph before the test body budget starts",
+    "Zero fixture timeout delegates to the underlying bounded launch operation; auto fixture failures propagate"
+  ],
+  "regressions": [
+    {
+      "command": "cargo test -p ferridriver-test --lib browser_launch_ownership_tests -- --nocapture",
+      "beforeExitCode": 101,
+      "afterExitCode": 0,
+      "assertion": "close must remain pending until session creation completes and session DELETE is observed"
+    },
+    {
+      "command": "cargo test -p ferridriver-test --lib setup_tests",
+      "exitCode": 0,
+      "assertion": "worker prerequisites remain lazy, cache across requests, and do not resolve test-scoped dependents"
+    },
+    {
+      "command": "./target/debug/ferridriver test --no-inherit --headless --config tests/integration/ferridriver.toml tests/integration/webdriver-connect.test.mjs --grep 'worker browser launch'",
+      "exitCode": 0,
+      "elapsedSeconds": 3.6,
+      "assertion": "1.5-second launch passes with a 500ms test budget; hung test body still times out; each session is deleted"
+    }
+  ],
+  "limitations": [
+    "The managed iOS native test workflow still fails at context.newPage(); standalone script success does not establish runner parity",
+    "No complete Safari API parity or comparative performance claim",
+    "Existing Simulator UI can display owned devices; cleanup preserves the original device and UI"
+  ],
+  "gate": {
+    "status": "passed",
+    "command": "just ready --only rust-build --only napi --only integration --only e2e --only bdd --only format",
+    "exitCode": 0,
+    "checks": 110,
+    "failedOrBlocked": 0,
+    "wallSeconds": 122.83,
+    "artifacts": "target/gate/1789286006-217504",
+    "log": "/tmp/ferridriver-ios-runner-ready-local-fixtures.log",
+    "e2ePassed": 2287,
+    "integrationPassed": 826,
+    "bddPassed": 637,
+    "scopeLimitation": "Does not include the protected acceptance snapshot baseline awaiting approval; does not make the failing real iOS native test workflow pass"
+  },
+  "standaloneRegression": {
+    "artifacts": "/tmp/ferridriver-ios-safari-_bgvkd4q",
+    "runtime": "script",
+    "scenario": "form",
+    "protocolLogging": false,
+    "managed": true,
+    "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+    "executionHost": "ssh",
+    "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v7",
+    "exitCode": 0,
+    "wallMs": 136413.83,
+    "cleanupVerified": true,
+    "cleanupScope": [
+      "device UUID/name/state",
+      "Simulator UI processes",
+      "xcodebuild processes"
+    ],
+    "scriptBodyMs": 4840
+  },
+  "gateAttempts": [
+    {
+      "artifacts": "target/gate/1789285522-7504",
+      "exitCode": 1,
+      "failure": "items_after_test_module in newly added fixture regression; moved test module to end of file"
+    },
+    {
+      "artifacts": "target/gate/1789285638-9844",
+      "exitCode": 1,
+      "checks": 110,
+      "failedOrBlocked": 1,
+      "wallSeconds": 193.61,
+      "failure": "67 BDD scenarios received Error 1200 from external example.com; 570 passed"
+    }
+  ],
+  "bddFixtureFix": {
+    "mechanism": "Use repository-served example-domain.html and domain-info.html instead of the external page and link destination; retain content, count and exact URL assertions",
+    "targetedCommand": "./target/debug/ferridriver bdd --no-inherit --headless --config ferridriver.toml tests/features/navigation.feature tests/features/assertions.feature tests/features/interaction.feature",
+    "exitCode": 0,
+    "passed": 40,
+    "backends": [
+      "cdp-pipe",
+      "cdp-raw",
+      "bidi",
+      "webkit"
+    ],
+    "wallSeconds": 3.1,
+    "limitation": "Other existing BDD cases still use external sites"
+  },
+  "nextDriverInvestigation": {
+    "xcuitest": "lib/commands/window.ts and lib/driver.ts have no newWindow method in the normal atoms backend",
+    "remoteDebugger": "lib/protocol/index.ts Runtime.evaluate whitelist excludes emulateUserGesture; lib/rpc/remote-messages.ts documents false as the default to preserve popup blocking",
+    "reference": "Playwright packages/playwright-core/src/server/webkit/wkExecutionContext.ts uses emulateUserGesture for evaluation",
+    "constraint": "Do not globally change normal script gesture semantics or enable the experimentally wedged Automation session lifecycle"
+  }
+}

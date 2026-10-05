@@ -1,0 +1,245 @@
+{
+  "date": "2026-09-13",
+  "status": "verified native iOS Simulator form and repeated-tab milestone",
+  "scope": "W3C newWindow through the existing Appium Safari backend and ferridriver context.newPage",
+  "sources": {
+    "xcuitest": {
+      "revision": "65585c013009dd3f3dd4e85cb89f7dca185d017c",
+      "archiveSha256": "a7c82efe6ad7be4e31a73fadf3271a32ec2700e374918c9aa7ea4fb97c4fdab8",
+      "patchSha256": "7ef2f836170e41842a5376a093ba5373bb8351bcf8b7da593a8f424ad68ab492"
+    },
+    "remoteDebugger": {
+      "revision": "64e4914bb763be134ec577176118ecda242b04d6",
+      "patchSha256": "21ca95a717225967ca98ad3bca0ee31e478cee9650ff9353fc40bdad8b07ef78"
+    },
+    "playwright": "packages/playwright-core/src/client/browserContext.ts:newPage and server/webkit/wkExecutionContext.ts",
+    "webdriverio": "packages/webdriverio/src/commands/browser/newWindow.ts explicitly rejects mobile environments"
+  },
+  "mechanism": [
+    "Appium createNewWindow delegates through its existing WebExecutionBackend interface",
+    "The atoms backend requests a scoped WebKit user gesture to open an unnamed tab without an opener; normal execute calls keep their previous gesture behavior",
+    "Identify the created tab by a unique temporary name, clear its name, remove the source marker, and restore the previously selected window; close the owned tab on identification failure",
+    "Build and verify pinned XCUITest and remote-debugger sources in the private installer; local registration links the compiled tarball without rerunning its source-only prepare lifecycle"
+  ],
+  "upstreamTests": [
+    {
+      "suite": "remote-debugger",
+      "command": "npm test",
+      "exitCode": 0,
+      "passed": 369,
+      "log": "/tmp/ferridriver-remote-debugger-window-tests.log"
+    },
+    {
+      "suite": "xcuitest",
+      "command": "npm test",
+      "exitCode": 0,
+      "passed": 510,
+      "log": "/tmp/ferridriver-xcuitest-window-tests-v11.log"
+    }
+  ],
+  "failedProbes": [
+    {
+      "binary": "ferridriver-v8",
+      "log": "/tmp/ferridriver-ios-new-window-install.log",
+      "exitCode": 1,
+      "reason": "Local Appium registration invoked prepare in the packed driver; tsconfig.json is deliberately absent from the tarball"
+    },
+    {
+      "binary": "ferridriver-v10",
+      "artifacts": "/tmp/ferridriver-ios-safari-iv8khsg7",
+      "exitCode": 1,
+      "cleanupVerified": true,
+      "wallMs": 185457.53,
+      "reason": "Helper returned a bare boolean rejected by Appium result conversion; corrected to the expected value envelope and added a regression using the actual converter"
+    }
+  ],
+  "currentBinary": {
+    "path": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v11",
+    "sha256": "92a43cb0b65a234900bd8444bd3e980a7f099a6dfe621d8c65304e118b7963c2"
+  },
+  "install": {
+    "log": "/tmp/ferridriver-ios-new-window-install-v11.log",
+    "exitCode": 0,
+    "displayedDuration": "1m25s"
+  },
+  "desktopWorkflow": {
+    "source": "scripts/fixtures/portable-new-page-workflow.js",
+    "artifacts": "/tmp/ferridriver-new-page-desktop-3uttyse9",
+    "backends": [
+      "cdp-pipe",
+      "cdp-ws",
+      "bidi",
+      "webkit"
+    ],
+    "exitCodes": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "assertions": [
+      "two context.newPage calls create distinct blank unnamed tabs without openers",
+      "each new tab receives trusted input",
+      "closing restores the page count and leaves the original title and temporary marker inventory unchanged"
+    ]
+  },
+  "iosNativeTest": {
+    "status": "passed",
+    "log": "/tmp/ferridriver-ios-native-test-v11.log",
+    "artifacts": "/tmp/ferridriver-ios-safari-g4nc99od",
+    "runtime": "test",
+    "scenario": "form",
+    "protocolLogging": false,
+    "managed": true,
+    "workflow": "/home/sashoush/Workspace/ferridriver/scripts/fixtures/portable-form-workflow.js",
+    "executionHost": "ssh",
+    "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v11",
+    "exitCode": 0,
+    "wallMs": 143905.46,
+    "cleanupVerified": true,
+    "cleanupScope": [
+      "device UUID/name/state",
+      "Simulator UI processes",
+      "xcodebuild processes"
+    ]
+  },
+  "limitations": [
+    "No paid cloud or physical-device verification",
+    "No full Playwright API or performance superiority claim",
+    "The private patched Appium driver is required for the verified newWindow behavior",
+    "The protected acceptance screenshot baseline remains pending approval; acceptance is outside this scoped gate"
+  ],
+  "iosRepeatedTabs": {
+    "status": "passed",
+    "log": "/tmp/ferridriver-ios-native-new-pages-v11.log",
+    "artifacts": "/tmp/ferridriver-ios-safari-am70x7eh",
+    "runtime": "test",
+    "scenario": "form",
+    "protocolLogging": false,
+    "managed": true,
+    "workflow": "scripts/fixtures/portable-new-page-workflow.js",
+    "executionHost": "ssh",
+    "binary": "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v11",
+    "exitCode": 0,
+    "wallMs": 139887.5,
+    "cleanupVerified": true,
+    "cleanupScope": [
+      "device UUID/name/state",
+      "Simulator UI processes",
+      "xcodebuild processes"
+    ],
+    "result": {
+      "status": "ok",
+      "value": {
+        "version": "safari/26.2",
+        "created": 2,
+        "trustedClicks": 2,
+        "remainingPages": 2
+      }
+    }
+  },
+  "repeatCommand": [
+    "python3",
+    "scripts/probe-ios-safari.py",
+    "--managed",
+    "--model",
+    "iPhone 16",
+    "--runtime",
+    "test",
+    "--workflow",
+    "scripts/fixtures/portable-new-page-workflow.js",
+    "--ssh-command",
+    "/home/sashoush/Workspace/apple-vms/scripts/macos-ssh",
+    "--remote-binary",
+    "/tmp/ferridriver-managed-launch.Cn1OBi/ferridriver-v11",
+    "--remote-cache",
+    "/Users/sashoush/ferridriver-managed-ios.YcoQl7/browsers",
+    "--diagnostics"
+  ],
+  "failedGate": {
+    "status": "failed",
+    "artifacts": "target/gate/1789286973-430370",
+    "exitCode": 1,
+    "checks": 110,
+    "failedOrBlocked": 34,
+    "reason": "NAPI processes segfaulted while executing a zeroed region in the linked native library; investigation in progress"
+  },
+  "napiRecovery": {
+    "observation": {
+      "artifact": "crates/ferridriver-node/ferridriver-node.linux-x64-gnu.node",
+      "size": 260057424,
+      "sha256": "39715810ccf52ad027875599501d242e6c060ca052668ba40c1afc7eead0c370",
+      "zeroTextRange": [
+        "0x237bebb",
+        "0x2380000"
+      ],
+      "gdbLog": "/tmp/ferridriver-napi-segv-gdb.log",
+      "crashPids": [
+        452486,
+        481430,
+        503122
+      ],
+      "objectCandidates": [
+        "target/debug/incremental/ferridriver_node-3py6ncuar8vnz/s-hm8z3hnpen-1992b43-eq51n05p2lkko857rg9l5qv83/5iyeatp6857s66nn57ud4ww0a.o",
+        "target/debug/incremental/ferridriver_node-3py6ncuar8vnz/s-hm8z3uvt2h-0h809s9-eq51n05p2lkko857rg9l5qv83/5iyeatp6857s66nn57ud4ww0a.o"
+      ],
+      "expectedFromRawObjectBytes": "50e80000000059c3",
+      "gate": "target/gate/1789286973-430370",
+      "gateExitCode": 1,
+      "gateFailedOrBlocked": 34
+    },
+    "repeatedLinks": [
+      {
+        "path": "/tmp/ferridriver-napi-link-repro-zzqeqg3h/ferridriver-napi-link-20260913/repeat-0.so",
+        "sha256": "5fa539575b3036e0984b644ef739a1868f3d8e651819a2a5753a0f57b5324d9f",
+        "zeroCodeSpans": [],
+        "exitCode": 0
+      },
+      {
+        "path": "/tmp/ferridriver-napi-link-repro-zzqeqg3h/ferridriver-napi-link-20260913/repeat-1.so",
+        "sha256": "5fa539575b3036e0984b644ef739a1868f3d8e651819a2a5753a0f57b5324d9f",
+        "zeroCodeSpans": [],
+        "exitCode": 0
+      },
+      {
+        "path": "/tmp/ferridriver-napi-link-repro-zzqeqg3h/ferridriver-napi-link-20260913/repeat-2.so",
+        "sha256": "5fa539575b3036e0984b644ef739a1868f3d8e651819a2a5753a0f57b5324d9f",
+        "zeroCodeSpans": [],
+        "exitCode": 0
+      }
+    ],
+    "standardRebuild": [
+      {
+        "file": "target/debug/libferridriver_node.so",
+        "sha256": "91997b00706d034866c19e8d266dc4defcfa6eb03ab7a3d44a1419b5e8291311",
+        "zeroTextSpans": []
+      },
+      {
+        "file": "crates/ferridriver-node/ferridriver-node.linux-x64-gnu.node",
+        "sha256": "91997b00706d034866c19e8d266dc4defcfa6eb03ab7a3d44a1419b5e8291311",
+        "zeroTextSpans": []
+      }
+    ],
+    "targetedTests": {
+      "command": "cd crates/ferridriver-node && bun test test/browser.test.ts test/webdriver-connect.test.ts",
+      "exitCode": 0,
+      "passed": 259,
+      "failed": 0,
+      "log": "/tmp/ferridriver-napi-recovered-tests.log"
+    },
+    "limitation": "The source of the original zeroed machine-code region remains undetermined. A valid rebuild and stable repeat links establish recovery, not a root-cause fix."
+  },
+  "gate": {
+    "status": "passed",
+    "log": "/tmp/ferridriver-ios-new-window-ready-recovered.log",
+    "command": "just ready --only rust-build --only napi --only integration --only e2e --only bdd --only format",
+    "artifacts": "target/gate/1789288304-655166",
+    "exitCode": 0,
+    "checks": 110,
+    "failedOrBlocked": 0,
+    "wallSeconds": 153.79,
+    "e2ePassed": 2287,
+    "integrationPassed": 826,
+    "bddPassed": 637
+  }
+}

@@ -1,0 +1,251 @@
+{
+  "date": "2026-09-13",
+  "environment": {
+    "macOS": "15.7.9",
+    "Xcode": "26.3",
+    "iOS": "26.2",
+    "simulator": "iPhone SE VM",
+    "Appium": "3.7.0",
+    "XCUITest": "12.12.3",
+    "WebDriverAgent": "16.12.8"
+  },
+  "workflowSha256": "05769d194e04fe9c52bacaffa0f4eb30d5ed43a3e28f3a921988e543a576430a",
+  "command": "python3 scripts/probe-ios-safari.py --runtime <napi|script> --endpoint http://127.0.0.1:4727 --device <booted-simulator-udid> --ssh-command <vm-ssh-helper>",
+  "preconditions": [
+    "Appium endpoint forwarded to host",
+    "Booted simulator with XCUITest installed",
+    "SSH helper supports reverse forwarding",
+    "Built target/debug/ferridriver and NAPI addon"
+  ],
+  "measurement": "Warm simulator and Appium server; sequential session creation, workflow, and cleanup. Five samples per runtime do not establish tail latency or cross-tool performance superiority.",
+  "runs": {
+    "napi": {
+      "samples": [
+        {
+          "runtime": "napi",
+          "exitCode": 0,
+          "wallMs": 5401.7,
+          "result": {
+            "version": "safari/26.2",
+            "result": "sashoush",
+            "click": {
+              "trusted": true,
+              "x": 20,
+              "y": 20.40625
+            },
+            "promised": {
+              "answer": 42
+            },
+            "rejected": true
+          }
+        },
+        {
+          "runtime": "napi",
+          "exitCode": 0,
+          "wallMs": 5371.63,
+          "result": {
+            "version": "safari/26.2",
+            "result": "sashoush",
+            "click": {
+              "trusted": true,
+              "x": 20,
+              "y": 20.40625
+            },
+            "promised": {
+              "answer": 42
+            },
+            "rejected": true
+          }
+        },
+        {
+          "runtime": "napi",
+          "exitCode": 0,
+          "wallMs": 5505.94,
+          "result": {
+            "version": "safari/26.2",
+            "result": "sashoush",
+            "click": {
+              "trusted": true,
+              "x": 20,
+              "y": 20.40625
+            },
+            "promised": {
+              "answer": 42
+            },
+            "rejected": true
+          }
+        },
+        {
+          "runtime": "napi",
+          "exitCode": 0,
+          "wallMs": 5426.39,
+          "result": {
+            "version": "safari/26.2",
+            "result": "sashoush",
+            "click": {
+              "trusted": true,
+              "x": 20,
+              "y": 20.40625
+            },
+            "promised": {
+              "answer": 42
+            },
+            "rejected": true
+          }
+        },
+        {
+          "runtime": "napi",
+          "exitCode": 0,
+          "wallMs": 5353.75,
+          "result": {
+            "version": "safari/26.2",
+            "result": "sashoush",
+            "click": {
+              "trusted": true,
+              "x": 20,
+              "y": 20.40625
+            },
+            "promised": {
+              "answer": 42
+            },
+            "rejected": true
+          }
+        }
+      ],
+      "medianWallMs": 5401.7
+    },
+    "script": {
+      "samples": [
+        {
+          "runtime": "script",
+          "exitCode": 0,
+          "wallMs": 5722.24,
+          "result": {
+            "version": "safari/26.2",
+            "result": "sashoush",
+            "click": {
+              "trusted": true,
+              "x": 20,
+              "y": 20.40625
+            },
+            "promised": {
+              "answer": 42
+            },
+            "rejected": true
+          }
+        },
+        {
+          "runtime": "script",
+          "exitCode": 0,
+          "wallMs": 5255.21,
+          "result": {
+            "version": "safari/26.2",
+            "result": "sashoush",
+            "click": {
+              "trusted": true,
+              "x": 20,
+              "y": 20.40625
+            },
+            "promised": {
+              "answer": 42
+            },
+            "rejected": true
+          }
+        },
+        {
+          "runtime": "script",
+          "exitCode": 0,
+          "wallMs": 5247.26,
+          "result": {
+            "version": "safari/26.2",
+            "result": "sashoush",
+            "click": {
+              "trusted": true,
+              "x": 20,
+              "y": 20.40625
+            },
+            "promised": {
+              "answer": 42
+            },
+            "rejected": true
+          }
+        },
+        {
+          "runtime": "script",
+          "exitCode": 0,
+          "wallMs": 5208.15,
+          "result": {
+            "version": "safari/26.2",
+            "result": "sashoush",
+            "click": {
+              "trusted": true,
+              "x": 20,
+              "y": 20.40625
+            },
+            "promised": {
+              "answer": 42
+            },
+            "rejected": true
+          }
+        },
+        {
+          "runtime": "script",
+          "exitCode": 0,
+          "wallMs": 5645.53,
+          "result": {
+            "version": "safari/26.2",
+            "result": "sashoush",
+            "click": {
+              "trusted": true,
+              "x": 20,
+              "y": 20.40625
+            },
+            "promised": {
+              "answer": 42
+            },
+            "rejected": true
+          }
+        }
+      ],
+      "medianWallMs": 5255.21
+    }
+  },
+  "finalBinaryChecks": [
+    {
+      "runtime": "script",
+      "exitCode": 0,
+      "wallMs": 5679.03,
+      "result": {
+        "version": "safari/26.2",
+        "result": "sashoush",
+        "click": {
+          "trusted": true,
+          "x": 20,
+          "y": 20.40625
+        },
+        "promised": {
+          "answer": 42
+        },
+        "rejected": true
+      }
+    },
+    {
+      "runtime": "napi",
+      "exitCode": 0,
+      "wallMs": 5718.62,
+      "result": {
+        "version": "safari/26.2",
+        "result": "sashoush",
+        "click": {
+          "trusted": true,
+          "x": 20,
+          "y": 20.40625
+        },
+        "promised": {
+          "answer": 42
+        },
+        "rejected": true
+      }
+    }
+  ]
+}

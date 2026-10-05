@@ -1,0 +1,503 @@
+{
+  "date": "2026-09-13",
+  "status": "incomplete",
+  "device": {
+    "name": "iPhone SE VM",
+    "runtime": "iOS 26.2",
+    "udid": "938B5F8C-C87D-4120-A17D-61163AC1C024"
+  },
+  "driver": {
+    "appium": "3.7.0",
+    "xcuitest": "12.12.3",
+    "remoteDebugger": "17.4.2"
+  },
+  "fixture": "scripts/fixtures/portable-tabs-workflow.js",
+  "sha256": "8db4543b2781b46f9447bfd8b056614bf4eebbd51cee5363dd1d9417818a86bf",
+  "command": [
+    "python3",
+    "scripts/probe-ios-safari.py",
+    "--device",
+    "938B5F8C-C87D-4120-A17D-61163AC1C024",
+    "--ssh-command",
+    "/home/sashoush/Workspace/apple-vms/scripts/macos-ssh",
+    "--scenario",
+    "tabs",
+    "--runtime",
+    "script"
+  ],
+  "notes": [
+    "Change --runtime to napi for the identical fixture through NAPI.",
+    "Start with only the original test tab. Successful runs close their extra tab.",
+    "Wall times include session creation and cleanup on an already booted device.",
+    "The fifth native run failed with Missing target for given targetId. Multi-tab reliability is not established.",
+    "The NAPI timing outlier is unexplained. No equivalent-tool speed comparison was performed."
+  ],
+  "gate": {
+    "command": "just ready --only rust-build --only napi --only integration --only e2e --only bdd --only format",
+    "logRoot": "target/gate/1789269616-2740429",
+    "exitCode": 0,
+    "checks": 110,
+    "failures": 0,
+    "wallSeconds": 179.45
+  },
+  "runs": [
+    {
+      "runtime": "script",
+      "scenario": "tabs",
+      "exitCode": 0,
+      "wallMs": 17904.05,
+      "artifacts": "/tmp/ferridriver-ios-safari-0b1acqve",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "tabs": 2,
+          "trustedClicks": 2,
+          "remainingTabs": 1
+        },
+        "duration_ms": 14801,
+        "console": []
+      }
+    },
+    {
+      "runtime": "napi",
+      "scenario": "tabs",
+      "exitCode": 0,
+      "wallMs": 45957.57,
+      "artifacts": "/tmp/ferridriver-ios-safari-5qdre1r2",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "tabs": 2,
+          "trustedClicks": 2,
+          "remainingTabs": 1
+        }
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "tabs",
+      "exitCode": 0,
+      "wallMs": 15136.36,
+      "artifacts": "/tmp/ferridriver-ios-safari-uc3ks7_8",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "tabs": 2,
+          "trustedClicks": 2,
+          "remainingTabs": 1
+        },
+        "duration_ms": 12790,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "tabs",
+      "exitCode": 0,
+      "wallMs": 15402.44,
+      "artifacts": "/tmp/ferridriver-ios-safari-d6l4r6_w",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "tabs": 2,
+          "trustedClicks": 2,
+          "remainingTabs": 1
+        },
+        "duration_ms": 13001,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "tabs",
+      "exitCode": 0,
+      "wallMs": 15031.65,
+      "artifacts": "/tmp/ferridriver-ios-safari-qkt8pk29",
+      "result": {
+        "status": "ok",
+        "value": {
+          "version": "safari/26.2",
+          "tabs": 2,
+          "trustedClicks": 2,
+          "remainingTabs": 1
+        },
+        "duration_ms": 12624,
+        "console": []
+      }
+    },
+    {
+      "runtime": "script",
+      "scenario": "tabs",
+      "exitCode": 1,
+      "wallMs": 3942.52,
+      "artifacts": "/tmp/ferridriver-ios-safari-0ccxu6y2",
+      "result": {
+        "status": "error",
+        "error": {
+          "kind": "runtime",
+          "name": "FerriError",
+          "message": "protocol error (WebDriver POST /execute/async): server returned 500 Internal Server Error, error unknown error: Missing target for given targetId",
+          "stack": ""
+        },
+        "duration_ms": 1645,
+        "console": []
+      }
+    }
+  ],
+  "routingPatchVerification": {
+    "patch": "scripts/patches/appium-remote-debugger-17.4.2-page-routing.patch",
+    "revision": "routing-only, before explicit page detach",
+    "endpoint": "http://127.0.0.1:4728",
+    "runs": [
+      {
+        "runtime": "script",
+        "scenario": "tabs",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 44256.6,
+        "artifacts": "/tmp/ferridriver-ios-safari-z5v_dugn",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "tabs": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          },
+          "duration_ms": 41874,
+          "console": []
+        }
+      },
+      {
+        "runtime": "script",
+        "scenario": "tabs",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 15519.55,
+        "artifacts": "/tmp/ferridriver-ios-safari-u97x8rgx",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "tabs": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          },
+          "duration_ms": 13070,
+          "console": []
+        }
+      },
+      {
+        "runtime": "script",
+        "scenario": "tabs",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 14935.42,
+        "artifacts": "/tmp/ferridriver-ios-safari-u59vsgjs",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "tabs": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          },
+          "duration_ms": 12529,
+          "console": []
+        }
+      },
+      {
+        "runtime": "script",
+        "scenario": "tabs",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 15440.14,
+        "artifacts": "/tmp/ferridriver-ios-safari-7mxjj7xt",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "tabs": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          },
+          "duration_ms": 13057,
+          "console": []
+        }
+      },
+      {
+        "runtime": "script",
+        "scenario": "tabs",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 15600.32,
+        "artifacts": "/tmp/ferridriver-ios-safari-ca0jcgd0",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "tabs": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          },
+          "duration_ms": 13257,
+          "console": []
+        }
+      },
+      {
+        "runtime": "napi",
+        "scenario": "tabs",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 15288.78,
+        "artifacts": "/tmp/ferridriver-ios-safari-ugf5pazb",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "tabs": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          }
+        }
+      },
+      {
+        "runtime": "napi",
+        "scenario": "tabs",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 15217.05,
+        "artifacts": "/tmp/ferridriver-ios-safari-rummtujt",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "tabs": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          }
+        }
+      },
+      {
+        "runtime": "napi",
+        "scenario": "tabs",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 15278.63,
+        "artifacts": "/tmp/ferridriver-ios-safari-tc2eyylm",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "tabs": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          }
+        }
+      },
+      {
+        "runtime": "napi",
+        "scenario": "tabs",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 15122.73,
+        "artifacts": "/tmp/ferridriver-ios-safari-b1j7qevp",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "tabs": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          }
+        }
+      },
+      {
+        "runtime": "napi",
+        "scenario": "tabs",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 14751.74,
+        "artifacts": "/tmp/ferridriver-ios-safari-1cw054q0",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "tabs": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          }
+        }
+      }
+    ],
+    "notes": [
+      "Ten consecutive runs, five per binding. All exited zero.",
+      "Already booted simulator; wall times include session creation and teardown.",
+      "First native run remains a timing outlier; no equivalent competitor workload was measured.",
+      "Reconnect failed after these runs, so they do not establish reconnect reliability."
+    ]
+  },
+  "reconnectBeforeDetach": {
+    "runtime": "script",
+    "scenario": "reconnect",
+    "protocolLogging": false,
+    "exitCode": 1,
+    "wallMs": 41178.99,
+    "artifacts": "/tmp/ferridriver-ios-safari-xnu4cco7",
+    "result": {
+      "status": "error",
+      "error": {
+        "kind": "runtime",
+        "name": "TimeoutError",
+        "message": "Timeout 30000ms exceeded while executing WebDriver command",
+        "stack": ""
+      },
+      "duration_ms": 38830,
+      "console": []
+    }
+  },
+  "reconnectAfterDetach": {
+    "patch": "scripts/patches/appium-remote-debugger-17.4.2-page-routing.patch",
+    "patchSha256": "3ae169ac5fa87782d8f1da311bc360433d3fb58d1c35be6879e0322a814cb6bc",
+    "packageSha256": "bae54085b01f5de4ae7b62c78d62e7acc2947f95486efb9eccd5dc762fe519eb",
+    "sourceBase": "64e4914bb763be134ec577176118ecda242b04d6",
+    "endpoint": "http://127.0.0.1:4728",
+    "upstreamVerification": {
+      "buildExitCode": 0,
+      "lintExitCode": 0,
+      "unitExitCode": 0,
+      "passed": 390,
+      "failed": 0,
+      "skipped": 0
+    },
+    "runs": [
+      {
+        "runtime": "script",
+        "scenario": "reconnect",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 25022.53,
+        "artifacts": "/tmp/ferridriver-ios-safari-tzll2hw4",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "preservedDocuments": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          },
+          "duration_ms": 13727,
+          "console": []
+        }
+      },
+      {
+        "runtime": "napi",
+        "scenario": "reconnect",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 16376.73,
+        "artifacts": "/tmp/ferridriver-ios-safari-5rim0j2r",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "preservedDocuments": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          }
+        }
+      },
+      {
+        "runtime": "script",
+        "scenario": "reconnect",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 16681.32,
+        "artifacts": "/tmp/ferridriver-ios-safari-nhx84fn0",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "preservedDocuments": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          },
+          "duration_ms": 14352,
+          "console": []
+        }
+      },
+      {
+        "runtime": "napi",
+        "scenario": "reconnect",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 16294.16,
+        "artifacts": "/tmp/ferridriver-ios-safari-8q8_m3hj",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "preservedDocuments": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          }
+        }
+      },
+      {
+        "runtime": "script",
+        "scenario": "reconnect",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 16541.0,
+        "artifacts": "/tmp/ferridriver-ios-safari-gejl1ann",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "preservedDocuments": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          },
+          "duration_ms": 14140,
+          "console": []
+        }
+      },
+      {
+        "runtime": "napi",
+        "scenario": "reconnect",
+        "protocolLogging": false,
+        "exitCode": 0,
+        "wallMs": 17091.34,
+        "artifacts": "/tmp/ferridriver-ios-safari-9y_j0kxr",
+        "result": {
+          "status": "ok",
+          "value": {
+            "version": "safari/26.2",
+            "preservedDocuments": 2,
+            "trustedClicks": 2,
+            "remainingTabs": 1
+          }
+        }
+      }
+    ],
+    "notes": [
+      "Six consecutive runs, three native-script and three NAPI, all exit zero.",
+      "Both documents retained in-memory tokens across session deletion and creation; two trusted clicks and one remaining tab were asserted.",
+      "The patch is only installed in the isolated VM test dependency; managed installation is unfinished."
+    ],
+    "scopedGate": {
+      "command": "just ready --only format --only integration",
+      "logRoot": "target/gate/1789272227-2977602",
+      "exitCode": 0,
+      "checks": 5,
+      "failures": 0,
+      "wallSeconds": 77.7,
+      "integrationPassed": 825,
+      "integrationSkipped": 1
+    }
+  }
+}
